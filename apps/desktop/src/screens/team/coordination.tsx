@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { setCoordSettings, setHarnessDelivery, setHarnessMode } from "../../api";
-import type { CoordHarness, CoordinationView, CoordSettings, Delivery, Nudges, Overlaps, QuestionsTo, SubagentMode, TeamStatus } from "../../engine-client";
-import { Button, Segmented, Select } from "../../ui";
+import { listSkills, setCoordSettings, setHarnessDelivery, setHarnessMode, type SkillView } from "../../api";
+import type { CoordHarness, CoordinationView, CoordSettings, Delivery, Nudges, Overlaps, QuestionsTo, SkillRole, SubagentMode, TeamStatus } from "../../engine-client";
+import { useLoad, type Loaded } from "../../state";
+import { Button, Checkbox, Segmented, Select } from "../../ui";
 import type { SelectOption } from "../../ui";
 import { displayText } from "../conversation";
 import { changeNote } from "./controls";
@@ -18,7 +19,61 @@ export const COORD_DEFAULTS: CoordSettings = {
   overlaps: "warn",
   nudges: "off",
   counted_tools: ["start_work", "inspect_work", "update_work", "transfer_work", "finish_work", "ctx_*", "graphify", "Skill"],
+  role_skills: { master: null, lead: null, worker: null },
 };
+
+const ROLES: { role: SkillRole; label: string; about: string }[] = [
+  { role: "master", label: "Master", about: "The project's master agent." },
+  { role: "lead", label: "Lead", about: "A sub-agent that can start sub-agents of its own." },
+  { role: "worker", label: "Worker", about: "Any other sub-agent or teammate." },
+];
+
+/** The skill names a project's agents can be given: each skill that is on, on in this
+ * project and readable, once per name, in name order. Input: the project's skills read.
+ * Output: the names. */
+export function approvedSkills(skills: SkillView[]): string[] {
+  return [...new Set(skills.filter((skill) => skill.enabled && skill.on_here !== false && !skill.refused).map((skill) => skill.name))].sort();
+}
+
+/** One role's names to save after a skill's box changes: its chosen names, or every approved
+ * name while it gets them all, with that skill added or taken out, in name order. Inputs: the
+ * role's choice, the approved names, the skill and its new state. Output: the names. */
+export function tickedSkills(chosen: string[] | null, approved: string[], name: string, on: boolean): string[] {
+  const names = (chosen ?? approved).filter((kept) => kept !== name);
+  return on ? [...names, name].sort() : names;
+}
+
+/** Skills per role (DEC-111 R3): each team role with All approved skills or Chosen skills and,
+ * for a role on Chosen skills, a box per approved skill; chosen names that are not approved
+ * here are listed so they can be seen. Inputs: the settings, the project's skills read,
+ * whether a change is saving and the change. Output: the controls. */
+export function RoleSkillsControls({ settings, skills, busy, onChoose }: {
+  settings: CoordSettings;
+  skills: Loaded<SkillView[]>;
+  busy: boolean;
+  onChoose: (role: SkillRole, chosen: string[] | null) => void;
+}) {
+  const approved = skills.kind === "ok" ? approvedSkills(skills.value) : [];
+  return <div className="stack-small" role="group" aria-label="Skills per role">
+    {ROLES.map(({ role, label, about }) => {
+      const chosen = settings.role_skills[role];
+      const unapproved = skills.kind === "ok" ? (chosen ?? []).filter((name) => !approved.includes(name)) : [];
+      return <div className="pj-row" key={role}>
+        <span aria-hidden="true">{label} skills</span>
+        <Segmented label={`${label} skills`} value={chosen ? "chosen" : "all"}
+          onValue={(next) => { if (!busy && (next === "chosen") !== Boolean(chosen)) onChoose(role, next === "all" ? null : [...approved]); }}
+          options={[{ value: "all", label: "All approved skills" }, { value: "chosen", label: "Chosen skills" }]} />
+        <span className="tg-terminal-note">{about}</span>
+        {chosen && (skills.kind === "loading" ? <span className="tg-terminal-note">Loading this project's skills...</span>
+          : skills.kind !== "ok" ? <span className="tg-terminal-note">Couldn't load this project's skills.</span>
+          : approved.length === 0 ? <span className="tg-terminal-note">No approved skills for this project yet.</span>
+          : <span className="row">{approved.map((name) => <Checkbox key={name} label={name} checked={chosen.includes(name)} disabled={busy}
+            onChecked={(on) => onChoose(role, tickedSkills(chosen, approved, name, on))} />)}</span>)}
+        {unapproved.length > 0 && <span className="tg-terminal-note">Chosen but not approved here, so no agent gets them: {unapproved.join(", ")}.</span>}
+      </div>;
+    })}
+  </div>;
+}
 
 const HARNESS_NAMES: Record<CoordHarness, string> = { "claude-code": "Claude Code", codex: "Codex", rcli: "rcli" };
 
@@ -56,11 +111,13 @@ export function countedToolsInput(text: string): { kind: "ok"; tools: string[] }
 }
 
 /** Coordination settings on the Agents tab: each harness kind's sub-agent mode and delivery,
- * where sub-agent questions go, what overlapping claims do, workflow nudges and the counted
- * tools. Every option is selectable; the plan defaults show for an older engine. Inputs: the
- * project id, the latest team status and a reload. Output: the controls. */
+ * where sub-agent questions go, what overlapping claims do, workflow nudges, the counted tools
+ * and the skills each team role gets. Every option is selectable; the plan defaults show for
+ * an older engine. Inputs: the project id, the latest team status and a reload. Output: the
+ * controls. */
 export function CoordinationControls({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
   const view = coordination(status);
+  const [skills] = useLoad(() => listSkills(projectId), [projectId], "skills");
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState("");
   const [counted, setCounted] = useState<string | null>(null);
@@ -122,6 +179,8 @@ export function CoordinationControls({ projectId, status, reload }: { projectId:
       <span className="tg-terminal-note" id={`tg-counted-help-${projectId}`}>{counted !== null && countedCheck.kind === "invalid" ? countedCheck.reason
         : "The Process page and the graph count these tool calls per agent. One name per line; * matches any ending, such as ctx_*."}</span>
     </form>
+    <RoleSkillsControls settings={view.settings} skills={skills} busy={busy}
+      onChoose={(role, chosen) => void save({ role_skills: { ...view.settings.role_skills, [role]: chosen } }, `the ${role} skills`)} />
     {note && <p className="pj-note warn" role="alert">{displayText(note)}</p>}
   </section>;
 }

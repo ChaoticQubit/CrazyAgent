@@ -2,6 +2,7 @@ use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Read;
 #[cfg(unix)]
@@ -18,6 +19,16 @@ const FILE_HEADING: &str = "\n### \n\n";
 pub const SECTION_BYTES_MAX: usize =
     HEADING.len() + FILES_MAX * (FILE_HEADING.len() + NAME_BYTES_MAX + 1) + FILES_BYTES_MAX;
 const TABLE: &str = "agent_instruction_settings";
+const BADGES_TABLE: &str = "team_instruction_badges";
+const SECTION_REMOVED: &str = "This section was removed.";
+const PREAMBLE_REMOVED: &str = "The text before the first section was removed.";
+const SECTIONS_CUT: &str =
+    "More sections changed than one message carries; they apply in full when you next start.";
+const SECTION_SEPARATOR: &str = "\n\n";
+/// The words a running agent's next task starts with after the owner edited its
+/// instructions, before the changed sections.
+pub const CHANGED_HEADER: &str =
+    "Your instructions changed since you started. The changed sections now read:";
 
 /// The names an agent's instruction files record may hold: launches before DEC-106 read
 /// these files and recorded them; a launch now records none.
@@ -93,14 +104,48 @@ impl Mode {
     }
 }
 
-/// One project's agent instruction settings: which instruction texts its agents get and
-/// whether headless Claude runs keep their transcript. A project the owner never changed
-/// gets both texts and keeps transcripts.
+/// How an edit to the owner's instruction texts reaches a project's agents that already
+/// run (DEC-111 QR1): the changed sections at the start of the agent's next task (the
+/// default), a restart at the agent's next idle that resumes its conversation with the new
+/// text, or only an "Instructions changed" badge on its row until it starts again.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EditDelivery {
+    #[default]
+    NextMessage,
+    Restart,
+    Badge,
+}
+
+impl EditDelivery {
+    /// Returns the stored and wire name of this choice.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::NextMessage => "next_message",
+            Self::Restart => "restart",
+            Self::Badge => "badge",
+        }
+    }
+
+    /// Reads a stored or wire name back. Input: the name. Output: the choice, or none.
+    pub fn parse(name: &str) -> Option<Self> {
+        [Self::NextMessage, Self::Restart, Self::Badge]
+            .into_iter()
+            .find(|edits| edits.as_str() == name)
+    }
+}
+
+/// One project's agent instruction settings: which instruction texts its agents get,
+/// whether headless Claude runs keep their transcript and how an instruction edit reaches
+/// agents already running. A project the owner never changed gets both texts, keeps
+/// transcripts and sends an edit in each running agent's next task.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
     pub mode: Mode,
     pub transcripts: bool,
+    #[serde(default)]
+    pub edits: EditDelivery,
 }
 
 impl Default for Settings {
@@ -108,6 +153,7 @@ impl Default for Settings {
         Self {
             mode: Mode::Both,
             transcripts: true,
+            edits: EditDelivery::NextMessage,
         }
     }
 }
@@ -196,6 +242,296 @@ pub fn known_name(name: &str) -> bool {
     NAMES.contains(&name)
 }
 
+/// One part of an instruction text: a `## ` heading line with the lines up to the next
+/// one, or the text before the first heading (an empty heading). `place` counts the parts
+/// with the same heading before it, so a repeated heading is told apart by its place.
+struct Section<'a> {
+    heading: &'a str,
+    place: usize,
+    text: &'a str,
+}
+
+/// Splits an instruction text at its `## ` heading lines, leaving out blank parts. Input:
+/// the text. Output: the parts in order, each without the blank lines around it.
+fn sections(text: &str) -> Vec<Section<'_>> {
+    let mut bounds = Vec::new();
+    let mut at = 0;
+    for line in text.split_inclusive('\n') {
+        if line.starts_with("## ") {
+            bounds.push(at);
+        }
+        at += line.len();
+    }
+    assert_eq!(at, text.len());
+    let mut found: Vec<Section<'_>> = Vec::new();
+    let preamble = text[..bounds.first().copied().unwrap_or(text.len())].trim();
+    if !preamble.is_empty() {
+        found.push(Section {
+            heading: "",
+            place: 0,
+            text: preamble,
+        });
+    }
+    for (index, start) in bounds.iter().enumerate() {
+        let end = bounds.get(index + 1).copied().unwrap_or(text.len());
+        let part = text[*start..end].trim();
+        let heading = part.lines().next().unwrap_or_default().trim_end();
+        assert!(heading.starts_with("## "));
+        let place = found.iter().filter(|seen| seen.heading == heading).count();
+        found.push(Section {
+            heading,
+            place,
+            text: part,
+        });
+    }
+    found
+}
+
+/// Tells whether two parts read the same once blank lines and trailing spaces are left out.
+fn same_text(left: &str, right: &str) -> bool {
+    left.lines()
+        .map(str::trim_end)
+        .filter(|line| !line.is_empty())
+        .eq(right
+            .lines()
+            .map(str::trim_end)
+            .filter(|line| !line.is_empty()))
+}
+
+/// The parts of the owner's instruction text that changed between what an agent started with
+/// and the text now, split at `## ` headings: each added or edited part in full, in the
+/// order it now reads, then each removed part as its heading and "This section was removed.".
+/// Blank lines alone are no change. Inputs: both texts. Output: the parts, at most
+/// `SECTION_BYTES_MAX` bytes joined by blank lines; when they do not all fit, the parts that
+/// fit in order and a last line saying the rest apply at the agent's next start.
+pub fn changed_sections(started: &str, now: &str) -> Vec<String> {
+    fit_sections(changed_parts(started, now), SECTION_BYTES_MAX)
+}
+
+/// Every part that changed between the two texts, as `changed_sections` describes, uncut.
+/// Inputs: both texts. Output: the parts.
+fn changed_parts(started: &str, now: &str) -> Vec<String> {
+    let before = sections(started);
+    let after = sections(now);
+    let mut changed: Vec<String> = after
+        .iter()
+        .filter(|part| {
+            !before.iter().any(|old| {
+                old.heading == part.heading
+                    && old.place == part.place
+                    && same_text(old.text, part.text)
+            })
+        })
+        .map(|part| part.text.to_owned())
+        .collect();
+    changed.extend(
+        before
+            .iter()
+            .filter(|old| {
+                !after
+                    .iter()
+                    .any(|part| part.heading == old.heading && part.place == old.place)
+            })
+            .map(|old| match old.heading {
+                "" => PREAMBLE_REMOVED.to_owned(),
+                heading => format!("{heading}{SECTION_SEPARATOR}{SECTION_REMOVED}"),
+            }),
+    );
+    changed
+}
+
+/// Keeps the changed parts that fit in `limit` bytes joined by blank lines: all of them, or
+/// the leading ones that fit with `SECTIONS_CUT` as the last line. Inputs: the parts and the
+/// limit, at least the cut line and one separator. Output: at most `limit` bytes of parts.
+fn fit_sections(changed: Vec<String>, limit: usize) -> Vec<String> {
+    assert!(limit >= SECTION_SEPARATOR.len() + SECTIONS_CUT.len());
+    if changed.join(SECTION_SEPARATOR).len() <= limit {
+        return changed;
+    }
+    let room = limit - SECTION_SEPARATOR.len() - SECTIONS_CUT.len();
+    let mut kept = Vec::new();
+    let mut used = 0;
+    for part in changed {
+        let cost = part.len()
+            + if kept.is_empty() {
+                0
+            } else {
+                SECTION_SEPARATOR.len()
+            };
+        if used + cost > room {
+            break;
+        }
+        used += cost;
+        kept.push(part);
+    }
+    kept.push(SECTIONS_CUT.to_owned());
+    assert!(kept.join(SECTION_SEPARATOR).len() <= limit);
+    kept
+}
+
+/// The block a running agent's next task starts with after the owner edited its
+/// instructions: `CHANGED_HEADER`, then the changed parts. Input: at least one part from
+/// `changed_sections`. Output: the block, ending in a blank line.
+pub fn changed_message(sections: &[String]) -> String {
+    assert!(!sections.is_empty());
+    let message = format!(
+        "{CHANGED_HEADER}{SECTION_SEPARATOR}{}{SECTION_SEPARATOR}",
+        sections.join(SECTION_SEPARATOR)
+    );
+    assert!(
+        message.len() <= CHANGED_HEADER.len() + 2 * SECTION_SEPARATOR.len() + SECTION_BYTES_MAX
+    );
+    message
+}
+
+/// An owner edit one running agent has not had yet: the project's choice of how it reaches
+/// the agent, the changed parts, the text the agent has, and the engine data folder and the
+/// text now, which become the agent's record once the change reached it.
+pub struct Edit {
+    pub delivery: EditDelivery,
+    pub sections: Vec<String>,
+    started: String,
+    data: PathBuf,
+    now: String,
+}
+
+impl Edit {
+    /// The change block cut to fit `bytes`, for a terminal input with a size limit such as
+    /// the live master's: the changed parts that fit, then `SECTIONS_CUT` when some do not,
+    /// with control characters other than line feed and tab dropped so the input stays plain.
+    /// Input: the bytes the block may take. Output: the block, or none when not even the
+    /// header and the cut line fit.
+    pub fn message_within(&self, bytes: usize) -> Option<String> {
+        let framing = CHANGED_HEADER.len() + 2 * SECTION_SEPARATOR.len();
+        let limit = bytes.checked_sub(framing)?.min(SECTION_BYTES_MAX);
+        if limit < SECTION_SEPARATOR.len() + SECTIONS_CUT.len() {
+            return None;
+        }
+        let plain = |text: &str| -> String {
+            text.chars()
+                .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+                .collect()
+        };
+        let parts = match changed_parts(&plain(&self.started), &plain(&self.now)) {
+            parts if parts.is_empty() => vec![SECTIONS_CUT.to_owned()],
+            parts => fit_sections(parts, limit),
+        };
+        let message = changed_message(&parts);
+        assert!(message.len() <= bytes);
+        Some(message)
+    }
+
+    /// A hash of the owner text this edit brings, the same for the same text within one
+    /// engine run, so one edit is acted on once. Output: the hash.
+    pub fn text_hash(&self) -> u64 {
+        let mut hasher = std::hash::DefaultHasher::new();
+        std::hash::Hash::hash(&self.now, &mut hasher);
+        std::hash::Hasher::finish(&hasher)
+    }
+}
+
+/// Reads whether the owner's instructions changed since one agent of the project started or
+/// last had a change: the engine's own record of what the agent was given, or for a launch
+/// before that record the instruction file its launch wrote in its home, against what a
+/// launch would give it now. Inputs: a connection to `engine.db`, the project, the agent's
+/// home and its launch harness id. Output: the edit, none without a change or for a harness
+/// with no instruction file or a home never launched, or a plain code.
+pub fn edit_for(
+    connection: &Connection,
+    project: &ProjectId,
+    home: &Path,
+    harness: &str,
+) -> Result<Option<Edit>, EngineError> {
+    let Some(kind) = crate::agent_home::Harness::from_id(harness) else {
+        return Ok(None);
+    };
+    if !home.is_dir() {
+        return Ok(None);
+    }
+    let tx = connection
+        .unchecked_transaction()
+        .map_err(|_| failure("instruction_settings_unavailable"))?;
+    let delivery = load(&tx, project).map_err(failure)?.edits;
+    let agent = crate::launch_context::agent_project(&tx, project)
+        .map_err(|problem| failure(&problem.0))?;
+    drop(tx);
+    let now = crate::agent_home::text(&agent)
+        .map_err(|problem| failure(&problem.0))?
+        .text;
+    let started = match crate::agent_home::given_text(&agent.data, home)
+        .map_err(|problem| failure(&problem.0))?
+    {
+        Some(text) => text,
+        None => {
+            match crate::agent_home::received(home, kind).map_err(|problem| failure(&problem.0))? {
+                Some(received) => received.text,
+                None => return Ok(None),
+            }
+        }
+    };
+    let sections = changed_sections(&started, &now);
+    if sections.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(Edit {
+        delivery,
+        sections,
+        started,
+        data: agent.data,
+        now,
+    }))
+}
+
+/// Records that an edit reached the agent, so the same change is never sent twice. Inputs:
+/// the edit and the agent's home. Output: unit, or a plain code.
+pub fn delivered(edit: &Edit, home: &Path) -> Result<(), EngineError> {
+    crate::agent_home::record_given(&edit.data, home, &edit.now)
+        .map_err(|problem| failure(&problem.0))
+}
+
+/// Replaces the running agents of one project whose row shows "Instructions changed", writing
+/// only when the set changed. Inputs: the engine connection, the project and the agents.
+/// Output: unit.
+pub fn set_badges(
+    connection: &Connection,
+    project: &ProjectId,
+    agents: &BTreeSet<i64>,
+) -> rusqlite::Result<()> {
+    if &badges(connection, project)? == agents {
+        return Ok(());
+    }
+    let tx = connection.unchecked_transaction()?;
+    tx.execute(
+        "DELETE FROM team_instruction_badges WHERE project=?1",
+        [project.as_str()],
+    )?;
+    for agent in agents {
+        tx.execute(
+            "INSERT OR REPLACE INTO team_instruction_badges(agent, project) VALUES (?1, ?2)",
+            params![agent, project.as_str()],
+        )?;
+    }
+    tx.commit()
+}
+
+/// Reads the agents of one project whose row shows "Instructions changed"; a database
+/// without the table has none. Inputs: the connection and the project. Output: their ids.
+pub fn badges(connection: &Connection, project: &ProjectId) -> rusqlite::Result<BTreeSet<i64>> {
+    let table: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+        [BADGES_TABLE],
+        |row| row.get(0),
+    )?;
+    if !table {
+        return Ok(BTreeSet::new());
+    }
+    let mut statement =
+        connection.prepare("SELECT agent FROM team_instruction_badges WHERE project=?1")?;
+    statement
+        .query_map([project.as_str()], |row| row.get(0))?
+        .collect()
+}
+
 /// Creates the settings and import tables, and turns a settings table from before DEC-106,
 /// whose `files` column held the removed instruction files choice, into the mode column
 /// with every stored choice read as the default mode. Input: a connection to `engine.db`.
@@ -205,11 +541,16 @@ pub fn initialize(connection: &Connection) -> rusqlite::Result<()> {
         "CREATE TABLE IF NOT EXISTS agent_instruction_settings (
             project TEXT PRIMARY KEY,
             mode TEXT NOT NULL,
-            transcripts INTEGER NOT NULL
+            transcripts INTEGER NOT NULL,
+            edits TEXT NOT NULL DEFAULT 'next_message'
         );
         CREATE TABLE IF NOT EXISTS instruction_imports (
             project TEXT PRIMARY KEY,
             moved TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS team_instruction_badges (
+            agent INTEGER PRIMARY KEY,
+            project TEXT NOT NULL
         );",
     )?;
     let old: bool = connection.query_row(
@@ -224,7 +565,22 @@ pub fn initialize(connection: &Connection) -> rusqlite::Result<()> {
               WHERE mode IN ('project', 'project_and_user', 'none');",
         )?;
     }
+    if !edits_column(connection)? {
+        connection.execute_batch(
+            "ALTER TABLE agent_instruction_settings ADD COLUMN edits TEXT NOT NULL DEFAULT 'next_message';",
+        )?;
+    }
     Ok(())
+}
+
+/// Tells whether the settings table holds the edit delivery column, which tables made
+/// before DEC-111 QR1 lack. Input: a connection to `engine.db`. Output: the answer.
+fn edits_column(connection: &Connection) -> rusqlite::Result<bool> {
+    connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('agent_instruction_settings') WHERE name='edits')",
+        [],
+        |row| row.get(0),
+    )
 }
 
 /// Reads one project's settings; a project, or a database, that never stored any gets the
@@ -243,15 +599,21 @@ pub fn load(connection: &Connection, project: &ProjectId) -> Result<Settings, &'
     if !table {
         return Ok(Settings::default());
     }
-    let stored: Option<(String, i64)> = connection
+    let edits = match edits_column(connection).map_err(unavailable)? {
+        true => "edits",
+        false => "'next_message'",
+    };
+    let stored: Option<(String, i64, String)> = connection
         .query_row(
-            "SELECT mode, transcripts FROM agent_instruction_settings WHERE project=?1",
+            &format!(
+                "SELECT mode, transcripts, {edits} FROM agent_instruction_settings WHERE project=?1"
+            ),
             [project.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(unavailable)?;
-    let Some((mode, transcripts)) = stored else {
+    let Some((mode, transcripts, edits)) = stored else {
         return Ok(Settings::default());
     };
     let mode = Mode::parse(&mode).ok_or("instruction_settings_invalid")?;
@@ -260,7 +622,12 @@ pub fn load(connection: &Connection, project: &ProjectId) -> Result<Settings, &'
         1 => true,
         _ => return Err("instruction_settings_invalid"),
     };
-    Ok(Settings { mode, transcripts })
+    let edits = EditDelivery::parse(&edits).ok_or("instruction_settings_invalid")?;
+    Ok(Settings {
+        mode,
+        transcripts,
+        edits,
+    })
 }
 
 /// Stores one project's settings whole, creating the table first when it is missing.
@@ -273,12 +640,13 @@ pub fn save(
 ) -> rusqlite::Result<()> {
     initialize(connection)?;
     let changed = connection.execute(
-        "INSERT INTO agent_instruction_settings(project, mode, transcripts) VALUES (?1, ?2, ?3)
-         ON CONFLICT(project) DO UPDATE SET mode=excluded.mode, transcripts=excluded.transcripts",
+        "INSERT INTO agent_instruction_settings(project, mode, transcripts, edits) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(project) DO UPDATE SET mode=excluded.mode, transcripts=excluded.transcripts, edits=excluded.edits",
         params![
             project.as_str(),
             settings.mode.as_str(),
-            i64::from(settings.transcripts)
+            i64::from(settings.transcripts),
+            settings.edits.as_str()
         ],
     )?;
     assert_eq!(changed, 1);

@@ -1,5 +1,7 @@
 mod routes;
 
+use crazyagent::agent_git::Layout;
+use crazyagent::coord::settings::SkillRole;
 use crazyagent::coord::{MessageKind, NewMessage, Party, QuestionFor, Severity};
 use crazyagent::landing::{AgentKind, ChangeAgent, TurnEnd, TurnOutcome, Workspace};
 use crazyagent::protocol::ProjectId;
@@ -20,6 +22,7 @@ const BODY_BYTES_MAX: usize = 4 * 1024 * 1024;
 const TOKEN_BYTES: usize = 32;
 const RECORD_MODE: &str = "record-turn-end";
 const ASK_MODE: &str = "ask-owner";
+const SKILLS_MODE: &str = "role-skills";
 const RECORD_ARGS_MAX: usize = 10;
 
 /// The one bridge every route shares, as the app's `NativeState` does.
@@ -255,11 +258,64 @@ fn ask_owner(args: &[OsString]) -> Result<String, String> {
     Ok(id.to_string())
 }
 
+/// Installs what one team role's agent is given for a project the way a team launch does,
+/// through the engine's own `launch_context::for_team_role` on its database and a Claude Code
+/// install with tools on, so the end-to-end test reads the skills the owner's choice gives
+/// that role (DEC-111 R3). Inputs: engine root, project, role (master, lead or worker) and an
+/// empty private home folder. Output: the installed skill names in order, comma-separated,
+/// or `none`.
+fn role_skills(args: &[OsString]) -> Result<String, String> {
+    let [root, project, role, home] = args else {
+        return Err(format!(
+            "usage: desktop-e2e-bridge {SKILLS_MODE} <engine root> <project> <master|lead|worker> <home>"
+        ));
+    };
+    let text = |value: &OsString| {
+        value
+            .to_str()
+            .map(str::to_owned)
+            .ok_or_else(|| "arguments must be UTF-8".to_owned())
+    };
+    let role = match text(role)?.as_str() {
+        "master" => SkillRole::Master,
+        "lead" => SkillRole::Lead,
+        "worker" => SkillRole::Worker,
+        _ => return Err("the role is master, lead or worker".to_owned()),
+    };
+    let project = ProjectId::new(text(project)?).map_err(|_| "invalid project id".to_owned())?;
+    let db = crazyagent::landing::open(Path::new(root)).map_err(|error| error.0)?;
+    let context = crazyagent::launch_context::for_team_role(&db, &project, Layout::Linked, role)
+        .map_err(|error| error.0)?;
+    let home = Path::new(home);
+    let installed = context
+        .install("claude-code", home, true)
+        .map_err(|error| error.0)?;
+    let folder = home.join("crazyagent/plugin/skills");
+    let mut names = Vec::new();
+    if folder.is_dir() {
+        for entry in std::fs::read_dir(&folder).map_err(|error| error.to_string())? {
+            let name = entry.map_err(|error| error.to_string())?.file_name();
+            names.push(
+                name.into_string()
+                    .map_err(|_| "a skill folder name is not UTF-8".to_owned())?,
+            );
+        }
+    }
+    drop(installed);
+    assert!(names.len() <= context.plugins().skills.len());
+    names.sort();
+    Ok(match names.is_empty() {
+        true => "none".to_owned(),
+        false => names.join(","),
+    })
+}
+
 /// Serves the app's `desktop_*` commands to the end-to-end test on 127.0.0.1 for as long as
-/// stdin stays open; with `record-turn-end` first, records one ended agent turn, and with
-/// `ask-owner` first, puts one agent's question to the owner. Input: the engine socket path.
-/// Output: prints `ready <port> <token>` once listening, or the recorded change set or the
-/// question's id; exits non-zero when it cannot.
+/// stdin stays open; with `record-turn-end` first, records one ended agent turn, with
+/// `ask-owner` first, puts one agent's question to the owner, and with `role-skills` first,
+/// installs one team role's skills. Input: the engine socket path. Output: prints
+/// `ready <port> <token>` once listening, or the recorded change set, the question's id or
+/// the installed skills; exits non-zero when it cannot.
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     let all: Vec<OsString> = std::env::args_os().skip(1).take(RECORD_ARGS_MAX).collect();
@@ -271,6 +327,18 @@ async fn main() -> std::process::ExitCode {
             }
             Err(error) => {
                 eprintln!("{ASK_MODE}: {error}");
+                std::process::ExitCode::FAILURE
+            }
+        };
+    }
+    if all.first().is_some_and(|mode| mode == SKILLS_MODE) {
+        return match role_skills(&all[1..]) {
+            Ok(names) => {
+                println!("{names}");
+                std::process::ExitCode::SUCCESS
+            }
+            Err(error) => {
+                eprintln!("{SKILLS_MODE}: {error}");
                 std::process::ExitCode::FAILURE
             }
         };

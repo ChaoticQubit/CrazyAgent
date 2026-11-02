@@ -5,7 +5,7 @@ use super::project::{REFRESH_MS, plain_problem};
 use super::project_time::{clock, duration};
 use crate::coord::settings::{
     COUNTED_TOOL_BYTES_MAX, COUNTED_TOOLS_DEFAULT, COUNTED_TOOLS_MAX, Delivery, HarnessKind,
-    Nudges, Overlaps, QuestionsTo, SubagentMode,
+    Nudges, Overlaps, QuestionsTo, ROLE_SKILLS_MAX, SkillRole, SubagentMode,
 };
 use crate::engine::owner::OwnerResult;
 use crate::project_setup::{SetupQuery, SetupView};
@@ -117,15 +117,16 @@ pub(in crate::tui) struct WakeEdit {
 const WAKE_ROWS: usize = EventKind::ALL.len() + 1;
 
 /// The open coordination editor (DEC-104): the row with the cursor and, while the owner
-/// types the counted tools, their input. Rows follow `COORD_ROWS`.
+/// types the counted tools or one role's skill names, that input. Rows follow `COORD_ROWS`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) struct CoordEdit {
     pub row: usize,
-    pub counted: Option<TextInput>,
+    pub input: Option<TextInput>,
 }
 
 /// One row of the coordination editor: a harness kind's sub-agent mode or message delivery,
-/// where sub-agent questions go, overlapping edits, workflow nudges or the counted tools.
+/// where sub-agent questions go, overlapping edits, workflow nudges, the counted tools or
+/// the skills one team role gets (DEC-111 R3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum CoordRow {
     Mode(HarnessKind),
@@ -134,9 +135,10 @@ pub(in crate::tui) enum CoordRow {
     Overlaps,
     Nudges,
     Counted,
+    Skills(SkillRole),
 }
 
-const COORD_ROWS: [CoordRow; 10] = [
+const COORD_ROWS: [CoordRow; 13] = [
     CoordRow::Mode(HarnessKind::ClaudeCode),
     CoordRow::Delivery(HarnessKind::ClaudeCode),
     CoordRow::Mode(HarnessKind::Codex),
@@ -147,10 +149,15 @@ const COORD_ROWS: [CoordRow; 10] = [
     CoordRow::Overlaps,
     CoordRow::Nudges,
     CoordRow::Counted,
+    CoordRow::Skills(SkillRole::Master),
+    CoordRow::Skills(SkillRole::Lead),
+    CoordRow::Skills(SkillRole::Worker),
 ];
 const DELIVERIES: [Delivery; 3] = [Delivery::Auto, Delivery::NativeOnly, Delivery::TypingOnly];
 const OVERLAPS: [Overlaps; 3] = [Overlaps::Warn, Overlaps::Block, Overlaps::Off];
 const COUNTED_TEXT_BYTES_MAX: usize = COUNTED_TOOLS_MAX * (COUNTED_TOOL_BYTES_MAX + 2);
+const SKILL_NAMES_TEXT_BYTES_MAX: usize =
+    ROLE_SKILLS_MAX * (crate::plugins::skill_folder::NAME_BYTES_MAX + 2);
 
 /// A stop the owner pressed that waits on one more key: Stop all asks y or n, Stop harness
 /// asks y or n for that agent, and Stop teammate asks which running teammate of that agent
@@ -288,7 +295,7 @@ impl TeamView {
                         if matches!(action, TeamAction::CoordSettings { .. })
                             && let Some(edit) = &mut self.coord
                         {
-                            edit.counted = None;
+                            edit.input = None;
                         }
                         self.notice = done.map(Notice::plain);
                         self.read_ms = None;
@@ -317,10 +324,7 @@ impl TeamView {
     pub fn typing(&self) -> bool {
         self.draft.is_some()
             || self.branch_edit.is_some()
-            || self
-                .coord
-                .as_ref()
-                .is_some_and(|edit| edit.counted.is_some())
+            || self.coord.as_ref().is_some_and(|edit| edit.input.is_some())
     }
 
     /// Adds pasted text to the task or the branch setting being written.
@@ -331,7 +335,7 @@ impl TeamView {
             edit.input.insert_str(text);
             return true;
         }
-        if let Some(input) = self.coord.as_mut().and_then(|edit| edit.counted.as_mut()) {
+        if let Some(input) = self.coord.as_mut().and_then(|edit| edit.input.as_mut()) {
             input.insert_str(text);
             return true;
         }
@@ -1536,32 +1540,35 @@ impl TeamView {
                 self.notice = None;
                 self.coord = Some(CoordEdit {
                     row: 0,
-                    counted: None,
+                    input: None,
                 });
             }
         }
     }
 
     /// Handles one key while the coordination editor is open: move, change the row's value,
-    /// edit or reset the counted tools, or close. Takes the key. Output: the change to send,
+    /// edit or reset the counted tools, switch a role between All approved skills and Chosen
+    /// skills or type its skill names, or close. Takes the key. Output: the change to send,
     /// or Handled.
     fn coord_key(&mut self, key: KeyEvent) -> TeamReply {
         let Some(edit) = self.coord.clone() else {
             return TeamReply::Ignored;
         };
-        if edit.counted.is_some() {
+        if edit.input.is_some() {
             return match key.code {
                 KeyCode::Esc => {
                     self.coord = Some(CoordEdit {
-                        counted: None,
+                        input: None,
                         ..edit
                     });
                     TeamReply::Handled
                 }
-                KeyCode::Enter => self.save_counted(),
+                KeyCode::Enter => match COORD_ROWS[edit.row] {
+                    CoordRow::Skills(role) => self.save_skills(role),
+                    _ => self.save_counted(),
+                },
                 _ => {
-                    if let Some(input) = self.coord.as_mut().and_then(|edit| edit.counted.as_mut())
-                    {
+                    if let Some(input) = self.coord.as_mut().and_then(|edit| edit.input.as_mut()) {
                         input.handle(key);
                     }
                     TeamReply::Handled
@@ -1590,7 +1597,7 @@ impl TeamView {
                 };
                 self.coord = Some(CoordEdit {
                     row: next,
-                    counted: None,
+                    input: None,
                 });
                 TeamReply::Handled
             }
@@ -1599,7 +1606,7 @@ impl TeamView {
                 input.set(&view.settings.counted_tools.join(", "));
                 self.coord = Some(CoordEdit {
                     row: edit.row,
-                    counted: Some(input),
+                    input: Some(input),
                 });
                 TeamReply::Handled
             }
@@ -1613,6 +1620,13 @@ impl TeamView {
                     },
                     "The counted tools are back to the defaults.".to_owned(),
                 )
+            }
+            KeyCode::Enter if matches!(row, CoordRow::Skills(_)) => {
+                let CoordRow::Skills(role) = row else {
+                    return TeamReply::Handled;
+                };
+                self.type_skills(edit.row, view.settings.role_skills.of(role));
+                TeamReply::Handled
             }
             KeyCode::Char(' ') | KeyCode::Enter | KeyCode::Right => {
                 self.coord_step(row, &view, true)
@@ -1718,8 +1732,84 @@ impl TeamView {
                 )
             }
             CoordRow::Counted => return TeamReply::Handled,
+            CoordRow::Skills(role) => {
+                if settings.role_skills.of(role).is_none() {
+                    if let Some(at) = self.coord.as_ref().map(|edit| edit.row) {
+                        self.type_skills(at, None);
+                    }
+                    return TeamReply::Handled;
+                }
+                settings.role_skills.set(role, None);
+                (
+                    TeamAction::CoordSettings {
+                        project_id,
+                        settings,
+                    },
+                    format!("{} skills: all approved skills.", role_label(role)),
+                )
+            }
         };
         self.coord_change(action, done)
+    }
+
+    /// Opens the input for one role's skill names on its row, holding the role's chosen
+    /// names, empty while it gets All approved skills. Takes the row and the choice.
+    fn type_skills(&mut self, at: usize, chosen: Option<&[String]>) {
+        assert!(matches!(COORD_ROWS[at], CoordRow::Skills(_)));
+        let mut input = TextInput::single(SKILL_NAMES_TEXT_BYTES_MAX);
+        input.set(&chosen.unwrap_or_default().join(", "));
+        self.coord = Some(CoordEdit {
+            row: at,
+            input: Some(input),
+        });
+    }
+
+    /// Sends the skill names typed for one role as its Chosen skills: names split on commas
+    /// or spaces, each kept once in order, checked with the engine's rule first; an empty
+    /// list gives the role no skills. Takes the role. Output: the change, or Handled with
+    /// the reason the names can't be saved.
+    fn save_skills(&mut self, role: SkillRole) -> TeamReply {
+        let Some(typed) = self
+            .coord
+            .as_ref()
+            .and_then(|edit| edit.input.as_ref())
+            .map(|input| input.value().to_owned())
+        else {
+            return TeamReply::Handled;
+        };
+        let Some(mut settings) = self
+            .status
+            .as_ref()
+            .and_then(|status| status.coordination.as_ref())
+            .map(|view| view.settings.clone())
+        else {
+            return TeamReply::Handled;
+        };
+        let mut names: Vec<String> = Vec::new();
+        for name in typed
+            .split([',', ' ', '\t'])
+            .filter(|name| !name.is_empty())
+        {
+            if !names.iter().any(|kept| kept == name) {
+                names.push(name.to_owned());
+            }
+        }
+        let done = match names.is_empty() {
+            true => format!("{} skills: none.", role_label(role)),
+            false => format!("{} skills: {}.", role_label(role), names.join(", ")),
+        };
+        settings.role_skills.set(role, Some(names));
+        if settings.validate().is_err() {
+            self.notice = Some(Notice::problem(team_plain("coord_settings_invalid")));
+            return TeamReply::Handled;
+        }
+        self.coord_change(
+            TeamAction::CoordSettings {
+                project_id: self.project.clone(),
+                settings,
+            },
+            done,
+        )
     }
 
     /// Sends the counted tools typed in the editor: names split on commas or spaces, each kept
@@ -1729,7 +1819,7 @@ impl TeamView {
         let Some(typed) = self
             .coord
             .as_ref()
-            .and_then(|edit| edit.counted.as_ref())
+            .and_then(|edit| edit.input.as_ref())
             .map(|input| input.value().to_owned())
         else {
             return TeamReply::Handled;
@@ -1842,6 +1932,15 @@ impl TeamView {
                     view.settings.counted_tools.join(", "),
                     "",
                 ),
+                CoordRow::Skills(role) => (
+                    format!("{} skills", role_label(role)),
+                    match view.settings.role_skills.of(role) {
+                        None => "All approved skills".to_owned(),
+                        Some([]) => "Chosen skills: none".to_owned(),
+                        Some(names) => format!("Chosen skills: {}", names.join(", ")),
+                    },
+                    "",
+                ),
             };
             rows.push(list_row(
                 Row::of(label, look.fg)
@@ -1854,13 +1953,19 @@ impl TeamView {
                 look,
             ));
         }
-        let Some(input) = &edit.counted else {
+        let Some(input) = &edit.input else {
             return (rows, None);
         };
         let inner = content.saturating_sub(4).max(2);
         let (lines, (line, column)) = input.wrap(inner - 1);
         let text = if input.value().is_empty() {
-            Row::of("No tools counted", look.muted)
+            Row::of(
+                match COORD_ROWS[edit.row] {
+                    CoordRow::Skills(_) => "No skills: type names separated by commas",
+                    _ => "No tools counted",
+                },
+                look.muted,
+            )
         } else {
             Row::of(lines.get(line).cloned().unwrap_or_default(), look.fg)
         };
@@ -2460,14 +2565,18 @@ impl TeamView {
             return vec![("y", "Cancel task"), ("n", "Keep")];
         }
         if let Some(edit) = &self.coord {
-            if edit.counted.is_some() {
+            if edit.input.is_some() {
                 return vec![("Enter", "Save"), ("Esc", "Close")];
             }
             let mut help = vec![("\u{2191}\u{2193}", "Move")];
-            if COORD_ROWS[edit.row] == CoordRow::Counted {
-                help.extend([("Enter", "Edit tools"), ("r", "Default tools")]);
-            } else {
-                help.extend([("Space", "Change"), ("\u{2190}\u{2192}", "Change")]);
+            match COORD_ROWS[edit.row] {
+                CoordRow::Counted => {
+                    help.extend([("Enter", "Edit tools"), ("r", "Default tools")]);
+                }
+                CoordRow::Skills(_) => {
+                    help.extend([("Space", "All or chosen"), ("Enter", "Edit skills")]);
+                }
+                _ => help.extend([("Space", "Change"), ("\u{2190}\u{2192}", "Change")]),
             }
             help.push(("Esc", "Close"));
             return help;
@@ -2618,6 +2727,14 @@ fn overlaps_words(overlaps: Overlaps) -> &'static str {
         Overlaps::Warn => "Warn",
         Overlaps::Block => "Block",
         Overlaps::Off => "Off",
+    }
+}
+
+fn role_label(role: SkillRole) -> &'static str {
+    match role {
+        SkillRole::Master => "Master",
+        SkillRole::Lead => "Lead",
+        SkillRole::Worker => "Worker",
     }
 }
 
