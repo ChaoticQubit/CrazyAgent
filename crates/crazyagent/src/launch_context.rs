@@ -1,4 +1,5 @@
 use crate::agent_git::Layout;
+use crate::coord::settings::{RoleSkills, SkillRole};
 use crate::harnesses::launch::LaunchError;
 use crate::plugins::{
     EffectiveHook, EffectivePlugins, EffectiveSkill, LaunchPlugins, LaunchSecret, LaunchServer,
@@ -216,6 +217,22 @@ pub fn for_project(
     })
 }
 
+/// Reads what one team role's agents launched for a project receive (DEC-111 R3): the
+/// project's context with only the approved skills the owner chose for that role. Inputs: a
+/// connection to the engine's `engine.db`, the project, the agent's git layout and its
+/// role. Output: the context, or a plain code.
+pub fn for_team_role(
+    connection: &Connection,
+    project: &ProjectId,
+    layout: Layout,
+    role: SkillRole,
+) -> Result<AgentContext, LaunchError> {
+    let chosen = crate::coord::settings::read(connection, project)
+        .map_err(|problem| LaunchError(problem.0))?
+        .role_skills;
+    Ok(for_project(connection, project, layout)?.for_role(chosen.of(role)))
+}
+
 /// Reads the tools the owner switched off, for the project or app-wide, on each approved MCP
 /// server and on the engine's own server, by the server's stored name. Input: the read
 /// transaction, the project and its approved plugins. Output: each server with switched-off
@@ -318,8 +335,9 @@ pub fn master_tools(tx: &Transaction<'_>, project: &ProjectId) -> Result<bool, L
 /// same project context, approved memories and linked-worktree landing rules every
 /// Sandboxed agent gets, since the conversation runs in a linked worktree, then with tools on what
 /// its tools are and how it starts a sub-agent (DEC-093), or with tools off the names of
-/// the approved skills and MCP servers that team agents with tools on receive, then how the
-/// team's work lands. No secret
+/// the approved skills and MCP servers that team agents with tools on receive, with the team
+/// roles each skill goes to when the owner chose skills per role, then how the team's work
+/// lands. No secret
 /// value, command, URL or file of a server is read or given. Input: a transaction the caller
 /// holds on `engine.db`, the project, its master tools switch and the live model access,
 /// none without settings. Output: at most `MASTER_INSTRUCTIONS_BYTES_MAX` bytes of markdown,
@@ -343,7 +361,10 @@ pub fn for_master(
     } else {
         let plugins = crate::storage::plugins::effective(tx, &root, project)
             .map_err(|problem| LaunchError(problem.0))?;
-        text.push_str(&team_index(&plugins));
+        let roles = crate::coord::settings::read(tx, project)
+            .map_err(|problem| LaunchError(problem.0))?
+            .role_skills;
+        text.push_str(&team_index(&plugins, &roles));
     }
     text.push_str(MASTER_LANDING_RULES);
     assert!(text.len() <= MASTER_INSTRUCTIONS_BYTES_MAX);
@@ -608,7 +629,8 @@ impl AgentContext {
     }
 
     /// Adds the names of the project's approved skills and MCP servers for a team master
-    /// whose own tools are off, so it plans the team's work with them. No secret value,
+    /// whose own tools are off, with the team roles each skill goes to when the owner chose
+    /// skills per role, so it plans the team's work with them. No secret value,
     /// command, URL or file of a server is read or given. Input: a connection to the
     /// engine's `engine.db` and the project. Output: the context, or a plain code.
     pub fn with_team_index(
@@ -620,12 +642,15 @@ impl AgentContext {
         let tx = connection.unchecked_transaction().map_err(unavailable)?;
         let plugins = crate::storage::plugins::effective(&tx, &root, project)
             .map_err(|problem| LaunchError(problem.0))?;
+        let roles = crate::coord::settings::read(&tx, project)
+            .map_err(|problem| LaunchError(problem.0))?
+            .role_skills;
         drop(tx);
-        Ok(self.with_index(&plugins))
+        Ok(self.with_index(&plugins, &roles))
     }
 
-    fn with_index(mut self, plugins: &EffectivePlugins) -> Self {
-        self.instructions.push_str(&team_index(plugins));
+    fn with_index(mut self, plugins: &EffectivePlugins, roles: &RoleSkills) -> Self {
+        self.instructions.push_str(&team_index(plugins, roles));
         assert!(self.instructions.len() <= MASTER_INSTRUCTIONS_BYTES_MAX);
         self
     }
@@ -1101,25 +1126,49 @@ fn skills_index(folder: &Path, skills: &[EffectiveSkill], skill_tool: bool) -> S
     index
 }
 
-fn team_index(plugins: &EffectivePlugins) -> String {
-    if plugins.skills.is_empty() && plugins.servers.is_empty() {
-        return String::new();
-    }
-    let mut index = String::from(
-        "\n## Team skills and MCP servers\n\nYour own tools are off in this conversation, so you cannot call these. The owner approved them for this project, and every team agent with tools on receives them. Plan the team's work with them in mind.\n\n",
-    );
-    let skills = plugins.skills.iter().map(|skill| {
+/// Lists for a master whose own tools are off the approved skills and MCP servers that team
+/// agents with tools on receive. While the owner chose skills for leads or workers (DEC-111
+/// R3), each skill names the roles that get it, and a skill neither gets is left out.
+/// Inputs: the project's approved plugins and its skills per role. Output: the section, or
+/// nothing when no agent gets anything.
+fn team_index(plugins: &EffectivePlugins, roles: &RoleSkills) -> String {
+    let per_role = roles.lead.is_some() || roles.worker.is_some();
+    let gets = |role, name: &str| {
+        roles
+            .of(role)
+            .is_none_or(|chosen| chosen.iter().any(|kept| kept == name))
+    };
+    let skills = plugins.skills.iter().filter_map(|skill| {
+        let tag = match (
+            gets(SkillRole::Lead, &skill.name),
+            gets(SkillRole::Worker, &skill.name),
+        ) {
+            (false, false) => return None,
+            _ if !per_role => "",
+            (true, true) => " (leads and workers)",
+            (true, false) => " (leads)",
+            (false, true) => " (workers)",
+        };
         let description = skill_description(&skill.folder.join("SKILL.md"));
-        format!(
-            "- Skill {}: {}\n",
+        Some(format!(
+            "- Skill {}{tag}: {}\n",
             clip(&skill.name, NAME_BYTES_MAX),
             clip(description.trim(), DESCRIPTION_BYTES_MAX)
-        )
+        ))
     });
     let servers = plugins
         .servers
         .iter()
         .map(|server| format!("- MCP server {}\n", clip(&server.name, NAME_BYTES_MAX)));
+    let mut index = String::from(match per_role {
+        false => {
+            "\n## Team skills and MCP servers\n\nYour own tools are off in this conversation, so you cannot call these. The owner approved them for this project, and every team agent with tools on receives them. Plan the team's work with them in mind.\n\n"
+        }
+        true => {
+            "\n## Team skills and MCP servers\n\nYour own tools are off in this conversation, so you cannot call these. The owner approved them for this project. Every team agent with tools on receives the MCP servers, but each skill only the team roles named after it, as the owner chose: a lead is a sub-agent that may start sub-agents of its own, and a worker is any other sub-agent or teammate. Plan the team's work with them in mind.\n\n"
+        }
+    });
+    let head = index.len();
     let mut left = 0;
     for line in skills.chain(servers) {
         if left > 0 || index.len() + line.len() > TEAM_INDEX_BYTES_MAX {
@@ -1127,6 +1176,9 @@ fn team_index(plugins: &EffectivePlugins) -> String {
             continue;
         }
         index.push_str(&line);
+    }
+    if index.len() == head && left == 0 {
+        return String::new();
     }
     if left > 0 {
         index.push_str(&format!("- and {left} more\n"));

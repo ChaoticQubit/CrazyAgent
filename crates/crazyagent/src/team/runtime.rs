@@ -5044,12 +5044,10 @@ impl TeamRuntime {
     ) -> Result<AgentContext, String> {
         let unread =
             |e: LaunchError| with_code("the project context could not be read", Some(&e.0));
-        let context = crate::launch_context::for_project(&self.connection, project, layout)
-            .and_then(|context| {
-                let skills = crate::coord::settings::read(&self.connection, project)
-                    .map_err(|problem| LaunchError(problem.0))?
-                    .role_skills;
-                Ok(context.for_role(skills.of(self.skill_role(project, id, role)?)))
+        let context = self
+            .skill_role(project, id, role)
+            .and_then(|skills| {
+                crate::launch_context::for_team_role(&self.connection, project, layout, skills)
             })
             .map_err(unread)?;
         let master = role == AgentRole::Master;

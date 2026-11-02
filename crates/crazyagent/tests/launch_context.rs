@@ -908,12 +908,8 @@ fn role_launch(case: &Case, project: &ProjectId, role: SkillRole, home: &Path) -
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
     )
     .unwrap();
-    let skills = crazyagent::coord::settings::read(&connection, project)
-        .unwrap()
-        .role_skills;
-    let context = launch_context::for_project(&connection, project, Layout::Linked)
-        .unwrap()
-        .for_role(skills.of(role));
+    let context =
+        launch_context::for_team_role(&connection, project, Layout::Linked, role).unwrap();
     let (command, files) =
         command_with_context(&request(case, "claude-code", home, true), &context).unwrap();
     let written = argument_after(&command, "--plugin-dir")
@@ -1039,6 +1035,108 @@ async fn with_chosen_skills_each_role_gets_its_own_list() {
         coordination(&mut owner, &project).await.role_skills,
         chosen,
         "a refused choice changes nothing"
+    );
+    drop(owner);
+    case.close().await;
+}
+
+/// The team section a master with tools off reads (DEC-111 R3). Takes the case and the
+/// project. Returns the section between its heading and the landing rules.
+fn team_section(case: &Case, project: &ProjectId) -> String {
+    let (_, text) = case.master(project, false).unwrap();
+    let Some((_, section)) = text.split_once("\n## Team skills and MCP servers\n\n") else {
+        return String::new();
+    };
+    section
+        .split_once("\n## Landing the team's work")
+        .unwrap()
+        .0
+        .to_owned()
+}
+
+#[tokio::test]
+async fn a_master_with_tools_off_hears_which_team_roles_get_each_skill() {
+    let case = Case::new().await;
+    let mut owner = case.owner().await;
+    let project = crew_with_skills(
+        &case,
+        &mut owner,
+        &["meal-tips", "release-notes", "style-guide"],
+    )
+    .await;
+    let tools_off = "Your own tools are off in this conversation, so you cannot call these.";
+    assert_eq!(
+        team_section(&case, &project),
+        format!(
+            "{tools_off} The owner approved them for this project, and every team agent with tools on receives them. Plan the team's work with them in mind.\n\n- Skill meal-tips: Teaches meal-tips.\n- Skill release-notes: Teaches release-notes.\n- Skill style-guide: Teaches style-guide.\n"
+        ),
+        "with All approved skills for every role, every team agent gets every skill"
+    );
+    let per_role = format!(
+        "{tools_off} The owner approved them for this project. Every team agent with tools on receives the MCP servers, but each skill only the team roles named after it, as the owner chose: a lead is a sub-agent that may start sub-agents of its own, and a worker is any other sub-agent or teammate. Plan the team's work with them in mind.\n\n"
+    );
+    save_coordination(
+        &mut owner,
+        &project,
+        CoordSettings {
+            role_skills: RoleSkills {
+                master: Some(Vec::new()),
+                lead: Some(owned(&["meal-tips", "not-approved"])),
+                worker: Some(owned(&["release-notes", "meal-tips"])),
+            },
+            ..CoordSettings::default()
+        },
+        2,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        team_section(&case, &project),
+        format!(
+            "{per_role}- Skill meal-tips (leads and workers): Teaches meal-tips.\n- Skill release-notes (workers): Teaches release-notes.\n"
+        ),
+        "each skill names the roles the owner chose for it, and one no team agent gets is left out"
+    );
+    save_coordination(
+        &mut owner,
+        &project,
+        CoordSettings {
+            role_skills: RoleSkills {
+                worker: Some(Vec::new()),
+                ..RoleSkills::default()
+            },
+            ..CoordSettings::default()
+        },
+        3,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        team_section(&case, &project),
+        format!(
+            "{per_role}- Skill meal-tips (leads): Teaches meal-tips.\n- Skill release-notes (leads): Teaches release-notes.\n- Skill style-guide (leads): Teaches style-guide.\n"
+        ),
+        "leads on All approved skills get every skill while workers get none"
+    );
+    save_coordination(
+        &mut owner,
+        &project,
+        CoordSettings {
+            role_skills: RoleSkills {
+                lead: Some(Vec::new()),
+                worker: Some(Vec::new()),
+                ..RoleSkills::default()
+            },
+            ..CoordSettings::default()
+        },
+        4,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        team_section(&case, &project),
+        "",
+        "with no skill for any team agent and no MCP server, the master hears no team section"
     );
     drop(owner);
     case.close().await;
