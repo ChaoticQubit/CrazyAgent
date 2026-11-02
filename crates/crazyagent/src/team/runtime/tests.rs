@@ -4612,7 +4612,8 @@ fn with_next_message_full_inputs_note_the_waiting_edit_once_per_edited_text() {
             crate::agent_home::save_app(&fixture.base, edit).unwrap();
         }
         let label = format!("Results {turns}:");
-        let results = format!("{label} {}", "Task done. ".repeat(2000));
+        let line = format!("{}\n", "Task done. ".repeat(50));
+        let results = format!("{label}\n{}", line.repeat(40));
         assert!(results.len() > crate::team::master::INPUT_TEXT_MAX);
         let tx = fixture.connection.transaction().unwrap();
         append_message(
