@@ -1,9 +1,12 @@
 #![cfg(unix)]
 
+mod pane_support;
+
+use pane_support::{LEAD_PANE, PaneCallers};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 const MATE_PANE: &str = "%7";
 const MATE_RESTS: &str = "00000000000000000000000000000008.idle";
@@ -14,6 +17,7 @@ struct Team {
     _root: tempfile::TempDir,
     config: PathBuf,
     mailbox: PathBuf,
+    callers: PaneCallers,
 }
 
 impl Team {
@@ -35,29 +39,25 @@ impl Team {
             .to_string(),
         )
         .unwrap();
-        let mailbox = root.path().join("mailbox");
-        std::fs::create_dir(&mailbox).unwrap();
-        std::fs::set_permissions(&mailbox, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (mailbox, callers) = PaneCallers::new(root.path(), &[(MATE_PANE, "greet")]);
         Self {
             _root: root,
             config,
             mailbox,
+            callers,
         }
     }
 
     fn hook(&self, event: &str, pane: &str, input: serde_json::Value) -> String {
-        let mut child = crazyagent::spawn_gate::spawn(
+        let mut child = self.callers.run(
+            pane,
             Command::new(env!("CARGO_BIN_EXE_crazyagent"))
                 .arg("coord-hook")
                 .arg(event)
                 .arg(&self.mailbox)
                 .env("CLAUDE_CONFIG_DIR", &self.config)
-                .env("TMUX_PANE", pane)
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped()),
-        )
-        .unwrap();
+                .env("TMUX_PANE", pane),
+        );
         child
             .stdin
             .take()
@@ -162,7 +162,7 @@ fn a_teammate_handed_a_waiting_message_at_its_stop_does_not_rest_and_the_lead_ne
 
     let lead = Team::new();
     lead.hook("stop", "%3", session(LEAD_SESSION));
-    lead.hook("stop", MATE_PANE, session(LEAD_SESSION));
+    lead.hook("stop", LEAD_PANE, session(MATE_SESSION));
     assert!(
         lead.marks().is_empty(),
         "the lead's own stop is the engine's to read, never a resting mark: {:?}",

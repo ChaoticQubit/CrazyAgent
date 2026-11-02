@@ -150,6 +150,7 @@ pub(super) fn register(
                         params![id, at],
                     )
                     .map_err(error)?;
+                keep_name(connection, lead, id, &member.name)?;
             }
             None => {
                 connection
@@ -161,6 +162,7 @@ pub(super) fn register(
                     .map_err(error)?;
                 let id = connection.last_insert_rowid();
                 let _ = names::assign_role(connection, project, id, &member.name)?;
+                keep_name(connection, lead, id, &member.name)?;
             }
         }
     }
@@ -190,6 +192,47 @@ pub(super) fn register(
         }
     }
     Ok(())
+}
+
+/// Keeps the name a native teammate's row is known by: the first one its lead's team config
+/// gave its pane when the engine saw it live, kept only when it names a worktree and no
+/// other live teammate of the lead holds it (DEC-111 Q18, RH-2). The config is the agents'
+/// own file, so a later rename there changes nothing. Inputs: the connection, the lead,
+/// the teammate row and the name. Output: any SQLite failure.
+fn keep_name(
+    connection: &Connection,
+    lead: i64,
+    teammate: i64,
+    name: &str,
+) -> Result<(), EngineError> {
+    if !crate::agent_git::worktree_name_valid(name) {
+        return Ok(());
+    }
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO team_teammate_names(agent,name)
+             SELECT ?1,?2 WHERE NOT EXISTS (
+                 SELECT 1 FROM team_teammate_names n JOIN team_agents a ON a.id=n.agent
+                 WHERE a.parent=?3 AND a.role='teammate'
+                 AND a.status IN ('starting','idle','working') AND n.name=?2 AND n.agent<>?1)",
+            params![teammate, name, lead],
+        )
+        .map_err(error)?;
+    Ok(())
+}
+
+/// The name the engine keeps for a native teammate's row (DEC-111 Q18, RH-2). Inputs: the
+/// connection and the row. Output: the name, or none, also when unread.
+pub(super) fn name(connection: &Connection, teammate: i64) -> Option<String> {
+    connection
+        .query_row(
+            "SELECT name FROM team_teammate_names WHERE agent=?1",
+            [teammate],
+            |row| row.get(0),
+        )
+        .optional()
+        .ok()
+        .flatten()
 }
 
 /// Lists a lead's running teammate rows with their pane ids, so the terminal host learns
