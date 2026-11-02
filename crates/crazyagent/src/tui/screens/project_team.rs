@@ -12,9 +12,9 @@ use crate::project_setup::{SetupQuery, SetupView};
 use crate::protocol::ProjectId;
 use crate::team::events::{EventKind, HOURLY_CAP_MAX, RuleTarget, WakeRule};
 use crate::team::{
-    AgentRole, AgentStatus, BranchMode, ChildLanding, CoordinationView, DelegationPath,
-    MASTER_BRANCH_BYTES_MAX, SwitchMode, TASK_PROMPT_BYTES_MAX, TaskSource, TaskStatus, TeamAction,
-    TeamAgent, TeamHarness, TeamStatus, TeamTask,
+    AgentRole, AgentStatus, BackgroundAtEnd, BranchMode, ChildLanding, CoordinationView,
+    DelegationPath, MASTER_BRANCH_BYTES_MAX, SwitchMode, TASK_PROMPT_BYTES_MAX, TaskSource,
+    TaskStatus, TeamAction, TeamAgent, TeamHarness, TeamStatus, TeamTask,
 };
 use crate::tui::seam::AccountRow;
 use crossterm::event::{KeyCode, KeyEvent};
@@ -543,6 +543,8 @@ impl TeamView {
             }
             KeyCode::Char('g') => self.ask_before_merge(),
             KeyCode::Char('F') => self.new_folder_limit(),
+            KeyCode::Char('B') => self.background_at_end(),
+            KeyCode::Char('G') => self.grace_time(),
             KeyCode::Char('c') => {
                 self.open_coord();
                 TeamReply::Handled
@@ -1522,6 +1524,67 @@ impl TeamView {
         })
     }
 
+    /// Moves "Background commands", what a task does at its turn end while commands its
+    /// agent started in the background still run (DEC-111 Q13), from Wait to a grace time of
+    /// [`crate::team::BACKGROUND_GRACE_SECS_DEFAULT`], to Stop and back to Wait. Output: the
+    /// change to send, or Handled with a notice while loading or saving.
+    fn background_at_end(&mut self) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        let choice = match status.background_at_end {
+            BackgroundAtEnd::Wait => BackgroundAtEnd::Grace {
+                secs: crate::team::BACKGROUND_GRACE_SECS_DEFAULT,
+            },
+            BackgroundAtEnd::Grace { .. } => BackgroundAtEnd::Stop,
+            BackgroundAtEnd::Stop => BackgroundAtEnd::Wait,
+        };
+        self.save_background(choice)
+    }
+
+    /// Moves the grace time of "Background commands" to the next of
+    /// [`crate::team::BACKGROUND_GRACE_CHOICES_SECS`] above it, the first after the last, or
+    /// starts a grace time of [`crate::team::BACKGROUND_GRACE_SECS_DEFAULT`] from Wait or
+    /// Stop. Output: the change to send, or Handled with a notice while loading or saving.
+    fn grace_time(&mut self) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        let choices = crate::team::BACKGROUND_GRACE_CHOICES_SECS;
+        let secs = match status.background_at_end {
+            BackgroundAtEnd::Grace { secs } => choices
+                .iter()
+                .copied()
+                .find(|choice| *choice > secs)
+                .unwrap_or(choices[0]),
+            BackgroundAtEnd::Wait | BackgroundAtEnd::Stop => {
+                crate::team::BACKGROUND_GRACE_SECS_DEFAULT
+            }
+        };
+        assert!(crate::team::BACKGROUND_GRACE_SECS.contains(&secs));
+        self.save_background(BackgroundAtEnd::Grace { secs })
+    }
+
+    /// Sends one Background commands choice with the notice that says what it now does.
+    /// Takes the choice. Output: the change to send, or Handled while saving.
+    fn save_background(&mut self, choice: BackgroundAtEnd) -> TeamReply {
+        let done = match choice {
+            BackgroundAtEnd::Wait => "A task now waits for the commands its agent started in the background, up to its task limit.".to_owned(),
+            BackgroundAtEnd::Grace { secs } => format!(
+                "A task's background commands now get {} after its turn ends, then stop.",
+                crate::team::span_words(secs.into())
+            ),
+            BackgroundAtEnd::Stop => "A task's background commands now stop when its turn ends, and its agent is told so.".to_owned(),
+        };
+        let action = TeamAction::BackgroundAtEnd {
+            project_id: self.project.clone(),
+            choice,
+        };
+        self.change(&done, action)
+    }
+
     /// Opens the coordination editor on its first row. Output: none; a notice while the team
     /// is loading or when the engine sends no coordination settings.
     fn open_coord(&mut self) {
@@ -2088,7 +2151,8 @@ impl TeamView {
     /// The Team rows: the agent counts, a stopped team and alerts, then every team setting
     /// in order (Keep warm, Task, Session, Idle stop, On harness switch, Sub-agent depth,
     /// Worker lands, Agent branches, Max harnesses, Max teammates, Spread accounts, Token
-    /// budget, Master's branch, Land on, Ask before merge, New folder limit), each whole. A
+    /// budget, Master's branch, Land on, Ask before merge, New folder limit, Background
+    /// commands), each whole. A
     /// setting that does not fit on the row starts the next one, right-aligned under the
     /// first. Counts wider
     /// than the content are cut with an ellipsis like any row. Inputs: the content width and
@@ -2205,6 +2269,10 @@ impl TeamView {
             setting(
                 "New folder limit",
                 format!("{} files", status.new_folder_files_max),
+            ),
+            setting(
+                "Background commands",
+                background_words(status.background_at_end),
             ),
         ];
         let mut rows = Vec::new();
@@ -2529,6 +2597,8 @@ impl TeamView {
             ("L", "Land on"),
             ("g", "Ask before merge"),
             ("F", "New folder limit"),
+            ("B", "Background commands"),
+            ("G", "Grace time"),
             ("c", "Coordination"),
             ("e", "Wake rules"),
         ];
@@ -2643,6 +2713,18 @@ fn next_limit(choices: &[u32], current: Option<u32>) -> Option<u32> {
     }
 }
 
+/// The summary words for Background commands at task end (DEC-111 Q13). Input: the
+/// choice. Output: the words.
+fn background_words(choice: BackgroundAtEnd) -> String {
+    match choice {
+        BackgroundAtEnd::Wait => "Wait".to_owned(),
+        BackgroundAtEnd::Grace { secs } => {
+            format!("Stop after {}", crate::team::span_words(secs.into()))
+        }
+        BackgroundAtEnd::Stop => "Stop at turn end".to_owned(),
+    }
+}
+
 /// A time limit as Team settings shows it, "Off" for none. Input: the limit in seconds.
 fn limit_label(secs: Option<u32>) -> String {
     secs.map_or_else(
@@ -2702,6 +2784,7 @@ pub(in crate::tui) fn team_plain(code: &str) -> String {
         "team_land_on_invalid" => {
             "Type a branch name such as stage or release/2.0, or leave it empty for the master's branch.".into()
         }
+        "team_background_grace_invalid" => "Pick a grace time from 10 s to 1 h.".into(),
         other => plain_problem(other),
     }
 }

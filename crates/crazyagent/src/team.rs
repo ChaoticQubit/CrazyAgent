@@ -516,6 +516,10 @@ pub const BACKGROUND_GRACE_SECS: std::ops::RangeInclusive<u32> = 10..=3600;
 /// The grace time, in seconds, offered when the owner first picks a grace time.
 pub const BACKGROUND_GRACE_SECS_DEFAULT: u32 = 120;
 
+/// The grace times, in seconds, a client steps through, each inside
+/// [`BACKGROUND_GRACE_SECS`].
+pub const BACKGROUND_GRACE_CHOICES_SECS: [u32; 8] = [10, 30, 60, 120, 300, 600, 1800, 3600];
+
 impl BackgroundAtEnd {
     /// The stored mode name and grace time. Output: `wait`, `grace` with its seconds, or
     /// `stop`, each without seconds but grace.
