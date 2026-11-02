@@ -443,16 +443,40 @@ pub(super) fn branches(db: &Connection, id: &ChangeSetId) -> Result<TargetBranch
     let current = current_branch(&owner)?
         .and_then(|reference| reference.strip_prefix("refs/heads/").map(str::to_owned));
     assert!(branches.len() <= BRANCHES_MAX);
-    let land_on = land_on(db, &owner, &record.project)
-        .ok()
-        .flatten()
-        .map(|(branch, _)| branch);
+    let (land_on, land_on_problem) = match land_on(db, &owner, &record.project) {
+        Ok(found) => (found.map(|(branch, _)| branch), None),
+        Err(error) => (None, Some(land_on_problem(db, &record.project, &error))),
+    };
     Ok(TargetBranches {
         branches,
         current,
         land_on,
-        land_on_problem: None,
+        land_on_problem,
     })
+}
+
+/// The plain sentence the Accept branch list carries when a project's Land on branch
+/// cannot be resolved (DEC-111 Q1): the setting that names the missing branch and what to
+/// do, or that the setting could not be read. Inputs: the store, the project and the
+/// failure. Output: the sentence.
+fn land_on_problem(db: &Connection, project: &ProjectId, error: &EngineError) -> String {
+    let unread =
+        "Your Land on branch could not be read. Pick a branch, or check Land on in Team settings.";
+    if error.0 != "changes_target_invalid" {
+        return unread.to_owned();
+    }
+    match crate::team::land_on(db, project) {
+        Ok(Some(name)) => format!(
+            "Your Land on branch {name} is not a local branch of this project. Pick a branch, or change Land on in Team settings."
+        ),
+        Ok(None) => match crate::team::master_branch_choice(db, project) {
+            Ok(Some(name)) => format!(
+                "Land on uses the Master's branch {name}, which is not a local branch of this project. Pick a branch, or change the Master's branch in Team settings."
+            ),
+            Ok(None) | Err(_) => unread.to_owned(),
+        },
+        Err(_) => unread.to_owned(),
+    }
 }
 
 /// Refuses an owner checkout with tracked changes, staged or not, or with an untracked

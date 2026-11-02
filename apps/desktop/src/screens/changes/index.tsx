@@ -6,7 +6,7 @@ import { Button, ConfirmDialog, Dialog, Select, TextArea } from "../../ui";
 import { displayText } from "../conversation";
 import { Badge, NotReady, ProjectEmpty } from "../project/shared";
 import type { ProjectData } from "../project/shared";
-import { acceptNote, acceptTarget, actions, agentName, branchLabel, checkedNote, commitMessage, conflictNote, diffText, fileLine, fileMarks, lastPageSeen, movedNote, outcomeNote, restoreNote, reviewed, reviewOf, sizeLine, stateBadge, updatingNote } from "./model";
+import { acceptBlocked, acceptNote, acceptTarget, actions, agentName, branchLabel, checkedNote, commitMessage, conflictNote, diffText, fileLine, fileMarks, lastPageSeen, movedNote, outcomeNote, restoreNote, reviewed, reviewOf, sizeLine, stateBadge, updatingNote } from "./model";
 import type { Review } from "./model";
 import "./changes.css";
 
@@ -49,18 +49,19 @@ export function AcceptDialog({ set, pending, onCancel, onAccept }: {
     void loadTargetBranches(set.id).then((result) => {
       if (!current || result.kind !== "ok") return;
       setBranches(result.value);
-      setTarget(result.value.land_on ?? result.value.current ?? result.value.branches[0] ?? "");
+      setTarget((result.value.land_on_problem ?? null) !== null ? "" : result.value.land_on ?? result.value.current ?? result.value.branches[0] ?? "");
     });
     return () => { current = false; };
   }, [set.id]);
   const { picked, text: lands } = acceptTarget(branches, target);
+  const blocked = acceptBlocked(branches, target);
   return <Dialog open title="Accept these changes?" onClose={onCancel} busy={pending}
     footer={<><Button disabled={pending} onClick={onCancel}>Keep reviewing</Button>
-      <Button variant="primary" pending={pending} disabled={message === null} onClick={() => { if (message !== null) onAccept(message, picked); }}>Accept</Button></>}>
+      <Button variant="primary" pending={pending} disabled={message === null || blocked} onClick={() => { if (message !== null && !blocked) onAccept(message, picked); }}>Accept</Button></>}>
     <p>{lands}</p>
     {branches !== null && branches.branches.length > 0 &&
       <Select id={branchId} label="Branch" value={target} onValue={setTarget}
-        options={branches.branches.map((name) => ({ value: name, label: branchLabel(branches, name) }))} />}
+        options={[...(blocked ? [{ value: "", label: "Pick a branch" }] : []), ...branches.branches.map((name) => ({ value: name, label: branchLabel(branches, name) }))]} />}
     {shown !== set.message && <p role="alert">The proposed message held characters you cannot see. They are shown as escapes: check it before you accept.</p>}
     <TextArea id={id} label="Commit message" value={text} onValue={setText} rows={6}
       error={message === null ? "Write a commit message of up to 4096 bytes, with no hidden characters, to accept." : undefined} />
