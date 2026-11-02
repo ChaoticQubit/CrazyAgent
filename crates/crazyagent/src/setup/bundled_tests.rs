@@ -188,7 +188,7 @@ fn the_shipped_hook_files_unpack_privately_replace_an_older_copy_and_name_their_
     assert_eq!(hook_folder(setup.path(), "graphify"), None);
     let unpacked = extract_hooks(setup.path()).unwrap();
     assert_eq!(unpacked, setup.path().join("bundled-hooks"));
-    assert_eq!(HOOK_FILES.len(), 2);
+    assert_eq!(HOOK_FILES.len(), 3);
     for (path, bytes) in HOOK_FILES {
         let file = unpacked.join(path);
         assert_eq!(std::fs::read(&file).unwrap(), *bytes, "{path}");
@@ -342,6 +342,12 @@ fn a_hookless_folder_with_a_bad_name_reads_as_having_no_hooks_before_its_name_is
             .1,
     )
     .unwrap();
+    assert_eq!(
+        crate::plugins::hook_folder::read(&bad),
+        Err("hooks_plugin_manifest_missing")
+    );
+    std::fs::create_dir(bad.join(".claude-plugin")).unwrap();
+    std::fs::write(bad.join(".claude-plugin/plugin.json"), r#"{"name":".bad"}"#).unwrap();
     assert_eq!(
         crate::plugins::hook_folder::read(&bad),
         Err("hook_plugin_name_invalid")

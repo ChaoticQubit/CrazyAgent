@@ -135,7 +135,7 @@ export const KNOWN_ERROR_CODES = Object.keys(COPY);
  * sentence, or undefined when there is none. */
 export function knownError(code: string): string | undefined {
   if (Object.hasOwn(COPY, code)) return COPY[code];
-  return /^(skill|server|plugins?)_[a-z_]+$/.test(code) ? errorMessage({ code }) : undefined;
+  return /^(skill|server|plugins?|hooks?)_[a-z_]+$/.test(code) ? errorMessage({ code }) : undefined;
 }
 
 /** The owner's line for a failure, never opaque: its own sentence, else the generic sentence;
