@@ -12573,3 +12573,168 @@ fn a_native_teammate_cannot_change_a_hook_its_lead_runs() {
         );
     }
 }
+
+/// A native lead's teammate cannot change the skills or the message relay its lead's Claude
+/// Code reads (TPH). The project holds one owner skill, added through the plugin store, and
+/// the lead has tools on with the engine's relay. Once the lead's launch installs both into
+/// its agent home, the teammate, in its installed profile, overwrites and replaces the skill's
+/// copy, rewrites the relay's hooks file and plugin manifest and moves the relay folder away:
+/// every write is refused and each file keeps the engine's bytes.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_teammate_cannot_change_its_lead_s_skills_or_relay_plugin() {
+    use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    set_mode(
+        &fixture.connection,
+        &project,
+        HarnessKind::ClaudeCode,
+        SubagentMode::Native,
+    )
+    .unwrap();
+    let source = fixture.base.join("owner-skills").join("lead-notes");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(
+        source.join("SKILL.md"),
+        "---\nname: lead-notes\ndescription: The lead's notes.\n---\n",
+    )
+    .unwrap();
+    let mut store = Connection::open(fixture.base.join("engine.db")).unwrap();
+    crate::storage::plugins::execute(
+        &mut store,
+        &fixture.base,
+        crate::storage::plugins::Command::AddSkill {
+            scope: crate::plugins::Scope::Project {
+                project_id: project.clone(),
+            },
+            source: source.to_str().unwrap().into(),
+        },
+    )
+    .unwrap();
+    drop(store);
+    std::fs::set_permissions(
+        fixture.base.join("engine.db"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let bin = fixture.base.join("engine-bin");
+    std::fs::create_dir(&bin).unwrap();
+    let engine = bin.join("crazyagent");
+    engine_file(&engine);
+    let host = crate::terminal::tmux_host(&fixture.base, Some(fixture.tmux.clone()));
+    let runtime = exiting_claude_runtime(&fixture)
+        .with_delegation_tool(&engine)
+        .unwrap()
+        .with_terminal(host.clone())
+        .unwrap();
+    let profile = reference("managed-profile");
+    let managed = runtime.custody.as_ref().unwrap().profile_home(&profile);
+    std::fs::create_dir_all(&managed).unwrap();
+    std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let account = TeamAccount {
+        connection: reference("managed-connection"),
+        reach: TeamReach::Managed {
+            profile_ref: profile,
+            model: None,
+        },
+    };
+    let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    let (_, plan, _) = runtime
+        .prepare(
+            &fixture.setup,
+            id,
+            AgentRole::Sub,
+            "claude-code",
+            true,
+            &account,
+            false,
+            Layout::Linked,
+        )
+        .unwrap();
+    assert!(plan.native, "the lead starts with native teammates");
+    std::fs::create_dir_all(runtime.mailbox(id).parent().unwrap()).unwrap();
+    let home = agent_home(&runtime.state, id);
+    let context = runtime
+        .context(&project, id, AgentRole::Sub, true, Layout::Linked)
+        .unwrap();
+    let installed = plan
+        .team_context(context)
+        .install("claude-code", &home, true)
+        .unwrap();
+    assert!(crate::coord::relay::installed(&home));
+    let skill = home
+        .join("crazyagent")
+        .join("plugin")
+        .join("skills")
+        .join("lead-notes")
+        .join("SKILL.md");
+    let relay = home.join(crate::coord::relay::PLUGIN_FOLDER);
+    let relay_hooks = relay.join("hooks").join("hooks.json");
+    let relay_manifest = relay.join(".claude-plugin").join("plugin.json");
+    let engine_bytes: Vec<(PathBuf, Vec<u8>)> = [&skill, &relay_hooks, &relay_manifest]
+        .into_iter()
+        .map(|file| (file.clone(), std::fs::read(file).unwrap()))
+        .collect();
+
+    let work = plan.working_dir.clone();
+    let tried = work.join("tried.txt");
+    let mate = work.join("mate.sh");
+    std::fs::write(
+        &mate,
+        format!(
+            "printf 'planted\\n' > '{skill}'; echo skill=$? > {tried}\n\
+             rm -f '{skill}' && printf 'planted\\n' > '{skill}'; echo skill_replace=$? >> {tried}\n\
+             printf '{{}}\\n' > '{hooks}'; echo relay_hooks=$? >> {tried}\n\
+             printf '{{}}\\n' > '{manifest}'; echo relay_manifest=$? >> {tried}\n\
+             mv '{relay}' '{relay}.away'; echo relay_move=$? >> {tried}\n",
+            skill = skill.display(),
+            hooks = relay_hooks.display(),
+            manifest = relay_manifest.display(),
+            relay = relay.display(),
+            tried = tried.display(),
+        ),
+    )
+    .unwrap();
+    let mated = crate::spawn_gate::output(
+        Command::new(crate::sandbox::SANDBOX_EXEC)
+            .arg("-f")
+            .arg(agent_teammates_profile(&runtime.state, id))
+            .arg("/bin/sh")
+            .arg(&mate)
+            .current_dir(&work)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    let attempts = std::fs::read_to_string(&tried).unwrap_or_default();
+    drop(installed);
+
+    for attempt in [
+        "skill",
+        "skill_replace",
+        "relay_hooks",
+        "relay_manifest",
+        "relay_move",
+    ] {
+        assert!(
+            attempts
+                .lines()
+                .any(|line| line.starts_with(&format!("{attempt}=")) && !line.ends_with("=0")),
+            "a teammate's {attempt} write in its lead's home succeeded: {attempts} {}",
+            String::from_utf8_lossy(&mated.stderr)
+        );
+    }
+    for (file, bytes) in engine_bytes {
+        assert_eq!(
+            std::fs::read(&file).ok().as_deref(),
+            Some(bytes.as_slice()),
+            "{} changed",
+            file.display()
+        );
+    }
+}
