@@ -169,6 +169,18 @@ test("Accept lands on the team's Land on branch unless the owner picks another, 
   assert.equal(model.branchLabel({ branches: ["main"], current: "main", land_on: "main" }, "main"), "main (Land on, checked out)");
 });
 
+test("Accept with a missing Land on branch names it, offers no default and waits for a picked branch", () => {
+  const missing = "Your Land on branch stage is not a local branch of this project. Pick a branch, or change Land on in Team settings.";
+  const listed = { branches: ["feat/x", "main"], current: "feat/x", land_on: null, land_on_problem: missing };
+  assert.deepEqual(model.acceptTarget(listed, ""), { picked: null, text: missing });
+  assert.equal(model.acceptBlocked(listed, ""), true);
+  assert.deepEqual(model.acceptTarget(listed, "feat/x"), { picked: "feat/x", text: "They land as one commit on feat/x, the branch checked out in your project folder, under your own Git name. CrazyAgent did not check them." });
+  assert.equal(model.acceptBlocked(listed, "feat/x"), false);
+  assert.equal(model.acceptTarget(listed, "main").picked, "main");
+  assert.equal(model.acceptBlocked({ branches: ["main"], current: "main", land_on: "main" }, "main"), false);
+  assert.equal(model.acceptBlocked(null, ""), false);
+});
+
 test("Accept shows hidden characters in a proposed message as escapes and never sends them", () => {
   assert.equal(model.commitMessage("Owner title\u{e0041}\u{e0042}"), null);
   assert.equal(model.commitMessage("Zero\u200bwidth"), null);

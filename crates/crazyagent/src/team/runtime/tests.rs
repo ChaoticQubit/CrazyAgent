@@ -1503,6 +1503,70 @@ fn a_new_agent_s_worktree_starts_from_the_land_on_branch_tip() {
     );
 }
 
+/// A Land on branch the project lacks, deleted after the owner chose it, refuses a new
+/// agent's start with the reason naming the Land on setting, so no agent starts from the
+/// Master's branch instead (DEC-111 Q1, review F1).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_deleted_land_on_branch_refuses_a_new_agent_s_start_naming_the_setting() {
+    let fixture = Fixture::new(1);
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let project = fixture.base.join("project");
+    let home = fixture.base.join("git-home");
+    std::fs::create_dir(&home).unwrap();
+    let git = |arguments: &[&str]| {
+        let output = level_git(&project, &home, arguments);
+        assert!(
+            output.status.success(),
+            "git {arguments:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+    git(&["init", "-q", "--template=", "-b", "main"]);
+    std::fs::write(project.join("owner.txt"), "work\n").unwrap();
+    git(&["add", "owner.txt"]);
+    git(&[
+        "-c",
+        "user.name=Owner",
+        "-c",
+        "user.email=owner@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        "Start",
+    ]);
+    git(&["branch", "stage"]);
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_land_on(project,branch) VALUES (?1,'stage')",
+            [PROJECT],
+        )
+        .unwrap();
+    git(&["branch", "-D", "stage"]);
+    let access = fixture.access.clone();
+    let runtime = TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", codex)]),
+        Box::new(move || Some(access.clone())),
+        TeamLimits::default(),
+    )
+    .unwrap();
+    let root = project.canonicalize().unwrap();
+    assert_eq!(
+        runtime.master_tip(&fixture.setup.project_id, &root),
+        Err(
+            "the Land on branch is not a local branch of the project. (changes_target_invalid)"
+                .to_owned()
+        )
+    );
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn a_managed_agent_runs_in_its_own_home_and_never_reaches_the_account_home() {

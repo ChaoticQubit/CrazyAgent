@@ -1030,6 +1030,56 @@ fn accept_preselects_the_land_on_branch_and_sends_a_plain_accept_for_it() {
     );
 }
 
+/// With the Land on branch missing, Accept names the setting and the branch, preselects no
+/// branch and sends nothing until the owner picks one with Tab, which it then names
+/// (DEC-111 Q1, review F1): the checked-out branch is never the silent destination.
+#[test]
+fn accept_with_a_missing_land_on_branch_names_it_and_waits_for_a_picked_branch() {
+    let missing = "Your Land on branch stage is not a local branch of this project. Pick a branch, or change Land on in Team settings.";
+    let mut view = listed(vec![set('1', ChangeState::Pending)]);
+    assert!(view.key(key(KeyCode::Char('a')), NOW));
+    reply(
+        &mut view,
+        Ok(ChangesView::Branches(TargetBranches {
+            branches: vec!["feat/x".into(), "main".into()],
+            current: Some("feat/x".into()),
+            land_on: None,
+            land_on_problem: Some(missing.into()),
+        })),
+    );
+    let shown = flat(&view);
+    assert!(shown.contains(missing), "{shown}");
+    assert!(
+        shown.contains("Press Tab to pick the branch they land on."),
+        "{shown}"
+    );
+    assert!(!shown.contains("Branch feat/x"), "{shown}");
+    assert!(!shown.contains("They land as one commit on"), "{shown}");
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    assert_eq!(view.next_query(NOW), None, "nothing lands before a pick");
+    assert!(flat(&view).contains(missing), "{}", flat(&view));
+    assert!(view.key(key(KeyCode::Tab), NOW));
+    let picked = flat(&view);
+    assert!(picked.contains("Branch feat/x"), "{picked}");
+    assert!(
+        picked.contains(
+            "They land as one commit on feat/x, the branch checked out in your project folder"
+        ),
+        "{picked}"
+    );
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    assert_eq!(
+        view.next_query(NOW),
+        Some(ChangesQuery::AcceptInto {
+            id: id('1'),
+            expected_head: "1".repeat(40),
+            message: "Add a file".into(),
+            target: "feat/x".into(),
+        }),
+        "a picked branch is always named"
+    );
+}
+
 /// Opening the Accept editor drops an older notice about the same change set, such as a
 /// refused Discard, so the editor shows only what bears on this Accept: the branch list,
 /// or the notice that it could not be read (review WL-L2).
