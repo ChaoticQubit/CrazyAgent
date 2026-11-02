@@ -2,7 +2,7 @@ import { nextGeneration, poolSummaries } from "../../api";
 import type { Result } from "../../api";
 import { useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { failureCopy, loadAgentPolicy, loadProjectCatalog, loadProjects, loadReadPaths, receiptState, removeProject, saveAgentPolicy, saveReadPaths, setProjectPool, updateProjectSetup } from "../../api-projects";
+import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, receiptState, removeProject, saveAgentPolicy, saveHiddenPaths, saveReadPaths, setProjectPool, updateProjectSetup } from "../../api-projects";
 import type { AgentAccess, AgentNetwork, PolicyView, ProjectCatalog, StoredSetup } from "../../api-projects";
 import { AccessLevels, FULL_ACCESS_WARNING, LOWERING_STOPS_AGENTS, NetworkChoices, ToolchainSwitches, accessLabel, confirmFirst, policyOf } from "./access";
 import { Button, ConfirmDialog } from "../../ui";
@@ -220,6 +220,9 @@ function GeneralSection({ data, setup }: { data: ProjectData; setup: StoredSetup
 /** The most extra read-only folders a project can share with its agents, as the engine allows. */
 export const READ_PATHS_MAX = 8;
 
+/** The most folders a project can hide from its agents, as the engine allows. */
+export const HIDDEN_PATHS_MAX = 8;
+
 /** Adds one typed folder to the extra read-only list, as the engine will check it again.
  * Inputs: the current list and the typed text. Output: the new list, or a plain error. */
 export function addReadPath(paths: string[], typed: string): { paths: string[] } | { error: string } {
@@ -228,6 +231,18 @@ export function addReadPath(paths: string[], typed: string): { paths: string[] }
   if (path.length > 1024 || /[\u0000-\u001f\u007f]/.test(path)) return { error: "Each folder must be one plain path of up to 1024 characters." };
   if (paths.includes(path)) return { error: "That folder is already in the list." };
   if (paths.length >= READ_PATHS_MAX) return { error: `A project can share at most ${READ_PATHS_MAX} extra folders.` };
+  return { paths: [...paths, path] };
+}
+
+/** Adds one typed folder to the hidden list, as the engine will check it again against the
+ * project folder. Inputs: the current list and the typed text. Output: the new list, or a plain
+ * error for what the client can judge; the engine checks the folder exists inside the project. */
+export function addHiddenPath(paths: string[], typed: string): { paths: string[] } | { error: string } {
+  const path = typed.trim();
+  if (!path.startsWith("/")) return { error: "Type the full path of a folder, starting with /." };
+  if (path.length > 1024 || /[\u0000-\u001f\u007f]/.test(path)) return { error: "Each folder must be one plain path of up to 1024 characters." };
+  if (paths.includes(path)) return { error: "That folder is already in the list." };
+  if (paths.length >= HIDDEN_PATHS_MAX) return { error: `A project can hide at most ${HIDDEN_PATHS_MAX} folders.` };
   return { paths: [...paths, path] };
 }
 
@@ -284,6 +299,63 @@ function SandboxSection({ data }: { data: ProjectData }) {
     </form>}
     {note && <p className="pj-note warn" role="status">{note}</p>}
     <div><Button variant="primary" pending={busy} pendingLabel="Saving..." disabled={!changed || busy} onClick={() => void save()}>Save folders</Button></div>
+  </div>;
+}
+
+function HiddenSection({ data }: { data: ProjectData }) {
+  const [saved, setSaved] = useState<string[] | null>(null);
+  const [paths, setPaths] = useState<string[]>([]);
+  const [typed, setTyped] = useState("");
+  const [note, setNote] = useState("");
+  const [busy, setBusy] = useState(false);
+  const notReady = "Not ready yet: hidden folders aren't in this build.";
+  useEffect(() => {
+    let live = true;
+    void loadHiddenPaths(data.id).then((result) => {
+      if (!live) return;
+      if (result.kind === "ok") { setSaved(result.value); setPaths(result.value); }
+      else setNote(result.kind === "not_ready" ? notReady : failureCopy(result));
+    });
+    return () => { live = false; };
+  }, [data.id]);
+
+  function add() {
+    const next = addHiddenPath(paths, typed);
+    if ("error" in next) return setNote(next.error);
+    setPaths(next.paths);
+    setTyped("");
+    setNote("");
+  }
+
+  async function save() {
+    setBusy(true);
+    const result = await saveHiddenPaths(data.id, paths, nextGeneration());
+    setBusy(false);
+    if (result.kind !== "ok") return setNote(result.kind === "not_ready" ? notReady : failureCopy(result));
+    const state = receiptState(result.value);
+    if (state.kind !== "applied") return setNote(state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check it and save again.");
+    setSaved(paths);
+    setNote("");
+    data.notify("Hidden folders saved. Agents started from now on can't open them.");
+  }
+
+  const changed = saved !== null && JSON.stringify(saved) !== JSON.stringify(paths);
+  return <div className="pj-stack">
+    <h2>Folders agents can't open</h2>
+    <p className="pj-secondary">Folders inside the project that agents, the master and research jobs can't read, write or run, even with Full access off. Use it for a secrets folder or a vendored dump you don't want touched. Each must be a folder inside the project.</p>
+    {saved === null && !note && <p className="pj-muted" role="status">Loading...</p>}
+    {saved !== null && <ul className="pj-paths" aria-label="Hidden folders">
+      {paths.length === 0 && <li className="pj-muted">No hidden folders.</li>}
+      {paths.map((path) => <li key={path}><span className="pj-mono">{displayText(path)}</span>{" "}
+        <button type="button" className="btn" aria-label={`Stop hiding ${path}`} onClick={() => setPaths(paths.filter((item) => item !== path))}>Remove</button></li>)}
+    </ul>}
+    {saved !== null && <form className="pj-field" onSubmit={(event) => { event.preventDefault(); add(); }}>
+      <label className="pj-label" htmlFor="ps-hidden-path">Folder path</label>
+      <input id="ps-hidden-path" className="pj-input" value={typed} placeholder="/Users/you/project/secrets" onChange={(event) => setTyped(event.target.value)} />
+      <div><button type="submit" className="btn" disabled={!typed.trim()}>Hide folder</button></div>
+    </form>}
+    {note && <p className="pj-note warn" role="status">{note}</p>}
+    <div><Button variant="primary" pending={busy} pendingLabel="Saving..." disabled={!changed || busy} onClick={() => void save()}>Save hidden folders</Button></div>
   </div>;
 }
 
@@ -384,7 +456,7 @@ export function SettingsTab({ data, section }: { data: ProjectData; section?: st
         <PluginsAndSkills projectId={data.id} />
       </div>}
       {active === "access" && <AccessSection data={data} />}
-      {active === "sandbox" && <SandboxSection data={data} />}
+      {active === "sandbox" && <div className="pj-stack"><SandboxSection data={data} /><HiddenSection data={data} /></div>}
       {active === "remove" && <RemoveSection data={data} setup={setup} />}
     </div>
   </div>;

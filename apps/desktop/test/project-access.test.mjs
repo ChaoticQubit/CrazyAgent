@@ -83,3 +83,16 @@ test("None explains the Port 443 overlap and Full access annotates the network c
   const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
   assert.match(page, /<NetworkChoices[^>]*access=\{access\}/);
 });
+
+test("Hiding a folder takes an absolute path, rejects duplicates and caps at the engine's limit", () => {
+  assert.deepEqual(settings.addHiddenPath([], "/Users/you/project/secrets"), { paths: ["/Users/you/project/secrets"] });
+  assert.ok("error" in settings.addHiddenPath([], "secrets"));
+  assert.ok("error" in settings.addHiddenPath(["/a"], "/a"));
+  const full = Array.from({ length: settings.HIDDEN_PATHS_MAX }, (_, index) => `/dir${index}`);
+  assert.ok("error" in settings.addHiddenPath(full, "/one-more"));
+  const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
+  assert.match(page, /<HiddenSection data=\{data\} \/>/);
+  for (const code of ["hidden_paths_too_many", "hidden_paths_invalid", "hidden_path_not_absolute", "hidden_path_missing", "hidden_path_not_folder", "hidden_path_outside_project"]) {
+    assert.ok(api.KNOWN_ERROR_CODES.includes(code), code);
+  }
+});
