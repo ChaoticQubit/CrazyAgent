@@ -12712,7 +12712,6 @@ fn a_native_teammate_cannot_change_its_lead_s_skills_or_relay_plugin() {
     )
     .unwrap();
     let attempts = std::fs::read_to_string(&tried).unwrap_or_default();
-    drop(installed);
 
     for attempt in [
         "skill",
@@ -12737,4 +12736,5 @@ fn a_native_teammate_cannot_change_its_lead_s_skills_or_relay_plugin() {
             file.display()
         );
     }
+    drop(installed);
 }
