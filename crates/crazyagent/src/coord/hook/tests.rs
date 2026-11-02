@@ -50,6 +50,65 @@ fn log_tools_counts_each_skill_by_name_and_graphify_once() {
     );
 }
 
+/// Under the FirstEdit nudges (DEC-111 R4) a session's first edit before any code-graph
+/// query gets one reminder as `additionalContext` and no permission decision, so the edit
+/// stays allowed; its next edit gets none. A session that ran graphify or a graphify MCP
+/// tool first gets none, and the Off and TenMinutes options never remind on an edit.
+#[test]
+fn the_first_edit_without_a_graph_query_gets_one_reminder_and_is_allowed() {
+    let (root, folder) = mailbox();
+    let roster = |nudges: Nudges| {
+        let bytes = serde_json::to_vec(&relay::Roster {
+            overlaps: Overlaps::Warn,
+            nudges,
+            root: None,
+        })
+        .unwrap();
+        relay::put(&folder, relay::ROSTER_FILE, &bytes).unwrap();
+    };
+    let session = |tag: &str| Identity {
+        inbox: Some(tag.to_owned()),
+        activity: Some(tag.to_owned()),
+        teammate: None,
+        cwd: None,
+    };
+    let input = json!({
+        "tool_name": "Edit",
+        "tool_input": {"file_path": root.path().join("a.rs"), "old_string": "a", "new_string": "b"},
+    });
+    let edit = |tag: &str| edit_answer(&folder, &session(tag), &input);
+
+    for quiet in [Nudges::Off, Nudges::TenMinutes] {
+        roster(quiet);
+        assert_eq!(edit(LEAD_TAG), None, "{quiet:?} never reminds on an edit");
+    }
+    roster(Nudges::FirstEdit);
+    let first = edit(LEAD_TAG).expect("the first edit without a graph query is reminded");
+    assert_eq!(
+        first,
+        json!({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": "You are editing before any code-graph query. Run graphify query first if this touches code you have not mapped.",
+        }}),
+        "a reminder, never a decision: the edit stays allowed"
+    );
+    assert_eq!(edit(LEAD_TAG), None, "one reminder per session");
+
+    log_tools(
+        &folder,
+        "%7",
+        &json!({"tool_name": "Bash", "tool_input": {"command": "graphify query \"pools\""}}),
+    );
+    log_tools(
+        &folder,
+        "%8",
+        &json!({"tool_name": "mcp__graphify__query_graph", "tool_input": {"question": "pools"}}),
+    );
+    assert_eq!(edit("%7"), None, "a session that queried the graph first");
+    assert_eq!(edit("%8"), None, "a graphify MCP query counts too");
+    assert!(edit("%9").is_some(), "each session is reminded on its own");
+}
+
 use crate::coord::{BODY_BYTES_MAX, MessageId, MessageKind};
 
 fn mailbox() -> (tempfile::TempDir, Mailbox) {

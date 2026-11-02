@@ -2,7 +2,7 @@ use super::relay::{
     self, ANSWER, ANSWER_BYTES_MAX, ASK, ASKED, Answer, Ask, Held, IDLE, INBOX, INBOX_MAX,
     LEAD_TAG, Letter, SHOWN, TOOLS, TOOLS_LOG_BYTES_MAX, TOUCH, WAITING,
 };
-use super::settings::Overlaps;
+use super::settings::{Nudges, Overlaps};
 use super::{TOOL_BYTES_MAX, Waiting};
 use crate::team::tool::{Mailbox, call_id};
 use serde_json::{Value, json};
@@ -23,6 +23,8 @@ const MEMBERS_MAX: usize = 64;
 const NAME_BYTES_MAX: usize = 64;
 const LEAD_NAME: &str = "team-lead";
 const GRAPHIFY: &str = "graphify";
+const GRAPHED: &str = ".graphed";
+const NUDGED: &str = ".nudged";
 
 const _: () = assert!(CONTEXT_CHARS_MAX < 10_000 && CONTEXT_CHARS_MAX > 2 * super::BODY_BYTES_MAX);
 const _: () = assert!(ASK_WAIT.as_secs() < Event::Edit.timeout_seconds() as u64);
@@ -111,8 +113,9 @@ struct Team {
 /// teammate that stops with none left rests until its next tool call or prompt;
 /// AskUserQuestion and permission or elicitation notifications set Waiting; a user prompt
 /// clears it; an edit is denied outside a teammate's own worktree or, under Overlaps Block,
-/// on a file another active agent claimed. Inputs: the event argument, the mailbox, the
-/// input and the output. Output: Ok, or the usage text for an unknown event.
+/// on a file another active agent claimed, and under the FirstEdit nudges a session's first
+/// edit before any code-graph query gets one reminder. Inputs: the event argument, the
+/// mailbox, the input and the output. Output: Ok, or the usage text for an unknown event.
 pub fn run(
     event: &str,
     mailbox: &Path,
@@ -201,13 +204,7 @@ pub fn run(
             }
             None
         }
-        Event::Edit => guard(&folder, &who, &input).map(|reason| {
-            json!({"hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": reason,
-            }})
-        }),
+        Event::Edit => edit_answer(&folder, &who, &input),
     };
     if let Some(answer) = answer {
         let _ = writeln!(output, "{answer}");
@@ -465,6 +462,11 @@ fn log_tools(folder: &Mailbox, tag: &str, input: &Value) {
         lines.push_str(GRAPHIFY);
         lines.push('\n');
     }
+    if graphify
+        || super::adoption::tool_key(tool, &input["tool_input"]).as_deref() == Some(GRAPHIFY)
+    {
+        let _ = folder.create(&format!("{key}{GRAPHED}"));
+    }
     if let Some(skill) = super::adoption::skill_key(tool, &input["tool_input"]) {
         lines.push_str(&skill);
         lines.push('\n');
@@ -478,6 +480,42 @@ fn log_tools(folder: &Mailbox, tag: &str, input: &Value) {
     {
         let _ = file.write_all(lines.as_bytes());
     }
+}
+
+/// Answers one file edit before it runs: the guard's denial when it refuses the edit, else,
+/// under the FirstEdit nudges, the first-edit reminder as `additionalContext` with no
+/// permission decision, so the harness's own permission rules still decide the edit. Takes
+/// the mailbox, the identity and the hook input. Returns the answer, or None for none.
+fn edit_answer(folder: &Mailbox, who: &Identity, input: &Value) -> Option<Value> {
+    if let Some(reason) = guard(folder, who, input) {
+        return Some(json!({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }}));
+    }
+    first_edit(folder, who).map(|text| {
+        json!({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "additionalContext": text,
+        }})
+    })
+}
+
+/// Hands a session the first-edit reminder once (DEC-111 R4): only under the project's
+/// FirstEdit nudges, only while the session made no code-graph query (`log_tools` marks
+/// one), and only the first time, which an exclusive marker in the mailbox records. Takes
+/// the mailbox and the identity. Returns the reminder, or None.
+fn first_edit(folder: &Mailbox, who: &Identity) -> Option<&'static str> {
+    if relay::read_roster(folder)?.nudges != Nudges::FirstEdit {
+        return None;
+    }
+    let key = relay::tag_key(who.activity.as_deref()?)?;
+    if folder.read(&format!("{key}{GRAPHED}")).is_ok() {
+        return None;
+    }
+    folder.create(&format!("{key}{NUDGED}")).ok()?;
+    Some(super::adoption::FIRST_EDIT_REMINDER)
 }
 
 /// Decides one file edit before it runs. A native teammate may edit only inside

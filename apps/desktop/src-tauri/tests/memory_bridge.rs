@@ -560,6 +560,182 @@ async fn agent_writes_flow(root: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+async fn approve_flow(root: &Path) -> Result<(), Box<dyn Error>> {
+    use crazyagent::memory::library::{AgentWrites, ApprovedMemories, ApprovedMemory};
+    use crazyagent::team::tool::{REMEMBER_TOOL, serve_live};
+    let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
+    assert!(bridge.connect().await?.connected);
+    let _home = engine_support::pick_home(&mut bridge, 1).await;
+    let receipt = bridge
+        .setup_project(
+            ProjectSpec {
+                name: "Recipe box".into(),
+                repositories: vec![],
+            },
+            ProjectSetup {
+                about: "Keeps family recipes.".into(),
+                tech_stack: vec!["rust".into()],
+                platforms: vec![Platform::Website],
+                research: vec![ResearchKind::MarketResearch],
+                pool: None,
+                team: None,
+                documents: vec![],
+            },
+            2,
+        )
+        .await?;
+    assert!(
+        matches!(receipt.outcome, ActionOutcome::Applied),
+        "{receipt:?}"
+    );
+    let id = receipt.intent.project_id.clone().unwrap();
+    let asked = bridge.set_agent_memory_writes(AgentWrites::Ask, 3).await?;
+    assert!(matches!(asked.outcome, ActionOutcome::Applied), "{asked:?}");
+
+    let project = crazyagent::protocol::ProjectId::new(&id).unwrap();
+    let mut connection = rusqlite::Connection::open(root.join("engine.db"))?;
+    connection.busy_timeout(Duration::from_secs(5))?;
+    connection.execute(
+        "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms) VALUES (?1,'sub','codex',1,'working',1,1)",
+        [&id],
+    )?;
+    let agent = connection.last_insert_rowid();
+    let label = crazyagent::team::events::label(&connection, agent).unwrap();
+    let mailbox = root.join("agent-calls");
+    std::fs::create_dir(&mailbox)?;
+    let request = format!(
+        "{}\n",
+        serde_json::json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": REMEMBER_TOOL, "arguments": {"text": "Recipes print on one page.", "scope": "project"}}})
+    );
+    let served = mailbox.clone();
+    let server = std::thread::spawn(move || {
+        let mut output = Vec::new();
+        serve_live(
+            std::io::Cursor::new(request),
+            &mut output,
+            &served,
+            &[],
+            None,
+        )
+        .map(|()| output)
+    });
+    let agents = root.join("agents");
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !server.is_finished() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the team tool never answered"
+        );
+        crazyagent::team::history::serve_agent_calls(
+            &mut connection,
+            &project,
+            (agent, &label),
+            &agents,
+            &mailbox,
+            &mut |connection, pane| {
+                crazyagent::team::runtime::team_caller(
+                    connection,
+                    None,
+                    Some(root),
+                    &project,
+                    (agent, &label),
+                    pane,
+                )
+            },
+            &mut |_, _, _| None,
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let output = server.join().unwrap()?;
+    let answer: serde_json::Value = serde_json::from_slice(&output)?;
+    assert_eq!(
+        answer["result"]["content"][0]["text"],
+        "Saved for the owner's approval. Agents get it once the owner approves it in the Memory tab."
+    );
+
+    let listed = bridge.memories(Some(&id), None, None).await?;
+    assert_eq!(listed.items.len(), 1, "{:?}", listed.items);
+    assert_eq!(listed.next, None);
+    assert_eq!(listed.agent_writes, AgentWrites::Ask);
+    let memory = listed.items[0].id.clone();
+    let note = |origin: &str| {
+        serde_json::json!([{
+            "id": memory,
+            "text": "Recipes print on one page.",
+            "scope": "project",
+            "project_id": id,
+            "origin": origin,
+            "from_project_id": null,
+            "source_path": null,
+            "agent": label,
+        }])
+    };
+    assert_eq!(serde_json::to_value(&listed.items)?, note("requested"));
+    assert_eq!(
+        bridge.approved_memories(&id).await?,
+        ApprovedMemories {
+            items: vec![],
+            complete: true
+        },
+        "a waiting memory reaches no agent"
+    );
+
+    let approved = bridge.approve_memory(&memory, 4).await?;
+    assert!(
+        matches!(approved.outcome, ActionOutcome::Applied),
+        "{approved:?}"
+    );
+    assert_eq!(approved.intent.kind, "memory_approve");
+    let listed = bridge.memories(Some(&id), None, None).await?;
+    assert_eq!(serde_json::to_value(&listed.items)?, note("agent"));
+    assert_eq!(listed.next, None);
+    assert_eq!(
+        bridge.approved_memories(&id).await?,
+        ApprovedMemories {
+            items: vec![ApprovedMemory {
+                scope: ApprovedScope::Project,
+                kind: ApprovedKind::Note,
+                text: "Recipes print on one page.".into(),
+            }],
+            complete: true
+        },
+        "an approved memory reaches the project's agents"
+    );
+    let origin: String = connection.query_row(
+        "SELECT origin FROM memory_library WHERE id=?1",
+        [&memory],
+        |row| row.get(0),
+    )?;
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&origin)?,
+        serde_json::json!({"kind": "agent", "agent": label})
+    );
+    let again = bridge.approve_memory(&memory, 5).await?;
+    assert_eq!(again.rejection.as_deref(), Some("memory_not_requested"));
+    assert!(bridge.pending_intent()?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn approving_a_waiting_memory_through_the_bridge_makes_it_approved() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-mem-approve-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let root_path = root.path().canonicalize().unwrap();
+    let config = engine_support::engine_config(&root_path);
+    let (_cancel, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start(&root_path, "e.sock", &config, &stopped)
+        .await
+        .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(30), approve_flow(&root_path)).await;
+    let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
+    assert!(matches!(cleanup, Ok(Ok(()))));
+    result.unwrap().unwrap();
+}
+
 #[tokio::test]
 async fn desktop_changes_agent_memory_writes_and_approve_refuses_what_no_agent_asked_for() {
     let root = tempfile::Builder::new()

@@ -791,25 +791,15 @@ async fn a_codex_agent_with_tools_on_gets_the_skill_index_with_each_description_
         .to_owned();
     let skill = home.join("skills/crazyagent/release-notes/SKILL.md");
     assert!(skill.is_file(), "the index names the copy Codex reads");
-    assert!(developer.starts_with(context.instructions()));
-    assert!(developer.contains("\n## Skills\n"), "{developer}");
-    assert!(developer.contains("Check this list first"), "{developer}");
-    assert!(
-        developer.contains(&format!(
-            "- release-notes: Teaches release-notes. ({})\n",
+    assert_eq!(
+        developer,
+        format!(
+            "{}\n## Skills\n\nThe owner approved these skills for this project. Check this list first: before work that involves files, a specialised tool or a repeatable workflow, look here for a skill that fits. To use one, read its SKILL.md at the path shown and follow it.\n\n- release-notes: Teaches release-notes. ({})\n",
+            context.instructions(),
             skill.display()
-        )),
-        "{developer}"
+        ),
+        "the project context, then the index of the one skill on for the project, told to read the file since Codex has no Skill tool"
     );
-    assert!(
-        developer.contains("read its SKILL.md at the path shown"),
-        "{developer}"
-    );
-    assert!(
-        !developer.contains("Skill tool"),
-        "Codex has no Skill tool: {developer}"
-    );
-    assert!(!developer.contains("switched-off"));
     drop(files);
 
     let off = private_directory(&agents.join("codex-off"));

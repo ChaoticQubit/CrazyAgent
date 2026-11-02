@@ -329,6 +329,10 @@ test("pack states read in plain words and only on or off entries count as instal
   assert.deepEqual(intake.packStateView({ state: "on" }), { word: "On", tone: "ok", line: null });
   assert.deepEqual(intake.packStateView({ state: "off" }), { word: "Off", tone: "neutral", line: null });
   assert.deepEqual(intake.packStateView({ state: "failed", reason: "Checksum didn't match." }), { word: "Failed", tone: "danger", line: "Checksum didn't match." });
+  const refused = "This folder has hooks but no .claude-plugin/plugin.json naming the plugin.";
+  assert.deepEqual(intake.packStateView({ state: "on" }, refused), { word: "On", tone: "ok", line: `Hooks not added: ${refused}` });
+  assert.deepEqual(intake.packStateView({ state: "off" }, refused), { word: "Off", tone: "neutral", line: `Hooks not added: ${refused}` });
+  assert.deepEqual(intake.packStateView({ state: "on" }, null), { word: "On", tone: "ok", line: null });
   assert.deepEqual(pack.filter(intake.installed).map((item) => item.id), ["headroom"]);
   assert.equal(intake.installed(entry("x", "skill", "workflow", true, { state: "off" })), true);
   assert.equal(intake.installed(entry("x", "skill", "workflow", true, { state: "failed", reason: "no" })), false);
@@ -588,6 +592,17 @@ test("the tools step lists dependencies and the pack by group, and names the MCP
   assert.match(running, /Installing: 1 of 5 done\. You can continue; setup keeps going\./);
   assert.match(running, />Continue<\/button>/);
   assert.match(html(ToolsSetupView, { ...base, status: notReady }), /Not ready yet[\s\S]*>Continue<\/button>/);
+});
+
+test("the tools step says why an installed entry's hooks were not added, on that entry only", () => {
+  const refused = "This folder has hooks but no .claude-plugin/plugin.json naming the plugin.";
+  const listed = pack.map((item) => item.id === "headroom" ? { ...item, hooks_refused: refused } : item);
+  const markup = html(ToolsSetupView, { status: ok({ dependencies: [], pack: listed, running: false }), ticks: intake.packTicks(listed), onTick: noop, busy: false, started: false, problem: "", onRun: noop, onContinue: noop });
+  const rows = markup.split('<li class="in-row">').filter((row) => row.includes("headroom"));
+  assert.equal(rows.length, 1);
+  assert.match(rows[0], /Already installed/);
+  assert.ok(rows[0].includes(`<span class="pj-small pj-error">Hooks not added: ${refused}</span>`), rows[0]);
+  assert.equal(markup.split("Hooks not added").length - 1, 1, "only the refused entry says so");
 });
 
 test("a failed setup read keeps the shown setup, says so, backs off, and a newer read clears it", () => {

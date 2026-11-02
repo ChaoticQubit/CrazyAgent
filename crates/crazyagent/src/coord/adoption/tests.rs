@@ -311,7 +311,7 @@ fn notes(db: &Connection, agent: AgentId) -> Vec<String> {
 }
 
 #[test]
-fn adoption_tick_sends_one_note_per_flag_only_while_nudges_on() {
+fn adoption_tick_sends_one_note_per_flag_only_under_ten_minute_nudges() {
     let (_root, db, project) = database();
     let long_ago = NOW - UNGROUNDED_MS;
     let flagged = agent_row(&db, &project, "working", true, long_ago, false);
@@ -321,8 +321,9 @@ fn adoption_tick_sends_one_note_per_flag_only_while_nudges_on() {
     let stopped = agent_row(&db, &project, "stopped", true, long_ago, false);
     call(&db, stopped, "Edit", &json!({}), 1);
 
-    assert!(
-        !crate::coord::settings::CoordSettings::default().nudges,
+    assert_eq!(
+        crate::coord::settings::CoordSettings::default().nudges,
+        Nudges::Off,
         "nudges default to off (DEC-109)"
     );
     tick(&db, &project, NOW).unwrap();
@@ -331,14 +332,14 @@ fn adoption_tick_sends_one_note_per_flag_only_while_nudges_on() {
         "a project that never set nudges sends nothing"
     );
     let off = crate::coord::settings::CoordSettings {
-        nudges: false,
+        nudges: Nudges::Off,
         ..Default::default()
     };
     crate::coord::settings::write(&db, &project, &off).unwrap();
     tick(&db, &project, NOW).unwrap();
     assert!(notes(&db, flagged).is_empty(), "nudges off sends nothing");
     let view_off = view(&db, &project, &[], NOW).unwrap();
-    assert!(!view_off.nudges);
+    assert_eq!(view_off.nudges, Nudges::Off);
     assert_eq!(
         row(&view_off, flagged).flags,
         [Flag::EditsWithoutWork, Flag::Ungrounded],
@@ -346,7 +347,7 @@ fn adoption_tick_sends_one_note_per_flag_only_while_nudges_on() {
     );
 
     let on = crate::coord::settings::CoordSettings {
-        nudges: true,
+        nudges: Nudges::TenMinutes,
         ..Default::default()
     };
     crate::coord::settings::write(&db, &project, &on).unwrap();
@@ -373,6 +374,69 @@ fn adoption_tick_sends_one_note_per_flag_only_while_nudges_on() {
         row(&view_on, flagged).reminded,
         [Flag::EditsWithoutWork, Flag::Ungrounded]
     );
+}
+
+/// Under the FirstEdit nudges (DEC-111 R4) the engine reminds each running tools-on agent
+/// without the hook path, a Codex agent or a launch that fires no hooks, once its counted
+/// calls hold a file edit and no code-graph query, however often it ticks, and sends no
+/// flag note. A Claude Code agent with hooks gets its reminder from the hook instead.
+#[test]
+fn first_edit_nudges_remind_each_agent_without_hooks_once() {
+    let (_root, db, project) = database();
+    let long_ago = NOW - UNGROUNDED_MS;
+    let codex = |tools: bool| {
+        let id = agent_row(&db, &project, "working", tools, long_ago, false);
+        db.execute("UPDATE team_agents SET harness='codex' WHERE id=?1", [id])
+            .unwrap();
+        id
+    };
+    let hooked = agent_row(&db, &project, "working", true, long_ago, false);
+    call(&db, hooked, "Edit", &json!({}), 1);
+    let bare = agent_row(&db, &project, "working", true, long_ago, true);
+    call(&db, bare, "Edit", &json!({}), 1);
+    let edited = codex(true);
+    call(&db, edited, "apply_patch", &json!({}), 2);
+    let grounded = codex(true);
+    call(
+        &db,
+        grounded,
+        "exec_command",
+        &json!({"cmd": "graphify query parser"}),
+        1,
+    );
+    call(&db, grounded, "apply_patch", &json!({}), 1);
+    let reading = codex(true);
+    call(&db, reading, "exec_command", &json!({"cmd": "ls"}), 1);
+    let toolless = codex(false);
+    call(&db, toolless, "apply_patch", &json!({}), 1);
+    let stopped = agent_row(&db, &project, "stopped", true, long_ago, true);
+    call(&db, stopped, "Edit", &json!({}), 1);
+
+    let first_edit = crate::coord::settings::CoordSettings {
+        nudges: Nudges::FirstEdit,
+        ..Default::default()
+    };
+    crate::coord::settings::write(&db, &project, &first_edit).unwrap();
+    assert_eq!(
+        view(&db, &project, &[], NOW).unwrap().nudges,
+        Nudges::FirstEdit
+    );
+    tick(&db, &project, NOW).unwrap();
+    tick(&db, &project, NOW + 60_000).unwrap();
+    for reminded in [edited, bare] {
+        assert_eq!(
+            notes(&db, reminded),
+            [FIRST_EDIT_REMINDER],
+            "agent {reminded} is reminded once"
+        );
+    }
+    for quiet in [hooked, grounded, reading, toolless, stopped] {
+        assert!(
+            notes(&db, quiet).is_empty(),
+            "agent {quiet}: {:?}",
+            notes(&db, quiet)
+        );
+    }
 }
 
 #[test]
@@ -552,7 +616,7 @@ fn hookless_agent_raises_no_flags() {
     assert!(!row(hooked).hookless);
 
     let nudges = crate::coord::settings::CoordSettings {
-        nudges: true,
+        nudges: Nudges::TenMinutes,
         ..Default::default()
     };
     crate::coord::settings::write(&db, &project, &nudges).unwrap();

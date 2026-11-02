@@ -166,7 +166,7 @@ export function NewProjectFlow({ step: routeStep, navigate = go }: { step?: stri
     }
     const access = draft.access ?? NEW_PROJECT_ACCESS;
     if (access !== "sandboxed") {
-      const saved = await saveAgentPolicy(id, { access, toolchains: [] }, nextGeneration());
+      const saved = await saveAgentPolicy(id, { access, network: "open", toolchains: [] }, nextGeneration());
       const state = saved.kind === "ok" ? receiptState(saved.value) : null;
       if (state?.kind !== "applied") {
         const why = saved.kind === "error" ? ` ${failureCopy(saved)}` : state?.kind === "rejected" ? ` ${failureCopy(state)}` : "";

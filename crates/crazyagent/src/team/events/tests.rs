@@ -597,6 +597,74 @@ fn a_numbered_name_reaches_that_agent_not_one_whose_handle_reads_as_it() {
     );
 }
 
+/// A name a finished and a running sub-agent share reaches the running one (DEC-111 Q19), so
+/// the master's finished list names the finished one by its number only, whether they share
+/// the persona or the handle in any case, or one's persona is the other's handle. A name only
+/// it carries, or one only a stopped agent or another project's agent also carries, still
+/// shows with its number.
+#[test]
+fn a_finished_agent_sharing_a_running_agent_s_name_is_listed_by_number_only() {
+    let fixture = Fixture::new();
+    let name = |agent: i64, project: &str, persona: &str, handle: Option<&str>| {
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_names(agent,project,persona,handle) VALUES (?1,?2,?3,?4)",
+                params![agent, project, persona, handle],
+            )
+            .unwrap();
+    };
+    let finished = |persona: &str, handle: Option<&str>| {
+        let id = fixture.agent(PROJECT, "sub", "codex", "stopped");
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,'/repo',?3,'/repo/.git')",
+                params![id, PROJECT, format!("/repo/agent-{id}")],
+            )
+            .unwrap();
+        name(id, PROJECT, persona, handle);
+        id
+    };
+    let other = |project: &str, status: &str, persona: &str, handle: Option<&str>| {
+        let id = fixture.agent(project, "sub", "codex", status);
+        name(id, project, persona, handle);
+    };
+    let ada = finished("Ada", None);
+    let cy = finished("Cy", Some("charts"));
+    let di = finished("Di", Some("api"));
+    let bo = finished("Bo", Some("docs"));
+    let fay = finished("Fay", None);
+    let gus = finished("Gus", Some("maps"));
+    let ivy = finished("Ivy", Some("kit"));
+    other(PROJECT, "working", "Ada", None);
+    other(PROJECT, "idle", "cy", Some("login"));
+    other(PROJECT, "starting", "Eve", Some("API"));
+    other(PROJECT, "stopped", "Bo", Some("docs"));
+    other(OTHER, "working", "Fay", None);
+    other(PROJECT, "working", "Hal", Some("gus"));
+    other(PROJECT, "idle", "Kit", None);
+    let lines: std::collections::BTreeMap<i64, String> =
+        finished_agents(&fixture.connection, &project(), 1)
+            .unwrap()
+            .into_iter()
+            .collect();
+    let line = |named: String| format!("- {named} (Codex): no task yet; finished");
+    assert_eq!(
+        lines,
+        std::collections::BTreeMap::from([
+            (ada, line(format!("Sub-agent {ada}"))),
+            (cy, line(format!("Sub-agent {cy}"))),
+            (di, line(format!("Sub-agent {di}"))),
+            (bo, line(format!("Bo (@docs), Sub-agent {bo}"))),
+            (fay, line(format!("Fay, Sub-agent {fay}"))),
+            (gus, line(format!("Sub-agent {gus}"))),
+            (ivy, line(format!("Sub-agent {ivy}"))),
+        ])
+    );
+    assert!(!lines[&ada].contains("Ada"), "{}", lines[&ada]);
+}
+
 #[test]
 fn a_task_end_records_finished_or_failed_whatever_its_last_line_asks_and_master_delegations_are_carried()
  {

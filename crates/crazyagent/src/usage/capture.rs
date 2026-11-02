@@ -323,6 +323,30 @@ fn codex_tools(value: &Value) -> Vec<String> {
     names
 }
 
+/// Names the tool calls one Claude Code transcript line records, the way adoption counts
+/// them: each `tool_use` item of an assistant line by its name and input, and a skill it
+/// called or read by `skill:` and the skill's name too. Input: the parsed line. Output: the
+/// counted names, at most two a call, none for any other line.
+fn claude_tools(value: &Value) -> Vec<String> {
+    if value["type"] != "assistant" {
+        return Vec::new();
+    }
+    let mut names = Vec::new();
+    for item in value["message"]["content"].as_array().into_iter().flatten() {
+        if item["type"] != "tool_use" {
+            continue;
+        }
+        let name = item["name"].as_str().unwrap_or_default();
+        let called: Vec<String> = crate::coord::adoption::tool_key(name, &item["input"])
+            .into_iter()
+            .chain(crate::coord::adoption::skill_key(name, &item["input"]))
+            .collect();
+        assert!(called.len() <= 2);
+        names.extend(called);
+    }
+    names
+}
+
 /// Lists a home's session records, at most `FILES_PER_SCAN_MAX`, most recently changed
 /// first: Claude Code's `projects/<folder>/<session>.jsonl` with its sub-agent records
 /// further down, or Codex's `sessions/<year>/<month>/<day>/rollout-*.jsonl`. The walk
@@ -448,8 +472,8 @@ fn read_record(
     read_opened(opened, format, progress, now_ms)
 }
 
-/// Reads one record as `read_record` does and also collects the Codex tool calls its new
-/// lines record. Inputs: the record, its progress, the time and the collected tools.
+/// Reads one record as `read_record` does and also collects the tool calls its new lines
+/// record. Inputs: the record, its progress, the time and the collected tools.
 /// Output: the growth and the last limits.
 fn read_record_with(
     path: &Path,
@@ -478,8 +502,8 @@ fn read_opened(
 /// wait for the next scan. The record is the one the progress pinned while its inode is
 /// the same, under the crate-wide volume renumber rule, and the pin then moves to the live
 /// device, so a reboot never counts a whole record again. Inputs: the open record with its
-/// identity and length, its progress, the time and where to collect the Codex tool calls
-/// read, at most `TOOLS_PER_READ_MAX`, if anywhere. Output: the growth and the last limits.
+/// identity and length, its progress, the time and where to collect the tool calls read,
+/// at most `TOOLS_PER_READ_MAX`, if anywhere. Output: the growth and the last limits.
 fn read_opened_with(
     (mut file, identity, length): (File, (u64, u64), u64),
     format: Format,
@@ -531,12 +555,16 @@ fn read_opened_with(
                 let (gained, observed) = codex_line(&value, progress, now_ms);
                 growth = growth.plus(gained);
                 limits = observed.or(limits);
-                if let Some(tools) = tools.as_deref_mut() {
-                    for tool in codex_tools(&value) {
-                        if tools.len() < TOOLS_PER_READ_MAX {
-                            tools.push(tool);
-                        }
-                    }
+            }
+        }
+        if let Some(tools) = tools.as_deref_mut() {
+            let called = match format {
+                Format::Claude => claude_tools(&value),
+                Format::Codex => codex_tools(&value),
+            };
+            for tool in called {
+                if tools.len() < TOOLS_PER_READ_MAX {
+                    tools.push(tool);
                 }
             }
         }
@@ -579,11 +607,12 @@ pub fn scan_home(
     scan(db, home, format, attribution, None, now_ms)
 }
 
-/// Counts a team agent's home as `scan_home` does and, for a Codex home, also counts each
-/// tool call the new lines record against the agent for the coordination layer, in the
-/// same write as the tokens, so each call counts once. Claude Code agents count theirs
-/// through their hooks. Inputs: the store, the home, its format, the attribution, the
-/// agent and the time. Output: the tokens added, or a plain code.
+/// Counts a team agent's home as `scan_home` does and also counts each tool call the new
+/// lines record against the agent for the coordination layer, in the same write as the
+/// tokens, so each call counts once: a Codex agent's always, and a Claude Code agent's only
+/// when its launch fires no hooks (DEC-104 bare-hooks), since hooks count the others.
+/// Inputs: the store, the home, its format, the attribution, the agent and the time.
+/// Output: the tokens added, or a plain code.
 pub fn scan_agent_home(
     db: &Connection,
     home: &Path,
@@ -604,7 +633,10 @@ fn scan(
     now_ms: i64,
 ) -> Result<Tokens, EngineError> {
     checked_attribution(attribution)?;
-    let counting = agent.filter(|_| format == Format::Codex);
+    let counting = match agent {
+        Some(id) if format == Format::Codex || launched_without_hooks(db, id)? => Some(id),
+        _ => None,
+    };
     let hour_ms = now_ms - now_ms.rem_euclid(HOUR_MS);
     let mut changed = Vec::new();
     for path in records(home, format) {
@@ -658,6 +690,20 @@ fn scan(
     }
     tx.commit().map_err(storage)?;
     Ok(added)
+}
+
+/// Says whether a team agent's launch fires no hooks (`team_agents.hookless`). Inputs: the
+/// store and the agent. Output: the answer, false for an agent the store does not hold, or
+/// `usage_unavailable`.
+fn launched_without_hooks(db: &Connection, agent: i64) -> Result<bool, EngineError> {
+    db.query_row(
+        "SELECT hookless FROM team_agents WHERE id=?1",
+        [agent],
+        |row| row.get(0),
+    )
+    .optional()
+    .map(Option::unwrap_or_default)
+    .map_err(storage)
 }
 
 fn text(value: Option<&str>) -> &str {
