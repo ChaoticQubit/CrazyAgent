@@ -116,10 +116,17 @@ fn the_network_choice_explains_the_none_overlap_and_notes_full_access_makes_it_m
     );
     let look = super::new_project_view::Look::plain();
     let note_shows = |access: AgentAccess| {
-        AccessEdit::of(&PolicyView { access, ..view() })
+        let shown = AccessEdit::of(&PolicyView { access, ..view() })
             .body(&look)
             .iter()
-            .any(|row| row.text().contains(NETWORK_IGNORED_UNDER_FULL))
+            .map(|row| row.text())
+            .collect::<Vec<_>>()
+            .join(" ");
+        shown
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .contains(NETWORK_IGNORED_UNDER_FULL)
     };
     assert!(
         note_shows(AgentAccess::Full),
