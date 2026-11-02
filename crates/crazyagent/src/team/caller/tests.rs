@@ -415,3 +415,19 @@ fn who_is_answered_with_the_pane_and_the_member_the_engine_knows_there() {
         );
     }
 }
+
+/// Dropping the socket leaves its node in place, so while no engine answers there, as
+/// across an engine restart, a hook that asks is refused rather than finding no socket,
+/// which reads as an agent that leads no native team (DEC-111 Q18, RH-2).
+#[test]
+fn a_dropped_socket_leaves_its_node_for_hooks_to_be_refused_on() {
+    let folder = folder();
+    let socket = folder.path().join(CALLER_SOCKET);
+    let callers = Callers::bind(&socket, None).unwrap();
+    drop(callers);
+    assert!(
+        std::fs::symlink_metadata(&socket).is_ok_and(|meta| meta.file_type().is_socket()),
+        "the node stays"
+    );
+    assert!(crate::spawn_gate::connect_unix_std(&socket).is_err());
+}
