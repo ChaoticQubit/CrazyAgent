@@ -379,6 +379,58 @@ fn the_agent_temp_folder_is_short_private_writable_and_removed() {
     assert!(!opened.exists());
 }
 
+/// An agent writes inside its temp folder but cannot open, remove or replace the folder
+/// itself, so the sockets the engine binds there stay where the engine put them (DEC-111
+/// S1R1-1).
+#[test]
+fn an_agent_cannot_open_remove_or_replace_its_temp_folder() {
+    let case = case();
+    let tmp = toolchains::make_tmp(&case.home).unwrap();
+    let sandbox = ProjectSandbox::new(
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_scratch(&tmp)
+    .unwrap();
+    let output = run(
+        &sandbox,
+        &case.profiles.join("tmp.sb"),
+        "echo kept > \"$TMPDIR/file\" && cat \"$TMPDIR/file\"; chmod 755 \"$TMPDIR\"; chmod +a 'everyone allow list' \"$TMPDIR\"; rm -rf \"$TMPDIR\"; ln -s / \"$TMPDIR\"; true",
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "kept\n");
+    let metadata = fs::symlink_metadata(&tmp);
+    assert!(
+        metadata.as_ref().is_ok_and(|metadata| metadata.is_dir()),
+        "{metadata:?}"
+    );
+    assert_eq!(metadata.unwrap().permissions().mode() & 0o777, 0o700);
+    let listed = crazyagent::spawn_gate::output(
+        std::process::Command::new("/bin/ls")
+            .arg("-lde")
+            .arg(&tmp)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    let listed = String::from_utf8_lossy(&listed.stdout);
+    assert_eq!(
+        listed.lines().count(),
+        1,
+        "no access list was added: {listed}"
+    );
+    assert_eq!(toolchains::existing_tmp(&case.home), Some(tmp));
+    toolchains::remove_tmp(&case.home).unwrap();
+}
+
 #[test]
 fn an_agent_builds_and_tests_a_tiny_crate_offline_with_the_owner_toolchain() {
     let case = case();

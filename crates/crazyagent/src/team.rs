@@ -6,6 +6,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+#[cfg(unix)]
+pub mod caller;
 pub mod caps;
 pub mod cleanup;
 pub mod direct;

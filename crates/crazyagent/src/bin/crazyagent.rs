@@ -137,7 +137,6 @@ fn main() -> ExitCode {
                     io::stdout().lock(),
                     Path::new(&args[1]),
                     &off,
-                    std::env::var("TMUX_PANE").ok().as_deref(),
                 )
                 .map_err(|e| e.to_string())
             }
@@ -168,7 +167,6 @@ fn main() -> ExitCode {
                     io::stdout().lock(),
                     Path::new(&args[1]),
                     &off,
-                    std::env::var("TMUX_PANE").ok().as_deref(),
                 )
                 .map_err(|e| e.to_string())
             }
