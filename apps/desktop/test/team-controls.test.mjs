@@ -113,6 +113,18 @@ test("the On master harness switch setting offers Carry over first and shows the
   assert.match(fresh, /<option value="carry">Carry conversation over<\/option><option value="fresh" selected="">Start fresh<\/option>/);
 });
 
+test("Land on offers the master's branch by default and a named branch, and shows the engine's choice", () => {
+  const render = (extra) => renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status(extra), reload() {} }));
+  const field = (value) => `<input id="tg-land-on-chores" class="pj-input" placeholder="The master&#x27;s branch" aria-describedby="tg-land-on-help-chores" value="${value}"/>`;
+  const unset = render();
+  assert.match(unset, /<form class="pj-row" aria-label="Land on"><label for="tg-land-on-chores">Land on<\/label>/);
+  assert.ok(unset.includes(field("")), "no branch named shows the master's branch as the default");
+  assert.ok(unset.includes('<button type="button" class="btn small" disabled="">Use the master&#x27;s branch</button>'), "with no branch named there is nothing to clear");
+  const named = render({ land_on: "stage" });
+  assert.ok(named.includes(field("stage")), "a named branch shows as the engine keeps it");
+  assert.ok(named.includes('<button type="button" class="btn small">Use the master&#x27;s branch</button>'), "a named branch can go back to the master's branch");
+});
+
 test("a team view the engine shortened to fit says older history is hidden", () => {
   const whole = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status(), reload() {} }));
   assert.doesNotMatch(whole, /Older team history is hidden/);

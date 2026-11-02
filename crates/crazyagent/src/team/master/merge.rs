@@ -10,8 +10,9 @@ const SHOWN_MAX: usize = 64;
 const FILES_SHOWN_MAX: usize = 400;
 const COMMIT_SHOWN: usize = 12;
 
-/// Merges a finished harness's task branch into the project's Master's branch for the live
-/// master's `merge` tool (DEC-100): the harness's waiting change set lands through
+/// Merges a finished harness's task branch into the project's Land on branch, the Master's
+/// branch unless the owner named another (DEC-111 Q1), for the live master's `merge` tool
+/// (DEC-100): the harness's waiting change set lands through
 /// landing's `accept_into` as one squash commit with the owner's git identity, locally and
 /// never pushed, with Accept's own refusals for a dirty, busy or detached checkout and a
 /// conflict. When the owner's "Ask me before merging" setting is on, nothing lands: the
@@ -127,13 +128,20 @@ pub(super) fn merge(
         }
         _ => {}
     }
-    let choice = crate::team::master_branch_choice(connection, project)?;
+    let land_on = crate::team::land_on(connection, project)?;
+    let (choice, setting) = match land_on {
+        Some(branch) => (Some(branch), "Land on branch"),
+        None => (
+            crate::team::master_branch_choice(connection, project)?,
+            "Master's branch",
+        ),
+    };
     let target = answering
         .stored
         .project_folder()
         .canonicalize()
         .map_err(|_| EngineError("changes_workspace_invalid".into()))
-        .and_then(|repository| crate::landing::master_branch(&repository, choice.as_deref()));
+        .and_then(|repository| crate::landing::land_on(connection, &repository, project));
     let target = match target {
         Ok(Some((branch, _))) => branch,
         Ok(None) => {
@@ -145,7 +153,7 @@ pub(super) fn merge(
         Err(problem) => {
             return Ok((
                 format!(
-                    "Not merged: the Master's branch {} is not a local branch of the project ({}). Ask the owner to check the Master's branch setting.",
+                    "Not merged: the {setting} {} is not a local branch of the project ({}). Ask the owner to check the {setting} setting.",
                     bound_text(choice.as_deref().unwrap_or("default"), SHOWN_MAX),
                     bound_text(&problem.0, 120)
                 ),

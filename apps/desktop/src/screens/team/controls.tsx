@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { delegateTeamTask, keepTeamWarm, setAgentBranches, setAskBeforeMerge, setChildLanding, setMasterBranch, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
+import { delegateTeamTask, keepTeamWarm, setAgentBranches, setAskBeforeMerge, setChildLanding, setLandOn, setMasterBranch, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
 import type { Result } from "../../api";
 import { failureCopy, receiptState } from "../../api-projects";
 import type { BranchMode, ChildLanding, IntentReceipt, SwitchMode, TeamStatus } from "../../engine-client";
@@ -165,6 +165,7 @@ export function TeamControls({ projectId, status, harness, reload }: {
   const [stopAsked, setStopAsked] = useState(false);
   const [spread, setSpread] = useState<"off" | "on" | null>(null);
   const [masterBranch, setMasterBranchText] = useState<string | null>(null);
+  const [landOn, setLandOnText] = useState<string | null>(null);
   const [askMerge, setAskMerge] = useState<"off" | "on" | null>(null);
   const [newFolder, setNewFolder] = useState<number | null>(null);
   const [target, setTarget] = useState(ANY_HARNESS);
@@ -266,6 +267,16 @@ export function TeamControls({ projectId, status, harness, reload }: {
     const message = changeNote(await setMasterBranch(projectId, branch), "the Master's branch");
     setBusy(false);
     setMasterBranchText(null);
+    setNote(message);
+    reload();
+  }
+
+  async function saveLandOn(branch: string | null) {
+    if (busy) return;
+    setBusy(true);
+    const message = changeNote(await setLandOn(projectId, branch), "the Land on branch");
+    setBusy(false);
+    setLandOnText(null);
     setNote(message);
     reload();
   }
@@ -409,6 +420,14 @@ export function TeamControls({ projectId, status, harness, reload }: {
       <Button type="submit" size="small" disabled={busy || masterBranch === null} pending={busy && masterBranch !== null} pendingLabel="Saving...">Save</Button>
       <Button type="button" size="small" disabled={busy || !status.master_branch} onClick={() => void saveMasterBranch(null)}>Use default</Button>
       <span className="tg-terminal-note" id={`tg-master-branch-help-${projectId}`}>The master works on this branch and merges finished harnesses into it, locally; nothing is pushed. Empty uses the repository's default branch.</span>
+    </form>
+    <form className="pj-row" aria-label="Land on" onSubmit={(event) => { event.preventDefault(); void saveLandOn((landOn ?? status.land_on ?? "").trim() || null); }}>
+      <label htmlFor={`tg-land-on-${projectId}`}>Land on</label>
+      <input id={`tg-land-on-${projectId}`} className="pj-input" value={landOn ?? status.land_on ?? ""} placeholder="The master's branch"
+        onChange={(event) => setLandOnText(event.target.value)} aria-describedby={`tg-land-on-help-${projectId}`} />
+      <Button type="submit" size="small" disabled={busy || landOn === null} pending={busy && landOn !== null} pendingLabel="Saving...">Save</Button>
+      <Button type="button" size="small" disabled={busy || !status.land_on} onClick={() => void saveLandOn(null)}>Use the master's branch</Button>
+      <span className="tg-terminal-note" id={`tg-land-on-help-${projectId}`}>The master's merges and your Accept in Changes land on this branch, and each change set counts only what this branch lacks. It can be a branch checked out nowhere: then your project folder's files stay as they are. Empty uses the master's branch. New agents start from its tip.</span>
     </form>
     <div className="pj-row">
       <span aria-hidden="true">Ask me before merging into the master's branch</span>

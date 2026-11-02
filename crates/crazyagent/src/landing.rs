@@ -238,13 +238,19 @@ pub enum AcceptOutcome {
 }
 
 /// The local branches of a change set's repository that an Accept can land on, at most
-/// `BRANCHES_MAX`, and the checked-out one, the default target; None when the owner's
-/// checkout is on a detached HEAD.
+/// `BRANCHES_MAX`, the checked-out one, None when the owner's checkout is on a detached
+/// HEAD, and the Land on branch an Accept with no branch named lands on (DEC-111 Q1),
+/// None when it cannot be resolved. `land_on_problem` is the plain sentence naming the
+/// Land on setting and its missing branch when it cannot, so a client offers no default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TargetBranches {
     pub branches: Vec<String>,
     pub current: Option<String>,
+    #[serde(default)]
+    pub land_on: Option<String>,
+    #[serde(default)]
+    pub land_on_problem: Option<String>,
 }
 
 /// What merging a sub-agent's branch into its lead's task branch did (DEC-104 K5b):
@@ -391,6 +397,26 @@ pub fn master_branch(
     #[cfg(not(unix))]
     {
         let _ = (repository, chosen);
+        Err(unavailable())
+    }
+}
+
+/// The branch a project's work lands on, with its tip (DEC-111 Q1): the master's merges,
+/// an Accept with no branch named, the measuring of change sets and the start of new
+/// agents. The owner's Land on choice, else the Master's branch as [`master_branch`]
+/// resolves it. Inputs: the engine database, the owner checkout root and the project.
+/// Output: the branch and tip, None when nothing was chosen and no Master's branch
+/// exists, or `changes_target_invalid` for a chosen branch that is no local branch.
+pub fn land_on(
+    db: &Connection,
+    repository: &Path,
+    project: &ProjectId,
+) -> Result<Option<(String, String)>, EngineError> {
+    #[cfg(unix)]
+    return owner::land_on_branch(db, repository, project);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, repository, project);
         Err(unavailable())
     }
 }
