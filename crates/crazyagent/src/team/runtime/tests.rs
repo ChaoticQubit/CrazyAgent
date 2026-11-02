@@ -331,6 +331,7 @@ fn a_pane_taken_over_after_its_level_was_lowered_while_the_engine_was_down_is_st
             PROJECT,
             &crate::sandbox::policy::AgentPolicy {
                 access,
+                network: crate::sandbox::policy::AgentNetwork::default(),
                 toolchains: Vec::new(),
             },
         )
@@ -5283,6 +5284,7 @@ fn agent_at_level(access: crate::sandbox::policy::AgentAccess) -> LevelRun {
         PROJECT,
         &crate::sandbox::policy::AgentPolicy {
             access,
+            network: crate::sandbox::policy::AgentNetwork::default(),
             toolchains: Vec::new(),
         },
     )
@@ -5433,6 +5435,7 @@ fn lowering_full_access_stops_the_running_agent_and_its_next_start_is_confined()
         PROJECT,
         &crate::sandbox::policy::AgentPolicy {
             access: crate::sandbox::policy::AgentAccess::OwnBranch,
+            network: crate::sandbox::policy::AgentNetwork::default(),
             toolchains: Vec::new(),
         },
     )
@@ -5485,6 +5488,7 @@ fn an_own_branch_agent_lowered_to_sandboxed_is_stopped_and_never_woken_in_its_cl
         PROJECT,
         &crate::sandbox::policy::AgentPolicy {
             access: crate::sandbox::policy::AgentAccess::Sandboxed,
+            network: crate::sandbox::policy::AgentNetwork::default(),
             toolchains: Vec::new(),
         },
     )
@@ -9149,6 +9153,36 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
     assert!(request.unconfined && request.sandbox_profile.is_none());
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn a_tools_on_agent_profile_follows_the_project_network_choice() {
+    use crate::sandbox::policy::AgentNetwork;
+    use crate::sandbox::{ProjectSandbox, SandboxRemote};
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let make = |name: &str| {
+        let folder = base.join(name);
+        std::fs::create_dir(&folder).unwrap();
+        folder
+    };
+    let (root, home, tmp) = (make("project"), make("home"), make("tmp"));
+    let model = SandboxRemote::AnyHost(8443);
+    let profile = |choice: AgentNetwork| {
+        ProjectSandbox::new(&root, &home, &tmp, choice.sandbox(Some(model)))
+            .unwrap()
+            .profile()
+    };
+    let open = profile(AgentNetwork::Open);
+    assert!(open.contains("(remote ip \"*:*\")"), "{open}");
+    let https = profile(AgentNetwork::Https);
+    assert!(https.contains("(remote ip \"*:443\")"), "{https}");
+    assert!(!https.contains("(remote ip \"*:*\")"), "{https}");
+    let none = profile(AgentNetwork::None);
+    assert!(none.contains("(remote ip \"*:8443\")"), "{none}");
+    assert!(!none.contains("(remote ip \"*:443\")"), "{none}");
+    assert!(!none.contains("(remote ip \"*:*\")"), "{none}");
+}
+
 #[test]
 fn the_shared_graph_shows_in_an_agent_worktree_only_when_it_ignores_graphify_out() {
     let dir = tempfile::tempdir().unwrap();
@@ -9539,6 +9573,7 @@ fn a_lead_delegates_and_its_worker_starts_at_the_lead_commit() {
                 PROJECT,
                 &crate::sandbox::policy::AgentPolicy {
                     access,
+                    network: crate::sandbox::policy::AgentNetwork::default(),
                     toolchains: Vec::new(),
                 },
             )
