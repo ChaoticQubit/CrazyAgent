@@ -456,6 +456,8 @@ pub struct TeamRuntime {
     reproving: Option<Arc<AtomicBool>>,
     #[cfg(unix)]
     callers: BTreeMap<i64, Option<super::caller::Callers>>,
+    #[cfg(unix)]
+    caller_folders: BTreeMap<i64, (u64, u64)>,
 }
 
 fn error(value: impl std::fmt::Display) -> EngineError {
@@ -605,6 +607,8 @@ impl TeamRuntime {
             deliveries: crate::coord::delivery::Deliveries::default(),
             #[cfg(unix)]
             callers: BTreeMap::new(),
+            #[cfg(unix)]
+            caller_folders: BTreeMap::new(),
             adoption_failed: None,
             reproving: None,
         })
@@ -3070,6 +3074,8 @@ impl TeamRuntime {
     /// the lead calls that reach only the workers it started (DEC-104, N1, N2). Takes the
     /// setup and live access.
     fn serve_agent_calls(&mut self, stored: &StoredSetup, access: &ModelAccess) {
+        #[cfg(unix)]
+        self.tend_callers(&stored.project_id);
         if self.delegation_tool.is_none() {
             return;
         }
@@ -3091,29 +3097,6 @@ impl TeamRuntime {
             })
             .map(|(id, _)| *id)
             .collect();
-        #[cfg(unix)]
-        {
-            let workers = &self.workers;
-            self.callers.retain(|id, _| workers.contains_key(id));
-            for id in &subs {
-                let pinned = match self.callers.get(id) {
-                    Some(Some(callers)) if callers.intact() => continue,
-                    Some(Some(callers)) => Some(callers.folder()),
-                    Some(None) => continue,
-                    None if self.stored_mode(*id).as_deref()
-                        == Some(crate::coord::settings::SubagentMode::Native.as_str()) =>
-                    {
-                        None
-                    }
-                    None => continue,
-                };
-                let bound = self.bind_callers(*id, pinned);
-                if pinned.is_some() && bound.is_ok() {
-                    eprintln!("team_caller_socket_rebound");
-                }
-                self.callers.insert(*id, bound.ok());
-            }
-        }
         let host = self.terminal.as_deref();
         for id in subs {
             let label = super::events::label(&self.connection, id)
@@ -3121,13 +3104,6 @@ impl TeamRuntime {
             let mailbox = self.mailbox(id);
             #[cfg(unix)]
             let mut callers = self.callers.get_mut(&id).and_then(Option::as_mut);
-            #[cfg(unix)]
-            {
-                if let Some(callers) = callers.as_mut() {
-                    let lead = AgentId::team(id).ok();
-                    callers.serve(&mut || listed_panes(host, lead.as_ref()));
-                }
-            }
             super::history::serve_agent_calls(
                 &mut self.connection,
                 project,
@@ -3152,6 +3128,59 @@ impl TeamRuntime {
                         .unwrap_or_else(|_| Some((LEAD_UNREAD.to_owned(), true)))
                 },
             );
+        }
+    }
+
+    /// Keeps the caller socket of each native lead of a project bound and answered (DEC-111
+    /// Q18): binds it again in the folder it was pinned to when it is gone, replaced or was
+    /// refused on an earlier tick, logging only a change, then serves each bound socket once,
+    /// whether or not the lead has the team tool, so its hooks and monitors learn their pane
+    /// and its team servers get their calls named. Takes the project.
+    #[cfg(unix)]
+    fn tend_callers(&mut self, project: &ProjectId) {
+        let workers = &self.workers;
+        self.callers.retain(|id, _| workers.contains_key(id));
+        self.caller_folders.retain(|id, _| workers.contains_key(id));
+        let leads: Vec<i64> = self
+            .workers
+            .iter()
+            .filter(|(_, worker)| &worker.project == project && worker.role == AgentRole::Sub)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in &leads {
+            let was_bound = match self.callers.get(id) {
+                Some(Some(callers)) if callers.intact() => continue,
+                Some(bound) => Some(bound.is_some()),
+                None if self.stored_mode(*id).as_deref()
+                    == Some(crate::coord::settings::SubagentMode::Native.as_str()) =>
+                {
+                    None
+                }
+                None => continue,
+            };
+            let pinned = self.caller_folders.get(id).copied();
+            match self.bind_callers(*id, pinned) {
+                Ok(bound) => {
+                    if was_bound.is_some() {
+                        eprintln!("team_caller_socket_rebound");
+                    }
+                    self.caller_folders.insert(*id, bound.folder());
+                    self.callers.insert(*id, Some(bound));
+                }
+                Err(error) => {
+                    if was_bound != Some(false) {
+                        eprintln!("team_caller_socket_not_bound kind={:?}", error.kind());
+                    }
+                    self.callers.insert(*id, None);
+                }
+            }
+        }
+        let host = self.terminal.as_deref();
+        for id in leads {
+            if let Some(callers) = self.callers.get_mut(&id).and_then(Option::as_mut) {
+                let lead = AgentId::team(id).ok();
+                callers.serve(&mut || listed_panes(host, lead.as_ref()));
+            }
         }
     }
 
@@ -4209,12 +4238,15 @@ impl TeamRuntime {
         let prepared = prepared.and_then(|(root, plan, mode)| {
             if plan.native {
                 self.callers.remove(&id);
+                self.caller_folders.remove(&id);
                 let bound = self.bind_callers(id, plan.scratch_pin).map_err(|e| {
+                    eprintln!("team_caller_socket_not_bound kind={:?}", e.kind());
                     with_code(
                         "the lead's caller socket could not be made",
                         Some(io_code(&e)),
                     )
                 })?;
+                self.caller_folders.insert(id, bound.folder());
                 self.callers.insert(id, Some(bound));
             }
             Ok((root, plan, mode))
@@ -4516,8 +4548,9 @@ impl TeamRuntime {
     }
 
     /// Binds a native lead's caller socket in its short temp folder, where its team servers
-    /// find it from their mailbox (DEC-111 Q18); a failure is logged and leaves the lead's
-    /// calls unnamed, so they are refused. Takes the lead. Returns the socket or the failure.
+    /// find it from their mailbox (DEC-111 Q18), in the folder `pinned` names when given.
+    /// Takes the lead and the folder pin. Returns the socket, or the failure, which leaves
+    /// the lead's calls unnamed and so refused until a later bind succeeds.
     #[cfg(unix)]
     fn bind_callers(
         &self,
@@ -4531,9 +4564,7 @@ impl TeamRuntime {
             Some(socket.as_path()),
             "the lead's servers find the socket the engine binds"
         );
-        super::caller::Callers::bind(&socket, pinned).inspect_err(|error| {
-            eprintln!("team_caller_socket_not_bound kind={:?}", error.kind());
-        })
+        super::caller::Callers::bind(&socket, pinned)
     }
 
     /// The sub-agent mode name stored on an agent's row, if any. Takes the agent. Returns
@@ -5031,7 +5062,9 @@ impl TeamRuntime {
                 Some(callers.as_path()),
                 "the lead's servers find the caller socket its sandbox reaches"
             );
-            sandbox = sandbox.allow_unix_socket(&callers).map_err(sandboxed)?;
+            sandbox = sandbox
+                .allow_unix_socket_connect(&callers)
+                .map_err(sandboxed)?;
             native_tmux = Some(tmux);
         }
         expose_graph(&root, &working_dir);

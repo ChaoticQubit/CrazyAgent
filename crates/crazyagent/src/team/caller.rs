@@ -30,6 +30,9 @@ const LINE_BYTES: usize = ID_BYTES + 1 + 2 * DIGEST_BYTES + 1;
 const PROCESSES_BYTES_MAX: usize = 1 << 20;
 const NAMED: &[u8; 3] = b"ok\n";
 const UNNAMED: &[u8; 3] = b"no\n";
+const WHO: &[u8; 4] = b"who\n";
+/// The most bytes of the engine's answer to `who`: a tmux pane id and its newline.
+const PANE_REPLY_BYTES_MAX: usize = 16;
 
 const _: () = assert!(PENDING_PER_PANE_MAX < PENDING_MAX && STAMPS_PER_PANE_MAX < STAMPS_MAX);
 
@@ -81,6 +84,31 @@ pub fn name_call(mailbox: &Path, id: &str, digest: &[u8; DIGEST_BYTES]) -> bool 
         && stream.write_all(&line).is_ok()
         && stream.read_exact(&mut reply).is_ok()
         && &reply == NAMED
+}
+
+/// Asks the engine which pane the asking process runs in (DEC-111 Q18): connects to the
+/// lead's caller socket, sends `who` and waits up to `wait` for the pane the engine reached
+/// from the process the kernel says connected, never from the caller's environment. Takes
+/// the mailbox and the wait. Returns the pane id, or None for no socket, no pane, a reply
+/// that is no pane id or no reply in time.
+pub fn own_pane(mailbox: &Path, wait: Duration) -> Option<String> {
+    let socket = socket_for_mailbox(mailbox)?;
+    let mut stream = crate::spawn_gate::connect_unix_std(&socket).ok()?;
+    stream.set_read_timeout(Some(wait)).ok()?;
+    stream.set_write_timeout(Some(wait)).ok()?;
+    stream.write_all(WHO).ok()?;
+    let deadline = Instant::now() + wait;
+    let mut reply = Vec::with_capacity(PANE_REPLY_BYTES_MAX);
+    let mut byte = [0_u8; 1];
+    while reply.len() < PANE_REPLY_BYTES_MAX && Instant::now() < deadline {
+        stream.read_exact(&mut byte).ok()?;
+        if byte[0] == b'\n' {
+            let pane = String::from_utf8(reply).ok()?;
+            return crate::terminal::pane_id_valid(&pane).then_some(pane);
+        }
+        reply.push(byte[0]);
+    }
+    None
 }
 
 fn parse_line(line: &[u8]) -> Option<(String, [u8; DIGEST_BYTES])> {
@@ -138,6 +166,7 @@ struct Stamp {
 enum Received {
     Partial,
     Broken,
+    Who,
     Line(String, [u8; DIGEST_BYTES]),
 }
 
@@ -151,7 +180,9 @@ impl Pending {
                 self.line.extend_from_slice(&buffer[..read]);
                 assert!(self.line.len() <= LINE_BYTES);
                 if self.line.len() < LINE_BYTES {
-                    return if self.line.contains(&b'\n') {
+                    return if self.line == WHO {
+                        Received::Who
+                    } else if self.line.contains(&b'\n') {
                         Received::Broken
                     } else {
                         Received::Partial
@@ -221,7 +252,8 @@ impl Callers {
     /// Accepts the connections waiting on the socket, at most `CALLERS_PER_TICK_MAX`, finds
     /// on accepting each the pane whose process is the connecting process or one of its
     /// first `ANCESTORS_MAX` parents, then reads each one's call id and digest and names the
-    /// call by that pane, answering yes or no. A connection whose line has not fully arrived
+    /// call by that pane, answering yes or no; a `who` request is answered with that pane, or
+    /// no (DEC-111 Q18). A connection whose line has not fully arrived
     /// waits, at most `PENDING_PER_PANE_MAX` of one pane at once, and is dropped with no
     /// full line within `PENDING_WAIT`. Takes the lead's panes as (pane id, pid), listed
     /// with the process table at most once a tick, only when a connection arrives. Returns
@@ -271,6 +303,7 @@ impl Callers {
                     }
                 }
                 Received::Broken => {}
+                Received::Who => tell(pending),
                 Received::Line(call, digest) => {
                     named += usize::from(self.answer(pending, call, digest, now));
                 }
@@ -280,6 +313,7 @@ impl Callers {
             match pending.receive() {
                 Received::Partial => self.pending.push(pending),
                 Received::Broken => {}
+                Received::Who => tell(pending),
                 Received::Line(call, digest) => {
                     named += usize::from(self.answer(pending, call, digest, now));
                 }
@@ -371,6 +405,17 @@ impl Drop for Callers {
             let _ = std::fs::remove_file(&self.path);
         }
     }
+}
+
+/// Answers a `who` request with the pane the connection reached, or no for a process in
+/// no pane or a pane id that is not plain. Takes the connection.
+fn tell(mut pending: Pending) {
+    let reply = pending
+        .pane
+        .take()
+        .filter(|pane| crate::terminal::pane_id_valid(pane) && pane.len() < PANE_REPLY_BYTES_MAX)
+        .map_or_else(|| UNNAMED.to_vec(), |pane| format!("{pane}\n").into_bytes());
+    let _ = pending.stream.write_all(&reply);
 }
 
 fn socket_pin(path: &Path) -> Option<(u64, u64)> {

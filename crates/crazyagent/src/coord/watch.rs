@@ -36,13 +36,13 @@ pub fn run(mailbox: &Path, mut output: impl Write) -> Result<(), String> {
     if parent <= 1 {
         return Ok(());
     }
-    let mut tag = super::hook::identify(None, None).inbox;
+    let mut tag = super::hook::identify(mailbox, None, None).inbox;
     let mut announced: VecDeque<MessageId> = VecDeque::with_capacity(ANNOUNCED_MAX);
     let mut known: BTreeSet<MessageId> = BTreeSet::new();
     let mut polls: u32 = 0;
     while std::os::unix::process::parent_id() == parent {
         if polls % IDENTIFY_EVERY == IDENTIFY_EVERY - 1 {
-            tag = super::hook::identify(None, None).inbox;
+            tag = super::hook::identify(mailbox, None, None).inbox;
         }
         polls = polls.wrapping_add(1);
         if let (Some(tag), Ok(folder)) = (&tag, Mailbox::open(mailbox)) {

@@ -1,5 +1,7 @@
 #![cfg(unix)]
 
+mod pane_support;
+
 use crazyagent::coord::adoption::Flag;
 use crazyagent::coord::settings::{CoordSettings, Nudges, Overlaps};
 use crazyagent::protocol::ProjectId;
@@ -13,6 +15,8 @@ use std::process::{Child, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use pane_support::{LEAD_PANE, PaneCallers};
+
 const LEAD_SESSION: &str = "lead-session";
 const MATE_SESSION: &str = "mate-session";
 const MATE_PANE: &str = "%7";
@@ -25,6 +29,7 @@ struct Team {
     root: PathBuf,
     config: PathBuf,
     mailbox: PathBuf,
+    callers: PaneCallers,
 }
 
 impl Team {
@@ -48,14 +53,13 @@ impl Team {
             .to_string(),
         )
         .unwrap();
-        let mailbox = path.join("agent").join("tmp").join("calls");
-        std::fs::create_dir_all(&mailbox).unwrap();
-        std::fs::set_permissions(&mailbox, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (mailbox, callers) = PaneCallers::new(&path);
         Self {
             _root: root,
             root: path,
             config,
             mailbox,
+            callers,
         }
     }
 
@@ -74,13 +78,13 @@ impl Team {
     }
 
     fn start_hook(&self, event: &str, pane: Option<&str>, input: Value) -> Child {
-        let mut child = crazyagent::spawn_gate::spawn(
+        let mut child = self.callers.spawn(
+            pane.unwrap_or(LEAD_PANE),
             self.command(&["coord-hook", event], pane)
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped()),
-        )
-        .unwrap();
+        );
         child
             .stdin
             .take()
@@ -436,7 +440,7 @@ fn under_overlaps_block_an_edit_on_another_agents_claim_is_denied_once_the_engin
         now_ms(),
     )
     .unwrap();
-    let home = team.root.join("agent").join("home");
+    let home = team.root.join("agent-1").join("home");
     std::fs::create_dir_all(&home).unwrap();
     let serve = || {
         crazyagent::coord::relay::serve(&db, &project, lead, &home, &team.mailbox, false, now_ms())
@@ -482,7 +486,7 @@ fn under_overlaps_block_an_edit_on_another_agents_claim_is_denied_once_the_engin
 fn nudged(team: &Team, nudges: Nudges) -> ([String; 2], Vec<String>) {
     let (db, project) = engine(team, nudges);
     let lead = tools_agent(&db, "claude-code", false);
-    let home = team.root.join("agent").join("home");
+    let home = team.root.join("agent-1").join("home");
     std::fs::create_dir_all(&home).unwrap();
     let serve = || {
         crazyagent::coord::relay::serve(&db, &project, lead, &home, &team.mailbox, false, now_ms())
@@ -742,7 +746,8 @@ fn with_first_edit_a_bare_claude_agent_gets_the_engine_reminder_once() {
 #[test]
 fn the_monitor_prints_each_new_letter_for_its_session_once_and_exits_with_its_parent() {
     let team = Team::new();
-    let mut parent = crazyagent::spawn_gate::spawn(
+    let mut parent = team.callers.spawn(
+        LEAD_PANE,
         Command::new("/bin/sh")
             .arg("-c")
             .arg("\"$0\" coord-watch \"$1\" & exec sleep 60")
@@ -754,8 +759,7 @@ fn the_monitor_prints_each_new_letter_for_its_session_once_and_exits_with_its_pa
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::null()),
-    )
-    .unwrap();
+    );
     let mut output = BufReader::new(parent.stdout.take().unwrap());
     let (lines, received) = mpsc::channel();
     let reader = std::thread::spawn(move || {

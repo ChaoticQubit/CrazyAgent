@@ -607,7 +607,7 @@ pub struct ProjectSandbox {
     engine_secrets: Vec<PathBuf>,
     checkout: Option<Checkout>,
     clone: Option<PathBuf>,
-    sockets: Vec<PathBuf>,
+    sockets: Vec<(PathBuf, bool)>,
 }
 
 /// The one git worktree a confined agent writes in place of the whole project folder,
@@ -668,7 +668,23 @@ impl ProjectSandbox {
     /// own Codex app-server socket in the shared daemon folder (DEC-104 K2b). Input: a plain
     /// absolute path of letters, digits, `/`, `.`, `-` and `_` in an existing folder.
     /// Output: the widened sandbox, or `Invalid`; only Seatbelt can hold the grant.
-    pub fn allow_unix_socket(mut self, socket: &Path) -> Result<Self, SandboxError> {
+    pub fn allow_unix_socket(self, socket: &Path) -> Result<Self, SandboxError> {
+        self.grant_unix_socket(socket, true)
+    }
+
+    /// Lets the agent connect to one Unix socket at an exact path and read that file and its
+    /// folder's metadata, never bind a socket there: a native lead's caller socket, which
+    /// only the engine binds, so an answer on it comes from the engine (DEC-111 Q18). Input:
+    /// a plain absolute path as for `allow_unix_socket`. Output: the widened sandbox, or
+    /// `Invalid`; only Seatbelt can hold the grant.
+    pub fn allow_unix_socket_connect(self, socket: &Path) -> Result<Self, SandboxError> {
+        self.grant_unix_socket(socket, false)
+    }
+
+    /// Adds one exact Unix socket grant, with binding there when `bind` is set. Takes the
+    /// sandbox, the socket and whether the agent binds it. Returns the widened sandbox, or
+    /// `Invalid`.
+    fn grant_unix_socket(mut self, socket: &Path, bind: bool) -> Result<Self, SandboxError> {
         if !cfg!(target_os = "macos") {
             return Err(invalid("unix socket grants need Seatbelt"));
         }
@@ -692,7 +708,7 @@ impl ProjectSandbox {
         if !plain || folder.is_none() {
             return Err(invalid("the unix socket path is not plain"));
         }
-        self.sockets.push(socket.to_path_buf());
+        self.sockets.push((socket.to_path_buf(), bind));
         assert!(self.sockets.len() <= SOCKETS_MAX);
         Ok(self)
     }
@@ -996,7 +1012,7 @@ impl ProjectSandbox {
         if self
             .sockets
             .iter()
-            .any(|known| known.parent() == Some(scratch.as_path()))
+            .any(|(known, _)| known.parent() == Some(scratch.as_path()))
         {
             return Err(invalid("the sandbox already has a tmux server"));
         }
@@ -1202,14 +1218,26 @@ impl ProjectSandbox {
         text.push_str(
             "(allow file-read*\n  (literal \"/dev\")\n  (literal \"/dev/random\")\n  (literal \"/dev/urandom\")\n  (literal \"/dev/stdin\")\n  (literal \"/dev/stdout\")\n  (literal \"/dev/stderr\"))\n(allow file-read* file-write-data file-ioctl\n  (literal \"/dev/null\")\n  (literal \"/dev/zero\")\n  (literal \"/dev/tty\")\n  (literal \"/dev/ptmx\")\n  (literal \"/dev/dtracehelper\")\n  (subpath \"/dev/fd\"))\n(allow file-read-metadata file-ioctl\n  (regex #\"^/dev/ttys[0-9]+$\"))\n(allow file-read* file-write-data\n  (require-all\n    (regex #\"^/dev/ttys[0-9]+$\")\n    (extension \"com.apple.sandbox.pty\")))\n",
         );
-        for socket in &self.sockets {
+        for (socket, bind) in &self.sockets {
             let path = socket.display();
             let folder = socket.parent().unwrap_or(socket).display();
-            text.push_str(&format!(
-                "(allow file-read* file-write*\n  (literal \"{path}\")\n  (literal \"{path}.lock\"))\n(allow file-read-metadata (literal \"{folder}\"))\n(allow network-bind (local unix-socket (path-literal \"{path}\")))\n(allow network-outbound (remote unix-socket (path-literal \"{path}\")))\n"
-            ));
+            if *bind {
+                text.push_str(&format!(
+                    "(allow file-read* file-write*\n  (literal \"{path}\")\n  (literal \"{path}.lock\"))\n(allow file-read-metadata (literal \"{folder}\"))\n(allow network-bind (local unix-socket (path-literal \"{path}\")))\n(allow network-outbound (remote unix-socket (path-literal \"{path}\")))\n"
+                ));
+            } else {
+                text.push_str(&format!(
+                    "(allow file-read* (literal \"{path}\"))\n(allow file-read-metadata (literal \"{folder}\"))\n(allow network-outbound (remote unix-socket (path-literal \"{path}\")))\n"
+                ));
+            }
         }
-        assert_eq!(text.matches("unix-socket").count(), 2 * self.sockets.len());
+        assert_eq!(
+            text.matches("unix-socket").count(),
+            self.sockets
+                .iter()
+                .map(|(_, bind)| 1 + usize::from(*bind))
+                .sum::<usize>()
+        );
         let network = text.len();
         match &self.network {
             SandboxNetwork::Open => {

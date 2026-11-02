@@ -1083,3 +1083,58 @@ fn a_lead_profile_runs_its_own_tmux_server_and_never_reaches_another() {
         "{stderr}"
     );
 }
+
+/// An agent reaches a native lead's caller socket but cannot bind one in its place: it may
+/// unlink the engine's socket in its temp folder, yet no socket of its own can answer
+/// there, so a hook's answer on the caller socket comes from the engine (DEC-111 Q18).
+#[test]
+fn an_agent_reaches_the_caller_socket_but_cannot_bind_one_in_its_place() {
+    let case = case();
+    let tmp = toolchains::make_tmp(&case.home).unwrap();
+    let socket = tmp.join("caller.sock");
+    let listener = crazyagent::spawn_gate::bind_unix_std(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let engine = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline {
+            match crazyagent::spawn_gate::accept_unix_std(&listener) {
+                Ok(mut stream) => {
+                    stream.set_nonblocking(false).unwrap();
+                    let mut line = String::new();
+                    std::io::BufRead::read_line(
+                        &mut std::io::BufReader::new(&mut stream),
+                        &mut line,
+                    )
+                    .unwrap();
+                    std::io::Write::write_all(&mut stream, b"engine\n").unwrap();
+                    return Some(line);
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        }
+        None
+    });
+    let sandbox = ProjectSandbox::new(&case.project, &case.home, &case.tmp, SandboxNetwork::Open)
+        .unwrap()
+        .allow_scratch(&tmp)
+        .unwrap()
+        .allow_unix_socket_connect(&socket)
+        .unwrap();
+    let output = run(
+        &sandbox,
+        &case.profiles.join("caller.sb"),
+        "printf 'hi\\n' | /usr/bin/nc -U \"$TMPDIR/caller.sock\"; rm -f \"$TMPDIR/caller.sock\"; /usr/bin/nc -l -U \"$TMPDIR/caller.sock\" </dev/null >/dev/null 2>&1 & sleep 1; [ -S \"$TMPDIR/caller.sock\" ] && echo bound; kill $! 2>/dev/null; true",
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(engine.join().unwrap().as_deref(), Some("hi\n"));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "engine\n",
+        "the agent reached the engine and bound no socket of its own"
+    );
+    toolchains::remove_tmp(&case.home).unwrap();
+}

@@ -1,5 +1,8 @@
 #![cfg(unix)]
 
+mod pane_support;
+
+use pane_support::PaneCallers;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -14,6 +17,7 @@ struct Team {
     _root: tempfile::TempDir,
     config: PathBuf,
     mailbox: PathBuf,
+    callers: PaneCallers,
 }
 
 impl Team {
@@ -35,18 +39,18 @@ impl Team {
             .to_string(),
         )
         .unwrap();
-        let mailbox = root.path().join("mailbox");
-        std::fs::create_dir(&mailbox).unwrap();
-        std::fs::set_permissions(&mailbox, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (mailbox, callers) = PaneCallers::new(root.path());
         Self {
             _root: root,
             config,
             mailbox,
+            callers,
         }
     }
 
     fn hook(&self, event: &str, pane: &str, input: serde_json::Value) -> String {
-        let mut child = crazyagent::spawn_gate::spawn(
+        let mut child = self.callers.spawn(
+            pane,
             Command::new(env!("CARGO_BIN_EXE_crazyagent"))
                 .arg("coord-hook")
                 .arg(event)
@@ -56,8 +60,7 @@ impl Team {
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped()),
-        )
-        .unwrap();
+        );
         child
             .stdin
             .take()

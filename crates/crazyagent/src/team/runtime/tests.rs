@@ -8115,6 +8115,125 @@ fn an_unlinked_caller_socket_is_bound_again_on_the_next_tick() {
     assert_eq!(callers.take(&id, &digest), Some("%5".to_owned()));
 }
 
+/// Something an agent leaves at the caller socket's path, such as a folder, stops the
+/// engine binding there, and the lead's calls are refused meanwhile. The engine tries again
+/// each tick, so once the obstacle is gone the next tick binds the socket and a call is
+/// named again (DEC-111 S1R1-2).
+#[test]
+fn a_caller_socket_blocked_by_an_obstacle_is_bound_once_the_obstacle_is_gone() {
+    struct TmpRemoved(PathBuf);
+    impl Drop for TmpRemoved {
+        fn drop(&mut self) {
+            let _ = crate::sandbox::toolchains::remove_tmp(&self.0);
+        }
+    }
+    let f = Fixture::new(1);
+    let bin = f.base.join("engine-bin");
+    std::fs::create_dir(&bin).unwrap();
+    let engine = bin.join("crazyagent");
+    engine_file(&engine);
+    let mut team = f.runtime().with_delegation_tool(&engine).unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let lead = f.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    f.connection
+        .execute("UPDATE team_agents SET mode='native' WHERE id=?1", [lead])
+        .unwrap();
+    team.workers
+        .insert(lead, between_turns(&project, AgentRole::Sub, true, true));
+    let home = agent_home(&team.state, lead);
+    let scratch = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let _scratch = TmpRemoved(home);
+    let socket = scratch.join(crate::team::caller::CALLER_SOCKET);
+    let bound = || {
+        std::fs::symlink_metadata(&socket)
+            .is_ok_and(|metadata| std::os::unix::fs::FileTypeExt::is_socket(&metadata.file_type()))
+    };
+    team.serve_agent_calls(&f.setup, &f.access);
+    assert!(bound());
+
+    std::fs::remove_file(&socket).unwrap();
+    std::fs::create_dir(&socket).unwrap();
+    std::fs::write(socket.join("kept"), b"agent data").unwrap();
+    team.serve_agent_calls(&f.setup, &f.access);
+    assert!(
+        socket.join("kept").is_file(),
+        "the obstacle is not the engine's to remove"
+    );
+    std::fs::remove_dir_all(&socket).unwrap();
+    team.serve_agent_calls(&f.setup, &f.access);
+    assert!(bound(), "bound once the obstacle is gone");
+    let mailbox = team.mailbox(lead);
+    let digest = [8_u8; crate::team::tool::CALL_DIGEST_BYTES];
+    let id = format!("{:032x}", 2);
+    let callers = team
+        .callers
+        .get_mut(&lead)
+        .and_then(Option::as_mut)
+        .unwrap();
+    let own = std::process::id();
+    let named = std::thread::scope(|scope| {
+        let asked = scope.spawn(|| crate::team::caller::name_call(&mailbox, &id, &digest));
+        let deadline = Instant::now() + crate::team::caller::CALLER_WAIT;
+        while !asked.is_finished() && Instant::now() < deadline {
+            callers.serve(&mut || vec![("%5".to_owned(), own)]);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        asked.join().unwrap()
+    });
+    assert!(named);
+    assert_eq!(callers.take(&id, &digest), Some("%5".to_owned()));
+}
+
+/// A native lead whose team tool is off still has its caller socket bound and answered on
+/// each tick, so its teammates' hooks learn which pane they run in (DEC-111 Q18).
+#[test]
+fn a_native_lead_without_the_team_tool_still_has_its_caller_socket_answered() {
+    struct TmpRemoved(PathBuf);
+    impl Drop for TmpRemoved {
+        fn drop(&mut self) {
+            let _ = crate::sandbox::toolchains::remove_tmp(&self.0);
+        }
+    }
+    let f = Fixture::new(1);
+    let mut team = f.runtime();
+    assert!(team.delegation_tool.is_none());
+    let project = ProjectId::new(PROJECT).unwrap();
+    let lead = f.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    f.connection
+        .execute("UPDATE team_agents SET mode='native' WHERE id=?1", [lead])
+        .unwrap();
+    team.workers
+        .insert(lead, between_turns(&project, AgentRole::Sub, true, true));
+    let home = agent_home(&team.state, lead);
+    let scratch = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let _scratch = TmpRemoved(home);
+    let socket = scratch.join(crate::team::caller::CALLER_SOCKET);
+    team.serve_agent_calls(&f.setup, &f.access);
+    assert!(
+        std::fs::symlink_metadata(&socket)
+            .is_ok_and(|metadata| std::os::unix::fs::FileTypeExt::is_socket(&metadata.file_type())),
+        "the socket is bound without the team tool"
+    );
+    let mut asked = crate::spawn_gate::connect_unix_std(&socket).unwrap();
+    std::io::Write::write_all(&mut asked, b"who\n").unwrap();
+    asked
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    let mut reply = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !reply.ends_with(b"\n") && Instant::now() < deadline {
+        team.serve_agent_calls(&f.setup, &f.access);
+        let mut byte = [0_u8; 1];
+        if std::io::Read::read(&mut asked, &mut byte).is_ok_and(|read| read == 1) {
+            reply.push(byte[0]);
+        }
+    }
+    assert_eq!(
+        reply, b"no\n",
+        "a process in no pane of the lead is told so on the next tick"
+    );
+}
+
 /// A worker at the owner's Sub-agent depth gets a team server without spawn, stop and
 /// merge, a tool the owner switched off is left out for every agent and both sections
 /// say so; the same calls planted in the worker's mailbox anyway are refused.
