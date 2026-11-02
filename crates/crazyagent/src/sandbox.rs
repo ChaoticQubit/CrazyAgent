@@ -700,9 +700,10 @@ impl ProjectSandbox {
     }
 
     /// Lets the agent connect to one Unix socket at an exact path and read it, never bind
-    /// it or unlink it, such as a native lead reaching its teammates' tmux server (rv-audit
-    /// S1 F1). Input: as [`Self::allow_unix_socket`]. Output: the widened sandbox, or
-    /// `Invalid`.
+    /// it or create, change, link or unlink a node there, such as a native lead reaching its
+    /// teammates' tmux server and its teammates reaching the engine's caller socket (rv-audit
+    /// S1 F1, TTDL F1). Input: as [`Self::allow_unix_socket`]. Output: the widened sandbox,
+    /// or `Invalid`.
     pub fn reach_unix_socket(mut self, socket: &Path) -> Result<Self, SandboxError> {
         self.socket_room(socket)?;
         self.reached.push(socket.to_path_buf());
@@ -1072,9 +1073,10 @@ impl ProjectSandbox {
     }
 
     /// Splits a native-mode lead's sandbox into the lead's and its teammates' (DEC-104,
-    /// rv-audit S1 F1). The lead runs its own tmux server at `own`, uses the engine's caller
-    /// socket at `callers` and only reaches its teammates' server at `mates`. The teammates
-    /// serve `mates`, use `callers` as the lead does and are shut out of `own`. Inputs: the
+    /// rv-audit S1 F1, TTDL F1). The lead runs its own tmux server at `own`, uses the engine's
+    /// caller socket at `callers` and only reaches its teammates' server at `mates`. The
+    /// teammates serve `mates`, only reach `callers` and are shut out of `own`, so no teammate
+    /// holds a listener or places a node where the lead or the engine connects. Inputs: the
     /// three sockets and the canonical tmux program. Output: the lead's and the teammates'
     /// sandboxes, `Invalid`, or `Unavailable` off macOS.
     pub fn native_team(
@@ -1087,7 +1089,7 @@ impl ProjectSandbox {
         let teammates = self
             .clone()
             .serve_tmux_server(mates, tmux)?
-            .allow_unix_socket(callers)?
+            .reach_unix_socket(callers)?
             .shut_unix_socket(own)?;
         let lead = self
             .allow_tmux_server(own, tmux)?
@@ -1344,7 +1346,7 @@ impl ProjectSandbox {
             let path = socket.display();
             let folder = socket.parent().unwrap_or(socket).display();
             text.push_str(&format!(
-                "(allow file-read* (literal \"{path}\"))\n(allow file-read-metadata (literal \"{folder}\"))\n(allow network-outbound (remote unix-socket (path-literal \"{path}\")))\n(deny file-write-unlink (literal \"{path}\"))\n"
+                "(allow file-read* (literal \"{path}\"))\n(allow file-read-metadata (literal \"{folder}\"))\n(allow network-outbound (remote unix-socket (path-literal \"{path}\")))\n(deny file-write* (literal \"{path}\"))\n"
             ));
         }
         for socket in &self.shut {
@@ -1357,14 +1359,21 @@ impl ProjectSandbox {
             text.matches("unix-socket").count(),
             2 * self.sockets.len() + self.served.len() + self.reached.len()
         );
+        let denied_last = |operations: &str, socket: &PathBuf| {
+            text.rfind(&format!(
+                "(deny {operations} (literal \"{}\"))",
+                socket.display()
+            )) > text.rfind("(allow file-write*")
+        };
         assert!(
-            self.served.iter().chain(&self.reached).all(|socket| {
-                text.rfind(&format!(
-                    "(deny file-write-unlink (literal \"{}\"))",
-                    socket.display()
-                )) > text.rfind("(allow file-write*")
-            }),
-            "a served or reached socket's unlink deny must follow every write allow, since the last match wins"
+            self.served
+                .iter()
+                .all(|socket| denied_last("file-write-unlink", socket))
+                && self
+                    .reached
+                    .iter()
+                    .all(|socket| denied_last("file-write*", socket)),
+            "a served socket's unlink deny and a reached socket's write deny must follow every write allow, since the last match wins"
         );
         let network = text.len();
         match &self.network {
