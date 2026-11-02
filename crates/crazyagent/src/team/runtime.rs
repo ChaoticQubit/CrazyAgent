@@ -461,6 +461,7 @@ pub struct TeamRuntime {
     instructions_next: BTreeMap<ProjectId, Instant>,
     instruction_restarts: BTreeMap<i64, ProjectId>,
     master_restarts: BTreeSet<ProjectId>,
+    restarted_for: BTreeMap<i64, u64>,
     #[cfg(unix)]
     callers: BTreeMap<i64, Option<super::caller::Callers>>,
 }
@@ -617,6 +618,7 @@ impl TeamRuntime {
             instructions_next: BTreeMap::new(),
             instruction_restarts: BTreeMap::new(),
             master_restarts: BTreeSet::new(),
+            restarted_for: BTreeMap::new(),
         })
     }
 
@@ -3238,10 +3240,11 @@ impl TeamRuntime {
 
     /// Types the oldest waiting team message into a project's live master once it is idle
     /// and the owner is not typing, with the owner's prompts to sub-agents it has not heard,
-    /// and under the Next task choice the owner's instruction edit first, once, when the
-    /// whole input stays typable (DEC-111 QR1). Takes the project. Returns any SQLite
-    /// failure; a message that cannot be typed is failed with a team note, one that must
-    /// wait stays pending.
+    /// and under the Next task choice the owner's instruction edit first, once, cut to the
+    /// room the input limit leaves beside the message; when not even the cut block fits, a
+    /// team note says the edit waits for a later message (DEC-111 QR1). Takes the project.
+    /// Returns any SQLite failure; a message that cannot be typed is failed with a team
+    /// note, one that must wait stays pending.
     fn feed_live(&mut self, project: &ProjectId) -> Result<(), EngineError> {
         let Some(id) = self.master(project) else {
             return Ok(());
@@ -3268,18 +3271,18 @@ impl TeamRuntime {
         let (typed, noted) = live_input(&heard, &author, &text);
         let newest = newest.filter(|_| noted);
         let home = agent_home(&self.state, id);
-        let edited = self.next_message_edit(project, id, &home).and_then(|edit| {
-            let text = format!(
-                "{}{typed}",
-                crate::instruction_files::changed_message(&edit.sections)
-            );
-            (super::master::typable(&typed) && super::master::typable(&text))
-                .then_some((edit, text))
+        let edit = self
+            .next_message_edit(project, id, &home)
+            .filter(|_| super::master::typable(&typed));
+        let block = edit.as_ref().and_then(|edit| {
+            edit.message_within(super::master::INPUT_TEXT_MAX.saturating_sub(typed.len()))
         });
-        let (edit, typed) = match edited {
-            Some((edit, text)) => (Some(edit), text),
+        let missed = edit.is_some() && block.is_none();
+        let (edit, typed) = match block {
+            Some(block) => (edit, format!("{block}{}", typed.trim_start())),
             None => (None, typed),
         };
+        assert!(edit.is_none() || super::master::typable(&typed));
         let state = match super::master::master_input(
             &self.connection,
             host.as_ref(),
@@ -3305,6 +3308,9 @@ impl TeamRuntime {
         }
         if let Some(edit) = &edit {
             let _ = crate::instruction_files::delivered(edit, &home);
+        }
+        if missed {
+            self.note(project, INSTRUCTIONS_WAIT_FOR_ROOM)?;
         }
         if let Some(newest) = newest {
             super::direct::delivered(&self.connection, project, newest)?;
@@ -3569,8 +3575,9 @@ impl TeamRuntime {
     /// Applies the project's Restart or Badge choice for owner instruction edits (DEC-111
     /// QR1), checking its agents whose process reported ready at most once each
     /// `INSTRUCTION_CHECK_EVERY`: under Restart an idle agent whose instructions changed
-    /// stops and starts again, a sub-agent once its process ended, the live master while it
-    /// is quiet through `keep_live`, and a master that is not live at the next message; under
+    /// stops and starts again, once per edited text, a sub-agent once its process ended, the
+    /// live master while it is quiet through `keep_live`, and a master that is not live at
+    /// the next message; under
     /// Badge each running agent whose instructions changed is flagged for the team status,
     /// and the flags clear under any other choice. Takes the setup, the access and the paused
     /// accounts. Returns any SQLite failure.
@@ -3621,6 +3628,10 @@ impl TeamRuntime {
                 flagged.insert(id);
                 continue;
             }
+            let hash = edit.text_hash();
+            if self.restarted_for.get(&id) == Some(&hash) {
+                continue;
+            }
             let waits = self.workers[&id].kept_session && self.lead_waits(id)?;
             let quiet = self.workers[&id].live
                 && super::master::quiet(
@@ -3638,15 +3649,18 @@ impl TeamRuntime {
                     worker.stopping = true;
                     let _ = worker.orders.send(Order::Stop);
                     self.instruction_restarts.insert(id, project.clone());
+                    self.restarted_for.insert(id, hash);
                 }
                 (AgentRole::Master, true) if idle && quiet && worker.turn_started.is_none() => {
                     worker.stopping = true;
                     let _ = worker.orders.send(Order::Stop);
                     self.master_restarts.insert(project.clone());
+                    self.restarted_for.insert(id, hash);
                 }
                 (AgentRole::Master, false) if idle => {
                     worker.stopping = true;
                     let _ = worker.orders.send(Order::Stop);
+                    self.restarted_for.insert(id, hash);
                 }
                 _ => {}
             }
@@ -7448,6 +7462,7 @@ const OWN_TURN_FAILED: &str = "The lead's own turn did not finish";
 const OWNER_STOPPED_TASK: &str =
     "The owner stopped this sub-agent, so it was not started again. Only the owner can wake it.";
 const OWNER_RESTARTED: &str = "The owner restarted it in its own worktree. It is idle and takes the next task for its harness.";
+const INSTRUCTIONS_WAIT_FOR_ROOM: &str = "The message just typed into the live master left no room for your instruction change, so a later message carries it; it applies in full when the master starts again.";
 const INSTRUCTIONS_RESTARTED: &str = "It restarted in its own worktree and conversation to load the owner's changed instructions. It is idle and takes the next task for its harness.";
 const OWNER_WOKE: &str = "The owner woke it again in its own worktree. It is idle and takes the next task for its harness.";
 const OWNER_STOPPED_AGENT: &str = "The owner stopped it and its teammates. Its task waits for it until the owner starts it again; do not hand that work to another agent.";

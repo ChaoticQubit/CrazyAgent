@@ -305,6 +305,12 @@ fn same_text(left: &str, right: &str) -> bool {
 /// `SECTION_BYTES_MAX` bytes joined by blank lines; when they do not all fit, the parts that
 /// fit in order and a last line saying the rest apply at the agent's next start.
 pub fn changed_sections(started: &str, now: &str) -> Vec<String> {
+    fit_sections(changed_parts(started, now), SECTION_BYTES_MAX)
+}
+
+/// Every part that changed between the two texts, as `changed_sections` describes, uncut.
+/// Inputs: both texts. Output: the parts.
+fn changed_parts(started: &str, now: &str) -> Vec<String> {
     let before = sections(started);
     let after = sections(now);
     let mut changed: Vec<String> = after
@@ -331,10 +337,18 @@ pub fn changed_sections(started: &str, now: &str) -> Vec<String> {
                 heading => format!("{heading}{SECTION_SEPARATOR}{SECTION_REMOVED}"),
             }),
     );
-    if changed.join(SECTION_SEPARATOR).len() <= SECTION_BYTES_MAX {
+    changed
+}
+
+/// Keeps the changed parts that fit in `limit` bytes joined by blank lines: all of them, or
+/// the leading ones that fit with `SECTIONS_CUT` as the last line. Inputs: the parts and the
+/// limit, at least the cut line and one separator. Output: at most `limit` bytes of parts.
+fn fit_sections(changed: Vec<String>, limit: usize) -> Vec<String> {
+    assert!(limit >= SECTION_SEPARATOR.len() + SECTIONS_CUT.len());
+    if changed.join(SECTION_SEPARATOR).len() <= limit {
         return changed;
     }
-    let room = SECTION_BYTES_MAX - SECTION_SEPARATOR.len() - SECTIONS_CUT.len();
+    let room = limit - SECTION_SEPARATOR.len() - SECTIONS_CUT.len();
     let mut kept = Vec::new();
     let mut used = 0;
     for part in changed {
@@ -351,7 +365,7 @@ pub fn changed_sections(started: &str, now: &str) -> Vec<String> {
         kept.push(part);
     }
     kept.push(SECTIONS_CUT.to_owned());
-    assert!(kept.join(SECTION_SEPARATOR).len() <= SECTION_BYTES_MAX);
+    assert!(kept.join(SECTION_SEPARATOR).len() <= limit);
     kept
 }
 
@@ -371,13 +385,49 @@ pub fn changed_message(sections: &[String]) -> String {
 }
 
 /// An owner edit one running agent has not had yet: the project's choice of how it reaches
-/// the agent, the changed parts, and the engine data folder and the text now, which become
-/// the agent's record once the change reached it.
+/// the agent, the changed parts, the text the agent has, and the engine data folder and the
+/// text now, which become the agent's record once the change reached it.
 pub struct Edit {
     pub delivery: EditDelivery,
     pub sections: Vec<String>,
+    started: String,
     data: PathBuf,
     now: String,
+}
+
+impl Edit {
+    /// The change block cut to fit `bytes`, for a terminal input with a size limit such as
+    /// the live master's: the changed parts that fit, then `SECTIONS_CUT` when some do not,
+    /// with control characters other than line feed and tab dropped so the input stays plain.
+    /// Input: the bytes the block may take. Output: the block, or none when not even the
+    /// header and the cut line fit.
+    pub fn message_within(&self, bytes: usize) -> Option<String> {
+        let framing = CHANGED_HEADER.len() + 2 * SECTION_SEPARATOR.len();
+        let limit = bytes.checked_sub(framing)?.min(SECTION_BYTES_MAX);
+        if limit < SECTION_SEPARATOR.len() + SECTIONS_CUT.len() {
+            return None;
+        }
+        let plain = |text: &str| -> String {
+            text.chars()
+                .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+                .collect()
+        };
+        let parts = match changed_parts(&plain(&self.started), &plain(&self.now)) {
+            parts if parts.is_empty() => vec![SECTIONS_CUT.to_owned()],
+            parts => fit_sections(parts, limit),
+        };
+        let message = changed_message(&parts);
+        assert!(message.len() <= bytes);
+        Some(message)
+    }
+
+    /// A hash of the owner text this edit brings, the same for the same text within one
+    /// engine run, so one edit is acted on once. Output: the hash.
+    pub fn text_hash(&self) -> u64 {
+        let mut hasher = std::hash::DefaultHasher::new();
+        std::hash::Hash::hash(&self.now, &mut hasher);
+        std::hash::Hasher::finish(&hasher)
+    }
 }
 
 /// Reads whether the owner's instructions changed since one agent of the project started or
@@ -426,6 +476,7 @@ pub fn edit_for(
     Ok(Some(Edit {
         delivery,
         sections,
+        started,
         data: agent.data,
         now,
     }))
