@@ -1,3 +1,4 @@
+use super::super::teammates_socket;
 use super::super::{
     AgentId, Host, HostError, OWN_SERVER_UNAVAILABLE, PANES_LISTED_MAX, PaneInfo, PaneRef,
     TerminalStream, failure,
@@ -18,10 +19,12 @@ const LEADS_KEPT_MAX: usize = 256;
 /// The most adopted teammates the engine remembers the lead of at once.
 const MEMBERS_KEPT_MAX: usize = LEADS_KEPT_MAX * PANES_LISTED_MAX;
 
-/// The engine's terminal host across its tmux servers: its own private server, and one
-/// server per native-mode lead started inside that lead's Seatbelt profile. Every call for
-/// an agent whose own server listens goes to that server, through a client inside the
-/// lead's profile, and so does every call for a teammate adopted into one; every other call
+/// The engine's terminal host across its tmux servers: its own private server, and per
+/// native-mode lead one server started inside that lead's Seatbelt profile and one inside
+/// its teammates' profile, where the lead's app splits its teammates (rv-audit S1 F1).
+/// Every call for an agent whose own server listens goes to that server, through a client
+/// inside the lead's profile, every call for a teammate adopted into one to its lead's
+/// teammates' server, or its lead's own for a lead started without one; every other call
 /// goes to the engine's server. So team code, viewers and stops reach a native lead and its
 /// teammates by name, and no unconfined client ever connects to a server a lead controls.
 pub struct Servers {
@@ -29,6 +32,7 @@ pub struct Servers {
     root: PathBuf,
     program: Option<PathBuf>,
     leads: Mutex<BTreeMap<AgentId, Arc<Tmux>>>,
+    mates: Mutex<BTreeMap<AgentId, Arc<Tmux>>>,
     members: Mutex<BTreeMap<AgentId, AgentId>>,
 }
 
@@ -46,13 +50,57 @@ fn profile_of(root: &Path, agent: &AgentId) -> Result<PathBuf, HostError> {
     let id = agent
         .team_agent()
         .ok_or_else(|| failure("terminal_agent_invalid"))?;
-    let profile = crate::team::runtime::agent_profile(&root.join("team"), id);
+    plain_profile(crate::team::runtime::agent_profile(&root.join("team"), id))
+}
+
+/// The installed Seatbelt profile of a native lead's teammates, which their own server runs
+/// inside. Takes the engine root and the lead. Returns the profile path, or
+/// `terminal_own_server_unavailable` when it is not this user's plain file.
+fn teammates_profile_of(root: &Path, lead: &AgentId) -> Result<PathBuf, HostError> {
+    let id = lead
+        .team_agent()
+        .ok_or_else(|| failure("terminal_agent_invalid"))?;
+    plain_profile(crate::team::runtime::agent_teammates_profile(
+        &root.join("team"),
+        id,
+    ))
+}
+
+/// Checks that an installed profile is this user's plain file, read without following a
+/// link. Takes the path. Returns it, or `terminal_own_server_unavailable`.
+fn plain_profile(profile: PathBuf) -> Result<PathBuf, HostError> {
     let plain = std::fs::symlink_metadata(&profile)
         .is_ok_and(|metadata| metadata.is_file() && metadata.uid() == user());
     if !plain {
         return Err(failure(OWN_SERVER_UNAVAILABLE));
     }
     Ok(profile)
+}
+
+/// A native lead's panes as team code reads them: the window of its anchor on its
+/// teammates' server, where the anchor stands for the lead with its own pane's process and
+/// state from its own server, so every pane id read for the team comes from one server and
+/// no teammate's id can name the lead. Takes both servers and the lead. Returns the panes.
+fn lead_panes(own: &Tmux, mates: &Tmux, lead: &AgentId) -> Result<Vec<PaneInfo>, HostError> {
+    let lead_pane = own.own_pane(lead)?;
+    let anchor = mates.own_pane(lead)?;
+    let panes: Vec<PaneInfo> = mates
+        .panes(lead)?
+        .into_iter()
+        .map(|pane| {
+            if pane.id == anchor.id {
+                PaneInfo {
+                    id: anchor.id.clone(),
+                    pid: lead_pane.pid,
+                    dead: lead_pane.dead,
+                }
+            } else {
+                pane
+            }
+        })
+        .collect();
+    assert!(panes.len() <= PANES_LISTED_MAX);
+    Ok(panes)
 }
 
 impl Servers {
@@ -65,6 +113,7 @@ impl Servers {
             root: root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
             program,
             leads: Mutex::new(BTreeMap::new()),
+            mates: Mutex::new(BTreeMap::new()),
             members: Mutex::new(BTreeMap::new()),
         }
     }
@@ -107,6 +156,72 @@ impl Servers {
         Ok(server)
     }
 
+    /// The client host for one native lead's teammates' server at the socket its latest
+    /// start named, opened once and kept while it listens; the server starts on its first
+    /// call. A kept host of an earlier start's socket ends that server first. Takes the lead
+    /// and the socket. Returns the host, or a refusal when the lead lacks either installed
+    /// profile or too many are kept.
+    fn mates_host(&self, lead: &AgentId, socket: &Path) -> Result<Arc<Tmux>, HostError> {
+        let mut mates = self
+            .mates
+            .lock()
+            .map_err(|_| failure("terminal_unavailable"))?;
+        match mates.remove(lead) {
+            Some(found) if found.socket() == socket => {
+                mates.insert(lead.clone(), found.clone());
+                return Ok(found);
+            }
+            Some(earlier) => {
+                let _ = earlier.close(&[]);
+            }
+            None => {}
+        }
+        mates.retain(|_, server| listening(&server.socket()));
+        if mates.len() >= LEADS_KEPT_MAX {
+            return Err(failure("terminal_unavailable"));
+        }
+        let server = Arc::new(Tmux::teammates(
+            self.program.clone(),
+            socket,
+            &profile_of(&self.root, lead)?,
+            &teammates_profile_of(&self.root, lead)?,
+        )?);
+        mates.insert(lead.clone(), server.clone());
+        assert!(mates.len() <= LEADS_KEPT_MAX);
+        Ok(server)
+    }
+
+    /// A native lead's teammates' server when one accepts connections at the socket its
+    /// latest start named, else none; a raw connect, never a tmux client, looks, since an
+    /// ended server's socket stays. Takes the agent. Returns the server host or the failure
+    /// to open one.
+    fn mates(&self, lead: &AgentId) -> Result<Option<Arc<Tmux>>, HostError> {
+        let Ok(socket) = teammates_socket(&self.root, lead) else {
+            return Ok(None);
+        };
+        if !listening(&socket) || crate::spawn_gate::connect_unix_std(&socket).is_err() {
+            if let Ok(mut mates) = self.mates.lock() {
+                mates.remove(lead);
+            }
+            return Ok(None);
+        }
+        self.mates_host(lead, &socket).map(Some)
+    }
+
+    /// Forgets the client hosts of a lead's servers and the teammates adopted under it.
+    /// Takes the lead.
+    fn forget(&self, lead: &AgentId) {
+        if let Ok(mut leads) = self.leads.lock() {
+            leads.remove(lead);
+        }
+        if let Ok(mut mates) = self.mates.lock() {
+            mates.remove(lead);
+        }
+        if let Ok(mut members) = self.members.lock() {
+            members.retain(|_, known| known != lead);
+        }
+    }
+
     /// The native-mode leads whose own servers listen now, found from the team's agent
     /// folders, at most `LEADS_SCAN_MAX` read. Takes nothing. Returns the leads in order.
     fn leads_listening(&self) -> Vec<AgentId> {
@@ -128,9 +243,10 @@ impl Servers {
         leads
     }
 
-    /// The own server of the lead an adopted teammate runs under while it listens, else
-    /// none, forgetting a teammate whose lead's server is gone. Takes the teammate. Returns
-    /// the server host or the failure to open one.
+    /// The server an adopted teammate runs on while it listens: its lead's teammates' server,
+    /// or its lead's own for a lead started without one; else none, forgetting a teammate
+    /// whose lead's servers are gone. Takes the teammate. Returns the server host or the
+    /// failure to open one.
     fn member(&self, agent: &AgentId) -> Result<Option<Arc<Tmux>>, HostError> {
         let lead = self
             .members
@@ -140,7 +256,10 @@ impl Servers {
         let Some(lead) = lead else {
             return Ok(None);
         };
-        let server = self.own(&lead)?;
+        let server = match self.mates(&lead)? {
+            Some(mates) => Some(mates),
+            None => self.own(&lead)?,
+        };
         if server.is_none()
             && let Ok(mut members) = self.members.lock()
         {
@@ -186,6 +305,22 @@ impl Servers {
             None => call(&self.engine),
         }
     }
+
+    /// Runs one call on the server that holds the panes of an agent's window: a native
+    /// lead's teammates' server while it and the lead's own listen, else as [`Self::on`].
+    /// Takes the agent and the call. Returns the call's result.
+    fn on_panes<T>(
+        &self,
+        agent: &AgentId,
+        call: impl FnOnce(&Tmux) -> Result<T, HostError>,
+    ) -> Result<T, HostError> {
+        if self.own(agent)?.is_some()
+            && let Some(mates) = self.mates(agent)?
+        {
+            return call(&mates);
+        }
+        self.on(agent, call)
+    }
 }
 
 impl Host for Servers {
@@ -211,7 +346,13 @@ impl Host for Servers {
         }
         let socket = harness_socket(&self.root, agent)?;
         let server = self.server(agent, &socket)?;
-        server.spawn(agent, command)
+        if server.alive()?.contains(agent) {
+            return Err(failure("terminal_agent_running"));
+        }
+        let pane_env = self
+            .mates_host(agent, &teammates_socket(&self.root, agent)?)?
+            .anchor_for(agent, command)?;
+        server.spawn_with(agent, command, &pane_env)
     }
 
     fn attach(&self, agent: &AgentId) -> Result<TerminalStream, HostError> {
@@ -235,18 +376,28 @@ impl Host for Servers {
     }
 
     fn resize(&self, agent: &AgentId, cols: u16, rows: u16) -> Result<(), HostError> {
-        self.on(agent, |server| server.resize(agent, cols, rows))
+        self.on(agent, |server| server.resize(agent, cols, rows))?;
+        if self.own(agent)?.is_some()
+            && let Some(mates) = self.mates(agent)?
+        {
+            mates.resize(agent, cols, rows)?;
+        }
+        Ok(())
     }
 
     fn kill(&self, agent: &AgentId) -> Result<(), HostError> {
+        let mates = self.mates(agent)?;
         if let Some(server) = self.own(agent)? {
             server.close(&[])?;
-            if let Ok(mut leads) = self.leads.lock() {
-                leads.remove(agent);
+            if let Some(mates) = mates {
+                mates.close(&[])?;
             }
-            if let Ok(mut members) = self.members.lock() {
-                members.retain(|_, lead| lead != agent);
-            }
+            self.forget(agent);
+            return Ok(());
+        }
+        if let Some(mates) = mates {
+            mates.close(&[])?;
+            self.forget(agent);
             return Ok(());
         }
         if let Some(server) = self.member(agent)? {
@@ -258,11 +409,14 @@ impl Host for Servers {
         }
         let mut ended = false;
         for lead in self.leads_listening() {
-            let Some(server) = self.own(&lead).ok().flatten() else {
-                continue;
-            };
-            if server.holds(agent) && server.kill(agent).is_ok() {
-                ended = true;
+            let servers = [self.mates(&lead), self.own(&lead)];
+            for server in servers
+                .into_iter()
+                .filter_map(|server| server.ok().flatten())
+            {
+                if server.holds(agent) && server.kill(agent).is_ok() {
+                    ended = true;
+                }
             }
         }
         if ended {
@@ -273,9 +427,10 @@ impl Host for Servers {
     }
 
     fn adopt_pane(&self, agent: &AgentId, lead: &AgentId, pane: &str) -> Result<(), HostError> {
-        let server = self
+        let own = self
             .own(lead)?
             .ok_or_else(|| failure(OWN_SERVER_UNAVAILABLE))?;
+        let server = self.mates(lead)?.unwrap_or(own);
         if self.own(agent)?.is_some() || self.engine.alive()?.contains(agent) {
             return Err(failure("terminal_agent_running"));
         }
@@ -284,27 +439,32 @@ impl Host for Servers {
     }
 
     fn panes(&self, agent: &AgentId) -> Result<Vec<PaneInfo>, HostError> {
+        if let Some(own) = self.own(agent)?
+            && let Some(mates) = self.mates(agent)?
+        {
+            return lead_panes(&own, &mates, agent);
+        }
         self.on(agent, |server| server.panes(agent))
     }
 
     fn kill_pane(&self, agent: &AgentId, pane: &str) -> Result<(), HostError> {
-        self.on(agent, |server| server.kill_pane(agent, pane))
+        self.on_panes(agent, |server| server.kill_pane(agent, pane))
     }
 
     fn attach_pane(&self, agent: &AgentId, pane: &str) -> Result<TerminalStream, HostError> {
-        self.on(agent, |server| server.attach_pane(agent, pane))
+        self.on_panes(agent, |server| server.attach_pane(agent, pane))
     }
 
     fn snapshot_pane(&self, agent: &AgentId, pane: &str) -> Result<TerminalStream, HostError> {
-        self.on(agent, |server| server.snapshot_pane(agent, pane))
+        self.on_panes(agent, |server| server.snapshot_pane(agent, pane))
     }
 
     fn input_pane(&self, agent: &AgentId, pane: &str, bytes: &[u8]) -> Result<(), HostError> {
-        self.on(agent, |server| server.input_pane(agent, pane, bytes))
+        self.on_panes(agent, |server| server.input_pane(agent, pane, bytes))
     }
 
     fn input_live_pane(&self, agent: &AgentId, pane: &str) -> Result<bool, HostError> {
-        self.on(agent, |server| server.input_live_pane(agent, pane))
+        self.on_panes(agent, |server| server.input_live_pane(agent, pane))
     }
 
     fn alive(&self) -> Result<Vec<AgentId>, HostError> {

@@ -1083,3 +1083,100 @@ fn a_lead_profile_runs_its_own_tmux_server_and_never_reaches_another() {
         "{stderr}"
     );
 }
+
+/// Reads one `name=status` line a probe script printed. Takes the output text and the name.
+/// Returns the status, panicking when the line is missing.
+fn status_of(text: &str, name: &str) -> String {
+    text.lines()
+        .find_map(|line| line.strip_prefix(&format!("{name}=")))
+        .unwrap_or_else(|| panic!("no {name}= in {text}"))
+        .to_owned()
+}
+
+#[test]
+fn a_teammates_profile_serves_its_tmux_socket_but_never_reaches_unlinks_or_takes_the_leads() {
+    let case = case();
+    let tmux = crazyagent::terminal::tmux::installed(&case.project).expect("tmux is installed");
+    let tmp = toolchains::make_tmp(&case.home).unwrap();
+    let own = tmp.join("tmux.sock");
+    let mates = tmp.join("teammates-0123456789abcdef.sock");
+    let scratch = || {
+        ProjectSandbox::new(
+            &case.project,
+            &case.home,
+            &case.tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap()
+        .allow_scratch(&tmp)
+        .unwrap()
+    };
+    let invalid = |result: Result<ProjectSandbox, SandboxError>| match result {
+        Err(SandboxError::Invalid(reason)) => reason,
+        other => panic!("granted: {:?}", other.map(|_| ())),
+    };
+    let teammates = scratch()
+        .serve_tmux_server(&mates, &tmux)
+        .unwrap()
+        .shut_unix_socket(&own)
+        .unwrap();
+    assert!(invalid(teammates.clone().reach_unix_socket(&mates)).contains("already has a grant"));
+    assert!(
+        invalid(teammates.clone().allow_tmux_server(&own, &tmux)).contains("already has a tmux")
+    );
+    let lead = scratch()
+        .allow_tmux_server(&own, &tmux)
+        .unwrap()
+        .reach_unix_socket(&mates)
+        .unwrap();
+
+    let served = run(
+        &teammates,
+        &case.profiles.join("teammates.sb"),
+        &format!(
+            "{t} -S {m} new-session -d -s mates 'sleep 60'; echo start=$?\n\
+             {t} -S {m} list-sessions; echo own=$?\n\
+             rm -f {m}; echo rm=$?\n\
+             mv {m} {m}.away; echo mv=$?\n\
+             touch {o}; echo lead=$?\n",
+            t = quoted(&tmux),
+            m = quoted(&mates),
+            o = quoted(&own),
+        ),
+    );
+    let reached = run(
+        &lead,
+        &case.profiles.join("lead.sb"),
+        &format!(
+            "{t} -S {m} list-sessions -F '#{{session_name}}'; echo reach=$?\nrm -f {m}; echo rm=$?\n",
+            t = quoted(&tmux),
+            m = quoted(&mates),
+        ),
+    );
+    let still = fs::symlink_metadata(&mates)
+        .is_ok_and(|metadata| std::os::unix::fs::FileTypeExt::is_socket(&metadata.file_type()));
+    let _ = tmux_at(&tmux, &mates, &["kill-server"]);
+    let _ = fs::remove_file(&mates);
+    toolchains::remove_tmp(&case.home).unwrap();
+
+    let served_text = String::from_utf8_lossy(&served.stdout).into_owned();
+    let served_errors = String::from_utf8_lossy(&served.stderr);
+    assert_eq!(status_of(&served_text, "start"), "0", "{served_errors}");
+    for name in ["own", "rm", "mv", "lead"] {
+        assert_ne!(
+            status_of(&served_text, name),
+            "0",
+            "a teammate's {name} attempt succeeded: {served_errors}"
+        );
+    }
+    assert!(!own.exists(), "a teammate made the lead's socket path");
+    let reached_text = String::from_utf8_lossy(&reached.stdout).into_owned();
+    let reached_errors = String::from_utf8_lossy(&reached.stderr);
+    assert!(
+        reached_text.starts_with("mates\n"),
+        "{reached_text} {reached_errors}"
+    );
+    assert_eq!(status_of(&reached_text, "reach"), "0", "{reached_errors}");
+    assert_ne!(status_of(&reached_text, "rm"), "0", "{reached_errors}");
+    assert!(still, "the teammates' socket was removed or replaced");
+}

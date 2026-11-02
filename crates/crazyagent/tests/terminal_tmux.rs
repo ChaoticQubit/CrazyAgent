@@ -1270,13 +1270,15 @@ fn pane_process_writes_its_environment() {
 }
 
 /// One engine root with team agent 1 ready to lead in its own server: its home, its short
-/// private temp folder that holds the socket and an allow-default installed profile.
+/// private temp folder that holds its own and its teammates' sockets and allow-default
+/// installed profiles for it and its teammates.
 struct Lead {
     root: tempfile::TempDir,
     tmux: PathBuf,
     home: PathBuf,
     profile: PathBuf,
     socket: PathBuf,
+    mates: PathBuf,
 }
 
 impl Lead {
@@ -1291,14 +1293,22 @@ impl Lead {
         let profile = crazyagent::team::runtime::agent_profile(&team, 1);
         std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
         std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+        std::fs::write(
+            crazyagent::team::runtime::agent_teammates_profile(&team, 1),
+            "(version 1)\n(allow default)\n",
+        )
+        .unwrap();
         let socket =
             crazyagent::terminal::harness_socket(&path, &AgentId::team(1).unwrap()).unwrap();
+        let mates = crazyagent::terminal::renew_teammates_socket(&path, &AgentId::team(1).unwrap())
+            .unwrap();
         Self {
             root,
             tmux,
             home,
             profile,
             socket,
+            mates,
         }
     }
 
@@ -1348,7 +1358,11 @@ impl Lead {
 
 impl Drop for Lead {
     fn drop(&mut self) {
-        for socket in [self.socket.clone(), self.path().join(FOLDER).join(SOCKET)] {
+        for socket in [
+            self.socket.clone(),
+            self.mates.clone(),
+            self.path().join(FOLDER).join(SOCKET),
+        ] {
             let _ = crazyagent::spawn_gate::status(
                 Command::new(&self.tmux)
                     .arg("-S")
@@ -1455,14 +1469,23 @@ fn a_native_lead_runs_in_its_own_server_and_every_call_reaches_it_by_name() {
         host.attach_pane(&leader, &window).unwrap_err().0,
         "terminal_pane_unknown"
     );
-    assert!(host.attach_pane(&leader, &own_pane[0].id).is_ok());
+    assert_eq!(
+        host.attach_pane(&leader, &own_pane[0].id).unwrap_err().0,
+        "terminal_pane_unknown",
+        "the anchor standing for the lead on its teammates' server is no pane to attach"
+    );
+    drop(host.attach(&leader).unwrap());
 
     host.close(&[]).unwrap();
     assert!(host.alive().unwrap().is_empty());
-    assert!(
-        !std::fs::symlink_metadata(&lead.socket)
-            .is_ok_and(|metadata| metadata.file_type().is_socket())
-    );
+    for socket in [&lead.socket, &lead.mates] {
+        assert!(
+            !std::fs::symlink_metadata(socket)
+                .is_ok_and(|metadata| metadata.file_type().is_socket()),
+            "{}",
+            socket.display()
+        );
+    }
 }
 
 #[cfg(target_os = "macos")]

@@ -72,11 +72,14 @@ type Answer = Result<Lines, HostError>;
 /// home is deleted, so no server outlives the folder that reaches it. A confined host drives a
 /// native-mode lead's own server instead: the server and every client the engine starts on it
 /// run inside the lead's Seatbelt profile, since a tmux server can make a client run commands.
+/// A teammates host drives a native lead's teammates' server: the server starts inside the
+/// teammates' profile, and the engine's clients connect inside the lead's.
 pub struct Tmux {
     executable: Option<PathBuf>,
     folder: PathBuf,
     socket: PathBuf,
     confined: Option<PathBuf>,
+    starts_in: Option<PathBuf>,
     control: Mutex<Option<Arc<Control>>>,
     spawning: Mutex<()>,
 }
@@ -137,6 +140,7 @@ impl Tmux {
             folder: folder.to_path_buf(),
             socket: folder.join(SOCKET),
             confined: None,
+            starts_in: None,
             control: Mutex::new(None),
             spawning: Mutex::new(()),
         }
@@ -161,8 +165,31 @@ impl Tmux {
             folder: folder.to_path_buf(),
             socket: socket.to_path_buf(),
             confined: Some(profile.to_path_buf()),
+            starts_in: None,
             control: Mutex::new(None),
             spawning: Mutex::new(()),
+        })
+    }
+
+    /// Opens the host on a native lead's teammates' own tmux server (see
+    /// [`super::teammates_socket`], rv-audit S1 F1): the server starts inside the teammates'
+    /// profile, which cannot reach its socket, and each engine client connects inside the
+    /// lead's profile and never starts a server, so no server runs in the lead's profile with
+    /// teammate panes. Nothing starts until the first call. Takes the tmux program, the
+    /// socket, the lead's installed profile and the teammates'. Returns the host, or
+    /// `terminal_folder_unsafe` for a socket path with no folder.
+    pub fn teammates(
+        executable: Option<PathBuf>,
+        socket: &Path,
+        profile: &Path,
+        server_profile: &Path,
+    ) -> Result<Self, HostError> {
+        if !server_profile.is_absolute() || server_profile == profile {
+            return Err(failure("terminal_folder_unsafe"));
+        }
+        Ok(Self {
+            starts_in: Some(server_profile.to_path_buf()),
+            ..Self::confined(executable, socket, profile)?
         })
     }
 
@@ -196,9 +223,15 @@ impl Tmux {
         self.remove_socket()
     }
 
-    /// Removes the socket file an ended server left behind. Output: Ok once it is gone,
-    /// or `terminal_folder_unsafe` when it cannot be removed.
+    /// Removes the socket file an ended server left behind. A teammates' socket stays: once
+    /// it is gone a teammate still running could bind a server of its own there, which the
+    /// lead's tmux clients would then obey (rv-audit S1 F1), and the lead's next start names
+    /// a new one. Output: Ok once it is gone or kept, or `terminal_folder_unsafe` when it
+    /// cannot be removed.
     fn remove_socket(&self) -> Result<(), HostError> {
+        if self.starts_in.is_some() {
+            return Ok(());
+        }
         match std::fs::remove_file(self.socket()) {
             Ok(()) => Ok(()),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
@@ -311,9 +344,46 @@ impl Tmux {
         Ok(socket)
     }
 
+    /// Starts a teammates' server with its holder session inside the teammates' profile when
+    /// no socket exists yet (rv-audit S1 F1); a raw connect probe, never a tmux client,
+    /// looks. A socket an ended server left is never removed or served again (see
+    /// [`Self::remove_socket`]). Takes the tmux program, the socket and the teammates'
+    /// profile. Returns Ok once a server was found or started, or `terminal_unavailable`.
+    fn start_in(&self, executable: &Path, socket: &Path, profile: &Path) -> Result<(), HostError> {
+        match crate::spawn_gate::connect_unix_std(socket) {
+            Ok(_) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(failure("terminal_unavailable")),
+        }
+        let started = crate::spawn_gate::status(
+            Command::new(crate::sandbox::SANDBOX_EXEC)
+                .arg("-f")
+                .arg(profile)
+                .arg(executable)
+                .args(["-u", "-f", "/dev/null", "-S"])
+                .arg(socket)
+                .args(["new-session", "-d", "-s", SESSION, "-n", HOLDER])
+                .args(HOLDER_SHELL)
+                .arg(HOLDER_COMMAND)
+                .env_clear()
+                .env("PATH", SERVER_PATH)
+                .current_dir(&self.folder)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .map_err(|_| failure("terminal_unavailable"))?;
+        if !started.success() {
+            return Err(failure("terminal_unavailable"));
+        }
+        Ok(())
+    }
+
     /// Connects a control client to the server, starting the server with its holder
-    /// session only when `may_start` is set; otherwise tmux -N refuses an ended server.
-    /// Takes whether it may start one. Output: the control, or a plain code.
+    /// session only when `may_start` is set; otherwise tmux -N refuses an ended server. A
+    /// teammates host starts its server through [`Self::start_in`] and always connects with
+    /// -N, so its client, inside the lead's profile, never starts one. Takes whether it may
+    /// start one. Output: the control, or a plain code.
     fn connect(&self, may_start: bool) -> Result<Control, HostError> {
         let executable = self
             .executable
@@ -326,6 +396,9 @@ impl Tmux {
         {
             return Err(failure("terminal_folder_unsafe"));
         }
+        if may_start && let Some(server_profile) = &self.starts_in {
+            self.start_in(executable, &socket, server_profile)?;
+        }
         let mut command = match &self.confined {
             Some(profile) => {
                 let mut command = Command::new(crate::sandbox::SANDBOX_EXEC);
@@ -337,7 +410,7 @@ impl Tmux {
         let mut child = crate::spawn_gate::spawn(
             command
                 .args(["-u", "-f", "/dev/null"])
-                .args((!may_start).then_some("-N"))
+                .args((!may_start || self.starts_in.is_some()).then_some("-N"))
                 .arg("-S")
                 .arg(&socket)
                 .args(["-C", "new-session", "-A", "-s", SESSION, "-n", HOLDER])
@@ -437,20 +510,99 @@ impl Tmux {
                 .is_ok_and(|control| self.agent_target(&control, agent).is_ok())
     }
 
-    /// Checks that a pane belongs to an agent terminal's own window. Takes the agent and the
-    /// pane id. Returns the pane as a tmux target, or `terminal_pane_unknown`.
+    /// Checks that a pane belongs to an agent terminal's own window; on a teammates' server
+    /// the lead's anchor pane stands for the lead, not a teammate, and is refused. Takes the
+    /// agent and the pane id. Returns the pane as a tmux target, or `terminal_pane_unknown`.
     fn member_pane(&self, agent: &AgentId, pane: &str) -> Result<String, HostError> {
         if !pane_id_valid(pane) || !self.panes(agent)?.iter().any(|listed| listed.id == pane) {
+            return Err(failure("terminal_pane_unknown"));
+        }
+        if self.starts_in.is_some() && self.agent_target(&*self.live_control()?, agent)? == pane {
             return Err(failure("terminal_pane_unknown"));
         }
         Ok(pane.to_owned())
     }
 
-    /// Hands a native-mode lead's environment to its own server before the lead starts: the
-    /// server environment is emptied, then holds the terminal defaults and the lead's own
-    /// checked variables, so the lead and every teammate pane it splits off get those and the
-    /// tmux variables, and nothing of the engine's. Takes the control client and the
-    /// command. Returns Ok, or `terminal_environment_unclean`.
+    /// The pane tagged with an agent's name on a lead's server, as listed with its window.
+    /// Takes the agent. Returns the pane, or `terminal_agent_unknown`.
+    pub(super) fn own_pane(&self, agent: &AgentId) -> Result<PaneInfo, HostError> {
+        let own = self.agent_target(&*self.live_control()?, agent)?;
+        self.panes(agent)?
+            .into_iter()
+            .find(|pane| pane.id == own)
+            .ok_or_else(|| failure("terminal_agent_unknown"))
+    }
+
+    /// Readies a native lead's teammates' server for the lead's start (rv-audit S1 F1): the
+    /// server starts if none listens, the holder pane of a fresh one is tagged as the lead's
+    /// anchor, and its environment becomes the lead's, which every teammate pane gets. Takes
+    /// the lead and its command. Returns the variables the lead's pane starts with, so its
+    /// app splits teammates off the anchor here: `TMUX` naming this server and `TMUX_PANE`
+    /// the anchor. Fails with `terminal_command_failed` when no single anchor is found.
+    pub(super) fn anchor_for(
+        &self,
+        lead: &AgentId,
+        command: &InteractiveCommand,
+    ) -> Result<Vec<(String, String)>, HostError> {
+        assert!(
+            self.starts_in.is_some(),
+            "only a teammates' server holds a lead's anchor"
+        );
+        let control = self.control()?;
+        let _one = self
+            .spawning
+            .lock()
+            .map_err(|_| failure("terminal_unavailable"))?;
+        let anchor = match self.agent_target(&control, lead) {
+            Ok(anchor) => anchor,
+            Err(_) => {
+                let lines = control.ask(&format!(
+                    "list-panes -t {SESSION}:={HOLDER} -F '#{{pane_id}}{FORMAT_END}'"
+                ))?;
+                let [only] = lines.as_slice() else {
+                    return Err(failure("terminal_command_failed"));
+                };
+                let anchor = String::from_utf8_lossy(only).into_owned();
+                if !pane_id_valid(&anchor) {
+                    return Err(failure("terminal_command_failed"));
+                }
+                control.run(&format!("set-option -p -t {anchor} {AGENT_TAG} {lead}"))?;
+                anchor
+            }
+        };
+        Self::lead_environment(&control, command)?;
+        let lines = control.ask(&format!(
+            "display-message -p -t {anchor} '#{{pid}} #{{session_id}}{FORMAT_END}'"
+        ))?;
+        let text = lines
+            .first()
+            .map(|line| String::from_utf8_lossy(line).into_owned())
+            .unwrap_or_default();
+        let (pid, session) = text
+            .split_once(' ')
+            .and_then(|(pid, session)| {
+                let pid = pid.parse::<u32>().ok().filter(|pid| *pid > 0)?;
+                let session = session.strip_prefix('$')?.parse::<u32>().ok()?;
+                Some((pid, session))
+            })
+            .ok_or_else(|| failure("terminal_command_failed"))?;
+        let server = self
+            .socket
+            .to_str()
+            .filter(|server| !server.contains(','))
+            .ok_or_else(|| failure("terminal_folder_unsafe"))?;
+        assert!(pane_id_valid(&anchor));
+        Ok(vec![
+            ("TMUX".to_owned(), format!("{server},{pid},{session}")),
+            ("TMUX_PANE".to_owned(), anchor),
+        ])
+    }
+
+    /// Hands a native-mode lead's environment to its own or its teammates' server before the
+    /// lead starts: the server environment is emptied, then holds the terminal defaults and
+    /// the lead's own checked variables, so the lead and every teammate pane it splits off
+    /// get those and the tmux variables, and nothing of the engine's. Takes the control
+    /// client and the command. Returns Ok, or `terminal_environment_unclean`.
     fn lead_environment(control: &Control, command: &InteractiveCommand) -> Result<(), HostError> {
         clear_environment(control)?;
         let defaults = TERMINAL_DEFAULTS
@@ -825,14 +977,16 @@ fn spawn_line(agent: &AgentId, command: &InteractiveCommand) -> Result<String, H
 /// Builds the new-window line that starts a native-mode lead in its own server. The server
 /// already runs inside the lead's profile, so the command's leading `sandbox-exec -f
 /// <profile>` must name that same profile and is dropped, and the environment comes from the
-/// server (see `Tmux::lead_environment`). The lead's window becomes the session's current
-/// one, since tmux puts a split the lead's app runs without a target into the current
-/// window, which would otherwise be the holder. Takes the agent, the command and the
-/// server's profile. Returns the line, or `terminal_command_invalid` for any other command.
+/// server (see `Tmux::lead_environment`) with `pane_env` set over it in the lead's pane only.
+/// The lead's window becomes the session's current one, since tmux puts a split the lead's
+/// app runs without a target into the current window, which would otherwise be the holder.
+/// Takes the agent, the command, the server's profile and those variables. Returns the line,
+/// or `terminal_command_invalid` for any other command or a variable name not plain.
 fn confined_line(
     agent: &AgentId,
     command: &InteractiveCommand,
     profile: &Path,
+    pane_env: &[(String, String)],
 ) -> Result<String, HostError> {
     let invalid = || failure("terminal_command_invalid");
     let cwd = checked(command)?;
@@ -855,6 +1009,17 @@ fn confined_line(
         "new-window -P -F '{PLACED}{FORMAT_END}' -n {agent} -c {} -t {SESSION}: -- {PANE_PROGRAM}",
         quote(cwd)
     );
+    for (name, value) in pane_env {
+        let plain = !name.is_empty()
+            && name
+                .bytes()
+                .all(|byte| byte == b'_' || byte.is_ascii_uppercase() || byte.is_ascii_digit());
+        if !plain || value.contains('\0') {
+            return Err(invalid());
+        }
+        line.push(' ');
+        line.push_str(&quote(&format!("{name}={value}")));
+    }
     for arg in program {
         line.push(' ');
         line.push_str(&quote(arg));
@@ -1360,11 +1525,22 @@ impl Tmux {
     }
 }
 
-impl Host for Tmux {
-    fn spawn(&self, agent: &AgentId, command: &InteractiveCommand) -> Result<PaneRef, HostError> {
+impl Tmux {
+    /// Starts an agent's terminal as [`Host::spawn`] does, the pane of a lead's own server
+    /// also starting with `pane_env` set over what the server hands it, such as the
+    /// variables that point a native lead's app at its teammates' server. Takes the agent,
+    /// the command and those variables, none off a lead's server. Returns where it runs, or
+    /// the plain code.
+    pub(super) fn spawn_with(
+        &self,
+        agent: &AgentId,
+        command: &InteractiveCommand,
+        pane_env: &[(String, String)],
+    ) -> Result<PaneRef, HostError> {
         let line = match &self.confined {
-            Some(profile) => confined_line(agent, command, profile)?,
-            None => spawn_line(agent, command)?,
+            Some(profile) => confined_line(agent, command, profile, pane_env)?,
+            None if pane_env.is_empty() => spawn_line(agent, command)?,
+            None => return Err(failure("terminal_command_invalid")),
         };
         let control = self.control()?;
         let _one = self
@@ -1413,6 +1589,12 @@ impl Host for Tmux {
             pane: pane.to_owned(),
             pid,
         })
+    }
+}
+
+impl Host for Tmux {
+    fn spawn(&self, agent: &AgentId, command: &InteractiveCommand) -> Result<PaneRef, HostError> {
+        self.spawn_with(agent, command, &[])
     }
 
     fn attach(&self, agent: &AgentId) -> Result<TerminalStream, HostError> {
@@ -1533,9 +1715,10 @@ impl Host for Tmux {
     }
 
     fn panes(&self, agent: &AgentId) -> Result<Vec<PaneInfo>, HostError> {
-        let lines = self.live_control()?.ask(&format!(
-            "list-panes -t {} -F '{PANE_FIELDS}{FORMAT_END}'",
-            target(agent)
+        let control = self.live_control()?;
+        let window = self.agent_target(&control, agent)?;
+        let lines = control.ask(&format!(
+            "list-panes -t {window} -F '{PANE_FIELDS}{FORMAT_END}'"
         ))?;
         let panes: Vec<PaneInfo> = lines
             .iter()
@@ -1547,11 +1730,8 @@ impl Host for Tmux {
     }
 
     fn kill_pane(&self, agent: &AgentId, pane: &str) -> Result<(), HostError> {
-        if !pane_id_valid(pane) {
-            return Err(failure("terminal_pane_unknown"));
-        }
-        let panes = self.panes(agent)?;
-        if panes.len() < 2 || !panes.iter().any(|listed| listed.id == pane) {
+        let pane = self.member_pane(agent, pane)?;
+        if self.panes(agent)?.len() < 2 {
             return Err(failure("terminal_pane_unknown"));
         }
         self.live_control()?
@@ -1583,7 +1763,7 @@ impl Host for Tmux {
         if !keep.is_empty() {
             return Ok(());
         }
-        let control = self.control()?;
+        let control = self.control_with(self.starts_in.is_none())?;
         let _ = control.run("kill-server");
         control.close();
         if let Ok(mut slot) = self.control.lock() {
