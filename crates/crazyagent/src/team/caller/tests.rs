@@ -430,3 +430,53 @@ fn a_dropped_socket_leaves_its_node_for_hooks_to_be_refused_on() {
     );
     assert!(crate::spawn_gate::connect_unix_std(&socket).is_err());
 }
+
+/// A caller socket bound again, as on a native lead's relaunch or the rebind after an engine
+/// restart, never leaves its path empty: a hook asking all along finds the old node or the
+/// new socket, and is never told that its agent leads no native team, which would hand a
+/// teammate the lead's place (rv-secreview RH2R2-1).
+#[test]
+fn a_hook_asking_while_the_socket_is_bound_again_never_reads_alone() {
+    struct TmpRemoved(PathBuf);
+    impl Drop for TmpRemoved {
+        fn drop(&mut self) {
+            let _ = crate::sandbox::toolchains::remove_tmp(&self.0);
+        }
+    }
+    const REBINDS: usize = 2000;
+    let root = folder();
+    let agent = root.path().join("agent-1");
+    let mailbox = agent.join("tmp").join(crate::team::tool::MAILBOX_FOLDER);
+    std::fs::create_dir_all(&mailbox).unwrap();
+    let home = agent.join("home");
+    let scratch = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let _scratch = TmpRemoved(home);
+    let socket = socket_for_mailbox(&mailbox).unwrap();
+    assert_eq!(socket, scratch.join(CALLER_SOCKET));
+    let callers = Callers::bind(&socket, None).unwrap();
+    let pin = callers.folder();
+    drop(callers);
+    let done = std::sync::atomic::AtomicBool::new(false);
+    let (asked, alone) = std::thread::scope(|scope| {
+        let watcher = scope.spawn(|| {
+            let (mut asked, mut alone) = (0_usize, 0_usize);
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                asked += 1;
+                if own_place(&mailbox, Duration::from_millis(1)) == Place::Alone {
+                    alone += 1;
+                }
+            }
+            (asked, alone)
+        });
+        for _ in 0..REBINDS {
+            drop(Callers::bind(&socket, Some(pin)).unwrap());
+        }
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        watcher.join().unwrap()
+    });
+    assert!(asked > 0);
+    assert_eq!(
+        alone, 0,
+        "{alone} of {asked} asks during {REBINDS} rebinds read the lead's place"
+    );
+}

@@ -59,6 +59,14 @@ pub fn socket_for_mailbox(mailbox: &Path) -> Option<PathBuf> {
     Some(crate::sandbox::toolchains::tmp_path(&home).join(CALLER_SOCKET))
 }
 
+/// The name in the same folder that a caller socket is bound at before one rename moves it
+/// over the socket's own path, so that path never stands empty while the engine binds again
+/// (rv-secreview RH2R2-1). Takes the socket path. Returns the sibling, the socket's name
+/// with the `new` extension.
+pub fn binding_path(socket: &Path) -> PathBuf {
+    socket.with_extension("new")
+}
+
 /// Asks the engine to name a call before it is written: connects to the lead's caller
 /// socket, sends the call id and the digest of the call's bytes, and waits up to
 /// `CALLER_WAIT` for the engine's yes. Takes the mailbox, the call id and the digest.

@@ -9700,6 +9700,57 @@ fn a_native_lead_without_the_team_tool_still_has_its_caller_socket_answered() {
     );
 }
 
+/// A native lead that ends leaves its caller socket's node in its short temp folder while
+/// everything else there goes, which ends its own and its teammates' tmux servers. A
+/// teammate still running until then is refused when its hook asks, held as no one, and
+/// never takes the lead's place (rv-secreview RH2R2-1).
+#[test]
+fn a_teammate_asking_after_its_lead_ended_is_held_not_taken_for_the_lead() {
+    struct TmpRemoved(PathBuf);
+    impl Drop for TmpRemoved {
+        fn drop(&mut self) {
+            let _ = crate::sandbox::toolchains::remove_tmp(&self.0);
+        }
+    }
+    let f = Fixture::new(1);
+    let mut team = f.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let lead = f.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    f.connection
+        .execute("UPDATE team_agents SET mode='native' WHERE id=?1", [lead])
+        .unwrap();
+    team.workers
+        .insert(lead, between_turns(&project, AgentRole::Sub, true, true));
+    let home = agent_home(&team.state, lead);
+    let scratch = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let _scratch = TmpRemoved(home);
+    let socket = scratch.join(crate::team::caller::CALLER_SOCKET);
+    let bound = || {
+        std::fs::symlink_metadata(&socket)
+            .is_ok_and(|metadata| std::os::unix::fs::FileTypeExt::is_socket(&metadata.file_type()))
+    };
+    team.serve_agent_calls(&f.setup, &f.access);
+    assert!(bound());
+    let mates = scratch.join("teammates-0123456789abcdef.sock");
+    std::fs::write(&mates, b"").unwrap();
+    let work = scratch.join("work");
+    std::fs::create_dir(&work).unwrap();
+    std::fs::write(work.join("left"), b"agent data").unwrap();
+
+    team.collect().unwrap();
+    assert!(!team.workers.contains_key(&lead), "the lead ended");
+    assert!(
+        !mates.exists() && !work.exists(),
+        "the rest of the lead's temp folder is gone"
+    );
+    assert!(bound(), "the caller socket's node stays");
+    assert_eq!(
+        crate::team::caller::own_place(&team.mailbox(lead), Duration::from_secs(1)),
+        crate::team::caller::Place::Unplaced,
+        "a hook asking after the lead ended is held"
+    );
+}
+
 /// A worker at the owner's Sub-agent depth gets a team server without spawn, stop and
 /// merge, a tool the owner switched off is left out for every agent and both sections
 /// say so; the same calls planted in the worker's mailbox anyway are refused.
