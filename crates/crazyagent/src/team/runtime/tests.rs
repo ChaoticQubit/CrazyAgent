@@ -11052,7 +11052,7 @@ fn a_managed_tools_on_agent_under_no_network_cannot_reach_a_non_model_host_on_44
         Command::new("/usr/bin/sandbox-exec")
             .arg("-f")
             .arg(&plan.sandbox_profile)
-            .args(["/usr/bin/nc", "-z", "-G", "3", "127.0.0.1", "443"])
+            .args(["/usr/bin/nc", "-v", "-z", "-G", "3", "127.0.0.1", "443"])
             .current_dir(&plan.working_dir)
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
