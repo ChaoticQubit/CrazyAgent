@@ -18,6 +18,7 @@ const TWO: &str = "Reply with exactly the word TWO and nothing else.";
 const COUNT: &str = "Write every whole number from 1 to 600 in order, one per line, then a last line with only the word COUNTED. Use no tools.";
 const TEAM_TURN: Duration = Duration::from_secs(420);
 const POLL: Duration = Duration::from_millis(250);
+const GRACE: Duration = Duration::from_secs(30);
 
 /// A real Claude Code lead prepared by the team runtime on the owner's signed-in account,
 /// in a pane of a tmux host of its own test folder. Output: the lead and the folder.
@@ -377,12 +378,19 @@ impl LeadServers {
         .unwrap_or_default()
     }
 
-    /// Polls both servers until `done` is set or `wait` passed. Inputs: the lead's anchor
-    /// pane, the run's token, the stop flag and the longest wait. Output: what it saw.
+    /// Polls both servers until `wait` passed, or `done` is set and either the lead's client
+    /// read a teammate pane holding the token or `GRACE` passed since. Inputs: the lead's
+    /// anchor pane, the run's token, the stop flag and the longest wait. Output: what it saw.
     fn watch(&self, anchor: &str, token: &str, done: &AtomicBool, wait: Duration) -> Seen {
-        let deadline = Instant::now() + wait;
+        let mut ends = Instant::now() + wait;
         let mut seen = Seen::default();
-        while !done.load(Ordering::SeqCst) && Instant::now() < deadline {
+        while Instant::now() < ends {
+            if done.load(Ordering::SeqCst) {
+                if !seen.read.is_empty() {
+                    break;
+                }
+                ends = ends.min(Instant::now() + GRACE);
+            }
             match (self.panes(&self.own), self.panes(&self.mates)) {
                 (Some(own), Some(mates)) => {
                     seen.own.extend(own.into_keys());
@@ -418,6 +426,20 @@ impl Drop for LeadServers {
     }
 }
 
+/// How a turn of the lead ended and its text, when the text holds `token`, whether the
+/// engine typed the turn or a teammate's message started it. Inputs: one report and the
+/// token. Output: the end and the text, or none.
+fn token_turn(report: &Report, token: &str) -> Option<(TurnEnd, String)> {
+    match report {
+        Report::Finished { text, end, .. }
+        | Report::Own {
+            end: Some(end),
+            text,
+        } if text.contains(token) => Some((*end, text.clone())),
+        _ => None,
+    }
+}
+
 /// The lead's one turn: create one teammate and pass its message on. Input: the run's
 /// token. Output: the prompt.
 fn team_prompt(token: &str) -> String {
@@ -430,7 +452,7 @@ fn team_prompt(token: &str) -> String {
 /// engine's own terminal host gets the teammates' server's anchor as `TMUX` and
 /// `TMUX_PANE`. The teammate it creates is split off that anchor's window in the teammates'
 /// server and never appears in the lead's own server, the lead's own tmux client inside its
-/// profile reads that pane, and the lead's turn ends with the teammate's word.
+/// profile reads that pane, and a turn of the lead ends in success with the run's word.
 #[test]
 #[ignore = "live qualification: needs a signed-in Claude account, CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
 fn live_native_lead_splits_teammates_into_mates_server() {
@@ -483,19 +505,26 @@ fn live_native_lead_splits_teammates_into_mates_server() {
     let done = AtomicBool::new(false);
     let (reports, seen) = std::thread::scope(|scope| {
         let watcher = scope.spawn(|| servers.watch(&anchor, &token, &done, TEAM_TURN));
-        let reports = team.until_finished(TEAM_TURN);
+        let reports = team.reports_until(TEAM_TURN, |report| token_turn(report, &token).is_some());
         done.store(true, Ordering::SeqCst);
         (reports, watcher.join().unwrap())
     });
-    let turns = finished(&reports);
+    let (end, text) = reports
+        .last()
+        .and_then(|report| token_turn(report, &token))
+        .expect("the wait ends on the lead's turn holding the token");
     let teammates: BTreeMap<&String, &String> = seen
         .mates
         .iter()
         .filter(|(pane, _)| **pane != anchor)
         .collect();
     println!(
-        "real claude native team: own={:?} mates={:?} read={:?} misses={} turns={turns:?}",
-        seen.own, seen.mates, seen.read, seen.misses
+        "real claude native team: own={:?} mates={:?} read={:?} misses={} end={end:?} text={text:?} turns={:?}",
+        seen.own,
+        seen.mates,
+        seen.read,
+        seen.misses,
+        finished(&reports)
     );
     assert_eq!(
         seen.misses, 0,
@@ -518,7 +547,7 @@ fn live_native_lead_splits_teammates_into_mates_server() {
         !seen.read.is_empty(),
         "the lead's tmux client read no teammate pane holding {token}"
     );
-    assert!(answered(&turns, &token), "{turns:?}");
+    assert_eq!(end, TurnEnd::Success, "{text:?}");
     team.order(Order::Stop);
     let (_, problem) = team.until_ended(STOP);
     assert_eq!(problem, None);
