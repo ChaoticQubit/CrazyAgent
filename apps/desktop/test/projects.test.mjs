@@ -33,13 +33,13 @@ registerHooks({
   },
 });
 
-const application = await import("../src/screens/legacy.tsx");
+const creation = await import("../src/screens/projects.tsx");
 const { useOwnerBrowser } = await import("../src/state.ts");
 
 test("Projects navigation renders a bounded declaration form without owner authority", () => {
   function ProjectsView() {
     const state = useOwnerBrowser();
-    return createElement(application.OwnerView, { state: { ...state, view: "projects" } });
+    return createElement(creation.Projects, { state: { ...state, view: "projects" } });
   }
   const markup = renderToStaticMarkup(createElement(ProjectsView));
   assert.match(markup, /<form\b[^>]*aria-label="Create project"/);
@@ -53,8 +53,6 @@ test("Projects navigation renders a bounded declaration form without owner autho
   assert.doesNotMatch(markup, /<input\b[^>]*name="(?:project_id|request_id|expected_revision|owner_id)"/);
   assert.ok(Buffer.byteLength(markup) < 32768);
 });
-
-const creation = await import("../src/screens/projects.tsx");
 
 test("production project parser preserves exact declarations and UTF-8 boundaries", async () => {
   const name = "é".repeat(128);
@@ -124,7 +122,7 @@ test("production creation reducer isolates replacement and cancel generations", 
 test("real Projects rendering retains local values and reports their declaration count", () => {
   function DraftView() {
     const state = useOwnerBrowser();
-    return createElement(application.OwnerView, { state: {
+    return createElement(creation.Projects, { state: {
       ...state, view: "projects", projectForm: { name: "<Literal> & project", repositories: "/first path\n/second", generation: 3 },
     } });
   }

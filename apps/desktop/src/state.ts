@@ -4,16 +4,16 @@ import type { OwnerProfile, Result } from "./api";
 import type { EngineState } from "./ui/shell";
 import type { Route } from "./ui/router";
 import {
-  approveBaseline, baselines, connect, errorMessage, history, inspectBaseline,
+  connect, errorMessage, history,
   openProject, pendingIntent, projects, reconcileIntent, replaceBrief, retryIntent,
-  revokeBaseline, sendMessage, status, watchUnconfirmed, leavesProfileUnconfirmed,
+  sendMessage, status, watchUnconfirmed, leavesProfileUnconfirmed,
   modelAccessPage, inspectModelAccess, editModelAccess, createProject,
   startNativeAuth, readNativeAuth, cancelNativeAuth, logoutNativeAuth, submitClaudeAuthCode,
   prepareManagedAccount, prepareConfiguredAccount, accountAuthCapabilities,
   configureAccountProfile, readAccountProfile,
 } from "./engine-client";
 import type {
-  ActionReceipt, BaselineDetail, BaselinePage, HistoryPage, IntentReceipt,
+  ActionReceipt, HistoryPage, IntentReceipt,
   PendingIntent, ProjectDetail, ProjectPage,
   ModelAccessCollection, ModelAccessPage, ModelAccessDetail,
   ManagedAccountPlan, ConfiguredAccountPlan, AccountAuthCapabilitiesReply, AccountProfileView,
@@ -79,14 +79,12 @@ function receiptMessage(receipt: ActionReceipt | IntentReceipt): string {
 }
 
 export function useOwnerBrowser() {
-  const [page, setPage] = useState<BaselinePage>();
-  const [detail, setDetail] = useState<BaselineDetail>();
   const [projectPage, setProjectPage] = useState<ProjectPage>();
   const [project, setProject] = useState<ProjectDetail>();
   const [historyPage, setHistoryPage] = useState<HistoryPage>();
   const [projectId, setProjectId] = useState("");
   const [drafts, setDrafts] = useState<Record<string, ProjectDrafts>>(() => Object.create(null));
-  const [view, setView] = useState<"approvals" | "conversation" | "settings" | "projects">("approvals");
+  const [view, setView] = useState<"conversation" | "settings" | "projects">("conversation");
   const [projectForm, setProjectForm] = useState<ProjectCreationDraft>({ name: "", repositories: "", generation: 0 });
   const currentProjectForm = useRef(projectForm);
   const creationSubmission = useRef<CreationSubmission | undefined>(undefined);
@@ -151,8 +149,6 @@ export function useOwnerBrowser() {
 
   function stale() {
     updateNativeAuth({ kind: "invalidate" });
-    setPage((old) => old ? { ...old, fresh: false } : old);
-    setDetail((old) => old ? { ...old, fresh: false } : old);
     setProjectPage((old) => old ? { ...old, fresh: false } : old);
     setProject((old) => old ? { ...old, fresh: false } : old);
     setHistoryPage((old) => old ? { ...old, fresh: false } : old);
@@ -229,7 +225,6 @@ export function useOwnerBrowser() {
     if (id !== activeProject.current || activeView.current !== "conversation" || current !== navigation.current) return;
     setProject(selected);
     setHistoryPage(entries);
-    setDetail((old) => old ? { ...old, fresh: false } : old);
     if (!currentDrafts.current[id]) {
       saveDrafts(id, {
         message: { text: "", generation: nextGeneration(), ticket: "", version: "" },
@@ -242,35 +237,18 @@ export function useOwnerBrowser() {
     const current = navigation.current;
     setConnected(false);
     stale();
-    setDetail(undefined);
     setProject(undefined);
     setHistoryPage(undefined);
     const result = await connect();
     setConnected(result.connected);
     setPending(result.pending || Boolean(currentAccountProfile.current?.uncertain || currentAccountProfile.current?.submitting));
-    if (activeView.current === "approvals") setPage(await baselines());
-    else if (activeView.current === "settings") {
+    if (activeView.current === "settings") {
       await loadModels();
       await recoverNativeAuth(current);
     }
     else {
       await loadProjects();
       if (activeProject.current) await loadProject(activeProject.current);
-    }
-  }
-
-  async function refresh(next = false) {
-    setDetail(undefined);
-    setPage(await baselines(next));
-  }
-
-  async function finishBaseline(receipt: ActionReceipt) {
-    setPending(receipt.pending);
-    setNotice(`${receipt.baseline_id}: ${receiptMessage(receipt)}`);
-    stale();
-    if (!receipt.pending && activeView.current === "approvals") {
-      setPage(await baselines());
-      setDetail(await inspectBaseline(receipt.baseline_id));
     }
   }
 
@@ -332,10 +310,6 @@ export function useOwnerBrowser() {
         setModelForm(undefined);
       }
       if (!receipt.pending && activeView.current === "settings") await loadModels();
-      return;
-    }
-    if (receipt.baseline_id) {
-      await finishBaseline({ ...receipt, baseline_id: receipt.baseline_id });
       return;
     }
     setPending(receipt.pending);
@@ -672,7 +646,7 @@ export function useOwnerBrowser() {
 
   return {
     nextGeneration,
-    page, detail, connected, pending, intent, busy, error, notice, view,
+    connected, pending, intent, busy, error, notice, view,
     projectPage, project, historyPage, projectId, drafts,
     projectForm, createdProject, editProject, discardProject,
     modelCollection, modelPage, modelDetail, modelForm,
@@ -801,20 +775,10 @@ export function useOwnerBrowser() {
     },
     nativeAuth, openNativeAuth, nativeAuthAction, closeNativeAuth, submitNativeClaudeCode,
     reconnect: () => run(reconnect),
-    refresh: (next = false) => run(() => refresh(next)),
-    select: (id: string) => run(async () => setDetail(await inspectBaseline(id))),
-    approve: () => run(async () => { if (detail) await finishBaseline(await approveBaseline(detail.ticket)); }, true),
-    revoke: () => run(async () => { if (detail) await finishBaseline(await revokeBaseline(detail.ticket)); }, true),
     reconcile: () => run(async () => finishIntent(await reconcileIntent()), true),
     retry: () => run(async () => finishIntent(await retryIntent()), true),
-    showApprovals: () => {
-      changeView("approvals");
-      setDetail(undefined);
-      return read(() => activeView.current === "approvals" ? refresh() : Promise.resolve());
-    },
     showConversation: () => {
       changeView("conversation");
-      setDetail((old) => old ? { ...old, fresh: false } : old);
       return read(async () => {
         if (activeView.current !== "conversation") return;
         await loadProjects();
