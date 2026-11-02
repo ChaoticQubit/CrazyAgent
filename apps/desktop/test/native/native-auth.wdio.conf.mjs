@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { writeFileSync } from "node:fs";
+
+let tests = 0;
 import { config as baseline } from "../../wdio.conf.mjs";
 import NoRespawnTauriService from "./zero-retry-tauri-service.mjs";
 
@@ -31,7 +33,8 @@ export const config = {
   afterTest: function (_test, _context, result) {
     const proof = JSON.stringify({ passed: Boolean(result.passed), sign_in_qualified: false });
     assert(Buffer.byteLength(proof) <= 128, "bounded nonsecret auth test status required");
-    writeFileSync(join(process.env.CRAZYAGENT_DESKTOP_TEST_EVIDENCE, "native-auth-status.json"),
+    tests += 1;
+    writeFileSync(join(process.env.CRAZYAGENT_DESKTOP_TEST_EVIDENCE, `native-auth-status-${tests}.json`),
       proof, { flag: "wx", mode: 0o600 });
   },
 };

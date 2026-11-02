@@ -130,10 +130,19 @@ test("Account added lines follow the method and the real check result", () => {
   const url = catalog[3].methods[0];
   assert.equal(addedLine(key, account({})), "Key saved. CrazyAgent will check it the first time an agent uses it.");
   assert.equal(addedLine(catalog[0].methods[0], account({})), "Signed in.");
-  assert.equal(addedLine(url, account({}), { kind: "ok", value: { models: ["a", "b", "c"] } }), "Connected. 3 models found.");
-  assert.equal(addedLine(url, account({}), { kind: "ok", value: { models: ["a"] } }), "Connected. 1 model found.");
+  assert.equal(addedLine(url, account({}), { kind: "ok", value: { account: account({ status: "key_saved" }), models: ["a", "b", "c"] } }), "Connected. 3 models found.");
+  assert.equal(addedLine(url, account({}), { kind: "ok", value: { account: account({ status: "key_saved" }), models: ["a"] } }), "Connected. 1 model found.");
   assert.equal(addedLine(url, account({}), { kind: "error", code: "account_url_unreachable", message: "Can't reach this URL." }), "Saved. Can't reach this URL.");
   assert.equal(addedLine(url, account({})), "Saved. Checking the connection...");
+});
+
+test("Account added never says Connected when the engine's check found the URL unreachable or the key turned down", () => {
+  const url = catalog[3].methods[0];
+  const checked = (status) => ({ kind: "ok", value: { account: account({ method: "url", status }), models: [] } });
+  assert.equal(addedLine(url, account({}), checked("unreachable")),
+    "Saved. Can't reach this URL. Check the address and that the server is running.");
+  assert.equal(addedLine(url, account({}), checked("not_signed_in")), "Saved. This URL didn't accept the key. Check it and try again.");
+  assert.equal(addedLine(url, account({}), checked("key_saved")), "Connected. 0 models found.");
 });
 
 test("sign-in stages come from real reducer states, never from a reply the reducer refused", () => {
