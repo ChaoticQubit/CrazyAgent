@@ -2632,6 +2632,8 @@ pub struct TeamAgent {
     pub pane: Option<String>,
     #[serde(default)]
     pub hookless: bool,
+    #[serde(default)]
+    pub instructions_changed: bool,
 }
 
 /// One teammate a harness split off in its own pane of the harness's terminal, such as a
@@ -2876,6 +2878,7 @@ pub(crate) fn agent_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamAgent> 
         teammates: Vec::new(),
         pane: row.get(17)?,
         hookless: row.get(18)?,
+        instructions_changed: false,
     })
 }
 
@@ -3964,8 +3967,10 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
             .collect::<Result<_, _>>()
             .map_err(error)?
     };
+    let changed = crate::instruction_files::badges(connection, project).map_err(error)?;
     for agent in &mut agents {
         agent.owner_stopped = stopped.contains(&agent.id);
+        agent.instructions_changed = changed.contains(&agent.id) && agent.status.live();
         agent.teammates = teammates(connection, project, agent.id)?;
     }
     let (live_master, live_problem) = master::switch(connection, project)?;

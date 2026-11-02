@@ -5,7 +5,7 @@ use crate::agent_home::TEXT_BYTES_MAX;
 use crate::coord::adoption::AgentAdoption;
 use crate::coord::settings::Nudges;
 use crate::engine::owner::{Adoption, InstructionSettings};
-use crate::instruction_files::Mode;
+use crate::instruction_files::{EditDelivery, Mode};
 use crate::plugins::SkillView;
 use crate::protocol::ProjectId;
 use crate::tui::client::OwnerEvent;
@@ -242,6 +242,42 @@ fn mode_note(mode: Mode) -> &'static str {
     }
 }
 
+/// The owner's words for one way an instruction edit reaches running agents. Input: the
+/// choice. Output: its name.
+fn edits_label(edits: EditDelivery) -> &'static str {
+    match edits {
+        EditDelivery::NextMessage => "Next task",
+        EditDelivery::Restart => "Restart when idle",
+        EditDelivery::Badge => "Badge only",
+    }
+}
+
+/// The choice Ctrl-R moves to from one choice, in the order the page lists them.
+/// Input: the choice. Output: the next one, wrapping to the first.
+fn next_edits(edits: EditDelivery) -> EditDelivery {
+    match edits {
+        EditDelivery::NextMessage => EditDelivery::Restart,
+        EditDelivery::Restart => EditDelivery::Badge,
+        EditDelivery::Badge => EditDelivery::NextMessage,
+    }
+}
+
+/// What one choice does when the owner edits the instructions, in one sentence.
+/// Input: the choice. Output: the sentence.
+fn edits_note(edits: EditDelivery) -> &'static str {
+    match edits {
+        EditDelivery::NextMessage => {
+            "A running agent's next task starts with the sections you changed, sent once."
+        }
+        EditDelivery::Restart => {
+            "A running agent restarts when it is next idle and resumes its conversation with the new text."
+        }
+        EditDelivery::Badge => {
+            "Nothing is sent. A running agent shows Instructions changed until it starts again."
+        }
+    }
+}
+
 /// Writes a byte count the way the Process pages show sizes. Input: bytes. Output: words.
 pub(in crate::tui) fn size(bytes: usize) -> String {
     if bytes < 1024 {
@@ -466,8 +502,9 @@ impl Editor {
 /// for one project. Reads the saved text on opening, edits it in place and saves it only on
 /// Ctrl-S. At app level Ctrl-G reads the owner's global instructions and Ctrl-D the default
 /// process, each into a preview first. For one project it also shows the agent settings:
-/// Ctrl-F picks the instruction files its agents get and Ctrl-T whether headless Claude runs
-/// keep their transcript, each saved at once. One request runs at a time.
+/// Ctrl-F picks the instruction files its agents get, Ctrl-T whether headless Claude runs
+/// keep their transcript and Ctrl-R how an instruction edit reaches running agents, each
+/// saved at once. One request runs at a time.
 pub(in crate::tui) struct ProcessPage {
     scope: Scope,
     state: State,
@@ -948,6 +985,7 @@ impl ProcessPage {
                 transcripts,
                 "Ctrl-T",
             ),
+            ("Instruction edits", edits_label(settings.edits), "Ctrl-R"),
         ] {
             lines.push(row(
                 width,
@@ -959,11 +997,13 @@ impl ProcessPage {
                 ctx.glyphs,
             ));
         }
-        lines.extend(
-            wrap(mode_note(settings.mode), width)
-                .into_iter()
-                .map(|text| styled(text, Role::Muted, theme)),
-        );
+        for note in [mode_note(settings.mode), edits_note(settings.edits)] {
+            lines.extend(
+                wrap(note, width)
+                    .into_iter()
+                    .map(|text| styled(text, Role::Muted, theme)),
+            );
+        }
         lines.push(Line::default());
     }
 }
@@ -1104,6 +1144,7 @@ impl Screen for ProcessPage {
         if matches!(self.scope, Scope::Project { .. }) && self.settings.is_some() {
             hints.push(hint("Ctrl-F", "Instructions"));
             hints.push(hint("Ctrl-T", "Transcripts"));
+            hints.push(hint("Ctrl-R", "Instruction edits"));
         }
         if self.scope == Scope::App {
             hints.push(hint("Ctrl-G", "Import from file"));
@@ -1154,6 +1195,10 @@ impl Screen for ProcessPage {
             }
             (State::Ready { .. }, Key::Ctrl('t')) if self.settings.is_some() => {
                 self.change_settings(|settings| settings.transcripts = !settings.transcripts, ctx);
+                Flow::Handled
+            }
+            (State::Ready { .. }, Key::Ctrl('r')) if self.settings.is_some() => {
+                self.change_settings(|settings| settings.edits = next_edits(settings.edits), ctx);
                 Flow::Handled
             }
             (State::Ready { .. }, Key::Ctrl('o')) => self.open_skill(ctx),

@@ -1,6 +1,6 @@
 use super::{
-    Adoption, Grant, Managed, Mode, Order, Plan, Report, TeamLimits, TeamRuntime, TurnEnd,
-    TurnRules, per_turn,
+    Adoption, Grant, Launch, Managed, Mode, Order, Plan, Report, Seat, TeamLimits, TeamRuntime,
+    TurnEnd, TurnRules, per_turn,
 };
 use crate::config::{
     AccountPool, ModelAccess, ModelAuthentication, ModelConnection, ModelEndpoint, ModelReference,
@@ -8,25 +8,26 @@ use crate::config::{
 use crate::engine::NativeProfileCustody;
 use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
 use crate::engine::owner::{HostStamp, NativeProfileBinding};
-use crate::harnesses::terminal_session::{PaneRecord, Resume};
+use crate::harnesses::terminal_session::{PaneRecord, Resume, paste};
 use crate::project_setup::{HarnessSlot, StoredSetup, TeamPlan};
 use crate::protocol::{ConfigId, CredentialRef, Cursor, ProjectId, RequestId};
-use crate::team::{AgentRole, TeamAccount, TeamReach};
-use crate::terminal::Host;
+use crate::sandbox::policy::{AgentAccess, AgentPolicy};
+use crate::team::{AgentRole, TaskSource, TeamAccount, TeamReach};
+use crate::terminal::{AgentId, Host};
 use rusqlite::{Connection, params};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::mpsc::channel;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{RecvTimeoutError, channel};
+use std::time::{Duration, Instant};
 
 const PROJECT: &str = "dec-090";
-const AGENT: i64 = 1;
+pub(super) const AGENT: i64 = 1;
 const SIGNED_IN_CLAUDE: &str = "CRAZYAGENT_MANAGED_CLAUDE_PROFILE";
 const SIGNED_IN_CODEX: &str = "CRAZYAGENT_MANAGED_CODEX_PROFILE";
 
@@ -527,9 +528,15 @@ impl ManagedAgent {
     }
 
     /// The first order of a signed-in native lead: a turn carrying the held profile, the
-    /// project context and the saved access level. Inputs: the profile, the prompt and the
-    /// turn's time. Output: the order.
-    fn granted_turn(&self, profile: NativeProfileUse, prompt: &str, turn_time: Duration) -> Order {
+    /// project context and the saved access level. Inputs: the profile, the prompt, the
+    /// turn's time and the saved level. Output: the order.
+    fn granted_turn(
+        &self,
+        profile: NativeProfileUse,
+        prompt: &str,
+        turn_time: Duration,
+        access: AgentAccess,
+    ) -> Order {
         let project = ProjectId::new(PROJECT).unwrap();
         let context = self
             .runtime
@@ -546,7 +553,7 @@ impl ManagedAgent {
             Some(Box::new(Grant {
                 profile,
                 context,
-                access: crate::sandbox::policy::AgentAccess::Sandboxed,
+                access,
             })),
             TurnRules {
                 limit: Some(turn_time),
@@ -572,7 +579,7 @@ impl ManagedAgent {
         let (orders, ordered) = channel();
         let (reports, reported) = channel();
         orders
-            .send(self.granted_turn(profile, prompts[0], turn_time))
+            .send(self.granted_turn(profile, prompts[0], turn_time, AgentAccess::Sandboxed))
             .unwrap();
         for prompt in &prompts[1..] {
             orders
@@ -632,7 +639,7 @@ impl ManagedAgent {
         let (orders, ordered) = channel();
         let (reports, reported) = channel();
         orders
-            .send(self.granted_turn(profile, prompt, turn_time))
+            .send(self.granted_turn(profile, prompt, turn_time, AgentAccess::Sandboxed))
             .unwrap();
         orders.send(Order::Stop).unwrap();
         let problem = super::native_adopted(
@@ -645,6 +652,78 @@ impl ManagedAgent {
         );
         drop(reports);
         (reported.iter().collect(), problem)
+    }
+
+    /// Starts this agent as a native-mode lead in a real worker of its team runtime, as the
+    /// runtime's first dispatch to a kept session does: the project saves `access`, the
+    /// worker starts from the agent's plan at that level, its first turn carries the held
+    /// profile and the worker then counts as briefed. Inputs: the profile, the first prompt,
+    /// the turn's time, the saved level and the folder of the lead's terminal host, kept
+    /// until the lead stopped. Output: the running team.
+    pub(super) fn into_native_worker(
+        mut self,
+        profile: NativeProfileUse,
+        prompt: &str,
+        turn_time: Duration,
+        access: AgentAccess,
+        folder: tempfile::TempDir,
+    ) -> NativeTeam {
+        self.make_native();
+        crate::sandbox::policy::save(
+            &self.runtime.connection,
+            PROJECT,
+            &AgentPolicy {
+                access,
+                ..AgentPolicy::default()
+            },
+        )
+        .unwrap();
+        self.plan.access = access;
+        let first = self.granted_turn(profile, prompt, turn_time, access);
+        let pane = self
+            .plan
+            .pane
+            .clone()
+            .expect("a native lead runs in a pane");
+        let seat = Seat {
+            project: ProjectId::new(PROJECT).unwrap(),
+            role: self.role,
+            harness: self.plan.harness.clone(),
+            connection: self.binding.connection.id.clone(),
+            tools: true,
+            hosted: None,
+        };
+        let Self {
+            mut runtime,
+            plan,
+            home,
+            _root,
+            ..
+        } = self;
+        runtime
+            .run_worker(
+                AGENT,
+                Launch::Fresh(
+                    Box::new(plan),
+                    Box::new(Mode::PerTurn { home: home.clone() }),
+                ),
+                seat,
+            )
+            .unwrap();
+        let worker = runtime
+            .workers
+            .get_mut(&AGENT)
+            .expect("the lead's worker runs");
+        assert!(worker.managed && worker.kept_session && !worker.briefed);
+        worker.orders.send(first).unwrap();
+        worker.briefed |= worker.kept_session;
+        NativeTeam {
+            runtime,
+            home,
+            pane,
+            _root,
+            _folder: folder,
+        }
     }
 
     /// Builds a command that runs `program` the way the agent's harness runs its tools:
@@ -677,5 +756,193 @@ impl ManagedAgent {
     /// Output: the finished process with its captured output.
     pub(crate) fn shell(&self, script: &str) -> Output {
         crate::spawn_gate::output(&mut self.command(Path::new("/bin/sh"), &["-c", script])).unwrap()
+    }
+}
+
+/// A native lead running as a real worker of its team runtime, started by
+/// [`ManagedAgent::into_native_worker`]: the runtime, the lead's home, its pane on its own
+/// server and the test folders. Dropping it stops the lead before the folders go, so no
+/// signed-in app outlives its test. Its methods call the runtime's own admission, dispatch
+/// and access-level steps; the lead's reports are read here and never reach the runtime's
+/// report handling, so task rows and the worker's busy state stay as dispatch left them.
+pub(super) struct NativeTeam {
+    pub(super) runtime: TeamRuntime,
+    pub(super) home: PathBuf,
+    pane: (Arc<dyn Host>, AgentId),
+    _root: tempfile::TempDir,
+    _folder: tempfile::TempDir,
+}
+
+impl NativeTeam {
+    /// The lead's worker as the runtime records it. Output: the worker.
+    pub(super) fn lead(&self) -> &super::Worker {
+        &self.runtime.workers[&AGENT]
+    }
+
+    /// Waits for the lead's reports until one matches `last`. Inputs: the longest wait and
+    /// the match. Output: every report up to and with the match, or a panic that says what
+    /// ended the wait when the worker ended or the wait passed first.
+    pub(super) fn reports_until(
+        &self,
+        wait: Duration,
+        last: impl Fn(&Report) -> bool,
+    ) -> Vec<Report> {
+        let deadline = Instant::now() + wait;
+        let mut seen = Vec::new();
+        let mut ended = None;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.lead().reports.recv_timeout(left) {
+                Ok(report) => {
+                    let done = last(&report);
+                    if let Report::Ended { problem } = &report {
+                        ended = Some(problem.clone());
+                    }
+                    seen.push(report);
+                    if done {
+                        return seen;
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    panic!(
+                        "no awaited report from the lead in {wait:?}, after {} others",
+                        seen.len()
+                    )
+                }
+                Err(RecvTimeoutError::Disconnected) => panic!(
+                    "the lead's worker ended before the awaited report, problem {ended:?}, after {} others",
+                    seen.len()
+                ),
+            }
+        }
+    }
+
+    /// Every report of the lead through its next finished turn. Input: the longest wait.
+    /// Output: the reports, the finished turn last.
+    pub(super) fn until_finished(&self, wait: Duration) -> Vec<Report> {
+        self.reports_until(wait, |report| matches!(report, Report::Finished { .. }))
+    }
+
+    /// Every report of the lead until its worker ended. Input: the longest wait. Output:
+    /// the reports before the end and the problem the worker ended with.
+    pub(super) fn until_ended(&self, wait: Duration) -> (Vec<Report>, Option<String>) {
+        let mut reports = self.reports_until(wait, |report| matches!(report, Report::Ended { .. }));
+        let Some(Report::Ended { problem }) = reports.pop() else {
+            unreachable!("the wait ends on the worker's end");
+        };
+        (reports, problem)
+    }
+
+    /// Sends the lead's worker one order, as the runtime does. Input: the order.
+    pub(super) fn order(&self, order: Order) {
+        self.lead().orders.send(order).unwrap();
+    }
+
+    fn setup(&self) -> (StoredSetup, ModelAccess) {
+        let tx = self.runtime.connection.unchecked_transaction().unwrap();
+        let stored = crate::project_setup::load_setup(&tx, &ProjectId::new(PROJECT).unwrap())
+            .unwrap()
+            .expect("the project's setup");
+        drop(tx);
+        (stored, (self.runtime.access)().expect("the team's pool"))
+    }
+
+    /// Queues one owner task for the team's sub-agents through the engine's own admission.
+    /// Input: the prompt. Output: the task id, or a panic with the refusal code.
+    pub(super) fn queue(&self, prompt: &str) -> i64 {
+        let (stored, access) = self.setup();
+        let tx = self.runtime.connection.unchecked_transaction().unwrap();
+        let task = crate::team::admit(
+            &tx,
+            &access,
+            &stored,
+            Some(&self.lead().harness),
+            prompt,
+            TaskSource::Owner,
+            None,
+            super::now_ms(),
+        )
+        .unwrap()
+        .unwrap_or_else(|code| panic!("the task was refused: {code}"));
+        tx.commit().unwrap();
+        task
+    }
+
+    /// Runs one pass of the runtime's task dispatch, as each engine tick does.
+    pub(super) fn dispatch(&mut self) {
+        let (stored, access) = self.setup();
+        self.runtime
+            .dispatch(&stored, &access, &BTreeSet::new())
+            .unwrap();
+    }
+
+    /// The status, agent and error the engine recorded for one task. Input: the task id.
+    /// Output: them.
+    pub(super) fn task(&self, task: i64) -> (String, Option<i64>, Option<String>) {
+        self.runtime
+            .connection
+            .query_row(
+                "SELECT status,agent,error FROM team_tasks WHERE id=?1",
+                [task],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+    }
+
+    /// The owner saves a new access level for the project, and the runtime's next tick
+    /// retires every agent whose running process started at a wider one (AL-2).
+    /// Input: the new level.
+    pub(super) fn save_access(&mut self, access: AgentAccess) {
+        crate::sandbox::policy::save(
+            &self.runtime.connection,
+            PROJECT,
+            &AgentPolicy {
+                access,
+                ..AgentPolicy::default()
+            },
+        )
+        .unwrap();
+        self.runtime
+            .retire_lowered(&ProjectId::new(PROJECT).unwrap());
+    }
+
+    /// Types one prompt into the lead's pane as a person at its terminal does, outside the
+    /// engine's turns, so its app starts a turn by itself. Input: the prompt.
+    pub(super) fn type_into_pane(&self, prompt: &str) {
+        let (host, agent) = &self.pane;
+        for part in paste(prompt) {
+            host.input(agent, part.as_bytes()).unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        host.input(agent, b"\r").unwrap();
+    }
+
+    /// Whether the lead's pane still runs on its own server. Output: true while it does,
+    /// false once it or its server ended.
+    pub(super) fn pane_alive(&self) -> bool {
+        let (host, agent) = &self.pane;
+        host.alive().is_ok_and(|alive| alive.contains(agent))
+    }
+}
+
+impl Drop for NativeTeam {
+    /// Stops the lead and waits, at most a minute, for its worker, so a test that ends
+    /// early leaves no signed-in app running. Takes the team. Returns nothing.
+    fn drop(&mut self) {
+        let Some(worker) = self.runtime.workers.get_mut(&AGENT) else {
+            return;
+        };
+        worker.cancel.store(true, Ordering::SeqCst);
+        let _ = worker.orders.send(Order::Stop);
+        let Some(thread) = worker.thread.take() else {
+            return;
+        };
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !thread.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if thread.is_finished() {
+            let _ = thread.join();
+        }
     }
 }
