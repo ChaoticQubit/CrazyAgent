@@ -415,6 +415,7 @@ struct Worker {
     ran_before: Duration,
     told_finished: BTreeSet<i64>,
     parent: Option<i64>,
+    ready: bool,
 }
 
 impl Worker {
@@ -1844,6 +1845,7 @@ impl TeamRuntime {
             .filter_map(|row| row.ok().and_then(|p| ProjectId::new(p).ok()))
             .collect();
         projects.extend(self.workers.values().map(|w| w.project.clone()));
+        projects.extend(self.instruction_restarts.values().cloned());
         Ok(projects.into_iter().collect())
     }
 
@@ -3451,15 +3453,20 @@ impl TeamRuntime {
 
     /// The owner's instruction edit a sub-agent's next task starts with under the project's
     /// default Next task choice (DEC-111 QR1): the sections changed since its launch or its
-    /// last change block. A read that fails sends the task without one. Takes the project,
-    /// the agent and its home. Returns the edit, or none.
+    /// last change block, once its process reported ready, so a launch still writing its
+    /// instructions gets none. A read that fails sends the task without one. Takes the
+    /// project, the agent and its home. Returns the edit, or none.
     fn next_message_edit(
         &self,
         project: &ProjectId,
         agent: i64,
         home: &Path,
     ) -> Option<crate::instruction_files::Edit> {
-        let harness = launch_harness(&self.workers[&agent].harness)?;
+        let worker = &self.workers[&agent];
+        if !worker.ready {
+            return None;
+        }
+        let harness = launch_harness(&worker.harness)?;
         crate::instruction_files::edit_for(&self.connection, project, home, harness)
             .ok()
             .flatten()
@@ -3467,11 +3474,12 @@ impl TeamRuntime {
     }
 
     /// Applies the project's Restart or Badge choice for owner instruction edits (DEC-111
-    /// QR1), checking its running agents at most once each `INSTRUCTION_CHECK_EVERY`: under
-    /// Restart an idle sub-agent whose instructions changed stops, and starts again once its
-    /// process ended; under Badge each running agent whose instructions changed is flagged
-    /// for the team status, and the flags clear under any other choice. Takes the setup, the
-    /// access and the paused accounts. Returns any SQLite failure.
+    /// QR1), checking its agents whose process reported ready at most once each
+    /// `INSTRUCTION_CHECK_EVERY`: under Restart an idle sub-agent whose instructions changed
+    /// stops, and starts again once its process ended; under Badge each running agent whose
+    /// instructions changed is flagged for the team status, and the flags clear under any
+    /// other choice. Takes the setup, the access and the paused accounts. Returns any SQLite
+    /// failure.
     fn instruction_edits(
         &mut self,
         stored: &StoredSetup,
@@ -3499,7 +3507,9 @@ impl TeamRuntime {
             _ => self
                 .workers
                 .iter()
-                .filter(|(_, worker)| &worker.project == project && !worker.stopping)
+                .filter(|(_, worker)| {
+                    &worker.project == project && !worker.stopping && worker.ready
+                })
                 .map(|(id, _)| *id)
                 .collect(),
         };
@@ -4537,6 +4547,7 @@ impl TeamRuntime {
                 ran_before: Duration::ZERO,
                 told_finished: BTreeSet::new(),
                 parent,
+                ready: false,
             },
         );
         assert!(self.panes(&self.workers[&id].project) <= PANES_PER_PROJECT_MAX);
@@ -5399,6 +5410,10 @@ impl TeamRuntime {
     fn apply(&mut self, id: i64, report: Report) -> Result<bool, EngineError> {
         match report {
             Report::Ready { group, pane } => {
+                self.workers
+                    .get_mut(&id)
+                    .expect("ready worker exists")
+                    .ready = true;
                 if let Some(record) = &pane {
                     let worker = self.workers.get_mut(&id).expect("ready worker exists");
                     worker.ran_before = u64::try_from(now_ms()).map_or(Duration::ZERO, |now| {
