@@ -196,7 +196,7 @@ test("Background commands: a grace time the owner types and saves is kept and sh
     await me.capture("background-grace-refused");
     assert.deepEqual((await status()).background_at_end, { mode: "grace", secs: 45 }, "a refused time changes nothing");
     const asked = await bridgeCall(bridge, "desktop_team_background", { id: project, choice: { mode: "grace", secs: 5 }, generation: 900 });
-    assert.equal(asked.value?.rejection ?? asked.failure?.code, "team_background_grace_invalid", `the engine refuses 5 seconds itself: ${JSON.stringify(asked)}`);
+    assert.deepEqual(asked.failure, { code: "team_action_invalid", cause: "team_background_grace_invalid" }, `the engine refuses 5 seconds itself: ${JSON.stringify(asked)}`);
     assert.deepEqual((await status()).background_at_end, { mode: "grace", secs: 45 }, "the engine's refusal changes nothing");
     await reload();
     assert.deepEqual(await shown(page, project), { choice: "grace", grace: "45" }, "the kept grace time is shown after the refusal");
