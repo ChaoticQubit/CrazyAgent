@@ -5066,6 +5066,60 @@ fn a_worker_gets_only_the_skills_chosen_for_workers() {
     );
 }
 
+/// DEC-111 R3: the master follows the master's own choice and a worker on All approved
+/// skills gets every approved skill while the lead above it follows the leads' choice, so
+/// each role reads its own setting and no other.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_master_and_a_worker_on_all_approved_skills_follow_their_own_setting() {
+    let fixture = Fixture::new(1);
+    approve_skills(&fixture, &["meal-tips", "release-notes", "style-guide"]);
+    crate::coord::settings::write(
+        &fixture.connection,
+        &fixture.setup.project_id,
+        &crate::coord::settings::CoordSettings {
+            role_skills: crate::coord::settings::RoleSkills {
+                master: Some(vec!["meal-tips".into()]),
+                lead: Some(vec!["style-guide".into()]),
+                worker: None,
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let team = fixture.runtime();
+    let master = fixture.agent(AgentRole::Master, "claude-code", AgentStatus::Idle);
+    let lead = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Idle);
+    let worker = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Idle);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?1 WHERE id=?2",
+            params![lead, worker],
+        )
+        .unwrap();
+
+    assert_eq!(
+        written_skills(&team, &fixture, master, AgentRole::Master),
+        BTreeSet::from(["meal-tips".to_owned()]),
+        "the master gets the master's choice"
+    );
+    assert_eq!(
+        written_skills(&team, &fixture, lead, AgentRole::Sub),
+        BTreeSet::from(["style-guide".to_owned()]),
+        "the lead gets the leads' choice"
+    );
+    assert_eq!(
+        written_skills(&team, &fixture, worker, AgentRole::Sub),
+        BTreeSet::from([
+            "meal-tips".to_owned(),
+            "release-notes".to_owned(),
+            "style-guide".to_owned(),
+        ]),
+        "a worker on All approved skills gets every approved skill"
+    );
+}
+
 #[cfg(target_os = "macos")]
 const AGENT_GIT: &str = "/Library/Developer/CommandLineTools/usr/bin/git";
 
