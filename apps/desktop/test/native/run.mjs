@@ -22,8 +22,8 @@ const started = new Date().toISOString();
 const began = performance.now();
 const app = process.env.CRAZYAGENT_DESKTOP_TEST_APP;
 const fixture = process.env.CRAZYAGENT_DESKTOP_TEST_FIXTURE;
-const suite = process.env.CRAZYAGENT_DESKTOP_TEST_SUITE ?? "baseline";
-assert(["baseline", "model-access", "model-access-read-only", "native-auth"].includes(suite),
+const suite = process.env.CRAZYAGENT_DESKTOP_TEST_SUITE;
+assert(["model-access", "model-access-read-only", "native-auth"].includes(suite),
   "closed native suite required");
 let interrupted = false;
 
@@ -215,8 +215,8 @@ async function execute() {
     const test = launch("webdriver", process.execPath,
       ["--import", pathToFileURL(join(appRoot, "test/native/private-log-preload.mjs")).href,
         join(appRoot, "node_modules/@wdio/cli/bin/wdio.js"), "run",
-        suite === "baseline" ? "wdio.conf.mjs" : suite === "native-auth" ?
-          "test/native/native-auth.wdio.conf.mjs" : "test/native/model-access.wdio.conf.mjs"],
+        suite === "native-auth" ? "test/native/native-auth.wdio.conf.mjs"
+          : "test/native/model-access.wdio.conf.mjs"],
       env, 120);
     const result = await test.done;
     assert(!test.reason && result.code !== null, "native test process did not exit normally");
