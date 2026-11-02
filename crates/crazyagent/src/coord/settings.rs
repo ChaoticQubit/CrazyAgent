@@ -23,6 +23,9 @@ pub const COUNTED_TOOLS_DEFAULT: [&str; 8] = [
 
 const _: () = assert!(COUNTED_TOOLS_DEFAULT.len() <= COUNTED_TOOLS_MAX);
 
+/// The most skill names one team role's choice holds: every skill of both scopes.
+pub const ROLE_SKILLS_MAX: usize = 2 * crate::plugins::SKILLS_PER_SCOPE_MAX;
+
 /// The harness kinds the coordination settings are kept for, one per existing harness
 /// id that runs team agents or the master.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -97,6 +100,56 @@ pub enum Overlaps {
     Off,
 }
 
+/// A team role whose skills the owner chooses (DEC-111 R3): the master, a lead (a
+/// sub-agent that may start sub-agents of its own) or a worker (any other sub-agent or
+/// teammate).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillRole {
+    Master,
+    Lead,
+    Worker,
+}
+
+impl SkillRole {
+    /// Every role, in the order settings list them.
+    pub const ALL: [Self; 3] = [Self::Master, Self::Lead, Self::Worker];
+}
+
+/// Which approved skills each team role of a project gets: none is All approved skills
+/// (the default), a list is Chosen skills, and an empty list gives that role no skills.
+/// A chosen name that is not an approved skill of the project reaches no agent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RoleSkills {
+    pub master: Option<Vec<String>>,
+    pub lead: Option<Vec<String>>,
+    pub worker: Option<Vec<String>>,
+}
+
+impl RoleSkills {
+    /// Gives one role's choice. Takes the role. Returns its chosen names, or none for All
+    /// approved skills.
+    pub fn of(&self, role: SkillRole) -> Option<&[String]> {
+        match role {
+            SkillRole::Master => self.master.as_deref(),
+            SkillRole::Lead => self.lead.as_deref(),
+            SkillRole::Worker => self.worker.as_deref(),
+        }
+    }
+
+    /// Sets one role's choice. Takes the role and its chosen names, or none for All
+    /// approved skills. Returns nothing.
+    pub fn set(&mut self, role: SkillRole, chosen: Option<Vec<String>>) {
+        let slot = match role {
+            SkillRole::Master => &mut self.master,
+            SkillRole::Lead => &mut self.lead,
+            SkillRole::Worker => &mut self.worker,
+        };
+        *slot = chosen;
+    }
+}
+
 /// When the workflow nudges remind an agent (DEC-111 Q4, R4): never, with the engine's
 /// note for each flag an agent raised after ten minutes of work, or once on its first file
 /// edit before any code-graph query, by its hook where hooks run and by an engine note for
@@ -153,6 +206,8 @@ pub struct CoordSettings {
     pub overlaps: Overlaps,
     pub nudges: Nudges,
     pub counted_tools: Vec<String>,
+    #[serde(default)]
+    pub role_skills: RoleSkills,
 }
 
 impl Default for CoordSettings {
@@ -162,6 +217,7 @@ impl Default for CoordSettings {
             overlaps: Overlaps::Warn,
             nudges: Nudges::Off,
             counted_tools: COUNTED_TOOLS_DEFAULT.map(str::to_owned).to_vec(),
+            role_skills: RoleSkills::default(),
         }
     }
 }
@@ -169,7 +225,8 @@ impl Default for CoordSettings {
 impl CoordSettings {
     /// Checks settings that came from a client: at most `COUNTED_TOOLS_MAX` counted
     /// tools, each 1 to `COUNTED_TOOL_BYTES_MAX` bytes of letters, digits, `_`, `-` and
-    /// `*`, none twice. Takes the settings. Returns Ok or `coord_settings_invalid`.
+    /// `*`, none twice, and at most `ROLE_SKILLS_MAX` valid skill names per role, none
+    /// twice. Takes the settings. Returns Ok or `coord_settings_invalid`.
     pub fn validate(&self) -> Result<(), EngineError> {
         let name = |tool: &String| {
             !tool.is_empty()
@@ -183,9 +240,23 @@ impl CoordSettings {
             .iter()
             .enumerate()
             .all(|(at, tool)| !self.counted_tools[..at].contains(tool));
+        let skills = SkillRole::ALL
+            .into_iter()
+            .filter_map(|role| self.role_skills.of(role))
+            .all(|names| {
+                names.len() <= ROLE_SKILLS_MAX
+                    && names
+                        .iter()
+                        .all(|skill| crate::plugins::skill_folder::valid_name(skill))
+                    && names
+                        .iter()
+                        .enumerate()
+                        .all(|(at, skill)| !names[..at].contains(skill))
+            });
         let fine = self.counted_tools.len() <= COUNTED_TOOLS_MAX
             && self.counted_tools.iter().all(name)
-            && unique;
+            && unique
+            && skills;
         fine.then_some(())
             .ok_or_else(|| failure("coord_settings_invalid"))
     }

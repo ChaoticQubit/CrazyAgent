@@ -5,7 +5,7 @@ use super::project::{REFRESH_MS, plain_problem};
 use super::project_time::{clock, duration};
 use crate::coord::settings::{
     COUNTED_TOOL_BYTES_MAX, COUNTED_TOOLS_DEFAULT, COUNTED_TOOLS_MAX, Delivery, HarnessKind,
-    Nudges, Overlaps, QuestionsTo, SubagentMode,
+    Nudges, Overlaps, QuestionsTo, ROLE_SKILLS_MAX, SkillRole, SubagentMode,
 };
 use crate::engine::owner::OwnerResult;
 use crate::project_setup::{SetupQuery, SetupView};
@@ -117,15 +117,16 @@ pub(in crate::tui) struct WakeEdit {
 const WAKE_ROWS: usize = EventKind::ALL.len() + 1;
 
 /// The open coordination editor (DEC-104): the row with the cursor and, while the owner
-/// types the counted tools, their input. Rows follow `COORD_ROWS`.
+/// types the counted tools or one role's skill names, that input. Rows follow `COORD_ROWS`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) struct CoordEdit {
     pub row: usize,
-    pub counted: Option<TextInput>,
+    pub input: Option<TextInput>,
 }
 
 /// One row of the coordination editor: a harness kind's sub-agent mode or message delivery,
-/// where sub-agent questions go, overlapping edits, workflow nudges or the counted tools.
+/// where sub-agent questions go, overlapping edits, workflow nudges, the counted tools or
+/// the skills one team role gets (DEC-111 R3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum CoordRow {
     Mode(HarnessKind),
@@ -134,9 +135,10 @@ pub(in crate::tui) enum CoordRow {
     Overlaps,
     Nudges,
     Counted,
+    Skills(SkillRole),
 }
 
-const COORD_ROWS: [CoordRow; 10] = [
+const COORD_ROWS: [CoordRow; 13] = [
     CoordRow::Mode(HarnessKind::ClaudeCode),
     CoordRow::Delivery(HarnessKind::ClaudeCode),
     CoordRow::Mode(HarnessKind::Codex),
@@ -147,10 +149,15 @@ const COORD_ROWS: [CoordRow; 10] = [
     CoordRow::Overlaps,
     CoordRow::Nudges,
     CoordRow::Counted,
+    CoordRow::Skills(SkillRole::Master),
+    CoordRow::Skills(SkillRole::Lead),
+    CoordRow::Skills(SkillRole::Worker),
 ];
 const DELIVERIES: [Delivery; 3] = [Delivery::Auto, Delivery::NativeOnly, Delivery::TypingOnly];
 const OVERLAPS: [Overlaps; 3] = [Overlaps::Warn, Overlaps::Block, Overlaps::Off];
 const COUNTED_TEXT_BYTES_MAX: usize = COUNTED_TOOLS_MAX * (COUNTED_TOOL_BYTES_MAX + 2);
+const SKILL_NAMES_TEXT_BYTES_MAX: usize =
+    ROLE_SKILLS_MAX * (crate::plugins::skill_folder::NAME_BYTES_MAX + 2);
 
 /// A stop the owner pressed that waits on one more key: Stop all asks y or n, Stop harness
 /// asks y or n for that agent, and Stop teammate asks which running teammate of that agent
@@ -164,6 +171,21 @@ pub(in crate::tui) enum Ask {
 
 const TEAMMATE_KEYS_MAX: usize = 9;
 
+/// The branch setting the open branch editor writes: the Master's branch (DEC-100) or the
+/// Land on branch (DEC-111 Q1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::tui) enum BranchSetting {
+    Master,
+    LandOn,
+}
+
+/// The open branch editor: the setting it writes and the branch name being typed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::tui) struct BranchEdit {
+    pub setting: BranchSetting,
+    pub input: TextInput,
+}
+
 /// The live team of one project: its agents, the tasks the master or the owner
 /// handed to sub-agents, cancel and the keep-warm switch.
 /// Takes engine reads through `apply` and keys through `key`; never invents data.
@@ -176,7 +198,7 @@ pub(in crate::tui) struct TeamView {
     pub confirm: Option<i64>,
     pub ask: Option<Ask>,
     pub draft: Option<Draft>,
-    pub branch_edit: Option<TextInput>,
+    pub branch_edit: Option<BranchEdit>,
     pub wake: Option<WakeEdit>,
     pub coord: Option<CoordEdit>,
     pub alerts: bool,
@@ -264,13 +286,16 @@ impl TeamView {
                         if matches!(action, TeamAction::Delegate { .. }) {
                             self.draft = None;
                         }
-                        if matches!(action, TeamAction::MasterBranch { .. }) {
+                        if matches!(
+                            action,
+                            TeamAction::MasterBranch { .. } | TeamAction::LandOn { .. }
+                        ) {
                             self.branch_edit = None;
                         }
                         if matches!(action, TeamAction::CoordSettings { .. })
                             && let Some(edit) = &mut self.coord
                         {
-                            edit.counted = None;
+                            edit.input = None;
                         }
                         self.notice = done.map(Notice::plain);
                         self.read_ms = None;
@@ -293,27 +318,24 @@ impl TeamView {
         self.changing.is_some()
     }
 
-    /// Says whether the owner is writing a new task or the Master's branch, so the host
+    /// Says whether the owner is writing a new task or a branch setting, so the host
     /// sends pastes here, keeps its own letter keys off and shows the cursor.
     /// Takes the view. Returns true while the task composer or the branch editor is open.
     pub fn typing(&self) -> bool {
         self.draft.is_some()
             || self.branch_edit.is_some()
-            || self
-                .coord
-                .as_ref()
-                .is_some_and(|edit| edit.counted.is_some())
+            || self.coord.as_ref().is_some_and(|edit| edit.input.is_some())
     }
 
-    /// Adds pasted text to the task or the Master's branch being written.
+    /// Adds pasted text to the task or the branch setting being written.
     /// Takes untrusted pasted text; control characters are dropped.
     /// Returns true when the composer or the branch editor took it.
     pub fn paste(&mut self, text: &str) -> bool {
-        if let Some(input) = &mut self.branch_edit {
-            input.insert_str(text);
+        if let Some(edit) = &mut self.branch_edit {
+            edit.input.insert_str(text);
             return true;
         }
-        if let Some(input) = self.coord.as_mut().and_then(|edit| edit.counted.as_mut()) {
+        if let Some(input) = self.coord.as_mut().and_then(|edit| edit.input.as_mut()) {
             input.insert_str(text);
             return true;
         }
@@ -516,7 +538,11 @@ impl TeamView {
             KeyCode::Char('T') => self.token_budget(),
             KeyCode::Char('P') => self.spread_accounts(),
             KeyCode::Char('m') => {
-                self.open_branch_edit();
+                self.open_branch_edit(BranchSetting::Master);
+                TeamReply::Handled
+            }
+            KeyCode::Char('L') => {
+                self.open_branch_edit(BranchSetting::LandOn);
                 TeamReply::Handled
             }
             KeyCode::Char('g') => self.ask_before_merge(),
@@ -1375,43 +1401,52 @@ impl TeamView {
         })
     }
 
-    /// Opens the Master's branch editor filled with the current choice, empty for the
-    /// repository default. Output: none; a notice while the team is loading.
-    fn open_branch_edit(&mut self) {
+    /// Opens the editor of one branch setting filled with the current choice, empty for
+    /// its default: the repository's default branch for the Master's branch, the Master's
+    /// branch for Land on. Takes the setting. Output: none; a notice while the team is
+    /// loading.
+    fn open_branch_edit(&mut self, setting: BranchSetting) {
         let Some(status) = &self.status else {
             self.notice = Some(Notice::plain("The team is still loading."));
             return;
         };
         let mut input = TextInput::single(MASTER_BRANCH_BYTES_MAX);
-        input.set(status.master_branch.as_deref().unwrap_or(""));
-        self.branch_edit = Some(input);
+        input.set(
+            match setting {
+                BranchSetting::Master => status.master_branch.as_deref(),
+                BranchSetting::LandOn => status.land_on.as_deref(),
+            }
+            .unwrap_or(""),
+        );
+        self.branch_edit = Some(BranchEdit { setting, input });
     }
 
-    /// Handles one key while the Master's branch editor is open: Enter saves, Esc closes,
-    /// other keys edit. Takes the key. Output: the change to send, or Handled.
+    /// Handles one key while a branch editor is open: Enter saves, Esc closes, other keys
+    /// edit. Takes the key. Output: the change to send, or Handled.
     fn branch_key(&mut self, key: KeyEvent) -> TeamReply {
         match key.code {
             KeyCode::Esc => {
                 self.branch_edit = None;
                 TeamReply::Handled
             }
-            KeyCode::Enter => self.save_master_branch(),
+            KeyCode::Enter => self.save_branch(),
             _ => {
-                if let Some(input) = &mut self.branch_edit {
-                    input.handle(key);
+                if let Some(edit) = &mut self.branch_edit {
+                    edit.input.handle(key);
                 }
                 TeamReply::Handled
             }
         }
     }
 
-    /// Sends the Master's branch typed in the editor; an empty name goes back to the
-    /// repository default. Output: the change to send, or Handled with a notice while saving.
-    fn save_master_branch(&mut self) -> TeamReply {
-        let Some(input) = &self.branch_edit else {
+    /// Sends the branch typed in the open editor to its setting; an empty name goes back to
+    /// the setting's default. Output: the change to send, or Handled with a notice while
+    /// saving.
+    fn save_branch(&mut self) -> TeamReply {
+        let Some(edit) = &self.branch_edit else {
             return TeamReply::Handled;
         };
-        let typed = input.value().trim();
+        let typed = edit.input.value().trim();
         let branch = (!typed.is_empty()).then(|| typed.to_owned());
         if self.changing.is_some() {
             self.notice = Some(Notice::problem(
@@ -1419,13 +1454,19 @@ impl TeamView {
             ));
             return TeamReply::Handled;
         }
-        self.changing = Some(match &branch {
-            Some(name) => format!("The master now works on {name}."),
-            None => "The master now works on the repository's default branch.".to_owned(),
+        let setting = edit.setting;
+        self.changing = Some(match (setting, &branch) {
+            (BranchSetting::Master, Some(name)) => format!("The master now works on {name}."),
+            (BranchSetting::Master, None) => {
+                "The master now works on the repository's default branch.".to_owned()
+            }
+            (BranchSetting::LandOn, Some(name)) => format!("Work now lands on {name}."),
+            (BranchSetting::LandOn, None) => "Work now lands on the master's branch.".to_owned(),
         });
-        TeamReply::Change(TeamAction::MasterBranch {
-            project_id: self.project.clone(),
-            branch,
+        let project_id = self.project.clone();
+        TeamReply::Change(match setting {
+            BranchSetting::Master => TeamAction::MasterBranch { project_id, branch },
+            BranchSetting::LandOn => TeamAction::LandOn { project_id, branch },
         })
     }
 
@@ -1499,32 +1540,35 @@ impl TeamView {
                 self.notice = None;
                 self.coord = Some(CoordEdit {
                     row: 0,
-                    counted: None,
+                    input: None,
                 });
             }
         }
     }
 
     /// Handles one key while the coordination editor is open: move, change the row's value,
-    /// edit or reset the counted tools, or close. Takes the key. Output: the change to send,
+    /// edit or reset the counted tools, switch a role between All approved skills and Chosen
+    /// skills or type its skill names, or close. Takes the key. Output: the change to send,
     /// or Handled.
     fn coord_key(&mut self, key: KeyEvent) -> TeamReply {
         let Some(edit) = self.coord.clone() else {
             return TeamReply::Ignored;
         };
-        if edit.counted.is_some() {
+        if edit.input.is_some() {
             return match key.code {
                 KeyCode::Esc => {
                     self.coord = Some(CoordEdit {
-                        counted: None,
+                        input: None,
                         ..edit
                     });
                     TeamReply::Handled
                 }
-                KeyCode::Enter => self.save_counted(),
+                KeyCode::Enter => match COORD_ROWS[edit.row] {
+                    CoordRow::Skills(role) => self.save_skills(role),
+                    _ => self.save_counted(),
+                },
                 _ => {
-                    if let Some(input) = self.coord.as_mut().and_then(|edit| edit.counted.as_mut())
-                    {
+                    if let Some(input) = self.coord.as_mut().and_then(|edit| edit.input.as_mut()) {
                         input.handle(key);
                     }
                     TeamReply::Handled
@@ -1553,7 +1597,7 @@ impl TeamView {
                 };
                 self.coord = Some(CoordEdit {
                     row: next,
-                    counted: None,
+                    input: None,
                 });
                 TeamReply::Handled
             }
@@ -1562,7 +1606,7 @@ impl TeamView {
                 input.set(&view.settings.counted_tools.join(", "));
                 self.coord = Some(CoordEdit {
                     row: edit.row,
-                    counted: Some(input),
+                    input: Some(input),
                 });
                 TeamReply::Handled
             }
@@ -1576,6 +1620,13 @@ impl TeamView {
                     },
                     "The counted tools are back to the defaults.".to_owned(),
                 )
+            }
+            KeyCode::Enter if matches!(row, CoordRow::Skills(_)) => {
+                let CoordRow::Skills(role) = row else {
+                    return TeamReply::Handled;
+                };
+                self.type_skills(edit.row, view.settings.role_skills.of(role));
+                TeamReply::Handled
             }
             KeyCode::Char(' ') | KeyCode::Enter | KeyCode::Right => {
                 self.coord_step(row, &view, true)
@@ -1681,8 +1732,84 @@ impl TeamView {
                 )
             }
             CoordRow::Counted => return TeamReply::Handled,
+            CoordRow::Skills(role) => {
+                if settings.role_skills.of(role).is_none() {
+                    if let Some(at) = self.coord.as_ref().map(|edit| edit.row) {
+                        self.type_skills(at, None);
+                    }
+                    return TeamReply::Handled;
+                }
+                settings.role_skills.set(role, None);
+                (
+                    TeamAction::CoordSettings {
+                        project_id,
+                        settings,
+                    },
+                    format!("{} skills: all approved skills.", role_label(role)),
+                )
+            }
         };
         self.coord_change(action, done)
+    }
+
+    /// Opens the input for one role's skill names on its row, holding the role's chosen
+    /// names, empty while it gets All approved skills. Takes the row and the choice.
+    fn type_skills(&mut self, at: usize, chosen: Option<&[String]>) {
+        assert!(matches!(COORD_ROWS[at], CoordRow::Skills(_)));
+        let mut input = TextInput::single(SKILL_NAMES_TEXT_BYTES_MAX);
+        input.set(&chosen.unwrap_or_default().join(", "));
+        self.coord = Some(CoordEdit {
+            row: at,
+            input: Some(input),
+        });
+    }
+
+    /// Sends the skill names typed for one role as its Chosen skills: names split on commas
+    /// or spaces, each kept once in order, checked with the engine's rule first; an empty
+    /// list gives the role no skills. Takes the role. Output: the change, or Handled with
+    /// the reason the names can't be saved.
+    fn save_skills(&mut self, role: SkillRole) -> TeamReply {
+        let Some(typed) = self
+            .coord
+            .as_ref()
+            .and_then(|edit| edit.input.as_ref())
+            .map(|input| input.value().to_owned())
+        else {
+            return TeamReply::Handled;
+        };
+        let Some(mut settings) = self
+            .status
+            .as_ref()
+            .and_then(|status| status.coordination.as_ref())
+            .map(|view| view.settings.clone())
+        else {
+            return TeamReply::Handled;
+        };
+        let mut names: Vec<String> = Vec::new();
+        for name in typed
+            .split([',', ' ', '\t'])
+            .filter(|name| !name.is_empty())
+        {
+            if !names.iter().any(|kept| kept == name) {
+                names.push(name.to_owned());
+            }
+        }
+        let done = match names.is_empty() {
+            true => format!("{} skills: none.", role_label(role)),
+            false => format!("{} skills: {}.", role_label(role), names.join(", ")),
+        };
+        settings.role_skills.set(role, Some(names));
+        if settings.validate().is_err() {
+            self.notice = Some(Notice::problem(team_plain("coord_settings_invalid")));
+            return TeamReply::Handled;
+        }
+        self.coord_change(
+            TeamAction::CoordSettings {
+                project_id: self.project.clone(),
+                settings,
+            },
+            done,
+        )
     }
 
     /// Sends the counted tools typed in the editor: names split on commas or spaces, each kept
@@ -1692,7 +1819,7 @@ impl TeamView {
         let Some(typed) = self
             .coord
             .as_ref()
-            .and_then(|edit| edit.counted.as_ref())
+            .and_then(|edit| edit.input.as_ref())
             .map(|input| input.value().to_owned())
         else {
             return TeamReply::Handled;
@@ -1805,6 +1932,15 @@ impl TeamView {
                     view.settings.counted_tools.join(", "),
                     "",
                 ),
+                CoordRow::Skills(role) => (
+                    format!("{} skills", role_label(role)),
+                    match view.settings.role_skills.of(role) {
+                        None => "All approved skills".to_owned(),
+                        Some([]) => "Chosen skills: none".to_owned(),
+                        Some(names) => format!("Chosen skills: {}", names.join(", ")),
+                    },
+                    "",
+                ),
             };
             rows.push(list_row(
                 Row::of(label, look.fg)
@@ -1817,13 +1953,19 @@ impl TeamView {
                 look,
             ));
         }
-        let Some(input) = &edit.counted else {
+        let Some(input) = &edit.input else {
             return (rows, None);
         };
         let inner = content.saturating_sub(4).max(2);
         let (lines, (line, column)) = input.wrap(inner - 1);
         let text = if input.value().is_empty() {
-            Row::of("No tools counted", look.muted)
+            Row::of(
+                match COORD_ROWS[edit.row] {
+                    CoordRow::Skills(_) => "No skills: type names separated by commas",
+                    _ => "No tools counted",
+                },
+                look.muted,
+            )
         } else {
             Row::of(lines.get(line).cloned().unwrap_or_default(), look.fg)
         };
@@ -1855,8 +1997,9 @@ impl TeamView {
     }
 
     /// Draws the Team view for the Team screen's settings box and places the typing cursor.
-    /// While the footer asks a question, the settings summary folds toward its first row
-    /// when the window is too short to keep the question beside the lists and the panel.
+    /// When the window is too short for the lists, the panel and any footer question, the
+    /// blank rows before the panel and before the tasks go first, then the settings summary
+    /// folds toward its first row, so every setting shows while blank rows can make room.
     /// Takes the content width, the rows available, the accounts and the look.
     /// Returns the body rows, the help keys and, while the owner writes a task,
     /// the cursor as a body row and a column inside that row.
@@ -1905,8 +2048,8 @@ impl TeamView {
                 let (rows, at) = draft_rows(draft, content, look);
                 (rows, Some(at))
             }
-            (None, Some(input), _) => {
-                let (rows, at) = branch_rows(input, content, look);
+            (None, Some(edit), _) => {
+                let (rows, at) = branch_rows(edit, content, look);
                 (rows, Some(at))
             }
             (None, None, Some(edit)) => (self.wake_rows(edit, content, look), None),
@@ -1918,21 +2061,18 @@ impl TeamView {
         let footer = self.footer(look);
         let hidden = self.finished_hidden();
         let fixed = lines.len() + 5 + usize::from(hidden > 0) + panel.len() + footer.len();
-        let folded = if footer.is_empty() {
-            0
-        } else {
-            (fixed + 2)
-                .saturating_sub(room)
-                .min(summary_rows.saturating_sub(1))
-        };
+        let over = (fixed + 2).saturating_sub(room);
+        let spacers = over.min(2);
+        let folded = (over - spacers).min(summary_rows.saturating_sub(1));
         assert!(
             folded < summary_rows.max(1),
             "the summary's first row stays"
         );
+        assert!(folded == 0 || spacers == 2, "blank rows go before settings");
         if folded > 0 {
             lines.drain(1..=folded);
         }
-        let fixed = fixed - folded;
+        let fixed = fixed - spacers - folded;
         let free = room.saturating_sub(fixed).max(2);
         let wanted_tasks = tasks.len().max(1).min(free / 2);
         let agent_rows = agents
@@ -1999,7 +2139,9 @@ impl TeamView {
                 look.muted,
             ));
         }
-        lines.push(Row::default());
+        if spacers < 2 {
+            lines.push(Row::default());
+        }
 
         lines.push(Row::of("Tasks", look.heading).push(format!("  {}", tasks.len()), look.muted));
         let task_widths = if wide {
@@ -2038,7 +2180,9 @@ impl TeamView {
                 look,
             ));
         }
-        lines.push(Row::default());
+        if spacers == 0 {
+            lines.push(Row::default());
+        }
         let cursor = caret.map(|(row, column)| (lines.len() + row, column));
         lines.extend(panel);
         lines.extend(footer);
@@ -2048,7 +2192,7 @@ impl TeamView {
     /// The Team rows: the agent counts, a stopped team and alerts, then every team setting
     /// in order (Keep warm, Task, Session, Idle stop, On harness switch, Sub-agent depth,
     /// Worker lands, Agent branches, Max harnesses, Max teammates, Spread accounts, Token
-    /// budget, Master's branch, Ask before merge, New folder limit), each whole. A
+    /// budget, Master's branch, Land on, Ask before merge, New folder limit), each whole. A
     /// setting that does not fit on the row starts the next one, right-aligned under the
     /// first. Counts wider
     /// than the content are cut with an ellipsis like any row. Inputs: the content width and
@@ -2150,6 +2294,13 @@ impl TeamView {
                     .master_branch
                     .clone()
                     .unwrap_or_else(|| "Repository default".to_owned()),
+            ),
+            setting(
+                "Land on",
+                status
+                    .land_on
+                    .clone()
+                    .unwrap_or_else(|| "Master's branch".to_owned()),
             ),
             setting(
                 "Ask before merge",
@@ -2414,14 +2565,18 @@ impl TeamView {
             return vec![("y", "Cancel task"), ("n", "Keep")];
         }
         if let Some(edit) = &self.coord {
-            if edit.counted.is_some() {
+            if edit.input.is_some() {
                 return vec![("Enter", "Save"), ("Esc", "Close")];
             }
             let mut help = vec![("\u{2191}\u{2193}", "Move")];
-            if COORD_ROWS[edit.row] == CoordRow::Counted {
-                help.extend([("Enter", "Edit tools"), ("r", "Default tools")]);
-            } else {
-                help.extend([("Space", "Change"), ("\u{2190}\u{2192}", "Change")]);
+            match COORD_ROWS[edit.row] {
+                CoordRow::Counted => {
+                    help.extend([("Enter", "Edit tools"), ("r", "Default tools")]);
+                }
+                CoordRow::Skills(_) => {
+                    help.extend([("Space", "All or chosen"), ("Enter", "Edit skills")]);
+                }
+                _ => help.extend([("Space", "Change"), ("\u{2190}\u{2192}", "Change")]),
             }
             help.push(("Esc", "Close"));
             return help;
@@ -2479,6 +2634,7 @@ impl TeamView {
                 },
             ),
             ("m", "Master's branch"),
+            ("L", "Land on"),
             ("g", "Ask before merge"),
             ("F", "New folder limit"),
             ("c", "Coordination"),
@@ -2574,6 +2730,14 @@ fn overlaps_words(overlaps: Overlaps) -> &'static str {
     }
 }
 
+fn role_label(role: SkillRole) -> &'static str {
+    match role {
+        SkillRole::Master => "Master",
+        SkillRole::Lead => "Lead",
+        SkillRole::Worker => "Worker",
+    }
+}
+
 /// Which team time limit a key moves.
 #[derive(Clone, Copy)]
 enum Limit {
@@ -2651,6 +2815,9 @@ pub(in crate::tui) fn team_plain(code: &str) -> String {
         "team_master_branch_invalid" => {
             "Type a branch name such as main or release/2.0, or leave it empty for the repository default.".into()
         }
+        "team_land_on_invalid" => {
+            "Type a branch name such as stage or release/2.0, or leave it empty for the master's branch.".into()
+        }
         other => plain_problem(other),
     }
 }
@@ -2708,20 +2875,33 @@ fn draft_rows(draft: &Draft, content: usize, look: &Look) -> (Vec<Row>, (usize, 
     (rows, cursor)
 }
 
-/// Draws the Master's branch editor. Takes the input, the content width and the look.
-/// Returns the rows and the cursor as a row and a column inside those rows.
-fn branch_rows(input: &TextInput, content: usize, look: &Look) -> (Vec<Row>, (usize, usize)) {
-    let mut rows = vec![
-        Row::of("Master's branch", look.heading),
-        Row::of(
+/// Draws the editor of one branch setting: the Master's branch or Land on. Takes the
+/// editor, the content width and the look. Returns the rows and the cursor as a row and a
+/// column inside those rows.
+fn branch_rows(edit: &BranchEdit, content: usize, look: &Look) -> (Vec<Row>, (usize, usize)) {
+    let (heading, help, empty) = match edit.setting {
+        BranchSetting::Master => (
+            "Master's branch",
             "The master works there and merges finished harnesses into it. Leave it empty for the repository default.",
-            look.muted,
+            "Repository default",
         ),
-    ];
+        BranchSetting::LandOn => (
+            "Land on",
+            "The master's merges and your Accept land there, and each change set counts only what it lacks. It can be a branch checked out nowhere: then your project folder's files stay as they are. Leave it empty for the master's branch.",
+            "The master's branch",
+        ),
+    };
+    let input = &edit.input;
+    let mut rows = vec![Row::of(heading, look.heading)];
+    rows.extend(
+        wrap_words(help, content)
+            .into_iter()
+            .map(|line| Row::of(line, look.muted)),
+    );
     let inner = content.saturating_sub(4).max(2);
     let (lines, (line, column)) = input.wrap(inner - 1);
     let text = if input.value().is_empty() {
-        Row::of("Repository default", look.muted)
+        Row::of(empty, look.muted)
     } else {
         Row::of(lines.get(line).cloned().unwrap_or_default(), look.fg)
     };

@@ -119,7 +119,7 @@ pub(in crate::tui) struct ProjectChanges {
     asking: Option<Ask>,
     target: Option<(ChangeSetId, String)>,
     branches: Option<(ChangeSetId, TargetBranches)>,
-    branch: usize,
+    branch: Option<usize>,
     wanted_branches: Option<ChangeSetId>,
     message: TextInput,
     notice: Option<Notice>,
@@ -147,7 +147,7 @@ impl ProjectChanges {
             asking: None,
             target: None,
             branches: None,
-            branch: 0,
+            branch: None,
             wanted_branches: None,
             message: TextInput::multi(MESSAGE_BYTES_MAX),
             notice: None,
@@ -277,18 +277,23 @@ impl ProjectChanges {
             }
             (ChangesQuery::Branches { id }, Ok(ChangesView::Branches(listed))) => {
                 if self.target.as_ref().is_some_and(|(asked, _)| asked == id) {
-                    self.branch = listed
-                        .current
-                        .as_ref()
-                        .and_then(|current| listed.branches.iter().position(|name| name == current))
-                        .unwrap_or(0);
+                    self.branch = match listed.land_on_problem {
+                        Some(_) => None,
+                        None => Some(
+                            landing_default(listed)
+                                .and_then(|default| {
+                                    listed.branches.iter().position(|name| name == default)
+                                })
+                                .unwrap_or(0),
+                        ),
+                    };
                     self.branches = Some((id.clone(), listed.clone()));
                 }
             }
             (ChangesQuery::Branches { .. }, Err(code)) => {
                 self.say(
                     Notice::problem(format!(
-                        "Couldn't list your branches, so these changes land on the checked-out branch. {}",
+                        "Couldn't list your branches, so these changes land on your project's Land on branch. {}",
                         refusal(code)
                     )),
                     about,
@@ -397,7 +402,8 @@ impl ProjectChanges {
         if self.asking == Some(Ask::Accept) {
             match key.code {
                 KeyCode::Enter if key.modifiers.is_empty() => {
-                    if !self.message.value().trim().is_empty() {
+                    if !self.message.value().trim().is_empty() && self.unpicked_problem().is_none()
+                    {
                         self.asking = None;
                         self.act(Ask::Accept);
                     }
@@ -444,7 +450,7 @@ impl ProjectChanges {
                 self.notice_set = None;
                 self.ask(Ask::Accept);
                 self.branches = None;
-                self.branch = 0;
+                self.branch = None;
                 self.wanted_branches = self.target.as_ref().map(|(id, _)| id.clone());
                 true
             }
@@ -569,8 +575,9 @@ impl ProjectChanges {
         });
     }
 
-    /// Moves the Accept target to the next or previous listed branch, wrapping around.
-    /// Input: true for the next one. Output: none; nothing moves before the list arrives.
+    /// Moves the Accept target to the next or previous listed branch, wrapping around, or
+    /// picks the first or last one while none is picked. Input: true for the next one.
+    /// Output: none; nothing moves before the list arrives.
     fn turn_branch(&mut self, forward: bool) {
         let Some((_, listed)) = &self.branches else {
             return;
@@ -579,27 +586,38 @@ impl ProjectChanges {
         if count == 0 {
             return;
         }
-        self.branch = if forward {
-            (self.branch + 1) % count
-        } else {
-            (self.branch + count - 1) % count
-        };
-        assert!(self.branch < count);
+        self.branch = Some(match self.branch {
+            Some(at) if forward => (at + 1) % count,
+            Some(at) => (at + count - 1) % count,
+            None if forward => 0,
+            None => count - 1,
+        });
+        assert!(self.branch.is_some_and(|at| at < count));
     }
 
-    /// The branch the owner picked for Accept, when it is not the checked-out one, which
-    /// is the engine's default. Output: the branch, or None for the default.
+    /// The sentence naming the missing Land on branch while the owner has picked no branch
+    /// for Accept, which waits for a pick then (DEC-111 Q1). Output: the sentence, or None.
+    fn unpicked_problem(&self) -> Option<&str> {
+        match (&self.branches, self.branch) {
+            (Some((_, listed)), None) => listed.land_on_problem.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// The branch the owner picked for Accept, when it is not the one the engine lands on
+    /// with no branch named, as [`landing_default`] says. Output: the branch, or None for
+    /// the default.
     fn chosen_branch(&self) -> Option<String> {
         let (_, listed) = self.branches.as_ref()?;
-        let name = listed.branches.get(self.branch)?;
-        (listed.current.as_ref() != Some(name)).then(|| name.clone())
+        let name = listed.branches.get(self.branch?)?;
+        (landing_default(listed) != Some(name)).then(|| name.clone())
     }
 
     /// The branch Accept lands on, once the list arrived, and whether it is checked out.
     /// Output: the branch and that answer, or None before the list arrives.
     fn landing_branch(&self) -> Option<(&str, bool)> {
         let (_, listed) = self.branches.as_ref()?;
-        let name = listed.branches.get(self.branch)?;
+        let name = listed.branches.get(self.branch?)?;
         Some((name.as_str(), listed.current.as_ref() == Some(name)))
     }
 
@@ -828,12 +846,16 @@ impl ProjectChanges {
         let (question, size) = self.question(Ask::Accept);
         let mut rows = vec![Row::of(question, look.warning)];
         rows.extend(size.map(|size| Row::of(size, look.fg)));
-        let landing = match self.landing_branch() {
-            None => "They land as one commit on the branch checked out in your project folder, under your own Git name.".to_owned(),
-            Some((name, true)) => format!(
+        let landing = match (self.unpicked_problem(), self.landing_branch()) {
+            (Some(problem), _) => problem.to_owned(),
+            (None, None) => {
+                "They land as one commit on your project's Land on branch, under your own Git name."
+                    .to_owned()
+            }
+            (None, Some((name, true))) => format!(
                 "They land as one commit on {name}, the branch checked out in your project folder, under your own Git name."
             ),
-            Some((name, false)) => format!(
+            (None, Some((name, false))) => format!(
                 "They land as one commit on {name}, under your own Git name. That branch isn't checked out, so the files in your project folder stay as they are."
             ),
         };
@@ -861,6 +883,12 @@ impl ProjectChanges {
         if self.message.value().trim().is_empty() {
             rows.push(Row::of("Write a commit message to accept.", look.warning));
         }
+        if self.unpicked_problem().is_some() {
+            rows.push(Row::of(
+                "Press Tab to pick the branch they land on.",
+                look.warning,
+            ));
+        }
         (rows, Some(cursor))
     }
 
@@ -872,11 +900,10 @@ impl ProjectChanges {
                     ("Ctrl-J", "New line"),
                     ("Esc", "Keep reviewing"),
                 ];
-                if self
-                    .branches
-                    .as_ref()
-                    .is_some_and(|(_, listed)| listed.branches.len() > 1)
-                {
+                if self.branches.as_ref().is_some_and(|(_, listed)| {
+                    listed.branches.len() > 1
+                        || (listed.land_on_problem.is_some() && !listed.branches.is_empty())
+                }) {
                     help.insert(1, ("Tab", "Branch"));
                 }
                 return help;
@@ -1010,6 +1037,16 @@ fn agent_name(set: &ChangeSetView) -> String {
         AgentKind::Master => "Master".to_owned(),
         AgentKind::Sub => set.agent.label.clone(),
     }
+}
+
+/// The branch an Accept with no branch named lands on (DEC-111 Q1): the team's Land on
+/// branch, else the checked-out one. Input: the listed branches. Output: the name, None
+/// when neither is known or the Land on branch is missing.
+fn landing_default(listed: &TargetBranches) -> Option<&String> {
+    if listed.land_on_problem.is_some() {
+        return None;
+    }
+    listed.land_on.as_ref().or(listed.current.as_ref())
 }
 
 /// The change set a Changes request is about. Input: the request. Output: its id, or None

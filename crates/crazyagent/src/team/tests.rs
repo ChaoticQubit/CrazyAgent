@@ -4432,6 +4432,10 @@ fn coordination_settings_are_checked_saved_and_read_back_per_harness_kind() {
         overlaps: Overlaps::Block,
         nudges: crate::coord::settings::Nudges::FirstEdit,
         counted_tools: vec!["start_work".into(), "ctx_*".into()],
+        role_skills: crate::coord::settings::RoleSkills {
+            worker: Some(vec!["release-notes".into()]),
+            ..Default::default()
+        },
     };
     for action in [
         TeamAction::CoordSettings {
