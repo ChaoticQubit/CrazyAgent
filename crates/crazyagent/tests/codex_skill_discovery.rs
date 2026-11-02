@@ -3,6 +3,7 @@
 use crazyagent::adapters::codex::{CodexProtocol, Event};
 use crazyagent::agent_git::Layout;
 use crazyagent::client_controller::OwnerController;
+use crazyagent::coord::delivery::codex;
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
 use crazyagent::harnesses::launch::{
@@ -17,7 +18,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{ChildStdin, Stdio};
+use std::process::{ChildStdin, Command, Stdio};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 use tokio::sync::watch;
@@ -27,14 +28,34 @@ const SKILLS: [&str; 2] = ["meal-tips", "release-notes"];
 const LIST_ID: &str = "skills-list";
 const REPLY_TIME_MAX: Duration = Duration::from_secs(30);
 
-fn codex() -> PathBuf {
-    std::env::var_os("PATH")
+/// Finds the real Codex on PATH and checks it is a release the engine supports.
+/// Input: nothing. Output: the canonical executable; panics UNAVAILABLE when Codex is
+/// absent or its version is not one of `codex::VERSIONS`.
+fn installed_codex() -> PathBuf {
+    let executable = std::env::var_os("PATH")
         .iter()
         .flat_map(std::env::split_paths)
         .map(|directory| directory.join("codex"))
         .find(|candidate| candidate.is_file())
         .map(|candidate| fs::canonicalize(candidate).unwrap())
-        .expect("UNAVAILABLE: no codex executable on PATH")
+        .expect("UNAVAILABLE: no codex executable on PATH");
+    let output = crazyagent::spawn_gate::output(
+        Command::new(&executable)
+            .arg("--version")
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    let version = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        codex::VERSIONS
+            .iter()
+            .any(|(major, minor)| version.starts_with(&format!("codex-cli {major}.{minor}."))),
+        "UNAVAILABLE: {version:?} is not one of the Codex releases in codex::VERSIONS"
+    );
+    executable
 }
 
 fn private_directory(path: &Path) -> PathBuf {
@@ -80,7 +101,7 @@ fn next_line(lines: &mpsc::Receiver<Vec<u8>>, deadline: Instant) -> Vec<u8> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn codex_0_164_discovers_every_skill_the_engine_copies_into_the_agent_home() {
+async fn a_supported_codex_discovers_every_skill_the_engine_copies_into_the_agent_home() {
     let root = tempfile::Builder::new()
         .prefix("ca-codex-skills-")
         .tempdir_in(fs::canonicalize("/tmp").unwrap())
@@ -157,7 +178,7 @@ async fn codex_0_164_discovers_every_skill_the_engine_copies_into_the_agent_home
     let (mut command, _installed) = command_with_context(
         &LaunchRequest {
             harness: "codex".into(),
-            executable: codex(),
+            executable: installed_codex(),
             working_dir: work.clone(),
             account: AccountBinding::Url {
                 home: home.clone(),
