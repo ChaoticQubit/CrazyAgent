@@ -4072,7 +4072,8 @@ impl TeamRuntime {
     }
 
     /// Starts a stopped agent again under its own id in the worktree and home it left: a
-    /// sub-agent through [`TeamRuntime::wake`], or a project's live master. It clears only
+    /// sub-agent through [`TeamRuntime::wake`], or a project's live master. The agent shows no
+    /// process group until its new process is ready, never the one that ended. It clears only
     /// the agent's own owner stop; the owner's Wake or restart clears its lead tree in
     /// [`TeamRuntime::start_again`]. Takes the setup, the agent, its role, harness and
     /// tools switch, the account to run on and the register restart if any. Returns its id,
@@ -4109,7 +4110,7 @@ impl TeamRuntime {
         let changed = self
             .connection
             .execute(
-                "UPDATE team_agents SET status='starting', connection=?3, task=NULL, error=NULL, stopped_ms=NULL, turns=0, heartbeat_ms=?4
+                "UPDATE team_agents SET status='starting', connection=?3, task=NULL, error=NULL, stopped_ms=NULL, turns=0, heartbeat_ms=?4, process_group=NULL
                  WHERE id=?1 AND project=?2 AND role=?5 AND status IN ('stopped','failed')",
                 params![id, stored.project_id.as_str(), account.connection.as_str(), now_ms(), role.name()],
             )
