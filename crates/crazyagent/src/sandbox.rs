@@ -614,6 +614,7 @@ pub struct ProjectSandbox {
     served: Vec<PathBuf>,
     reached: Vec<PathBuf>,
     shut: Vec<PathBuf>,
+    read_only: Vec<PathBuf>,
 }
 
 /// The one git worktree a confined agent writes in place of the whole project folder,
@@ -669,6 +670,7 @@ impl ProjectSandbox {
             served: Vec::new(),
             reached: Vec::new(),
             shut: Vec::new(),
+            read_only: Vec::new(),
         })
     }
 
@@ -1076,8 +1078,10 @@ impl ProjectSandbox {
     /// rv-audit S1 F1, TTDL F1). The lead runs its own tmux server at `own`, uses the engine's
     /// caller socket at `callers` and only reaches its teammates' server at `mates`. The
     /// teammates serve `mates`, only reach `callers` and are shut out of `own`, so no teammate
-    /// holds a listener or places a node where the lead or the engine connects. Inputs: the
-    /// three sockets and the canonical tmux program. Output: the lead's and the teammates'
+    /// holds a listener or places a node where the lead or the engine connects. They read but
+    /// never write the launch folders the engine installs in the lead's home, its hooks,
+    /// skills and relay plugin, which the lead's Claude Code runs (TPH). Inputs: the three
+    /// sockets and the canonical tmux program. Output: the lead's and the teammates'
     /// sandboxes, `Invalid`, or `Unavailable` off macOS.
     pub fn native_team(
         self,
@@ -1086,11 +1090,15 @@ impl ProjectSandbox {
         callers: &Path,
         tmux: &Path,
     ) -> Result<(Self, Self), SandboxError> {
-        let teammates = self
+        let mut teammates = self
             .clone()
             .serve_tmux_server(mates, tmux)?
             .reach_unix_socket(callers)?
             .shut_unix_socket(own)?;
+        teammates.read_only = vec![
+            self.agent_home.join(crate::launch_context::STATE),
+            self.agent_home.join(crate::coord::relay::PLUGIN_FOLDER),
+        ];
         let lead = self
             .allow_tmux_server(own, tmux)?
             .allow_unix_socket(callers)?
@@ -1355,9 +1363,27 @@ impl ProjectSandbox {
                 "(deny file-write*\n  (literal \"{path}\")\n  (literal \"{path}.lock\"))\n"
             ));
         }
+        for folder in &self.read_only {
+            text.push_str(&format!(
+                "(deny file-write* (subpath \"{}\"))\n",
+                folder.display()
+            ));
+        }
         assert_eq!(
             text.matches("unix-socket").count(),
             2 * self.sockets.len() + self.served.len() + self.reached.len()
+        );
+        let last_write_allow = text
+            .rfind("(allow file-write*")
+            .max(text.rfind("(allow file-read* file-write*"));
+        assert!(
+            self.read_only.iter().all(|folder| {
+                text.rfind(&format!(
+                    "(deny file-write* (subpath \"{}\"))",
+                    folder.display()
+                )) > last_write_allow
+            }),
+            "a read-only folder's write deny must follow every write allow, since the last match wins"
         );
         let denied_last = |operations: &str, socket: &PathBuf| {
             text.rfind(&format!(
