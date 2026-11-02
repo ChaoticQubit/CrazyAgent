@@ -112,6 +112,7 @@ pub fn pack_rows(
                 license: entry.license.clone(),
                 on_by_default: entry.on_by_default,
                 state,
+                hooks_refused: None,
             }
         })
         .collect();

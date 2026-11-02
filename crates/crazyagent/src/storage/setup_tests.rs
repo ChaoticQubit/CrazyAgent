@@ -1025,8 +1025,18 @@ fn no_hooks_are_seeded_for_an_entry_not_installed_switched_off_or_without_hooks(
     assert!(hook_views(&mut connection, root, None).is_empty());
 }
 
+fn hooks_refused(status: &SetupStatus, id: &str) -> Option<String> {
+    status
+        .pack
+        .iter()
+        .find(|entry| entry.id == id)
+        .unwrap()
+        .hooks_refused
+        .clone()
+}
+
 #[test]
-fn importing_a_hooks_pack_without_plugin_json_shows_the_plain_reason() {
+fn a_hooks_pack_without_plugin_json_is_refused_and_its_setup_row_says_why_until_seeded() {
     let (dir, mut connection) = database();
     let root = dir.path();
     let work = tempfile::tempdir().unwrap();
@@ -1039,15 +1049,37 @@ fn importing_a_hooks_pack_without_plugin_json_shows_the_plain_reason() {
         None,
     )
     .unwrap();
+    assert_eq!(
+        hooks_refused(&status_of(&mut connection, root), "caveman"),
+        None
+    );
     let plugin = hook_plugin(work.path(), "caveman-hooks");
     std::fs::remove_dir_all(plugin.join(".claude-plugin")).unwrap();
     let refused = seed(&mut connection, root, "caveman", &plugin).map_err(|problem| problem.0);
     assert_eq!(refused, Err("hooks_plugin_manifest_missing".to_owned()));
+    assert!(hook_views(&mut connection, root, None).is_empty());
+    let sentence = "This folder has hooks but no .claude-plugin/plugin.json naming the plugin.";
     assert_eq!(
         crate::plugins::plain_problem("hooks_plugin_manifest_missing"),
-        Some("This pack has hooks but no plugin.json.")
+        Some(sentence)
     );
-    assert!(hook_views(&mut connection, root, None).is_empty());
+    let status = status_of(&mut connection, root);
+    assert_eq!(pack_state(&status, "caveman"), PackState::On);
+    assert_eq!(hooks_refused(&status, "caveman").as_deref(), Some(sentence));
+    assert_eq!(hooks_refused(&status, "superpowers"), None);
+
+    std::fs::create_dir_all(plugin.join(".claude-plugin")).unwrap();
+    std::fs::write(
+        plugin.join(".claude-plugin/plugin.json"),
+        r#"{"name":"caveman-hooks"}"#,
+    )
+    .unwrap();
+    seed(&mut connection, root, "caveman", &plugin).unwrap();
+    assert_eq!(hook_views(&mut connection, root, None).len(), 2);
+    assert_eq!(
+        hooks_refused(&status_of(&mut connection, root), "caveman"),
+        None
+    );
 }
 
 #[test]

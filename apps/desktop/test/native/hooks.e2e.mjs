@@ -92,8 +92,8 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await me.capture("hooks-empty");
 
         await me.click("Add hooks from a plugin");
-        const refused = await me.waitFor("the refusal of a folder without plugin.json", (text) => text.includes("This pack has hooks but no plugin.json.") || text.includes("Added 1 hook.") || text.includes("Something went wrong"), STEP_MS);
-        assert.ok(refused.includes("This pack has hooks but no plugin.json.") && !refused.includes("Added 1 hook."),
+        const refused = await me.waitFor("the refusal of a folder without plugin.json", (text) => text.includes("This folder has hooks but no .claude-plugin/plugin.json naming the plugin.") || text.includes("Added 1 hook.") || text.includes("Something went wrong"), STEP_MS);
+        assert.ok(refused.includes("This folder has hooks but no .claude-plugin/plugin.json naming the plugin.") && !refused.includes("Added 1 hook."),
           `a folder without plugin.json is refused with its plain reason:\n${refused.slice(0, 2000)}`);
         assert.deepEqual(await hooks(), [], "the refused folder added no hooks");
         await me.capture("hooks-refused");

@@ -1270,6 +1270,7 @@ export interface PackEntry {
   license: string;
   on_by_default: boolean;
   state: PackState;
+  hooks_refused?: string | null;
 }
 
 export interface SetupStatus {

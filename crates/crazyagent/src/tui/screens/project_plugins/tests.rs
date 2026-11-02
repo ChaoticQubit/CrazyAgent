@@ -1382,7 +1382,8 @@ async fn hooks_are_added_with_h_switched_with_space_and_switched_per_project_thr
     assert!(sent.contains(&"plugin change"), "{sent:?}");
     let shown = render(&mut shell, 120, 36);
     assert!(
-        shown.contains("This pack has hooks but no plugin.json."),
+        shown
+            .contains("This folder has hooks but no .claude-plugin/plugin.json naming the plugin."),
         "{shown}"
     );
     assert!(

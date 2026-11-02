@@ -254,7 +254,8 @@ pub enum PackState {
 }
 
 /// One default-pack entry as the setup screen and Settings list it: its id, kind and
-/// group, where it comes from, its license, whether it starts ticked and its state.
+/// group, where it comes from, its license, whether it starts ticked, its state and, for
+/// an installed entry whose hooks were refused, the plain reason they were not added.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PackEntry {
@@ -265,6 +266,8 @@ pub struct PackEntry {
     pub license: String,
     pub on_by_default: bool,
     pub state: PackState,
+    #[serde(default)]
+    pub hooks_refused: Option<String>,
 }
 
 /// Everything the setup screen shows: each dependency, each pack entry, and whether a
