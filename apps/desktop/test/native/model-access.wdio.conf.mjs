@@ -16,7 +16,8 @@ assert.equal(baseline.services[0][1].autoInstallTauriDriver, false);
 export const config = {
   ...baseline,
   services: [[NoRespawnTauriService, baseline.services[0][1]]],
-  specs: [fileURLToPath(new URL("model-access.e2e.mjs", import.meta.url))],
+  specs: [fileURLToPath(new URL(process.env.CRAZYAGENT_DESKTOP_TEST_SUITE === "model-access-read-only"
+    ? "model-access-read-only.e2e.mjs" : "model-access.e2e.mjs", import.meta.url))],
   specFileRetries: 0,
   mochaOpts: { timeout: 100000, retries: 0 },
   afterTest: async function (test, context, result) {

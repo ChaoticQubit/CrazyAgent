@@ -285,3 +285,48 @@ fn dropping_the_socket_never_removes_through_a_swapped_folder() {
         "the file behind the link survives"
     );
 }
+
+#[test]
+fn a_pane_respawned_with_another_process_names_nothing_also_after_a_rebind() {
+    let folder = folder();
+    let socket = folder.path().join(CALLER_SOCKET);
+    let mut callers = Callers::bind(&socket, None).unwrap();
+    let own = std::process::id();
+    let parent = std::os::unix::process::parent_id();
+    let digest = [5_u8; DIGEST_BYTES];
+    let mut first = sent(&socket, &line(&id(1), &digest));
+    assert_eq!(callers.serve(&mut || vec![("%7".to_owned(), own)]), 1);
+    assert_eq!(reply(&mut first), NAMED);
+    assert_eq!(callers.take(&id(1), &digest), Some("%7".to_owned()));
+
+    let mut respawned = sent(&socket, &line(&id(2), &digest));
+    assert_eq!(callers.serve(&mut || vec![("%7".to_owned(), parent)]), 0);
+    assert_eq!(
+        reply(&mut respawned),
+        UNNAMED,
+        "the pane's id under another process names nothing"
+    );
+    assert_eq!(callers.take(&id(2), &digest), None);
+
+    let pins = callers.pins();
+    let pin = callers.folder();
+    drop(callers);
+    let mut rebound = Callers::bind(&socket, Some(pin)).unwrap().with_pins(pins);
+    let mut again = sent(&socket, &line(&id(3), &digest));
+    assert_eq!(rebound.serve(&mut || vec![("%7".to_owned(), parent)]), 0);
+    assert_eq!(
+        reply(&mut again),
+        UNNAMED,
+        "a socket bound again keeps the pins"
+    );
+    drop(rebound);
+
+    let mut fresh = Callers::bind(&socket, Some(pin)).unwrap();
+    let mut unpinned = sent(&socket, &line(&id(4), &digest));
+    assert_eq!(fresh.serve(&mut || vec![("%7".to_owned(), parent)]), 1);
+    assert_eq!(
+        reply(&mut unpinned),
+        NAMED,
+        "only the pin refused the respawned pane"
+    );
+}
