@@ -1782,6 +1782,15 @@ fn keeping_agents_warm_stops_when_a_warm_agent_dies_before_any_work() {
     warm_agents_ended(b"#!/bin/sh\nexit 1\n");
 }
 
+/// The second warm sub-agent dies 2 s after the first has turned keeping warm off: it still
+/// ends Failed, and nothing starts again in its place.
+#[test]
+fn a_warm_agent_that_dies_after_keeping_warm_went_off_still_ends_failed() {
+    warm_agents_ended(
+        b"#!/bin/sh\ncase \"$CODEX_HOME\" in */agent-1/*) exit 1 ;; esac\n/bin/sleep 2\nexit 1\n",
+    );
+}
+
 #[test]
 fn a_sub_agent_whose_harness_breaks_its_protocol_names_the_launch_code() {
     let cold = warm_agents_ended(b"#!/bin/sh\nread line\necho not-json\nexec /bin/sleep 30\n");
@@ -1801,7 +1810,7 @@ fn a_sub_agent_whose_harness_breaks_its_protocol_names_the_launch_code() {
 }
 
 /// Runs a project that keeps its two codex sub-agents warm on a stand-in harness until a
-/// warm agent that ended before any work turns keeping warm off.
+/// warm agent that ended before any work turns keeping warm off and both agents have ended.
 /// Input: the stand-in harness script. Output: the team status once both agents ended.
 fn warm_agents_ended(script: &[u8]) -> TeamStatus {
     let directory = tempfile::tempdir().unwrap();
@@ -1875,14 +1884,16 @@ fn warm_agents_ended(script: &[u8]) -> TeamStatus {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
         team.tick().unwrap();
-        if !status(&connection, &setup).unwrap().keep_warm {
+        let now = status(&connection, &setup).unwrap();
+        if !now.keep_warm
+            && now
+                .agents
+                .iter()
+                .all(|a| matches!(a.status, AgentStatus::Stopped | AgentStatus::Failed))
+        {
             break;
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "{:#?}",
-            status(&connection, &setup).unwrap()
-        );
+        assert!(std::time::Instant::now() < deadline, "{now:#?}");
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     for _ in 0..10 {
@@ -1896,7 +1907,19 @@ fn warm_agents_ended(script: &[u8]) -> TeamStatus {
         2,
         "the plan's two warm sub-agents start once and are not started again: {cold:#?}"
     );
-    assert!(cold.agents.iter().all(|a| a.status == AgentStatus::Failed));
+    assert!(
+        cold.agents.iter().all(|a| a.status == AgentStatus::Failed),
+        "every warm sub-agent ends Failed: {:?}",
+        cold.agents
+            .iter()
+            .map(|a| (
+                a.id,
+                a.label.as_str(),
+                a.status.name(),
+                a.problem.as_deref()
+            ))
+            .collect::<Vec<_>>()
+    );
     assert_eq!(
         cold.agents
             .iter()
@@ -4409,6 +4432,10 @@ fn coordination_settings_are_checked_saved_and_read_back_per_harness_kind() {
         overlaps: Overlaps::Block,
         nudges: crate::coord::settings::Nudges::FirstEdit,
         counted_tools: vec!["start_work".into(), "ctx_*".into()],
+        role_skills: crate::coord::settings::RoleSkills {
+            worker: Some(vec!["release-notes".into()]),
+            ..Default::default()
+        },
     };
     for action in [
         TeamAction::CoordSettings {

@@ -141,7 +141,7 @@ fn the_master_hears_skill_and_server_names_but_no_server_detail() {
         ],
     };
 
-    let text = team_index(&plugins);
+    let text = team_index(&plugins, &RoleSkills::default());
 
     assert!(text.contains("Your own tools are off"));
     assert!(text.contains("- Skill meal-tips: Gives meal planning tips.\n"));
@@ -157,7 +157,10 @@ fn the_master_hears_skill_and_server_names_but_no_server_detail() {
     ] {
         assert!(!text.contains(hidden), "{hidden}");
     }
-    assert_eq!(team_index(&EffectivePlugins::default()), "");
+    assert_eq!(
+        team_index(&EffectivePlugins::default(), &RoleSkills::default()),
+        ""
+    );
 }
 
 #[test]
@@ -180,7 +183,7 @@ fn the_team_index_stays_within_its_bound_with_many_plugins() {
             .collect(),
     };
 
-    let text = team_index(&plugins);
+    let text = team_index(&plugins, &RoleSkills::default());
 
     assert!(
         text.len() <= TEAM_INDEX_BYTES_MAX + SECTION_SLACK,
@@ -355,7 +358,7 @@ fn a_team_master_with_tools_off_hears_the_team_plugin_names() {
         native_team: None,
         relay: None,
     }
-    .with_index(&plugins);
+    .with_index(&plugins, &RoleSkills::default());
     let home = root.join("codex");
     fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
 

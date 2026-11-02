@@ -397,9 +397,20 @@ async fn the_tui_reads_and_stores_every_agent_setting_through_the_engine() {
         Ok(ProcessReply::Settings(InstructionSettings::default())),
         "a project the owner never changed gets both texts and keeps transcripts"
     );
-    for mode in [Mode::ProjectOnly, Mode::AppOnly, Mode::Both] {
-        for transcripts in [false, true] {
-            let settings = InstructionSettings { mode, transcripts };
+    let every = [Mode::ProjectOnly, Mode::AppOnly, Mode::Both]
+        .into_iter()
+        .flat_map(|mode| [false, true].map(|transcripts| (mode, transcripts)));
+    for (mode, transcripts) in every {
+        for edits in [
+            crate::instruction_files::EditDelivery::NextMessage,
+            crate::instruction_files::EditDelivery::Restart,
+            crate::instruction_files::EditDelivery::Badge,
+        ] {
+            let settings = InstructionSettings {
+                mode,
+                transcripts,
+                edits,
+            };
             assert_eq!(
                 native
                     .process(ProcessQuery::SaveSettings {
