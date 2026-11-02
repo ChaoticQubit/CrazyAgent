@@ -746,7 +746,9 @@ impl ManagedAgent {
 /// A native lead running as a real worker of its team runtime, started by
 /// [`ManagedAgent::into_native_worker`]: the runtime, the lead's home, its pane on its own
 /// server and the test folders. Dropping it stops the lead before the folders go, so no
-/// signed-in app outlives its test. Its methods drive the worker as the runtime's tick does.
+/// signed-in app outlives its test. Its methods call the runtime's own admission, dispatch
+/// and access-level steps; the lead's reports are read here and never reach the runtime's
+/// report handling, so task rows and the worker's busy state stay as dispatch left them.
 pub(super) struct NativeTeam {
     pub(super) runtime: TeamRuntime,
     pub(super) home: PathBuf,

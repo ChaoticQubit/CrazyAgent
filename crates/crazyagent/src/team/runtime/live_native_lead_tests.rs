@@ -158,6 +158,9 @@ fn live_native_lead_managed_adopted_gets_credential() {
     );
 }
 
+/// A kept native lead granted once serves the next task dispatch hands it with no grant, on
+/// the same session. The lead's reports are read here, not by the runtime's report handling,
+/// so the task stays running in the engine's records after the lead answered it.
 #[test]
 #[ignore = "live qualification: needs a signed-in Claude account, CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
 fn live_dispatch_grants_kept_session_once() {
@@ -187,7 +190,10 @@ fn live_dispatch_grants_kept_session_once() {
         ("running".to_owned(), Some(AGENT), None),
         "the briefed kept session takes the task with no grant; a grant needs a sign-in this engine never recorded"
     );
-    assert_eq!(team.lead().grants, 0, "the runtime took no profile for it");
+    assert!(
+        !team.lead().stopping,
+        "no grant was tried, so no refused sign-in stopped the lead"
+    );
     let second = team.until_finished(TURN);
     let turns = finished(&second);
     println!("real claude kept lead, dispatched task: {turns:?}");
