@@ -4583,7 +4583,7 @@ fn with_next_message_an_edit_past_the_input_limit_reaches_the_live_master_once_c
 #[test]
 fn with_next_message_full_inputs_note_the_waiting_edit_once_per_edited_text() {
     const NEWER_TEXT: &str = "## Style\n\nUse spaces.\n\n## Tests\n\nRun them last.\n";
-    let fixture = Fixture::new(1);
+    let mut fixture = Fixture::new(1);
     let host = fixture.host();
     edit_settings(
         &fixture,
