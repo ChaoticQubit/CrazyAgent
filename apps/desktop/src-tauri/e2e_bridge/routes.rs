@@ -690,6 +690,21 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state) .await? .team_master_branch(&id, branch, generation) .await }.await;
             routed(result)
         }
+        "desktop_team_land_on" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                branch: Option<String>,
+                generation: u64,
+            }
+            let Args { id, branch, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .team_land_on(&id, branch, generation) .await }.await;
+            routed(result)
+        }
         "desktop_team_ask_before_merge" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]

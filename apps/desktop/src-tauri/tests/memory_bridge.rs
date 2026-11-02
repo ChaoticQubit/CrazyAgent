@@ -611,14 +611,7 @@ async fn approve_flow(root: &Path) -> Result<(), Box<dyn Error>> {
     let served = mailbox.clone();
     let server = std::thread::spawn(move || {
         let mut output = Vec::new();
-        serve_live(
-            std::io::Cursor::new(request),
-            &mut output,
-            &served,
-            &[],
-            None,
-        )
-        .map(|()| output)
+        serve_live(std::io::Cursor::new(request), &mut output, &served, &[]).map(|()| output)
     });
     let agents = root.join("agents");
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -633,14 +626,13 @@ async fn approve_flow(root: &Path) -> Result<(), Box<dyn Error>> {
             (agent, &label),
             &agents,
             &mailbox,
-            &mut |connection, pane| {
+            &mut |connection, _, _| {
                 crazyagent::team::runtime::team_caller(
                     connection,
                     None,
-                    Some(root),
                     &project,
-                    (agent, &label),
-                    pane,
+                    (agent, label.as_str()),
+                    None,
                 )
             },
             &mut |_, _, _| None,

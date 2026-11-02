@@ -1190,6 +1190,12 @@ impl ProjectSandbox {
         text.push_str(&format!(
             "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\")\n  (literal \"{project}/.git/index\")\n  (literal \"{project}/.git\")\n  (literal \"{project}/.git/commondir\")\n  (literal \"{project}/.git/config.worktree\")\n  (subpath \"{project}/.git/info\")\n  (literal \"{project}/.git/shallow\")\n  (literal \"{project}/.git/objects\")\n  (literal \"{project}/.git/objects/info\")\n  (literal \"{project}/.git/objects/info/alternates\")\n  (literal \"{project}/.git/objects/info/http-alternates\")\n  (subpath \"{project}/.git/modules\")\n  (literal \"{project}/.crazyagent\"))\n"
         ));
+        if let Some(scratch) = &self.scratch {
+            text.push_str(&format!(
+                "(deny file-write-unlink file-write-create file-write-mode file-write-acl\n  (literal \"{}\"))\n",
+                scratch.display()
+            ));
+        }
         text.push_str(&self.git_link_denies());
         text.push_str(&self.submodule_denies());
         text.push_str(&self.nested_git_denies());

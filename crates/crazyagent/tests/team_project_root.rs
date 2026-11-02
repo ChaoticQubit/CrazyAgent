@@ -5,7 +5,7 @@ use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
 use crazyagent::onboarding::project_id_for;
 use crazyagent::protocol::CredentialRef;
-use crazyagent::sandbox::policy::{AgentAccess, AgentPolicy};
+use crazyagent::sandbox::policy::{AgentAccess, AgentNetwork, AgentPolicy};
 use crazyagent::team::TeamAction;
 use crazyagent::team::runtime::{TeamLimits, TeamRuntime};
 use rusqlite::OptionalExtension;
@@ -150,7 +150,7 @@ async fn wire(chosen: Option<AgentAccess>) -> Wired {
         let policy = AgentPolicy {
             access,
             toolchains: Vec::new(),
-            ..AgentPolicy::default()
+            network: AgentNetwork::Open,
         };
         let set = owner
             .set_project_agent_policy(project.clone(), policy, generation)
