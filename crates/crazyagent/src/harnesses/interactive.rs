@@ -1,8 +1,8 @@
 use super::launch::{
     AccountBinding, CLAUDE_DENY_FLAG, CLAUDE_MCP_CONNECT_LIMIT, CLAUDE_NATIVE_TEAM_TOOLS,
-    CLAUDE_NO_MCP, LOCAL_PLACEHOLDER_KEY, LaunchError, LaunchRequest, SANDBOX_EXEC, Secret,
-    TOOLS_OFF_PATH, TOOLS_ON_PATH, claude_bare, claude_denied, codex_configuration, failure,
-    harness_id, key_file_text, validate,
+    CLAUDE_NO_MCP, CODEX_NO_USER_INPUT, LOCAL_PLACEHOLDER_KEY, LaunchError, LaunchRequest,
+    SANDBOX_EXEC, Secret, TOOLS_OFF_PATH, TOOLS_ON_PATH, claude_bare, claude_denied,
+    codex_configuration, failure, harness_id, key_file_text, validate,
 };
 use crate::launch_context::{Installed, NativeTeam};
 use crate::sandbox::toolchains::{self, ToolHomes};
@@ -406,6 +406,7 @@ fn codex(
     let mut arguments = Vec::new();
     for setting in codex_configuration(request, context, key_file)
         .into_iter()
+        .chain((!request.tools).then(|| CODEX_NO_USER_INPUT.to_owned()))
         .chain([
             "check_for_update_on_startup=false".to_owned(),
             format!("projects={{{folder}={{trust_level=\"trusted\"}}}}"),
