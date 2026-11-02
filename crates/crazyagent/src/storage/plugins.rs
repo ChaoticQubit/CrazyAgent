@@ -174,7 +174,11 @@ pub(crate) enum ResultValue {
     Skills(Vec<SkillView>, Option<u16>),
     Servers(Vec<ServerView>, Option<u16>),
     Secret(Box<ServerView>, Option<String>),
-    Check(Box<ServerSpec>, Vec<EffectiveSecret>),
+    Check(
+        Box<ServerSpec>,
+        Vec<EffectiveSecret>,
+        crate::sandbox::SandboxNetwork,
+    ),
     Effective(Box<EffectivePlugins>),
     Launch(Box<LaunchPlugins>),
     HooksAdded(Vec<HookView>, PathBuf),
@@ -791,6 +795,51 @@ fn switched_off(tx: &Transaction<'_>, project: &ProjectId) -> Result<Vec<String>
         .collect::<Result<Vec<_>, _>>()
         .map_err(error)?;
     Ok(items)
+}
+
+/// The network a global server's plugin check runs under: the strictest choice among the
+/// projects that enable the server, so the check reaches no further than any of their agents
+/// may; Open when no project enables it. A project enables a global server unless it is in
+/// that project's switched-off list. Takes the transaction and the server id. Returns the
+/// sandbox network, or `project_network_unreadable` when a project's policy cannot be read.
+fn global_check_network(
+    tx: &Transaction<'_>,
+    id: &str,
+) -> Result<crate::sandbox::SandboxNetwork, EngineError> {
+    use crate::sandbox::policy::AgentNetwork;
+    let mut ids: Vec<String> = Vec::new();
+    {
+        let mut statement = tx.prepare("SELECT id FROM projects").map_err(error)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(error)?;
+        for row in rows {
+            ids.push(row.map_err(error)?);
+        }
+    }
+    let rank = |network: AgentNetwork| {
+        AgentNetwork::ALL
+            .iter()
+            .position(|choice| *choice == network)
+            .unwrap_or(0)
+    };
+    let mut strictest: Option<AgentNetwork> = None;
+    for project in ids {
+        let project = ProjectId::new(&project).map_err(|_| error("project_network_unreadable"))?;
+        if switched_off(tx, &project)?.iter().any(|item| item == id) {
+            continue;
+        }
+        let network = crate::sandbox::policy::load(tx, project.as_str())
+            .map_err(|_| error("project_network_unreadable"))?
+            .network;
+        let replace = strictest.is_none_or(|current| rank(network) > rank(current));
+        if replace {
+            strictest = Some(network);
+        }
+    }
+    Ok(strictest
+        .map(|network| network.sandbox(None))
+        .unwrap_or(crate::sandbox::SandboxNetwork::Open))
 }
 
 fn visible(scope: &Scope, project: Option<&ProjectId>) -> bool {
@@ -1615,7 +1664,16 @@ pub(super) fn run(
         }
         Command::GetServer { id } => {
             let record: ServerRecord = load(tx, "server", &id)?;
-            ResultValue::Check(Box::new(record.spec), record.secrets)
+            let network = match &record.scope {
+                Scope::Project { project_id } => {
+                    crate::sandbox::policy::load(tx, project_id.as_str())
+                        .map_err(|_| error("project_network_unreadable"))?
+                        .network
+                        .sandbox(None)
+                }
+                Scope::Global => global_check_network(tx, &id)?,
+            };
+            ResultValue::Check(Box::new(record.spec), record.secrets, network)
         }
         Command::RecordCheck {
             id,
