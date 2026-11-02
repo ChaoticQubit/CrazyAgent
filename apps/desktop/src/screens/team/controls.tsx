@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { delegateTeamTask, keepTeamWarm, setAgentBranches, setAskBeforeMerge, setChildLanding, setLandOn, setMasterBranch, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
+import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, setAskBeforeMerge, setChildLanding, setLandOn, setMasterBranch, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
 import type { Result } from "../../api";
 import { failureCopy, receiptState } from "../../api-projects";
-import type { BranchMode, ChildLanding, IntentReceipt, SwitchMode, TeamStatus } from "../../engine-client";
+import type { BackgroundAtEnd, BranchMode, ChildLanding, IntentReceipt, SwitchMode, TeamStatus } from "../../engine-client";
 import { Button, ConfirmDialog, Segmented, Select, Switch, keyLabel, shortcutKey } from "../../ui";
 import type { SelectOption } from "../../ui";
 import { displayText } from "../conversation";
@@ -92,6 +92,33 @@ export const NEW_FOLDER_OPTIONS: SelectOption[] = [100, 1000, 10000, 100000].map
 }));
 export const NEW_FOLDER_DEFAULT = 1000;
 
+/** The choices of Background commands at task end, Wait first as the default. */
+export const BACKGROUND_OPTIONS: SelectOption[] = [
+  { value: "wait", label: "Wait for them" },
+  { value: "grace", label: "Stop them after a grace time" },
+  { value: "stop", label: "Stop them when the turn ends" },
+];
+
+/** The grace time offered when the owner first picks one, and its bounds, in seconds. */
+export const GRACE_SECS_DEFAULT = 120;
+export const GRACE_SECS_MIN = 10;
+export const GRACE_SECS_MAX = 3600;
+
+/** The Background commands choice a team status holds, Wait when an older engine sends none.
+ * Input: the status. Output: the choice. */
+export function backgroundChoice(status: Pick<TeamStatus, "background_at_end">): BackgroundAtEnd {
+  return status.background_at_end ?? { mode: "wait" };
+}
+
+/** Reads a grace time the owner typed: whole seconds from 10 to 3600. Input: the text.
+ * Output: the seconds, or null for anything else. */
+export function graceSecs(text: string): number | null {
+  const typed = text.trim();
+  if (!/^[0-9]{1,4}$/.test(typed)) return null;
+  const secs = Number(typed);
+  return secs >= GRACE_SECS_MIN && secs <= GRACE_SECS_MAX ? secs : null;
+}
+
 /** The choices of where a lead's worker lands, When the lead accepts first as the default. */
 export const LANDING_OPTIONS: SelectOption[] = [
   { value: "lead", label: "When the lead accepts" },
@@ -168,6 +195,8 @@ export function TeamControls({ projectId, status, harness, reload }: {
   const [landOn, setLandOnText] = useState<string | null>(null);
   const [askMerge, setAskMerge] = useState<"off" | "on" | null>(null);
   const [newFolder, setNewFolder] = useState<number | null>(null);
+  const [background, setBackground] = useState<BackgroundAtEnd | null>(null);
+  const [graceText, setGraceText] = useState<string | null>(null);
   const [target, setTarget] = useState(ANY_HARNESS);
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -177,6 +206,8 @@ export function TeamControls({ projectId, status, harness, reload }: {
   const checked = warm ?? status.keep_warm;
   const shown = limits ?? { turn: status.turn_limit_secs ?? null, session: status.session_limit_secs ?? null, idle: status.idle_stop_secs ?? null };
   const check = taskInput(text);
+  const backgroundShown = background ?? backgroundChoice(status);
+  const graceTyped = backgroundShown.mode === "grace" ? graceText ?? String(backgroundShown.secs) : null;
   const subs = options.length > 1;
 
   async function toggle(on: boolean) {
@@ -333,6 +364,23 @@ export function TeamControls({ projectId, status, harness, reload }: {
     reload();
   }
 
+  async function saveBackground(choice: BackgroundAtEnd) {
+    if (busy) return;
+    setBackground(choice);
+    setBusy(true);
+    const message = changeNote(await setBackgroundAtEnd(projectId, choice), "the Background commands setting");
+    setBusy(false);
+    setBackground(null);
+    setGraceText(null);
+    setNote(message);
+    reload();
+  }
+
+  function chooseBackground(mode: string) {
+    if (mode === "wait" || mode === "stop") void saveBackground({ mode });
+    if (mode === "grace") void saveBackground({ mode, secs: backgroundShown.mode === "grace" ? backgroundShown.secs : GRACE_SECS_DEFAULT });
+  }
+
   async function hand() {
     if (check.kind !== "ok" || busy) return;
     setBusy(true);
@@ -384,6 +432,15 @@ export function TeamControls({ projectId, status, harness, reload }: {
     <Select id={`tg-new-folder-${projectId}`} label="Refuse a change set when one new folder adds more than" value={String(newFolder ?? status.new_folder_files_max ?? NEW_FOLDER_DEFAULT)} options={NEW_FOLDER_OPTIONS}
       onValue={(value) => { const chosen = Number(value); if (!busy && NEW_FOLDER_OPTIONS.some((option) => option.value === value)) void chooseNewFolder(chosen); }}
       helper="Counts the files a change set adds in one new top-level folder your branch does not have, such as a scratch folder an agent committed. The agent is told the folder to remove and finishes again." />
+    <Select id={`tg-background-${projectId}`} label="Background commands at task end" value={backgroundShown.mode} options={BACKGROUND_OPTIONS}
+      onValue={(value) => { if (!busy) chooseBackground(value); }}
+      helper="Wait keeps a task open until the commands its agent started in the background end, up to the task limit. A grace time gives them that long after the turn ends, then stops them. Stop ends the task with its turn and stops them; the agent is told first." />
+    {graceTyped !== null && <form className="pj-row" aria-label="Grace time" onSubmit={(event) => { event.preventDefault(); const secs = graceSecs(graceTyped); if (secs !== null) void saveBackground({ mode: "grace", secs }); }}>
+      <label htmlFor={`tg-grace-${projectId}`}>Grace time in seconds</label><input id={`tg-grace-${projectId}`} className="pj-input" inputMode="numeric" value={graceTyped}
+        onChange={(event) => setGraceText(event.target.value)} aria-describedby={`tg-grace-help-${projectId}`} />
+      <Button type="submit" size="small" disabled={busy || graceText === null || graceSecs(graceTyped) === null} pending={busy && background !== null} pendingLabel="Saving...">Save</Button>
+      <span className="tg-terminal-note" id={`tg-grace-help-${projectId}`}>From 10 to 3600 seconds.</span>
+    </form>}
     <Select id={`tg-max-harnesses-${projectId}`} label="Max harnesses per project" value={status.max_harnesses == null ? NO_LIMIT : String(status.max_harnesses)} options={capOptions()}
       onValue={(value) => void cap("harnesses", value)}
       helper="How many harnesses the master's work runs at once. More tasks wait until one finishes." />

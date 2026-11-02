@@ -798,6 +798,11 @@ export interface TeamMessage {
  * over to the new harness, or start the new harness fresh. */
 export type SwitchMode = "carry" | "fresh";
 
+/** What a task does at its turn end while commands its agent started in the background
+ * still run: wait for them, give them a grace time in seconds and stop them, or stop them
+ * with the turn and tell the agent first. */
+export type BackgroundAtEnd = { mode: "wait" } | { mode: "grace"; secs: number } | { mode: "stop" };
+
 /** Where a lead's worker lands its change set: on the lead's branch when the lead accepts it,
  * or only when the owner accepts it. */
 export type ChildLanding = "lead" | "owner";
@@ -858,6 +863,7 @@ export interface TeamStatus {
   agent_branches?: BranchMode;
   master_branch?: string | null;
   land_on?: string | null;
+  background_at_end?: BackgroundAtEnd;
   ask_before_merge?: boolean;
   new_folder_files_max?: number;
   coordination?: CoordinationView | null;

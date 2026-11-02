@@ -1,6 +1,6 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
-import type { ActionReceipt, BranchMode, ChildLanding, CoordHarness, CoordSettings, Delivery, PendingIntent, SubagentMode, SwitchMode, ToolSwitch, ToolView } from "./engine-client";
+import type { ActionReceipt, BackgroundAtEnd, BranchMode, ChildLanding, CoordHarness, CoordSettings, Delivery, PendingIntent, SubagentMode, SwitchMode, ToolSwitch, ToolView } from "./engine-client";
 import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill, QuestionsInbox } from "./engine-client";
 
 export type { AgentMemoryWrites, SavedMemory, SavedMemoryPage } from "./engine-client";
@@ -1195,6 +1195,13 @@ export function setMasterBranch(id: string, branch: string | null): Promise<Resu
  * for the master's branch. Output: the engine receipt, not ready, or a plain error. */
 export function setLandOn(id: string, branch: string | null): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_land_on", { id, branch, generation: nextGeneration() });
+}
+
+/** Sets what the project's tasks do at their turn end while commands their agents started in
+ * the background still run. Inputs: the project id and the choice. Output: the engine
+ * receipt, not ready, or a plain error; the engine refuses a grace time outside 10 to 3600 s. */
+export function setBackgroundAtEnd(id: string, choice: BackgroundAtEnd): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_background", { id, choice, generation: nextGeneration() });
 }
 
 /** Turns the project's "Ask me before merging into the master's branch" setting on or off;
