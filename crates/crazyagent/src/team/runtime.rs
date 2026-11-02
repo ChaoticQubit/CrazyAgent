@@ -7094,6 +7094,13 @@ const PROCESS_CLOSED: &str = "The agent process closed";
 const BACKGROUND_INTERRUPTED: &str = "The owner's interrupt ended this task while a command it started in the background still ran; that command was stopped with it.";
 /// What a task cut by a time limit says when commands its agent started still ran.
 const BACKGROUND_CUT: &str = "The time limit ended this task while a command it started in the background still ran; that command was stopped with it.";
+/// What a task the owner's background grace time ended says (DEC-111 Q13).
+const BACKGROUND_GRACE_ENDED: &str = "The background grace time in Team settings ended this task while a command it started in the background still ran; that command was stopped.";
+/// What a task that ended with its turn under the owner's Stop setting says (DEC-111 Q13).
+const BACKGROUND_STOPPED: &str = "This task ended with its turn, as Team settings say, while a command it started in the background still ran; that command was stopped.";
+/// The task prompt line for agents whose background commands stop at task end, only then.
+const BACKGROUND_STOPS_LINE: &str =
+    "Commands you start in the background stop when your turn ends.";
 /// The task line a kept native lead's own turn is recorded under: a turn its app started
 /// by itself, such as after messages from its teammates, with no task given to it.
 const OWN_TURN_TASK: &str =
