@@ -4488,10 +4488,13 @@ fn background_task(
 /// it ends only after the command's notification turn, with that turn's reply in its
 /// result, and the command finishes instead of being ended with the task. On 2026-10-29 a
 /// lead's task ended at "Waiting for the compile check to finish" and its check was killed.
+/// This is DEC-111 Q13 option A, saved through the team action, whose agent is not told
+/// that its commands stop at turn end.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_task_stays_open_until_the_background_command_it_started_ends() {
     let fixture = Fixture::new(1);
+    choose_background(&fixture, crate::team::BackgroundAtEnd::Wait);
     let (status, result, _, finished) = background_task(&fixture, BACKGROUND_CLAUDE, None);
     assert!(
         finished.exists(),
@@ -4503,6 +4506,215 @@ fn a_task_stays_open_until_the_background_command_it_started_ends() {
         result.contains("Waiting for the check.") && result.contains("Check passed."),
         "{result}"
     );
+    let typed = std::fs::read_to_string(finished.with_file_name("typed")).unwrap();
+    assert!(typed.contains("Run the compile check."), "{typed}");
+    assert!(!typed.contains(BACKGROUND_STOPS_LINE), "{typed}");
+}
+
+/// Saves the project's Background commands at task end choice through the team action, as
+/// the owner's Team settings save it, and reads it back. Takes the fixture and the choice.
+#[cfg(target_os = "macos")]
+fn choose_background(fixture: &Fixture, choice: crate::team::BackgroundAtEnd) {
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::execute(
+            &tx,
+            &fixture.access,
+            &crate::team::TeamAction::BackgroundAtEnd {
+                project_id: fixture.setup.project_id.clone(),
+                choice,
+            },
+        )
+        .unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    tx.commit().unwrap();
+    assert_eq!(
+        crate::team::background_at_end(&fixture.connection, &fixture.setup.project_id).unwrap(),
+        choice
+    );
+}
+
+/// The background stand-in with a command that runs `secs` seconds, writes its pid to
+/// `background-pid` as it starts, and marks the end of its first turn in `held`. Takes the
+/// seconds. Returns the script.
+#[cfg(target_os = "macos")]
+fn long_background(secs: u32) -> String {
+    let script = BACKGROUND_CLAUDE
+        .replace("/bin/sleep 2\n", &format!("/bin/sleep {secs}\n"))
+        .replace(
+            "  ) &\n",
+            "  ) &\n  printf %s \"$!\" > \"$CLAUDE_CONFIG_DIR/background-pid\"\n",
+        )
+        .replace(
+            ">> \"$f\"\ndone\n",
+            ">> \"$f\"\n  printf held > \"$CLAUDE_CONFIG_DIR/held\"\ndone\n",
+        );
+    assert_eq!(script.matches(&format!("sleep {secs}\n")).count(), 1);
+    assert_eq!(
+        script.matches("CLAUDE_CONFIG_DIR/background-pid").count(),
+        1
+    );
+    assert_eq!(script.matches("CLAUDE_CONFIG_DIR/held").count(), 1);
+    script
+}
+
+/// Whether the stand-in's background command still runs, by the pid it wrote, waiting up
+/// to 3 s for a stopped one to go. Takes the fixture and the agent. Returns the answer.
+#[cfg(target_os = "macos")]
+fn background_alive(fixture: &Fixture, agent: i64) -> bool {
+    let pid: u32 = std::fs::read_to_string(stand_in_file(fixture, agent, "background-pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let alive = || {
+        crate::spawn_gate::status(
+            Command::new("/bin/kill")
+                .arg("-0")
+                .arg(pid.to_string())
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .unwrap()
+        .success()
+    };
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while alive() {
+        if Instant::now() >= deadline {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
+/// How one task ended whose agent's background command outlived its turn: the task's
+/// status, result and error, the time from the turn's end to the task's, whether the
+/// command still ran 3 s after, whether it finished, and the prompt the agent was typed.
+#[cfg(target_os = "macos")]
+struct Outlived {
+    status: String,
+    result: String,
+    error: Option<String>,
+    waited: Duration,
+    alive: bool,
+    finished: bool,
+    typed: String,
+}
+
+/// Runs one task whose agent's background command outlives its turn under the saved
+/// choice, timing it from the end of the agent's turn. Takes the fixture and the choice.
+/// Returns how the task ended.
+#[cfg(target_os = "macos")]
+fn outliving_background(fixture: &Fixture, choice: crate::team::BackgroundAtEnd) -> Outlived {
+    choose_background(fixture, choice);
+    let host = fixture.host();
+    let mut team = check_runtime(fixture, &host, &long_background(25), None, None);
+    fixture.until(&mut team, "the agent's turn ends", |f| {
+        subs(f)
+            .first()
+            .is_some_and(|agent| stand_in_file(f, *agent, "held").exists())
+    });
+    let turn_ended = Instant::now();
+    let agent = subs(fixture)[0];
+    fixture.until(&mut team, "the task ends", |f| check_end(f).is_some());
+    let waited = turn_ended.elapsed();
+    let (status, result, error) = check_end(fixture).unwrap();
+    let alive = background_alive(fixture, agent);
+    let finished = stand_in_file(fixture, agent, "background-done").exists();
+    let typed = std::fs::read_to_string(stand_in_file(fixture, agent, "typed")).unwrap();
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    Outlived {
+        status,
+        result: result.unwrap_or_default(),
+        error,
+        waited,
+        alive,
+        finished,
+        typed,
+    }
+}
+
+/// With a grace time saved (DEC-111 Q13 option B), a task whose turn ended while its
+/// background command still runs ends once that time is over, says so first in its result,
+/// and the command is stopped; the agent is not told that its commands stop at turn end.
+#[cfg(target_os = "macos")]
+#[test]
+fn with_grace_a_task_ends_after_the_grace_time_and_its_background_command_is_stopped() {
+    let fixture = Fixture::new(1);
+    let Outlived {
+        status,
+        result,
+        error,
+        waited,
+        alive,
+        finished,
+        typed,
+    } = outliving_background(&fixture, crate::team::BackgroundAtEnd::Grace { secs: 10 });
+    assert!(
+        waited >= Duration::from_secs(9) && waited < Duration::from_secs(20),
+        "{waited:?}: {result}"
+    );
+    assert_eq!((status.as_str(), error), ("done", None), "{result}");
+    assert!(
+        result.starts_with(BACKGROUND_GRACE_ENDED) && result.contains("Waiting for the check."),
+        "{result}"
+    );
+    assert!(!alive, "the grace time left the background command running");
+    assert!(!finished);
+    assert!(typed.contains("Run the compile check."), "{typed}");
+    assert!(!typed.contains(BACKGROUND_STOPS_LINE), "{typed}");
+}
+
+/// With a grace time saved, a background command that ends within it ends its task as
+/// waiting does, with the reply of its notification turn and no grace line (DEC-111 Q13 B).
+#[cfg(target_os = "macos")]
+#[test]
+fn with_grace_a_background_command_that_ends_in_time_ends_its_task_with_its_result() {
+    let fixture = Fixture::new(1);
+    choose_background(&fixture, crate::team::BackgroundAtEnd::Grace { secs: 10 });
+    let (status, result, _, finished) = background_task(&fixture, BACKGROUND_CLAUDE, None);
+    assert!(finished.exists(), "{status} {result:?}");
+    assert_eq!(status, "done");
+    let result = result.unwrap_or_default();
+    assert!(
+        result.contains("Waiting for the check.")
+            && result.contains("Check passed.")
+            && !result.contains(BACKGROUND_GRACE_ENDED),
+        "{result}"
+    );
+}
+
+/// With background commands set to stop at task end (DEC-111 Q13 option C), the agent's
+/// task prompt says so, and its task ends with its turn while its background command still
+/// runs, says so first in its result, and the command is stopped.
+#[cfg(target_os = "macos")]
+#[test]
+fn with_no_wait_a_task_ends_with_its_turn_and_its_agent_was_told() {
+    let fixture = Fixture::new(1);
+    let Outlived {
+        status,
+        result,
+        error,
+        waited,
+        alive,
+        finished,
+        typed,
+    } = outliving_background(&fixture, crate::team::BackgroundAtEnd::Stop);
+    assert!(typed.contains(BACKGROUND_STOPS_LINE), "{typed}");
+    assert!(waited < Duration::from_secs(5), "{waited:?}: {result}");
+    assert_eq!((status.as_str(), error), ("done", None), "{result}");
+    assert!(
+        result.starts_with(BACKGROUND_STOPPED) && result.contains("Waiting for the check."),
+        "{result}"
+    );
+    assert!(!alive, "the turn's end left the background command running");
+    assert!(!finished);
 }
 
 /// A task its time limit ends while a command its agent started in the background still
