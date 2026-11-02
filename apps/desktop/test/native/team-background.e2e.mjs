@@ -98,8 +98,12 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
           await me.waitFor("the Background commands setting on the Agents tab", (text) => text.includes(SETTING));
         };
         const reload = async () => {
+          await page.evaluate("window.__e2eBeforeReload = true");
           await page.send("Page.reload", { ignoreCache: true });
-          await me.waitFor("the Background commands setting after the reload", (text) => text.includes(SETTING));
+          const fresh = `window.__e2eBeforeReload !== true && document.body.innerText.includes(${JSON.stringify(SETTING)})`;
+          for (const deadline = Date.now() + STEP_MS; !(await page.evaluate(fresh).catch(() => false)); await pause(POLL_MS)) {
+            assert.ok(Date.now() < deadline, "the reloaded page never showed the Background commands setting");
+          }
         };
         await agents();
         await steps({ project, bridge, me, page, reload, status });
