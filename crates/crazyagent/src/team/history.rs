@@ -122,13 +122,15 @@ pub fn answer(
     }
 }
 
-type CallerFinder<'a> = dyn FnMut(&Connection, Option<&str>) -> Option<(i64, String)> + 'a;
+type CallerFinder<'a> = dyn FnMut(&Connection, &str, Option<&[u8; tool::CALL_DIGEST_BYTES]>) -> Option<(i64, String)>
+    + 'a;
 type LeadAnswerer<'a> = dyn FnMut(&mut Connection, i64, Call) -> Option<(String, bool)> + 'a;
 
 /// Answers the calls a sub-agent's team server left in its mailbox, at most
 /// `AGENT_CALLS_PER_TICK_MAX`, each checked again and against the owner's tool switches
-/// (DEC-104): `who` names the caller from the pane its server stamped, the mailbox's own
-/// agent or, for a native lead, one of its teammates, which may not start, stop or merge
+/// (DEC-104): `who` names the caller from the call id and the digest of its bytes, the
+/// mailbox's own agent or, for a native lead, the agent whose pane the engine named the
+/// call by (DEC-111 Q18), a teammate of which may not start, stop or merge
 /// agents; `sessions`, `session`, `remember` and `recall` are answered here, the work verbs
 /// and the lead calls through `lead` as the caller, and any call `lead` does not answer is
 /// refused. Takes the engine database, the project, the mailbox's agent and its label, the
@@ -144,10 +146,10 @@ pub fn serve_agent_calls(
     lead: &mut LeadAnswerer<'_>,
 ) -> usize {
     let taken = tool::take_calls(mailbox, AGENT_CALLS_PER_TICK_MAX);
-    for (call_id, call, pane) in &taken {
+    for (call_id, call, digest) in &taken {
         let call = call.clone().map(tool::checked);
         let caller = match &call {
-            Some(Ok(_)) => who(connection, pane.as_deref()),
+            Some(Ok(_)) => who(connection, call_id, digest.as_ref()),
             _ => Some((id, agent.to_owned())),
         };
         let off = match (&call, &caller) {

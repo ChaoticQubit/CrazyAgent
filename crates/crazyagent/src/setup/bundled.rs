@@ -236,9 +236,14 @@ pub const FILES: &[(&str, &[u8])] = &[
 ];
 
 /// The hook folders CrazyAgent ships for default-pack entries whose own source has no hooks,
-/// as paths relative to `assets/pack` and their bytes. `hooks/<entry id>` is one entry's
-/// plugin folder, with its `hooks/hooks.json` and the scripts it runs.
+/// as paths relative to `assets/pack` and their bytes, in path order. `hooks/<entry id>` is
+/// one entry's plugin folder, with the `.claude-plugin/plugin.json` naming it, its
+/// `hooks/hooks.json` and the scripts it runs.
 pub const HOOK_FILES: &[(&str, &[u8])] = &[
+    (
+        "hooks/graphify/.claude-plugin/plugin.json",
+        include_bytes!("../../assets/pack/hooks/graphify/.claude-plugin/plugin.json"),
+    ),
     (
         "hooks/graphify/hooks/graphify-reminder.sh",
         include_bytes!("../../assets/pack/hooks/graphify/hooks/graphify-reminder.sh"),

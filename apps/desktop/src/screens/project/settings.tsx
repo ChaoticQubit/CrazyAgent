@@ -3,8 +3,8 @@ import type { Result } from "../../api";
 import { useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { failureCopy, loadAgentPolicy, loadProjectCatalog, loadProjects, loadReadPaths, receiptState, removeProject, saveAgentPolicy, saveReadPaths, setProjectPool, updateProjectSetup } from "../../api-projects";
-import type { AgentAccess, PolicyView, ProjectCatalog, StoredSetup } from "../../api-projects";
-import { AccessLevels, FULL_ACCESS_WARNING, LOWERING_STOPS_AGENTS, ToolchainSwitches, accessLabel, confirmFirst, policyOf } from "./access";
+import type { AgentAccess, AgentNetwork, PolicyView, ProjectCatalog, StoredSetup } from "../../api-projects";
+import { AccessLevels, FULL_ACCESS_WARNING, LOWERING_STOPS_AGENTS, NetworkChoices, ToolchainSwitches, accessLabel, confirmFirst, policyOf } from "./access";
 import { Button, ConfirmDialog } from "../../ui";
 import { displayText } from "../conversation";
 import { BasicsFields, ResearchSwitches } from "../new-project/fields";
@@ -290,6 +290,7 @@ function SandboxSection({ data }: { data: ProjectData }) {
 function AccessSection({ data }: { data: ProjectData }) {
   const [view, setView] = useState<PolicyView | null>(null);
   const [access, setAccess] = useState<AgentAccess>("sandboxed");
+  const [network, setNetwork] = useState<AgentNetwork>("open");
   const [allowed, setAllowed] = useState<boolean[]>([]);
   const [confirming, setConfirming] = useState(false);
   const [busy, setBusy] = useState(false);
@@ -298,6 +299,7 @@ function AccessSection({ data }: { data: ProjectData }) {
   function seed(next: PolicyView) {
     setView(next);
     setAccess(next.access);
+    setNetwork(next.network);
     setAllowed(next.toolchains.map((row) => row.allowed));
   }
   useEffect(() => {
@@ -314,7 +316,7 @@ function AccessSection({ data }: { data: ProjectData }) {
     if (!view) return;
     setConfirming(false);
     setBusy(true);
-    const result = await saveAgentPolicy(data.id, policyOf(view, access, allowed), nextGeneration());
+    const result = await saveAgentPolicy(data.id, policyOf(view, access, network, allowed), nextGeneration());
     if (result.kind !== "ok") {
       setBusy(false);
       return setNote(result.kind === "not_ready" ? notReady : failureCopy(result));
@@ -331,13 +333,14 @@ function AccessSection({ data }: { data: ProjectData }) {
     data.notify(`Agent access saved: ${accessLabel(access)}. Agents and master turns started from now on use it.`);
   }
 
-  const changed = view !== null && (access !== view.access || allowed.some((on, index) => on !== view.toolchains[index]?.allowed));
+  const changed = view !== null && (access !== view.access || network !== view.network || allowed.some((on, index) => on !== view.toolchains[index]?.allowed));
   return <div className="pj-stack">
     <h2>Agent access</h2>
     <p className="pj-secondary">What this project's agents may touch. It applies to the master, sub-agents and research jobs; research jobs write reports, so they run Sandboxed unless you choose Full access.</p>
     {view === null && !note && <p className="pj-muted" role="status">Loading...</p>}
     {view && <AccessLevels name="ps-access" value={access} unavailable={(level) => view.levels.find((item) => item.access === level)?.unavailable ?? null} onChange={setAccess} />}
     {view && <p className="pj-help">{LOWERING_STOPS_AGENTS}</p>}
+    {view && <NetworkChoices name="ps-network" value={network} access={access} onChange={setNetwork} />}
     {view && <ToolchainSwitches prefix="ps" view={view} allowed={allowed} onChange={setAllowed} />}
     {note && <p className="pj-note warn" role="status">{note}</p>}
     <div><Button variant="primary" pending={busy} pendingLabel="Saving..." disabled={!changed || busy}

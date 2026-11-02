@@ -6,6 +6,8 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+#[cfg(unix)]
+pub mod caller;
 pub mod caps;
 pub mod cleanup;
 pub mod direct;
@@ -3786,6 +3788,11 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
             .map_err(error)?
     };
     for agent in agents.iter_mut().filter(|agent| agent.finished) {
+        if agent.role == AgentRole::Sub
+            && events::name_reaches_running(connection, project, agent.id)?
+        {
+            agent.label = AgentRole::Sub.agent_label(agent.id);
+        }
         let refusal = wake_refusal(connection, project, agent.id)?;
         agent.wakeable = refusal.is_none() && !waking.contains(&agent.id);
         agent.wake_note = if waking.contains(&agent.id) {

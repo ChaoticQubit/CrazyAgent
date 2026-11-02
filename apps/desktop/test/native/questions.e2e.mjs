@@ -188,7 +188,14 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await me.click("Answer", "li.tg-question button");
         await me.type(".tg-answer textarea", ANSWER);
         await me.click("Send answer", ".tg-answer button");
-        await me.waitFor("the emptied inbox", (text) => text.includes("No agent is waiting on you.") && !text.includes(QUESTION));
+        await me.waitFor("the emptied inbox", (text) => text.includes("No agent is waiting on you."));
+        const inbox = await page.evaluate(`(() => {
+          const section = [...document.querySelectorAll("section.tg-events")].find((item) => item.querySelector("h3")?.textContent.startsWith("Questions for you"));
+          return section ? { text: section.innerText, rows: section.querySelectorAll("li.tg-question").length } : null;
+        })()`);
+        assert.ok(inbox !== null, "the Agents tab shows the Questions for you section");
+        assert.equal(inbox.rows, 0, `the answered question left the inbox:\n${inbox.text}`);
+        assert.ok(!inbox.text.includes(QUESTION), `the inbox no longer shows the answered question:\n${inbox.text}`);
         await me.capture("questions-answered");
         const sent = log.trail.filter((call) => call.cmd === "desktop_coord_answer");
         assert.equal(sent.length, 1, `one answer was sent: ${JSON.stringify(sent)}`);

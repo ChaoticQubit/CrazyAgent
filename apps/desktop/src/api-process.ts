@@ -1,7 +1,7 @@
 import { call } from "./api";
 import type { Result } from "./api";
 import { failureCopy } from "./api-projects";
-import type { GraphNode, ImportCommit, ImportFile } from "./engine-client";
+import type { GraphNode, ImportCommit, ImportFile, Nudges } from "./engine-client";
 import { formatRoute } from "./ui/router";
 
 /** The most bytes one instructions text may hold; the engine refuses more. */
@@ -365,11 +365,11 @@ export interface AgentAdoption {
   hookless?: boolean;
 }
 
-/** A project's workflow adoption: whether nudges are on, the counted tools that name the
+/** A project's workflow adoption: its nudges option, the counted tools that name the
  * count columns, the skills its agents receive, its newest agents, and how many older agents
  * the view's size limit left out. */
 export interface Adoption {
-  nudges: boolean;
+  nudges: Nudges;
   counted: string[];
   skills?: string[];
   agents: AgentAdoption[];

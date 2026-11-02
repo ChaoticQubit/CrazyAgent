@@ -702,6 +702,22 @@ impl AppSetup {
                 .map(|part| styled(part, Role::Muted, theme)),
             );
         }
+        for entry in self.entries() {
+            if let Some(reason) = &entry.hooks_refused {
+                lines.extend(
+                    wrap(
+                        &format!(
+                            "{} hooks were not added: {}",
+                            entry_title(&entry.id),
+                            setup_reason(reason)
+                        ),
+                        limit,
+                    )
+                    .into_iter()
+                    .map(|part| styled(part, Role::Muted, theme)),
+                );
+            }
+        }
         let servers: Vec<&str> = self
             .entries()
             .iter()

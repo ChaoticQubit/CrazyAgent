@@ -1,5 +1,5 @@
 use super::hook::Event;
-use super::settings::{self, Delivery, HarnessKind, Overlaps};
+use super::settings::{self, Delivery, HarnessKind, Nudges, Overlaps};
 use super::store::{failure, message, state};
 use super::{
     AgentId, BODY_BYTES_MAX, MessageId, MessageKind, PENDING_MAX, Party, QuestionFor, Receipt,
@@ -127,12 +127,14 @@ impl Letter {
 }
 
 /// What the engine tells a mailbox's sessions each tick, as `relay.json`: the project's
-/// "Overlapping edits" setting and the lead's own worktree, under which its teammates
-/// work in `.worktrees/<name>`.
+/// "Overlapping edits" and workflow nudges settings and the lead's own worktree, under
+/// which its teammates work in `.worktrees/<name>`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Roster {
     pub overlaps: Overlaps,
+    #[serde(default)]
+    pub nudges: Nudges,
     pub root: Option<String>,
 }
 
@@ -288,6 +290,7 @@ pub fn serve(
     let delivery = settings::delivery(db, project, HarnessKind::ClaudeCode)?;
     let roster = Roster {
         overlaps: chosen.overlaps,
+        nudges: chosen.nudges,
         root: worktree(db, project, lead)?,
     };
     write_roster(&folder, &roster);
