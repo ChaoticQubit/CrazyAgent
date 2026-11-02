@@ -312,7 +312,10 @@ fn the_master_hands_two_tasks_to_sandboxed_sub_agents_and_hears_their_results() 
         setup,
     };
     let project = owner.setup.project_id.clone();
-    for attempt in 1..=ASKS_MAX {
+    let mut asks = 0;
+    let (team, first_two) = loop {
+        asks += 1;
+        let before = owner.status().tasks.iter().map(|t| t.id).max().unwrap_or(0);
         assert_eq!(
             owner.act(TeamAction::Message {
                 project_id: project.clone(),
@@ -329,34 +332,43 @@ fn the_master_hands_two_tasks_to_sandboxed_sub_agents_and_hears_their_results() 
         let handed = team
             .tasks
             .iter()
-            .filter(|t| t.source == TaskSource::Master)
+            .filter(|t| t.source == TaskSource::Master && t.id > before)
             .count();
-        if handed >= 2 {
-            break;
+        if handed < 2 {
+            assert!(asks < ASKS_MAX, "the master never delegated: {team:#?}");
+            continue;
         }
-        assert!(attempt < ASKS_MAX, "the master never delegated: {team:#?}");
-    }
 
-    let team = owner.wait("results reach the master", 20, |team| {
-        let delivered = team.messages.iter().position(|m| {
-            m.author == MessageAuthor::Engine
-                && m.text.starts_with("Results from your sub-agents")
-                && m.state == MessageState::Answered
+        let team = owner.wait("results reach the master", 20, |team| {
+            let delivered = team.messages.iter().position(|m| {
+                m.id > asked
+                    && m.author == MessageAuthor::Engine
+                    && m.text.starts_with("Results from your sub-agents")
+                    && m.state == MessageState::Answered
+            });
+            delivered.is_some_and(|at| {
+                team.messages[at..]
+                    .iter()
+                    .any(|m| m.author == MessageAuthor::Master && m.state == MessageState::Reply)
+            })
         });
-        delivered.is_some_and(|at| {
-            team.messages[at..]
-                .iter()
-                .any(|m| m.author == MessageAuthor::Master && m.state == MessageState::Reply)
-        })
-    });
-    let handed: Vec<_> = team
-        .tasks
-        .iter()
-        .filter(|t| t.source == TaskSource::Master)
-        .collect();
-    assert!(handed.len() >= 2, "{team:#?}");
-    let first_two = &handed[..2];
-    for task in first_two {
+        let first_two: Vec<_> = team
+            .tasks
+            .iter()
+            .filter(|t| t.source == TaskSource::Master && t.id > before)
+            .take(2)
+            .cloned()
+            .collect();
+        let unanswered = first_two.iter().any(|t| {
+            t.status == TaskStatus::Done && t.result.as_deref().is_none_or(|r| r.trim().is_empty())
+        });
+        if unanswered && asks < ASKS_MAX {
+            continue;
+        }
+        break (team, first_two);
+    };
+    assert_eq!(first_two.len(), 2, "{team:#?}");
+    for task in &first_two {
         assert_eq!(task.status, TaskStatus::Done, "{task:#?}");
         assert!(
             task.result.as_deref().is_some_and(|r| !r.trim().is_empty()),
