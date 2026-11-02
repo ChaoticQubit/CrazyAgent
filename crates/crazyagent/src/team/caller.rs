@@ -273,10 +273,13 @@ impl Pending {
 impl Callers {
     /// Binds a lead's caller socket at `path`. The folder must still be this user's own
     /// private folder, not a link, and the very folder the engine pinned when it made it,
-    /// if it did (DEC-111 S1R1-1); then whatever an earlier run left at `path` is removed.
-    /// The socket is kept non-blocking so a tick never waits on it. Takes the path in the
-    /// lead's short temp folder and the folder's pin, if known. Returns the socket, or the
-    /// I/O failure, `PermissionDenied` for a changed folder.
+    /// if it did (DEC-111 S1R1-1). The socket is bound at [`binding_path`], after whatever
+    /// an earlier bind left there is removed, and one rename moves it over whatever is at
+    /// `path`, so a hook asking meanwhile finds the old node or the new socket and never an
+    /// empty path (rv-secreview RH2R2-1). The socket is kept non-blocking so a tick never
+    /// waits on it. Takes the path in the lead's short temp folder and the folder's pin, if
+    /// known. Returns the socket, or the I/O failure, `PermissionDenied` for a changed
+    /// folder and `NotFound` when the node moved over `path` is not the one bound.
     pub fn bind(path: &Path, pinned: Option<(u64, u64)>) -> std::io::Result<Self> {
         let folder = path
             .parent()
@@ -288,16 +291,20 @@ impl Callers {
                     "the caller socket folder changed",
                 )
             })?;
-        if let Err(error) = std::fs::remove_file(path)
+        let binding = binding_path(path);
+        if let Err(error) = std::fs::remove_file(&binding)
             && error.kind() != std::io::ErrorKind::NotFound
         {
             return Err(error);
         }
-        let listener = crate::spawn_gate::bind_unix_std(path)?;
+        let listener = crate::spawn_gate::bind_unix_std(&binding)?;
         listener.set_nonblocking(true)?;
-        let node = socket_pin(path).ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::NotFound, "the bound socket is gone")
-        })?;
+        let gone = || std::io::Error::new(std::io::ErrorKind::NotFound, "the bound socket is gone");
+        let made = socket_pin(&binding).ok_or_else(gone)?;
+        std::fs::rename(&binding, path)?;
+        let node = socket_pin(path)
+            .filter(|node| *node == made)
+            .ok_or_else(gone)?;
         Ok(Self {
             listener,
             path: path.to_path_buf(),

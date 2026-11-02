@@ -1421,9 +1421,11 @@ impl TeamRuntime {
         Ok(true)
     }
 
-    /// Marks stopped the native teammates of a lead that just ended, since they ran in the
-    /// lead's own terminal server and ended with it. Sub-agents a worker runs go on. Takes
-    /// the lead. Returns any SQLite failure.
+    /// Marks stopped the native teammates of a lead that just ended. They run on their own
+    /// tmux server, which ends itself once the engine clears the lead's short temp folder,
+    /// and may outlive the lead until then; the lead's caller socket node stays there, so a
+    /// teammate's hook meanwhile is refused and never takes the lead's place (rv-secreview
+    /// RH2R2-1). Sub-agents a worker runs go on. Takes the lead. Returns any SQLite failure.
     fn lead_ended(&self, lead: i64) -> Result<(), EngineError> {
         let children: Vec<i64> = {
             let mut statement = self
@@ -5987,7 +5989,10 @@ impl TeamRuntime {
                 if worker.live {
                     super::master::pane_ended(&self.connection, &worker.project, id)?;
                 }
-                let _ = toolchains::remove_tmp(&self.agent_folder(id).join("home"));
+                let _ = toolchains::remove_tmp_keeping(
+                    &self.agent_folder(id).join("home"),
+                    super::caller::CALLER_SOCKET,
+                );
                 self.connection
                     .execute("DELETE FROM team_panes WHERE agent=?1", [id])
                     .map_err(error)?;

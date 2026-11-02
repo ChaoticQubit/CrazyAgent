@@ -1078,7 +1078,9 @@ impl ProjectSandbox {
     /// teammates serve `mates`, only reach `callers` and are shut out of `own`, so no agent
     /// binds, blocks or replaces the caller socket the engine answers on (DEC-111 Q18,
     /// rv-secreview RH-1) and no teammate holds a listener or places a node where the lead
-    /// connects. Inputs: the three sockets and the canonical tmux program. Output: the lead's
+    /// connects. Both are shut out of the name the engine binds the caller socket at before
+    /// it moves it over `callers`, so neither swaps its own listener in there (rv-secreview
+    /// RH2R2-1). Inputs: the three sockets and the canonical tmux program. Output: the lead's
     /// and the teammates' sandboxes, `Invalid`, or `Unavailable` off macOS.
     pub fn native_team(
         self,
@@ -1087,15 +1089,18 @@ impl ProjectSandbox {
         callers: &Path,
         tmux: &Path,
     ) -> Result<(Self, Self), SandboxError> {
+        let binding = crate::team::caller::binding_path(callers);
         let teammates = self
             .clone()
             .serve_tmux_server(mates, tmux)?
             .reach_unix_socket(callers)?
-            .shut_unix_socket(own)?;
+            .shut_unix_socket(own)?
+            .shut_unix_socket(&binding)?;
         let lead = self
             .allow_tmux_server(own, tmux)?
             .reach_unix_socket(callers)?
-            .reach_unix_socket(mates)?;
+            .reach_unix_socket(mates)?
+            .shut_unix_socket(&binding)?;
         Ok((lead, teammates))
     }
 
