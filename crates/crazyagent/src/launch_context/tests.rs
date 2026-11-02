@@ -1676,12 +1676,13 @@ fn on_path(name: &str) -> Option<PathBuf> {
     })
 }
 
+/// The engine's shared context-mode install under a test folder: an engine root whose
+/// `setup/npm` holds context-mode copied from the npm prefix `CRAZYAGENT_CONTEXT_MODE_INSTALL`
+/// names, approved for the project `app`. Input: the test folder. Output: the project's
+/// launch context, the engine's database and the shared install folder, or a panic naming
+/// what is unavailable.
 #[cfg(target_os = "macos")]
-#[test]
-fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandboxed_home() {
-    use crate::sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
-    use crate::sandbox::{ProjectSandbox, SandboxNetwork};
-    const CLAUDE_CONNECT_LIMIT: Duration = Duration::from_secs(30);
+fn shared_context_mode(base: &Path) -> (AgentContext, rusqlite::Connection, PathBuf) {
     let Some(source) = std::env::var_os("CRAZYAGENT_CONTEXT_MODE_INSTALL") else {
         panic!(
             "UNAVAILABLE: CRAZYAGENT_CONTEXT_MODE_INSTALL, an npm prefix holding node_modules/context-mode@{CONTEXT_MODE_VERSION}"
@@ -1691,8 +1692,6 @@ fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandb
         panic!("UNAVAILABLE: npx and node on PATH");
     };
     let bin = npx.parent().unwrap().to_path_buf();
-    let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
     let root = private_folder(&base.join("engine"));
     let npm = private_folder(&root.join("setup").join("npm"));
     let install = npm.join(format!("context-mode@{CONTEXT_MODE_VERSION}"));
@@ -1704,20 +1703,27 @@ fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandb
     )
     .unwrap();
     assert!(copied.success());
-
     let mut connection = store_context_mode(&root, &bin);
     let context = context_mode_context(launch_app(&mut connection, &root));
-    let home = private_folder(&base.join("home"));
-    let (command, args) = claude_context_mode(&context, &home);
-    assert_ne!(
-        Path::new(&command).file_name(),
-        Some("npx".as_ref()),
-        "a fresh home never starts context-mode through npx"
-    );
+    (context, connection, install)
+}
 
+/// Installs the Seatbelt profile a tools-on agent of `context` runs under, with Node and
+/// the context's own read paths granted, plus `reads`. Inputs: the test folder, the agent
+/// home, the context and the extra folders to read. Output: the sandbox, its profile path
+/// and the agent's project folder.
+#[cfg(target_os = "macos")]
+fn agent_sandbox(
+    base: &Path,
+    home: &Path,
+    context: &AgentContext,
+    reads: &[&Path],
+) -> (crate::sandbox::ProjectSandbox, PathBuf, PathBuf) {
+    use crate::sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
+    use crate::sandbox::{ProjectSandbox, SandboxNetwork};
     let project = private_folder(&base.join("project"));
     let tmp = private_folder(&base.join("tmp"));
-    let mut sandbox = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new()))
+    let mut sandbox = ProjectSandbox::new(&project, home, &tmp, SandboxNetwork::Only(Vec::new()))
         .unwrap()
         .allow_tools(&Toolchains::grant(
             &ToolHomes::owner().unwrap(),
@@ -1727,8 +1733,30 @@ fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandb
     for read in context.read_paths() {
         sandbox = sandbox.allow_read(read.parent().unwrap()).unwrap();
     }
+    for read in reads {
+        sandbox = sandbox.allow_read(read).unwrap();
+    }
     let profile = base.join("agent.sb");
     sandbox.install(&profile).unwrap();
+    (sandbox, profile, project)
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandboxed_home() {
+    const CLAUDE_CONNECT_LIMIT: Duration = Duration::from_secs(30);
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let (context, _connection, install) = shared_context_mode(&base);
+    let home = private_folder(&base.join("home"));
+    let (command, args) = claude_context_mode(&context, &home);
+    assert_ne!(
+        Path::new(&command).file_name(),
+        Some("npx".as_ref()),
+        "a fresh home never starts context-mode through npx"
+    );
+
+    let (sandbox, profile, _project) = agent_sandbox(&base, &home, &context, &[]);
     let mut server = sandbox.command(&profile, Path::new(&command));
     server.args(&args);
     let (took, tools) = mcp_handshake(server, CLAUDE_CONNECT_LIMIT);
@@ -1744,4 +1772,110 @@ fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandb
         fs::read_dir(&install).unwrap().count() > 0,
         "the shared install stays in place for the next agent"
     );
+}
+
+/// A fresh Claude Code agent whose home the engine's launch context set up, with
+/// context-mode started from the engine's shared install, lists the context-mode tools it
+/// actually has: real Claude Code runs once in the agent's sandbox with its provider port
+/// closed, and its own init event shows the server connected and the ctx tools in its tool
+/// list. Needs Claude Code and `CRAZYAGENT_CONTEXT_MODE_INSTALL`; spends no tokens.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "live: needs Claude Code and CRAZYAGENT_CONTEXT_MODE_INSTALL"]
+fn a_fresh_claude_agent_lists_the_context_mode_tools_of_the_engine_install() {
+    const RUN_TIME_MAX: Duration = Duration::from_secs(120);
+    const SERVER: &str = "plugin_context-mode_context-mode";
+    let Some(claude) = on_path("claude") else {
+        panic!("UNAVAILABLE: no claude executable on PATH");
+    };
+    let claude = claude.canonicalize().unwrap();
+    let node = on_path("node").expect("UNAVAILABLE: npx and node on PATH");
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let (context, _connection, _install) = shared_context_mode(&base);
+    let home = private_folder(&base.join("home"));
+    let installed = context.install("claude-code", &home, true).unwrap();
+    let (sandbox, profile, project) =
+        agent_sandbox(&base, &home, &context, &[claude.parent().unwrap()]);
+    let closed = crate::spawn_gate::bind_tcp_std("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let stream = base.join("stream.jsonl");
+    let mut command = sandbox.command(&profile, &claude);
+    command
+        .env_clear()
+        .env(
+            "PATH",
+            format!("{}:/usr/bin:/bin", node.parent().unwrap().display()),
+        )
+        .env("HOME", &home)
+        .env("CLAUDE_CONFIG_DIR", &home)
+        .env("TMPDIR", base.join("tmp"))
+        .env("TERM", "dumb")
+        .env("DISABLE_TELEMETRY", "1")
+        .env("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "1")
+        .env("CLAUDE_CODE_MAX_RETRIES", "0")
+        .env("MCP_TIMEOUT", "60000")
+        .env("ANTHROPIC_API_KEY", "crazyagent-offline-placeholder")
+        .env("ANTHROPIC_BASE_URL", format!("http://127.0.0.1:{closed}"))
+        .current_dir(&project)
+        .stdin(std::process::Stdio::null())
+        .stdout(fs::File::create(&stream).unwrap())
+        .stderr(std::process::Stdio::null())
+        .args([
+            "-p",
+            "check",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--strict-mcp-config",
+        ])
+        .args(installed.arguments());
+    let mut child = crate::spawn_gate::spawn(&mut command).unwrap();
+    let deadline = std::time::Instant::now() + RUN_TIME_MAX;
+    while child.try_wait().unwrap().is_none() {
+        if std::time::Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!("claude did not finish within {RUN_TIME_MAX:?} with the provider port closed");
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    drop(installed);
+
+    let events: Vec<serde_json::Value> = fs::read_to_string(&stream)
+        .unwrap()
+        .lines()
+        .map(|line| {
+            serde_json::from_str(line)
+                .unwrap_or_else(|_| panic!("claude wrote a line that is not JSON: {line}"))
+        })
+        .collect();
+    let init = events
+        .iter()
+        .find(|event| event["type"] == "system" && event["subtype"] == "init")
+        .unwrap_or_else(|| panic!("claude wrote no init event: {events:?}"));
+    let server = init["mcp_servers"]
+        .as_array()
+        .and_then(|servers| servers.iter().find(|server| server["name"] == SERVER))
+        .unwrap_or_else(|| panic!("the init event lists no {SERVER} server: {init}"));
+    assert_eq!(
+        server["status"], "connected",
+        "context-mode connects from the shared install: {server}"
+    );
+    let tools: Vec<&str> = init["tools"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the init event has no tool list: {init}"))
+        .iter()
+        .filter_map(|tool| tool.as_str())
+        .collect();
+    for tool in ["ctx_execute", "ctx_batch_execute", "ctx_search"] {
+        let name = format!("mcp__{SERVER}__{tool}");
+        assert!(
+            tools.contains(&name.as_str()),
+            "the agent has {name}: {tools:?}"
+        );
+    }
 }
