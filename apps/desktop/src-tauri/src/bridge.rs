@@ -633,6 +633,11 @@ impl NativeBridge {
                 Some(project_id.as_str().to_owned()),
                 None,
             ),
+            OwnerMutation::SetProjectHiddenPaths { project_id, .. } => (
+                "project_hidden_paths",
+                Some(project_id.as_str().to_owned()),
+                None,
+            ),
             OwnerMutation::SetProjectAgentPolicy { project_id, .. } => (
                 "project_agent_policy",
                 Some(project_id.as_str().to_owned()),

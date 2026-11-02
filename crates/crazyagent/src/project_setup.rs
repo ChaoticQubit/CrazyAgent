@@ -719,6 +719,10 @@ pub enum SetupAction {
         project_id: ProjectId,
         paths: Vec<String>,
     },
+    SetHiddenPaths {
+        project_id: ProjectId,
+        paths: Vec<String>,
+    },
     SetAgentPolicy {
         project_id: ProjectId,
         policy: crate::sandbox::policy::AgentPolicy,
@@ -772,6 +776,16 @@ impl SetupAction {
                         .any(|path| path.len() > 1024 || path.chars().any(char::is_control))
                 {
                     return Err(failure("read_paths_invalid"));
+                }
+                Ok(())
+            }
+            Self::SetHiddenPaths { paths, .. } => {
+                if paths.len() > crate::sandbox::hidden_paths::HIDDEN_PATHS_MAX
+                    || paths
+                        .iter()
+                        .any(|path| path.len() > 1024 || path.chars().any(char::is_control))
+                {
+                    return Err(failure("hidden_paths_invalid"));
                 }
                 Ok(())
             }
@@ -1776,6 +1790,9 @@ pub(crate) fn execute(
         SetupAction::Remove { project_id } => remove(tx, project_id, revision),
         SetupAction::CancelResearch { project_id, job } => cancel_research(tx, project_id, *job),
         SetupAction::SetReadPaths { project_id, paths } => set_read_paths(tx, project_id, paths),
+        SetupAction::SetHiddenPaths { project_id, paths } => {
+            set_hidden_paths(tx, project_id, paths)
+        }
         SetupAction::SetAgentPolicy { project_id, policy } => {
             set_agent_policy(tx, project_id, policy)
         }
@@ -2232,6 +2249,26 @@ fn set_read_paths(
     Ok(Outcome::Applied)
 }
 
+/// Saves a project's hidden folders once each passes
+/// [`crate::sandbox::hidden_paths::checked`] against the project's own folder, so agents are
+/// kept out of them. Takes the transaction, project and typed paths. Returns Applied, or a
+/// plain rejection for an unknown project or a refused path.
+fn set_hidden_paths(
+    tx: &Transaction<'_>,
+    project_id: &ProjectId,
+    paths: &[String],
+) -> Result<Outcome, EngineError> {
+    let Some(setup) = load_setup(tx, project_id)? else {
+        return Ok(rejected("invalid_project"));
+    };
+    let checked = match crate::sandbox::hidden_paths::checked_all(paths, &setup.project_folder()) {
+        Ok(checked) => checked,
+        Err(code) => return Ok(rejected(code)),
+    };
+    crate::sandbox::hidden_paths::save(tx, project_id.as_str(), &checked).map_err(error)?;
+    Ok(Outcome::Applied)
+}
+
 /// Saves a project's agent policy (DEC-101, DEC-102): its access level and toolchain
 /// choices. Takes the transaction, project and policy. Returns Applied, or a plain
 /// rejection for an unknown project, an invalid policy or a level this computer cannot run.
@@ -2291,6 +2328,7 @@ fn remove(
         .map_err(error)?;
     }
     crate::sandbox::extra_paths::save(tx, project_id.as_str(), &[]).map_err(error)?;
+    crate::sandbox::hidden_paths::save(tx, project_id.as_str(), &[]).map_err(error)?;
     crate::sandbox::policy::remove(tx, project_id.as_str()).map_err(error)?;
     crate::scheduling::forget_project(tx, project_id.as_str())?;
     crate::coord::forget_project(tx, project_id)?;

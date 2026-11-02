@@ -200,6 +200,11 @@ impl NativeOwner {
                             .set_project_read_paths(project_id, paths, generation)
                             .await
                     }
+                    SetupAction::SetHiddenPaths { project_id, paths } => {
+                        controller
+                            .set_project_hidden_paths(project_id, paths, generation)
+                            .await
+                    }
                     SetupAction::SetAgentPolicy { project_id, policy } => {
                         controller
                             .set_project_agent_policy(project_id, policy, generation)

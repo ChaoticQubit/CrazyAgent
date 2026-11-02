@@ -14,6 +14,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 pub mod extra_paths;
+pub mod hidden_paths;
 #[cfg(target_os = "linux")]
 pub mod linux;
 pub mod policy;
@@ -77,7 +78,7 @@ pub const FULL_ACCESS_NEEDS_MACOS: &str = "Full access agents run only on macOS 
 const PATH_BYTES_MAX: usize = 1024;
 const READ_ROOTS_MAX: usize = 16;
 const WORKTREES_MAX: usize = 8;
-const HIDDEN_MAX: usize = 4;
+const HIDDEN_MAX: usize = 8;
 /// The most exact Unix sockets one agent may bind and connect: its own Codex app-server's.
 const SOCKETS_MAX: usize = 2;
 /// The longest Unix socket path macOS binds, `sun_path` less its closing NUL.
@@ -1155,7 +1156,7 @@ impl ProjectSandbox {
         }
         text.push_str(")\n");
         text.push_str("(deny file-read* file-write*");
-        for secret in self.secret_paths().into_iter().chain(self.hidden.clone()) {
+        for secret in self.secret_paths() {
             if clean_absolute(&secret) {
                 text.push_str(&format!("\n  (subpath \"{}\")", secret.display()));
             }
@@ -1176,6 +1177,15 @@ impl ProjectSandbox {
             text.push_str(&format!("\n  (global-name \"{service}\")"));
         }
         text.push_str(")\n");
+        if !self.hidden.is_empty() {
+            text.push_str("(deny file-read* file-write* process-exec");
+            for folder in &self.hidden {
+                if clean_absolute(folder) {
+                    text.push_str(&format!("\n  (subpath \"{}\")", folder.display()));
+                }
+            }
+            text.push_str(")\n");
+        }
         let project = self.project_root.display();
         text.push_str(&format!(
             "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\")\n  (literal \"{project}/.git/index\")\n  (literal \"{project}/.git\")\n  (literal \"{project}/.git/commondir\")\n  (literal \"{project}/.git/config.worktree\")\n  (subpath \"{project}/.git/info\")\n  (literal \"{project}/.git/shallow\")\n  (literal \"{project}/.git/objects\")\n  (literal \"{project}/.git/objects/info\")\n  (literal \"{project}/.git/objects/info/alternates\")\n  (literal \"{project}/.git/objects/info/http-alternates\")\n  (subpath \"{project}/.git/modules\")\n  (literal \"{project}/.crazyagent\"))\n"

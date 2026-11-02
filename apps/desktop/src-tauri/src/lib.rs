@@ -665,6 +665,16 @@ async fn desktop_project_read_paths(
 }
 
 #[tauri::command]
+async fn desktop_project_hidden_paths(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<Vec<String>, BridgeError> {
+    main_window(&window)?;
+    read(&state).await?.project_hidden_paths(&id).await
+}
+
+#[tauri::command]
 async fn desktop_project_agent_policy(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -712,6 +722,21 @@ async fn desktop_set_project_read_paths(
     lock(&state)
         .await?
         .set_project_read_paths(&id, paths, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_set_project_hidden_paths(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    paths: Vec<String>,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .set_project_hidden_paths(&id, paths, generation)
         .await
 }
 
@@ -2988,8 +3013,10 @@ pub fn run() {
             desktop_add_project_documents,
             desktop_delete_project_context,
             desktop_project_read_paths,
+            desktop_project_hidden_paths,
             desktop_project_files,
             desktop_set_project_read_paths,
+            desktop_set_project_hidden_paths,
             desktop_project_agent_policy,
             desktop_set_project_agent_policy,
             desktop_team_status,

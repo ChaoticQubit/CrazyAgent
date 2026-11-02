@@ -521,6 +521,18 @@ export function saveReadPaths(id: string, paths: string[], generation: number): 
   return call<IntentReceipt>("desktop_set_project_read_paths", { id, paths, generation });
 }
 
+/** Reads the folders this project's agents are kept out of, read, write and run.
+ * Input: project id. Output: the folders in saved order. */
+export function loadHiddenPaths(id: string): Promise<Result<string[]>> {
+  return call<string[]>("desktop_project_hidden_paths", { id });
+}
+
+/** Replaces the folders this project's agents are kept out of; the engine refuses a path
+ * outside the project. Inputs: project id, the folders and a generation. Output: the receipt. */
+export function saveHiddenPaths(id: string, paths: string[], generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_set_project_hidden_paths", { id, paths, generation });
+}
+
 /** Reads this project's agent access level and the toolchains its agents may use.
  * Input: project id. Output: the engine's view of the saved policy. */
 export function loadAgentPolicy(id: string): Promise<Result<PolicyView>> {
