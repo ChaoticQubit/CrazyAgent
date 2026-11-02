@@ -3218,7 +3218,7 @@ impl TeamRuntime {
         for id in leads {
             if let Some(callers) = self.callers.get_mut(&id).and_then(Option::as_mut) {
                 let lead = AgentId::team(id).ok();
-                callers.serve(&mut || listed_panes(host, lead.as_ref()));
+                callers.serve(&mut || listed_panes(host, lead.as_ref()), &mut |_| None);
             }
         }
     }
@@ -8195,6 +8195,21 @@ pub fn team_caller(
         .iter()
         .any(|listed| listed.pid == own.pid && listed.id == pane)
         .then(|| (lead, label.to_owned()))
+}
+
+/// Who runs in one pane of a native lead's team, from the engine's own rows (DEC-111 Q18,
+/// RH-2). Inputs: the database, the terminal host, the project, the lead and the pane.
+/// Output: the lead, a live teammate by its registered name, or none.
+#[cfg(unix)]
+pub(crate) fn pane_whom(
+    connection: &Connection,
+    host: Option<&dyn Host>,
+    project: &ProjectId,
+    lead: i64,
+    pane: &str,
+) -> Option<super::caller::Whom> {
+    let _ = (connection, host, project, lead, pane);
+    None
 }
 
 /// The panes a native lead's own tmux server lists, live ones only, as (pane id, pid).

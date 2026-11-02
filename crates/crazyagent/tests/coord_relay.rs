@@ -53,7 +53,7 @@ impl Team {
             .to_string(),
         )
         .unwrap();
-        let (mailbox, callers) = PaneCallers::new(&path);
+        let (mailbox, callers) = PaneCallers::new(&path, &[(MATE_PANE, "greet")]);
         Self {
             _root: root,
             root: path,
@@ -72,7 +72,9 @@ impl Team {
             .env_remove("CLAUDE_PROJECT_DIR")
             .env_remove("TMUX_PANE");
         if let Some(pane) = pane {
-            command.env("TMUX_PANE", pane);
+            command
+                .env("TMUX_PANE", pane)
+                .env("CLAUDE_PROJECT_DIR", &self.root);
         }
         command
     }

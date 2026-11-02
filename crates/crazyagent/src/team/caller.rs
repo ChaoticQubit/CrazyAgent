@@ -135,6 +135,15 @@ fn parse_line(line: &[u8]) -> Option<(String, [u8; DIGEST_BYTES])> {
     Some((id.to_owned(), digest))
 }
 
+/// Who the engine says runs in the pane a `who` request came from, from its own rows and
+/// never from a file the agents write (DEC-111 Q18, RH-2): the native lead itself, or one of
+/// its live teammates by the name the engine first registered for that teammate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Whom {
+    Lead,
+    Teammate(String),
+}
+
 /// One native lead's caller socket (DEC-111 Q18): the engine names each team call by the
 /// process the kernel says connected, walked up its parents to a pane the lead's tmux
 /// server lists, never by anything the call or the caller's environment says. A name
@@ -279,7 +288,12 @@ impl Callers {
     /// full line within `PENDING_WAIT`. Takes the lead's panes as (pane id, pid), listed
     /// with the process table at most once a tick, only when a connection arrives. Returns
     /// how many it named.
-    pub fn serve(&mut self, panes: &mut dyn FnMut() -> Vec<(String, u32)>) -> usize {
+    pub fn serve(
+        &mut self,
+        panes: &mut dyn FnMut() -> Vec<(String, u32)>,
+        whom: &mut dyn FnMut(&str) -> Option<Whom>,
+    ) -> usize {
+        let _ = whom;
         let now = Instant::now();
         self.stamps
             .retain(|stamp| now.duration_since(stamp.at) < STAMP_TTL);

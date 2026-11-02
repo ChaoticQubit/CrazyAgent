@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-use crazyagent::team::caller::{Callers, socket_for_mailbox};
+use crazyagent::team::caller::{Callers, Whom, socket_for_mailbox};
 use crazyagent::team::tool::MAILBOX_FOLDER;
 use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
@@ -78,7 +78,8 @@ impl Drop for Placed {
 /// A native lead's team as its hooks see it: a real tmux server with the lead's pane and
 /// two teammate panes, Claude Code's team config naming the teammates by those panes, the
 /// lead's mailbox in the engine's layout, and the lead's caller socket, which the test
-/// serves as the engine does.
+/// serves as the engine does, answering `who` for the lead's pane and each teammate's pane
+/// from the names it registered, as the engine answers from its rows.
 struct Team {
     _folder: tempfile::TempDir,
     root: PathBuf,
@@ -86,8 +87,9 @@ struct Team {
     config: PathBuf,
     mailbox: PathBuf,
     server: Server,
-    callers: Callers,
+    callers: Option<Callers>,
     _placed: Placed,
+    lead: String,
     alpha: String,
     beta: String,
     runs: u32,
@@ -167,8 +169,9 @@ impl Team {
             config,
             mailbox,
             server,
-            callers,
+            callers: Some(callers),
             _placed: placed,
+            lead,
             alpha,
             beta,
             runs: 0,
@@ -195,8 +198,9 @@ impl Team {
         let done = self.root.join(format!("done-{run_id}"));
         std::fs::write(&input_path, input.to_string()).unwrap();
         let run = format!(
-            "/usr/bin/env CLAUDE_CONFIG_DIR='{}' TMUX_PANE='{claimed}' '{}' coord-hook {event} '{}' < '{}' > '{}'; touch '{}'",
+            "/usr/bin/env CLAUDE_CONFIG_DIR='{}' CLAUDE_PROJECT_DIR='{}' TMUX_PANE='{claimed}' '{}' coord-hook {event} '{}' < '{}' > '{}'; touch '{}'",
             self.config.display(),
+            self.project.display(),
             env!("CARGO_BIN_EXE_crazyagent"),
             self.mailbox.display(),
             input_path.display(),
@@ -211,9 +215,20 @@ impl Team {
         self.server
             .run(&["respawn-pane", "-k", "-t", pane, &command]);
         let server = &self.server;
+        let rows = [
+            (self.lead.as_str(), Whom::Lead),
+            (self.alpha.as_str(), Whom::Teammate("alpha".to_owned())),
+            (self.beta.as_str(), Whom::Teammate("beta".to_owned())),
+        ];
         let deadline = Instant::now() + Duration::from_secs(30);
         while !done.exists() && Instant::now() < deadline {
-            self.callers.serve(&mut || server.panes());
+            if let Some(callers) = self.callers.as_mut() {
+                callers.serve(&mut || server.panes(), &mut |pane| {
+                    rows.iter()
+                        .find(|(row, _)| *row == pane)
+                        .map(|(_, whom)| whom.clone())
+                });
+            }
             std::thread::sleep(Duration::from_millis(20));
         }
         assert!(done.exists(), "the hook in {pane} never finished");
@@ -223,6 +238,42 @@ impl Team {
     fn tools(&self, pane: &str) -> Option<String> {
         let number: u128 = pane[1..].parse().unwrap();
         std::fs::read_to_string(self.mailbox.join(format!("{:032x}.tools", number + 1))).ok()
+    }
+
+    fn lead_tools(&self) -> Option<String> {
+        std::fs::read_to_string(self.mailbox.join(format!("{:032x}.tools", 0))).ok()
+    }
+
+    /// Overwrites the team config the way any agent of the team can. Takes the new config.
+    fn forge(&self, config: &Value) {
+        std::fs::write(
+            self.config
+                .join("teams")
+                .join("pane-team")
+                .join("config.json"),
+            config.to_string(),
+        )
+        .unwrap();
+    }
+
+    /// Leaves one message in the mailbox for a delivery tag, as the engine does. Takes the
+    /// message id, the tag and the body.
+    fn letter(&self, id: i64, to: &str, body: &str) {
+        std::fs::write(
+            self.mailbox.join(format!("{id:032x}.inbox")),
+            json!({
+                "id": id,
+                "to": to,
+                "from": "Ada (@lead-a)",
+                "kind": "note",
+                "question": null,
+                "work": null,
+                "reply_to": null,
+                "body": body,
+            })
+            .to_string(),
+        )
+        .unwrap();
     }
 }
 
@@ -305,6 +356,100 @@ fn a_hook_outside_every_pane_counts_for_nobody_and_its_edits_are_held() {
         reason
             .as_deref()
             .is_some_and(|reason| reason.contains("could not tell which agent")),
+        "{printed}"
+    );
+}
+
+/// A teammate that rewrites its lead's team config, which every agent of the team can
+/// write, still acts only as itself, since the engine names the pane and the member behind
+/// it from its own rows (DEC-111 Q18, RH-2): naming its own session as the lead's, giving
+/// its pane another member's name or removing every pane entry still hands it only its own
+/// letters, counts its tools for its own pane and keeps its edits in its own worktree.
+#[test]
+fn a_teammate_rewriting_its_team_config_still_acts_as_itself() {
+    let mut team = Team::new();
+    let (alpha, beta) = (team.alpha.clone(), team.beta.clone());
+    let forgeries = [
+        json!({
+            "leadSessionId": MATE_SESSION,
+            "members": [
+                {"name": "team-lead", "tmuxPaneId": "leader"},
+                {"name": "alpha", "tmuxPaneId": alpha, "cwd": team.project},
+                {"name": "beta", "tmuxPaneId": beta, "cwd": team.project},
+            ],
+        }),
+        json!({
+            "leadSessionId": LEAD_SESSION,
+            "members": [
+                {"name": "team-lead", "tmuxPaneId": "leader"},
+                {"name": "beta", "tmuxPaneId": alpha, "cwd": team.project},
+                {"name": "alpha", "tmuxPaneId": beta, "cwd": team.project},
+            ],
+        }),
+        json!({
+            "leadSessionId": LEAD_SESSION,
+            "members": [{"name": "team-lead", "tmuxPaneId": "leader"}],
+        }),
+    ];
+    let theirs = team
+        .project
+        .join(".worktrees")
+        .join("beta")
+        .join("notes.md");
+    for (round, forged) in forgeries.iter().enumerate() {
+        team.forge(forged);
+        let id = 10 + 2 * i64::try_from(round).unwrap();
+        team.letter(id, "leader", &format!("For the lead {round}."));
+        team.letter(id + 1, &alpha, &format!("For alpha {round}."));
+        let printed = team.hook(&alpha, &alpha, "post-tool", &read_tool(MATE_SESSION), false);
+        assert!(
+            printed.contains(&format!("For alpha {round}.")),
+            "round {round}: {printed}"
+        );
+        assert!(
+            !printed.contains("For the lead"),
+            "round {round}: {printed}"
+        );
+        assert_eq!(
+            team.lead_tools(),
+            None,
+            "round {round}: nothing counts for the lead"
+        );
+        assert!(
+            team.tools(&alpha)
+                .is_some_and(|tools| tools.contains("Read")),
+            "round {round}: the tool counts for alpha's pane"
+        );
+        let printed = team.hook(&alpha, &alpha, "edit", &edit(MATE_SESSION, &theirs), false);
+        assert!(
+            denial(&printed).is_some_and(|reason| reason.contains("you are teammate alpha")),
+            "round {round}: {printed}"
+        );
+    }
+}
+
+/// While the engine is away, its caller socket bound by no one, a teammate's hook is told
+/// nothing and so is nobody: its tool counts for no one and its edit is held, never taken
+/// for the lead's as when the agent leads no native team (DEC-111 Q18, RH-2).
+#[test]
+fn a_teammate_hook_while_the_engine_is_away_is_held_not_taken_for_the_lead() {
+    let mut team = Team::new();
+    let alpha = team.alpha.clone();
+    team.callers = None;
+
+    let printed = team.hook(&alpha, &alpha, "post-tool", &read_tool(MATE_SESSION), false);
+    assert_eq!(printed, "");
+    assert_eq!(team.tools(&alpha), None, "nothing counts for the teammate");
+    assert_eq!(team.lead_tools(), None, "nothing counts for the lead");
+
+    let own = team
+        .project
+        .join(".worktrees")
+        .join("alpha")
+        .join("notes.md");
+    let printed = team.hook(&alpha, &alpha, "edit", &edit(MATE_SESSION, &own), false);
+    assert!(
+        denial(&printed).is_some_and(|reason| reason.contains("could not tell which agent")),
         "{printed}"
     );
 }

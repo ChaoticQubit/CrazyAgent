@@ -2,7 +2,7 @@
 
 mod pane_support;
 
-use pane_support::PaneCallers;
+use pane_support::{LEAD_PANE, PaneCallers};
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -39,7 +39,7 @@ impl Team {
             .to_string(),
         )
         .unwrap();
-        let (mailbox, callers) = PaneCallers::new(root.path());
+        let (mailbox, callers) = PaneCallers::new(root.path(), &[(MATE_PANE, "greet")]);
         Self {
             _root: root,
             config,
@@ -165,7 +165,7 @@ fn a_teammate_handed_a_waiting_message_at_its_stop_does_not_rest_and_the_lead_ne
 
     let lead = Team::new();
     lead.hook("stop", "%3", session(LEAD_SESSION));
-    lead.hook("stop", MATE_PANE, session(LEAD_SESSION));
+    lead.hook("stop", LEAD_PANE, session(MATE_SESSION));
     assert!(
         lead.marks().is_empty(),
         "the lead's own stop is the engine's to read, never a resting mark: {:?}",

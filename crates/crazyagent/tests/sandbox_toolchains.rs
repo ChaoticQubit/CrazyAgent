@@ -1084,19 +1084,61 @@ fn a_lead_profile_runs_its_own_tmux_server_and_never_reaches_another() {
     );
 }
 
-/// An agent reaches a native lead's caller socket but cannot bind one in its place: it may
-/// unlink the engine's socket in its temp folder, yet no socket of its own can answer
-/// there, so a hook's answer on the caller socket comes from the engine (DEC-111 Q18).
+/// Neither a native lead nor its teammates can bind, block or take the engine's caller
+/// socket (DEC-111 Q18, rv-secreview RH-1): with the path free, a listener, a folder or a
+/// file either places there is refused; once the engine listens, both reach it and get its
+/// answer, yet removing, flagging or moving its node is refused, and the engine's socket
+/// stays the one it bound, so every hook's answer on it comes from the engine.
 #[test]
-fn an_agent_reaches_the_caller_socket_but_cannot_bind_one_in_its_place() {
-    let case = case();
-    let tmp = toolchains::make_tmp(&case.home).unwrap();
-    let socket = tmp.join("caller.sock");
-    let listener = crazyagent::spawn_gate::bind_unix_std(&socket).unwrap();
+fn neither_a_native_lead_nor_its_teammates_bind_block_or_take_the_caller_socket() {
+    use std::os::macos::fs::MetadataExt;
+    let team = LiveTeam::start();
+    let c = quoted(&team.callers);
+    let roles: [(&str, fn(&LiveTeam, &str) -> Output); 2] = [
+        ("lead", LiveTeam::as_lead),
+        ("teammate", LiveTeam::teammate),
+    ];
+    for (role, run) in roles {
+        let free = run(
+            &team,
+            &format!(
+                "{}; echo bind=$?\nmkdir {c}; echo mkdir=$?\n: > {c}; echo file=$?\n",
+                team.session(&team.callers, "planted")
+            ),
+        );
+        let text = String::from_utf8_lossy(&free.stdout).into_owned();
+        for name in ["bind", "mkdir", "file"] {
+            assert_ne!(
+                status_of(&text, name),
+                "0",
+                "the {role}'s {name} at the free caller socket path succeeded: {}",
+                String::from_utf8_lossy(&free.stderr)
+            );
+        }
+        assert!(
+            fs::symlink_metadata(&team.callers).is_err(),
+            "the {role} left a node at the caller socket path"
+        );
+    }
+
+    let listener = crazyagent::spawn_gate::bind_unix_std(&team.callers).unwrap();
     listener.set_nonblocking(true).unwrap();
+    let node = |path: &Path| {
+        fs::symlink_metadata(path).ok().map(|meta| {
+            (
+                meta.st_dev(),
+                meta.st_ino(),
+                meta.st_mode(),
+                meta.st_flags(),
+            )
+        })
+    };
+    let bound = node(&team.callers);
+    assert!(bound.is_some());
     let engine = std::thread::spawn(move || {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        while std::time::Instant::now() < deadline {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut answered = 0;
+        while answered < roles.len() && std::time::Instant::now() < deadline {
             match crazyagent::spawn_gate::accept_unix_std(&listener) {
                 Ok(mut stream) => {
                     stream.set_nonblocking(false).unwrap();
@@ -1106,37 +1148,43 @@ fn an_agent_reaches_the_caller_socket_but_cannot_bind_one_in_its_place() {
                         &mut line,
                     )
                     .unwrap();
+                    assert_eq!(line, "who\n");
                     std::io::Write::write_all(&mut stream, b"engine\n").unwrap();
-                    return Some(line);
+                    answered += 1;
                 }
                 Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
             }
         }
-        None
+        answered
     });
-    let sandbox = ProjectSandbox::new(&case.project, &case.home, &case.tmp, SandboxNetwork::Open)
-        .unwrap()
-        .allow_scratch(&tmp)
-        .unwrap()
-        .reach_unix_socket(&socket)
-        .unwrap();
-    let output = run(
-        &sandbox,
-        &case.profiles.join("caller.sb"),
-        "printf 'hi\\n' | /usr/bin/nc -U \"$TMPDIR/caller.sock\"; rm -f \"$TMPDIR/caller.sock\"; /usr/bin/nc -l -U \"$TMPDIR/caller.sock\" </dev/null >/dev/null 2>&1 & sleep 1; [ -S \"$TMPDIR/caller.sock\" ] && echo bound; kill $! 2>/dev/null; true",
-    );
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(engine.join().unwrap().as_deref(), Some("hi\n"));
-    assert_eq!(
-        String::from_utf8_lossy(&output.stdout),
-        "engine\n",
-        "the agent reached the engine and bound no socket of its own"
-    );
-    toolchains::remove_tmp(&case.home).unwrap();
+    for (role, run) in roles {
+        let taken = run(
+            &team,
+            &format!(
+                "printf 'who\\n' | /usr/bin/nc -U {c}; echo reach=$?\nrm -f {c}; echo rm=$?\nchflags uchg {c}; echo chflags=$?\nmv -f {c} {c}.away; echo mv=$?\n"
+            ),
+        );
+        let text = String::from_utf8_lossy(&taken.stdout).into_owned();
+        let errors = String::from_utf8_lossy(&taken.stderr);
+        assert!(
+            text.lines().any(|line| line == "engine"),
+            "the {role} reached the engine: {text} {errors}"
+        );
+        assert_eq!(status_of(&text, "reach"), "0", "{errors}");
+        for name in ["rm", "chflags", "mv"] {
+            assert_ne!(
+                status_of(&text, name),
+                "0",
+                "the {role}'s {name} of the caller socket succeeded: {errors}"
+            );
+        }
+        assert_eq!(
+            node(&team.callers),
+            bound,
+            "the engine's socket survives the {role}"
+        );
+    }
+    assert_eq!(engine.join().unwrap(), roles.len());
 }
 
 /// Reads one `name=status` line a probe script printed. Takes the output text and the name.

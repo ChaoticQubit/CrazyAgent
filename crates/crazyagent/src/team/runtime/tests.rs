@@ -7823,6 +7823,74 @@ fn a_fifo_or_link_at_an_agent_git_pointer_is_refused_without_waiting() {
     );
 }
 
+/// A native teammate keeps the name its lead's team config gave its pane when the engine
+/// first saw it: the config is the agents' own file, so a later rename there changes
+/// nothing, a second live teammate under a name already held gets none, a name that could
+/// not name a worktree is never kept, and `who` for each pane answers from those rows
+/// (DEC-111 Q18, RH-2).
+#[test]
+fn a_native_teammate_keeps_the_name_it_was_first_seen_with() {
+    let directory = tempfile::tempdir().unwrap();
+    let connection = Connection::open(directory.path().join("engine.db")).unwrap();
+    super::super::initialize(&connection).unwrap();
+    crate::project_setup::initialize(&connection).unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    connection
+        .execute(
+            "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms)
+             VALUES (?1,'sub','claude-code',1,?2,'working',1,1)",
+            params![PROJECT, ENDPOINT],
+        )
+        .unwrap();
+    let lead = connection.last_insert_rowid();
+    let home = directory.path().join("home");
+    let team = home.join("teams").join("session-1");
+    std::fs::create_dir_all(&team).unwrap();
+    let config = |members: &str| {
+        std::fs::write(
+            team.join("config.json"),
+            format!(r#"{{"members":[{{"name":"team-lead","tmuxPaneId":"leader"}},{members}]}}"#),
+        )
+        .unwrap();
+    };
+    let whom = |pane: &str| super::pane_whom(&connection, None, &project, lead, pane);
+    let named = |name: &str| Some(crate::team::caller::Whom::Teammate(name.to_owned()));
+
+    config(r#"{"name":"greet","tmuxPaneId":"%7"}"#);
+    super::teammates::register(&connection, &project, lead, &home, &["%7"], 1, 5).unwrap();
+    assert_eq!(whom("%7"), named("greet"));
+
+    config(
+        r#"{"name":"other","tmuxPaneId":"%7"},{"name":"greet","tmuxPaneId":"%8"},{"name":"../up","tmuxPaneId":"%9"}"#,
+    );
+    super::teammates::register(
+        &connection,
+        &project,
+        lead,
+        &home,
+        &["%7", "%8", "%9"],
+        1,
+        6,
+    )
+    .unwrap();
+    assert_eq!(
+        whom("%7"),
+        named("greet"),
+        "a rename in the config changes nothing"
+    );
+    assert_eq!(
+        whom("%8"),
+        None,
+        "a second live teammate never takes a name already held"
+    );
+    assert_eq!(
+        whom("%9"),
+        None,
+        "a name that names no worktree is never kept"
+    );
+    assert_eq!(whom("%10"), None, "a pane with no row is no one");
+}
+
 #[test]
 fn a_rediscovered_native_teammate_keeps_the_idle_its_relay_read() {
     let directory = tempfile::tempdir().unwrap();
@@ -9014,7 +9082,10 @@ fn a_named_call_whose_file_changed_after_naming_is_refused() {
         streams.push(stream);
     }
     let own = std::process::id();
-    assert_eq!(callers.serve(&mut || vec![(native.own.clone(), own)]), 2);
+    assert_eq!(
+        callers.serve(&mut || vec![(native.own.clone(), own)], &mut |_| None),
+        2
+    );
     for stream in &mut streams {
         let mut reply = Vec::new();
         stream.read_to_end(&mut reply).unwrap();
@@ -9174,7 +9245,7 @@ fn an_unlinked_caller_socket_is_bound_again_on_the_next_tick() {
         let asked = scope.spawn(|| crate::team::caller::name_call(&mailbox, &id, &digest));
         let deadline = Instant::now() + crate::team::caller::CALLER_WAIT;
         while !asked.is_finished() && Instant::now() < deadline {
-            callers.serve(&mut || vec![("%5".to_owned(), own)]);
+            callers.serve(&mut || vec![("%5".to_owned(), own)], &mut |_| None);
             std::thread::sleep(Duration::from_millis(10));
         }
         asked.join().unwrap()
@@ -9186,7 +9257,8 @@ fn an_unlinked_caller_socket_is_bound_again_on_the_next_tick() {
 /// Something an agent leaves at the caller socket's path, such as a folder, stops the
 /// engine binding there, and the lead's calls are refused meanwhile. The engine tries again
 /// each tick, so once the obstacle is gone the next tick binds the socket and a call is
-/// named again (DEC-111 S1R1-2).
+/// named again (DEC-111 S1R1-2), still under the pane pins the replaced socket held, so no
+/// other process takes a pinned pane across the gap (rv-secreview merge point 3).
 #[test]
 fn a_caller_socket_blocked_by_an_obstacle_is_bound_once_the_obstacle_is_gone() {
     struct TmpRemoved(PathBuf);
@@ -9216,8 +9288,35 @@ fn a_caller_socket_blocked_by_an_obstacle_is_bound_once_the_obstacle_is_gone() {
         std::fs::symlink_metadata(&socket)
             .is_ok_and(|metadata| std::os::unix::fs::FileTypeExt::is_socket(&metadata.file_type()))
     };
+    let mailbox = team.mailbox(lead);
+    let digest = [8_u8; crate::team::tool::CALL_DIGEST_BYTES];
+    let own = std::process::id();
+    let parent = std::os::unix::process::parent_id();
+    let name = |team: &mut TeamRuntime, n: u8, (pane, pid): (&str, u32)| -> Option<String> {
+        let id = format!("{n:032x}");
+        let callers = team
+            .callers
+            .get_mut(&lead)
+            .and_then(Option::as_mut)
+            .unwrap();
+        let named = std::thread::scope(|scope| {
+            let asked = scope.spawn(|| crate::team::caller::name_call(&mailbox, &id, &digest));
+            let deadline = Instant::now() + crate::team::caller::CALLER_WAIT;
+            while !asked.is_finished() && Instant::now() < deadline {
+                callers.serve(&mut || vec![(pane.to_owned(), pid)], &mut |_| None);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            asked.join().unwrap()
+        });
+        named.then(|| callers.take(&id, &digest)).flatten()
+    };
     team.serve_agent_calls(&f.setup, &f.access);
     assert!(bound());
+    assert_eq!(
+        name(&mut team, 1, ("%5", parent)),
+        Some("%5".to_owned()),
+        "the first process pins its pane"
+    );
 
     std::fs::remove_file(&socket).unwrap();
     std::fs::create_dir(&socket).unwrap();
@@ -9230,26 +9329,12 @@ fn a_caller_socket_blocked_by_an_obstacle_is_bound_once_the_obstacle_is_gone() {
     std::fs::remove_dir_all(&socket).unwrap();
     team.serve_agent_calls(&f.setup, &f.access);
     assert!(bound(), "bound once the obstacle is gone");
-    let mailbox = team.mailbox(lead);
-    let digest = [8_u8; crate::team::tool::CALL_DIGEST_BYTES];
-    let id = format!("{:032x}", 2);
-    let callers = team
-        .callers
-        .get_mut(&lead)
-        .and_then(Option::as_mut)
-        .unwrap();
-    let own = std::process::id();
-    let named = std::thread::scope(|scope| {
-        let asked = scope.spawn(|| crate::team::caller::name_call(&mailbox, &id, &digest));
-        let deadline = Instant::now() + crate::team::caller::CALLER_WAIT;
-        while !asked.is_finished() && Instant::now() < deadline {
-            callers.serve(&mut || vec![("%5".to_owned(), own)]);
-            std::thread::sleep(Duration::from_millis(10));
-        }
-        asked.join().unwrap()
-    });
-    assert!(named);
-    assert_eq!(callers.take(&id, &digest), Some("%5".to_owned()));
+    assert_eq!(
+        name(&mut team, 2, ("%5", own)),
+        None,
+        "the socket bound again keeps the pins of the one it replaces"
+    );
+    assert_eq!(name(&mut team, 3, ("%6", own)), Some("%6".to_owned()));
 }
 
 /// A native lead whose team tool is off still has its caller socket bound and answered on
