@@ -5138,6 +5138,245 @@ fn a_codex_live_master_gets_its_instructions_as_developer_instructions() {
     host.close(&[]).unwrap();
 }
 
+/// Adds global skills to the fixture's plugin store from real SKILL.md folders, as the
+/// owner's Add skill does. Takes the fixture and the names.
+#[cfg(target_os = "macos")]
+fn approve_skills(fixture: &Fixture, names: &[&str]) {
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    for name in names {
+        let folder = fixture.base.join("picked").join(name);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(
+            folder.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: Teaches {name}.\n---\n\nSteps.\n"),
+        )
+        .unwrap();
+        crate::storage::plugins::execute(
+            &mut connection,
+            &fixture.base,
+            crate::storage::plugins::Command::AddSkill {
+                scope: crate::plugins::Scope::Global,
+                source: folder.to_str().unwrap().into(),
+            },
+        )
+        .unwrap();
+    }
+}
+
+/// The skills a team agent's Claude Code launch writes into its plugin folder, from the
+/// runtime's own launch context for that agent with tools on. Takes the runtime, the
+/// fixture, the agent and its role. Returns the skill folder names.
+#[cfg(target_os = "macos")]
+fn written_skills(
+    team: &TeamRuntime,
+    fixture: &Fixture,
+    id: i64,
+    role: AgentRole,
+) -> BTreeSet<String> {
+    let context = team
+        .context(&fixture.setup.project_id, id, role, true, Layout::Linked)
+        .unwrap();
+    let home = fixture.base.join(format!("skills-home-{id}"));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&home)
+        .unwrap();
+    let installed = context.install("claude-code", &home, true).unwrap();
+    let skills = home.join("crazyagent/plugin/skills");
+    let names = match skills.is_dir() {
+        true => std::fs::read_dir(&skills)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect(),
+        false => BTreeSet::new(),
+    };
+    drop(installed);
+    names
+}
+
+/// DEC-111 R3: a worker's launch writes only the approved skills the owner chose for
+/// workers (a chosen name that is not approved adds nothing), while the lead above it and
+/// the master keep every approved skill, since their setting is still All approved skills.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_worker_gets_only_the_skills_chosen_for_workers() {
+    let fixture = Fixture::new(1);
+    approve_skills(&fixture, &["meal-tips", "release-notes"]);
+    crate::coord::settings::write(
+        &fixture.connection,
+        &fixture.setup.project_id,
+        &crate::coord::settings::CoordSettings {
+            role_skills: crate::coord::settings::RoleSkills {
+                worker: Some(vec!["not-approved".into(), "release-notes".into()]),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let team = fixture.runtime();
+    let master = fixture.agent(AgentRole::Master, "claude-code", AgentStatus::Idle);
+    let lead = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Idle);
+    let worker = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Idle);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?1 WHERE id=?2",
+            params![lead, worker],
+        )
+        .unwrap();
+    let every = BTreeSet::from(["meal-tips".to_owned(), "release-notes".to_owned()]);
+
+    assert_eq!(
+        written_skills(&team, &fixture, worker, AgentRole::Sub),
+        BTreeSet::from(["release-notes".to_owned()]),
+        "a worker, one level below its lead at the default Sub-agent depth of 2, gets the workers' choice"
+    );
+    assert_eq!(
+        written_skills(&team, &fixture, lead, AgentRole::Sub),
+        every,
+        "the lead keeps All approved skills"
+    );
+    assert_eq!(
+        written_skills(&team, &fixture, master, AgentRole::Master),
+        every
+    );
+}
+
+/// DEC-111 R3: the master follows the master's own choice and a worker on All approved
+/// skills gets every approved skill while the lead above it follows the leads' choice, so
+/// each role reads its own setting and no other.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_master_and_a_worker_on_all_approved_skills_follow_their_own_setting() {
+    let fixture = Fixture::new(1);
+    approve_skills(&fixture, &["meal-tips", "release-notes", "style-guide"]);
+    crate::coord::settings::write(
+        &fixture.connection,
+        &fixture.setup.project_id,
+        &crate::coord::settings::CoordSettings {
+            role_skills: crate::coord::settings::RoleSkills {
+                master: Some(vec!["meal-tips".into()]),
+                lead: Some(vec!["style-guide".into()]),
+                worker: None,
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let team = fixture.runtime();
+    let master = fixture.agent(AgentRole::Master, "claude-code", AgentStatus::Idle);
+    let lead = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Idle);
+    let worker = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Idle);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?1 WHERE id=?2",
+            params![lead, worker],
+        )
+        .unwrap();
+
+    assert_eq!(
+        written_skills(&team, &fixture, master, AgentRole::Master),
+        BTreeSet::from(["meal-tips".to_owned()]),
+        "the master gets the master's choice"
+    );
+    assert_eq!(
+        written_skills(&team, &fixture, lead, AgentRole::Sub),
+        BTreeSet::from(["style-guide".to_owned()]),
+        "the lead gets the leads' choice"
+    );
+    assert_eq!(
+        written_skills(&team, &fixture, worker, AgentRole::Sub),
+        BTreeSet::from([
+            "meal-tips".to_owned(),
+            "release-notes".to_owned(),
+            "style-guide".to_owned(),
+        ]),
+        "a worker on All approved skills gets every approved skill"
+    );
+}
+
+/// DEC-111 R3: a teammate gets the workers' choice even at a depth where a sub-agent leads,
+/// since only a sub-agent may start sub-agents of its own.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_teammate_gets_the_workers_skills_where_a_sub_agent_would_lead() {
+    let fixture = Fixture::new(1);
+    approve_skills(&fixture, &["meal-tips", "release-notes", "style-guide"]);
+    crate::coord::settings::write(
+        &fixture.connection,
+        &fixture.setup.project_id,
+        &crate::coord::settings::CoordSettings {
+            role_skills: crate::coord::settings::RoleSkills {
+                master: None,
+                lead: Some(vec!["style-guide".into()]),
+                worker: Some(vec!["release-notes".into()]),
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let team = fixture.runtime();
+    let lead = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Idle);
+    let teammate = fixture.agent(AgentRole::Teammate, "claude-code", AgentStatus::Idle);
+
+    assert_eq!(
+        written_skills(&team, &fixture, lead, AgentRole::Sub),
+        BTreeSet::from(["style-guide".to_owned()]),
+        "a sub-agent at the top of the default Sub-agent depth of 2 leads"
+    );
+    assert_eq!(
+        written_skills(&team, &fixture, teammate, AgentRole::Teammate),
+        BTreeSet::from(["release-notes".to_owned()]),
+        "a teammate at the same depth gets the workers' choice"
+    );
+}
+
+/// DEC-111 R3: the runtime's tools-off master hears, in its team index, which team roles
+/// get each skill under the owner's choice per role, and no skill that no lead or worker
+/// gets.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_tools_off_master_hears_the_roles_each_skill_goes_to() {
+    let fixture = Fixture::new(1);
+    approve_skills(&fixture, &["meal-tips", "release-notes", "style-guide"]);
+    crate::coord::settings::write(
+        &fixture.connection,
+        &fixture.setup.project_id,
+        &crate::coord::settings::CoordSettings {
+            role_skills: crate::coord::settings::RoleSkills {
+                master: Some(Vec::new()),
+                lead: Some(vec!["meal-tips".into()]),
+                worker: Some(vec!["meal-tips".into(), "release-notes".into()]),
+            },
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let team = fixture.runtime();
+    let master = fixture.agent(AgentRole::Master, "claude-code", AgentStatus::Idle);
+    let context = team
+        .context(
+            &fixture.setup.project_id,
+            master,
+            AgentRole::Master,
+            false,
+            Layout::Linked,
+        )
+        .unwrap();
+    let index = context
+        .instructions()
+        .split_once("\n## Team skills and MCP servers\n\n")
+        .map(|(_, index)| index)
+        .unwrap();
+
+    assert_eq!(
+        index,
+        "Your own tools are off in this conversation, so you cannot call these. The owner approved them for this project. Every team agent with tools on receives the MCP servers, but each skill only the team roles named after it, as the owner chose: a lead is a sub-agent that may start sub-agents of its own, and a worker is any other sub-agent or teammate. Plan the team's work with them in mind.\n\n- Skill meal-tips (leads and workers): Teaches meal-tips.\n- Skill release-notes (workers): Teaches release-notes.\n"
+    );
+}
+
 #[cfg(target_os = "macos")]
 const AGENT_GIT: &str = "/Library/Developer/CommandLineTools/usr/bin/git";
 
