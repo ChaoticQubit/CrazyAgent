@@ -242,6 +242,17 @@ fn frame(view: &TeamView, width: u16, height: u16) -> Vec<String> {
     lines
 }
 
+/// The words a frame shows in reading order, its rows joined with single spaces and its
+/// borders left out, so a text wrapped over several rows reads as one line. Takes the
+/// frame's rows. Returns the words.
+fn words(rows: &[String]) -> String {
+    rows.iter()
+        .flat_map(|row| row.split_whitespace())
+        .filter(|word| word.chars().any(char::is_alphanumeric))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
 fn find<'a>(rows: &'a [String], needle: &str) -> &'a str {
     rows.iter()
         .find(|row| row.contains(needle))
@@ -2593,11 +2604,13 @@ fn f_moves_the_new_folder_limit_through_every_choice() {
 /// B steps Background commands at task end from Wait to a 2 min grace time, to Stop and
 /// back to Wait, and G steps the grace time through every choice, starting a grace time
 /// from another choice (DEC-111 Q13): each key sends its change, the engine's answer says
-/// the new choice and the team rows show what the engine stored. A grace time the engine
-/// refuses has its own plain text.
+/// the new choice and which agents it acts on, read whole in an 80 column terminal, and
+/// the team rows show what the engine stored. A grace time the engine refuses has its own
+/// plain text.
 #[test]
 fn shift_b_steps_background_commands_and_shift_g_steps_the_grace_time() {
     use crate::team::BackgroundAtEnd;
+    const SCOPE: &str = "It applies to Claude agents and to agents run per turn; a kept Codex pane keeps its background commands whatever the choice.";
     let mut view = TeamView::new(project());
     for key in ['B', 'G'] {
         assert_eq!(view.key(press(KeyCode::Char(key))), TeamReply::Handled);
@@ -2613,20 +2626,24 @@ fn shift_b_steps_background_commands_and_shift_g_steps_the_grace_time() {
     let grace = |secs: u32, span: &str| {
         (
             BackgroundAtEnd::Grace { secs },
-            format!("A task's background commands now get {span} after its turn ends, then stop."),
+            format!(
+                "A task's background commands now get {span} after its turn ends, then stop. {SCOPE}"
+            ),
             format!("Background commands  Stop after {span}"),
         )
     };
     let stop = (
         BackgroundAtEnd::Stop,
-        "A task's background commands now stop when its turn ends, and its agent is told so."
-            .to_owned(),
+        format!(
+            "A task's background commands now stop when its turn ends, and its agent is told so. {SCOPE}"
+        ),
         "Background commands  Stop at turn end".to_owned(),
     );
     let wait = (
         BackgroundAtEnd::Wait,
-        "A task now waits for the commands its agent started in the background, up to its task limit."
-            .to_owned(),
+        format!(
+            "A task now waits for the commands its agent started in the background, up to its task limit. {SCOPE}"
+        ),
         "Background commands  Wait".to_owned(),
     );
     let mut stored = team();
@@ -2650,6 +2667,8 @@ fn shift_b_steps_background_commands_and_shift_g_steps_the_grace_time() {
         );
         applied(&mut view, reply);
         assert_eq!(view.notice, Some(Notice::plain(done)));
+        let narrow = frame(&view, 80, 30);
+        assert!(words(&narrow).contains(SCOPE), "{}", narrow.join("\n"));
         stored.background_at_end = choice;
         at += 60_000;
         reread(&mut view, stored.clone(), at);

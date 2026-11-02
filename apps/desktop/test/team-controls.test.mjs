@@ -125,12 +125,13 @@ test("Land on offers the master's branch by default and a named branch, and show
   assert.ok(named.includes('<button type="button" class="btn small">Use the master&#x27;s branch</button>'), "a named branch can go back to the master's branch");
 });
 
-test("Background commands at task end offers Wait first, a grace time and Stop, and shows the engine's choice", () => {
+test("Background commands at task end offers Wait first, a grace time and Stop, says which agents it acts on, and shows the engine's choice", () => {
   const render = (extra) => renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status(extra), reload() {} }));
   const wait = render();
   assert.match(wait, /<label for="tg-background-chores">Background commands at task end<\/label>/);
   assert.match(wait, /<option value="wait" selected="">Wait for them<\/option><option value="grace">Stop them after a grace time<\/option><option value="stop">Stop them when the turn ends<\/option>/);
   assert.doesNotMatch(wait, /id="tg-grace-chores"/, "no grace time to type while Wait is on");
+  assert.ok(wait.includes("It applies to Claude agents and to agents run per turn; a kept Codex pane keeps its background commands whatever the choice."), "the setting says which agents it acts on");
   const grace = render({ background_at_end: { mode: "grace", secs: 300 } });
   assert.match(grace, /<option value="wait">Wait for them<\/option><option value="grace" selected="">Stop them after a grace time<\/option>/);
   assert.match(grace, /<label for="tg-grace-chores">Grace time in seconds<\/label><input id="tg-grace-chores"[^>]* value="300"/);
