@@ -268,8 +268,8 @@ fn one_pane_holding_unfinished_lines_never_stops_another_pane_s_call() {
     drop(held);
 }
 
-/// The engine removes its socket when dropped only from the folder it bound in: a folder
-/// swapped for a link to another folder keeps whatever that folder holds (DEC-111 S1R1-1).
+/// The engine removes nothing when its socket is dropped, also not through a folder swapped
+/// for a link to another folder, which keeps whatever it holds (DEC-111 S1R1-1, RH-2).
 #[test]
 fn dropping_the_socket_never_removes_through_a_swapped_folder() {
     let root = folder();

@@ -1073,12 +1073,13 @@ impl ProjectSandbox {
     }
 
     /// Splits a native-mode lead's sandbox into the lead's and its teammates' (DEC-104,
-    /// rv-audit S1 F1, TTDL F1). The lead runs its own tmux server at `own`, uses the engine's
-    /// caller socket at `callers` and only reaches its teammates' server at `mates`. The
-    /// teammates serve `mates`, only reach `callers` and are shut out of `own`, so no teammate
-    /// holds a listener or places a node where the lead or the engine connects. Inputs: the
-    /// three sockets and the canonical tmux program. Output: the lead's and the teammates'
-    /// sandboxes, `Invalid`, or `Unavailable` off macOS.
+    /// rv-audit S1 F1, TTDL F1). The lead runs its own tmux server at `own` and only reaches
+    /// the engine's caller socket at `callers` and its teammates' server at `mates`. The
+    /// teammates serve `mates`, only reach `callers` and are shut out of `own`, so no agent
+    /// binds, blocks or replaces the caller socket the engine answers on (DEC-111 Q18,
+    /// rv-secreview RH-1) and no teammate holds a listener or places a node where the lead
+    /// connects. Inputs: the three sockets and the canonical tmux program. Output: the lead's
+    /// and the teammates' sandboxes, `Invalid`, or `Unavailable` off macOS.
     pub fn native_team(
         self,
         own: &Path,
@@ -1093,7 +1094,7 @@ impl ProjectSandbox {
             .shut_unix_socket(own)?;
         let lead = self
             .allow_tmux_server(own, tmux)?
-            .allow_unix_socket(callers)?
+            .reach_unix_socket(callers)?
             .reach_unix_socket(mates)?;
         Ok((lead, teammates))
     }

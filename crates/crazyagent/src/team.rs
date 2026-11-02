@@ -1360,6 +1360,10 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 stopped_ms INTEGER,
                 PRIMARY KEY(agent, pane)
             );
+            CREATE TABLE IF NOT EXISTS team_teammate_names (
+                agent INTEGER PRIMARY KEY,
+                name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 64)
+            );
             CREATE TABLE IF NOT EXISTS team_agent_conversations (
                 agent INTEGER PRIMARY KEY,
                 project TEXT NOT NULL,
