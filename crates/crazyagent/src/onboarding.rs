@@ -487,6 +487,7 @@ pub(crate) fn execute(
     let policy = AgentPolicy {
         access,
         toolchains: Vec::new(),
+        network: crate::sandbox::policy::AgentNetwork::default(),
     };
     crate::sandbox::policy::save(tx, project_id.as_str(), &policy).map_err(error)?;
     let stored = crate::project_setup::load_setup(tx, &project_id)?

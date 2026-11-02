@@ -82,6 +82,58 @@ impl AgentAccess {
     }
 }
 
+/// How far one project's tools-on agents and the plugin "Check again" server may reach on
+/// the network (DEC-111 Q17): Open is the whole network, Https is port 443 only, None is
+/// nothing beyond the model endpoint. The same choice applies to the agents and to the
+/// check. It does not widen or narrow the live master, which always reaches the model's
+/// port only, whatever this choice.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentNetwork {
+    #[default]
+    Open,
+    Https,
+    None,
+}
+
+impl AgentNetwork {
+    /// Every choice, widest first.
+    pub const ALL: [Self; 3] = [Self::Open, Self::Https, Self::None];
+
+    /// The choice's stable id, as stored and sent to clients.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Https => "https",
+            Self::None => "none",
+        }
+    }
+
+    /// The name shown to the owner.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Open => "Open",
+            Self::Https => "Port 443 only",
+            Self::None => "None",
+        }
+    }
+
+    /// The sandbox reach this choice grants. Input: the model endpoint the agent still
+    /// needs, or None for the plugin check, which needs no model. Output: Open for Open,
+    /// port 443 plus the model for Https, the model alone for None.
+    pub fn sandbox(self, model: Option<super::SandboxRemote>) -> super::SandboxNetwork {
+        match self {
+            Self::Open => super::SandboxNetwork::Open,
+            Self::Https => {
+                let mut remotes = vec![super::SandboxRemote::AnyHost(443)];
+                remotes.extend(model);
+                super::SandboxNetwork::Only(remotes)
+            }
+            Self::None => super::SandboxNetwork::Only(model.into_iter().collect()),
+        }
+    }
+}
+
 /// The owner's choice for one toolchain family; a family with no choice follows the
 /// project (on when the project uses it).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -98,6 +150,8 @@ pub struct ToolchainChoice {
 pub struct AgentPolicy {
     pub access: AgentAccess,
     pub toolchains: Vec<ToolchainChoice>,
+    #[serde(default)]
+    pub network: AgentNetwork,
 }
 
 impl AgentPolicy {
@@ -150,12 +204,20 @@ impl AgentPolicy {
         assert!(toolchains.len() <= Toolchain::ALL.len());
         PolicyView {
             access: self.access,
+            network: self.network,
             levels: AgentAccess::ALL
                 .into_iter()
                 .map(|access| LevelView {
                     access,
                     label: access.label().to_owned(),
                     unavailable: access.unavailable().map(str::to_owned),
+                })
+                .collect(),
+            networks: AgentNetwork::ALL
+                .into_iter()
+                .map(|network| NetworkView {
+                    network,
+                    label: network.label().to_owned(),
                 })
                 .collect(),
             toolchains,
@@ -175,8 +237,18 @@ impl AgentPolicy {
 #[serde(deny_unknown_fields)]
 pub struct PolicyView {
     pub access: AgentAccess,
+    pub network: AgentNetwork,
     pub levels: Vec<LevelView>,
+    pub networks: Vec<NetworkView>,
     pub toolchains: Vec<ToolchainView>,
+}
+
+/// One network choice with the name shown to the owner.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NetworkView {
+    pub network: AgentNetwork,
+    pub label: String,
 }
 
 /// One access level with the reason it cannot run here, if any.
@@ -298,6 +370,7 @@ mod tests {
         assert_eq!(load(&connection, "p").unwrap(), AgentPolicy::default());
         let policy = AgentPolicy {
             access: AgentAccess::Full,
+            network: AgentNetwork::default(),
             toolchains: vec![ToolchainChoice {
                 toolchain: Toolchain::Python,
                 allowed: false,
@@ -322,5 +395,29 @@ mod tests {
         }
         remove(&connection, "p").unwrap();
         assert_eq!(load(&connection, "p").unwrap(), AgentPolicy::default());
+    }
+
+    #[test]
+    fn a_saved_network_choice_reads_back_and_defaults_to_open() {
+        let connection = Connection::open_in_memory().unwrap();
+        assert_eq!(AgentNetwork::default(), AgentNetwork::Open);
+        assert_eq!(load(&connection, "p").unwrap().network, AgentNetwork::Open);
+        let mut policy = AgentPolicy::default();
+        for choice in AgentNetwork::ALL {
+            policy.network = choice;
+            save(&connection, "p", &policy).unwrap();
+            assert_eq!(load(&connection, "p").unwrap().network, choice);
+        }
+        connection.execute(TABLE, []).unwrap();
+        connection
+            .execute(
+                "INSERT INTO project_agent_policy (project, body) VALUES ('old', ?1)
+                 ON CONFLICT(project) DO UPDATE SET body=excluded.body",
+                [r#"{"access":"own_branch","toolchains":[]}"#],
+            )
+            .unwrap();
+        let old = load(&connection, "old").unwrap();
+        assert_eq!(old.access, AgentAccess::OwnBranch);
+        assert_eq!(old.network, AgentNetwork::Open);
     }
 }

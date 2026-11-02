@@ -290,6 +290,7 @@ impl ProjectPage {
                     policy: AgentPolicy {
                         access,
                         toolchains: Vec::new(),
+                        network: crate::sandbox::policy::AgentNetwork::default(),
                     },
                 },
                 generation,

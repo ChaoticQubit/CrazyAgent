@@ -71,6 +71,9 @@ test("with the live master on, its terminal fills the master area with no close 
   assert.ok(seen.sessions.top - seen.area.top <= 60, `only the head sits above the Sessions bar: ${JSON.stringify(seen)}`);
   assert.ok(seen.box.top - seen.sessions.bottom <= 13, `the terminal starts right below the Sessions bar: ${JSON.stringify(seen)}`);
   assert.ok(seen.box.height >= (seen.area.bottom - seen.sessions.bottom) - 13, `the terminal takes the area below the head and the Sessions bar: ${JSON.stringify(seen)}`);
+  assert.ok(seen.inset !== null, "the head title and the Sessions bar's text and buttons are measured");
+  assert.equal(seen.inset.bar, seen.inset.head, `the Sessions bar's text starts where the head's title does: ${JSON.stringify(seen.inset)}`);
+  assert.equal(seen.inset.barEnd, seen.inset.headEnd, `the Sessions bar's buttons keep the head's inset from the right edge: ${JSON.stringify(seen.inset)}`);
   assert.deepEqual(Object.values(seen.titles).filter((title) => /live master/i.test(title)), [], JSON.stringify(seen.titles));
 });
 

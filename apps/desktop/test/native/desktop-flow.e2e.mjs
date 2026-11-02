@@ -187,8 +187,10 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
       await me.click("Conversation", "a, button, [role=tab]");
       const master = log.answers.get("desktop_project_setup")?.value?.team?.master;
       assert.ok(["codex", "claude-code"].includes(master), `the setup gave the project a master that runs live in its terminal: ${master}`);
+      const head = log.answers.get("desktop_harness_catalog")?.value?.find((entry) => entry.id === master)?.name;
+      assert.ok(head, `the engine's harness catalog names the master: ${master}`);
       const waiting = "Waiting for the master's terminal. It opens once the master signs in and starts.";
-      const live = await me.waitFor("the live master waiting for its sign-in", (text) => /Master: [^\n,]+, live/.test(text) && text.includes(waiting), STEP_MS);
+      const live = await me.waitFor("the live master waiting for its sign-in", (text) => text.includes(`${head}\nOpening\n`) && text.includes(waiting), STEP_MS);
       await me.capture("live-master");
       for (const gone of ["Stop live master", "Start live master", "Earlier conversation"]) {
         assert.ok(!live.includes(gone), `the master area offers no ${gone}`);

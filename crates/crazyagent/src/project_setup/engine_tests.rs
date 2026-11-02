@@ -1384,6 +1384,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
 
     let policy = AgentPolicy {
         access: AgentAccess::OwnBranch,
+        network: crate::sandbox::policy::AgentNetwork::default(),
         toolchains: vec![ToolchainChoice {
             toolchain: Toolchain::Rust,
             allowed: !rust.allowed,
@@ -1410,6 +1411,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
 
     let twice = AgentPolicy {
         access: AgentAccess::Full,
+        network: crate::sandbox::policy::AgentNetwork::default(),
         toolchains: vec![
             ToolchainChoice {
                 toolchain: Toolchain::Node,
@@ -1438,6 +1440,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
 
     let full = AgentPolicy {
         access: AgentAccess::Full,
+        network: crate::sandbox::policy::AgentNetwork::default(),
         toolchains: Vec::new(),
     };
     let saved = owner
