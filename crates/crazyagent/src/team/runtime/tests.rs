@@ -4006,6 +4006,19 @@ fn master_replies(fixture: &Fixture) -> usize {
         .count()
 }
 
+/// `RESUMING_CODEX` that also records the first line of each paste, the one that starts
+/// with the paste mark, so a typed text's opening line is kept. Returns the script.
+#[cfg(target_os = "macos")]
+fn recording_codex() -> String {
+    let script = RESUMING_CODEX.replacen(
+        "*\"$e[200~\"*) open=1; continue ;;",
+        "*\"$e[200~\"*) open=1; printf '%s\\n' \"$line\" >> \"$CODEX_HOME/typed\"; continue ;;",
+        1,
+    );
+    assert_ne!(script, RESUMING_CODEX);
+    script
+}
+
 /// The instruction file the engine wrote into one agent's Codex home.
 #[cfg(target_os = "macos")]
 fn codex_instructions(fixture: &Fixture, agent: i64) -> String {
@@ -4228,7 +4241,7 @@ fn with_next_message_an_edit_reaches_the_masters_next_message_once() {
         &fixture,
         crate::instruction_files::EditDelivery::NextMessage,
     );
-    let mut team = live_runtime(&fixture, &host, RESUMING_CODEX);
+    let mut team = live_runtime(&fixture, &host, &recording_codex());
     tell_master(&fixture, "Plan the page");
     fixture.until(&mut team, "the master answers the first message", |f| {
         master_replies(f) == 1
@@ -4276,7 +4289,7 @@ fn with_next_message_an_edit_reaches_the_live_masters_next_typed_message_once() 
         &fixture,
         crate::instruction_files::EditDelivery::NextMessage,
     );
-    let mut team = live_runtime(&fixture, &host, RESUMING_CODEX);
+    let mut team = live_runtime(&fixture, &host, &recording_codex());
     super::super::master::set_live(&fixture.connection, &fixture.setup.project_id, true).unwrap();
     fixture.until(&mut team, "the live master's pane runs", |f| {
         live_agent(&f.connection).is_some()
@@ -4329,7 +4342,7 @@ fn with_restart_an_idle_live_master_restarts_in_its_own_conversation_with_the_ne
     let fixture = Fixture::new(1);
     let host = fixture.host();
     edit_settings(&fixture, crate::instruction_files::EditDelivery::Restart);
-    let mut team = live_runtime(&fixture, &host, RESUMING_CODEX);
+    let mut team = live_runtime(&fixture, &host, &recording_codex());
     let project = fixture.setup.project_id.clone();
     switch_session(&fixture.connection, "s-one");
     super::super::master::set_live(&fixture.connection, &project, true).unwrap();
@@ -4382,7 +4395,7 @@ fn with_restart_an_idle_master_stops_and_its_next_message_starts_it_with_the_new
     let fixture = Fixture::new(1);
     let host = fixture.host();
     edit_settings(&fixture, crate::instruction_files::EditDelivery::Restart);
-    let mut team = live_runtime(&fixture, &host, RESUMING_CODEX);
+    let mut team = live_runtime(&fixture, &host, &recording_codex());
     tell_master(&fixture, "Plan the page");
     fixture.until(&mut team, "the master answers the first message", |f| {
         master_replies(f) == 1
@@ -4424,7 +4437,7 @@ fn with_badge_the_master_gets_nothing_and_shows_instructions_changed_until_it_st
     let fixture = Fixture::new(1);
     let host = fixture.host();
     edit_settings(&fixture, crate::instruction_files::EditDelivery::Badge);
-    let mut team = live_runtime(&fixture, &host, RESUMING_CODEX);
+    let mut team = live_runtime(&fixture, &host, &recording_codex());
     let project = fixture.setup.project_id.clone();
     super::super::master::set_live(&fixture.connection, &project, true).unwrap();
     fixture.until(&mut team, "the live master's pane runs", |f| {
