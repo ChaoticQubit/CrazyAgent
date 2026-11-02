@@ -5437,24 +5437,24 @@ fn with_no_wait_a_task_ends_with_its_turn_and_its_agent_was_told() {
 /// A task its time limit ends while a command its agent started in the background still
 /// runs says so first in its result, so the master and the owner read that the command was
 /// stopped with the task rather than that it finished, and the command really stops with
-/// the task: while the runtime and its panes still run, it never writes what it would have
-/// written on finishing (w-review LTK-L1, rounds 1 and 2). The agent's reply comes 2 s after
-/// its background command, later than the 1 s limit, as on a loaded machine, and the result
-/// still holds it.
+/// the task: released after the task ended, it never writes what it would have written on
+/// finishing (w-review LTK-L1, rounds 1 and 2). The agent's reply comes 2 s after its
+/// background command, later than the 1 s limit, as on a loaded machine, and the result
+/// still holds it: the stand-in writes both before it shows it is ready, so they are in its
+/// transcript before the engine types the task and the limit's clock starts, an order no
+/// machine load changes (leader 2026-11-02).
 #[cfg(target_os = "macos")]
 #[test]
 fn a_task_cut_by_its_time_limit_says_its_background_command_was_stopped() {
     let fixture = Fixture::new(1);
     let host = fixture.host();
-    let late = format!("  /bin/sleep 2\n{WAITING_REPLY}");
-    let slow = BACKGROUND_CLAUDE
-        .replace("/bin/sleep 2\n", "/bin/sleep 4\n")
-        .replace(WAITING_REPLY, &late);
-    assert!(slow.contains(&late) && slow.contains("/bin/sleep 4\n"));
-    let mut team = check_runtime(&fixture, &host, &slow, Some(1), None);
+    let mut team = check_runtime(&fixture, &host, STAGED_BACKGROUND_CLAUDE, Some(1), None);
     fixture.until(&mut team, "the task ends", |f| check_end(f).is_some());
     let (status, result, error) = check_end(&fixture).unwrap();
-    let finished = stand_in_file(&fixture, subs(&fixture)[0], "background-done");
+    let agent = subs(&fixture)[0];
+    let finished = stand_in_file(&fixture, agent, "background-done");
+    assert!(!finished.exists());
+    std::fs::write(stand_in_file(&fixture, agent, "release"), "go").unwrap();
     std::thread::sleep(Duration::from_secs(5));
     let outlived = finished.exists();
     team.shutdown().unwrap();
@@ -5474,6 +5474,38 @@ fn a_task_cut_by_its_time_limit_says_its_background_command_was_stopped() {
         "{result}"
     );
 }
+
+/// A Claude Code stand-in that writes its first turn before it shows it is ready: a
+/// background command, then 2 s later the reply "Waiting for the check." and a turn end, so
+/// the turn stays open for the command. The command writes `background-done` only once the
+/// test creates `release`, so nothing but the engine ends it while the task runs. The lines
+/// the owner types are kept in `typed`.
+#[cfg(target_os = "macos")]
+const STAGED_BACKGROUND_CLAUDE: &str = r#"#!/bin/sh
+printf '%s\n' "$*" >> "$CLAUDE_CONFIG_DIR/launches"
+id=""
+prev=""
+for a in "$@"; do
+  case "$prev" in --resume|--session-id) id="$a" ;; esac
+  prev="$a"
+done
+[ -n "$id" ] || { echo "no session id"; exit 4; }
+d="$CLAUDE_CONFIG_DIR/projects/$(/bin/pwd -P | /usr/bin/tr -c 'A-Za-z0-9\n' '-' | /usr/bin/tr -d '\n')"
+/bin/mkdir -p "$d" || exit 1
+f="$d/$id.jsonl"
+(
+  while [ ! -e "$CLAUDE_CONFIG_DIR/release" ]; do /bin/sleep 0.1; done
+  printf done > "$CLAUDE_CONFIG_DIR/background-done"
+) &
+printf '{"type":"user","message":{"content":"Owner turn"}}\n' >> "$f"
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_bg","name":"Bash","input":{"command":"check","run_in_background":true}}],"stop_reason":"tool_use"}}' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bg","content":"Command running in background with ID: bgcheck1."}]},"toolUseResult":{"backgroundTaskId":"bgcheck1"}}' >> "$f"
+/bin/sleep 2
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"Waiting for the check."}],"stop_reason":"end_turn"}}' '{"type":"system","subtype":"turn_duration","durationMs":300}' >> "$f"
+printf '\033[?2004hClaude stand-in ready\n'
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> "$CLAUDE_CONFIG_DIR/typed"
+done
+"#;
 
 /// The reply line of the background stand-in's first turn, which a variant swaps for its
 /// own steps before the reply.
