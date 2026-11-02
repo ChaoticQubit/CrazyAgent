@@ -5502,16 +5502,17 @@ fn under_stop_a_per_turn_agent_is_told_its_background_commands_stop() {
 /// stopped with the task rather than that it finished, and the command really stops with
 /// the task: released after the task ended, it never writes what it would have written on
 /// finishing (w-review LTK-L1, rounds 1 and 2). The agent's reply comes 2 s after its
-/// background command, later than the 1 s limit, as on a loaded machine, and the result
-/// still holds it: the stand-in writes both before it shows it is ready, so they are in its
-/// transcript before the engine types the task and the limit's clock starts, an order no
-/// machine load changes (leader 2026-11-02).
+/// background command, as on a loaded machine, and the result still holds it: the stand-in
+/// writes both before it shows it is ready, so they are in its transcript before the engine
+/// types the task and the limit's clock starts, an order no machine load changes (leader
+/// 2026-11-02). The command never ends by itself, so the 4 s limit is what ends the task and
+/// leaves the engine time to read the transcript after typing it (rv-audit S3 r1).
 #[cfg(target_os = "macos")]
 #[test]
 fn a_task_cut_by_its_time_limit_says_its_background_command_was_stopped() {
     let fixture = Fixture::new(1);
     let host = fixture.host();
-    let mut team = check_runtime(&fixture, &host, STAGED_BACKGROUND_CLAUDE, Some(1), None);
+    let mut team = check_runtime(&fixture, &host, STAGED_BACKGROUND_CLAUDE, Some(4), None);
     fixture.until(&mut team, "the task ends", |f| check_end(f).is_some());
     let (status, result, error) = check_end(&fixture).unwrap();
     let agent = subs(&fixture)[0];
@@ -5529,7 +5530,7 @@ fn a_task_cut_by_its_time_limit_says_its_background_command_was_stopped() {
     assert_eq!(status, "failed");
     assert_eq!(
         error.as_deref(),
-        Some("The sub-agent was stopped by the 1 s task limit; change it in Team settings")
+        Some("The sub-agent was stopped by the 4 s task limit; change it in Team settings")
     );
     let result = result.unwrap_or_default();
     assert!(
