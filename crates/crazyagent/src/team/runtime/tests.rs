@@ -5444,7 +5444,7 @@ fn under_stop_a_kept_codex_agent_is_not_told_its_background_commands_stop() {
     let fixture = Fixture::new(1);
     let host = fixture.host();
     choose_background(&fixture, crate::team::BackgroundAtEnd::Stop);
-    let mut team = live_runtime(&fixture, &host, RESUMING_CODEX);
+    let mut team = live_runtime(&fixture, &host, &recording_codex());
     owner(&fixture, &[hand_off(&fixture, "Write page.md")]);
     fixture.until(&mut team, "the task is done", |f| {
         task_of(f, "Write page.md").0 == "done"
@@ -5467,7 +5467,7 @@ fn under_stop_a_per_turn_agent_is_told_its_background_commands_stop() {
     let bin = fixture.base.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let codex = bin.join("codex");
-    std::fs::write(&codex, RESUMING_CODEX).unwrap();
+    std::fs::write(&codex, recording_codex()).unwrap();
     std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
     let mut agent = super::managed_agent::ManagedAgent::in_pane(
         "codex",
