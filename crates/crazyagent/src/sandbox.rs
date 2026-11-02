@@ -80,6 +80,9 @@ const WORKTREES_MAX: usize = 8;
 const HIDDEN_MAX: usize = 4;
 /// The most exact Unix sockets one agent may bind and connect: its own Codex app-server's.
 const SOCKETS_MAX: usize = 2;
+/// The most exact Unix socket grants one agent holds, of every use together: a native lead's
+/// own tmux server, its caller socket and its teammates' tmux server.
+const SOCKET_GRANTS_MAX: usize = 4;
 /// The longest Unix socket path macOS binds, `sun_path` less its closing NUL.
 const SOCKET_PATH_BYTES_MAX: usize = 103;
 const TOOL_ROOTS_MAX: usize = 24;
@@ -607,7 +610,10 @@ pub struct ProjectSandbox {
     engine_secrets: Vec<PathBuf>,
     checkout: Option<Checkout>,
     clone: Option<PathBuf>,
-    sockets: Vec<(PathBuf, bool)>,
+    sockets: Vec<PathBuf>,
+    served: Vec<PathBuf>,
+    reached: Vec<PathBuf>,
+    shut: Vec<PathBuf>,
 }
 
 /// The one git worktree a confined agent writes in place of the whole project folder,
@@ -660,6 +666,9 @@ impl ProjectSandbox {
             checkout: None,
             clone: None,
             sockets: Vec::new(),
+            served: Vec::new(),
+            reached: Vec::new(),
+            shut: Vec::new(),
         })
     }
 
@@ -668,28 +677,77 @@ impl ProjectSandbox {
     /// own Codex app-server socket in the shared daemon folder (DEC-104 K2b). Input: a plain
     /// absolute path of letters, digits, `/`, `.`, `-` and `_` in an existing folder.
     /// Output: the widened sandbox, or `Invalid`; only Seatbelt can hold the grant.
-    pub fn allow_unix_socket(self, socket: &Path) -> Result<Self, SandboxError> {
-        self.grant_unix_socket(socket, true)
+    pub fn allow_unix_socket(mut self, socket: &Path) -> Result<Self, SandboxError> {
+        self.socket_room(socket)?;
+        if self.sockets.len() >= SOCKETS_MAX {
+            return Err(invalid("too many unix sockets"));
+        }
+        self.sockets.push(socket.to_path_buf());
+        assert!(self.sockets.len() <= SOCKETS_MAX && self.socket_grants() <= SOCKET_GRANTS_MAX);
+        Ok(self)
     }
 
-    /// Lets the agent connect to one Unix socket at an exact path and read that file and its
-    /// folder's metadata, never bind a socket there: a native lead's caller socket, which
-    /// only the engine binds, so an answer on it comes from the engine (DEC-111 Q18). Input:
-    /// a plain absolute path as for `allow_unix_socket`. Output: the widened sandbox, or
-    /// `Invalid`; only Seatbelt can hold the grant.
-    pub fn allow_unix_socket_connect(self, socket: &Path) -> Result<Self, SandboxError> {
-        self.grant_unix_socket(socket, false)
+    /// Lets the agent serve one Unix socket at an exact path but never connect to it or
+    /// unlink it: bind, create and change that file and its `<path>.lock`, and read its
+    /// folder's metadata. A native lead's teammates run their tmux server this way, so none
+    /// of them reaches it or swaps the node for a listener of its own (rv-audit S1 F1).
+    /// Input: as [`Self::allow_unix_socket`]. Output: the widened sandbox, or `Invalid`.
+    pub fn serve_unix_socket(mut self, socket: &Path) -> Result<Self, SandboxError> {
+        self.socket_room(socket)?;
+        self.served.push(socket.to_path_buf());
+        assert!(self.socket_grants() <= SOCKET_GRANTS_MAX);
+        Ok(self)
     }
 
-    /// Adds one exact Unix socket grant, with binding there when `bind` is set. Takes the
-    /// sandbox, the socket and whether the agent binds it. Returns the widened sandbox, or
-    /// `Invalid`.
-    fn grant_unix_socket(mut self, socket: &Path, bind: bool) -> Result<Self, SandboxError> {
+    /// Lets the agent connect to one Unix socket at an exact path and read it, never bind
+    /// it or create, change, link or unlink a node there, such as a native lead reaching its
+    /// teammates' tmux server and its teammates reaching the engine's caller socket (rv-audit
+    /// S1 F1, TTDL F1). Input: as [`Self::allow_unix_socket`]. Output: the widened sandbox,
+    /// or `Invalid`.
+    pub fn reach_unix_socket(mut self, socket: &Path) -> Result<Self, SandboxError> {
+        self.socket_room(socket)?;
+        self.reached.push(socket.to_path_buf());
+        assert!(self.socket_grants() <= SOCKET_GRANTS_MAX);
+        Ok(self)
+    }
+
+    /// Keeps the agent from writing, unlinking or locking one Unix socket at an exact path
+    /// inside its writable folders, with no grant to bind or reach it, such as a native
+    /// lead's own tmux socket for its teammates (rv-audit S1 F1). Input: as
+    /// [`Self::allow_unix_socket`]. Output: the narrowed sandbox, or `Invalid`.
+    pub fn shut_unix_socket(mut self, socket: &Path) -> Result<Self, SandboxError> {
+        self.socket_room(socket)?;
+        self.shut.push(socket.to_path_buf());
+        assert!(self.socket_grants() <= SOCKET_GRANTS_MAX);
+        Ok(self)
+    }
+
+    /// The Unix socket grants of every use this sandbox holds. Takes the sandbox. Returns
+    /// the count.
+    fn socket_grants(&self) -> usize {
+        self.sockets.len() + self.served.len() + self.reached.len() + self.shut.len()
+    }
+
+    /// Checks that one more Unix socket grant fits and names a plain path no grant of this
+    /// sandbox names yet: absolute, at most `SOCKET_PATH_BYTES_MAX`, of letters, digits,
+    /// `/`, `.`, `-` and `_`, in an existing folder. Takes the socket. Returns Ok, or
+    /// `Invalid`; off macOS no Unix socket grant exists.
+    fn socket_room(&self, socket: &Path) -> Result<(), SandboxError> {
         if !cfg!(target_os = "macos") {
             return Err(invalid("unix socket grants need Seatbelt"));
         }
-        if self.sockets.len() >= SOCKETS_MAX {
+        if self.socket_grants() >= SOCKET_GRANTS_MAX {
             return Err(invalid("too many unix sockets"));
+        }
+        let granted = self
+            .sockets
+            .iter()
+            .chain(&self.served)
+            .chain(&self.reached)
+            .chain(&self.shut)
+            .any(|known| known == socket);
+        if granted {
+            return Err(invalid("the unix socket already has a grant"));
         }
         let text = socket
             .to_str()
@@ -708,9 +766,7 @@ impl ProjectSandbox {
         if !plain || folder.is_none() {
             return Err(invalid("the unix socket path is not plain"));
         }
-        self.sockets.push((socket.to_path_buf(), bind));
-        assert!(self.sockets.len() <= SOCKETS_MAX);
-        Ok(self)
+        Ok(())
     }
 
     /// Keeps the ports of the owner's configured local model endpoints free of this agent's
@@ -997,11 +1053,60 @@ impl ProjectSandbox {
     /// Lets a native-mode lead run its own tmux server (DEC-104): an exact socket grant, as
     /// `allow_unix_socket` gives, for its own socket in its short temp folder, and read
     /// access to the tmux program's folder when no system root covers it. No other Unix
-    /// socket becomes reachable, the engine's own tmux server included, and the server, the
-    /// teammate panes it forks and every engine client on it stay inside this profile. Only
-    /// Seatbelt holds it. Input: the socket (`terminal::harness_socket`) and the canonical
-    /// tmux program. Output: the widened sandbox, `Invalid`, or `Unavailable` off macOS.
-    pub fn allow_tmux_server(mut self, socket: &Path, tmux: &Path) -> Result<Self, SandboxError> {
+    /// socket becomes reachable, the engine's own tmux server included, and the server and
+    /// every engine client on it stay inside this profile; its teammates run in a server of
+    /// their own (see [`Self::serve_tmux_server`]). Only Seatbelt holds it. Input: the socket
+    /// (`terminal::harness_socket`) and the canonical tmux program. Output: the widened
+    /// sandbox, `Invalid`, or `Unavailable` off macOS.
+    pub fn allow_tmux_server(self, socket: &Path, tmux: &Path) -> Result<Self, SandboxError> {
+        self.tmux_server(socket, tmux, false)
+    }
+
+    /// Lets a native lead's teammates run their own tmux server (rv-audit S1 F1): as
+    /// [`Self::allow_tmux_server`], but the socket is served only, as
+    /// [`Self::serve_unix_socket`] gives, so no teammate pane the server forks connects to
+    /// it, unlinks it or binds a server of its own there. Input: the socket
+    /// (`terminal::teammates_socket`) and the canonical tmux program. Output: the widened
+    /// sandbox, `Invalid`, or `Unavailable` off macOS.
+    pub fn serve_tmux_server(self, socket: &Path, tmux: &Path) -> Result<Self, SandboxError> {
+        self.tmux_server(socket, tmux, true)
+    }
+
+    /// Splits a native-mode lead's sandbox into the lead's and its teammates' (DEC-104,
+    /// rv-audit S1 F1, TTDL F1). The lead runs its own tmux server at `own`, uses the engine's
+    /// caller socket at `callers` and only reaches its teammates' server at `mates`. The
+    /// teammates serve `mates`, only reach `callers` and are shut out of `own`, so no teammate
+    /// holds a listener or places a node where the lead or the engine connects. Inputs: the
+    /// three sockets and the canonical tmux program. Output: the lead's and the teammates'
+    /// sandboxes, `Invalid`, or `Unavailable` off macOS.
+    pub fn native_team(
+        self,
+        own: &Path,
+        mates: &Path,
+        callers: &Path,
+        tmux: &Path,
+    ) -> Result<(Self, Self), SandboxError> {
+        let teammates = self
+            .clone()
+            .serve_tmux_server(mates, tmux)?
+            .reach_unix_socket(callers)?
+            .shut_unix_socket(own)?;
+        let lead = self
+            .allow_tmux_server(own, tmux)?
+            .allow_unix_socket(callers)?
+            .reach_unix_socket(mates)?;
+        Ok((lead, teammates))
+    }
+
+    /// Grants one tmux server in the agent temp folder, served and reached or served only.
+    /// Takes the socket, the canonical tmux program and whether the socket is served only.
+    /// Returns the widened sandbox, `Invalid`, or `Unavailable` off macOS.
+    fn tmux_server(
+        mut self,
+        socket: &Path,
+        tmux: &Path,
+        served_only: bool,
+    ) -> Result<Self, SandboxError> {
         if !cfg!(target_os = "macos") {
             return Err(SandboxError::Unavailable(TMUX_SERVER_NEEDS_SEATBELT.into()));
         }
@@ -1012,7 +1117,8 @@ impl ProjectSandbox {
         if self
             .sockets
             .iter()
-            .any(|(known, _)| known.parent() == Some(scratch.as_path()))
+            .chain(&self.served)
+            .any(|known| known.parent() == Some(scratch.as_path()))
         {
             return Err(invalid("the sandbox already has a tmux server"));
         }
@@ -1036,7 +1142,11 @@ impl ProjectSandbox {
         if !covered {
             self = self.allow_read(folder)?;
         }
-        self = self.allow_unix_socket(socket)?;
+        self = if served_only {
+            self.serve_unix_socket(socket)?
+        } else {
+            self.allow_unix_socket(socket)?
+        };
         assert!(self.writes(socket.parent().unwrap_or(socket)));
         Ok(self)
     }
@@ -1218,25 +1328,52 @@ impl ProjectSandbox {
         text.push_str(
             "(allow file-read*\n  (literal \"/dev\")\n  (literal \"/dev/random\")\n  (literal \"/dev/urandom\")\n  (literal \"/dev/stdin\")\n  (literal \"/dev/stdout\")\n  (literal \"/dev/stderr\"))\n(allow file-read* file-write-data file-ioctl\n  (literal \"/dev/null\")\n  (literal \"/dev/zero\")\n  (literal \"/dev/tty\")\n  (literal \"/dev/ptmx\")\n  (literal \"/dev/dtracehelper\")\n  (subpath \"/dev/fd\"))\n(allow file-read-metadata file-ioctl\n  (regex #\"^/dev/ttys[0-9]+$\"))\n(allow file-read* file-write-data\n  (require-all\n    (regex #\"^/dev/ttys[0-9]+$\")\n    (extension \"com.apple.sandbox.pty\")))\n",
         );
-        for (socket, bind) in &self.sockets {
+        for socket in &self.sockets {
             let path = socket.display();
             let folder = socket.parent().unwrap_or(socket).display();
-            if *bind {
-                text.push_str(&format!(
-                    "(allow file-read* file-write*\n  (literal \"{path}\")\n  (literal \"{path}.lock\"))\n(allow file-read-metadata (literal \"{folder}\"))\n(allow network-bind (local unix-socket (path-literal \"{path}\")))\n(allow network-outbound (remote unix-socket (path-literal \"{path}\")))\n"
-                ));
-            } else {
-                text.push_str(&format!(
-                    "(allow file-read* (literal \"{path}\"))\n(allow file-read-metadata (literal \"{folder}\"))\n(allow network-outbound (remote unix-socket (path-literal \"{path}\")))\n"
-                ));
-            }
+            text.push_str(&format!(
+                "(allow file-read* file-write*\n  (literal \"{path}\")\n  (literal \"{path}.lock\"))\n(allow file-read-metadata (literal \"{folder}\"))\n(allow network-bind (local unix-socket (path-literal \"{path}\")))\n(allow network-outbound (remote unix-socket (path-literal \"{path}\")))\n"
+            ));
+        }
+        for socket in &self.served {
+            let path = socket.display();
+            let folder = socket.parent().unwrap_or(socket).display();
+            text.push_str(&format!(
+                "(allow file-read* file-write*\n  (literal \"{path}\")\n  (literal \"{path}.lock\"))\n(allow file-read-metadata (literal \"{folder}\"))\n(allow network-bind (local unix-socket (path-literal \"{path}\")))\n(deny file-write-unlink (literal \"{path}\"))\n"
+            ));
+        }
+        for socket in &self.reached {
+            let path = socket.display();
+            let folder = socket.parent().unwrap_or(socket).display();
+            text.push_str(&format!(
+                "(allow file-read* (literal \"{path}\"))\n(allow file-read-metadata (literal \"{folder}\"))\n(allow network-outbound (remote unix-socket (path-literal \"{path}\")))\n(deny file-write* (literal \"{path}\"))\n"
+            ));
+        }
+        for socket in &self.shut {
+            let path = socket.display();
+            text.push_str(&format!(
+                "(deny file-write*\n  (literal \"{path}\")\n  (literal \"{path}.lock\"))\n"
+            ));
         }
         assert_eq!(
             text.matches("unix-socket").count(),
-            self.sockets
+            2 * self.sockets.len() + self.served.len() + self.reached.len()
+        );
+        let denied_last = |operations: &str, socket: &PathBuf| {
+            text.rfind(&format!(
+                "(deny {operations} (literal \"{}\"))",
+                socket.display()
+            )) > text.rfind("(allow file-write*")
+        };
+        assert!(
+            self.served
                 .iter()
-                .map(|(_, bind)| 1 + usize::from(*bind))
-                .sum::<usize>()
+                .all(|socket| denied_last("file-write-unlink", socket))
+                && self
+                    .reached
+                    .iter()
+                    .all(|socket| denied_last("file-write*", socket)),
+            "a served socket's unlink deny and a reached socket's write deny must follow every write allow, since the last match wins"
         );
         let network = text.len();
         match &self.network {

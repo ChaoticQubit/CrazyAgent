@@ -12298,3 +12298,213 @@ fn a_turn_in_the_live_master_s_terminal_marks_its_session_used_and_listed() {
         .unwrap();
     assert_eq!(marked, 1);
 }
+
+/// Ends the tmux servers one native lead test started, on every exit of the test: the lead's
+/// through the engine host, then any socket left in the lead's temp folder but its caller
+/// socket, so a failed assertion leaves no server running.
+#[cfg(target_os = "macos")]
+struct LeadServersDown {
+    host: Arc<dyn Host>,
+    lead: AgentId,
+    tmux: PathBuf,
+    scratch: PathBuf,
+}
+
+#[cfg(target_os = "macos")]
+impl Drop for LeadServersDown {
+    fn drop(&mut self) {
+        let _ = self.host.kill(&self.lead);
+        let Ok(entries) = std::fs::read_dir(&self.scratch) else {
+            return;
+        };
+        for socket in entries.filter_map(Result::ok).map(|entry| entry.path()) {
+            let named = socket.file_name().and_then(|name| name.to_str());
+            if socket
+                .extension()
+                .is_none_or(|extension| extension != "sock")
+                || named == Some(super::super::caller::CALLER_SOCKET)
+            {
+                continue;
+            }
+            let _ = crate::spawn_gate::status(
+                Command::new(&self.tmux)
+                    .arg("-S")
+                    .arg(&socket)
+                    .arg("kill-server")
+                    .env_clear()
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+            );
+        }
+    }
+}
+
+/// Waits for a file to hold at least `lines` whole lines. Takes the path and the count.
+/// Returns its text; panics after `WAIT`.
+#[cfg(target_os = "macos")]
+fn lines_written(path: &Path, lines: usize) -> String {
+    let deadline = Instant::now() + WAIT;
+    loop {
+        if let Ok(text) = std::fs::read_to_string(path)
+            && text.ends_with('\n')
+            && text.lines().count() >= lines
+        {
+            return text;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "{} never had {lines} lines",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// A native lead's teammate cannot type into the lead's own pane (rv-audit S1 F1). The lead
+/// is a shell under its real installed profile in its own server. It splits a teammate pane
+/// the way Claude Code 2.1 does, `split-window -d -t $TMUX_PANE ... -- cat` and then
+/// `respawn-pane -k` with the teammate's command, through the tmux on its PATH. The
+/// teammate sends keys to the lead's pane through the server its own environment names and
+/// through the lead's socket. Neither reaches the lead, and the lead still splits.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_teammate_cannot_type_into_its_lead_s_pane() {
+    use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    set_mode(
+        &fixture.connection,
+        &project,
+        HarnessKind::ClaudeCode,
+        SubagentMode::Native,
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        fixture.base.join("engine.db"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let host = crate::terminal::tmux_host(&fixture.base, Some(fixture.tmux.clone()));
+    let runtime = exiting_claude_runtime(&fixture)
+        .with_terminal(host.clone())
+        .unwrap();
+    let profile = reference("managed-profile");
+    let managed = runtime.custody.as_ref().unwrap().profile_home(&profile);
+    std::fs::create_dir_all(&managed).unwrap();
+    std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let account = TeamAccount {
+        connection: reference("managed-connection"),
+        reach: TeamReach::Managed {
+            profile_ref: profile,
+            model: None,
+        },
+    };
+    let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    let (_, plan, _) = runtime
+        .prepare(
+            &fixture.setup,
+            id,
+            AgentRole::Sub,
+            "claude-code",
+            true,
+            &account,
+            false,
+            Layout::Linked,
+        )
+        .unwrap();
+    assert!(plan.native, "the lead starts with native teammates");
+    assert_eq!(plan.sandbox_profile, agent_profile(&runtime.state, id));
+    let lead = AgentId::team(id).unwrap();
+    let socket = crate::terminal::harness_socket(&fixture.base, &lead).unwrap();
+    let _down = LeadServersDown {
+        host: host.clone(),
+        lead: lead.clone(),
+        tmux: fixture.tmux.clone(),
+        scratch: socket.parent().unwrap().to_path_buf(),
+    };
+    let work = plan.working_dir.clone();
+    let session = fixture.base.join("lead-session.jsonl");
+    std::fs::write(&session, format!("{TURN_OPEN}\n")).unwrap();
+    let command = InteractiveCommand {
+        argv: vec![
+            crate::sandbox::SANDBOX_EXEC.into(),
+            "-f".into(),
+            plan.sandbox_profile.to_str().unwrap().into(),
+            "/bin/sh".into(),
+        ],
+        cwd: work.clone(),
+        env: vec![
+            ("PS1".into(), "lead$ ".into()),
+            (
+                "PATH".into(),
+                format!("{}:/usr/bin:/bin", fixture.tmux.parent().unwrap().display()),
+            ),
+            (
+                "HOME".into(),
+                agent_home(&runtime.state, id).to_str().unwrap().into(),
+            ),
+        ],
+        transcript: Transcript::ClaudeSession { file: session },
+    };
+    let placed = host.spawn_own_server(&lead, &command).unwrap();
+    assert!(crate::terminal::pane_id_valid(&placed.pane));
+
+    let marker = work.join("reached.txt");
+    let tried = work.join("tried.txt");
+    let mate = work.join("mate.sh");
+    std::fs::write(
+        &mate,
+        format!(
+            "tmux send-keys -t {pane} 'echo reached > {marker}' Enter\n\
+             echo own-server=$? > {tried}\n\
+             tmux -S {socket} send-keys -t {pane} 'echo reached > {marker}' Enter\n\
+             echo lead-socket=$? >> {tried}\n\
+             exec /bin/sleep 300\n",
+            pane = placed.pane,
+            marker = marker.display(),
+            tried = tried.display(),
+            socket = socket.display(),
+        ),
+    )
+    .unwrap();
+    let split = work.join("split.txt");
+    host.input(
+        &lead,
+        format!(
+            "p=$(tmux split-window -d -t \"$TMUX_PANE\" -h -l 70% -P -F '#{{pane_id}}' -- cat) && echo \"$p\" > {split} && tmux set-option -p -t \"$p\" remain-on-exit failed && tmux respawn-pane -k -t \"$p\" -- '/bin/sh {mate}'\n",
+            split = split.display(),
+            mate = mate.display(),
+        )
+        .as_bytes(),
+    )
+    .unwrap();
+    let teammate = lines_written(&split, 1).trim().to_owned();
+    assert!(crate::terminal::pane_id_valid(&teammate), "{teammate:?}");
+    let attempts = lines_written(&tried, 2);
+    let after = work.join("after.txt");
+    host.input(
+        &lead,
+        format!("echo after > {}\n", after.display()).as_bytes(),
+    )
+    .unwrap();
+    lines_written(&after, 1);
+
+    assert!(
+        !marker.exists(),
+        "a teammate pane typed into its lead's pane: {attempts}"
+    );
+    for attempt in ["own-server", "lead-socket"] {
+        assert!(
+            attempts
+                .lines()
+                .any(|line| line.starts_with(&format!("{attempt}=")) && !line.ends_with("=0")),
+            "{attempts}"
+        );
+    }
+    let listed = host.panes(&lead).unwrap();
+    assert!(
+        listed.iter().any(|pane| pane.id == teammate && !pane.dead),
+        "the lead's teammate pane is listed for it: {listed:?}"
+    );
+}

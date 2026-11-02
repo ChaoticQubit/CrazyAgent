@@ -24,6 +24,8 @@ const STAMPS_MAX: usize = 64;
 /// (DEC-111 S1R1-3).
 const STAMPS_PER_PANE_MAX: usize = 8;
 const STAMP_TTL: Duration = Duration::from_secs(60);
+/// The most panes whose first naming process the socket remembers; the oldest makes room.
+const PINS_MAX: usize = 64;
 const ID_BYTES: usize = 32;
 const DIGEST_BYTES: usize = 32;
 const LINE_BYTES: usize = ID_BYTES + 1 + 2 * DIGEST_BYTES + 1;
@@ -139,7 +141,9 @@ fn parse_line(line: &[u8]) -> Option<(String, [u8; DIGEST_BYTES])> {
 /// holds the call id and the digest of the call's bytes, so a teammate that shares the
 /// mailbox can neither reuse another caller's name nor swap the named call's contents.
 /// The folder and the socket node are pinned by (device, inode) when bound, so the engine
-/// can tell either replaced and never acts through a folder an agent swapped.
+/// can tell either replaced and never acts through a folder an agent swapped. Each pane is
+/// also pinned to the pane process it first named a call by, so a pane respawned with
+/// another process under the same id names nothing.
 pub struct Callers {
     listener: UnixListener,
     path: PathBuf,
@@ -147,11 +151,12 @@ pub struct Callers {
     node: (u64, u64),
     pending: Vec<Pending>,
     stamps: Vec<Stamp>,
+    pins: Vec<(String, u32)>,
 }
 
 struct Pending {
     stream: UnixStream,
-    pane: Option<String>,
+    pane: Option<(String, u32)>,
     line: Vec<u8>,
     since: Instant,
 }
@@ -233,7 +238,23 @@ impl Callers {
             node,
             pending: Vec::new(),
             stamps: Vec::new(),
+            pins: Vec::new(),
         })
+    }
+
+    /// Carries the pane pins of the socket this one replaces in the same folder, so binding
+    /// again never frees a pane to be named by another process. Takes the new socket and
+    /// the old one's pins. Returns the socket.
+    #[must_use]
+    pub fn with_pins(mut self, pins: Vec<(String, u32)>) -> Self {
+        assert!(self.pins.is_empty() && pins.len() <= PINS_MAX);
+        self.pins = pins;
+        self
+    }
+
+    /// The pane pins held, for [`Self::with_pins`]. Takes the socket. Returns them.
+    pub fn pins(&self) -> Vec<(String, u32)> {
+        self.pins.clone()
     }
 
     /// Tells whether the socket node at the path is still the one bound, in one look: false
@@ -336,6 +357,9 @@ impl Callers {
     ) -> bool {
         let fresh = !self.stamps.iter().any(|stamp| stamp.call == call);
         let pane = if fresh { pending.pane.take() } else { None };
+        let pane = pane
+            .filter(|(pane, pid)| self.pinned(pane, *pid))
+            .map(|(pane, _)| pane);
         let named = pane.is_some();
         if let Some(pane) = pane {
             self.make_room(&pane);
@@ -350,6 +374,22 @@ impl Callers {
             .stream
             .write_all(if named { NAMED } else { UNNAMED });
         named
+    }
+
+    /// Whether a pane may name a call by this pane process: the first one seen pins the pane
+    /// to itself, and any other process under that pane id later is refused. The oldest pin
+    /// makes room past `PINS_MAX`. Takes the socket, the pane id and the pane process.
+    /// Returns the answer.
+    fn pinned(&mut self, pane: &str, pid: u32) -> bool {
+        if let Some((_, held)) = self.pins.iter().find(|(pinned, _)| pinned == pane) {
+            return *held == pid;
+        }
+        if self.pins.len() >= PINS_MAX {
+            self.pins.remove(0);
+        }
+        self.pins.push((pane.to_owned(), pid));
+        assert!(self.pins.len() <= PINS_MAX);
+        true
     }
 
     /// Frees a place for one more name of `pane`: its own oldest when it holds
@@ -413,6 +453,7 @@ fn tell(mut pending: Pending) {
     let reply = pending
         .pane
         .take()
+        .map(|(pane, _)| pane)
         .filter(|pane| crate::terminal::pane_id_valid(pane) && pane.len() < PANE_REPLY_BYTES_MAX)
         .map_or_else(|| UNNAMED.to_vec(), |pane| format!("{pane}\n").into_bytes());
     let _ = pending.stream.write_all(&reply);
@@ -444,11 +485,15 @@ fn peer_pid(_stream: &UnixStream) -> Option<u32> {
     None
 }
 
-fn pane_of(pid: u32, panes: &[(String, u32)], parents: &HashMap<u32, u32>) -> Option<String> {
+fn pane_of(
+    pid: u32,
+    panes: &[(String, u32)],
+    parents: &HashMap<u32, u32>,
+) -> Option<(String, u32)> {
     let mut current = pid;
     for _ in 0..ANCESTORS_MAX {
-        if let Some((pane, _)) = panes.iter().find(|(_, listed)| *listed == current) {
-            return Some(pane.clone());
+        if let Some(found) = panes.iter().find(|(_, listed)| *listed == current) {
+            return Some(found.clone());
         }
         if current <= 1 {
             return None;
