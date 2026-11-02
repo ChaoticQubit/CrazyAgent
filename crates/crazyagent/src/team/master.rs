@@ -424,17 +424,74 @@ pub(crate) fn master_input_at(
     now: i64,
 ) -> Result<(), InputRefused> {
     let text = text.trim();
-    let plain = !text
-        .chars()
-        .any(|c| c.is_control() && c != '\n' && c != '\t');
-    if text.is_empty() || text.len() > INPUT_TEXT_MAX || !plain {
+    if !typable(text) {
         return Err(InputRefused::Invalid);
     }
     let failed = |problem: rusqlite::Error| InputRefused::Failed(state(problem).0);
     let tx =
         Transaction::new_unchecked(connection, TransactionBehavior::Immediate).map_err(failed)?;
+    let agent = input_open(&tx, typing, project, now)?;
+    let pane = AgentId::team(agent).map_err(|problem| InputRefused::Failed(problem.0))?;
+    tx.execute(
+        "UPDATE team_live_masters SET input_ms=?2 WHERE project=?1",
+        params![project.as_str(), now],
+    )
+    .map_err(failed)?;
+    tx.commit().map_err(failed)?;
+    let typed = paste(text)
+        .iter()
+        .try_for_each(|part| host.input(&pane, part.as_bytes()))
+        .and_then(|()| {
+            std::thread::sleep(PASTE_SETTLE);
+            host.input(&pane, b"\r")
+        });
+    if let Err(problem) = typed {
+        let _ = connection.execute(
+            "UPDATE team_live_masters SET input_ms=NULL WHERE project=?1 AND input_ms=?2",
+            params![project.as_str(), now],
+        );
+        return Err(InputRefused::Failed(problem.0));
+    }
+    Ok(())
+}
+
+/// Whether text can be typed into a live master: once trimmed it is not empty, holds at
+/// most `INPUT_TEXT_MAX` bytes and has no control character but newline and tab. Takes the
+/// text. Returns the answer.
+pub(crate) fn typable(text: &str) -> bool {
+    let text = text.trim();
+    !text.is_empty()
+        && text.len() <= INPUT_TEXT_MAX
+        && !text
+            .chars()
+            .any(|c| c.is_control() && c != '\n' && c != '\t')
+}
+
+/// Whether a project's live master is quiet now: it runs, no turn is open, the engine's last
+/// input settled and the owner holds no recent key or unsent line, so engine input or a
+/// stop cuts nothing short. Takes the engine database, the owner typing signal, the project
+/// and the time in milliseconds. Returns the answer; a failed read is not quiet.
+pub(crate) fn quiet(
+    connection: &Connection,
+    typing: Option<&OwnerTyping>,
+    project: &ProjectId,
+    now: i64,
+) -> bool {
+    input_open(connection, typing, project, now).is_ok()
+}
+
+/// Checks that engine input may reach a project's live master now, as `quiet` describes.
+/// Takes the engine database, the owner typing signal, the project and the time. Returns
+/// the master's agent id, or why the input waits or cannot go.
+fn input_open(
+    connection: &Connection,
+    typing: Option<&OwnerTyping>,
+    project: &ProjectId,
+    now: i64,
+) -> Result<i64, InputRefused> {
+    let failed = |problem: rusqlite::Error| InputRefused::Failed(state(problem).0);
     type Row = (bool, Option<i64>, bool, Option<i64>, Option<i64>, bool);
-    let row: Option<Row> = tx
+    let row: Option<Row> = connection
         .query_row(
             "SELECT live,agent,turn_open,input_ms,typed_ms,draft FROM team_live_masters WHERE project=?1",
             [project.as_str()],
@@ -466,28 +523,7 @@ pub(crate) fn master_input_at(
     if owner_holds(typed_ms, draft, now) {
         return Err(InputRefused::OwnerTyping);
     }
-    let pane = AgentId::team(agent).map_err(|problem| InputRefused::Failed(problem.0))?;
-    tx.execute(
-        "UPDATE team_live_masters SET input_ms=?2 WHERE project=?1",
-        params![project.as_str(), now],
-    )
-    .map_err(failed)?;
-    tx.commit().map_err(failed)?;
-    let typed = paste(text)
-        .iter()
-        .try_for_each(|part| host.input(&pane, part.as_bytes()))
-        .and_then(|()| {
-            std::thread::sleep(PASTE_SETTLE);
-            host.input(&pane, b"\r")
-        });
-    if let Err(problem) = typed {
-        let _ = connection.execute(
-            "UPDATE team_live_masters SET input_ms=NULL WHERE project=?1 AND input_ms=?2",
-            params![project.as_str(), now],
-        );
-        return Err(InputRefused::Failed(problem.0));
-    }
-    Ok(())
+    Ok(agent)
 }
 
 /// Records keys the owner typed into a team agent's terminal, the owner typing signal that

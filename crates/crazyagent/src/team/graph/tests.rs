@@ -29,6 +29,7 @@ fn agent(id: i64, role: AgentRole, harness: &str, status: AgentStatus) -> TeamAg
         teammates: Vec::new(),
         pane: None,
         hookless: false,
+        instructions_changed: false,
     }
 }
 
@@ -482,6 +483,31 @@ fn finished_sub_agents_leave_the_graph_until_the_owner_shows_them() {
     assert_eq!(
         agents(&graph(&status, &none())),
         ["team-3", "team-4", "team-5", "team-6"]
+    );
+}
+
+#[test]
+fn an_agent_whose_instructions_changed_says_so_in_its_status_until_it_starts_again() {
+    let mut changed = tree();
+    for agent in &mut changed.agents {
+        agent.instructions_changed = matches!(agent.id, 7 | 8) || agent.role == AgentRole::Master;
+    }
+    let graph = graph(&changed, &none());
+    let label = |id: &str| {
+        graph
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .and_then(|node| node.status_label.clone())
+            .unwrap()
+    };
+    assert_eq!(label("team-7"), "Working - Instructions changed");
+    assert_eq!(label("team-8"), "Waiting for work - Instructions changed");
+    assert_eq!(label("team-3"), AgentStatus::Working.label());
+    assert!(
+        label("master").ends_with(" - Instructions changed"),
+        "{}",
+        label("master")
     );
 }
 

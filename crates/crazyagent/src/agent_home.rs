@@ -26,6 +26,7 @@ const STALE_CONTEXT_FOLDER: &str = "crazyagent-context";
 const TOO_LARGE: &str = "agent_instructions_too_large_";
 const SKILLS_FOLDER: &str = "agent-skills";
 const FILES_FOLDER: &str = "agent-instruction-files";
+const GIVEN_FOLDER: &str = "agent-instructions-given";
 const FILES_RECORD_BYTES_MAX: usize =
     crate::instruction_files::FILES_MAX * ("unreadable\t18446744073709551615\t\n".len() + 32);
 pub const SKILLS_RECORD_MAX: usize = 2 * crate::plugins::SKILLS_PER_SCOPE_MAX;
@@ -299,6 +300,7 @@ pub fn prepare(
     }
     real_folder(home)?;
     record_files(&project.data, home, &given.files)?;
+    write_record(&project.data, GIVEN_FOLDER, home, &given.text)?;
     remove_entry(&home.join(STALE_CONTEXT_FOLDER))?;
     let name = harness.instruction_file();
     if given.text.is_empty() {
@@ -339,7 +341,7 @@ fn record_files(
 /// root, the record's folder name and the agent's home. Output: the folder and the file
 /// name, or `agent_instructions_unreadable`.
 fn record_place(data: &Path, kind: &str, home: &Path) -> Result<(PathBuf, String), AgentHomeError> {
-    assert!(kind == FILES_FOLDER || kind == SKILLS_FOLDER);
+    assert!(kind == FILES_FOLDER || kind == SKILLS_FOLDER || kind == GIVEN_FOLDER);
     let real =
         |path: &Path| fs::canonicalize(path).map_err(|_| failure("agent_instructions_unreadable"));
     let home = real(home)?;
@@ -400,6 +402,29 @@ pub fn given_files(
         home,
         FILES_RECORD_BYTES_MAX,
     )?)
+}
+
+/// Reads the engine's own record of the owner text one agent home was last given, at its
+/// launch or by the last change block a running agent had, kept outside the agent's home so
+/// nothing the agent writes changes what counts as an edit. Inputs: the engine data root and
+/// the agent's home. Output: the text, none before any launch recorded one, or a plain code.
+pub fn given_text(data: &Path, home: &Path) -> Result<Option<String>, AgentHomeError> {
+    let (folder, name) = record_place(data, GIVEN_FOLDER, home)?;
+    match fs::symlink_metadata(folder.join(name)) {
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        _ => read_record(data, GIVEN_FOLDER, home, GIVEN_BYTES_MAX).map(Some),
+    }
+}
+
+/// Replaces the engine's record of the owner text an agent home has, after a running agent
+/// was sent the sections that changed. Inputs: the engine data root, the agent's home and
+/// the text, at most `GIVEN_BYTES_MAX` bytes. Output: unit, or a plain code.
+pub fn record_given(data: &Path, home: &Path, text: &str) -> Result<(), AgentHomeError> {
+    if text.len() > GIVEN_BYTES_MAX {
+        return Err(failure("agent_instructions_too_large"));
+    }
+    real_folder(home)?;
+    write_record(data, GIVEN_FOLDER, home, text)
 }
 
 /// Reads back the instruction files record one launch left. Input: the record text.
