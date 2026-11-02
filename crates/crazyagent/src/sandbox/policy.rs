@@ -82,10 +82,11 @@ impl AgentAccess {
     }
 }
 
-/// How far one project's tools-on agents, the live master and the plugin "Check again"
-/// server may reach on the network (DEC-111 Q17): Open is the whole network, Https is port
-/// 443 only, None is nothing beyond the model endpoint. The same choice applies to the
-/// agents and to the check.
+/// How far one project's tools-on agents and the plugin "Check again" server may reach on
+/// the network (DEC-111 Q17): Open is the whole network, Https is port 443 only, None is
+/// nothing beyond the model endpoint. The same choice applies to the agents and to the
+/// check. It does not widen or narrow the live master, which always reaches the model's
+/// port only, whatever this choice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentNetwork {

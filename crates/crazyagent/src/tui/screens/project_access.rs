@@ -11,6 +11,11 @@ pub(in crate::tui) const FULL_ACCESS_WARNING: &str =
 pub(in crate::tui) const LOWERING_STOPS_AGENTS: &str =
     "Lowering the level stops agents running above it; they restart at the new level.";
 
+/// Why the network choice has no effect under Full access: Full access runs agents with no
+/// sandbox, so nothing bounds their network.
+pub(in crate::tui) const NETWORK_IGNORED_UNDER_FULL: &str =
+    "Full access runs agents without a sandbox, so this choice does not apply.";
+
 const TEXT_WIDTH: usize = 56;
 
 /// The Agent access box over the Settings tab (DEC-101, DEC-102): the project's access level
@@ -212,6 +217,13 @@ impl AccessEdit {
                 .into_iter()
                 .map(|line| Row::of(format!("              {line}"), look.muted)),
         );
+        if self.access == AgentAccess::Full {
+            body.extend(
+                wrap_words(NETWORK_IGNORED_UNDER_FULL, TEXT_WIDTH)
+                    .into_iter()
+                    .map(|line| Row::of(line, look.warning)),
+            );
+        }
         body.push(Row::default());
         if self.confirm_full {
             body.extend(
@@ -298,7 +310,9 @@ pub(in crate::tui) fn network_help(network: AgentNetwork) -> &'static str {
         AgentNetwork::Https => {
             "Agents and the plugin check reach port 443 only; agents also still reach the model."
         }
-        AgentNetwork::None => "Agents reach only the model; the plugin check reaches nothing.",
+        AgentNetwork::None => {
+            "Agents reach only the model's port, on any host; for subscription accounts that is all of port 443, same as Port 443 only; the plugin check reaches nothing."
+        }
     }
 }
 

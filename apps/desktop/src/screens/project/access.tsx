@@ -27,8 +27,11 @@ export function accessLabel(access: AgentAccess): string {
 export const NETWORK_CHOICES: { network: AgentNetwork; label: string; help: string }[] = [
   { network: "open", label: "Open", help: "Agents with tools on reach the whole network, and so does the plugin check." },
   { network: "https", label: "Port 443 only", help: "Agents and the plugin check reach port 443 only; agents also still reach the model." },
-  { network: "none", label: "None", help: "Agents reach only the model; the plugin check reaches nothing." },
+  { network: "none", label: "None", help: "Agents reach only the model's port, on any host; for subscription accounts that is all of port 443, same as Port 443 only; the plugin check reaches nothing." },
 ];
+
+/** Why the network choice has no effect under Full access. */
+export const NETWORK_IGNORED_UNDER_FULL = "Full access runs agents without a sandbox, so this choice does not apply.";
 
 /** Names a network choice as the owner sees it. Input: the choice. Output: the label. */
 export function networkLabel(network: AgentNetwork): string {
@@ -93,10 +96,11 @@ export function AccessLevels({ name, value, unavailable, onChange }: {
   </fieldset>;
 }
 
-/** The network choice as radio cards. Inputs: the radio group name, the chosen network and the
- * change handler. Output: the fieldset. */
-export function NetworkChoices({ name, value, onChange }: {
-  name: string; value: AgentNetwork; onChange: (network: AgentNetwork) => void;
+/** The network choice as radio cards, with a note when Full access makes it moot. Inputs: the
+ * radio group name, the chosen network, the chosen access level and the change handler.
+ * Output: the fieldset. */
+export function NetworkChoices({ name, value, access, onChange }: {
+  name: string; value: AgentNetwork; access: AgentAccess; onChange: (network: AgentNetwork) => void;
 }) {
   return <fieldset className="pj-field">
     <legend>Network for agents with tools on</legend>
@@ -109,6 +113,7 @@ export function NetworkChoices({ name, value, onChange }: {
         </span>
       </label>)}
     </div>
+    {access === "full" && <p className="pj-note" role="note">{NETWORK_IGNORED_UNDER_FULL}</p>}
   </fieldset>;
 }
 

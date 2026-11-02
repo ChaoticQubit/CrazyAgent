@@ -393,7 +393,7 @@ impl LinuxSandbox {
             return Err(invalid("sandbox executable must be an absolute file"));
         }
         if matches!(backend, LinuxBackend::Bubblewrap { .. })
-            && matches!(sandbox.network(), SandboxNetwork::Only(_))
+            && matches!(sandbox.network(), SandboxNetwork::Only(remotes) if !remotes.is_empty())
         {
             return Err(SandboxError::Unavailable(
                 "limiting an agent to its model endpoints needs Landlock network rules \
@@ -495,7 +495,9 @@ impl Sandbox for LinuxSandbox {
                 command.args(landlock_policy(&grants, self.sandbox.network()).args());
                 command
             }
-            LinuxBackend::Bubblewrap { bwrap } => bwrap_command(bwrap, &grants, cwd),
+            LinuxBackend::Bubblewrap { bwrap } => {
+                bwrap_command(bwrap, &grants, cwd, self.sandbox.network())
+            }
         };
         let env = agent_env(
             &[
@@ -646,7 +648,7 @@ fn ports(remotes: &[SandboxRemote]) -> Vec<u16> {
     ports
 }
 
-fn bwrap_command(bwrap: &Path, grants: &Grants, cwd: &Path) -> Command {
+fn bwrap_command(bwrap: &Path, grants: &Grants, cwd: &Path, network: &SandboxNetwork) -> Command {
     let mut command = Command::new(bwrap);
     command.args([
         "--die-with-parent",
@@ -662,6 +664,9 @@ fn bwrap_command(bwrap: &Path, grants: &Grants, cwd: &Path) -> Command {
         "--tmpfs",
         "/tmp",
     ]);
+    if matches!(network, SandboxNetwork::Only(remotes) if remotes.is_empty()) {
+        command.arg("--unshare-net");
+    }
     for &root in SYSTEM_READ_ROOTS {
         command.args(["--ro-bind-try", root, root]);
     }
@@ -694,7 +699,32 @@ mod tests {
             read: Vec::new(),
             write: Vec::new(),
         };
-        let command = bwrap_command(Path::new(BWRAP_PATHS[0]), &grants, Path::new("/tmp"));
+        let command = bwrap_command(
+            Path::new(BWRAP_PATHS[0]),
+            &grants,
+            Path::new("/tmp"),
+            &SandboxNetwork::Open,
+        );
         assert!(command.get_args().any(|arg| arg == "--new-session"));
+    }
+
+    #[test]
+    fn bubblewrap_cuts_off_the_network_only_when_nothing_is_allowed() {
+        let grants = Grants {
+            read: Vec::new(),
+            write: Vec::new(),
+        };
+        let unshares = |network: SandboxNetwork| {
+            bwrap_command(
+                Path::new(BWRAP_PATHS[0]),
+                &grants,
+                Path::new("/tmp"),
+                &network,
+            )
+            .get_args()
+            .any(|arg| arg == "--unshare-net")
+        };
+        assert!(unshares(SandboxNetwork::Only(Vec::new())));
+        assert!(!unshares(SandboxNetwork::Open));
     }
 }
