@@ -187,12 +187,20 @@ async function acceptPreselected(me, lands, branch) {
   return me.waitFor("the landed change set", (text) => new RegExp(`Accepted as [0-9a-f]{7} on ${branch}\\.`).test(text));
 }
 
-test("Land on: the master's branch receives a finished agent's merge", { timeout: 600000 }, async (t) => {
-  await onEngine(t, "ca-lo-m-", async ({ project, repo, worktree, tips, me, open, status, recordTurn, addAgent }) => {
+test("Land on: the master's branch receives a finished agent's merge by default and again after the owner switches back from a named branch", { timeout: 600000 }, async (t) => {
+  await onEngine(t, "ca-lo-m-", async ({ project, repo, worktree, tips, me, page, open, status, recordTurn, addAgent }) => {
     await open("agents");
     await me.waitFor("the Land on setting on the Agents tab", (text) => text.includes("Land on") && text.includes("Empty uses the master's branch."));
     assert.equal((await status()).land_on ?? null, null, "Land on starts as the master's branch");
     await saveBranch(me, "Master's branch", `tg-master-branch-${project}`, "main", "master_branch", status);
+    await saveBranch(me, "Land on", `tg-land-on-${project}`, "stage", "land_on", status);
+    await me.click("Use the master's branch");
+    for (const deadline = Date.now() + STEP_MS; ((await status()).land_on ?? null) !== null; await pause(POLL_MS)) {
+      assert.ok(Date.now() < deadline, "the engine never went back to the master's branch");
+    }
+    for (const deadline = Date.now() + STEP_MS; await page.evaluate(`document.getElementById(${JSON.stringify(`tg-land-on-${project}`)}).value`) !== ""; await pause(POLL_MS)) {
+      assert.ok(Date.now() < deadline, "the Land on field still names a branch");
+    }
     await me.capture("land-on-master-branch");
 
     git(repo, "worktree", "add", "-q", "--detach", worktree, tips.main);
@@ -251,6 +259,41 @@ test("Land on: a named branch checked out nowhere receives the merge and the own
     assert.equal(git(repo, "rev-parse", "HEAD"), tips.feat, "the owner's checked-out feat/x is not moved");
     assert.equal(readFileSync(join(repo, "README.md"), "utf8"), README, "the owner's files stay as they are");
     assert.ok(!existsSync(join(repo, "STAGE.md")), "stage's files never reach the owner's checkout");
+    assert.equal(git(repo, "status", "--porcelain"), "", "the owner's checkout has no stray changes");
+  });
+});
+
+test("Land on: a deleted Land on branch is named in the Accept dialog, which lands nowhere until the owner picks a branch", { timeout: 600000 }, async (t) => {
+  await onEngine(t, "ca-lo-d-", async ({ project, repo, worktree, tips, me, page, open, status, recordTurn, addAgent }) => {
+    await open("agents");
+    await me.waitFor("the Land on setting on the Agents tab", (text) => text.includes("Land on") && text.includes("Empty uses the master's branch."));
+    await saveBranch(me, "Land on", `tg-land-on-${project}`, "stage", "land_on", status);
+
+    git(repo, "worktree", "add", "-q", "--detach", worktree, tips.stage);
+    const member = addAgent();
+    writeFileSync(join(worktree, "README.md"), `${README}Now with plots.\n`);
+    recordTurn(member, "Add plots");
+    git(repo, "branch", "-D", "stage");
+    await open("changes");
+    await me.waitFor("the agent's change set still waiting", (text) => text.includes(AGENT_LABEL) && /Ready to review/.test(text));
+    await me.follow(".ch-row");
+    await me.waitFor("the change set's diff", (text) => /Now with plots\./.test(text));
+    await me.click("Accept");
+    const missing = "Your Land on branch stage is not a local branch of this project. Pick a branch, or change Land on in Team settings.";
+    const asked = await me.waitFor("the Accept dialog naming the missing Land on branch", (text) => /Accept these changes\?/.test(text) && text.includes(missing));
+    await me.capture("land-on-missing-accept");
+    assert.ok(!asked.includes("They land as one commit on"), "the dialog names no branch the changes would land on");
+    const dialog = await page.evaluate(`(() => {
+      const select = document.querySelector("dialog select");
+      const accept = [...document.querySelectorAll("dialog button")].find((button) => button.innerText.trim() === "Accept");
+      return { value: select?.value ?? null, first: select?.options[0]?.text ?? null, disabled: accept?.disabled ?? null };
+    })()`);
+    assert.deepEqual(dialog, { value: "", first: "Pick a branch", disabled: true }, "no branch is picked and Accept waits for one");
+    await me.click("Keep reviewing", "dialog button");
+    await me.waitFor("the dialog closed", (text) => !/Accept these changes\?/.test(text));
+    assert.equal(git(repo, "rev-parse", "main"), tips.main, "main is not moved");
+    assert.equal(git(repo, "rev-parse", "HEAD"), tips.feat, "the owner's checked-out feat/x is not moved");
+    assert.equal(git(repo, "symbolic-ref", "HEAD"), "refs/heads/feat/x", "the owner's checkout stays on feat/x");
     assert.equal(git(repo, "status", "--porcelain"), "", "the owner's checkout has no stray changes");
   });
 });

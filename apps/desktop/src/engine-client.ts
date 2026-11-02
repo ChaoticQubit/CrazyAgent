@@ -294,6 +294,7 @@ export function errorMessage(error: unknown): string {
     hooks_too_many: "This plugin has more than 64 hooks.",
     hooks_too_large: "The files these hooks run are larger than 16 MB or 2048 files.",
     hook_plugin_name_invalid: "The plugin name must be 1 to 32 letters, digits, ., - or _.",
+    hooks_plugin_manifest_missing: "This folder has hooks but no .claude-plugin/plugin.json naming the plugin.",
     hooks_already_added: "These hooks were already added here.",
     hook_limit: "There are already 100 hooks here.",
     tool_unknown: "That tool is not on this server. Check the server again to list its tools.",
@@ -820,13 +821,16 @@ export type Delivery = "auto" | "native_only" | "typing_only";
 export type QuestionsTo = "lead" | "me";
 /** What happens when two agents claim the same files: warn both, block the edit, or nothing. */
 export type Overlaps = "warn" | "block" | "off";
+/** When workflow nudges remind an agent: never, with the engine's note per flag after ten
+ * minutes of work, or with one hook reminder on its first edit before any code-graph query. */
+export type Nudges = "off" | "ten_minutes" | "first_edit";
 
 /** A project's coordination settings: question routing, claim overlaps, workflow nudges and the
  * tool names the adoption counts include. */
 export interface CoordSettings {
   questions_to: QuestionsTo;
   overlaps: Overlaps;
-  nudges: boolean;
+  nudges: Nudges;
   counted_tools: string[];
 }
 
@@ -1276,6 +1280,7 @@ export interface PackEntry {
   license: string;
   on_by_default: boolean;
   state: PackState;
+  hooks_refused?: string | null;
 }
 
 export interface SetupStatus {

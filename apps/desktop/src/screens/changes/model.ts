@@ -163,10 +163,13 @@ export function commitMessage(text: string): string | null {
 
 /** Where an Accept lands and how the dialog says it: the picked branch to send, null when it
  * is where the engine lands with no branch named, the team's Land on branch, else the
- * checked-out one, and the sentence naming that branch. Inputs: the listed branches, null
- * before they load, and the picked branch, empty for none. Output: the branch and sentence. */
+ * checked-out one, and the sentence naming that branch, or the engine's sentence naming a
+ * missing Land on branch while none is picked. Inputs: the listed branches, null before they
+ * load, and the picked branch, empty for none. Output: the branch and sentence. */
 export function acceptTarget(branches: TargetBranches | null, target: string): { picked: string | null; text: string } {
-  const fallback = branches === null ? null : branches.land_on ?? branches.current;
+  const problem = branches?.land_on_problem ?? null;
+  if (problem !== null && target === "") return { picked: null, text: displayText(problem) };
+  const fallback = branches === null || problem !== null ? null : branches.land_on ?? branches.current;
   const lands = target !== "" ? target : fallback;
   const picked = branches !== null && target !== "" && target !== fallback ? target : null;
   const where = lands === null
@@ -175,6 +178,13 @@ export function acceptTarget(branches: TargetBranches | null, target: string): {
       ? `They land as one commit on ${displayText(lands)}, the branch checked out in your project folder, under your own Git name.`
       : `They land as one commit on ${displayText(lands)}, under your own Git name. That branch isn't checked out, so the files in your project folder stay as they are.`;
   return { picked, text: `${where} CrazyAgent did not check them.` };
+}
+
+/** Whether the Accept dialog must wait for the owner to pick a branch: the Land on branch is
+ * missing, so no branch is where the changes land by default. Inputs: the listed branches,
+ * null before they load, and the picked branch, empty for none. Output: true to wait. */
+export function acceptBlocked(branches: TargetBranches | null, target: string): boolean {
+  return (branches?.land_on_problem ?? null) !== null && target === "";
 }
 
 /** One branch as the Accept dialog lists it, marked as the Land on branch and as checked out

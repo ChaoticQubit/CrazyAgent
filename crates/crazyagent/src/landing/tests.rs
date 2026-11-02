@@ -3762,6 +3762,7 @@ fn accept_into_an_unchecked_out_branch_moves_only_the_ref() {
             branches: vec!["main".into(), "release".into()],
             current: Some("main".into()),
             land_on: Some("main".into()),
+            land_on_problem: None,
         }
     );
     let before = case.checkout();

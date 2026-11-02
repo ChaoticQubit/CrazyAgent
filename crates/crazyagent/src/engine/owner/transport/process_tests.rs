@@ -601,13 +601,21 @@ fn refusals(source: &str) -> std::collections::BTreeSet<&str> {
 
 #[test]
 fn process_codes_cover_every_refusal_of_the_store_and_protocol() {
-    let found: std::collections::BTreeSet<&str> = [
+    let (prefixes, found): (
+        std::collections::BTreeSet<&str>,
+        std::collections::BTreeSet<&str>,
+    ) = [
         include_str!("../../../agent_home.rs"),
         include_str!("process.rs"),
     ]
     .into_iter()
     .flat_map(refusals)
-    .collect();
+    .partition(|literal| literal.ends_with('_'));
+    assert_eq!(
+        prefixes,
+        std::collections::BTreeSet::from(["agent_instructions_too_large_"]),
+        "the one prefix builds launch refusals, which the Process page never answers with"
+    );
     assert!(found.len() >= 12);
     for code in &found {
         assert!(
@@ -688,7 +696,11 @@ fn process_adoption_round_trip() {
     }
 
     let view = adoption(&root, &project).unwrap();
-    assert!(view.nudges, "nudges are on by default");
+    assert_eq!(
+        view.nudges,
+        crate::coord::settings::Nudges::Off,
+        "nudges are off by default (DEC-111 Q4)"
+    );
     assert_eq!(
         view.counted,
         crate::coord::settings::COUNTED_TOOLS_DEFAULT
@@ -740,6 +752,30 @@ fn process_adoption_round_trip() {
         Reply::Adoption { adoption } => assert_eq!(adoption, view),
         _ => panic!("an adoption reply reads back as one"),
     }
+
+    {
+        let mut connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+        let tx = connection.transaction().unwrap();
+        let spec = crate::protocol::ProjectSpec {
+            name: "Process".into(),
+            repositories: vec![],
+        };
+        assert!(matches!(
+            crate::storage::create_project(&tx, &project, &spec).unwrap(),
+            crate::protocol::Outcome::Applied
+        ));
+        tx.commit().unwrap();
+        let on = crate::coord::settings::CoordSettings {
+            nudges: crate::coord::settings::Nudges::TenMinutes,
+            ..Default::default()
+        };
+        crate::coord::settings::write(&connection, &project, &on).unwrap();
+    }
+    assert_eq!(
+        adoption(&root, &project).unwrap().nudges,
+        crate::coord::settings::Nudges::TenMinutes,
+        "the view shows nudges the owner turned on"
+    );
 
     assert_eq!(
         adoption(&root, &unknown).unwrap_err().0,

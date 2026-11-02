@@ -36,10 +36,10 @@ fn the_master_counts_as_its_projects_master_and_an_agent_without_an_account_is_u
     let db = crate::usage::open(&root).unwrap();
     db.execute_batch(
         "CREATE TABLE team_agents (id INTEGER PRIMARY KEY, project TEXT, role TEXT, harness TEXT,
-            connection TEXT, status TEXT, stopped_ms INTEGER);
-         INSERT INTO team_agents VALUES (1,'alpha','master','claude-code','claude-a','idle',NULL);
-         INSERT INTO team_agents VALUES (2,'alpha','sub_agent','claude-code',NULL,'working',NULL);
-         INSERT INTO team_agents VALUES (3,'beta','master','claude-code','claude-a','stopped',0);",
+            connection TEXT, status TEXT, stopped_ms INTEGER, hookless INTEGER NOT NULL DEFAULT 0);
+         INSERT INTO team_agents VALUES (1,'alpha','master','claude-code','claude-a','idle',NULL,0);
+         INSERT INTO team_agents VALUES (2,'alpha','sub_agent','claude-code',NULL,'working',NULL,0);
+         INSERT INTO team_agents VALUES (3,'beta','master','claude-code','claude-a','stopped',0,0);",
     )
     .unwrap();
     for (id, input) in [(1, 50), (2, 7), (3, 1000)] {
@@ -97,8 +97,8 @@ fn a_step_that_panics_ends_only_that_step_and_the_next_step_still_counts() {
     let db = crate::usage::open(&root).unwrap();
     db.execute_batch(
         "CREATE TABLE team_agents (id INTEGER PRIMARY KEY, project TEXT, role TEXT, harness TEXT,
-            connection TEXT, status TEXT, stopped_ms INTEGER);
-         INSERT INTO team_agents VALUES (4,'alpha','sub_agent','claude-code',NULL,'working',NULL);
+            connection TEXT, status TEXT, stopped_ms INTEGER, hookless INTEGER NOT NULL DEFAULT 0);
+         INSERT INTO team_agents VALUES (4,'alpha','sub_agent','claude-code',NULL,'working',NULL,0);
          CREATE TABLE held (n INTEGER);",
     )
     .unwrap();

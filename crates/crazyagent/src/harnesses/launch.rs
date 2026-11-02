@@ -60,6 +60,9 @@ pub(crate) const CODEX_TOOLS_OFF: [&str; 13] = [
     "web_search=\"disabled\"",
     "mcp_servers={}",
 ];
+/// The Codex 0.164 setting that removes `request_user_input`, the one tool a tools-off
+/// research agent or pane agent is still offered after [`CODEX_TOOLS_OFF`].
+pub(crate) const CODEX_NO_USER_INPUT: &str = "tools.experimental_request_user_input.enabled=false";
 const CODEX_TOOLS_ON: [&str; 8] = [
     "sandbox_mode=\"danger-full-access\"",
     "approval_policy=\"never\"",

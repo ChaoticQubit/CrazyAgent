@@ -5,7 +5,7 @@ use super::project::{REFRESH_MS, plain_problem};
 use super::project_time::{clock, duration};
 use crate::coord::settings::{
     COUNTED_TOOL_BYTES_MAX, COUNTED_TOOLS_DEFAULT, COUNTED_TOOLS_MAX, Delivery, HarnessKind,
-    Overlaps, QuestionsTo, SubagentMode,
+    Nudges, Overlaps, QuestionsTo, SubagentMode,
 };
 use crate::engine::owner::OwnerResult;
 use crate::project_setup::{SetupQuery, SetupView};
@@ -1767,18 +1767,17 @@ impl TeamView {
                 )
             }
             CoordRow::Nudges => {
-                settings.nudges = !settings.nudges;
-                let done = if settings.nudges {
-                    "Workflow nudges are on."
-                } else {
-                    "Workflow nudges are off."
-                };
+                settings.nudges = cycle(&Nudges::ALL, settings.nudges, forward);
+                let done = format!(
+                    "Workflow nudges: {}.",
+                    settings.nudges.words().to_lowercase()
+                );
                 (
                     TeamAction::CoordSettings {
                         project_id,
                         settings,
                     },
-                    done.to_owned(),
+                    done,
                 )
             }
             CoordRow::Counted => return TeamReply::Handled,
@@ -1898,7 +1897,7 @@ impl TeamView {
                 ),
                 CoordRow::Nudges => (
                     "Workflow nudges".to_owned(),
-                    if view.settings.nudges { "On" } else { "Off" }.to_owned(),
+                    view.settings.nudges.words().to_owned(),
                     "",
                 ),
                 CoordRow::Counted => (

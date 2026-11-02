@@ -1088,3 +1088,84 @@ fn restore_tools_clears_only_that_scope() {
     .unwrap();
     assert!(global.iter().all(|view| view.global == Switch::On));
 }
+
+#[test]
+fn a_project_server_check_is_refused_when_the_project_network_cannot_be_read() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let spec = ServerSpec::Stdio {
+        command: "/bin/true".into(),
+        args: vec![],
+    };
+    let ResultValue::Server(view) = execute(
+        &mut connection,
+        root,
+        Command::AddServer {
+            scope: Scope::Project {
+                project_id: ProjectId::new("app").unwrap(),
+            },
+            name: "p".into(),
+            spec,
+            secrets: Vec::new(),
+        },
+    )
+    .unwrap() else {
+        panic!("server view required");
+    };
+    crate::sandbox::policy::save(
+        &connection,
+        "app",
+        &crate::sandbox::policy::AgentPolicy::default(),
+    )
+    .unwrap();
+    connection
+        .execute(
+            "UPDATE project_agent_policy SET body=?1 WHERE project='app'",
+            [r#"{"access":"sandboxed","toolchains":[],"network":"proxy"}"#],
+        )
+        .unwrap();
+    let refused = execute(&mut connection, root, Command::GetServer { id: view.id });
+    let Err(error) = refused else {
+        panic!("the project server check must be refused");
+    };
+    assert_eq!(error.0, "project_network_unreadable");
+}
+
+#[test]
+fn a_global_server_check_uses_the_strictest_network_among_projects_that_enable_it() {
+    use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    connection
+        .execute("INSERT INTO projects(id, body) VALUES('beta','{}')", [])
+        .unwrap();
+    crate::sandbox::policy::save(
+        &connection,
+        "app",
+        &AgentPolicy {
+            network: AgentNetwork::Open,
+            ..AgentPolicy::default()
+        },
+    )
+    .unwrap();
+    crate::sandbox::policy::save(
+        &connection,
+        "beta",
+        &AgentPolicy {
+            network: AgentNetwork::None,
+            ..AgentPolicy::default()
+        },
+    )
+    .unwrap();
+    let spec = ServerSpec::Stdio {
+        command: "/bin/true".into(),
+        args: vec![],
+    };
+    let id = server(&mut connection, root, "fixture", &spec);
+    let ResultValue::Check(_, _, network) =
+        execute(&mut connection, root, Command::GetServer { id }).unwrap()
+    else {
+        panic!("check value required");
+    };
+    assert_eq!(network, crate::sandbox::SandboxNetwork::Only(vec![]));
+}

@@ -399,7 +399,7 @@ fn serve_while(fixture: &mut Fixture, mailbox: &Path, requests: Vec<Value>) -> V
     let served = mailbox.to_path_buf();
     let server = std::thread::spawn(move || {
         let mut output = Vec::new();
-        tool::serve_live(Cursor::new(input), &mut output, &served, &[], None).unwrap();
+        tool::serve_live(Cursor::new(input), &mut output, &served, &[]).unwrap();
         output
     });
     let access = ModelAccess::default();
@@ -2138,6 +2138,89 @@ fn a_merge_lands_on_the_land_on_branch_when_the_owner_names_one() {
     );
 }
 
+/// With Land on naming a branch the owner deleted after choosing it, every reader of the
+/// setting says so and nothing lands elsewhere (DEC-111 Q1, review F1): the master's merge
+/// names the Land on branch setting, Accept with no branch named and Update refuse it as
+/// no local branch, a poll still measures the set from the agent's start, and the Accept
+/// branch list offers no Land on branch and names the setting and the missing branch.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_deleted_land_on_branch_is_named_by_every_reader_and_nothing_lands_elsewhere() {
+    let mut fixture = Fixture::new();
+    let (repo, _remote) = project_repo(&fixture);
+    let start = git_at(&fixture, &repo, &["rev-parse", "main"]);
+    git_at(&fixture, &repo, &["branch", "stage", "main"]);
+    let (_, id) = finished_harness(&fixture, &repo, "docs-writer", "docs", "one\ntwo\n");
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_land_on(project,branch) VALUES (?1,'stage')",
+            [PROJECT],
+        )
+        .unwrap();
+    git_at(&fixture, &repo, &["branch", "-D", "stage"]);
+    let (said, refused) = as_master(
+        &mut fixture,
+        tool::MERGE_TOOL,
+        json!({"agent": "@docs-writer"}),
+    );
+    assert_eq!(
+        (said.as_str(), refused),
+        (
+            "Not merged: the Land on branch stage is not a local branch of the project (changes_target_invalid). Ask the owner to check the Land on branch setting.",
+            true
+        )
+    );
+    let db = crate::landing::open(&fixture.base).unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let shown = |db: &Connection| {
+        crate::landing::list(db, &project)
+            .unwrap()
+            .into_iter()
+            .find(|set| set.id == id)
+            .unwrap()
+    };
+    let head = shown(&db).head;
+    assert_eq!(
+        crate::landing::accept(&db, &fixture.base, &id, &head, None)
+            .unwrap_err()
+            .0,
+        "changes_target_invalid"
+    );
+    assert_eq!(
+        crate::landing::update(&db, &id).unwrap_err().0,
+        "changes_target_invalid"
+    );
+    crate::landing::observe(&db, Some(&project)).unwrap();
+    let polled = shown(&db);
+    assert_eq!(
+        (polled.state, polled.files, polled.head.as_str()),
+        (crate::landing::ChangeState::Pending, 1, head.as_str())
+    );
+    let listed = crate::landing::target_branches(&db, &id).unwrap();
+    assert_eq!(
+        (
+            listed.land_on.as_deref(),
+            listed.land_on_problem.as_deref(),
+            listed.current.as_deref()
+        ),
+        (
+            None,
+            Some(
+                "Your Land on branch stage is not a local branch of this project. Pick a branch, or change Land on in Team settings."
+            ),
+            Some("main")
+        )
+    );
+    assert!(!listed.branches.iter().any(|name| name == "stage"));
+    assert_eq!(git_at(&fixture, &repo, &["rev-parse", "main"]), start);
+    assert_eq!(
+        git_at(&fixture, &repo, &["symbolic-ref", "HEAD"]),
+        "refs/heads/main"
+    );
+    assert_eq!(git_at(&fixture, &repo, &["status", "--porcelain"]), "");
+}
+
 /// The master's merge refuses, in plain words and landing nothing, an unknown name, a
 /// harness still working, a worker a lead started, an owner checkout with uncommitted
 /// changes and work that conflicts with the Master's branch (DEC-100 S3).
@@ -3355,12 +3438,11 @@ fn a_sub_agent_remembers_through_its_own_mailbox_under_its_name_and_ask_me_first
         let served = mailbox.clone();
         let server = std::thread::spawn(move || {
             let mut output = Vec::new();
-            tool::serve_live(Cursor::new(input), &mut output, &served, &[], None).unwrap();
+            tool::serve_live(Cursor::new(input), &mut output, &served, &[]).unwrap();
             output
         });
         let deadline = Instant::now() + Duration::from_secs(30);
         let agents = fixture.base.join("agents");
-        let runtime = fixture.base.clone();
         while !server.is_finished() {
             assert!(Instant::now() < deadline, "the server never finished");
             super::super::history::serve_agent_calls(
@@ -3369,14 +3451,13 @@ fn a_sub_agent_remembers_through_its_own_mailbox_under_its_name_and_ask_me_first
                 (sub, &label),
                 &agents,
                 &mailbox,
-                &mut |connection, pane| {
+                &mut |connection, _, _| {
                     super::super::runtime::team_caller(
                         connection,
                         None,
-                        Some(runtime.as_path()),
                         &project,
                         (sub, &label),
-                        pane,
+                        None,
                     )
                 },
                 &mut |_, _, _| None,
