@@ -270,6 +270,13 @@ impl TerminalSession {
         self.background.len()
     }
 
+    /// Says whether the engine-typed turn has ended in the app, is held open only for
+    /// commands it started in the background, and every event it gave has been read.
+    /// Output: the answer.
+    pub fn held(&self) -> bool {
+        self.held && self.queue.is_empty()
+    }
+
     /// Types one prompt into the app as a bracketed paste, then Enter. The first prompt
     /// waits, at most `READY_WAIT`, until the app has drawn its screen, gone quiet and
     /// reads keys itself (see [`Host::input_live`]), so its Enter is not lost.
@@ -660,6 +667,25 @@ impl AgentSession {
         match self {
             Self::Piped(_) => 0,
             Self::Terminal(session) => session.background_running(),
+        }
+    }
+
+    /// Says whether a pane app's engine-typed turn has ended and is held open only for its
+    /// background commands; a headless session never holds one. Output: the answer.
+    pub fn held(&self) -> bool {
+        match self {
+            Self::Piped(_) => false,
+            Self::Terminal(session) => session.held(),
+        }
+    }
+
+    /// Says whether the engine sees the commands the agent starts in the background, so a
+    /// turn can be held for them or stopped with them: a pane app whose record reports
+    /// them; a headless session reports none. Output: the answer.
+    pub fn reports_background(&self) -> bool {
+        match self {
+            Self::Piped(_) => false,
+            Self::Terminal(session) => session.reader.reports_background(),
         }
     }
 
