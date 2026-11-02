@@ -309,6 +309,12 @@ pub(super) fn master_branch(
     chosen: Option<&str>,
 ) -> Result<Option<(String, String)>, EngineError> {
     let owner = Repo::open(repository, &repository.join(".git"), Some(repository))?;
+    branch_of(&owner, chosen)
+}
+
+/// Resolves the Master's branch in an open owner repository as [`master_branch`] says.
+/// Inputs: the owner repository and the owner's choice. Output: as [`master_branch`].
+fn branch_of(owner: &Repo, chosen: Option<&str>) -> Result<Option<(String, String)>, EngineError> {
     let local = |name: &str| -> Result<Option<String>, EngineError> {
         let reference = format!("refs/heads/{name}");
         if name.is_empty()
@@ -343,7 +349,7 @@ pub(super) fn master_branch(
     {
         return Ok(Some((name, tip)));
     }
-    let Some(reference) = current_branch(&owner)? else {
+    let Some(reference) = current_branch(owner)? else {
         return Ok(None);
     };
     let name = reference
@@ -353,12 +359,75 @@ pub(super) fn master_branch(
     Ok(local(&name)?.map(|tip| (name, tip)))
 }
 
+/// Resolves a project's Land on branch as [`land_on`] does, opening the owner repository.
+/// Inputs: the store, the owner checkout root and the project. Output: as [`land_on`].
+pub(super) fn land_on_branch(
+    db: &Connection,
+    repository: &Path,
+    project: &ProjectId,
+) -> Result<Option<(String, String)>, EngineError> {
+    let owner = Repo::open(repository, &repository.join(".git"), Some(repository))?;
+    land_on(db, &owner, project)
+}
+
+/// The branch a project's work lands on, with its tip (DEC-111 Q1): the owner's Land on
+/// choice, else the Master's branch as [`master_branch`] resolves it. A store that keeps
+/// no team tables has no choice. Inputs: the store, the owner repository and the project.
+/// Output: the branch and tip, None when nothing was chosen and no Master's branch
+/// exists, or `changes_target_invalid` for a chosen branch that is no local branch.
+pub(super) fn land_on(
+    db: &Connection,
+    owner: &Repo,
+    project: &ProjectId,
+) -> Result<Option<(String, String)>, EngineError> {
+    let kept: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name='team_land_on')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| failure("changes_unavailable"))?;
+    let chosen = match kept {
+        false => None,
+        true => match crate::team::land_on(db, project)? {
+            Some(branch) => Some(branch),
+            None => crate::team::master_branch_choice(db, project)?,
+        },
+    };
+    branch_of(owner, chosen.as_deref())
+}
+
+/// The tip of the branch a project's work lands on, None while it cannot be read: an
+/// unfinished git operation in the owner's checkout, no such branch, or a failed read,
+/// logged by its plain code. Inputs: the store, the owner repository opened for object
+/// work, its root and the project. Output: the tip.
+fn land_on_tip(
+    db: &Connection,
+    owner: &Repo,
+    repository: &Path,
+    project: &ProjectId,
+) -> Option<String> {
+    match idle(repository).and_then(|()| land_on(db, owner, project)) {
+        Ok(found) => found.map(|(_, tip)| tip),
+        Err(error) => {
+            if error.0 != "changes_git_busy" {
+                eprintln!(
+                    "landing_land_on_failed cause={}",
+                    crate::protocol::plain_code(&error.0)
+                );
+            }
+            None
+        }
+    }
+}
+
 /// Lists the local branches of a change set's repository, in git's order and at most
 /// `BRANCHES_MAX`, with the owner's checked-out one. Inputs: the store and the change
 /// set. Output: the branches.
 pub(super) fn branches(db: &Connection, id: &ChangeSetId) -> Result<TargetBranches, EngineError> {
     store::initialize(db)?;
-    let repository = store::load(db, id)?.repository;
+    let record = store::load(db, id)?;
+    let repository = record.repository;
     let owner = Repo::open(&repository, &repository.join(".git"), Some(&repository))?;
     let listing = owner.capture(
         &["for-each-ref", "--format=%(refname)", "refs/heads/"],
@@ -374,7 +443,40 @@ pub(super) fn branches(db: &Connection, id: &ChangeSetId) -> Result<TargetBranch
     let current = current_branch(&owner)?
         .and_then(|reference| reference.strip_prefix("refs/heads/").map(str::to_owned));
     assert!(branches.len() <= BRANCHES_MAX);
-    Ok(TargetBranches { branches, current })
+    let (land_on, land_on_problem) = match land_on(db, &owner, &record.project) {
+        Ok(found) => (found.map(|(branch, _)| branch), None),
+        Err(error) => (None, Some(land_on_problem(db, &record.project, &error))),
+    };
+    Ok(TargetBranches {
+        branches,
+        current,
+        land_on,
+        land_on_problem,
+    })
+}
+
+/// The plain sentence the Accept branch list carries when a project's Land on branch
+/// cannot be resolved (DEC-111 Q1): the setting that names the missing branch and what to
+/// do, or that the setting could not be read. Inputs: the store, the project and the
+/// failure. Output: the sentence.
+fn land_on_problem(db: &Connection, project: &ProjectId, error: &EngineError) -> String {
+    let unread =
+        "Your Land on branch could not be read. Pick a branch, or check Land on in Team settings.";
+    if error.0 != "changes_target_invalid" {
+        return unread.to_owned();
+    }
+    match crate::team::land_on(db, project) {
+        Ok(Some(name)) => format!(
+            "Your Land on branch {name} is not a local branch of this project. Pick a branch, or change Land on in Team settings."
+        ),
+        Ok(None) => match crate::team::master_branch_choice(db, project) {
+            Ok(Some(name)) => format!(
+                "Land on uses the Master's branch {name}, which is not a local branch of this project. Pick a branch, or change the Master's branch in Team settings."
+            ),
+            Ok(None) | Err(_) => unread.to_owned(),
+        },
+        Err(_) => unread.to_owned(),
+    }
 }
 
 /// Refuses an owner checkout with tracked changes, staged or not, or with an untracked
@@ -613,10 +715,10 @@ pub(super) fn accept(
     accept_to(db, home, id, expected_head, message, None, stopped)
 }
 
-/// Lands a change set as one squash commit on a target branch, the owner's checked-out
-/// branch when none is named: as [`accept`] through the owner's checkout, by moving the
-/// ref alone for a branch checked out nowhere, or through an agent's worktree for that
-/// agent's own branch. Inputs: as [`accept`], plus the target branch. Output: the landed
+/// Lands a change set as one squash commit on a target branch, the project's Land on
+/// branch when none is named (DEC-111 Q1): as [`accept`] through the owner's checkout, by
+/// moving the ref alone for a branch checked out nowhere, or through an agent's worktree
+/// for that agent's own branch. Inputs: as [`accept`], plus the target branch. Output: the landed
 /// commit and branch, or the conflicts.
 pub(super) fn accept_to(
     db: &Connection,
@@ -641,7 +743,11 @@ pub(super) fn accept_to(
     flow::check_places(&record.repository, &record.worktree, &record.git_dir)?;
     let git_dir = repository.join(".git");
     let owner = Repo::open(&repository, &git_dir, Some(&repository))?;
-    let (reference, tip, target) = landing_target(db, &owner, &repository, target)?;
+    let named = match target {
+        Some(target) => Some(target.to_owned()),
+        None => land_on(db, &owner, &record.project)?.map(|(branch, _)| branch),
+    };
+    let (reference, tip, target) = landing_target(db, &owner, &repository, named.as_deref())?;
     verify_objects(&repository, &[&record.head, &tip], &[&record.base])?;
     let from = measured_from(db, &owner, &record, &tip)?;
     let paths = diff::changed_paths(&owner, &from, &record.head)?;
@@ -808,10 +914,15 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
                 None => String::from("Merge the lead's branch into this agent's work\n"),
             },
         ),
-        None => (
-            owner_branch(&owner, &repository)?.1,
-            String::from("Merge the owner's branch into this agent's work\n"),
-        ),
+        None => {
+            idle(&repository)?;
+            let (_, tip) = land_on(db, &owner, &record.project)?
+                .ok_or_else(|| failure("changes_detached_head"))?;
+            (
+                tip,
+                String::from("Merge the owner's branch into this agent's work\n"),
+            )
+        }
     };
     verify_objects(&repository, &[&record.head, &tip], &[&record.base])?;
     let from = measured_from(db, &owner, &record, &tip)?;
@@ -1000,16 +1111,9 @@ pub(super) fn measured_from(
     Ok(joined)
 }
 
-/// The tip of the owner's checked-out branch, None while it cannot be read: a detached
-/// HEAD, an unfinished git operation or a failed read. Inputs: the owner repository and
-/// its root. Output: the tip.
-pub(super) fn checked_out_tip(owner: &Repo, repository: &Path) -> Option<String> {
-    owner_branch(owner, repository).ok().map(|(_, tip)| tip)
-}
-
 /// The tip a change set is measured against, the branch it lands on (DEC-107): its lead's
-/// branch for a lead's worker while the owner's Lands setting is Lead, else the owner's
-/// checked-out branch. A lead tip that cannot be read, also for a lead whose worktree is
+/// branch for a lead's worker while the owner's Lands setting is Lead, else the project's
+/// Land on branch (DEC-111 Q1). A lead tip that cannot be read, also for a lead whose worktree is
 /// gone, is logged by its plain code and gives None, never the owner's branch, which that
 /// worker does not land on. Inputs: the store, the owner repository opened for object
 /// work, its root and the change set's project and agent. Output: the tip, None while it
@@ -1023,7 +1127,7 @@ pub(super) fn landing_tip(
 ) -> Option<String> {
     match super::subagent::lead_tip(db, project, agent, repository) {
         Ok(Some(tip)) => Some(tip),
-        Ok(None) => checked_out_tip(owner, repository),
+        Ok(None) => land_on_tip(db, owner, repository, project),
         Err(error) => {
             eprintln!(
                 "landing_lead_tip_failed cause={}",
@@ -1239,25 +1343,18 @@ fn observe_one(
     }
 }
 
-/// Opens the owner repository for object and ref work and reads its checked-out branch
-/// tip. Input: the owner checkout root. Output: the repository and tip, None while its
-/// HEAD is detached, an operation is unfinished or it cannot be read; an unreadable one is
-/// logged by its plain code.
-fn owner_tip(repository: &Path) -> Option<(Repo, String)> {
-    let found = shared(repository)
-        .and_then(|owner| owner_branch(&owner, repository).map(|(_, tip)| (owner, tip)));
-    match found {
-        Ok(found) => Some(found),
+/// Opens the owner repository for object and ref work and reads the tip of a project's
+/// Land on branch (DEC-111 Q1). Inputs: the store, the owner checkout root and the
+/// project. Output: the repository and tip, None while an operation is unfinished, no
+/// such branch exists or it cannot be read; an unreadable one is logged by its plain code.
+fn owner_tip(db: &Connection, repository: &Path, project: &ProjectId) -> Option<(Repo, String)> {
+    match shared(repository) {
+        Ok(owner) => land_on_tip(db, &owner, repository, project).map(|tip| (owner, tip)),
         Err(error) => {
-            if !matches!(
-                error.0.as_str(),
-                "changes_git_busy" | "changes_detached_head"
-            ) {
-                eprintln!(
-                    "landing_observe_failed cause={}",
-                    crate::protocol::plain_code(&error.0)
-                );
-            }
+            eprintln!(
+                "landing_observe_failed cause={}",
+                crate::protocol::plain_code(&error.0)
+            );
             None
         }
     }
@@ -1317,14 +1414,14 @@ fn against(db: &Connection, records: &[Record]) -> Vec<Against> {
 /// judged or left.
 pub(super) fn observe(db: &Connection, project: Option<&ProjectId>) -> Result<(), EngineError> {
     store::initialize(db)?;
-    let mut by_repository: BTreeMap<PathBuf, Vec<Record>> = BTreeMap::new();
+    let mut by_repository: BTreeMap<(PathBuf, ProjectId), Vec<Record>> = BTreeMap::new();
     for record in store::open_of(db, project)? {
         by_repository
-            .entry(record.repository.clone())
+            .entry((record.repository.clone(), record.project.clone()))
             .or_default()
             .push(record);
     }
-    for (repository, records) in by_repository {
+    for ((repository, project), records) in by_repository {
         let tips = against(db, &records);
         let ids: Vec<ChangeSetId> = records.iter().map(|record| record.id.clone()).collect();
         let heads: Vec<&str> = records.iter().map(|record| record.head.as_str()).collect();
@@ -1335,7 +1432,7 @@ pub(super) fn observe(db: &Connection, project: Option<&ProjectId>) -> Result<()
                 crate::protocol::plain_code(&error.0)
             );
         }
-        let owner = owner_tip(&repository);
+        let owner = owner_tip(db, &repository, &project);
         let present = match &owner {
             Some((repo, _)) => repo.commits_among(&heads).unwrap_or_else(|error| {
                 eprintln!(
@@ -1370,6 +1467,6 @@ pub(super) fn observe_for_diff(
     let record = store::load(db, id)?;
     let tips = against(db, std::slice::from_ref(&record));
     let _held = hold(&record.repository);
-    let owner = owner_tip(&record.repository);
+    let owner = owner_tip(db, &record.repository, &record.project);
     observe_one(db, id, owner.as_ref(), &tips[0], &BTreeSet::new())
 }

@@ -386,6 +386,8 @@ fn accept_opens_the_proposed_commit_message_for_editing_and_sends_the_edit() {
         Ok(ChangesView::Branches(crate::landing::TargetBranches {
             branches: vec!["main".into(), "release".into()],
             current: Some("main".into()),
+            land_on: None,
+            land_on_problem: None,
         })),
     );
     assert_eq!(asked, ChangesQuery::Branches { id: id('1') });
@@ -894,6 +896,8 @@ fn accept_lists_the_branches_and_tab_picks_another_target() {
     let listed_branches = TargetBranches {
         branches: vec!["main".into(), "release".into(), "next".into()],
         current: Some("main".into()),
+        land_on: None,
+        land_on_problem: None,
     };
     let query = reply(&mut view, Ok(ChangesView::Branches(listed_branches)));
     assert_eq!(query, ChangesQuery::Branches { id: id('1') });
@@ -939,6 +943,8 @@ fn accept_on_the_checked_out_branch_sends_a_plain_accept_and_esc_drops_the_list(
         Ok(ChangesView::Branches(TargetBranches {
             branches: vec!["main".into(), "release".into()],
             current: Some("main".into()),
+            land_on: None,
+            land_on_problem: None,
         })),
     );
     assert!(view.key(key(KeyCode::Enter), NOW));
@@ -957,13 +963,120 @@ fn accept_on_the_checked_out_branch_sends_a_plain_accept_and_esc_drops_the_list(
     let shown = flat(&failed);
     assert!(
         shown.contains(
-            "Couldn't list your branches, so these changes land on the checked-out branch."
+            "Couldn't list your branches, so these changes land on your project's Land on branch."
         ),
         "{shown}"
     );
     assert!(
-        shown.contains("They land as one commit on the branch checked out in your project folder"),
+        shown.contains(
+            "They land as one commit on your project's Land on branch, under your own Git name."
+        ),
         "{shown}"
+    );
+}
+
+#[test]
+fn accept_preselects_the_land_on_branch_and_sends_a_plain_accept_for_it() {
+    let land_on = || TargetBranches {
+        branches: vec!["feat/x".into(), "main".into(), "stage".into()],
+        current: Some("feat/x".into()),
+        land_on: Some("stage".into()),
+        land_on_problem: None,
+    };
+    let mut view = listed(vec![set('1', ChangeState::Pending)]);
+    assert!(view.key(key(KeyCode::Char('a')), NOW));
+    reply(&mut view, Ok(ChangesView::Branches(land_on())));
+    let shown = flat(&view);
+    assert!(shown.contains("Branch stage"), "{shown}");
+    assert!(
+        shown.contains(
+            "They land as one commit on stage, under your own Git name. That branch isn't checked out"
+        ),
+        "{shown}"
+    );
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    assert_eq!(
+        view.next_query(NOW),
+        Some(ChangesQuery::Accept {
+            id: id('1'),
+            expected_head: "1".repeat(40),
+            message: "Add a file".into(),
+        }),
+        "the Land on branch is where the engine lands with no branch named"
+    );
+
+    let mut view = listed(vec![set('1', ChangeState::Pending)]);
+    assert!(view.key(key(KeyCode::Char('a')), NOW));
+    reply(&mut view, Ok(ChangesView::Branches(land_on())));
+    assert!(view.key(key(KeyCode::Tab), NOW));
+    let shown = flat(&view);
+    assert!(shown.contains("Branch feat/x"), "{shown}");
+    assert!(
+        shown.contains(
+            "They land as one commit on feat/x, the branch checked out in your project folder"
+        ),
+        "{shown}"
+    );
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    assert_eq!(
+        view.next_query(NOW),
+        Some(ChangesQuery::AcceptInto {
+            id: id('1'),
+            expected_head: "1".repeat(40),
+            message: "Add a file".into(),
+            target: "feat/x".into(),
+        }),
+        "the checked-out branch is named when it is not the Land on branch"
+    );
+}
+
+/// With the Land on branch missing, Accept names the setting and the branch, preselects no
+/// branch and sends nothing until the owner picks one with Tab, which it then names
+/// (DEC-111 Q1, review F1): the checked-out branch is never the silent destination.
+#[test]
+fn accept_with_a_missing_land_on_branch_names_it_and_waits_for_a_picked_branch() {
+    let missing = "Your Land on branch stage is not a local branch of this project. Pick a branch, or change Land on in Team settings.";
+    let mut view = listed(vec![set('1', ChangeState::Pending)]);
+    assert!(view.key(key(KeyCode::Char('a')), NOW));
+    reply(
+        &mut view,
+        Ok(ChangesView::Branches(TargetBranches {
+            branches: vec!["feat/x".into(), "main".into()],
+            current: Some("feat/x".into()),
+            land_on: None,
+            land_on_problem: Some(missing.into()),
+        })),
+    );
+    let shown = flat(&view);
+    assert!(shown.contains(missing), "{shown}");
+    assert!(
+        shown.contains("Press Tab to pick the branch they land on."),
+        "{shown}"
+    );
+    assert!(!shown.contains("Branch feat/x"), "{shown}");
+    assert!(!shown.contains("They land as one commit on"), "{shown}");
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    assert_eq!(view.next_query(NOW), None, "nothing lands before a pick");
+    assert!(flat(&view).contains(missing), "{}", flat(&view));
+    assert!(view.key(key(KeyCode::Tab), NOW));
+    let picked = flat(&view);
+    assert!(picked.contains("Branch feat/x"), "{picked}");
+    assert!(
+        picked.contains(
+            "They land as one commit on feat/x, the branch checked out in your project folder"
+        ),
+        "{picked}"
+    );
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    assert_eq!(
+        view.next_query(NOW),
+        Some(ChangesQuery::AcceptInto {
+            id: id('1'),
+            expected_head: "1".repeat(40),
+            message: "Add a file".into(),
+            target: "feat/x".into(),
+        }),
+        "a picked branch is always named"
     );
 }
 
@@ -998,7 +1111,7 @@ fn opening_accept_drops_an_older_notice_about_the_set() {
     assert!(!failed.contains(&refused), "{failed}");
     assert!(
         failed.contains(
-            "Couldn't list your branches, so these changes land on the checked-out branch."
+            "Couldn't list your branches, so these changes land on your project's Land on branch."
         ),
         "{failed}"
     );

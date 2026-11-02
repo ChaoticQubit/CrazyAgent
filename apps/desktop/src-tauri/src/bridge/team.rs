@@ -251,6 +251,25 @@ impl NativeBridge {
             .await
     }
 
+    /// Sets the branch a project's team work lands on (DEC-111 Q1): the master's merges,
+    /// an Accept with no branch named and the measuring of change sets, or clears it back
+    /// to the Master's branch. Takes the project id, the branch name, None for the Master's
+    /// branch, and the client generation. Returns the actual commit receipt; the engine
+    /// refuses a name git cannot hold.
+    pub async fn team_land_on(
+        &mut self,
+        id: &str,
+        branch: Option<String>,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        let branch = branch
+            .map(|branch| branch.trim().to_owned())
+            .filter(|branch| !branch.is_empty());
+        self.team_action(TeamAction::LandOn { project_id, branch }, generation)
+            .await
+    }
+
     /// Turns a project's "Ask me before merging into the master's branch" setting on or
     /// off: on, the master's merge of a finished harness waits for the owner's Accept.
     /// Takes the project id, the switch and the client generation. Returns the actual

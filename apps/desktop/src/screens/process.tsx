@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { listSkills, type Result } from "../api";
 import { HOOKLESS_WORDS, type ImportFile, type Nudges } from "../engine-client";
 import {
-  DEFAULT_INSTRUCTION_SETTINGS, INSTRUCTION_MODES, PROCESS_TEXT_BYTES_MAX, commitInstructionImport, committedMessage, confirmInstructionImport, defaultProcess, flagWords,
+  DEFAULT_INSTRUCTION_SETTINGS, EDIT_DELIVERIES, INSTRUCTION_MODES, PROCESS_TEXT_BYTES_MAX, commitInstructionImport, committedMessage, confirmInstructionImport, defaultProcess, flagWords,
   importInstructionsFile, importRefusal, loadAdoption, loadInstructionImport, loadUncommittedImport, loadInstructionSettings, loadProcess, processMessage, processTextError, saveInstructionSettings,
   saveProcess, savedMessage, skillSegments, textBytes, type Adoption, type AgentAdoption, type InstructionSettings, type SkillEntry,
 } from "../api-process";
@@ -130,6 +130,7 @@ export function AgentSettingsView({ settings, busy, failure, onSave }: {
   if (settings.kind === "not_ready") return <NotReady what="Agent settings" />;
   const current = settings.kind === "ok" ? settings.value : DEFAULT_INSTRUCTION_SETTINGS;
   const choice = INSTRUCTION_MODES.find((option) => option.value === current.mode) ?? INSTRUCTION_MODES[2];
+  const delivery = EDIT_DELIVERIES.find((option) => option.value === current.edits) ?? EDIT_DELIVERIES[0];
   const save = (next: InstructionSettings) => { if (!busy) onSave(next); };
   return <Panel title="Agent settings">
     <div className="stack-small">
@@ -145,6 +146,11 @@ export function AgentSettingsView({ settings, busy, failure, onSave }: {
       <p className="secondary">{current.transcripts
         ? "Headless Claude runs keep their transcript in the agent's own home."
         : "Headless Claude runs keep no transcript."}</p>
+      <span>When you edit instructions</span>
+      <Segmented label="When you edit instructions" value={delivery.value}
+        options={EDIT_DELIVERIES.map(({ value, label }) => ({ value, label }))}
+        onValue={(edits) => save({ ...current, edits })} />
+      <p className="secondary">{delivery.note}</p>
     </div>
   </Panel>;
 }

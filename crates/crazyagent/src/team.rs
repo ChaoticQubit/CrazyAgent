@@ -593,6 +593,11 @@ pub enum TeamAction {
         #[serde(default)]
         branch: Option<String>,
     },
+    LandOn {
+        project_id: ProjectId,
+        #[serde(default)]
+        branch: Option<String>,
+    },
     AskBeforeMerge {
         project_id: ProjectId,
         on: bool,
@@ -817,6 +822,11 @@ impl TeamAction {
                 .is_none_or(plain_branch_name)
                 .then_some(())
                 .ok_or_else(|| failure("team_master_branch_invalid")),
+            Self::LandOn { branch, .. } => branch
+                .as_deref()
+                .is_none_or(plain_branch_name)
+                .then_some(())
+                .ok_or_else(|| failure("team_land_on_invalid")),
             Self::AnswerQuestion { message, text, .. } => {
                 if *message <= 0 {
                     return Err(failure("coord_question_missing"));
@@ -855,6 +865,7 @@ impl TeamAction {
             | Self::FinishedAgents { project_id, .. }
             | Self::AgentBranches { project_id, .. }
             | Self::MasterBranch { project_id, .. }
+            | Self::LandOn { project_id, .. }
             | Self::AskBeforeMerge { project_id, .. }
             | Self::NewFolderLimit { project_id, .. }
             | Self::LiveMaster { project_id, .. }
@@ -884,8 +895,8 @@ impl TeamAction {
     }
 }
 
-/// Tells whether a branch name the owner typed for the Master's branch is one git can hold
-/// as a local branch: printable ASCII without spaces or git's special characters, no `..`,
+/// Tells whether a branch name the owner typed for the Master's branch or Land on is one
+/// git can hold as a local branch: printable ASCII without spaces or git's special characters, no `..`,
 /// `@{`, `//` or leading `-`, no part starting with `.` or ending in `.lock`, at most
 /// `MASTER_BRANCH_BYTES_MAX` bytes. Whether that branch exists is checked when it is used.
 /// Input: the name. Output: the answer.
@@ -1272,6 +1283,10 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 mode TEXT NOT NULL CHECK(mode IN ('named','detached'))
             );
             CREATE TABLE IF NOT EXISTS team_master_branch (
+                project TEXT PRIMARY KEY,
+                branch TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS team_land_on (
                 project TEXT PRIMARY KEY,
                 branch TEXT NOT NULL
             );
@@ -2099,6 +2114,21 @@ pub fn execute(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::LandOn { branch, .. } => {
+            match branch {
+                Some(branch) => tx.execute(
+                    "INSERT INTO team_land_on(project,branch) VALUES (?1,?2)
+                     ON CONFLICT(project) DO UPDATE SET branch=excluded.branch",
+                    params![project.as_str(), branch],
+                ),
+                None => tx.execute(
+                    "DELETE FROM team_land_on WHERE project=?1",
+                    [project.as_str()],
+                ),
+            }
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::AskBeforeMerge { on, .. } => {
             tx.execute(
                 "INSERT INTO team_merge_ask(project,ask) VALUES (?1,?2)
@@ -2524,6 +2554,8 @@ pub struct TeamAgent {
     pub pane: Option<String>,
     #[serde(default)]
     pub hookless: bool,
+    #[serde(default)]
+    pub instructions_changed: bool,
 }
 
 /// One teammate a harness split off in its own pane of the harness's terminal, such as a
@@ -2681,6 +2713,8 @@ pub struct TeamStatus {
     #[serde(default)]
     pub master_branch: Option<String>,
     #[serde(default)]
+    pub land_on: Option<String>,
+    #[serde(default)]
     pub ask_before_merge: bool,
     #[serde(default = "new_folder_default")]
     pub new_folder_files_max: u32,
@@ -2764,6 +2798,7 @@ pub(crate) fn agent_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamAgent> 
         teammates: Vec::new(),
         pane: row.get(17)?,
         hookless: row.get(18)?,
+        instructions_changed: false,
     })
 }
 
@@ -3129,6 +3164,27 @@ pub fn master_branch_choice(
         .map_err(error)?;
     match branch {
         Some(branch) if !plain_branch_name(&branch) => Err(error("team_master_branch_invalid")),
+        branch => Ok(branch),
+    }
+}
+
+/// The branch the owner chose for the team's work to land on (DEC-111 Q1): the master's
+/// merges, an Accept with no branch named and the measuring of change sets. None means
+/// the Master's branch. Takes a connection and the project. Returns the choice.
+pub fn land_on(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<Option<String>, EngineError> {
+    let branch: Option<String> = connection
+        .query_row(
+            "SELECT branch FROM team_land_on WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    match branch {
+        Some(branch) if !plain_branch_name(&branch) => Err(error("team_land_on_invalid")),
         branch => Ok(branch),
     }
 }
@@ -3808,8 +3864,10 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
             .collect::<Result<_, _>>()
             .map_err(error)?
     };
+    let changed = crate::instruction_files::badges(connection, project).map_err(error)?;
     for agent in &mut agents {
         agent.owner_stopped = stopped.contains(&agent.id);
+        agent.instructions_changed = changed.contains(&agent.id) && agent.status.live();
         agent.teammates = teammates(connection, project, agent.id)?;
     }
     let (live_master, live_problem) = master::switch(connection, project)?;
@@ -3829,6 +3887,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         show_finished: show_finished(connection, project)?,
         agent_branches: agent_branches(connection, project)?,
         master_branch: master_branch_choice(connection, project)?,
+        land_on: land_on(connection, project)?,
         ask_before_merge: ask_before_merge(connection, project)?,
         new_folder_files_max: new_folder_files_max(connection, project)?,
         coordination: Some(coordination(connection, project)?),
