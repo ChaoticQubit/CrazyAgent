@@ -10,7 +10,7 @@ import "../project/projects.css";
 import "./intake.css";
 
 function PackRow({ entry, ticked, onTick, locked }: { entry: PackEntry; ticked: boolean; onTick: (id: string, on: boolean) => void; locked: boolean }) {
-  const state = packStateView(entry.state);
+  const state = packStateView(entry.state, entry.hooks_refused);
   const name = <span className="row"><Icon name={entryIcon(entry)} size={14} />{entryName(entry)}{entry.kind === "mcp_server" && <span className="pj-small pj-muted">MCP server</span>}</span>;
   return <li className="in-row">
     <span className="in-row-main">

@@ -567,7 +567,7 @@ const PROBLEMS: &[(&str, &str)] = &[
     ),
     (
         "hooks_plugin_manifest_missing",
-        "This pack has hooks but no plugin.json.",
+        "This folder has hooks but no .claude-plugin/plugin.json naming the plugin.",
     ),
     (
         "hooks_already_added",

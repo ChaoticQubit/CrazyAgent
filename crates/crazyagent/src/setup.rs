@@ -471,6 +471,18 @@ pub fn plain_reason(code: &str) -> &'static str {
     known_reason(code).unwrap_or("Something went wrong during setup.")
 }
 
+/// Turns a pack install or hooks code into the plain sentence a pack entry shows: a setup
+/// or pack code from the setup table, any other from the plugin table first. Input: the
+/// code. Output: its sentence, or the general setup sentence.
+pub fn pack_reason(code: &str) -> String {
+    if code.starts_with("setup_") || code.starts_with("pack_") {
+        return plain_reason(code).to_owned();
+    }
+    crate::plugins::plain_problem(code)
+        .unwrap_or_else(|| plain_reason(code))
+        .to_owned()
+}
+
 /// Finds the setup sentence for a code. Input: a code such as `setup_checksum_mismatch`.
 /// Output: its sentence, or none for a code setup has no sentence for.
 pub fn known_reason(code: &str) -> Option<&'static str> {
