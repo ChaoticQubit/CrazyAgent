@@ -4334,6 +4334,71 @@ fn with_next_message_an_edit_reaches_the_live_masters_next_typed_message_once() 
     );
 }
 
+/// The line a change block ends with when more sections changed than it carries.
+#[cfg(target_os = "macos")]
+const SECTIONS_CUT_LINE: &str =
+    "More sections changed than one message carries; they apply in full when you next start.";
+
+/// With the default choice, an owner edit whose changed sections pass the live master's
+/// 16 KiB input limit still reaches it once: the next typed message starts with as many
+/// changed sections as fit beside it and the line saying the rest apply at its next start,
+/// and the message after it carries no block (w-review R2-M1).
+#[cfg(target_os = "macos")]
+#[test]
+fn with_next_message_an_edit_past_the_input_limit_reaches_the_live_master_once_cut() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    edit_settings(
+        &fixture,
+        crate::instruction_files::EditDelivery::NextMessage,
+    );
+    let large: String = std::iter::once(EDITED_TEXT.to_owned())
+        .chain((0..40).map(|part| {
+            format!(
+                "\n## Part {part}\n\n{}\n",
+                "Keep each page short and plain. ".repeat(20)
+            )
+        }))
+        .collect();
+    assert!(large.len() > crate::team::master::INPUT_TEXT_MAX + 4096);
+    let mut team = live_runtime(&fixture, &host, &recording_codex());
+    super::super::master::set_live(&fixture.connection, &fixture.setup.project_id, true).unwrap();
+    fixture.until(&mut team, "the live master's pane runs", |f| {
+        live_agent(&f.connection).is_some()
+    });
+    let master = masters(&fixture.connection)[0];
+    for (turns, text) in [
+        (1, "Plan the page"),
+        (2, "Plan the title"),
+        (3, "Plan the footer"),
+    ] {
+        if turns == 2 {
+            crate::agent_home::save_app(&fixture.base, &large).unwrap();
+        }
+        tell_master(&fixture, text);
+        fixture.until(&mut team, "the live master's turn ends", |f| {
+            typed(f, master).contains(text) && live_turns(&f.connection) == (turns, false)
+        });
+    }
+    let text = typed(&fixture, master);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    assert_eq!(text.matches(CHANGED_HEADER).count(), 1, "{text}");
+    let block = change_block(&text, "Plan the title");
+    assert!(
+        block.len() <= crate::team::master::INPUT_TEXT_MAX,
+        "{}",
+        block.len()
+    );
+    assert!(
+        block.contains("Use spaces.") && block.contains("## Part 0"),
+        "{block}"
+    );
+    assert!(!block.contains("## Part 39"), "{block}");
+    assert!(block.contains(SECTIONS_CUT_LINE), "{block}");
+    assert!(text.contains("Plan the footer"), "{text}");
+}
+
 /// With Restart chosen, an idle live master stops after each owner edit and starts again
 /// in its own conversation with the new text, types nothing, and stays live: three
 /// restarts in a row never count as the start failures that turn the live master off.
@@ -4385,6 +4450,50 @@ fn with_restart_an_idle_live_master_restarts_in_its_own_conversation_with_the_ne
     );
     assert!(!text.contains(CHANGED_HEADER), "{text}");
     assert_eq!(turns, (0, false), "nothing typed on restart");
+}
+
+/// With Restart chosen, the live master restarts once per owner edit: when its new launch
+/// still leaves the engine's record behind the text, as a record write that failed would,
+/// it is not restarted again every check (w-review R2-L3).
+#[cfg(target_os = "macos")]
+#[test]
+fn with_restart_a_live_master_restarts_once_per_edit_even_when_its_record_stays_behind() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    edit_settings(&fixture, crate::instruction_files::EditDelivery::Restart);
+    let mut team = live_runtime(&fixture, &host, &recording_codex());
+    let project = fixture.setup.project_id.clone();
+    switch_session(&fixture.connection, "s-one");
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the live master runs and is kept", |f| {
+        live_agent(&f.connection).is_some() && kept_conversation(&f.connection, "s-one").is_some()
+    });
+    let master = masters(&fixture.connection)[0];
+    crate::agent_home::save_app(&fixture.base, EDITED_TEXT).unwrap();
+    fixture.until(&mut team, "the live master starts again", |f| {
+        launches(f, master).len() == 2
+            && live_agent(&f.connection) == Some(master)
+            && host.alive().unwrap() == names(&[master])
+    });
+    let home = fixture
+        .base
+        .join("team/agents")
+        .join(format!("agent-{master}"))
+        .join("home");
+    crate::agent_home::record_given(&fixture.base, &home, STARTED_TEXT).unwrap();
+    for _ in 0..4 {
+        idle_ticks(&mut team);
+    }
+    let started = launches(&fixture, master);
+    let on = super::super::master::live(&fixture.connection, &project).unwrap();
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    assert_eq!(
+        started.len(),
+        2,
+        "one restart for the one edit: {started:?}"
+    );
+    assert!(on);
 }
 
 /// With Restart chosen, an idle master that is not live stops after an owner edit, and the
