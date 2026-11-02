@@ -1,5 +1,6 @@
 use super::{
-    Adoption, Grant, Managed, Mode, Order, Plan, Report, TeamLimits, TeamRuntime, TurnEnd, per_turn,
+    Adoption, Grant, Managed, Mode, Order, Plan, Report, TeamLimits, TeamRuntime, TurnEnd,
+    TurnRules, per_turn,
 };
 use crate::config::{
     AccountPool, ModelAccess, ModelAuthentication, ModelConnection, ModelEndpoint, ModelReference,
@@ -438,7 +439,10 @@ impl ManagedAgent {
                         context,
                         access: crate::sandbox::policy::AgentAccess::Sandboxed,
                     })),
-                    Some(turn_time),
+                    TurnRules {
+                        limit: Some(turn_time),
+                        background: crate::team::BackgroundAtEnd::Wait,
+                    },
                 ))
                 .unwrap();
         }
@@ -485,7 +489,10 @@ impl ManagedAgent {
                     context,
                     access: crate::sandbox::policy::AgentAccess::Sandboxed,
                 })),
-                Some(turn_time),
+                TurnRules {
+                    limit: Some(turn_time),
+                    background: crate::team::BackgroundAtEnd::Wait,
+                },
             ))
             .unwrap();
         drop(orders);
@@ -541,7 +548,10 @@ impl ManagedAgent {
                 context,
                 access: crate::sandbox::policy::AgentAccess::Sandboxed,
             })),
-            Some(turn_time),
+            TurnRules {
+                limit: Some(turn_time),
+                background: crate::team::BackgroundAtEnd::Wait,
+            },
         )
     }
 
@@ -566,7 +576,14 @@ impl ManagedAgent {
             .unwrap();
         for prompt in &prompts[1..] {
             orders
-                .send(Order::Turn((*prompt).to_owned(), None, Some(turn_time)))
+                .send(Order::Turn(
+                    (*prompt).to_owned(),
+                    None,
+                    TurnRules {
+                        limit: Some(turn_time),
+                        background: crate::team::BackgroundAtEnd::Wait,
+                    },
+                ))
                 .unwrap();
         }
         orders.send(Order::Stop).unwrap();

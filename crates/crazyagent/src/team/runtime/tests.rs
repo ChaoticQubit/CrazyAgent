@@ -8692,7 +8692,17 @@ fn wiring_a_native_lead_adopted_without_its_account_is_killed() {
     let host = fixture.host();
     for (first, leave) in [
         (Order::Stop, false),
-        (Order::Turn("Plan the page".into(), None, None), false),
+        (
+            Order::Turn(
+                "Plan the page".into(),
+                None,
+                TurnRules {
+                    limit: None,
+                    background: crate::team::BackgroundAtEnd::Wait,
+                },
+            ),
+            false,
+        ),
         (Order::Start("Your brief".into(), None), false),
         (Order::Stop, true),
     ] {
@@ -8770,7 +8780,17 @@ fn wiring_a_native_lead_started_without_its_account_starts_nothing() {
     };
     let home = fixture.base.join("lead-home");
     for (first, taken) in [
-        (Order::Turn("Plan the page".into(), None, None), true),
+        (
+            Order::Turn(
+                "Plan the page".into(),
+                None,
+                TurnRules {
+                    limit: None,
+                    background: crate::team::BackgroundAtEnd::Wait,
+                },
+            ),
+            true,
+        ),
         (Order::Start("Your brief".into(), None), false),
     ] {
         let (orders, ordered) = channel();
