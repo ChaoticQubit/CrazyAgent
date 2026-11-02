@@ -14,6 +14,16 @@ pub mod windows;
 
 pub const FOLDER: &str = "terminal";
 pub const HARNESS_SOCKET: &str = "tmux.sock";
+/// The start of a native lead's teammates' socket name: each lead start names a new one,
+/// `teammates-` and 16 hex digits then `.sock`, beside the lead's own.
+pub const TEAMMATES_SOCKET_PREFIX: &str = "teammates-";
+#[cfg(unix)]
+const TEAMMATES_SOCKET_SUFFIX: &str = ".sock";
+#[cfg(unix)]
+const TEAMMATES_NONCE_BYTES: usize = 8;
+#[cfg(unix)]
+const TEAMMATES_NAME_BYTES: usize =
+    TEAMMATES_SOCKET_PREFIX.len() + 2 * TEAMMATES_NONCE_BYTES + TEAMMATES_SOCKET_SUFFIX.len();
 const HARNESS_SOCKET_BYTES_MAX: usize = 104;
 pub const AGENT_ID_BYTES_MAX: usize = 64;
 pub const INPUT_BYTES_MAX: usize = 4096;
@@ -594,11 +604,101 @@ pub fn tmux_host(engine_root: &Path, program: Option<PathBuf>) -> Arc<dyn Host> 
 /// Takes the engine root and the lead. Returns the path, or `terminal_agent_invalid` for a
 /// name that is not a team agent.
 pub fn harness_socket(engine_root: &Path, lead: &AgentId) -> Result<PathBuf, HostError> {
+    lead_temp_socket(engine_root, lead, HARNESS_SOCKET)
+}
+
+/// The socket of a native lead's teammates' own tmux server (rv-audit S1 F1), in the lead's
+/// short private temp folder under the name its latest start chose (see
+/// [`renew_teammates_socket`]). That server and every teammate pane it forks run in the
+/// teammates' profile, which serves this socket but never reaches or unlinks it, nor the
+/// lead's own; the lead and the engine's clients reach it inside the lead's profile. Takes
+/// the engine root and the lead. Returns the path, `terminal_agent_invalid` for a name that
+/// is not a team agent, or `terminal_own_server_unavailable` when no plain name is kept.
+#[cfg(unix)]
+pub fn teammates_socket(engine_root: &Path, lead: &AgentId) -> Result<PathBuf, HostError> {
+    use std::os::unix::fs::MetadataExt;
+    let id = lead
+        .team_agent()
+        .ok_or_else(|| failure("terminal_agent_invalid"))?;
+    let kept = crate::team::runtime::agent_teammates_socket_name(&engine_root.join("team"), id);
+    let unavailable = || failure(OWN_SERVER_UNAVAILABLE);
+    let plain = std::fs::symlink_metadata(&kept).is_ok_and(|metadata| {
+        metadata.is_file()
+            && metadata.uid() == rustix::process::getuid().as_raw()
+            && u64::try_from(TEAMMATES_NAME_BYTES).is_ok_and(|bytes| metadata.len() == bytes)
+    });
+    if !plain {
+        return Err(unavailable());
+    }
+    let name = std::fs::read_to_string(&kept).map_err(|_| unavailable())?;
+    if !teammates_name_valid(&name) {
+        return Err(unavailable());
+    }
+    lead_temp_socket(engine_root, lead, &name)
+}
+
+/// Names a new socket for a native lead's teammates' server as the lead starts and keeps
+/// the name in the engine's own profiles folder, so no path a teammate's profile ever
+/// served is reused: a teammate still running from an earlier start cannot bind a listener
+/// where the lead's tmux clients now connect. Takes the engine root and the lead, whose
+/// profiles folder must exist. Returns the new path, or a plain code.
+#[cfg(unix)]
+pub fn renew_teammates_socket(engine_root: &Path, lead: &AgentId) -> Result<PathBuf, HostError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let id = lead
+        .team_agent()
+        .ok_or_else(|| failure("terminal_agent_invalid"))?;
+    let mut nonce = [0_u8; TEAMMATES_NONCE_BYTES];
+    getrandom::fill(&mut nonce).map_err(|_| failure(OWN_SERVER_UNAVAILABLE))?;
+    let digits: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
+    let name = format!("{TEAMMATES_SOCKET_PREFIX}{digits}{TEAMMATES_SOCKET_SUFFIX}");
+    assert!(teammates_name_valid(&name));
+    let kept = crate::team::runtime::agent_teammates_socket_name(&engine_root.join("team"), id);
+    let staging = kept.with_extension(format!("{}.tmp", std::process::id()));
+    let written = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .open(&staging)
+        .and_then(|mut file| {
+            file.write_all(name.as_bytes())
+                .and_then(|()| file.sync_all())
+        })
+        .and_then(|()| std::fs::rename(&staging, &kept));
+    if written.is_err() {
+        let _ = std::fs::remove_file(&staging);
+        return Err(failure(OWN_SERVER_UNAVAILABLE));
+    }
+    lead_temp_socket(engine_root, lead, &name)
+}
+
+/// Whether a text is a teammates' socket name as [`renew_teammates_socket`] makes one.
+/// Takes the text, read from a file. Returns the answer.
+#[cfg(unix)]
+fn teammates_name_valid(name: &str) -> bool {
+    name.len() == TEAMMATES_NAME_BYTES
+        && name
+            .strip_prefix(TEAMMATES_SOCKET_PREFIX)
+            .and_then(|rest| rest.strip_suffix(TEAMMATES_SOCKET_SUFFIX))
+            .is_some_and(|digits| {
+                digits.len() == 2 * TEAMMATES_NONCE_BYTES
+                    && digits
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+            })
+}
+
+/// One named socket in a team agent's short private temp folder. Takes the engine root, the
+/// agent and the socket name. Returns the path, or `terminal_agent_invalid` for a name that
+/// is not a team agent.
+fn lead_temp_socket(engine_root: &Path, lead: &AgentId, name: &str) -> Result<PathBuf, HostError> {
     let id = lead
         .team_agent()
         .ok_or_else(|| failure("terminal_agent_invalid"))?;
     let home = crate::team::runtime::agent_home(&engine_root.join("team"), id);
-    let socket = crate::sandbox::toolchains::tmp_path(&home).join(HARNESS_SOCKET);
+    let socket = crate::sandbox::toolchains::tmp_path(&home).join(name);
     assert!(socket.is_absolute() && socket.as_os_str().len() <= HARNESS_SOCKET_BYTES_MAX);
     Ok(socket)
 }

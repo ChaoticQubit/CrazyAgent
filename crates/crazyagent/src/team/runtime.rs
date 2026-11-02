@@ -3135,18 +3135,20 @@ impl TeamRuntime {
             let workers = &self.workers;
             self.callers.retain(|id, _| workers.contains_key(id));
             for id in &subs {
-                let pinned = match self.callers.get(id) {
+                let (pinned, pins) = match self.callers.get(id) {
                     Some(Some(callers)) if callers.intact() => continue,
-                    Some(Some(callers)) => Some(callers.folder()),
+                    Some(Some(callers)) => (Some(callers.folder()), callers.pins()),
                     Some(None) => continue,
                     None if self.stored_mode(*id).as_deref()
                         == Some(crate::coord::settings::SubagentMode::Native.as_str()) =>
                     {
-                        None
+                        (None, Vec::new())
                     }
                     None => continue,
                 };
-                let bound = self.bind_callers(*id, pinned);
+                let bound = self
+                    .bind_callers(*id, pinned)
+                    .map(|bound| bound.with_pins(pins));
                 if pinned.is_some() && bound.is_ok() {
                     eprintln!("team_caller_socket_rebound");
                 }
@@ -5258,6 +5260,7 @@ impl TeamRuntime {
         }
         .map_err(sandboxed)?;
         let mut native_tmux = None;
+        let mut teammates = None;
         if native {
             if confinement(layout, policy.access)? {
                 return Err(with_code(
@@ -5286,16 +5289,31 @@ impl TeamRuntime {
                     .is_some_and(|named| named == socket),
                 "the lead's own socket is the one the terminal host routes to"
             );
-            sandbox = sandbox
-                .allow_tmux_server(&socket, &tmux)
-                .map_err(sandboxed)?;
+            let runtime = self
+                .state
+                .parent()
+                .ok_or("the team state folder has no engine root")?;
+            let lead = AgentId::team(id)
+                .map_err(|e| with_code("the lead has no terminal name", Some(&e.0)))?;
+            let mates_socket = crate::terminal::renew_teammates_socket(runtime, &lead)
+                .map_err(|e| with_code("the teammates' socket could not be named", Some(&e.0)))?;
+            assert!(
+                mates_socket.parent() == Some(scratch.as_path())
+                    && crate::terminal::teammates_socket(runtime, &lead)
+                        .is_ok_and(|named| named == mates_socket),
+                "the teammates' socket is the one the terminal host routes to"
+            );
             let callers = scratch.join(super::caller::CALLER_SOCKET);
             assert_eq!(
                 super::caller::socket_for_mailbox(&self.mailbox(id)).as_deref(),
                 Some(callers.as_path()),
                 "the lead's servers find the caller socket its sandbox reaches"
             );
-            sandbox = sandbox.allow_unix_socket(&callers).map_err(sandboxed)?;
+            let (lead, mates) = sandbox
+                .native_team(&socket, &mates_socket, &callers, &tmux)
+                .map_err(sandboxed)?;
+            sandbox = lead;
+            teammates = Some(mates);
             native_tmux = Some(tmux);
         }
         expose_graph(&root, &working_dir);
@@ -5311,6 +5329,11 @@ impl TeamRuntime {
                     Some("team_delegate_writable"),
                 ));
             }
+        }
+        if let Some(mates) = &teammates {
+            mates
+                .install(&agent_teammates_profile(&self.state, id))
+                .map_err(sandboxed)?;
         }
         sandbox.install(&profile).map_err(sandboxed)?;
         let plan = Plan {
@@ -8262,6 +8285,26 @@ fn ignores_graph(worktree: &Path) -> bool {
 /// the team state folder and the agent id. Output: `<state>/profiles/agent-<id>.sb`.
 pub fn agent_profile(state: &Path, id: i64) -> PathBuf {
     state.join("profiles").join(format!("agent-{id}.sb"))
+}
+
+/// The Seatbelt profile a native-mode lead's teammates' own tmux server, and every teammate
+/// pane it forks, run inside (rv-audit S1 F1): the lead's profile without its own tmux
+/// socket, serving the teammates' socket without reaching it. Inputs: the team state folder
+/// and the lead's id. Output: `<state>/profiles/agent-<id>-teammates.sb`.
+pub fn agent_teammates_profile(state: &Path, id: i64) -> PathBuf {
+    state
+        .join("profiles")
+        .join(format!("agent-{id}-teammates.sb"))
+}
+
+/// Where the engine keeps the socket name a native-mode lead's latest start chose for its
+/// teammates' tmux server (see `terminal::renew_teammates_socket`), beside the profiles no
+/// agent writes. Inputs: the team state folder and the lead's id. Output:
+/// `<state>/profiles/agent-<id>-teammates.socket`.
+pub fn agent_teammates_socket_name(state: &Path, id: i64) -> PathBuf {
+    state
+        .join("profiles")
+        .join(format!("agent-{id}-teammates.socket"))
 }
 
 /// Starts the team runtime for a running engine: team state in `<runtime>/team`,
