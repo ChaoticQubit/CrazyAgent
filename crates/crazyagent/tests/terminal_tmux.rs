@@ -1478,14 +1478,26 @@ fn a_native_lead_runs_in_its_own_server_and_every_call_reaches_it_by_name() {
 
     host.close(&[]).unwrap();
     assert!(host.alive().unwrap().is_empty());
-    for socket in [&lead.socket, &lead.mates] {
-        assert!(
-            !std::fs::symlink_metadata(socket)
-                .is_ok_and(|metadata| metadata.file_type().is_socket()),
-            "{}",
-            socket.display()
-        );
-    }
+    assert!(
+        !std::fs::symlink_metadata(&lead.socket)
+            .is_ok_and(|metadata| metadata.file_type().is_socket())
+    );
+    assert!(
+        std::fs::symlink_metadata(&lead.mates)
+            .is_ok_and(|metadata| metadata.file_type().is_socket()),
+        "an ended teammates' server keeps its socket, so no teammate can bind one there"
+    );
+    assert_eq!(
+        crazyagent::spawn_gate::connect_unix_std(&lead.mates)
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::ConnectionRefused
+    );
+    assert_ne!(
+        crazyagent::terminal::renew_teammates_socket(&root, &leader).unwrap(),
+        lead.mates,
+        "the lead's next start names a new teammates' socket"
+    );
 }
 
 #[cfg(target_os = "macos")]
