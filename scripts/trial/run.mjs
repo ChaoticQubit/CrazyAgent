@@ -7,6 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import { setTimeout as pause } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
+import { stopRelaunched } from "../../apps/desktop/test/native/trial-app.mjs";
 
 const TRIAL = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(TRIAL, "..", "..");
@@ -707,6 +708,11 @@ export async function main(argv) {
     await stopLive();
     if (snapshots) shots = await snapshots.stop();
     if (recorder) recorded = await recorder.stop();
+  }
+  const relaunched = await stopRelaunched(opts.evidence).catch((error) => ({ failed: error.message }));
+  if (relaunched) {
+    const failed = typeof relaunched === "object";
+    steps.add("desktop", "Quit the relaunched app", "an app the trial opened as the Dock does has no WebDriver service or process group to stop it", !failed, failed ? `could not stop it: ${relaunched.failed}` : relaunched, ["relaunched.json"]);
   }
   const desktopOk = desktop !== null && desktop.code === 0 && desktop.cause === null && !desktop.error;
   const desktopDetail = desktop === null ? "not started" : `${ending(desktop, opts.deadlineMs)}; ${shots} process snapshots; ${envNames.length} environment names in logs/env.txt`;

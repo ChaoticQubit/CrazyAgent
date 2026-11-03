@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
-import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, join } from "node:path";
+import { setTimeout as pause } from "node:timers/promises";
 import { SECRET_SOURCES, mask } from "./trial3-mask.mjs";
 import { teamWait } from "./trial3-team.mjs";
 import { click, shot, shown } from "./settings-steps.mjs";
+import { RELAUNCHED, appBundle, attach, command, ended, listener } from "./trial-app.mjs";
 
 export const MODE = process.env.TRIAL3_MODE;
 export const EVIDENCE = process.env.TRIAL_EVIDENCE;
@@ -11,6 +14,7 @@ export const PROJECT = process.env.TRIAL_PROJECT;
 export const NAME = PROJECT ? basename(PROJECT) : "";
 export const TEAM_MS = Number(process.env.TRIAL_TEAM_MS ?? 7200000);
 export const UI_MS = 30000;
+const OPEN_MS = 60000;
 const PURPOSES = ["skill", "project", "projects_home", "memory", "plugin"];
 assert(Number.isFinite(TEAM_MS) && TEAM_MS > 0, "the team deadline is positive");
 
@@ -289,4 +293,35 @@ export async function graph() {
   const cards = await browser.execute(() => Object.fromEntries(["master", "lead", "sub", "teammate"]
     .map((kind) => [kind, [...document.querySelectorAll(`.tg-card.${kind}`)].filter((node) => node.getClientRects().length).length])));
   return { nodes, cards };
+}
+
+/** Quits the app and opens it again as the Dock does: open -a on its bundle, so it starts with
+ * no CRAZYAGENT_DESKTOP_SOCKET and only the two variables its WebDriver server needs, then
+ * attaches a new WebDriver session. Live runs only: an app opened that way looks for this
+ * machine's default engine and may install its login service. The relaunched app is recorded
+ * in relaunched.json; the conf and the runner quit it. Output: what it did. */
+export async function relaunch() {
+  assert.equal(MODE, "live", "relaunch runs in a live run only: an app opened without CRAZYAGENT_DESKTOP_SOCKET looks for this machine's default engine and may install its login service");
+  const port = Number(process.env.WD_PORT);
+  const bundle = appBundle(process.env.TRIAL3_APP);
+  const old = listener(port);
+  assert(old, `no app serves WebDriver on port ${port}`);
+  const binary = command(old);
+  process.kill(old, "SIGTERM");
+  assert(await ended(old, binary, UI_MS), `the app (pid ${old}) did not quit within ${UI_MS / 1000} s`);
+  const others = spawnSync("/usr/bin/pgrep", ["-f", binary], { encoding: "utf8", timeout: 10000 }).stdout.trim();
+  assert.equal(others, "", `another ${binary} runs (pid ${others}), so open -a would bring it forward instead of opening the app`);
+  const opened = spawnSync("/usr/bin/open", ["-a", bundle, "--env", `TAURI_WEBDRIVER_PORT=${port}`, "--env", "WDIO_EMBEDDED_SERVER=true"], { encoding: "utf8", timeout: 30000 });
+  assert.equal(opened.status, 0, `open -a ${bundle} failed: ${opened.stderr}`);
+  let pid = null;
+  for (const deadline = Date.now() + OPEN_MS; Date.now() < deadline; await pause(250)) {
+    pid = listener(port);
+    if (pid !== null && pid !== old && await fetch(`http://127.0.0.1:${port}/status`).then((reply) => reply.ok, () => false)) break;
+    pid = null;
+  }
+  assert(pid, `the app opened by open -a never served WebDriver on port ${port} within ${OPEN_MS / 1000} s`);
+  writeFileSync(join(EVIDENCE, RELAUNCHED), `${JSON.stringify({ pid, binary: command(pid), bundle, at: new Date().toISOString() })}\n`, { mode: 0o600 });
+  await browser.reloadSession();
+  await attach(browser);
+  return `quit pid ${old}, opened ${bundle} with open -a (no CRAZYAGENT_DESKTOP_SOCKET), WebDriver attached to pid ${pid}`;
 }
