@@ -699,7 +699,8 @@ fn the_project_override_wins_over_the_app_default() {
             "agent_requests",
             "inventory",
             "skip_markers",
-            "protected_change"
+            "protected_change",
+            "removed_tests"
         ]
     );
     let defaults = serde_json::to_value(ChecksSettings::default()).unwrap();
