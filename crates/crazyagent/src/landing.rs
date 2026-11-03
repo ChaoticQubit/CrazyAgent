@@ -8,6 +8,8 @@ use std::time::Duration;
 #[cfg(unix)]
 mod clone;
 #[cfg(unix)]
+pub(crate) use clone::check_store;
+#[cfg(unix)]
 mod diff;
 #[cfg(unix)]
 mod flow;

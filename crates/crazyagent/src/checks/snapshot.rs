@@ -27,6 +27,9 @@ const LISTING_BYTES_MAX: usize = 64 * 1024 * 1024;
 const SMALL_BYTES_MAX: usize = 4096;
 const PATH_BYTES_MAX: usize = 256;
 const KEPT_MARK: &str = "kept";
+const SPENT_MARK: &str = "holdout-ran";
+/// The refusal for any run on a snapshot a holdout check ran in.
+pub const SPENT: &str = "checks_snapshot_spent";
 const UNAVAILABLE: &str = "checks_unavailable";
 #[cfg(unix)]
 const SNAPSHOT_FAILED: &str = "checks_snapshot_failed";
@@ -135,8 +138,9 @@ pub fn project_folder(project: &ProjectId) -> String {
 /// agent worktree and the owner checkout are only read. Inputs: the engine connection, the
 /// engine's checks folder, the change set and the run. Output: the snapshot, or
 /// `checks_change_set_unknown`, `checks_change_set_discarded`, `checks_run_exists`,
-/// `checks_snapshot_link`, `checks_snapshot_too_large`, `checks_snapshot_failed`, a git
-/// metadata refusal or `checks_unavailable`; a refused run leaves no folder.
+/// `checks_snapshot_link`, `checks_snapshot_too_large`, `checks_snapshot_store_invalid`,
+/// `checks_snapshot_failed`, a git metadata refusal or `checks_unavailable`; a refused run
+/// leaves no folder.
 #[cfg(unix)]
 pub fn prepare(
     db: &Connection,
@@ -188,14 +192,41 @@ impl Snapshot {
         &self.folder
     }
 
+    /// Whether a holdout check was placed in this snapshot, which ends its use: repository
+    /// code that ran beside the holdout files could have copied them into the snapshot.
+    /// Output: true once marked, and for anything at the mark's path or a path that cannot
+    /// be read.
+    pub fn spent(&self) -> bool {
+        !matches!(
+            fs::symlink_metadata(self.folder.join(SPENT_MARK)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound
+        )
+    }
+
     /// Copies holdout files into the snapshot for one run, refusing an unsafe path, a path
-    /// the change set already holds and any link on the way. Input: each relative path with
-    /// its bytes. Output: the placed files, removed when dropped, or `checks_holdout_invalid`,
-    /// `checks_holdout_collides` or `checks_unavailable`.
+    /// the change set already holds and any link on the way. Any file first marks the
+    /// snapshot spent in its run folder, which the check cannot write. Input: each relative
+    /// path with its bytes. Output: the placed files, removed when dropped, or
+    /// `checks_snapshot_spent`, `checks_holdout_invalid`, `checks_holdout_collides` or
+    /// `checks_unavailable`.
     #[cfg(unix)]
     pub fn place(&self, files: &BTreeMap<String, Vec<u8>>) -> Result<Placed, CheckRefusal> {
         use std::io::Write;
         use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+        if !files.is_empty() {
+            fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+                .open(self.folder.join(SPENT_MARK))
+                .and_then(|file| file.sync_all())
+                .map_err(|error| match error.kind() {
+                    io::ErrorKind::AlreadyExists => failure(SPENT),
+                    _ => failure(UNAVAILABLE),
+                })?;
+        }
+        assert!(files.is_empty() || self.spent());
         let mut placed = Placed {
             root: self.root.clone(),
             files: Vec::new(),
@@ -391,19 +422,37 @@ fn source(db: &Connection, change_set: &ChangeSetId) -> Result<Source, CheckRefu
 
 /// The object stores the checkout borrows, the owner's first so an object both hold is read
 /// from the owner's store: the repository's `.git/objects` and, for an agent's own clone,
-/// its git folder's `objects`. Input: the source. Output: the canonical stores, or
+/// its git folder's `objects` once it passes the check a landing fetch runs (DEC102-F1,
+/// AL-1), so the agent cannot point the checkout at another store or carry past the tree
+/// bounds. Input: the source. Output: the canonical stores, `checks_snapshot_store_invalid`
+/// or `checks_snapshot_too_large` for an agent store landing refuses, or
 /// `checks_unavailable` for a store reached through a link or a path git cannot list.
 #[cfg(unix)]
 fn stores(source: &Source) -> Result<Vec<PathBuf>, CheckRefusal> {
+    let agent = source.git_dir.join("objects");
     let mut stores = Vec::new();
     for store in [
         source.repository.join(".git").join("objects"),
-        source.git_dir.join("objects"),
+        agent.clone(),
     ] {
         match fs::symlink_metadata(&store) {
             Ok(found) if found.is_dir() => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
             _ => return Err(failure(UNAVAILABLE)),
+        }
+        if store == agent {
+            crate::landing::check_store(
+                &source.repository,
+                &source.git_dir,
+                &crate::worktrees::TREE_BOUNDS,
+            )
+            .map_err(|refused| {
+                failure(if refused.0 == "changes_too_large" {
+                    "checks_snapshot_too_large"
+                } else {
+                    "checks_snapshot_store_invalid"
+                })
+            })?;
         }
         let real = store.canonicalize().map_err(|_| failure(UNAVAILABLE))?;
         let printable = real

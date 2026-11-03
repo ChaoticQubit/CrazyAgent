@@ -84,8 +84,12 @@ pub struct ReportFile {
 /// printed inside the sandbox (`none` for no toolchain), the digests cover the installed
 /// sandbox profile and every environment name and value, `cleanup_uncertain` says the
 /// sandbox could not be confirmed empty afterwards, and `gaps` names the limits not enforced.
+/// `holdout` marks a holdout check's run: its repository code saw the holdout files and
+/// could print them, so its tails and report are owner-only wherever they are stored, and
+/// an agent-facing view of it shows only the verdict and counts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckExecution {
+    pub holdout: bool,
     pub exit: Option<i32>,
     pub timed_out: bool,
     pub cancelled: bool,
@@ -106,8 +110,9 @@ pub struct CheckExecution {
 }
 
 impl CheckExecution {
-    fn unstarted(network: NetworkMode) -> Self {
+    fn unstarted(network: NetworkMode, holdout: bool) -> Self {
         Self {
+            holdout,
             exit: None,
             timed_out: false,
             cancelled: false,
@@ -148,11 +153,13 @@ struct Ended {
 /// run folder, a short scratch folder for build output, the check's toolchain read-only and
 /// the narrower of the check's network and the ceiling; no credentials, owner home, engine
 /// runtime, mailbox or other worktree is granted. Holdout files are copied in for the run
-/// only. The toolchain version is read first in the same boundary. A timeout or cancel kills
-/// the process group, and the run's warden then stops every process left in its sandbox.
-/// Inputs: the snapshot, the check, its holdout bytes by path (empty for an ordinary check),
-/// the limits and the cancel flag. Output: the execution; `unavailable` names why it did
-/// not start, such as `checks_holdout_missing`.
+/// only; a holdout check runs with network off and spends its snapshot, so every later run
+/// on it is refused with `checks_snapshot_spent` and the queue runs holdout checks last,
+/// each in its own snapshot. The toolchain version is read first in the same boundary. A
+/// timeout or cancel kills the process group, and the run's warden then stops every process
+/// left in its sandbox. Inputs: the snapshot, the check, its holdout bytes by path (empty
+/// for an ordinary check), the limits and the cancel flag. Output: the execution;
+/// `unavailable` names why it did not start, such as `checks_holdout_missing`.
 pub fn run(
     snapshot: &Snapshot,
     check: &AdmittedCheck,
@@ -160,8 +167,12 @@ pub fn run(
     limits: &RunLimits,
     cancel: &AtomicBool,
 ) -> CheckExecution {
-    let network = check.spec.network.min(limits.network_ceiling);
-    let mut execution = CheckExecution::unstarted(network);
+    let network = if check.holdout.is_some() {
+        NetworkMode::Off
+    } else {
+        check.spec.network.min(limits.network_ceiling)
+    };
+    let mut execution = CheckExecution::unstarted(network, check.holdout.is_some());
     #[cfg(target_os = "macos")]
     if let Err(refusal) = confined(snapshot, check, holdout, limits, cancel, &mut execution) {
         execution.unavailable = Some(refusal.0);
@@ -176,6 +187,9 @@ pub fn run(
     assert!(execution.stdout_tail.len() <= limits.output_cap);
     assert!(execution.stderr_tail.len() <= limits.output_cap);
     assert!(execution.network <= limits.network_ceiling && execution.network <= check.spec.network);
+    assert!(check.holdout.is_none() || execution.network == NetworkMode::Off);
+    assert_eq!(execution.holdout, check.holdout.is_some());
+    assert!(execution.report.is_empty() || !execution.cleanup_uncertain);
     execution
 }
 
@@ -194,6 +208,9 @@ fn confined(
     use crate::sandbox::toolchains::{self, ScopedTmp, ToolHomes, Toolchains};
     use crate::sandbox::{ProjectSandbox, SandboxNetwork};
     use sha2::{Digest, Sha256};
+    if snapshot.spent() {
+        return Err(failure(super::snapshot::SPENT));
+    }
     verify_holdout(check, holdout)?;
     let folder = snapshot.folder();
     let home = fresh_folder(&folder.join("home"))?;
@@ -278,6 +295,7 @@ fn confined(
         check.spec.format,
         check.spec.report.as_deref(),
         limits.report_cap,
+        execution.cleanup_uncertain,
     );
     Ok(())
 }
@@ -626,8 +644,10 @@ fn await_group_exit(group: u32) {
 
 /// Reads the report a check left in its snapshot: nothing for libtest and exit-code
 /// checks, the JUnit file, or every `*-result.json` of the Allure folder, by name, never
-/// through a link and at most `cap` bytes in all. Inputs: the snapshot root, the format,
-/// the report path and the cap. Output: the files, and `report_missing`,
+/// through a link and at most `cap` bytes in all. Nothing is read when the run's cleanup is
+/// uncertain, since a process it left could swap a folder on the path for a link between
+/// the check and the open. Inputs: the snapshot root, the format, the report path, the cap
+/// and whether cleanup is uncertain. Output: the files, and `report_missing`,
 /// `report_link_refused`, `report_unreadable` or `report_too_large` when it cannot be read.
 #[cfg(target_os = "macos")]
 fn read_report(
@@ -635,9 +655,11 @@ fn read_report(
     format: ReportFormat,
     report: Option<&str>,
     cap: usize,
+    uncertain: bool,
 ) -> (Vec<ReportFile>, Option<&'static str>) {
     let read = match (format, report) {
         (ReportFormat::Libtest | ReportFormat::ExitCode, _) => return (Vec::new(), None),
+        _ if uncertain => Err("report_unreadable"),
         (_, None) => Err("report_missing"),
         (ReportFormat::Junit, Some(name)) => inside(root, name).and_then(|path| {
             read_file(&path, cap).map(|bytes| {

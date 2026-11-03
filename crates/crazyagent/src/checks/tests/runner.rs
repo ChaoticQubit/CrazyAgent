@@ -1,10 +1,11 @@
-use crate::checks::runner::{self, CheckExecution, RunLimits};
+use crate::checks::runner::{self, CheckExecution, ReportFile, RunLimits};
 use crate::checks::snapshot::{self, RunKey, Snapshot};
 use crate::checks::{
     AdmittedCheck, CheckKind, CheckSpec, NetworkMode, ProfileId, ReportFormat, Trigger,
 };
 use crate::landing::{self, AgentKind, ChangeAgent, ChangeSetId, TurnEnd, TurnOutcome, Workspace};
 use crate::protocol::ProjectId;
+use crate::sandbox::SandboxRemote;
 use crate::sandbox::toolchains::Toolchain;
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
@@ -197,6 +198,50 @@ impl Case {
         snapshot::prepare(&self.db, &self.checks(), id, &RunKey::new(run).unwrap()).unwrap()
     }
 
+    /// Moves the agent into its own clone of the owner repository (DEC-102 Own branch),
+    /// made and recorded as the engine makes it, commits files there as the agent would and
+    /// records the turn end, which fetches the agent branch. Input: the files. Output: the
+    /// change set.
+    fn own_branch_change_set(&mut self, files: &[(&str, &str)]) -> ChangeSetId {
+        let worktree = self.root.join("agent-own");
+        landing::add_agent_clone(&self.repo, &worktree).unwrap();
+        self.workspace.git_dir = crate::agent_git::git_dir(&worktree);
+        self.workspace.worktree = worktree;
+        landing::record_worktree_start(
+            &self.db,
+            &self.workspace.repository,
+            &self.workspace.worktree,
+            &self.workspace.git_dir,
+        )
+        .unwrap();
+        for (path, text) in files {
+            write(&self.workspace.worktree.join(path), text);
+        }
+        git(&self.home, &self.workspace.worktree, &["add", "-A"]);
+        git(
+            &self.home,
+            &self.workspace.worktree,
+            &[
+                "-c",
+                "user.name=Agent One",
+                "-c",
+                "user.email=agent@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "Agent work",
+            ],
+        );
+        let turn = TurnEnd {
+            outcome: TurnOutcome::Succeeded,
+            turn: "turn-1".into(),
+            prompt_line: "Add the agent file".into(),
+        };
+        landing::record_turn_end(&self.db, &self.workspace, &turn)
+            .unwrap()
+            .unwrap()
+    }
+
     fn head(&self, id: &ChangeSetId) -> String {
         landing::change_set(&self.db, id).unwrap().unwrap().1.head
     }
@@ -307,6 +352,7 @@ fn a_check_cannot_write_the_agent_worktree_or_read_the_owner_home() {
     );
     assert!(!execution.timed_out && !execution.cancelled);
     assert_eq!(execution.unavailable, None);
+    assert!(!execution.holdout);
     assert_eq!(
         fs::read_to_string(snapshot.root.join("made.txt")).unwrap(),
         "inside\n"
@@ -583,6 +629,7 @@ fn holdout_files_exist_only_inside_the_snapshot_during_the_run() {
         String::from_utf8_lossy(&execution.stderr_tail)
     );
     assert_eq!(stdout(&execution), "visible\nholdout-ran\n");
+    assert!(execution.holdout);
     for folder in [&snapshot.root, &case.workspace.worktree, &case.repo] {
         assert!(!folder.join("holdout/hidden_test.sh").exists());
         assert!(!folder.join("holdout").exists());
@@ -592,7 +639,134 @@ fn holdout_files_exist_only_inside_the_snapshot_during_the_run() {
         &check(&["/bin/sh", "-c", "ls holdout"]),
         &limits(),
     );
-    assert_ne!(plain.exit, Some(0));
+    assert_eq!(plain.unavailable.as_deref(), Some("checks_snapshot_spent"));
+    assert_eq!(plain.exit, None);
+}
+
+#[test]
+fn a_snapshot_that_ran_a_holdout_check_refuses_every_later_check() {
+    let case = Case::new();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let id = case.change_set(&[("visible.txt", "visible\n")]);
+    let snapshot = case.snapshot(&id, "run-1");
+    let files = BTreeMap::from([(
+        "holdout/leak.sh".to_owned(),
+        format!(
+            "cp holdout/leak.sh copied.txt && echo copied\n\
+             exec /usr/bin/perl -MIO::Socket::INET -e 'IO::Socket::INET->new(PeerAddr => \"127.0.0.1:{port}\", Timeout => 5) or exit 3; exit 0'\n"
+        )
+        .into_bytes(),
+    )]);
+    let holdout = admitted(
+        &["/bin/sh", "holdout/leak.sh"],
+        NetworkMode::Remotes,
+        None,
+        &files,
+    );
+    let mut wide = limits();
+    wide.remotes = vec![SandboxRemote::Loopback(port)];
+    let execution = runner::run(&snapshot, &holdout, &files, &wide, &AtomicBool::new(false));
+    assert_eq!(execution.network, NetworkMode::Off);
+    assert_eq!(
+        execution.exit,
+        Some(3),
+        "{}",
+        String::from_utf8_lossy(&execution.stderr_tail)
+    );
+    assert_eq!(stdout(&execution), "copied\n");
+    assert!(execution.holdout);
+    assert!(listener.accept().is_err());
+    assert!(snapshot.root.join("copied.txt").exists());
+    assert!(!snapshot.root.join("holdout").exists());
+    let later = run(&snapshot, &check(&["/bin/cat", "copied.txt"]), &limits());
+    assert_eq!(later.unavailable.as_deref(), Some("checks_snapshot_spent"));
+    assert_eq!(later.exit, None);
+    assert!(later.stdout_tail.is_empty());
+    let again = runner::run(&snapshot, &holdout, &files, &wide, &AtomicBool::new(false));
+    assert_eq!(again.unavailable.as_deref(), Some("checks_snapshot_spent"));
+    assert!(!snapshot.root.join("holdout").exists());
+}
+
+#[test]
+fn an_agent_store_that_borrows_a_third_repository_is_refused() {
+    let mut case = Case::new();
+    let id = case.own_branch_change_set(&[("agent.txt", "agent\n")]);
+    let honest = case.snapshot(&id, "run-1");
+    assert_eq!(honest.commit, case.head(&id));
+    assert_eq!(
+        fs::read_to_string(honest.root.join("agent.txt")).unwrap(),
+        "agent\n"
+    );
+    let third = case.root.join("third");
+    private(&third);
+    git(
+        &case.home,
+        &third,
+        &["init", "-q", "--template=", "-b", "main"],
+    );
+    let alternates = case.workspace.git_dir.join("objects/info/alternates");
+    let mut lines = fs::read_to_string(&alternates).unwrap();
+    lines.push_str(&format!(
+        "{}\n",
+        third.join(".git/objects").to_str().unwrap()
+    ));
+    fs::set_permissions(&alternates, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::write(&alternates, lines).unwrap();
+    let refused = snapshot::prepare(
+        &case.db,
+        &case.checks(),
+        &id,
+        &RunKey::new("run-2").unwrap(),
+    )
+    .unwrap_err();
+    assert_eq!(refused.0, "checks_snapshot_store_invalid");
+    let project = case
+        .checks()
+        .join(snapshot::project_folder(&case.workspace.project));
+    assert!(!project.join("run-2").exists());
+}
+
+#[test]
+fn a_report_is_not_read_when_the_run_cleanup_is_uncertain() {
+    let case = Case::new();
+    let id = case.change_set(&[
+        ("report.sh", "echo '<testsuite/>' > report.xml\n"),
+        (
+            "unwarded.sh",
+            "for warden in $(/usr/bin/pgrep -P $$); do kill -9 \"$warden\"; done\n\
+             echo '<testsuite/>' > report.xml\n",
+        ),
+    ]);
+    let snapshot = case.snapshot(&id, "run-1");
+    let junit = |script: &str| {
+        let mut junit = check(&["/bin/sh", script]);
+        junit.spec.format = ReportFormat::Junit;
+        junit.spec.report = Some("report.xml".into());
+        junit
+    };
+    let confirmed = run(&snapshot, &junit("report.sh"), &limits());
+    assert_eq!(confirmed.exit, Some(0));
+    assert!(!confirmed.cleanup_uncertain);
+    assert_eq!(confirmed.report_problem, None);
+    assert_eq!(
+        confirmed.report,
+        vec![ReportFile {
+            name: "report.xml".into(),
+            bytes: b"<testsuite/>\n".to_vec(),
+        }]
+    );
+    let uncertain = run(&snapshot, &junit("unwarded.sh"), &limits());
+    assert_eq!(
+        uncertain.exit,
+        Some(0),
+        "{}",
+        String::from_utf8_lossy(&uncertain.stderr_tail)
+    );
+    assert!(uncertain.cleanup_uncertain);
+    assert!(uncertain.report.is_empty());
+    assert_eq!(uncertain.report_problem, Some("report_unreadable"));
 }
 
 #[test]
