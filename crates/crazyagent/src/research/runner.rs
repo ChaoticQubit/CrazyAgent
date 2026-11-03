@@ -2884,6 +2884,7 @@ mod tests {
                 Path::new("/work/report.md"),
                 Path::new("/home"),
                 tools,
+                crate::trust::Trust::Reviewed,
                 &account,
             )
             .unwrap();
@@ -2898,6 +2899,53 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A research agent of an untrusted project reads no project docs and Codex names its
+    /// worktree untrusted, with the prompt still last; a reviewed one gets neither setting.
+    #[test]
+    fn an_untrusted_research_codex_reads_no_project_docs_and_names_its_worktree_untrusted() {
+        let account = ResearchAccount::ManagedCodex {
+            connection: codex_connection(),
+            model: None,
+        };
+        let args = |trust: crate::trust::Trust| {
+            let mut command = Command::new("/usr/bin/true");
+            codex_arguments(
+                &mut command,
+                Path::new("/work/tree"),
+                Path::new("/work/report.md"),
+                Path::new("/home"),
+                true,
+                trust,
+                &account,
+            )
+            .unwrap();
+            command
+                .get_args()
+                .map(|argument| argument.to_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        let untrusted = args(crate::trust::Trust::Untrusted);
+        for setting in [
+            "project_doc_max_bytes=0",
+            "projects={\"/work/tree\"={trust_level=\"untrusted\"}}",
+        ] {
+            assert!(
+                untrusted
+                    .windows(2)
+                    .any(|pair| pair[0] == "-c" && pair[1] == setting),
+                "{setting}: {untrusted:?}"
+            );
+        }
+        assert_eq!(untrusted.last().map(String::as_str), Some("-"));
+        let reviewed = args(crate::trust::Trust::Reviewed);
+        assert!(
+            reviewed.iter().all(|argument| {
+                !argument.contains("project_doc_max_bytes") && !argument.contains("trust_level")
+            }),
+            "{reviewed:?}"
+        );
     }
 
     /// A research job's lease names the job as a holder of its account in the agent
