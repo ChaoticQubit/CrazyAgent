@@ -638,6 +638,9 @@ pub fn conversation_messages(harness: &str, record: &Path) -> Vec<(Speaker, Stri
 
 /// Most bytes of one tool call's input or of one tool's output the session search keeps.
 pub const TOOL_TEXT_BYTES_MAX: usize = 32 * 1024;
+/// Most bytes of a tool value's plain lines made before the cut: the kept bytes and enough
+/// past them that a cut shows, a character's bytes at most.
+const FIELDS_BYTES_MAX: usize = TOOL_TEXT_BYTES_MAX + 4;
 
 /// Reads one line of a harness conversation record for the session search: the messages
 /// `conversation_messages` reads, plus each tool call with its input (Claude Code
@@ -744,23 +747,87 @@ fn tool_output(text: &str) -> String {
 }
 
 /// A tool's input or output as plain lines: each field of an object as "name: value", a
-/// list of strings joined by spaces and a string as it is, so secret masking reads it line
-/// by line and word by word. Takes the JSON value. Returns the text.
+/// list of strings joined by spaces, a string as it is and any other value as compact JSON,
+/// so secret masking reads it line by line and word by word. Only the first
+/// `FIELDS_BYTES_MAX` bytes are made, so a deep or huge value costs about its kept bytes.
+/// Takes the JSON value. Returns the text, longer than `TOOL_TEXT_BYTES_MAX` only when the
+/// whole text is.
 fn fields(value: &Value) -> String {
+    let mut text = String::new();
+    push_fields(value, &mut text);
+    text
+}
+
+/// Appends a tool value's plain lines to `out`, as [`fields`] makes them, stopping once
+/// `out` holds `FIELDS_BYTES_MAX` bytes. Takes the value and the text to extend.
+fn push_fields(value: &Value, out: &mut String) {
     match value {
-        Value::Null => String::new(),
-        Value::String(text) => text.clone(),
-        Value::Object(map) => map
-            .iter()
-            .map(|(key, value)| format!("{key}: {}", fields(value)))
-            .collect::<Vec<_>>()
-            .join("\n"),
-        Value::Array(items) if items.iter().all(Value::is_string) => items
-            .iter()
-            .filter_map(Value::as_str)
-            .collect::<Vec<_>>()
-            .join(" "),
-        other => other.to_string(),
+        Value::Null => {}
+        Value::String(text) => push_bounded(out, text),
+        Value::Object(map) => {
+            for (at, (key, value)) in map.iter().enumerate() {
+                if out.len() >= FIELDS_BYTES_MAX {
+                    return;
+                }
+                if at > 0 {
+                    push_bounded(out, "\n");
+                }
+                push_bounded(out, key);
+                push_bounded(out, ": ");
+                push_fields(value, out);
+            }
+        }
+        Value::Array(items) if items.iter().all(Value::is_string) => {
+            for (at, item) in items.iter().filter_map(Value::as_str).enumerate() {
+                if out.len() >= FIELDS_BYTES_MAX {
+                    return;
+                }
+                if at > 0 {
+                    push_bounded(out, " ");
+                }
+                push_bounded(out, item);
+            }
+        }
+        other => {
+            let mut json = Bounded {
+                bytes: Vec::new(),
+                room: FIELDS_BYTES_MAX.saturating_sub(out.len()),
+            };
+            let _ = serde_json::to_writer(&mut json, other);
+            push_bounded(out, &String::from_utf8_lossy(&json.bytes));
+        }
+    }
+}
+
+/// Appends as much of `text` to `out` as fits under `FIELDS_BYTES_MAX` bytes, cut at a
+/// character boundary. Takes the text to extend and the text to add.
+fn push_bounded(out: &mut String, text: &str) {
+    let mut end = text.len().min(FIELDS_BYTES_MAX.saturating_sub(out.len()));
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    out.push_str(&text[..end]);
+}
+
+/// Bytes a JSON value is written into, at most `room` of them; a write past that fails, so
+/// serializing a huge value stops at the bound.
+struct Bounded {
+    bytes: Vec<u8>,
+    room: usize,
+}
+
+impl std::io::Write for Bounded {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let taken = bytes.len().min(self.room - self.bytes.len());
+        if taken == 0 && !bytes.is_empty() {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        self.bytes.extend_from_slice(&bytes[..taken]);
+        Ok(taken)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
 }
 

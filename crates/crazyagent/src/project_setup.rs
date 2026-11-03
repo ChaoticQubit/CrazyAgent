@@ -74,7 +74,7 @@ const KEY_BLOCK_END: &str = "-----end";
 const BASE64_RUN_MIN: usize = 20;
 const WRAPPED_TAIL_MIN: usize = 8;
 const PGPASS_FIELDS_MIN: usize = 5;
-const SECRET_PREFIXES: [&str; 13] = [
+const SECRET_PREFIXES: [&str; 14] = [
     "sk-",
     "sk_",
     "pk_",
@@ -87,6 +87,7 @@ const SECRET_PREFIXES: [&str; 13] = [
     "xoxp-",
     "glpat-",
     "AKIA",
+    "ASIA",
     "eyJ",
 ];
 const HIDDEN_LINE: &str = "[hidden: this line may contain a secret]";
@@ -3213,7 +3214,8 @@ fn push_without_user_part(kept: &mut String, word: &str) {
 /// `_` inside it (the value of `KEY=value` or `"key":"value"`) starting with a known token
 /// prefix and at least 16 bytes long, or an opaque such run of at least 32 bytes mixing
 /// letters and digits; a base64 run of at least `BASE64_RUN_MIN` bytes mixing upper case,
-/// lower case and digits with no plain lowercase folder name between its `/`; a
+/// lower case and digits with no plain lowercase folder name between its `/`, or one such
+/// part between its `/` alone (a webhook URL's secret path part); a
 /// `.pgpass`-style line of at least `PGPASS_FIELDS_MIN` filled fields; a `-p<password>` or
 /// `--user=user:password` flag; or a path to a credential the sandbox guards. Takes the
 /// word.
@@ -3233,14 +3235,17 @@ fn secret_like(word: &str) -> bool {
             prefixed || opaque
         });
     let base64 = |c: char| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=');
-    let encoded = word.split(|c: char| !base64(c)).any(|run| {
+    let mixed = |run: &str| {
         run.len() >= BASE64_RUN_MIN
             && run.bytes().any(|b| b.is_ascii_digit())
             && run.bytes().any(|b| b.is_ascii_uppercase())
             && run.bytes().any(|b| b.is_ascii_lowercase())
-            && !run
-                .split('/')
-                .any(|folder| folder.len() >= 3 && folder.bytes().all(|b| b.is_ascii_lowercase()))
+    };
+    let encoded = word.split(|c: char| !base64(c)).any(|run| {
+        let path = run
+            .split('/')
+            .any(|folder| folder.len() >= 3 && folder.bytes().all(|b| b.is_ascii_lowercase()));
+        (mixed(run) && !path) || run.split('/').any(mixed)
     });
     let pgpass = word.split(':').count() >= PGPASS_FIELDS_MIN
         && word.split(':').all(|field| {
