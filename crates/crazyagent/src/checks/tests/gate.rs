@@ -1,7 +1,9 @@
-use crate::checks::gate::{self, FAILED, GateNote, NEW_SKIPS, NOT_RUN, PROTECTED_CHANGE, STALE};
+use crate::checks::gate::{
+    self, FAILED, GateNote, NEW_SKIPS, NOT_RUN, PROTECTED_CHANGE, STALE, TESTS_REMOVED,
+};
 use crate::checks::queue::{self, JobState};
 use crate::checks::record;
-use crate::checks::settings::{self, GateMode, ProtectedChange, SkipMarkers};
+use crate::checks::settings::{self, GateMode, ProtectedChange, RemovedTests, SkipMarkers};
 use crate::checks::{self, Actor, AdmittedProfile, ChecksChoice, Scope, Trigger};
 use crate::landing::{
     self, AcceptOutcome, AgentKind, ChangeAgent, ChangeSetId, ChangeState, TurnEnd, TurnOutcome,
@@ -286,6 +288,60 @@ impl Case {
             .map(|recorded| recorded.note)
             .collect()
     }
+
+    /// Sets the inventory of the integrity block of a change set's newest run of one check
+    /// to the tests it no longer reports against that run as baseline, as the assessment
+    /// records a deleted test, or removes the block. Inputs: the change set, the check and
+    /// the removed names, None to remove the block.
+    fn removed(&self, id: &ChangeSetId, check: &str, names: Option<&[&str]>) {
+        let run = record::latest(&self.db, id)
+            .unwrap()
+            .into_iter()
+            .find(|run| run.check == check)
+            .unwrap();
+        let block = names.map(|names| {
+            let stored: String = self
+                .db
+                .query_row(
+                    "SELECT integrity_json FROM tk_runs WHERE id = ?1",
+                    [run.run],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            let mut block: Value = serde_json::from_str(&stored).unwrap();
+            block["inventory"] = json!({
+                "baseline_run": run.id.to_string(),
+                "removed": names,
+                "removed_total": names.len(),
+            });
+            block.to_string()
+        });
+        let changed = self
+            .db
+            .execute(
+                "UPDATE tk_runs SET integrity_json = ?1 WHERE id = ?2",
+                rusqlite::params![block, run.run],
+            )
+            .unwrap();
+        assert_eq!(changed, 1);
+    }
+
+    /// Accepts a change set at its reviewed head onto the owner's branch, running `between`
+    /// once its files are written and before the branch moves. Inputs: the change set and
+    /// what to change then. Output: the outcome, or the refusal code.
+    fn accept_between(
+        &self,
+        id: &ChangeSetId,
+        between: &dyn Fn(),
+    ) -> Result<AcceptOutcome, String> {
+        let head = self.head(id);
+        landing::accept_between(&self.db, &self.home, id, &head, between).map_err(|error| error.0)
+    }
+
+    fn untouched(&self, main: &str) {
+        assert_eq!(self.tip("main"), main);
+        assert_eq!(git(&self.home, &self.repo, &["status", "--porcelain"]), "");
+    }
 }
 
 fn landed(outcome: Result<AcceptOutcome, String>) -> String {
@@ -566,4 +622,151 @@ fn skip_markers_refuse_blocks_accept_when_the_change_adds_a_skip() {
         choice.skip_markers = Some(SkipMarkers::Flag);
     });
     landed(case.accept(&id));
+}
+
+#[test]
+fn require_refuses_when_the_profile_requires_no_check() {
+    let case = Case::new();
+    let id = case.turn("turn-1", &[("pass.sh", "exit 0\n")]);
+    let profile = case.approve(json!([check("lint", "pass.sh", false)]), &[]);
+    case.gate(GateMode::Require);
+    let main = case.tip("main");
+
+    assert_eq!(case.accept(&id).unwrap_err(), NOT_RUN);
+    case.run(&id);
+    assert_eq!(case.accept(&id).unwrap_err(), NOT_RUN);
+    case.untouched(&main);
+    let note = gate::assess(&case.db, &id, &case.head(&id)).unwrap();
+    assert_eq!(note.profile, Some(profile.id));
+    assert_eq!(codes(&note), [(NOT_RUN, None)]);
+
+    case.gate(GateMode::Warn);
+    landed(case.accept(&id));
+    let notes = case.notes(&id);
+    assert_eq!(notes.len(), 1);
+    assert_eq!(codes(&notes[0]), [(NOT_RUN, None)]);
+}
+
+#[test]
+fn a_profile_approved_while_accept_runs_refuses_before_the_branch_moves() {
+    let case = Case::new();
+    let id = case.turn("turn-1", &[("pass.sh", "exit 0\n")]);
+    case.approve(json!([check("unit", "pass.sh", true)]), &[]);
+    case.run(&id);
+    case.gate(GateMode::Require);
+    let main = case.tip("main");
+    assert!(
+        gate::admit(&case.db, &id, &case.head(&id))
+            .unwrap()
+            .gaps
+            .is_empty()
+    );
+
+    let refused = case.accept_between(&id, &|| {
+        case.approve(
+            json!([
+                check("unit", "pass.sh", true),
+                check("lint", "pass.sh", false)
+            ]),
+            &[],
+        );
+    });
+    assert_eq!(refused.unwrap_err(), STALE);
+    case.untouched(&main);
+    assert!(!case.repo.join("pass.sh").exists());
+    assert_eq!(case.state(&id), ChangeState::Pending);
+
+    case.run(&id);
+    let commit = landed(case.accept(&id));
+    assert_eq!(case.tip("main"), commit);
+}
+
+#[test]
+fn the_gate_set_to_require_while_accept_runs_refuses_before_the_branch_moves() {
+    let case = Case::new();
+    let id = case.turn("turn-1", &[("notes.txt", "one\n")]);
+    let main = case.tip("main");
+
+    let refused = case.accept_between(&id, &|| case.gate(GateMode::Require));
+    assert_eq!(refused.unwrap_err(), NOT_RUN);
+    case.untouched(&main);
+    assert!(!case.repo.join("notes.txt").exists());
+    assert_eq!(case.state(&id), ChangeState::Pending);
+}
+
+#[test]
+fn removed_tests_flag_refuses_under_require_and_is_kept_in_the_note_under_warn() {
+    let case = Case::new();
+    let id = case.turn("turn-1", &[("pass.sh", "exit 0\n")]);
+    case.approve(json!([check("unit", "pass.sh", true)]), &[]);
+    case.run(&id);
+    case.removed(&id, "unit", Some(&["math::subtracts"]));
+    assert_eq!(
+        settings::effective(&case.db, &case.project)
+            .unwrap()
+            .removed_tests,
+        RemovedTests::Flag
+    );
+    case.gate(GateMode::Require);
+    let main = case.tip("main");
+
+    assert_eq!(case.accept(&id).unwrap_err(), TESTS_REMOVED);
+    assert_eq!(case.accept_into(&id, "release").unwrap_err(), TESTS_REMOVED);
+    case.untouched(&main);
+    let run = record::latest(&case.db, &id).unwrap().remove(0);
+    let note = gate::assess(&case.db, &id, &case.head(&id)).unwrap();
+    assert_eq!(note.removed_tests, RemovedTests::Flag);
+    assert_eq!(codes(&note), [(TESTS_REMOVED, Some("unit"))]);
+    assert_eq!(note.gaps[0].paths, ["math::subtracts"]);
+    assert_eq!(note.gaps[0].paths_total, 1);
+    assert_eq!(
+        note.gaps[0].run.as_deref(),
+        Some(run.id.to_string().as_str())
+    );
+
+    case.gate(GateMode::Warn);
+    landed(case.accept(&id));
+    let notes = case.notes(&id);
+    assert_eq!(notes.len(), 1);
+    assert_eq!(codes(&notes[0]), [(TESTS_REMOVED, Some("unit"))]);
+}
+
+#[test]
+fn removed_tests_refuse_blocks_accept_under_warn() {
+    let case = Case::new();
+    let id = case.turn("turn-1", &[("pass.sh", "exit 0\n")]);
+    case.approve(json!([check("unit", "pass.sh", true)]), &[]);
+    case.run(&id);
+    case.removed(&id, "unit", Some(&["math::subtracts", "math::divides"]));
+    case.set(|choice| choice.removed_tests = Some(RemovedTests::Refuse));
+    let main = case.tip("main");
+
+    assert_eq!(case.accept(&id).unwrap_err(), TESTS_REMOVED);
+    case.untouched(&main);
+    assert!(case.notes(&id).is_empty());
+    let note = gate::assess(&case.db, &id, &case.head(&id)).unwrap();
+    assert_eq!(note.gate, GateMode::Warn);
+    assert_eq!(note.removed_tests, RemovedTests::Refuse);
+    assert_eq!(note.gaps[0].paths, ["math::divides", "math::subtracts"]);
+    assert_eq!(note.gaps[0].paths_total, 2);
+
+    case.removed(&id, "unit", Some(&[]));
+    landed(case.accept(&id));
+    assert!(case.notes(&id).is_empty());
+}
+
+#[test]
+fn a_passing_run_without_an_integrity_block_counts_as_removing_tests() {
+    let case = Case::new();
+    let id = case.turn("turn-1", &[("pass.sh", "exit 0\n")]);
+    case.approve(json!([check("unit", "pass.sh", true)]), &[]);
+    case.run(&id);
+    case.removed(&id, "unit", None);
+    case.gate(GateMode::Require);
+
+    assert_eq!(case.accept(&id).unwrap_err(), TESTS_REMOVED);
+    let note = gate::assess(&case.db, &id, &case.head(&id)).unwrap();
+    assert_eq!(codes(&note), [(TESTS_REMOVED, Some("unit"))]);
+    assert!(note.gaps[0].paths.is_empty());
+    assert_eq!(note.gaps[0].paths_total, 0);
 }
