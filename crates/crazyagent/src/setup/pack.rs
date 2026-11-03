@@ -13,6 +13,12 @@ pub const NAME_PART_BYTES_MAX: usize = 100;
 const GITHUB: &str = "https://github.com/";
 const SHIPPED: &str = include_str!("pack.toml");
 
+/// The default pack's ticket rule, `rules/tickets.md` under `assets/pack`: how a lead plans
+/// and hands off work as tickets and how a working agent takes and proves one. A live
+/// master's and a sub-agent's launch gives it after their team tools, so it is compiled in
+/// and never unpacked.
+pub const TICKET_RULES: &str = include_str!("../../assets/pack/rules/tickets.md");
+
 /// What a default-pack entry installs: a skill folder agents read, or an MCP server
 /// agents call. Track C's `PackEntry` status view reuses this kind.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
