@@ -473,6 +473,22 @@ fn export_escapes_agent_text_and_follows_no_symlink() {
             path.display()
         );
     }
+    for name in [
+        "CLAUDE.md",
+        "claude.md",
+        "CLAUDE.local.md",
+        "AGENTS.md",
+        "exports/agents.md",
+        "GEMINI.md",
+        "copilot-instructions.md",
+    ] {
+        assert_eq!(
+            refused(write(Path::new(name), &project)),
+            codes::EXPORT_PATH_REFUSED,
+            "{name}"
+        );
+        assert!(!folder.join(name).exists(), "{name}");
+    }
     assert_eq!(fs::read_to_string(&outside).unwrap(), "keep me\n");
     assert!(!dir.path().join("escape.md").exists());
     assert!(!folder.join("inside.md").exists());
@@ -1046,5 +1062,45 @@ fn import_counts_its_tickets_against_the_actors_open_ticket_bound() {
     let by_owner = apply(&owner(), &last, 2_300).unwrap();
     assert_eq!(by_owner.tickets.len(), 1);
     assert_eq!(by_owner.tickets[0].created_by, owner());
+
+    for number in 1..bound {
+        ticket(
+            &tx,
+            &format!("Owner work {number}"),
+            TicketKind::Feature,
+            TicketStatus::Todo,
+            2,
+            "",
+            2_400,
+        );
+    }
+    let more = written(
+        dir.path(),
+        "more.md",
+        &format!(
+            "# Roadmap\n\n## V1: first release\nScope:\n- Item {}\n",
+            bound + 2
+        ),
+    );
+    let extra = import::preview(&tx, &Standalone, &owner(), &key(), &more).unwrap();
+    assert_eq!(
+        changes(&extra),
+        vec![feature("V1", &format!("Item {}", bound + 2))]
+    );
+    let held = counts(&tx);
+    assert_eq!(
+        refused(import::apply(
+            &tx,
+            &Standalone,
+            &owner(),
+            &key(),
+            &more,
+            &keys(&extra),
+            2_500
+        )),
+        codes::OPEN_TICKETS_FULL,
+        "the owner has no exemption"
+    );
+    assert_eq!(counts(&tx), held);
     replayed(&tx, &key());
 }

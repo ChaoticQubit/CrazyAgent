@@ -16,6 +16,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub const EXPORT_HEADER: &str = "# Trackwright export: ";
 /// The largest export the core builds or writes.
 pub const EXPORT_BYTES_MAX: usize = 16 * 1024 * 1024;
+/// File names that harnesses load as agent instructions. An export never takes one, in any
+/// case and in any folder a host allows, because its text holds agent-written titles.
+pub const INSTRUCTION_FILE_NAMES: [&str; 6] = [
+    "CLAUDE.md",
+    "CLAUDE.local.md",
+    "AGENTS.md",
+    "AGENTS.override.md",
+    "GEMINI.md",
+    "copilot-instructions.md",
+];
 
 const MARKS: &str = "\\`*_[]<>&~|#!";
 const FENCE_TILDES_MIN: usize = 3;
@@ -223,8 +233,9 @@ pub fn ticket(tx: &Transaction<'_>, id: &ShortId) -> Result<String, StoreError> 
 
 /// Writes an export to the `.md` file the host confines the requested path to, through a
 /// private temporary file renamed over it, so a link at the path is never followed. Refuses
-/// a path the host refuses, a path that is not `.md`, a folder that is a link or missing, a
-/// link or folder at the path, and a file there that is not an export. Inputs: the
+/// a path the host refuses, an agent instruction file name, a path that is not `.md`, a
+/// folder that is a link or missing, a link or folder at the path, and a file there that is
+/// not an export. Inputs: the
 /// transaction, the host, the actor, the project, the requested path and the export.
 /// Output: Ok, or `export_path_refused`, the host's refusal or `store_failed`.
 pub fn write(
@@ -237,7 +248,22 @@ pub fn write(
 ) -> Result<(), StoreError> {
     assert!(text.starts_with(EXPORT_HEADER), "only an export is written");
     let path = host.resolve(tx, key, actor, OpKind::Export, requested)?;
+    if instruction_file(&path) {
+        return Err(path_refused(
+            "an export never takes the name of an agent instruction file",
+        ));
+    }
     write_file(&path, text)
+}
+
+fn instruction_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(OsStr::to_str)
+        .is_some_and(|name| {
+            INSTRUCTION_FILE_NAMES
+                .iter()
+                .any(|known| name.eq_ignore_ascii_case(known))
+        })
 }
 
 fn write_file(path: &Path, text: &str) -> Result<(), StoreError> {

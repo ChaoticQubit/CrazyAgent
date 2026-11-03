@@ -165,8 +165,11 @@ impl<T: Links + Evidence + Authority + Paths> Host for T {}
 /// Joins a relative path under a root folder without leaving it: every part must be a
 /// plain name, never `.`, `..`, a root or a drive, at most `PATH_PARTS_MAX` parts, and every
 /// folder on the way must exist below the root as a real folder, not a link. The root
-/// itself is the host's and is not checked. Inputs: the root and the requested path.
-/// Output: the joined path, or why it is refused, in words safe to show a caller.
+/// itself is the host's and is not checked. Each folder is checked once, so a writer inside
+/// the root that swaps one for a link before the file is opened is not caught; a host
+/// whose root takes untrusted writers needs more than this. Inputs: the root and the
+/// requested path. Output: the joined path, or why it is refused, in words safe to show a
+/// caller.
 pub fn confined(root: &Path, requested: &Path) -> Result<PathBuf, &'static str> {
     let mut parts = Vec::with_capacity(PATH_PARTS_MAX);
     for component in requested.components() {
