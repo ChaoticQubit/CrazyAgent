@@ -126,6 +126,7 @@ pub const WRITES_PER_ACTOR_MINUTE_MAX: usize = 30;
 pub const OPEN_TICKETS_CREATED_PER_ACTOR_MAX: usize = 50;
 pub const REQUEST_BYTES_MAX: usize = 16 * 1024;
 pub const REQUEST_ID_BYTES_MAX: usize = 64;
+pub const HOST_CODE_BYTES_MAX: usize = 64;
 
 /// A plain refusal the core, a host or a caller acts on. Fields: a stable code from a fixed
 /// vocabulary (`codes` for the core's own), and one line saying why, safe to show an agent.
@@ -136,8 +137,38 @@ pub struct Refusal {
 }
 
 impl Refusal {
-    /// Builds a refusal. Inputs: the code and the message. Output: the refusal.
+    /// Builds one of the core's own refusals. Inputs: a code from `codes::ALL` and the
+    /// message. Output: the refusal. A code outside the core vocabulary panics; a host
+    /// refusal goes through `Refusal::host`.
     pub fn new(code: &'static str, message: impl Into<String>) -> Self {
+        assert!(
+            codes::ALL.contains(&code),
+            "{code:?} is not a core code; a host refusal uses Refusal::host"
+        );
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    /// Builds a host's refusal. Inputs: the host's code, 1 to `HOST_CODE_BYTES_MAX` bytes of
+    /// lowercase ASCII letters and underscores and never a core code, and the message.
+    /// Output: the refusal. A code of another shape panics.
+    pub fn host(code: &'static str, message: impl Into<String>) -> Self {
+        assert!(!code.is_empty(), "a host code is not empty");
+        assert!(
+            code.len() <= HOST_CODE_BYTES_MAX,
+            "host code {code:?} is over {HOST_CODE_BYTES_MAX} bytes"
+        );
+        assert!(
+            code.bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_'),
+            "host code {code:?} is lowercase ASCII letters and underscores"
+        );
+        assert!(
+            !codes::ALL.contains(&code),
+            "{code:?} is a core code; a host names its own"
+        );
         Self {
             code,
             message: message.into(),

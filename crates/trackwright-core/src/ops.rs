@@ -1,5 +1,5 @@
 use crate::catalog;
-use crate::host::{Host, LinkState, TicketView};
+use crate::host::{self, Host, LinkState, TicketView};
 use crate::model::{
     Actor, LINKS_PER_TICKET_MAX, OPEN_TICKETS_CREATED_PER_ACTOR_MAX, OpKind, Priority, ProjectKey,
     Refusal, ShortId, Ticket, TicketKind, TicketStatus, WRITES_PER_ACTOR_MINUTE_MAX, codes,
@@ -317,9 +317,9 @@ fn handle<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
         | OpKind::VersionUpsert
         | OpKind::CycleStart
         | OpKind::CycleClose => unavailable(cx),
-        OpKind::Link
-        | OpKind::Unlink
-        | OpKind::PolicyGet
+        OpKind::Link => link(cx),
+        OpKind::Unlink => unlink(cx),
+        OpKind::PolicyGet
         | OpKind::CriterionAdd
         | OpKind::CriterionEdit
         | OpKind::CheckAdd
@@ -628,6 +628,57 @@ fn move_to<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
         ..TicketChange::default()
     };
     update(cx, ticket, &change)
+}
+
+fn link<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
+    let ticket = cx.ticket();
+    let kind = cx.args.need::<&str>("kind");
+    let target = cx.args.need::<&str>("target");
+    let (added, state) = host::link(
+        cx.tx,
+        cx.host,
+        cx.actor,
+        &ticket.short_id,
+        kind,
+        target,
+        cx.at_ms,
+    )?;
+    assert_eq!(added.kind, kind);
+    assert_eq!(added.target, target);
+    let mut data = link_json(kind, target, &Ok(state));
+    data["id"] = json!(ticket.short_id.to_string());
+    Ok(Outcome {
+        data,
+        next: ticket_next(cx.tx, ticket)?,
+        cursor: None,
+    })
+}
+
+fn unlink<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
+    let ticket = cx.ticket();
+    let kind = cx.args.need::<&str>("kind");
+    let target = cx.args.need::<&str>("target");
+    let removed = host::unlink(
+        cx.tx,
+        cx.host,
+        cx.actor,
+        &ticket.short_id,
+        kind,
+        target,
+        cx.at_ms,
+    )?;
+    assert_eq!(removed.kind, kind);
+    assert_eq!(removed.target, target);
+    Ok(Outcome {
+        data: json!({
+            "id": ticket.short_id.to_string(),
+            "kind": kind,
+            "target": target,
+            "removed": true,
+        }),
+        next: ticket_next(cx.tx, ticket)?,
+        cursor: None,
+    })
 }
 
 fn link_json(kind: &str, target: &str, state: &Result<LinkState, Refusal>) -> Value {

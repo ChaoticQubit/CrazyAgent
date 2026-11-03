@@ -8,9 +8,9 @@ use trackwright_core::host::{
     Authority, CheckView, Evidence, EvidenceState, LinkKind, LinkState, Links, TicketView,
 };
 use trackwright_core::model::{
-    ACTOR_BYTES_MAX, Actor, CRITERIA_PER_TICKET_MAX, OPEN_TICKETS_CREATED_PER_ACTOR_MAX, OpKind,
-    Priority, ProjectKey, REQUEST_BYTES_MAX, Refusal, ShortId, TicketKind, TicketStatus,
-    WRITES_PER_ACTOR_MINUTE_MAX, codes,
+    ACTOR_BYTES_MAX, Actor, CRITERIA_PER_TICKET_MAX, HOST_CODE_BYTES_MAX,
+    OPEN_TICKETS_CREATED_PER_ACTOR_MAX, OpKind, Priority, ProjectKey, REQUEST_BYTES_MAX, Refusal,
+    ShortId, TicketKind, TicketStatus, WRITES_PER_ACTOR_MINUTE_MAX, codes,
 };
 use trackwright_core::ops;
 use trackwright_core::reply::{
@@ -69,7 +69,7 @@ impl Links for TableHost {
                 label: format!("{kind} {target}"),
                 state,
             }),
-            None => Err(Refusal::new("host_target_unknown", "no such target")),
+            None => Err(Refusal::host("host_target_unknown", "no such target")),
         }
     }
 }
@@ -115,7 +115,7 @@ impl Authority for TableHost {
         if granted > 0 {
             Ok(())
         } else {
-            Err(Refusal::new(
+            Err(Refusal::host(
                 "host_not_allowed",
                 "this actor may not run it",
             ))
@@ -905,4 +905,87 @@ fn move_keeps_to_open_statuses_and_names_close_for_the_rest() {
         store::ticket(&tx, &id("CA-1")).unwrap().status,
         TicketStatus::InProgress
     );
+}
+
+#[test]
+fn link_and_unlink_go_through_the_host_and_a_refused_link_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = setup(dir.path());
+    let tx = store.transaction().unwrap();
+    ok(
+        &tx,
+        "owner",
+        "create",
+        json!({"project": "CA", "title": "Linked"}),
+    );
+    tx.execute(
+        "INSERT INTO host_targets(kind, target, state) VALUES ('branch', 'feat/x', 'open')",
+        [],
+    )
+    .unwrap();
+    let branch = json!({"id": "CA-1", "kind": "branch", "target": "feat/x"});
+
+    let linked = ok(&tx, "owner", "link", branch.clone());
+    assert_eq!(linked["data"]["id"], "CA-1");
+    assert_eq!(linked["data"]["kind"], "branch");
+    assert_eq!(linked["data"]["target"], "feat/x");
+    assert_eq!(linked["data"]["live"], true);
+    assert_eq!(linked["data"]["state"], "open");
+    assert_eq!(count(&tx, "SELECT count(*) FROM tk_links"), 1);
+
+    let events = count(&tx, "SELECT count(*) FROM tk_events");
+    let unknown_kind = refused(
+        &tx,
+        "owner",
+        "link",
+        json!({"id": "CA-1", "kind": "wiki", "target": "feat/x"}),
+    );
+    assert_eq!(unknown_kind["code"], codes::LINK_KIND_UNKNOWN);
+    let unknown_target = refused(
+        &tx,
+        "owner",
+        "link",
+        json!({"id": "CA-1", "kind": "branch", "target": "feat/none"}),
+    );
+    assert_eq!(unknown_target["code"], "host_target_unknown");
+    assert_eq!(count(&tx, "SELECT count(*) FROM tk_links"), 1);
+    assert_eq!(count(&tx, "SELECT count(*) FROM tk_events"), events);
+
+    let removed = ok(&tx, "owner", "unlink", branch.clone());
+    assert_eq!(removed["data"]["id"], "CA-1");
+    assert_eq!(removed["data"]["removed"], true);
+    assert_eq!(count(&tx, "SELECT count(*) FROM tk_links"), 0);
+    let again = refused(&tx, "owner", "unlink", branch);
+    assert_eq!(again["code"], codes::LINK_UNKNOWN);
+}
+
+#[test]
+fn a_host_code_is_kept_apart_from_the_core_codes() {
+    let refusal = Refusal::host("host_target_unknown", "no such target");
+    assert_eq!(refusal.code, "host_target_unknown");
+    assert_eq!(refusal.message, "no such target");
+    assert_eq!(
+        Refusal::new(codes::STALE_VERSION, "x").code,
+        codes::STALE_VERSION
+    );
+    let at_bound: &'static str = "h".repeat(HOST_CODE_BYTES_MAX).leak();
+    assert_eq!(Refusal::host(at_bound, "x").code.len(), HOST_CODE_BYTES_MAX);
+
+    let over: &'static str = "h".repeat(HOST_CODE_BYTES_MAX + 1).leak();
+    for code in [
+        codes::STALE_VERSION,
+        "",
+        "Host_x",
+        "host-x",
+        "host x",
+        "h\u{f4}st",
+        over,
+    ] {
+        let built = std::panic::catch_unwind(|| Refusal::host(code, "x"));
+        assert!(built.is_err(), "{code:?} is not a host code");
+    }
+    for code in ["host_target_unknown", "Stale_version"] {
+        let built = std::panic::catch_unwind(|| Refusal::new(code, "x"));
+        assert!(built.is_err(), "{code:?} is not a core code");
+    }
 }
