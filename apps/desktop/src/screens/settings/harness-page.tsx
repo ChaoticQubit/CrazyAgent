@@ -106,7 +106,7 @@ export interface HarnessSettingsViewProps {
 export function HarnessSettingsView(props: HarnessSettingsViewProps) {
   const { page, scope, query, drafts, busy, notes } = props;
   if (page.kind === "loading") return <Skeleton shape="row" count={6} />;
-  if (notReady(page)) return <NotReady what="This page" compact />;
+  if (page.kind === "not_ready" || notReady(page)) return <NotReady what="This page" compact />;
   if (page.kind === "error" && page.code === "harness_settings_no_catalog") return <Notice tone="info">{NO_CATALOG_LINE}</Notice>;
   if (page.kind === "error") return <LoadError message={harnessSettingsRefusal(page)} onRetry={props.onRetry} />;
   const value = page.value;
@@ -130,8 +130,8 @@ export function HarnessSettingsView(props: HarnessSettingsViewProps) {
  * the plain line, or "" once stored. */
 export function changeNote(result: Result<void>): string {
   if (result.kind === "ok") return "";
+  if (result.kind === "not_ready" || notReady(result)) return "Not ready yet: changing harness settings isn't in this build.";
   if (isStale(result)) return STALE_LINE;
-  if (notReady(result)) return "Not ready yet: changing harness settings isn't in this build.";
   return harnessSettingsRefusal(result);
 }
 
