@@ -41,9 +41,10 @@ pub const OPS: &[&str] = &[
     PLAN_REMOVE,
 ];
 
-/// Migration step 2: the test management tables, added beside the step 1 tables without
-/// touching a step 1 row. Results are never updated; retention (VT-2) may delete the
-/// results of a pruned run.
+/// Migration step 2: the test management tables beside the step 1 tables, and `tk_policy`
+/// rebuilt with every step 1 row and column so it also takes the five V3b policy keys
+/// (SQLite cannot widen a CHECK in place). Results are never updated; retention (VT-2) may
+/// delete the results of a pruned run.
 pub(crate) const SCHEMA_STEP_TWO: &str = "
 CREATE TABLE tk_cases(
     id INTEGER PRIMARY KEY,
@@ -155,6 +156,20 @@ CREATE TABLE tk_results(
 CREATE INDEX tk_results_case ON tk_results(case_id, run_id) WHERE case_id IS NOT NULL;
 CREATE TRIGGER tk_results_no_update BEFORE UPDATE ON tk_results
     BEGIN SELECT RAISE(ABORT, 'tk_results is append-only'); END;
+CREATE TABLE tk_policy_step_two(
+    project INTEGER NOT NULL REFERENCES tk_projects(id),
+    key TEXT NOT NULL CHECK (key IN
+        ('close', 'create', 'agent_edit', 'cycle_days', 'rollover', 'import',
+         'test_evidence', 'skipped_counts', 'case_protected_visibility', 'run_writers',
+         'run_retention')),
+    value_json TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version >= 1),
+    PRIMARY KEY (project, key)
+) WITHOUT ROWID;
+INSERT INTO tk_policy_step_two(project, key, value_json, version)
+    SELECT project, key, value_json, version FROM tk_policy;
+DROP TABLE tk_policy;
+ALTER TABLE tk_policy_step_two RENAME TO tk_policy;
 ";
 
 macro_rules! case_select {
