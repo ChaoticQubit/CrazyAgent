@@ -1568,9 +1568,10 @@ fn an_adopted_teammate_pane_is_reached_and_ended_by_its_own_name_even_after_a_re
 }
 
 /// PLC (d): a native lead's team panes live only on the teammates' server its start named.
-/// Its own server numbers panes from the same `%0`, so once the teammates' server ends no
-/// team pane call goes to the lead's own server: a pane the lead split there is neither
-/// listed, typed into nor adopted as a teammate under a teammate pane's id.
+/// Its own server numbers its panes on its own, so a teammate pane's id can name a pane the
+/// lead split there; once the teammates' server ends no team pane call goes to the lead's
+/// own server, so that pane is neither listed, typed into nor adopted as a teammate under
+/// the teammate pane's id.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_native_lead_s_team_pane_calls_never_reach_its_own_server_once_its_teammates_server_ended() {
@@ -1581,8 +1582,11 @@ fn a_native_lead_s_team_pane_calls_never_reach_its_own_server_once_its_teammates
     let [ann, bob] = [2, 3].map(|id| AgentId::team(id).unwrap());
     host.spawn_own_server(&leader, &lead.confined("lead$ ", &["/bin/sh"]))
         .unwrap();
-    let ann_pane = lead.new_pane(host.as_ref(), &leader, "split-window -d", "sleep 600");
-    host.adopt_pane(&ann, &leader, &ann_pane).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !contains(&host.snapshot(&leader).unwrap().screen, b"lead$") {
+        assert!(Instant::now() < deadline, "the lead's shell never prompted");
+        std::thread::sleep(Duration::from_millis(50));
+    }
     let own_out = root.join("own.txt");
     let own_id = root.join("own-id.txt");
     let line = format!(
@@ -1594,10 +1598,18 @@ fn a_native_lead_s_team_pane_calls_never_reach_its_own_server_once_its_teammates
     );
     host.input(&leader, line.as_bytes()).unwrap();
     let own_split = wait_text(&own_id).trim().to_owned();
+    let mut ann_pane = lead.new_pane(host.as_ref(), &leader, "split-window -d", "sleep 600");
+    for _ in 0..4 {
+        if ann_pane == own_split {
+            break;
+        }
+        ann_pane = lead.new_pane(host.as_ref(), &leader, "split-window -d", "sleep 600");
+    }
     assert_eq!(
-        own_split, ann_pane,
-        "the lead's own server numbers its first split as the teammates' server does"
+        ann_pane, own_split,
+        "a teammate pane on the teammates' server has the id of the lead's split on its own"
     );
+    host.adopt_pane(&ann, &leader, &ann_pane).unwrap();
 
     let killed = crazyagent::spawn_gate::status(
         Command::new(&lead.tmux)
