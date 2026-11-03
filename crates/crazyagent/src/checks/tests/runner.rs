@@ -352,6 +352,7 @@ fn a_check_cannot_write_the_agent_worktree_or_read_the_owner_home() {
     );
     assert!(!execution.timed_out && !execution.cancelled);
     assert_eq!(execution.unavailable, None);
+    assert!(!execution.holdout);
     assert_eq!(
         fs::read_to_string(snapshot.root.join("made.txt")).unwrap(),
         "inside\n"
@@ -628,6 +629,7 @@ fn holdout_files_exist_only_inside_the_snapshot_during_the_run() {
         String::from_utf8_lossy(&execution.stderr_tail)
     );
     assert_eq!(stdout(&execution), "visible\nholdout-ran\n");
+    assert!(execution.holdout);
     for folder in [&snapshot.root, &case.workspace.worktree, &case.repo] {
         assert!(!folder.join("holdout/hidden_test.sh").exists());
         assert!(!folder.join("holdout").exists());
@@ -674,6 +676,7 @@ fn a_snapshot_that_ran_a_holdout_check_refuses_every_later_check() {
         String::from_utf8_lossy(&execution.stderr_tail)
     );
     assert_eq!(stdout(&execution), "copied\n");
+    assert!(execution.holdout);
     assert!(listener.accept().is_err());
     assert!(snapshot.root.join("copied.txt").exists());
     assert!(!snapshot.root.join("holdout").exists());
