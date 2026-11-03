@@ -84,8 +84,12 @@ pub struct ReportFile {
 /// printed inside the sandbox (`none` for no toolchain), the digests cover the installed
 /// sandbox profile and every environment name and value, `cleanup_uncertain` says the
 /// sandbox could not be confirmed empty afterwards, and `gaps` names the limits not enforced.
+/// `holdout` marks a holdout check's run: its repository code saw the holdout files and
+/// could print them, so its tails and report are owner-only wherever they are stored, and
+/// an agent-facing view of it shows only the verdict and counts.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckExecution {
+    pub holdout: bool,
     pub exit: Option<i32>,
     pub timed_out: bool,
     pub cancelled: bool,
@@ -106,8 +110,9 @@ pub struct CheckExecution {
 }
 
 impl CheckExecution {
-    fn unstarted(network: NetworkMode) -> Self {
+    fn unstarted(network: NetworkMode, holdout: bool) -> Self {
         Self {
+            holdout,
             exit: None,
             timed_out: false,
             cancelled: false,
@@ -167,7 +172,7 @@ pub fn run(
     } else {
         check.spec.network.min(limits.network_ceiling)
     };
-    let mut execution = CheckExecution::unstarted(network);
+    let mut execution = CheckExecution::unstarted(network, check.holdout.is_some());
     #[cfg(target_os = "macos")]
     if let Err(refusal) = confined(snapshot, check, holdout, limits, cancel, &mut execution) {
         execution.unavailable = Some(refusal.0);
@@ -183,6 +188,7 @@ pub fn run(
     assert!(execution.stderr_tail.len() <= limits.output_cap);
     assert!(execution.network <= limits.network_ceiling && execution.network <= check.spec.network);
     assert!(check.holdout.is_none() || execution.network == NetworkMode::Off);
+    assert_eq!(execution.holdout, check.holdout.is_some());
     assert!(execution.report.is_empty() || !execution.cleanup_uncertain);
     execution
 }
