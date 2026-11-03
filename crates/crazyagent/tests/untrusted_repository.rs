@@ -8,7 +8,6 @@ use crazyagent::checks::{
 use crazyagent::config::resolve_config;
 use crazyagent::engine::Engine;
 use crazyagent::harnesses::interactive::{InteractiveCommand, Transcript};
-use crazyagent::instruction_files::{self, Choice, Delivery, State};
 use crazyagent::landing::{
     self, AgentKind, ChangeAgent, ChangeSetId, TurnEnd, TurnOutcome, Workspace,
 };
@@ -279,13 +278,20 @@ fn alive(pid: i32) -> bool {
     .success()
 }
 
-fn given<'a>(delivery: &'a Delivery, name: &str) -> &'a State {
-    &delivery
-        .records
-        .iter()
-        .find(|record| record.name == name)
-        .unwrap_or_else(|| panic!("no record for {name}: {:?}", delivery.records))
-        .state
+/// What the case project's agents receive from the owner's instruction texts at the
+/// project's current trust, with both texts given; DEC-106 reads no instruction file
+/// outside the app. Input: the case. Output: the text.
+fn agent_text(case: &Hostile) -> String {
+    let given = crazyagent::agent_home::text(&crazyagent::agent_home::AgentProject {
+        data: case.runtime.clone(),
+        id: ProjectId::new(PROJECT).unwrap(),
+        folder: Some(case.repo.clone()),
+        mode: crazyagent::instruction_files::Mode::Both,
+        trust: case.trust(),
+    })
+    .unwrap();
+    assert!(given.files.is_empty() && given.section_bytes == 0);
+    given.text
 }
 
 impl Hostile {
@@ -580,15 +586,13 @@ async fn a_symlink_in_the_tree_that_points_outside_is_never_followed_by_engine_g
         .checks()
         .join(snapshot::project_folder(&case.workspace.project));
     let left = fs::read_dir(&project_folder).map_or(0, |entries| entries.count());
-    let delivery =
-        instruction_files::read(Some(&case.repo), None, Choice::Project, Trust::Untrusted);
-    let state = *given(&delivery, "CLAUDE.md");
+    let given = agent_text(&case);
     record(
         "a_symlink_in_the_tree_that_points_outside_is_never_followed_by_engine_git_or_a_check",
         &[
             ("snapshot", format!("{:?}", refused.as_ref().err())),
             ("snapshot_folders_left", left.to_string()),
-            ("claude_md_state", format!("{state:?}")),
+            ("instructions_bytes", given.len().to_string()),
         ],
     );
     assert!(
@@ -596,8 +600,7 @@ async fn a_symlink_in_the_tree_that_points_outside_is_never_followed_by_engine_g
         "a change set holding outside links got a snapshot"
     );
     assert_eq!(left, 0);
-    assert_ne!(state, State::Given);
-    assert!(!delivery.text.contains(outside_text.trim()));
+    assert!(!given.contains(outside_text.trim()));
     case.close().await;
 }
 
@@ -746,17 +749,14 @@ async fn an_oversized_file_in_the_tree_stays_inside_every_engine_bound() {
     assert!(config.len() > 65536);
     fs::write(case.repo.join(".git/config"), &config).unwrap();
     let capacity = case.admit().await;
-    let delivery =
-        instruction_files::read(Some(&case.repo), None, Choice::Project, Trust::Untrusted);
-    let state = *given(&delivery, "CLAUDE.md");
+    let given = agent_text(&case);
     let flood = "exec /usr/bin/perl -e 'print \"x\" x (12 * 1024 * 1024)'\n";
     let (_, execution) = case.probe("flood", flood, None);
     record(
         "an_oversized_file_in_the_tree_stays_inside_every_engine_bound",
         &[
             ("config_admission", format!("{capacity:?}")),
-            ("claude_md_state", format!("{state:?}")),
-            ("instructions_bytes", delivery.text.len().to_string()),
+            ("instructions_bytes", given.len().to_string()),
             ("stdout_tail_bytes", execution.stdout_tail.len().to_string()),
             ("exit", format!("{:?}", execution.exit)),
         ],
@@ -767,8 +767,8 @@ async fn an_oversized_file_in_the_tree_stays_inside_every_engine_bound() {
             code: "git_config_capacity".into()
         }
     );
-    assert_eq!(state, State::TooLarge);
-    assert!(delivery.text.len() <= instruction_files::SECTION_BYTES_MAX);
+    assert!(!given.contains("UR3 oversized instruction line"));
+    assert!(given.len() <= crazyagent::agent_home::GIVEN_BYTES_MAX);
     assert!(!execution.stdout_tail.is_empty());
     assert!(execution.stdout_tail.len() <= runner::OUTPUT_CAP);
     case.close().await;
@@ -1216,8 +1216,8 @@ async fn a_repository_vscode_task_and_settings_never_run_in_the_untrusted_ide() 
 
 /// U3-18: a committed `CLAUDE.md` imitates the engine's untrusted-text heading, an owner
 /// rule heading and a fake end of the section, and `AGENTS.md` carries a direction
-/// override and terminal escapes; every repository line reaches the master quoted under
-/// the one engine heading, and no raw control or bidi character reaches it.
+/// override and terminal escapes; no repository line and no raw control or bidi character
+/// reaches the master's instructions, since DEC-106 reads no repository instruction file.
 #[tokio::test]
 async fn a_claude_md_that_imitates_the_label_end_stays_inside_the_label() {
     let tag = unique();
@@ -1233,48 +1233,29 @@ async fn a_claude_md_that_imitates_the_label_end_stays_inside_the_label() {
         ("AGENTS.md", Entry::Text(&escapes)),
     ])
     .await;
-    let delivery =
-        instruction_files::read(Some(&case.repo), None, Choice::Project, Trust::Untrusted);
-    let state = *given(&delivery, "CLAUDE.md");
-    let escapes_state = *given(&delivery, "AGENTS.md");
+    let given = agent_text(&case);
     record(
         "a_claude_md_that_imitates_the_label_end_stays_inside_the_label",
-        &[
-            ("claude_md_state", format!("{state:?}")),
-            ("agents_md_state", format!("{escapes_state:?}")),
-            ("delivered", delivery.text.clone()),
-        ],
+        &[("delivered", given.clone())],
     );
-    assert_eq!(state, State::Given);
-    assert_eq!(
-        delivery.text.matches(trust::repo_config::HEADING).count(),
-        1
+    assert!(
+        !given.contains(&tag),
+        "repository text reached the master: {given}"
     );
-    let heading_at = delivery.text.find(trust::repo_config::HEADING).unwrap();
-    for line in delivery.text.lines() {
-        if line.contains(&tag) {
-            assert!(
-                line.starts_with("> "),
-                "a repository line escaped its quote: {line}"
-            );
-        }
+    assert!(!given.contains(trust::repo_config::HEADING));
+    for line in given.lines() {
         assert_ne!(line, "# Owner rules");
         assert_ne!(line, "## End of untrusted repository text");
     }
-    let canary_at = delivery.text.find(&format!("UR3-CANARY-{tag}")).unwrap();
-    assert!(
-        canary_at > heading_at,
-        "repository text came before the untrusted heading"
-    );
-    assert!(!delivery.text.contains('\u{202e}'));
-    assert!(!delivery.text.contains('\u{1b}'));
-    assert!(!delivery.text.contains('\u{7}'));
+    assert!(!given.contains('\u{202e}'));
+    assert!(!given.contains('\u{1b}'));
+    assert!(!given.contains('\u{7}'));
     case.close().await;
 }
 
 /// U3-19: the repository commits a `.crazyagent/` folder with project instructions and a
-/// settings file that claims the reviewed level and full access; the instructions reach
-/// agents only as quoted untrusted text, and the project stays untrusted.
+/// settings file that claims the reviewed level and full access; the committed instructions
+/// never reach agents as the owner's project instructions, and the project stays untrusted.
 #[tokio::test]
 async fn a_repository_that_commits_a_crazyagent_folder_gives_the_engine_no_state() {
     let tag = unique();
@@ -1291,27 +1272,19 @@ async fn a_repository_that_commits_a_crazyagent_folder_gives_the_engine_no_state
         ),
     ])
     .await;
-    let delivery = instruction_files::read(Some(&case.repo), None, Choice::None, case.trust());
+    let given = agent_text(&case);
     record(
         "a_repository_that_commits_a_crazyagent_folder_gives_the_engine_no_state",
         &[
-            (
-                "repository_instructions",
-                delivery.repository_instructions.to_string(),
-            ),
-            ("delivered", delivery.text.clone()),
+            ("delivered", given.clone()),
             ("trust_after", format!("{:?}", case.trust())),
         ],
     );
-    assert!(delivery.repository_instructions);
-    assert!(delivery.text.contains(trust::repo_config::HEADING));
-    for line in delivery.text.lines().filter(|line| line.contains(&tag)) {
-        assert!(
-            line.starts_with("> "),
-            "committed instructions read as the owner's: {line}"
-        );
-    }
-    assert!(delivery.text.contains(&tag));
+    assert!(
+        !given.contains(&tag),
+        "committed instructions read as the owner's: {given}"
+    );
+    assert!(!given.contains("## Project instructions"));
     assert_eq!(case.trust(), Trust::Untrusted);
     case.close().await;
 }
