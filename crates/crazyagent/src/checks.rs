@@ -21,6 +21,8 @@ pub mod snapshot;
 
 #[cfg(all(test, unix))]
 mod tests {
+    #[cfg(target_os = "macos")]
+    mod gate;
     mod profile;
     #[cfg(target_os = "macos")]
     mod record;
