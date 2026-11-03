@@ -3470,8 +3470,10 @@ impl TeamRuntime {
     /// Sends each of the project's sub-agents whose task turn ended with no reply text its
     /// one re-ask turn, with the grant and turn rules a task turn gets. A sub-agent that
     /// cannot take it finishes the task with no reply text, as with the setting off; one on
-    /// a rate-limited connection waits for it, as a task does. Takes the project setup, the
-    /// live model access and the paused connections. Returns any SQLite failure.
+    /// a rate-limited connection waits for it, as a task does, and a kept native lead waits
+    /// while a teammate of it works or its app runs a turn of its own, as instruction edits
+    /// do (RER-L1). Takes the project setup, the live model access and the paused
+    /// connections. Returns any SQLite failure.
     fn send_reasks(
         &mut self,
         stored: &StoredSetup,
@@ -3485,12 +3487,16 @@ impl TeamRuntime {
             .filter(|(_, worker)| {
                 &worker.project == project
                     && !worker.stopping
+                    && worker.own_turn.is_none()
                     && !paused.contains(&worker.connection)
             })
             .filter_map(|(id, worker)| worker.reask.map(|task| (*id, task)))
             .collect();
         for (agent, task) in due {
             assert_eq!(self.workers[&agent].busy, Some(Busy::Task(task)));
+            if self.workers[&agent].kept_session && self.lead_waits(agent)? {
+                continue;
+            }
             let handed = self.workers[&agent].kept_session && self.workers[&agent].briefed;
             let grant = if self.workers[&agent].managed && !handed {
                 match self.grant(access, agent, project) {
