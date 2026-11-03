@@ -238,6 +238,7 @@ fn removing_a_project_clears_its_plugins_so_a_reused_id_inherits_nothing() {
         },
     )
     .unwrap();
+    let version = plugin_version(&connection, &shared).unwrap();
     execute(
         &mut connection,
         root,
@@ -245,6 +246,7 @@ fn removing_a_project_clears_its_plugins_so_a_reused_id_inherits_nothing() {
             project: project.clone(),
             id: shared.clone(),
             on: false,
+            version,
         },
     )
     .unwrap();
