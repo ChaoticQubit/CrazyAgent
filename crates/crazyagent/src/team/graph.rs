@@ -582,6 +582,6 @@ fn overlap_edges(coord: &Snapshot, end: &impl Fn(Party) -> Option<String>) -> Ve
     merged
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "graph/tests.rs"]
 mod tests;
