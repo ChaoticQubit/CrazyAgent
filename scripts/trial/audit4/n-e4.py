@@ -12,7 +12,8 @@ import re
 import audit
 
 ID = "N-E4"
-OP = []
+OP = ["OP-54"]
+WHY = "B-20 is not in owner problems part A; its commits are the agent work OP-54 lands through Changes."
 TITLE = "Trial commits carry the repo identity, no Co-Authored-By, whole-word subjects and no local paths"
 
 FIELD = "\x1f"

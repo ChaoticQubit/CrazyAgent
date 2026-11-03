@@ -48,7 +48,7 @@ class CommitTests(unittest.TestCase):
 
     def test_the_module_follows_the_trial_4_convention(self):
         self.assertEqual(CHECK.ID, "N-E4")
-        self.assertEqual(CHECK.OP, [])
+        self.assertEqual(CHECK.OP, ["OP-54"])
         self.assertTrue(CHECK.TITLE)
 
     def test_commits_by_the_repo_identity_with_whole_subjects_pass(self):
