@@ -776,6 +776,53 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(record["result"], "UNKNOWN")
         self.assertIn("not exercised", record["detail"])
 
+    def two_on_accounts(self, first, second, second_role="sub"):
+        w = self.world
+        lead = w.agent("sub", mode="app_spawned", connection=first[0])
+        other = w.agent(second_role, parent=lead, connection=second[0])
+        for agent, (_, start, end) in ((lead, first), (other, second)):
+            w.row("team_tasks", project=PROJECT, source="master", harness="claude-code", tools=1, prompt="Write a.md", status="done",
+                  agent=agent, created_ms=w.now - 900_000, started_ms=w.now - 600_000 + start * 1000,
+                  finished_ms=None if end is None else w.now - 600_000 + end * 1000)
+        return lead, other
+
+    def test_t3_27_shared_account_passes_when_two_agents_run_on_one_account_at_once_and_fails_when_one_waited(self):
+        record = self.world.audit("T3-27")
+        self.assertEqual(record["result"], "UNKNOWN")
+        self.assertIn("not exercised", record["detail"])
+        work, home = "claude-max-work", "claude-max-home"
+        cases = (
+            ((work, 0, 300), (work, 100, 400), "sub", "PASS", "ran tasks 1 and 2 on account 1 together for 200 s"),
+            ((work, 0, None), (work, 100, 400), "sub", "PASS", "together for 300 s"),
+            ((work, 0, 300), (work, 300, 400), "sub", "UNKNOWN", "agents on one account at once=0"),
+            ((work, 0, 300), (home, 100, 400), "sub", "UNKNOWN", "on accounts=2"),
+            ((work, 0, 300), (work, 100, 400), "teammate", "UNKNOWN", "agents with an account=1"),
+        )
+        for first, second, role, result, shown in cases:
+            self.tearDown()
+            self.setUp()
+            self.two_on_accounts(first, second, role)
+            record = self.world.audit("T3-27")
+            self.assertEqual(record["result"], result, (first, second, role, record["detail"]))
+            self.assertIn(shown, record["detail"])
+            for path in self.world.out.rglob("*"):
+                if path.is_file():
+                    self.assertNotIn("claude-max", path.read_text(encoding="utf-8", errors="replace"), path)
+        for table, said in (("team_tasks", "error"), ("team_events", "text")):
+            self.tearDown()
+            self.setUp()
+            w = self.world
+            lead, _ = self.two_on_accounts((work, 0, 300), (work, 100, 400))
+            if table == "team_tasks":
+                waited = w.row("team_tasks", project=PROJECT, source="master", harness="claude-code", tools=1, prompt="Write b.md",
+                               status="queued", agent=lead, created_ms=w.now, error="native_profile_in_use")
+            else:
+                waited = w.row("team_events", project=PROJECT, agent=lead, kind="status", text="Waiting for a free account",
+                               state="new", created_ms=w.now)
+            record = w.audit("T3-27")
+            self.assertEqual(record["result"], "FAIL", (table, record["detail"]))
+            self.assertIn(f"an agent waited for its account: {table} {waited}", record["detail"])
+
     def test_every_check_writes_its_contract_record_with_evidence(self):
         w = self.world
         w.agent("sub", mode="app_spawned")
@@ -786,7 +833,7 @@ class AuditTests(unittest.TestCase):
         self.assertIn(done.returncode, (0, 1), done.stderr)
         written = sorted(p.stem for p in (w.out / "checks").glob("*.json"))
         self.assertEqual(written, [check["id"] for check in audit.CHECKS])
-        self.assertEqual(len(written), 26)
+        self.assertEqual(len(written), 27)
         for name in written:
             record = json.loads((w.out / "checks" / f"{name}.json").read_text())
             self.assertEqual(set(record), {"id", "title", "proves", "why", "how", "result", "detail", "evidence"})
