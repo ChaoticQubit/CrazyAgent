@@ -1137,6 +1137,8 @@ fn import_from_file_reads_a_named_file_as_a_preview() {
         vec![ProcessQuery::Save {
             project: None,
             text: "Plan first.\n".into(),
+            version: READ_VERSION,
+            opened: None,
         }]
     );
 }
