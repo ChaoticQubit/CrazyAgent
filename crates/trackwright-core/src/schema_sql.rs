@@ -1,5 +1,5 @@
 use crate::model::{Refusal, codes};
-use crate::store::StoreError;
+use crate::store::{self, StoreError};
 use rusqlite::{OptionalExtension, Transaction};
 
 pub const SCHEMA_VERSION: i64 = 1;
@@ -157,8 +157,8 @@ const MIGRATIONS: [&str; SCHEMA_VERSION as usize] = [V1];
 /// database a later core wrote.
 pub fn migrate(tx: &Transaction<'_>) -> Result<(), StoreError> {
     tx.execute_batch(META)?;
-    let current: i64 = tx
-        .query_row(VERSION_READ, [], |row| row.get(0))
+    let current: i64 = store::prepare(tx, VERSION_READ)?
+        .query_row([], |row| row.get(0))
         .optional()?
         .unwrap_or(0);
     if current > SCHEMA_VERSION {
@@ -179,7 +179,7 @@ pub fn migrate(tx: &Transaction<'_>) -> Result<(), StoreError> {
     }
     for (index, migration) in MIGRATIONS.iter().enumerate().skip(current as usize) {
         tx.execute_batch(migration)?;
-        tx.execute(VERSION_WRITE, [index as i64 + 1])?;
+        store::prepare(tx, VERSION_WRITE)?.execute([index as i64 + 1])?;
     }
     Ok(())
 }
