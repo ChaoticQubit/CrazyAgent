@@ -277,7 +277,7 @@ fn a_question_box_on_a_master_screen_is_logged_once() {
 }
 
 #[test]
-fn the_box_leaving_after_owner_input_marks_it_answered_in_terminal() {
+fn the_box_leaving_after_owner_input_reports_it_left() {
     let fixture = Fixture::new();
     let host = fixture.host();
     let answered = fixture.base.join("answered.txt");
@@ -292,7 +292,7 @@ fn the_box_leaving_after_owner_input_marks_it_answered_in_terminal() {
         assert_eq!(
             watch.scan(host.as_ref(), &masters, &logged),
             vec![],
-            "a logged box still on screen is neither asked again nor answered"
+            "a logged box still on screen is neither asked again nor closed"
         );
     }
 
@@ -307,11 +307,11 @@ fn the_box_leaving_after_owner_input_marks_it_answered_in_terminal() {
     assert_eq!(
         watch.scan(host.as_ref(), &masters, &logged),
         vec![],
-        "one scan without the box is not yet an answer"
+        "one scan without the box does not yet close it"
     );
     assert_eq!(
         watch.scan(host.as_ref(), &masters, &logged),
-        vec![Change::Answered(7)]
+        vec![Change::Left { id: 7, agent: 41 }]
     );
     for _ in 0..3 {
         assert_eq!(watch.scan(host.as_ref(), &masters, &[]), vec![]);
@@ -319,7 +319,7 @@ fn the_box_leaving_after_owner_input_marks_it_answered_in_terminal() {
 }
 
 #[test]
-fn a_logged_question_whose_master_left_or_whose_terminal_ended_is_answered() {
+fn a_logged_question_whose_master_left_or_whose_terminal_ended_has_left() {
     let fixture = Fixture::new();
     let host = fixture.host();
     let answered = fixture.base.join("answered.txt");
@@ -341,7 +341,7 @@ fn a_logged_question_whose_master_left_or_whose_terminal_ended_is_answered() {
     );
     assert_eq!(
         watch.scan(host.as_ref(), &masters, &logged),
-        vec![Change::Answered(8)],
+        vec![Change::Left { id: 8, agent: 43 }],
         "a master no longer live shows none of its questions"
     );
     let logged = [pending(9, 44)];
@@ -359,7 +359,7 @@ fn a_logged_question_whose_master_left_or_whose_terminal_ended_is_answered() {
     assert_eq!(watch.scan(host.as_ref(), &masters, &logged), vec![]);
     assert_eq!(
         watch.scan(host.as_ref(), &masters, &logged),
-        vec![Change::Answered(9)],
+        vec![Change::Left { id: 9, agent: 44 }],
         "a question whose terminal ended is closed"
     );
     assert!(

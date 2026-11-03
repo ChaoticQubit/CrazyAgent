@@ -215,7 +215,8 @@ pub fn apply_master_calls(
 
 /// Logs and records what a conversation master asked of the owner during one turn, under
 /// its session. Answers are recorded first, and only from the owner's message of that turn,
-/// so no question is answered by a message older than itself. Inputs: the engine
+/// so no question is answered by a message older than itself, and that message answers at
+/// most one question, as an owner turn of a team master does. Inputs: the engine
 /// connection, the project, the session, the turn's owner message number and text when it
 /// has one, and the drop file. Output: as `apply_master_calls`.
 pub fn apply_session_calls(
@@ -230,6 +231,7 @@ pub fn apply_session_calls(
         .into_iter()
         .partition(|call| matches!(call, Call::RecordAnswer { .. }));
     calls.extend(asks);
+    let mut used = false;
     applied(calls, |call| match call {
         Call::Ask { .. } => logged_ask(db, project, &asker, call),
         Call::RecordAnswer {
@@ -237,13 +239,18 @@ pub fn apply_session_calls(
             version,
             owner_turn,
         } => match owner {
-            Some((number, text)) if u64::try_from(owner_turn).ok() == Some(number) => not_recorded(
-                question,
-                version,
-                crate::questions::record_from_session(
+            Some((number, _)) if used && u64::try_from(owner_turn).ok() == Some(number) => {
+                Some(format!(
+                    "Your record of question {question} was not taken: message {owner_turn} already answered another question."
+                ))
+            }
+            Some((number, text)) if u64::try_from(owner_turn).ok() == Some(number) => {
+                let outcome = crate::questions::record_from_session(
                     db, project, session, question, version, text,
-                ),
-            ),
+                );
+                used = matches!(outcome, Ok(Settlement::Settled));
+                not_recorded(question, version, outcome)
+            }
             _ => Some(format!(
                 "Your record of question {question} was not taken: message {owner_turn} is not the owner's message of that turn."
             )),
@@ -303,7 +310,7 @@ fn not_recorded(
         Err(problem) => match problem.0.as_str() {
             "questions_not_found" => "you asked no such question in this project".to_owned(),
             "questions_owner_turn_invalid" => {
-                "that message is not the owner's, or came before the question".to_owned()
+                "that message is not the owner's, came before the question, or already answered another question".to_owned()
             }
             "questions_answer_invalid" | "questions_text_invalid" => {
                 "the owner's message cannot be stored as an answer".to_owned()

@@ -222,6 +222,9 @@ impl PoolEditor {
                 name,
                 members,
                 quota: self.quota,
+                opened_name: self.start.0.clone(),
+                opened_members: self.start.1.iter().cloned().collect(),
+                opened_quota: self.start.2,
             },
             None => PoolChange::Create {
                 name,
@@ -815,11 +818,19 @@ mod tests {
                         name,
                         members,
                         quota,
+                        opened_name,
+                        opened_members,
+                        opened_quota,
                     },
             }) => {
                 assert_eq!(sent, id);
                 assert_eq!(name, "Main 2");
                 assert_eq!(members, vec![account(2).id]);
+                assert_eq!(
+                    (opened_name.as_str(), opened_members, opened_quota),
+                    ("Main", vec![account(2).id], ProviderQuotaPolicy::Strict),
+                    "the update carries the form as it was opened"
+                );
                 assert_eq!(
                     quota,
                     ProviderQuotaPolicy::Strict,

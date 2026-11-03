@@ -5,7 +5,7 @@ use crazyagent::terminal::buffer::skipped_marker;
 use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
 use crazyagent::terminal::{
     AgentId, FOLDER, Host, INPUT_BYTES_MAX, SCROLLBACK_LINES, TerminalStream,
-    VIEWER_BUFFER_BYTES_MAX, plain_reason, platform, quit,
+    VIEWER_BUFFER_BYTES_MAX, VIEWERS_MAX, plain_reason, platform, quit,
 };
 use std::collections::BTreeMap;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
@@ -1084,6 +1084,175 @@ fn an_agent_between_runs_shows_its_last_screen_labeled_finished_until_it_runs_ag
     );
     host.kill(&agent).unwrap();
     assert!(ended(&mut live));
+}
+
+#[test]
+fn a_screen_read_of_an_ended_agent_is_unknown_though_its_viewers_get_the_last_screen() {
+    let root = root();
+    let tmux = tmux(root.path());
+    let _server = Server {
+        tmux,
+        socket: root.path().join(FOLDER).join(SOCKET),
+    };
+    let (ready, host) = platform(root.path());
+    assert!(ready);
+    let agent = AgentId::team(6).unwrap();
+    host.spawn(
+        &agent,
+        &shell(
+            root.path(),
+            Vec::new(),
+            &[
+                "/bin/sh",
+                "-c",
+                "printf 'Allow this edit? (y/n)\\n'; exec sleep 600",
+            ],
+        ),
+    )
+    .unwrap();
+    let mut live = host.attach(&agent).unwrap();
+    let mut seen = live.screen.clone();
+    assert!(read_until(&mut live, &mut seen, b"Allow this edit?"));
+    drop(live);
+    assert!(contains(&host.screen(&agent).unwrap(), b"Allow this edit?"));
+    host.kill(&agent).unwrap();
+
+    let last = host.attach(&agent).unwrap();
+    assert!(
+        contains(&last.screen, b"Allow this edit?") && contains(&last.screen, b"Finished at "),
+        "{}",
+        String::from_utf8_lossy(&last.screen)
+    );
+    assert_eq!(
+        host.screen(&agent).unwrap_err().0,
+        "terminal_agent_unknown",
+        "the question scan never reads an ended agent's kept screen"
+    );
+}
+
+#[test]
+fn a_screen_read_and_an_ending_take_no_viewer_slot() {
+    let root = root();
+    let tmux = tmux(root.path());
+    let _server = Server {
+        tmux,
+        socket: root.path().join(FOLDER).join(SOCKET),
+    };
+    let (ready, host) = platform(root.path());
+    assert!(ready);
+    let agent = AgentId::team(5).unwrap();
+    host.spawn(
+        &agent,
+        &shell(
+            root.path(),
+            Vec::new(),
+            &[
+                "/bin/sh",
+                "-c",
+                "printf 'busy agent output\\n'; exec sleep 600",
+            ],
+        ),
+    )
+    .unwrap();
+    let mut viewers: Vec<TerminalStream> = (0..VIEWERS_MAX)
+        .map(|_| host.attach(&agent).unwrap())
+        .collect();
+    let mut seen = viewers[0].screen.clone();
+    assert!(read_until(&mut viewers[0], &mut seen, b"busy agent output"));
+    assert_eq!(host.attach(&agent).unwrap_err().0, "terminal_viewers_full");
+
+    let screen = host
+        .screen(&agent)
+        .expect("a screen read needs no viewer slot");
+    assert!(
+        contains(&screen, b"busy agent output"),
+        "{}",
+        String::from_utf8_lossy(&screen)
+    );
+    host.kill(&agent).unwrap();
+    for viewer in &mut viewers {
+        assert!(ended(viewer));
+    }
+    drop(viewers);
+
+    let last = host
+        .attach(&agent)
+        .expect("an ending with every viewer slot taken still keeps the last screen");
+    assert!(
+        contains(&last.screen, b"busy agent output") && contains(&last.screen, b"Finished at "),
+        "{}",
+        String::from_utf8_lossy(&last.screen)
+    );
+}
+
+#[test]
+fn a_history_past_the_reply_bound_opens_without_it_and_every_other_terminal_keeps_running() {
+    let root = root();
+    let tmux = tmux(root.path());
+    let _server = Server {
+        tmux,
+        socket: root.path().join(FOLDER).join(SOCKET),
+    };
+    let (ready, host) = platform(root.path());
+    assert!(ready);
+    let quiet = AgentId::team(3).unwrap();
+    host.spawn(
+        &quiet,
+        &shell(root.path(), Vec::new(), &["/bin/sh", "-c", "exec /bin/cat"]),
+    )
+    .unwrap();
+    let mut watching = host.attach(&quiet).unwrap();
+
+    let colourful = root.path().join("colourful.pl");
+    std::fs::write(
+        &colourful,
+        "for my $row (1..1900) { print join('', map { sprintf(\"\\e[38;5;%d;48;5;%dm%s\", $_ % 256, ($row + $_) % 256, chr(97 + $_ % 26)) } 1..1000), \"\\r\\n\" }\nopen(my $done, '>', 'printed') or die; close($done);\n",
+    )
+    .unwrap();
+    let loud = AgentId::team(4).unwrap();
+    host.spawn(
+        &loud,
+        &shell(
+            root.path(),
+            Vec::new(),
+            &[
+                "/bin/sh",
+                "-c",
+                "while [ ! -f go ]; do /bin/sleep 0.05; done; /usr/bin/perl colourful.pl; exec /bin/sleep 600",
+            ],
+        ),
+    )
+    .unwrap();
+    host.resize(&loud, 1000, 50).unwrap();
+    std::fs::write(root.path().join("go"), b"").unwrap();
+    let printing = Instant::now();
+    while !root.path().join("printed").exists() {
+        assert!(
+            printing.elapsed() < Duration::from_secs(90),
+            "the colourful output never finished"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(Duration::from_millis(500));
+
+    let opened = host
+        .attach(&loud)
+        .expect("a history past the reply bound still opens the screen");
+    assert!(opened.history.is_empty());
+    assert_eq!((opened.cols, opened.rows), (1000, 50));
+    assert!(contains(&opened.screen, b"\x1b["));
+    drop(opened);
+    assert_eq!(host.alive().unwrap(), vec![quiet.clone(), loud.clone()]);
+    host.input(&quiet, b"still-here\r").unwrap();
+    let mut seen = watching.screen.clone();
+    assert!(
+        read_until(&mut watching, &mut seen, b"still-here"),
+        "another agent's viewer kept its terminal: {}",
+        String::from_utf8_lossy(&seen)
+    );
+    host.kill(&loud).unwrap();
+    host.kill(&quiet).unwrap();
+    assert!(ended(&mut watching));
 }
 
 #[test]

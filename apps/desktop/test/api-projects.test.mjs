@@ -65,3 +65,11 @@ test("a reconciled New Project counts as created only when the reconcile settled
   assert.equal(api.settledReceipt(sent, { kind: "error", code: "engine_unreachable", message: "x" }), sent);
   assert.equal(api.settledReceipt(sent, { kind: "not_ready" }), sent);
 });
+
+test("a refused team change names the engine's own sentence for the refusal behind it", () => {
+  assert.equal(
+    api.failureCopy({ code: "team_action_invalid", cause: "team_time_limits_invalid" }),
+    "Pick a listed time limit; an agent session may not be shorter than a task. (team_time_limits_invalid)",
+  );
+  assert.equal(api.failureCopy("team_time_limits_invalid"), "Pick a listed time limit; an agent session may not be shorter than a task.");
+});

@@ -890,6 +890,36 @@ fn create_sends_every_field_and_then_waits_for_the_engine() {
     );
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn review_preselects_own_branch_and_left_and_right_change_the_agent_access() {
+    use crate::sandbox::policy::AgentAccess;
+    let mut wizard = Wizard::new(pool_choices(&config()), None);
+    type_text(&mut wizard, "Tidepool");
+    load_catalog(&mut wizard, &["c-codex"]);
+    wizard.go(Step::Review);
+    assert_eq!(wizard.access, AgentAccess::OwnBranch);
+    assert_eq!(wizard.focused(), Control::Continue);
+    assert_eq!(
+        wizard.controls(),
+        [Control::Access, Control::Back, Control::Continue]
+    );
+    wizard.focus_on(Control::Access);
+    assert_eq!(wizard.key(key(KeyCode::Right)), Reply::Handled);
+    assert_eq!(wizard.access, AgentAccess::Full);
+    assert_eq!(wizard.key(key(KeyCode::Right)), Reply::Handled);
+    assert_eq!(wizard.access, AgentAccess::Sandboxed);
+    assert_eq!(wizard.key(key(KeyCode::Left)), Reply::Handled);
+    assert_eq!(wizard.access, AgentAccess::Full);
+    assert_eq!(wizard.key(key(KeyCode::Char(' '))), Reply::Handled);
+    assert_eq!(wizard.access, AgentAccess::Sandboxed);
+    assert_eq!(wizard.key(key(KeyCode::Left)), Reply::Handled);
+    assert!(matches!(wizard.key(key(KeyCode::Enter)), Reply::Create(_)));
+    assert_eq!(wizard.access, AgentAccess::Full);
+    assert_eq!(wizard.key(key(KeyCode::Right)), Reply::Ignored);
+    assert_eq!(wizard.access, AgentAccess::Full);
+}
+
 #[test]
 fn create_jumps_to_the_first_step_that_needs_a_fix() {
     let mut wizard = wizard();

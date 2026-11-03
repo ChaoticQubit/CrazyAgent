@@ -113,9 +113,12 @@ fn default_engine() -> Result<(crazyagent::paths::Layout, crazyagent::service::S
     Ok((layout, service))
 }
 
-/// Installs the service when it is missing or `reinstall` asks, else starts it, then
-/// waits for the engine with the shared bound. Inputs: the layout, the service and
-/// whether to replace the definition with this app's sidecar. Output: Ok once it answers.
+/// Installs the service when it is missing, when `reinstall` asks or when it is
+/// [`crazyagent::service::Service::stale`], else starts it as it is, then waits for the
+/// engine with the shared bound. The service runs the sidecar, or its private copy when
+/// the sidecar sits in the AppImage mount folder; a sidecar other users can change is
+/// refused. Inputs: the layout, the service and whether to replace the definition with
+/// this app's sidecar. Output: Ok once it answers.
 async fn start_engine(
     layout: &crazyagent::paths::Layout,
     service: &crazyagent::service::Service,
@@ -126,7 +129,14 @@ async fn start_engine(
         .status()
         .map_err(|_| engine_failure("engine_service_failed"))?
         .installed;
-    if reinstall || !installed {
+    let appdir = std::env::var_os("APPDIR").map(std::path::PathBuf::from);
+    let bundled = &service.executable;
+    let service = crazyagent::service::Service {
+        executable: crazyagent::service::persistable(bundled, layout, appdir.as_deref())
+            .map_err(|_| engine_failure("engine_service_failed"))?,
+        ..service.clone()
+    };
+    if reinstall || !installed || service.stale(bundled) {
         if !service.executable.is_file() {
             return Err(engine_failure("engine_sidecar_missing"));
         }
@@ -219,16 +229,19 @@ async fn desktop_engine_versions(window: WebviewWindow) -> Result<EngineVersions
 }
 
 /// Restarts the default engine through its login service, pointing the service at this
-/// app's sidecar so the engine and the app share one version, then reconnects.
+/// app's sidecar so the engine and the app share one version, then reconnects. Refuses
+/// `busy` while an update check or install holds the update lock, and holds it itself.
 #[tauri::command]
 async fn desktop_restart_engine(
     window: WebviewWindow,
     state: State<'_, NativeState>,
+    update: State<'_, UpdateState>,
 ) -> Result<ConnectionStatus, BridgeError> {
     main_window(&window)?;
     if std::env::var_os(SOCKET_OVERRIDE).is_some_and(|socket| !socket.is_empty()) {
         return Err(engine_failure("engine_restart_unavailable"));
     }
+    let _update = updates::hold(&update)?;
     let mut bridge = lock(&state).await?;
     let (layout, service) = default_engine()?;
     start_engine(&layout, &service, true).await?;
@@ -625,7 +638,33 @@ async fn desktop_project_read_paths(
     id: String,
 ) -> Result<crazyagent::project_setup::ReadPaths, BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.project_read_paths(&id).await
+    read(&state).await?.project_read_paths(&id).await
+}
+
+#[tauri::command]
+async fn desktop_project_agent_policy(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<crazyagent::sandbox::policy::PolicyView, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.project_agent_policy(&id).await
+}
+
+#[tauri::command]
+async fn desktop_set_project_agent_policy(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    version: u64,
+    policy: crazyagent::sandbox::policy::AgentPolicy,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .set_project_agent_policy(&id, version, policy, generation)
+        .await
 }
 
 #[tauri::command]
@@ -636,7 +675,7 @@ async fn desktop_project_files(
     query: String,
 ) -> Result<Vec<String>, BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.project_files(&id, &query).await
+    read(&state).await?.project_files(&id, &query).await
 }
 
 #[tauri::command]
@@ -729,12 +768,65 @@ async fn desktop_team_keep_warm(
     state: State<'_, NativeState>,
     id: String,
     on: bool,
+    version: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
     lock(&state)
         .await?
-        .team_keep_warm(&id, on, generation)
+        .team_keep_warm(&id, on, version, generation)
+        .await
+}
+
+/// Sets a project team's task and session time limits and sub-agent idle stop from Team
+/// settings: seconds from the listed choices, or none for no limit. Output: the receipt.
+#[tauri::command]
+async fn desktop_team_time_limits(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    turn_secs: Option<u32>,
+    session_secs: Option<u32>,
+    idle_secs: Option<u32>,
+    version: u64,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_time_limits(&id, turn_secs, session_secs, idle_secs, version, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_on_harness_switch(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    mode: String,
+    version: u64,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_on_harness_switch(&id, &mode, version, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_finished_agents(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    show: bool,
+    version: u64,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_finished_agents(&id, show, version, generation)
         .await
 }
 
@@ -744,12 +836,13 @@ async fn desktop_team_live_master(
     state: State<'_, NativeState>,
     id: String,
     on: bool,
+    version: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
     lock(&state)
         .await?
-        .team_live_master(&id, on, generation)
+        .team_live_master(&id, on, version, generation)
         .await
 }
 
@@ -822,6 +915,21 @@ async fn desktop_team_rename(
     lock(&state)
         .await?
         .team_rename(&id, agent, handle, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_wake_agent(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    agent: i64,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_wake_agent(&id, agent, generation)
         .await
 }
 
@@ -1751,7 +1859,8 @@ async fn desktop_skill_import_scan(
     state: State<'_, NativeState>,
 ) -> Result<crazyagent::skills::import::ImportList, BridgeError> {
     main_window(&window)?;
-    read(&state).await?.skill_import_scan().await
+    let call = read(&state).await?.skill_import_scan()?;
+    call.await
 }
 
 #[tauri::command]
@@ -1762,7 +1871,8 @@ async fn desktop_import_skill(
     replace: Option<String>,
 ) -> Result<crazyagent::skills::import::Imported, BridgeError> {
     main_window(&window)?;
-    lock(&state).await?.import_skill(folder, replace).await
+    let call = read(&state).await?.import_skill(folder, replace)?;
+    call.await
 }
 
 #[tauri::command]
@@ -1786,10 +1896,10 @@ async fn desktop_add_mcp_server(
     secrets: Vec<(String, String)>,
 ) -> Result<ServerView, BridgeError> {
     main_window(&window)?;
-    lock(&state)
+    let call = read(&state)
         .await?
-        .add_mcp_server(scope, name, spec, secrets)
-        .await
+        .add_mcp_server(scope, name, spec, secrets)?;
+    call.await
 }
 
 #[tauri::command]
@@ -2473,6 +2583,17 @@ async fn desktop_recovery_banner(
 }
 
 #[tauri::command]
+async fn desktop_instruction_settings(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+) -> Result<crazyagent::engine::owner::InstructionView, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.instruction_settings(project_id)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_retry_recovery(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2492,6 +2613,21 @@ async fn desktop_dismiss_recovery(
 ) -> Result<(), BridgeError> {
     main_window(&window)?;
     let call = lock(&state).await?.dismiss_recovery(action_kind, id)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_save_instruction_settings(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+    settings: crazyagent::engine::owner::InstructionSettings,
+    version: Option<u64>,
+) -> Result<crazyagent::engine::owner::InstructionView, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state)
+        .await?
+        .save_instruction_settings(project_id, settings, version)?;
     call.await
 }
 
@@ -2772,15 +2908,21 @@ pub fn run() {
             desktop_project_read_paths,
             desktop_project_files,
             desktop_set_project_read_paths,
+            desktop_project_agent_policy,
+            desktop_set_project_agent_policy,
             desktop_team_status,
             desktop_team_message,
             desktop_team_delegate,
             desktop_team_cancel,
             desktop_team_keep_warm,
+            desktop_team_time_limits,
+            desktop_team_on_harness_switch,
+            desktop_team_finished_agents,
             desktop_team_live_master,
             desktop_team_pause,
             desktop_team_hand_off,
             desktop_team_rename,
+            desktop_team_wake_agent,
             desktop_team_graph,
             desktop_team_events,
             desktop_team_wake_rule,
@@ -2924,6 +3066,8 @@ pub fn run() {
             desktop_ide_hide,
             desktop_ide_close,
             desktop_ide_touch,
+            desktop_instruction_settings,
+            desktop_save_instruction_settings,
             desktop_usage_report,
             desktop_usage_refresh,
             desktop_usage_set_reset,

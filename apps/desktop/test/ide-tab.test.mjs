@@ -56,6 +56,14 @@ test("an unqualified platform shows Unavailable with the platform name and offer
   for (const code of ["ide_capability_capacity", "ide_capability_unavailable"]) {
     assert.equal(client.openFailure(code), "The IDE couldn't get its private link to CrazyAgent, so it didn't start. Try again.", code);
   }
+  const folder = client.openFailure("ide_project_folder_invalid");
+  assert.match(folder, /colon \(:\)/);
+  assert.match(folder, /add the project again from a folder whose path has none\.$/);
+  const exclude = client.openFailure("git_exclude_invalid");
+  assert.match(exclude, /\.git\/info\/exclude/);
+  assert.match(exclude, /a plain file under 1 MiB, not links, then open the IDE again\.$/);
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/engine/owner/transport/ide_tab.rs", import.meta.url), "utf8");
+  for (const code of ["ide_project_folder_invalid", "git_exclude_invalid"]) assert.ok(engine.includes(`"${code}",`), code);
 });
 
 test("the IDE tab takes the place of Changes and Context once the engine's IDE can open", () => {

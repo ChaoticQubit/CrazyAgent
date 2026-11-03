@@ -71,8 +71,9 @@ pub(super) fn handles(request: &OwnerRequest) -> bool {
 /// for one owner. Input: the stream, engine, authority, owner packet and
 /// admission, the validated request and the exchange deadline. Output: the
 /// reply written under the owner egress barrier. The exchange deadline bounds
-/// the replay check and the plan; the disk work runs under its own bounds and
-/// a fresh owner deadline then bounds the record and the reply, so a finished
+/// the replay check, the plan and a grant check under the owner barrier just
+/// before the disk work, which runs under its own bounds and without the
+/// barrier; a fresh owner deadline then bounds the record and the reply, so a finished
 /// effect is recorded as Applied or as Rejected with the refusal code. A home
 /// move then sends a settle job for this exchange's pending move: one whose
 /// record did not finish it (a stale grant, a slow barrier, a failed record)
@@ -104,11 +105,26 @@ pub(super) async fn serve(
     );
     let (step, deadline, ran) = match planned {
         Ok(Planned::Work(work)) => {
-            let interrupted = work.interrupted();
-            let step = tokio::task::spawn_blocking(move || work.run())
-                .await
-                .map_err(|_| failure(interrupted));
-            (step, Instant::now() + engine.timeout, true)
+            let admitted = tokio::time::timeout_at(deadline, async {
+                let _barrier = engine.owner_egress.write().await;
+                match authority.authenticate(packet) {
+                    Ok(current) if &current == a => Ok(()),
+                    Ok(_) => Err(failure("owner_grant_stale_or_revoked")),
+                    Err(e) => Err(e),
+                }
+            })
+            .await
+            .unwrap_or_else(|_| Err(failure(UNKNOWN)));
+            match admitted {
+                Ok(()) => {
+                    let interrupted = work.interrupted();
+                    let step = tokio::task::spawn_blocking(move || work.run())
+                        .await
+                        .map_err(|_| failure(interrupted));
+                    (step, Instant::now() + engine.timeout, true)
+                }
+                Err(e) => (Err(e), deadline, false),
+            }
         }
         Ok(Planned::Step(step)) => (Ok(step), deadline, false),
         Err(e) => (Err(e), deadline, false),

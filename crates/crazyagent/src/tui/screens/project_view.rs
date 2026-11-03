@@ -68,7 +68,8 @@ pub(in crate::tui) fn project_screen(
     let running = screen.counts().0;
     let items = tab_items(running, width, look);
     let mut rows: Vec<Row> = tab_strip(width, &items, screen.tab as usize, look).into();
-    let banner = screen.recovery.rows(content, look);
+    let composer = screen.tab == Tab::Conversation && screen.typing;
+    let banner = screen.recovery.rows(content, look, composer);
     let room = body_height.saturating_sub(2 + banner.len());
     for line in banner {
         rows.push(Row::of("  ", Style::new()).cat(line).pad(width));
@@ -165,7 +166,7 @@ pub(in crate::tui) fn project_screen(
         } else {
             Row::of(
                 format!(
-                    "Lines {}-{end} of {}. Read to the end to save it.",
+                    "Lines {}-{end} of {}. Read to the end to save or edit it.",
                     review.scroll + 1,
                     lines.len()
                 ),
@@ -181,12 +182,7 @@ pub(in crate::tui) fn project_screen(
                 ("Esc", "Back"),
             ]
         } else {
-            vec![
-                ("Down", "Read on"),
-                ("e", "Edit first"),
-                ("n", "Dismiss"),
-                ("Esc", "Back"),
-            ]
+            vec![("Down", "Read on"), ("n", "Dismiss"), ("Esc", "Back")]
         };
         return Screen {
             rows,
@@ -305,6 +301,29 @@ pub(in crate::tui) fn project_screen(
         return Screen {
             rows,
             cursor,
+            crumbs,
+            help,
+            status: header_status(running, look),
+        };
+    }
+    if let Some(access) = &screen.access {
+        let body = access.body(look);
+        rows = modal(&rows, width, 62, "Agent access", body, 4, look);
+        help = if access.busy {
+            vec![("Esc", "Close")]
+        } else if access.confirm_full {
+            vec![("y", "Allow Full access"), ("n", "Keep")]
+        } else {
+            vec![
+                ("Up/Down", "Move"),
+                ("Left/Right", "Change"),
+                ("Enter", "Save"),
+                ("Esc", "Cancel"),
+            ]
+        };
+        return Screen {
+            rows,
+            cursor: None,
             crumbs,
             help,
             status: header_status(running, look),
@@ -1753,6 +1772,7 @@ fn context(
         ("v", "Edit file"),
         TABS,
         ("Esc", "Home"),
+        ("O", "Open in IDE"),
     ];
     let mut lines = vec![
         spread(
@@ -1979,6 +1999,14 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
         ),
         entry("Team", team_line(screen, look)),
         entry("Folders", folders_line(screen, look)),
+        entry(
+            "Access",
+            Row::of(
+                super::project_access::summary(screen.agent_policy.as_ref()),
+                look.fg,
+            )
+            .push("   c Agent access", look.muted),
+        ),
         entry(
             "Process",
             Row::of("Instructions for this project's agents", look.fg)

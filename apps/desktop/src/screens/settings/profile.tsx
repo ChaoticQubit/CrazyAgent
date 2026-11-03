@@ -1,10 +1,12 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { applyTheme, readTheme, useAppSession, type ThemeChoice } from "../../state";
+import { applyTheme, readMasterInput, readTheme, saveMasterInput, useAppSession, type ThemeChoice } from "../../state";
+import { INPUT_CHOICES, type InputChoice } from "../team/terminal-io";
 import { Button, LoadError, NotReady, Notice, Panel, Segmented, Skeleton } from "../../ui";
 import { ProfileFields, draftFromProfile, emptyProfileDraft, submitProfile, type ProfileDraft, type ProfileErrors } from "../first-run";
 
 function Appearance() {
   const [theme, setTheme] = useState<ThemeChoice>(readTheme);
+  const [input, setInput] = useState<InputChoice>(readMasterInput);
   return <Panel title="Appearance">
     <div className="field">
       <span className="field-label">Theme</span>
@@ -12,6 +14,11 @@ function Appearance() {
         { value: "system", label: "System", icon: "monitor" }, { value: "light", label: "Light", icon: "sun" }, { value: "dark", label: "Dark", icon: "moon" },
       ]} />
       <p className="helper">System follows your Mac. This choice is kept in this app only.</p>
+    </div>
+    <div className="field">
+      <span className="field-label">Master input</span>
+      <Segmented label="Master input" value={input} onValue={(value) => { setInput(value); saveMasterInput(value); }} options={INPUT_CHOICES} />
+      <p className="helper">Where you type to a live master: straight into its terminal, in a message box under it that sends your text as one message, or both. Kept in this app only.</p>
     </div>
   </Panel>;
 }

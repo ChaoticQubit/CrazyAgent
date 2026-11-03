@@ -3,7 +3,7 @@ import { nextGeneration } from "../../api";
 import type { Result } from "../../api";
 import { failureCopy, readOwnerLines, readSessions, receiptState, resumeSession, startNewSession } from "../../api-projects";
 import type { ReceiptState } from "../../api-projects";
-import type { IntentReceipt, MasterSessionSummary, MasterTurn } from "../../engine-client";
+import type { IntentReceipt, MasterSessionSummary, MasterTurn, TeamStatus } from "../../engine-client";
 import { displayText } from "../conversation";
 import { Badge } from "./shared";
 
@@ -99,6 +99,24 @@ export function switchProblem(kind: "new" | "resume", code: string): string {
     return "This session started before the engine or its settings changed, so it can't continue. Start a new session.";
   }
   return failureCopy({ code });
+}
+
+/** The divider a session's conversation shows where its master harness switched: the
+ * engine's note for the live session's latest switch. Input: the latest team status read,
+ * if any. Output: the note, or null when the live session never switched or no read came. */
+export function switchDivider(team: Result<TeamStatus> | undefined): string | null {
+  return team?.kind === "ok" ? team.value.live_switch?.note ?? null : null;
+}
+
+/** The "Switched to <harness>" divider, for the live master area above the new harness's
+ * terminal. Input: the latest team status read. Output: the divider, or nothing when the
+ * live session never switched. */
+export function SwitchDivider({ team }: { team: Result<TeamStatus> | undefined }) {
+  const note = switchDivider(team);
+  if (note === null) return null;
+  return <div className="pj-row pj-small pj-muted" role="separator" aria-label={displayText(note)} data-testid="harness-switch">
+    <span>{displayText(note)}</span>
+  </div>;
 }
 
 type Pending = { kind: "new" } | { kind: "resume"; session: MasterSessionSummary };

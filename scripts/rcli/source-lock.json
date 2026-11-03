@@ -373,8 +373,8 @@
     },
     {
       "path": "scripts/rcli/host.construction.test.ts",
-      "sha256": "e9f5d0280bd1f2c69ff30af0aaf7c307e35717ab490473d732f1fbf6cbdd88ba",
-      "bytes": 5075
+      "sha256": "a0a34053503e066da927142f9e2797a14950ddee5a10151dfa69dcfa35e27fa6",
+      "bytes": 5671
     },
     {
       "path": "scripts/rcli/entry.ts",

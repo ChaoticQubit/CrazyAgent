@@ -4,7 +4,6 @@ use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
-use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
 const ENTRIES_SCANNED_MAX: usize = 1024;
@@ -400,20 +399,12 @@ fn linked(entries: &Path, back: &str) -> Result<Option<PathBuf>, &'static str> {
     Err("team_worktree_entries_many")
 }
 
-/// Reads a small plain file such as a worktree's `.git` pointer or `gitdir` link, never
-/// through a link. Input: the path. Output: the text, none when it is not such a file.
+/// Reads a small plain file such as a worktree's `.git` pointer or `gitdir` link through
+/// one open that never follows a link, checking the opened file itself, so nothing swapped
+/// in after a check is read. Input: the path. Output: the text, none when it is not such
+/// a file.
 fn small(path: &Path) -> Option<String> {
-    let meta = std::fs::symlink_metadata(path).ok()?;
-    if !meta.is_file() || meta.len() > POINTER_BYTES_MAX {
-        return None;
-    }
-    let mut text = String::new();
-    std::fs::File::open(path)
-        .ok()?
-        .take(POINTER_BYTES_MAX)
-        .read_to_string(&mut text)
-        .ok()?;
-    Some(text)
+    crate::platform::read_plain_file(path, POINTER_BYTES_MAX)
 }
 
 fn empty(folder: &Path) -> bool {

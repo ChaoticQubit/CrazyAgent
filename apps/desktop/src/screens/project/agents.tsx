@@ -7,11 +7,11 @@ import type { IntentReceipt } from "../../engine-client";
 import { displayText } from "../conversation";
 import { poolName } from "../new-project/wizard";
 import { RESEARCH_ICONS, harnessName } from "../new-project/team-editor";
-import { accountName, changeOutcome, nearBottom, researchActions, researchRow, teamPanel } from "./research";
+import { accountName, changeOutcome, finishedRows, nearBottom, researchActions, researchRow, teamPanel } from "./research";
 import { AgentUsageCard } from "./usage";
 import { FinishedAgentsCleanup } from "./cleanup";
 import type { ResearchRow } from "./research";
-import { TeamPanel } from "./team";
+import { FinishedAgentsPanel, TeamPanel } from "./team";
 import { TeamGraphView } from "../team";
 import { TeamControls } from "../team/controls";
 import { TeamEventsPanel } from "../team/wake-rules";
@@ -83,6 +83,7 @@ export function AgentsTab({ data }: { data: ProjectData }) {
   const teamCount = (shown: "running" | "all") => teamPanel(teamValue, [], (id) => id, shown, team.at).agents.length;
   const teamShown = teamPanel(teamValue, [], (id) => id, filter, team.at);
   const working = cardActivity(team.result, data.research).agents;
+  const cleanup = <FinishedAgentsCleanup projectId={data.id} finished={teamValue.agents.filter((agent) => agent.status === "stopped" || agent.status === "failed").length} harness={(id) => harnessName(harnesses, id)} />;
 
   function settle(result: Result<IntentReceipt>, done: string, missing: string) {
     setBusy(null);
@@ -119,7 +120,9 @@ export function AgentsTab({ data }: { data: ProjectData }) {
     {team.result?.kind === "ok" && <TeamControls projectId={data.id} status={team.result.value} harness={(id) => harnessName(harnesses, id)} reload={data.reloadTeam} />}
     {team.result?.kind === "ok" && <TeamEventsPanel projectId={data.id} status={team.result.value} reload={data.reloadTeam} />}
     <TeamPanel data={data} team={team} filter={filter} harnesses={harnesses} accounts={named} reload={data.reloadTeam} />
-    <FinishedAgentsCleanup projectId={data.id} finished={teamValue.agents.filter((agent) => agent.status === "stopped" || agent.status === "failed").length} harness={(id) => harnessName(harnesses, id)} />
+    {finishedRows(teamValue, (id) => id, team.at).length > 0
+      ? <FinishedAgentsPanel data={data} team={team} harnesses={harnesses} reload={data.reloadTeam}>{cleanup}</FinishedAgentsPanel>
+      : cleanup}
     <AgentUsageCard projectId={data.id} agents={teamValue.agents} nowMs={data.now} />
     {list.length > 0 && <h3>Research</h3>}
     {list.length > 0 ? <ul className="pj-rows" aria-label="Research agents">{list.map((job) => {

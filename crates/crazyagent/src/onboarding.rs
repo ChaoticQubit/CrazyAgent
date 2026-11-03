@@ -192,6 +192,10 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 heartbeat_ms INTEGER,
                 created_ms INTEGER NOT NULL,
                 updated_ms INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS onboarding_saved_drafts (
+                repo TEXT PRIMARY KEY,
+                seal TEXT NOT NULL CHECK(length(seal)=64)
             );",
         )
         .map_err(error)
@@ -279,15 +283,59 @@ fn project_folder(path: &Path, database: &Path) -> Result<PathBuf, &'static str>
     Ok(repo)
 }
 
+/// Records the seal of the draft the engine saved in `repo`'s `.crazyagent/setup/draft.json`.
+/// The row outlives the project, so adding the folder again reuses that draft. Takes the
+/// connection, the folder and the draft. Returns any storage failure.
+pub(crate) fn seal_draft(
+    connection: &Connection,
+    repo: &Path,
+    drafted: &draft::Drafted,
+) -> rusqlite::Result<()> {
+    let (Some(repo), Some(seal)) = (repo.to_str(), draft::seal(drafted)) else {
+        return Ok(());
+    };
+    connection.execute(
+        "INSERT INTO onboarding_saved_drafts(repo,seal) VALUES (?1,?2)
+         ON CONFLICT(repo) DO UPDATE SET seal=excluded.seal",
+        params![repo, seal],
+    )?;
+    Ok(())
+}
+
+/// The draft in the folder's `.crazyagent/setup/draft.json` when this engine saved it
+/// there: it matches the seal recorded for the folder. A draft the folder came with, or
+/// one changed since, is never taken as the engine's. Takes the transaction, the folder
+/// and its layout. Returns the draft, or None.
+fn engine_draft(
+    tx: &Transaction<'_>,
+    repo: &str,
+    layout: &Path,
+) -> Result<Option<draft::Drafted>, EngineError> {
+    let sealed: Option<String> = tx
+        .query_row(
+            "SELECT seal FROM onboarding_saved_drafts WHERE repo=?1",
+            [repo],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some(sealed) = sealed else {
+        return Ok(None);
+    };
+    Ok(draft::reused(layout)
+        .filter(|drafted| draft::seal(drafted).as_deref() == Some(sealed.as_str())))
+}
+
 fn real_dir(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.file_type().is_dir())
 }
 
 /// Registers a found or cloned folder as a project and queues its graph and
 /// mapping steps, inside the owner transaction. The folder's `.crazyagent/`
-/// is created through the projects home layout, or reused with its saved
-/// draft when it already exists; nothing in it is overwritten. Research stays
-/// off. Starting a folder that is already onboarding returns its project and
+/// is created through the projects home layout, or reused with the draft this
+/// engine saved there; a draft the folder came with is not taken as the engine's,
+/// and the brief is written from the recorded setup. Research stays off.
+/// Starting a folder that is already onboarding returns its project and
 /// retries only failed steps; an onboarding left by a removed project starts
 /// over as a new project, also when it was left at another folder with the
 /// same name that is gone, and is refused as `onboarding_project_mismatch`
@@ -367,7 +415,7 @@ pub(crate) fn execute(
     {
         return Ok(rejected("onboarding_layout_incomplete"));
     }
-    let mut drafted = draft::reused(&layout)
+    let mut drafted = engine_draft(tx, repo_text, &layout)?
         .unwrap_or_else(|| draft::Drafted::new(draft::folder_name(&repo), pool));
     drafted.draft.pool = Some(pool.clone());
     drafted.draft.research = Vec::new();
@@ -399,11 +447,9 @@ pub(crate) fn execute(
     if outcome != Outcome::Applied {
         return Ok(outcome);
     }
-    if std::fs::symlink_metadata(layout.join(CONTEXT_DIRECTORY).join("brief.md")).is_err() {
-        let stored = crate::project_setup::load_setup(tx, &project_id)?
-            .ok_or_else(|| failure("project_setup_missing"))?;
-        crate::project_setup::write_brief_at(&layout, &stored).map_err(failure)?;
-    }
+    let stored = crate::project_setup::load_setup(tx, &project_id)?
+        .ok_or_else(|| failure("project_setup_missing"))?;
+    crate::project_setup::write_brief_at(&layout, &stored).map_err(failure)?;
     let now = now_ms();
     let graph = graph_step(tx)?;
     let (graph_state, graph_reason) = graph.columns();

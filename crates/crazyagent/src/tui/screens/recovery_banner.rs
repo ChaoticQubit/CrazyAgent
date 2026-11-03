@@ -1,3 +1,4 @@
+use super::new_project_input::cells;
 use super::new_project_view::{Look, Row, wrap_words};
 use super::project::plain_problem;
 use crate::engine::owner::{BannerNotice, BannerRun, NoticeShown, RecoveryBanner, RunShown};
@@ -199,8 +200,10 @@ impl ProjectRecovery {
 
     /// The banner's rows: a heading, one line or two per group with items, what the owner
     /// can do and the result of the last choice; a problem line when the read failed; none
-    /// when nothing waits for the owner. Inputs: the width and the look. Output: the rows.
-    pub(in crate::tui) fn rows(&self, width: usize, look: &Look) -> Vec<Row> {
+    /// when nothing waits for the owner. While the Conversation composer holds the keys the
+    /// key line says Tab comes first. Inputs: the width, the look and whether the composer
+    /// holds the keys. Output: the rows.
+    pub(in crate::tui) fn rows(&self, width: usize, look: &Look, composer: bool) -> Vec<Row> {
         let Some(banner) = self.banner.as_ref().filter(|banner| open(banner)) else {
             return match &self.problem {
                 Some(problem) => vec![
@@ -296,7 +299,10 @@ impl ProjectRecovery {
             keys.push("Ctrl-N Next item".to_owned());
         }
         if !keys.is_empty() {
-            rows.push(Row::of(keys.join("   "), look.accent));
+            let lead = if composer { "Tab first, then " } else { "" };
+            for line in key_lines(lead, &keys, width) {
+                rows.push(Row::of(line, look.accent));
+            }
         }
         if let Some(note) = &self.note {
             rows.push(Row::of(note.clone(), look.muted));
@@ -304,6 +310,41 @@ impl ProjectRecovery {
         rows.push(Row::default());
         rows
     }
+}
+
+/// Lays the key hints out in lines no wider than the banner: the lead, then the hints three
+/// spaces apart, breaking only between hints so each key stays beside its action; a lead or
+/// hint wider than a whole line wraps by word. Inputs: the lead, the hints and the width in
+/// cells. Output: the lines.
+fn key_lines(lead: &str, keys: &[String], width: usize) -> Vec<String> {
+    let mut lines = wrap_words(lead, width);
+    let mut line = lines.pop().unwrap_or_default();
+    let mut gap = " ";
+    for key in keys {
+        let joined = if line.is_empty() {
+            cells(key)
+        } else {
+            cells(&line) + cells(gap) + cells(key)
+        };
+        if joined <= width {
+            if !line.is_empty() {
+                line.push_str(gap);
+            }
+            line.push_str(key);
+        } else {
+            if !line.is_empty() {
+                lines.push(std::mem::take(&mut line));
+            }
+            let mut parts = wrap_words(key, width);
+            line = parts.pop().unwrap_or_default();
+            lines.extend(parts);
+        }
+        gap = "   ";
+    }
+    if !line.is_empty() {
+        lines.push(line);
+    }
+    lines
 }
 
 /// Whether a banner holds anything for the owner to resolve.

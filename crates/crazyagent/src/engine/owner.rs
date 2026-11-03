@@ -27,7 +27,10 @@ pub use transport::ide::IDE_CODES;
 pub use transport::ide_extensions::IDE_EXTENSIONS_CODES;
 pub use transport::ide_tab::{IDE_TAB_CODES, IdeTabServer, IdeTabState};
 pub use transport::plugins::{ServerPage, SkillPage};
-pub use transport::process::{AgentInstructions, PROCESS_CODES, ProcessText, SavedText};
+pub use transport::process::{
+    AgentInstructions, InstructionRecord, InstructionSettings, InstructionView, PROCESS_CODES,
+    ProcessSaved, ProcessText, SavedText,
+};
 pub use transport::questions::QUESTIONS_CODES;
 pub use transport::recovery::{
     BANNER_NOTICES_MAX, BANNER_RUNS_MAX, BannerNotice, BannerRun, NoticeShown, RECOVERY_CODES,
@@ -161,6 +164,11 @@ pub enum OwnerMutation {
         project_id: ProjectId,
         version: u64,
         paths: Vec<String>,
+    },
+    SetProjectAgentPolicy {
+        project_id: ProjectId,
+        version: u64,
+        policy: crate::sandbox::policy::AgentPolicy,
     },
     Team {
         action: crate::team::TeamAction,
@@ -340,6 +348,19 @@ impl OwnerMutation {
                     project_id: project_id.clone(),
                     version: *version,
                     paths: paths.clone(),
+                };
+                action.validate()?;
+                Command::ProjectSetup { action }
+            }
+            Self::SetProjectAgentPolicy {
+                project_id,
+                version,
+                policy,
+            } => {
+                let action = crate::project_setup::SetupAction::SetAgentPolicy {
+                    project_id: project_id.clone(),
+                    version: *version,
+                    policy: policy.clone(),
                 };
                 action.validate()?;
                 Command::ProjectSetup { action }
@@ -619,6 +640,9 @@ pub enum OwnerRead {
     ProjectReadPaths {
         project_id: ProjectId,
     },
+    ProjectAgentPolicy {
+        project_id: ProjectId,
+    },
     ResearchJobs {
         project_id: ProjectId,
     },
@@ -734,6 +758,7 @@ impl OwnerRead {
             | Self::CurrentBrief { .. }
             | Self::ProjectSetup { .. }
             | Self::ProjectReadPaths { .. }
+            | Self::ProjectAgentPolicy { .. }
             | Self::ResearchJobs { .. }
             | Self::TeamStatus { .. }
             | Self::TeamGraph { .. }
@@ -1090,6 +1115,10 @@ pub enum OwnerData {
         project_id: ProjectId,
         paths: Vec<String>,
         version: u64,
+    },
+    ProjectAgentPolicy {
+        project_id: ProjectId,
+        policy: crate::sandbox::policy::PolicyView,
     },
     ResearchJobs {
         project_id: ProjectId,

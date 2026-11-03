@@ -101,6 +101,7 @@ const POLL_FAILURES: Record<string, string> = {
   usage_unreachable: "CrazyAgent couldn't reach the provider. It tries again in 10 minutes.",
   usage_reply_invalid: "The provider's answer wasn't one CrazyAgent can read.",
   usage_request_invalid: "CrazyAgent couldn't ask the provider for this account's limits.",
+  usage_step_panicked: "CrazyAgent's usage check hit an internal error. It tries again on its own.",
 };
 
 /** The refusal codes of the usage protocol that have their own sentence. */

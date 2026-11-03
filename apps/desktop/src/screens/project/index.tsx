@@ -7,6 +7,7 @@ import { displayText } from "../conversation";
 import { HEARTBEAT_MS, closeIde, ideFetching, ideReplacesTabs, ideView, touchIde } from "../../api-ide";
 import type { IdeView } from "../../api-ide";
 import { ChangesTab } from "../changes";
+import { WaitingChanges } from "../changes/waiting";
 import { AgentsTab } from "./agents";
 import { ContextTab } from "./context";
 import { IdeExtensionConfirm } from "./ide-extensions";
@@ -248,6 +249,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
     <IdeUnavailable view={view} failure={failure} busy={busy} onAction={() => void (failure ? readIde() : fetchIde())} />
     <Tabs label="Project" current={active}
       tabs={tabs.map((item) => ({ id: item.id, label: item.label, icon: item.icon, href: formatRoute({ name: "project", id: projectId, tab: item.id }) }))} />
+    {active !== "changes" && <WaitingChanges projectId={projectId} />}
     <div className="pj-tab-panel" id="pj-tab-panel" role="tabpanel" aria-labelledby={`tab-${active}`}>
       {active === "overview" && <OverviewTab data={data} />}
       {active === "conversation" && <TeamActivity data={data}><MasterArea data={data} /></TeamActivity>}

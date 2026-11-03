@@ -6,7 +6,7 @@ use crazyagent::client_controller::OwnerController;
 use crazyagent::engine::bootstrap::EngineService;
 use crazyagent::engine::owner::{OwnerClientKind, OwnerMutation, OwnerResponse, OwnerResult};
 use crazyagent::onboarding::service::{
-    CODEX_MISSING, OnboardingLimits, OnboardingService, installed_graphify,
+    CODEX_MISSING, OVERVIEW_BLOCKED, OnboardingLimits, OnboardingService, installed_graphify,
 };
 use crazyagent::onboarding::{OnboardingView, Step, project_id_for};
 use crazyagent::plugins::Scope;
@@ -1112,24 +1112,37 @@ async fn stopping_the_service_mid_mapping_stops_the_agent_and_requeues_the_step(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_existing_crazyagent_folder_is_reused_not_overwritten() {
+async fn a_draft_or_brief_the_folder_came_with_is_never_taken_as_the_engines() {
     let mut bench = Bench::start(|repo| {
         fs::create_dir_all(repo.join(".crazyagent/setup")).unwrap();
+        fs::create_dir_all(repo.join(".crazyagent/context")).unwrap();
         fs::write(repo.join(".crazyagent/setup/draft.json"), SAVED_DRAFT).unwrap();
         fs::write(repo.join(".crazyagent/overview.md"), OWNER_OVERVIEW).unwrap();
+        fs::write(repo.join(".crazyagent/context/brief.md"), FORGED_BRIEF).unwrap();
     })
     .await;
     let project = bench.start_onboarding().await;
-    let reused = bench.view(&project).await;
-    assert_eq!(reused.name, "Demo Tool");
-    assert_eq!(reused.draft.about, "Kept by the owner.");
-    assert_eq!(reused.draft.platforms, [Platform::Cli]);
+    let fresh = bench.view(&project).await;
+    assert_eq!(fresh.name, PROJECT);
+    assert_eq!(fresh.draft.about, "");
+    assert!(fresh.draft.tech_stack.is_empty());
+    assert!(fresh.draft.platforms.is_empty());
     assert_eq!(
-        reused.draft.pool.as_ref().map(CredentialRef::as_str),
+        fresh.draft.pool.as_ref().map(CredentialRef::as_str),
         Some(POOL)
     );
-    assert!(reused.draft.research.is_empty());
-    assert_eq!(reused.overview.as_deref(), Some(OWNER_OVERVIEW.trim()));
+    assert_eq!(fresh.overview.as_deref(), Some(OWNER_OVERVIEW.trim()));
+    let setup = bench
+        .owner
+        .project_setup(project.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!((setup.name.as_str(), setup.about.as_str()), (PROJECT, ""));
+    let brief = fs::read_to_string(bench.repo.join(".crazyagent/context/brief.md")).unwrap();
+    assert!(!brief.contains("Forged brief"), "{brief}");
+    assert!(!brief.contains("Kept by the owner."), "{brief}");
+
     let (runner, _) = bench.runner();
     let service = OnboardingService::start(
         runner,
@@ -1140,16 +1153,27 @@ async fn an_existing_crazyagent_folder_is_reused_not_overwritten() {
     );
     let view = bench.settle(&project, Duration::from_secs(60)).await;
     stop_service(service).await;
-    assert_eq!(view.draft.about, "Kept by the owner.");
-    assert_eq!(view.draft.tech_stack, ["Postgres", "Rust"]);
+    assert_eq!(view.draft.about, "");
+    assert_eq!(view.draft.tech_stack, ["Rust"]);
     assert_eq!(
         fs::read_to_string(bench.repo.join(".crazyagent/overview.md")).unwrap(),
         OWNER_OVERVIEW
     );
-    assert!(bench.repo.join(".crazyagent/context/brief.md").is_file());
-    let setup = bench.owner.project_setup(project).await.unwrap().unwrap();
-    assert_eq!(setup.name, "Demo Tool");
-    assert_eq!(setup.about, "Kept by the owner.");
+
+    bench.generation += 1;
+    let removed = bench
+        .owner
+        .remove_project(project.clone(), bench.generation)
+        .await
+        .unwrap();
+    assert_eq!(rejection(&removed), None, "{removed:?}");
+    let again = bench.start_onboarding().await;
+    let reused = bench.view(&again).await;
+    assert_eq!(
+        reused.draft.tech_stack,
+        ["Rust"],
+        "the draft this engine saved is reused when the folder is added again"
+    );
     bench.stop().await;
 }
 
@@ -1281,6 +1305,42 @@ async fn without_codex_or_claude_mapping_fails_before_any_account_is_picked() {
     assert_eq!(agent_runs(&agents, "onboard-m-"), 0);
     assert!(view.draft.tech_stack.iter().any(|entry| entry == "Rust"));
     assert!(processes_with(&agents).is_empty());
+    bench.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_overview_entry_that_is_not_a_text_file_fails_mapping_before_any_account_is_picked() {
+    let mut bench = Bench::start(|repo| {
+        fs::create_dir_all(repo.join(".crazyagent")).unwrap();
+        fs::write(repo.join(".crazyagent/overview.md"), "").unwrap();
+    })
+    .await;
+    let project = bench.start_onboarding().await;
+    let asked = Arc::new(Mutex::new(0_usize));
+    let (runner, agents) = bench.runner();
+    let service = {
+        let asked = asked.clone();
+        OnboardingService::start(
+            runner,
+            move |_: &CredentialRef, _: &[ResearchHarness]| {
+                *asked.lock().unwrap() += 1;
+                AccountPick::NoUsableAccount
+            },
+            || None,
+            OnboardingLimits::default(),
+            Duration::from_millis(50),
+        )
+    };
+    let view = bench.settle(&project, Duration::from_secs(60)).await;
+    stop_service(service).await;
+    assert_eq!(view.mapping, failed(OVERVIEW_BLOCKED), "{view:?}");
+    assert_eq!(*asked.lock().unwrap(), 0);
+    assert_eq!(agent_runs(&agents, "onboard-m-"), 0);
+    assert!(view.draft.tech_stack.iter().any(|entry| entry == "Rust"));
+    assert_eq!(
+        fs::read(bench.repo.join(".crazyagent/overview.md")).unwrap(),
+        b""
+    );
     bench.stop().await;
 }
 
@@ -1508,11 +1568,18 @@ async fn removing_a_project_ends_its_rows_and_re_adding_the_folder_gives_a_worki
         .execute_batch(&format!(
             "INSERT INTO team_messages(project,author,text,state,created_ms) VALUES ('{PROJECT}','owner','Old question','answered',1);
              INSERT INTO team_tasks(project,source,harness,tools,prompt,status,delivered,created_ms) VALUES ('{PROJECT}','owner','codex',0,'Old step','done',1,1);
-             INSERT INTO research_jobs(project,kind,harness,tools,status,created_ms) VALUES ('{PROJECT}','market_research','codex',0,'failed',1);"
+             INSERT INTO research_jobs(project,kind,harness,tools,status,created_ms) VALUES ('{PROJECT}','market_research','codex',0,'failed',1);
+             INSERT INTO team_finished_view(project,show) VALUES ('{PROJECT}',1);"
         ))
         .unwrap();
     drop(database);
-    for table in ["onboarding", "team_messages", "team_tasks", "research_jobs"] {
+    for table in [
+        "onboarding",
+        "team_messages",
+        "team_tasks",
+        "research_jobs",
+        "team_finished_view",
+    ] {
         assert_eq!(project_rows(&bench.root, table), 1, "{table}");
     }
 
@@ -1523,7 +1590,13 @@ async fn removing_a_project_ends_its_rows_and_re_adding_the_folder_gives_a_worki
         .await
         .unwrap();
     assert_eq!(rejection(&response), None, "{response:?}");
-    for table in ["onboarding", "team_messages", "team_tasks", "research_jobs"] {
+    for table in [
+        "onboarding",
+        "team_messages",
+        "team_tasks",
+        "research_jobs",
+        "team_finished_view",
+    ] {
         assert_eq!(project_rows(&bench.root, table), 0, "{table} after removal");
     }
     assert!(
@@ -1675,6 +1748,7 @@ async fn a_failing_mapping_agent_reports_its_own_reason() {
 
 /// Makes the agent state folder `name` under `agents` with a file in it, as an
 /// earlier onboarding of a project with the same id left it.
+#[cfg(target_os = "macos")]
 fn leftover_agent(agents: &Path, name: &str) {
     fs::create_dir_all(agents.join(name).join("home")).unwrap();
     fs::write(agents.join(name).join("stdout.log"), "earlier run\n").unwrap();
@@ -1729,6 +1803,7 @@ async fn agent_folders_left_by_an_earlier_project_with_the_same_id_never_block_a
     bench.stop().await;
 }
 
+#[cfg(target_os = "macos")]
 fn onboarding_created_ms(root: &Path) -> i64 {
     let database = rusqlite::Connection::open(root.join("engine.db")).unwrap();
     database

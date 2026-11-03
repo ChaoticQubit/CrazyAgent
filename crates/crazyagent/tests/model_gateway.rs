@@ -297,6 +297,56 @@ fn only_completed_effect_free_quota_failure_selects_an_approved_next_account() {
 }
 
 #[test]
+fn a_failure_finished_after_a_backward_clock_step_completes_and_still_holds_its_connection() {
+    let config = load_config(CATALOG);
+    let mut database = Connection::open_in_memory().unwrap();
+    initialize(&database).unwrap();
+    ready(&mut database, &config);
+    let tx = database.transaction().unwrap();
+    let start = begin_attempt(&tx, &config, &config, &request("first", None), 150).unwrap();
+    let connection = start.attempt.connection.clone();
+    let index = config
+        .settings
+        .model_access
+        .as_ref()
+        .unwrap()
+        .connections
+        .iter()
+        .position(|candidate| *candidate == connection)
+        .unwrap();
+    let mut newer = observation(&config, index, 2);
+    newer.observed_at_ms = 5000;
+    newer.valid_until_ms = 9000;
+    observe(&tx, &config, &newer).unwrap();
+    finish_attempt(
+        &tx,
+        &RequestId::new("first").unwrap(),
+        &AttemptCompletion {
+            outcome: AttemptOutcome::Failed(FailureKind::RateLimited),
+            effects: Effects::None,
+            finished_at_ms: 200,
+            retry_at_ms: Some(500),
+        },
+    )
+    .unwrap();
+    let stored = read_attempt(&tx, &RequestId::new("first").unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(stored.completion.unwrap().finished_at_ms, 200);
+    let state = connection_state(&tx, &connection, 5000).unwrap();
+    assert_eq!(state.health, Health::RateLimited);
+    assert_eq!(state.observed_at_ms, Some(5000));
+    assert_eq!(state.cooldown_until_ms, Some(5300));
+    assert_eq!(
+        connection_state(&tx, &connection, 5300)
+            .unwrap()
+            .cooldown_until_ms,
+        None
+    );
+    tx.commit().unwrap();
+}
+
+#[test]
 fn uncertain_effects_nonquota_errors_and_completed_work_do_not_automatically_rotate() {
     let config = load_config(CATALOG);
     for (outcome, effects) in [

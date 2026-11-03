@@ -85,8 +85,12 @@ fn fake_tool_homes(tools: &Path) -> ToolHomes {
 }
 
 fn run(sandbox: &ProjectSandbox, profile: &Path, script: &str) -> Output {
+    run_in(sandbox, profile, Path::new("/bin/sh"), script)
+}
+
+fn run_in(sandbox: &ProjectSandbox, profile: &Path, shell: &Path, script: &str) -> Output {
     sandbox.install(profile).unwrap();
-    let mut command = sandbox.command(profile, Path::new("/bin/sh"));
+    let mut command = sandbox.command(profile, shell);
     command
         .arg("-c")
         .arg(script)
@@ -471,4 +475,158 @@ fn a_missing_toolchain_is_never_installed_by_an_agent() {
     assert!(stderr.contains("is not installed"), "{stderr}");
     assert!(!case.home.join(".rustup").exists());
     assert_eq!(names(&homes.rustup().join("toolchains")), toolchains_before);
+}
+
+#[test]
+fn a_heredoc_works_in_every_agent_shell() {
+    let case = case();
+    let scratch = toolchains::make_tmp(&case.home).unwrap();
+    let granted = ProjectSandbox::new(
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_scratch(&scratch)
+    .unwrap();
+    let plain = ProjectSandbox::new(
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap();
+    for (sandbox, profile) in [(&granted, "granted.sb"), (&plain, "plain.sb")] {
+        for shell in ["/bin/zsh", "/bin/bash", "/bin/sh"] {
+            let output = run_in(
+                sandbox,
+                &case.profiles.join(profile),
+                Path::new(shell),
+                "cat <<EOF\nheredoc $((40 + 2))\nEOF\n",
+            );
+            assert!(
+                output.status.success(),
+                "{shell} {profile}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                "heredoc 42\n",
+                "{shell} {profile}"
+            );
+        }
+    }
+    toolchains::remove_tmp(&case.home).unwrap();
+}
+
+#[test]
+fn an_agent_never_writes_the_owner_toolchains_or_reads_their_credentials() {
+    let case = case();
+    let homes = fake_tool_homes(&case.tools);
+    write(&case.project.join("Cargo.toml"), "[package]\n");
+    toolchains::prepare_cargo_home(&case.home, &homes).unwrap();
+    let sandbox = ProjectSandbox::new(
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_tools(&Toolchains::detect(&case.project, &homes))
+    .unwrap();
+    let profile = case.profiles.join("walls.sb");
+    let readable = run(
+        &sandbox,
+        &profile,
+        &format!(
+            "cat {} {}",
+            quoted(&case.home.join(".cargo/registry/index.txt")),
+            quoted(&case.tools.join(".rustup/settings.toml"))
+        ),
+    );
+    assert!(
+        readable.status.success(),
+        "{}",
+        String::from_utf8_lossy(&readable.stderr)
+    );
+    for target in [
+        case.home.join(".cargo/registry/planted"),
+        case.tools.join(".cargo/registry/planted"),
+        case.tools.join(".cargo/bin/planted"),
+        case.tools.join(".cargo/config.toml"),
+        case.tools.join(".rustup/toolchains/stable-x/bin/planted"),
+        case.tools.join(".rustup/settings.toml"),
+    ] {
+        let output = run(
+            &sandbox,
+            &profile,
+            &format!("echo FIXTURE-PLANTED >> {}", quoted(&target)),
+        );
+        assert!(!output.status.success(), "{} was written", target.display());
+        assert!(
+            !fs::read_to_string(&target)
+                .unwrap_or_default()
+                .contains("FIXTURE-PLANTED"),
+            "{}",
+            target.display()
+        );
+    }
+    let credential = run(
+        &sandbox,
+        &profile,
+        &format!(
+            "cat {}",
+            quoted(&case.tools.join(".cargo/credentials.toml"))
+        ),
+    );
+    assert!(!credential.status.success());
+    assert!(!String::from_utf8_lossy(&credential.stdout).contains("FIXTURE"));
+}
+
+#[test]
+fn a_toolchain_the_owner_switched_off_is_unreadable_and_one_switched_on_is_readable() {
+    use crazyagent::sandbox::toolchains::Toolchain;
+    let case = case();
+    let homes = fake_tool_homes(&case.tools);
+    write(&case.project.join("Cargo.toml"), "[package]\n");
+    let used: Vec<Toolchain> = Toolchain::ALL
+        .into_iter()
+        .filter(|toolchain| toolchain.used_by(&case.project))
+        .collect();
+    assert_eq!(used, [Toolchain::Rust]);
+    let probe = |chosen: &[Toolchain], name: &str| {
+        let sandbox = ProjectSandbox::new(
+            &case.project,
+            &case.home,
+            &case.tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap()
+        .allow_tools(&Toolchains::grant(&homes, chosen))
+        .unwrap();
+        let profile = case.profiles.join(name);
+        [
+            case.tools.join(".cargo/bin/cargo"),
+            case.tools.join(".rustup/settings.toml"),
+            case.tools.join(".nvm/versions/node/v1/bin/node"),
+        ]
+        .map(|file| {
+            run(
+                &sandbox,
+                &profile,
+                &format!("cat {} > /dev/null", quoted(&file)),
+            )
+            .status
+            .success()
+        })
+    };
+    assert_eq!(probe(&[], "none.sb"), [false, false, false]);
+    assert_eq!(probe(&[Toolchain::Rust], "rust.sb"), [true, true, false]);
+    assert_eq!(probe(&[Toolchain::Node], "node.sb"), [false, false, true]);
+    assert_eq!(
+        Toolchains::grant(&homes, &[Toolchain::Rust]).roots(),
+        Toolchains::detect(&case.project, &homes).roots(),
+        "a project that uses Rust gets the same grant as the Rust switch"
+    );
 }

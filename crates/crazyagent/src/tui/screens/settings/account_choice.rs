@@ -4,11 +4,9 @@ use crate::scheduling::{
     AccountPlan, Pin, PoolRanking, RANK_MAX, RESERVE_PERCENT_MAX, Schedule, ScheduleChange,
     Standing, Strategy,
 };
-use crate::tui::client::settings::SettingsJob;
 use crate::tui::ctx::Ctx;
 use crate::tui::frame::{Hint, Modal, hint};
 use crate::tui::keys::Key;
-use crate::tui::seam::Request;
 use ratatui::text::Line;
 
 const RESERVE_STEP: u8 = 5;
@@ -229,20 +227,18 @@ impl ChoiceEditor {
         Self { pool, row: 0 }
     }
 
-    /// Handles one key: arrows move and change, `<` and `>` move a reserve, `p` cycles a
-    /// pin and Esc closes. Takes the key, the stored schedule, the pool and the context.
-    /// Returns false when the editor closes; a change is queued for the engine.
+    /// Handles one key: arrows move and change, `<` and `>` move a reserve and `p` cycles a
+    /// pin. Takes the key, the schedule with every change sent so far, and the pool.
+    /// Returns the change the key makes, for the caller to apply and send to the engine.
     pub fn key(
         &mut self,
         key: &Key,
         schedule: &Schedule,
         pool: &PoolSummary,
-        ctx: &mut Ctx,
-    ) -> bool {
+    ) -> Option<ScheduleChange> {
         let rows = 2 + pool.members.len();
         self.row = self.row.min(rows - 1);
-        let change = match key {
-            Key::Esc => return false,
+        match key {
             Key::Up => {
                 self.row = self.row.saturating_sub(1);
                 None
@@ -261,16 +257,7 @@ impl ChoiceEditor {
                 ..plan
             }),
             _ => None,
-        };
-        if let Some(change) = change {
-            let generation = ctx.next_generation();
-            ctx.request(Request::Settings(Box::new(SettingsJob::SetSchedule {
-                change,
-                version: schedule.version,
-                generation,
-            })));
         }
-        true
     }
 
     fn shift(

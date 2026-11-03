@@ -113,6 +113,14 @@ impl<H: Host> Host for LastScreenHost<H> {
         }
     }
 
+    fn screen(&self, agent: &AgentId) -> Result<Vec<u8>, HostError> {
+        self.inner.screen(agent)
+    }
+
+    fn snapshot(&self, agent: &AgentId) -> Result<TerminalStream, HostError> {
+        self.inner.snapshot(agent)
+    }
+
     fn input(&self, agent: &AgentId, bytes: &[u8]) -> Result<(), HostError> {
         self.inner.input(agent, bytes)
     }
@@ -126,7 +134,7 @@ impl<H: Host> Host for LastScreenHost<H> {
     }
 
     fn kill(&self, agent: &AgentId) -> Result<(), HostError> {
-        let last = self.inner.attach(agent).ok();
+        let last = self.inner.snapshot(agent).ok();
         self.inner.kill(agent)?;
         if let Some(last) = last {
             use crate::tui::clock::{clock, local_offset, now_ms};

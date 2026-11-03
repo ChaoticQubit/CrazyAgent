@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 
 const GIT: &str = "/usr/bin/git";
 pub(super) const OUTPUT_BYTES_MAX: usize = 64 * 1024 * 1024;
-const LISTING_BYTES_MAX: usize = 64 * 1024;
+pub(super) const LISTING_BYTES_MAX: usize = 64 * 1024;
 const STEP_TIME: Duration = Duration::from_secs(90);
 const POLL: Duration = Duration::from_millis(2);
 const VERSION_MIN: (u32, u32) = (2, 40);
@@ -180,6 +180,20 @@ impl Repo {
     #[cfg(not(unix))]
     pub(super) fn open(_git_dir: &Path, _work_tree: Option<&Path>) -> Result<Self, EngineError> {
         Err(failure("changes_unavailable"))
+    }
+
+    /// Opens a repository the engine is making itself, whose config only the engine wrote:
+    /// no filter listing, no owner ignore file and no version check, which the owner
+    /// repository opened before it already passed. Inputs: the git folder and the work
+    /// tree, which must exist. Output: the repository.
+    #[cfg(unix)]
+    pub(super) fn fresh(git_dir: &Path, work_tree: &Path) -> Self {
+        Self {
+            git_dir: git_dir.to_path_buf(),
+            work_tree: Some(work_tree.to_path_buf()),
+            overrides: Vec::new(),
+            excludes: None,
+        }
     }
 
     fn check_version(&self) -> Result<(), EngineError> {

@@ -1,4 +1,5 @@
 use super::new_project_input::TextInput;
+use super::project_access::next_level;
 #[cfg(all(test, unix))]
 use crate::config::EffectiveConfig;
 use crate::project_setup::{
@@ -7,6 +8,7 @@ use crate::project_setup::{
     SUB_HARNESSES_MAX, TEAM_AGENTS_MAX, TECH_ENTRIES_MAX, TECH_ENTRY_BYTES_MAX, TeamPlan,
 };
 use crate::protocol::{CredentialRef, ProjectSpec};
+use crate::sandbox::policy::AgentAccess;
 use crate::tui::text::coded;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::path::{Path, PathBuf};
@@ -99,6 +101,7 @@ pub(in crate::tui) enum Control {
     Team,
     Min,
     Max,
+    Access,
     Back,
     Continue,
 }
@@ -344,6 +347,7 @@ pub(in crate::tui) struct Wizard {
     pub picker: Option<Picker>,
     pub note: Option<Note>,
     pub phase: Phase,
+    pub access: AgentAccess,
 }
 
 impl Wizard {
@@ -389,6 +393,7 @@ impl Wizard {
             picker: None,
             note: None,
             phase: Phase::Editing,
+            access: AgentAccess::NEW_PROJECT,
         };
         wizard.assert_consistent();
         wizard
@@ -488,7 +493,8 @@ impl Wizard {
             Step::Work => vec![Control::Work],
             Step::Pool => vec![Control::Pools],
             Step::Team if self.team.is_some() => vec![Control::Team, Control::Min, Control::Max],
-            Step::Team | Step::Review => Vec::new(),
+            Step::Team => Vec::new(),
+            Step::Review => vec![Control::Access],
         };
         controls.extend([Control::Back, Control::Continue]);
         controls
@@ -1122,6 +1128,7 @@ impl Wizard {
             Control::Work => self.work_key(key),
             Control::Pools => self.pool_key(key),
             Control::Team => self.team_key(key),
+            Control::Access => self.access_key(key),
             Control::Back if key.code == KeyCode::Enter => self.back(),
             Control::Continue if key.code == KeyCode::Enter => self.advance(),
             Control::Back | Control::Continue => Reply::Ignored,
@@ -1431,6 +1438,19 @@ impl Wizard {
                     self.document_cursor = self.document_cursor.min(self.documents.len() - 1);
                 }
             }
+            _ => return Reply::Ignored,
+        }
+        Reply::Handled
+    }
+
+    fn access_key(&mut self, key: KeyEvent) -> Reply {
+        if self.phase != Phase::Editing {
+            return Reply::Ignored;
+        }
+        match key.code {
+            KeyCode::Left => self.access = next_level(self.access, false),
+            KeyCode::Right | KeyCode::Char(' ') => self.access = next_level(self.access, true),
+            KeyCode::Enter => return self.advance(),
             _ => return Reply::Ignored,
         }
         Reply::Handled

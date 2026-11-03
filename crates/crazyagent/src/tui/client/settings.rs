@@ -273,13 +273,16 @@ pub(in crate::tui) enum SettingsEvent {
     SuggestionDone(Suggestion, Result<(), String>),
     Plugins(Result<(Vec<SkillView>, Vec<ServerView>), String>),
     ProjectPlugins(ProjectId, Result<(Vec<SkillView>, Vec<ServerView>), String>),
-    SkillDetail(Result<crate::skills::SkillDetail, String>),
+    SkillDetail(
+        Option<ProjectId>,
+        Result<crate::skills::SkillDetail, String>,
+    ),
     ImportScan(Result<crate::skills::import::ImportList, String>),
     Imported(Result<ImportOutcomes, String>),
     PluginChanged(Result<Option<ServerView>, String>),
     AppSetup(AppSetupEvent),
     Schedule(Result<crate::scheduling::Schedule, String>),
-    ScheduleSet(Result<(), String>),
+    ScheduleSet(u64, Result<(), String>),
     Ranking(Result<Vec<crate::scheduling::PoolRanking>, String>),
 }
 
@@ -307,13 +310,17 @@ impl SettingsEvent {
             SettingsJob::ProjectPlugins { project } => {
                 Self::ProjectPlugins(project.clone(), Err(problem))
             }
-            SettingsJob::SkillDetail { .. } => Self::SkillDetail(Err(problem)),
+            SettingsJob::SkillDetail { project, .. } => {
+                Self::SkillDetail(project.clone(), Err(problem))
+            }
             SettingsJob::ImportScan => Self::ImportScan(Err(problem)),
             SettingsJob::ImportSkills { .. } => Self::Imported(Err(problem)),
             SettingsJob::Plugin(_) => Self::PluginChanged(Err(problem)),
             SettingsJob::AppSetup(job) => Self::AppSetup(AppSetupEvent::failed(job, problem)),
             SettingsJob::Schedule => Self::Schedule(Err(problem)),
-            SettingsJob::SetSchedule { .. } => Self::ScheduleSet(Err(problem)),
+            SettingsJob::SetSchedule { generation, .. } => {
+                Self::ScheduleSet(*generation, Err(problem))
+            }
             SettingsJob::Ranking => Self::Ranking(Err(problem)),
         }
     }
@@ -454,13 +461,17 @@ impl NativeOwner {
                 self.plugins(Some(project), lost).await,
             ),
             SettingsJob::SkillDetail { id, project } => {
-                SettingsEvent::SkillDetail(match self.settings_controller() {
-                    Ok(controller) => controller
-                        .skill_detail(id, project)
-                        .await
-                        .map_err(|error| problem(&error, lost)),
-                    Err(error) => Err(error),
-                })
+                let asked = project.clone();
+                SettingsEvent::SkillDetail(
+                    asked,
+                    match self.settings_controller() {
+                        Ok(controller) => controller
+                            .skill_detail(id, project)
+                            .await
+                            .map_err(|error| problem(&error, lost)),
+                        Err(error) => Err(error),
+                    },
+                )
             }
             SettingsJob::ImportScan => {
                 SettingsEvent::ImportScan(match self.settings_controller() {
@@ -509,16 +520,19 @@ impl NativeOwner {
                 change,
                 version,
                 generation,
-            } => SettingsEvent::ScheduleSet(match self.settings_controller() {
-                Ok(controller) => applied(
-                    controller
-                        .set_account_schedule(change, version, generation)
-                        .await,
-                    "account_schedule_outcome_unknown",
-                    lost,
-                ),
-                Err(error) => Err(error),
-            }),
+            } => SettingsEvent::ScheduleSet(
+                generation,
+                match self.settings_controller() {
+                    Ok(controller) => applied(
+                        controller
+                            .set_account_schedule(change, version, generation)
+                            .await,
+                        "account_schedule_outcome_unknown",
+                        lost,
+                    ),
+                    Err(error) => Err(error),
+                },
+            ),
             SettingsJob::AddMemory {
                 scope,
                 text,
@@ -649,7 +663,7 @@ impl NativeOwner {
     }
 
     /// Reads the research memories waiting for the owner and the ones kept in a
-    /// project, the first page of each project's inbox, as the desktop does.
+    /// project, every inbox batch of each project, as the desktop does.
     /// Inputs: the projects and the lost-connection flag. Output: at most
     /// SUGGESTIONS_MAX suggestions, or the first plain problem code.
     pub(super) async fn suggestions(
@@ -661,7 +675,7 @@ impl NativeOwner {
         let mut found: Vec<Suggestion> = Vec::new();
         for project in projects.into_iter().take(SUGGESTION_PROJECTS_MAX) {
             let entries = controller
-                .project_memories(project, None)
+                .all_project_memories(project)
                 .await
                 .map_err(|error| problem(&error, lost))?;
             found.extend(entries.into_iter().filter_map(|entry| {
@@ -1674,13 +1688,13 @@ mod tests {
             })
             .await
         {
-            SettingsEvent::SkillDetail(Ok(detail)) => {
+            SettingsEvent::SkillDetail(None, Ok(detail)) => {
                 assert_eq!(detail.skill.id, skills[0].id);
                 assert!(detail.text.ends_with("\n\nSteps.\n"), "{}", detail.text);
                 let files: Vec<&str> = detail.files.iter().map(|file| file.path.as_str()).collect();
                 assert_eq!(files, vec!["SKILL.md"]);
             }
-            SettingsEvent::SkillDetail(Err(code)) => panic!("skill detail failed: {code}"),
+            SettingsEvent::SkillDetail(_, Err(code)) => panic!("skill detail failed: {code}"),
             _ => panic!("a skill detail reply required"),
         }
 

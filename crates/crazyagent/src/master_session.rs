@@ -187,6 +187,7 @@ pub enum MasterReason {
     UnsupportedCapability,
     RepositoryMissing,
     RepositoryConfigRefused,
+    InstructionsTooLarge,
     Cancelled,
     Unknown,
 }
