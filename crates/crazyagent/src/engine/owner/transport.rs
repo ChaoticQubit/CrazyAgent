@@ -46,6 +46,7 @@ pub(crate) mod changes;
 pub(crate) mod cleanup;
 mod github;
 mod harness_catalog;
+pub(crate) mod harness_settings;
 pub(crate) mod ide;
 pub(crate) mod ide_extensions;
 pub(crate) mod ide_tab;
@@ -2041,6 +2042,7 @@ enum Protocol {
     GitHub,
     AccountProfile,
     HarnessCatalog,
+    HarnessSettings,
     Plugins,
     Agents,
     Changes,
@@ -2074,6 +2076,7 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("github", Protocol::GitHub),
         ("account_profile", Protocol::AccountProfile),
         ("harness_catalog", Protocol::HarnessCatalog),
+        ("harness_settings", Protocol::HarnessSettings),
         ("plugins", Protocol::Plugins),
         ("agents", Protocol::Agents),
         ("changes", Protocol::Changes),
@@ -2154,6 +2157,7 @@ async fn serve_admitted(
             Protocol::Recovery => return Ok(Some(Deferred::Recovery(a))),
             Protocol::Questions => return Ok(Some(Deferred::Questions(a))),
             Protocol::Tracker => return Ok(Some(Deferred::Tracker(a))),
+            Protocol::HarnessSettings => return Ok(Some(Deferred::HarnessSettings(a))),
             Protocol::NativeAuth => {
                 return native_auth::serve(stream, engine, authority, auth, &a, body)
                     .await
@@ -2343,6 +2347,10 @@ async fn serve_admitted(
             let served = usage::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(usage::USAGE_TIMEOUT, served).await;
         }
+        Deferred::HarnessSettings(a) => {
+            let served = harness_settings::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(harness_settings::HARNESS_SETTINGS_TIMEOUT, served).await;
+        }
     }
 }
 
@@ -2394,9 +2402,10 @@ struct Tasks {
 /// write lock and rewrite a project's questions page, Tracker requests, which wait for the
 /// same lock and rewrite a project's ticket view, Cleanup requests, which size and
 /// remove finished agents' worktrees and folders, skill import scans and imports, which
-/// copy skill folders, and Usage requests, which read and write the usage store. Each
-/// carries the admission, and the projects home its validated request; the others read
-/// the request frame.
+/// copy skill folders, Usage requests, which read and write the usage store, and harness
+/// settings requests, which ask the installed harness for its version. Each carries the
+/// admission, and the projects home its validated request; the others read the request
+/// frame.
 enum Deferred {
     ProjectsHome(Admission, Box<OwnerRequest>),
     GitHub(Admission),
@@ -2412,6 +2421,7 @@ enum Deferred {
     Cleanup(Admission),
     SkillImport(Admission),
     Usage(Admission),
+    HarnessSettings(Admission),
 }
 
 /// Answers an admitted request the engine will not run, in its own protocol's reply
@@ -2445,6 +2455,7 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::GitHub => github::refusal(code)?,
         Protocol::AccountProfile => account_profile::refusal(body, code)?,
         Protocol::HarnessCatalog => harness_catalog::refusal(code)?,
+        Protocol::HarnessSettings => harness_settings::refusal(code)?,
         Protocol::Plugins => plugins::refusal(code)?,
         Protocol::Agents => agents::refusal(code)?,
         Protocol::Changes => changes::refusal(code)?,

@@ -96,6 +96,43 @@ const CLAUDE_BACKGROUND_TASKS_OFF: (&str, &str) = ("CLAUDE_CODE_DISABLE_BACKGROU
 /// machine busy with builds, and a server that never answers delays the start by 60 s only.
 pub(super) const CLAUDE_MCP_CONNECT_LIMIT: (&str, &str) = ("MCP_TIMEOUT", "60000");
 const CLAUDE_SETTINGS: &str = "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"disableAllHooks\":true,\"includeCoAuthoredBy\":false}";
+/// Claude Code settings the engine decides itself, so no owner value ever takes one: the
+/// fixed settings and the key helper of a keyed account, and the settings behind the
+/// engine's flags and environment (model, permissions and tools, MCP servers, hooks and
+/// environment variables).
+pub(crate) const CLAUDE_ENGINE_KEYS: [&str; 12] = [
+    "apiKeyHelper",
+    "attribution",
+    "disableAllHooks",
+    "disabledMcpjsonServers",
+    "enableAllProjectMcpServers",
+    "enabledMcpjsonServers",
+    "env",
+    "hooks",
+    "includeCoAuthoredBy",
+    "model",
+    "permissions",
+    "skipDangerousModePermissionPrompt",
+];
+/// Codex settings the engine decides itself, so no owner value ever takes one: those it
+/// sets on some launches only (the account's provider and model, the project's MCP servers,
+/// a pane's trusted folder), those it writes into the agent's `config.toml` (its
+/// instructions and the project docs limit), and those that would replace the
+/// instructions it delivers.
+pub(crate) const CODEX_ENGINE_KEYS: [&str; 12] = [
+    "check_for_update_on_startup",
+    "developer_instructions",
+    "experimental_instructions_file",
+    "instructions",
+    "mcp_servers",
+    "model",
+    "model_instructions_file",
+    "model_provider",
+    "model_providers",
+    "project_doc_fallback_filenames",
+    "project_doc_max_bytes",
+    "projects",
+];
 const CLAUDE_COMMON: [&str; 12] = [
     "--print",
     "--verbose",
@@ -438,7 +475,7 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         .map(|_| key_file_text(&home.join(KEY_FILE)))
         .transpose()?;
     let (arguments, environment) = match harness_id(request) {
-        "codex" => codex_invocation(request, installed.is_some(), key_file.as_deref()),
+        "codex" => codex_invocation(request, installed, key_file.as_deref()),
         "claude-code" => claude_invocation(request, installed, key_file.as_deref()),
         _ => return Err(failure("launch_harness_unsupported")),
     };
@@ -508,11 +545,28 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
     Ok(command)
 }
 
-fn codex_invocation(request: &LaunchRequest, context: bool, key_file: Option<&str>) -> Invocation {
+fn codex_invocation(
+    request: &LaunchRequest,
+    installed: Option<&Installed>,
+    key_file: Option<&str>,
+) -> Invocation {
     let home = request.account.home().as_os_str().to_owned();
     let environment = vec![("CODEX_HOME", home)];
+    let engine = codex_configuration(request, installed.is_some(), key_file);
+    let owner = installed.map_or_else(Vec::new, |installed| {
+        let set: Vec<String> = engine
+            .iter()
+            .cloned()
+            .chain(crate::launch_context::CODEX_CONFIG_FIXED.map(str::to_owned))
+            .collect();
+        crate::harness_settings::apply::codex_lines(
+            &set,
+            &CODEX_ENGINE_KEYS,
+            installed.harness_settings(),
+        )
+    });
     let mut arguments = Vec::new();
-    for setting in codex_configuration(request, context, key_file) {
+    for setting in owner.into_iter().chain(engine) {
         arguments.push(OsString::from("-c"));
         arguments.push(OsString::from(setting));
     }
@@ -586,10 +640,14 @@ pub(super) fn codex_configuration(
 /// Claude Code's `--settings` for one launch: the fixed settings, plus for a keyed account
 /// an `apiKeyHelper` that prints its relay token from `key_file` (see [`key_file_text`]),
 /// and without `disableAllHooks` when the launch's generated plugin holds the hooks the
-/// owner turned on. Setting sources stay off, so no other hook loads. Inputs: the key file
-/// of a keyed account and whether the launch runs hooks. Output: the settings JSON.
-fn claude_settings(key_file: Option<&str>, hooks: bool) -> String {
-    if key_file.is_none() && !hooks {
+/// owner turned on, merged over the owner's Claude Code settings of the installed context,
+/// whose locked values it must hold. Setting sources stay off, so no other hook loads.
+/// Inputs: the key file of a keyed account and the installed context. Output: the settings
+/// JSON.
+fn claude_settings(key_file: Option<&str>, installed: Option<&Installed>) -> String {
+    let hooks = installed.is_some_and(Installed::runs_hooks);
+    let owner = installed.map(Installed::harness_settings);
+    if key_file.is_none() && !hooks && owner.is_none() {
         return CLAUDE_SETTINGS.to_owned();
     }
     let mut settings: serde_json::Value =
@@ -602,6 +660,14 @@ fn claude_settings(key_file: Option<&str>, hooks: bool) -> String {
             .as_object_mut()
             .and_then(|fields| fields.remove("disableAllHooks"));
         assert_eq!(removed, Some(serde_json::Value::Bool(true)));
+    }
+    if let Some(owner) = owner {
+        settings = crate::harness_settings::apply::json_settings(
+            &settings,
+            owner,
+            crate::harness_settings::Apply::ClaudeSettings,
+            &CLAUDE_ENGINE_KEYS,
+        );
     }
     settings.to_string()
 }
@@ -651,7 +717,7 @@ fn claude_invocation(
 ) -> Invocation {
     assert_eq!(request.account.key().is_some(), key_file.is_some());
     let home = request.account.home().as_os_str().to_owned();
-    let settings = claude_settings(key_file, installed.is_some_and(Installed::runs_hooks));
+    let settings = claude_settings(key_file, installed);
     let keep = installed.is_some_and(Installed::keeps_transcript);
     let mut arguments: Vec<OsString> = CLAUDE_COMMON
         .iter()

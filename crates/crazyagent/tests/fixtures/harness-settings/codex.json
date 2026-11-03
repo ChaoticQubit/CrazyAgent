@@ -1,0 +1,82 @@
+{
+  "harness": "codex",
+  "qualified_versions": ["0.50.0", "0.51.0"],
+  "sources": ["https://example.invalid/fixture/codex-config"],
+  "keys": [
+    {
+      "key": "hide_agent_reasoning",
+      "label": "Hide agent reasoning",
+      "help": "Fixture: hides reasoning events in the agent's output.",
+      "type": "bool",
+      "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "model_reasoning_effort",
+      "label": "Reasoning effort",
+      "help": "Fixture: how hard the model reasons.",
+      "type": "enum",
+      "options": ["minimal", "low", "medium", "high"],
+      "default": "medium",
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "project_doc_max_bytes",
+      "label": "Project doc limit",
+      "help": "Fixture: the most bytes of AGENTS.md read.",
+      "type": "integer",
+      "default": 32768,
+      "min": 0,
+      "max": 1048576,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "CrazyAgent delivers the project's instructions itself.",
+        "engine_value": 0
+      }
+    },
+    {
+      "key": "tui.status_label",
+      "label": "Status label",
+      "help": "Fixture: one line shown in the status bar.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 32,
+      "apply": "codex_config",
+      "scope": "app",
+      "locked": null
+    },
+    {
+      "key": "sandbox_mode",
+      "label": "Sandbox",
+      "help": "Fixture: the sandbox the agent runs in.",
+      "type": "enum",
+      "options": ["read-only", "workspace-write", "danger-full-access"],
+      "default": "read-only",
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "CrazyAgent runs every agent in its own sandbox.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "approval_policy",
+      "label": "Approvals",
+      "help": "Fixture: when the agent asks before running a command.",
+      "type": "enum",
+      "options": ["untrusted", "on-failure", "on-request", "never"],
+      "default": "on-request",
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The engine decides what an agent may run.",
+        "engine_value": "never"
+      }
+    }
+  ]
+}

@@ -1,9 +1,11 @@
 use super::launch::{
-    AccountBinding, CLAUDE_DENY_FLAG, CLAUDE_MCP_CONNECT_LIMIT, CLAUDE_NATIVE_TEAM_TOOLS,
-    CLAUDE_NO_MCP, CODEX_NO_USER_INPUT, LOCAL_PLACEHOLDER_KEY, LaunchError, LaunchRequest,
-    SANDBOX_EXEC, Secret, TOOLS_OFF_PATH, TOOLS_ON_PATH, claude_bare, claude_denied,
-    codex_configuration, failure, harness_id, key_file_text, validate,
+    AccountBinding, CLAUDE_DENY_FLAG, CLAUDE_ENGINE_KEYS, CLAUDE_MCP_CONNECT_LIMIT,
+    CLAUDE_NATIVE_TEAM_TOOLS, CLAUDE_NO_MCP, CODEX_ENGINE_KEYS, CODEX_NO_USER_INPUT,
+    LOCAL_PLACEHOLDER_KEY, LaunchError, LaunchRequest, SANDBOX_EXEC, Secret, TOOLS_OFF_PATH,
+    TOOLS_ON_PATH, claude_bare, claude_denied, codex_configuration, failure, harness_id,
+    key_file_text, validate,
 };
+use crate::harness_settings::{Apply, apply};
 use crate::launch_context::{Installed, NativeTeam};
 use crate::sandbox::toolchains::{self, ToolHomes};
 use std::ffi::OsStr;
@@ -284,7 +286,7 @@ pub fn command(
             } else {
                 None
             };
-            let settings = codex(request, installed.is_some(), &cwd, key_file.as_deref())?;
+            let settings = codex(request, installed, &cwd, key_file.as_deref())?;
             if request.tools {
                 argv.extend([
                     "/bin/sh".to_owned(),
@@ -397,21 +399,30 @@ fn text(path: &Path) -> Result<String, LaunchError> {
 
 fn codex(
     request: &LaunchRequest,
-    context: bool,
+    installed: Option<&Installed>,
     cwd: &Path,
     key_file: Option<&str>,
 ) -> Result<Vec<String>, LaunchError> {
     let folder = serde_json::to_string(&text(cwd)?)
         .map_err(|_| failure("launch_working_dir_unavailable"))?;
-    let mut arguments = Vec::new();
-    for setting in codex_configuration(request, context, key_file)
+    let engine: Vec<String> = codex_configuration(request, installed.is_some(), key_file)
         .into_iter()
         .chain((!request.tools).then(|| CODEX_NO_USER_INPUT.to_owned()))
         .chain([
             "check_for_update_on_startup=false".to_owned(),
             format!("projects={{{folder}={{trust_level=\"trusted\"}}}}"),
         ])
-    {
+        .collect();
+    let owner = installed.map_or_else(Vec::new, |installed| {
+        let set: Vec<String> = engine
+            .iter()
+            .cloned()
+            .chain(crate::launch_context::CODEX_CONFIG_FIXED.map(str::to_owned))
+            .collect();
+        apply::codex_lines(&set, &CODEX_ENGINE_KEYS, installed.harness_settings())
+    });
+    let mut arguments = Vec::new();
+    for setting in owner.into_iter().chain(engine) {
         arguments.push("-c".to_owned());
         arguments.push(setting);
     }
@@ -438,6 +449,14 @@ fn claude(
             .as_object_mut()
             .and_then(|fields| fields.remove("disableAllHooks"));
         assert_eq!(removed, Some(serde_json::Value::Bool(true)));
+    }
+    if let Some(installed) = installed {
+        settings = apply::json_settings(
+            &settings,
+            installed.harness_settings(),
+            Apply::ClaudeSettings,
+            &CLAUDE_ENGINE_KEYS,
+        );
     }
     let mut arguments = vec![
         "--strict-mcp-config".to_owned(),

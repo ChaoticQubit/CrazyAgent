@@ -1,5 +1,6 @@
 use crate::agent_git::Layout;
 use crate::coord::settings::{RoleSkills, SkillRole};
+use crate::harness_settings::apply::Applied;
 use crate::harnesses::launch::LaunchError;
 use crate::plugins::{
     EffectiveHook, EffectivePlugins, EffectiveSkill, LaunchPlugins, LaunchSecret, LaunchServer,
@@ -128,7 +129,7 @@ fn skill_unavailable<E>(_: E) -> LaunchError {
 /// one bounded startup instruction holding the project brief, an index of its context files
 /// and the owner-approved memories, whether a headless Claude run keeps its transcript,
 /// whether a Claude Code lead runs its own agent team, and the engine executable and mailbox
-/// of a team agent's message relay.
+/// of a team agent's message relay, and the owner's harness settings.
 #[derive(Debug)]
 pub struct AgentContext {
     plugins: LaunchPlugins,
@@ -138,6 +139,7 @@ pub struct AgentContext {
     off_tools: Vec<(String, Vec<String>)>,
     native_team: Option<(PathBuf, PathBuf)>,
     relay: Option<(PathBuf, PathBuf)>,
+    settings: Applied,
 }
 
 /// The project whose app and project instructions and instruction files each launch reads
@@ -152,9 +154,10 @@ struct Process {
 
 /// The files one launch wrote into its agent home, whether a headless Claude run keeps its
 /// transcript, whether its generated plugin holds hooks, the Claude Code tool names the
-/// owner switched off, whether the lead runs its own agent team, and the lock that keeps a
-/// second launch out of that home. Dropping it deletes every file holding a secret and the
-/// copied skills and hooks, unless `keep` left them to a pane that still runs.
+/// owner switched off, whether the lead runs its own agent team, the owner's settings for
+/// its harness, and the lock that keeps a second launch out of that home. Dropping it
+/// deletes every file holding a secret and the copied skills and hooks, unless `keep` left
+/// them to a pane that still runs.
 #[derive(Debug)]
 pub struct Installed {
     arguments: Vec<OsString>,
@@ -164,6 +167,7 @@ pub struct Installed {
     relay: bool,
     denied: Vec<String>,
     native: Option<NativeTeam>,
+    settings: Applied,
     _lock: File,
 }
 
@@ -226,6 +230,7 @@ pub fn for_project(
         off_tools,
         native_team: None,
         relay: None,
+        settings: Applied::default(),
     })
 }
 
@@ -732,6 +737,30 @@ impl AgentContext {
         self
     }
 
+    /// Gives every launch of this context the owner's settings for one harness, from
+    /// [`crate::harness_settings::apply::for_launch`]. Input: the settings. Output: the
+    /// context, which then installs only for that harness.
+    pub fn with_harness_settings(mut self, settings: Applied) -> Self {
+        self.settings = settings;
+        self
+    }
+
+    /// Builds a context with no skills, MCP servers, process files or owner settings,
+    /// for tests that need a real `install`. Output: the context.
+    #[cfg(test)]
+    pub(crate) fn empty() -> Self {
+        Self {
+            plugins: LaunchPlugins::default(),
+            instructions: "# Project context from CrazyAgent\n".into(),
+            process: None,
+            transcripts: false,
+            off_tools: Vec::new(),
+            native_team: None,
+            relay: None,
+            settings: Applied::default(),
+        }
+    }
+
     /// Reports whether any MCP secret value occurs in `text`, so launchers can prove a
     /// command line or environment never carries one.
     pub fn exposes_secret(&self, text: &[u8]) -> bool {
@@ -775,6 +804,7 @@ impl AgentContext {
         crate::harnesses::launch::validate_home(home)?;
         let lock = lock(home)?;
         let state = home.join(STATE);
+        assert!(self.settings.harness().is_none_or(|harness| harness == id));
         let mut installed = Installed {
             arguments: Vec::new(),
             files: Some(InstalledFiles {
@@ -786,6 +816,7 @@ impl AgentContext {
             relay: false,
             denied: Vec::new(),
             native: None,
+            settings: self.settings.clone(),
             _lock: lock,
         };
         remove(&state);
@@ -961,6 +992,12 @@ impl Installed {
         self.transcripts
     }
 
+    /// Returns the owner's settings this launch's harness starts with, see
+    /// [`crate::harness_settings::apply`].
+    pub fn harness_settings(&self) -> &Applied {
+        &self.settings
+    }
+
     /// Tells whether this launch's plugins hold hooks, the ones the owner turned on or the
     /// message relay's, so Claude Code must run with hooks allowed.
     pub fn runs_hooks(&self) -> bool {
@@ -1001,6 +1038,7 @@ impl Installed {
             arguments: Vec::new(),
             files: Some(files.clone()),
             transcripts: false,
+            settings: Applied::default(),
             hooks: false,
             relay: false,
             denied: Vec::new(),
@@ -1339,6 +1377,10 @@ fn secret_text(secret: &LaunchSecret) -> Result<&str, LaunchError> {
         .filter(|text| !text.is_empty() && !text.chars().any(char::is_control))
         .ok_or_else(|| failure("launch_context_secret_invalid"))
 }
+
+/// The Codex settings every installed agent's `config.toml` sets to a fixed value, as
+/// `-c` lines, so a launch's lock checks read them with its own `-c` settings.
+pub(crate) const CODEX_CONFIG_FIXED: [&str; 1] = ["project_doc_max_bytes=0"];
 
 /// Names the switched-off tools of the servers one Claude Code launch declares, the way
 /// Claude Code names them: `mcp__<declared server>__<tool>`. Input: the declared servers and

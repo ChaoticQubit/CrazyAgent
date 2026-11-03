@@ -26,7 +26,7 @@ use std::fs::File;
 #[cfg(unix)]
 use std::io::Write;
 #[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -94,10 +94,39 @@ impl OwnerRuntimeHandle {
         allocate_master_capture(&self.authority.root)
     }
 
+    /// Reads the owner's harness settings one master turn applies on a blocking thread, so
+    /// the store read and a first version probe never hold the async runtime. Input: the
+    /// prepared turn. Output: the settings, none for an rcli master, or a
+    /// `HARNESS_SETTINGS_CODES` refusal.
+    pub(super) async fn master_settings(
+        &self,
+        prepared: &PreparedMasterTurn,
+    ) -> Result<crate::harness_settings::apply::Applied, EngineError> {
+        let (harness, executable) = match prepared.session.selection.backend {
+            MasterBackend::Codex => ("codex", self.registered_codex_executable()?),
+            MasterBackend::Claude => ("claude-code", self.registered_claude_executable()?),
+            MasterBackend::Rcli => return Ok(Default::default()),
+        };
+        let executable = executable.verified_path()?.to_path_buf();
+        let root = super::changes::engine_root(&self.authority)?;
+        let project = prepared.session.project_id.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::harness_settings::apply::for_launch(
+                &crate::storage::versioned::open(&root)?,
+                harness,
+                &executable,
+                Some(&project),
+            )
+        })
+        .await
+        .map_err(|_| failure("harness_settings_unavailable"))?
+    }
+
     pub(super) fn prepare_master_host(
         &self,
         prepared: &PreparedMasterTurn,
         profile: &NativeProfileUse,
+        settings: crate::harness_settings::apply::Applied,
     ) -> Result<MasterHostLaunch, EngineError> {
         validate_master_binding(prepared)?;
         let binding = prepared.profile.binding();
@@ -142,6 +171,13 @@ impl OwnerRuntimeHandle {
         let process = crate::agent_home::text(&prepared.agent_project)
             .map_err(|problem| EngineError(problem.0))?;
         let claude = prepared.session.selection.backend == MasterBackend::Claude;
+        let harness = if claude { "claude-code" } else { "codex" };
+        if settings
+            .harness()
+            .is_some_and(|resolved| resolved != harness)
+        {
+            return Err(failure("master_runtime_binding"));
+        }
         let process = match claude {
             true => claude_process(&prepared.instructions, process),
             false => process,
@@ -155,6 +191,7 @@ impl OwnerRuntimeHandle {
                 &master_prompt(&prepared.instructions, &process.text),
                 wall_time,
                 delegate,
+                &settings,
             )?
         } else {
             codex_master_turn(
@@ -174,6 +211,9 @@ impl OwnerRuntimeHandle {
         };
         crate::agent_home::prepare(&turn.home, harness, &prepared.agent_project, &process)
             .map_err(|problem| EngineError(problem.0))?;
+        if !claude {
+            write_master_settings(&turn.home, &turn.command, &settings)?;
+        }
         let MasterTurnLaunch {
             command,
             sandbox,
@@ -289,7 +329,9 @@ pub(super) struct MasterTurnLaunch {
 /// account lease, the registered executable, the attempt's connection, the instruction text,
 /// the turn's wall time and the engine executable for tools on. Output: the launch parts with
 /// the copy, or the refusal of the part that failed, `native_profile_renewal_failed`, a
-/// transient refusal, when the token still lapses within a minute after a renewal.
+/// transient refusal, when the token still lapses within a minute after a renewal. The
+/// owner's Claude Code settings go into its `--settings`.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn claude_master_turn(
     place: &MasterTurnPlace<'_>,
     profile: &NativeProfileUse,
@@ -298,6 +340,7 @@ pub(super) fn claude_master_turn(
     instructions: &str,
     wall_time: Duration,
     engine: Option<&Path>,
+    settings: &crate::harness_settings::apply::Applied,
 ) -> Result<MasterTurnLaunch, EngineError> {
     let instructions = write_master_instructions(place.root, place.runtime_ref, instructions)?;
     let home = master_turn_home(place.root, place.runtime_ref)?;
@@ -310,6 +353,7 @@ pub(super) fn claude_master_turn(
                 &home,
                 &connection.model.id,
                 Some(instructions.as_path()),
+                settings,
             )?,
             master_sandbox(
                 place.root,
@@ -351,6 +395,7 @@ pub(super) fn claude_master_turn(
                     engine,
                     drop: &drop,
                 },
+                settings,
             )?;
             (command, sandbox, Some(drop))
         }
@@ -437,6 +482,55 @@ pub(super) fn codex_master_turn(
         credential,
         tool_record: Some(drop),
     })
+}
+
+/// Writes the owner's Codex settings into a master turn's home as a new 0600 `config.toml`,
+/// leaving out every key the turn's command sets with `-c`, which Codex reads over the
+/// file. Inputs: the turn home, the command and the settings. Output: Ok, or
+/// `harness_settings_unavailable` when the file cannot be made.
+#[cfg(unix)]
+fn write_master_settings(
+    home: &Path,
+    command: &Command,
+    settings: &crate::harness_settings::apply::Applied,
+) -> Result<(), EngineError> {
+    let args: Vec<&str> = command
+        .get_args()
+        .map(|arg| arg.to_str())
+        .collect::<Option<_>>()
+        .ok_or_else(|| failure("harness_settings_unavailable"))?;
+    let engine: Vec<String> = args
+        .windows(2)
+        .filter(|pair| pair[0] == "-c")
+        .map(|pair| pair[1].to_owned())
+        .collect();
+    let Some(text) = crate::harness_settings::apply::codex_config(
+        &engine,
+        &crate::harnesses::launch::CODEX_ENGINE_KEYS,
+        settings,
+    ) else {
+        return Ok(());
+    };
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(home.join("config.toml"))
+        .map_err(|_| failure("harness_settings_unavailable"))?;
+    file.write_all(text.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|_| failure("harness_settings_unavailable"))
+}
+
+/// Refuses the owner's Codex settings file where a master turn cannot run. Takes the home,
+/// command and settings, all unused. Returns `master_host_unavailable`.
+#[cfg(not(unix))]
+fn write_master_settings(
+    _home: &Path,
+    _command: &Command,
+    _settings: &crate::harness_settings::apply::Applied,
+) -> Result<(), EngineError> {
+    Err(failure("master_host_unavailable"))
 }
 
 /// Makes the private home of one master turn inside its turn folder, so everything the
@@ -1623,6 +1717,7 @@ mod tests {
             &home,
             ACCOUNT_DEFAULT_MODEL,
             None,
+            &crate::harness_settings::apply::Applied::default(),
         )
         .unwrap();
         let claude = sandbox.wrap(&claude).unwrap();
@@ -2265,6 +2360,47 @@ mod tests {
         std::fs::set_permissions(temporary.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
         assert!(allocate_master_capture(&root).is_err());
         assert_eq!(std::fs::read_dir(temporary.path()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn every_key_a_codex_master_sets_is_locked_in_the_shipped_catalog() {
+        use crate::harness_settings::{apply::Applied, catalog, resolve, tests};
+        let shipped = catalog::builtin("codex").unwrap().unwrap();
+        let version = shipped.qualified_versions.first().map(String::as_str);
+        let settings = Applied::new(
+            &shipped,
+            resolve(&shipped, version, &Default::default(), None),
+        );
+        let temporary = private_root();
+        let engine = temporary.path().join("crazyagent");
+        let drop = temporary.path().join(crate::team::tool::DROP_FILE);
+        let tools = crate::engine::claude_host::MasterTools {
+            engine: &engine,
+            drop: &drop,
+        };
+        for (name, tools) in [("off", None), ("on", Some(tools))] {
+            let home = temporary.path().join(name);
+            std::fs::create_dir(&home).unwrap();
+            let command = master_command(
+                Path::new("/registered/codex"),
+                &home,
+                Path::new("/leased/worktree"),
+                "admitted-model",
+                tools,
+            )
+            .unwrap();
+            let args: Vec<&str> = command
+                .get_args()
+                .map(|arg| arg.to_str().unwrap())
+                .collect();
+            let lines = args
+                .windows(2)
+                .filter(|pair| pair[0] == "-c")
+                .map(|pair| pair[1]);
+            tests::assert_locked_in_shipped("codex", &tests::codex_settings(lines));
+            write_master_settings(&home, &command, &settings).unwrap();
+            assert!(!home.join("config.toml").exists());
+        }
     }
 }
 

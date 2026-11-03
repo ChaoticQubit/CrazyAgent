@@ -209,6 +209,7 @@ fn a_home_is_free_once_its_launch_ends_even_while_a_child_shares_its_lock() {
         off_tools: Vec::new(),
         native_team: None,
         relay: None,
+        settings: Applied::default(),
     };
     let installed = context.install("codex", &home, false).unwrap();
     let mut child = crate::spawn_gate::spawn(
@@ -250,6 +251,7 @@ fn a_team_master_with_tools_on_gets_the_engine_delegate_tool() {
         off_tools: Vec::new(),
         native_team: None,
         relay: None,
+        settings: Applied::default(),
     };
     let context = fresh().with_team_tool(engine, &record).unwrap();
     assert_eq!(
@@ -357,6 +359,7 @@ fn a_team_master_with_tools_off_hears_the_team_plugin_names() {
         off_tools: Vec::new(),
         native_team: None,
         relay: None,
+        settings: Applied::default(),
     }
     .with_index(&plugins, &RoleSkills::default());
     let home = root.join("codex");
@@ -399,6 +402,7 @@ fn a_skills_link_a_sandboxed_agent_plants_never_steers_a_removal_outside_its_hom
         off_tools: Vec::new(),
         native_team: None,
         relay: None,
+        settings: Applied::default(),
     };
 
     agents.shell(&plant);
@@ -546,6 +550,7 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
         off_tools: Vec::new(),
         native_team: None,
         relay: None,
+        settings: Applied::default(),
     };
     let start = "# Project context from CrazyAgent\n";
     assert!(!fresh(start.into()).instructions().contains(rule));
@@ -723,6 +728,7 @@ fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
         off_tools: Vec::new(),
         native_team: None,
         relay: None,
+        settings: Applied::default(),
     };
     let home = |name: &str| {
         let home = root.join(name);
@@ -816,6 +822,7 @@ fn every_claude_and_codex_launch_is_told_how_its_work_lands_in_its_layout() {
             off_tools: Vec::new(),
             native_team: None,
             relay: None,
+            settings: Applied::default(),
         };
         let claude = home(&format!("claude-{layout:?}"));
         let installed = context.install("claude-code", &claude, false).unwrap();
@@ -896,6 +903,7 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
         off_tools: Vec::new(),
         native_team: None,
         relay: None,
+        settings: Applied::default(),
     };
     let request = || crate::harnesses::launch::LaunchRequest {
         harness: "codex".into(),
@@ -990,6 +998,7 @@ impl LeftPane {
             off_tools: Vec::new(),
             native_team: None,
             relay: None,
+            settings: Applied::default(),
         };
         let request = crate::harnesses::launch::LaunchRequest {
             harness: "codex".into(),
@@ -1134,6 +1143,7 @@ fn a_live_team_server_takes_its_mailbox_and_the_tools_left_out_and_says_so() {
         off_tools: Vec::new(),
         native_team: None,
         relay: None,
+        settings: Applied::default(),
     };
     let off = vec![crate::team::tool::STOP_TOOL.to_owned()];
     for (context, subcommand) in [
@@ -1219,6 +1229,7 @@ fn context_with(
         off_tools,
         native_team: None,
         relay: None,
+        settings: Applied::default(),
     }
 }
 
@@ -1524,6 +1535,7 @@ fn a_claude_launch_with_tools_on_writes_only_the_hooks_given_each_rerooted_in_it
         off_tools: Vec::new(),
         native_team: None,
         relay: None,
+        settings: Applied::default(),
     };
     let home = |name: &str| {
         let home = root.join(name);
@@ -1681,6 +1693,7 @@ fn context_mode_context(plugins: LaunchPlugins) -> AgentContext {
         off_tools: Vec::new(),
         native_team: None,
         relay: None,
+        settings: Applied::default(),
     }
 }
 

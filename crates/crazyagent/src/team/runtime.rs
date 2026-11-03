@@ -5414,7 +5414,23 @@ impl TeamRuntime {
                 with_code("the master's tool mailbox could not be made", Some(&e.0))
             })?;
         }
-        let context = self.context(&stored.project_id, id, role, tools, layout)?;
+        let settings = crate::harness_settings::apply::for_launch(
+            &self.connection,
+            launch,
+            executable,
+            Some(&stored.project_id),
+        )
+        .map_err(|e| {
+            let name = crate::harnesses::spec(launch).map_or(launch, |spec| spec.name);
+            let sentence = format!(
+                "the saved {name} settings could not be read, so this agent did not start; \
+                 reset them in Settings > Harnesses"
+            );
+            with_code(&sentence, Some(&e.0))
+        })?;
+        let context = self
+            .context(&stored.project_id, id, role, tools, layout)?
+            .with_harness_settings(settings);
         let policy = crate::sandbox::policy::load(&self.connection, stored.project_id.as_str())
             .map_err(|_| with_code("the project's agent access could not be read", None))?;
         if let Some(reason) = policy.access.unavailable() {
