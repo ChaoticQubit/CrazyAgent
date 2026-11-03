@@ -804,9 +804,6 @@ const FORMAT_TEXT: Readonly<Record<string, string>> = {
   libtest: "libtest text on standard output", junit: "A JUnit XML file", allure: "An Allure results folder", exit_code: "Only its exit status",
 };
 const TOOLCHAIN_TEXT: Readonly<Record<string, string>> = { rust: "Rust", node: "Node.js", python: "Python" };
-const NETWORK_TEXT: Readonly<Record<NetworkMode, string>> = {
-  off: "None", localhost: "Loopback on this Mac only", remotes: "The remotes of this project's sandbox",
-};
 const TRIGGER_TEXT: Readonly<Record<string, string>> = {
   turn_end: "at an agent's turn end", before_accept: "before you accept", on_request: "when you or the change set's agent asks",
 };

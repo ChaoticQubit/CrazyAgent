@@ -398,11 +398,11 @@ test("profiles: approve and revoke follow the state, holdout files show digests 
   const words = Object.fromEntries(api.checkRows(check).map((row) => [row.field, row.value]));
   assert.deepEqual(words, {
     id: "unit", kind: "Unit", toolchain: "Rust", argv: "cargo test", cwd: ".", format: "libtest text on standard output", report: "None",
-    timeout_s: "600 s", network: "None", when: "at an agent's turn end, before you accept", required: "Required to pass", protected: "Not protected",
+    timeout_s: "600 s", network: "Off, no sockets", when: "at an agent's turn end, before you accept", required: "Required to pass", protected: "Not protected",
   });
   const reach = { ...check, toolchain: null, format: "junit", report: "target/junit.xml", network: "remotes", when: [], required: false, protected: true };
   assert.deepEqual(api.checkRows(reach).filter((row) => ["toolchain", "format", "report", "network", "when", "required", "protected"].includes(row.field)).map((row) => row.value),
-    ["None managed", "A JUnit XML file", "target/junit.xml", "The remotes of this project's sandbox", "Never on its own", "Not required", "Protected"]);
+    ["None managed", "A JUnit XML file", "target/junit.xml", "The project's sandbox remotes", "Never on its own", "Not required", "Protected"]);
   assert.ok(html.includes('Protected paths: <span class="pj-mono">tests/</span>'), "the protected paths are listed");
   const rows = [{ id: PROFILE, state: "current", proposed_by: "owner", proposed_ms: 1, approved_ms: APPROVED_MS, revoked_ms: null, question: null, checks: 2, holdouts: 1 }];
   const list = render(createElement(checks.ProfilesView, { profiles: { kind: "ok", value: { rows, next: null } }, selected: null, onSelect: () => {}, onRetry: () => {} }));
