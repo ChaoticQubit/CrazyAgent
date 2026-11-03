@@ -5,6 +5,7 @@ import { isAbsolute, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { setTimeout as pause } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import { SevereServiceError } from "webdriverio";
 import { closedPort, start, stop } from "./e2e-harness.mjs";
 
 process.umask(0o077);
@@ -207,21 +208,21 @@ export const config = {
   framework: "mocha",
   reporters: ["spec"],
   logLevel: "warn",
-  outputDir: fixture ? join(fixture, "logs", "webdriver") : undefined,
+  outputDir: fixture ? `${fixture}-webdriver` : undefined,
   connectionRetryCount: 0,
   connectionRetryTimeout: 180000,
   waitforTimeout: 15000,
   specFileRetries: 0,
   mochaOpts: { timeout: 14400000, retries: 0, bail: false },
   onPrepare: async function () {
-    mkdirSync(join(evidence, "screenshots"), { recursive: true, mode: 0o700 });
-    assert.deepEqual(readdirSync(join(evidence, "screenshots")), [], "the run folder has no screenshots from an earlier run");
-    if (mode === "live") return checkLive();
     try {
-      await prepareFixture();
+      mkdirSync(join(evidence, "screenshots"), { recursive: true, mode: 0o700 });
+      assert.deepEqual(readdirSync(join(evidence, "screenshots")), [], "the run folder has no screenshots from an earlier run");
+      if (mode === "live") checkLive();
+      else await prepareFixture();
     } catch (failure) {
       await stop(engine);
-      throw failure;
+      throw new SevereServiceError(`trial 3 cannot start: ${failure?.message ?? failure}`);
     }
   },
   before: async function () {
