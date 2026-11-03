@@ -457,6 +457,81 @@ fn a_stale_board_move_shows_one_line_and_changes_nothing() {
 }
 
 #[test]
+fn a_board_move_into_done_closes_and_out_of_done_reopens_with_the_version_read() {
+    let (_folder, path) = database();
+    let mut owner = seed(&path);
+    let mut recorder = Recorder::new(&mut owner);
+    let mut views = Views::new(key());
+    views.open(Page::Board, &mut recorder);
+    for _ in 0..2 {
+        assert!(views.key(Key::Right, &mut recorder));
+    }
+    let read = shown_version(&recorder.received, "TW-3");
+    recorder.sent.clear();
+    assert!(views.key(Key::Char('>'), &mut recorder));
+    assert_eq!(
+        recorder.sent[0],
+        (
+            OpKind::Close,
+            json!({ "id": "TW-3", "version": read, "status": "done" })
+        )
+    );
+    assert!(views.notice().is_none(), "{:?}", views.notice());
+    let closed = data(&mut recorder, OpKind::Show, json!({ "id": "TW-3" }));
+    assert_eq!(closed["ticket"]["status"], json!("done"));
+    assert_eq!(closed["ticket"]["closed_by"], json!("owner"));
+    let rows = render(&views, 80, 24);
+    let marked: Vec<&String> = rows.iter().filter(|row| row.contains('>')).collect();
+    assert_eq!(marked.len(), 1, "{rows:#?}");
+    let column = marked[0].find('>').unwrap();
+    assert_eq!(column, 60, "{rows:#?}");
+    assert!(marked[0][column..].starts_with(">TW-3"), "{rows:#?}");
+
+    let version = closed["ticket"]["version"].as_i64().unwrap();
+    recorder.sent.clear();
+    assert!(views.key(Key::Char('<'), &mut recorder));
+    assert_eq!(
+        recorder.sent[0],
+        (
+            OpKind::Reopen,
+            json!({ "id": "TW-3", "version": version, "status": "in_review" })
+        )
+    );
+    assert!(views.notice().is_none(), "{:?}", views.notice());
+    let reopened = data(&mut recorder, OpKind::Show, json!({ "id": "TW-3" }));
+    assert_eq!(reopened["ticket"]["status"], json!("in_review"));
+    assert_eq!(reopened["ticket"]["closed_by"], Value::Null);
+}
+
+#[test]
+fn a_board_close_the_policy_refuses_shows_one_line_and_changes_nothing() {
+    let (_folder, path) = database();
+    drop(seed(&path));
+    let mut agent = Local::open(&path, actor("agent:export")).unwrap();
+    let mut views = Views::new(key());
+    views.open(Page::Board, &mut agent);
+    for _ in 0..2 {
+        assert!(views.key(Key::Right, &mut agent));
+    }
+    assert!(views.key(Key::Char('>'), &mut agent));
+    let line = "close_owner_only: policy close is owner: only the owner may close";
+    assert_eq!(
+        views.notice().map(|notice| notice.text.as_str()),
+        Some(line)
+    );
+    let rows = render(&views, 80, 24);
+    assert_eq!(
+        rows.iter().filter(|row| row.contains(line)).count(),
+        1,
+        "{rows:#?}"
+    );
+    assert_eq!(rows[23].trim_end(), format!(" {line}"));
+    let after = data(&mut agent, OpKind::Show, json!({ "id": "TW-3" }));
+    assert_eq!(after["ticket"]["status"], json!("in_review"));
+    assert_eq!(after["ticket"]["closed_by"], Value::Null);
+}
+
+#[test]
 fn the_list_loads_the_next_page_at_its_last_row() {
     let (_folder, path) = database();
     let mut writers: Vec<Local> = ["owner", "ci", "agent:seed"]
