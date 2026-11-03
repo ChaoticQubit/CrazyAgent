@@ -176,6 +176,54 @@ fn row_id(tx: &Transaction<'_>, table: &str, key: &str, number: u32) -> i64 {
         .unwrap()
 }
 
+const V3B_POLICY: &[(&str, &str)] = &[
+    ("test_evidence", "\"latest\""),
+    ("skipped_counts", "\"fail\""),
+    ("case_protected_visibility", "\"full\""),
+    ("run_writers", "\"any\""),
+    ("run_retention", "\"keep_all\""),
+];
+
+fn policy_sql(tx: &Transaction<'_>) -> String {
+    tx.query_row(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'tk_policy'",
+        [],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+fn policy_keys(sql: &str) -> Vec<String> {
+    let start = sql.find("key IN").expect("tk_policy lists its keys");
+    let list = &sql[start..];
+    let end = list.find(')').expect("the key list closes");
+    list[..end]
+        .split('\'')
+        .skip(1)
+        .step_by(2)
+        .map(str::to_owned)
+        .collect()
+}
+
+fn policy_columns(tx: &Transaction<'_>) -> Vec<(String, String, i64, i64)> {
+    tx.prepare("SELECT name, type, \"notnull\", pk FROM pragma_table_info('tk_policy')")
+        .unwrap()
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .unwrap()
+        .map(Result::unwrap)
+        .collect()
+}
+
+fn insert_policy(tx: &Transaction<'_>, project: i64, key: &str, value: &str) -> bool {
+    tx.execute(
+        "INSERT INTO tk_policy(project, key, value_json, version) VALUES (?1, ?2, ?3, 1)",
+        rusqlite::params![project, key, value],
+    )
+    .is_ok()
+}
+
 fn insert_finished_run(tx: &Transaction<'_>, project: i64, case_id: i64, outcome: &str) {
     tx.execute(
         "INSERT INTO tk_runs(project, number, title, state, verdict, source_json, policy_json,
@@ -1035,4 +1083,182 @@ fn a_ticket_history_never_carries_a_protected_cases_steps() {
     }
     let shown = tests_store::case_show(&tx, &actor("agent:w1"), &held.short_id).unwrap();
     assert_eq!(shown.detail, None, "the link stays behind the hidden view");
+}
+
+#[test]
+fn migrate_step_two_widens_the_policy_keys_and_keeps_every_policy_row() {
+    let mut connection = Connection::open_in_memory().unwrap();
+    let tx = connection.transaction().unwrap();
+    schema::migrate_to(&tx, 1).unwrap();
+    let owner = actor("owner");
+    store::create_project(&tx, &owner, &key("CA"), "CrazyAgent", 1_000).unwrap();
+    let project = project_id(&tx, "CA");
+    let v3a_keys = policy_keys(&policy_sql(&tx));
+    assert!(v3a_keys.iter().any(|key| key == "close"), "{v3a_keys:?}");
+    for (at, key) in v3a_keys.iter().enumerate() {
+        let value = format!("\"value {at}\"");
+        assert!(
+            insert_policy(&tx, project, key, &value),
+            "step 1 stores {key}"
+        );
+    }
+    for (key, value) in V3B_POLICY {
+        assert!(
+            !insert_policy(&tx, project, key, value),
+            "step 1 refuses {key}"
+        );
+    }
+    let columns = policy_columns(&tx);
+    let before = rows(&tx, "tk_policy");
+    assert_eq!(before.len(), v3a_keys.len());
+
+    schema::migrate(&tx).unwrap();
+    assert_eq!(schema_step(&tx), 2);
+    assert_eq!(
+        policy_columns(&tx),
+        columns,
+        "the rebuilt table keeps every column"
+    );
+    assert_eq!(
+        rows(&tx, "tk_policy"),
+        before,
+        "every V3a policy row survives step 2"
+    );
+    let mut widened = v3a_keys.clone();
+    widened.extend(V3B_POLICY.iter().map(|(key, _)| (*key).to_owned()));
+    assert_eq!(
+        policy_keys(&policy_sql(&tx)),
+        widened,
+        "step 2 keeps every V3a key and adds the V3b keys"
+    );
+    for (key, value) in V3B_POLICY {
+        assert!(
+            insert_policy(&tx, project, key, value),
+            "step 2 stores {key}"
+        );
+    }
+    assert!(!insert_policy(&tx, project, "not_a_policy", "\"x\""));
+
+    let mut secret = new_case("Holdout", None);
+    secret.protected = true;
+    let held = tests_store::create_case(&tx, &owner, &key("CA"), &secret, 1_001).unwrap();
+    let seen = tests_store::case_show(&tx, &actor("agent:w1"), &held.short_id).unwrap();
+    assert_eq!(seen.steps, StepsView::Full(held.steps.clone()));
+    assert!(seen.detail.is_some(), "a stored full visibility is read");
+    let once = master(&tx);
+    schema::migrate(&tx).unwrap();
+    assert_eq!(master(&tx), once, "a second migrate changes nothing");
+}
+
+#[test]
+fn a_release_has_at_most_one_active_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = actor("owner");
+    let agent = actor("agent:w1");
+    let mut store = opened(dir.path());
+    let tx = store.transaction().unwrap();
+    store::create_project(&tx, &owner, &key("CA"), "CrazyAgent", 1_000).unwrap();
+    tx.execute(
+        "INSERT INTO tk_versions(project, name, position, target_day, status, source, version)
+         VALUES (?1, '1.0', 0, NULL, 'planned', 'manual', 1)",
+        [project_id(&tx, "CA")],
+    )
+    .unwrap();
+    let active = PlanFields {
+        name: "Release 1.0".to_owned(),
+        release: Some("1.0".to_owned()),
+        cycle: None,
+        status: PlanStatus::Active,
+    };
+    let first = tests_store::upsert_plan(&tx, &owner, &key("CA"), None, &active, 1_001).unwrap();
+    let events = count(&tx, "tk_events");
+    for who in [&agent, &owner] {
+        assert_eq!(
+            refused(tests_store::upsert_plan(
+                &tx,
+                who,
+                &key("CA"),
+                None,
+                &active,
+                1_002
+            )),
+            codes::ACTIVE_PLAN_EXISTS,
+            "{who:?} cannot open a second active plan on 1.0"
+        );
+    }
+    let draft = PlanFields {
+        name: "Release 1.0 without the holdouts".to_owned(),
+        status: PlanStatus::Draft,
+        ..active.clone()
+    };
+    let second = tests_store::upsert_plan(&tx, &agent, &key("CA"), None, &draft, 1_003).unwrap();
+    let raised = PlanFields {
+        status: PlanStatus::Active,
+        ..draft.clone()
+    };
+    assert_eq!(
+        refused(tests_store::upsert_plan(
+            &tx,
+            &agent,
+            &key("CA"),
+            Some((&second.short_id, second.version)),
+            &raised,
+            1_004
+        )),
+        codes::ACTIVE_PLAN_EXISTS
+    );
+    assert_eq!(
+        count(&tx, "tk_events"),
+        events + 1,
+        "only the draft was recorded"
+    );
+    let first_id = row_id(&tx, "tk_plans", "CA", first.short_id.number());
+    let version_id: i64 = tx
+        .query_row(
+            "SELECT version_id FROM tk_plans WHERE id = ?1",
+            [first_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let forced = tx.execute(
+        "INSERT INTO tk_plans(project, number, name, version_id, cycle_id, status, version)
+         VALUES (?1, 9, 'forced', ?2, NULL, 'active', 1)",
+        [project_id(&tx, "CA"), version_id],
+    );
+    assert!(
+        forced.is_err(),
+        "the table keeps one active plan per release"
+    );
+
+    let closed = PlanFields {
+        status: PlanStatus::Closed,
+        ..active.clone()
+    };
+    let first = tests_store::upsert_plan(
+        &tx,
+        &owner,
+        &key("CA"),
+        Some((&first.short_id, first.version)),
+        &closed,
+        1_005,
+    )
+    .unwrap();
+    assert_eq!(first.status, PlanStatus::Closed);
+    let second = tests_store::upsert_plan(
+        &tx,
+        &agent,
+        &key("CA"),
+        Some((&second.short_id, second.version)),
+        &raised,
+        1_006,
+    )
+    .unwrap();
+    assert_eq!(second.status, PlanStatus::Active);
+    let unreleased = PlanFields {
+        release: None,
+        ..active.clone()
+    };
+    for at in [1_007, 1_008] {
+        tests_store::upsert_plan(&tx, &agent, &key("CA"), None, &unreleased, at).unwrap();
+    }
 }

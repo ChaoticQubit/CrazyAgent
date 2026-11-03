@@ -8,8 +8,8 @@ use crate::schema;
 use crate::text::{self, TextField};
 use rusqlite::types::Type;
 use rusqlite::{
-    CachedStatement, Connection, OpenFlags, OptionalExtension, Row, Transaction,
-    TransactionBehavior, params,
+    Connection, OpenFlags, OptionalExtension, Row, Statement, Transaction, TransactionBehavior,
+    params,
 };
 use std::fmt;
 use std::fs;
@@ -225,6 +225,13 @@ impl Store {
         Ok(self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?)
+    }
+
+    /// Gives up the store for its connection, already migrated, with foreign keys on and the
+    /// busy timeout set, so a session can own it like a host's connection. Output: the
+    /// connection.
+    pub fn into_connection(self) -> Connection {
+        self.connection
     }
 }
 
@@ -668,14 +675,15 @@ pub fn state(tx: &Transaction<'_>, key: &ProjectKey) -> Result<State, StoreError
     })
 }
 
-/// Prepares one of the core's listed statements through the connection's cache. Inputs: the
-/// transaction and the statement. Output: the prepared statement.
+/// Prepares one of the core's listed statements. Plain `prepare`, because the core builds
+/// rusqlite without its statement cache feature. Inputs: the transaction and the statement.
+/// Output: the prepared statement.
 pub(crate) fn prepare<'t>(
     tx: &'t Transaction<'_>,
     sql: &'static str,
-) -> rusqlite::Result<CachedStatement<'t>> {
+) -> rusqlite::Result<Statement<'t>> {
     assert!(STATEMENTS.contains(&sql), "every core statement is listed");
-    tx.prepare_cached(sql)
+    tx.prepare(sql)
 }
 
 /// Builds the refusal error for one code. Inputs: the code and the message. Output: the
@@ -806,12 +814,12 @@ fn link_row_of(row: &Row<'_>) -> rusqlite::Result<Link> {
 /// Reads a stored actor, the core's own `host:` actors included. Inputs: the row and the
 /// column. Output: the actor, or a conversion error for a bad shape.
 pub(crate) fn actor(row: &Row<'_>, index: usize) -> rusqlite::Result<Actor> {
-    Actor::try_from(row.get::<_, String>(index)?).map_err(|refused| conversion(index, refused))
+    Actor::stored(&row.get::<_, String>(index)?).map_err(|refused| conversion(index, refused))
 }
 
 fn optional_actor(row: &Row<'_>, index: usize) -> rusqlite::Result<Option<Actor>> {
     row.get::<_, Option<String>>(index)?
-        .map(Actor::try_from)
+        .map(|text| Actor::stored(&text))
         .transpose()
         .map_err(|refused| conversion(index, refused))
 }

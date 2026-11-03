@@ -41,9 +41,10 @@ pub const OPS: &[&str] = &[
     PLAN_REMOVE,
 ];
 
-/// Migration step 2: the test management tables, added beside the step 1 tables without
-/// touching a step 1 row. Results are never updated; retention (VT-2) may delete the
-/// results of a pruned run.
+/// Migration step 2: the test management tables beside the step 1 tables, and `tk_policy`
+/// rebuilt with every step 1 row and column so it also takes the five V3b policy keys
+/// (SQLite cannot widen a CHECK in place). Results are never updated; retention (VT-2) may
+/// delete the results of a pruned run.
 pub(crate) const SCHEMA_STEP_TWO: &str = "
 CREATE TABLE tk_cases(
     id INTEGER PRIMARY KEY,
@@ -97,6 +98,8 @@ CREATE TABLE tk_plans(
     version INTEGER NOT NULL CHECK (version >= 1),
     UNIQUE (project, number)
 );
+CREATE UNIQUE INDEX tk_plans_active_release ON tk_plans(project, version_id)
+    WHERE status = 'active' AND version_id IS NOT NULL;
 CREATE TABLE tk_plan_items(
     plan_id INTEGER NOT NULL REFERENCES tk_plans(id),
     position INTEGER NOT NULL CHECK (position >= 1),
@@ -155,6 +158,20 @@ CREATE TABLE tk_results(
 CREATE INDEX tk_results_case ON tk_results(case_id, run_id) WHERE case_id IS NOT NULL;
 CREATE TRIGGER tk_results_no_update BEFORE UPDATE ON tk_results
     BEGIN SELECT RAISE(ABORT, 'tk_results is append-only'); END;
+CREATE TABLE tk_policy_step_two(
+    project INTEGER NOT NULL REFERENCES tk_projects(id),
+    key TEXT NOT NULL CHECK (key IN
+        ('close', 'create', 'agent_edit', 'cycle_days', 'rollover', 'import',
+         'test_evidence', 'skipped_counts', 'case_protected_visibility', 'run_writers',
+         'run_retention')),
+    value_json TEXT NOT NULL,
+    version INTEGER NOT NULL CHECK (version >= 1),
+    PRIMARY KEY (project, key)
+) WITHOUT ROWID;
+INSERT INTO tk_policy_step_two(project, key, value_json, version)
+    SELECT project, key, value_json, version FROM tk_policy;
+DROP TABLE tk_policy;
+ALTER TABLE tk_policy_step_two RENAME TO tk_policy;
 ";
 
 macro_rules! case_select {
@@ -189,7 +206,8 @@ const CASE_PAGE: &str = concat!(
     " AND (?5 IS NULL OR EXISTS (SELECT 1 FROM tk_set_cases m",
     " WHERE m.case_id = c.id AND m.set_id = ?5))",
     " AND (?6 = 0 OR NOT EXISTS (SELECT 1 FROM tk_case_criteria k WHERE k.case_id = c.id))",
-    " AND (?7 = 1 OR c.protected = 0 OR (?3 IS NULL AND ?4 IS NULL))",
+    " AND (?7 = 1 OR c.protected = 0",
+    " OR (?3 IS NULL AND ?4 IS NULL AND ?5 IS NULL AND ?6 = 0))",
     " ORDER BY c.number LIMIT ?8"
 );
 const CASE_COUNT: &str = "SELECT count(*) FROM tk_cases WHERE project = ?1";
@@ -282,6 +300,15 @@ const ITEMS_OF_PLAN: &str = "SELECT i.position, c.number, s.number FROM tk_plan_
 const PLAN_ITEMS_OF_PROJECT: &str = "SELECT i.plan_id, i.position, i.case_id, i.set_id \
      FROM tk_plan_items i JOIN tk_plans l ON l.id = i.plan_id WHERE l.project = ?1 \
      ORDER BY i.plan_id, i.position";
+const ACTIVE_PLAN_OF_RELEASE: &str = "SELECT number FROM tk_plans WHERE project = ?1 \
+     AND version_id = ?2 AND status = 'active' AND id IS NOT ?3";
+const PLAN_HOLDS_PROTECTED: &str = "SELECT EXISTS (SELECT 1 FROM tk_plan_items i \
+     LEFT JOIN tk_set_cases m ON m.set_id = i.set_id \
+     JOIN tk_cases c ON c.id = coalesce(i.case_id, m.case_id) \
+     WHERE i.plan_id = ?1 AND c.protected = 1)";
+const ITEM_HOLDS_PROTECTED: &str = "SELECT EXISTS (SELECT 1 FROM tk_cases c \
+     WHERE c.protected = 1 AND (c.id = ?1 OR c.id IN \
+     (SELECT m.case_id FROM tk_set_cases m WHERE m.set_id = ?2)))";
 const TEST_EVENTS_OF_PROJECT: &str =
     "SELECT op, before_json, after_json FROM tk_events WHERE project = ?1 ORDER BY id";
 
@@ -342,6 +369,9 @@ const STATEMENTS: &[&str] = &[
     PLAN_ITEM_DELETE,
     ITEMS_OF_PLAN,
     PLAN_ITEMS_OF_PROJECT,
+    ACTIVE_PLAN_OF_RELEASE,
+    PLAN_HOLDS_PROTECTED,
+    ITEM_HOLDS_PROTECTED,
     TEST_EVENTS_OF_PROJECT,
 ];
 
@@ -716,41 +746,10 @@ fn set_member(
         if held.project != before.project {
             return Err(cross_project(case_id, id));
         }
-        let position: Option<u32> = prepare(tx, SET_MEMBER_GET)?
-            .query_row([before.id, held.id], |row| row.get(0))
-            .optional()?;
-        let member = if adding {
-            if position.is_some() {
-                return Err(store::refusal(
-                    codes::SET_CASE_EXISTS,
-                    format!("{case_id} is already in {id}"),
-                ));
-            }
-            if count(tx, SET_MEMBER_COUNT, [before.id])? >= CASES_PER_SET_MAX {
-                return Err(full(
-                    codes::SET_CASES_FULL,
-                    "cases in a set",
-                    CASES_PER_SET_MAX,
-                ));
-            }
-            let position = next(tx, SET_MEMBER_NEXT, before.id)?;
-            prepare(tx, SET_MEMBER_INSERT)?.execute([before.id, held.id, position])?;
-            SetCase {
-                set_id: before.id,
-                case_id: held.id,
-                position: number_of(position),
-            }
-        } else {
-            let position = position.ok_or_else(|| {
-                store::refusal(codes::SET_CASE_UNKNOWN, format!("{case_id} is not in {id}"))
-            })?;
-            prepare(tx, SET_MEMBER_DELETE)?.execute([before.id, held.id])?;
-            SetCase {
-                set_id: before.id,
-                case_id: held.id,
-                position,
-            }
-        };
+        if !adding && held.protected && !sees_protected(actor) {
+            return Err(protected_refused(case_id));
+        }
+        let member = set_slot(tx, (id, &before), (case_id, &held), adding)?;
         let changed = prepare(tx, SET_TOUCH)?.execute([before.id, version])?;
         assert_eq!(changed, 1, "the version was checked in this transaction");
         let after = set_by_id(tx, before.id)?;
@@ -769,10 +768,55 @@ fn set_member(
     })
 }
 
-/// Creates a plan, or changes one at the version the caller read. Inputs: the transaction,
-/// the actor, the project key, the plan and its version when it exists, the fields and the
-/// time. Output: the plan, or `plans_full`, `release_unknown`, `cycle_unknown`,
-/// `stale_version` or a name refusal.
+fn set_slot(
+    tx: &Transaction<'_>,
+    (id, set): (&TestId, &TestSet),
+    (case_id, held): (&TestId, &Case),
+    adding: bool,
+) -> Result<SetCase, StoreError> {
+    assert_eq!(
+        held.project, set.project,
+        "the caller refused a case of another project"
+    );
+    let position: Option<u32> = prepare(tx, SET_MEMBER_GET)?
+        .query_row([set.id, held.id], |row| row.get(0))
+        .optional()?;
+    if !adding {
+        let position = position.ok_or_else(|| {
+            store::refusal(codes::SET_CASE_UNKNOWN, format!("{case_id} is not in {id}"))
+        })?;
+        prepare(tx, SET_MEMBER_DELETE)?.execute([set.id, held.id])?;
+        return Ok(SetCase {
+            set_id: set.id,
+            case_id: held.id,
+            position,
+        });
+    }
+    if position.is_some() {
+        let message = format!("{case_id} is already in {id}");
+        return Err(store::refusal(codes::SET_CASE_EXISTS, message));
+    }
+    if count(tx, SET_MEMBER_COUNT, [set.id])? >= CASES_PER_SET_MAX {
+        return Err(full(
+            codes::SET_CASES_FULL,
+            "cases in a set",
+            CASES_PER_SET_MAX,
+        ));
+    }
+    let position = next(tx, SET_MEMBER_NEXT, set.id)?;
+    prepare(tx, SET_MEMBER_INSERT)?.execute([set.id, held.id, position])?;
+    Ok(SetCase {
+        set_id: set.id,
+        case_id: held.id,
+        position: number_of(position),
+    })
+}
+
+/// Creates a plan, or changes one at the version the caller read; a release holds at most
+/// one active plan. Inputs: the transaction, the actor, the key, the plan and its version
+/// when it exists, the fields and the time. Output: the plan, or `plans_full`,
+/// `active_plan_exists`, `release_unknown`, `cycle_unknown`, `stale_version` or a name
+/// refusal.
 pub fn upsert_plan(
     tx: &Transaction<'_>,
     actor: &Actor,
@@ -790,6 +834,7 @@ pub fn upsert_plan(
             if count(tx, PLAN_COUNT, [project.id])? >= PLANS_PER_PROJECT_MAX {
                 return Err(full(codes::PLANS_FULL, "plans", PLANS_PER_PROJECT_MAX));
             }
+            active_plan_free(tx, project.id, (release, fields.status), None)?;
             let number = next(tx, PLAN_NEXT, project.id)?;
             prepare(tx, PLAN_INSERT)?.execute(params![
                 project.id,
@@ -813,30 +858,58 @@ pub fn upsert_plan(
             return Ok(created);
         };
         same_key(id, key)?;
-        let before = plan(tx, id)?;
-        store::current(&format!("plan {id}"), before.version, version)?;
-        let changed = prepare(tx, PLAN_UPDATE)?.execute(params![
-            before.id,
-            version,
-            fields.name,
-            release,
-            cycle,
-            status
-        ])?;
-        assert_eq!(changed, 1, "the version was checked in this transaction");
-        let after = plan_by_id(tx, before.id)?;
-        assert_eq!(after.status, fields.status);
-        record(
-            tx,
-            after.project,
-            PLAN_UPSERT,
-            actor,
-            now_ms,
-            Some(&before),
-            Some(&after),
-        )?;
-        Ok(after)
+        change_plan(tx, actor, (id, version), fields, (release, cycle), now_ms)
     })
+}
+
+fn change_plan(
+    tx: &Transaction<'_>,
+    actor: &Actor,
+    (id, version): (&TestId, i64),
+    fields: &PlanFields,
+    (release, cycle): (Option<i64>, Option<i64>),
+    now_ms: i64,
+) -> Result<TestPlan, StoreError> {
+    let before = plan(tx, id)?;
+    store::current(&format!("plan {id}"), before.version, version)?;
+    active_plan_free(
+        tx,
+        before.project,
+        (release, fields.status),
+        Some(before.id),
+    )?;
+    let reaimed =
+        before.status != fields.status || before.version_id != release || before.cycle_id != cycle;
+    if reaimed && !sees_protected(actor) && holds_protected(tx, PLAN_HOLDS_PROTECTED, [before.id])?
+    {
+        let message = format!(
+            "{id} holds a protected case; only the owner moves its status, release or cycle"
+        );
+        return Err(store::refusal(codes::CASE_PROTECTED, message));
+    }
+    let status = fields.status.as_str();
+    let changed = prepare(tx, PLAN_UPDATE)?.execute(params![
+        before.id,
+        version,
+        fields.name,
+        release,
+        cycle,
+        status
+    ])?;
+    assert_eq!(changed, 1, "the version was checked in this transaction");
+    let after = plan_by_id(tx, before.id)?;
+    assert_eq!(after.status, fields.status);
+    assert_eq!(after.version_id, release);
+    record(
+        tx,
+        after.project,
+        PLAN_UPSERT,
+        actor,
+        now_ms,
+        Some(&before),
+        Some(&after),
+    )?;
+    Ok(after)
 }
 
 /// Appends one case or one set of the plan's project to an open plan. Inputs: the
@@ -885,32 +958,15 @@ fn plan_member(
             ));
         }
         let (case_id, set_id) = item_ids(tx, &before, item)?;
-        let held = plan_position(tx, before.id, (case_id, set_id))?;
-        let position = if adding {
-            if held.is_some() {
-                return Err(store::refusal(
-                    codes::PLAN_ITEM_EXISTS,
-                    format!("{id} holds it"),
-                ));
-            }
-            if count(tx, PLAN_ITEM_COUNT, [before.id])? >= ITEMS_PER_PLAN_MAX {
-                return Err(full(
-                    codes::PLAN_ITEMS_FULL,
-                    "plan items",
-                    ITEMS_PER_PLAN_MAX,
-                ));
-            }
-            let position = next(tx, PLAN_ITEM_NEXT, before.id)?;
-            prepare(tx, PLAN_ITEM_INSERT)?
-                .execute(params![before.id, position, case_id, set_id])?;
-            number_of(position)
-        } else {
-            let position = held.ok_or_else(|| {
-                store::refusal(codes::PLAN_ITEM_UNKNOWN, format!("{id} does not hold it"))
-            })?;
-            prepare(tx, PLAN_ITEM_DELETE)?.execute(params![before.id, position])?;
-            position
-        };
+        if !adding
+            && !sees_protected(actor)
+            && holds_protected(tx, ITEM_HOLDS_PROTECTED, params![case_id, set_id])?
+        {
+            let (PlanItemRef::Case(target) | PlanItemRef::Set(target)) = item;
+            let message = format!("{target} is or holds a protected case; only the owner drops it");
+            return Err(store::refusal(codes::CASE_PROTECTED, message));
+        }
+        let position = plan_slot(tx, (id, before.id), (case_id, set_id), adding)?;
         let member = PlanItem {
             plan_id: before.id,
             position,
@@ -920,6 +976,7 @@ fn plan_member(
         let changed = prepare(tx, PLAN_TOUCH)?.execute([before.id, version])?;
         assert_eq!(changed, 1, "the version was checked in this transaction");
         let after = plan_by_id(tx, before.id)?;
+        assert_eq!(after.version, before.version + 1);
         let op = if adding { PLAN_ADD } else { PLAN_REMOVE };
         let parents = (&before, &after);
         record_member(
@@ -932,6 +989,74 @@ fn plan_member(
         )?;
         Ok(after)
     })
+}
+
+fn plan_slot(
+    tx: &Transaction<'_>,
+    (id, plan_id): (&TestId, i64),
+    (case_id, set_id): (Option<i64>, Option<i64>),
+    adding: bool,
+) -> Result<u32, StoreError> {
+    assert_ne!(
+        case_id.is_some(),
+        set_id.is_some(),
+        "a plan item names one case or one set"
+    );
+    let held = plan_position(tx, plan_id, (case_id, set_id))?;
+    if !adding {
+        let position = held.ok_or_else(|| {
+            store::refusal(codes::PLAN_ITEM_UNKNOWN, format!("{id} does not hold it"))
+        })?;
+        prepare(tx, PLAN_ITEM_DELETE)?.execute(params![plan_id, position])?;
+        return Ok(position);
+    }
+    if held.is_some() {
+        return Err(store::refusal(
+            codes::PLAN_ITEM_EXISTS,
+            format!("{id} holds it"),
+        ));
+    }
+    if count(tx, PLAN_ITEM_COUNT, [plan_id])? >= ITEMS_PER_PLAN_MAX {
+        return Err(full(
+            codes::PLAN_ITEMS_FULL,
+            "plan items",
+            ITEMS_PER_PLAN_MAX,
+        ));
+    }
+    let position = next(tx, PLAN_ITEM_NEXT, plan_id)?;
+    prepare(tx, PLAN_ITEM_INSERT)?.execute(params![plan_id, position, case_id, set_id])?;
+    Ok(number_of(position))
+}
+
+fn active_plan_free(
+    tx: &Transaction<'_>,
+    project: i64,
+    (release, status): (Option<i64>, PlanStatus),
+    except: Option<i64>,
+) -> Result<(), StoreError> {
+    let (Some(release), PlanStatus::Active) = (release, status) else {
+        return Ok(());
+    };
+    let holder: Option<u32> = prepare(tx, ACTIVE_PLAN_OF_RELEASE)?
+        .query_row(params![project, release, except], |row| row.get(0))
+        .optional()?;
+    let Some(number) = holder else {
+        return Ok(());
+    };
+    assert!(number >= 1, "plan numbers start at 1");
+    let message = format!("plan {number} is already the active plan of that release");
+    Err(store::refusal(codes::ACTIVE_PLAN_EXISTS, message))
+}
+
+fn holds_protected<P: Params>(
+    tx: &Transaction<'_>,
+    sql: &'static str,
+    args: P,
+) -> Result<bool, StoreError> {
+    assert!(sql == PLAN_HOLDS_PROTECTED || sql == ITEM_HOLDS_PROTECTED);
+    let held: i64 = prepare(tx, sql)?.query_row(args, |row| row.get(0))?;
+    assert!(held == 0 || held == 1, "EXISTS reads 0 or 1");
+    Ok(held == 1)
 }
 
 fn plan_position(
@@ -1068,9 +1193,9 @@ pub fn case_show(tx: &Transaction<'_>, actor: &Actor, id: &TestId) -> Result<Cas
     Ok(view)
 }
 
-/// Lists one page of a project's cases, at most `LIST_ROWS_MAX`, in number order. A
-/// protected case's kind and status stay hidden, and never match a kind or status filter,
-/// for an actor that may not see them. Inputs: the transaction, the actor, the key and the
+/// Lists one page of a project's cases, at most `LIST_ROWS_MAX`, in number order. For an
+/// actor that may not see protected cases, their kind and status stay hidden and no kind,
+/// status, set or unlinked filter matches them. Inputs: the transaction, actor, key and
 /// filter. Output: the rows, or `project_unknown`, `set_unknown` or `cross_project`.
 pub fn case_list(
     tx: &Transaction<'_>,
@@ -1622,6 +1747,10 @@ fn full(code: &'static str, what: &str, max: usize) -> StoreError {
     store::refusal(code, format!("at most {max} {what}"))
 }
 
+/// Appends one test event in the write's transaction. Test events carry no ticket, so a
+/// ticket's history never holds a case's steps or stable name; any read of a project's
+/// events must narrow protected cases with `case_view` before they leave the core. Inputs:
+/// the transaction, project, op, actor, time and the row before and after. Output: Ok.
 fn record<T: Serialize>(
     tx: &Transaction<'_>,
     project: i64,

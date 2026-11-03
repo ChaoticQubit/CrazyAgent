@@ -531,7 +531,7 @@ fn bounds_and_hidden_characters_are_refused_plainly() {
 }
 
 #[test]
-#[should_panic]
+#[should_panic(expected = "source.bytes().all(actor_byte)")]
 fn the_core_s_own_actor_takes_only_a_plain_source() {
     Actor::host("two words");
 }
@@ -615,5 +615,70 @@ fn no_trackwright_crate_depends_on_crazyagent() {
     assert!(
         seen >= 7,
         "the check read every dependency table ({seen} entries)"
+    );
+}
+
+#[test]
+fn a_store_hands_over_its_migrated_connection_with_foreign_keys_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let connection = opened(dir.path()).into_connection();
+    let foreign_keys: i64 = connection
+        .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(foreign_keys, 1);
+    let version: i64 = connection
+        .query_row(
+            "SELECT value FROM tk_meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, schema::SCHEMA_VERSION);
+}
+
+#[test]
+fn a_caller_cannot_pose_as_the_core_s_own_actor() {
+    #[derive(Debug, serde::Deserialize)]
+    struct Request {
+        assignee: Option<Actor>,
+    }
+    let posed = serde_json::from_str::<Request>(r#"{"assignee":"host:evidence"}"#).unwrap_err();
+    assert!(posed.to_string().contains(codes::ACTOR_INVALID), "{posed}");
+    let named = serde_json::from_str::<Request>(r#"{"assignee":"agent:w1"}"#).unwrap();
+    assert_eq!(named.assignee, Some(actor("agent:w1")));
+    assert_eq!(
+        Actor::try_from("host:evidence".to_owned())
+            .unwrap_err()
+            .code,
+        codes::ACTOR_INVALID
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = opened(dir.path());
+    let core = Actor::host("import");
+    let tx = store.transaction().unwrap();
+    store::create_project(&tx, &core, &key(), "CrazyAgent", 4_000).unwrap();
+    let imported =
+        store::create_ticket(&tx, &core, &key(), &new_ticket("Imported"), 4_001).unwrap();
+    store::update_ticket(
+        &tx,
+        &core,
+        &imported.short_id,
+        imported.version,
+        &TicketChange {
+            assignee: Some(Some(core.clone())),
+            ..TicketChange::default()
+        },
+        4_002,
+    )
+    .unwrap();
+    store::add_link(&tx, &core, &imported.short_id, "roadmap", "V3a", 4_003).unwrap();
+    let current = store::state(&tx, &key()).unwrap();
+    assert!(current.tickets[0].created_by.is_host());
+    assert_eq!(current.tickets[0].assignee.as_ref(), Some(&core));
+    assert_eq!(
+        events::replay(&tx, &key()).unwrap(),
+        current,
+        "the core's own actors still read back from rows and events"
     );
 }

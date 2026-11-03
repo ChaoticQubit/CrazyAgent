@@ -29,6 +29,7 @@ pub mod codes {
     pub const OPTION_NEEDS_HOST: &str = "option_needs_host";
     pub const RELEASE_UNKNOWN: &str = "release_unknown";
     pub const CYCLE_UNKNOWN: &str = "cycle_unknown";
+    pub const ACTIVE_PLAN_EXISTS: &str = "active_plan_exists";
 }
 
 pub const CASE_TITLE_BYTES_MAX: usize = 200;
