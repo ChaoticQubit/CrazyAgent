@@ -322,7 +322,7 @@ test("names and titles from agents or the file show hidden characters", () => {
 
 test("Settings and the project show the ticket settings and the Roadmap tab", () => {
   assert.equal(SETTINGS_TABS[SETTINGS_TABS.indexOf("process") + 1], "tickets");
-  assert.equal(PROJECT_TABS[PROJECT_TABS.indexOf("process") + 1], "roadmap");
+  assert.equal(PROJECT_TABS[PROJECT_TABS.indexOf("tickets") + 1], "roadmap");
   const app = read("src/screens/settings/index.tsx");
   assert.match(app, /\{ id: "tickets", label: "Tickets", icon: "[a-z-]+" \}/);
   assert.match(app, /tab === "tickets" \? <TicketSettings \/>/);

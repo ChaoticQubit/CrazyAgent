@@ -3,7 +3,7 @@ import type { Result } from "../../api";
 import { failureCopy } from "../../api-projects";
 import { loadTicketSettings } from "../../api-ticket-settings";
 import { trackerOp, trackerProjects } from "../../api-tracker";
-import type { TrackerEnvelope } from "../../api-tracker";
+import type { TrackerEnvelope, TrackerOpName } from "../../api-tracker";
 import { useLoad, type Loaded } from "../../state";
 import { Button, Checkbox, LoadError, Notice, NotReady, Skeleton } from "../../ui";
 import { displayText } from "../conversation";
@@ -311,7 +311,7 @@ export function roadmapRefusal(code: string): string {
   return Object.hasOwn(ROADMAP_REFUSALS, code) ? ROADMAP_REFUSALS[code] : failureCopy(code);
 }
 
-async function op<T>(name: string, args: Record<string, unknown>, read: (data: unknown) => T | null): Promise<Result<{ data: T; cursor: string | null }>> {
+async function op<T>(name: TrackerOpName, args: Record<string, unknown>, read: (data: unknown) => T | null): Promise<Result<{ data: T; cursor: string | null }>> {
   const result: Result<TrackerEnvelope> = await trackerOp(name, args);
   if (result.kind !== "ok") return result;
   const envelope = result.value;
