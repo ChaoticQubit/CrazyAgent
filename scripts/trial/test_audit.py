@@ -734,8 +734,8 @@ class AuditTests(unittest.TestCase):
                   finished_ms=None if end is None else w.now - 600_000 + end * 1000)
         return lead, other
 
-    def test_t3_26_shared_account_passes_when_two_agents_run_on_one_account_at_once_and_fails_when_one_waited(self):
-        record = self.world.audit("T3-26")
+    def test_t3_27_shared_account_passes_when_two_agents_run_on_one_account_at_once_and_fails_when_one_waited(self):
+        record = self.world.audit("T3-27")
         self.assertEqual(record["result"], "UNKNOWN")
         self.assertIn("not exercised", record["detail"])
         work, home = "claude-max-work", "claude-max-home"
@@ -750,7 +750,7 @@ class AuditTests(unittest.TestCase):
             self.tearDown()
             self.setUp()
             self.two_on_accounts(first, second, role)
-            record = self.world.audit("T3-26")
+            record = self.world.audit("T3-27")
             self.assertEqual(record["result"], result, (first, second, role, record["detail"]))
             self.assertIn(shown, record["detail"])
             for path in self.world.out.rglob("*"):
@@ -767,7 +767,7 @@ class AuditTests(unittest.TestCase):
             else:
                 waited = w.row("team_events", project=PROJECT, agent=lead, kind="status", text="Waiting for a free account",
                                state="new", created_ms=w.now)
-            record = w.audit("T3-26")
+            record = w.audit("T3-27")
             self.assertEqual(record["result"], "FAIL", (table, record["detail"]))
             self.assertIn(f"an agent waited for its account: {table} {waited}", record["detail"])
 

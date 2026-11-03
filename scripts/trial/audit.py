@@ -1891,7 +1891,7 @@ CHECKS = (
         "how": "team_reask_empty for the project (no row is on); done team_tasks with a blank result per agent; the engine's re-ask turn text in each agent's transcript; engine notes of an empty master reply, which the setting does not cover.",
     },
     {
-        "id": "T3-26", "name": "shared account", "run": check_shared_account,
+        "id": "T3-27", "name": "shared account", "run": check_shared_account,
         "title": "Agents beyond the pool's account count run at once, none waiting for a free account",
         "proves": "Two agents of the project ran tasks on the same pool account at the same time, and no agent, task or team event says it waited for its account.",
         "why": "OP-40, DEC-086: any number of agents share one signed-in account (fix 08ac582c, B-55). Owner 10-25: Claude has 4 accounts, agents beyond 4 wait for a free account. New in trial 3; UNKNOWN when no two agents shared an account at once.",
