@@ -15,7 +15,7 @@ pub use transport::native_auth_channel::claude::ClaudeAuthInput;
 pub use native_auth::{
     NativeAuthAccount, NativeAuthAction, NativeAuthCancel, NativeAuthChallenge, NativeAuthFact,
     NativeAuthLogout, NativeAuthMethod, NativeAuthPhase, NativeAuthQuery, NativeAuthReply,
-    NativeAuthScope, NativeAuthStart,
+    NativeAuthScope, NativeAuthStart, ends_operation,
 };
 
 pub use transport::accounts::{AccountCheck, AccountPage};
@@ -25,10 +25,10 @@ pub use transport::cleanup::CLEANUP_CODES;
 pub use transport::ide::IDE_CODES;
 pub use transport::ide_extensions::IDE_EXTENSIONS_CODES;
 pub use transport::ide_tab::{IDE_TAB_CODES, IdeTabServer, IdeTabState};
-pub use transport::plugins::{ServerPage, SkillPage};
+pub use transport::plugins::{HookPage, ServerPage, SkillPage};
 pub use transport::process::{
-    AgentInstructions, InstructionRecord, InstructionSettings, InstructionView, PROCESS_CODES,
-    ProcessSaved, ProcessText, SavedText,
+    Adoption, AgentInstructions, ImportCommit, ImportFile, InstructionMode, InstructionRecord,
+    InstructionSettings, InstructionView, PROCESS_CODES, ProcessSaved, ProcessText, SavedText,
 };
 pub use transport::questions::QUESTIONS_CODES;
 pub use transport::recovery::{
@@ -162,6 +162,10 @@ pub enum OwnerMutation {
     SetProjectReadPaths {
         project_id: ProjectId,
         version: u64,
+        paths: Vec<String>,
+    },
+    SetProjectHiddenPaths {
+        project_id: ProjectId,
         paths: Vec<String>,
     },
     SetProjectAgentPolicy {
@@ -346,6 +350,14 @@ impl OwnerMutation {
                 let action = crate::project_setup::SetupAction::SetReadPaths {
                     project_id: project_id.clone(),
                     version: *version,
+                    paths: paths.clone(),
+                };
+                action.validate()?;
+                Command::ProjectSetup { action }
+            }
+            Self::SetProjectHiddenPaths { project_id, paths } => {
+                let action = crate::project_setup::SetupAction::SetHiddenPaths {
+                    project_id: project_id.clone(),
                     paths: paths.clone(),
                 };
                 action.validate()?;
@@ -639,6 +651,9 @@ pub enum OwnerRead {
     ProjectReadPaths {
         project_id: ProjectId,
     },
+    ProjectHiddenPaths {
+        project_id: ProjectId,
+    },
     ProjectAgentPolicy {
         project_id: ProjectId,
     },
@@ -660,6 +675,9 @@ pub enum OwnerRead {
         limit: u16,
     },
     TeamEvents,
+    CoordQuestions {
+        project_id: ProjectId,
+    },
     ProjectContext {
         project_id: ProjectId,
     },
@@ -697,7 +715,9 @@ pub enum OwnerRead {
     PoolSummaries {
         offset: u8,
     },
-    AccountSchedule,
+    AccountSchedule {
+        after: Option<crate::scheduling::ScheduleCursor>,
+    },
     AccountRanking,
     Page {
         view: OwnerView,
@@ -757,12 +777,14 @@ impl OwnerRead {
             | Self::CurrentBrief { .. }
             | Self::ProjectSetup { .. }
             | Self::ProjectReadPaths { .. }
+            | Self::ProjectHiddenPaths { .. }
             | Self::ProjectAgentPolicy { .. }
             | Self::ResearchJobs { .. }
             | Self::TeamStatus { .. }
             | Self::TeamGraph { .. }
             | Self::IdeAsks { .. }
             | Self::TeamEvents
+            | Self::CoordQuestions { .. }
             | Self::ProjectContext { .. }
             | Self::OwnerProfile
             | Self::ProjectsHome
@@ -772,7 +794,7 @@ impl OwnerRead {
             | Self::Memory { .. }
             | Self::ApprovedMemories { .. }
             | Self::PoolSummaries { .. }
-            | Self::AccountSchedule
+            | Self::AccountSchedule { .. }
             | Self::AccountRanking => return Ok(None),
             Self::Memories { search, limit, .. } => {
                 crate::memory::library::validate_page(search.as_deref(), *limit)?;
@@ -1115,6 +1137,10 @@ pub enum OwnerData {
         paths: Vec<String>,
         version: u64,
     },
+    ProjectHiddenPaths {
+        project_id: ProjectId,
+        paths: Vec<String>,
+    },
     ProjectAgentPolicy {
         project_id: ProjectId,
         policy: crate::sandbox::policy::PolicyView,
@@ -1138,6 +1164,9 @@ pub enum OwnerData {
     },
     TeamEvents {
         events: Box<crate::team::events::AppEvents>,
+    },
+    CoordQuestions {
+        inbox: Box<crate::team::questions::Inbox>,
     },
     ProjectContext {
         context: crate::project_setup::ProjectContext,
@@ -1183,6 +1212,7 @@ pub enum OwnerData {
     },
     AccountSchedule {
         schedule: crate::scheduling::Schedule,
+        next: Option<crate::scheduling::ScheduleCursor>,
     },
     AccountRanking {
         pools: Vec<crate::scheduling::PoolRanking>,

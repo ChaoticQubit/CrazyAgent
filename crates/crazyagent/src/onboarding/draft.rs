@@ -180,7 +180,10 @@ fn open_text(path: &Path) -> std::io::Result<std::fs::File> {
 #[cfg(unix)]
 type Folder = rustix::fd::OwnedFd;
 
-/// A real folder checked by path where no folder-relative open exists here.
+/// A real folder checked by path, since std has no folder-relative open on Windows. Each
+/// later open goes by path again, so a local process that swaps a folder for a junction
+/// between the check and the open is not caught: a known Windows gap until a handle-based
+/// open that never follows a reparse point replaces it.
 #[cfg(windows)]
 type Folder = std::path::PathBuf;
 
@@ -193,8 +196,9 @@ fn open_folder(path: &Path) -> Option<Folder> {
     rustix::fs::open(path, flags, Mode::empty()).ok()
 }
 
-/// Checks that `path` is a real folder, not a link to one. Takes the path.
-/// Returns the folder path or `None`.
+/// Checks that `path` is a real folder, not a link to one, at the time of the check only:
+/// the known Windows gap described on [`Folder`]. Takes the path. Returns the folder path
+/// or `None`.
 #[cfg(windows)]
 fn open_folder(path: &Path) -> Option<Folder> {
     real_dir(path).then(|| path.to_path_buf())
@@ -251,8 +255,9 @@ fn open_in(folder: &Folder, name: &str) -> Option<std::fs::File> {
         .map(std::fs::File::from)
 }
 
-/// Opens the file `name` in `folder` as the reparse point itself. Takes the
-/// folder and the file name. Returns the file or `None`.
+/// Opens the file `name` in `folder` as the reparse point itself, reaching the folder by
+/// path again: the known Windows gap described on [`Folder`]. Takes the folder and the
+/// file name. Returns the file or `None`.
 #[cfg(windows)]
 fn open_in(folder: &Folder, name: &str) -> Option<std::fs::File> {
     open_text(&folder.join(name)).ok()
@@ -715,6 +720,13 @@ pub(crate) fn seal(drafted: &Drafted) -> Option<String> {
     Some(format!("{:x}", Sha256::digest(bytes)))
 }
 
+/// The seal of an overview the engine wrote: the SHA-256 of its text as [`overview`] reads
+/// it back, so the onboarding view shows an overview as the mapping agent's only while the
+/// folder holds that text. Takes the text. Returns the lowercase hex digest.
+pub(crate) fn overview_seal(overview: &str) -> String {
+    format!("{:x}", Sha256::digest(overview.as_bytes()))
+}
+
 /// The draft saved in `layout`/setup/draft.json, when it is a readable, valid draft;
 /// `None` otherwise, so onboarding starts fresh without touching the file. Whether this
 /// engine saved it is the caller's check against its seal.
@@ -844,19 +856,20 @@ pub(crate) fn overview_blocked(layout: &Path) -> bool {
 /// Writes the agent's overview as `layout`/overview.md while nothing is there, never
 /// replacing an entry: an overview kept from before stays as the owner or an earlier run
 /// left it, and a file made meanwhile wins. Takes the layout folder and the overview text.
-/// Returns whether it wrote.
+/// Returns the overview as [`overview`] reads it back when it wrote, else `None`.
 #[cfg(unix)]
-pub(crate) fn write_overview(layout: &Path, overview: &str) -> std::io::Result<bool> {
+pub(crate) fn write_overview(layout: &Path, overview: &str) -> std::io::Result<Option<String>> {
     let body = overview.trim();
     if body.is_empty() {
-        return Ok(false);
+        return Ok(None);
     }
     let text = if body.starts_with('#') {
         format!("{body}\n")
     } else {
         format!("# Project overview\n\n{body}\n")
     };
+    let text = clip(&text, OVERVIEW_BYTES_MAX);
     let layout =
         open_folder(layout).ok_or_else(|| std::io::Error::other("not a real directory"))?;
-    write_new(&layout, OVERVIEW_FILE, text.as_bytes())
+    Ok(write_new(&layout, OVERVIEW_FILE, text.as_bytes())?.then(|| text.trim().to_owned()))
 }

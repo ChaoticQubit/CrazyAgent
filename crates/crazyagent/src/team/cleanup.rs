@@ -307,10 +307,17 @@ pub fn finished(
             disk_bytes(&target.place.worktree, &mut budget)
         };
         let (folder, all_folder) = disk_bytes(&agent_folder(team, agent.id), &mut budget);
+        let label = if agent.role == AgentRole::Sub
+            && super::events::name_reaches_running(db, project, agent.id)?
+        {
+            AgentRole::Sub.agent_label(agent.id)
+        } else {
+            agent.label
+        };
         found.push(FinishedAgent {
             id: agent.id,
             role: agent.role,
-            label: agent.label,
+            label,
             harness: agent.harness,
             stopped_ms: agent.stopped_ms,
             bytes: worktree.saturating_add(folder),
@@ -512,12 +519,20 @@ fn unclaim(db: &Connection, project: &ProjectId, agents: &[i64]) -> Result<(), E
     tx.commit().map_err(unavailable)
 }
 
-/// Deletes a removed agent's folder and sandbox profile from the team state, making its
-/// read-only folders writable first, such as a module cache a toolchain left. Inputs: the
-/// team state folder and the agent. Output: Ok once both are gone.
+/// Deletes a removed agent's folder and sandbox profile from the team state, with a native
+/// lead's teammates' profile and teammates' socket name record (rv-audit TTDL F2), making
+/// its read-only folders writable first, such as a module cache a toolchain left. Inputs:
+/// the team state folder and the agent. Output: Ok once all are gone.
 fn remove_agent_files(team: &Path, id: i64) -> Result<(), EngineError> {
     remove_tree(&agent_folder(team, id))?;
-    gone(std::fs::remove_file(profile(team, id)))
+    for file in [
+        profile(team, id),
+        super::runtime::agent_teammates_profile(team, id),
+        super::runtime::agent_teammates_socket_name(team, id),
+    ] {
+        gone(std::fs::remove_file(file))?;
+    }
+    Ok(())
 }
 
 fn gone(result: std::io::Result<()>) -> Result<(), EngineError> {

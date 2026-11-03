@@ -6,10 +6,13 @@ use crate::engine::owner::{ProcessText, SavedText};
 mod tests;
 
 /// One Process request the TUI sends.
-/// Reads or saves the app-wide or one project's instructions, reads a seed for a preview,
-/// reads what one team agent received at its last launch (none for the newest master), or
-/// reads or saves one project's agent instruction settings. A save names the version it
-/// read and, only for "Keep mine" after a stale reply, the older version the owner opened.
+/// Reads or saves the app-wide or one project's instructions, reads a seed for a preview
+/// (the default process or one file the owner named), reads what one team agent received at
+/// its last launch (none for the newest master), reads or saves one project's agent
+/// instruction settings, reads its workflow adoption, lists or confirms the one-time
+/// import of its own instruction files, lists the moved files still waiting for a commit or
+/// commits that move (DEC-106 and its addendum). A save names the version it read and, only
+/// for "Keep mine" after a stale reply, the older version the owner opened.
 /// Runs on the owner worker; the reply arrives as `OwnerEvent::Process` with this query.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum ProcessQuery {
@@ -22,7 +25,9 @@ pub(in crate::tui) enum ProcessQuery {
         version: u64,
         opened: Option<u64>,
     },
-    ImportGlobal,
+    ReadFile {
+        path: std::path::PathBuf,
+    },
     Default,
     Agent {
         project: ProjectId,
@@ -36,12 +41,29 @@ pub(in crate::tui) enum ProcessQuery {
         settings: crate::engine::owner::InstructionSettings,
         version: Option<u64>,
     },
+    Adoption {
+        project: ProjectId,
+    },
+    PendingImport {
+        project: ProjectId,
+    },
+    ConfirmImport {
+        project: ProjectId,
+    },
+    Uncommitted {
+        project: ProjectId,
+    },
+    CommitImport {
+        project: ProjectId,
+    },
 }
 
 /// What one Process request returned: a seed text, the saved text with its version, what a
 /// save did (saved with what it comes to beside what a Claude master takes, or stale with
-/// the newer text), what one team agent received at its last launch, or one project's
-/// agent instruction settings as stored with their version.
+/// the newer text), what one team agent received at its last launch, one project's agent
+/// instruction settings as stored with their version, its workflow adoption, the
+/// instruction files an import would move or moved, the moved paths still waiting for a
+/// commit, or that commit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum ProcessReply {
     Text(String),
@@ -49,6 +71,10 @@ pub(in crate::tui) enum ProcessReply {
     Saved(SavedText),
     Agent(Box<crate::engine::owner::AgentInstructions>),
     Settings(crate::engine::owner::InstructionView),
+    Adoption(Box<crate::engine::owner::Adoption>),
+    Files(Vec<crate::engine::owner::ImportFile>),
+    Paths(Vec<String>),
+    Committed(crate::engine::owner::ImportCommit),
 }
 
 /// One Process reply for the screens.
@@ -126,8 +152,8 @@ impl NativeOwner {
                 .save_process_text(project, text, version, opened)
                 .await
                 .map(ProcessReply::Saved),
-            ProcessQuery::ImportGlobal => controller
-                .import_global_instructions()
+            ProcessQuery::ReadFile { path } => controller
+                .read_instruction_file(path)
                 .await
                 .map(ProcessReply::Text),
             ProcessQuery::Default => controller.default_process().await.map(ProcessReply::Text),
@@ -147,6 +173,26 @@ impl NativeOwner {
                 .save_instruction_settings(project, settings, version)
                 .await
                 .map(ProcessReply::Settings),
+            ProcessQuery::Adoption { project } => controller
+                .adoption(project)
+                .await
+                .map(|view| ProcessReply::Adoption(Box::new(view))),
+            ProcessQuery::PendingImport { project } => controller
+                .instruction_import(project)
+                .await
+                .map(ProcessReply::Files),
+            ProcessQuery::ConfirmImport { project } => controller
+                .confirm_instruction_import(project)
+                .await
+                .map(ProcessReply::Files),
+            ProcessQuery::Uncommitted { project } => controller
+                .uncommitted_instruction_import(project)
+                .await
+                .map(ProcessReply::Paths),
+            ProcessQuery::CommitImport { project } => controller
+                .commit_instruction_import(project)
+                .await
+                .map(ProcessReply::Committed),
         }
         .map_err(problem)
     }

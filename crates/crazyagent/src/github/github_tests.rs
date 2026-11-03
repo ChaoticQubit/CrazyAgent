@@ -568,6 +568,67 @@ fn repos_page_uses_the_stored_token_and_offers_the_next_page_when_full() {
     assert_eq!(query.get("sort").map(String::as_str), Some("pushed"));
 }
 
+#[test]
+fn a_dot_named_repository_is_listed_and_never_stops_the_rest_of_the_page() {
+    let scratch = Scratch::new();
+    let secret_text = token();
+    let expected = secret_text.clone();
+    let long = format!("octo-cat/{}\u{202e}", "x".repeat(300));
+    let served_long = long.clone();
+    let server = Server::start(move |seen, _| match seen.path.as_str() {
+        "/user" => user(seen, &expected),
+        "/user/repos" if bearer(seen, &expected) => {
+            let repos: Vec<serde_json::Value> = (0..100)
+                .map(|index| {
+                    let full_name = match index {
+                        3 => "octo-cat/.github".to_owned(),
+                        5 => "octo-cat/-dash".to_owned(),
+                        9 => served_long.clone(),
+                        _ => format!("octo-cat/repo-{index}"),
+                    };
+                    let branch = if index == 7 { "ma\u{7}in\nx" } else { "main" };
+                    serde_json::json!({
+                        "full_name": full_name,
+                        "private": false,
+                        "default_branch": branch,
+                        "size": 1,
+                    })
+                })
+                .collect();
+            Answer::json(200, serde_json::Value::Array(repos))
+        }
+        _ => Answer::json(401, serde_json::json!({})),
+    });
+    let account = scratch.account(&server);
+    account.use_token(secret(&secret_text)).unwrap();
+    let page = account.repos(1).unwrap();
+    assert_eq!(page.repos.len(), 100);
+    assert_eq!(page.next, Some(2));
+    assert_eq!(page.repos[3].full_name, "octo-cat/.github");
+    assert_eq!(page.repos[5].full_name, "octo-cat/-dash");
+    assert_eq!(page.repos[7].default_branch, "ma\\u0007in\\u000ax");
+    assert_eq!(page.repos[8].full_name, "octo-cat/repo-8");
+    let shown = &page.repos[9].full_name;
+    assert!(
+        shown.starts_with("octo-cat/xxx") && shown.len() <= 201,
+        "{shown}"
+    );
+    assert!(!shown.contains('\u{202e}'), "{shown}");
+    assert_ne!(shown, &long);
+    for (index, repo) in page.repos.iter().enumerate() {
+        let refused = matches!(index, 3 | 5 | 9).then_some("github_repo_name_unsupported");
+        assert_eq!(repo.refused.as_deref(), refused, "{index}");
+    }
+    let home = tempfile::tempdir().unwrap();
+    assert_eq!(
+        account
+            .clone_repo(home.path(), "octo-cat/.github")
+            .unwrap_err()
+            .0,
+        "github_repo_name_invalid"
+    );
+}
+
 fn served_repository(full_name: &str, secret_text: &str) -> (tempfile::TempDir, Server) {
     let source = tempfile::tempdir().unwrap();
     let work = source.path().join("work");

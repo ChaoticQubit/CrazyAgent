@@ -9,23 +9,23 @@ const io = await import("../src/screens/team/terminal-io.ts");
 const view = await import("../src/screens/team/index.tsx");
 
 const node = (id, kind, extra = {}) => ({
-  id, kind, parent: null, label: id, harness: "codex", status: null, status_label: null, account: null, agents: null, terminal: null, ...extra,
+  id, kind, parent: null, label: id, harness: "codex", status: null, status_label: null, account: null, terminal: null, ...extra,
 });
 const edge = (task_id, from, to, state, extra = {}) => ({ from, to, task_id, source: "master", text: `Task ${task_id}`, state, reply: null, ...extra });
 
 const team = {
   project_id: "chores",
   nodes: [
-    node("team-2", "agent", { parent: "g-codex", label: "codex-2", status: "working", status_label: "Working", account: "acct-work", terminal: "team-2" }),
-    node("g-codex", "harness_group", { parent: "m", label: "Codex", agents: 2 }),
-    node("m", "master", { label: "Master", status: "idle", terminal: "team-9" }),
-    node("team-1", "agent", { parent: "g-codex", label: "codex-1", status: "idle", terminal: "team-1" }),
-    node("g-claude", "harness_group", { parent: "m", label: "Claude Code", harness: "claude", agents: 0 }),
+    node("team-2", "sub", { parent: "team-4", label: "codex-2", status: "working", status_label: "Working", account: "acct-work", terminal: "team-2", agent: 2 }),
+    node("teammate-4-12", "teammate", { parent: "team-4", label: "Teammate %12", harness: "claude", status_label: "Running", terminal: "team-4", agent: null, pane: "%12" }),
+    node("m", "master", { label: "Master", status: "idle", terminal: "team-9", agent: 9 }),
+    node("team-1", "lead", { parent: "m", label: "codex-1", status: "idle", terminal: "team-1", agent: 1 }),
+    node("team-4", "lead", { parent: "m", label: "claude-4", harness: "claude", status: "idle", terminal: "team-4", agent: 4 }),
   ],
   edges: [
     edge(3, "m", "team-1", "done", { reply: "Wrote chores.md" }),
     edge(7, "m", "team-2", "running"),
-    edge(8, "m", "g-claude", "sent", { source: "owner" }),
+    edge(8, "m", "m", "sent", { source: "owner" }),
   ],
 };
 
@@ -35,37 +35,42 @@ test("graph nodes name their account as the Team panel does, never by its id", (
   assert.deepEqual(named.nodes.map((item) => item.account), ["Work ChatGPT", null, null, null, null]);
   assert.equal(team.nodes[0].account, "acct-work", "the engine's graph is left as it was");
   assert.deepEqual(graph.namedAccounts(team, () => "x").edges, team.edges);
-  assert.equal(view.nodeLabel(named.nodes[0]), "codex-2, codex, Work ChatGPT, Working. No task yet. Opens its terminal.");
+  assert.equal(view.nodeLabel(named.nodes[0]), "codex-2, Sub-agent, codex, Work ChatGPT, Working. No task yet. Opens its terminal.");
 });
 
 test("nodes and edges use the engine's status words with fixed tones", () => {
   assert.deepEqual(graph.nodeStatus(team.nodes[0]), { word: "Working", tone: "info" });
-  assert.deepEqual(graph.nodeStatus(node("a", "agent", { status: "failed", status_label: " " })), { word: "Failed", tone: "danger" });
-  assert.equal(graph.nodeStatus(node("g", "harness_group")), null);
+  assert.deepEqual(graph.nodeStatus(node("a", "sub", { status: "failed", status_label: " " })), { word: "Failed", tone: "danger" });
+  assert.deepEqual(graph.nodeStatus(team.nodes[1]), { word: "Running", tone: "info" }, "a pane teammate has a label and no status");
+  assert.equal(graph.nodeStatus(node("t", "teammate", { status_label: "  " })), null);
   assert.deepEqual(graph.edgeStatus(team.edges[0]), { word: "Done", tone: "ok" });
   assert.deepEqual(graph.edgeStatus(team.edges[1]), { word: "Running", tone: "info" });
   const name = (id) => ({ codex: "Codex", claude: "Claude Code" })[id] ?? id;
   assert.equal(graph.nodeDetail(team.nodes[2], name), "Master, Codex");
-  assert.equal(graph.nodeDetail(team.nodes[1], name), "Codex, 2 agents");
-  assert.equal(graph.nodeDetail(node("g", "harness_group", { agents: 1 })), "codex, 1 agent");
-  assert.equal(graph.nodeDetail(node("g", "harness_group", { agents: 1, status_label: "1 of 2 agents" }), name), "Codex, 1 of 2 agents");
-  assert.equal(graph.nodeDetail(team.nodes[0], name), "Codex, acct-work");
-  assert.equal(graph.nodeDetail(named.nodes[0], name), "Codex, Work ChatGPT");
-  assert.equal(graph.nodeDetail(team.nodes[3], name), "Codex");
-  const ada = node("team-7", "agent", { label: "Ada (@onboarding-fix)", harness: "claude", status: "working", status_label: "Working" });
+  assert.equal(graph.nodeDetail(team.nodes[1], name), "Teammate, Claude Code");
+  assert.equal(graph.nodeDetail(team.nodes[0], name), "Sub-agent, Codex, acct-work");
+  assert.equal(graph.nodeDetail(named.nodes[0], name), "Sub-agent, Codex, Work ChatGPT");
+  assert.equal(graph.nodeDetail(team.nodes[3], name), "Lead, Codex");
+  assert.equal(graph.nodeDetail(team.nodes[4]), "Lead, claude");
+  assert.equal(graph.nodeDetail(node("x", "someday", { account: "  " })), "Agent, codex", "an unknown kind from a newer engine still reads");
+  const ada = node("team-7", "sub", { label: "Ada (@onboarding-fix)", harness: "claude", status: "working", status_label: "Working" });
   assert.equal(graph.nodeLine(ada, name), "Ada (@onboarding-fix) \u00b7 Claude Code \u00b7 working");
   assert.equal(graph.cardText(ada, [], name).title, "Ada (@onboarding-fix)");
-  assert.equal(graph.cardTip(ada, [], name)[0], "Ada (@onboarding-fix)");
+  assert.equal(graph.cardText(ada, [], name).branch, null);
+  assert.equal(graph.cardText({ ...ada, branch: " crazyagent/agent-7 " }, [], name).branch, "crazyagent/agent-7");
+  assert.equal(graph.cardTip(ada, { project_id: "p", nodes: [ada], edges: [] }, name)[0], "Ada (@onboarding-fix)");
   assert.equal(graph.nodeLine(team.nodes[2], name), "Master \u00b7 Codex \u00b7 idle");
-  assert.equal(graph.nodeLine(node("team-8", "agent", { label: "Grace" })), "Grace \u00b7 codex");
+  assert.equal(graph.nodeLine(node("team-8", "sub", { label: "Grace" })), "Grace \u00b7 codex");
 });
 
 test("the graph reads again quickly only while work is live", () => {
   assert.equal(graph.graphLive(team), true);
   const quiet = { ...team, nodes: team.nodes.map((item) => ({ ...item, status: item.status && "idle" })), edges: [edge(3, "m", "team-1", "done")] };
   assert.equal(graph.graphLive(quiet), false);
-  assert.equal(graph.graphSummary(team), "1 of 2 agents working. 2 tasks live.");
-  assert.equal(graph.graphSummary(quiet), "0 of 2 agents working. 0 tasks live.");
+  assert.equal(graph.graphSummary(team), "1 of 4 agents working. 2 tasks live.");
+  assert.equal(graph.graphSummary(quiet), "0 of 4 agents working. 0 tasks live.");
+  const asking = { ...team, nodes: team.nodes.map((item) => item.id === "team-1" ? { ...item, waiting: "permission" } : item.id === "m" ? { ...item, owner_questions: 2 } : item) };
+  assert.equal(graph.graphSummary(asking, 3), "1 of 4 agents working. 2 tasks live. 2 waiting on you. 3 agents not shown.");
 });
 
 test("typed keys reach the agent as the UTF-8 bytes a terminal reads", () => {
@@ -163,7 +168,7 @@ test("the terminal panel names the agent, says it is connecting and offers Close
   assert.match(html, /aria-label="Close terminal"/);
   assert.match(html, /Connecting to the terminal\.\.\./);
   assert.match(html, /codex-2 \u00b7 codex \u00b7 working<\/span><span class="tg-terminal-detail">acct-work</);
-  const none = renderToStaticMarkup(createElement(view.TerminalPanel, { node: node("team-5", "agent"), onClose() {} }));
+  const none = renderToStaticMarkup(createElement(view.TerminalPanel, { node: node("team-5", "sub"), onClose() {} }));
   assert.match(none, /This agent has no terminal yet/);
   assert.doesNotMatch(none, /Connecting/);
 });
@@ -230,6 +235,12 @@ test("the note under a live terminal says typed keys are not kept or told to the
   assert.equal(panel.typingNote(team.nodes[2]), "Typing goes straight to the master.");
   assert.equal(panel.typingNote(team.nodes[0]),
     "Typing goes straight to this agent and is not kept. Only a prompt you send below is also told to its master.");
+  assert.equal(panel.typingNote(team.nodes[1]), "Typing goes straight to this teammate's pane and is not kept or told to the master.");
+  assert.equal(panel.teammatePane(team.nodes[1]), "%12");
+  assert.equal(panel.teammatePane(team.nodes[0]), null);
+  assert.equal(panel.promptCopy(team.nodes[1]).placeholder, "Tell Teammate %12 what to do. It goes to its pane only.");
+  assert.equal(panel.typingNote({ ...team.nodes[1], agent: 12 }),
+    "Typing goes straight to this agent and is not kept. Only a prompt you send below is also told to its master.");
 });
 
 test("the composer names who reads the prompt and says a sub-agent's master is told", () => {
@@ -243,7 +254,7 @@ test("the composer names who reads the prompt and says a sub-agent's master is t
   const master = panel(team.nodes[2]);
   assert.match(master, /Prompt the master/);
   assert.doesNotMatch(master, /Its master is told/);
-  assert.doesNotMatch(panel(node("team-5", "agent")), /tg-composer/);
+  assert.doesNotMatch(panel(node("team-5", "sub")), /tg-composer/);
 });
 
 test("the Agents tab shows the team graph above the team panel", async () => {

@@ -1,5 +1,5 @@
 use crate::project_setup::ProjectContext;
-use crate::team::{NodeKind, TeamGraph};
+use crate::team::TeamGraph;
 
 pub(in crate::tui) const PROMPT_LINES_MAX: usize = 8;
 pub(in crate::tui) const MENU_SHOWN_MAX: usize = 6;
@@ -157,7 +157,7 @@ pub(in crate::tui) fn tags(
     let handles = graph
         .into_iter()
         .flat_map(|graph| &graph.nodes)
-        .filter(|node| node.kind == NodeKind::Agent)
+        .filter(|node| node.kind.agent())
         .filter_map(|node| label_tag(&node.label))
         .map(str::to_owned);
     let listed = files.into_iter().flatten().map(String::as_str);

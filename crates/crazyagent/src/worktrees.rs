@@ -120,6 +120,14 @@ struct Identity {
     inode: u64,
 }
 
+impl Identity {
+    /// Gives the identity as the (device, inode) pair the whole-volume renumber rule
+    /// compares. Input: the identity. Output: its pair.
+    fn pair(&self) -> (u64, u64) {
+        (self.device, self.inode)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Admission {
     repository: String,
@@ -1032,12 +1040,20 @@ fn inspect(repository: &str) -> Result<Admission, EngineError> {
     })
 }
 
-fn verify(admission: &Admission) -> Result<(), EngineError> {
+/// Checks that an admitted repository still holds the admitted root and .git folders,
+/// accepting a whole-volume device renumber with every inode exact. Input: the stored
+/// admission, never rewritten. Output: the live admission, or
+/// `admitted_repository_replaced`.
+fn verify(admission: &Admission) -> Result<Admission, EngineError> {
     let current = inspect(&admission.repository)?;
-    if current.root != admission.root || current.metadata != admission.metadata {
+    if !crate::file_identity::same_files(
+        &[admission.root.pair(), admission.metadata.pair()],
+        &[current.root.pair(), current.metadata.pair()],
+    ) {
         return Err(error("admitted_repository_replaced"));
     }
-    Ok(())
+    assert_eq!(current.repository, admission.repository);
+    Ok(current)
 }
 
 #[cfg(unix)]
@@ -1225,7 +1241,7 @@ fn prepare(
     owner_session: SessionId,
     native_descendant: Option<String>,
 ) -> Result<LeaseRecord, EngineError> {
-    verify(&admission)?;
+    let admission = verify(&admission)?;
     let root = private_worktree_root(runtime)?;
     let key = format!("{}\0{}", admission.repository, task_id.as_str());
     let digest = format!("{:x}", Sha256::digest(key.as_bytes()));
@@ -1342,9 +1358,16 @@ pub(crate) fn lease_git_dir(
         return Err(error("lease_changed"));
     }
     let metadata = worktree_metadata(&record)?;
-    if record.metadata.is_none() || record.metadata != Some(identity(&metadata, true)?) {
-        return Err(error("worktree_identity_changed"));
-    }
+    let repository = Path::new(&record.lease.repository);
+    same_lease_files(
+        &record,
+        [
+            identity(repository, true)?,
+            identity(&repository.join(".git"), true)?,
+            identity(Path::new(&record.lease.path), true)?,
+            identity(&metadata, true)?,
+        ],
+    )?;
     assert!(metadata.starts_with(Path::new(&record.lease.repository).join(".git/worktrees")));
     Ok(metadata)
 }
@@ -2295,17 +2318,46 @@ pub fn lock_existing(connection: &Connection) -> Result<usize, EngineError> {
     Ok(locked)
 }
 
+/// Checks a lease record's four pinned folders, the admitted root and .git, the worktree
+/// folder and its Git metadata folder, against the live ones in that order under the
+/// whole-volume renumber rule. Inputs: the record and the live identities. Output:
+/// success, or `worktree_identity_changed`, also for a record without worktree pins.
+fn same_lease_files(record: &LeaseRecord, live: [Identity; 4]) -> Result<(), EngineError> {
+    let (Some(directory), Some(admin)) = (&record.directory, &record.metadata) else {
+        return Err(error("worktree_identity_changed"));
+    };
+    let pinned = [
+        &record.admission.root,
+        &record.admission.metadata,
+        directory,
+        admin,
+    ]
+    .map(Identity::pair);
+    if !crate::file_identity::same_files(&pinned, &live.map(|identity| identity.pair())) {
+        return Err(error("worktree_identity_changed"));
+    }
+    Ok(())
+}
+
+/// Checks that a lease still owns its worktree: the admitted repository, the worktree
+/// folder and its Git metadata folder keep their pinned identities, under the whole-volume
+/// renumber rule over all four, and Git still registers the lease branch and revision.
+/// Input: the stored lease record, never rewritten. Output: success, or the refusal code.
 fn verify_record(record: &LeaseRecord) -> Result<(), EngineError> {
     assert_record_consistent(record);
-    verify(&record.admission)?;
+    let current = verify(&record.admission)?;
     let target = Path::new(&record.lease.path);
     canonical(target)?;
     let metadata = worktree_metadata(record)?;
-    if record.directory.as_ref() != Some(&identity(target, true)?)
-        || record.metadata.as_ref() != Some(&identity(&metadata, true)?)
-    {
-        return Err(error("worktree_identity_changed"));
-    }
+    same_lease_files(
+        record,
+        [
+            current.root,
+            current.metadata,
+            identity(target, true)?,
+            identity(&metadata, true)?,
+        ],
+    )?;
     let bytes = git(
         Path::new(&record.lease.repository),
         &["worktree", "list", "--porcelain", "-z"],
@@ -2342,6 +2394,18 @@ fn verify_record(record: &LeaseRecord) -> Result<(), EngineError> {
     Ok(())
 }
 
+/// Tells whether an Uncertain lease may have been left Uncertain only by a volume renumber
+/// that an older engine refused: its worktree identities were pinned and the live
+/// repository folder now has another device. Such a lease is verified again and can only
+/// become RecoveryRequired. Input: the stored record. Output: true to verify it again.
+#[cfg(unix)]
+fn renumbered(record: &LeaseRecord) -> bool {
+    record.directory.is_some()
+        && record.metadata.is_some()
+        && identity(Path::new(&record.lease.repository), true)
+            .is_ok_and(|live| live.device != record.admission.root.device)
+}
+
 #[cfg(unix)]
 pub(crate) fn reconcile(connection: &Connection) -> Result<(), EngineError> {
     let mut statement = connection
@@ -2356,11 +2420,12 @@ pub(crate) fn reconcile(connection: &Connection) -> Result<(), EngineError> {
         return Err(error("lease_capacity"));
     }
     for mut record in records {
-        record.lease.state = if matches!(
-            record.lease.state,
-            LeaseState::Ready | LeaseState::RecoveryRequired
-        ) && verify_record(&record).is_ok()
-        {
+        let checked = match record.lease.state {
+            LeaseState::Ready | LeaseState::RecoveryRequired => true,
+            LeaseState::Uncertain => renumbered(&record),
+            LeaseState::Reserved => false,
+        };
+        record.lease.state = if checked && verify_record(&record).is_ok() {
             LeaseState::RecoveryRequired
         } else {
             LeaseState::Uncertain

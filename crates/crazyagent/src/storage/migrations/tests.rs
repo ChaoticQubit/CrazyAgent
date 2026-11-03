@@ -695,3 +695,257 @@ fn setups_or_text(db: &Connection) -> BTreeMap<String, String> {
         .collect::<Result<_, _>>()
         .unwrap()
 }
+
+#[test]
+fn an_upgrade_sweeps_plugins_left_by_projects_that_are_gone() {
+    let root = Root::new();
+    let mut db = root.connection();
+    db.execute_batch(
+        "CREATE TABLE projects (id TEXT PRIMARY KEY, body TEXT NOT NULL);
+         CREATE TABLE plugin_items (
+             id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 64),
+             kind TEXT NOT NULL CHECK(kind IN ('skill','server')),
+             scope TEXT NOT NULL CHECK(length(scope) BETWEEN 1 AND 160),
+             name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 64),
+             body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) <= 65536),
+             UNIQUE(kind, scope, name));
+         CREATE TABLE plugin_switches (
+             project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),
+             item TEXT NOT NULL CHECK(length(item) BETWEEN 1 AND 64),
+             PRIMARY KEY(project, item));
+         CREATE TABLE file_trash (
+             kind TEXT NOT NULL CHECK(kind IN ('account_key','mcp_secret','mcp_checks')),
+             name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 128),
+             PRIMARY KEY(kind, name)) WITHOUT ROWID;",
+    )
+    .unwrap();
+
+    db.execute("INSERT INTO projects VALUES ('live','{}')", [])
+        .unwrap();
+    db.execute(
+        "INSERT INTO file_trash VALUES ('mcp_secret','pending-secret')",
+        [],
+    )
+    .unwrap();
+    for row in [
+        ["sk-ghost", "skill", "project:ghost", "notes", "{}"],
+        ["sk-live", "skill", "project:live", "guide", "{}"],
+    ] {
+        db.execute("INSERT INTO plugin_items VALUES (?1,?2,?3,?4,?5)", row)
+            .unwrap();
+    }
+    db.execute(
+        "INSERT INTO plugin_switches VALUES ('ghost','sw-ghost')",
+        [],
+    )
+    .unwrap();
+    db.execute("INSERT INTO plugin_switches VALUES ('live','sw-live')", [])
+        .unwrap();
+
+    let ghost_folder = root
+        .path()
+        .join("plugins")
+        .join("skills")
+        .join("project")
+        .join("ghost");
+    let live_folder = root
+        .path()
+        .join("plugins")
+        .join("skills")
+        .join("project")
+        .join("live");
+    std::fs::create_dir_all(&ghost_folder).unwrap();
+    std::fs::create_dir_all(&live_folder).unwrap();
+
+    db.execute_batch("PRAGMA user_version = 4").unwrap();
+
+    upgrade(&mut db, &root.database(), None, STEPS).unwrap();
+
+    assert_eq!(version(&db).unwrap(), latest(STEPS));
+
+    let ghost_items: i64 = db
+        .query_row(
+            "SELECT count(*) FROM plugin_items WHERE scope='project:ghost'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(ghost_items, 0, "the orphaned project's rows are swept");
+    let ghost_switches: i64 = db
+        .query_row(
+            "SELECT count(*) FROM plugin_switches WHERE project='ghost'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(ghost_switches, 0, "the orphaned switches are swept");
+
+    let live_items: i64 = db
+        .query_row(
+            "SELECT count(*) FROM plugin_items WHERE scope='project:live'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(live_items, 1, "a live project keeps its plugins");
+
+    let kept: i64 = db
+        .query_row(
+            "SELECT count(*) FROM file_trash WHERE kind='mcp_secret' AND name='pending-secret'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        kept, 1,
+        "step 5 rebuilds file_trash and keeps its pending notes"
+    );
+    let queued: i64 = db
+        .query_row(
+            "SELECT count(*) FROM file_trash WHERE kind='skill_folder' AND name='ghost'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        queued, 1,
+        "the orphaned skill folder is queued for the sweep"
+    );
+
+    crate::storage::trash::sweep(&db, root.path()).unwrap();
+    assert!(
+        !ghost_folder.exists(),
+        "the orphaned skill folder is reclaimed"
+    );
+    assert!(
+        live_folder.exists(),
+        "a live project keeps its skill folder"
+    );
+}
+
+#[test]
+fn an_upgrade_from_six_lets_items_hold_hooks_and_the_trash_hold_hook_folders_keeping_every_row() {
+    let root = Root::new();
+    let mut db = root.connection();
+    db.execute_batch(
+        "CREATE TABLE plugin_items (
+             id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 64),
+             kind TEXT NOT NULL CHECK(kind IN ('skill','server')),
+             scope TEXT NOT NULL CHECK(length(scope) BETWEEN 1 AND 160),
+             name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 64),
+             body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) <= 65536),
+             UNIQUE(kind, scope, name));
+         CREATE TABLE file_trash (
+             kind TEXT NOT NULL CHECK(kind IN ('account_key','mcp_secret','mcp_checks','skill_folder')),
+             name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 128),
+             PRIMARY KEY(kind, name)) WITHOUT ROWID;",
+    )
+    .unwrap();
+    for row in [
+        ["sk-guide", "skill", "global", "guide", "{\"on\":true}"],
+        ["sv-notes", "server", "project:live", "notes", "{}"],
+    ] {
+        db.execute("INSERT INTO plugin_items VALUES (?1,?2,?3,?4,?5)", row)
+            .unwrap();
+    }
+    db.execute(
+        "INSERT INTO file_trash VALUES ('skill_folder','pending-folder')",
+        [],
+    )
+    .unwrap();
+    let hook = "INSERT INTO plugin_items VALUES ('hk-start','hook','global','start','{}')";
+    let hook_folder = "INSERT INTO file_trash VALUES ('hook_folder','hk-start')";
+    assert!(db.execute(hook, []).is_err(), "version 6 refuses a hook");
+    assert!(db.execute(hook_folder, []).is_err());
+    let before = rows(&db);
+    db.execute_batch("PRAGMA user_version = 6").unwrap();
+
+    upgrade(&mut db, &root.database(), None, STEPS).unwrap();
+
+    assert_eq!(version(&db).unwrap(), latest(STEPS));
+    let after = rows(&db);
+    for table in ["plugin_items", "file_trash"] {
+        assert_eq!(after[table], before[table], "{table} keeps every row");
+    }
+    db.execute(hook, []).unwrap();
+    db.execute(hook_folder, []).unwrap();
+    let hooks: i64 = db
+        .query_row(
+            "SELECT count(*) FROM plugin_items WHERE kind='hook'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(hooks, 1);
+    assert!(
+        db.execute(
+            "INSERT INTO plugin_items VALUES ('xx','widget','global','x','{}')",
+            [],
+        )
+        .is_err(),
+        "the widened check still refuses an unknown kind"
+    );
+}
+
+/// Step 8 (N1) gives the team tables of a version 7 database a `parent` column, keeping each
+/// row with no lead; a database with no team tables upgrades with none made, and a second
+/// engine start adds nothing.
+#[test]
+fn migration_8_adds_parent_to_team_tasks_and_agents() {
+    let root = Root::new();
+    let mut db = root.connection();
+    db.execute_batch(
+        "CREATE TABLE team_tasks (id INTEGER PRIMARY KEY, project TEXT NOT NULL, prompt TEXT NOT NULL);
+         CREATE TABLE team_agents (id INTEGER PRIMARY KEY, project TEXT NOT NULL, role TEXT NOT NULL);
+         INSERT INTO team_tasks(id,project,prompt) VALUES (3,'notes','Write the notes page');
+         INSERT INTO team_agents(id,project,role) VALUES (5,'notes','sub');
+         PRAGMA user_version = 7;",
+    )
+    .unwrap();
+
+    upgrade(&mut db, &root.database(), None, STEPS).unwrap();
+
+    assert_eq!(version(&db).unwrap(), latest(STEPS));
+    for (table, id) in [("team_tasks", 3), ("team_agents", 5)] {
+        let parent: Option<i64> = db
+            .query_row(
+                &format!("SELECT parent FROM {table} WHERE id=?1"),
+                [id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(parent, None, "{table} keeps its row with no lead");
+    }
+    db.execute("UPDATE team_agents SET parent=5 WHERE id=5", [])
+        .unwrap();
+    db.execute_batch("PRAGMA user_version = 7").unwrap();
+    upgrade(&mut db, &root.database(), None, STEPS).unwrap();
+    let columns: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('team_agents') WHERE name='parent'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(columns, 1, "the step adds the column once");
+    let parent: Option<i64> = db
+        .query_row("SELECT parent FROM team_agents WHERE id=5", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(parent, Some(5), "a second run keeps the recorded lead");
+
+    let bare = Root::new();
+    let mut empty = bare.connection();
+    empty.execute_batch("PRAGMA user_version = 7").unwrap();
+    upgrade(&mut empty, &bare.database(), None, STEPS).unwrap();
+    assert_eq!(version(&empty).unwrap(), latest(STEPS));
+    let tables: i64 = empty
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name IN ('team_tasks','team_agents')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(tables, 0, "the step makes no team table of its own");
+}

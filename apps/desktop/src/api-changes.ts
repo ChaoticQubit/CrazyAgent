@@ -22,6 +22,7 @@ export interface ChangeSet {
   conflicts: string[];
   message: string;
   waiting: boolean;
+  outside: boolean;
 }
 
 export type FileStatus = "added" | "modified" | "deleted" | "renamed";
@@ -59,6 +60,7 @@ const REFUSALS: Record<string, string> = {
   changes_conflict: "These changes conflict with your branch. Ask the agent to update, or discard.",
   changes_stale: "These changes moved on since you opened them. Review them again, then accept.",
   changes_branch_moved: "Your branch moved while these changes were landing, so nothing changed. Review and accept again.",
+  changes_branch_not_above_base: "The agent's branch no longer holds the commit these changes start from. Ask the agent to update, or discard.",
   changes_git_unsupported: "The Git on this computer can't land changes. Update Git, then try again.",
   changes_ignored_files: "These changes add files your project's ignore rules leave out. Ask the agent to remove them.",
   changes_message_invalid: "The commit message is empty, too long or has characters Git can't keep. Edit it, then accept again.",
@@ -72,6 +74,13 @@ const REFUSALS: Record<string, string> = {
   changes_owner_identity_missing: "Git has no name and email for you in your project folder. Set user.name and user.email, then accept again.",
   changes_owner_unavailable: "Your project folder couldn't be read. Check that it is still there, then try again.",
   changes_too_large: "These changes are larger than CrazyAgent can show or land. Ask the agent to split them up.",
+  changes_bare_repository: "These changes add a folder Git would open as a repository: a HEAD file beside objects and refs. Ask the agent to remove it.",
+  changes_embedded_repository: "These changes add a folder Git would treat as a repository of its own inside the project, such as a submodule. Ask the agent to remove it.",
+  changes_agent_branch_invalid: "The agent's branch couldn't be read from its own copy of the project. Ask the agent to check its branch, or discard.",
+  changes_agent_branch_exists: "A branch with this agent's name is already in your project. Rename or delete it, then start the agent again.",
+  changes_target_invalid: "That branch isn't a local branch of your project any more. Pick another branch, then accept again.",
+  changes_target_checked_out: "That branch is checked out in another working copy CrazyAgent doesn't manage. Pick another branch, or check it out in your project folder.",
+  changes_link_outside: "These changes add a link that points outside the project or into an agent's folder. Ask the agent to remove it.",
   changes_workspace_invalid: "The agent's working copy was moved or changed outside CrazyAgent, so these changes can't land from it.",
   changes_master_tools_off: "This master has tools off, so it can't edit files to update these changes. Turn tools on for the master, or discard.",
   changes_master_closed: "The master conversation these changes came from is closed, so it can't update them. Discard them, or start a new conversation.",
@@ -113,11 +122,29 @@ export function loadChangeDiff(id: string, page: number): Promise<Result<ChangeD
   return call<ChangeDiff>("desktop_change_diff", { id, page });
 }
 
-/** Lands a change set as one commit on the owner's checked-out branch. Inputs: the id,
- * the head the owner reviewed and the owner's commit message. Output: the new commit and
+/** The local branches a change set can land on, the checked-out one and the team's Land on
+ * branch, where an Accept with no branch picked lands, or the plain sentence naming the Land on
+ * setting and its missing branch when that branch cannot be found. */
+export interface TargetBranches {
+  branches: string[];
+  current: string | null;
+  land_on?: string | null;
+  land_on_problem?: string | null;
+}
+
+/** Lands a change set as one commit on a local branch: the team's Land on branch by default, or
+ * the named target, which moves as a ref while the project folder's files stay as they are
+ * when it isn't checked out. Inputs: the id, the head the owner reviewed, the owner's commit
+ * message and the target branch, null for the Land on branch. Output: the new commit and
  * its branch, or the files that conflict with the branch, in which case nothing changed. */
-export function acceptChange(id: string, expectedHead: string, message: string): Promise<Result<AcceptOutcome>> {
-  return call<AcceptOutcome>("desktop_accept_change", { id, expectedHead, message });
+export function acceptChange(id: string, expectedHead: string, message: string, target: string | null = null): Promise<Result<AcceptOutcome>> {
+  return call<AcceptOutcome>("desktop_accept_change", { id, expectedHead, message, target });
+}
+
+/** Lists the local branches a change set can be accepted onto. Input: the id. Output: the
+ * branches, the checked-out one and the Land on branch. */
+export function loadTargetBranches(id: string): Promise<Result<TargetBranches>> {
+  return call<TargetBranches>("desktop_change_branches", { id });
 }
 
 /** Discards a change set; it stays restorable for 7 days. Inputs: the id and the head the

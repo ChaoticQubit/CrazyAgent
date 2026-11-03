@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
+pub mod import;
 pub mod library;
 
 /// The memory rows an owner review or source retraction may fill, above every configured

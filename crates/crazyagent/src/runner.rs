@@ -2,6 +2,7 @@ use crate::protocol::{
     ControllerEpoch, FRAME_BYTES_MAX, PROTOCOL_VERSION, RequestId, encode_frame,
 };
 use crazyagent::adapters::NativeAction;
+use crazyagent::file_identity::same_files;
 use crazyagent::worker_dispatch::{
     AdmissionCheckOffer, DeniedReceipt, FenceOrder, FenceReceipt,
     RunnerBootIdentity as RunnerIdentity, RunnerReady,
@@ -697,10 +698,10 @@ pub async fn run(root: &Path) -> io::Result<()> {
     let mut state = State::new(journal, records)?;
     let path = root.join("control.sock");
     if std::fs::symlink_metadata(&path).is_ok() {
-        let (device, inode) = state
+        let recorded = state
             .endpoint
             .ok_or_else(|| invalid("unrecognized_control_endpoint"))?;
-        remove_endpoint(&path, device, inode)?;
+        remove_endpoint(&path, recorded)?;
     }
     let listener = crate::spawn_gate::bind_unix(&path)
         .map_err(|error| invalid(format!("runner_bind: {error}")))?;
@@ -712,22 +713,26 @@ pub async fn run(root: &Path) -> io::Result<()> {
         device: metadata.dev(),
         inode: metadata.ino(),
     }) {
-        remove_endpoint(&path, metadata.dev(), metadata.ino())?;
+        remove_endpoint(&path, (metadata.dev(), metadata.ino()))?;
         return Err(error);
     }
     let state = Arc::new(Mutex::new(state));
     let result = serve(listener, state).await;
-    remove_endpoint(&path, metadata.dev(), metadata.ino())?;
+    remove_endpoint(&path, (metadata.dev(), metadata.ino()))?;
     result
 }
 
-fn remove_endpoint(path: &PathBuf, device: u64, inode: u64) -> io::Result<()> {
+/// Removes the control socket a runner recorded, while it is still that socket under the
+/// crate's file identity rule, so a socket a run left before its volume was renumbered at
+/// mount is still removed. Inputs: the socket path and its recorded (device, inode).
+/// Output: done, `endpoint_identity_changed`, or the I/O error.
+fn remove_endpoint(path: &PathBuf, recorded: (u64, u64)) -> io::Result<()> {
     let metadata = std::fs::symlink_metadata(path)?;
-    if !metadata.file_type().is_socket() || metadata.dev() != device || metadata.ino() != inode {
+    let live = (metadata.dev(), metadata.ino());
+    if !metadata.file_type().is_socket() || !same_files(&[recorded], &[live]) {
         return Err(invalid("endpoint_identity_changed"));
     }
-    assert_eq!(metadata.dev(), device);
-    assert_eq!(metadata.ino(), inode);
+    assert_eq!(live.1, recorded.1);
     std::fs::remove_file(path)
 }
 

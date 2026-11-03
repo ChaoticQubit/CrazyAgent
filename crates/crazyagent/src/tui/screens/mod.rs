@@ -22,13 +22,6 @@ pub(in crate::tui) mod project_markdown;
 pub(in crate::tui) mod project_master;
 pub(in crate::tui) mod project_page;
 pub(in crate::tui) mod project_plugins;
-#[cfg_attr(
-    not(all(test, unix)),
-    expect(
-        dead_code,
-        reason = "v1-tui-projects plugs the live team view into the project screen"
-    )
-)]
 pub(in crate::tui) mod project_team;
 pub(in crate::tui) mod project_time;
 pub(in crate::tui) mod project_view;

@@ -15,8 +15,7 @@ fn project(root: &Path) -> AgentProject {
         data,
         id: ProjectId::new("process").unwrap(),
         folder: Some(folder),
-        files: crate::instruction_files::Choice::Project,
-        owner_home: None,
+        mode: crate::instruction_files::Mode::Both,
     }
 }
 
@@ -85,8 +84,11 @@ fn the_size_bound_holds_on_save_and_on_read() {
     save_app(&project.data, &full).unwrap();
     save_project(&folder, &full).unwrap();
     assert_eq!(read_app(&project.data).unwrap().len(), TEXT_BYTES_MAX);
-    let rendered = text(&project).unwrap().text;
-    assert!(rendered.len() <= PROCESS_BYTES_MAX);
+    assert_eq!(
+        text(&project).unwrap_err().0,
+        "agent_instructions_too_large_app",
+        "two full parts are more than one launch is given, and the refusal names the larger"
+    );
 
     let over = "a".repeat(TEXT_BYTES_MAX + 1);
     assert_eq!(
@@ -267,31 +269,34 @@ fn a_cleared_page_removes_the_stale_file_and_a_planted_entry_is_replaced_not_fol
 #[test]
 fn a_relaunch_replaces_a_planted_skills_record_in_place_without_writing_through_it() {
     let (_directory, root) = folder();
+    let data = project(&root).data;
     let outside = root.join("outside.txt");
     fs::write(&outside, "owner file").unwrap();
     let codex = home(&root, "codex");
-    std::os::unix::fs::symlink(&outside, codex.join(SKILLS_FILE)).unwrap();
-    record_skills(&codex, &["tdd"]).unwrap();
+    record_skills(&data, &codex, &[]).unwrap();
+    let (records, name) = record_place(&data, SKILLS_FOLDER, &codex).unwrap();
+    let record = records.join(name);
+    fs::remove_file(&record).unwrap();
+    std::os::unix::fs::symlink(&outside, &record).unwrap();
+    record_skills(&data, &codex, &["tdd"]).unwrap();
     assert_eq!(fs::read_to_string(&outside).unwrap(), "owner file");
-    let record = fs::symlink_metadata(codex.join(SKILLS_FILE)).unwrap();
-    assert!(record.is_file() && !record.file_type().is_symlink());
-    assert_eq!(
-        fs::read_to_string(codex.join(SKILLS_FILE)).unwrap(),
-        "tdd\n"
-    );
+    let held = fs::symlink_metadata(&record).unwrap();
+    assert!(held.is_file() && !held.file_type().is_symlink());
+    assert_eq!(fs::read_to_string(&record).unwrap(), "tdd\n");
 
-    fs::remove_file(codex.join(SKILLS_FILE)).unwrap();
-    fs::create_dir_all(codex.join(SKILLS_FILE).join("inner")).unwrap();
-    record_skills(&codex, &[]).unwrap();
-    assert_eq!(fs::read_to_string(codex.join(SKILLS_FILE)).unwrap(), "");
-    record_skills(&codex, &["code-review"]).unwrap();
+    fs::remove_file(&record).unwrap();
+    fs::create_dir_all(record.join("inner")).unwrap();
+    record_skills(&data, &codex, &[]).unwrap();
+    assert_eq!(fs::read_to_string(&record).unwrap(), "");
+    record_skills(&data, &codex, &["code-review"]).unwrap();
     assert_eq!(
-        received(&codex, Harness::Codex).unwrap(),
-        Some(Received {
-            text: String::new(),
-            skills: vec!["code-review".into()],
-        }),
+        given_skills(&data, &codex).unwrap(),
+        ["code-review"],
         "the last record replaces the one before it"
+    );
+    assert!(
+        fs::read_dir(&codex).unwrap().next().is_none(),
+        "nothing is recorded in the agent's home"
     );
 }
 
@@ -312,35 +317,30 @@ fn what_an_agent_received_is_read_back_from_its_own_home() {
     );
 
     prepare(&claude, Harness::Claude, &project, &given("# given\n")).unwrap();
-    record_skills(&claude, &["tdd", "release-notes"]).unwrap();
+    record_skills(&project.data, &claude, &["tdd", "release-notes"]).unwrap();
     assert_eq!(
         received(&claude, Harness::Claude).unwrap(),
         Some(Received {
             text: "# given\n".into(),
-            skills: vec!["tdd".into(), "release-notes".into()],
         })
+    );
+    assert_eq!(
+        given_skills(&project.data, &claude).unwrap(),
+        ["tdd", "release-notes"]
     );
     assert_eq!(
         received(&claude, Harness::Codex).unwrap().unwrap().text,
         "",
         "each harness reads only its own file"
     );
-    assert_eq!(
-        fs::metadata(claude.join(SKILLS_FILE))
-            .unwrap()
-            .permissions()
-            .mode()
-            & 0o777,
-        0o600
-    );
+    let (records, name) = record_place(&project.data, SKILLS_FOLDER, &claude).unwrap();
+    let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&records.join(name)), 0o600);
+    assert_eq!(mode(&records), 0o700);
 
-    record_skills(&claude, &[]).unwrap();
+    record_skills(&project.data, &claude, &[]).unwrap();
     assert!(
-        received(&claude, Harness::Claude)
-            .unwrap()
-            .unwrap()
-            .skills
-            .is_empty(),
+        given_skills(&project.data, &claude).unwrap().is_empty(),
         "a launch without skills clears the last list"
     );
 }
@@ -385,9 +385,16 @@ fn the_received_view_refuses_links_and_entries_the_launch_did_not_write() {
     );
     fs::remove_file(&file).unwrap();
 
-    std::os::unix::fs::symlink(&secret, claude.join(SKILLS_FILE)).unwrap();
-    assert_eq!(refused(&claude), "agent_instructions_unsafe");
-    fs::remove_file(claude.join(SKILLS_FILE)).unwrap();
+    let data = project(&root).data;
+    record_skills(&data, &claude, &[]).unwrap();
+    let (records, name) = record_place(&data, SKILLS_FOLDER, &claude).unwrap();
+    fs::remove_file(records.join(&name)).unwrap();
+    std::os::unix::fs::symlink(&secret, records.join(&name)).unwrap();
+    assert_eq!(
+        given_skills(&data, &claude).unwrap_err().0,
+        "agent_instructions_unsafe"
+    );
+    fs::remove_file(records.join(&name)).unwrap();
 
     let linked = root.join("linked-home");
     std::os::unix::fs::symlink(&claude, &linked).unwrap();
@@ -425,28 +432,23 @@ fn the_received_view_holds_its_bounds() {
         .map(|index| format!("skill-{index}"))
         .collect();
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
-    record_skills(&codex, &names).unwrap();
+    let data = project(&root).data;
+    record_skills(&data, &codex, &names).unwrap();
     assert_eq!(
-        received(&codex, Harness::Codex)
-            .unwrap()
-            .unwrap()
-            .skills
-            .len(),
+        given_skills(&data, &codex).unwrap().len(),
         SKILLS_RECORD_MAX
     );
-    fs::write(
-        codex.join(SKILLS_FILE),
-        format!("{}\nextra\n", names.join("\n")),
-    )
-    .unwrap();
+    let (records, name) = record_place(&data, SKILLS_FOLDER, &codex).unwrap();
+    let record = records.join(name);
+    fs::write(&record, format!("{}\nextra\n", names.join("\n"))).unwrap();
     assert_eq!(
-        received(&codex, Harness::Codex).unwrap_err().0,
+        given_skills(&data, &codex).unwrap_err().0,
         "agent_instructions_too_large"
     );
     for planted in ["Upper\n", "with space\n", "-dash\n", "\n"] {
-        fs::write(codex.join(SKILLS_FILE), planted).unwrap();
+        fs::write(&record, planted).unwrap();
         assert_eq!(
-            received(&codex, Harness::Codex).unwrap_err().0,
+            given_skills(&data, &codex).unwrap_err().0,
             "agent_instructions_invalid",
             "{planted:?}"
         );
@@ -529,4 +531,41 @@ fn the_default_process_leaves_commits_to_the_landing_rules_of_each_access_level(
     ] {
         assert!(DEFAULT_PROCESS.contains(rule), "{rule}");
     }
+}
+
+#[test]
+fn owner_text_up_to_the_cap_is_given_inline_and_more_is_refused_by_its_larger_part() {
+    let (_directory, root) = folder();
+    let project = project(&root);
+    let app = format!("{}\n", "a".repeat(40 * 1024));
+    save_app(&project.data, &app).unwrap();
+    let given = text(&project).unwrap();
+    assert!(given.text.contains(app.trim()));
+    assert!(given.text.len() <= GIVEN_BYTES_MAX);
+
+    let claude = home(&root, "claude");
+    let stale = claude.join(STALE_CONTEXT_FOLDER);
+    fs::create_dir(&stale).unwrap();
+    fs::write(stale.join("app-instructions.md"), &app).unwrap();
+    prepare(&claude, Harness::Claude, &project, &given).unwrap();
+    assert_eq!(
+        fs::read_to_string(claude.join("CLAUDE.md")).unwrap(),
+        given.text
+    );
+    assert!(
+        !stale.exists(),
+        "an earlier launch's context folder never outlives an inline launch"
+    );
+
+    let folder = project.folder.clone().unwrap();
+    save_project(&folder, &"p".repeat(30 * 1024)).unwrap();
+    assert_eq!(
+        text(&project).unwrap_err().0,
+        "agent_instructions_too_large_app"
+    );
+    save_project(&folder, &"p".repeat(60 * 1024)).unwrap();
+    assert_eq!(
+        text(&project).unwrap_err().0,
+        "agent_instructions_too_large_project"
+    );
 }

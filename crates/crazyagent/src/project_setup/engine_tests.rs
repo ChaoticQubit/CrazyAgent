@@ -1856,6 +1856,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
 
     let policy = AgentPolicy {
         access: AgentAccess::OwnBranch,
+        network: crate::sandbox::policy::AgentNetwork::default(),
         toolchains: vec![ToolchainChoice {
             toolchain: Toolchain::Rust,
             allowed: !rust.allowed,
@@ -1879,6 +1880,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
                 access: AgentAccess::Sandboxed,
                 toolchains: Vec::new(),
                 ide_git_hooks: false,
+                network: crate::sandbox::policy::AgentNetwork::default(),
             },
             7,
         )
@@ -1908,6 +1910,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
 
     let twice = AgentPolicy {
         access: AgentAccess::Full,
+        network: crate::sandbox::policy::AgentNetwork::default(),
         toolchains: vec![
             ToolchainChoice {
                 toolchain: Toolchain::Node,
@@ -1938,6 +1941,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
 
     let full = AgentPolicy {
         access: AgentAccess::Full,
+        network: crate::sandbox::policy::AgentNetwork::default(),
         toolchains: Vec::new(),
         ide_git_hooks: false,
     };
@@ -2016,6 +2020,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
                 access: AgentAccess::Full,
                 toolchains: Vec::new(),
                 ide_git_hooks: false,
+                network: crate::sandbox::policy::AgentNetwork::default(),
             },
             6,
         )
@@ -2039,6 +2044,7 @@ async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_poli
                 access: AgentAccess::OwnBranch,
                 toolchains: Vec::new(),
                 ide_git_hooks: false,
+                network: crate::sandbox::policy::AgentNetwork::default(),
             },
             7,
         )
@@ -2115,6 +2121,94 @@ async fn the_owner_pauses_and_cancels_a_team_whose_full_status_passes_one_reply(
         engine.rows("SELECT count(*) FROM team_paused_projects WHERE project='setup-pooled'"),
         1
     );
+    drop(owner);
+    engine.stop().await;
+}
+
+/// Removing a project takes the owner's agent limits, token budget, account spread and the
+/// teammate panes the engine saw with it (S4, DEC-104 K8), so a reused id starts with none.
+#[tokio::test]
+async fn owner_removal_takes_the_team_limits_budget_spread_and_teammates_with_it() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    for (generation, action) in [
+        (
+            2,
+            crate::team::TeamAction::MaxHarnesses {
+                project_id: project.clone(),
+                max: Some(2),
+            },
+        ),
+        (
+            3,
+            crate::team::TeamAction::MaxTeammates {
+                project_id: project.clone(),
+                max: Some(3),
+            },
+        ),
+        (
+            4,
+            crate::team::TeamAction::TokenBudget {
+                project_id: project.clone(),
+                tokens: Some(crate::team::BUDGET_CHOICES[0]),
+            },
+        ),
+        (
+            5,
+            crate::team::TeamAction::SpreadAccounts {
+                project_id: project.clone(),
+                on: true,
+            },
+        ),
+    ] {
+        let response = owner.team_action(action.clone(), generation).await.unwrap();
+        assert_eq!(result(response), OwnerResult::Applied, "{action:?}");
+    }
+    rusqlite::Connection::open(engine.root.path().join("engine.db"))
+        .unwrap()
+        .execute(
+            "INSERT INTO team_teammates(agent,project,pane,seen_ms) VALUES (1,'setup-pooled','%3',1)",
+            [],
+        )
+        .unwrap();
+    let tables = [
+        "team_caps",
+        "team_token_budgets",
+        "team_account_spread",
+        "team_teammates",
+    ];
+    for table in tables {
+        assert_eq!(
+            engine.rows(&format!(
+                "SELECT count(*) FROM {table} WHERE project='setup-pooled'"
+            )),
+            1,
+            "{table} holds the project's row before removal"
+        );
+    }
+
+    let removed = owner.remove_project(project.clone(), 6).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    for table in tables {
+        assert_eq!(
+            engine.rows(&format!(
+                "SELECT count(*) FROM {table} WHERE project='setup-pooled'"
+            )),
+            0,
+            "{table} goes with the project"
+        );
+    }
     drop(owner);
     engine.stop().await;
 }

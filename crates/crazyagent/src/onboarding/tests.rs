@@ -176,11 +176,56 @@ fn a_saved_draft_and_overview_are_reused_not_overwritten() {
     saved.draft.about = "Kept by the owner.".into();
     draft::save(&layout, &saved).unwrap();
     assert_eq!(draft::reused(&layout), Some(saved));
-    assert!(draft::write_overview(&layout, "First overview.").unwrap());
-    assert!(!draft::write_overview(&layout, "Second overview.").unwrap());
+    let first = draft::write_overview(&layout, "First overview.").unwrap();
+    assert_eq!(first, draft::overview(&layout));
+    assert_eq!(
+        draft::write_overview(&layout, "Second overview.").unwrap(),
+        None
+    );
     let overview = draft::overview(&layout).unwrap();
     assert!(overview.contains("First overview."));
     assert!(!overview.contains("Second overview."));
+}
+
+#[test]
+fn only_an_overview_this_engine_wrote_is_shown_as_the_mapping_agents() {
+    let dir = rust_repo();
+    let layout = dir.path().join(CRAZYAGENT_DIRECTORY);
+    std::fs::create_dir(&layout).unwrap();
+    let mut database = Connection::open_in_memory().unwrap();
+    crate::storage::plugins::initialize(&database).unwrap();
+    crate::storage::setup::initialize(&database).unwrap();
+    crate::project_setup::initialize(&database).unwrap();
+    initialize(&database).unwrap();
+    database
+        .execute(
+            "INSERT INTO onboarding(project,repo,pool,graph_state,mapping_state,drafted,created_ms,updated_ms)
+             VALUES ('demo',?1,'main','done','done',?2,1,1)",
+            params![
+                dir.path().to_str().unwrap(),
+                serde_json::to_string(&Drafted::new("demo".into(), &pool())).unwrap()
+            ],
+        )
+        .unwrap();
+    let shown = |database: &mut Connection| {
+        let tx = database.transaction().unwrap();
+        let view = status(&tx, &ProjectId::new("demo").unwrap())
+            .unwrap()
+            .unwrap();
+        (view.overview, view.folder_overview)
+    };
+
+    let written = draft::write_overview(&layout, "Greets people.")
+        .unwrap()
+        .unwrap();
+    assert_eq!(shown(&mut database), (None, Some(written.clone())));
+    seal_overview(&database, dir.path(), &written).unwrap();
+    assert_eq!(shown(&mut database), (Some(written), None));
+    std::fs::write(layout.join("overview.md"), "# Changed by hand\n").unwrap();
+    assert_eq!(
+        shown(&mut database),
+        (None, Some("# Changed by hand".to_owned()))
+    );
 }
 
 #[test]
@@ -242,7 +287,9 @@ fn a_mapping_answer_without_an_overview_fails_and_keeps_its_fields() {
     std::fs::create_dir(&layout).unwrap();
     let base = Drafted::new("demo".into(), &pool());
     let json_only = "```json\n{\"about\": \"Greets people.\", \"tech_stack\": [\"Rust\"]}\n```\n";
-    let (step, kept) = service::answered(&layout, &base, json_only, &MappingFacts::default(), &[]);
+    let (step, kept, wrote) =
+        service::answered(&layout, &base, json_only, &MappingFacts::default(), &[]);
+    assert_eq!(wrote, None);
     assert_eq!(
         step,
         Step::Failed {
@@ -255,15 +302,18 @@ fn a_mapping_answer_without_an_overview_fails_and_keeps_its_fields() {
     assert_eq!(draft::reused(&layout), Some(kept));
 
     let prose = "## Structure\n\nOne binary that greets people.\n\n```json\n{}\n```\n";
-    let (step, _) = service::answered(&layout, &base, prose, &MappingFacts::default(), &[]);
+    let (step, _, wrote) = service::answered(&layout, &base, prose, &MappingFacts::default(), &[]);
     assert_eq!(step, Step::Done);
+    assert_eq!(wrote, draft::overview(&layout));
     assert!(
         draft::overview(&layout)
             .unwrap()
             .contains("One binary that greets people.")
     );
 
-    let (step, _) = service::answered(&layout, &base, json_only, &MappingFacts::default(), &[]);
+    let (step, _, wrote) =
+        service::answered(&layout, &base, json_only, &MappingFacts::default(), &[]);
+    assert_eq!(wrote, None);
     assert_eq!(
         step,
         Step::Done,
@@ -436,6 +486,13 @@ fn the_graph_leaves_out_the_engine_files_in_the_project() {
     )
     .unwrap();
     std::fs::write(repo.join(".crazyagent/overview.md"), "# Overview\n").unwrap();
+    let secret = repo.join("secret");
+    std::fs::create_dir(&secret).unwrap();
+    std::fs::write(
+        secret.join("vault.py"),
+        "def owner_vault_key():\n    return 1\n",
+    )
+    .unwrap();
     let scratch = tempfile::Builder::new()
         .prefix("ca-state-")
         .tempdir_in("/tmp")
@@ -450,6 +507,7 @@ fn the_graph_leaves_out_the_engine_files_in_the_project() {
         &repo,
         &state,
         "onboard-g-hide",
+        std::slice::from_ref(&secret),
         std::time::Duration::from_secs(300),
         &|| false,
     )
@@ -464,8 +522,13 @@ fn the_graph_leaves_out_the_engine_files_in_the_project() {
             !text.contains(".crazyagent") && !text.contains("crazyagent_probe"),
             "{name}: {text}"
         );
+        assert!(
+            !text.contains("owner_vault_key"),
+            "the hidden owner folder leaked into {name}: {text}"
+        );
     }
     assert!(engine.join("probe.py").is_file());
+    assert!(secret.join("vault.py").is_file());
 }
 
 #[test]
@@ -502,7 +565,8 @@ fn an_overview_entry_that_is_not_a_text_file_is_reported_and_left_as_it_is() {
     let outside = tempfile::tempdir().unwrap();
     let target = outside.path().join("notes.md");
     std::fs::write(&target, "# Notes\n\nKept outside.\n").unwrap();
-    let entries: [(&str, &dyn Fn(&Path)); 3] = [
+    type Make<'a> = &'a dyn Fn(&Path);
+    let entries: [(&str, Make); 3] = [
         ("an empty file", &|path| std::fs::write(path, "").unwrap()),
         ("a link", &|path| symlink(&target, path).unwrap()),
         ("a folder", &|path| std::fs::create_dir(path).unwrap()),
@@ -515,8 +579,10 @@ fn an_overview_entry_that_is_not_a_text_file_is_reported_and_left_as_it_is() {
         make(entry.as_path());
         let before = std::fs::symlink_metadata(&entry).unwrap().file_type();
         let base = Drafted::new("demo".into(), &pool());
-        let (step, kept) = service::answered(&layout, &base, prose, &MappingFacts::default(), &[]);
+        let (step, kept, wrote) =
+            service::answered(&layout, &base, prose, &MappingFacts::default(), &[]);
         assert_eq!(step, Step::failed(service::OVERVIEW_BLOCKED), "{what}");
+        assert_eq!(wrote, None, "{what}");
         assert_eq!(kept.draft.about, "Greets people.", "{what}");
         assert_eq!(draft::reused(&layout), Some(kept), "{what}");
         assert_eq!(

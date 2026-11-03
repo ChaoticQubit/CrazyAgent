@@ -1,4 +1,6 @@
 use super::*;
+use crate::engine::owner::OwnerResult;
+use crate::memory::import::ImportReport;
 use crate::memory::library::{
     ApprovedMemories, LibraryAction, MemoryPage, MemoryScope, PAGE_ITEMS_MAX, SavedMemory,
     validate_note,
@@ -156,6 +158,51 @@ impl OwnerController {
             text,
         };
         self.change_memory(action, generation).await
+    }
+
+    /// Imports the markdown memory files of a folder the owner chose into one
+    /// project's memory, one memory per file, sending each as its own owner change.
+    /// Takes the project, the absolute folder and the client generation. Returns how
+    /// many were saved and skipped; a duplicate or refused file is skipped, full
+    /// memory skips the rest, and an unconfirmed change stops the import as an error.
+    pub async fn import_memories(
+        &mut self,
+        project_id: ProjectId,
+        folder: &std::path::Path,
+        generation: u64,
+    ) -> Result<ImportReport, EngineError> {
+        let scan = crate::memory::import::read_folder(folder)?;
+        let total = scan.files.len() as u32 + scan.skipped;
+        let mut report = ImportReport {
+            imported: 0,
+            skipped: scan.skipped,
+        };
+        let count = scan.files.len();
+        for (index, item) in scan.files.into_iter().enumerate() {
+            let action = LibraryAction::Import {
+                project_id: project_id.clone(),
+                file: item.file,
+                text: item.text,
+            };
+            let result = match self.change_memory(action, generation).await? {
+                OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation } => {
+                    operation.result
+                }
+                OwnerResponse::Rejected { code } => return Err(EngineError(code)),
+                _ => return Err(EngineError("memory_outcome_unknown".into())),
+            };
+            match result {
+                OwnerResult::Applied => report.imported += 1,
+                OwnerResult::Rejected { code } if code == "memory_full" => {
+                    report.skipped += (count - index) as u32;
+                    break;
+                }
+                OwnerResult::Rejected { .. } => report.skipped += 1,
+                _ => return Err(EngineError("memory_outcome_unknown".into())),
+            }
+        }
+        assert_eq!(report.imported + report.skipped, total);
+        Ok(report)
     }
 
     /// Sends one validated saved-memory change as a retained owner mutation.

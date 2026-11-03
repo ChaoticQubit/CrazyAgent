@@ -158,6 +158,21 @@ impl CodexHostProcess {
         }
     }
 
+    /// Poisons the custody's shared state with a real panic under its lock, as a panic in
+    /// any holder would, so the next output the custody counts fails its accounting.
+    /// Input: the host. Output: none.
+    #[cfg(test)]
+    pub(super) fn poison_shared_state(&self) {
+        let shared = Arc::clone(&self.shared);
+        let poisoned = std::thread::spawn(move || {
+            let _held = shared.state.lock();
+            panic!("a holder of the custody state panicked");
+        })
+        .join();
+        assert!(poisoned.is_err());
+        assert!(self.shared.state.is_poisoned());
+    }
+
     #[cfg(test)]
     pub(super) fn exit_status(&self) -> Option<ExitStatus> {
         match self.shared.state.lock() {

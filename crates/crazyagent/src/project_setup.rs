@@ -646,6 +646,9 @@ pub enum SetupQuery {
     ReadPaths {
         project: ProjectId,
     },
+    HiddenPaths {
+        project: ProjectId,
+    },
     AgentPolicy {
         project: ProjectId,
     },
@@ -680,6 +683,9 @@ pub enum SetupQuery {
         action: crate::team::TeamAction,
         generation: u64,
     },
+    CoordQuestions {
+        project: ProjectId,
+    },
     Library(crate::memory::library::LibraryQuery),
 }
 
@@ -690,12 +696,14 @@ pub enum SetupView {
     Jobs(Vec<ResearchJob>),
     Context(ProjectContext),
     ReadPaths(ReadPaths),
+    HiddenPaths(Vec<String>),
     AgentPolicy(crate::sandbox::policy::PolicyView),
     Item(ContextChunk),
     Log(Vec<String>),
     Changed(crate::engine::owner::OwnerResult),
     Memories(Vec<crate::memory::KnowledgeEntry>),
     Team(Box<crate::team::TeamStatus>),
+    CoordQuestions(Box<crate::team::questions::Inbox>),
     Library(crate::memory::library::LibraryView),
 }
 
@@ -743,6 +751,10 @@ pub enum SetupAction {
     SetReadPaths {
         project_id: ProjectId,
         version: u64,
+        paths: Vec<String>,
+    },
+    SetHiddenPaths {
+        project_id: ProjectId,
         paths: Vec<String>,
     },
     SetAgentPolicy {
@@ -799,6 +811,16 @@ impl SetupAction {
                         .any(|path| path.len() > 1024 || path.chars().any(char::is_control))
                 {
                     return Err(failure("read_paths_invalid"));
+                }
+                Ok(())
+            }
+            Self::SetHiddenPaths { paths, .. } => {
+                if paths.len() > crate::sandbox::hidden_paths::HIDDEN_PATHS_MAX
+                    || paths
+                        .iter()
+                        .any(|path| path.len() > 1024 || path.chars().any(char::is_control))
+                {
+                    return Err(failure("hidden_paths_invalid"));
                 }
                 Ok(())
             }
@@ -1811,6 +1833,9 @@ pub(crate) fn execute(
             version,
             paths,
         } => set_read_paths(tx, project_id, *version, paths),
+        SetupAction::SetHiddenPaths { project_id, paths } => {
+            set_hidden_paths(tx, project_id, paths)
+        }
         SetupAction::SetAgentPolicy {
             project_id,
             version,
@@ -2309,7 +2334,7 @@ fn plan_roadmap(
 
 /// The tables whose rows belong to one project and go with it when it is removed.
 /// Live team agents are not listed: the team runtime stops them and keeps their rows.
-const REMOVED_WITH_PROJECT: [&str; 19] = [
+const REMOVED_WITH_PROJECT: [&str; 29] = [
     "research_jobs",
     "onboarding",
     "team_messages",
@@ -2320,14 +2345,24 @@ const REMOVED_WITH_PROJECT: [&str; 19] = [
     "team_master_switch",
     "team_session_switches",
     "team_finished_view",
+    "team_agent_branches",
+    "team_master_branch",
+    "team_land_on",
+    "team_background",
+    "team_merge_ask",
     "team_paused_projects",
     "team_worktrees",
     "team_task_pins",
     "team_wake_requests",
     "team_owner_stops",
     "team_owner_turns",
+    "team_caps",
+    "team_token_budgets",
+    "team_teammates",
+    "team_account_spread",
     "team_agent_conversations",
     "agent_instruction_settings",
+    "instruction_imports",
     "project_setups",
 ];
 
@@ -2364,6 +2399,30 @@ fn set_read_paths(
         return Ok(rejected(crate::storage::versioned::STALE_CODE));
     }
     crate::sandbox::extra_paths::save(tx, project_id.as_str(), &checked).map_err(error)?;
+    Ok(Outcome::Applied)
+}
+
+/// Saves a project's hidden folders once each passes
+/// [`crate::sandbox::hidden_paths::checked`] against the project's own folder, so agents are
+/// kept out of them. Takes the transaction, project and typed paths. Returns Applied, or a
+/// plain rejection for an unknown project or a refused path.
+fn set_hidden_paths(
+    tx: &Transaction<'_>,
+    project_id: &ProjectId,
+    paths: &[String],
+) -> Result<Outcome, EngineError> {
+    let Some(setup) = load_setup(tx, project_id)? else {
+        return Ok(rejected("invalid_project"));
+    };
+    let folder = setup.project_folder();
+    let checked = match crate::sandbox::hidden_paths::checked_all(paths, &folder) {
+        Ok(checked) => checked,
+        Err(code) => return Ok(rejected(code)),
+    };
+    if let Err(code) = crate::sandbox::hidden_paths::none_tracked(&folder, &checked) {
+        return Ok(rejected(code));
+    }
+    crate::sandbox::hidden_paths::save(tx, project_id.as_str(), &checked).map_err(error)?;
     Ok(Outcome::Applied)
 }
 
@@ -2407,11 +2466,13 @@ fn set_agent_policy(
 /// conversation ends in the same change; its onboarding, research jobs, team conversation,
 /// tasks, settings and ended agents are deleted, so a waiting step is never claimed and a
 /// running one stops; its read folders, agent access, agent settings and its agents' own
-/// instructions go too. The versions of its read folders, agent access, agent settings,
-/// project instructions and team settings move on once more, so a project added again under
-/// the same id refuses a save from a screen read before the removal (V2V-1, V2SYNC-2); agent
-/// ids are never reused, so its agents' instruction versions are dropped. Returns
-/// `invalid_project` for an unknown project.
+/// instructions go too. Its project-scoped MCP servers, skills, secrets and per-project
+/// switches are cleared too, so a new project reusing the id never inherits them. The
+/// versions of its read folders, agent access, agent settings, project instructions and
+/// team settings move on once more, so a project added again under the same id refuses a
+/// save from a screen read before the removal (V2V-1, V2SYNC-2); agent ids are never
+/// reused, so its agents' instruction versions are dropped. Returns `invalid_project` for
+/// an unknown project.
 fn remove(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
@@ -2438,6 +2499,7 @@ fn remove(
     crate::sandbox::extra_paths::save(tx, project_id.as_str(), &[]).map_err(error)?;
     crate::storage::agent_text::forget_project(tx, project_id)?;
     crate::questions::forget_project(tx, project_id)?;
+    crate::sandbox::hidden_paths::save(tx, project_id.as_str(), &[]).map_err(error)?;
     crate::sandbox::policy::remove(tx, project_id.as_str()).map_err(error)?;
     for item in [
         crate::storage::versioned::read_paths_item(project_id),
@@ -2448,6 +2510,8 @@ fn remove(
     ] {
         crate::storage::versioned::retire(tx, &item)?;
     }
+    crate::scheduling::forget_project(tx, project_id.as_str())?;
+    crate::coord::forget_project(tx, project_id)?;
     tx.execute(
         "DELETE FROM team_panes WHERE agent IN
          (SELECT id FROM team_agents WHERE project=?1 AND status IN ('stopped','failed'))",
@@ -2468,6 +2532,7 @@ fn remove(
         .execute("DELETE FROM projects WHERE id=?1", [project_id.as_str()])
         .map_err(error)?;
     assert_eq!(removed, 1);
+    crate::storage::plugins::remove_project(tx, project_id)?;
     Ok(Outcome::Applied)
 }
 

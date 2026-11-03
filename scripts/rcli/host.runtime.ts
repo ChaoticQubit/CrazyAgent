@@ -1,33 +1,61 @@
 import assert from "node:assert/strict";
-import { lstat, realpath } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, open, realpath, type FileHandle } from "node:fs/promises";
 import { isAbsolute, join, normalize } from "node:path";
 import { Writable } from "node:stream";
 import type { AgentEvent, TurnStatus } from "../../.local-state/tools/rcli-source/src/core/bus/events.ts";
 import { BoundedEventWriter, identifier, readControls, type Control, type EventBody } from "./host.codec.ts";
 import { SdkTurnProjection, type HostAction } from "./host.turns.ts";
 
-export type Launch = { sessionId: string; instanceId: string; homeDir: string; cwd: string };
+export type Launch = { sessionId: string; instanceId: string; homeDir: string; cwd: string; instructionsFile?: string };
+
+const INSTRUCTIONS_BYTES_MAX = 65_536;
 
 export function parseLaunch(argv: string[]): Launch {
   try {
-    if (!Array.isArray(argv) || argv.length !== 8 || argv.some((value) => typeof value !== "string")) throw new Error();
+    if (!Array.isArray(argv) || (argv.length !== 8 && argv.length !== 10) || argv.some((value) => typeof value !== "string")) throw new Error();
     const fields = new Map<string, string>();
-    const names = ["--session-id", "--instance-id", "--home-dir", "--cwd"];
+    const required = ["--session-id", "--instance-id", "--home-dir", "--cwd"];
+    const names = [...required, "--instructions-file"];
     for (let index = 0; index < argv.length; index += 2) {
       const key = argv[index]!;
       if (!names.includes(key) || fields.has(key)) throw new Error();
       fields.set(key, argv[index + 1]!);
     }
+    if (required.some((name) => !fields.has(name))) throw new Error();
     const sessionId = identifier(fields.get("--session-id"));
     const instanceId = identifier(fields.get("--instance-id"));
     const homeDir = fields.get("--home-dir")!;
     const cwd = fields.get("--cwd")!;
-    for (const path of [homeDir, cwd]) {
+    const instructionsFile = fields.get("--instructions-file");
+    for (const path of instructionsFile === undefined ? [homeDir, cwd] : [homeDir, cwd, instructionsFile]) {
       if (!path.isWellFormed() || path.includes("\0") || Buffer.byteLength(path) > 4096 || !isAbsolute(path) || normalize(path) !== path || path === "/") throw new Error();
     }
     if (homeDir === cwd) throw new Error();
-    return { sessionId, instanceId, homeDir, cwd };
+    if (instructionsFile === undefined) return { sessionId, instanceId, homeDir, cwd };
+    if ([homeDir, cwd].some((folder) => instructionsFile === folder || instructionsFile.startsWith(`${folder}/`))) throw new Error();
+    return { sessionId, instanceId, homeDir, cwd, instructionsFile };
   } catch { throw new Error("host_launch_rejected"); }
+}
+
+export async function readInstructions(path: string): Promise<string> {
+  let handle: FileHandle | undefined;
+  try {
+    if (typeof process.getuid !== "function") throw new Error();
+    const named = await lstat(path);
+    if (!named.isFile() || named.isSymbolicLink() || named.uid !== process.getuid() || (named.mode & 0o077) !== 0 || named.nlink !== 1 || named.size < 1 || named.size > INSTRUCTIONS_BYTES_MAX || await realpath(path) !== path) throw new Error();
+    handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
+    const held = await handle.stat();
+    if (held.ino !== named.ino || held.dev !== named.dev || held.size !== named.size) throw new Error();
+    const bytes = Buffer.alloc(INSTRUCTIONS_BYTES_MAX + 1);
+    const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
+    if (bytesRead !== named.size) throw new Error();
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, bytesRead));
+    if (text.includes("\0") || text.trim() === "") throw new Error();
+    assert(Buffer.byteLength(text) <= INSTRUCTIONS_BYTES_MAX, "host_instructions_invariant");
+    return text;
+  } catch { throw new Error("host_launch_rejected"); }
+  finally { await handle?.close().catch(() => undefined); }
 }
 
 export async function admitLaunch(launch: Launch, environmentHome: string | undefined): Promise<void> {
@@ -195,6 +223,7 @@ export async function runExecutable(argv: string[]): Promise<void> {
   }
   const launch = parseLaunch(argv);
   await within(admitLaunch(launch, process.env.HOME), 5000);
+  const startupEnvironmentPrompt = launch.instructionsFile === undefined ? undefined : await within(readInstructions(launch.instructionsFile), 5000);
   const [{ Config }, { createAgentClient }, { buildPermissionContext }, { assembleClosedController }] = await within(Promise.all([
     import("../../.local-state/tools/rcli-source/src/config/Config.ts"),
     import("../../.local-state/tools/rcli-source/src/providers/createAgentClient.ts"),
@@ -206,7 +235,7 @@ export async function runExecutable(argv: string[]): Promise<void> {
   const client = createAgentClient(config);
   const permissions = buildPermissionContext(config.cwd, "manual", false);
   if (permissions.mode !== "manual" || permissions.interactive || permissions.rules.allow.length !== 0) throw new Error("host_startup_failed");
-  const { controller, bus } = assembleClosedController({ config, client, permissions, sessionId: launch.sessionId, cwd: launch.cwd, homeDir: launch.homeDir });
+  const { controller, bus } = assembleClosedController({ config, client, permissions, sessionId: launch.sessionId, cwd: launch.cwd, homeDir: launch.homeDir, startupEnvironmentPrompt });
   const channel = new HostChannel(process.stdout, launch.sessionId, launch.instanceId);
   const runs = new Set<Promise<void>>();
   let stopping = false;

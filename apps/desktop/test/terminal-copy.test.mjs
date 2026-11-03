@@ -48,11 +48,11 @@ async function keyPress(send, modifiers) {
   await send("Input.dispatchKeyEvent", { type: "keyUp", ...event });
 }
 
-async function securePage(evaluate, send) {
+async function securePage(evaluate, send, context) {
   const server = createServer((_, reply) => reply.end("<!doctype html><title>terminal</title>"));
   await new Promise((done) => server.listen(0, "127.0.0.1", done));
   const origin = `http://127.0.0.1:${server.address().port}`;
-  await send("Browser.grantPermissions", { origin, permissions: ["clipboardReadWrite", "clipboardSanitizedWrite"] });
+  await send("Browser.grantPermissions", { origin, permissions: ["clipboardReadWrite", "clipboardSanitizedWrite"], browserContextId: context });
   await send("Page.navigate", { url: `${origin}/` });
   for (let waited = 0; !(await evaluate("location.origin + document.readyState")).endsWith("complete") || await evaluate("location.origin") !== origin; waited += 20) {
     assert.ok(waited < 5000, "the page never loaded");
@@ -63,8 +63,8 @@ async function securePage(evaluate, send) {
 
 test("in a real terminal, Cmd+C puts the selection on the clipboard and types nothing, and Ctrl+C with nothing selected interrupts the agent", async () => {
   let server = null;
-  const seen = await withPage(async ({ evaluate, send }) => {
-    server = await securePage(evaluate, send);
+  const seen = await withPage(async ({ evaluate, send, context }) => {
+    server = await securePage(evaluate, send, context);
     await evaluate(fixture);
     await evaluate("Fixture.mountKeys(true)");
     await evaluate(`Fixture.write(${JSON.stringify("first line of output\r\nsecond line")})`);
@@ -87,8 +87,8 @@ test("in a real terminal, Cmd+C puts the selection on the clipboard and types no
 
 test("off a Mac, Ctrl+C copies the selection and lets it go, so the next Ctrl+C interrupts the agent", async () => {
   let server = null;
-  const seen = await withPage(async ({ evaluate, send }) => {
-    server = await securePage(evaluate, send);
+  const seen = await withPage(async ({ evaluate, send, context }) => {
+    server = await securePage(evaluate, send, context);
     await evaluate(fixture);
     await evaluate("Fixture.mountKeys(false)");
     await evaluate(`Fixture.write(${JSON.stringify("first line of output\r\nsecond line")})`);
@@ -135,8 +135,8 @@ const inside = (inner, outer) => inner.left >= outer.left && inner.top >= outer.
 
 test("a right-click on the terminal's last rows or near its right edge opens the whole menu inside the panel", async () => {
   let server = null;
-  const seen = await withPage(async ({ evaluate, send }) => {
-    server = await securePage(evaluate, send);
+  const seen = await withPage(async ({ evaluate, send, context }) => {
+    server = await securePage(evaluate, send, context);
     await send("Emulation.setDeviceMetricsOverride", { width: 1000, height: 700, deviceScaleFactor: 1, mobile: false });
     await evaluate(fixture);
     await evaluate("Fixture.mountMenu(true)");
@@ -156,8 +156,8 @@ test("a right-click on the terminal's last rows or near its right edge opens the
 
 test("the terminal menu moves with the arrow keys and Escape hands focus back to the terminal", async () => {
   let server = null;
-  const seen = await withPage(async ({ evaluate, send }) => {
-    server = await securePage(evaluate, send);
+  const seen = await withPage(async ({ evaluate, send, context }) => {
+    server = await securePage(evaluate, send, context);
     await evaluate(fixture);
     await evaluate("Fixture.mountMenu(true)");
     await evaluate(`Fixture.write(${JSON.stringify("first line of output\r\nsecond line")})`);
@@ -178,8 +178,8 @@ test("the terminal menu moves with the arrow keys and Escape hands focus back to
 
 test("Copy output in the terminal menu puts the whole output on the clipboard and hands focus back to the terminal", async () => {
   let server = null;
-  const seen = await withPage(async ({ evaluate, send }) => {
-    server = await securePage(evaluate, send);
+  const seen = await withPage(async ({ evaluate, send, context }) => {
+    server = await securePage(evaluate, send, context);
     await evaluate(fixture);
     await evaluate("Fixture.mountMenu(true)");
     await evaluate(`Fixture.write(${JSON.stringify("first line of output\r\nsecond line")})`);

@@ -1,6 +1,7 @@
 use super::intake::{NOT_READY, ask, copy, event, not_ready};
 use super::new_project::{NAME_BYTES_MAX, PLATFORM_ORDER};
 use super::new_project_view::ROADMAP_LABEL;
+use super::project_markdown::sanitize;
 use super::project_time::{clock, local_offset};
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection, open};
 use crate::engine::owner::OwnerResult;
@@ -10,6 +11,7 @@ use crate::project_setup::{Platform, ResearchKind, SetupAction, SetupQuery, Setu
 use crate::protocol::{CredentialRef, ProjectId};
 use crate::tui::client::OwnerEvent;
 use crate::tui::client::intake::{IntakeQuery, IntakeView};
+use crate::tui::client::process::{ProcessEvent, ProcessQuery, ProcessReply};
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::keys::Key;
@@ -76,6 +78,7 @@ struct Review {
     roadmap: bool,
     focus: Focus,
     revision: Load<u64>,
+    move_left: bool,
 }
 
 impl Review {
@@ -102,6 +105,7 @@ impl Review {
             roadmap,
             focus: Focus::Name,
             revision: Load::Idle,
+            move_left: false,
         }
     }
 
@@ -199,6 +203,7 @@ pub struct OnboardingPage {
     project: Option<ProjectId>,
     phase: Phase,
     problem: Option<String>,
+    move_sent: Option<ProcessQuery>,
 }
 
 impl OnboardingPage {
@@ -217,6 +222,78 @@ impl OnboardingPage {
             project,
             phase,
             problem: None,
+            move_sent: None,
+        }
+    }
+
+    /// The moved instruction files git still shows as deleted, while the owner has not
+    /// left them (DEC-106 addendum). Input: the review. Output: the paths, empty when the
+    /// Commit the move choice is not offered.
+    fn waiting(review: &Review) -> Vec<&str> {
+        if review.move_left {
+            return Vec::new();
+        }
+        review
+            .onboarding
+            .imported
+            .iter()
+            .filter(|file| file.uncommitted)
+            .map(|file| file.path.as_str())
+            .collect()
+    }
+
+    /// Asks the engine to commit the instruction import's move: one local commit on the
+    /// checkout's current branch holding only the moved files, never pushed. Only the owner's
+    /// Ctrl-G calls this. Inputs: the project and the context. Output: none; the commit
+    /// arrives as a process event.
+    fn commit_move(&mut self, project: ProjectId, ctx: &mut Ctx) {
+        if self.move_sent.is_some() {
+            return;
+        }
+        let query = ProcessQuery::CommitImport { project };
+        if ctx.try_request(Request::Process(Box::new(query.clone()))) {
+            self.move_sent = Some(query);
+        } else {
+            ctx.say(Message::error(
+                "The move wasn't committed: too many requests are waiting.",
+                "",
+            ));
+        }
+    }
+
+    /// Applies the commit of the import's move: marks the committed files as no longer
+    /// waiting and names the branch, or says why nothing was committed. Inputs: the process
+    /// event and the context. Output: none.
+    fn committed(&mut self, event: &ProcessEvent, ctx: &mut Ctx) {
+        if self.move_sent.as_ref() != Some(&event.query) {
+            return;
+        }
+        self.move_sent = None;
+        let (Phase::Review(review) | Phase::Confirming(review)) = &mut self.phase else {
+            return;
+        };
+        match &event.result {
+            Ok(ProcessReply::Committed(commit)) => {
+                for file in &mut review.onboarding.imported {
+                    if commit.files.contains(&file.path) {
+                        file.uncommitted = false;
+                    }
+                }
+                let files: Vec<String> = commit.files.iter().map(|path| sanitize(path)).collect();
+                ctx.say(Message::success(
+                    &format!("Committed the move on {}:", sanitize(&commit.branch)),
+                    &format!("{}. Nothing was pushed.", files.join(", ")),
+                ));
+            }
+            Ok(_) => {}
+            Err(code) => {
+                if code == "process_commit_none" {
+                    for file in &mut review.onboarding.imported {
+                        file.uncommitted = false;
+                    }
+                }
+                ctx.say(Message::error(&super::process::message(code), ""));
+            }
         }
     }
 
@@ -562,6 +639,39 @@ impl OnboardingPage {
         let mut lines =
             Self::step_line("Build the code graph", &review.onboarding.graph, limit, ctx);
         lines.push(Line::default());
+        if !review.onboarding.imported.is_empty() {
+            lines.extend(
+                wrap(
+                    "CrazyAgent copied these instruction files into .crazyagent/instructions.md and moved them to .crazyagent/imported/:",
+                    limit,
+                )
+                .into_iter()
+                .map(|text| styled(text, Role::Muted, theme)),
+            );
+            for file in &review.onboarding.imported {
+                let tracked = if file.uncommitted {
+                    " (git shows it as deleted)"
+                } else {
+                    ""
+                };
+                lines.extend(
+                    wrap(&format!("- {}{tracked}", sanitize(&file.path)), limit)
+                        .into_iter()
+                        .map(Line::raw),
+                );
+            }
+            if !Self::waiting(review).is_empty() {
+                lines.extend(
+                    wrap(
+                        "Merges into this branch are refused until the move is committed. Ctrl-G Commit the move makes one local commit on your current branch holding only that move; it is never pushed. Ctrl-L Leave it.",
+                        limit,
+                    )
+                    .into_iter()
+                    .map(|text| styled(text, Role::Warning, theme)),
+                );
+            }
+            lines.push(Line::default());
+        }
         if let Step::Failed { reason } = &review.onboarding.mapping
             && !review.onboarding.finished
         {
@@ -715,7 +825,7 @@ impl Screen for OnboardingPage {
 
     fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
         let arrows = format!("{}{}", ctx.glyphs.up, ctx.glyphs.down);
-        match &self.phase {
+        let mut hints = match &self.phase {
             Phase::Pool { .. } if Self::pools(ctx).is_empty() => {
                 vec![hint("p", "Create a pool"), hint("Esc", "Back")]
             }
@@ -758,7 +868,19 @@ impl Screen for OnboardingPage {
                 ],
             },
             _ => vec![hint("Esc", "Back")],
+        };
+        if let Phase::Review(review) = &self.phase
+            && !Self::waiting(review).is_empty()
+        {
+            hints.splice(
+                0..0,
+                [
+                    hint("Ctrl-G", "Commit the move"),
+                    hint("Ctrl-L", "Leave it"),
+                ],
+            );
         }
+        hints
     }
 
     fn typing(&self) -> bool {
@@ -769,6 +891,22 @@ impl Screen for OnboardingPage {
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         if matches!(key, Key::Esc) {
             return Flow::Ignored;
+        }
+        if let Phase::Review(review) = &mut self.phase
+            && !Self::waiting(review).is_empty()
+        {
+            match key {
+                Key::Ctrl('g') => {
+                    let project = review.onboarding.project_id.clone();
+                    self.commit_move(project, ctx);
+                    return Flow::Handled;
+                }
+                Key::Ctrl('l') => {
+                    review.move_left = true;
+                    return Flow::Handled;
+                }
+                _ => {}
+            }
         }
         let pools = Self::pools(ctx).len();
         match &mut self.phase {
@@ -839,6 +977,12 @@ impl Screen for OnboardingPage {
         if let Some(reply) = event(arrival) {
             let (query, result) = (reply.query.clone(), reply.result.clone());
             self.intake(&query, &result, ctx);
+            return Flow::Handled;
+        }
+        if let Arrival::Owner(owner) = arrival
+            && let OwnerEvent::Process(process) = owner.as_ref()
+        {
+            self.committed(process, ctx);
             return Flow::Handled;
         }
         if let Arrival::Owner(owner) = arrival
@@ -927,6 +1071,9 @@ impl Screen for OnboardingPage {
     }
 
     fn busy(&self, _ctx: &Ctx) -> bool {
+        if self.move_sent.is_some() {
+            return true;
+        }
         match &self.phase {
             Phase::Starting | Phase::Confirming(_) | Phase::Assigning(_) => true,
             Phase::Running(load) => !matches!(load, Load::Failed(_) | Load::NotReady),

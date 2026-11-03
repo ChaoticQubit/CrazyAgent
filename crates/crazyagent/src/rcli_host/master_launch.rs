@@ -19,6 +19,7 @@ use std::process::Command;
 use std::process::Stdio;
 
 const CONFIG_BYTES_MAX: u64 = 65_536;
+const _: () = assert!(crate::agent_home::GIVEN_BYTES_MAX as u64 <= CONFIG_BYTES_MAX);
 #[cfg(unix)]
 const ARTIFACT_BYTES_MAX: u64 = 536_870_912;
 
@@ -43,6 +44,7 @@ pub struct RcliMasterLaunch {
     pub home_dir: PathBuf,
     pub cwd: PathBuf,
     pub profile_config_sha256: String,
+    pub instructions: Option<PathBuf>,
 }
 
 #[derive(Deserialize)]
@@ -126,8 +128,14 @@ impl RcliMasterLaunch {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
+        if let Some(instructions) = &self.instructions {
+            command.arg("--instructions-file").arg(instructions);
+        }
         assert_eq!(command.get_program(), self.executable.as_os_str());
-        assert_eq!(command.get_args().count(), 8);
+        assert_eq!(
+            command.get_args().count(),
+            if self.instructions.is_some() { 10 } else { 8 }
+        );
         Ok(command)
     }
 
@@ -147,6 +155,13 @@ impl RcliMasterLaunch {
         }
         if self.executable.starts_with(&self.cwd) || self.executable.starts_with(&self.home_dir) {
             return Err(error(code));
+        }
+        if let Some(instructions) = &self.instructions {
+            if instructions.starts_with(&self.cwd) || instructions.starts_with(&self.home_dir) {
+                return Err(error(code));
+            }
+            let metadata = fs::symlink_metadata(instructions).map_err(|_| error(code))?;
+            validate_file(instructions, &metadata, false)?;
         }
         assert_ne!(self.cwd, self.home_dir);
         assert!(!anchor.file_type().is_symlink());

@@ -283,6 +283,26 @@ fn a_real_tools_on_claude_team_agent_keeps_its_default_tools_but_no_built_in_sub
 
 #[cfg(unix)]
 #[test]
+fn a_tools_on_claude_team_agent_waits_long_enough_for_its_mcp_servers_to_connect() {
+    let connect_limit = |command: &std::process::Command| {
+        command
+            .get_envs()
+            .find(|(name, _)| *name == "MCP_TIMEOUT")
+            .and_then(|(_, value)| value.map(std::ffi::OsStr::to_owned))
+    };
+    let mut off = team_launch("claude-code");
+    off.request.tools = false;
+    assert_eq!(connect_limit(&super::command(&off.request).unwrap()), None);
+    let on = team_launch("claude-code");
+    assert_eq!(
+        connect_limit(&super::command(&on.request).unwrap()),
+        Some("60000".into()),
+        "Claude Code's own 30 s connect limit drops context-mode on a busy machine"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn the_installed_codex_reads_a_tools_on_team_agent_with_its_own_sub_agents_off() {
     let launch = team_launch("codex");
     let mut features = std::process::Command::new(&launch.request.executable);
@@ -630,4 +650,58 @@ fn a_team_agent_commits_as_the_owner_and_its_claude_settings_turn_attribution_of
         git(&["log", "-1", "--format=%an|%ae|%cn|%ce"]),
         "Repo Owner|owner@example.invalid|Repo Owner|owner@example.invalid\n"
     );
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_launch_path_starts_with_the_agent_git_only_while_the_temp_folder_holds_it() {
+    use crate::sandbox::toolchains::{self, ToolHomes};
+    use std::os::unix::fs::PermissionsExt;
+    let directory = tempfile::Builder::new()
+        .prefix("ca-agent-git-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let [home, work] = ["home", "work"].map(|name| base.join(name));
+    for folder in [&home, &work] {
+        std::fs::create_dir(folder).unwrap();
+        std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let profile = base.join("project.sb");
+    std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    let path_of = |tools: bool| -> String {
+        let request = LaunchRequest {
+            harness: "claude-code".into(),
+            executable: PathBuf::from("/usr/bin/true"),
+            working_dir: work.clone(),
+            account: AccountBinding::Subscription { home: home.clone() },
+            model: None,
+            tools,
+            sandbox_profile: Some(profile.clone()),
+            unconfined: false,
+            git_identity: None,
+            limits: LaunchLimits::default(),
+        };
+        let command = super::command(&request).unwrap();
+        command
+            .get_envs()
+            .find(|(name, _)| *name == "PATH")
+            .and_then(|(_, value)| value)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned()
+    };
+    let tools_on = toolchains::agent_path(&ToolHomes::owner().unwrap(), super::TOOLS_ON_PATH);
+    assert_eq!(path_of(true), tools_on);
+    assert_eq!(path_of(false), super::TOOLS_OFF_PATH);
+    let tmp = toolchains::make_tmp(&home).unwrap();
+    let bin = tmp.join("bin");
+    assert_eq!(path_of(true), format!("{}:{tools_on}", bin.display()));
+    assert_eq!(
+        path_of(false),
+        format!("{}:{}", bin.display(), super::TOOLS_OFF_PATH)
+    );
+    toolchains::remove_tmp(&home).unwrap();
+    assert_eq!(path_of(false), super::TOOLS_OFF_PATH);
 }

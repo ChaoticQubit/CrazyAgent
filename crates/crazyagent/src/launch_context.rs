@@ -1,13 +1,16 @@
 use crate::agent_git::Layout;
+use crate::coord::settings::{RoleSkills, SkillRole};
 use crate::harnesses::launch::LaunchError;
 use crate::plugins::{
-    EffectivePlugins, EffectiveSkill, LaunchPlugins, LaunchSecret, LaunchServer, ServerSpec,
+    EffectiveHook, EffectivePlugins, EffectiveSkill, LaunchPlugins, LaunchSecret, LaunchServer,
+    ServerSpec, hook_folder,
 };
 use crate::project_setup::{ContextKind, StoredSetup};
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, Transaction};
 #[cfg(unix)]
 use rustix::fs::{FlockOperation, Mode, OFlags};
+use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::Read;
@@ -21,9 +24,9 @@ pub const HEADER_BYTES_MAX: usize = HEADER_TITLE.len()
     + "You are working on the project \"\".\n".len()
     + NAME_BYTES_MAX
     + 2 * ("Project folder: \n".len() + FOLDER_BYTES_MAX);
-pub const BRIEF_BYTES_MAX: usize = crate::project_setup::CONTEXT_CHUNK_BYTES;
+pub const BRIEF_BYTES_MAX: usize = 3 * 1024;
 pub const INDEX_ITEMS_MAX: usize = crate::project_setup::CONTEXT_ITEMS_MAX;
-pub const INDEX_BYTES_MAX: usize = 7 * 1024;
+pub const INDEX_BYTES_MAX: usize = 3 * 1024;
 pub const MEMORY_ITEMS_MAX: usize = crate::memory::library::LAUNCH_ITEMS_MAX;
 pub const MEMORY_SECTION_BYTES_MAX: usize = crate::memory::library::LAUNCH_BYTES_MAX + 1024;
 pub const INSTRUCTIONS_BYTES_MAX: usize = 34 * 1024;
@@ -31,6 +34,17 @@ pub const SKILLS_INDEX_BYTES_MAX: usize = 8 * 1024;
 pub const TEAM_INDEX_BYTES_MAX: usize = 4 * 1024;
 pub const MASTER_INSTRUCTIONS_BYTES_MAX: usize =
     INSTRUCTIONS_BYTES_MAX + TEAM_INDEX_BYTES_MAX + SECTION_SLACK + MASTER_LANDING_RULES.len();
+
+const _: () = assert!(TOOLS_SECTION_BYTES_MAX <= TEAM_INDEX_BYTES_MAX);
+/// The most bytes of the team tools section a live master or sub-agent with tools reads.
+pub const TOOLS_SECTION_BYTES_MAX: usize = 3 * 1024;
+/// The most bytes of a live master's own instructions: its role, its team tools or the
+/// DELEGATE line, and how the team's work lands.
+pub const LIVE_RULES_BYTES_MAX: usize = 4 * 1024;
+/// The most bytes a live master adds to what its harness reads at launch: its own
+/// instructions and the seed of a fresh conversation for a session with earlier turns.
+pub const LIVE_INSTRUCTIONS_BYTES_MAX: usize =
+    LIVE_RULES_BYTES_MAX + 2 + crate::master_sessions::SEED_BYTES_MAX;
 
 /// How a Sandboxed agent's work lands, given at every launch in a linked worktree:
 /// CrazyAgent, not the agent, turns the edits left in its worktree into a change set the
@@ -55,14 +69,26 @@ pub const SKILL_BYTES_MAX: u64 = 64 * 1024 * 1024;
 const SKILL_DEPTH_MAX: usize = 8;
 const SECTION_SLACK: usize = 512;
 const ASK_RULE_BYTES_MAX: usize = 1024;
-const NAME_BYTES_MAX: usize = 256;
+pub(crate) const NAME_BYTES_MAX: usize = 256;
 const DESCRIPTION_BYTES_MAX: usize = 512;
+const SKILL_LINE_DESCRIPTION_BYTES_MAX: usize = 160;
+const SKILL_TOOL_USE: &str = "Use one with the Skill tool, where it is named crazyagent:NAME; without a Skill tool, read its SKILL.md at the path shown.";
+const SKILL_FILE_USE: &str = "To use one, read its SKILL.md at the path shown and follow it.";
 const FOLDER_BYTES_MAX: usize = 1024;
 const HEADER_TITLE: &str = "# Project context from CrazyAgent\n\n";
 const STATE: &str = "crazyagent";
+const CONTEXT_MODE_SERVER: &str = "context-mode";
+const CONTEXT_MODE_DECLARED: &str = "plugin_context-mode_context-mode";
+const TEAMMATE_COMMAND: &str = "teammate";
+const TEAMMATE_INSTRUCTIONS: &str = "teammate.md";
+/// The most switched-off tools one launch passes to its harness, across every server.
+pub const DENIED_TOOLS_MAX: usize = 256;
 #[cfg(unix)]
 const LOCK: &str = "crazyagent.lock";
 const PLUGIN_MANIFEST: &str = "{\"name\":\"crazyagent\",\"version\":\"1.0.0\",\"description\":\"Skills the owner approved for this project in CrazyAgent\"}\n";
+const HOOK_PLUGINS: &str = "hook-plugins";
+const HOOK_ROOT: &str = "CRAZYAGENT_HOOK_ROOT";
+const PLUGIN_ROOT: &str = "${CLAUDE_PLUGIN_ROOT}";
 
 const _: () = assert!(
     HEADER_BYTES_MAX
@@ -91,35 +117,64 @@ fn skill_unavailable<E>(_: E) -> LaunchError {
 }
 
 /// What every agent the engine launches for one project receives: the approved skills and
-/// MCP servers with their secret values, one bounded startup instruction holding the
-/// project brief, an index of its context files and the owner-approved memories, and
-/// whether a headless Claude run keeps its transcript.
+/// MCP servers with their secret values, the tools the owner switched off on each server,
+/// one bounded startup instruction holding the project brief, an index of its context files
+/// and the owner-approved memories, whether a headless Claude run keeps its transcript,
+/// whether a Claude Code lead runs its own agent team, and the engine executable and mailbox
+/// of a team agent's message relay.
 #[derive(Debug)]
 pub struct AgentContext {
     plugins: LaunchPlugins,
     instructions: String,
     process: Option<Box<Process>>,
     transcripts: bool,
+    off_tools: Vec<(String, Vec<String>)>,
+    native_team: Option<(PathBuf, PathBuf)>,
+    relay: Option<(PathBuf, PathBuf)>,
 }
 
-/// The owner's app and project instructions and the instruction files one launch writes
-/// into the agent's home, with the project they belong to.
+/// The project whose app and project instructions and instruction files each launch reads
+/// and writes into the agent's home, and the hooks the owner turned on for it.
 #[derive(Debug)]
 struct Process {
     project: crate::agent_home::AgentProject,
-    given: crate::agent_home::Given,
+    hooks: Vec<EffectiveHook>,
 }
 
 /// The files one launch wrote into its agent home, whether a headless Claude run keeps its
-/// transcript, and the lock that keeps a second launch out of that home. Dropping it
-/// deletes every file holding a secret and the copied skills.
+/// transcript, whether its generated plugin holds hooks, the Claude Code tool names the
+/// owner switched off, whether the lead runs its own agent team, and the lock that keeps a
+/// second launch out of that home. Dropping it deletes every file holding a secret and the
+/// copied skills and hooks, unless `keep` left them to a pane that still runs.
 #[derive(Debug)]
 pub struct Installed {
     arguments: Vec<OsString>,
-    removals: Vec<PathBuf>,
-    copies: Option<PathBuf>,
+    files: Option<InstalledFiles>,
     transcripts: bool,
+    hooks: bool,
+    relay: bool,
+    denied: Vec<String>,
+    native: Option<NativeTeam>,
     _lock: File,
+}
+
+/// What a native-team lead's launch gives its teammates (DEC-104 K5a): the tmux program
+/// Claude Code splits their panes with, which is on the lead's PATH, and the instruction
+/// file each teammate starts with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeTeam {
+    pub tmux: PathBuf,
+    pub instructions: PathBuf,
+}
+
+/// Where one launch wrote its files, as a pane record keeps it, so an engine that adopts
+/// the pane later deletes them when the pane stops: the agent home, and whether the launch
+/// was for Codex, which also writes `config.toml` and the skill copies there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstalledFiles {
+    pub home: PathBuf,
+    pub codex: bool,
 }
 
 struct Budget {
@@ -145,22 +200,110 @@ pub fn for_project(
     let transcripts = crate::instruction_files::load(&tx, project)
         .map_err(failure)?
         .transcripts;
+    let hooks = crate::storage::plugins::effective_hooks(&tx, &root, project)
+        .map_err(|problem| LaunchError(problem.0))?;
+    let off_tools = off_tools(&tx, project, &plugins)?;
     drop(tx);
-    let given = crate::agent_home::text(&home_project).map_err(|problem| LaunchError(problem.0))?;
+    crate::agent_home::text(&home_project).map_err(|problem| LaunchError(problem.0))?;
     Ok(AgentContext {
         plugins,
         instructions,
         process: Some(Box::new(Process {
             project: home_project,
-            given,
+            hooks,
         })),
         transcripts,
+        off_tools,
+        native_team: None,
+        relay: None,
     })
 }
 
+/// Reads what one team role's agents launched for a project receive (DEC-111 R3): the
+/// project's context with only the approved skills the owner chose for that role. Inputs: a
+/// connection to the engine's `engine.db`, the project, the agent's git layout and its
+/// role. Output: the context, or a plain code.
+pub fn for_team_role(
+    connection: &Connection,
+    project: &ProjectId,
+    layout: Layout,
+    role: SkillRole,
+) -> Result<AgentContext, LaunchError> {
+    let chosen = crate::coord::settings::read(connection, project)
+        .map_err(|problem| LaunchError(problem.0))?
+        .role_skills;
+    Ok(for_project(connection, project, layout)?.for_role(chosen.of(role)))
+}
+
+/// Reads the tools the owner switched off, for the project or app-wide, on each approved MCP
+/// server and on the engine's own server, by the server's stored name. Input: the read
+/// transaction, the project and its approved plugins. Output: each server with switched-off
+/// tools and their names, or `launch_context_tool_switch_invalid` for a stored name that is
+/// not a plain tool name or more than `DENIED_TOOLS_MAX` names in all.
+fn off_tools(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    plugins: &LaunchPlugins,
+) -> Result<Vec<(String, Vec<String>)>, LaunchError> {
+    let invalid = || failure("launch_context_tool_switch_invalid");
+    let mut found = Vec::new();
+    let mut total = 0;
+    let names = plugins
+        .servers
+        .iter()
+        .map(|server| server.name.as_str())
+        .chain([crate::coord::tool_switches::CRAZYAGENT_SERVER]);
+    for server in names {
+        let off = crate::coord::tool_switches::off_tools(tx, project, server)
+            .map_err(|problem| LaunchError(problem.0))?;
+        if off.is_empty() || found.iter().any(|(seen, _): &(String, _)| seen == server) {
+            continue;
+        }
+        if off.iter().any(|tool| !tool_name_plain(tool)) {
+            return Err(invalid());
+        }
+        total += off.len();
+        if total > DENIED_TOOLS_MAX {
+            return Err(invalid());
+        }
+        found.push((server.to_owned(), off));
+    }
+    assert!(found.iter().map(|(_, off)| off.len()).sum::<usize>() <= DENIED_TOOLS_MAX);
+    Ok(found)
+}
+
+fn tool_name_plain(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= crate::coord::tool_switches::NAME_BYTES_MAX
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+}
+
+/// The part only a native lead's teammates read after the lead's own instructions: they work
+/// in the lead's agent team, and graphify finds the project graph through the lead's
+/// worktree, since its read-only graph links exist only there. Input: the lead's worktree.
+/// Output: the section, or `launch_path_invalid` for a path with a control character.
+fn teammate_section(worktree: &Path) -> Result<String, LaunchError> {
+    let folder = worktree
+        .to_str()
+        .filter(|text| !text.chars().any(|c| c.is_control() || c == '`'))
+        .ok_or_else(|| failure("launch_path_invalid"))?;
+    Ok(format!(
+        "\n## You are a teammate\n\nYou are a teammate in the Claude Code agent team of a CrazyAgent lead, which works in `{folder}`. Your own worktree has no project graph: run graphify with `--graph {folder}/graphify-out/graph.json`.\n"
+    ))
+}
+
+/// Where a native-team lead's launch writes the command Claude Code runs for each teammate
+/// (`CLAUDE_CODE_TEAMMATE_COMMAND`), inside the launch's own files so it goes when they do.
+/// Input: the agent home. Output: the path.
+pub(crate) fn teammate_command(home: &Path) -> PathBuf {
+    home.join(STATE).join(TEAMMATE_COMMAND)
+}
+
 /// Names what an agent home of the project receives the owner's instructions from: the
-/// engine data folder (the folder of `engine.db`), the project's recorded folder, the
-/// instruction files the owner chose for its agents and the owner's home.
+/// engine data folder (the folder of `engine.db`), the project's recorded folder and which
+/// of the owner's two instruction texts its agents get.
 /// Input: a transaction on `engine.db` and the project. Output: the project, or a plain code.
 pub(crate) fn agent_project(
     tx: &Transaction<'_>,
@@ -170,15 +313,14 @@ pub(crate) fn agent_project(
         .map_err(unavailable)?
         .map(|setup| setup.project_folder())
         .filter(|folder| folder.is_absolute());
-    let files = crate::instruction_files::load(tx, project)
+    let mode = crate::instruction_files::load(tx, project)
         .map_err(failure)?
-        .files;
+        .mode;
     Ok(crate::agent_home::AgentProject {
         data: engine_root(tx)?,
         id: project.clone(),
         folder,
-        files,
-        owner_home: crate::instruction_files::owner_home(),
+        mode,
     })
 }
 
@@ -195,8 +337,9 @@ pub fn master_tools(tx: &Transaction<'_>, project: &ProjectId) -> Result<bool, L
 /// same project context, approved memories and linked-worktree landing rules every
 /// Sandboxed agent gets, since the conversation runs in a linked worktree, then with tools on what
 /// its tools are and how it starts a sub-agent (DEC-093), or with tools off the names of
-/// the approved skills and MCP servers that team agents with tools on receive, then how the
-/// team's work lands. No secret
+/// the approved skills and MCP servers that team agents with tools on receive, with the team
+/// roles each skill goes to when the owner chose skills per role, then how the team's work
+/// lands. No secret
 /// value, command, URL or file of a server is read or given. Input: a transaction the caller
 /// holds on `engine.db`, the project, its master tools switch and the live model access,
 /// none without settings. Output: at most `MASTER_INSTRUCTIONS_BYTES_MAX` bytes of markdown,
@@ -220,7 +363,10 @@ pub fn for_master(
     } else {
         let plugins = crate::storage::plugins::effective(tx, &root, project)
             .map_err(|problem| LaunchError(problem.0))?;
-        text.push_str(&team_index(&plugins));
+        let roles = crate::coord::settings::read(tx, project)
+            .map_err(|problem| LaunchError(problem.0))?
+            .role_skills;
+        text.push_str(&team_index(&plugins, &roles));
     }
     text.push_str(MASTER_LANDING_RULES);
     assert!(text.len() <= MASTER_INSTRUCTIONS_BYTES_MAX);
@@ -268,6 +414,25 @@ pub(crate) fn master_tools_section(setup: &StoredSetup, available: &[&str]) -> S
     section
 }
 
+/// The section that names a live master's or sub-agent's team tools (DEC-104), each on
+/// one line, with the two question tags and the branch rule for the agents it leads
+/// (Q-W-LAND-26). Input: the team tools left out. Output: at most
+/// `TOOLS_SECTION_BYTES_MAX` bytes of markdown.
+pub fn team_tools_section(off: &[String]) -> String {
+    let mut section = format!(
+        "\n## Team tools\n\nYour team tools are in the `{}` MCP server. The engine answers each by your place in the team:\n",
+        crate::team::tool::SERVER_NAME
+    );
+    for (name, line) in crate::coord::tool_switches::BUILTIN_TOOLS {
+        if !off.iter().any(|tool| tool == name) {
+            section.push_str(&format!("- {name}: {line}\n"));
+        }
+    }
+    section.push_str("Call start_work with your claims before you edit, read inspect_work when the engine says something waits for you, and end with finish_work and its evidence.\nEvery question carries two tags: for (me for the owner, master, or lead for your own lead) and severity (high, normal or low). A for me question reaches the owner only; no agent answers it. Pass a question you cannot answer on up with update_work, never at a lower severity.\nBranches: an agent you lead works on `<your task branch>--<its name>`, never `<your task branch>/<its name>`, which git refuses.\n");
+    assert!(section.len() <= TOOLS_SECTION_BYTES_MAX);
+    section
+}
+
 fn engine_root(connection: &Connection) -> Result<PathBuf, LaunchError> {
     Ok(connection
         .path()
@@ -305,17 +470,70 @@ impl AgentContext {
         &self.plugins
     }
 
-    /// Lists what a project sandbox must let an agent with tools on read beyond its home:
-    /// the executable of every approved command server.
+    /// Keeps only the approved skills the owner chose for one team role (DEC-111 R3); a
+    /// chosen name that is not approved adds nothing. Input: the role's chosen names, or
+    /// none for All approved skills, which keeps every one. Output: the context.
+    pub fn for_role(mut self, chosen: Option<&[String]>) -> Self {
+        if let Some(names) = chosen {
+            let before = self.plugins.skills.len();
+            self.plugins
+                .skills
+                .retain(|skill| names.contains(&skill.name));
+            assert!(self.plugins.skills.len() <= before.min(names.len()));
+        }
+        self
+    }
+
+    /// Lists what a project sandbox must let an agent with tools on read beyond its home, as
+    /// paths whose folders it reads: the executable of every approved command server and,
+    /// for context-mode run from the engine's shared install, that install's `node_modules`.
     pub fn read_paths(&self) -> Vec<PathBuf> {
-        self.plugins
-            .servers
-            .iter()
-            .filter_map(|server| match &server.spec {
-                ServerSpec::Stdio { command, .. } => Some(PathBuf::from(command)),
-                ServerSpec::Http { .. } => None,
-            })
-            .collect()
+        let mut paths = Vec::with_capacity(2 * self.plugins.servers.len());
+        for server in &self.plugins.servers {
+            if let ServerSpec::Stdio { command, .. } = &server.spec {
+                paths.push(PathBuf::from(command));
+            }
+            #[cfg(unix)]
+            paths.extend(
+                crate::context_mode::shared_install(&server.spec)
+                    .map(|install| install.join("node_modules")),
+            );
+        }
+        paths
+    }
+
+    /// Adds a live master's own instructions to what its harness reads at launch, so they
+    /// reach it as system context and never as a typed message. Input: at most
+    /// `LIVE_INSTRUCTIONS_BYTES_MAX` bytes the engine built. Output: the context.
+    pub fn with_live_instructions(mut self, text: &str) -> Self {
+        assert!(text.len() <= LIVE_INSTRUCTIONS_BYTES_MAX);
+        self.instructions.push('\n');
+        self.instructions.push_str(text);
+        assert!(
+            self.instructions.len()
+                <= MASTER_INSTRUCTIONS_BYTES_MAX + 1 + LIVE_INSTRUCTIONS_BYTES_MAX
+        );
+        self
+    }
+
+    /// Lets a Claude Code lead with tools on run its own agent team (DEC-104 Q10, native mode):
+    /// its launch keeps Agent and TeamCreate, starts teammates in tmux panes of its own
+    /// terminal and gives each the lead's instructions and where the project graph is.
+    /// Other harnesses and tools-off launches ignore it. Input: the tmux program the lead's
+    /// own server runs and the lead's worktree. Output: the context.
+    pub fn with_native_team(mut self, tmux: &Path, worktree: &Path) -> Self {
+        assert!(tmux.is_absolute() && worktree.is_absolute());
+        self.native_team = Some((tmux.to_path_buf(), worktree.to_path_buf()));
+        self
+    }
+
+    /// Gives a team agent's Claude Code launch the message relay plugin (DEC-104 K2a), which
+    /// delivers its team messages and reports its activity through its mailbox, and which its
+    /// native teammates get from it. Other harnesses ignore it. Input: the absolute engine
+    /// executable the relay runs and the agent's absolute mailbox. Output: the context.
+    pub fn with_relay(mut self, engine: &Path, mailbox: &Path) -> Self {
+        self.relay = Some((engine.to_path_buf(), mailbox.to_path_buf()));
+        self
     }
 
     /// Adds the owner's own instructions for one team agent after the app and project text
@@ -353,44 +571,59 @@ impl AgentContext {
             executable,
             crate::team::tool::SERVER_COMMAND,
             drop,
+            &[],
             AskReach::ReplyEnd,
         )
     }
 
     /// Adds the engine's own MCP server that gives a live team master with tools on its team
-    /// tools, answered by the engine at once through the mailbox folder, and tells it to ask
-    /// the owner only with that server's `ask` tool. Input: the absolute canonical engine
-    /// executable and the absolute mailbox in the master's private temporary folder.
-    /// Output: the context, or a plain code as for [`Self::with_team_tool`].
+    /// tools (DEC-104), answered by the engine at once through the mailbox folder, the
+    /// section that names them, and tells it to ask the owner only with that server's `ask`
+    /// tool. Input: the absolute canonical engine executable, the absolute mailbox in the
+    /// master's private temporary folder and the team tools left out. Output: the context,
+    /// or a plain code as for [`Self::with_team_tool`].
     pub fn with_live_team_tool(
         self,
         executable: &Path,
         mailbox: &Path,
+        off: &[String],
     ) -> Result<Self, LaunchError> {
         self.with_team_server(
             executable,
             crate::team::tool::LIVE_SERVER_COMMAND,
             mailbox,
+            off,
             AskReach::Live,
         )
+        .map(|context| context.with_tools_section(off))
     }
 
-    /// Adds the engine's own MCP server that gives a sub-agent with tools on only the `ask`
-    /// tool, answered by the engine at once through the mailbox folder, and tells it to ask
-    /// the owner only with that tool. Input: the absolute canonical engine executable and the
-    /// absolute mailbox in the agent's private temporary folder. Output: the context, or a
-    /// plain code as for [`Self::with_team_tool`].
+    /// Adds the engine's own MCP server that gives a sub-agent with tools its team tools
+    /// (DEC-104) and the `ask` tool, answered by the engine through the mailbox folder, the
+    /// section that names them, and tells it to ask the owner only with `ask`. Input: the
+    /// absolute canonical engine executable, the absolute mailbox in the agent's private
+    /// temporary folder and the tools left out. Output: the context, or a plain code as for
+    /// [`Self::with_team_tool`].
     pub fn with_agent_team_tool(
         self,
         executable: &Path,
         mailbox: &Path,
+        off: &[String],
     ) -> Result<Self, LaunchError> {
         self.with_team_server(
             executable,
-            crate::team::tool::questions::AGENT_SERVER_COMMAND,
+            crate::team::tool::AGENT_SERVER_COMMAND,
             mailbox,
+            off,
             AskReach::SubAgent,
         )
+        .map(|context| context.with_tools_section(off))
+    }
+
+    fn with_tools_section(mut self, off: &[String]) -> Self {
+        self.instructions.push_str(&team_tools_section(off));
+        assert!(self.instructions.len() <= MASTER_INSTRUCTIONS_BYTES_MAX);
+        self
     }
 
     fn with_team_server(
@@ -398,8 +631,12 @@ impl AgentContext {
         executable: &Path,
         subcommand: &str,
         drop: &Path,
+        off: &[String],
         reach: AskReach,
     ) -> Result<Self, LaunchError> {
+        if !crate::team::tool::known_tools(off) {
+            return Err(failure("launch_context_team_tool_invalid"));
+        }
         let plain = |path: &Path| {
             path.is_absolute()
                 .then(|| path.to_str())
@@ -423,17 +660,23 @@ impl AgentContext {
             name: name.into(),
             spec: ServerSpec::Stdio {
                 command,
-                args: vec![subcommand.into(), drop],
+                args: [subcommand.to_owned(), drop]
+                    .into_iter()
+                    .chain(off.iter().cloned())
+                    .collect(),
             },
             secrets: Vec::new(),
         });
-        self.instructions.push_str(&ask_rule(reach));
+        if !off.iter().any(|tool| tool == crate::team::tool::ASK_TOOL) {
+            self.instructions.push_str(&ask_rule(reach));
+        }
         assert!(self.instructions.len() <= MASTER_INSTRUCTIONS_BYTES_MAX);
         Ok(self)
     }
 
     /// Adds the names of the project's approved skills and MCP servers for a team master
-    /// whose own tools are off, so it plans the team's work with them. No secret value,
+    /// whose own tools are off, with the team roles each skill goes to when the owner chose
+    /// skills per role, so it plans the team's work with them. No secret value,
     /// command, URL or file of a server is read or given. Input: a connection to the
     /// engine's `engine.db` and the project. Output: the context, or a plain code.
     pub fn with_team_index(
@@ -445,12 +688,15 @@ impl AgentContext {
         let tx = connection.unchecked_transaction().map_err(unavailable)?;
         let plugins = crate::storage::plugins::effective(&tx, &root, project)
             .map_err(|problem| LaunchError(problem.0))?;
+        let roles = crate::coord::settings::read(&tx, project)
+            .map_err(|problem| LaunchError(problem.0))?
+            .role_skills;
         drop(tx);
-        Ok(self.with_index(&plugins))
+        Ok(self.with_index(&plugins, &roles))
     }
 
-    fn with_index(mut self, plugins: &EffectivePlugins) -> Self {
-        self.instructions.push_str(&team_index(plugins));
+    fn with_index(mut self, plugins: &EffectivePlugins, roles: &RoleSkills) -> Self {
+        self.instructions.push_str(&team_index(plugins, roles));
         assert!(self.instructions.len() <= MASTER_INSTRUCTIONS_BYTES_MAX);
         self
     }
@@ -464,6 +710,20 @@ impl AgentContext {
                 !value.is_empty() && text.windows(value.len()).any(|window| window == value)
             })
         })
+    }
+
+    /// Refuses a launch whose command line or environment would hold an MCP secret of this
+    /// context, as when the owner saves a secret that is also part of a path or flag the
+    /// launch uses: that is the owner's input, not an engine fault. Input: every argument,
+    /// environment name and value of the command. Output: Ok, or `launch_secret_in_command`.
+    pub fn refuse_exposed<'a>(
+        &self,
+        parts: impl IntoIterator<Item = &'a [u8]>,
+    ) -> Result<(), LaunchError> {
+        if parts.into_iter().any(|part| self.exposes_secret(part)) {
+            return Err(failure("launch_secret_in_command"));
+        }
+        Ok(())
     }
 
     /// Writes this context into one agent's private home for one launch of `harness`.
@@ -486,20 +746,36 @@ impl AgentContext {
         let state = home.join(STATE);
         let mut installed = Installed {
             arguments: Vec::new(),
-            removals: vec![state.clone()],
-            copies: None,
+            files: Some(InstalledFiles {
+                home: home.to_path_buf(),
+                codex: id == "codex",
+            }),
             transcripts: self.transcripts,
+            hooks: false,
+            relay: false,
+            denied: Vec::new(),
+            native: None,
             _lock: lock,
         };
         remove(&state);
         directory(&state, true)?;
-        if let Some(process) = &self.process {
-            let harness = crate::agent_home::Harness::from_id(id)
-                .ok_or_else(|| failure("launch_harness_unsupported"))?;
-            crate::agent_home::prepare(home, harness, &process.project, &process.given)
-                .map_err(|problem| LaunchError(problem.0))?;
-        }
+        let given = match &self.process {
+            Some(process) => {
+                let harness = crate::agent_home::Harness::from_id(id)
+                    .ok_or_else(|| failure("launch_harness_unsupported"))?;
+                let given = crate::agent_home::text(&process.project)
+                    .map_err(|problem| LaunchError(problem.0))?;
+                crate::agent_home::prepare(home, harness, &process.project, &given)
+                    .map_err(|problem| LaunchError(problem.0))?;
+                given
+            }
+            None => crate::agent_home::Given::default(),
+        };
         let servers: &[LaunchServer] = if tools { &self.plugins.servers } else { &[] };
+        let hooks: &[EffectiveHook] = match &self.process {
+            Some(process) if tools => &process.hooks,
+            _ => &[],
+        };
         let skills = tools && !self.plugins.skills.is_empty();
         let names: Vec<&str> = match skills {
             true => self
@@ -510,35 +786,43 @@ impl AgentContext {
                 .collect(),
             false => Vec::new(),
         };
-        crate::agent_home::record_skills(home, &names).map_err(|problem| LaunchError(problem.0))?;
+        if let Some(process) = &self.process {
+            crate::agent_home::record_skills(&process.project.data, home, &names)
+                .map_err(|problem| LaunchError(problem.0))?;
+        }
         if id == "codex" {
             let config = home.join("config.toml");
             let copies = home.join("skills").join(STATE);
-            installed.removals.push(config.clone());
-            installed.copies = Some(home.to_path_buf());
             remove_copies(home);
+            let mut developer = self.instructions.clone();
             if skills {
                 directory(&home.join("skills"), false)?;
                 self.copy_skills(&copies)?;
+                developer.push_str(&skills_index(&copies, &self.plugins.skills, false));
             }
+            assert!(
+                developer.len()
+                    <= MASTER_INSTRUCTIONS_BYTES_MAX
+                        + 1
+                        + LIVE_INSTRUCTIONS_BYTES_MAX
+                        + SKILLS_INDEX_BYTES_MAX
+                        + SECTION_SLACK
+            );
             remove(&config);
-            write_secret(&config, codex_config(&self.instructions, servers)?)?;
+            write_secret(&config, codex_config(&developer, servers, &self.off_tools)?)?;
         } else {
+            installed.denied = denied_tools(servers, &self.off_tools);
             let mcp = state.join("mcp.json");
             write_secret(&mcp, claude_config(servers)?)?;
             installed
                 .arguments
                 .extend([OsString::from("--mcp-config"), mcp.into_os_string()]);
             let mut text = self.instructions.clone();
-            if let Some(process) = self
-                .process
-                .as_ref()
-                .filter(|process| !process.given.text.is_empty())
-            {
+            if !given.text.is_empty() {
                 text.push('\n');
-                text.push_str(&process.given.text);
+                text.push_str(&given.text);
             }
-            if skills {
+            if skills || !hooks.is_empty() {
                 let plugin = state.join("plugin");
                 directory(&plugin, true)?;
                 directory(&plugin.join(".claude-plugin"), true)?;
@@ -546,29 +830,62 @@ impl AgentContext {
                     &plugin.join(".claude-plugin").join("plugin.json"),
                     PLUGIN_MANIFEST.as_bytes(),
                 )?;
-                self.copy_skills(&plugin.join("skills"))?;
-                text.push_str(&skills_index(&plugin.join("skills"), &self.plugins.skills));
+                if skills {
+                    self.copy_skills(&plugin.join("skills"))?;
+                    text.push_str(&skills_index(
+                        &plugin.join("skills"),
+                        &self.plugins.skills,
+                        true,
+                    ));
+                }
+                installed.hooks = write_hooks(&plugin, hooks)?;
                 installed
                     .arguments
                     .extend([OsString::from("--plugin-dir"), plugin.into_os_string()]);
+            }
+            if let Some((engine, mailbox)) = &self.relay {
+                let relay = crate::coord::relay::install(home, mailbox, engine)
+                    .map_err(|problem| LaunchError(problem.0))?;
+                installed.relay = true;
+                installed
+                    .arguments
+                    .extend([OsString::from("--plugin-dir"), relay.into_os_string()]);
             }
             assert!(
                 text.len()
                     <= MASTER_INSTRUCTIONS_BYTES_MAX
                         + 1
+                        + LIVE_INSTRUCTIONS_BYTES_MAX
                         + SKILLS_INDEX_BYTES_MAX
                         + SECTION_SLACK
                         + crate::agent_home::PROCESS_BYTES_MAX
             );
             let instructions = state.join("instructions.md");
             write_private(&instructions, text.as_bytes())?;
+            if let Some((tmux, worktree)) = self.native_team.as_ref().filter(|_| tools) {
+                let mut mate = text.clone();
+                mate.push_str(&teammate_section(worktree)?);
+                let file = state.join(TEAMMATE_INSTRUCTIONS);
+                write_private(&file, mate.as_bytes())?;
+                installed.native = Some(NativeTeam {
+                    tmux: tmux.clone(),
+                    instructions: file,
+                });
+            }
             installed.arguments.extend([
                 OsString::from("--append-system-prompt-file"),
                 instructions.into_os_string(),
             ]);
         }
-        assert!(installed.removals.iter().all(|path| path.starts_with(home)));
-        assert!(installed.arguments.len() <= 6);
+        assert!(installed.files.as_ref().is_some_and(|files| {
+            files.home == home && files.removals().iter().all(|path| path.starts_with(home))
+        }));
+        assert!(installed.arguments.len() <= 8);
+        assert!(!installed.hooks || (id == "claude-code" && !hooks.is_empty()));
+        assert!(!installed.relay || id == "claude-code");
+        assert!(installed.denied.len() <= DENIED_TOOLS_MAX);
+        assert!(installed.denied.is_empty() || (id == "claude-code" && tools));
+        assert!(installed.native.is_none() || (id == "claude-code" && tools));
         Ok(installed)
     }
 
@@ -606,6 +923,71 @@ impl Installed {
     pub fn keeps_transcript(&self) -> bool {
         self.transcripts
     }
+
+    /// Tells whether this launch's plugins hold hooks, the ones the owner turned on or the
+    /// message relay's, so Claude Code must run with hooks allowed.
+    pub fn runs_hooks(&self) -> bool {
+        self.hooks || self.relay
+    }
+
+    /// Names the MCP tools the owner switched off for this Claude Code launch, as Claude Code
+    /// names them (`mcp__<declared server>__<tool>`), for its deny list. Codex gets them in
+    /// `config.toml` instead, so its list is empty.
+    pub fn denied_tools(&self) -> &[String] {
+        &self.denied
+    }
+
+    /// Tells whether this Claude Code launch is a lead that runs its own agent team.
+    pub fn native_team(&self) -> bool {
+        self.native.is_some()
+    }
+
+    /// Names what this native-team lead's teammates get, none for any other launch.
+    pub fn native(&self) -> Option<&NativeTeam> {
+        self.native.as_ref()
+    }
+
+    /// Names where this launch wrote its files, for the record of a pane that may outlive
+    /// the engine. Output: the files, none once `keep` left them to the pane.
+    pub fn files(&self) -> Option<&InstalledFiles> {
+        self.files.as_ref()
+    }
+
+    /// Takes over the files an earlier engine's launch left for a pane that still runs, so
+    /// they are deleted when the adopted pane stops. Input: the files from the pane record.
+    /// Output: the guard, a `launch_account_home_*` code for a home that is no longer a
+    /// private agent home, or `launch_home_busy` while another launch uses it.
+    pub fn adopt(files: &InstalledFiles) -> Result<Self, LaunchError> {
+        crate::harnesses::launch::validate_home(&files.home)?;
+        let lock = lock(&files.home)?;
+        Ok(Self {
+            arguments: Vec::new(),
+            files: Some(files.clone()),
+            transcripts: false,
+            hooks: false,
+            relay: false,
+            denied: Vec::new(),
+            native: None,
+            _lock: lock,
+        })
+    }
+
+    /// Releases the home lock but leaves the files to a pane kept running as the engine
+    /// quits; a later engine adopts them from the pane record. Takes the guard.
+    pub fn keep(mut self) {
+        self.files = None;
+    }
+}
+
+impl InstalledFiles {
+    /// Lists the generated file and folder paths a launch deletes, all inside its home.
+    fn removals(&self) -> Vec<PathBuf> {
+        let mut paths = vec![self.home.join(STATE)];
+        if self.codex {
+            paths.push(self.home.join("config.toml"));
+        }
+        paths
+    }
 }
 
 impl Drop for Installed {
@@ -613,11 +995,13 @@ impl Drop for Installed {
     /// description, so a process that shares it, such as a child another thread is
     /// starting, can never keep the home busy after the launch ends.
     fn drop(&mut self) {
-        for path in &self.removals {
-            remove(path);
-        }
-        if let Some(home) = &self.copies {
-            remove_copies(home);
+        if let Some(files) = &self.files {
+            for path in files.removals() {
+                remove(&path);
+            }
+            if files.codex {
+                remove_copies(&files.home);
+            }
         }
         #[cfg(unix)]
         let _ = rustix::fs::flock(&self._lock, FlockOperation::Unlock);
@@ -768,15 +1152,50 @@ fn skill_description(path: &Path) -> String {
     crate::plugins::skill_folder::stored_description(path).unwrap_or_default()
 }
 
-fn skills_index(folder: &Path, skills: &[EffectiveSkill]) -> String {
-    let mut index = String::from(
-        "\n## Skills\n\nThe owner approved these skills for this project. Read a skill's SKILL.md before you use it.\n\n",
+/// Cuts a skill description to at most `bytes` bytes for one index line, at the last whole
+/// word with "..." when it is longer. Inputs: the description and the bound, above 3.
+/// Output: the description or its cut.
+fn short_description(text: &str, bytes: usize) -> String {
+    assert!(bytes > "...".len());
+    if text.len() <= bytes {
+        return text.to_owned();
+    }
+    let head = clip(text, bytes - "...".len());
+    let whole = text[head.len()..].starts_with(char::is_whitespace);
+    let cut = match head.rfind(char::is_whitespace) {
+        Some(end) if !whole => &head[..end],
+        _ => head,
+    };
+    let short = format!("{}...", cut.trim_end());
+    assert!(short.len() <= bytes);
+    short
+}
+
+/// Lists the skills the owner approved for one launch, each with its one-line description
+/// and the path of its `SKILL.md` copy, and says to check the list first and how to use a
+/// skill: through Claude Code's Skill tool, or for Codex by reading the file. Inputs: the
+/// folder the skills were copied into, the skills and whether the harness has a Skill tool.
+/// Output: at most `SKILLS_INDEX_BYTES_MAX` plus slack bytes of markdown.
+fn skills_index(folder: &Path, skills: &[EffectiveSkill], skill_tool: bool) -> String {
+    let using = match skill_tool {
+        true => SKILL_TOOL_USE,
+        false => SKILL_FILE_USE,
+    };
+    let mut index = format!(
+        "\n## Skills\n\nThe owner approved these skills for this project. Check this list first: before work that involves files, a specialised tool or a repeatable workflow, look here for a skill that fits. {using}\n\n"
     );
     let mut left = 0;
     for skill in skills {
-        let path = folder.join(&skill.name).join("SKILL.md");
-        let description = skill_description(&path);
-        let line = format!("- {}: {} ({})\n", skill.name, description, path.display());
+        let name = clip(&skill.name, NAME_BYTES_MAX);
+        let path = folder.join(name).join("SKILL.md");
+        let description = short_description(
+            skill_description(&skill.folder.join("SKILL.md")).trim(),
+            SKILL_LINE_DESCRIPTION_BYTES_MAX,
+        );
+        let line = match description.is_empty() {
+            true => format!("- {name} ({})\n", path.display()),
+            false => format!("- {name}: {description} ({})\n", path.display()),
+        };
         if left > 0 || index.len() + line.len() > SKILLS_INDEX_BYTES_MAX {
             left += 1;
             continue;
@@ -790,25 +1209,49 @@ fn skills_index(folder: &Path, skills: &[EffectiveSkill]) -> String {
     index
 }
 
-fn team_index(plugins: &EffectivePlugins) -> String {
-    if plugins.skills.is_empty() && plugins.servers.is_empty() {
-        return String::new();
-    }
-    let mut index = String::from(
-        "\n## Team skills and MCP servers\n\nYour own tools are off in this conversation, so you cannot call these. The owner approved them for this project, and every team agent with tools on receives them. Plan the team's work with them in mind.\n\n",
-    );
-    let skills = plugins.skills.iter().map(|skill| {
+/// Lists for a master whose own tools are off the approved skills and MCP servers that team
+/// agents with tools on receive. While the owner chose skills for leads or workers (DEC-111
+/// R3), each skill names the roles that get it, and a skill neither gets is left out.
+/// Inputs: the project's approved plugins and its skills per role. Output: the section, or
+/// nothing when no agent gets anything.
+fn team_index(plugins: &EffectivePlugins, roles: &RoleSkills) -> String {
+    let per_role = roles.lead.is_some() || roles.worker.is_some();
+    let gets = |role, name: &str| {
+        roles
+            .of(role)
+            .is_none_or(|chosen| chosen.iter().any(|kept| kept == name))
+    };
+    let skills = plugins.skills.iter().filter_map(|skill| {
+        let tag = match (
+            gets(SkillRole::Lead, &skill.name),
+            gets(SkillRole::Worker, &skill.name),
+        ) {
+            (false, false) => return None,
+            _ if !per_role => "",
+            (true, true) => " (leads and workers)",
+            (true, false) => " (leads)",
+            (false, true) => " (workers)",
+        };
         let description = skill_description(&skill.folder.join("SKILL.md"));
-        format!(
-            "- Skill {}: {}\n",
+        Some(format!(
+            "- Skill {}{tag}: {}\n",
             clip(&skill.name, NAME_BYTES_MAX),
             clip(description.trim(), DESCRIPTION_BYTES_MAX)
-        )
+        ))
     });
     let servers = plugins
         .servers
         .iter()
         .map(|server| format!("- MCP server {}\n", clip(&server.name, NAME_BYTES_MAX)));
+    let mut index = String::from(match per_role {
+        false => {
+            "\n## Team skills and MCP servers\n\nYour own tools are off in this conversation, so you cannot call these. The owner approved them for this project, and every team agent with tools on receives them. Plan the team's work with them in mind.\n\n"
+        }
+        true => {
+            "\n## Team skills and MCP servers\n\nYour own tools are off in this conversation, so you cannot call these. The owner approved them for this project. Every team agent with tools on receives the MCP servers, but each skill only the team roles named after it, as the owner chose: a lead is a sub-agent that may start sub-agents of its own, and a worker is any other sub-agent or teammate. Plan the team's work with them in mind.\n\n"
+        }
+    });
+    let head = index.len();
     let mut left = 0;
     for line in skills.chain(servers) {
         if left > 0 || index.len() + line.len() > TEAM_INDEX_BYTES_MAX {
@@ -817,11 +1260,25 @@ fn team_index(plugins: &EffectivePlugins) -> String {
         }
         index.push_str(&line);
     }
+    if index.len() == head && left == 0 {
+        return String::new();
+    }
     if left > 0 {
         index.push_str(&format!("- and {left} more\n"));
     }
     assert!(index.len() <= TEAM_INDEX_BYTES_MAX + SECTION_SLACK);
     index
+}
+
+/// Names an approved MCP server the way an agent's harness declares it. The context-mode
+/// server takes the name its own Claude Code plugin gives it, so the tool names its hooks
+/// and the owner's instructions use, such as `mcp__plugin_context-mode_context-mode__ctx_search`,
+/// exist for every agent and teammate. Input: the stored server name. Output: the declared name.
+pub(crate) fn declared_server_name(name: &str) -> &str {
+    match name {
+        CONTEXT_MODE_SERVER => CONTEXT_MODE_DECLARED,
+        other => other,
+    }
 }
 
 fn secret_text(secret: &LaunchSecret) -> Result<&str, LaunchError> {
@@ -831,7 +1288,32 @@ fn secret_text(secret: &LaunchSecret) -> Result<&str, LaunchError> {
         .ok_or_else(|| failure("launch_context_secret_invalid"))
 }
 
-fn codex_config(instructions: &str, servers: &[LaunchServer]) -> Result<String, LaunchError> {
+/// Names the switched-off tools of the servers one Claude Code launch declares, the way
+/// Claude Code names them: `mcp__<declared server>__<tool>`. Input: the declared servers and
+/// the switched-off tools by stored server name. Output: the names, in server order.
+fn denied_tools(servers: &[LaunchServer], off_tools: &[(String, Vec<String>)]) -> Vec<String> {
+    let denied: Vec<String> = servers
+        .iter()
+        .filter_map(|server| {
+            off_tools
+                .iter()
+                .find(|(name, _)| *name == server.name)
+                .map(|(_, off)| (declared_server_name(&server.name), off))
+        })
+        .flat_map(|(declared, off)| {
+            off.iter()
+                .map(move |tool| format!("mcp__{declared}__{tool}"))
+        })
+        .collect();
+    assert!(denied.iter().all(|name| !name.starts_with('-')));
+    denied
+}
+
+fn codex_config(
+    instructions: &str,
+    servers: &[LaunchServer],
+    off_tools: &[(String, Vec<String>)],
+) -> Result<String, LaunchError> {
     let mut document = toml_edit::DocumentMut::new();
     document["developer_instructions"] = toml_edit::value(instructions);
     document["project_doc_max_bytes"] = toml_edit::value(0);
@@ -863,7 +1345,15 @@ fn codex_config(instructions: &str, servers: &[LaunchServer]) -> Result<String, 
                     }
                 }
             }
-            table.insert(&server.name, toml_edit::Item::Table(entry));
+            if let Some((_, off)) = off_tools.iter().find(|(name, _)| *name == server.name) {
+                entry["disabled_tools"] =
+                    toml_edit::value(off.iter().map(String::as_str).collect::<toml_edit::Array>());
+            }
+            let name = declared_server_name(&server.name);
+            if table.contains_key(name) {
+                return Err(failure("launch_context_server_name_taken"));
+            }
+            table.insert(name, toml_edit::Item::Table(entry));
         }
         document["mcp_servers"] = toml_edit::Item::Table(table);
     }
@@ -885,7 +1375,11 @@ fn claude_config(servers: &[LaunchServer]) -> Result<String, LaunchError> {
                 "type": "http", "url": url, "headers": values
             }),
         };
-        declared.insert(server.name.clone(), entry);
+        let name = declared_server_name(&server.name);
+        if declared.contains_key(name) {
+            return Err(failure("launch_context_server_name_taken"));
+        }
+        declared.insert(name.to_owned(), entry);
     }
     serde_json::to_string(&serde_json::json!({ "mcpServers": declared }))
         .map_err(|_| failure("launch_context_unavailable"))
@@ -1022,6 +1516,72 @@ fn write_secret(path: &Path, text: String) -> Result<(), LaunchError> {
     let written = write_private(path, &bytes);
     bytes.fill(0);
     written
+}
+
+/// Writes the hooks one Claude launch runs into its generated plugin: each hook's stored
+/// plugin folder copied once under `hook-plugins/<folder id>`, and `hooks/hooks.json`
+/// holding every hook with its command run from that copy, so `CLAUDE_PLUGIN_ROOT` names
+/// the hook's own plugin files while the skills stay in the generated plugin. A plugin
+/// path a shell double quote cannot hold gets no hooks. Inputs: the generated plugin
+/// folder and the hooks. Output: whether hooks were written, or a launch refusal.
+fn write_hooks(plugin: &Path, hooks: &[EffectiveHook]) -> Result<bool, LaunchError> {
+    let quotable = plugin.to_str().is_some_and(|text| {
+        !text
+            .chars()
+            .any(|character| character.is_control() || "\"$`\\".contains(character))
+    });
+    if hooks.is_empty() || !quotable {
+        return Ok(false);
+    }
+    let copies = plugin.join(HOOK_PLUGINS);
+    directory(&copies, true)?;
+    let mut tally = hook_folder::Tally::default();
+    let mut copied: Vec<&Path> = Vec::new();
+    let mut events = serde_json::Map::new();
+    for hook in hooks {
+        let id = hook
+            .folder
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| crate::protocol::single_component(name))
+            .ok_or_else(|| failure("launch_context_hook_unavailable"))?;
+        if !copied.contains(&hook.folder.as_path()) {
+            hook_folder::copy_stored(&hook.folder, &copies.join(id), &mut tally).map_err(
+                |code| match code {
+                    "hooks_too_large" => failure("launch_context_too_large"),
+                    _ => failure("launch_context_hook_unavailable"),
+                },
+            )?;
+            copied.push(&hook.folder);
+        }
+        let command = format!(
+            "{HOOK_ROOT}=\"{PLUGIN_ROOT}/{HOOK_PLUGINS}/{id}\"; export CLAUDE_PLUGIN_ROOT=\"${HOOK_ROOT}\"; {}",
+            hook.command
+                .replace(PLUGIN_ROOT, &format!("${{{HOOK_ROOT}}}"))
+        );
+        let mut entry = serde_json::json!({"type": "command", "command": command});
+        if let Some(timeout) = hook.timeout {
+            entry["timeout"] = timeout.into();
+        }
+        let mut group = serde_json::json!({"hooks": [entry]});
+        if let Some(matcher) = &hook.matcher {
+            group["matcher"] = matcher.clone().into();
+        }
+        match events
+            .entry(hook.event.clone())
+            .or_insert_with(|| serde_json::Value::Array(Vec::new()))
+        {
+            serde_json::Value::Array(groups) => groups.push(group),
+            _ => unreachable!("each event holds a list of groups"),
+        }
+    }
+    assert!(!copied.is_empty() && copied.len() <= hooks.len());
+    directory(&plugin.join("hooks"), true)?;
+    write_private(
+        &plugin.join("hooks").join("hooks.json"),
+        serde_json::json!({"hooks": events}).to_string().as_bytes(),
+    )?;
+    Ok(true)
 }
 
 fn copy_tree(

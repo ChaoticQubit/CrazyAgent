@@ -1,12 +1,12 @@
 import { useEffect, useId, useState } from "react";
 import type { Failure, Result } from "../../api";
-import { acceptChange, changesRefusal, discardChange, loadChangeDiff, loadChanges, notReady, restoreChange, updateChange } from "../../api-changes";
-import type { ChangeDiff, ChangeSet } from "../../api-changes";
-import { Button, ConfirmDialog, Dialog, TextArea } from "../../ui";
+import { acceptChange, changesRefusal, discardChange, loadChangeDiff, loadChanges, loadTargetBranches, notReady, restoreChange, updateChange } from "../../api-changes";
+import type { ChangeDiff, ChangeSet, TargetBranches } from "../../api-changes";
+import { Button, ConfirmDialog, Dialog, Select, TextArea } from "../../ui";
 import { displayText } from "../conversation";
 import { Badge, NotReady, ProjectEmpty } from "../project/shared";
 import type { ProjectData } from "../project/shared";
-import { acceptNote, actions, agentName, checkedNote, commitMessage, conflictNote, diffText, fileLine, fileMarks, lastPageSeen, movedNote, outcomeNote, restoreNote, reviewed, reviewOf, sizeLine, stateBadge, updatingNote } from "./model";
+import { acceptBlocked, acceptNote, acceptTarget, actions, agentName, branchLabel, checkedNote, commitMessage, conflictNote, diffText, fileLine, fileMarks, lastPageSeen, movedNote, outcomeNote, restoreNote, reviewed, reviewOf, sizeLine, stateBadge, updatingNote } from "./model";
 import type { Review } from "./model";
 import "./changes.css";
 
@@ -25,24 +25,43 @@ export function ChangesNotReady() {
   return <NotReady what="reviewing and landing agent changes isn't in this engine yet." />;
 }
 
-/** The Accept dialog: says where the changes land and shows the proposed commit message
- * for the owner to edit first, hidden characters as escapes with a warning; Accept stays
- * off while the message is empty, too long or holds hidden characters.
- * Inputs: the change set, whether the accept runs, and the handlers. Output: the dialog. */
+/** The Accept dialog: says where the changes land, lets the owner pick the local branch
+ * they land on, the team's Land on branch first, and shows the proposed commit message for the
+ * owner to edit first, hidden characters as escapes with a warning; Accept stays off while
+ * the message is empty, too long or holds hidden characters.
+ * Inputs: the change set, whether the accept runs, and the handlers; Accept gets the
+ * message and the picked branch, null for the Land on branch. Output: the dialog. */
 export function AcceptDialog({ set, pending, onCancel, onAccept }: {
   set: ChangeSet;
   pending: boolean;
   onCancel: () => void;
-  onAccept: (message: string) => void;
+  onAccept: (message: string, target: string | null) => void;
 }) {
   const shown = displayText(set.message);
   const [text, setText] = useState(shown);
+  const [branches, setBranches] = useState<TargetBranches | null>(null);
+  const [target, setTarget] = useState("");
   const id = useId();
+  const branchId = useId();
   const message = commitMessage(text);
+  useEffect(() => {
+    let current = true;
+    void loadTargetBranches(set.id).then((result) => {
+      if (!current || result.kind !== "ok") return;
+      setBranches(result.value);
+      setTarget((result.value.land_on_problem ?? null) !== null ? "" : result.value.land_on ?? result.value.current ?? result.value.branches[0] ?? "");
+    });
+    return () => { current = false; };
+  }, [set.id]);
+  const { picked, text: lands } = acceptTarget(branches, target);
+  const blocked = acceptBlocked(branches, target);
   return <Dialog open title="Accept these changes?" onClose={onCancel} busy={pending}
     footer={<><Button disabled={pending} onClick={onCancel}>Keep reviewing</Button>
-      <Button variant="primary" pending={pending} disabled={message === null} onClick={() => { if (message !== null) onAccept(message); }}>Accept</Button></>}>
-    <p>They land as one commit on the branch checked out in your project folder, under your own Git name. CrazyAgent did not check them.</p>
+      <Button variant="primary" pending={pending} disabled={message === null || blocked} onClick={() => { if (message !== null && !blocked) onAccept(message, picked); }}>Accept</Button></>}>
+    <p>{lands}</p>
+    {branches !== null && branches.branches.length > 0 &&
+      <Select id={branchId} label="Branch" value={target} onValue={setTarget}
+        options={[...(blocked ? [{ value: "", label: "Pick a branch" }] : []), ...branches.branches.map((name) => ({ value: name, label: branchLabel(branches, name) }))]} />}
     {shown !== set.message && <p role="alert">The proposed message held characters you cannot see. They are shown as escapes: check it before you accept.</p>}
     <TextArea id={id} label="Commit message" value={text} onValue={setText} rows={6}
       error={message === null ? "Write a commit message of up to 4096 bytes, with no hidden characters, to accept." : undefined} />
@@ -119,15 +138,16 @@ function Detail({ set, now, busy, onAsk, onUpdate, onRestore }: {
 }
 
 /** Changes tab: every change set the project's agents made, newest first, with its diff and
- * the owner's Accept, Discard, Restore and Ask agent to update. Input: the project data.
- * Output: the tab; the list rereads every few seconds while it is open. */
+ * the owner's Accept, Discard, Restore and Ask agent to update. A refused action is shown only
+ * while the set it was about is the one shown, never under another set. Input: the project
+ * data. Output: the tab; the list rereads every few seconds while it is open. */
 export function ChangesTab({ data }: { data: ProjectData }) {
   const [list, setList] = useState<Result<ChangeSet[]>>();
   const [round, setRound] = useState(0);
   const [selected, setSelected] = useState<string | null>(null);
   const [asking, setAsking] = useState<Asking>(null);
   const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState("");
+  const [note, setNote] = useState<{ set: string; text: string } | null>(null);
   useEffect(() => {
     let current = true;
     void loadChanges(data.id).then((result) => { if (current) setList(result); });
@@ -137,42 +157,42 @@ export function ChangesTab({ data }: { data: ProjectData }) {
   const sets = list?.kind === "ok" ? list.value : [];
   const shown = sets.find((set) => set.id === selected) ?? sets[0] ?? null;
 
-  async function settle<T>(result: Result<T>, done: (value: T) => string | null) {
+  async function settle<T>(set: ChangeSet, result: Result<T>, done: (value: T) => string | null) {
     setBusy(false);
     setAsking(null);
     if (result.kind === "ok") {
-      setNote("");
+      setNote(null);
       const message = done(result.value);
       if (message !== null) data.notify(message);
-    } else setNote(notReady(result) ? "Landing changes isn't ready in this engine yet." : refusalOf(result));
+    } else setNote({ set: set.id, text: notReady(result) ? "Landing changes isn't ready in this engine yet." : refusalOf(result) });
     setRound((value) => value + 1);
   }
 
-  async function accept(set: ChangeSet, message: string) {
+  async function accept(set: ChangeSet, message: string, target: string | null) {
     setBusy(true);
-    await settle(await acceptChange(set.id, set.head, message), acceptNote);
+    await settle(set, await acceptChange(set.id, set.head, message, target), acceptNote);
   }
 
   async function discard(set: ChangeSet) {
     setBusy(true);
-    await settle(await discardChange(set.id, set.head), () => "Discarded. You can restore these changes for 7 days.");
+    await settle(set, await discardChange(set.id, set.head), () => "Discarded. You can restore these changes for 7 days.");
   }
 
   async function update(set: ChangeSet) {
     setBusy(true);
-    await settle(await updateChange(set.id), () => "Your branch is merged into the agent's copy. The list shows when the agent picks it up.");
+    await settle(set, await updateChange(set.id), () => "Your branch is merged into the agent's copy. The list shows when the agent picks it up.");
   }
 
   async function restore(set: ChangeSet) {
     setBusy(true);
-    await settle(await restoreChange(set.id), () => "Restored. The changes are ready to review again.");
+    await settle(set, await restoreChange(set.id), () => "Restored. The changes are ready to review again.");
   }
 
   if (list === undefined) return <p className="pj-muted pj-small" role="status">Loading changes...</p>;
   if (notReady(list)) return <ChangesNotReady />;
   return <div className="pj-stack">
     {list.kind === "error" && <p className="pj-error" role="alert">Couldn't load changes. {refusalOf(list)}</p>}
-    {note && <p className="pj-note warn" role="alert">{note}</p>}
+    {note !== null && note.set === shown?.id && <p className="pj-note warn" role="alert">{note.text}</p>}
     {list.kind === "ok" && sets.length === 0 && <ProjectEmpty title="No changes yet">
       When the master or a sub-agent edits files, its changes wait here for you to review and accept.
     </ProjectEmpty>}
@@ -187,7 +207,7 @@ export function ChangesTab({ data }: { data: ProjectData }) {
       {shown && <Detail set={shown} now={data.now} busy={busy} onAsk={setAsking} onUpdate={(set) => void update(set)} onRestore={(set) => void restore(set)} />}
     </div>}
     {asking?.kind === "accept" && <AcceptDialog key={`${asking.set.id}:${asking.set.head}`} set={asking.set} pending={busy}
-      onCancel={() => setAsking(null)} onAccept={(message) => void accept(asking.set, message)} />}
+      onCancel={() => setAsking(null)} onAccept={(message, target) => void accept(asking.set, message, target)} />}
     <ConfirmDialog open={asking?.kind === "discard"} pending={busy} title="Discard these changes?" confirmLabel="Discard" cancelLabel="Keep reviewing"
       onCancel={() => setAsking(null)} onConfirm={() => { if (asking) void discard(asking.set); }}>
       The agent's working copy goes back to your branch. You can restore these changes for 7 days.

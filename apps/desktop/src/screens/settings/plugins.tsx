@@ -1,8 +1,9 @@
 import { createRef, useRef, useState, type RefObject } from "react";
 import {
-  addMcpServer, addSkill, approveMcpServer, checkMcpServer, importSkill, listMcpServers, listSkills, pickFolder, plainError, removeMcpSecret, removeMcpServer,
-  removeSkill, setMcpSecret, setMcpServerEnabled, setSkillEnabled, skillDetail, skillImportScan, switchPlugin, type ImportCandidate, type ImportedSkill,
-  type ImportFrom, type ImportList, type ImportState, type McpServerSpec, type McpServerView, type PluginScope, type Result, type SkillDetail, type SkillView, type Failure,
+  addHooks, addMcpServer, addSkill, approveMcpServer, checkMcpServer, importSkill, listHooks, listMcpServers, listSkills, pickFolder, plainError, removeMcpSecret,
+  removeMcpServer, removeSkill, setHookEnabled, setMcpSecret, setMcpServerEnabled, setSkillEnabled, skillDetail, skillImportScan, switchPlugin, type HookView,
+  type ImportCandidate, type ImportedSkill, type ImportFrom, type ImportList, type ImportState, type McpServerSpec, type McpServerView, type PluginScope,
+  type Result, type SkillDetail, type SkillView, type Failure,
 } from "../../api";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import {
@@ -16,13 +17,14 @@ import { useLinkOpener } from "../project/links";
 import { SkillTag } from "../skill-tag";
 import { displayText } from "../conversation";
 import { homePath } from "./harnesses";
+import { ToolSwitches, ToolsSection } from "./tools";
 
 const ARGS_MAX = 32;
 const SECRETS_MAX = 16;
 const NAME_COPY = "Use 1 to 64 lowercase letters, digits, - or _ for the name.";
 const SECRET_NAME_COPY = "Use letters, digits, _ or - for the secret name, starting with a letter.";
 const COMMAND_COPY = "Enter the full path to the command, starting with /.";
-const ARGS_COPY = "Use up to 32 arguments, each on one line.";
+const ARGS_COPY = "Use up to 32 arguments, each on one line, with at most 4 KB for the command and its arguments together.";
 const URL_COPY = "Use an https address. Plain http works only for this Mac, and the address can't hold a password.";
 const LOOPBACK = new Set(["127.0.0.1", "localhost", "[::1]"]);
 const NOT_READY = "This change isn't ready in this build yet.";
@@ -402,6 +404,7 @@ export function ServersView({ servers, projectId, failure, busy, onAdd, onToggle
   onRemove: (server: McpServerView) => void;
   onRetry: () => void;
 }) {
+  const [expanded, setExpanded] = useState<string | null>(null);
   if (servers.kind === "loading") return <Skeleton shape="row" count={4} />;
   if (servers.kind === "not_ready") return <NotReady what="MCP servers" compact />;
   if (servers.kind === "error") return <LoadError message="Couldn't load MCP servers." onRetry={onRetry} />;
@@ -430,7 +433,10 @@ export function ServersView({ servers, projectId, failure, busy, onAdd, onToggle
                 <span className="field-error">Can't start: {server.problem ?? "the server didn't answer."}</span>
                 {command && <Button size="small" icon="refresh-cw" pending={busy === server.id} pendingLabel="Checking..." onClick={() => onCheck(server)}>Check again</Button>}
               </span>}
-              {server.tools.length > 0 && <span className="secondary">Tools: {server.tools.join(", ")}</span>}
+              {server.tools.length > 0 && <span><Button size="small" variant="quiet" icon={expanded === server.id ? "chevron-down" : "chevron-right"}
+                aria-expanded={expanded === server.id} onClick={() => setExpanded(expanded === server.id ? null : server.id)}>
+                {server.tools.length} {server.tools.length === 1 ? "tool" : "tools"}
+              </Button></span>}
             </div>
             <span className="row">
               <Switch id={`server-on-${index}`} label={on.label} checked={on.checked} onChecked={(next) => onToggle(server, next)}
@@ -438,6 +444,7 @@ export function ServersView({ servers, projectId, failure, busy, onAdd, onToggle
               {menu.length > 0 && <Menu label={`More for ${server.name}`} items={menu} />}
             </span>
           </div>
+          {expanded === server.id && <div className="review"><ToolSwitches projectId={projectId} serverId={server.id} /></div>}
           {server.status === "waiting_for_approval" && <div className="review">
             {command ? <span>Runs: <span className="mono">{server.runs}</span></span>
               : <span>Connects to: <span className="mono">{server.spec.kind === "http" ? server.spec.url : ""}</span></span>}
@@ -447,6 +454,52 @@ export function ServersView({ servers, projectId, failure, busy, onAdd, onToggle
               {!on.project && <Button icon="trash" onClick={() => onRemove(server)}>Remove</Button>}
             </span>
           </div>}
+        </div>;
+      })}
+    </div></Panel>}
+  </div>;
+}
+
+/** What one hook row says it runs on: its event and, when set, its matcher.
+ * Input: the hook. Output: the line. */
+export function hookTrigger(hook: HookView): string {
+  return hook.matcher ? `${hook.event}, matching ${hook.matcher}` : hook.event;
+}
+
+/** The hooks list as a pure view of the engine read: each hook with its plugin, event,
+ * command and switch. Inputs: the read, the project id when shown in a project, the last
+ * failure and the actions. */
+export function HooksView({ hooks, projectId, failure, onAdd, onToggle, onRetry }: {
+  hooks: Loaded<HookView[]>;
+  projectId?: string;
+  failure: string;
+  onAdd: () => void;
+  onToggle: (hook: HookView, on: boolean) => void;
+  onRetry: () => void;
+}) {
+  if (hooks.kind === "loading") return <Skeleton shape="row" count={4} />;
+  if (hooks.kind === "not_ready") return <NotReady what="Hooks" compact />;
+  if (hooks.kind === "error") return <LoadError message="Couldn't load hooks." onRetry={onRetry} />;
+  const add = <Button icon="folder-plus" onClick={onAdd}>Add hooks from a plugin</Button>;
+  return <div className="stack-small">
+    <div className="row between">
+      <p className="secondary">Hooks are commands Claude Code agents run on events such as session start or a tool call. They run inside the agent's sandbox. A hook that came with a skill or MCP server runs only while that item is on.</p>
+      {hooks.value.length > 0 && add}
+    </div>
+    {failure && <Notice tone="danger" alert>{failure}</Notice>}
+    {hooks.value.length === 0 ? <EmptyState icon="zap" title="No hooks yet" compact action={add} /> : <Panel padded={false}><div className="rows">
+      {hooks.value.map((hook, index) => {
+        const on = pluginSwitch(hook, projectId);
+        return <div className="item-row" key={hook.id}>
+          <div className="stack-small">
+            <span className="row"><span className="title">{hook.plugin}</span><span className="secondary">{hookTrigger(hook)}</span></span>
+            <span className="mono muted small">{hook.command}</span>
+            {hook.follows && <span className="secondary">Runs while {hook.follows} is on.</span>}
+          </div>
+          <span className="row">
+            <Switch id={`hook-on-${index}`} label={on.label} checked={on.checked} onChecked={(next) => onToggle(hook, next)}
+              disabledReason={on.project && !hook.enabled ? "Turned off for every project in Settings." : undefined} />
+          </span>
         </div>;
       })}
     </div></Panel>}
@@ -664,9 +717,10 @@ type Removing = { kind: "skill"; skill: SkillView } | { kind: "server"; server: 
 export function PluginsAndSkills({ projectId, skill }: { projectId?: string; skill?: string } = {}) {
   const session = useAppSession();
   const scope: PluginScope = projectId ? { kind: "project", project_id: projectId } : { kind: "global" };
-  const [section, setSection] = useState<"skills" | "servers">("skills");
+  const [section, setSection] = useState<"skills" | "servers" | "hooks" | "tools">("skills");
   const [skills, reloadSkills] = useLoad(() => listSkills(projectId), [projectId], "skills");
   const [servers, reloadServers] = useLoad(() => listMcpServers(projectId), [projectId], "mcp-servers");
+  const [hooks, reloadHooks] = useLoad(() => listHooks(projectId), [projectId], "hooks");
   const [failure, setFailure] = useState("");
   const [busy, setBusy] = useState<string | null>(null);
   const [adding, setAdding] = useState<{ kind: "skill"; message?: string } | { kind: "server" }>();
@@ -701,6 +755,19 @@ export function PluginsAndSkills({ projectId, skill }: { projectId?: string; ski
     void act<unknown>(skill.id, () => target.project && projectId ? switchPlugin(projectId, skill.id, on, skill.version) : setSkillEnabled(skill.id, on, skill.version),
       () => on ? "Skill turned on." : "Skill turned off.", reloadSkills);
   };
+  const addHooksFromChooser = async () => {
+    setFailure("");
+    const picked = await pickFolder("plugin");
+    if (picked.kind !== "ok") return setFailure(picked.kind === "not_ready" ? "The folder chooser isn't ready in this build." : picked.message);
+    const folder = picked.value;
+    if (folder === null) return;
+    await act(folder, () => addHooks(scope, folder), (added) => `Added ${added.length} ${added.length === 1 ? "hook" : "hooks"}.`, reloadHooks);
+  };
+  const toggleHook = (hook: HookView, on: boolean) => {
+    const target = pluginSwitch(hook, projectId);
+    void act<unknown>(hook.id, () => target.project && projectId ? switchPlugin(projectId, hook.id, on) : setHookEnabled(hook.id, on),
+      () => on ? "Hook turned on." : "Hook turned off.", reloadHooks);
+  };
   const toggleServer = (server: McpServerView, on: boolean) => {
     const target = pluginSwitch(server, projectId);
     void act<unknown>(server.id, () => target.project && projectId ? switchPlugin(projectId, server.id, on, server.version) : setMcpServerEnabled(server.id, on, server.version),
@@ -716,8 +783,10 @@ export function PluginsAndSkills({ projectId, skill }: { projectId?: string; ski
 
   return <div className="stack">
     <Segmented label="Plugins and skills" value={section} onValue={(next) => { setFailure(""); setSection(next); }}
-      options={[{ value: "skills", label: "Skills", icon: "book-open" }, { value: "servers", label: "MCP servers", icon: "plug" }]} />
-    {section === "skills"
+      options={[{ value: "skills", label: "Skills", icon: "book-open" }, { value: "servers", label: "MCP servers", icon: "plug" }, { value: "hooks", label: "Hooks", icon: "zap" }, { value: "tools", label: "Tools", icon: "wrench" }]} />
+    {section === "tools" && <ToolsSection projectId={projectId} onAddTool={() => setAdding({ kind: "server" })} />}
+    {section === "hooks" && <HooksView hooks={hooks} projectId={projectId} failure={failure} onRetry={reloadHooks} onAdd={() => void addHooksFromChooser()} onToggle={toggleHook} />}
+    {section === "hooks" || section === "tools" ? null : section === "skills"
       ? <SkillsView skills={skills} projectId={projectId} failure={failure} onRetry={reloadSkills} onAdd={() => void addSkillFromChooser()}
         onImport={projectId ? undefined : () => setImporting(true)} onOpen={(item) => open(item.id)} onToggle={toggleSkill} onRemove={(skill) => setRemoving({ kind: "skill", skill })} />
       : <ServersView servers={servers} projectId={projectId} failure={failure} busy={busy} onRetry={reloadServers} onAdd={() => setAdding({ kind: "server" })}

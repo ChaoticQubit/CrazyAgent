@@ -7,6 +7,9 @@ use tokio::sync::Mutex;
 
 type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
+const IMPORT_TEST: &str = "importing_skills_and_adding_a_server_leave_the_bridge_free";
+const PLANTED_ROOT: &str = "CRAZYAGENT_TEST_PLANTED_HOME_ROOT";
+
 async fn flow(root: &std::path::Path) -> TestResult<()> {
     let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
     bridge.connect().await?;
@@ -125,27 +128,58 @@ async fn import_flow(root: &std::path::Path) -> TestResult<()> {
     Ok(())
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn importing_skills_and_adding_a_server_leave_the_bridge_free() {
+async fn run_with_planted_home() {
     let root = tempfile::Builder::new()
         .prefix("ca-dli-")
         .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let global = root.path().join("g.toml");
+    std::fs::create_dir(root.path().join("home")).unwrap();
+    let exe = std::env::current_exe().unwrap();
+    let planted = root.path().to_path_buf();
+    let output = tokio::task::spawn_blocking(move || {
+        crazyagent::spawn_gate::output(
+            std::process::Command::new(exe)
+                .args([IMPORT_TEST, "--exact", "--nocapture"])
+                .env("HOME", planted.join("home"))
+                .env(PLANTED_ROOT, &planted)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped()),
+        )
+    })
+    .await
+    .unwrap()
+    .unwrap();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains(&format!("test {IMPORT_TEST} ... ok")),
+        "the flow with the planted home as HOME failed: {}\n{stdout}\n{stderr}",
+        output.status
+    );
+}
+
+async fn import_with_planted_home(root: &std::path::Path) {
+    assert_eq!(
+        std::env::var_os("HOME").map(std::path::PathBuf::from),
+        Some(root.join("home")),
+        "the engine in this run scans the planted home, never the owner's"
+    );
+    let global = root.join("g.toml");
     std::fs::write(&global, "version = 1\ntimeout_ms = 2000\n").unwrap();
     std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
     let (_stop, stopped) = tokio::sync::watch::channel(false);
     let mut service = EngineService::start_with_settings_sources(
-        root.path(),
+        root,
         "e.sock",
         &global,
-        &root.path().join("p.toml"),
+        &root.join("p.toml"),
         &stopped,
     )
     .await
     .unwrap();
-    let path = root.path().to_path_buf();
+    let path = root.to_path_buf();
     let mut body = tokio::spawn(async move { import_flow(&path).await });
     let result = tokio::time::timeout(Duration::from_secs(40), &mut body).await;
     if result.is_err() {
@@ -158,4 +192,12 @@ async fn importing_skills_and_adding_a_server_leave_the_bridge_free() {
         "actual owner service must stop"
     );
     result.unwrap().unwrap().unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn importing_skills_and_adding_a_server_leave_the_bridge_free() {
+    match std::env::var_os(PLANTED_ROOT) {
+        Some(root) => import_with_planted_home(std::path::Path::new(&root)).await,
+        None => run_with_planted_home().await,
+    }
 }

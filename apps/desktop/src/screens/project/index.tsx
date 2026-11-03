@@ -16,7 +16,7 @@ import { MasterArea } from "./live-master";
 import { go, takeFlash } from "./flash";
 import { IdeConfirm } from "./ide-confirm";
 import { OverviewTab } from "./overview";
-import { ProcessEditor } from "../process";
+import { ImportMoveBanner, InstructionImportPrompt, ProcessEditor } from "../process";
 import { QuestionsTab } from "./questions";
 import { pauseSummary, shouldPoll } from "./research";
 import { RecoveryBanner } from "./recovery-banner";
@@ -195,6 +195,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
   const active = routedTab(tab, tabs);
   const setup = valueOf(data.setup);
   const settingsSection = section ?? hashSection();
+  const [importMoves, setImportMoves] = useState(0);
   const select = (next: TabId) => navigate(`/projects/${encodeURIComponent(projectId)}/${next}`);
 
   useEffect(() => () => void closeIde(projectId), [projectId]);
@@ -250,6 +251,8 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
     <Tabs label="Project" current={active}
       tabs={tabs.map((item) => ({ id: item.id, label: item.label, icon: item.icon, href: formatRoute({ name: "project", id: projectId, tab: item.id }) }))} />
     {active !== "changes" && <WaitingChanges projectId={projectId} />}
+    <ImportMoveBanner projectId={projectId} version={importMoves} />
+    <InstructionImportPrompt projectId={projectId} name={data.name ? displayText(data.name) : projectId} onMoved={() => setImportMoves((count) => count + 1)} />
     <div className="pj-tab-panel" id="pj-tab-panel" role="tabpanel" aria-labelledby={`tab-${active}`}>
       {active === "overview" && <OverviewTab data={data} />}
       {active === "conversation" && <TeamActivity data={data}><MasterArea data={data} /></TeamActivity>}

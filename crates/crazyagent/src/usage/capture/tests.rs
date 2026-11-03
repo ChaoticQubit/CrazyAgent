@@ -964,3 +964,401 @@ fn a_home_filled_with_records_is_walked_within_one_bound_in_all() {
         "the walk read all {FOLDERS} folders of 1,000 records"
     );
 }
+
+/// A session record whose stored progress names the same inode on another device, as a
+/// reboot that renumbered the volume leaves it, keeps its offset and counts only the lines
+/// appended since the last scan, while its stored pin moves to the live device. A record
+/// removed and recreated on that renumbered pin, with a new inode, starts over.
+#[test]
+fn a_record_whose_volume_was_renumbered_keeps_its_place_and_counts_nothing_twice() {
+    use std::os::unix::fs::MetadataExt;
+    let (_root, db) = store();
+    let home = tempfile::tempdir().unwrap();
+    let record = home.path().join("projects/-work-alpha/s1.jsonl");
+    let who = attribution(RunKind::Agent, None);
+    let key = record.to_string_lossy().into_owned();
+    let renumber = |db: &Connection| {
+        let text: String = db
+            .query_row(
+                "SELECT progress FROM usage_files WHERE path=?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let mut progress: Progress = serde_json::from_str(&text).unwrap();
+        progress.identity.0 ^= 1;
+        db.execute(
+            "UPDATE usage_files SET progress=?2 WHERE path=?1",
+            params![key, serde_json::to_string(&progress).unwrap()],
+        )
+        .unwrap();
+    };
+    let stored_identity = |db: &Connection| -> (u64, u64) {
+        let text: String = db
+            .query_row(
+                "SELECT progress FROM usage_files WHERE path=?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        serde_json::from_str::<Progress>(&text).unwrap().identity
+    };
+
+    append(&record, &claude_assistant("r1", 5, 2, 0, 0, "end_turn"));
+    assert_eq!(
+        scan_home(&db, home.path(), Format::Claude, &who, NOW)
+            .unwrap()
+            .input,
+        5
+    );
+
+    renumber(&db);
+    append(&record, &claude_assistant("r2", 3, 1, 0, 0, "end_turn"));
+    assert_eq!(
+        scan_home(&db, home.path(), Format::Claude, &who, NOW + 1).unwrap(),
+        Tokens {
+            input: 3,
+            output: 1,
+            cache_read: 0,
+            cache_write: 0,
+        },
+        "only the line appended since the last scan is counted, not the whole record again"
+    );
+    let live = std::fs::metadata(&record).unwrap();
+    assert_eq!(
+        stored_identity(&db),
+        (live.dev(), live.ino()),
+        "the pin moved to the live device"
+    );
+
+    let kept_offset = {
+        let text: String = db
+            .query_row(
+                "SELECT progress FROM usage_files WHERE path=?1",
+                params![key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        serde_json::from_str::<Progress>(&text).unwrap().offset
+    };
+    renumber(&db);
+    std::fs::remove_file(&record).unwrap();
+    append(&record, &claude_assistant("r3", 9, 4, 0, 0, "end_turn"));
+    append(&record, &claude_assistant("r4", 2, 1, 0, 0, "end_turn"));
+    append(&record, &claude_assistant("r5", 1, 1, 0, 0, "end_turn"));
+    assert!(
+        std::fs::metadata(&record).unwrap().len() >= kept_offset,
+        "the recreated record is at least as long as the kept offset, so only the \
+         inode check, not the length guard, can start it over"
+    );
+    assert_eq!(
+        scan_home(&db, home.path(), Format::Claude, &who, NOW + 2)
+            .unwrap()
+            .input,
+        12,
+        "a record recreated with a new inode on the renumbered pin starts over"
+    );
+    let live = std::fs::metadata(&record).unwrap();
+    assert_eq!(stored_identity(&db), (live.dev(), live.ino()));
+}
+
+/// A home past the entry bound still counts the record that changed last: the walk enters
+/// the most recently changed folder first and reads every entry of it, so the bound leaves
+/// out only folders that changed before. Here that record is the last entry of a folder of
+/// 1,100 records that a walk in plain directory order reaches last.
+#[test]
+fn a_home_past_the_entry_bound_still_counts_the_record_that_changed_last() {
+    const FOLDERS: usize = 20;
+    let (_root, db) = store();
+    let home = tempfile::tempdir().unwrap();
+    let projects = home.path().join("projects");
+    let at =
+        |secs: u64| std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + secs);
+    for folder in 0..FOLDERS {
+        let dir = projects.join(format!("f{folder:02}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        for file in 0..1100 {
+            std::fs::File::create(dir.join(format!("s{file:04}.jsonl")))
+                .unwrap()
+                .set_modified(at(u64::try_from(file).unwrap()))
+                .unwrap();
+        }
+    }
+    let listed = |dir: &Path| -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect()
+    };
+    let folders = listed(&projects);
+    let last = folders[0].clone();
+    for dir in &folders[1..] {
+        std::fs::File::open(dir)
+            .unwrap()
+            .set_modified(at(0))
+            .unwrap();
+    }
+    let live = listed(&last).pop().unwrap();
+    append(&live, &claude_assistant("m1", 7, 3, 0, 0, "end_turn"));
+    let added = scan_home(
+        &db,
+        home.path(),
+        Format::Claude,
+        &attribution(RunKind::Agent, None),
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(
+        (added.input, added.output),
+        (7, 3),
+        "the record that changed last is counted"
+    );
+}
+
+/// One Codex rollout line recording a tool call of the given item type, name and payload.
+fn codex_call(kind: &str, name: &str, field: &str, value: serde_json::Value) -> String {
+    let mut payload = serde_json::json!({"type": kind, "name": name});
+    payload[field] = value;
+    format!(
+        "{}\n",
+        serde_json::json!({"type": "response_item", "payload": payload})
+    )
+}
+
+fn tool_counts(db: &Connection, agent: i64) -> Vec<(String, i64)> {
+    let mut query = db
+        .prepare("SELECT tool,count FROM coord_tool_use WHERE agent=?1 ORDER BY tool")
+        .unwrap();
+    query
+        .query_map(params![agent], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+#[test]
+fn codex_rollout_tool_calls_count_once_per_line() {
+    let (_root, db) = store();
+    crate::storage::initialize_authority_schemas(&db).unwrap();
+    db.execute(
+        "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,hookless)
+         VALUES ('alpha','sub','codex',1,'running',?1,?1,0)",
+        params![NOW],
+    )
+    .unwrap();
+    let agent = db.last_insert_rowid();
+    let home = tempfile::tempdir().unwrap();
+    let record = home
+        .path()
+        .join("sessions/2026/10/27/rollout-2026-10-27T03-00-00-t.jsonl");
+    let graphify = serde_json::json!({"cmd": "graphify query \"who owns pools\""}).to_string();
+    let skill =
+        serde_json::json!({"cmd": "sed -n 1,80p /h/.codex/skills/tdd/SKILL.md"}).to_string();
+    let oversized =
+        serde_json::json!({"cmd": format!("graphify {}", "x".repeat(ARGUMENTS_BYTES_MAX))})
+            .to_string();
+    append(
+        &record,
+        &codex_call(
+            "function_call",
+            "exec_command",
+            "arguments",
+            graphify.clone().into(),
+        ),
+    );
+    append(
+        &record,
+        &codex_call("function_call", "exec_command", "arguments", skill.into()),
+    );
+    append(
+        &record,
+        &codex_call(
+            "custom_tool_call",
+            "apply_patch",
+            "input",
+            "*** Begin Patch".into(),
+        ),
+    );
+    append(
+        &record,
+        &codex_call(
+            "local_shell_call",
+            "",
+            "action",
+            serde_json::json!({"type": "exec", "command": ["bash", "-lc", "ls"]}),
+        ),
+    );
+    append(
+        &record,
+        &codex_call(
+            "function_call",
+            "mcp__context-mode__ctx_search",
+            "arguments",
+            "{}".into(),
+        ),
+    );
+    append(
+        &record,
+        &codex_call(
+            "function_call",
+            "exec_command",
+            "arguments",
+            oversized.into(),
+        ),
+    );
+    append(
+        &record,
+        "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\"}}\n",
+    );
+    append(&record, &codex_count(1000, 600, 50));
+    let mut who = attribution(RunKind::Agent, None);
+    who.harness = "codex".into();
+    let counted = vec![
+        ("Skill".to_owned(), 1),
+        ("apply_patch".to_owned(), 1),
+        ("ctx_search".to_owned(), 1),
+        ("exec_command".to_owned(), 1),
+        ("graphify".to_owned(), 1),
+        ("local_shell_call".to_owned(), 1),
+        ("skill:tdd".to_owned(), 1),
+    ];
+
+    scan_agent_home(&db, home.path(), Format::Codex, &who, agent, NOW).unwrap();
+    assert_eq!(tool_counts(&db, agent), counted);
+
+    scan_agent_home(&db, home.path(), Format::Codex, &who, agent, NOW + 1).unwrap();
+    assert_eq!(
+        tool_counts(&db, agent),
+        counted,
+        "a second scan of the same lines counts nothing again"
+    );
+
+    append(
+        &record,
+        &codex_call(
+            "function_call",
+            "exec_command",
+            "arguments",
+            graphify.into(),
+        ),
+    );
+    scan_agent_home(&db, home.path(), Format::Codex, &who, agent, NOW + 2).unwrap();
+    let graphify_count = tool_counts(&db, agent)
+        .into_iter()
+        .find(|(tool, _)| tool == "graphify")
+        .map(|(_, count)| count);
+    assert_eq!(graphify_count, Some(2), "only the new line counts");
+
+    let other = tempfile::tempdir().unwrap();
+    append(
+        &other
+            .path()
+            .join("sessions/2026/10/27/rollout-2026-10-27T03-00-00-u.jsonl"),
+        &codex_call(
+            "function_call",
+            "exec_command",
+            "arguments",
+            "{\"cmd\":\"graphify\"}".into(),
+        ),
+    );
+    scan_home(&db, other.path(), Format::Codex, &who, NOW + 3).unwrap();
+    assert_eq!(
+        tool_counts(&db, agent)
+            .iter()
+            .map(|(_, count)| count)
+            .sum::<i64>(),
+        8,
+        "a scan for no agent counts no tool calls"
+    );
+}
+
+/// One Claude Code transcript line of an assistant message that calls one tool.
+/// Inputs: the message id, the tool's name and its input. Output: the line.
+fn claude_call(id: &str, name: &str, input: serde_json::Value) -> String {
+    format!(
+        "{}\n",
+        serde_json::json!({
+            "type": "assistant",
+            "message": {
+                "id": id,
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": format!("toolu_{id}"), "name": name, "input": input}],
+                "usage": {"input_tokens": 10, "output_tokens": 2}
+            }
+        })
+    )
+}
+
+/// A Claude Code agent launched without hooks (DEC-104 bare-hooks) has its tool calls
+/// counted from its transcript, each call once however often the home is scanned, the way a
+/// Codex agent's rollout is. One with hooks counts its own through them, so its transcript
+/// counts tokens only.
+#[test]
+fn claude_transcript_tool_calls_count_only_for_an_agent_launched_without_hooks() {
+    let (_root, db) = store();
+    crate::storage::initialize_authority_schemas(&db).unwrap();
+    let agent = |hookless: bool| {
+        db.execute(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,hookless)
+             VALUES ('alpha','sub','claude-code',1,'running',?1,?1,?2)",
+            params![NOW, hookless],
+        )
+        .unwrap();
+        db.last_insert_rowid()
+    };
+    let bare = agent(true);
+    let hooked = agent(false);
+    let lines = [
+        claude_call(
+            "m1",
+            "Bash",
+            serde_json::json!({"command": "graphify query \"pools\""}),
+        ),
+        claude_call("m2", "Skill", serde_json::json!({"skill": "tdd"})),
+        claude_call(
+            "m3",
+            "Edit",
+            serde_json::json!({"file_path": "/repo/a.rs", "old_string": "a", "new_string": "b"}),
+        ),
+        "{\"type\":\"user\",\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"toolu_m3\",\"content\":\"ok\"}]}}\n".to_owned(),
+        claude_assistant("m4", 10, 2, 0, 0, "end_turn"),
+    ];
+    let homes = [bare, hooked].map(|agent| {
+        let home = tempfile::tempdir().unwrap();
+        let record = home.path().join("projects/-repo/s1.jsonl");
+        for line in &lines {
+            append(&record, line);
+        }
+        (agent, home)
+    });
+    let who = attribution(RunKind::Agent, None);
+    let scan = |at: i64| {
+        homes.each_ref().map(|(agent, home)| {
+            let added =
+                scan_agent_home(&db, home.path(), Format::Claude, &who, *agent, at).unwrap();
+            (added.input, added.output)
+        })
+    };
+
+    assert_eq!(
+        scan(NOW),
+        [(40, 8); 2],
+        "both transcripts count their tokens"
+    );
+    assert_eq!(scan(NOW + 1), [(0, 0); 2]);
+    assert_eq!(
+        tool_counts(&db, bare),
+        vec![
+            ("Edit".to_owned(), 1),
+            ("Skill".to_owned(), 1),
+            ("graphify".to_owned(), 1),
+            ("skill:tdd".to_owned(), 1),
+        ],
+        "each call of the agent without hooks counts once"
+    );
+    assert_eq!(
+        tool_counts(&db, hooked),
+        Vec::new(),
+        "the agent with hooks counts its calls through them"
+    );
+}

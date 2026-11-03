@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { nextGeneration, type Result } from "../../api";
 import { intakeCopy, loadOnboarding, startOnboarding } from "../../api-intake";
 import {
@@ -10,6 +10,7 @@ import { Button, LoadError, Notice, NotReady, PageHeader, Panel, Skeleton, Statu
 import { BasicsFields, ResearchSwitches, RoadmapSwitch } from "../new-project/fields";
 import { basicsErrors, editRequest, type ProjectDraft } from "../new-project/wizard";
 import { MarkdownView } from "../project/markdown";
+import { ImportMoveCommit } from "../process";
 import { ONBOARDING_POLL_MS, confirmReady, mappingRetry, missingLabels, onboardingDraft, projectFolder, settled, startedProject, stepView } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
@@ -17,11 +18,13 @@ import "./intake.css";
 const STEPS = [{ key: "graph", title: "Build the code graph" }, { key: "mapping", title: "Map the project" }] as const;
 
 /** The setup review as a view of its state: the graph and mapping steps, the mapping agent's
- * overview, the pre-filled form with missing items marked, and a Confirm that waits for the agent.
+ * overview or a labelled one found in the folder, the pre-filled form with missing items marked,
+ * and a Confirm that waits for the agent.
  * A failed mapping offers Retry and Skip until skipped; a saved setup shows its saved values.
  * Inputs: the project name, the onboarding read, the form draft or null before it fills in, the
- * catalog, field errors, flags, the last problem and the handlers. Output: the page. */
-export function OnboardingReviewView({ name, view, draft, catalog, errors, showErrors, busy, problem, onDraft, onConfirm, onOpenLink, onRetry, skipped = false, retrying = false, onRetryMapping, onSkipMapping }: {
+ * catalog, field errors, flags, the last problem, the handlers and the Commit the move choice
+ * shown under the moved instruction files. Output: the page. */
+export function OnboardingReviewView({ name, view, draft, catalog, errors, showErrors, busy, problem, onDraft, onConfirm, onOpenLink, onRetry, skipped = false, retrying = false, onRetryMapping, onSkipMapping, importMove }: {
   name: string;
   view: Loaded<OnboardingView>;
   draft: ProjectDraft | null;
@@ -38,6 +41,7 @@ export function OnboardingReviewView({ name, view, draft, catalog, errors, showE
   retrying?: boolean;
   onRetryMapping?: () => void;
   onSkipMapping?: () => void;
+  importMove?: ReactNode;
 }) {
   const finished = view.kind === "ok" && view.value.finished;
   const header = <PageHeader title={`Set up ${name}`} description={finished ? "This project is set up. You can change its setup here." : "Review what CrazyAgent found, fill in anything missing, then confirm."} />;
@@ -61,7 +65,15 @@ export function OnboardingReviewView({ name, view, draft, catalog, errors, showE
       <Button pending={retrying} pendingLabel="Retrying..." onClick={() => onRetryMapping?.()}>Retry mapping</Button>
       <Button disabled={retrying} onClick={() => onSkipMapping?.()}>Skip mapping</Button>
     </span>}
+    {(value.imported ?? []).length > 0 && <Notice tone="info">
+      <span className="pj-stack">
+        <span>CrazyAgent copied these instruction files into .crazyagent/instructions.md and moved them to .crazyagent/imported/:</span>
+        <ul>{(value.imported ?? []).map((file) => <li key={file.path}>{file.path}{file.uncommitted === true ? " (git shows it as deleted)" : ""}</li>)}</ul>
+      </span>
+    </Notice>}
+    {importMove}
     {value.overview && <Panel title="Overview"><MarkdownView source={value.overview} onOpenLink={onOpenLink} /></Panel>}
+    {value.folder_overview && <Panel title="Overview found in the folder"><p className="pj-help">The mapping agent did not write this: it came with the folder or was changed since.</p><MarkdownView source={value.folder_overview} onOpenLink={onOpenLink} /></Panel>}
     {draft && missing.length > 0 && <Notice tone="warn">Not found: {missing.join(", ")}. Add them below.</Notice>}
     {draft && <form className="pj-stack" aria-label="Project details" noValidate onSubmit={(event) => { event.preventDefault(); onConfirm(); }}>
       <BasicsFields prefix="ob" draft={draft} onChange={onDraft} catalog={catalog} errors={errors} showErrors={showErrors} missing={value.missing} />
@@ -96,7 +108,9 @@ export function OnboardingReview({ id }: { id: string }) {
   const [showErrors, setShowErrors] = useState(false);
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState("");
+  const [moveLeft, setMoveLeft] = useState(false);
   const value = view.kind === "ok" ? view.value : null;
+  const waiting = (value?.imported ?? []).filter((file) => file.uncommitted === true).map((file) => file.path);
   const saved: StoredSetup | null = stored.kind === "ok" ? stored.value : null;
   const done = value !== null && settled(value);
 
@@ -163,5 +177,6 @@ export function OnboardingReview({ id }: { id: string }) {
 
   return <OnboardingReviewView name={name} view={view} draft={draft} catalog={catalog} errors={errors} showErrors={showErrors} busy={busy} problem={problem}
     onDraft={setDraft} onConfirm={() => void confirm()} onOpenLink={(href) => void openLink(href)} onRetry={reloadView}
-    skipped={skipped} retrying={retrying} onRetryMapping={() => void retryMapping()} onSkipMapping={skipMapping} />;
+    skipped={skipped} retrying={retrying} onRetryMapping={() => void retryMapping()} onSkipMapping={skipMapping}
+    importMove={waiting.length > 0 && !moveLeft ? <ImportMoveCommit projectId={id} files={waiting} onCommitted={reloadView} onLeave={() => setMoveLeft(true)} /> : undefined} />;
 }

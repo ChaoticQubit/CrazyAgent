@@ -10,7 +10,7 @@ export const routes = [];
 export const queries = [];
 export let stops = 0;
 
-const graphNode = (id, label) => ({ id, kind: "agent", parent: "g", label, harness: "codex", status: "working", status_label: null, account: null, agents: null, terminal: null });
+const graphNode = (id, label) => ({ id, kind: "sub", parent: "master", label, harness: "codex", status: "working", status_label: null, account: null, terminal: null });
 const lines = [
   { id: "1", kind: "owner", text: "Ask @master about the login" },
   { id: "2", kind: "reply", text: "The login form posts to /api/session." },

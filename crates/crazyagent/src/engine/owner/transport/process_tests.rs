@@ -49,7 +49,7 @@ fn with_project(root: &Path, folder: &Path) -> ProjectId {
 }
 
 fn read(root: &Path, project: Option<ProjectId>) -> Result<ProcessText, EngineError> {
-    match run(root, None, Action::Read { project }, None)? {
+    match run(root, Action::Read { project }, None)? {
         Answer::Current(current) => Ok(current),
         _ => panic!("a read answers the text and its version"),
     }
@@ -76,7 +76,7 @@ fn keep(
         version,
         opened,
     };
-    match run(root, None, action, Some(text.into()))? {
+    match run(root, action, Some(text.into()))? {
         Answer::Saved(saved) => Ok(saved),
         _ => panic!("a save answers saved or stale"),
     }
@@ -153,12 +153,13 @@ fn the_global_instructions_are_read_only_on_the_explicit_import() {
     fs::write(home.join(".claude/CLAUDE.md"), "OWNER-GLOBAL-RULE\n").unwrap();
 
     for action in [Action::Read { project: None }, Action::Default] {
-        let text = answered(run(&root, Some(&home), action, None).unwrap());
+        let text = answered(run(&root, action, None).unwrap());
         assert!(!text.contains("OWNER-GLOBAL-RULE"));
     }
     assert_eq!(crate::agent_home::read_app(&root).unwrap(), "");
 
-    let imported = answered(run(&root, Some(&home), Action::ImportGlobal, None).unwrap());
+    let path = home.join(".claude/CLAUDE.md");
+    let imported = answered(run(&root, Action::ReadFile { path }, None).unwrap());
     assert_eq!(imported, "OWNER-GLOBAL-RULE\n");
     assert_eq!(
         crate::agent_home::read_app(&root).unwrap(),
@@ -168,15 +169,15 @@ fn the_global_instructions_are_read_only_on_the_explicit_import() {
 
     let empty = root.join("empty");
     fs::create_dir_all(&empty).unwrap();
+    let path = empty.join(".claude/CLAUDE.md");
     assert_eq!(
-        run(&root, Some(&empty), Action::ImportGlobal, None)
-            .unwrap_err()
-            .0,
+        run(&root, Action::ReadFile { path }, None).unwrap_err().0,
         "process_import_missing"
     );
+    let path = PathBuf::from("relative/CLAUDE.md");
     assert_eq!(
-        run(&root, None, Action::ImportGlobal, None).unwrap_err().0,
-        "process_import_missing"
+        run(&root, Action::ReadFile { path }, None).unwrap_err().0,
+        "process_request_invalid"
     );
 }
 
@@ -190,15 +191,14 @@ fn an_import_follows_the_owners_linked_global_file() {
     fs::create_dir_all(&dotfiles).unwrap();
     fs::write(dotfiles.join("AGENTS.md"), "LINKED-RULE\n").unwrap();
     std::os::unix::fs::symlink(dotfiles.join("AGENTS.md"), home.join(".claude/CLAUDE.md")).unwrap();
+    let path = home.join(".claude/CLAUDE.md");
     assert_eq!(
-        answered(run(&root, Some(&home), Action::ImportGlobal, None).unwrap()),
+        answered(run(&root, Action::ReadFile { path: path.clone() }, None).unwrap()),
         "LINKED-RULE\n"
     );
     fs::write(dotfiles.join("AGENTS.md"), "a".repeat(TEXT_BYTES_MAX + 1)).unwrap();
     assert_eq!(
-        run(&root, Some(&home), Action::ImportGlobal, None)
-            .unwrap_err()
-            .0,
+        run(&root, Action::ReadFile { path }, None).unwrap_err().0,
         "process_text_too_large"
     );
 }
@@ -206,7 +206,7 @@ fn an_import_follows_the_owners_linked_global_file() {
 #[test]
 fn the_default_process_is_plain_bounded_and_keeps_the_owner_rules() {
     let (_directory, root) = root();
-    let text = answered(run(&root, None, Action::Default, None).unwrap());
+    let text = answered(run(&root, Action::Default, None).unwrap());
     assert_eq!(text, crate::agent_home::DEFAULT_PROCESS);
     crate::agent_home::validate(&text).unwrap();
     assert!(!text.contains('\u{2014}'), "no em dash");
@@ -217,14 +217,19 @@ fn the_default_process_is_plain_bounded_and_keeps_the_owner_rules() {
         "review your own diff",
         "No comments in code, except a short docstring",
         "Never use an em dash",
-        "never commit, and never write inside `.git`",
-        "CrazyAgent turns them into a change set",
+        "never write inside the project folder's `.git` or rewrite history",
+        "Commit or leave your edits as the \"How your work lands\" section CrazyAgent gives you says",
+        "The owner accepts your work in the project's Changes view",
         "Never put a secret",
         "asks the master",
         "escalates to the owner only for security, destructive or irreversible actions, spending, and product or scope decisions",
     ] {
         assert!(text.contains(rule), "the default process misses: {rule}");
     }
+    assert!(
+        !text.contains("never commit"),
+        "an Own branch agent lands only its commits, so the seed defers to the layout rule"
+    );
     for tool in [
         "graphify",
         "context-mode",
@@ -245,7 +250,6 @@ fn a_mismatched_or_oversized_request_is_refused() {
     assert_eq!(
         run(
             &root,
-            None,
             Action::Save {
                 project: None,
                 version: 0,
@@ -258,9 +262,7 @@ fn a_mismatched_or_oversized_request_is_refused() {
         "process_request_invalid"
     );
     assert_eq!(
-        run(&root, None, Action::Default, Some("x".into()))
-            .unwrap_err()
-            .0,
+        run(&root, Action::Default, Some("x".into())).unwrap_err().0,
         "process_request_invalid"
     );
     assert_eq!(
@@ -441,7 +443,7 @@ fn agent_read(root: &Path, project: &ProjectId, agent: i64) -> Result<ProcessTex
         project: project.clone(),
         agent,
     };
-    match run(root, None, action, None)? {
+    match run(root, action, None)? {
         Answer::Current(current) => Ok(current),
         _ => panic!("an agent text read answers the text and its version"),
     }
@@ -461,7 +463,7 @@ fn agent_save(
         version,
         opened,
     };
-    match run(root, None, action, Some(text.into()))? {
+    match run(root, action, Some(text.into()))? {
         Answer::Saved(saved) => Ok(saved),
         _ => panic!("an agent text save answers saved or stale"),
     }
@@ -613,15 +615,27 @@ fn stale_agent_instructions_save_is_refused() {
 /// is refused as stale, and the stored version counts exactly the saves that landed (Q35).
 #[test]
 fn saves_at_once_land_only_on_the_version_they_read() {
-    use crate::instruction_files::Choice;
+    use crate::instruction_files::{EditDelivery, Mode};
     let (_directory, root) = root();
     let folder = root.join("project");
     fs::create_dir_all(&folder).unwrap();
     let project = with_project(&root, &folder);
-    let options: Vec<InstructionSettings> = [Choice::Project, Choice::ProjectAndUser, Choice::None]
+    let options: Vec<InstructionSettings> = [Mode::ProjectOnly, Mode::AppOnly, Mode::Both]
         .into_iter()
-        .flat_map(|files| {
-            [true, false].map(|transcripts| InstructionSettings { files, transcripts })
+        .flat_map(|mode| [true, false].map(|transcripts| (mode, transcripts)))
+        .zip(
+            [
+                EditDelivery::NextMessage,
+                EditDelivery::Restart,
+                EditDelivery::Badge,
+            ]
+            .into_iter()
+            .cycle(),
+        )
+        .map(|((mode, transcripts), edits)| InstructionSettings {
+            mode,
+            transcripts,
+            edits,
         })
         .collect();
     assert_eq!(options.len(), 6);
@@ -681,7 +695,7 @@ fn saves_at_once_land_only_on_the_version_they_read() {
 #[test]
 fn a_stale_settings_save_changes_nothing_and_only_unreadable_settings_take_a_save_with_no_version()
 {
-    use crate::instruction_files::Choice;
+    use crate::instruction_files::{EditDelivery, Mode};
     let (_directory, root) = root();
     let folder = root.join("project");
     fs::create_dir_all(&folder).unwrap();
@@ -695,8 +709,9 @@ fn a_stale_settings_save_changes_nothing_and_only_unreadable_settings_take_a_sav
         }
     );
     let none = InstructionSettings {
-        files: Choice::None,
+        mode: Mode::ProjectOnly,
         transcripts: false,
+        edits: EditDelivery::Restart,
     };
     let saved = instruction_settings(&root, &project, Some((none, Some(0)))).unwrap();
     assert_eq!(
@@ -707,8 +722,9 @@ fn a_stale_settings_save_changes_nothing_and_only_unreadable_settings_take_a_sav
         }
     );
     let user = InstructionSettings {
-        files: Choice::ProjectAndUser,
+        mode: Mode::AppOnly,
         transcripts: true,
+        edits: EditDelivery::Badge,
     };
     assert_eq!(
         instruction_settings(&root, &project, Some((user, Some(0))))
@@ -728,7 +744,7 @@ fn a_stale_settings_save_changes_nothing_and_only_unreadable_settings_take_a_sav
     let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
     connection
         .execute(
-            "UPDATE agent_instruction_settings SET files='bogus' WHERE project=?1",
+            "UPDATE agent_instruction_settings SET mode='bogus' WHERE project=?1",
             [project.as_str()],
         )
         .unwrap();
@@ -817,8 +833,7 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
         data: root.clone(),
         id: project.clone(),
         folder: Some(folder.clone()),
-        files: crate::instruction_files::Choice::Project,
-        owner_home: None,
+        mode: crate::instruction_files::Mode::Both,
     };
     let text = |text: &str| crate::agent_home::Given {
         text: text.into(),
@@ -827,7 +842,7 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
     };
     let sub_home = launched_home(&root, sub);
     prepare(&sub_home, Harness::Codex, &given, &text("# Sub rules\n")).unwrap();
-    record_skills(&sub_home, &["tdd", "code-review"]).unwrap();
+    record_skills(&root, &sub_home, &["tdd", "code-review"]).unwrap();
     assert_eq!(
         agent_instructions(&root, &project, Some(sub)).unwrap(),
         AgentInstructions {
@@ -925,7 +940,7 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
 #[test]
 fn an_agent_cannot_change_the_instruction_files_its_card_lists() {
     use crate::agent_home::{AgentProject, Given, Harness, prepare};
-    use crate::instruction_files::{Choice, Record, State};
+    use crate::instruction_files::{Mode, Record, State};
     let (_directory, root) = root();
     let folder = root.join("project");
     fs::create_dir_all(&folder).unwrap();
@@ -953,8 +968,7 @@ fn an_agent_cannot_change_the_instruction_files_its_card_lists() {
         data: root.clone(),
         id: project.clone(),
         folder: Some(folder.clone()),
-        files: Choice::Project,
-        owner_home: None,
+        mode: Mode::Both,
     };
     prepare(&home, Harness::Claude, &launch, &given).unwrap();
     assert_eq!(
@@ -978,6 +992,56 @@ fn an_agent_cannot_change_the_instruction_files_its_card_lists() {
     let shown = agent_instructions(&root, &project, Some(sub)).unwrap();
     assert_eq!(
         shown.files, files,
+        "the card lists only the engine's own record, whatever the agent writes in its home"
+    );
+    assert_eq!(shown.text, "# Rules\n");
+}
+
+#[cfg(unix)]
+#[test]
+fn an_agent_cannot_change_the_skills_its_card_lists() {
+    use crate::agent_home::{AgentProject, Given, Harness, prepare, record_skills};
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(&folder).unwrap();
+    let project = with_project(&root, &folder);
+    let sub = team_agent(&root, project.as_str(), "sub", "codex");
+    let home = launched_home(&root, sub);
+    let launch = AgentProject {
+        data: root.clone(),
+        id: project.clone(),
+        folder: Some(folder.clone()),
+        mode: crate::instruction_files::Mode::Both,
+    };
+    let given = Given {
+        text: "# Rules\n".into(),
+        files: Vec::new(),
+        section_bytes: 0,
+    };
+    prepare(&home, Harness::Codex, &launch, &given).unwrap();
+    record_skills(&root, &home, &["tdd", "code-review"]).unwrap();
+    let installed = vec!["tdd".to_owned(), "code-review".to_owned()];
+    assert_eq!(
+        agent_instructions(&root, &project, Some(sub))
+            .unwrap()
+            .skills,
+        installed
+    );
+
+    let forged = "secret-exfiltration\n";
+    let mut planted = vec![home.join("crazyagent-skills")];
+    for entry in fs::read_dir(&home).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() && path.file_name().is_some_and(|name| name != "AGENTS.md") {
+            planted.push(path);
+        }
+    }
+    for path in &planted {
+        fs::write(path, forged).unwrap();
+    }
+    let shown = agent_instructions(&root, &project, Some(sub)).unwrap();
+    assert_eq!(
+        shown.skills, installed,
         "the card lists only the engine's own record, whatever the agent writes in its home"
     );
     assert_eq!(shown.text, "# Rules\n");
@@ -1033,13 +1097,21 @@ fn refusals(source: &str) -> std::collections::BTreeSet<&str> {
 
 #[test]
 fn process_codes_cover_every_refusal_of_the_store_and_protocol() {
-    let found: std::collections::BTreeSet<&str> = [
+    let (prefixes, found): (
+        std::collections::BTreeSet<&str>,
+        std::collections::BTreeSet<&str>,
+    ) = [
         include_str!("../../../agent_home.rs"),
         include_str!("process.rs"),
     ]
     .into_iter()
     .flat_map(refusals)
-    .collect();
+    .partition(|literal| literal.ends_with('_'));
+    assert_eq!(
+        prefixes,
+        std::collections::BTreeSet::from(["agent_instructions_too_large_"]),
+        "the one prefix builds launch refusals, which the Process page never answers with"
+    );
     assert!(found.len() >= 12);
     for code in &found {
         assert!(
@@ -1051,4 +1123,158 @@ fn process_codes_cover_every_refusal_of_the_store_and_protocol() {
     sorted.sort_unstable();
     sorted.dedup();
     assert_eq!(sorted, PROCESS_CODES);
+}
+
+#[test]
+fn process_adoption_round_trip() {
+    let (_directory, root) = root();
+    let folder = root.join("project");
+    fs::create_dir_all(&folder).unwrap();
+    let unknown = ProjectId::new("never-set-up").unwrap();
+    {
+        let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+        crate::storage::initialize_authority_schemas(&connection).unwrap();
+    }
+    let project = with_project(&root, &folder);
+    let master = team_agent(&root, project.as_str(), "master", "claude-code");
+    let sub = team_agent(&root, project.as_str(), "sub", "codex");
+    team_agent(&root, "another-project", "sub", "codex");
+    {
+        let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+        for _ in 0..2 {
+            crate::coord::record_tool(&connection, sub, "graphify", 5).unwrap();
+        }
+        crate::coord::record_tool(&connection, sub, "ctx_execute", 5).unwrap();
+        crate::coord::record_tool(&connection, master, "Edit", 5).unwrap();
+        crate::coord::record_tool(&connection, sub, "skill:tdd", 5).unwrap();
+        let skill = |id: &str, name: &str, scope: serde_json::Value, key: &str, enabled: bool| {
+            let folder = format!("plugins/skills/{id}/{name}");
+            fs::create_dir_all(root.join(&folder)).unwrap();
+            fs::write(
+                root.join(&folder).join("SKILL.md"),
+                format!("---\nname: {name}\ndescription: The {name} rule.\n---\n"),
+            )
+            .unwrap();
+            let body = serde_json::json!({
+                "id": id,
+                "name": name,
+                "description": format!("The {name} rule."),
+                "scope": scope,
+                "enabled": enabled,
+                "source": format!("/owner/skills/{name}"),
+                "folder": folder,
+            });
+            connection
+                .execute(
+                    "INSERT INTO plugin_items(id,kind,scope,name,body) VALUES(?1,'skill',?2,?3,?4)",
+                    rusqlite::params![id, key, name, body.to_string()],
+                )
+                .unwrap();
+        };
+        let own = serde_json::json!({"kind": "project", "project_id": project.as_str()});
+        let elsewhere = serde_json::json!({"kind": "project", "project_id": "another-project"});
+        skill(
+            "s1",
+            "zeta",
+            serde_json::json!({"kind": "global"}),
+            "global",
+            true,
+        );
+        skill("s2", "tdd", own, "project:process-1", true);
+        skill(
+            "s3",
+            "off",
+            serde_json::json!({"kind": "global"}),
+            "global",
+            false,
+        );
+        skill("s4", "theirs", elsewhere, "project:another-project", true);
+    }
+
+    let view = adoption(&root, &project).unwrap();
+    assert_eq!(
+        view.nudges,
+        crate::coord::settings::Nudges::Off,
+        "nudges are off by default (DEC-111 Q4)"
+    );
+    assert_eq!(
+        view.counted,
+        crate::coord::settings::COUNTED_TOOLS_DEFAULT
+            .map(str::to_owned)
+            .to_vec()
+    );
+    assert_eq!(
+        view.agents
+            .iter()
+            .map(|row| (row.agent, row.harness.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(sub, "codex"), (master, "claude-code")],
+        "the project's own agents, newest first"
+    );
+    assert_eq!(
+        (view.agents[0].graphify, view.agents[0].context_mode),
+        (2, 1)
+    );
+    assert_eq!(
+        (view.agents[1].graphify, view.agents[1].context_mode),
+        (0, 0)
+    );
+    assert_eq!(
+        view.skills,
+        vec!["tdd".to_owned(), "zeta".to_owned()],
+        "the project's enabled skills, its own and global ones, by name"
+    );
+    assert_eq!(view.agents[0].skills, vec![1, 0]);
+    assert_eq!(view.agents[1].skills, vec![0, 0]);
+    assert!(
+        view.agents
+            .iter()
+            .all(|row| row.counts.len() == view.counted.len())
+    );
+
+    let request: Envelope = serde_json::from_value(serde_json::json!({
+        "process": {"kind": "adoption", "project": project.as_str()},
+        "text_bytes": null
+    }))
+    .unwrap();
+    assert!(
+        matches!(request.process, Action::Adoption { project: ref asked } if *asked == project)
+    );
+    let wire = serde_json::to_vec(&Reply::Adoption {
+        adoption: view.clone(),
+    })
+    .unwrap();
+    match serde_json::from_slice::<Reply>(&wire).unwrap() {
+        Reply::Adoption { adoption } => assert_eq!(adoption, view),
+        _ => panic!("an adoption reply reads back as one"),
+    }
+
+    {
+        let mut connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+        let tx = connection.transaction().unwrap();
+        let spec = crate::protocol::ProjectSpec {
+            name: "Process".into(),
+            repositories: vec![],
+        };
+        assert!(matches!(
+            crate::storage::create_project(&tx, &project, &spec).unwrap(),
+            crate::protocol::Outcome::Applied
+        ));
+        tx.commit().unwrap();
+        let on = crate::coord::settings::CoordSettings {
+            nudges: crate::coord::settings::Nudges::TenMinutes,
+            ..Default::default()
+        };
+        crate::coord::settings::write(&connection, &project, &on).unwrap();
+    }
+    assert_eq!(
+        adoption(&root, &project).unwrap().nudges,
+        crate::coord::settings::Nudges::TenMinutes,
+        "the view shows nudges the owner turned on"
+    );
+
+    assert_eq!(
+        adoption(&root, &unknown).unwrap_err().0,
+        "process_project_unknown"
+    );
 }

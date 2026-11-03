@@ -15,6 +15,7 @@ mod accounts;
 mod agents;
 mod changes;
 mod cleanup;
+mod coord;
 mod ide;
 mod intake;
 mod memory;

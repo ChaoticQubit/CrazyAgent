@@ -1,5 +1,5 @@
 use super::new_project_view::{Look, Row, wrap_words};
-use crate::sandbox::policy::{AgentAccess, AgentPolicy, PolicyView, ToolchainChoice};
+use crate::sandbox::policy::{AgentAccess, AgentNetwork, AgentPolicy, PolicyView, ToolchainChoice};
 use crossterm::event::{KeyCode, KeyEvent};
 
 /// The plain warning the owner confirms before giving a project's agents Full access.
@@ -17,16 +17,22 @@ pub(in crate::tui) const IDE_GIT_HOOKS: &str = "IDE git runs the project's hooks
 /// What the IDE hooks switch does and never does (INT-1, IN1-1), the same in Desktop.
 pub(in crate::tui) const IDE_GIT_HOOKS_LINE: &str = "Off: git in the IDE skips this project's hooks. Agent folders never run theirs, and commits from the IDE are never signed; the Sandboxed terminal runs hooks and signs. Applies when the IDE next starts.";
 
+/// Why the network choice has no effect under Full access: Full access runs agents with no
+/// sandbox, so nothing bounds their network.
+pub(in crate::tui) const NETWORK_IGNORED_UNDER_FULL: &str =
+    "Full access runs agents without a sandbox, so this choice does not apply.";
+
 const TEXT_WIDTH: usize = 56;
 
 /// The Agent access box over the Settings tab (DEC-101, DEC-102): the project's access level,
-/// one switch per toolchain family and the IDE hooks switch. Row 0 is the level, each next
-/// row one toolchain of the view, and the last row the IDE hooks switch. Busy while the
-/// engine saves; a refusal keeps the choices with the reason.
+/// one switch per toolchain family, the network choice and the IDE hooks switch. Row 0 is the
+/// level, each next row one toolchain of the view, then the network row, and the last row the
+/// IDE hooks switch. Busy while the engine saves; a refusal keeps the choices with the reason.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) struct AccessEdit {
     pub view: PolicyView,
     pub access: AgentAccess,
+    pub network: AgentNetwork,
     pub allowed: Vec<bool>,
     pub ide_git_hooks: bool,
     pub cursor: usize,
@@ -49,6 +55,7 @@ impl AccessEdit {
     pub fn of(view: &PolicyView) -> Self {
         Self {
             access: view.access,
+            network: view.network,
             allowed: view.toolchains.iter().map(|row| row.allowed).collect(),
             ide_git_hooks: view.ide_git_hooks,
             view: view.clone(),
@@ -116,6 +123,7 @@ impl AccessEdit {
             .collect();
         let policy = AgentPolicy {
             access: self.access,
+            network: self.network,
             toolchains,
             ide_git_hooks: self.ide_git_hooks,
         };
@@ -124,8 +132,9 @@ impl AccessEdit {
     }
 
     /// The box's lines: what the setting does, the level row, what lowering the level does
-    /// to running agents, the toolchain rows, the IDE hooks row with its line, the warning or
-    /// the refusal, and the save line. Input: the look. Output: the rows.
+    /// to running agents, the toolchain rows, the network row with its help, the IDE hooks
+    /// row with its line, the warning or the refusal, and the save line. Input: the look.
+    /// Output: the rows.
     pub fn body(&self, look: &Look) -> Vec<Row> {
         let mut body: Vec<Row> = wrap_words(
             "Who decides what this project's agents may touch. Applies to the master, sub-agents and research jobs; research jobs write reports, so they run Sandboxed unless you choose Full access.",
@@ -200,6 +209,33 @@ impl AccessEdit {
             );
         }
         body.push(Row::default());
+        body.push(Row::of("Network for agents with tools on", look.accent));
+        let network_row = self.allowed.len() + 1;
+        body.push(
+            Row::of(mark(network_row), look.accent)
+                .push("Network     ", look.muted)
+                .push(
+                    format!("< {} >", self.network.label()),
+                    if self.cursor == network_row {
+                        look.selection
+                    } else {
+                        look.fg
+                    },
+                ),
+        );
+        body.extend(
+            wrap_words(network_help(self.network), TEXT_WIDTH)
+                .into_iter()
+                .map(|line| Row::of(format!("              {line}"), look.muted)),
+        );
+        if self.access == AgentAccess::Full {
+            body.extend(
+                wrap_words(NETWORK_IGNORED_UNDER_FULL, TEXT_WIDTH)
+                    .into_iter()
+                    .map(|line| Row::of(line, look.warning)),
+            );
+        }
+        body.push(Row::default());
         body.push(Row::of("IDE git", look.accent));
         let hooks = self.hooks_row();
         body.push(Row::of(mark(hooks), look.accent).push(
@@ -245,13 +281,17 @@ impl AccessEdit {
     }
 
     fn hooks_row(&self) -> usize {
-        self.allowed.len() + 1
+        self.allowed.len() + 2
     }
 
     fn change(&mut self, forward: bool) {
         self.error = None;
         if self.cursor == 0 {
             self.access = next_level(self.access, forward);
+            return;
+        }
+        if self.cursor == self.allowed.len() + 1 {
+            self.network = next_network(self.network, forward);
             return;
         }
         if self.cursor == self.hooks_row() {
@@ -284,6 +324,34 @@ pub(in crate::tui) fn next_level(current: AgentAccess, forward: bool) -> AgentAc
         .map(|index| AgentAccess::ALL[index])
         .find(|candidate| candidate.unavailable().is_none())
         .unwrap_or(current)
+}
+
+/// The next network choice, cycling in either direction; every choice runs on every
+/// computer. Input: the current choice and the direction. Output: the next choice.
+pub(in crate::tui) fn next_network(current: AgentNetwork, forward: bool) -> AgentNetwork {
+    let at = AgentNetwork::ALL
+        .iter()
+        .position(|network| *network == current)
+        .unwrap_or(0);
+    let count = AgentNetwork::ALL.len();
+    let step = if forward { 1 } else { count - 1 };
+    AgentNetwork::ALL[(at + step) % count]
+}
+
+/// One line on what a network choice lets agents and the plugin check reach. Input: the
+/// choice. Output: the line.
+pub(in crate::tui) fn network_help(network: AgentNetwork) -> &'static str {
+    match network {
+        AgentNetwork::Open => {
+            "Agents with tools on reach the whole network, and so does the plugin check."
+        }
+        AgentNetwork::Https => {
+            "Agents and the plugin check reach port 443 only; agents also still reach the model."
+        }
+        AgentNetwork::None => {
+            "Agents reach only the model's port, on any host; for subscription accounts that is all of port 443, same as Port 443 only; the plugin check reaches nothing."
+        }
+    }
 }
 
 /// One line on what an access level lets agents do. Input: the level. Output: the line.

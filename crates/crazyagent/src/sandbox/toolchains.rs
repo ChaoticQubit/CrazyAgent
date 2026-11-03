@@ -13,11 +13,132 @@ const NODE_MARKERS: &[&str] = &["package.json"];
 const PYTHON_MARKERS: &[&str] = &["pyproject.toml"];
 const NODE_HOMES: &[&str] = &[".nvm", ".volta", ".local/share/fnm"];
 const PYTHON_HOMES: &[&str] = &[".pyenv", ".local/share/uv/python"];
+/// Where the default pack's `uv tool install graphifyy` keeps graphify's own environment.
+const GRAPHIFY_TOOL: &str = ".local/share/uv/tools/graphifyy";
 const CARGO_SHARED: &[&str] = &["registry", "git"];
 const RUSTUP_BINS: &[&str] = &["/opt/homebrew/opt/rustup/bin", "/usr/local/opt/rustup/bin"];
 const TMP_PARENT: &str = "/private/tmp";
 const TMP_PREFIX: &str = "ca-";
 const TMP_HASH_BYTES: usize = 8;
+/// The folder of an agent's short temp folder that holds its own `git`, and that program.
+const GIT_FOLDER: &str = "bin";
+const GIT_PROGRAM: &str = "git";
+/// The xcrun shim at `/usr/bin/git`, whose cache file write Seatbelt denies (Q73).
+#[cfg(unix)]
+const GIT_SHIM: &str = "/usr/bin/git";
+/// The most bytes of an agent's `git` script read to tell whether it is current.
+#[cfg(unix)]
+const GIT_SCRIPT_BYTES_MAX: u64 = 8192;
+/// The script an agent's own `git` holds, with `@GIT@` for the real git and `@LEAD@` for 1
+/// in a lead's copy and 0 in any other agent's. It refuses merge, pull, rebase and
+/// cherry-pick, and aliases for them, with a plain reason (DEC-107 rule 2); a lead may
+/// still merge its own workers' `BRANCH--NAME` branches. Every other command runs as is.
+#[cfg(unix)]
+const GIT_SCRIPT: &str = r##"#!/bin/sh
+git='@GIT@'
+lead=@LEAD@
+worker_reason='You work only on your own branch: never merge, pull, rebase or cherry-pick another branch into it (DEC-107). If you need work from another branch, stop and tell your lead what you need; the master tells the owner.'
+lead_reason='A lead merges only the branches of its own workers, named BRANCH--NAME after its own branch, and never pulls, rebases or cherry-picks other branches (DEC-107). The engine merge tool merges app-spawned workers. If you need other work, stop and tell the master what you need.'
+refuse() {
+  printf 'crazyagent: git %s is refused. %s\n' "$1" "$2" >&2
+  exit 1
+}
+reason() {
+  if [ "$lead" = 1 ]; then
+    printf '%s' "$lead_reason"
+  else
+    printf '%s' "$worker_reason"
+  fi
+}
+aliased() {
+  case "$1" in
+    [Aa][Ll][Ii][Aa][Ss].*) refuse "$2" "Aliases set on the command line are refused. $(reason)" ;;
+  esac
+}
+sub=
+at=0
+skip=
+moved=0
+for word do
+  at=$((at + 1))
+  if [ -n "$skip" ]; then
+    if [ "$skip" = c ]; then
+      aliased "$word" "-c $word"
+    fi
+    skip=
+    continue
+  fi
+  case "$word" in
+    -c|--config-env) skip=c ;;
+    --config-env=*) aliased "${word#--config-env=}" "$word" ;;
+    -C|--git-dir|--work-tree)
+      skip=v
+      moved=1
+      ;;
+    --namespace|--super-prefix) skip=v ;;
+    --git-dir=*|--work-tree=*) moved=1 ;;
+    -*) ;;
+    *)
+      sub=$word
+      break
+      ;;
+  esac
+done
+own_workers() {
+  [ "$moved" = 0 ] || return 1
+  branch=$("$git" symbolic-ref --short -q HEAD) || return 1
+  [ -n "$branch" ] || return 1
+  named=0
+  value=0
+  for word do
+    if [ "$value" = 1 ]; then
+      value=0
+      continue
+    fi
+    case "$word" in
+      -m|-F|-s|-X|--message|--file|--strategy|--strategy-option|--into-name|--cleanup) value=1 ;;
+      -*) ;;
+      *)
+        word=${word#refs/heads/}
+        case "$word" in
+          "$branch"--*) ;;
+          *) return 1 ;;
+        esac
+        name=${word#"$branch"--}
+        case "$name" in
+          ''|*/*|*--*|.*|*[!A-Za-z0-9._-]*) return 1 ;;
+        esac
+        named=1
+        ;;
+    esac
+  done
+  [ "$named" = 1 ]
+}
+gate() {
+  shift "$1"
+  shift
+  if [ "$#" = 1 ]; then
+    case "$1" in
+      --abort|--quit|--continue|--skip) return 0 ;;
+    esac
+  fi
+  [ "$lead" = 1 ] && [ "$sub" = merge ] && own_workers "$@"
+}
+case "$sub" in
+  '') ;;
+  merge|pull|rebase|cherry-pick)
+    gate "$at" "$@" || refuse "$sub" "$(reason)"
+    ;;
+  add|am|apply|archive|bisect|blame|branch|bundle|cat-file|checkout|cherry|clean|clone|commit|config|describe|diff|diff-files|diff-index|diff-tree|difftool|fetch|for-each-ref|format-patch|fsck|gc|grep|hash-object|help|init|log|ls-files|ls-remote|ls-tree|merge-base|merge-file|merge-tree|mergetool|mv|name-rev|notes|push|range-diff|reflog|remote|reset|restore|rev-list|rev-parse|revert|rm|shortlog|show|show-ref|sparse-checkout|stash|status|submodule|switch|symbolic-ref|tag|update-index|update-ref|version|worktree) ;;
+  *)
+    expanded=$("$git" config --get "alias.$sub" 2>/dev/null)
+    case "$expanded" in
+      merge|'merge '*|pull|'pull '*|rebase|'rebase '*|cherry-pick|'cherry-pick '*) refuse "$sub" "Aliases for merge, pull, rebase or cherry-pick are refused as those commands are. $(reason)" ;;
+    esac
+    ;;
+esac
+exec "$git" "$@"
+"##;
 
 /// The variables that keep every agent's toolchains from installing themselves: rustup
 /// never fetches a missing toolchain, uv never downloads a Python, Corepack never fetches a
@@ -237,9 +358,36 @@ pub fn agent_env(home: &Path, homes: &ToolHomes) -> Vec<(&'static str, OsString)
     env
 }
 
+/// The read-only folders graphify needs in an agent's sandbox when the default pack
+/// installed it with uv (I3): its own environment, holding the `graphify` program, and the
+/// uv Python install its interpreter runs from when that sits in the owner's home. Takes the
+/// tool homes. Returns the canonical folders, none when graphify is not installed there.
+pub fn graphify(homes: &ToolHomes) -> Vec<PathBuf> {
+    let Ok(tool) = below(&homes.home, GRAPHIFY_TOOL).canonicalize() else {
+        return Vec::new();
+    };
+    let inside = |folder: &Path| folder.starts_with(&homes.home) && folder != homes.home;
+    let program = std::fs::symlink_metadata(tool.join("bin").join("graphify"))
+        .is_ok_and(|metadata| metadata.is_file());
+    if !program || !inside(&tool) || !tool.is_dir() {
+        return Vec::new();
+    }
+    let install = tool
+        .join("bin")
+        .join("python3")
+        .canonicalize()
+        .ok()
+        .and_then(|python| python.parent()?.parent().map(Path::to_path_buf))
+        .filter(|install| inside(install) && !tool.starts_with(install));
+    let folders: Vec<PathBuf> = std::iter::once(tool).chain(install).collect();
+    assert!((1..=2).contains(&folders.len()));
+    folders
+}
+
 /// A tools-on agent's search path: the owner's cargo proxies and Homebrew's rustup proxies
-/// where they hold `cargo`, then `base`. Inputs: the tool homes and the base path. Output:
-/// the joined path.
+/// where they hold `cargo`, then `base`, then graphify's own program folder when the default
+/// pack installed it (see [`graphify`]), last so it never shadows a toolchain's `python3`.
+/// Inputs: the tool homes and the base path. Output: the joined path.
 pub fn agent_path(homes: &ToolHomes, base: &str) -> String {
     let mut parts: Vec<String> = std::iter::once(homes.cargo.join("bin"))
         .chain(RUSTUP_BINS.iter().map(PathBuf::from))
@@ -251,6 +399,12 @@ pub fn agent_path(homes: &ToolHomes, base: &str) -> String {
         })
         .collect();
     parts.push(base.to_owned());
+    parts.extend(
+        graphify(homes)
+            .first()
+            .and_then(|tool| tool.join("bin").to_str().map(str::to_owned))
+            .filter(|bin| !bin.contains(':')),
+    );
     parts.join(":")
 }
 
@@ -272,8 +426,10 @@ pub fn tmp_path(home: &Path) -> PathBuf {
 }
 
 /// Makes the agent's short temp folder with mode 0700, or reuses the one this user already
-/// owns there and makes it private again. Input: the agent home. Output: the folder, or a
-/// refusal when the path is a link, a file or another user's folder.
+/// owns there and makes it private again, and writes the agent's own `git` into it (see
+/// [`with_agent_git`]); a `git` that cannot be written is logged and the agent keeps the
+/// system one. Input: the agent home. Output: the folder, or a refusal when the path is a
+/// link, a file or another user's folder.
 #[cfg(unix)]
 pub fn make_tmp(home: &Path) -> io::Result<PathBuf> {
     let path = tmp_path(home);
@@ -289,7 +445,135 @@ pub fn make_tmp(home: &Path) -> io::Result<PathBuf> {
     }
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
     assert!(private_folder(&path));
+    if let Some(script) = git_script(crate::research::runner::setup_git(), false)
+        && let Err(error) = write_git(&path, &script)
+    {
+        eprintln!("agent_git_not_written kind={:?}", error.kind());
+    }
     Ok(path)
+}
+
+/// The script an agent's own `git` holds: it runs the real git the engine itself resolved,
+/// so the agent's git calls never reach the `/usr/bin/git` xcrun shim, whose `xcrun_db`
+/// cache write Seatbelt denies, and git still finds its helpers beside its real path, which
+/// a link to it would lose; it refuses merges as [`GIT_SCRIPT`] says. Inputs: the real git
+/// and whether the agent leads workers. Output: the script, or none when git is the shim or
+/// its path is not plain.
+#[cfg(unix)]
+fn git_script(git: &Path, lead: bool) -> Option<String> {
+    let text = git.to_str()?;
+    let plain = git.is_absolute()
+        && git != Path::new(GIT_SHIM)
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"/._-+ ".contains(&byte));
+    let script = plain.then(|| {
+        GIT_SCRIPT
+            .replace("@GIT@", text)
+            .replace("@LEAD@", if lead { "1" } else { "0" })
+    })?;
+    assert!(!script.contains("@GIT@") && !script.contains("@LEAD@"));
+    assert!(script.len() as u64 <= GIT_SCRIPT_BYTES_MAX);
+    Some(script)
+}
+
+/// Rewrites the agent's own `git` in its short temp folder as a lead's copy, which lets the
+/// lead merge its own workers' branches (DEC-107 rule 2), after [`make_tmp`] wrote the
+/// copy every agent gets. Input: the folder `make_tmp` returned. Output: Ok, also when git
+/// is the shim and no copy is written, or the write failure.
+#[cfg(unix)]
+pub fn lead_git(tmp: &Path) -> io::Result<()> {
+    match git_script(crate::research::runner::setup_git(), true) {
+        Some(script) => write_git(tmp, &script),
+        None => Ok(()),
+    }
+}
+
+/// Writes the agent's own `git` into `bin` of its short temp folder as a 0700 file of this
+/// user, replacing a copy that differs, through descriptors that never follow a link the
+/// agent left there. Inputs: the temp folder and the script. Output: done, or the refusal.
+#[cfg(unix)]
+fn write_git(tmp: &Path, script: &str) -> io::Result<()> {
+    use rustix::fs::{AtFlags, CWD, Mode, OFlags};
+    use std::io::{Read, Write};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static STAGED: AtomicU64 = AtomicU64::new(0);
+    let folder_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let tmp = rustix::fs::openat(CWD, tmp, folder_flags, Mode::empty())?;
+    match rustix::fs::mkdirat(&tmp, GIT_FOLDER, Mode::from_raw_mode(0o700)) {
+        Ok(()) | Err(rustix::io::Errno::EXIST) => {}
+        Err(error) => return Err(error.into()),
+    }
+    let folder = rustix::fs::openat(&tmp, GIT_FOLDER, folder_flags, Mode::empty())?;
+    if rustix::fs::fstat(&folder)?.st_uid != nix::unistd::getuid().as_raw() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the agent git folder is not this user's",
+        ));
+    }
+    rustix::fs::fchmod(&folder, Mode::from_raw_mode(0o700))?;
+    let current = rustix::fs::openat(
+        &folder,
+        GIT_PROGRAM,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+        Mode::empty(),
+    )
+    .ok()
+    .map(fs::File::from)
+    .and_then(|file| {
+        let metadata = file.metadata().ok()?;
+        if !metadata.is_file() || metadata.mode() & 0o7777 != 0o700 {
+            return None;
+        }
+        let mut text = String::new();
+        file.take(GIT_SCRIPT_BYTES_MAX + 1)
+            .read_to_string(&mut text)
+            .ok()?;
+        Some(text)
+    });
+    if current.as_deref() == Some(script) {
+        return Ok(());
+    }
+    let staged = format!(
+        ".{GIT_PROGRAM}-{}-{}",
+        std::process::id(),
+        STAGED.fetch_add(1, Ordering::Relaxed)
+    );
+    let file = rustix::fs::openat(
+        &folder,
+        staged.as_str(),
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::from_raw_mode(0o700),
+    )?;
+    let mut file = fs::File::from(file);
+    let placed = file
+        .write_all(script.as_bytes())
+        .and_then(|()| file.set_permissions(fs::Permissions::from_mode(0o700)))
+        .and_then(|()| {
+            rustix::fs::renameat(&folder, staged.as_str(), &folder, GIT_PROGRAM)
+                .map_err(io::Error::from)
+        });
+    if placed.is_err() {
+        let _ = rustix::fs::unlinkat(&folder, staged.as_str(), AtFlags::empty());
+    }
+    placed
+}
+
+/// Puts the agent's own `git` (see [`make_tmp`]) at the front of a harness's search path,
+/// so the agent's git calls under Seatbelt run the real git, not the `/usr/bin/git` shim.
+/// Only a harness's own path gets it, never a command the engine runs under the profile,
+/// since the agent can change that folder. Inputs: the agent home and the path. Output:
+/// the path, unchanged when the agent has no such `git`.
+pub fn with_agent_git(home: &Path, path: String) -> String {
+    let Some(folder) = existing_tmp(home).map(|tmp| tmp.join(GIT_FOLDER)) else {
+        return path;
+    };
+    let present =
+        fs::symlink_metadata(folder.join(GIT_PROGRAM)).is_ok_and(|metadata| metadata.is_file());
+    match folder.to_str() {
+        Some(text) if present && !text.contains(':') => format!("{text}:{path}"),
+        _ => path,
+    }
 }
 
 /// The agent's short temp folder when it exists as this user's private folder. Input: the
@@ -328,8 +612,19 @@ fn own_folder(path: &Path) -> bool {
 
 #[cfg(unix)]
 fn private_folder(path: &Path) -> bool {
-    own_folder(path)
-        && fs::symlink_metadata(path).is_ok_and(|metadata| metadata.mode() & 0o077 == 0)
+    private_folder_pin(path).is_some()
+}
+
+/// The (device, inode) of a folder that is this user's own private folder, read in one
+/// look that never follows a link. Input: the path. Output: the pin, or None for a link, a
+/// file, another user's folder or one open to others.
+#[cfg(unix)]
+pub fn private_folder_pin(path: &Path) -> Option<(u64, u64)> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    (metadata.is_dir()
+        && metadata.uid() == nix::unistd::getuid().as_raw()
+        && metadata.mode() & 0o077 == 0)
+        .then(|| (metadata.dev(), metadata.ino()))
 }
 
 /// The short temp folder of one agent run that ends inside a single call, removed with
@@ -408,6 +703,12 @@ pub fn make_tmp(_home: &Path) -> io::Result<PathBuf> {
     Err(io::ErrorKind::Unsupported.into())
 }
 
+/// No agent `git` outside Unix. Takes the agent temp folder, unused. Returns `Unsupported`.
+#[cfg(not(unix))]
+pub fn lead_git(_tmp: &Path) -> io::Result<()> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
 /// Nothing to remove outside Unix. Takes the agent home, unused. Returns done.
 #[cfg(not(unix))]
 pub fn remove_tmp(_home: &Path) -> io::Result<()> {
@@ -420,3 +721,6 @@ pub fn remove_tmp(_home: &Path) -> io::Result<()> {
 pub fn prepare_cargo_home(_home: &Path, _homes: &ToolHomes) -> io::Result<PathBuf> {
     Err(io::ErrorKind::Unsupported.into())
 }
+
+#[cfg(all(test, unix))]
+mod tests;

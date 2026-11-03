@@ -78,6 +78,7 @@ pub(super) struct State {
     scroll: u16,
     notice: Cow<'static, str>,
     polled: Option<std::time::Instant>,
+    clearing: bool,
 }
 
 impl Default for State {
@@ -100,6 +101,7 @@ impl Default for State {
             scroll: 0,
             notice: Cow::Borrowed("Select a managed native connection"),
             polled: None,
+            clearing: false,
         }
     }
 }
@@ -162,6 +164,7 @@ impl State {
         self.hide()?;
         self.flight = None;
         self.job = None;
+        self.clearing = false;
         self.inspected = false;
         self.context = None;
         if !basis.writable || !supported(&connection) {
@@ -187,6 +190,7 @@ impl State {
     pub(super) fn access(&mut self, identity: Option<OwnerConnectionIdentity>, connected: bool) {
         self.flight = None;
         self.job = None;
+        self.clearing = false;
         self.inspected = false;
         self.connected = connected && identity.is_some();
         if self.hide().is_err() {
@@ -238,6 +242,12 @@ impl State {
         self.open
     }
 
+    /// The panel's last line for the owner, which the model-access screen shows while the
+    /// panel is closed.
+    pub(super) fn notice(&self) -> &str {
+        &self.notice
+    }
+
     pub(super) fn operation_id(&self) -> Option<&RequestId> {
         self.retained
             .as_ref()
@@ -258,6 +268,44 @@ impl State {
                     )
                 })
         })
+    }
+
+    /// Names the connection of a sign-in whose outcome is still open: running, or not
+    /// confirmed. Output: the connection, or None.
+    pub(super) fn stuck(&self) -> Option<&ModelConnection> {
+        self.retained
+            .as_ref()
+            .filter(|_| self.has_pending())
+            .map(|retained| &retained.original.context.connection)
+    }
+
+    /// Starts Clear stuck sign-in: reads the original operation with the scope it started
+    /// with, so it works after its connection can no longer be selected. The engine's
+    /// answer ends it, or a cancel follows while the engine still runs it. Input: the
+    /// current owner identity. Output: the refusal, if any.
+    pub(super) fn clear(
+        &mut self,
+        identity: Option<OwnerConnectionIdentity>,
+    ) -> Result<(), String> {
+        let identity = identity.ok_or("Owner disconnected; Ctrl-R reconnects")?;
+        let retained = self
+            .retained
+            .as_ref()
+            .filter(|_| self.has_pending())
+            .ok_or("No stuck sign-in")?;
+        let mut context = retained.original.context.clone();
+        if context.basis.identity.database_instance() != identity.database_instance() {
+            self.retained = None;
+            self.notice = Cow::Borrowed("Stuck sign-in cleared; the engine's database changed");
+            return Ok(());
+        }
+        context.basis.identity = identity;
+        context.generation = self.generation;
+        let command = self.query(false)?;
+        self.queue(Job { context, command })?;
+        self.clearing = true;
+        self.notice = Cow::Borrowed("Clearing the stuck sign-in; reading its original operation");
+        Ok(())
     }
 
     /// Re-reads the original operation every two seconds while sign-in is still moving, so
@@ -535,13 +583,32 @@ impl State {
         if self.flight.as_ref() != Some(&event.job) {
             return Ok(());
         }
-        let (mut list_using, mut sign_out) = (false, false);
+        let (mut list_using, mut sign_out, mut cancel_next) = (false, false, false);
         match event.result {
             Ok(Output::Auth(reply)) if !matches!(event.job.command, Command::Inspect) => {
                 if !self.matches_reply(&event.job, &reply) {
                     return Ok(());
                 }
+                let running = reply.fact.phase.unfinished();
                 self.accept_reply(&event.job, *reply);
+                if self.clearing && !running {
+                    self.retained = None;
+                    self.presentation = None;
+                    self.notice = Cow::Borrowed("Stuck sign-in cleared; the engine finished it");
+                } else if self.clearing {
+                    cancel_next = matches!(event.job.command, Command::Read(_));
+                    if !cancel_next {
+                        self.notice = Cow::Borrowed(
+                            "The sign-in is still stopping; press c again in a moment",
+                        );
+                    }
+                }
+            }
+            Err(problem) if self.clearing && crate::engine::owner::ends_operation(&problem) => {
+                self.retained = None;
+                self.presentation = None;
+                self.claude_code.clear();
+                self.notice = Cow::Borrowed("Stuck sign-in cleared; the engine no longer runs it");
             }
             Ok(Output::Inspected(reply)) if matches!(event.job.command, Command::Inspect) => {
                 self.inspected = self.matches_inspection(&event.job, &reply);
@@ -594,6 +661,7 @@ impl State {
         }
         self.flight = None;
         self.job = None;
+        self.clearing = false;
         if list_using {
             self.queue(Job {
                 context: event.job.context,
@@ -601,6 +669,13 @@ impl State {
             })?;
         } else if sign_out {
             self.begin(None)?;
+        } else if cancel_next {
+            let command = self.query(true)?;
+            self.queue(Job {
+                context: event.job.context,
+                command,
+            })?;
+            self.clearing = true;
         }
         self.assert_consistent();
         Ok(())
@@ -732,6 +807,9 @@ impl State {
         }
         if retained.uncertain {
             lines.push("Current outcome unresolved; read or cancel the original operation".into());
+        }
+        if self.has_pending() {
+            lines.push("Sign-in still open for this account; c clears a stuck sign-in".into());
         }
         lines.push("Last owner observation only; model delivery and quota remain separate".into());
         lines

@@ -2,10 +2,11 @@ use super::{AgentSession, KeyFile, Resume, TerminalSession, host_failure};
 use crate::harnesses::interactive::Transcript;
 use crate::harnesses::launch::{LaunchError, LaunchLimits, failure};
 use crate::harnesses::transcript::{TranscriptEvent, TranscriptReader};
+use crate::launch_context::{Installed, InstalledFiles};
 use crate::sandbox::policy::AgentAccess;
 use crate::terminal::{AgentId, Host};
 use serde::{Deserialize, Serialize};
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -27,9 +28,10 @@ pub enum RecordSource {
 /// What the engine keeps about one agent's live pane, so a later engine can adopt it
 /// without starting the harness again: the session record, the working folder, when the
 /// harness started, the pane's first process, the key file the harness reads, if any, for a
-/// resumed conversation its record and the offset where this pane's turns begin, and the
-/// project access level the agent started at. A record from an engine that did not keep
-/// the level has none.
+/// resumed conversation its record and the offset where this pane's turns begin, the
+/// project access level the agent started at, and where its launch wrote the project
+/// context files that hold MCP secrets. A record from an engine that did not keep the
+/// level or the files has none.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PaneRecord {
@@ -43,6 +45,8 @@ pub struct PaneRecord {
     pub resumed: Option<(PathBuf, u64)>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub access: Option<AgentAccess>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<InstalledFiles>,
 }
 
 impl PaneRecord {
@@ -74,6 +78,7 @@ impl PaneRecord {
             key: key.map(Path::to_path_buf),
             resumed: None,
             access: None,
+            context: None,
         })
     }
 
@@ -101,8 +106,25 @@ impl PaneRecord {
             .resumed
             .as_ref()
             .is_none_or(|(file, _)| file.is_absolute());
-        (path.is_absolute() && record.cwd.is_absolute() && record.pid > 0 && key && resumed)
+        let context = record
+            .context
+            .as_ref()
+            .is_none_or(|files| files.home.is_absolute());
+        (path.is_absolute()
+            && record.cwd.is_absolute()
+            && record.pid > 0
+            && key
+            && resumed
+            && context)
             .then_some(record)
+    }
+
+    /// Deletes the context files of a pane that ends without being taken over, unless its
+    /// home is no longer a private agent home or another launch uses it. Takes the record.
+    pub fn remove_context_files(&self) {
+        if let Some(files) = &self.context {
+            drop(Installed::adopt(files));
+        }
     }
 
     fn transcript(&self) -> Transcript {
@@ -120,6 +142,16 @@ impl PaneRecord {
         UNIX_EPOCH + Duration::from_millis(self.since_ms)
     }
 
+    /// Gives what is left of a launch's run time since this pane's harness started, so an
+    /// engine that adopts the pane keeps the launch's deadline. Takes the launch's run time.
+    /// Returns the rest, zero once it has passed.
+    pub fn run_time_left(&self, run_time: Duration) -> Duration {
+        let ran = SystemTime::now()
+            .duration_since(self.since())
+            .unwrap_or_default();
+        run_time.saturating_sub(ran)
+    }
+
     fn key_file(&self) -> Option<KeyFile> {
         let path = self.key.as_ref()?;
         std::fs::symlink_metadata(path)
@@ -128,9 +160,21 @@ impl PaneRecord {
     }
 }
 
+/// Adds the transcript facts an adopted pane already had to its event count, since the
+/// engine that launched it may have reported each of them. Fails with `launch_event_limit`
+/// past the launch's event budget, as the session itself would.
+fn count(events: &mut usize, facts: usize, limits: &LaunchLimits) -> Result<(), LaunchError> {
+    *events = events.saturating_add(facts);
+    if *events > limits.events {
+        return Err(failure("launch_event_limit"));
+    }
+    Ok(())
+}
+
 fn replay(
     reader: &mut TranscriptReader,
     limits: &LaunchLimits,
+    events: &mut usize,
 ) -> Result<Option<bool>, LaunchError> {
     let mut open = None;
     for _ in 0..REPLAY_READS_MAX {
@@ -139,6 +183,7 @@ fn replay(
         if reader.bytes() > limits.output_bytes as u64 {
             return Err(failure("launch_output_limit"));
         }
+        count(events, facts.len(), limits)?;
         if facts.is_empty() && reader.bytes() == before {
             return Ok(open);
         }
@@ -158,15 +203,17 @@ fn replay(
 impl TerminalSession {
     /// Takes over an agent pane a previous engine left running, without starting the harness
     /// again. A turn still running in it is stopped with Escape, since its result can no
-    /// longer be matched to the engine's work; the session then waits idle for the next prompt
-    /// and removes the pane's key file when it stops. Takes the host, the pane name, the
-    /// stored record and the limits. Returns the session, or a plain code when it cannot.
+    /// longer be matched to the engine's work. The launch's run time and event budget go on
+    /// counting from its start. The key and context files are removed when the session stops,
+    /// or at once when the pane cannot be taken over. Takes the host, the pane name, the
+    /// stored record and the limits. Returns the idle session, or a plain code.
     pub fn adopt(
         host: Arc<dyn Host>,
         agent: AgentId,
         record: &PaneRecord,
         limits: LaunchLimits,
     ) -> Result<Self, LaunchError> {
+        let context = record.context.as_ref().map(Installed::adopt).transpose()?;
         if !host.alive().map_err(host_failure)?.contains(&agent) {
             return Err(failure("launch_closed"));
         }
@@ -176,13 +223,16 @@ impl TerminalSession {
             }
             None => TranscriptReader::adopted(record.transcript(), &record.cwd, record.since()),
         };
-        if replay(&mut reader, &limits)? == Some(true) {
+        let mut events = 0;
+        if replay(&mut reader, &limits, &mut events)? == Some(true) {
             host.input(&agent, ESCAPE).map_err(host_failure)?;
             let deadline = Instant::now() + SETTLE_WAIT;
             let mut settled = false;
             while !settled && Instant::now() < deadline {
                 std::thread::sleep(POLL);
-                settled = reader.read()?.iter().any(|fact| {
+                let facts = reader.read()?;
+                count(&mut events, facts.len(), &limits)?;
+                settled = facts.iter().any(|fact| {
                     matches!(
                         fact,
                         TranscriptEvent::TurnFinished { .. } | TranscriptEvent::Interrupted
@@ -193,7 +243,7 @@ impl TerminalSession {
                 let _ = host.kill(&agent);
                 return Err(failure("launch_adopt_unsettled"));
             }
-            replay(&mut reader, &limits)?;
+            replay(&mut reader, &limits, &mut events)?;
         }
         Ok(Self {
             host,
@@ -202,18 +252,21 @@ impl TerminalSession {
             reader,
             queue: VecDeque::new(),
             limits,
-            deadline: Instant::now() + limits.run_time,
+            deadline: Instant::now() + record.run_time_left(limits.run_time),
             checked: Instant::now(),
-            events: 0,
+            events,
             ready: true,
             turn: false,
+            held: false,
             live: false,
+            own: false,
             facts: VecDeque::new(),
+            background: BTreeSet::new(),
             exited: false,
             stopped: false,
             record: Some(record.clone()),
             _key: record.key_file(),
-            _context: None,
+            _context: context,
             _relay: None,
         })
     }
@@ -233,7 +286,7 @@ impl TerminalSession {
             std::mem::forget(key);
         }
         if let Some(context) = self._context.take() {
-            std::mem::forget(context);
+            context.keep();
         }
     }
 }

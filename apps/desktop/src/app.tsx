@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { SessionContext, useLoad, useSession, type Loaded, type Session } from "./state";
-import { engineVersions, plainError, unconfirmedLine, PROFILE_UNCONFIRMED_LINE, type EngineVersions } from "./api";
+import { engineVersions, plainError, unconfirmedLine, PROFILE_UNCONFIRMED_LINE, STUCK_SIGN_IN_LINE, type EngineVersions } from "./api";
 import { ideFocus, type IdeFocus } from "./engine-client";
 import { loadTeamEvents, teamAttention } from "./api-projects";
 import { loadQuestionCounts, pendingByProject, unseenQuestionAlerts, withPendingQuestions } from "./api-questions";
@@ -14,7 +14,7 @@ import { OnboardingReview } from "./screens/intake/onboarding";
 import { NewProjectFlow } from "./screens/new-project";
 import { ProjectPage } from "./screens/project";
 import { Settings } from "./screens/settings";
-import { freshAlerts, unseenByProject } from "./screens/team/wake";
+import { alertRoute, freshAlerts, unseenByProject } from "./screens/team/wake";
 import { RestartEngine, UpdatesSettings, useEngineRestart, useUpdateWatch, type EngineRestart } from "./screens/settings/updates";
 import { blocking, updateStore } from "./screens/settings/updates-state";
 import { AppShell, Banner, BrandMark, Button, Icon, Sidebar, Skeleton, Toast, navigate, shortcutKey, useRoute, type Route } from "./ui";
@@ -155,12 +155,13 @@ export function AppView({ session, route, alerts }: { session: Session; route: R
         onSkip={(next) => navigate(next ?? { name: "home" }, true)} />
     </SessionContext.Provider>;
   }
+  const toastOpen = session.toastOpen;
   const projects = session.projects.kind === "ok" ? session.projects.value.map((project) => {
     const unseen = alerts?.get(project.id) ?? 0;
     return { id: project.id, name: displayText(project.name), flag: unseen > 0 ? String(unseen) : undefined };
   }) : undefined;
   return <SessionContext.Provider value={session}>
-    <AppShell toast={<Toast message={session.toast} />}
+    <AppShell toast={<Toast message={session.toast} onOpen={toastOpen ? () => navigate(toastOpen) : undefined} />}
       sidebar={<Sidebar route={route} projects={projects} profileName={profile?.name} engine={session.engine} onRetry={session.retry} />}>
       {session.unconfirmed && <Banner action={<span className="row">
         <Button size="small" pending={session.unconfirmed.busy} pendingLabel="Checking..." onClick={() => void session.checkUnconfirmed()}>Check again</Button>
@@ -173,6 +174,10 @@ export function AppView({ session, route, alerts }: { session: Session; route: R
       {session.profileCheck && <Banner action={<Button size="small" pending={session.profileCheck.busy} pendingLabel="Checking..."
         onClick={() => void session.checkProfile()}>Check again</Button>}>
         {PROFILE_UNCONFIRMED_LINE}
+      </Banner>}
+      {session.stuckSignIn && <Banner action={<Button size="small" pending={session.stuckSignIn.busy} pendingLabel="Clearing..."
+        onClick={() => void session.clearStuckSignIn()}>Clear stuck sign-in</Button>}>
+        {STUCK_SIGN_IN_LINE}
       </Banner>}
       <Screen route={route} session={session} alerts={alerts} />
       <GoToLayer projects={projects ?? []} />
@@ -197,11 +202,12 @@ function useShortcuts() {
 export const ALERT_READ_MS = 10_000;
 
 /** Watches the owner's team notifications and pending questions while the engine runs: every
- * 10 s it reads them, shows a new notification as a toast, keeps the app icon badge at the
+ * 10 s it reads them, shows a new notification as a toast, with Open to the Questions inbox
+ * for an urgent question or an agent waiting in its terminal, keeps the app icon badge at the
  * unseen notifications plus the pending questions, and asks for attention when a notification
- * is new. Inputs: whether the engine runs and the toast action. Output: what each project's
- * sidebar flag counts. */
-function useTeamAlerts(running: boolean, showToast: (message: string) => void): Map<string, number> {
+ * is new; a Normal question only counts toward the badge. Inputs: whether the engine runs and
+ * the toast action. Output: what each project's sidebar flag counts. */
+function useTeamAlerts(running: boolean, showToast: (message: string, open?: Route) => void): Map<string, number> {
   const [counts, setCounts] = useState<Map<string, number>>(() => new Map());
   const toast = useRef(showToast);
   toast.current = showToast;
@@ -221,7 +227,7 @@ function useTeamAlerts(running: boolean, showToast: (message: string) => void): 
         const flags = withPendingQuestions(unseenByProject(result.value), unseenQuestionAlerts(result.value.projects), pending);
         const total = [...flags.values()].reduce((sum, count) => sum + count, 0);
         setCounts(flags);
-        if (next.fresh[0]) toast.current(displayText(next.fresh[0].text));
+        if (next.fresh[0]) toast.current(displayText(next.fresh[0].text), alertRoute(next.fresh[0]));
         if (next.fresh.length > 0 || total !== shown) void teamAttention(total, next.fresh.length > 0);
         shown = total;
       }

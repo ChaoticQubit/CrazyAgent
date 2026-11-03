@@ -13,10 +13,12 @@ struct Busy {
     service: EngineService,
     _shutdown: tokio::sync::watch::Sender<bool>,
     client: OwnerClient,
+    _disk: tokio::sync::MutexGuard<'static, ()>,
 }
 
 impl Busy {
     async fn start() -> Self {
+        let disk = super::usage_tests::busy_storage().await;
         let root = tempfile::Builder::new()
             .prefix("ca-busy-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -45,6 +47,7 @@ impl Busy {
             service,
             _shutdown: shutdown,
             client,
+            _disk: disk,
         }
     }
 
@@ -65,14 +68,15 @@ impl Busy {
             .unwrap()
     }
 
+    /// Queues a real storage sweep of `SWEPT_FILES` files ahead of every later storage
+    /// job, in a removed skill folder of the private plugin store made as the engine makes
+    /// it. Output: the swept folder and the sweep.
     fn occupy_storage(&self) -> (PathBuf, Sweep) {
-        let swept = self
-            .engine_root()
-            .join(crate::storage::plugins::STORE)
-            .join("skills")
-            .join("global")
-            .join(".removed-busy-storage");
-        std::fs::create_dir_all(&swept).unwrap();
+        let swept =
+            crate::storage::plugins::store_folder(&self.engine_root(), &["skills", "global"])
+                .unwrap()
+                .join(".removed-busy-storage");
+        std::fs::create_dir(&swept).unwrap();
         for index in 0..SWEPT_FILES {
             std::fs::write(swept.join(index.to_string()), b"x").unwrap();
         }
@@ -252,6 +256,7 @@ async fn a_server_secret_replaced_while_storage_is_busy_keeps_the_new_one_and_dr
                 command: "/usr/bin/true".into(),
                 args: Vec::new(),
             },
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -291,6 +296,66 @@ async fn a_server_secret_replaced_while_storage_is_busy_keeps_the_new_one_and_dr
         0,
         "the replaced secret must not stay behind"
     );
+    busy.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_server_added_with_secrets_while_storage_is_busy_is_kept_with_every_one_of_them() {
+    let busy = Busy::start().await;
+    let controller = crate::client_controller::OwnerController::attach(
+        busy.root.path(),
+        OwnerClientKind::Tui,
+        Duration::from_secs(20),
+    )
+    .await
+    .unwrap();
+    let first = format!("first-added-secret-{}", std::process::id());
+    let second = format!("second-added-secret-{}", std::process::id());
+
+    let (swept, sweep) = busy.occupy_storage();
+    let added = controller
+        .add_mcp_server(
+            Scope::Global,
+            "busy-added".into(),
+            ServerSpec::Stdio {
+                command: "/usr/bin/true".into(),
+                args: Vec::new(),
+            },
+            vec![
+                (
+                    "API_TOKEN".into(),
+                    AccountSecret::new(first.as_bytes().to_vec()).unwrap(),
+                ),
+                (
+                    "API_KEY".into(),
+                    AccountSecret::new(second.as_bytes().to_vec()).unwrap(),
+                ),
+            ],
+        )
+        .await;
+    let code = added.err().map(|error| error.0).unwrap_or_default();
+    assert!(
+        code.ends_with("outcome_unknown") || code.contains("outcome_unknown_"),
+        "the add must outlast the owner wait behind the real sweep: {code}"
+    );
+    settled(&swept, sweep).await;
+
+    let servers = controller.plugin_servers(None).await.unwrap();
+    assert_eq!(servers.len(), 1, "storage committed the add");
+    let secrets: Vec<(&str, bool)> = servers[0]
+        .secrets
+        .iter()
+        .map(|secret| (secret.name.as_str(), secret.saved))
+        .collect();
+    assert_eq!(
+        secrets,
+        [("API_TOKEN", true), ("API_KEY", true)],
+        "a server is never left with only part of the secrets it was added with"
+    );
+    for secret in [&first, &second] {
+        assert_eq!(holders(&busy.engine_root(), secret.as_bytes()), 1);
+    }
+    drop(controller);
     busy.stop().await;
 }
 
@@ -341,6 +406,7 @@ async fn server_with_secrets(busy: &Busy, name: &str, secrets: &[(&str, &str)]) 
                 command: "/usr/bin/true".into(),
                 args: Vec::new(),
             },
+            Vec::new(),
         )
         .await
         .unwrap();
@@ -555,7 +621,10 @@ async fn a_checked_server_removed_while_storage_is_busy_leaves_no_check_folder()
         gone(&checked).await,
         "what a check wrote while it held the server's secrets must not stay on disk"
     );
-    assert_eq!(holders(&busy.engine_root(), cached.as_bytes()), 0);
+    assert!(
+        none_hold(&busy.engine_root(), cached.as_bytes()).await,
+        "what the check wrote must be deleted after its folder moved aside"
+    );
     assert!(
         gone(&profile).await,
         "the removed server's check profile must not stay behind"

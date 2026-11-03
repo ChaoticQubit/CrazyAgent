@@ -1,8 +1,8 @@
 use super::new_project_input::char_cells;
 use super::new_project_view::{Look, Row, columns, list_row, spread, wrap_words};
 use super::project_team::{Help, Notice, TABS, window};
-use super::settings_plugins::{plugin_plain, short_runs};
-use crate::plugins::{Scope, ServerStatus, ServerView, SkillView};
+use super::settings_plugins::{hook_runs, plugin_plain, short_runs};
+use crate::plugins::{HookView, Scope, ServerStatus, ServerView, SkillView};
 use crate::protocol::ProjectId;
 use crate::tui::client::settings::{PluginChange, SettingsEvent, SettingsJob};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -18,8 +18,8 @@ const PANEL_TEXT_LINES: usize = 2;
 /// What the project plugins view asks its host to do after a key.
 /// Ignored lets the host's own keys run; Send is one Settings job for the host
 /// to queue, whose reply comes back through `apply`; AddSkill, AddServer,
-/// Edit and OpenSkill ask the host to open the add form, the server's edit
-/// page or the skill's page for this project.
+/// AddHooks, Edit, OpenSkill and Tools ask the host to open the add form, the
+/// server's edit page, the skill's page or the tool switches for this project.
 #[derive(Debug)]
 pub(in crate::tui) enum PluginsReply {
     Ignored,
@@ -27,18 +27,27 @@ pub(in crate::tui) enum PluginsReply {
     Send(SettingsJob),
     AddSkill,
     AddServer,
+    AddHooks,
     Edit(Box<ServerView>),
-    OpenSkill { id: String, name: String },
+    OpenSkill {
+        id: String,
+        name: String,
+    },
+    Tools {
+        servers: Vec<(String, String)>,
+        at: usize,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Item {
     Skill(usize),
     Server(usize),
+    Hook(usize),
 }
 
-/// The skills and MCP servers one project's agents get: every-project items
-/// with whether they are on here, and this project's own items.
+/// The skills, MCP servers and hooks one project's agents get: every-project
+/// items with whether they are on here, and this project's own items.
 /// Takes engine reads through `apply` and keys through `key`; never invents data.
 /// Drawing the approval question keeps its first command line in range and
 /// notes the server whose command showed through its last line; `y` approves
@@ -47,6 +56,7 @@ pub(in crate::tui) struct ProjectPlugins {
     pub project: ProjectId,
     pub skills: Vec<SkillView>,
     pub servers: Vec<ServerView>,
+    pub hooks: Vec<HookView>,
     pub loaded: bool,
     pub cursor: usize,
     pub confirm: Option<String>,
@@ -54,6 +64,7 @@ pub(in crate::tui) struct ProjectPlugins {
     pub notice: Option<Notice>,
     waiting: bool,
     stale: bool,
+    hooks_stale: bool,
     changing: Option<String>,
     command_top: Cell<usize>,
     read_through: RefCell<Option<(String, String)>>,
@@ -68,6 +79,7 @@ impl ProjectPlugins {
             project,
             skills: Vec::new(),
             servers: Vec::new(),
+            hooks: Vec::new(),
             loaded: false,
             cursor: 0,
             confirm: None,
@@ -75,24 +87,37 @@ impl ProjectPlugins {
             notice: None,
             waiting: false,
             stale: true,
+            hooks_stale: false,
             changing: None,
             command_top: Cell::new(0),
             read_through: RefCell::new(None),
         }
     }
 
-    /// Gives the next read: one at the start and one after every change, never
-    /// two at once.
-    /// Takes the view. Returns `SettingsJob::ProjectPlugins`, or none.
+    /// Gives the next read: skills and servers at the start and after every
+    /// change, then that project's hooks, never two at once.
+    /// Takes the view. Returns `SettingsJob::ProjectPlugins`, `SettingsJob::Hooks`
+    /// or none.
     pub fn next_job(&mut self) -> Option<SettingsJob> {
-        if self.waiting || !self.stale {
+        if self.waiting {
             return None;
         }
-        self.waiting = true;
-        self.stale = false;
-        Some(SettingsJob::ProjectPlugins {
-            project: self.project.clone(),
-        })
+        if self.stale {
+            self.waiting = true;
+            self.stale = false;
+            self.hooks_stale = true;
+            return Some(SettingsJob::ProjectPlugins {
+                project: self.project.clone(),
+            });
+        }
+        if self.hooks_stale {
+            self.waiting = true;
+            self.hooks_stale = false;
+            return Some(SettingsJob::Hooks {
+                project: Some(self.project.clone()),
+            });
+        }
+        None
     }
 
     /// Forgets the read and change in flight after the engine connection dropped.
@@ -141,6 +166,24 @@ impl ProjectPlugins {
                     }
                 }
             }
+            SettingsEvent::Hooks(Some(project), result) if project == &self.project => {
+                self.waiting = false;
+                match result {
+                    Ok(hooks) => {
+                        for hook in hooks {
+                            assert!(visible(&hook.scope, &self.project));
+                            assert_eq!(hook.on_here.is_some(), hook.scope == Scope::Global);
+                        }
+                        self.hooks = hooks.clone();
+                    }
+                    Err(code) => {
+                        self.notice = Some(Notice::problem(format!(
+                            "Could not read this project's hooks. {}",
+                            plugin_plain(code)
+                        )));
+                    }
+                }
+            }
             SettingsEvent::PluginChanged(result) => {
                 let Some(done) = self.changing.take() else {
                     return;
@@ -169,14 +212,17 @@ impl ProjectPlugins {
     }
 
     fn count(&self) -> usize {
-        self.skills.len() + self.servers.len()
+        self.skills.len() + self.servers.len() + self.hooks.len()
     }
 
     fn item(&self) -> Option<Item> {
+        let listed = self.skills.len() + self.servers.len();
         if self.cursor < self.skills.len() {
             Some(Item::Skill(self.cursor))
-        } else if self.cursor < self.count() {
+        } else if self.cursor < listed {
             Some(Item::Server(self.cursor - self.skills.len()))
+        } else if self.cursor < self.count() {
+            Some(Item::Hook(self.cursor - listed))
         } else {
             None
         }
@@ -198,6 +244,10 @@ impl ProjectPlugins {
             Item::Server(index) => {
                 let server = &self.servers[index];
                 (&server.id, &server.name, &server.scope)
+            }
+            Item::Hook(index) => {
+                let hook = &self.hooks[index];
+                (&hook.id, &hook.name, &hook.scope)
             }
         };
         Some((id.clone(), name.clone(), *scope == Scope::Global))
@@ -292,8 +342,20 @@ impl ProjectPlugins {
             KeyCode::Char(' ') => self.toggle(),
             KeyCode::Char('a') => PluginsReply::AddSkill,
             KeyCode::Char('m') => PluginsReply::AddServer,
+            KeyCode::Char('h') => PluginsReply::AddHooks,
             KeyCode::Char('d') => self.ask_remove(),
             KeyCode::Char('e') => self.edit(),
+            KeyCode::Char('l') => PluginsReply::Tools {
+                servers: self
+                    .servers
+                    .iter()
+                    .map(|server| (server.id.clone(), server.name.clone()))
+                    .collect(),
+                at: match self.item() {
+                    Some(Item::Server(index)) => index + 1,
+                    _ => 0,
+                },
+            },
             KeyCode::Enter => match self.item() {
                 Some(Item::Skill(index)) => PluginsReply::OpenSkill {
                     id: self.skills[index].id.clone(),
@@ -352,6 +414,15 @@ impl ProjectPlugins {
                     server.version,
                 )
             }
+            Item::Hook(index) => {
+                let hook = &self.hooks[index];
+                (
+                    hook.id.clone(),
+                    hook.name.clone(),
+                    hook.enabled,
+                    hook.on_here,
+                )
+            }
         };
         let (change, done) = match (on_here, item) {
             (Some(_), _) if !enabled => {
@@ -389,6 +460,13 @@ impl ProjectPlugins {
                 },
                 format!("{name} is {}.", if enabled { "off" } else { "on" }),
             ),
+            (None, Item::Hook(_)) => (
+                PluginChange::SetHook {
+                    id,
+                    enabled: !enabled,
+                },
+                format!("{name} is {}.", if enabled { "off" } else { "on" }),
+            ),
         };
         self.changing = Some(done);
         PluginsReply::Send(SettingsJob::Plugin(change))
@@ -398,7 +476,11 @@ impl ProjectPlugins {
         let Some((id, name, global)) = self.chosen() else {
             return PluginsReply::Handled;
         };
-        if global {
+        if matches!(self.item(), Some(Item::Hook(_))) {
+            self.notice = Some(Notice::plain(format!(
+                "{name} is a hook. Press Space to turn it off."
+            )));
+        } else if global {
             self.notice = Some(Notice::plain(format!(
                 "{name} is for every project. Switch it off here, or remove it in Settings."
             )));
@@ -473,7 +555,7 @@ impl ProjectPlugins {
         PluginsReply::Send(SettingsJob::Plugin(change))
     }
 
-    /// Draws the Skills and MCP servers sections of the project's Settings tab; a short window
+    /// Draws the Skills, MCP servers and Hooks sections of the project's Settings tab; a short window
     /// cuts the details panel first, so the notice and any question always show. An
     /// approval question takes the whole section and never more than `room` rows.
     /// Takes the content width, the rows available and the look.
@@ -490,10 +572,15 @@ impl ProjectPlugins {
             return (self.approval(server, content, room, look), self.help());
         }
         let footer = self.footer(look);
+        let floor = 6 + footer.len();
+        let spaced = room > 9 + footer.len();
+        let reserve = if spaced { 9 } else { 6 };
         let mut panel = self.panel(content, look);
-        panel.truncate(room.saturating_sub(6 + footer.len()));
-        let fixed = 6 + panel.len() + footer.len();
-        let free = room.saturating_sub(fixed).max(2);
+        panel.truncate(room.saturating_sub(reserve + footer.len()));
+        let fixed = reserve + panel.len() + footer.len();
+        let free = room.saturating_sub(fixed).max(3);
+        let hook_rows = self.hooks.len().max(1).min((free / 3).max(1));
+        let free = free.saturating_sub(hook_rows).max(2);
         let wanted_servers = self.servers.len().max(1).min(free / 2);
         let skill_rows = self
             .skills
@@ -546,7 +633,9 @@ impl ProjectPlugins {
                 look,
             ));
         }
-        lines.push(Row::default());
+        if spaced {
+            lines.push(Row::default());
+        }
 
         lines.push(self.heading("MCP servers", self.servers.len(), content, look));
         if self.servers.is_empty() {
@@ -583,9 +672,45 @@ impl ProjectPlugins {
                 look,
             ));
         }
-        lines.push(Row::default());
+        if spaced {
+            lines.push(Row::default());
+        }
+
+        lines.push(self.heading("Hooks", self.hooks.len(), content, look));
+        if self.hooks.is_empty() {
+            lines.push(Row::of(
+                "  No hooks yet. Press h to add a plugin folder's hooks for this project.",
+                look.muted,
+            ));
+        }
+        let picked = match selected {
+            Some(Item::Hook(index)) => index,
+            _ => 0,
+        };
+        let first = window(picked, self.hooks.len(), hook_rows);
+        for (index, hook) in self.hooks.iter().enumerate().skip(first).take(hook_rows) {
+            let mut cells = vec![
+                Row::of(hook.plugin.clone(), look.fg),
+                state(hook.enabled, hook.on_here, None, look),
+                Row::of(place(&hook.scope), look.fg),
+            ];
+            if wide {
+                cells.push(Row::of(hook_runs(hook), look.muted));
+            }
+            lines.push(list_row(
+                columns(&widths, cells),
+                content,
+                selected == Some(Item::Hook(index)),
+                true,
+                look,
+            ));
+        }
+        if spaced {
+            lines.push(Row::default());
+        }
         lines.extend(panel);
         lines.extend(footer);
+        assert!(lines.len() <= room.max(floor));
         (lines, self.help())
     }
 
@@ -644,6 +769,22 @@ impl ProjectPlugins {
                         look.fg,
                     )),
                     None => {}
+                }
+            }
+            Some(Item::Hook(index)) => {
+                let hook = &self.hooks[index];
+                rows.push(spread(
+                    content,
+                    Row::of(hook.name.clone(), look.heading),
+                    Row::of(hook.scope.label(), look.muted),
+                ));
+                rows.push(entry("Runs", hook_runs(hook), look.fg));
+                if let Some(follows) = &hook.follows {
+                    rows.push(entry(
+                        "Follows",
+                        format!("Runs while {follows} is on."),
+                        look.fg,
+                    ));
                 }
             }
         }
@@ -753,7 +894,9 @@ impl ProjectPlugins {
         {
             help.push(("Enter", "Approve"));
         }
-        if let Some((_, _, false)) = self.chosen() {
+        if let Some((_, _, false)) = self.chosen()
+            && !matches!(self.item(), Some(Item::Hook(_)))
+        {
             if matches!(self.item(), Some(Item::Server(_))) {
                 help.push(("e", "Edit"));
             }
@@ -762,6 +905,8 @@ impl ProjectPlugins {
         help.extend([
             ("a", "Add skill"),
             ("m", "Add MCP server"),
+            ("h", "Add hooks"),
+            ("l", "Tools"),
             TABS,
             ("Esc", "Home"),
         ]);

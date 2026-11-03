@@ -117,6 +117,7 @@ pub struct Ctx {
     pub editor: Option<String>,
     pub editing: Option<super::client::editor::Edit>,
     pub editor_running: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pub sessions_key: Option<(crate::protocol::ProjectId, char)>,
     requests: VecDeque<Request>,
     reconnect: bool,
     message: Option<Message>,
@@ -153,6 +154,7 @@ impl Ctx {
             editor: None,
             editing: None,
             editor_running: std::sync::Arc::default(),
+            sessions_key: None,
             requests: VecDeque::new(),
             reconnect: false,
             message: None,
@@ -394,6 +396,7 @@ mod tests {
             assert!(ctx.try_request(Request::EditPool {
                 change: crate::tui::seam::PoolChange::Remove {
                     id: crate::protocol::CredentialRef::new("pool-a").unwrap(),
+                    opened_projects: 0,
                 },
             }));
         }

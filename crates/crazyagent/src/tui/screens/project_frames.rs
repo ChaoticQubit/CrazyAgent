@@ -82,6 +82,10 @@ async fn read(screen: &mut ProjectScreen, controller: &mut OwnerController, now_
                 .project_read_paths(project)
                 .await
                 .map(SetupView::ReadPaths),
+            SetupQuery::HiddenPaths { project } => controller
+                .project_hidden_paths(project)
+                .await
+                .map(SetupView::HiddenPaths),
             SetupQuery::AgentPolicy { project } => controller
                 .project_agent_policy(project)
                 .await

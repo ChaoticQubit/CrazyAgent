@@ -1,14 +1,13 @@
-use super::{ASK_TOOL, CALLS_PER_TICK_MAX, Call, RECORD_TOOL, REPLY_WAIT};
+use super::{ASK_TOOL, CALLS_PER_TICK_MAX, Call, RECORD_TOOL};
 use crate::engine::EngineError;
 use crate::protocol::{ProjectId, SessionId};
 use crate::questions::{Asker, Settlement};
 use rusqlite::Connection;
-use serde_json::{Value, json};
-use std::io::{BufRead, Read, Write};
+use serde_json::Value;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 pub const ASK_DROP_FILE: &str = "crazyagent-questions.jsonl";
-pub const AGENT_SERVER_COMMAND: &str = "team-mcp-agent";
 pub const ASKS_PER_REPLY_MAX: usize = 8;
 pub const ASK_DROP_BYTES_MAX: u64 = ASKS_PER_REPLY_MAX as u64 * super::CALL_BYTES_MAX;
 const ASK_LOGGED: &str = "Recorded. When your reply ends, the engine logs this question in the project's questions and notifies the owner, unless 8 of your questions are still open. Their answer or dismissal comes back to you once on a later turn, so do not ask it again.";
@@ -16,8 +15,7 @@ const RECORD_TAKEN: &str = "Noted. When your reply ends, the engine records the 
 const ASK_ONLY: &str = "Not sent: this tool only takes a question or a recorded answer.";
 const ASKS_FULL: &str = "Not sent: the engine takes at most 8 question calls from one reply. Make the next one in a later reply.";
 const ASK_UNWRITABLE: &str = "Not sent: the engine's question record could not be written.";
-const AGENT_ASKS_ONLY: &str = "Not sent: this server only asks the owner questions.";
-const UNREAD: &str = "The engine could not read this call. Call the tool again.";
+const AGENT_ASKS_ONLY: &str = "Not recorded: the owner answers a sub-agent's questions in the Questions view, so only the master records an answer from chat.";
 
 pub const NOTES_BYTES_MAX: usize = 8192;
 pub const OPEN_LINE_BYTES_MAX: usize = 4096;
@@ -336,85 +334,38 @@ pub fn clear_asks(drop: &Path) {
     super::clear(&ask_file(drop));
 }
 
-/// Serves a sub-agent's ask tool as an MCP server over stdio until its client closes
-/// input: each question goes into the mailbox folder in the agent's private temporary
-/// folder and its result is the engine's answer, the question's id. Inputs: the client's
-/// input and output and the absolute mailbox folder the engine made. Output: an input or
-/// output failure, or a refusal when the mailbox is not a plain folder.
-pub fn serve_agent(input: impl BufRead, output: impl Write, mailbox: &Path) -> std::io::Result<()> {
-    let plain = std::fs::symlink_metadata(mailbox).is_ok_and(|metadata| metadata.is_dir());
-    if !mailbox.is_absolute() || !plain {
-        return Err(std::io::Error::other(
-            "the mailbox must be an absolute plain folder",
-        ));
-    }
-    super::rpc(input, output, |request| answer_agent(request, mailbox))
-}
-
-fn answer_agent(request: &Value, mailbox: &Path) -> Option<Value> {
-    let method = request.get("method")?.as_str();
-    let id = request.get("id")?.clone();
-    let params = request.get("params");
-    let result = match method {
-        Some("initialize") => super::initialized(params),
-        Some("ping") => json!({}),
-        Some("tools/list") => json!({"tools": [ask_listing()]}),
-        Some("tools/call") => {
-            let name = params
-                .and_then(|params| params.get("name"))
-                .and_then(Value::as_str);
-            if name != Some(ASK_TOOL) {
-                return Some(super::failure(id, -32602, "Unknown tool"));
-            }
-            let arguments = params.and_then(|params| params.get("arguments"));
-            match super::live_call(ASK_TOOL, arguments) {
-                Some(Ok(call @ Call::Ask { .. })) => {
-                    let (text, error) = super::ask(mailbox, &call, REPLY_WAIT);
-                    super::tool_result(&text, error)
-                }
-                Some(Ok(_)) => super::tool_result(AGENT_ASKS_ONLY, true),
-                Some(Err(refused)) => super::tool_result(refused, true),
-                None => return Some(super::failure(id, -32602, "Unknown tool")),
-            }
-        }
-        _ => return Some(super::failure(id, -32601, "Method not found")),
+/// Logs the question a sub-agent asked through the `ask` tool of its team server, with the
+/// sub-agent as the asker; a sub-agent's `record_answer` is refused. Inputs: the engine
+/// connection, the project, the sub-agent's team id and its checked call, `ask` or
+/// `record_answer`. Output: the sentence the sub-agent reads and whether it is an error.
+pub(in crate::team) fn agent_ask(
+    db: &Connection,
+    project: &ProjectId,
+    agent: i64,
+    call: Call,
+) -> (String, bool) {
+    assert!(matches!(call, Call::Ask { .. } | Call::RecordAnswer { .. }));
+    let Call::Ask {
+        question,
+        options,
+        recommended,
+        context,
+    } = call
+    else {
+        return (AGENT_ASKS_ONLY.to_owned(), true);
     };
-    Some(json!({"jsonrpc": "2.0", "id": id, "result": result}))
-}
-
-/// Answers the questions a sub-agent's ask server left in its mailbox, at most
-/// `CALLS_PER_TICK_MAX` per call, each checked again before it is logged. Only questions
-/// are taken: any other call is refused. Every call is answered, a refused log included.
-/// Inputs: the mailbox and the step that logs one question for this sub-agent and returns
-/// its id or the store's refusal. Output: how many calls were answered.
-pub fn serve_agent_calls(
-    mailbox: &Path,
-    mut log: impl FnMut(&crate::questions::Ask) -> Result<u64, EngineError>,
-) -> usize {
-    let taken = super::take_calls(mailbox, CALLS_PER_TICK_MAX);
-    for (id, call) in &taken {
-        let (text, error) = match call.clone().map(super::checked) {
-            None => (UNREAD.to_owned(), true),
-            Some(Err(refused)) => (refused.to_owned(), true),
-            Some(Ok(Call::Ask {
-                question,
-                options,
-                recommended,
-                context,
-            })) => {
-                let ask = crate::questions::Ask {
-                    question,
-                    options,
-                    recommended,
-                    context,
-                };
-                logged(log(&ask))
-            }
-            Some(Ok(_)) => (AGENT_ASKS_ONLY.to_owned(), true),
-        };
-        let _ = super::answer_call(mailbox, id, &text, error);
-    }
-    taken.len()
+    let ask = crate::questions::Ask {
+        question,
+        options,
+        recommended,
+        context,
+    };
+    logged(crate::questions::ask(
+        db,
+        project,
+        &Asker::Agent(agent),
+        &ask,
+    ))
 }
 
 /// The sentence a sub-agent reads once its question was logged, or why it was not.

@@ -60,7 +60,9 @@ pub struct GitHubDeviceCode {
     pub expires_s: u64,
 }
 
-/// One repository the signed-in owner can clone.
+/// One repository on the signed-in owner's list. `refused` holds the failure code when
+/// CrazyAgent can't clone it, such as a name starting with a dot; the name and branch are
+/// then shown escaped and bounded, and the rest of the page still lists.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GitHubRepo {
@@ -68,6 +70,7 @@ pub struct GitHubRepo {
     pub private: bool,
     pub default_branch: String,
     pub size_kb: u64,
+    pub refused: Option<String>,
 }
 
 /// One page of repositories, newest activity first, and the next page number if any.
