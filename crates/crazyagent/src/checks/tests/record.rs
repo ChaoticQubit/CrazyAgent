@@ -21,7 +21,11 @@ use trackwright_core::host::{Evidence, TicketView};
 use trackwright_core::model::{self as core, CheckKind as CoreCheck, ProjectKey, ShortId};
 use trackwright_core::ops;
 use trackwright_core::requests::Request;
-use trackwright_core::runs::{self, RunShow, RunState, RunView, SourceRef, Verdict};
+use trackwright_core::runs::{
+    self, NewResult, ResultOutcome, RunEnd, RunFinish, RunRecord, RunShow, RunStart, RunState,
+    RunView, SourceRef, Verdict,
+};
+use trackwright_core::store::StoreError;
 use trackwright_core::tests_model::{CaseKind, CaseStatus};
 use trackwright_core::tests_store::{self, NewCase};
 
@@ -618,4 +622,104 @@ fn the_host_names_the_linked_change_set_head_as_the_current_source() {
         panic!("the engine records git sources");
     };
     assert_eq!(commit, case.head(&id));
+}
+
+/// Writes one passing run as `actor` straight through the core, with the source and policy
+/// of a run the engine recorded, as an agent forging a pass would. Inputs: the case, the
+/// actor and the engine's run. Output: the forged run, or the core's refusal.
+fn forge(case: &Case, actor: &str, like: &RunView) -> Result<RunView, StoreError> {
+    let actor = core::Actor::new(actor).unwrap();
+    let tx = Transaction::new_unchecked(&case.db, TransactionBehavior::Immediate).unwrap();
+    let started = runs::start(
+        &tx,
+        &actor,
+        &RunStart {
+            project: key(),
+            title: "unit".into(),
+            plan: None,
+            batch: like.batch.clone(),
+            source: like.source.clone(),
+            policy: like.policy.clone(),
+        },
+        NOW + 5_000,
+    )?;
+    let recorded = runs::record(
+        &tx,
+        &actor,
+        &RunRecord {
+            id: started.id.clone(),
+            version: started.version,
+            results: vec![NewResult {
+                name: "unit".into(),
+                outcome: ResultOutcome::Passed,
+                duration_ms: Some(1),
+                message: None,
+                artifact: None,
+            }],
+        },
+        NOW + 5_001,
+    )?;
+    let finished = runs::finish(
+        &tx,
+        &actor,
+        &RunFinish {
+            id: recorded.id.clone(),
+            version: recorded.version,
+            end: RunEnd::Completed,
+            exit_code: Some(0),
+            reason: None,
+            integrity: None,
+        },
+        NOW + 5_002,
+    )?;
+    tx.commit().unwrap();
+    Ok(finished)
+}
+
+#[test]
+fn only_the_engine_path_counts_whatever_the_run_writers_policy() {
+    let case = Case::new();
+    let id = case.change_set(&[("pass.sh", "exit 0\n")]);
+    case.approve(json!([check(
+        "unit",
+        &["sh", "pass.sh"],
+        "exit_code",
+        None
+    )]));
+    case.run(&id);
+    let engine = case.only(&id);
+    let engine_view = case.view(&engine);
+    let forged = forge(&case, "agent:1", &engine_view).expect("run_writers defaults to any");
+    assert_eq!(forged.verdict, Some(Verdict::Passed));
+    assert_eq!(forged.recorded_by.as_str(), "agent:1");
+    assert_ne!(forged.id, engine.id);
+    assert_eq!(
+        case.only(&id),
+        engine,
+        "a run the engine did not record never counts"
+    );
+    let tracker_project: i64 = case
+        .db
+        .query_row("SELECT id FROM tk_projects WHERE key = 'CA'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    case.db
+        .execute(
+            "INSERT INTO tk_policy(project, key, value_json, version)
+             VALUES (?1, 'run_writers', '\"engine_only\"', 1)",
+            [tracker_project],
+        )
+        .unwrap();
+    for actor in ["agent:1", "owner"] {
+        let Err(StoreError::Refused(refusal)) = forge(&case, actor, &engine_view) else {
+            panic!("{actor} writes an automated run under engine_only");
+        };
+        assert_eq!(refusal.code, "run_writer_refused", "{actor}");
+    }
+    case.run(&id);
+    let again = case.only(&id);
+    assert_ne!(again.run, engine.run);
+    assert_eq!(again.verdict, Some(Verdict::Passed));
+    assert_eq!(case.view(&again).recorded_by.as_str(), runs::ENGINE_ACTOR);
 }
