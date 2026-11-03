@@ -1,7 +1,7 @@
 use crate::engine::EngineError;
 use crate::engine::owner::failure;
 use crate::protocol::ProjectId;
-use crate::questions::{Ask, EngineSource};
+use crate::questions::{Ask, EngineSource, Settlement};
 use crate::team::{bound_text, now_ms};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -211,7 +211,7 @@ pub fn propose(
         }
     };
     tx.commit().map_err(unavailable)?;
-    dismiss_all(db, &evicted);
+    dismiss_all(db, project, &evicted);
     let question = match asking {
         Asking::No => None,
         Asking::Ask(Some(earlier)) if question_waiting(db, project, earlier)? => Some(earlier),
@@ -265,7 +265,7 @@ pub fn approve(
     .map_err(unavailable)?;
     tx.commit().map_err(unavailable)?;
     assert!(approved_ms > last);
-    dismiss_all(db, known.question.as_slice());
+    dismiss_all(db, project, known.question.as_slice());
     Ok(AdmittedProfile {
         id: known.id,
         project: known.project,
@@ -299,7 +299,7 @@ pub fn revoke(
     .map_err(unavailable)?;
     tx.commit().map_err(unavailable)?;
     assert_eq!(changed, 1);
-    dismiss_all(db, known.question.as_slice());
+    dismiss_all(db, project, known.question.as_slice());
     Ok(())
 }
 
@@ -465,7 +465,7 @@ fn ask_owner(
         )
         .map_err(unavailable)?;
     if linked == 0 {
-        dismiss_all(db, &[question]);
+        dismiss_all(db, project, &[question]);
         return Ok(None);
     }
     assert_eq!(linked, 1);
@@ -485,14 +485,30 @@ fn question_waiting(
         .any(|waiting| waiting.id == question))
 }
 
-/// Dismisses owner questions whose profile was settled, after the change committed. A
-/// question already answered, dismissed or pruned stays as it is; any other failure is
-/// logged, never returned, since the change it follows is already stored. Inputs: the
-/// connection and the question ids. Output: none.
-fn dismiss_all(db: &Connection, questions: &[u64]) {
+/// Dismisses the owner questions of settled profiles after the change committed, naming the
+/// version each pending one holds. A question no longer pending stays as the owner left it; a
+/// stale or failed dismissal is logged by code, never returned, since the change it follows
+/// is already stored. Inputs: the connection, the project and the question ids. Output: none.
+fn dismiss_all(db: &Connection, project: &ProjectId, questions: &[u64]) {
+    if questions.is_empty() {
+        return;
+    }
+    let waiting = match crate::questions::pending(db, project) {
+        Ok(waiting) => waiting,
+        Err(problem) => {
+            eprintln!("checks_question_unsettled code={}", problem.0);
+            return;
+        }
+    };
     for &question in questions {
-        match crate::questions::dismiss(db, question, 0) {
-            Ok(_) => {}
+        let Some(pending) = waiting.iter().find(|asked| asked.id == question) else {
+            continue;
+        };
+        match crate::questions::dismiss(db, question, pending.version) {
+            Ok(Settlement::Settled) => {}
+            Ok(Settlement::Stale) => {
+                eprintln!("checks_question_unsettled question={question} code=stale")
+            }
             Err(problem) if problem.0 == "questions_not_found" => {}
             Err(problem) => eprintln!(
                 "checks_question_unsettled question={question} code={}",
