@@ -417,6 +417,8 @@ fn owner_keys(request: &TerminalRequest) -> Option<&[u8]> {
         TerminalRequest::Input { bytes } => Some(bytes.as_slice()),
         TerminalRequest::Prompt { .. } => Some(PROMPT_SENT),
         TerminalRequest::Attach { .. }
+        | TerminalRequest::AttachPane { .. }
+        | TerminalRequest::AttachSized { .. }
         | TerminalRequest::Resize { .. }
         | TerminalRequest::Detach => None,
     }

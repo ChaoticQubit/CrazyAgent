@@ -1131,12 +1131,14 @@ fn seeded_hooks_follow_their_entry_and_turn_off_per_hook_per_project_or_with_the
     let off = SetupAction::Set {
         id: "caveman".into(),
         on: false,
+        version: status_of(&mut connection, root).version,
     };
     assert_eq!(owner(&mut connection, root, off), Outcome::Applied);
     assert!(effective_events(&mut connection, root, "project-2").is_empty());
     let on = SetupAction::Set {
         id: "caveman".into(),
         on: true,
+        version: status_of(&mut connection, root).version,
     };
     assert_eq!(owner(&mut connection, root, on), Outcome::Applied);
     assert_eq!(
@@ -1156,6 +1158,7 @@ fn seeded_hooks_follow_their_entry_and_turn_off_per_hook_per_project_or_with_the
     assert_eq!(folders.len(), 1);
     let remove = SetupAction::Remove {
         id: "caveman".into(),
+        version: status_of(&mut connection, root).version,
     };
     assert_eq!(owner(&mut connection, root, remove), Outcome::Applied);
     assert!(hook_views(&mut connection, root, None).is_empty());
@@ -1193,6 +1196,7 @@ fn no_hooks_are_seeded_for_an_entry_not_installed_switched_off_or_without_hooks(
     let off = SetupAction::Set {
         id: "superpowers".into(),
         on: false,
+        version: status_of(&mut connection, root).version,
     };
     assert_eq!(owner(&mut connection, root, off), Outcome::Applied);
     seed(&mut connection, root, "superpowers", &plugin).unwrap();
@@ -1314,12 +1318,18 @@ fn hooks_seeded_for_an_adopted_owner_skill_follow_that_skill() {
         effective_events(&mut connection, root, "project-1").len(),
         2
     );
+    let version = skills(&mut connection, root)
+        .into_iter()
+        .find(|skill| skill.id == owned[0].id)
+        .unwrap()
+        .version;
     plugins::execute(
         &mut connection,
         root,
         plugins::Command::SetSkill {
             id: owned[0].id.clone(),
             enabled: false,
+            version,
         },
     )
     .unwrap();
