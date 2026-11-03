@@ -173,15 +173,19 @@ fn here_valid(key: Option<&Key>, here: Option<&Value>) -> bool {
 /// One window row from the engine's row and the catalog key it names, none for a key stored
 /// here that the catalog no longer lists, which the engine must show read-only, not applied
 /// and with its stored value. A key is locked exactly when its catalog key is, with the
-/// engine's value; an editable key's value must pass the catalog's own check, while a stored
-/// value the catalog refuses stays on the row as not valid; a text key's bound must fit the
-/// engine's. Output: the row, or `owner_read_failed`.
+/// engine's value; an editable key's value must pass the catalog's own check, or be none
+/// from a null catalog default the harness decides, while a stored value the catalog
+/// refuses stays on the row as not valid; a text key's bound must fit the engine's. Output:
+/// the row, or `owner_read_failed`.
 fn row(key: Option<&Key>, setting: Setting) -> Result<SettingRow, BridgeError> {
     let editable = matches!(setting.access, Access::Editable);
     let locked = matches!(setting.access, Access::Locked { .. });
     let consistent = match key {
         Some(key) => {
-            (!editable || check_value(key, &setting.effective).is_ok())
+            let unset = key.default.is_null()
+                && setting.effective.is_null()
+                && setting.source == Source::Default;
+            (!editable || unset || check_value(key, &setting.effective).is_ok())
                 && locked == key.locked.is_some()
                 && (!locked || setting.source == Source::Engine)
                 && bound_fits(key.max_bytes)

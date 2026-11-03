@@ -30,6 +30,10 @@ const HELP_ROWS: usize = 2;
 const NUMBER_CHARS_MAX: usize = 20;
 const PAGE_STEP: isize = 10;
 
+/// What a key left to the harness shows as its value: the harness decides until the owner
+/// sets one.
+const HARNESS_DEFAULT: &str = "Harness default";
+
 #[derive(Debug, PartialEq)]
 enum State {
     Loading,
@@ -101,10 +105,14 @@ pub(in crate::tui) fn shown(value: &Value) -> String {
     }
 }
 
-/// What one key accepts and its default, in a sentence. Input: the catalog key. Output:
-/// the sentence.
+/// What one key accepts and its default, in a sentence; a null default reads as the
+/// harness default. Input: the catalog key. Output: the sentence.
 pub(in crate::tui) fn kind_sentence(key: &harness_settings::Key) -> String {
-    let default = shown(&key.default);
+    let default = if key.default.is_null() {
+        HARNESS_DEFAULT.to_owned()
+    } else {
+        shown(&key.default)
+    };
     match &key.kind {
         Kind::Bool => format!("On or off. Default: {default}."),
         Kind::Enum => format!("One of {}. Default: {default}.", key.options.join(", ")),
@@ -668,6 +676,9 @@ impl HarnessPage {
                         key.options.get(*at).map_or("", String::as_str),
                         glyphs.right
                     ),
+                    _ if setting.source == Source::Default && setting.effective.is_null() => {
+                        HARNESS_DEFAULT.into()
+                    }
                     _ => shown(&setting.effective),
                 };
                 let values = vec![Line::raw(label), Line::raw(value), self.from(setting, ctx)];

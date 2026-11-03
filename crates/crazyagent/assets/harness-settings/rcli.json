@@ -1,0 +1,123 @@
+{
+  "harness": "rcli",
+  "qualified_versions": [
+    "3.0.4"
+  ],
+  "sources": [
+    "https://github.com/Backboard-io/Backboard-R-CLI/blob/51bee17e02344de5fffd89523ce2b73d5042f216/src/config/BackboardConfigTypes.ts",
+    "https://github.com/Backboard-io/Backboard-R-CLI/blob/51bee17e02344de5fffd89523ce2b73d5042f216/src/config/backboardConfig.ts",
+    "https://github.com/Backboard-io/Backboard-R-CLI/blob/51bee17e02344de5fffd89523ce2b73d5042f216/src/config/Config.ts",
+    "https://github.com/Backboard-io/Backboard-R-CLI/blob/51bee17e02344de5fffd89523ce2b73d5042f216/src/config/defaults.ts",
+    "https://github.com/Backboard-io/Backboard-R-CLI/blob/51bee17e02344de5fffd89523ce2b73d5042f216/src/config/profiles/coding.ts",
+    "https://github.com/Backboard-io/Backboard-R-CLI/blob/51bee17e02344de5fffd89523ce2b73d5042f216/src/config/thinking.types.ts",
+    "https://github.com/Backboard-io/Backboard-R-CLI/blob/51bee17e02344de5fffd89523ce2b73d5042f216/src/config/timer.ts"
+  ],
+  "keys": [
+    {
+      "key": "model.provider",
+      "label": "Model provider",
+      "help": "The provider of the model rcli starts with, as a provider id.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "rcli_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The model comes from the account and pool the engine picks.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "model.model",
+      "label": "Model",
+      "help": "The model rcli starts with, as its provider names it.",
+      "type": "string",
+      "default": "",
+      "max_bytes": 256,
+      "apply": "rcli_config",
+      "scope": "app_and_project",
+      "locked": {
+        "reason": "The model comes from the account and pool the engine picks.",
+        "engine_value": null
+      }
+    },
+    {
+      "key": "thinking.effort",
+      "label": "Thinking effort",
+      "help": "How hard the model reasons: low, medium, high or max. A model with a lower ceiling runs max at its highest level. When unset, rcli uses each model's own default.",
+      "type": "enum",
+      "options": [
+        "low",
+        "medium",
+        "high",
+        "max"
+      ],
+      "default": null,
+      "apply": "rcli_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "memory",
+      "label": "Memory",
+      "help": "How rcli uses its Backboard memory: off, on, auto or readonly, which reads memory without writing to it.",
+      "type": "enum",
+      "options": [
+        "off",
+        "on",
+        "auto",
+        "readonly"
+      ],
+      "default": "auto",
+      "apply": "rcli_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "memoryProfile",
+      "label": "Memory profile",
+      "help": "Which memory profile rcli keeps: default, or code, which the coding profile rcli starts with picks.",
+      "type": "enum",
+      "options": [
+        "default",
+        "code"
+      ],
+      "default": "code",
+      "apply": "rcli_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "notify",
+      "label": "Notify",
+      "help": "Play a notification when a turn completes.",
+      "type": "bool",
+      "default": false,
+      "apply": "rcli_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "verbose",
+      "label": "Verbose",
+      "help": "Show tool rows at full detail in the conversation.",
+      "type": "bool",
+      "default": true,
+      "apply": "rcli_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "timerSeconds",
+      "label": "Turn timer",
+      "help": "An advisory wall-clock budget for each turn, in seconds. When unset, turns have no timer.",
+      "type": "integer",
+      "default": null,
+      "min": 1,
+      "max": 9007199254740,
+      "apply": "rcli_config",
+      "scope": "app_and_project",
+      "locked": null
+    }
+  ]
+}
