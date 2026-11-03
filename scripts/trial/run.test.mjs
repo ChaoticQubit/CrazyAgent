@@ -457,3 +457,17 @@ test("the desktop run is told the Land on branch the runner seeded for its trial
   assert.deepEqual(JSON.parse(readFileSync(seen, "utf8")), { land: "trial3-land", cli: join(paths.app, "Contents", "MacOS", "crazyagent") });
   assert.match(git(paths.project, "branch", "--list", "trial3-land"), /trial3-land/);
 });
+
+test("the runner quits an app the desktop run relaunched outside its process group and records the step", async () => {
+  const paths = fixture("ca-trial-relaunch-");
+  const desktop = [process.execPath, "--input-type=module", "-e", "import { spawn } from \"node:child_process\"; import { writeFileSync } from \"node:fs\"; const child = spawn(\"/bin/sleep\", [\"600\"], { detached: true, stdio: \"ignore\" }); child.unref(); writeFileSync(process.env.TRIAL_EVIDENCE + \"/relaunched.json\", JSON.stringify({ pid: child.pid, binary: \"/bin/sleep\" }));"];
+  const result = await runner(args(paths, { commands: { desktop } }), paths.env);
+  assert.ok([0, 1].includes(result.code), result.out);
+  const { pid } = JSON.parse(readFileSync(join(paths.evidence, "relaunched.json"), "utf8"));
+  const alive = spawnSync("/bin/ps", ["-o", "comm=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
+  if (alive) process.kill(pid, "SIGKILL");
+  assert.equal(alive, "", "the relaunched stand-in app was stopped");
+  const quit = steps(paths.evidence).find((step) => step.title === "Quit the relaunched app");
+  assert.equal(quit?.ok, true, JSON.stringify(quit));
+  assert.match(quit.detail, new RegExp(`stopped the relaunched app ${pid}`));
+});
