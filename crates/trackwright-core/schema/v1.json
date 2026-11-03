@@ -232,7 +232,7 @@
             "type": "string"
           },
           "status": {
-            "description": "An open status to start in; the project's create policy decides when absent.",
+            "description": "An open status to start in, backlog when absent; under create = triage an agent's ticket starts in triage.",
             "enum": [
               "triage",
               "backlog",
