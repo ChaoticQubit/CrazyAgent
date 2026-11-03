@@ -144,6 +144,15 @@ class World:
         return record
 
 
+
+def recorded_ids():
+    """The check ids a default audit run records: audit.py's own checks and every committed
+    scripts/trial/audit4 module. Takes nothing. Returns the ids sorted, as the record file
+    names list them."""
+    own = {check["id"] for check in audit.CHECKS}
+    return sorted(own | {check["id"] for check in audit.load_audit4(audit.AUDIT4, own)})
+
+
 class AuditTests(unittest.TestCase):
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory(prefix="ca-audit-")
@@ -724,6 +733,105 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(record["result"], "UNKNOWN")
         self.assertIn("not exercised", record["detail"])
 
+    def finished(self, shown, drawn="Master", ok=True, show=0):
+        w = self.world
+        w.db.executescript("CREATE TABLE team_finished_view (project TEXT PRIMARY KEY, show INTEGER NOT NULL);")
+        w.row("team_finished_view", project=PROJECT, show=show)
+        w.agent("master", status="idle")
+        lead = w.agent("sub", mode="app_spawned", stopped_ms=w.now - 60_000)
+        worker = w.agent("sub", parent=lead, stopped_ms=w.now - 900_000)
+        for agent, handle in ((lead, "lead-ada"), (worker, "worker-bo")):
+            w.row("team_names", agent=agent, project=PROJECT, persona=handle.title(), handle=handle)
+        for prompt in ("Write a.md", "Write b.md"):
+            w.row("team_tasks", project=PROJECT, source="master", harness="claude-code", tools=1, prompt=prompt, status="done",
+                  agent=worker, result="Done.", created_ms=w.now)
+        (w.out / "screenshots").mkdir(parents=True, exist_ok=True)
+        (w.out / "screenshots" / "20-finished-hide.png").write_bytes(b"\x89PNG")
+        steps = [
+            {"n": 18, "surface": "desktop", "title": "Stop all", "at": iso(w.now - 300_000), "ok": True},
+            {"n": 20, "surface": "desktop", "title": audit.FINISHED_HIDE_STEP, "at": iso(w.now), "ok": ok,
+             "detail": f"Finished ({shown}); drawn: {drawn}", "evidence": ["screenshots/20-finished-hide.png"]},
+        ]
+        (w.out / "steps.jsonl").write_text("".join(json.dumps(step) + "\n" for step in steps))
+
+    def test_t3_26_finished_agents_pass_when_hide_lists_every_stopped_agent_in_finished_and_draws_none(self):
+        record = self.world.audit("T3-26")
+        self.assertEqual(record["result"], "UNKNOWN")
+        self.assertIn("not in this build", record["detail"])
+        self.finished(shown=2)
+        record = self.world.audit("T3-26")
+        self.assertEqual(record["result"], "PASS", record["detail"])
+        self.assertIn("finished in the store=2", record["detail"])
+        self.assertIn("left on their own before Stop all=1", record["detail"])
+        self.assertIn("agents given more than one task=1", record["detail"])
+        self.assertIn("screenshots/20-finished-hide.png", [item["path"] for item in record["evidence"] if item["kind"] == "screenshot"])
+        cases = (
+            (dict(shown=1), "Finished (1) shown, 2 finished in the store"),
+            (dict(shown=2, drawn="Master, worker-bo"), "drawn while finished: worker-bo"),
+            (dict(shown=2, ok=False), "the step failed"),
+            (dict(shown=2, show=1), "Finished agents is Show"),
+        )
+        for given, shown in cases:
+            self.tearDown()
+            self.setUp()
+            self.finished(**given)
+            record = self.world.audit("T3-26")
+            self.assertEqual(record["result"], "FAIL", (given, record["detail"]))
+            self.assertIn(shown, record["detail"])
+        self.tearDown()
+        self.setUp()
+        self.world.db.executescript("CREATE TABLE team_finished_view (project TEXT PRIMARY KEY, show INTEGER NOT NULL);")
+        record = self.world.audit("T3-26")
+        self.assertEqual(record["result"], "UNKNOWN")
+        self.assertIn("not exercised", record["detail"])
+
+    def two_on_accounts(self, first, second, second_role="sub"):
+        w = self.world
+        lead = w.agent("sub", mode="app_spawned", connection=first[0])
+        other = w.agent(second_role, parent=lead, connection=second[0])
+        for agent, (_, start, end) in ((lead, first), (other, second)):
+            w.row("team_tasks", project=PROJECT, source="master", harness="claude-code", tools=1, prompt="Write a.md", status="done",
+                  agent=agent, created_ms=w.now - 900_000, started_ms=w.now - 600_000 + start * 1000,
+                  finished_ms=None if end is None else w.now - 600_000 + end * 1000)
+        return lead, other
+
+    def test_t3_27_shared_account_passes_when_two_agents_run_on_one_account_at_once_and_fails_when_one_waited(self):
+        record = self.world.audit("T3-27")
+        self.assertEqual(record["result"], "UNKNOWN")
+        self.assertIn("not exercised", record["detail"])
+        work, home = "claude-max-work", "claude-max-home"
+        cases = (
+            ((work, 0, 300), (work, 100, 400), "sub", "PASS", "ran tasks 1 and 2 on account 1 together for 200 s"),
+            ((work, 0, None), (work, 100, 400), "sub", "PASS", "together for 300 s"),
+            ((work, 0, 300), (work, 300, 400), "sub", "UNKNOWN", "agents on one account at once=0"),
+            ((work, 0, 300), (home, 100, 400), "sub", "UNKNOWN", "on accounts=2"),
+            ((work, 0, 300), (work, 100, 400), "teammate", "UNKNOWN", "agents with an account=1"),
+        )
+        for first, second, role, result, shown in cases:
+            self.tearDown()
+            self.setUp()
+            self.two_on_accounts(first, second, role)
+            record = self.world.audit("T3-27")
+            self.assertEqual(record["result"], result, (first, second, role, record["detail"]))
+            self.assertIn(shown, record["detail"])
+            for path in self.world.out.rglob("*"):
+                if path.is_file():
+                    self.assertNotIn("claude-max", path.read_text(encoding="utf-8", errors="replace"), path)
+        for table, said in (("team_tasks", "error"), ("team_events", "text")):
+            self.tearDown()
+            self.setUp()
+            w = self.world
+            lead, _ = self.two_on_accounts((work, 0, 300), (work, 100, 400))
+            if table == "team_tasks":
+                waited = w.row("team_tasks", project=PROJECT, source="master", harness="claude-code", tools=1, prompt="Write b.md",
+                               status="queued", agent=lead, created_ms=w.now, error="native_profile_in_use")
+            else:
+                waited = w.row("team_events", project=PROJECT, agent=lead, kind="status", text="Waiting for a free account",
+                               state="new", created_ms=w.now)
+            record = w.audit("T3-27")
+            self.assertEqual(record["result"], "FAIL", (table, record["detail"]))
+            self.assertIn(f"an agent waited for its account: {table} {waited}", record["detail"])
+
     def test_every_check_writes_its_contract_record_with_evidence(self):
         w = self.world
         w.agent("sub", mode="app_spawned")
@@ -733,8 +841,8 @@ class AuditTests(unittest.TestCase):
         )
         self.assertIn(done.returncode, (0, 1), done.stderr)
         written = sorted(p.stem for p in (w.out / "checks").glob("*.json"))
-        self.assertEqual(written, [check["id"] for check in audit.CHECKS])
-        self.assertEqual(len(written), 25)
+        self.assertEqual(written, recorded_ids())
+        self.assertEqual(sum(name.startswith("T3-") for name in written), 27)
         for name in written:
             record = json.loads((w.out / "checks" / f"{name}.json").read_text())
             self.assertEqual(set(record), {"id", "title", "proves", "why", "how", "result", "detail", "evidence"})
@@ -751,7 +859,7 @@ class AuditTests(unittest.TestCase):
         argv = ["python3", "-I", str(HERE / "audit.py"), PROJECT, "--engine", str(w.root), "--evidence", str(w.out), "--project-mark", MARK]
         done = subprocess.run(argv, capture_output=True, text=True, env=w.env, timeout=120)
         self.assertIn(done.returncode, (0, 1), done.stdout + done.stderr)
-        self.assertEqual(sorted(p.stem for p in (w.out / "checks").glob("*.json")), [check["id"] for check in audit.CHECKS])
+        self.assertEqual(sorted(p.stem for p in (w.out / "checks").glob("*.json")), recorded_ids())
         self.assertIn("SUMMARY project=trial", done.stdout)
 
     def test_secrets_across_a_cut_are_masked_before_the_cut(self):
