@@ -2,34 +2,16 @@ use crate::model::{Actor, ProjectKey, Refusal, ShortId, named_enum};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// The refusal codes of the test model. VT-2 to VT-5 add their own beside these.
+/// The refusal codes of the test model, declared once in `model::codes` so every core refusal
+/// is checked against one list.
 pub mod codes {
-    pub const TEST_ID_INVALID: &str = "test_id_invalid";
-    pub const CASE_UNKNOWN: &str = "case_unknown";
-    pub const SET_UNKNOWN: &str = "set_unknown";
-    pub const PLAN_UNKNOWN: &str = "plan_unknown";
-    pub const RUN_UNKNOWN: &str = "run_unknown";
-    pub const CASES_FULL: &str = "cases_full";
-    pub const SETS_FULL: &str = "sets_full";
-    pub const PLANS_FULL: &str = "plans_full";
-    pub const STEPS_FULL: &str = "steps_full";
-    pub const SET_CASES_FULL: &str = "set_cases_full";
-    pub const PLAN_ITEMS_FULL: &str = "plan_items_full";
-    pub const CASE_LINKS_FULL: &str = "case_links_full";
-    pub const STABLE_NAME_TAKEN: &str = "stable_name_taken";
-    pub const CASE_LINK_EXISTS: &str = "case_link_exists";
-    pub const CASE_LINK_UNKNOWN: &str = "case_link_unknown";
-    pub const SET_CASE_EXISTS: &str = "set_case_exists";
-    pub const SET_CASE_UNKNOWN: &str = "set_case_unknown";
-    pub const PLAN_ITEM_EXISTS: &str = "plan_item_exists";
-    pub const PLAN_ITEM_UNKNOWN: &str = "plan_item_unknown";
-    pub const PLAN_CLOSED: &str = "plan_closed";
-    pub const CASE_PROTECTED: &str = "case_protected";
-    pub const CROSS_PROJECT: &str = "cross_project";
-    pub const OPTION_NEEDS_HOST: &str = "option_needs_host";
-    pub const RELEASE_UNKNOWN: &str = "release_unknown";
-    pub const CYCLE_UNKNOWN: &str = "cycle_unknown";
-    pub const ACTIVE_PLAN_EXISTS: &str = "active_plan_exists";
+    pub use crate::model::codes::{
+        ACTIVE_PLAN_EXISTS, CASE_LINK_EXISTS, CASE_LINK_UNKNOWN, CASE_LINKS_FULL, CASE_PROTECTED,
+        CASE_UNKNOWN, CASES_FULL, CROSS_PROJECT, CYCLE_UNKNOWN, OPTION_NEEDS_HOST, PLAN_CLOSED,
+        PLAN_ITEM_EXISTS, PLAN_ITEM_UNKNOWN, PLAN_ITEMS_FULL, PLAN_UNKNOWN, PLANS_FULL,
+        RELEASE_UNKNOWN, RUN_UNKNOWN, SET_CASE_EXISTS, SET_CASE_UNKNOWN, SET_CASES_FULL,
+        SET_UNKNOWN, SETS_FULL, STABLE_NAME_TAKEN, STEPS_FULL, TEST_ID_INVALID,
+    };
 }
 
 pub const CASE_TITLE_BYTES_MAX: usize = 200;
