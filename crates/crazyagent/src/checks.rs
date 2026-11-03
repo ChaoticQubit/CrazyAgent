@@ -4,6 +4,9 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+#[cfg(unix)]
+pub mod integrity;
+pub mod markers;
 pub mod profile;
 pub mod settings;
 
