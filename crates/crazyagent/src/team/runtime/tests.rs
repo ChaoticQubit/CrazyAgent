@@ -11089,7 +11089,7 @@ fn nc_under_profile(runtime: &TeamRuntime, id: i64, plan: &Plan, port: u16) -> S
 /// listens on the port.
 fn proxy_status(port: u16, target: &str) -> String {
     use std::io::{BufRead, Write};
-    let mut client = match std::net::TcpStream::connect(("127.0.0.1", port)) {
+    let mut client = match crate::spawn_gate::connect_tcp_std(("127.0.0.1", port)) {
         Ok(client) => client,
         Err(error) => return format!("no proxy on {port}: {error}"),
     };
@@ -11218,7 +11218,7 @@ fn a_managed_tools_on_agent_under_no_network_reaches_the_network_only_through_it
         assert_eq!(proxy_status(port, target), status, "{target}");
     }
     drop(plan);
-    assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
+    assert!(crate::spawn_gate::connect_tcp_std(("127.0.0.1", port)).is_err());
 }
 
 /// A proxied agent's headless launch names its model proxy in its variables and exempts no
@@ -11381,7 +11381,7 @@ fn a_kept_pane_gets_its_model_proxy_back_on_its_saved_port_or_ends() {
         .unwrap()
     };
     let free = || {
-        std::net::TcpListener::bind(("127.0.0.1", 0))
+        crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0))
             .unwrap()
             .local_addr()
             .unwrap()
@@ -11411,7 +11411,7 @@ fn a_kept_pane_gets_its_model_proxy_back_on_its_saved_port_or_ends() {
     );
     assert_eq!(team.shutdown().unwrap(), names(&[kept]));
     let deadline = Instant::now() + WAIT;
-    while std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+    while crate::spawn_gate::connect_tcp_std(("127.0.0.1", port)).is_ok() {
         assert!(
             Instant::now() < deadline,
             "the model proxy outlived its worker"
@@ -11421,7 +11421,7 @@ fn a_kept_pane_gets_its_model_proxy_back_on_its_saved_port_or_ends() {
     host.kill(&AgentId::team(kept).unwrap()).unwrap();
 
     let taken = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
-    let holder = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let holder = crate::spawn_gate::bind_tcp_std(("127.0.0.1", 0)).unwrap();
     let held = holder.local_addr().unwrap().port();
     let record = PaneRecord {
         proxy: Some(held),

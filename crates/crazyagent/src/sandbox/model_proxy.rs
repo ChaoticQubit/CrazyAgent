@@ -1,5 +1,6 @@
+use crate::spawn_gate;
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
@@ -118,7 +119,7 @@ impl ModelProxy {
     /// bind error, such as a saved port another process took.
     pub fn bind(agent: i64, hosts: Vec<ModelHost>, port: Option<u16>) -> io::Result<Self> {
         assert!(!hosts.is_empty() && hosts.len() <= HOSTS_MAX);
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, port.unwrap_or(0)))?;
+        let listener = spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, port.unwrap_or(0)))?;
         let bound = listener.local_addr()?.port();
         assert!(bound != 0 && port.is_none_or(|port| port == bound));
         let stop = Arc::new(AtomicBool::new(false));
@@ -146,7 +147,7 @@ impl Drop for ModelProxy {
     /// short bound for the open tunnels to notice the stop. Takes the proxy.
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        let _ = TcpStream::connect_timeout(
+        let _ = spawn_gate::connect_tcp_std_timeout(
             &SocketAddr::from((Ipv4Addr::LOCALHOST, self.port)),
             Duration::from_secs(1),
         );
@@ -180,7 +181,7 @@ fn serve(
     stop: &Arc<AtomicBool>,
     open: &Arc<AtomicUsize>,
 ) {
-    for incoming in listener.incoming() {
+    for incoming in spawn_gate::incoming_tcp_std(listener) {
         if stop.load(Ordering::SeqCst) {
             return;
         }
@@ -432,20 +433,26 @@ pub fn server_name(record: &[u8]) -> Option<&str> {
 }
 
 /// Resolves one host on the engine's side and connects to the first address that answers
-/// before the deadline. Inputs: the host and the deadline. Output: the connection.
+/// before the deadline. Each socket is made inside the spawn gate, which is not held while
+/// connecting. Inputs: the host and the deadline. Output: the blocking connection.
 fn open_upstream(host: &ModelHost, deadline: Instant) -> io::Result<TcpStream> {
-    let mut last = io::Error::from(io::ErrorKind::NotFound);
-    for address in (host.name(), host.port()).to_socket_addrs()? {
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            return Err(io::ErrorKind::TimedOut.into());
-        }
-        match TcpStream::connect_timeout(&address, left) {
-            Ok(stream) => return Ok(stream),
-            Err(error) => last = error,
-        }
+    let left = deadline.saturating_duration_since(Instant::now());
+    if left.is_zero() {
+        return Err(io::ErrorKind::TimedOut.into());
     }
-    Err(last)
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()?;
+    let connected = runtime.block_on(async {
+        tokio::time::timeout(left, spawn_gate::connect_tcp((host.name(), host.port())))
+            .await
+            .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??
+            .into_std()
+    });
+    runtime.shutdown_background();
+    let stream = connected?;
+    stream.set_nonblocking(false)?;
+    Ok(stream)
 }
 
 /// Passes bytes both ways until either side closes, the proxy stops or nothing moved for

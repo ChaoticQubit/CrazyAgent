@@ -23,7 +23,7 @@ const CATALOG: &str = "version = 1\ntimeout_ms = 2000\nallowed_destinations = []
 /// The harness stand-in: inside the agent's sandbox it fetches a page through the proxy
 /// its variables name and again with every proxy skipped, writes both curl verdicts into
 /// its home and exits, so no model is asked anything.
-const STAND_IN: &str = "#!/bin/sh\nthrough=$(/usr/bin/curl -sS -o /dev/null --max-time 10 https://example.com 2>&1; printf ' exit=%s' \"$?\")\ndirect=$(/usr/bin/curl -sS -o /dev/null --max-time 10 --noproxy '*' https://example.com 2>&1; printf ' exit=%s' \"$?\")\nprintf 'proxy=%s\\nthrough=%s\\ndirect=%s\\n' \"$HTTPS_PROXY\" \"$through\" \"$direct\" > \"$HOME/network.part\"\nmv \"$HOME/network.part\" \"$HOME/network.txt\"\nexit 1\n";
+const STAND_IN: &str = "#!/bin/sh\nthrough=$(/usr/bin/curl -sS -o /dev/null --max-time 10 https://example.com 2>&1); through_exit=$?\ndirect=$(/usr/bin/curl -sS -o /dev/null --max-time 10 --noproxy '*' https://example.com 2>&1); direct_exit=$?\nprintf 'proxy=%s\\nthrough=%s\\nthrough_exit=%s\\ndirect=%s\\ndirect_exit=%s\\n' \"$HTTPS_PROXY\" \"$through\" \"$through_exit\" \"$direct\" \"$direct_exit\" > \"$HOME/network.part\"\nmv \"$HOME/network.part\" \"$HOME/network.txt\"\nexit 1\n";
 
 /// Runs git in `repo` with no global or system configuration.
 /// Takes the folder and the arguments. A failure fails the test.
@@ -199,14 +199,12 @@ async fn under_no_network_an_agent_reaches_no_other_host_through_or_around_its_m
         line("proxy").starts_with("http://127.0.0.1:"),
         "the harness was not pointed at its model proxy: {said}"
     );
-    let through = line("through");
     assert!(
-        through.contains("403") && through.ends_with(" exit=56"),
+        line("through").contains("403") && line("through_exit") == "56",
         "a fetch through the proxy reached a host that is not the model's: {said}"
     );
-    let direct = line("direct");
     assert!(
-        !direct.ends_with(" exit=0") && direct.contains("resolve host"),
+        line("direct").contains("resolve host") && line("direct_exit") != "0",
         "a fetch around the proxy left the sandbox: {said}"
     );
 

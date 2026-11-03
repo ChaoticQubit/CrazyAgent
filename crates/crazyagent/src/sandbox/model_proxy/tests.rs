@@ -38,7 +38,7 @@ fn host(name: &str, port: u16) -> ModelHost {
 /// Connects to the proxy and sends `request`. Inputs: the proxy and the bytes. Output: the
 /// connection, with a read bound so a test never hangs.
 fn ask(proxy: &ModelProxy, request: &[u8]) -> TcpStream {
-    let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy.port())).unwrap();
+    let mut client = spawn_gate::connect_tcp_std((Ipv4Addr::LOCALHOST, proxy.port())).unwrap();
     client
         .set_read_timeout(Some(Duration::from_secs(15)))
         .unwrap();
@@ -172,7 +172,7 @@ fn a_request_head_past_its_bound_is_refused_with_403() {
 
 #[test]
 fn an_allowed_host_gets_the_client_hello_and_both_ways_untouched() {
-    let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let upstream = spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = upstream.local_addr().unwrap().port();
     let proxy = ModelProxy::bind(7, vec![host("localhost", port)], None).unwrap();
     let mut sent = hello(Some("localhost"));
@@ -183,7 +183,7 @@ fn an_allowed_host_gets_the_client_hello_and_both_ways_untouched() {
         "HTTP/1.1 200 Connection Established\r\n\r\n"
     );
     client.write_all(&sent).unwrap();
-    let (mut server, _) = upstream.accept().unwrap();
+    let (mut server, _) = spawn_gate::accept_tcp_std(&upstream).unwrap();
     server
         .set_read_timeout(Some(Duration::from_secs(15)))
         .unwrap();
@@ -201,7 +201,7 @@ fn an_allowed_host_gets_the_client_hello_and_both_ways_untouched() {
 
 #[test]
 fn a_client_hello_naming_another_host_or_none_never_reaches_the_host() {
-    let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let upstream = spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = upstream.local_addr().unwrap().port();
     upstream.set_nonblocking(true).unwrap();
     let proxy = ModelProxy::bind(7, vec![host("localhost", port)], None).unwrap();
@@ -220,7 +220,7 @@ fn a_client_hello_naming_another_host_or_none_never_reaches_the_host() {
         assert_eq!(client.read_to_end(&mut rest).unwrap_or(0), 0);
         assert!(rest.is_empty());
     }
-    let reached = upstream.accept();
+    let reached = spawn_gate::accept_tcp_std(&upstream);
     assert!(
         reached
             .as_ref()
@@ -233,7 +233,7 @@ fn a_client_hello_naming_another_host_or_none_never_reaches_the_host() {
 /// Inputs: the proxy and how long to wait for a reply. Output: what the proxy said before
 /// the wait ran out, empty while it waits for a request.
 fn silent(proxy: &ModelProxy, wait: Duration) -> String {
-    let mut client = TcpStream::connect((Ipv4Addr::LOCALHOST, proxy.port())).unwrap();
+    let mut client = spawn_gate::connect_tcp_std((Ipv4Addr::LOCALHOST, proxy.port())).unwrap();
     client.set_read_timeout(Some(wait)).unwrap();
     let mut text = Vec::new();
     let _ = client.read_to_end(&mut text);
@@ -244,7 +244,7 @@ fn silent(proxy: &ModelProxy, wait: Duration) -> String {
 fn a_tunnel_past_the_bound_is_refused_with_503() {
     let proxy = ModelProxy::bind(7, vec![host("api.anthropic.com", 443)], None).unwrap();
     let held: Vec<TcpStream> = (0..TUNNELS_MAX)
-        .map(|_| TcpStream::connect((Ipv4Addr::LOCALHOST, proxy.port())).unwrap())
+        .map(|_| spawn_gate::connect_tcp_std((Ipv4Addr::LOCALHOST, proxy.port())).unwrap())
         .collect();
     let said = silent(&proxy, Duration::from_secs(5));
     assert!(
@@ -260,7 +260,7 @@ fn a_tunnel_past_the_bound_is_refused_with_503() {
 
 #[test]
 fn a_saved_port_another_process_holds_is_refused_and_a_free_one_is_kept() {
-    let taken = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let taken = spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = taken.local_addr().unwrap().port();
     let refused = ModelProxy::bind(7, vec![host("api.anthropic.com", 443)], Some(port));
     assert!(refused.is_err(), "{refused:?}");
@@ -271,18 +271,18 @@ fn a_saved_port_another_process_holds_is_refused_and_a_free_one_is_kept() {
 
 #[test]
 fn dropping_the_proxy_closes_its_port_and_its_open_tunnels() {
-    let upstream = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let upstream = spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = upstream.local_addr().unwrap().port();
     let proxy = ModelProxy::bind(7, vec![host("localhost", port)], None).unwrap();
     let listening = proxy.port();
     let mut client = ask(&proxy, &connect(&format!("localhost:{port}")));
     assert!(head(&mut client).starts_with("HTTP/1.1 200 "));
     client.write_all(&hello(Some("localhost"))).unwrap();
-    let (_server, _) = upstream.accept().unwrap();
+    let (_server, _) = spawn_gate::accept_tcp_std(&upstream).unwrap();
     let started = Instant::now();
     drop(proxy);
     let mut rest = Vec::new();
     assert_eq!(client.read_to_end(&mut rest).unwrap_or(0), 0);
     assert!(started.elapsed() < Duration::from_secs(5));
-    assert!(TcpStream::connect((Ipv4Addr::LOCALHOST, listening)).is_err());
+    assert!(spawn_gate::connect_tcp_std((Ipv4Addr::LOCALHOST, listening)).is_err());
 }
