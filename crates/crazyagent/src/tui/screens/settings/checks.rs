@@ -245,7 +245,14 @@ impl CheckSettingsPage {
         Flow::Handled
     }
 
+    /// Starts approving or revoking the selected profile: approval reads the whole profile
+    /// for its review, revocation opens its confirm. Nothing starts while a request waits,
+    /// so no confirm can sit under a review that a reply opens. Inputs: approve or revoke
+    /// and the context.
     fn ask_profile(&mut self, approve: bool, ctx: &mut Ctx) {
+        if self.pending.is_some() {
+            return;
+        }
         let Some(profile) = self.chosen_profile().cloned() else {
             return;
         };
@@ -269,7 +276,7 @@ impl CheckSettingsPage {
             self.confirm = Some(profile);
             return;
         }
-        let (Some(project), None) = (self.project(), self.pending) else {
+        let Some(project) = self.project() else {
             return;
         };
         self.ask(

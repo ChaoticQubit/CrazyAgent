@@ -595,3 +595,57 @@ fn enter_approves_only_after_every_line_of_the_profile_was_shown() {
     let job = one(&mut shell);
     assert_eq!(job_profile(&job), Some((true, &id)));
 }
+
+#[test]
+fn no_revoke_opens_while_a_profile_is_being_read_for_approval() {
+    let mut engine = Engine::new();
+    engine.propose(&["unit"]);
+    engine.propose(&["unit", "lint"]);
+    let listed = engine.profiles().unwrap();
+    let first: String = listed[0].id.as_str().chars().take(PROFILE_SHOWN).collect();
+    let second: String = listed[1].id.as_str().chars().take(PROFILE_SHOWN).collect();
+    let mut shell = page(&mut engine, project());
+    for _ in 0..choices().len() {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Char('p'));
+    let job = one(&mut shell);
+    assert!(
+        matches!(&job, ChecksJob::Show { profile, .. } if *profile == listed[0].id),
+        "p reads the first profile"
+    );
+
+    shell.key(Key::Down);
+    shell.key(Key::Char('v'));
+    assert!(
+        !says(&mut shell, "Revoke check profile"),
+        "no confirm opens while the read waits"
+    );
+    shell.key(Key::Char('p'));
+    assert!(jobs(&mut shell).is_empty(), "one request at a time");
+
+    reply(&mut shell, &mut engine, job);
+    assert!(says(&mut shell, &format!("Approve check profile {first}?")));
+    assert!(!says(&mut shell, "Revoke check profile"));
+    shell.key(Key::Esc);
+    assert!(jobs(&mut shell).is_empty(), "Keep it sends nothing");
+    assert!(
+        listed_states(&engine)
+            .iter()
+            .all(|state| *state == ProfileState::Proposed)
+    );
+
+    shell.key(Key::Char('v'));
+    assert!(says(&mut shell, &format!("Revoke check profile {second}?")));
+    shell.key(Key::Esc);
+    assert!(jobs(&mut shell).is_empty());
+}
+
+fn listed_states(engine: &Engine) -> Vec<ProfileState> {
+    engine
+        .profiles()
+        .unwrap()
+        .iter()
+        .map(|profile| profile.state)
+        .collect()
+}
