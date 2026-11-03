@@ -27,6 +27,8 @@ pub mod codes {
     pub const CASE_PROTECTED: &str = "case_protected";
     pub const CROSS_PROJECT: &str = "cross_project";
     pub const OPTION_NEEDS_HOST: &str = "option_needs_host";
+    pub const RELEASE_UNKNOWN: &str = "release_unknown";
+    pub const CYCLE_UNKNOWN: &str = "cycle_unknown";
 }
 
 pub const CASE_TITLE_BYTES_MAX: usize = 200;
@@ -311,8 +313,8 @@ pub enum PlanItemRef {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Case {
-    pub id: i64,
-    pub project: i64,
+    pub(crate) id: i64,
+    pub(crate) project: i64,
     pub short_id: TestId,
     pub title: String,
     pub kind: CaseKind,
@@ -330,16 +332,16 @@ pub struct Case {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaseCriterion {
-    pub case_id: i64,
-    pub criterion_id: i64,
+    pub(crate) case_id: i64,
+    pub(crate) criterion_id: i64,
 }
 
 /// A stored test set: a named, ordered group of cases.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TestSet {
-    pub id: i64,
-    pub project: i64,
+    pub(crate) id: i64,
+    pub(crate) project: i64,
     pub short_id: TestId,
     pub name: String,
     pub version: i64,
@@ -349,8 +351,8 @@ pub struct TestSet {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SetCase {
-    pub set_id: i64,
-    pub case_id: i64,
+    pub(crate) set_id: i64,
+    pub(crate) case_id: i64,
     pub position: u32,
 }
 
@@ -358,12 +360,12 @@ pub struct SetCase {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TestPlan {
-    pub id: i64,
-    pub project: i64,
+    pub(crate) id: i64,
+    pub(crate) project: i64,
     pub short_id: TestId,
     pub name: String,
-    pub version_id: Option<i64>,
-    pub cycle_id: Option<i64>,
+    pub(crate) version_id: Option<i64>,
+    pub(crate) cycle_id: Option<i64>,
     pub status: PlanStatus,
     pub version: i64,
 }
@@ -372,10 +374,10 @@ pub struct TestPlan {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlanItem {
-    pub plan_id: i64,
+    pub(crate) plan_id: i64,
     pub position: u32,
-    pub case_id: Option<i64>,
-    pub set_id: Option<i64>,
+    pub(crate) case_id: Option<i64>,
+    pub(crate) set_id: Option<i64>,
 }
 
 /// A case's steps as one actor may see them: none, the first line of each, or in full.
@@ -453,6 +455,15 @@ pub struct PlanView {
     pub cycle: Option<u32>,
     pub items: Vec<PlanItemView>,
     pub version: i64,
+}
+
+/// One row of `plan_list`: the plan, its status and how many items it holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlanRow {
+    pub id: TestId,
+    pub name: String,
+    pub status: PlanStatus,
+    pub items: u32,
 }
 
 /// Tells whether an actor sees protected cases unnarrowed. Input: the actor. Output: true
