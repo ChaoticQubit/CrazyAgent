@@ -29,6 +29,18 @@ fn unavailable(_: impl std::fmt::Display) -> EngineError {
     EngineError(super::TRACKER_UNAVAILABLE.into())
 }
 
+/// The tracker key of a project the hooks link for. `tracker::initialize` is unix-only,
+/// so elsewhere the engine database holds no tracker tables and every hook links nothing
+/// without querying them. Inputs: the transaction and the project. Output: the key, None
+/// off unix or for a project with no tickets, or `tracker_unavailable`.
+fn attached(tx: &Transaction<'_>, project: &ProjectId) -> Result<Option<ProjectKey>, EngineError> {
+    if cfg!(unix) {
+        key_of(tx, project)
+    } else {
+        Ok(None)
+    }
+}
+
 /// Reads the task a turn ran from the name the team runtime gives a task's turns,
 /// `task-<id>`, the id in decimal with no sign or leading zero. Input: the turn. Output:
 /// the task, None for any other turn.
@@ -135,7 +147,7 @@ pub(crate) fn task_taken(
 ) -> Result<(), EngineError> {
     assert!(task >= 1, "a task id is above 0");
     assert!(agent >= 1, "a team agent id is above 0");
-    let Some(key) = key_of(tx, project)? else {
+    let Some(key) = attached(tx, project)? else {
         return Ok(());
     };
     let place: Option<(String, String)> = tx
@@ -169,7 +181,7 @@ pub(crate) fn change_set_saved(
     let Some(task) = turn_task(turn) else {
         return Ok(());
     };
-    let Some(key) = key_of(tx, project)? else {
+    let Some(key) = attached(tx, project)? else {
         return Ok(());
     };
     let target = [("change_set", change_set.to_owned())];
@@ -188,7 +200,7 @@ pub(crate) fn change_set_closed(
     now_ms: i64,
 ) -> Result<(), EngineError> {
     assert!(!change_set.is_empty());
-    if key_of(tx, project)?.is_none() {
+    if attached(tx, project)?.is_none() {
         return Ok(());
     }
     let event = HostEvent {
@@ -220,7 +232,7 @@ fn agent_record(
     now_ms: i64,
 ) -> Result<(), EngineError> {
     assert!(!target.is_empty());
-    let Some(key) = key_of(tx, project)? else {
+    let Some(key) = attached(tx, project)? else {
         return Ok(());
     };
     let Some(task) = running_task(tx, project, agent)? else {
@@ -265,3 +277,31 @@ pub(crate) fn question_asked(
 #[cfg(all(test, unix))]
 #[path = "hooks_tests.rs"]
 mod tests;
+
+#[cfg(all(test, not(unix)))]
+mod off_unix {
+    use super::*;
+
+    /// An engine database without the unix-only tracker schema takes every hook as a
+    /// no-op, so a task take, a change set write, a memory and a question still store.
+    #[test]
+    fn every_hook_is_a_no_op_where_the_engine_holds_no_tracker_schema() {
+        let mut db = rusqlite::Connection::open_in_memory().unwrap();
+        let tx = db.transaction().unwrap();
+        let project = ProjectId::new("ticket-hooks").unwrap();
+        let ran = [
+            task_taken(&tx, &project, 1, 7, 1),
+            change_set_saved(&tx, &project, "cs-1", "task-1", 1),
+            change_set_closed(&tx, &project, "cs-1", 1),
+            memory_saved(&tx, &project, 7, "memory-1", 1),
+            question_asked(&tx, &project, 7, 1, 1),
+        ];
+        let errors: Vec<String> = ran
+            .into_iter()
+            .filter_map(|run| run.err())
+            .map(|e| e.0)
+            .collect();
+        assert_eq!(errors, Vec::<String>::new());
+        tx.commit().unwrap();
+    }
+}
