@@ -518,12 +518,14 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
     use crate::project_setup::HarnessSlot;
     let rule =
         "Ask the owner a question only with the `ask` tool of the `crazyagent-team` MCP server";
+    let joint = "Ask the owner a question with the `ask` tool of the `crazyagent-team` MCP server, or as a for me question in `update_work`; both reach the owner. Never ask in your reply text";
     assert_eq!(crate::team::tool::ASK_TOOL, "ask");
+    assert_eq!(crate::team::tool::UPDATE_WORK_TOOL, "update_work");
     let folder = tempfile::tempdir().unwrap();
     let mut setup = stored(folder.path());
     let conversation = master_tools_section(&setup, &["codex"]);
     assert_eq!(conversation.matches(rule).count(), 1, "{conversation}");
-    assert!(conversation.ends_with(&ask_rule(AskReach::ReplyEnd)));
+    assert!(conversation.ends_with(&ask_rule(AskReach::ReplyEnd, false)));
     assert!(conversation.contains("when your reply ends"));
     assert!(conversation.contains(&format!(
         "record it with `{}`",
@@ -551,7 +553,7 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
     let drop_file = fresh(start.into()).with_team_tool(engine, &record).unwrap();
     assert_eq!(
         drop_file.instructions(),
-        format!("{start}{}", ask_rule(AskReach::ReplyEnd))
+        format!("{start}{}", ask_rule(AskReach::ReplyEnd, false))
     );
 
     let live = fresh(start.into())
@@ -562,12 +564,16 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
         told,
         format!(
             "{start}{}{}",
-            ask_rule(AskReach::Live),
+            ask_rule(AskReach::Live, true),
             team_tools_section(&[])
         )
     );
-    assert_eq!(told.matches(rule).count(), 1, "{told}");
-    assert!(told.contains("never in your reply text"));
+    assert_eq!(told.matches(joint).count(), 1, "{told}");
+    assert!(
+        !told.contains(rule),
+        "the b18 tools section's for me path is never ruled out"
+    );
+    assert!(told.contains("A for me question reaches the owner only; no agent answers it."));
     assert!(told.contains("one question per call"));
     assert!(told.contains("Put up to 6 choices in `options`"));
     assert!(told.contains("the one you recommend in `recommended`"));
@@ -592,11 +598,13 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
         heard,
         format!(
             "{start}{}{}",
-            ask_rule(AskReach::SubAgent),
+            ask_rule(AskReach::SubAgent, true),
             team_tools_section(&unrecorded)
         )
     );
     assert!(heard.contains("types the owner's answer or dismissal into your terminal once"));
+    assert_eq!(heard.matches(joint).count(), 1, "{heard}");
+    assert!(!heard.contains(rule));
     assert!(!heard.contains(crate::team::tool::RECORD_TOOL));
     let server = &agent.plugins.servers[0];
     assert_eq!(server.name, crate::team::tool::SERVER_NAME);
@@ -630,13 +638,36 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
         .with_live_team_tool(engine, &mailbox, &[crate::team::tool::ASK_TOOL.to_owned()])
         .unwrap();
     assert!(
-        !asks_off.instructions().contains(rule),
+        !asks_off.instructions().contains(rule) && !asks_off.instructions().contains(joint),
         "a server with ask off is never told to ask with it"
     );
+    let unreported = [crate::team::tool::UPDATE_WORK_TOOL.to_owned()];
+    let reports_off = fresh(start.into())
+        .with_agent_team_tool(engine, &mailbox, &unreported)
+        .unwrap();
+    assert_eq!(
+        reports_off.instructions(),
+        format!(
+            "{start}{}{}",
+            ask_rule(AskReach::SubAgent, false),
+            team_tools_section(&unreported)
+        )
+    );
+    assert_eq!(reports_off.instructions().matches(rule).count(), 1);
+    assert!(
+        !reports_off.instructions().contains(joint),
+        "an agent with update_work off is never told to ask through it"
+    );
 
-    for reach in [AskReach::Live, AskReach::ReplyEnd, AskReach::SubAgent] {
-        assert!(ask_rule(reach).len() <= ASK_RULE_BYTES_MAX);
-        assert!(!ask_rule(reach).contains('\u{2014}'));
+    for (reach, for_me) in [
+        (AskReach::Live, true),
+        (AskReach::Live, false),
+        (AskReach::ReplyEnd, false),
+        (AskReach::SubAgent, true),
+        (AskReach::SubAgent, false),
+    ] {
+        assert!(ask_rule(reach, for_me).len() <= ASK_RULE_BYTES_MAX);
+        assert!(!ask_rule(reach, for_me).contains('\u{2014}'));
     }
     let full = fresh("x".repeat(INSTRUCTIONS_BYTES_MAX))
         .with_live_team_tool(engine, &mailbox, &[])
@@ -644,7 +675,7 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
     assert!(full.instructions().len() <= MASTER_INSTRUCTIONS_BYTES_MAX);
     assert!(full.instructions().ends_with(&format!(
         "{}{}",
-        ask_rule(AskReach::Live),
+        ask_rule(AskReach::Live, true),
         team_tools_section(&[])
     )));
 
@@ -659,7 +690,7 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
     assert!(crowded.len() <= TEAM_INDEX_BYTES_MAX + SECTION_SLACK);
     assert!(crowded.contains(" more\n"));
     assert!(
-        crowded.ends_with(&ask_rule(AskReach::ReplyEnd)),
+        crowded.ends_with(&ask_rule(AskReach::ReplyEnd, false)),
         "a crowded plan drops sub-agent lines, never the rule"
     );
 }
