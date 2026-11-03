@@ -5724,7 +5724,7 @@ fn renaming_the_master_harness_to_its_catalog_id_keeps_the_same_master() {
     switch_session(&fixture.connection, "s-one");
     super::super::master::set_live(&fixture.connection, &project, true).unwrap();
     fixture.until(&mut team, "the master on the alias runs", |f| {
-        live_agent(&f.connection).is_some()
+        live_agent(&f.connection).is_some_and(|master| launches(f, master).len() == 1)
     });
     let master = masters(&fixture.connection)[0];
     stop_live(&fixture, &mut team);
