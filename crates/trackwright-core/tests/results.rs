@@ -515,6 +515,20 @@ fn a_repeated_name_is_suffixed_on_every_occurrence() {
         vec!["works [1]", "works [3]", "works [2]", "works [4]"]
     );
 
+    let suffixed_twice = [
+        "a [1]".to_string(),
+        "a [1]".to_string(),
+        "a".to_string(),
+        "a".to_string(),
+    ];
+    let parsed = parse(
+        ResultFormat::Libtest,
+        libtest_block(&suffixed_twice).as_bytes(),
+    )
+    .expect("parses");
+    let got: Vec<&str> = parsed.rows.iter().map(|row| row.name.as_str()).collect();
+    assert_eq!(got, vec!["a [1] [1]", "a [1] [2]", "a [2]", "a [3]"]);
+
     let shadowed = format!(
         "{}running 1 test\ntest tests::it_works ... FAILED\n\nfailures:\n\nfailures:\n    tests::it_works\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n",
         libtest_block(&["tests::it_works".to_string()])
@@ -582,5 +596,18 @@ fn test_output_inside_a_failure_section_never_changes_the_report_structure() {
     assert_ne!(uncaptured, LIBTEST_FAILED);
     let parsed = parse(ResultFormat::Libtest, uncaptured.as_bytes()).expect("parses");
     assert!(!parsed.build_failed);
+    assert_eq!(outcomes(&parsed), outcomes(&original));
+
+    let last_ok = "test two_claimers_never_claim_the_same_job ... ok\n";
+    assert!(LIBTEST_FAILED.contains(last_ok));
+    let show_output = LIBTEST_FAILED.replace(
+        last_ok,
+        &format!(
+            "{last_ok}\nsuccesses:\n\n---- two_claimers_never_claim_the_same_job stdout ----\nclaimed once\n\n\nsuccesses:\n    two_claimers_never_claim_the_same_job\n"
+        ),
+    );
+    let parsed = parse(ResultFormat::Libtest, show_output.as_bytes())
+        .expect("--show-output sections end at the successes list");
+    assert_eq!(parsed.summary, original.summary);
     assert_eq!(outcomes(&parsed), outcomes(&original));
 }
