@@ -52,17 +52,22 @@ fn a_real_junit_file_records_one_result_per_case() {
             ("test.adds two numbers", ResultOutcome::Passed),
             ("test.reports a wrong sum", ResultOutcome::Failed),
             ("test.waits for a fixture", ResultOutcome::Skipped),
-            ("test.lists a future check", ResultOutcome::Skipped),
-            ("parser.reads nested cases", ResultOutcome::Passed),
         ]
     );
-    assert!(parsed.rows.iter().all(|row| row.duration_ms.is_some()));
+    assert_eq!(
+        parsed
+            .rows
+            .iter()
+            .map(|row| row.duration_ms)
+            .collect::<Vec<_>>(),
+        vec![Some(1), Some(1), Some(0)]
+    );
     let failed = row(&parsed, "test.reports a wrong sum");
     assert!(
-        failed
-            .message
-            .as_deref()
-            .is_some_and(|message| message.contains("2 !== 3")),
+        failed.message.as_deref().is_some_and(|message| message
+            .starts_with("[Error [ERR_TEST_FAILURE]: Expected values to be strictly equal:")
+            && message.contains("2 !== 3")
+            && message.contains("at TestContext.<anonymous> (file:///work/sample.test.mjs:9:10)")),
         "{failed:?}"
     );
     assert_eq!(
