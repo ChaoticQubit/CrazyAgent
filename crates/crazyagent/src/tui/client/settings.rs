@@ -116,6 +116,7 @@ pub(in crate::tui) enum SettingsJob {
         generation: u64,
     },
     Ranking,
+    HarnessSettings(Box<super::harness_settings::HarnessSettingsQuery>),
 }
 
 /// One change to skills and MCP servers, from Settings or from a project's
@@ -219,6 +220,7 @@ impl std::fmt::Debug for SettingsJob {
             Self::Schedule => "Schedule",
             Self::SetSchedule { .. } => "SetSchedule",
             Self::Ranking => "Ranking",
+            Self::HarnessSettings(_) => "HarnessSettings",
         })
     }
 }
@@ -340,6 +342,7 @@ pub(in crate::tui) enum SettingsEvent {
     Schedule(Result<crate::scheduling::Schedule, String>),
     ScheduleSet(u64, Result<(), String>),
     Ranking(Result<Vec<crate::scheduling::PoolRanking>, String>),
+    HarnessSettings(Box<super::harness_settings::HarnessSettingsEvent>),
 }
 
 impl SettingsEvent {
@@ -397,6 +400,9 @@ impl SettingsEvent {
                 Self::ScheduleSet(*generation, Err(problem))
             }
             SettingsJob::Ranking => Self::Ranking(Err(problem)),
+            SettingsJob::HarnessSettings(query) => Self::HarnessSettings(Box::new(
+                super::harness_settings::HarnessSettingsEvent::unavailable((**query).clone()),
+            )),
         }
     }
 }
@@ -725,6 +731,9 @@ impl NativeOwner {
             }
             SettingsJob::AgentWrites { set } => {
                 SettingsEvent::AgentWrites(self.agent_writes(set, lost).await)
+            }
+            SettingsJob::HarnessSettings(query) => {
+                SettingsEvent::HarnessSettings(Box::new(self.harness_settings(*query, lost).await))
             }
         }
     }

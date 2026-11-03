@@ -2082,7 +2082,10 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
             )
             .push("   u Change order", look.muted),
         ),
-        entry("Team", team_line(screen, look)),
+        entry(
+            "Team",
+            team_line(screen, look).push("   h Harness settings", look.muted),
+        ),
         entry("Folders", folders_line(screen, look)),
         entry("Hidden", hidden_line(screen, look)),
         entry(
