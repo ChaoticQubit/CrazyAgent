@@ -87,6 +87,9 @@ const SOCKET_GRANTS_MAX: usize = 4;
 /// The writes that move, remove, replace or re-permission a folder's own node while its
 /// contents stay writable: the scratch root's and a native lead's home for its teammates.
 const FIXED_WRITES: &str = "file-write-unlink file-write-create file-write-mode file-write-acl";
+/// The folders of a Claude Code config home whose scripts Claude Code 2.1.309 runs ahead of
+/// every Bash command: its shell snapshot and the session hook scripts (TPH-2).
+const CLAUDE_BASH_PRELUDES: [&str; 2] = ["shell-snapshots", "session-env"];
 /// The longest Unix socket path macOS binds, `sun_path` less its closing NUL.
 const SOCKET_PATH_BYTES_MAX: usize = 103;
 const TOOL_ROOTS_MAX: usize = 24;
@@ -1088,7 +1091,8 @@ impl ProjectSandbox {
     /// rv-secreview RH-1) and no teammate holds a listener or places a node where the lead
     /// connects. They read but never write the launch folders the engine installs in the
     /// lead's home, its hooks, skills and relay plugin, which the lead's Claude Code runs
-    /// (TPH), nor move, replace or re-permission that home itself (TPH r1 F1). Inputs: the
+    /// (TPH), nor move, replace or re-permission that home itself (TPH r1 F1), nor the
+    /// shell snapshot and session scripts its Bash commands run first (TPH-2). Inputs: the
     /// three sockets and the canonical tmux program. Output: the lead's and the teammates'
     /// sandboxes, `Invalid`, or `Unavailable` off macOS.
     pub fn native_team(
@@ -1107,6 +1111,11 @@ impl ProjectSandbox {
             self.agent_home.join(crate::launch_context::STATE),
             self.agent_home.join(crate::coord::relay::PLUGIN_FOLDER),
         ];
+        teammates.read_only.extend(
+            CLAUDE_BASH_PRELUDES
+                .iter()
+                .map(|folder| self.agent_home.join(folder)),
+        );
         teammates.fixed = vec![self.agent_home.clone()];
         let lead = self
             .allow_tmux_server(own, tmux)?
