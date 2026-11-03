@@ -9460,6 +9460,73 @@ fn a_named_call_whose_file_changed_after_naming_is_refused() {
     host.kill(&AgentId::team(lead).unwrap()).unwrap();
 }
 
+/// A teammates' server that lists another process under the lead's pane id cannot make
+/// that process the lead (PLC): the engine names a call, and answers `who`, as the lead's
+/// only when the pane process it found the caller under is the lead's own pane process from
+/// the engine's record, so a call or a `who` from any other process is nobody's.
+#[test]
+fn a_caller_found_under_the_lead_s_pane_id_from_another_process_is_not_the_lead() {
+    use std::io::{Read, Write};
+    let f = Fixture::new(1);
+    let host = f.host();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let native = native_lead(&f, &host);
+    let lead = native.lead;
+    let folder = tempfile::Builder::new()
+        .prefix("ca-callers-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(folder.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = folder.path().join(crate::team::caller::CALLER_SOCKET);
+    let mut callers = crate::team::caller::Callers::bind(&socket, None).unwrap();
+    let call = serde_json::to_vec(&crate::team::tool::Call::InspectWork).unwrap();
+    let digest = crate::team::tool::call_digest(&call);
+    let id = format!("{:032x}", 1);
+    let mut line = format!("{id} ");
+    for byte in digest {
+        line.push_str(&format!("{byte:02x}"));
+    }
+    line.push('\n');
+    let other = std::process::id();
+    assert_ne!(other, native.record.pid);
+    let mut named = crate::spawn_gate::connect_unix_std(&socket).unwrap();
+    named.write_all(line.as_bytes()).unwrap();
+    let mut asked = crate::spawn_gate::connect_unix_std(&socket).unwrap();
+    asked.write_all(b"who\n").unwrap();
+    let host_ref = host.as_ref();
+    assert_eq!(
+        callers.serve(&mut || vec![(native.own.clone(), other)], &mut |pane| {
+            pane_whom(&f.connection, Some(host_ref), &project, lead, pane)
+        }),
+        1
+    );
+    let mut reply = Vec::new();
+    named.read_to_end(&mut reply).unwrap();
+    assert_eq!(reply, b"ok\n");
+    let pane = callers.take(&id, &digest);
+    assert_eq!(pane.as_deref(), Some(native.own.as_str()));
+
+    let mut told = Vec::new();
+    asked.read_to_end(&mut told).unwrap();
+    let named_as = team_caller(
+        &f.connection,
+        Some(host_ref),
+        &project,
+        (lead, "Lead"),
+        pane.as_deref(),
+    );
+    assert_eq!(
+        named_as, None,
+        "a call from a process that is not the lead's pane process was named as the lead's"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&told),
+        "no\n",
+        "a `who` from a process that is not the lead's pane process was told it is the lead"
+    );
+    host.kill(&AgentId::team(lead).unwrap()).unwrap();
+}
+
 /// A native lead's short temp folder may have been swapped for a link to a folder the
 /// agent chose before an engine restart. The restarted engine binds no caller socket
 /// through it and removes nothing there, and the lead's calls stay refused (DEC-111
