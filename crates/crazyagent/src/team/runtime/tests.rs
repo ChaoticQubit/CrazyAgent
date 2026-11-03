@@ -11092,6 +11092,83 @@ fn a_live_master_launch_gets_the_ticket_rules_once_its_project_has_tickets() {
     );
 }
 
+/// A task handed off with a ticket is linked, in the transaction the runtime starts it in,
+/// to the sub-agent that takes it and to that agent's worktree and checked-out branch.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_ticket_task_the_runtime_starts_links_its_agent_worktree_and_branch() {
+    let fixture = Fixture::new(1);
+    attach_tickets(&fixture);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, WORKING_CODEX, TeamLimits::default());
+    owner(
+        &fixture,
+        &[hand_off(&fixture, "Write page.md for a long time")],
+    );
+    let task: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT id FROM team_tasks WHERE prompt='Write page.md for a long time'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let tx = rusqlite::Transaction::new_unchecked(
+        &fixture.connection,
+        rusqlite::TransactionBehavior::Immediate,
+    )
+    .unwrap();
+    let create = br#"{"project": "TP", "title": "Write the page"}"#;
+    let request = trackwright_core::requests::Request::parse("create", create).unwrap();
+    let by = trackwright_core::model::Actor::new("owner").unwrap();
+    assert!(trackwright_core::ops::dispatch(&tx, &crate::tracker::Host, &by, request).is_ok());
+    let project = &fixture.setup.project_id;
+    crate::team::tool::tracker::link_task(&tx, project, "TP-1", task, 1)
+        .unwrap()
+        .unwrap();
+    tx.commit().unwrap();
+    fixture.until(&mut team, "the sub-agent works on the ticket's task", |f| {
+        task_of(f, "Write page.md for a long time").0 == "running"
+    });
+    let agent: i64 = fixture
+        .connection
+        .query_row("SELECT agent FROM team_tasks WHERE id=?1", [task], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let mut wanted = vec![("agent".to_owned(), agent.to_string())];
+    let place: Option<(String, String)> = fixture
+        .connection
+        .query_row(
+            "SELECT worktree, git_dir FROM team_worktrees WHERE agent=?1",
+            [agent],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .unwrap();
+    if let Some((worktree, git_dir)) = place {
+        wanted.push(("worktree".to_owned(), worktree));
+        let head = std::fs::read_to_string(Path::new(&git_dir).join("HEAD")).unwrap();
+        if let Some(branch) = head.trim_end().strip_prefix("ref: refs/heads/") {
+            wanted.push(("branch".to_owned(), branch.to_owned()));
+        }
+    }
+    let mut linked: Vec<(String, String)> = fixture
+        .connection
+        .prepare("SELECT kind, target FROM tk_links WHERE created_by=?1")
+        .unwrap()
+        .query_map([crate::tracker::hooks::HOOK_ACTOR], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    linked.sort();
+    wanted.sort();
+    assert_eq!(linked, wanted);
+    team.shutdown().unwrap();
+}
+
 /// A worker at the owner's Sub-agent depth gets a team server without spawn, stop and
 /// merge, a tool the owner switched off is left out for every agent and both sections
 /// say so; the same calls planted in the worker's mailbox anyway are refused.

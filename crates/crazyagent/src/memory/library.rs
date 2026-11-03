@@ -554,14 +554,16 @@ pub(crate) fn agent_writes(connection: &rusqlite::Connection) -> Result<AgentWri
 }
 
 /// Saves one memory an agent gave with its `remember` tool, with the agent named as its
-/// origin: held for the owner's approval under Ask me first, else saved at once. The text is
-/// untrusted and checked like a hand-written note. Inputs: the engine connection, the
-/// agent's project, its label, whether the memory is app-wide and the text. Output: whether
-/// it waits for approval, or a refusal code `plain_problem` explains.
+/// origin: held for the owner's approval under Ask me first, else saved at once. A team
+/// agent's memory is linked, in the same transaction, to the tickets of the task it runs.
+/// The text is untrusted and checked like a hand-written note. Inputs: the engine
+/// connection, the agent's project, its team id (None for a caller that is no team agent)
+/// and label, whether the memory is app-wide and the text. Output: whether it waits for
+/// approval, or a refusal code `plain_problem` explains.
 pub(crate) fn agent_remember(
     connection: &mut rusqlite::Connection,
     project: &ProjectId,
-    agent: &str,
+    (team_agent, agent): (Option<i64>, &str),
     app: bool,
     text: &str,
 ) -> Result<Result<bool, String>, EngineError> {
@@ -605,6 +607,10 @@ pub(crate) fn agent_remember(
         }
     };
     insert(&tx, &id, &scope, &origin, text)?;
+    if let Some(team_agent) = team_agent {
+        let now_ms = crate::team::now_ms();
+        crate::tracker::hooks::memory_saved(&tx, project, team_agent, id.as_str(), now_ms)?;
+    }
     tx.commit().map_err(error)?;
     Ok(Ok(ask))
 }

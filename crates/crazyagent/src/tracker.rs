@@ -4,6 +4,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use trackwright_core::model::{Actor, ProjectKey, Refusal};
 use trackwright_core::store::{self, StoreError};
 
+pub mod hooks;
 pub mod host;
 pub mod settings;
 #[cfg(all(test, unix))]

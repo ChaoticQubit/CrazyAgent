@@ -977,7 +977,7 @@ fn answer(
                 .expect("a past-conversation call has an answer")
         }
         call @ (Call::Remember { .. } | Call::Recall { .. }) => {
-            return memory_answer(connection, project, MASTER_LABEL, call)
+            return memory_answer(connection, project, (master, MASTER_LABEL), call)
                 .expect("a memory call has an answer");
         }
         Call::Ask {
@@ -1479,12 +1479,12 @@ fn land_on_lead(
 
 /// Answers one saved-memory call of a project's agent: `remember` saves under the owner's
 /// Agent memory writes setting and `recall` searches what agents may read. Takes the
-/// engine database, the project, the agent's label and the call. Returns the text and
-/// whether it is an error, or a SQLite failure; none for any other call.
+/// engine database, the project, the agent's team id and label and the call. Returns the
+/// text and whether it is an error, or a SQLite failure; none for any other call.
 pub(super) fn memory_answer(
     connection: &mut Connection,
     project: &ProjectId,
-    agent: &str,
+    agent: (i64, &str),
     call: Call,
 ) -> Option<Result<(String, bool), EngineError>> {
     match call {
@@ -1497,13 +1497,15 @@ pub(super) fn memory_answer(
 fn remember(
     connection: &mut Connection,
     project: &ProjectId,
-    agent: &str,
+    (id, agent): (i64, &str),
     scope: tool::MemoryReach,
     text: &str,
 ) -> Result<(String, bool), EngineError> {
     let app = scope == tool::MemoryReach::App;
+    let saved =
+        crate::memory::library::agent_remember(connection, project, (Some(id), agent), app, text)?;
     Ok(
-        match crate::memory::library::agent_remember(connection, project, agent, app, text)? {
+        match saved {
             Ok(true) => (
                 "Saved for the owner's approval. Agents get it once the owner approves it in the Memory tab.".to_owned(),
                 false,

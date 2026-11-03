@@ -4256,12 +4256,18 @@ impl TeamRuntime {
                 let _ = crate::instruction_files::delivered(edit, &home);
             }
             crate::coord::delivery::delivered(&self.connection, &carried, now_ms())?;
-            self.connection
+            let taken = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(error)?;
+            taken
                 .execute(
                     "UPDATE team_tasks SET status='running', agent=?2, attempts=attempts+1, started_ms=?3, error=NULL WHERE id=?1",
                     params![task, agent, now_ms()],
                 )
                 .map_err(error)?;
+            crate::tracker::hooks::task_taken(&taken, project, task, agent, now_ms())?;
+            taken.commit().map_err(error)?;
             self.connection
                 .execute(
                     "UPDATE team_agents SET session=(SELECT session FROM team_tasks WHERE id=?1) WHERE id=?2 AND session IS NULL",

@@ -364,9 +364,10 @@ pub fn open(root: &Path) -> Result<Connection, EngineError> {
 /// Logs a question a master or sub-agent asked through its ask tool, or a box a screen
 /// watch saw on an agent's terminal, notifies the owner and rewrites the project's
 /// questions page. A sub-agent's question is also told to the project's master, when its
-/// conversation has room. Inputs: the engine connection, the project, the asker and the
-/// ask. Output: the question id, or `questions_ask_invalid`, `questions_text_invalid`,
-/// `questions_asker_full`, `questions_full` or `questions_project_missing`.
+/// conversation has room, and linked to the tickets of the task it runs. Inputs: the
+/// engine connection, the project, the asker and the ask. Output: the question id, or
+/// `questions_ask_invalid`, `questions_text_invalid`, `questions_asker_full`,
+/// `questions_full`, `questions_project_missing` or `tracker_unavailable`.
 pub fn ask(
     db: &Connection,
     project: &ProjectId,
@@ -379,6 +380,7 @@ pub fn ask(
     let tx = immediate(db)?;
     let id = insert(&tx, project, &asker.name(), source, ask, false)?;
     if let Asker::Agent(agent) = asker {
+        crate::tracker::hooks::question_asked(&tx, project, *agent, id, now_ms())?;
         let text = format!(
             "Agent {agent} asked the owner question {id}, in its own words {}. The owner's answer comes to you too, and CrazyAgent types it into agent {agent}'s terminal.",
             quoted(&ask.question)
