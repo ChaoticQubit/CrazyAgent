@@ -1,0 +1,10 @@
+[package]
+name = "trackwright-mcp"
+description = "MCP stdio server over the trackwright operation catalog"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+trackwright-core = { path = "../trackwright-core" }
