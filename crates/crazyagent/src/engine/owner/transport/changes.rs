@@ -516,10 +516,7 @@ fn run(root: &Path, action: Action) -> Result<(Reply, bool), EngineError> {
 /// still releases it, and the server's stop, a sender dropped or sent. Runs until the stop
 /// or until the authority is gone; a pass already running ends first, since its blocking
 /// work cannot be cancelled and holds its own connection to the engine database.
-pub(super) async fn upkeep(
-    authority: std::sync::Weak<Authority>,
-    mut stop: oneshot::Receiver<()>,
-) {
+pub(super) async fn upkeep(authority: std::sync::Weak<Authority>, mut stop: oneshot::Receiver<()>) {
     loop {
         let Some(root) = authority.upgrade().map(|authority| engine_root(&authority)) else {
             return;
@@ -773,7 +770,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(pruned, DISCARDED, "the pass the stop waited for ran to its end");
+        assert_eq!(
+            pruned, DISCARDED,
+            "the pass the stop waited for ran to its end"
+        );
     }
 
     /// The owner socket lists the local branches a change set can be accepted onto with the
