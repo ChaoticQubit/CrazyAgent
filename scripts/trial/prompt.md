@@ -9,4 +9,4 @@ Lead B: use spawn with mode app_spawned, with 2 sub-agents.
 - Sub-agent 2 adds sub(a, b) to calc.py. After its commit and before it calls finish_work, it starts `sleep 45; date +%s > bg-done.txt` in the background in its own worktree and does not wait for it.
 - Both sub-agents declare calc.py in start_work.
 
-Each worker commits on its own branch and calls finish_work. Each lead merges its workers' branches into its own branch, then finishes. Then merge both leads' branches locally. Do not push.
+Each worker commits on its own branch and calls finish_work. Each lead merges its workers' branches into its own branch. Then each lead starts `sleep 40; date +%s > lead-bg-done.txt` in the background in its own worktree, replies "Waiting for the background check." and ends its turn without waiting for it; once that command has ended, the lead finishes. Then merge both leads' branches locally. Do not push.

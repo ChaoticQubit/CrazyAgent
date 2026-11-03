@@ -245,6 +245,7 @@ test("renderPrompt fills every project placeholder and refuses an unknown one", 
   assert.ok(rendered.includes("`ls /Users/owner/Projects/ca-trial-3/private`"));
   assert.ok(rendered.includes("`cat /Users/owner/Projects/ca-trial-3/private/note.txt`"));
   assert.ok(rendered.includes("sleep 45; date +%s > bg-done.txt"));
+  assert.ok(rendered.includes("Then each lead starts `sleep 40; date +%s > lead-bg-done.txt` in the background in its own worktree"));
   assert.throws(() => renderPrompt("{{PROJECT}} and {{OTHER}}", "/p"), /OTHER/);
 });
 
