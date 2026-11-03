@@ -56,6 +56,7 @@ pub(crate) mod questions;
 pub(crate) mod recovery;
 mod setup;
 pub(crate) mod terminal;
+pub(crate) mod tracker;
 pub(crate) mod usage;
 pub(crate) use native_auth_channel::NativeAuthDispatchHost;
 use native_auth_channel::{NativeAuthHostRegistration, NativeAuthSlot};
