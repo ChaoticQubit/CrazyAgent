@@ -1299,7 +1299,7 @@ impl ProjectSandbox {
     pub fn profile(&self) -> String {
         let mut text = String::from("(version 1)\n(deny default)\n");
         text.push_str("(allow process-exec)\n(allow process-fork)\n");
-        text.push_str(&app_exec_denies(&self.owner_home));
+        text.push_str(&app_exec_denies(&self.owner_home, self.writable_roots()));
         text.push_str("(allow signal (target same-sandbox))\n");
         text.push_str("(allow process-info* (target same-sandbox))\n");
         text.push_str("(allow sysctl-read)\n");
@@ -2033,31 +2033,43 @@ fn seatbelt_pattern(path: &Path) -> String {
 
 /// The Seatbelt rule that keeps an agent from starting a macOS app: no exec of a main
 /// executable in an app bundle's `Contents/MacOS` under `/Applications`,
-/// `/System/Applications` or the owner's `~/Applications`, the Data volume path of each
-/// included, each name in any letter case. A GUI app started inside the agent profile
-/// aborts at launch and macOS shows a crash report for every attempt (Chrome crash
-/// popups, decision C1). Command-line tools a bundle ships under `Contents/Resources` or
+/// `/System/Applications` or the owner's `~/Applications`, nor anywhere in the folders the
+/// agent can write, where a download such as Puppeteer's Chrome for Testing, Playwright's
+/// Chromium or a project's Electron lands, the Data volume path of each included, each
+/// name in any letter case. A GUI app started inside the agent profile aborts at launch
+/// and macOS shows a crash report for every attempt (Chrome crash popups, decision C1,
+/// OP-24). Command-line tools a bundle ships under `Contents/Resources` or
 /// `Contents/Developer` stay allowed. It must follow the exec allow, since the last
-/// matching rule wins. Input: the owner's home. Output: the rule text.
-fn app_exec_denies(owner_home: &Path) -> String {
+/// matching rule wins. Inputs: the owner's home and the agent's writable roots. Output:
+/// the rule text.
+fn app_exec_denies<'a>(owner_home: &Path, writable: impl Iterator<Item = &'a PathBuf>) -> String {
     let data = format!(
         "/{}/{}/{}",
         any_case("System"),
         any_case("Volumes"),
         any_case("Data")
     );
-    let bundle = format!(
-        "/{}/.+{}/{}/{}/",
-        any_case("Applications"),
+    let app = format!(
+        ".+{}/{}/{}/",
         any_case(".app"),
         any_case("Contents"),
         any_case("MacOS")
     );
-    format!(
-        "(deny process-exec\n  (regex #\"^(/{}|{data})?{bundle}\")\n  (regex #\"^({data})?{}{bundle}\"))\n",
+    let bundle = format!("/{}/{app}", any_case("Applications"));
+    let mut rule = format!(
+        "(deny process-exec\n  (regex #\"^(/{}|{data})?{bundle}\")\n  (regex #\"^({data})?{}{bundle}\")",
         any_case("System"),
         seatbelt_pattern(owner_home)
-    )
+    );
+    for root in writable {
+        let root = root.display().to_string();
+        rule.push_str(&format!(
+            "\n  (regex #\"^({data})?{}/{app}\")",
+            any_case(&root)
+        ));
+    }
+    rule.push_str(")\n");
+    rule
 }
 
 /// The Seatbelt rules that keep an Own branch agent from repointing the object store its
