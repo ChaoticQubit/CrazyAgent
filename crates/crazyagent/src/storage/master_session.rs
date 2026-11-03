@@ -161,6 +161,7 @@ pub(crate) struct PreparedMasterTurn {
     pub(crate) lease: WorktreeLease,
     pub(crate) agent_project: crate::agent_home::AgentProject,
     pub(crate) agent_policy: crate::sandbox::policy::AgentPolicy,
+    pub(crate) hidden_paths: Vec<std::path::PathBuf>,
 }
 
 impl PreparedMasterTurn {
@@ -2787,6 +2788,8 @@ fn bundle(
         .map_err(|problem| EngineError(problem.0))?;
     let agent_policy =
         crate::sandbox::policy::load(tx, session.project_id.as_str()).map_err(error)?;
+    let hidden_paths =
+        crate::sandbox::hidden_paths::load(tx, session.project_id.as_str()).map_err(error)?;
     let prepared = PreparedMasterTurn {
         text: prompt(tx, &session, turn)?,
         message: running_message(tx, &session, turn)?,
@@ -2801,6 +2804,7 @@ fn bundle(
         lease: record.lease,
         agent_project,
         agent_policy,
+        hidden_paths,
     };
     assert_eq!(
         prepared.attempt.request.task_id,
