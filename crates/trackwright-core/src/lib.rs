@@ -8,6 +8,7 @@ pub mod ops;
 pub mod policy;
 pub mod reply;
 pub mod requests;
+pub mod results;
 pub mod runs;
 #[path = "schema_sql.rs"]
 pub mod schema;

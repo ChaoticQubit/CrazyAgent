@@ -1,0 +1,92 @@
+   Compiling crazyagent v0.1.0 (/work/crates/crazyagent)
+error[E0432]: unresolved imports `crazyagent::coordination`, `crazyagent::routing`
+ --> crates/crazyagent/tests/coordination_flow.rs:3:5
+  |
+3 |     coordination::*,
+  |     ^^^^^^^^^^^^ could not find `coordination` in `crazyagent`
+...
+6 |     routing::{ResourceBudget, RouteRequest},
+  |     ^^^^^^^ could not find `routing` in `crazyagent`
+
+error[E0599]: no variant named `CoordinationState` found for enum `crazyagent::protocol::Command`
+  --> crates/crazyagent/tests/coordination_flow.rs:72:66
+   |
+72 |         let Outcome::Coordination { state } = self.call(Command::CoordinationState {
+   |                                                                  ^^^^^^^^^^^^^^^^^ variant not found in `crazyagent::protocol::Command`
+
+error[E0599]: no variant named `Coordination` found for enum `crazyagent::protocol::Outcome`
+  --> crates/crazyagent/tests/coordination_flow.rs:72:22
+   |
+72 |         let Outcome::Coordination { state } = self.call(Command::CoordinationState {
+   |                      ^^^^^^^^^^^^ variant not found in `crazyagent::protocol::Outcome`
+
+error[E0599]: no variant named `OwnerCoordination` found for enum `crazyagent::protocol::Command`
+   --> crates/crazyagent/tests/coordination_flow.rs:103:53
+    |
+103 | fn owner(action: OwnerAction) -> Command { Command::OwnerCoordination { action } }
+    |                                                     ^^^^^^^^^^^^^^^^^ variant not found in `crazyagent::protocol::Command`
+
+error[E0599]: no variant named `ProposePlan` found for enum `crazyagent::protocol::Command`
+   --> crates/crazyagent/tests/coordination_flow.rs:114:24
+    |
+114 |     h.applied(Command::ProposePlan { plan: plan.clone() }).await;
+    |                        ^^^^^^^^^^^ variant not found in `crazyagent::protocol::Command`
+
+error[E0599]: no variant named `RouteWorkItem` found for enum `crazyagent::protocol::Command`
+   --> crates/crazyagent/tests/coordination_flow.rs:129:30
+    |
+129 |     rejected(h.call(Command::RouteWorkItem {
+    |                              ^^^^^^^^^^^^^ variant not found in `crazyagent::protocol::Command`
+
+error[E0599]: no variant named `Mailbox` found for enum `crazyagent::protocol::Command`
+   --> crates/crazyagent/tests/coordination_flow.rs:149:58
+    |
+149 |     let Outcome::Messages { messages } = h.call(Command::Mailbox {
+    |                                                          ^^^^^^^ variant not found in `crazyagent::protocol::Command`
+
+error[E0599]: no variant named `Messages` found for enum `crazyagent::protocol::Outcome`
+   --> crates/crazyagent/tests/coordination_flow.rs:149:18
+    |
+149 |     let Outcome::Messages { messages } = h.call(Command::Mailbox {
+    |                  ^^^^^^^^ variant not found in `crazyagent::protocol::Outcome`
+
+error[E0599]: no variant named `ProposePlan` found for enum `crazyagent::protocol::Command`
+   --> crates/crazyagent/tests/coordination_flow.rs:168:30
+    |
+168 |     rejected(h.call(Command::ProposePlan { plan: cyclic }).await, "dependency_cycle");
+    |                              ^^^^^^^^^^^ variant not found in `crazyagent::protocol::Command`
+
+error[E0599]: no variant named `ProposePlan` found for enum `crazyagent::protocol::Command`
+   --> crates/crazyagent/tests/coordination_flow.rs:171:30
+    |
+171 |     rejected(h.call(Command::ProposePlan { plan: forged }).await, "plan_context_mismatch");
+    |                              ^^^^^^^^^^^ variant not found in `crazyagent::protocol::Command`
+
+error[E0599]: no variant named `ProposePlan` found for enum `crazyagent::protocol::Command`
+   --> crates/crazyagent/tests/coordination_flow.rs:174:30
+    |
+174 |     rejected(h.call(Command::ProposePlan { plan: forged }).await, "route_scope_denied");
+    |                              ^^^^^^^^^^^ variant not found in `crazyagent::protocol::Command`
+
+error[E0599]: no variant named `ProposePlan` found for enum `crazyagent::protocol::Command`
+   --> crates/crazyagent/tests/coordination_flow.rs:175:40
+    |
+175 |     let mut stale = h.request(Command::ProposePlan { plan: valid.clone() });
+    |                                        ^^^^^^^^^^^ variant not found in `crazyagent::protocol::Command`
+
+error[E0599]: no variant named `ProposePlan` found for enum `crazyagent::protocol::Command`
+   --> crates/crazyagent/tests/coordination_flow.rs:179:24
+    |
+179 |     h.applied(Command::ProposePlan { plan: valid.clone() }).await;
+    |                        ^^^^^^^^^^^ variant not found in `crazyagent::protocol::Command`
+
+error[E0599]: no variant named `ProposePlan` found for enum `crazyagent::protocol::Command`
+   --> crates/crazyagent/tests/coordination_flow.rs:194:38
+    |
+194 |     let request = h.request(Command::ProposePlan { plan: plan.clone() });
+    |                                      ^^^^^^^^^^^ variant not found in `crazyagent::protocol::Command`
+
+Some errors have detailed explanations: E0432, E0599.
+For more information about an error, try `rustc --explain E0432`.
+error: could not compile `crazyagent` (test "coordination_flow") due to 14 previous errors
+warning: build failed, waiting for other jobs to finish...
