@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 const BRANCH_PREFIX: &str = "agent/";
-const LINKED_PREFIX: &str = "crazyagent/";
+pub(crate) const LINKED_PREFIX: &str = "crazyagent/";
 const FOLDER_BYTES_MAX: usize = 64;
 const TEAMMATE_SEPARATOR: &str = "--";
 const NAME_BYTES_MAX: usize = 48;

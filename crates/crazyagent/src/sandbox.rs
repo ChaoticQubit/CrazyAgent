@@ -631,6 +631,7 @@ pub struct ProjectSandbox {
     read_only: Vec<PathBuf>,
     fixed: Vec<PathBuf>,
     shared: Vec<PathBuf>,
+    teammates_of: Option<PathBuf>,
 }
 
 /// The one git worktree a confined agent writes in place of the whole project folder,
@@ -689,6 +690,7 @@ impl ProjectSandbox {
             read_only: Vec::new(),
             fixed: Vec::new(),
             shared: Vec::new(),
+            teammates_of: None,
         })
     }
 
@@ -1153,6 +1155,7 @@ impl ProjectSandbox {
         teammates.fixed = vec![home.clone()];
         teammates.fixed.extend(shared.iter().cloned());
         teammates.shared = shared;
+        teammates.teammates_of = teammates.clone.clone();
         if teammates.writes(&home) {
             return Err(invalid("a teammates' writable root holds the lead's home"));
         }
@@ -1447,6 +1450,9 @@ impl ProjectSandbox {
         for folder in &self.shared {
             text.push_str(&shared_denies(folder));
         }
+        if let Some(clone) = &self.teammates_of {
+            text.push_str(&teammates_clone_denies(clone));
+        }
         assert_eq!(
             text.matches("unix-socket").count(),
             2 * self.sockets.len() + self.served.len() + self.reached.len()
@@ -1468,8 +1474,12 @@ impl ProjectSandbox {
             }) && self
                 .shared
                 .iter()
-                .all(|folder| text.rfind(&shared_denies(folder)) > last_write_allow),
-            "a read-only, fixed or shared folder's write deny must follow every write allow, since the last match wins"
+                .all(|folder| text.rfind(&shared_denies(folder)) > last_write_allow)
+                && self
+                    .teammates_of
+                    .iter()
+                    .all(|clone| text.rfind(&teammates_clone_denies(clone)) > last_write_allow),
+            "a read-only, fixed, shared or teammates' clone write deny must follow every write allow, since the last match wins"
         );
         let denied_last = |operations: &str, socket: &PathBuf| {
             text.rfind(&format!(
@@ -2088,6 +2098,26 @@ fn clone_store_denies(clone: &Path) -> String {
     );
     assert_eq!(text.matches("(regex #\"^/").count(), 10);
     assert!(text.contains("(vnode-type SYMLINK)"));
+    text
+}
+
+/// The writes a clone lead's teammates may not make in the lead's clone (OP-9): anything but
+/// the teammates' folder, the clone's object store, the inside of each worktree record git
+/// keeps in `.git/worktrees`, and the refs and reflogs of `crazyagent/<task>--<name>`
+/// teammate branches; nor the links that tie a teammate worktree to the clone, which the
+/// engine writes with the lead's rights. It must follow every write allow, since the last
+/// match wins. Input: the clone. Output: the rule text.
+fn teammates_clone_denies(clone: &Path) -> String {
+    let path = clone.display();
+    let root = seatbelt_pattern(clone);
+    let folder = crate::agent_git::TEAMMATES_FOLDER;
+    let pattern = regex_escape(folder);
+    let branches = regex_escape(crate::agent_git::LINKED_PREFIX);
+    let text = format!(
+        "(deny file-write*\n  (require-all\n    (subpath \"{path}\")\n    (require-not (subpath \"{path}/{folder}\"))\n    (require-not (subpath \"{path}/.git/objects\"))\n    (require-not (regex #\"^{root}/\\.git/worktrees/[^/]+/.+$\"))\n    (require-not (regex #\"^{root}/\\.git/(logs/)?refs/heads/{branches}[a-z0-9-]+--[a-z0-9-]+(\\.lock)?$\"))))\n(deny file-write*\n  (regex #\"^{root}/{pattern}/[^/]+/\\.git$\")\n  (regex #\"^{root}/\\.git/worktrees/[^/]+/(commondir|gitdir)$\"))\n"
+    );
+    assert_eq!(text.matches("(regex #\"^/").count(), 4);
+    assert_eq!(text.matches("(subpath \"/").count(), 3);
     text
 }
 

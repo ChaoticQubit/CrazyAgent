@@ -463,6 +463,7 @@ pub struct TeamRuntime {
     events: Option<super::master::TeamEvents>,
     watch: super::events::Watch,
     teammates_next: Option<Instant>,
+    teammate_worktree_tries: BTreeMap<i64, BTreeMap<String, u8>>,
     receipts_next: BTreeMap<ProjectId, Instant>,
     live_starts: BTreeMap<ProjectId, Vec<Instant>>,
     resuming: Option<(i64, Resume)>,
@@ -673,6 +674,7 @@ impl TeamRuntime {
             events: None,
             watch: super::events::Watch::default(),
             teammates_next: None,
+            teammate_worktree_tries: BTreeMap::new(),
             receipts_next: BTreeMap::new(),
             live_starts: BTreeMap::new(),
             resuming: None,
@@ -1040,6 +1042,8 @@ impl TeamRuntime {
             .filter(|(_, worker)| worker.role == AgentRole::Sub && !worker.stopping)
             .map(|(id, worker)| (*id, worker.project.clone()))
             .collect();
+        self.teammate_worktree_tries
+            .retain(|lead, _| harnesses.iter().any(|(agent, _)| agent == lead));
         for (agent, project) in harnesses {
             let cap = super::teammate_cap(&self.connection, &project)?;
             if let Some(cap) = cap {
@@ -1088,6 +1092,7 @@ impl TeamRuntime {
                 i64::try_from(lead.since_ms).unwrap_or(i64::MAX),
                 at,
             )?;
+            self.make_teammate_worktrees(&project, agent)?;
             for (teammate, pane) in teammates::working(&self.connection, &project, agent)? {
                 if !live.contains(&pane.as_str()) {
                     continue;
@@ -5129,15 +5134,80 @@ impl TeamRuntime {
         name
     }
 
-    /// Makes each running native teammate's own worktree in its lead's clone (OP-9). Takes
-    /// the project and the lead. Returns Ok, or a SQLite failure.
+    /// Makes each running native teammate's own worktree in its lead's own clone (OP-9),
+    /// `.worktrees/<name>` on `<task branch>--<name>`, with git run under the lead's installed
+    /// profile, at most `TEAMMATE_WORKTREE_TRIES` times per name, then records each
+    /// teammate's worktree. Takes the project and the lead. Returns Ok, or a SQLite failure;
+    /// a worktree git could not make is left without one.
     fn make_teammate_worktrees(
         &mut self,
         project: &ProjectId,
         lead: i64,
     ) -> Result<(), EngineError> {
-        let _ = (project, lead);
-        Ok(())
+        let place: Option<(String, String, String)> = self
+            .connection
+            .query_row(
+                "SELECT repository,worktree,git_dir FROM team_worktrees WHERE agent=?1 AND project=?2",
+                params![lead, project.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(error)?;
+        let Some((repository, worktree, git_dir)) = place else {
+            return teammates::keep_worktrees(&self.connection, project, lead);
+        };
+        let (worktree, git_dir) = (PathBuf::from(worktree), PathBuf::from(git_dir));
+        if git_dir != crate::agent_git::git_dir(&worktree) {
+            return teammates::keep_worktrees(&self.connection, project, lead);
+        }
+        let made = crate::landing::teammate_worktrees(&self.connection, &worktree, &git_dir)
+            .unwrap_or_default();
+        let mut wanted = Vec::new();
+        for (teammate, _) in teammates::working(&self.connection, project, lead)? {
+            let Some(name) = teammates::name(&self.connection, teammate) else {
+                continue;
+            };
+            let tries = self.teammate_worktree_tries.entry(lead).or_default();
+            if made.contains(&name)
+                || (!tries.contains_key(&name) && tries.len() >= TEAMMATE_WORKTREE_NAMES_MAX)
+            {
+                continue;
+            }
+            let tried = tries.entry(name.clone()).or_insert(0);
+            if *tried < TEAMMATE_WORKTREE_TRIES {
+                *tried += 1;
+                wanted.push(name);
+            }
+        }
+        let sandbox = (!wanted.is_empty())
+            .then(|| Path::new(&repository).canonicalize().ok())
+            .flatten()
+            .and_then(|root| {
+                ProjectSandbox::new(
+                    &root,
+                    &agent_home(&self.state, lead),
+                    &self.agent_folder(lead).join("tmp"),
+                    SandboxNetwork::Only(Vec::new()),
+                )
+                .ok()
+            });
+        if let Some(sandbox) = &sandbox {
+            let profile = agent_profile(&self.state, lead);
+            let git = crate::landing::LeadGit {
+                sandbox,
+                profile: &profile,
+            };
+            for name in &wanted {
+                let _ = crate::landing::add_teammate_worktree(
+                    &self.connection,
+                    &worktree,
+                    &git_dir,
+                    name,
+                    &git,
+                );
+            }
+        }
+        teammates::keep_worktrees(&self.connection, project, lead)
     }
 
     /// What a harness reads about its git branch with each task (DEC-100): its task branch
@@ -5187,7 +5257,7 @@ impl TeamRuntime {
             );
         }
         format!(
-            "\nYour task branch is {branch}, checked out in your worktree: commit your work there. Each teammate of your agent team works in its own worktree and branch inside your worktree, made with git worktree add {folder}/<name> -b {branch}--<name>, and only there. Merge each finished teammate branch into {branch} before you report done; nothing under {folder} lands by itself.",
+            "\nYour task branch is {branch}, checked out in your worktree: commit your work there. Each teammate of your agent team works only in its own worktree {folder}/<name> inside your worktree, on its own branch {branch}--<name>, which CrazyAgent makes for it when it starts. Merge each finished teammate branch into {branch} before you report done; nothing under {folder} lands by itself.",
             folder = crate::agent_git::TEAMMATES_FOLDER
         )
     }
@@ -7834,6 +7904,12 @@ const OWNER_WOKE: &str = "The owner woke it again in its own worktree. It is idl
 const OWNER_STOPPED_AGENT: &str = "The owner stopped it and its teammates. Its task waits for it until the owner starts it again; do not hand that work to another agent.";
 /// The most teammate rows one harness keeps: its running teammates and the newest ended ones.
 const TEAMMATE_ROWS_KEPT: i64 = 32;
+/// The most times the engine runs git to make one native teammate's worktree (OP-9), so a
+/// worktree git refuses never costs a git run on every pass.
+const TEAMMATE_WORKTREE_TRIES: u8 = 3;
+/// The most teammate names of one lead whose worktree tries the engine counts.
+const TEAMMATE_WORKTREE_NAMES_MAX: usize = 64;
+const _: () = assert!(TEAMMATE_WORKTREE_NAMES_MAX >= TEAMMATE_ROWS_KEPT as usize);
 const _: () = assert!(TEAMMATE_ROWS_KEPT as usize >= super::TEAMMATES_SHOWN_MAX);
 /// The most owner-stopped native teammates one tick ends, so a long list never stalls it.
 const UNMANAGED_STOPS_PER_TICK_MAX: usize = 16;

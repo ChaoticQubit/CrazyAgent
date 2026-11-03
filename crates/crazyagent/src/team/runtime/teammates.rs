@@ -195,26 +195,27 @@ pub(super) fn register(
 }
 
 /// Keeps the worktree each running teammate row of a lead works in (DEC-111 Q17, OP-9):
-/// `<lead clone>/.worktrees/<name>` while the lead's clone records it on the teammate's own
-/// branch `<task branch>--<name>`, else none, which the graph shows in amber. The clone is
-/// read as data with no git run; one that cannot be read holds none. Inputs: the
-/// connection, the project and the lead. Output: any SQLite failure.
-fn keep_worktrees(
+/// `<lead clone>/.worktrees/<name>`, relative to the owner's checkout root as every other
+/// team worktree is stored, while the lead's clone records it on the teammate's own branch
+/// `<task branch>--<name>`, else none, which the graph shows in amber. The clone is read
+/// as data with no git run; one that cannot be read holds none. Inputs: the connection,
+/// the project and the lead. Output: any SQLite failure.
+pub(super) fn keep_worktrees(
     connection: &Connection,
     project: &ProjectId,
     lead: i64,
 ) -> Result<(), EngineError> {
-    let place: Option<(String, String)> = connection
+    let place: Option<(String, String, String)> = connection
         .query_row(
-            "SELECT worktree,git_dir FROM team_worktrees WHERE agent=?1 AND project=?2",
+            "SELECT repository,worktree,git_dir FROM team_worktrees WHERE agent=?1 AND project=?2",
             params![lead, project.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(error)?;
     let own = place
         .as_ref()
-        .and_then(|(worktree, git_dir)| {
+        .and_then(|(_, worktree, git_dir)| {
             crate::landing::teammate_worktrees(connection, Path::new(worktree), Path::new(git_dir))
                 .ok()
         })
@@ -223,10 +224,12 @@ fn keep_worktrees(
         let folder = name(connection, teammate)
             .filter(|kept| own.contains(kept))
             .zip(place.as_ref())
-            .and_then(|(kept, (worktree, _))| {
+            .and_then(|(kept, (repository, worktree, _))| {
                 Path::new(worktree)
                     .join(crate::agent_git::TEAMMATES_FOLDER)
                     .join(kept)
+                    .strip_prefix(repository)
+                    .ok()?
                     .to_str()
                     .map(str::to_owned)
             });
