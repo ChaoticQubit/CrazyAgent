@@ -155,6 +155,10 @@ pub enum OwnerMutation {
         project_id: ProjectId,
         paths: Vec<String>,
     },
+    SetProjectHiddenPaths {
+        project_id: ProjectId,
+        paths: Vec<String>,
+    },
     SetProjectAgentPolicy {
         project_id: ProjectId,
         policy: crate::sandbox::policy::AgentPolicy,
@@ -324,6 +328,14 @@ impl OwnerMutation {
             }
             Self::SetProjectReadPaths { project_id, paths } => {
                 let action = crate::project_setup::SetupAction::SetReadPaths {
+                    project_id: project_id.clone(),
+                    paths: paths.clone(),
+                };
+                action.validate()?;
+                Command::ProjectSetup { action }
+            }
+            Self::SetProjectHiddenPaths { project_id, paths } => {
+                let action = crate::project_setup::SetupAction::SetHiddenPaths {
                     project_id: project_id.clone(),
                     paths: paths.clone(),
                 };
@@ -601,6 +613,9 @@ pub enum OwnerRead {
     ProjectReadPaths {
         project_id: ProjectId,
     },
+    ProjectHiddenPaths {
+        project_id: ProjectId,
+    },
     ProjectAgentPolicy {
         project_id: ProjectId,
     },
@@ -721,6 +736,7 @@ impl OwnerRead {
             | Self::CurrentBrief { .. }
             | Self::ProjectSetup { .. }
             | Self::ProjectReadPaths { .. }
+            | Self::ProjectHiddenPaths { .. }
             | Self::ProjectAgentPolicy { .. }
             | Self::ResearchJobs { .. }
             | Self::TeamStatus { .. }
@@ -1075,6 +1091,10 @@ pub enum OwnerData {
         setup: Option<Box<crate::project_setup::StoredSetup>>,
     },
     ProjectReadPaths {
+        project_id: ProjectId,
+        paths: Vec<String>,
+    },
+    ProjectHiddenPaths {
         project_id: ProjectId,
         paths: Vec<String>,
     },
