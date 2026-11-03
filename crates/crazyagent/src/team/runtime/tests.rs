@@ -10125,10 +10125,16 @@ fn hookless_saved(fixture: &Fixture, id: i64) -> bool {
 
 /// Opens a team runtime whose only harness is a stand-in Claude Code that exits at once.
 fn exiting_claude_runtime(fixture: &Fixture) -> TeamRuntime {
+    standin_claude_runtime(fixture, "#!/bin/sh\nexit 0\n")
+}
+
+/// Opens a team runtime whose only harness is a stand-in Claude Code running one script.
+/// Takes the fixture and the script. Returns the runtime.
+fn standin_claude_runtime(fixture: &Fixture, script: &str) -> TeamRuntime {
     let bin = fixture.base.join("claude-bin");
     std::fs::create_dir_all(&bin).unwrap();
     let claude = bin.join("claude");
-    std::fs::write(&claude, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::write(&claude, script).unwrap();
     std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o700)).unwrap();
     let access = fixture.access.clone();
     TeamRuntime::open(
@@ -13414,6 +13420,156 @@ fn a_native_teammate_cannot_type_into_its_lead_s_pane() {
     assert!(
         listed.iter().any(|pane| pane.id == teammate && !pane.dead),
         "the lead's teammate pane is listed for it: {listed:?}"
+    );
+}
+
+/// A stand-in Claude Code that, run as a native lead, splits one teammate the way Claude Code
+/// 2.1.309 does (`createTeammatePaneWithLeader`, `sendCommandToPane`): a `cat` pane off
+/// `$TMUX_PANE` on the server `$TMUX` names, then `respawn-pane -k` with `cd`, `env`, the
+/// agent-teams variables and `$CLAUDE_CODE_TEAMMATE_COMMAND` with the teammate flags. Run as
+/// that teammate, it records its folder, home and arguments in its config home and waits.
+#[cfg(target_os = "macos")]
+const SPLITTING_CLAUDE: &str = r#"#!/bin/sh
+case " $* " in
+*" --agent-id "*)
+  printf '%s\n' "$PWD" "$HOME" "$*" > "$CLAUDE_CONFIG_DIR/teammate-started.txt"
+  exec /bin/sleep 300
+  ;;
+esac
+l="$PWD/lead-split.txt"
+s="${TMUX%%,*}"
+p=$(tmux -S "$s" split-window -d -t "$TMUX_PANE" -h -l 70% -P -F '#{pane_id}' -- cat 2>>"$l")
+echo "split=$? pane=$p" >> "$l"
+tmux -S "$s" set-option -p -t "$p" remain-on-exit failed 2>>"$l"
+tmux -S "$s" respawn-pane -k -t "$p" -- "cd '$PWD' && env CLAUDECODE=1 CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 CLAUDE_CONFIG_DIR='$CLAUDE_CONFIG_DIR' CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1 DISABLE_TELEMETRY=1 CLAUDE_SECURESTORAGE_CONFIG_DIR='$CLAUDE_SECURESTORAGE_CONFIG_DIR' CLAUDE_CODE_ATTRIBUTION_PROJECT='' '$CLAUDE_CODE_TEAMMATE_COMMAND' --agent-id mate@crew --agent-name mate --team-name crew --agent-color blue --parent-session-id 0b6f1c2e-5d4a-4f3e-9a8b-7c6d5e4f3a2b --dangerously-skip-permissions" 2>>"$l"
+echo "respawn=$?" >> "$l"
+exec /bin/sleep 300
+"#;
+
+/// A native lead's teammate starts (OP-3). The runtime prepares a native lead and starts it
+/// as the lead's worker does, on the lead's own server, so the engine writes the real
+/// teammate command. The stand-in lead splits a teammate as Claude Code 2.1.309 does, and
+/// the teammate's app starts in the lead's worktree and its own home, with the teammates'
+/// instructions and the team tools denied.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_lead_s_teammate_starts_through_the_command_its_lead_s_app_runs() {
+    use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    set_mode(
+        &fixture.connection,
+        &project,
+        HarnessKind::ClaudeCode,
+        SubagentMode::Native,
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        fixture.base.join("engine.db"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let host = crate::terminal::tmux_host(&fixture.base, Some(fixture.tmux.clone()));
+    let runtime = standin_claude_runtime(&fixture, SPLITTING_CLAUDE)
+        .with_terminal(host.clone())
+        .unwrap();
+    let profile = reference("managed-profile");
+    let managed = runtime.custody.as_ref().unwrap().profile_home(&profile);
+    std::fs::create_dir_all(&managed).unwrap();
+    std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let account = TeamAccount {
+        connection: reference("managed-connection"),
+        reach: TeamReach::Managed {
+            profile_ref: profile,
+            model: None,
+        },
+    };
+    let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    let (_, plan, _) = runtime
+        .prepare(
+            &fixture.setup,
+            id,
+            AgentRole::Sub,
+            "claude-code",
+            true,
+            &account,
+            false,
+            Layout::Linked,
+        )
+        .unwrap();
+    assert!(plan.native, "the lead starts with native teammates");
+    let lead = AgentId::team(id).unwrap();
+    let mates_socket = crate::terminal::teammates_socket(&fixture.base, &lead).unwrap();
+    let _down = LeadServersDown {
+        host: host.clone(),
+        lead: lead.clone(),
+        tmux: fixture.tmux.clone(),
+        scratch: mates_socket.parent().unwrap().to_path_buf(),
+    };
+    let home = agent_home(&runtime.state, id);
+    let mates = crate::launch_context::mates_home(&home);
+    let work = plan.working_dir.clone();
+    let context = runtime
+        .context(&project, id, AgentRole::Sub, true, Layout::Linked)
+        .unwrap();
+    let request = plan
+        .request(
+            AccountBinding::Subscription { home: home.clone() },
+            plan.access,
+        )
+        .unwrap();
+    let session =
+        AgentSession::start_resuming(request, plan.team_context(context), plan.pane.clone(), None)
+            .unwrap();
+
+    let started = mates.join("teammate-started.txt");
+    let deadline = Instant::now() + WAIT;
+    let text = loop {
+        match std::fs::read_to_string(&started) {
+            Ok(text) if text.lines().count() >= 3 => break text,
+            _ if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
+            _ => break String::new(),
+        }
+    };
+    let split = std::fs::read_to_string(work.join("lead-split.txt")).unwrap_or_default();
+    let screens: Vec<String> = host
+        .panes(&lead)
+        .unwrap_or_default()
+        .iter()
+        .map(|pane| {
+            let shown = crate::spawn_gate::output(
+                Command::new(crate::sandbox::SANDBOX_EXEC)
+                    .arg("-f")
+                    .arg(&plan.sandbox_profile)
+                    .arg(&fixture.tmux)
+                    .arg("-S")
+                    .arg(&mates_socket)
+                    .args(["capture-pane", "-p", "-J", "-t", &pane.id])
+                    .env_clear()
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null()),
+            )
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+            .unwrap_or_default();
+            format!("{pane:?} {shown:?}")
+        })
+        .collect();
+    drop(session);
+
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(
+        lines.len() >= 3,
+        "the lead's teammate never started: lead {split:?} panes {screens:?}"
+    );
+    assert_eq!(lines[0], work.to_str().unwrap(), "{text}");
+    assert_eq!(lines[1], mates.to_str().unwrap(), "{text}");
+    assert!(
+        lines[2].starts_with("--append-system-prompt-file ")
+            && lines[2].contains(
+                " --disallowedTools Agent TeamCreate --agent-id mate@crew --agent-name mate --team-name crew "
+            ),
+        "{text}"
     );
 }
 

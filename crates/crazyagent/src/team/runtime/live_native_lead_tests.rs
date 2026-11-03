@@ -680,6 +680,58 @@ fn files_under(root: &Path, depth: usize) -> Vec<PathBuf> {
     found
 }
 
+/// The team tool uses Claude Code transcripts record and the result each got: every
+/// `TeamCreate`, `Agent` and `SendMessage` call with its input, then its tool result, each
+/// cut to `SHOWN_MAX` characters, so a failed wait shows whether a lead tried to start a
+/// teammate and what Claude Code answered. Input: the files. Output: one line per use or
+/// result, in file order.
+fn team_calls(files: &[PathBuf]) -> Vec<String> {
+    const SHOWN_MAX: usize = 400;
+    const TEAM_TOOLS: [&str; 3] = ["TeamCreate", "Agent", "SendMessage"];
+    let cut = |text: String| text.chars().take(SHOWN_MAX).collect::<String>();
+    let mut uses = BTreeSet::new();
+    let mut lines = Vec::new();
+    for text in files
+        .iter()
+        .filter(|file| {
+            file.extension()
+                .is_some_and(|extension| extension == "jsonl")
+        })
+        .filter_map(|file| std::fs::read_to_string(file).ok())
+    {
+        for line in text.lines() {
+            let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let blocks = entry
+                .pointer("/message/content")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            for block in blocks {
+                let field = |name: &str| block.get(name).cloned().unwrap_or_default();
+                match (field("type").as_str(), field("name").as_str()) {
+                    (Some("tool_use"), Some(name)) if TEAM_TOOLS.contains(&name) => {
+                        uses.insert(field("id").to_string());
+                        lines.push(format!("use {name} {}", cut(field("input").to_string())));
+                    }
+                    (Some("tool_result"), _)
+                        if uses.contains(&field("tool_use_id").to_string()) =>
+                    {
+                        lines.push(format!(
+                            "result error={} {}",
+                            field("is_error"),
+                            cut(field("content").to_string())
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    lines
+}
+
 /// The files of `files` whose text holds `word`. Inputs: the files and the word. Output:
 /// the matching files.
 fn holding(files: &[PathBuf], word: &str) -> Vec<PathBuf> {
@@ -786,6 +838,11 @@ fn live_native_teammates_work_from_their_own_home_through_the_lead_s_team_folder
                 files_under(&mates.join("projects"), 3),
                 files_under(&team.home.join("teams"), 3),
                 files_under(&team.home.join("tasks"), 2)
+            );
+            println!(
+                "lead team calls={:?} teammate team calls={:?}",
+                team_calls(&files_under(&team.home.join("projects"), 3)),
+                team_calls(&files_under(&mates.join("projects"), 3))
             );
             panic!("{why}, after {} others: {:?}", seen.len(), shown(&seen))
         });
