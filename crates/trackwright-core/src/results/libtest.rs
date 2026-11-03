@@ -27,7 +27,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<ParsedResults, ParseRefusal> {
     let mut section: Option<(usize, String)> = None;
     for raw in text.lines() {
         let line = strip_ansi(raw);
-        let line = line.as_ref();
+        let line: &str = &line;
         if line.starts_with("error[E") || line.starts_with("error: could not compile") {
             build_failed = true;
         }
