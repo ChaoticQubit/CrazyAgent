@@ -48,9 +48,11 @@ as `done` once every criterion is met or waived:
 TRACKWRIGHT_ACTOR=engine:ci trackwright evidence-record --id SHOP-1 --position 1 --kind ci --ref login-redirect --result pass
 ```
 
-Under `close = evidence` only the owner closes a ticket by hand. To let agents close their
-own work instead of waiting for evidence, the owner sets the policy, and an agent closes
-the claimed ticket at the version its claim returned:
+A project can let agents close their own work instead of recording evidence. These two
+commands replace the evidence step above: once passing evidence has closed the ticket, a
+hand close is refused as `ticket_closed`. Under `close = evidence` only the owner closes a
+ticket by hand, so the owner sets the policy first, and the agent closes the claimed ticket
+at the version its claim returned:
 
 ```sh
 TRACKWRIGHT_ACTOR=owner trackwright policy-set --project SHOP --key close --value agents
@@ -136,10 +138,13 @@ A host is any type that implements the four traits of `trackwright_core::host`:
   sets actors itself.
 - `Paths`: where `export` and `import_preview`/`import_apply` may touch files.
 
-The core asks the host's `actor_may` before every operation and asks nothing else, so the
-project's policy holds only when the host applies it. The example applies the host's own
-rule first, then the policy through `policy::load` and `policy::permits`, as the standalone
-host does. The host names its actors so the policy reads their roles: `owner` for the
+For permission the core asks only `actor_may`, before every operation: who may create,
+edit, close, plan, import and set policy holds only when the host applies the project's
+policy there. The example applies the host's own rule first, then the policy through
+`policy::load` and `policy::permits`, as the standalone host does. The core applies the
+rest of the policy itself, whatever the host does: the starting status under
+`create = triage`, the refusal of an agent's own `met` under `close = evidence`, owner-only
+waiving, and the cycle settings. The host names its actors so the policy reads their roles: `owner` for the
 project's owner, `engine:<source>` for its own automation and any other name for an agent.
 
 The core tables live in the host's own SQLite database. The host migrates them in a
