@@ -83,13 +83,15 @@ impl MessageSettings {
     }
 }
 
-/// What the master or the owner said straight to a sub-agent once its terminal took it: a
-/// master's `message` or `answer`, or a prompt the owner sent.
+/// What the master, the owner or the engine said straight to a sub-agent once its terminal
+/// took it: a master's `message` or `answer`, a prompt the owner sent, or a notice the engine
+/// typed, such as which of a harness's teammates it ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Said {
     Message,
     Answer,
     Prompt,
+    Notice,
 }
 
 impl Said {
@@ -97,12 +99,13 @@ impl Said {
         match self {
             Self::Message | Self::Answer => Speaker::Master,
             Self::Prompt => Speaker::Owner,
+            Self::Notice => Speaker::Engine,
         }
     }
 
     fn kind(self) -> EntryKind {
         match self {
-            Self::Message => EntryKind::Message,
+            Self::Message | Self::Notice => EntryKind::Message,
             Self::Answer => EntryKind::Answer,
             Self::Prompt => EntryKind::Prompt,
         }
@@ -355,8 +358,9 @@ pub(super) fn save_settings(
     Ok(())
 }
 
-/// Keeps what the master or the owner said to a sub-agent once its terminal took it: the text
-/// made plain, or no text for a master's message when the project keeps none. The project's
+/// Keeps what the master, the owner or the engine said to a sub-agent once its terminal took
+/// it: the text made plain, or no text for a master's message or answer when the project
+/// keeps none. The project's
 /// oldest kept messages make room first, down to its kept count. Takes the transaction, the
 /// project, the agent, what was said, the text and the time. Returns the row id.
 pub(super) fn record(
@@ -369,7 +373,7 @@ pub(super) fn record(
 ) -> Result<i64, EngineError> {
     assert!(agent > 0);
     let settings = settings(tx, project)?;
-    let kept = said == Said::Prompt || settings.keep_master_messages;
+    let kept = said.author() != Speaker::Master || settings.keep_master_messages;
     let text = kept.then(|| bound_text(&events::plain_agent_text(text), SAID_BYTES_MAX));
     make_room(
         tx,

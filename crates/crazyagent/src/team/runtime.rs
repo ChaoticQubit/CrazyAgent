@@ -1107,8 +1107,13 @@ impl TeamRuntime {
             let ended = self.end_teammates(host.as_ref(), &project, agent, &team, pane_cap, at)?;
             assert!(team.iter().all(|pane| pane.pid != lead.pid));
             if let Some(text) = ended {
-                let _ =
-                    super::events::send_to(&self.connection, host.as_ref(), Some(agent), &text)?;
+                let _ = super::events::send_to(
+                    &self.connection,
+                    host.as_ref(),
+                    Some(agent),
+                    super::agent_messages::Said::Notice,
+                    &text,
+                )?;
             }
         }
         Ok(())

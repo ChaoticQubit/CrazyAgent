@@ -791,3 +791,47 @@ fn a_bad_page_size_or_an_agent_outside_the_project_is_refused() {
         30
     );
 }
+
+/// B19L merge (18.13's teammate notice through b19's timeline): a notice the engine types
+/// into a harness, such as which teammate it ended, shows as the engine's message, never the
+/// master's, and keeps its text when the project keeps no master messages.
+#[test]
+fn an_engine_notice_shows_as_the_engines_message_when_master_messages_are_not_kept() {
+    let connection = database();
+    let ada = agent(&connection, PROJECT);
+    save(
+        &connection,
+        PROJECT,
+        MessageSettings {
+            keep_master_messages: false,
+            ..MessageSettings::default()
+        },
+    );
+    said(
+        &connection,
+        PROJECT,
+        ada,
+        Said::Message,
+        "Master message",
+        10,
+    );
+    let notice = "[team] The owner stopped your teammate in pane %3.";
+    said(&connection, PROJECT, ada, Said::Notice, notice, 20);
+
+    let shown: Vec<(Speaker, EntryKind, Option<String>)> = page(&connection, ada, None, None)
+        .entries
+        .into_iter()
+        .map(|entry| (entry.from, entry.kind, entry.text))
+        .collect();
+    assert_eq!(
+        shown,
+        vec![
+            (
+                Speaker::Engine,
+                EntryKind::Message,
+                Some("(team) The owner stopped your teammate in pane %3.".to_owned())
+            ),
+            (Speaker::Master, EntryKind::Message, None),
+        ]
+    );
+}

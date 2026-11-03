@@ -1009,7 +1009,8 @@ pub fn send_to_agent(
 /// [`send_to_agent`] does, so a caller that already resolved the name passes its id rather
 /// than a name to read again. Only text the terminal took is kept, with the waiting mark
 /// cleared in the same transaction. Takes the connection, the terminal host, the agent or
-/// None when no agent was found, whether it is a message or an answer, and the text.
+/// None when no agent was found, whether it is a message, an answer or an engine notice,
+/// and the text.
 /// Returns the agent id, or the same plain refusal codes.
 pub fn send_to(
     connection: &Connection,
@@ -1020,7 +1021,7 @@ pub fn send_to(
 ) -> Result<Result<i64, &'static str>, EngineError> {
     assert!(
         said != Said::Prompt,
-        "the master sends messages and answers"
+        "the master sends messages and answers, the engine notices"
     );
     if text.trim().is_empty() || text.len() > SEND_BYTES_MAX {
         return Ok(Err("team_message_invalid"));
