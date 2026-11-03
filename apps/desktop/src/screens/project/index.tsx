@@ -24,6 +24,7 @@ import { valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { SettingsTab } from "./settings";
 import { TeamActivity } from "./team-activity";
+import { TestsTab } from "./tests";
 import { useTeam } from "./team";
 import "./projects.css";
 
@@ -32,6 +33,7 @@ export const TABS = [
   { id: "conversation", label: "Conversation", icon: "message-square" },
   { id: "agents", label: "Agents", icon: "bot" },
   { id: "changes", label: "Changes", icon: "git-branch" },
+  { id: "tests", label: "Tests", icon: "circle-check" },
   { id: "questions", label: "Questions", icon: "inbox" },
   { id: "context", label: "Context", icon: "folder-open" },
   { id: "process", label: "Process", icon: "list-checks" },
@@ -258,6 +260,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       {active === "conversation" && <TeamActivity data={data}><MasterArea data={data} /></TeamActivity>}
       {active === "agents" && <AgentsTab data={data} />}
       {active === "changes" && <ChangesTab data={data} />}
+      {active === "tests" && <TestsTab data={data} />}
       {active === "questions" && <QuestionsTab data={data} />}
       {active === "context" && <ContextTab data={data} />}
       {active === "process" && <ProcessEditor key={data.id} scope={{ kind: "project", id: data.id, name: data.name }} />}

@@ -1,6 +1,7 @@
 import { PageHeader, Tabs, formatRoute, type IconName, type SettingsTab } from "../../ui";
 import type { SettingsAction } from "../../ui/router";
 import { Accounts } from "./accounts";
+import { ChecksSettings } from "./checks";
 import { GitHubSettings } from "./github";
 import { Harnesses } from "./harnesses";
 import { MemorySettings } from "./memory";
@@ -21,6 +22,7 @@ const TABS: { id: SettingsTab; label: string; icon: IconName }[] = [
   { id: "plugins", label: "Plugins and skills", icon: "puzzle" },
   { id: "process", label: "Process", icon: "list-checks" },
   { id: "pack", label: "Pack", icon: "boxes" },
+  { id: "checks", label: "Checks", icon: "shield-check" },
   { id: "home", label: "Projects folder", icon: "folder" },
   { id: "github", label: "GitHub", icon: "git-branch" },
   { id: "memory", label: "Memory", icon: "brain" },
@@ -44,6 +46,7 @@ export function Settings({ tab, action, account, skill }: { tab: SettingsTab; ac
         : tab === "plugins" ? <PluginsAndSkills skill={skill} />
         : tab === "process" ? <ProcessSettings />
         : tab === "pack" ? <PackSettings />
+        : tab === "checks" ? <ChecksSettings />
         : tab === "home" ? <ProjectsHomeSettings />
         : tab === "github" ? <GitHubSettings />
         : tab === "memory" ? <MemorySettings />

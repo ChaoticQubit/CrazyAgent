@@ -18,6 +18,7 @@ import { changeOutcome } from "./research";
 import { PlanningLine } from "./planning";
 import { SessionContext, useLoad } from "../../state";
 import { ProjectAccountOrder } from "../settings/account-choice";
+import { ProjectChecks } from "../settings/checks";
 import { PluginsAndSkills } from "../settings/plugins";
 import { NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
@@ -29,6 +30,7 @@ const SECTIONS = [
   { id: "plugins", label: "Plugins and skills" },
   { id: "access", label: "Agent access" },
   { id: "sandbox", label: "Sandbox" },
+  { id: "checks", label: "Checks" },
   { id: "remove", label: "Remove project" },
 ] as const;
 
@@ -507,6 +509,7 @@ export function SettingsTab({ data, section }: { data: ProjectData; section?: st
       </div>}
       {active === "access" && <AccessSection data={data} />}
       {active === "sandbox" && <div className="pj-stack"><SandboxSection data={data} /><HiddenSection data={data} /></div>}
+      {active === "checks" && <ProjectChecks projectId={data.id} />}
       {active === "remove" && <RemoveSection data={data} setup={setup} />}
     </div>
   </div>;
