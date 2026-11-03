@@ -51,8 +51,8 @@ const _: () = assert!(text::CHECK_REF_BYTES_MAX <= text::LINK_TARGET_BYTES_MAX);
 const _: () = assert!(CHECKS_PER_CRITERION_MAX * CRITERIA_PER_TICKET_MAX <= 256);
 
 /// One outcome a caller reports for a check. Fields: the ticket, the criterion's position,
-/// the check's kind and reference, the result, and the reference of the run or look that
-/// produced it.
+/// the check's kind and reference, the result, and where the outcome can be read (a run or
+/// a look), if the caller names it; none is stored as an empty reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewEvidence {
     pub ticket: ShortId,
@@ -60,7 +60,7 @@ pub struct NewEvidence {
     pub kind: CheckKind,
     pub check: String,
     pub result: EvidenceResult,
-    pub reference: String,
+    pub reference: Option<String>,
 }
 
 /// What a criterion write left: the criterion and its ticket, closed when the write
@@ -247,7 +247,10 @@ pub fn record_evidence(
     now_ms: i64,
 ) -> Result<(Evidence, Outcome), StoreError> {
     text::check(TextField::CheckRef, &new.check)?;
-    text::check(TextField::CheckRef, &new.reference)?;
+    if let Some(reference) = &new.reference {
+        text::check(TextField::CheckRef, reference)?;
+    }
+    let reference = new.reference.clone().unwrap_or_default();
     store::write(tx, || {
         let ticket = open_ticket(tx, host, actor, OpKind::EvidenceRecord, &new.ticket)?;
         let criterion = criterion_at(tx, &ticket, new.criterion)?;
@@ -255,7 +258,7 @@ pub fn record_evidence(
         store::prepare(tx, EVIDENCE_INSERT)?.execute(params![
             check.id,
             new.result.as_str(),
-            new.reference,
+            reference,
             actor.as_str(),
             now_ms
         ])?;
@@ -263,7 +266,7 @@ pub fn record_evidence(
             id: tx.last_insert_rowid(),
             check: check.id,
             result: new.result,
-            reference: new.reference.clone(),
+            reference: reference.clone(),
             recorded_by: actor.clone(),
             recorded_ms: now_ms,
         };
