@@ -154,6 +154,9 @@ pub(in crate::tui) fn known(code: &str) -> Option<&'static str> {
             "There are no more repositories to show."
         }
         "github_repo_name_invalid" => "That isn't a GitHub repository name. Use owner/name.",
+        "github_repo_name_unsupported" => {
+            "CrazyAgent can't clone a repository whose name starts with a dot or dash, ends in .git or uses characters other than letters, digits, dots, dashes and underscores."
+        }
         "repo_missing" => "This repository isn't on your GitHub account anymore.",
         "repo_already_cloned" => "This repository is already in your projects folder.",
         "clone_failed" | "github_clone_failed" => {

@@ -12,7 +12,7 @@ const tick = "new Promise((done) => setTimeout(done, 0))";
 const CTRL = 2;
 const SHIFT = 8;
 
-const graphNode = (id, label) => ({ id, kind: "agent", parent: "g", label, harness: "codex", status: "working", status_label: null, account: null, agents: null, terminal: null });
+const graphNode = (id, label) => ({ id, kind: "sub", parent: "master", label, harness: "codex", status: "working", status_label: null, account: null, terminal: null });
 
 test("the console draws a terminal transcript: > owner lines with tags, Markdown replies, dim engine lines and prefixed tool and delegate lines", () => {
   const html = renderToStaticMarkup(createElement(Console, {

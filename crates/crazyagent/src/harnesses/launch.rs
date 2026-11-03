@@ -60,6 +60,9 @@ pub(crate) const CODEX_TOOLS_OFF: [&str; 13] = [
     "web_search=\"disabled\"",
     "mcp_servers={}",
 ];
+/// The Codex 0.164 setting that removes `request_user_input`, the one tool a tools-off
+/// research agent or pane agent is still offered after [`CODEX_TOOLS_OFF`].
+pub(crate) const CODEX_NO_USER_INPUT: &str = "tools.experimental_request_user_input.enabled=false";
 const CODEX_TOOLS_ON: [&str; 8] = [
     "sandbox_mode=\"danger-full-access\"",
     "approval_policy=\"never\"",
@@ -80,10 +83,18 @@ pub(crate) const CLAUDE_DENY_FLAG: &str = "--disallowedTools";
 /// names them `Agent` (offered as `Task` in print mode, its alias), `Workflow` and
 /// `TeamCreate`; denying a name also denies its aliases. Every other default tool stays.
 pub(crate) const CLAUDE_BUILT_IN_AGENTS: [&str; 3] = ["Agent", "Workflow", "TeamCreate"];
+/// The Claude Code team tools a native-team lead keeps (DEC-104 Q10): `TeamCreate` starts
+/// its agent team and `Agent` starts each teammate. `Workflow` stays denied, and every
+/// teammate is denied both again.
+pub(crate) const CLAUDE_NATIVE_TEAM_TOOLS: [&str; 2] = ["Agent", "TeamCreate"];
 /// Turns off Claude Code's background Bash commands and background agents for a tools-on
 /// team agent. In Claude Code 2.1.309 a finished background task starts another turn after
 /// the turn's result, which the engine would read as the next task's reply.
 const CLAUDE_BACKGROUND_TASKS_OFF: (&str, &str) = ("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1");
+/// Gives a tools-on Claude Code agent 60 s, not its own 30 s, to connect its MCP servers.
+/// context-mode from the engine's shared install answers in about 1 s; the margin covers a
+/// machine busy with builds, and a server that never answers delays the start by 60 s only.
+pub(super) const CLAUDE_MCP_CONNECT_LIMIT: (&str, &str) = ("MCP_TIMEOUT", "60000");
 const CLAUDE_SETTINGS: &str = "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"disableAllHooks\":true,\"includeCoAuthoredBy\":false}";
 const CLAUDE_COMMON: [&str; 12] = [
     "--print",
@@ -394,7 +405,8 @@ pub fn command(request: &LaunchRequest) -> Result<Command, LaunchError> {
 /// MCP servers, brief, context index and approved memories into the agent home, then
 /// points the harness at them. Input: the launch request and the project's context from
 /// `launch_context::for_project`. Output: the command and the guard that removes the
-/// generated files when dropped; no MCP secret is ever in an argument or the environment.
+/// generated files when dropped, or `launch_secret_in_command` when an MCP secret would be
+/// in an argument or the environment.
 pub fn command_with_context(
     request: &LaunchRequest,
     context: &AgentContext,
@@ -402,15 +414,11 @@ pub fn command_with_context(
     validate(request)?;
     let installed = context.install(&request.harness, request.account.home(), request.tools)?;
     let command = build(request, Some(&installed))?;
-    assert!(
-        command
-            .get_args()
-            .all(|argument| !context.exposes_secret(argument.as_encoded_bytes()))
-    );
-    assert!(command.get_envs().all(|(name, value)| {
-        !context.exposes_secret(name.as_encoded_bytes())
-            && value.is_none_or(|value| !context.exposes_secret(value.as_encoded_bytes()))
-    }));
+    context.refuse_exposed(command.get_args().map(OsStr::as_encoded_bytes).chain(
+        command.get_envs().flat_map(|(name, value)| {
+            std::iter::once(name.as_encoded_bytes()).chain(value.map(OsStr::as_encoded_bytes))
+        }),
+    ))?;
     Ok((command, installed))
 }
 
@@ -438,11 +446,14 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         return Err(failure("launch_sandbox_unavailable"));
     }
     let homes = ToolHomes::owner().map_err(|_| failure("launch_environment_refused"))?;
-    let path = if request.tools {
-        toolchains::agent_path(&homes, TOOLS_ON_PATH)
-    } else {
-        TOOLS_OFF_PATH.to_owned()
-    };
+    let path = toolchains::with_agent_git(
+        home,
+        if request.tools {
+            toolchains::agent_path(&homes, TOOLS_ON_PATH)
+        } else {
+            TOOLS_OFF_PATH.to_owned()
+        },
+    );
     let tmp = toolchains::existing_tmp(home).unwrap_or_else(|| home.to_path_buf());
     let tools = if request.tools {
         toolchains::agent_env(home, &homes)
@@ -573,16 +584,64 @@ pub(super) fn codex_configuration(
 }
 
 /// Claude Code's `--settings` for one launch: the fixed settings, plus for a keyed account
-/// an `apiKeyHelper` that prints its relay token from `key_file` (see [`key_file_text`]).
-/// Input: the key file of a keyed account. Output: the settings JSON.
-fn claude_settings(key_file: Option<&str>) -> String {
-    let Some(key_file) = key_file else {
+/// an `apiKeyHelper` that prints its relay token from `key_file` (see [`key_file_text`]),
+/// and without `disableAllHooks` when the launch's generated plugin holds the hooks the
+/// owner turned on. Setting sources stay off, so no other hook loads. Inputs: the key file
+/// of a keyed account and whether the launch runs hooks. Output: the settings JSON.
+fn claude_settings(key_file: Option<&str>, hooks: bool) -> String {
+    if key_file.is_none() && !hooks {
         return CLAUDE_SETTINGS.to_owned();
-    };
+    }
     let mut settings: serde_json::Value =
         serde_json::from_str(CLAUDE_SETTINGS).expect("fixed Claude settings are JSON");
-    settings["apiKeyHelper"] = format!("/bin/cat '{key_file}'").into();
+    if let Some(key_file) = key_file {
+        settings["apiKeyHelper"] = format!("/bin/cat '{key_file}'").into();
+    }
+    if hooks {
+        let removed = settings
+            .as_object_mut()
+            .and_then(|fields| fields.remove("disableAllHooks"));
+        assert_eq!(removed, Some(serde_json::Value::Bool(true)));
+    }
     settings.to_string()
+}
+
+/// Tells whether Claude Code starts `--bare` on an account: every account but a signed-in
+/// subscription, so a key or endpoint account never authenticates through an OAuth login or
+/// the keychain. Claude Code 2.1.309 fires no settings or plugin hooks under `--bare`
+/// (DEC-104 bare-hooks). Input: the account. Output: the answer.
+pub fn claude_bare(account: &AccountBinding) -> bool {
+    !matches!(account, AccountBinding::Subscription { .. })
+}
+
+/// Lists what a Claude Code launch passes after `--disallowedTools`: with tools on, Claude
+/// Code's own sub-agent tools, less `CLAUDE_NATIVE_TEAM_TOOLS` for a native-team lead, then
+/// every MCP tool the owner switched off. Input: the tools switch, whether the launch is a
+/// native-team lead and what it installed. Output: the names, empty when none is denied.
+pub(crate) fn claude_denied(
+    tools: bool,
+    native: bool,
+    installed: Option<&Installed>,
+) -> Vec<String> {
+    assert!(!native || tools);
+    let mut denied: Vec<String> = Vec::new();
+    if tools {
+        denied.extend(
+            CLAUDE_BUILT_IN_AGENTS
+                .iter()
+                .filter(|tool| !(native && CLAUDE_NATIVE_TEAM_TOOLS.contains(tool)))
+                .map(|tool| (*tool).to_owned()),
+        );
+    }
+    if let Some(installed) = installed {
+        denied.extend(installed.denied_tools().iter().cloned());
+    }
+    assert!(
+        denied
+            .iter()
+            .all(|name| !name.is_empty() && !name.starts_with('-'))
+    );
+    denied
 }
 
 fn claude_invocation(
@@ -592,7 +651,7 @@ fn claude_invocation(
 ) -> Invocation {
     assert_eq!(request.account.key().is_some(), key_file.is_some());
     let home = request.account.home().as_os_str().to_owned();
-    let settings = claude_settings(key_file);
+    let settings = claude_settings(key_file, installed.is_some_and(Installed::runs_hooks));
     let keep = installed.is_some_and(Installed::keeps_transcript);
     let mut arguments: Vec<OsString> = CLAUDE_COMMON
         .iter()
@@ -619,13 +678,16 @@ fn claude_invocation(
                 "default",
                 "--permission-mode",
                 "bypassPermissions",
-                CLAUDE_DENY_FLAG,
             ]
             .map(OsString::from),
         );
-        arguments.extend(CLAUDE_BUILT_IN_AGENTS.map(OsString::from));
     } else {
         arguments.extend(["--tools", "", "--disable-slash-commands"].map(OsString::from));
+    }
+    let denied = claude_denied(request.tools, false, installed);
+    if !denied.is_empty() {
+        arguments.push(OsString::from(CLAUDE_DENY_FLAG));
+        arguments.extend(denied.into_iter().map(OsString::from));
     }
     let mut environment = vec![
         ("CLAUDE_CONFIG_DIR", home.clone()),
@@ -644,8 +706,12 @@ fn claude_invocation(
             CLAUDE_BACKGROUND_TASKS_OFF.0,
             OsString::from(CLAUDE_BACKGROUND_TASKS_OFF.1),
         ));
+        environment.push((
+            CLAUDE_MCP_CONNECT_LIMIT.0,
+            OsString::from(CLAUDE_MCP_CONNECT_LIMIT.1),
+        ));
     }
-    if !matches!(request.account, AccountBinding::Subscription { .. }) {
+    if claude_bare(&request.account) {
         arguments.push(OsString::from("--bare"));
         if key_file.is_none() {
             environment.push(("ANTHROPIC_API_KEY", OsString::from(LOCAL_PLACEHOLDER_KEY)));

@@ -471,8 +471,10 @@ impl Process {
     }
 
     /// Notes when no process of the harness group is left. Only a reaped harness can leave its
-    /// group empty, and a group that refuses the probe still counts as present.
-    /// Takes nothing; records a fault when the group cannot be observed.
+    /// group empty, and a group that refuses the probe still counts as present: macOS refuses
+    /// it for a group left with only an unreaped process, so cleanup stops waiting for it at
+    /// its deadline, as it does for a harness it never reaps. Takes nothing; records a fault
+    /// when the group cannot be observed.
     fn observe_group(&mut self) {
         if self.status.is_none() || self.group_absent {
             return;
@@ -585,12 +587,18 @@ impl Process {
                     fault: self.fault,
                 });
             }
+            if uncertain && !self.group_absent {
+                self.fire_warden();
+                self.stdout = None;
+                self.stderr = None;
+                break;
+            }
             std::thread::sleep(POLL_TIME);
         }
-        assert!(self.status.is_some());
+        assert!(self.status.is_some() || uncertain);
         assert!(self.stdout.is_none());
         assert!(self.stderr.is_none());
-        assert!(self.group_absent);
+        assert!(self.group_absent || uncertain);
         if self.protocol.state() == State::Active && !self.stop.load(Ordering::Acquire) {
             self.fail(Fault::Host("claude_host_incomplete_turn"));
         }

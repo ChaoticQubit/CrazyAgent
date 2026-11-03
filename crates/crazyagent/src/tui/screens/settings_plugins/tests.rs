@@ -136,7 +136,11 @@ fn space_turns_the_focused_skill_or_server_off_and_reloads() {
     screen.arrive(&done, &mut ctx);
     assert_eq!(ctx.message().unwrap().lead, "frontend-design is off.");
     assert!(
-        matches!(ctx.next_request(), Some(Request::Settings(_))),
+        matches!(ctx.next_request(), Some(Request::Settings(job)) if matches!(*job, SettingsJob::Hooks { project: None })),
+        "the hooks reload"
+    );
+    assert!(
+        matches!(ctx.next_request(), Some(Request::Settings(job)) if matches!(*job, SettingsJob::Plugins)),
         "the lists reload"
     );
     for _ in 0..4 {
@@ -1359,4 +1363,35 @@ fn a_skill_agents_no_longer_get_says_why_on_the_list_and_its_page() {
     );
     let shown = texts(&SkillDetailPage::with(detail(true)).lines(70, &ctx));
     assert!(shown.iter().all(|line| !line.contains("Agents don't get")));
+}
+
+#[test]
+fn l_opens_tools_on_the_selected_server_or_on_the_crazyagent_tools() {
+    for (downs, header) in [
+        (0, "CrazyAgent tools  1 of 4"),
+        (4, "github  2 of 4"),
+        (5, "postgres-local  3 of 4"),
+    ] {
+        let (skills, servers) = lists();
+        let mut shell = Shell::with(
+            plugin_ctx(120, 36),
+            Box::new(Plugins::with(skills, servers)),
+        );
+        let shown = render(&mut shell, 120, 36).join("\n");
+        assert!(shown.contains("l Tools"), "{shown}");
+        for _ in 0..downs {
+            shell.key(Key::Down);
+        }
+        shell.key(Key::Char('l'));
+        let shown = render(&mut shell, 120, 36).join("\n");
+        assert!(shown.contains(header), "{header} missing in\n{shown}");
+        assert!(shown.contains("Reading the tools..."), "{shown}");
+        assert!(
+            matches!(
+                shell.ctx.next_request(),
+                Some(Request::Settings(job)) if matches!(*job, SettingsJob::Tools { project: None, .. })
+            ),
+            "the page reads the tools it opened on"
+        );
+    }
 }

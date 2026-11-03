@@ -341,13 +341,10 @@ async fn setup_status_projects_home_and_an_empty_team_graph_read_on_a_fresh_engi
         graph
             .nodes
             .iter()
-            .map(|node| (node.kind, node.harness.as_str(), node.agents))
+            .map(|node| (node.kind, node.harness.as_str(), node.parent.as_deref()))
             .collect::<Vec<_>>(),
-        [
-            (NodeKind::Master, "codex", None),
-            (NodeKind::HarnessGroup, "codex", Some(0))
-        ],
-        "the default team is a Codex master and one Codex research group with no agent running"
+        [(NodeKind::Master, "codex", None)],
+        "the default team is a Codex master leading no agent yet"
     );
     assert!(graph.nodes.iter().all(|node| node.terminal.is_none()));
     assert!(graph.edges.is_empty());

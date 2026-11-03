@@ -1,4 +1,4 @@
-use super::new_project_view::{Look, Row, columns, list_row, spread};
+use super::new_project_view::{Look, Row, columns, list_row, spread, wrap_words};
 use super::project_team::{Help, window};
 use super::project_time::{clock, duration};
 use crate::master_session::{MasterOwnerAction, MasterSessionPhase};
@@ -28,8 +28,9 @@ pub(in crate::tui) struct SessionRow {
     pub waiting: u32,
 }
 
-/// What the owner asked for: a fresh session, or making a parked one live. `cancel_running`
-/// is true only after the owner confirmed stopping the turn that was running.
+/// What the owner asked for: a fresh session, making a parked one live, or deleting one
+/// that is not live. `cancel_running` is true only after the owner confirmed stopping the
+/// turn that was running.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum SessionsAction {
     New {
@@ -38,6 +39,9 @@ pub(in crate::tui) enum SessionsAction {
     Resume {
         session: String,
         cancel_running: bool,
+    },
+    Delete {
+        session: String,
     },
 }
 
@@ -111,7 +115,8 @@ impl Sessions {
     /// Handles a key on the Conversation tab while the owner is not typing.
     /// Inputs: the key, whether the master can take actions now and whether a turn runs.
     /// Output: the reply; `n` starts a new session, `l` opens the list, Enter in the list
-    /// resumes the chosen session, and either asks first while a turn runs.
+    /// resumes the chosen session, and either asks first while a turn runs; `d` in the
+    /// list asks before deleting the chosen session when it is not the live one.
     pub fn key(&mut self, key: KeyEvent, ready: bool, running: bool) -> SessionsReply {
         if key
             .modifiers
@@ -132,6 +137,7 @@ impl Sessions {
                             session,
                             cancel_running: true,
                         },
+                        SessionsAction::Delete { session } => SessionsAction::Delete { session },
                     })
                 }
                 KeyCode::Char('n') | KeyCode::Esc => {
@@ -185,6 +191,14 @@ impl Sessions {
                 }
                 None => SessionsReply::Handled,
             },
+            KeyCode::Char('d') if self.open => {
+                if let Some(row) = self.picked().filter(|row| !row.live) {
+                    self.confirm = Some(SessionsAction::Delete {
+                        session: row.id.clone(),
+                    });
+                }
+                SessionsReply::Handled
+            }
             _ if self.open => SessionsReply::Handled,
             _ => SessionsReply::Ignored,
         }
@@ -238,36 +252,56 @@ impl Sessions {
             return None;
         }
         let mut body = Vec::new();
+        let when = |session: &str| {
+            self.rows
+                .as_ref()
+                .and_then(|rows| rows.iter().find(|row| row.id == session))
+                .map_or_else(String::new, |row| {
+                    format!(" from {}", started(row.started_ms, now_ms, offset))
+                })
+        };
         let question = self.confirm.as_ref().map(|action| match action {
-            SessionsAction::New { .. } => {
-                "A turn is running. Stop it and start a new session?".to_owned()
-            }
-            SessionsAction::Resume { session, .. } => {
-                let when = self
-                    .rows
-                    .as_ref()
-                    .and_then(|rows| rows.iter().find(|row| &row.id == session))
-                    .map_or_else(String::new, |row| {
-                        format!(" from {}", started(row.started_ms, now_ms, offset))
-                    });
-                format!("A turn is running. Stop it and resume the session{when}?")
-            }
+            SessionsAction::New { .. } => (
+                "A turn is running. Stop it and start a new session?".to_owned(),
+                vec![("y", "Stop the turn and switch"), ("n", "Keep it running")],
+            ),
+            SessionsAction::Resume { session, .. } => (
+                format!(
+                    "A turn is running. Stop it and resume the session{}?",
+                    when(session.as_str())
+                ),
+                vec![("y", "Stop the turn and switch"), ("n", "Keep it running")],
+            ),
+            SessionsAction::Delete { session } => (
+                format!(
+                    "Delete the session{}? Its messages and its transcript are removed for good.",
+                    when(session.as_str())
+                ),
+                vec![("y", "Delete it"), ("n", "Keep it")],
+            ),
         });
-        let list_room = room.saturating_sub(usize::from(question.is_some()) * 2);
+        let question = question.map(|(text, keys)| (wrap_words(&text, width), keys));
+        let list_room =
+            room.saturating_sub(question.as_ref().map_or(0, |(lines, _)| lines.len() + 1));
         if self.open {
             body.extend(self.list(width, list_room, now_ms, offset, look));
         }
-        let help = if let Some(question) = question {
+        let help = if let Some((question, keys)) = question {
             body.truncate(list_room);
             if !body.is_empty() {
                 body.push(Row::default());
             }
-            body.push(Row::of(question, look.warning).pad(width));
-            vec![("y", "Stop the turn and switch"), ("n", "Keep it running")]
+            body.extend(
+                question
+                    .into_iter()
+                    .map(|line| Row::of(line, look.warning).pad(width)),
+            );
+            keys
         } else {
             vec![
                 ("\u{2191}\u{2193}", "Move"),
                 ("Enter", "Resume"),
+                ("d", "Delete"),
                 ("n", "New session"),
                 ("Esc", "Back"),
             ]
@@ -357,22 +391,32 @@ pub(in crate::tui) fn rows_of(listed: &[MasterSessionSummary]) -> Vec<SessionRow
 /// Sends the owner's choice through the master client. Inputs: the client and the action.
 /// Output: the client's plain refusal when it cannot send it.
 pub(in crate::tui) fn act(master: &mut MasterState, action: &SessionsAction) -> Result<(), String> {
+    let listed = |master: &MasterState, session: &str| {
+        master
+            .sessions()
+            .and_then(|listed| {
+                listed
+                    .iter()
+                    .find(|item| item.session_id.as_str() == session)
+            })
+            .map(|item| item.session_id.clone())
+            .ok_or("That session is not in the Sessions list")
+    };
     match action {
+        SessionsAction::New { .. } if master.live_session_unused() => {
+            Err("This session has no messages yet, so it already is a new session.".into())
+        }
         SessionsAction::New { cancel_running } => master.new_session(*cancel_running),
         SessionsAction::Resume {
             session,
             cancel_running,
         } => {
-            let id = master
-                .sessions()
-                .and_then(|listed| {
-                    listed
-                        .iter()
-                        .find(|item| item.session_id.as_str() == session)
-                })
-                .map(|item| item.session_id.clone())
-                .ok_or("That session is not in the Sessions list")?;
+            let id = listed(&*master, session.as_str())?;
             master.resume(&id, *cancel_running)
+        }
+        SessionsAction::Delete { session } => {
+            let id = listed(&*master, session.as_str())?;
+            master.delete_session(&id)
         }
     }
 }

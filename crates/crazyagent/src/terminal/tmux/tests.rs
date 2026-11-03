@@ -120,7 +120,7 @@ fn the_attach_screen_puts_a_full_screen_app_back_on_its_alternate_screen_with_it
 
 #[test]
 fn an_attach_reads_the_pane_its_window_cursor_and_size() {
-    let found = located(&[b"%2 @2 8 0 80 24 1 0 312 0 0 0 0 0 0".to_vec()]).unwrap();
+    let found = located(&[b"%2 @2 8 0 80 24 1 0 312 0 0 0 0 0 0 end".to_vec()]).unwrap();
     assert_eq!(
         (
             found.pane,
@@ -140,7 +140,7 @@ fn an_attach_reads_the_pane_its_window_cursor_and_size() {
     );
     assert_eq!(found.history, 312);
     assert_eq!(
-        located(&[b"%2 @2 8 0 80 24 0 1 0 1 0 1 0 1 0".to_vec()])
+        located(&[b"%2 @2 8 0 80 24 0 1 0 1 0 1 0 1 0 end".to_vec()])
             .unwrap()
             .modes,
         Modes {
@@ -152,7 +152,7 @@ fn an_attach_reads_the_pane_its_window_cursor_and_size() {
         }
     );
     assert_eq!(
-        located(&[b"%2 @2 8 0 80 24 0 0 0 1 1   1 ".to_vec()])
+        located(&[b"%2 @2 8 0 80 24 0 0 0 1 1   1  end".to_vec()])
             .unwrap()
             .modes,
         Modes {
@@ -164,7 +164,7 @@ fn an_attach_reads_the_pane_its_window_cursor_and_size() {
         "a mode flag an older tmux leaves empty reads as off"
     );
     let full = format!(
-        "%2 @2 8 0 80 24 1 0 {} 0 0 0 0 0 0",
+        "%2 @2 8 0 80 24 1 0 {} 0 0 0 0 0 0{FORMAT_END}",
         u64::from(SCROLLBACK_LINES) * 3
     );
     assert_eq!(
@@ -172,15 +172,20 @@ fn an_attach_reads_the_pane_its_window_cursor_and_size() {
         HISTORY_ROWS_MAX,
         "history past what the capture asks for is clamped to it"
     );
-    assert!(located(&[b"%2 @2 8 0 80 24".to_vec()]).is_none());
-    assert!(located(&[b"%2 @2 8 0 80 24 1 0".to_vec()]).is_none());
-    assert!(located(&[b"%2 @2 8 0 80 24 1 x 0".to_vec()]).is_none());
-    assert!(located(&[b"%2 @2 8 0 80 24 1 0 -4".to_vec()]).is_none());
-    assert!(located(&[b"%2 @2 8 0 80 24 1 0 312".to_vec()]).is_none());
-    assert!(located(&[b"%2 @2 8 0 80 24 1 0 312 2 0 0 0 0 0".to_vec()]).is_none());
-    assert!(located(&[b"%2 @2 8 0 80 24 1 0 312 0 0 0 0 0 0 0".to_vec()]).is_none());
-    assert!(located(&[b"  0 0 80 24 0 0 0".to_vec()]).is_none());
+    assert!(located(&[b"%2 @2 8 0 80 24 end".to_vec()]).is_none());
+    assert!(located(&[b"%2 @2 8 0 80 24 1 0 end".to_vec()]).is_none());
+    assert!(located(&[b"%2 @2 8 0 80 24 1 x 0 end".to_vec()]).is_none());
+    assert!(located(&[b"%2 @2 8 0 80 24 1 0 -4 end".to_vec()]).is_none());
+    assert!(located(&[b"%2 @2 8 0 80 24 1 0 312 end".to_vec()]).is_none());
+    assert!(located(&[b"%2 @2 8 0 80 24 1 0 312 2 0 0 0 0 0 end".to_vec()]).is_none());
+    assert!(located(&[b"%2 @2 8 0 80 24 1 0 312 0 0 0 0 0 0 0 end".to_vec()]).is_none());
+    assert!(located(&[b"  0 0 80 24 0 0 0 end".to_vec()]).is_none());
     assert!(located(&[]).is_none());
+    assert!(
+        located(&[b"%2 @2 8 0 80 24 1 0 312 0 0 0 0 0 0".to_vec()]).is_none(),
+        "a line without the end mark is one tmux cut short"
+    );
+    assert!(located(&[b"%1 @1 0 ".to_vec()]).is_none());
 }
 
 #[test]
@@ -235,7 +240,7 @@ fn spawn_commands_go_through_env_with_every_argument_quoted() {
     };
     assert_eq!(
         spawn_line(&agent, &command).unwrap(),
-        "new-window -d -P -F '#{pane_id} #{pane_pid}' -n team-4 -c \"/private/tmp/project one\" -t crazyagent: -- /usr/bin/env -i \"TERM=xterm-256color\" \"COLORTERM=truecolor\" \"FOO=bar baz\" \"/bin/sh\" \"-c\" \"echo \\\"\\$FOO\\\"\""
+        "new-window -d -P -F '#{pane_id} #{pane_pid} end' -n team-4 -c \"/private/tmp/project one\" -t crazyagent: -- /usr/bin/env -i \"TERM=xterm-256color\" \"COLORTERM=truecolor\" \"FOO=bar baz\" \"/bin/sh\" \"-c\" \"echo \\\"\\$FOO\\\"\""
     );
     let mut own_terminal = command.clone();
     own_terminal.env.insert(0, ("TERM".into(), "dumb".into()));
@@ -515,4 +520,580 @@ fn an_attach_puts_the_pane_history_into_the_view_scrollback() {
             .starts_with(b"\x1b[0m\x1b[H\x1b[2J1\r\n2\r\n3\r\n"),
         "the history starts at the pane's first line"
     );
+}
+
+#[cfg(target_os = "macos")]
+struct Stalled(rustix::process::Pid);
+
+#[cfg(target_os = "macos")]
+impl Drop for Stalled {
+    fn drop(&mut self) {
+        let _ = rustix::process::kill_process(self.0, rustix::process::Signal::CONT);
+    }
+}
+
+/// tmux stops expanding a format once it has run for 100 ms of wall time and answers with
+/// the text so far as a success, which a server stalled on a loaded machine reaches: an
+/// attach then read `%1 @1 0 ` and failed, ending the agent. The real server is stalled
+/// again and again while callers attach, list the live agents and start new ones: every
+/// call still succeeds with the whole answer.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_reply_tmux_cut_short_while_its_server_stalls_is_asked_again() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    const STALLS: usize = 60;
+    const CALLERS: usize = 4;
+    const STARTED: i64 = 6;
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("terminal");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(home.path()).expect("tmux is required for this test");
+    let host = Arc::new(Tmux::open(Some(tmux.clone()), &folder));
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: host.socket(),
+    };
+    let command = InteractiveCommand {
+        argv: vec!["/bin/sleep".into(), "60".into()],
+        cwd: home.path().to_path_buf(),
+        env: Vec::new(),
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    let agent = AgentId::team(1).unwrap();
+    host.spawn(&agent, &command).unwrap();
+    let pid = crate::spawn_gate::output(
+        Command::new(&tmux)
+            .arg("-S")
+            .arg(host.socket())
+            .args(["display-message", "-p", "#{pid}"])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    let server = String::from_utf8_lossy(&pid.stdout)
+        .trim()
+        .parse::<i32>()
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .unwrap();
+    let stalling = Arc::new(AtomicBool::new(true));
+    let mut callers: Vec<_> = (0..CALLERS)
+        .map(|_| {
+            let (host, agent, stalling) = (host.clone(), agent.clone(), stalling.clone());
+            std::thread::spawn(move || {
+                let mut problems = Vec::new();
+                let mut asked = 0;
+                while stalling.load(Ordering::SeqCst) {
+                    if let Err(problem) = host.screen(&agent) {
+                        problems.push(format!("screen: {}", problem.0));
+                    }
+                    match host.alive() {
+                        Ok(alive) if alive.contains(&agent) => {}
+                        other => problems.push(format!("alive: {other:?}")),
+                    }
+                    asked += 1;
+                }
+                (asked, problems)
+            })
+        })
+        .collect();
+    let starter = {
+        let (host, command, stalling) = (host.clone(), command.clone(), stalling.clone());
+        std::thread::spawn(move || {
+            let mut problems = Vec::new();
+            for id in 2..=STARTED {
+                let started = AgentId::team(id).unwrap();
+                match host.spawn(&started, &command) {
+                    Ok(pane) if pane.agent == started && pane.pid > 0 => {}
+                    other => problems.push(format!("spawn {id}: {other:?}")),
+                }
+                std::thread::sleep(Duration::from_millis(400));
+            }
+            while stalling.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            (0, problems)
+        })
+    };
+    callers.push(starter);
+    {
+        let _stalled = Stalled(server);
+        for _ in 0..STALLS {
+            rustix::process::kill_process(server, rustix::process::Signal::STOP).unwrap();
+            std::thread::sleep(Duration::from_millis(150));
+            rustix::process::kill_process(server, rustix::process::Signal::CONT).unwrap();
+            std::thread::sleep(Duration::from_millis(30));
+        }
+    }
+    stalling.store(false, Ordering::SeqCst);
+    let mut asked = 0;
+    let mut problems = Vec::new();
+    for caller in callers {
+        let (count, found) = caller.join().unwrap();
+        asked += count;
+        problems.extend(found);
+    }
+    assert!(asked >= STALLS, "the callers kept asking: {asked}");
+    assert_eq!(problems, Vec::<String>::new());
+    let all: Vec<AgentId> = (1..=STARTED).map(|id| AgentId::team(id).unwrap()).collect();
+    assert_eq!(host.alive().unwrap(), all);
+}
+
+/// Splits a pane of a test's own private tmux server, as a native harness splits its window
+/// for a teammate. Takes the server and the pane to split. Panics unless tmux splits it.
+#[cfg(target_os = "macos")]
+fn split(server: &Server, pane: &str) {
+    let status = crate::spawn_gate::status(
+        Command::new(&server.tmux)
+            .arg("-S")
+            .arg(&server.socket)
+            .args(["split-window", "-d", "-t", pane, "exec /bin/sleep 60"])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    assert!(status.success(), "tmux split the pane");
+}
+
+/// A harness's teammate pane is listed under its agent and ended on its own (S4): `panes`
+/// lists the panes of the agent's window, and `kill_pane` ends only the named one while it
+/// refuses an invalid id, another agent's pane, an unknown pane and the window's last pane.
+#[cfg(target_os = "macos")]
+#[test]
+fn kill_pane_ends_only_that_pane_and_refuses_the_last_and_a_foreign_one() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("terminal");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(home.path()).expect("tmux is required for this test");
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let server = Server {
+        tmux,
+        socket: host.socket(),
+    };
+    let sleeper = || InteractiveCommand {
+        argv: vec!["/bin/sh".into(), "-c".into(), "exec /bin/sleep 60".into()],
+        cwd: home.path().to_path_buf(),
+        env: Vec::new(),
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    let lead = AgentId::team(1).unwrap();
+    let other = AgentId::team(2).unwrap();
+    host.spawn(&lead, &sleeper()).unwrap();
+    host.spawn(&other, &sleeper()).unwrap();
+    let first = host.panes(&lead).unwrap();
+    assert_eq!(first.len(), 1, "{first:?}");
+    let kept = first[0].id.clone();
+    assert!(pane_id_valid(&kept), "{kept}");
+    split(&server, &kept);
+    let panes = host.panes(&lead).unwrap();
+    assert_eq!(panes.len(), 2, "{panes:?}");
+    assert!(
+        panes.iter().all(|pane| !pane.dead && pane.pid > 0),
+        "{panes:?}"
+    );
+    let teammate = panes
+        .iter()
+        .find(|pane| pane.id != kept)
+        .unwrap()
+        .id
+        .clone();
+    let foreign = host.panes(&other).unwrap()[0].id.clone();
+    for (pane, why) in [
+        ("pane-1", "an invalid id"),
+        (foreign.as_str(), "another agent's pane"),
+        ("%999999", "an unknown pane"),
+    ] {
+        assert_eq!(
+            host.kill_pane(&lead, pane).unwrap_err().0,
+            "terminal_pane_unknown",
+            "{why}"
+        );
+    }
+    assert_eq!(host.panes(&other).unwrap().len(), 1);
+    assert_eq!(host.panes(&lead).unwrap().len(), 2);
+
+    host.kill_pane(&lead, &teammate).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let left = loop {
+        let left = host.panes(&lead).unwrap();
+        if left.len() == 1 {
+            break left;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the teammate pane ended: {left:?}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert_eq!(left[0].id, kept, "the lead's own pane stays");
+    assert_eq!(
+        host.kill_pane(&lead, &kept).unwrap_err().0,
+        "terminal_pane_unknown",
+        "the window's last pane is not a teammate"
+    );
+    assert_eq!(host.panes(&lead).unwrap().len(), 1);
+    assert_eq!(host.panes(&other).unwrap().len(), 1);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_pane_view_shows_and_types_into_only_the_teammate_pane_its_lead_window_lists() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("terminal");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(home.path()).expect("tmux is required for this test");
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let socket = host.socket();
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: socket.clone(),
+    };
+    let shell = |script: &str| InteractiveCommand {
+        argv: vec!["/bin/sh".into(), "-c".into(), script.into()],
+        cwd: home.path().to_path_buf(),
+        env: Vec::new(),
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    let lead = AgentId::team(1).unwrap();
+    let other = AgentId::team(2).unwrap();
+    host.spawn(&lead, &shell("echo lead-own-screen; exec /bin/cat"))
+        .unwrap();
+    host.spawn(&other, &shell("echo other-lead-screen; exec /bin/sleep 30"))
+        .unwrap();
+    let client = |args: &[&str]| {
+        let output = crate::spawn_gate::output(
+            Command::new(&tmux)
+                .arg("-S")
+                .arg(&socket)
+                .args(args)
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped()),
+        )
+        .unwrap();
+        assert!(
+            output.status.success(),
+            "tmux {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    let teammate = client(&[
+        "split-window",
+        "-d",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "-t",
+        &target(&lead),
+        "--",
+        "/bin/sh",
+        "-c",
+        "echo teammate-pane-ready; exec /bin/cat",
+    ]);
+    assert!(
+        pane_id_valid(&teammate),
+        "tmux names the split pane: {teammate}"
+    );
+    let elsewhere = client(&["list-panes", "-t", &target(&other), "-F", "#{pane_id}"]);
+    assert!(
+        pane_id_valid(&elsewhere) && elsewhere != teammate,
+        "{elsewhere}"
+    );
+    let host: Arc<dyn Host> = Arc::new(host);
+    let shows = |terminal: &dyn Host, wanted: &str| -> String {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            let screen =
+                String::from_utf8_lossy(&terminal.attach(&lead).unwrap().screen).into_owned();
+            if screen.contains(wanted) {
+                return screen;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the pane showed {wanted} in time: {screen}"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    };
+    let view = crate::terminal::pane_view(host.clone(), &teammate).unwrap();
+    let screen = shows(&*view, "teammate-pane-ready");
+    assert!(
+        !screen.contains("lead-own-screen"),
+        "the view shows the teammate's pane, not its lead's: {screen}"
+    );
+    view.input(&lead, b"typed-to-teammate\r").unwrap();
+    shows(&*view, "typed-to-teammate");
+    let own = shows(&*host, "lead-own-screen");
+    assert!(
+        !own.contains("typed-to-teammate") && !own.contains("teammate-pane-ready"),
+        "typing went to the teammate's pane only, and the lead's view stays its own: {own}"
+    );
+    let unknown = Err("terminal_pane_unknown".to_owned());
+    assert_eq!(
+        crate::terminal::pane_view(host.clone(), "lead")
+            .map(drop)
+            .map_err(|problem| problem.0),
+        unknown,
+        "an invalid pane id is refused before any call"
+    );
+    for pane in [elsewhere.as_str(), "%99999"] {
+        let view = crate::terminal::pane_view(host.clone(), pane).unwrap();
+        assert_eq!(
+            view.attach(&lead).map(drop).map_err(|problem| problem.0),
+            unknown,
+            "a pane its lead's window does not list is never attached: {pane}"
+        );
+        assert_eq!(
+            view.snapshot(&lead).map(drop).map_err(|problem| problem.0),
+            unknown,
+            "a pane its lead's window does not list is never read: {pane}"
+        );
+        assert_eq!(
+            view.input(&lead, b"typed-to-other\r")
+                .map_err(|problem| problem.0),
+            unknown,
+            "a pane its lead's window does not list is never typed into: {pane}"
+        );
+        assert_eq!(
+            view.input_live(&lead)
+                .map(drop)
+                .map_err(|problem| problem.0),
+            unknown,
+            "a pane its lead's window does not list is never checked for live input: {pane}"
+        );
+    }
+    let deadline = Instant::now() + Duration::from_secs(1);
+    loop {
+        let screen = String::from_utf8_lossy(&host.attach(&other).unwrap().screen).into_owned();
+        assert!(
+            !screen.contains("typed-to-other"),
+            "no refused typing reached the other lead's pane: {screen}"
+        );
+        if Instant::now() >= deadline && screen.contains("other-lead-screen") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline + Duration::from_secs(14),
+            "the other lead's pane showed its own screen in time: {screen}"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Says whether a host still holds a control connection that reads. Input: the host.
+/// Output: true while its held control has not seen its server end.
+#[cfg(target_os = "macos")]
+fn holds_reading_control(host: &Tmux) -> bool {
+    host.control
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|control| !control.closed())
+}
+
+/// Gives the inode of the file at a host's socket path, which changes when another server
+/// binds the path. Input: the host. Output: the inode, or none when no file is there.
+#[cfg(target_os = "macos")]
+fn socket_inode(host: &Tmux) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::symlink_metadata(host.socket())
+        .ok()
+        .map(|metadata| metadata.ino())
+}
+
+/// Starts a private host with one agent in a fresh 0700 folder, then ends its server from
+/// outside with kill-server, as another tmux client or a crash would. Takes the temp home
+/// and the agent. Returns the host, still holding the control it read with, its server and
+/// the inode of the socket that server bound.
+#[cfg(target_os = "macos")]
+fn ended_from_outside(home: &Path, agent: &AgentId) -> (Tmux, Server, u64) {
+    use std::os::unix::fs::PermissionsExt;
+    let folder = home.join("terminal");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(home).expect("tmux is required for this test");
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let server = Server {
+        tmux: tmux.clone(),
+        socket: host.socket(),
+    };
+    let command = InteractiveCommand {
+        argv: vec!["/bin/sleep".into(), "60".into()],
+        cwd: home.to_path_buf(),
+        env: Vec::new(),
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    host.spawn(agent, &command).unwrap();
+    assert_eq!(host.alive().unwrap(), vec![agent.clone()]);
+    assert!(
+        holds_reading_control(&host),
+        "the host holds a reading control"
+    );
+    let bound = socket_inode(&host).expect("the server bound its socket");
+    let ended = crate::spawn_gate::status(
+        Command::new(&tmux)
+            .arg("-S")
+            .arg(host.socket())
+            .arg("kill-server")
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    assert!(ended.success(), "tmux ended the server");
+    (host, server, bound)
+}
+
+/// A server ended from outside leaves its socket file behind. Once its control saw it end
+/// and nothing listens, the host has no live agents, forgets the socket and starts no server.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_server_ended_from_outside_has_no_live_agents_and_is_not_started_again() {
+    let home = tempfile::tempdir().unwrap();
+    let agent = AgentId::team(1).unwrap();
+    let (host, _server, _) = ended_from_outside(home.path(), &agent);
+    let until = Instant::now() + REPLY_TIME;
+    while holds_reading_control(&host) || crate::spawn_gate::connect_unix_std(host.socket()).is_ok()
+    {
+        assert!(
+            Instant::now() < until,
+            "the server ended and its control saw it"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(host.running(), "tmux leaves its socket file behind");
+    assert_eq!(host.alive().unwrap(), Vec::<AgentId>::new());
+    assert!(
+        !host.running(),
+        "the ended server's socket file is forgotten"
+    );
+    assert!(
+        crate::spawn_gate::connect_unix_std(host.socket()).is_err(),
+        "no server was started again"
+    );
+}
+
+/// Asks for the live agents at once after an outside kill-server, while the held control may
+/// still read, the server may still be ending, or both are gone. Every round has no live
+/// agents, never a closed or unavailable terminal, and no other server binds the socket
+/// path: it is gone or still the file the ended server bound.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_server_ended_from_outside_has_no_live_agents_while_its_control_still_reads() {
+    const ROUNDS: usize = 20;
+    let mut answers = Vec::new();
+    for _ in 0..ROUNDS {
+        let home = tempfile::tempdir().unwrap();
+        let agent = AgentId::team(1).unwrap();
+        let (host, _server, bound) = ended_from_outside(home.path(), &agent);
+        let answer = host.alive().map_err(|error| error.0);
+        let rebound = socket_inode(&host).is_some_and(|inode| inode != bound);
+        answers.push((answer, rebound));
+    }
+    assert_eq!(answers, vec![(Ok(Vec::new()), false); ROUNDS]);
+}
+
+const PROBE_FOLDER: &str = "CRAZYAGENT_TMUX_PROBE_FOLDER";
+const PROBE_HELPER: &str = "terminal::tmux::tests::probing_a_live_server_out_of_descriptors";
+
+/// A probe of a live server that fails without a refusal keeps the server's socket. A helper
+/// process that can open no more descriptors asks a fresh host for the live agents: it is
+/// told the terminal is unavailable, and the server keeps its socket and its agent.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_server_keeps_its_socket_when_a_probe_of_it_fails_without_a_refusal() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let folder = home.path().join("terminal");
+    std::fs::create_dir(&folder).unwrap();
+    std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let tmux = installed(home.path()).expect("tmux is required for this test");
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: host.socket(),
+    };
+    let agent = AgentId::team(1).unwrap();
+    let command = InteractiveCommand {
+        argv: vec!["/bin/sleep".into(), "60".into()],
+        cwd: home.path().to_path_buf(),
+        env: Vec::new(),
+        transcript: crate::harnesses::interactive::Transcript::Unavailable,
+    };
+    host.spawn(&agent, &command).unwrap();
+    let bound = socket_inode(&host).expect("the server bound its socket");
+    let ran = crate::spawn_gate::status(
+        Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", PROBE_HELPER, "--ignored", "--test-threads", "1"])
+            .env(PROBE_FOLDER, &folder)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null()),
+    )
+    .unwrap();
+    assert!(ran.success(), "the probing helper ran");
+    assert_eq!(
+        std::fs::read_to_string(home.path().join("answer")).unwrap(),
+        r#"Err("terminal_unavailable")"#
+    );
+    assert_eq!(
+        socket_inode(&host),
+        Some(bound),
+        "the live server keeps its socket"
+    );
+    assert_eq!(
+        Tmux::open(Some(tmux), &folder).alive().unwrap(),
+        vec![agent]
+    );
+}
+
+/// Opens descriptors until the process can open no more, then asks a fresh host for the
+/// live agents of the server in the folder `PROBE_FOLDER` names, and writes the answer
+/// beside that folder. Run only by the probe descriptor test as its helper process.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "run only by the probe descriptor test as its helper process"]
+fn probing_a_live_server_out_of_descriptors() {
+    use rustix::process::{Resource, Rlimit, getrlimit, setrlimit};
+    let Some(folder) = std::env::var_os(PROBE_FOLDER).map(PathBuf::from) else {
+        return;
+    };
+    let home = folder.parent().unwrap().to_path_buf();
+    let host = Tmux::open(installed(&home), &folder);
+    let limit = getrlimit(Resource::Nofile);
+    setrlimit(
+        Resource::Nofile,
+        Rlimit {
+            current: Some(128),
+            maximum: limit.maximum,
+        },
+    )
+    .unwrap();
+    let mut held = Vec::new();
+    let full = loop {
+        match std::fs::File::open("/dev/null") {
+            Ok(file) => held.push(file),
+            Err(error) => break error,
+        }
+        assert!(held.len() <= 128, "the lowered limit bounds the open files");
+    };
+    assert_eq!(
+        rustix::io::Errno::from_io_error(&full),
+        Some(rustix::io::Errno::MFILE)
+    );
+    let answer = host.alive().map_err(|error| error.0);
+    drop(held);
+    std::fs::write(home.join("answer"), format!("{answer:?}")).unwrap();
 }

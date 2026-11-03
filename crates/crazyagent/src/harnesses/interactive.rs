@@ -1,9 +1,10 @@
 use super::launch::{
-    AccountBinding, CLAUDE_BUILT_IN_AGENTS, CLAUDE_DENY_FLAG, CLAUDE_NO_MCP, LOCAL_PLACEHOLDER_KEY,
-    LaunchError, LaunchRequest, SANDBOX_EXEC, Secret, TOOLS_OFF_PATH, TOOLS_ON_PATH,
+    AccountBinding, CLAUDE_DENY_FLAG, CLAUDE_MCP_CONNECT_LIMIT, CLAUDE_NATIVE_TEAM_TOOLS,
+    CLAUDE_NO_MCP, CODEX_NO_USER_INPUT, LOCAL_PLACEHOLDER_KEY, LaunchError, LaunchRequest,
+    SANDBOX_EXEC, Secret, TOOLS_OFF_PATH, TOOLS_ON_PATH, claude_bare, claude_denied,
     codex_configuration, failure, harness_id, key_file_text, validate,
 };
-use crate::launch_context::Installed;
+use crate::launch_context::{Installed, NativeTeam};
 use crate::sandbox::toolchains::{self, ToolHomes};
 use std::ffi::OsStr;
 #[cfg(unix)]
@@ -19,6 +20,29 @@ const CLAUDE_CONFIG_BYTES_MAX: u64 = 1024 * 1024;
 #[cfg(unix)]
 const CLAUDE_KEY_TAIL_CHARS: usize = 20;
 const LOCALE: &str = "en_US.UTF-8";
+/// Runs a tools-on Codex agent as an app-server and a TUI attached to it with `--remote`, so
+/// the engine can steer the agent's thread natively (DEC-104 K2b). The app-server starts on
+/// the home's `unix://` control socket; when it has not bound within 5 s, or exits, the
+/// TUI runs alone as before. Arguments: the Codex program, the conversation to resume or
+/// an empty word, then the `-c` settings both take. The app-server ends with the TUI.
+const CODEX_BRIDGE_SCRIPT: &str = r#"e=$1; r=$2; shift 2
+s=$CODEX_HOME/app-server-control/app-server-control.sock
+/bin/rm -f "$s"
+"$e" app-server --listen unix:// "$@" </dev/null >/dev/null 2>&1 &
+a=$!
+i=0
+while [ ! -S "$s" ] && kill -0 "$a" 2>/dev/null && [ "$i" -lt 50 ]; do /bin/sleep 0.1; i=$((i+1)); done
+if [ -S "$s" ]; then set -- --remote unix:// "$@"; else kill "$a" 2>/dev/null; fi
+if [ -n "$r" ]; then "$e" "$@" resume "$r"; else "$e" "$@"; fi
+c=$?
+kill "$a" 2>/dev/null
+exit "$c"
+"#;
+/// Runs a tools-off Codex agent's TUI on its own app server instead of the shared one: the
+/// shared app server keeps unified exec on, and Codex 0.164 refuses it to a session whose
+/// tools-off settings turn unified exec off, so that agent would exit at its first line.
+/// The engine then reaches the agent by typing instead of the K2b bridge.
+const CODEX_NO_DAEMON: &str = "--no-daemon";
 const CLAUDE_TOOLS_ON: [&str; 4] = [
     "--tools",
     "default",
@@ -26,6 +50,12 @@ const CLAUDE_TOOLS_ON: [&str; 4] = [
     "bypassPermissions",
 ];
 const CLAUDE_TOOLS_OFF: [&str; 3] = ["--tools", "", "--disable-slash-commands"];
+const CLAUDE_TEAMMATE_MODE: [&str; 2] = ["--teammate-mode", "tmux"];
+const CLAUDE_AGENT_TEAMS: (&str, &str) = ("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1");
+const CLAUDE_TEAMMATE_COMMAND: &str = "CLAUDE_CODE_TEAMMATE_COMMAND";
+const CLAUDE_INSTRUCTIONS_FLAG: &str = "--append-system-prompt-file";
+const CLAUDE_BARE: &str = "--bare";
+const TEAMMATE_SCRIPT_BYTES_MAX: usize = 64 * 1024;
 
 /// What the terminal host runs for one interactive agent: the full argument list, starting
 /// with the project sandbox wrapper, the working folder and the environment, plus where the
@@ -227,11 +257,14 @@ pub fn command(
         ("HOME".to_owned(), home.clone()),
         (
             "PATH".to_owned(),
-            if request.tools {
-                toolchains::agent_path(&homes, TOOLS_ON_PATH)
-            } else {
-                TOOLS_OFF_PATH.to_owned()
-            },
+            toolchains::with_agent_git(
+                request.account.home(),
+                if request.tools {
+                    toolchains::agent_path(&homes, TOOLS_ON_PATH)
+                } else {
+                    TOOLS_OFF_PATH.to_owned()
+                },
+            ),
         ),
         ("LANG".to_owned(), LOCALE.to_owned()),
         ("LC_ALL".to_owned(), LOCALE.to_owned()),
@@ -246,18 +279,28 @@ pub fn command(
     let executable = text(&request.executable)?;
     let transcript = match harness_id(request) {
         "codex" => {
-            argv.push(executable);
-            argv.extend(codex(
-                request,
-                installed.is_some(),
-                &cwd,
-                key_file.as_deref(),
-            )?);
-            if run.resume {
+            let resume = if run.resume {
+                Some(session_id_checked(run.session_id)?.to_owned())
+            } else {
+                None
+            };
+            let settings = codex(request, installed.is_some(), &cwd, key_file.as_deref())?;
+            if request.tools {
                 argv.extend([
-                    "resume".to_owned(),
-                    session_id_checked(run.session_id)?.to_owned(),
+                    "/bin/sh".to_owned(),
+                    "-c".to_owned(),
+                    CODEX_BRIDGE_SCRIPT.to_owned(),
+                    "codex-bridge".to_owned(),
+                    executable,
+                    resume.unwrap_or_default(),
                 ]);
+                argv.extend(settings);
+            } else {
+                argv.extend([executable, CODEX_NO_DAEMON.to_owned()]);
+                argv.extend(settings);
+                if let Some(resume) = resume {
+                    argv.extend(["resume".to_owned(), resume]);
+                }
             }
             env.extend([
                 ("CODEX_HOME".to_owned(), home.clone()),
@@ -270,7 +313,18 @@ pub fn command(
         "claude-code" => {
             argv.push(executable);
             argv.extend(claude(request, installed, run, key_file.as_deref())?);
-            env.extend(claude_environment(request, &home));
+            let team = installed.and_then(Installed::native);
+            if let Some(team) = team {
+                tmux_on_path(&mut env, &team.tmux)?;
+            }
+            let teammates = team
+                .map(|_| {
+                    text(&crate::launch_context::teammate_command(
+                        request.account.home(),
+                    ))
+                })
+                .transpose()?;
+            env.extend(claude_environment(request, &home, teammates.as_deref()));
             let folder = claude_project_folder(&cwd)
                 .ok_or_else(|| failure("launch_working_dir_too_long"))?;
             Transcript::ClaudeSession {
@@ -352,6 +406,7 @@ fn codex(
     let mut arguments = Vec::new();
     for setting in codex_configuration(request, context, key_file)
         .into_iter()
+        .chain((!request.tools).then(|| CODEX_NO_USER_INPUT.to_owned()))
         .chain([
             "check_for_update_on_startup=false".to_owned(),
             format!("projects={{{folder}={{trust_level=\"trusted\"}}}}"),
@@ -377,6 +432,12 @@ fn claude(
     });
     if let Some(key_file) = key_file {
         settings["apiKeyHelper"] = format!("/bin/cat '{key_file}'").into();
+    }
+    if installed.is_some_and(Installed::runs_hooks) {
+        let removed = settings
+            .as_object_mut()
+            .and_then(|fields| fields.remove("disableAllHooks"));
+        assert_eq!(removed, Some(serde_json::Value::Bool(true)));
     }
     let mut arguments = vec![
         "--strict-mcp-config".to_owned(),
@@ -408,20 +469,37 @@ fn claude(
     if let Some(model) = &request.model {
         arguments.extend(["--model".to_owned(), model.clone()]);
     }
+    let native = installed.is_some_and(Installed::native_team);
+    if native && !request.tools {
+        return Err(failure("launch_native_team_needs_tools"));
+    }
     if request.tools {
         arguments.extend(CLAUDE_TOOLS_ON.map(str::to_owned));
-        arguments.push(CLAUDE_DENY_FLAG.to_owned());
-        arguments.extend(CLAUDE_BUILT_IN_AGENTS.map(str::to_owned));
     } else {
         arguments.extend(CLAUDE_TOOLS_OFF.map(str::to_owned));
     }
-    if !matches!(request.account, AccountBinding::Subscription { .. }) {
-        arguments.push("--bare".to_owned());
+    let denied = claude_denied(request.tools, native, installed);
+    if !denied.is_empty() {
+        arguments.push(CLAUDE_DENY_FLAG.to_owned());
+        arguments.extend(denied);
+    }
+    if native {
+        arguments.extend(CLAUDE_TEAMMATE_MODE.map(str::to_owned));
+    }
+    if claude_bare(&request.account) {
+        arguments.push(CLAUDE_BARE.to_owned());
     }
     Ok(arguments)
 }
 
-fn claude_environment(request: &LaunchRequest, home: &str) -> Vec<(String, String)> {
+/// Builds Claude Code's own variables for one launch. A native-team lead also gets agent
+/// teams turned on and the command its teammates run. Inputs: the request, the agent home
+/// and, for a native-team lead, the teammate command path. Output: the variables.
+fn claude_environment(
+    request: &LaunchRequest,
+    home: &str,
+    teammates: Option<&str>,
+) -> Vec<(String, String)> {
     let mut environment = vec![
         ("CLAUDE_CONFIG_DIR".to_owned(), home.to_owned()),
         (
@@ -437,6 +515,18 @@ fn claude_environment(request: &LaunchRequest, home: &str) -> Vec<(String, Strin
     ];
     if request.tools {
         environment.push(("SHELL".to_owned(), "/bin/zsh".to_owned()));
+        environment.push((
+            CLAUDE_MCP_CONNECT_LIMIT.0.to_owned(),
+            CLAUDE_MCP_CONNECT_LIMIT.1.to_owned(),
+        ));
+    }
+    if let Some(command) = teammates {
+        assert!(request.tools);
+        environment.push((
+            CLAUDE_AGENT_TEAMS.0.to_owned(),
+            CLAUDE_AGENT_TEAMS.1.to_owned(),
+        ));
+        environment.push((CLAUDE_TEAMMATE_COMMAND.to_owned(), command.to_owned()));
     }
     if matches!(request.account, AccountBinding::Subscription { .. }) {
         return environment;
@@ -574,6 +664,119 @@ pub fn write_key(home: &Path, key: &Secret) -> Result<PathBuf, LaunchError> {
     assert_eq!(metadata.mode() & 0o777, 0o600);
     assert_eq!(metadata.len(), key.reveal().len() as u64);
     Ok(path)
+}
+
+/// Puts the folder of the tmux program a native-team lead splits teammate panes with at the
+/// end of its PATH, unless PATH already names it, so no other program in that folder hides
+/// one the agent finds first. Inputs: the variables and the tmux program. Output: Ok, or
+/// `launch_path_invalid`.
+fn tmux_on_path(env: &mut [(String, String)], tmux: &Path) -> Result<(), LaunchError> {
+    let folder = tmux
+        .parent()
+        .map(text)
+        .transpose()?
+        .filter(|folder| !folder.is_empty() && !folder.contains(':'))
+        .ok_or_else(|| failure("launch_path_invalid"))?;
+    let (_, path) = env
+        .iter_mut()
+        .find(|(name, _)| name == "PATH")
+        .ok_or_else(|| failure("launch_path_invalid"))?;
+    if !path.split(':').any(|entry| entry == folder) {
+        path.push(':');
+        path.push_str(&folder);
+    }
+    assert!(path.split(':').any(|entry| entry == folder));
+    Ok(())
+}
+
+/// Writes the command a native-team lead's Claude Code runs for each teammate
+/// (`CLAUDE_CODE_TEAMMATE_COMMAND`): the lead's executable and variables, the teammates'
+/// instruction file and `--bare`, which Claude Code does not pass on, and Agent and TeamCreate
+/// denied. Claude Code 2.1.309 appends the lead's `--mcp-config`, `--strict-mcp-config`,
+/// `--plugin-dir`, `--settings`, deny rules and tools itself, so the script repeats none of
+/// them and no MCP server loads twice. It runs in the lead's pane, inside the lead's sandbox.
+/// Inputs: the agent home, the lead's built command, its request and what its teammates get.
+/// Output: Ok, or a plain code.
+#[cfg(unix)]
+pub fn write_teammate_command(
+    home: &Path,
+    built: &InteractiveCommand,
+    request: &LaunchRequest,
+    team: &NativeTeam,
+) -> Result<(), LaunchError> {
+    let refused = || failure("launch_teammate_command_invalid");
+    let start = if built.argv.first().map(String::as_str) == Some(SANDBOX_EXEC) {
+        3
+    } else {
+        0
+    };
+    let executable = built.argv.get(start).ok_or_else(refused)?;
+    let instructions = text(&team.instructions)?;
+    let mut words = vec!["/usr/bin/env".to_owned()];
+    words.extend(
+        built
+            .env
+            .iter()
+            .map(|(name, value)| format!("{name}={value}")),
+    );
+    words.extend([
+        executable.clone(),
+        CLAUDE_INSTRUCTIONS_FLAG.to_owned(),
+        instructions,
+    ]);
+    if built.argv[start..]
+        .iter()
+        .any(|argument| argument == CLAUDE_BARE)
+    {
+        words.push(CLAUDE_BARE.to_owned());
+    }
+    words.push(CLAUDE_DENY_FLAG.to_owned());
+    words.extend(CLAUDE_NATIVE_TEAM_TOOLS.map(str::to_owned));
+    let mut script = String::from("#!/bin/sh\nexec");
+    for word in &words {
+        if word.is_empty() || word.chars().any(char::is_control) {
+            return Err(refused());
+        }
+        script.push_str(" '");
+        script.push_str(&word.replace('\'', "'\\''"));
+        script.push('\'');
+    }
+    script.push_str(" \"$@\"\n");
+    if script.len() > TEAMMATE_SCRIPT_BYTES_MAX {
+        return Err(refused());
+    }
+    if let Some(key) = request.account.key() {
+        assert!(!script.contains(key.reveal()));
+    }
+    let path = crate::launch_context::teammate_command(home);
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o700)
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::CLOEXEC).bits() as i32)
+        .open(&path)
+        .map_err(|_| failure("launch_teammate_command_unavailable"))?;
+    file.write_all(script.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|_| failure("launch_teammate_command_unavailable"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| failure("launch_teammate_command_unavailable"))?;
+    assert_eq!(metadata.mode() & 0o777, 0o700);
+    assert_eq!(metadata.len(), script.len() as u64);
+    Ok(())
+}
+
+/// Refuses a native-team lead where no tmux teammate panes exist. Takes the agent home,
+/// command, request and team, all unused. Returns `launch_teammate_command_unavailable`.
+#[cfg(not(unix))]
+pub fn write_teammate_command(
+    _home: &Path,
+    _built: &InteractiveCommand,
+    _request: &LaunchRequest,
+    _team: &NativeTeam,
+) -> Result<(), LaunchError> {
+    Err(failure("launch_teammate_command_unavailable"))
 }
 
 /// Refuses to write an account key file where no owner-only 0600 file can be made.

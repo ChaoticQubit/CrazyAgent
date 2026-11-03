@@ -1,5 +1,5 @@
 use super::*;
-use crate::landing::{AcceptOutcome, ChangeDiff, ChangeSetId, ChangeSetView};
+use crate::landing::{AcceptOutcome, ChangeDiff, ChangeSetId, ChangeSetView, TargetBranches};
 use crate::protocol::ProjectId;
 
 impl OwnerController {
@@ -36,6 +36,28 @@ impl OwnerController {
         self.changes_client()?
             .accept_changes(id, expected_head, message)
             .await
+    }
+
+    /// Lands a change set as one squash commit on a chosen local branch; a branch not
+    /// checked out moves as a ref and the owner's files stay as they are. Inputs: the
+    /// change set, the reviewed head, the edited message and the target branch, None for
+    /// the checked-out one. Output: the landed commit and branch, or the conflicting files.
+    pub async fn accept_changes_into(
+        &self,
+        id: ChangeSetId,
+        expected_head: String,
+        message: Option<String>,
+        target: Option<String>,
+    ) -> Result<AcceptOutcome, EngineError> {
+        self.changes_client()?
+            .accept_changes_into(id, expected_head, message, target)
+            .await
+    }
+
+    /// Lists the local branches a change set can be accepted onto and the checked-out
+    /// one. Input: the change set. Output: the branches, or a `CHANGES_CODES` refusal.
+    pub async fn change_branches(&self, id: ChangeSetId) -> Result<TargetBranches, EngineError> {
+        self.changes_client()?.change_branches(id).await
     }
 
     /// Discards a change set, keeping it restorable. Inputs: the change set and the head
