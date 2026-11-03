@@ -116,6 +116,18 @@ pub fn is_teammate_branch(task: &str, branch: &str) -> bool {
         .is_some_and(|name| !name.is_empty())
 }
 
+/// Tells whether a branch is the one a named native teammate works on inside a harness's
+/// clone (DEC-111 Q17): `<task branch>--<name>` with the name as the teammate gives it, or
+/// as [`teammate_branch`] spells it. Inputs: the task branch, the teammate's name and the
+/// branch. Output: the answer.
+pub fn is_teammates_own_branch(task: &str, teammate: &str, branch: &str) -> bool {
+    branch
+        .strip_prefix(task)
+        .and_then(|rest| rest.strip_prefix(TEAMMATE_SEPARATOR))
+        == Some(teammate)
+        || teammate_branch(task, teammate).as_deref() == Some(branch)
+}
+
 /// Says whether a native teammate's name can name its worktree folder under
 /// `TEAMMATES_FOLDER`: 1 to `WORKTREE_NAME_BYTES_MAX` bytes of letters, digits, `-`, `_`
 /// and `.`, not starting with a dot, and not the name Claude Code gives the lead. Input:
