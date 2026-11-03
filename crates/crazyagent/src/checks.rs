@@ -41,6 +41,10 @@ pub const HOLDOUT_FILES_STORED_MAX: i64 = 1024;
 /// The most proposals one master or agent keeps waiting in a project; its next one makes
 /// room by removing its own oldest.
 pub const PENDING_PER_PROPOSER_MAX: i64 = 16;
+/// The most profile summaries one `profiles` page lists; two pages hold every kept profile.
+pub const PROFILES_PAGE_MAX: usize = 128;
+
+const _: () = assert!(2 * PROFILES_PAGE_MAX as i64 >= PROFILES_KEPT_MAX);
 
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS check_profiles (
     project TEXT NOT NULL,
@@ -110,6 +114,32 @@ pub struct StoredProfile {
     pub revoked_ms: Option<i64>,
     pub question: Option<u64>,
     pub state: ProfileState,
+}
+
+/// One stored profile as a list of profiles shows it, without its body: its id and state,
+/// who proposed it and when, when it was last approved or revoked, its owner question, and
+/// how many checks and holdouts it holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileSummary {
+    pub id: ProfileId,
+    pub state: ProfileState,
+    pub proposed_by: String,
+    pub proposed_ms: i64,
+    pub approved_ms: Option<i64>,
+    pub revoked_ms: Option<i64>,
+    pub question: Option<u64>,
+    pub checks: u32,
+    pub holdouts: u32,
+}
+
+/// One page of a project's stored profiles, newest first, and the cursor of the page after
+/// it, none on the last page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfilePage {
+    pub profiles: Vec<ProfileSummary>,
+    pub next: Option<u64>,
 }
 
 /// One `check_profiles` row as stored, with whether it is the project's current profile.
@@ -323,6 +353,18 @@ pub fn show(
     id: &ProfileId,
 ) -> Result<Option<StoredProfile>, CheckRefusal> {
     stored(db, project, id)
+}
+
+/// Lists one page of a project's stored profiles, newest first, at most
+/// `PROFILES_PAGE_MAX`, without their bodies. Inputs: the engine connection, the project and
+/// the `next` of the page before, none for the first. Output: the page, or
+/// `checks_project_missing` or `checks_unavailable`.
+pub fn profiles(
+    db: &Connection,
+    project: &ProjectId,
+    after: Option<u64>,
+) -> Result<ProfilePage, CheckRefusal> {
+    todo!()
 }
 
 /// The project's current admitted profile. Inputs: the engine connection or a transaction

@@ -43,6 +43,7 @@ mod account_profile;
 pub(crate) mod accounts;
 pub(crate) mod agents;
 pub(crate) mod changes;
+pub(crate) mod checks;
 pub(crate) mod cleanup;
 mod github;
 mod harness_catalog;
@@ -2049,6 +2050,7 @@ enum Protocol {
     IdeExtensions,
     Recovery,
     Questions,
+    Checks,
     Tracker,
     NativeAuth,
     Process,
@@ -2082,6 +2084,7 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("ide_extensions", Protocol::IdeExtensions),
         ("recovery", Protocol::Recovery),
         ("questions", Protocol::Questions),
+        ("checks", Protocol::Checks),
         ("tracker", Protocol::Tracker),
         ("native_auth", Protocol::NativeAuth),
         ("process", Protocol::Process),
@@ -2153,6 +2156,7 @@ async fn serve_admitted(
             Protocol::Usage => return Ok(Some(Deferred::Usage(a))),
             Protocol::Recovery => return Ok(Some(Deferred::Recovery(a))),
             Protocol::Questions => return Ok(Some(Deferred::Questions(a))),
+            Protocol::Checks => return Ok(Some(Deferred::Checks(a))),
             Protocol::Tracker => return Ok(Some(Deferred::Tracker(a))),
             Protocol::NativeAuth => {
                 return native_auth::serve(stream, engine, authority, auth, &a, body)
@@ -2327,6 +2331,10 @@ async fn serve_admitted(
             let served = questions::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(questions::QUESTIONS_TIMEOUT, served).await;
         }
+        Deferred::Checks(a) => {
+            let served = checks::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(checks::CHECKS_TIMEOUT, served).await;
+        }
         Deferred::Tracker(a) => {
             let served = tracker::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(tracker::TRACKER_TIMEOUT, served).await;
@@ -2391,7 +2399,8 @@ struct Tasks {
 /// owner's checkout, IDE extension approvals, which download and check a VSIX, Recovery
 /// requests, which wait for the action ledger under the owner barrier, IDE tab requests,
 /// which wait for an IDE server to start, Questions requests, which wait for the database
-/// write lock and rewrite a project's questions page, Tracker requests, which wait for the
+/// write lock and rewrite a project's questions page, Checks requests, which wait for the
+/// same lock and start check runners, Tracker requests, which wait for the
 /// same lock and rewrite a project's ticket view, Cleanup requests, which size and
 /// remove finished agents' worktrees and folders, skill import scans and imports, which
 /// copy skill folders, and Usage requests, which read and write the usage store. Each
@@ -2408,6 +2417,7 @@ enum Deferred {
     Ide(Admission),
     IdeTab(Admission),
     Questions(Admission),
+    Checks(Admission),
     Tracker(Admission),
     Cleanup(Admission),
     SkillImport(Admission),
@@ -2453,6 +2463,7 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::IdeExtensions => ide_extensions::refusal(code)?,
         Protocol::Recovery => recovery::refusal(code)?,
         Protocol::Questions => questions::refusal(code)?,
+        Protocol::Checks => checks::refusal(code)?,
         Protocol::Tracker => tracker::refusal(code)?,
         Protocol::NativeAuth => native_auth::refusal(body, code)?,
         Protocol::Process => process::refusal(code)?,
