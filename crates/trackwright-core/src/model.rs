@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use std::fmt;
 
 /// The refusal codes the core itself returns. A host adds its own codes beside these.
@@ -226,6 +226,8 @@ macro_rules! named_enum {
         }
     };
 }
+
+pub(crate) use named_enum;
 
 named_enum! {
     /// What a ticket is: new work, a defect, upkeep, or a time-boxed investigation.
@@ -492,7 +494,8 @@ impl fmt::Display for ShortId {
 
 /// Who acts: a host-set identity (`owner`, `master:<session>`, `agent:<team id>`) or a
 /// standalone self-declared name. 1 to 128 bytes of letters, digits and `: _ . - @ /`.
-/// The `host:` prefix belongs to the core's own writes (for example `host:evidence`).
+/// The `host:` prefix belongs to the core's own writes (for example `host:evidence`), so
+/// `new`, `TryFrom` and deserializing refuse it; only the core's stored rows read it back.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Actor(String);
@@ -501,7 +504,7 @@ impl Actor {
     /// Checks a caller's identity. Input: the text. Output: the actor, or `actor_invalid`
     /// for a bad shape or the reserved `host:` prefix.
     pub fn new(text: &str) -> Result<Self, Refusal> {
-        let actor = Self::shaped(text)?;
+        let actor = Self::stored(text)?;
         if actor.is_host() {
             return Err(Refusal::new(
                 codes::ACTOR_INVALID,
@@ -529,7 +532,9 @@ impl Actor {
         &self.0
     }
 
-    fn shaped(text: &str) -> Result<Self, Refusal> {
+    /// Reads an actor the core stored itself, its own `host:` actors included. Input: the
+    /// stored text. Output: the actor, or `actor_invalid` for a bad shape.
+    pub(crate) fn stored(text: &str) -> Result<Self, Refusal> {
         if text.is_empty() || text.len() > ACTOR_BYTES_MAX || !text.bytes().all(actor_byte) {
             return Err(Refusal::new(
                 codes::ACTOR_INVALID,
@@ -540,6 +545,19 @@ impl Actor {
     }
 }
 
+fn stored_actor<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Actor, D::Error> {
+    Actor::stored(&String::deserialize(deserializer)?).map_err(de::Error::custom)
+}
+
+fn stored_actor_option<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Actor>, D::Error> {
+    Option::<String>::deserialize(deserializer)?
+        .map(|text| Actor::stored(&text))
+        .transpose()
+        .map_err(de::Error::custom)
+}
+
 fn actor_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b':' | b'_' | b'.' | b'-' | b'@' | b'/')
 }
@@ -548,7 +566,7 @@ impl TryFrom<String> for Actor {
     type Error = Refusal;
 
     fn try_from(text: String) -> Result<Self, Refusal> {
-        Self::shaped(&text)
+        Self::new(&text)
     }
 }
 
@@ -723,11 +741,14 @@ pub struct Ticket {
     pub(crate) version_id: Option<i64>,
     pub(crate) cycle_id: Option<i64>,
     pub(crate) parent_id: Option<i64>,
+    #[serde(deserialize_with = "stored_actor_option")]
     pub assignee: Option<Actor>,
+    #[serde(deserialize_with = "stored_actor")]
     pub created_by: Actor,
     pub created_ms: i64,
     pub updated_ms: i64,
     pub closed_ms: Option<i64>,
+    #[serde(deserialize_with = "stored_actor_option")]
     pub closed_by: Option<Actor>,
     pub close_reason: Option<String>,
     pub version: i64,
@@ -763,6 +784,7 @@ pub struct Evidence {
     pub(crate) check: i64,
     pub result: EvidenceResult,
     pub reference: String,
+    #[serde(deserialize_with = "stored_actor")]
     pub recorded_by: Actor,
     pub recorded_ms: i64,
 }
@@ -774,6 +796,7 @@ pub struct Link {
     pub(crate) ticket: i64,
     pub kind: String,
     pub target: String,
+    #[serde(deserialize_with = "stored_actor")]
     pub created_by: Actor,
     pub created_ms: i64,
 }
