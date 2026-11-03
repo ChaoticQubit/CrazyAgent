@@ -209,6 +209,7 @@ pub(in crate::tui) struct ProjectPage {
     assigning: Option<(Option<CredentialRef>, Option<String>)>,
     recording: Option<u64>,
     access_wanted: Option<AgentAccess>,
+    live_wanted: bool,
     created_access: Option<u64>,
     master: MasterState,
     master_sent: Vec<MasterSent>,
@@ -272,6 +273,7 @@ impl ProjectPage {
             assigning: None,
             recording: None,
             access_wanted: None,
+            live_wanted: false,
             created_access: None,
             master: MasterState::default(),
             master_sent: Vec::new(),
@@ -872,14 +874,27 @@ impl ProjectPage {
         }
     }
 
-    /// Turns the project's live master switch on, for a new session the owner asked for.
-    /// Takes the context; the change goes out with a fresh generation.
-    fn turn_live_on(&self, ctx: &mut Ctx) {
+    /// Turns the project's live master switch on, for a new session the owner asked for: it
+    /// reads the team status first and switches at the team settings version read, since
+    /// the switch is a versioned team setting (DEC-098). Takes the context; the replies
+    /// arrive later.
+    fn turn_live_on(&mut self, ctx: &mut Ctx) {
+        self.live_wanted = true;
+        self.send(
+            SetupQuery::Team {
+                project: self.screen.project.clone(),
+            },
+            ctx,
+        );
+    }
+
+    fn send_live_on(&self, version: u64, ctx: &mut Ctx) {
         let generation = ctx.next_generation();
         ctx.request(Request::Setup(SetupQuery::TeamChange {
             action: crate::team::TeamAction::LiveMaster {
                 project_id: self.screen.project.clone(),
                 on: true,
+                version,
             },
             generation,
         }));
@@ -924,6 +939,21 @@ impl ProjectPage {
                 Err(code) => Self::stays_sandboxed(&plain_problem(code), ctx),
                 Ok(_) => Self::stays_sandboxed(&plain_problem("change_outcome_unknown"), ctx),
             }
+            return;
+        }
+        if matches!(query, SetupQuery::Team { .. }) && std::mem::take(&mut self.live_wanted) {
+            let why = match &event.result {
+                Ok(SetupView::Team(status)) => {
+                    self.send_live_on(status.settings_version, ctx);
+                    return;
+                }
+                Err(code) => plain_problem(code),
+                Ok(_) => plain_problem("change_outcome_unknown"),
+            };
+            ctx.say(Message::warning(
+                "The live master was not turned on for the new session.",
+                &why,
+            ));
             return;
         }
         let SetupQuery::Change { action, generation } = &query else {
