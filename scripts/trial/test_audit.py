@@ -144,6 +144,15 @@ class World:
         return record
 
 
+
+def recorded_ids():
+    """The check ids a default audit run records: audit.py's own checks and every committed
+    scripts/trial/audit4 module. Takes nothing. Returns the ids sorted, as the record file
+    names list them."""
+    own = {check["id"] for check in audit.CHECKS}
+    return sorted(own | {check["id"] for check in audit.load_audit4(audit.AUDIT4, own)})
+
+
 class AuditTests(unittest.TestCase):
     def setUp(self):
         self.folder = tempfile.TemporaryDirectory(prefix="ca-audit-")
@@ -733,8 +742,8 @@ class AuditTests(unittest.TestCase):
         )
         self.assertIn(done.returncode, (0, 1), done.stderr)
         written = sorted(p.stem for p in (w.out / "checks").glob("*.json"))
-        self.assertEqual(written, [check["id"] for check in audit.CHECKS])
-        self.assertEqual(len(written), 25)
+        self.assertEqual(written, recorded_ids())
+        self.assertEqual(sum(name.startswith("T3-") for name in written), 25)
         for name in written:
             record = json.loads((w.out / "checks" / f"{name}.json").read_text())
             self.assertEqual(set(record), {"id", "title", "proves", "why", "how", "result", "detail", "evidence"})
@@ -751,7 +760,7 @@ class AuditTests(unittest.TestCase):
         argv = ["python3", "-I", str(HERE / "audit.py"), PROJECT, "--engine", str(w.root), "--evidence", str(w.out), "--project-mark", MARK]
         done = subprocess.run(argv, capture_output=True, text=True, env=w.env, timeout=120)
         self.assertIn(done.returncode, (0, 1), done.stdout + done.stderr)
-        self.assertEqual(sorted(p.stem for p in (w.out / "checks").glob("*.json")), [check["id"] for check in audit.CHECKS])
+        self.assertEqual(sorted(p.stem for p in (w.out / "checks").glob("*.json")), recorded_ids())
         self.assertIn("SUMMARY project=trial", done.stdout)
 
     def test_secrets_across_a_cut_are_masked_before_the_cut(self):
