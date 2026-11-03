@@ -609,9 +609,9 @@ impl From<io::Error> for SandboxError {
 
 /// The Seatbelt boundary for one agent of one project: writes only inside the
 /// project folder (never its `context/` or git hooks and config), the agent's
-/// worktrees and its own home and temp dirs, never the launch files the engine
-/// writes in that home, reads of system paths plus those roots, and network per
-/// [`SandboxNetwork`].
+/// worktrees and its own home and temp dirs, never the launch files, instructions,
+/// skills or settings its harness loads from that home, reads of system paths plus
+/// those roots, and network per [`SandboxNetwork`].
 #[derive(Debug, Clone)]
 pub struct ProjectSandbox {
     project_root: PathBuf,
@@ -2282,42 +2282,83 @@ fn clear_of_secrets(root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError
     Ok(())
 }
 
-/// The Seatbelt rules that keep an agent from changing what the engine writes in its own home
-/// before each launch and its harness reads as instructions, skills or hooks (LL-2): no write
-/// in the launch folder, the relay plugin or the Codex skill copies, none to the global
-/// instruction files of Claude Code and Codex, the Codex override that would replace them or
-/// the Codex `config.toml` holding its developer instructions, and no move or removal of the
-/// `skills` folder, so no folder built elsewhere is moved in over the copies, each name in
-/// any letter case. Its own run cannot change the text it runs with until the next launch
-/// rewrites it. They must follow every write allow. Input: the home. Output: the rule text.
+/// The Seatbelt rules that keep an agent from changing what its harness loads from its own
+/// home as instructions, skills, hooks or settings (LL-2): no write in the launch folder or
+/// the relay plugin the engine writes before each launch, nor in the subagents, commands,
+/// output styles and rules folders Claude Code reads, none to the global instruction files
+/// of Claude Code and Codex, the Codex override that would replace them, the Codex
+/// `config.toml` holding its developer instructions or Claude Code's `settings.json`, none
+/// under `skills` but Codex's own `.system` skills, which Codex installs at its start, and no
+/// move or removal of the `skills` folder, so no folder built elsewhere is moved in, each
+/// name in any letter case. Its own run cannot change the text it runs with until the next
+/// launch rewrites it. They must follow every write allow. Input: the home. Output: the
+/// rule text.
 fn launch_denies(home: &Path) -> String {
     use crate::agent_home::Harness;
     use crate::launch_context::STATE;
     let home = seatbelt_pattern(home);
     let skills = format!("{home}/{}", any_case("skills"));
     let folders = [
-        format!("{home}/{}", any_case(STATE)),
-        format!("{home}/{}", any_case(crate::coord::relay::PLUGIN_FOLDER)),
-        format!("{skills}/{}", any_case(STATE)),
+        STATE,
+        crate::coord::relay::PLUGIN_FOLDER,
+        "agents",
+        "commands",
+        "output-styles",
+        "rules",
     ];
     let files = [
         Harness::Claude.instruction_file(),
         Harness::Codex.instruction_file(),
         "AGENTS.override.md",
         "config.toml",
+        "settings.json",
     ];
     let mut text = String::from("(deny file-write*\n");
-    for folder in &folders {
-        text.push_str(&format!("  (regex #\"^{folder}(/.*)?$\")\n"));
+    for folder in folders {
+        text.push_str(&format!(
+            "  (regex #\"^{home}/{}(/.*)?$\")\n",
+            any_case(folder)
+        ));
     }
     for file in files {
         text.push_str(&format!("  (regex #\"^{home}/{}$\")\n", any_case(file)));
     }
     text.push_str(&format!(
-        "  )\n(deny {PINNED_WRITES} (regex #\"^{skills}$\"))\n"
+        "  (regex #\"^{skills}/{}\"))\n(deny {PINNED_WRITES} (regex #\"^{skills}$\"))\n",
+        other_than(".system")
     ));
-    assert_eq!(text.matches("(regex #\"^/").count(), 8);
+    assert_eq!(text.matches("(regex #\"^/").count(), 13);
     text
+}
+
+/// Spells a Seatbelt regex for one path component other than `name` in any letter case,
+/// with whatever follows it: a component that differs from `name` at some character, stops
+/// short of it or runs past it. Input: a name of letters, digits and dots. Output: the
+/// pattern text, a group without anchors.
+fn other_than(name: &str) -> String {
+    assert!(
+        !name.is_empty()
+            && name
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '.')
+    );
+    let characters: Vec<char> = name.chars().collect();
+    let mut alternatives = Vec::with_capacity(2 * characters.len());
+    for at in 0..characters.len() {
+        let prefix = any_case(&characters[..at].iter().collect::<String>());
+        let character = characters[at];
+        alternatives.push(format!(
+            "{prefix}[^{}{}/]",
+            character.to_ascii_lowercase(),
+            character.to_ascii_uppercase()
+        ));
+        if at > 0 {
+            alternatives.push(format!("{prefix}(/|$)"));
+        }
+    }
+    alternatives.push(format!("{}[^/]", any_case(name)));
+    assert_eq!(alternatives.len(), 2 * characters.len());
+    format!("({})", alternatives.join("|"))
 }
 
 /// The Seatbelt rules that keep a shared team folder free of links and moved-in folders: no
