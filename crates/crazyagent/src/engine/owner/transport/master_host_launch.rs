@@ -1576,6 +1576,10 @@ mod tests {
                 .contains("(allow network-outbound (remote ip \"*:443\"))")
         );
         assert!(!sandbox.sandbox().profile().contains("(allow network*)"));
+        assert!(sandbox.sandbox().profile().contains(&format!(
+            "(allow process-exec\n  (literal \"{}\"))\n",
+            std::fs::canonicalize(&executable).unwrap().display()
+        )));
 
         let master = master_command(&executable, &home, &worktree, "admitted-model", None).unwrap();
         let wrapped = sandbox.wrap(&master).unwrap();
