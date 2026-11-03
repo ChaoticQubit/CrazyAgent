@@ -16,7 +16,7 @@ pub const TESTS_ARGS_BYTES_MAX: usize = 2 * 1024;
 /// The most bytes a checks request takes as JSON, room for the largest profile text.
 pub const CHECKS_REQUEST_BYTES_MAX: usize = 48 * 1024;
 /// The checks operations the window sends. Holdout files never pass through the window.
-pub const CHECKS_OPS: [&str; 10] = [
+pub const CHECKS_OPS: [&str; 11] = [
     "profile_propose",
     "profiles",
     "profile_show",
@@ -27,6 +27,7 @@ pub const CHECKS_OPS: [&str; 10] = [
     "run",
     "cancel",
     "runs",
+    "gate",
 ];
 /// The checks operations that also read or write the app's defaults, sent with no project.
 pub const APP_CHECKS_OPS: [&str; 2] = ["settings_show", "settings_save"];

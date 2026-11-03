@@ -276,7 +276,7 @@ fn window_args(op: &str) -> Value {
         "settings_show" => json!({}),
         "settings_save" => json!({ "values": { "gate": "warn", "parallel": 2 }, "version": 4 }),
         "run" => json!({ "change_set": CHANGE_SET, "checks": [] }),
-        "cancel" | "runs" => json!({ "change_set": CHANGE_SET }),
+        "cancel" | "runs" | "gate" => json!({ "change_set": CHANGE_SET }),
         other => panic!("{other} has window arguments"),
     }
 }
@@ -307,6 +307,20 @@ fn every_checks_op_the_window_sends_builds_its_request() {
         ChecksRequest::SettingsShow {
             project: Some(project)
         }
+    );
+}
+
+#[test]
+fn the_window_sends_exactly_the_bridges_checks_ops() {
+    let window = include_str!("../../src/api-checks.ts");
+    let start = window
+        .find("export type ChecksOp =")
+        .expect("the window's op list");
+    let line = window[start..].lines().next().expect("one line");
+    let sent: Vec<&str> = line.split('"').skip(1).step_by(2).collect();
+    assert_eq!(
+        sent, CHECKS_OPS,
+        "the window and the bridge list the same ops"
     );
 }
 

@@ -888,18 +888,19 @@ export type GateMode = typeof GATE_MODES[number];
 export type RemovedTests = "flag" | "refuse" | "off";
 
 /** What the gate says about a change set, once the engine joins it to `runs`. */
-export interface GateNote { gate: GateMode; removed_tests: RemovedTests; head: string; profile: string | null; gaps: { code: string; check: string | null; run: string | null; paths: string[]; paths_total: number }[] }
+export interface GateGap { code: string; check: string | null; run: string | null; paths: string[]; paths_total: number }
 
-/** A change set's checks: its jobs, the latest run per check and, when the engine sends it,
- * the gate's note. */
-export interface ChangeSetChecks { jobs: CheckJob[]; latest: LatestRun[]; gate?: GateNote }
+/** What Accept would meet at a change set's head, as the engine's gate reads it now: the gate
+ * and removed tests settings in effect, the head and profile, the code Accept would be refused
+ * with (null when it may go ahead), the first gaps and how many there are. */
+export interface GateView { gate: GateMode; removed_tests: RemovedTests; head: string; profile: string | null; refusal: string | null; gaps: GateGap[]; gaps_total: number }
 
-/** The gate's gap codes in precedence order; the first two block Accept under warn too, and
- * removed tests do when `removed_tests` is `refuse`. */
+/** A change set's checks: its jobs, the latest run per check and the gate's view. */
+export interface ChangeSetChecks { jobs: CheckJob[]; latest: LatestRun[]; gate: GateView }
+
+/** The gate's gap codes in precedence order. */
 export const GATE_CODES = ["checks_protected_change", "checks_new_skips", "checks_tests_removed", "checks_failed", "checks_stale", "checks_not_run"] as const;
 export type GateCode = typeof GATE_CODES[number];
-
-const HARD_GAPS: readonly string[] = ["checks_protected_change", "checks_new_skips"];
 
 const GATE_TEXT: Record<GateCode, string> = {
   checks_protected_change: "This change touches a protected path.",
@@ -910,26 +911,33 @@ const GATE_TEXT: Record<GateCode, string> = {
   checks_not_run: "A required check hasn't run on this change yet.",
 };
 
-/** Whether a gap blocks Accept under a gate mode: off blocks nothing; warn a protected path,
- * a new skip marker, and removed tests when `removed_tests` is `refuse`; require every gap.
- * Inputs: the mode, what removed tests do and the gap code. Output: true when Accept refuses. */
-export function gapBlocks(mode: GateMode, removed: RemovedTests, code: string): boolean {
-  assert(among(GATE_MODES, mode), `${mode} is a gate mode`);
-  if (mode === "off") return false;
-  if (code === "checks_tests_removed") return removed !== "off" && (mode === "require" || removed === "refuse");
-  return mode === "require" || HARD_GAPS.includes(code);
+/** One gap in plain words. Input: the gap's code. Output: the sentence. */
+export function gapText(code: string): string {
+  return Object.hasOwn(GATE_TEXT, code) ? GATE_TEXT[code as GateCode] : checksRefusal({ code });
 }
 
-/** The gate's line for a change set and its tone. Input: the gate's note. Output: the line. */
-export function gateLine(note: GateNote): { text: string; tone: "ok" | "warn" | "danger" | "neutral" } {
-  if (note.gate === "off") return { text: "Checks don't affect Accept for this project.", tone: "neutral" };
-  const gap = note.gaps[0];
-  if (gap === undefined) return { text: "Every required check passed on this change.", tone: "ok" };
-  const said = Object.hasOwn(GATE_TEXT, gap.code) ? GATE_TEXT[gap.code as GateCode] : checksRefusal({ code: gap.code });
-  const others = note.gaps.length - 1;
-  const more = others > 0 ? ` ${others} more ${others === 1 ? "gap" : "gaps"} below.` : "";
-  return gapBlocks(note.gate, note.removed_tests, gap.code) ? { text: `${said} Accept is blocked until this is fixed.${more}`, tone: "danger" }
-    : { text: `${said} Accept will go ahead and note it.${more}`, tone: "warn" };
+/** A gap's first paths or test names and how many more there are, as the engine sent them;
+ * the view escapes hidden characters. Input: the gap. Output: the line. */
+export function pathsLine(gap: GateGap): string {
+  assert(gap.paths.length <= gap.paths_total, "a gap counts every path it names");
+  const more = gap.paths_total - gap.paths.length;
+  assert(more >= 0, "no gap names more paths than it has");
+  return `${gap.paths.join(", ")}${more > 0 ? ` and ${more} more` : ""}`;
+}
+
+/** The gate's line for a change set and its tone. Whether Accept is blocked is the engine's
+ * call: its refusal code, never one the window works out. Input: the gate's view. Output: the
+ * line. */
+export function gateLine(view: GateView): { text: string; tone: "ok" | "warn" | "danger" | "neutral" } {
+  assert(among(GATE_MODES, view.gate), `${view.gate} is a gate mode`);
+  assert(view.gaps.length <= view.gaps_total, "the gate counts every gap it lists");
+  if (view.gate === "off") return { text: "Checks don't affect Accept for this project.", tone: "neutral" };
+  if (view.gaps_total === 0) return { text: "Every required check passed on this change.", tone: "ok" };
+  const others = view.gaps_total - 1;
+  const more = others > 0 ? ` ${others} more ${others === 1 ? "gap" : "gaps"}.` : "";
+  if (view.refusal !== null) return { text: `${gapText(view.refusal)} Accept is blocked until this is fixed.${more}`, tone: "danger" };
+  const first = view.gaps[0];
+  return { text: `${first === undefined ? "The gate found a gap." : gapText(first.code)} Accept will go ahead and note it.${more}`, tone: "warn" };
 }
 
 const REFUSALS: Record<string, string> = {
@@ -1014,10 +1022,11 @@ export type ChecksReply =
   | { kind: "saved"; saved: { outcome: "saved"; version: number } | { outcome: "stale"; current: number } }
   | { kind: "queued"; batch: string }
   | { kind: "cancelled"; jobs: number }
-  | { kind: "runs"; jobs: CheckJob[]; latest: LatestRun[]; gate?: GateNote };
+  | { kind: "runs"; jobs: CheckJob[]; latest: LatestRun[] }
+  | { kind: "gate"; gate: GateView };
 
 /** The checks ops the window sends. */
-export type ChecksOp = "profile_propose" | "profiles" | "profile_show" | "profile_approve" | "profile_revoke" | "settings_show" | "settings_save" | "run" | "cancel" | "runs";
+export type ChecksOp = "profile_propose" | "profiles" | "profile_show" | "profile_approve" | "profile_revoke" | "settings_show" | "settings_save" | "run" | "cancel" | "runs" | "gate";
 
 async function checksCall<K extends ChecksReply["kind"]>(projectId: string | null, op: ChecksOp, args: Record<string, unknown>, kind: K): Promise<Result<Extract<ChecksReply, { kind: K }>>> {
   assert(!Object.hasOwn(args, "project"), "the bridge names the project");
@@ -1082,13 +1091,16 @@ export async function revokeProfile(projectId: string, id: string): Promise<Resu
   return reply.kind === "ok" ? { kind: "ok", value: undefined } : reply;
 }
 
-/** Reads a change set's check jobs and latest runs. Inputs: the project and change set ids.
- * Output: the checks. */
+/** Reads a change set's check jobs, latest runs and what Accept would meet now. Inputs: the
+ * project and change set ids. Output: the checks. */
 export async function loadChangeSetChecks(projectId: string, changeSet: string): Promise<Result<ChangeSetChecks>> {
-  const reply = await checksCall(projectId, "runs", { change_set: changeSet }, "runs");
-  if (reply.kind !== "ok") return reply;
-  const { jobs, latest, gate } = reply.value;
-  return { kind: "ok", value: gate === undefined ? { jobs, latest } : { jobs, latest, gate } };
+  const [runs, gate] = await Promise.all([
+    checksCall(projectId, "runs", { change_set: changeSet }, "runs"),
+    checksCall(projectId, "gate", { change_set: changeSet }, "gate"),
+  ]);
+  if (runs.kind !== "ok") return runs;
+  if (gate.kind !== "ok") return gate;
+  return { kind: "ok", value: { jobs: runs.value.jobs, latest: runs.value.latest, gate: gate.value.gate } };
 }
 
 /** Asks for every on-request check of a change set. Inputs: the project and change set ids.

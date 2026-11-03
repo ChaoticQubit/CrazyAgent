@@ -294,7 +294,7 @@ test("the stale sentence names why a change set's run stopped counting", () => {
     { check: "unit", run_id: "CA-R7", batch: "b-1", state: "finished", verdict: "passed", commit: hex("9", 40), tree: hex("b", 40), profile: PROFILE, profile_approved_ms: APPROVED_MS, protected_touched: 0, holdout: false, finished_ms: 2_000 },
     { check: "secret", run_id: "CA-R8", batch: "b-1", state: "finished", verdict: "failed", commit: head, tree: hex("b", 40), profile: PROFILE, profile_approved_ms: APPROVED_MS, protected_touched: 1, holdout: true, finished_ms: 2_000 },
   ];
-  const html = render(createElement(tests.ChangeSetChecksView, { checks: { kind: "ok", value: { jobs: [], latest } }, head, current, busy: false, note: "", onRun: () => {}, onCancel: () => {}, onOpen: () => {}, onRetry: () => {} }));
+  const html = render(createElement(tests.ChangeSetChecksView, { checks: { kind: "ok", value: { jobs: [], latest, gate: { gate: "warn", removed_tests: "flag", head, profile: null, refusal: null, gaps: [], gaps_total: 0 } } }, head, current, busy: false, note: "", onRun: () => {}, onCancel: () => {}, onOpen: () => {}, onRetry: () => {} }));
   assert.ok(html.includes("This run covered an earlier version of the change"), "the change set view says which run is stale");
   assert.ok(html.includes("Run checks"));
   assert.ok(html.includes("Holdout"), "a holdout run is labelled");
@@ -302,25 +302,29 @@ test("the stale sentence names why a change set's run stopped counting", () => {
   assert.ok(html.includes("Failed") && html.includes("Passed"));
 });
 
-test("the gate line follows the mode: warn blocks only a protected path or a new skip", () => {
+test("the gate line says what the engine's gate says: blocked only on its refusal", () => {
   const gate = source("crates/crazyagent/src/checks/gate.rs");
   for (const code of api.GATE_CODES) assert.ok(gate.includes(`"${code}"`), `${code} is a gate code in gate.rs`);
   assert.deepEqual([...api.GATE_CODES], ["checks_protected_change", "checks_new_skips", "checks_tests_removed", "checks_failed", "checks_stale", "checks_not_run"]);
+  const owner = source("crates/crazyagent/src/engine/owner/transport/checks.rs");
+  assert.deepEqual(structFields(owner, "CheckGateView"), ["gate", "removed_tests", "head", "profile", "refusal", "gaps", "gaps_total"]);
+  assert.deepEqual(structFields(owner, "CheckGapView"), ["code", "check", "run", "paths", "paths_total"]);
   for (const code of api.GATE_CODES) {
-    assert.equal(api.gapBlocks("off", "flag", code), false);
-    assert.equal(api.gapBlocks("require", "flag", code), true);
-    assert.equal(api.gapBlocks("warn", "flag", code), code === "checks_protected_change" || code === "checks_new_skips");
-    assert.equal(api.gapBlocks("warn", "refuse", code), code === "checks_protected_change" || code === "checks_new_skips" || code === "checks_tests_removed");
-    assert.ok(api.checksRefusal({ code }).length > 10, `${code} has a sentence`);
+    assert.ok(api.gapText(code).length > 10 && api.gapText(code) === api.checksRefusal({ code }), `${code} has a sentence`);
   }
-  const note = (gate, codes) => ({ gate, removed_tests: "flag", head: COMMIT_A, profile: PROFILE, gaps: codes.map((code) => ({ code, check: "unit", run: null, paths: [], paths_total: 0 })) });
-  assert.deepEqual(api.gateLine(note("off", ["checks_failed"])), { text: "Checks don't affect Accept for this project.", tone: "neutral" });
-  assert.deepEqual(api.gateLine(note("require", [])), { text: "Every required check passed on this change.", tone: "ok" });
-  assert.equal(api.gateLine(note("warn", ["checks_failed"])).tone, "warn");
-  assert.equal(api.gateLine(note("warn", ["checks_new_skips", "checks_failed"])).text, "This change adds a skip marker to the tests. Accept is blocked until this is fixed. 1 more gap below.");
-  assert.equal(api.gateLine(note("require", ["checks_not_run"])).tone, "danger");
-  const html = render(createElement(tests.ChangeSetChecksView, { checks: { kind: "ok", value: { jobs: [], latest: [], gate: note("require", ["checks_not_run"]) } }, head: COMMIT_A, current: null, busy: false, note: "", onRun: () => {}, onCancel: () => {}, onOpen: () => {}, onRetry: () => {} }));
+  const view = (gate, codes, refusal = null, total = codes.length) => ({ gate, removed_tests: "flag", head: COMMIT_A, profile: PROFILE, refusal, gaps_total: total,
+    gaps: codes.map((code) => ({ code, check: "unit\u202e", run: null, paths: ["a.rs", "b.rs"], paths_total: 5 })) });
+  assert.deepEqual(api.gateLine(view("off", ["checks_failed"])), { text: "Checks don't affect Accept for this project.", tone: "neutral" });
+  assert.deepEqual(api.gateLine(view("require", [])), { text: "Every required check passed on this change.", tone: "ok" });
+  assert.deepEqual(api.gateLine(view("warn", ["checks_failed"])), { text: "A required check didn't pass on this change. Accept will go ahead and note it.", tone: "warn" });
+  assert.deepEqual(api.gateLine(view("warn", ["checks_new_skips", "checks_failed"], "checks_new_skips")),
+    { text: "This change adds a skip marker to the tests. Accept is blocked until this is fixed. 1 more gap.", tone: "danger" });
+  assert.equal(api.gateLine(view("require", ["checks_failed"], "checks_failed", 4)).text, "A required check didn't pass on this change. Accept is blocked until this is fixed. 3 more gaps.");
+  assert.throws(() => api.gateLine(view("require", ["checks_failed", "checks_stale"], "checks_failed", 1)), /counts every gap/);
+  const html = render(createElement(tests.ChangeSetChecksView, { checks: { kind: "ok", value: { jobs: [], latest: [], gate: view("require", ["checks_not_run"], "checks_not_run") } }, head: COMMIT_A, current: null, busy: false, note: "", onRun: () => {}, onCancel: () => {}, onOpen: () => {}, onRetry: () => {} }));
   assert.ok(html.includes("Accept is blocked until this is fixed."));
+  assert.ok(html.includes("Check: unit\\u202e."), "a gap's check name shows hidden characters as escapes");
+  assert.ok(html.includes("a.rs, b.rs and 3 more"), "a gap names its first paths and counts the rest");
 });
 
 test("every checks setting lists every engine option with what it does, the default labelled", () => {

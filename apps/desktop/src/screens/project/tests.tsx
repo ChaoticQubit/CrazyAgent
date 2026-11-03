@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import type { Result } from "../../api";
 import {
-  CASE_KINDS, CASE_STATUSES, PLAN_STATUSES, VERDICTS, cancelChecks, checksRefusal, currentProfile, gateLine, loadCases, loadChangeSetChecks,
+  CASE_KINDS, CASE_STATUSES, PLAN_STATUSES, VERDICTS, cancelChecks, checksRefusal, currentProfile, gapText, gateLine, pathsLine, loadCases, loadChangeSetChecks,
   loadCoverage, loadPlans, loadProfiles, loadRuns, loadVersions, outcomeLabel, runChecks, runLabel, runTone, staleLine, totalsLine, verdictText, whenText,
 } from "../../api-checks";
 import type { CaseFilter, CaseKind, CaseRow, CaseStatus, ChangeSetChecks as Checks, CoveragePage, CurrentProfile, ListPage, PlanRow, PlanStatus, RunFilter, RunRow, Verdict } from "../../api-checks";
@@ -284,7 +284,7 @@ export function ChangeSetChecksView(props: ChangeSetChecksViewProps) {
   if (checks.kind !== "ok") return <section className="pj-stack-s tt-checks" aria-label="Checks"><h4>Checks</h4><Failed page={checks} what="Checks" onRetry={props.onRetry} /></section>;
   const { jobs, latest, gate } = checks.value;
   const active = jobs.filter((job) => job.state === "queued" || job.state === "running").length;
-  const line = gate === undefined ? null : gateLine(gate);
+  const line = gateLine(gate);
   return <section className="pj-stack-s tt-checks" aria-label="Checks">
     <div className="pj-row between">
       <h4>Checks</h4>
@@ -293,7 +293,11 @@ export function ChangeSetChecksView(props: ChangeSetChecksViewProps) {
         {active > 0 && <Button size="small" variant="quiet" disabled={busy} onClick={props.onCancel}>Cancel checks</Button>}
       </span>
     </div>
-    {line !== null && <p className={`tt-gate ${line.tone}`}>{line.text}</p>}
+    <p className={`tt-gate ${line.tone}`}>{line.text}</p>
+    {gate.gate !== "off" && gate.gaps.length > 0 && <ul className="tt-lines" aria-label="Gaps">{gate.gaps.map((gap, at) => <li key={at} className="pj-small">
+      {gapText(gap.code)}{gap.check === null ? "" : ` Check: ${displayText(gap.check)}.`}
+      {gap.paths.length > 0 && <span className="pj-mono">{` ${displayText(pathsLine(gap))}`}</span>}
+    </li>)}</ul>}
     {active > 0 && <p className="pj-small pj-secondary" role="status">{active === 1 ? "1 check is queued or running." : `${active} checks are queued or running.`}</p>}
     {latest.length === 0 ? <p className="pj-muted pj-small">No check has run on this change yet.</p>
       : <ul className="tt-rows">{latest.map((run) => {
