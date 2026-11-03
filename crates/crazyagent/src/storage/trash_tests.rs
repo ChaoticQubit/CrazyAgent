@@ -175,10 +175,14 @@ fn a_check_folder_moved_aside_before_a_crash_is_swept_and_other_folders_stay() {
     let checks = root.join(CHECK_FOLDER);
     check_folder(root, &id);
     let live = check_folder(root, &kept);
+    let version = crate::storage::plugins::plugin_version(&connection, &id).unwrap();
     let ResultValue::Removed(_) = execute(
         &mut connection,
         root,
-        Command::RemoveServer { id: id.clone() },
+        Command::RemoveServer {
+            id: id.clone(),
+            version,
+        },
     )
     .unwrap() else {
         panic!("removed references required");

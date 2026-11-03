@@ -25,6 +25,7 @@ const NOT_RESUMABLE: &str = "its harness session has no id it can be resumed by"
 const NO_TERMINAL: &str = "its harness cannot resume in a terminal pane here";
 const STOPPED: &str = "it stopped before its session resumed";
 const NOTHING_WAITING: &str = "its task or message is no longer waiting";
+const TEAMMATE: &str = "a teammate starts only from its harness";
 const LIVE_OFF: &str = "the live master is turned off";
 const LET_GO: &str = "Its task or message was let go, so it is never typed twice";
 const RETRY_ONCE: &str =
@@ -231,6 +232,7 @@ impl TeamRuntime {
             return self.give_up(run, RunState::Interrupted, NOTHING_WAITING);
         };
         let tools = match run.kind {
+            AgentRole::Teammate => return self.give_up(run, RunState::Interrupted, TEAMMATE),
             AgentRole::Sub => {
                 let Some(slot) = super::super::slot(&stored.team, &run.harness) else {
                     return self.fail(

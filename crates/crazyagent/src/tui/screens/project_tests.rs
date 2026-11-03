@@ -2265,12 +2265,20 @@ fn the_read_only_folders_box_saves_colon_separated_folders_and_shows_refusals() 
 fn access_view(access: AgentAccess, version: u64) -> PolicyView {
     PolicyView {
         access,
+        network: crate::sandbox::policy::AgentNetwork::default(),
         levels: AgentAccess::ALL
             .into_iter()
             .map(|level| LevelView {
                 access: level,
                 label: level.label().to_owned(),
                 unavailable: None,
+            })
+            .collect(),
+        networks: crate::sandbox::policy::AgentNetwork::ALL
+            .into_iter()
+            .map(|network| crate::sandbox::policy::NetworkView {
+                network,
+                label: network.label().to_owned(),
             })
             .collect(),
         toolchains: Vec::new(),

@@ -2695,9 +2695,18 @@ async fn the_tools_page_switches_real_tools_and_ignores_reads_for_another_scope(
         "{shown}"
     );
 
+    let version = engine
+        .controller
+        .plugin_servers(None)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|view| view.id == server.id)
+        .unwrap()
+        .version;
     engine
         .controller
-        .remove_mcp_server(server.id.clone())
+        .remove_mcp_server(server.id.clone(), version)
         .await
         .unwrap();
     shell.key(Key::Char(' '));
