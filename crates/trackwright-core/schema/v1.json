@@ -39,7 +39,22 @@
     "op_unavailable",
     "use_close",
     "rate_limited",
-    "open_tickets_full"
+    "open_tickets_full",
+    "ticket_closed",
+    "ticket_open",
+    "status_invalid",
+    "close_needs_evidence",
+    "close_owner_only",
+    "create_owner_only",
+    "agent_edit_refused",
+    "owner_only",
+    "policy_value_invalid",
+    "criterion_has_checks",
+    "checks_full",
+    "check_exists",
+    "check_unknown",
+    "link_kind_unknown",
+    "notify_too_wide"
   ],
   "ops": {
     "check_add": {

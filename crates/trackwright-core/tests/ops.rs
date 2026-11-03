@@ -121,6 +121,10 @@ impl Authority for TableHost {
             ))
         }
     }
+
+    fn actors_verified(&self) -> bool {
+        true
+    }
 }
 
 fn db_path(dir: &Path) -> PathBuf {
