@@ -12364,7 +12364,8 @@ fn reask_off_finishes_a_quiet_task_at_once() {
 
 /// RER-L1: a re-ask is never typed into a kept native lead while a teammate of it still
 /// works or the lead's app runs a turn of its own, as instruction edits wait; it goes once,
-/// when both are over.
+/// when both are over. A message still on its way to the lead does not hold it: typing that
+/// message waits for the lead to be idle, so holding the re-ask for it would never end.
 #[test]
 fn a_reask_waits_for_a_kept_lead_s_working_teammates_and_its_own_turn() {
     let fixture = Fixture::new(1);
@@ -12409,6 +12410,29 @@ fn a_reask_waits_for_a_kept_lead_s_working_teammates_and_its_own_turn() {
         "no re-ask while the lead's app runs a turn of its own"
     );
     assert_eq!(team.workers[&lead].reask, Some(7), "the re-ask still waits");
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let tx = connection.transaction().unwrap();
+    crate::coord::send(
+        &tx,
+        crate::coord::NewMessage {
+            project: project.clone(),
+            from: crate::coord::Party::Owner,
+            to: crate::coord::Party::Agent(lead),
+            kind: crate::coord::MessageKind::Prompt,
+            question: None,
+            work: None,
+            reply_to: None,
+            body: "Check the page".into(),
+            idempotency_key: None,
+        },
+        1,
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    assert!(
+        team.lead_waits(lead).unwrap(),
+        "a message is on its way to the lead"
+    );
     team.workers.get_mut(&lead).unwrap().own_turn = None;
     team.send_reasks(&fixture.setup, &fixture.access, &none)
         .unwrap();
