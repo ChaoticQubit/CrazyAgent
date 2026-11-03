@@ -67,7 +67,8 @@ pub struct BatchId(String);
 
 /// Where one job of a batch stands: waiting for a free run slot, running in its snapshot,
 /// recorded as a trackwright run, or cancelled before it was recorded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum JobState {
     Queued,
     Running,
@@ -507,6 +508,15 @@ pub fn after_turn(db: &Connection, change_set: &ChangeSetId) -> Option<BatchId> 
         }
     }
     Some(batch)
+}
+
+/// Starts the project's `parallel` check runners in the background, each on its own
+/// connection to the same `engine.db`, running queued jobs until none can start. Inputs:
+/// the engine connection on `<runtime>/engine.db` and the change set whose project sets
+/// `parallel`. Output: how many runners started, 0 when the database has no absolute
+/// folder or no thread could start.
+pub fn start(db: &Connection, change_set: &ChangeSetId) -> u8 {
+    todo!()
 }
 
 /// What one pick of the queue found: nothing to start, a job it cancelled at once, or a
