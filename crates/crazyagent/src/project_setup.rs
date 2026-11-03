@@ -646,6 +646,9 @@ pub enum SetupQuery {
     ReadPaths {
         project: ProjectId,
     },
+    AgentPolicy {
+        project: ProjectId,
+    },
     Item {
         project: ProjectId,
         path: String,
@@ -687,6 +690,7 @@ pub enum SetupView {
     Jobs(Vec<ResearchJob>),
     Context(ProjectContext),
     ReadPaths(ReadPaths),
+    AgentPolicy(crate::sandbox::policy::PolicyView),
     Item(ContextChunk),
     Log(Vec<String>),
     Changed(crate::engine::owner::OwnerResult),
@@ -741,6 +745,11 @@ pub enum SetupAction {
         version: u64,
         paths: Vec<String>,
     },
+    SetAgentPolicy {
+        project_id: ProjectId,
+        version: u64,
+        policy: crate::sandbox::policy::AgentPolicy,
+    },
 }
 
 impl SetupAction {
@@ -793,6 +802,7 @@ impl SetupAction {
                 }
                 Ok(())
             }
+            Self::SetAgentPolicy { policy, .. } => policy.validate().map_err(failure),
             Self::Update { name, setup, .. } => {
                 let renamed = name.as_ref().map(|name| ProjectSpec {
                     name: name.clone(),
@@ -1801,6 +1811,11 @@ pub(crate) fn execute(
             version,
             paths,
         } => set_read_paths(tx, project_id, *version, paths),
+        SetupAction::SetAgentPolicy {
+            project_id,
+            version,
+            policy,
+        } => set_agent_policy(tx, project_id, *version, policy),
         SetupAction::RetryResearch { project_id, job } => {
             retry_research(tx, config, project_id, *job)
         }
@@ -2294,16 +2309,25 @@ fn plan_roadmap(
 
 /// The tables whose rows belong to one project and go with it when it is removed.
 /// Live team agents are not listed: the team runtime stops them and keeps their rows.
-const REMOVED_WITH_PROJECT: [&str; 10] = [
+const REMOVED_WITH_PROJECT: [&str; 19] = [
     "research_jobs",
     "onboarding",
     "team_messages",
     "team_tasks",
     "team_owner_prompts",
     "team_settings",
+    "team_time_limits",
+    "team_master_switch",
+    "team_session_switches",
+    "team_finished_view",
     "team_paused_projects",
     "team_worktrees",
     "team_task_pins",
+    "team_wake_requests",
+    "team_owner_stops",
+    "team_owner_turns",
+    "team_agent_conversations",
+    "agent_instruction_settings",
     "project_setups",
 ];
 
@@ -2343,14 +2367,51 @@ fn set_read_paths(
     Ok(Outcome::Applied)
 }
 
+/// Saves a project's agent policy (DEC-101, DEC-102): its access level and toolchain
+/// choices, when the owner's screen showed the current version. Takes the transaction,
+/// project, the version the screen read and the policy. Returns Applied, or a plain
+/// rejection for an unknown project, an invalid policy, a level this computer cannot run or
+/// a policy that changed since it was read (`stale_revision`).
+fn set_agent_policy(
+    tx: &Transaction<'_>,
+    project_id: &ProjectId,
+    version: u64,
+    policy: &crate::sandbox::policy::AgentPolicy,
+) -> Result<Outcome, EngineError> {
+    let exists: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+            [project_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if !exists {
+        return Ok(rejected("invalid_project"));
+    }
+    if let Err(code) = policy.validate() {
+        return Ok(rejected(code));
+    }
+    if policy.access.unavailable().is_some() {
+        return Ok(rejected("agent_access_unavailable"));
+    }
+    let item = crate::storage::versioned::agent_policy_item(project_id);
+    if crate::storage::versioned::owner_write(tx, &item, version)?.is_err() {
+        return Ok(rejected(crate::storage::versioned::STALE_CODE));
+    }
+    crate::sandbox::policy::save(tx, project_id.as_str(), policy).map_err(error)?;
+    Ok(Outcome::Applied)
+}
+
 /// Removes a project from CrazyAgent and leaves its folder on disk where it is.
 /// Takes the transaction, the project and the revision before the removal. Its open master
 /// conversation ends in the same change; its onboarding, research jobs, team conversation,
 /// tasks, settings and ended agents are deleted, so a waiting step is never claimed and a
-/// running one stops; its read folders and its agents' own instructions go too. The versions
-/// of its read folders and instructions stay, so a project added again under the same id
-/// refuses a save from a screen read before the removal. Returns `invalid_project` for an
-/// unknown project.
+/// running one stops; its read folders, agent access, agent settings and its agents' own
+/// instructions go too. The versions of its read folders, agent access, agent settings,
+/// project instructions and team settings move on once more, so a project added again under
+/// the same id refuses a save from a screen read before the removal (V2V-1, V2SYNC-2); agent
+/// ids are never reused, so its agents' instruction versions are dropped. Returns
+/// `invalid_project` for an unknown project.
 fn remove(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
@@ -2376,6 +2437,17 @@ fn remove(
     }
     crate::sandbox::extra_paths::save(tx, project_id.as_str(), &[]).map_err(error)?;
     crate::storage::agent_text::forget_project(tx, project_id)?;
+    crate::questions::forget_project(tx, project_id)?;
+    crate::sandbox::policy::remove(tx, project_id.as_str()).map_err(error)?;
+    for item in [
+        crate::storage::versioned::read_paths_item(project_id),
+        crate::storage::versioned::agent_policy_item(project_id),
+        crate::storage::versioned::instruction_settings_item(project_id),
+        crate::storage::versioned::process_text_item(Some(project_id)),
+        crate::storage::versioned::team_settings_item(project_id),
+    ] {
+        crate::storage::versioned::retire(tx, &item)?;
+    }
     tx.execute(
         "DELETE FROM team_panes WHERE agent IN
          (SELECT id FROM team_agents WHERE project=?1 AND status IN ('stopped','failed'))",

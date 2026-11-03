@@ -1,4 +1,5 @@
-use super::diff::{self, plain};
+use super::clone;
+use super::diff;
 use super::flow::{self, ENGINE, hold, pending_ref, reset_if_quiet, shared, verify_objects};
 use super::git::{Repo, failure};
 use super::store::{self, Intent, Record};
@@ -256,12 +257,15 @@ fn finish(db: &Connection, record: &mut Record, landed: &str) -> Result<(), Engi
 }
 
 /// The owner's edited Accept message: line ends made `\n`, trimmed, not empty, at most
-/// `MESSAGE_BYTES_MAX` bytes and plain text. Input: the text. Output: the message, else
-/// `changes_message_invalid`.
+/// `MESSAGE_BYTES_MAX` bytes and without a character `memory::hidden_text` finds. Input:
+/// the text. Output: the message, else `changes_message_invalid`.
 fn edited(text: &str) -> Result<String, EngineError> {
     let message = text.replace("\r\n", "\n");
     let message = message.trim();
-    if message.is_empty() || message.len() > MESSAGE_BYTES_MAX || plain(message) != message {
+    if message.is_empty()
+        || message.len() > MESSAGE_BYTES_MAX
+        || crate::memory::hidden_text(message)
+    {
         return Err(failure("changes_message_invalid"));
     }
     Ok(message.to_owned())
@@ -383,11 +387,26 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
     {
         return Err(failure("changes_stale"));
     }
-    let agent = flow::agent(db, &record)?;
-    if agent.head()? != record.head || !flow::holds_only(&agent.repo, &record.head)? {
-        return Err(failure("changes_agent_busy"));
-    }
     let git_dir = repository.join(".git");
+    let agent = if flow::in_clone(&record) {
+        flow::check_places(&record.repository, &record.worktree, &record.git_dir)?;
+        let fetched = clone::fetch(
+            &shared(&repository)?,
+            &repository,
+            &record.worktree,
+            &crate::worktrees::TREE_BOUNDS,
+        )?;
+        if fetched != record.head {
+            return Err(failure("changes_agent_busy"));
+        }
+        None
+    } else {
+        let agent = flow::agent(db, &record)?;
+        if agent.head()? != record.head || !flow::holds_only(&agent.repo, &record.head)? {
+            return Err(failure("changes_agent_busy"));
+        }
+        Some(agent)
+    };
     let owner = Repo::open(&git_dir, Some(&repository))?;
     let (_, tip) = owner_branch(&owner, &repository)?;
     verify_objects(&git_dir, &[&record.head, &tip], &[&record.base])?;
@@ -408,6 +427,9 @@ pub(super) fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineErro
     (record.files, record.added, record.removed) = (stats.files, stats.added, stats.removed);
     record.updated_ms = flow::now_ms()?;
     flow::set_engine_ref(&owner, &repository, &pending_ref(id), Some(&merged))?;
+    let Some(agent) = agent else {
+        return store::save(db, &record);
+    };
     record.intent = Some(Intent::Reset {
         target: merged.clone(),
     });

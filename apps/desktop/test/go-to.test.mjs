@@ -6,7 +6,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 
 const goTo = await import("../src/ui/go-to.tsx");
 const { supportDetails, AppView } = await import("../src/app.tsx");
-const { formatRoute, PROJECT_TABS } = await import("../src/ui/router.ts");
+const { formatRoute } = await import("../src/ui/router.ts");
 
 const projects = [{ id: "harbor", name: "Harbor Notes" }, { id: "fieldnotes-mobile", name: "Fieldnotes Mobile" }];
 
@@ -69,9 +69,14 @@ test("the Go to and shortcuts dialogs stay closed until asked for and the shell 
   assert.ok(goTo.SHORTCUTS.some(([keys]) => keys === "Cmd+/"));
 });
 
-test("the shortcuts dialog names one number key per project tab", () => {
-  assert.ok(PROJECT_TABS.length >= 1 && PROJECT_TABS.length <= 9);
-  assert.deepEqual(goTo.SHORTCUTS.filter(([, what]) => what === "Project tabs"), [[`Cmd+1 to Cmd+${PROJECT_TABS.length}`, "Project tabs"]]);
+test("the shortcuts dialog names no number key past the tabs the project page shows", async () => {
+  const page = await import("../src/screens/project/index.tsx");
+  const ready = { state: { build: { state: "ready", version: "1.143.17183", root: "/x" }, unqualified: null }, platform: "macos" };
+  const shown = [page.projectTabs(undefined), page.projectTabs(ready), page.projectTabs(ready, "changes")].map((tabs) => tabs.length);
+  const rows = goTo.SHORTCUTS.filter(([, what]) => what.startsWith("Project tabs"));
+  assert.equal(rows.length, 1, "one row names the tab keys");
+  const named = Math.max(...[...rows[0][0].matchAll(/Cmd\+(\d)/g)].map((match) => Number(match[1])));
+  assert.ok(named <= Math.min(...shown), `${rows[0][0]} names Cmd+${named}, and a page can show only ${Math.min(...shown)} tabs`);
 });
 
 test("support details name the problem, window and time, and nothing private", () => {

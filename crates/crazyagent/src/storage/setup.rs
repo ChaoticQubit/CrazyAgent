@@ -241,10 +241,85 @@ fn restore(moved: &[(PathBuf, PathBuf)]) {
     }
 }
 
+/// What a new pin keeps from the pin it replaces: whether the entry is on, each skill's
+/// on/off state and per-project switches by skill name, and the server when the new pin
+/// names the same one.
+#[cfg(unix)]
+struct Kept {
+    enabled: bool,
+    server: Option<String>,
+    skills: Vec<(String, bool, Vec<String>)>,
+}
+
+/// Reads what the owner set on an older pin, then removes its skills, and its server
+/// unless the new pin names the same server, which is then reused so its secrets,
+/// switches and on/off state stay. Inputs: the transaction, engine root, old row, new
+/// server and the moved-aside folders. Output: what the new pin keeps.
+#[cfg(unix)]
+fn carry(
+    tx: &Transaction<'_>,
+    root: &Path,
+    old: PackRecord,
+    server: Option<&(String, ServerSpec)>,
+    moved: &mut Vec<(PathBuf, PathBuf)>,
+) -> Result<Kept, EngineError> {
+    let mut skills = Vec::new();
+    for id in &old.skills {
+        let held: Option<(String, String)> = tx
+            .query_row(
+                "SELECT name, body FROM plugin_items WHERE id=?1 AND kind='skill'",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .map_err(error)?;
+        let Some((name, body)) = held else {
+            continue;
+        };
+        let enabled = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|body| body.get("enabled")?.as_bool())
+            .ok_or_else(|| error("setup_record_invalid"))?;
+        let mut statement = tx
+            .prepare("SELECT project FROM plugin_switches WHERE item=?1")
+            .map_err(error)?;
+        let projects = statement
+            .query_map([id], |row| row.get::<_, String>(0))
+            .map_err(error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(error)?;
+        skills.push((name, enabled, projects));
+    }
+    let reused = match (&old.server, server) {
+        (Some(id), Some((name, _))) => tx
+            .query_row(
+                "SELECT name FROM plugin_items WHERE id=?1 AND kind='server'",
+                [id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(error)?
+            .filter(|held| held == name)
+            .map(|_| id.clone()),
+        _ => None,
+    };
+    let mut dropped = old;
+    if reused.is_some() {
+        dropped.server = None;
+    }
+    remove_items(tx, root, &dropped, moved)?;
+    Ok(Kept {
+        enabled: dropped.enabled,
+        server: reused,
+        skills,
+    })
+}
+
 /// Installs one entry's pinned skills and server, replacing an older pin the pack itself
-/// installed. An item the owner holds under the entry's name is adopted as present and
-/// never replaced or removed. Inputs: the transaction, engine root, new row, skill folders
-/// and server, plus the lists of added and moved-aside folders. Output: any failure.
+/// installed while keeping what the owner set on it (see `carry`). An item the owner holds
+/// under the entry's name is adopted as present and never replaced or removed. Inputs: the
+/// transaction, engine root, new row, skill folders and server, plus the lists of added
+/// and moved-aside folders. Output: any failure.
 #[cfg(unix)]
 fn install(
     tx: &Transaction<'_>,
@@ -255,19 +330,22 @@ fn install(
     added: &mut Vec<PathBuf>,
     moved: &mut Vec<(PathBuf, PathBuf)>,
 ) -> Result<(), EngineError> {
+    let mut kept = None;
     if let Some(old) = load_pack(tx, &record.id)? {
         if old.source == record.source {
             return Ok(());
         }
         if old.source != PRESENT {
-            remove_items(tx, root, &old, moved)?;
+            kept = Some(carry(tx, root, old, server.as_ref(), moved)?);
         }
     }
+    let reused = kept.as_ref().and_then(|kept| kept.server.clone());
     if let Some(entry) = manifest()?
         .entries
         .iter()
         .find(|entry| entry.id == record.id)
         && let Some(owned) = present(tx, entry)?
+        && (reused.is_none() || owned.server != reused)
     {
         return save_pack(tx, &owned);
     }
@@ -291,34 +369,67 @@ fn install(
         };
         added.push(PathBuf::from(&change.view.folder));
         record.skills.push(change.view.id.clone());
+        let carried = kept
+            .iter()
+            .flat_map(|kept| &kept.skills)
+            .find(|(name, ..)| *name == change.view.name);
+        if let Some((_, enabled, projects)) = carried {
+            if !enabled {
+                plugins::run(
+                    tx,
+                    root,
+                    plugins::Command::SetSkill {
+                        id: change.view.id.clone(),
+                        enabled: false,
+                        version: plugins::plugin_version(tx, &change.view.id)?,
+                    },
+                )?;
+            }
+            for project in projects {
+                tx.execute(
+                    "INSERT OR IGNORE INTO plugin_switches(project,item) VALUES(?1,?2)",
+                    [project, &change.view.id],
+                )
+                .map_err(error)?;
+            }
+        }
     }
     if let Some((name, spec)) = server {
-        let change = plugins::run(
-            tx,
-            root,
-            plugins::Command::AddServer {
+        let command = match &reused {
+            Some(id) => plugins::Command::UpdateServer {
+                id: id.clone(),
+                spec: spec.clone(),
+                version: plugins::plugin_version(tx, id)?,
+            },
+            None => plugins::Command::AddServer {
                 scope: Scope::Global,
                 name,
                 spec: spec.clone(),
             },
-        )
-        .map_err(taken)?;
+        };
+        let change = plugins::run(tx, root, command).map_err(taken)?;
         let plugins::ResultValue::Server(view) = change else {
             return Err(error("setup_record_invalid"));
         };
-        plugins::run(
-            tx,
-            root,
-            plugins::Command::Approve {
-                id: view.id.clone(),
-                spec,
-            },
-        )?;
+        if view.enabled {
+            plugins::run(
+                tx,
+                root,
+                plugins::Command::Approve {
+                    id: view.id.clone(),
+                    spec,
+                },
+            )?;
+        }
         record.server = Some(view.id.clone());
     }
-    assert!(record.enabled);
     assert!(!record.skills.is_empty() || record.server.is_some());
-    save_pack(tx, &record)
+    if kept.is_none_or(|kept| kept.enabled) {
+        assert!(record.enabled);
+        save_pack(tx, &record)
+    } else {
+        set(tx, root, &mut record, false)
+    }
 }
 
 fn set(

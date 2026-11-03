@@ -145,6 +145,7 @@ pub fn scratch(prefix: &str) -> tempfile::TempDir {
 pub struct Engine {
     pub root: tempfile::TempDir,
     pub home: Option<PathBuf>,
+    pub harness: Option<(&'static str, PathBuf)>,
     child: Option<Child>,
     stderr: Option<std::thread::JoinHandle<String>>,
 }
@@ -160,6 +161,7 @@ impl Engine {
         Self {
             root,
             home: None,
+            harness: None,
             child: None,
             stderr: None,
         }
@@ -183,8 +185,9 @@ impl Engine {
         self.root.path().join("engine.sock")
     }
 
-    /// Starts the process on this root and waits up to 30 s for `ready`.
-    /// Output: none; panics with the engine's stderr when it never becomes ready.
+    /// Starts the process on this root, with the harness flag when one is set, and waits
+    /// up to 30 s for `ready`. Output: none; panics with the engine's stderr when it never
+    /// becomes ready.
     pub fn launch(&mut self) {
         assert!(self.child.is_none());
         let root = self.root.path();
@@ -201,6 +204,14 @@ impl Engine {
             .stderr(Stdio::piped());
         if let Some(home) = &self.home {
             command.env("HOME", home);
+        }
+        if let Some((flag, executable)) = &self.harness {
+            assert!(matches!(
+                *flag,
+                "--codex-executable" | "--claude-executable"
+            ));
+            assert!(executable.is_absolute());
+            command.arg(flag).arg(executable);
         }
         let mut child = crazyagent::spawn_gate::spawn(&mut command).unwrap();
         let stdout = child.stdout.take().unwrap();

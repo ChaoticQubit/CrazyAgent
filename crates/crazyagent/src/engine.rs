@@ -279,7 +279,7 @@ impl Server {
             tokio::select! {
                 _ = &mut stop => break Ok(()),
                 result = clients.join_next(), if !clients.is_empty() => {
-                    if let Some(Err(error)) = result { break Err(io_error(error)); }
+                    if let Some(Err(error)) = result && error.is_panic() { eprintln!("engine_client_panicked"); }
                 }
                 accepted = crate::spawn_gate::accept_unix(&self.listener) => {
                     let (stream, _) = match accepted { Ok(value) => value, Err(error) => break Err(io_error(error)) };
@@ -425,6 +425,10 @@ async fn serve_client(mut stream: UnixStream, engine: std::sync::Arc<Engine>, ti
     let exchange = async {
         verify_peer(&stream)?;
         let frame = read_frame(&mut stream).await?;
+        #[cfg(test)]
+        if frame[4..] == *b"test_panic" {
+            panic!("engine_test_panic");
+        }
         let request = decode_request(&frame).map_err(io_error)?;
         let request_id = request.request_id.clone();
         let reply = match engine.apply(request).await {
@@ -453,6 +457,13 @@ async fn serve_client(mut stream: UnixStream, engine: std::sync::Arc<Engine>, ti
     }
 }
 
+/// The terminal host the engine serves agent terminals through, once one is made: the tmux
+/// program it was made for, none when tmux was not found, and the host.
+type TerminalHost = (
+    Option<std::path::PathBuf>,
+    std::sync::Arc<dyn crate::terminal::Host>,
+);
+
 pub struct Engine {
     storage: Storage,
     input: Mutex<InputState>,
@@ -460,8 +471,9 @@ pub struct Engine {
     owner_egress: std::sync::Arc<tokio::sync::RwLock<()>>,
     dispatch_drive: tokio::sync::Mutex<()>,
     agents: Mutex<Option<std::sync::Arc<crate::agents::Agents>>>,
-    terminal: Mutex<Option<(bool, std::sync::Arc<dyn crate::terminal::Host>)>>,
+    terminal: Mutex<Option<TerminalHost>>,
     harness_probe: std::sync::Arc<crate::harnesses::ProbeCache>,
+    settings_files: Option<(std::path::PathBuf, std::path::PathBuf)>,
 }
 
 const HARNESS_PROBE_FRESH: Duration = Duration::from_secs(10);
@@ -471,12 +483,24 @@ impl Engine {
         &self,
         build: impl FnOnce(oneshot::Sender<Result<T, EngineError>>) -> Job,
     ) -> Result<T, EngineError> {
+        self.storage_job_within(self.timeout, build).await
+    }
+
+    /// Runs one storage job and waits at most `wait` for its answer, for owner work whose
+    /// client waits longer than the owner deadline. Inputs: the wait and the job.
+    /// Output: the job's result, or the outcome-unknown error while storage has not
+    /// answered in time or went away without answering.
+    async fn storage_job_within<T>(
+        &self,
+        wait: Duration,
+        build: impl FnOnce(oneshot::Sender<Result<T, EngineError>>) -> Job,
+    ) -> Result<T, EngineError> {
         let (send, receive) = oneshot::channel();
         self.storage
             .sender
             .try_send(build(send))
             .map_err(|_| EngineError("owner_queue_not_submitted".into()))?;
-        tokio::time::timeout(self.timeout, receive)
+        tokio::time::timeout(wait, receive)
             .await
             .map_err(|_| owner::native_auth::outcome_unknown())?
             .map_err(|_| owner::native_auth::outcome_unknown())?
@@ -485,8 +509,9 @@ impl Engine {
     /// Runs one storage job for a record that refers to files written before it, and hands
     /// storage's real answer to `settle` even when the owner stops waiting first, so a late
     /// commit never loses a file its record refers to. Inputs: the job and the settle step.
-    /// Output: the job's result with any settle error, or the outcome-unknown error while
-    /// storage has not answered in time or went away without answering.
+    /// Output: the settle step's error when it fails, else the job's result, or the
+    /// outcome-unknown error while storage has not answered in time or went away without
+    /// answering.
     async fn settled_job<T: Send + 'static>(
         &self,
         build: impl FnOnce(oneshot::Sender<Result<T, EngineError>>) -> Job,
@@ -502,13 +527,24 @@ impl Engine {
             let result = receive
                 .await
                 .map_err(|_| owner::native_auth::outcome_unknown())?;
-            let settled = settle(&result);
-            result.and_then(|value| settled.map(|()| value))
+            settle(&result).and(result)
         });
         tokio::time::timeout(self.timeout, answered)
             .await
             .map_err(|_| owner::native_auth::outcome_unknown())?
             .map_err(|_| owner::native_auth::outcome_unknown())?
+    }
+
+    /// The loopback ports of the owner's configured local model endpoints, read from the
+    /// engine's settings files at each call, for a sandbox the engine starts to keep free
+    /// of the listeners of what it runs. Output: the ports; none when the engine has no
+    /// settings files or they do not read, as for team and research launches.
+    pub(crate) fn owner_ports(&self) -> Vec<u16> {
+        self.settings_files
+            .as_ref()
+            .and_then(|(global, project)| crate::config::resolve_config(global, project).ok())
+            .and_then(|config| config.settings.model_access)
+            .map_or_else(Vec::new, |access| crate::sandbox::owner_ports(&access))
     }
 
     pub async fn open_with_settings_sources(
@@ -536,6 +572,7 @@ impl Engine {
                 agents: Mutex::default(),
                 terminal: Mutex::default(),
                 harness_probe: crate::harnesses::ProbeCache::new(HARNESS_PROBE_FRESH),
+                settings_files: Some((global.to_path_buf(), project.to_path_buf())),
             },
             config,
         ))
@@ -553,6 +590,7 @@ impl Engine {
             agents: Mutex::default(),
             terminal: Mutex::default(),
             harness_probe: crate::harnesses::ProbeCache::new(HARNESS_PROBE_FRESH),
+            settings_files: None,
         })
     }
 
@@ -568,6 +606,7 @@ impl Engine {
             agents: Mutex::default(),
             terminal: Mutex::default(),
             harness_probe: crate::harnesses::ProbeCache::new(HARNESS_PROBE_FRESH),
+            settings_files: None,
         })
     }
 
@@ -799,6 +838,60 @@ mod tests {
                 .set_controller_epoch(session, ControllerEpoch::new("epoch2").unwrap())
                 .is_err()
         );
+        engine.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_panicking_client_leaves_the_engine_server_serving_the_next() {
+        let root = tempfile::Builder::new()
+            .prefix("ca-eng-panic-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let config =
+            crate::config::resolve_config(&root.path().join("g"), &root.path().join("p")).unwrap();
+        let engine = std::sync::Arc::new(
+            Engine::open(&root.path().join("engine.db"), config.clone())
+                .await
+                .unwrap(),
+        );
+        let socket = root.path().join("e.sock");
+        let server = Server::bind(&socket, engine.clone(), &config).unwrap();
+        let (stop, stopped) = oneshot::channel();
+        let service = tokio::spawn(server.run(stopped));
+
+        let mut panicking = crate::spawn_gate::connect_unix(&socket).await.unwrap();
+        let mut frame = 10u32.to_be_bytes().to_vec();
+        frame.extend_from_slice(b"test_panic");
+        panicking.write_all(&frame).await.unwrap();
+        let mut answered = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            panicking.read_to_end(&mut answered),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(answered.is_empty(), "the panicking request gets no reply");
+
+        let reply = Client::new(socket.clone(), Duration::from_secs(5))
+            .unwrap()
+            .request(WireRequest {
+                protocol_version: PROTOCOL_VERSION,
+                client_id: ClientId::new("after-panic").unwrap(),
+                request_id: RequestId::new("after-panic").unwrap(),
+                expected_revision: Cursor::new(0),
+                command: Command::Snapshot,
+            })
+            .await
+            .unwrap_or_else(|error| panic!("after a client panic the engine answered {error}"));
+        assert!(
+            matches!(reply.outcome, Outcome::Snapshot { .. }),
+            "{reply:?}"
+        );
+        assert!(socket.exists(), "the engine socket is still in place");
+        stop.send(()).unwrap();
+        service.await.unwrap().unwrap();
         engine.close().await.unwrap();
     }
 

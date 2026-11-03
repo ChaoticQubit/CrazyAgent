@@ -15,7 +15,7 @@ import { MESSAGE_BYTES_MAX, NEW_CONVERSATION_NOTE, accountLines, changesLine, de
 import { Badge, NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { Menu, type Tone } from "../../ui";
-import { SessionsBar, ownerText, withOwnerLines } from "./sessions";
+import { SessionsBar, ownerText, switchDivider, withOwnerLines } from "./sessions";
 
 const READ_ONLY = "Read-only: the master runs live in its terminal now.";
 const sentByProject = new Map<string, Record<string, string>>();
@@ -259,9 +259,11 @@ export function ConversationTab({ data, readOnly = false }: { data: ProjectData;
   const settings = `/projects/${encodeURIComponent(data.id)}/settings`;
   const missing = setup ? masterMissingLine(harnesses, setup.team.master) : null;
   const told = [...consoleLines(turns, sent, sentAtByProject.get(data.id), now, held), ...queuedLines(queued, openFailed && !ticket)];
-  const lines: ConsoleLine[] = told.length > 0 ? told : [{ id: "empty", kind: "engine", text: readOnly
+  const switched = readOnly ? switchDivider(data.team.result) : null;
+  const lines: ConsoleLine[] = [...(told.length > 0 ? told : [{ id: "empty", kind: "engine" as const, text: readOnly
     ? "No earlier conversation. Messages sent to the master before it ran live stay here to read."
-    : `No messages yet. Ask the master anything about ${data.name || "this project"}. It has read the brief, documents and research.` }];
+    : `No messages yet. Ask the master anything about ${data.name || "this project"}. It has read the brief, documents and research.` }]),
+  ...(switched ? [{ id: "harness-switch", kind: "engine" as const, text: switched }] : [])];
   const agents = agentMentions(graph.shown?.kind === "ok" ? graph.shown.value.nodes : []);
   const gate = sendGate({ readOnly, ticket, openFailed, working, waiting, notReady, queued: queued !== null });
   const offer = (text: string) => {

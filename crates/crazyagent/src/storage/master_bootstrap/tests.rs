@@ -602,6 +602,38 @@ fn official_auth_start_does_not_authorize_bootstrap_receipt_or_lease() {
 }
 
 #[test]
+fn a_conversation_started_with_new_session_passes_the_bootstrap_scope_check() {
+    let mut case = Case::new();
+    let action = MasterOwnerAction::NewSession {
+        project_id: case.session.project_id.clone(),
+        expected_config_id: case.session.config_id.clone(),
+        expected_source_hash: case.session.source_hash.clone(),
+        selection: Box::new(case.session.selection.clone()),
+        cancel_running: false,
+    };
+    assert_eq!(case.act("actual-new-session", action), OwnerResult::Applied);
+    let reply = storage::master_session::read(
+        &mut case.db,
+        &case.config,
+        Some(&case.sources),
+        &case.started.owners[0].admission,
+        &OwnerRead::ProjectMaster {
+            project_id: case.session.project_id.clone(),
+        },
+    )
+    .unwrap();
+    let OwnerData::ProjectMaster {
+        session: Some(session),
+    } = reply.data
+    else {
+        panic!("actual NewSession must produce a persisted session");
+    };
+    assert_ne!(session.session_id, case.session.session_id);
+    let tx = case.db.transaction().unwrap();
+    super::current_session(&tx, &session).unwrap();
+}
+
+#[test]
 fn bootstrap_initializer_rejects_conflicting_schema() {
     let root = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
     let db = Connection::open(root.path().join("conflict.db")).unwrap();

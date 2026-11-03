@@ -10,6 +10,7 @@ use crate::harnesses::{HarnessEntry, HarnessStatus, TeamUse};
 use crate::pools::{MemberKind, PoolSummary};
 use crate::project_setup::{ProjectSetup, SetupQuery, SetupView};
 use crate::protocol::{CredentialRef, ProjectId, ProjectSpec};
+use crate::sandbox::policy::AgentAccess;
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::client::{
     CreationEvent, CreationJob, CreationSubmission, MutationDelivery, OwnerEvent,
@@ -207,6 +208,7 @@ pub(in crate::tui) struct NewProjectPage {
 struct Creation {
     submission: CreationSubmission,
     pool: Option<CredentialRef>,
+    access: AgentAccess,
     recovered: bool,
     assigning: bool,
     finished: bool,
@@ -341,6 +343,7 @@ impl NewProjectPage {
         self.creation = Some(Creation {
             submission,
             pool,
+            access: self.wizard.access,
             recovered: false,
             assigning: false,
             finished: false,
@@ -437,13 +440,18 @@ impl NewProjectPage {
                 "",
             ));
         }
+        let saves_access = !creation.finished && creation.access != AgentAccess::Sandboxed;
         creation.finished = true;
-        Flow::Replace(Box::new(ProjectPage::new(
+        let mut page = ProjectPage::new(
             creation.submission.project_id.clone(),
             creation.submission.spec.name.clone(),
             ProjectTab::Overview,
             ctx,
-        )))
+        );
+        if saves_access {
+            page.save_created_access(creation.access, ctx);
+        }
+        Flow::Replace(Box::new(page))
     }
 
     fn carry(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> bool {

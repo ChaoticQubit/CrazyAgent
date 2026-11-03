@@ -2,6 +2,7 @@
 
 pub mod accounts;
 pub mod adapters;
+pub mod agent_git;
 pub mod agent_home;
 pub mod agents;
 pub mod assets;
@@ -16,6 +17,7 @@ pub mod harnesses;
 /// The engine side of the IDE tab: per-project loopback IDE servers, their tokens, ports
 /// and environment.
 pub mod ide;
+pub mod instruction_files;
 #[cfg(unix)]
 pub mod isolation;
 pub mod landing;

@@ -16,6 +16,7 @@ pub(in crate::tui) mod planning_line;
 pub(in crate::tui) mod process;
 pub mod profile_form;
 pub(in crate::tui) mod project;
+pub(in crate::tui) mod project_access;
 pub(in crate::tui) mod project_activity;
 pub(in crate::tui) mod project_markdown;
 pub(in crate::tui) mod project_master;
@@ -53,6 +54,8 @@ mod new_project_frames;
 mod new_project_tests;
 #[cfg(all(test, unix))]
 mod planning_line_tests;
+#[cfg(all(test, unix))]
+mod project_access_tests;
 #[cfg(all(test, unix))]
 mod project_frames;
 #[cfg(all(test, unix))]

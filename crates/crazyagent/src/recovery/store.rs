@@ -1,6 +1,6 @@
 use super::{
-    ASKED_BYTES_MAX, HeldItem, Interrupted, LastTurn, REASON_BYTES_MAX, RUNS_PER_PROJECT_MAX,
-    RunState, unavailable,
+    ASKED_BYTES_MAX, HeldItem, Interrupted, LastTurn, Listed, REASON_BYTES_MAX,
+    RUNS_PER_PROJECT_MAX, RunState, unavailable,
 };
 use crate::engine::EngineError;
 use crate::harnesses::interactive::Transcript;
@@ -44,6 +44,9 @@ CREATE TABLE IF NOT EXISTS recovery_sessions (
 );";
 
 const COLUMNS: &str = "id,agent,project,kind,harness,at_ms,turn,task,message,asked,record,cwd,record_file,paused,state,reason";
+
+const WAITING: &str = "(state IN ('interrupted','resuming')
+    OR (state='failed' AND (retried=0 OR task IS NOT NULL OR message IS NOT NULL)))";
 
 /// One team agent in a turn as the engine stops: its row, the prompt of the task it ran,
 /// the owner message a master answered and its stored pane record.
@@ -394,24 +397,52 @@ pub(super) fn runs(
     )
 }
 
-/// Reads a project's newest settled runs in every state, oldest first.
-/// Inputs: the store, the project and the most runs to read. Output: the runs.
-pub(super) fn newest(
+/// Reads a project's runs in one snapshot: the oldest runs still waiting, open, or failed
+/// and holding their task or message or not yet retried, with how many more wait, and the
+/// newest settled ones, resumed or failed after a retry that let their item go, each oldest
+/// first. Inputs: the store, the project and the most runs of each kind. Output: the runs.
+pub(super) fn listed(
     db: &Connection,
     project: &ProjectId,
     max: usize,
-) -> Result<Vec<Interrupted>, EngineError> {
+) -> Result<Listed, EngineError> {
     let limit = i64::try_from(max).map_err(|_| unavailable())?;
-    read(
-        db,
+    let tx = Transaction::new_unchecked(db, TransactionBehavior::Deferred).map_err(storage)?;
+    let waiting = read(
+        &tx,
+        &format!(
+            "SELECT {COLUMNS} FROM recovery_runs WHERE project=?1 AND {WAITING}
+             ORDER BY id LIMIT ?2"
+        ),
+        params![project.as_str(), limit],
+    )?;
+    let count: i64 = tx
+        .query_row(
+            &format!("SELECT COUNT(*) FROM recovery_runs WHERE project=?1 AND {WAITING}"),
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(storage)?;
+    let settled = read(
+        &tx,
         &format!(
             "SELECT {COLUMNS} FROM (
-                 SELECT {COLUMNS} FROM recovery_runs WHERE project=?1 AND state<>'stopped'
+                 SELECT {COLUMNS} FROM recovery_runs
+                 WHERE project=?1 AND state IN ('resumed','failed') AND NOT {WAITING}
                  ORDER BY id DESC LIMIT ?2)
              ORDER BY id"
         ),
         params![project.as_str(), limit],
-    )
+    )?;
+    tx.commit().map_err(storage)?;
+    let count = usize::try_from(count).map_err(|_| unavailable())?;
+    assert!(waiting.len() <= max && settled.len() <= max && waiting.len() <= count);
+    assert!(waiting.iter().all(|run| run.state != RunState::Resumed));
+    Ok(Listed {
+        more: count - waiting.len(),
+        waiting,
+        settled,
+    })
 }
 
 /// Reads the newest run of one agent whose resume started and has not settled.

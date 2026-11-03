@@ -50,6 +50,28 @@ fn ensure_folder(path: &Path) -> Result<(), EngineError> {
 /// or a linked worktree whose git folder lives elsewhere and is left alone);
 /// `git_exclude_invalid` when `info` or `exclude` is a link or not plain.
 pub fn exclude_from_git(folder: &Path) -> Result<bool, EngineError> {
+    append_excludes(folder, &EXCLUDES)
+}
+
+/// Hides the project's agents root from git in the project folder, so git there never
+/// lists or stages an agent's files and only Accept brings agent work in (IN1-R1):
+/// `.crazyagent/` when the project keeps its state in that folder, `/worktrees/` for an
+/// older project that keeps its agents at its top. The IDE runs it before each start.
+/// Input: the project folder. Output: as [`exclude_from_git`].
+pub fn exclude_agents(folder: &Path) -> Result<bool, EngineError> {
+    assert_eq!(EXCLUDES[0], ".crazyagent/");
+    let line = if super::state_folder(folder).as_path() == folder {
+        "/worktrees/"
+    } else {
+        EXCLUDES[0]
+    };
+    append_excludes(folder, &[line])
+}
+
+/// Appends each of `lines` missing from the repository's `.git/info/exclude`, never
+/// through a link. Inputs: the project folder and the lines. Output: as
+/// [`exclude_from_git`].
+fn append_excludes(folder: &Path, lines: &[&str]) -> Result<bool, EngineError> {
     let git = folder.join(".git");
     match fs::symlink_metadata(&git) {
         Ok(metadata) if metadata.is_dir() && !metadata.file_type().is_symlink() => {}
@@ -79,8 +101,9 @@ pub fn exclude_from_git(folder: &Path) -> Result<bool, EngineError> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
         Err(_) => return Err(refused("git_exclude_invalid")),
     }
-    let missing: Vec<&str> = EXCLUDES
-        .into_iter()
+    let missing: Vec<&str> = lines
+        .iter()
+        .copied()
         .filter(|line| !existing.lines().any(|present| present.trim_end() == *line))
         .collect();
     if missing.is_empty() {
@@ -98,6 +121,6 @@ pub fn exclude_from_git(folder: &Path) -> Result<bool, EngineError> {
     file.write_all(text.as_bytes())
         .and_then(|()| file.sync_all())
         .map_err(|_| refused("git_exclude_invalid"))?;
-    assert!(!missing.is_empty() && missing.len() <= EXCLUDES.len());
+    assert!(!missing.is_empty() && missing.len() <= lines.len());
     Ok(true)
 }

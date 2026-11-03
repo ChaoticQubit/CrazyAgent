@@ -23,27 +23,12 @@ pub(crate) fn record(
     workspace: &Workspace,
     end: &TurnEnd,
 ) -> Result<Landed, EngineError> {
-    let head = |id: Option<&ChangeSetId>| -> Result<Option<(String, ChangeState)>, EngineError> {
-        Ok(landing::list(db, &workspace.project)?
-            .into_iter()
-            .find(|set| match id {
-                Some(id) => &set.id == id,
-                None => {
-                    set.agent.kind == workspace.agent.kind
-                        && set.agent.id == workspace.agent.id
-                        && matches!(
-                            set.state,
-                            ChangeState::Pending | ChangeState::Conflict | ChangeState::Updating
-                        )
-                }
-            })
-            .map(|set| (set.head, set.state)))
-    };
-    let before = head(None)?;
+    let before =
+        landing::open_change_set(db, &workspace.worktree)?.map(|set| (set.head, set.state));
     let Some(id) = landing::record_turn_end(db, workspace, end)? else {
         return Ok(Landed::Nothing);
     };
-    let after = head(Some(&id))?;
+    let after = landing::change_set(db, &id)?.map(|(_, set)| (set.head, set.state));
     if after.is_some() && after == before {
         return Ok(Landed::Waiting(id));
     }
@@ -156,20 +141,18 @@ pub(crate) fn master_of(
 /// What the engine asks a conversation master in its resolve turn: a plain line for the
 /// owner naming the conflicting files and the engine's resolve prompt fitted to its bound. Inputs:
 /// the store, project, session and change set. Output: the line and text, or None unless
-/// the set is that master's own and updating.
+/// the set is in that project, that master's own and updating.
 pub(crate) fn master_resolve(
     db: &Connection,
     project: &ProjectId,
     session: &SessionId,
     id: &ChangeSetId,
 ) -> Result<Option<(String, String)>, EngineError> {
-    let Some(set) = landing::list(db, project)?
-        .into_iter()
-        .find(|set| &set.id == id)
-    else {
+    let Some((set_project_id, set)) = landing::change_set(db, id)? else {
         return Ok(None);
     };
-    if set.agent.kind != AgentKind::Master
+    if set_project_id != *project
+        || set.agent.kind != AgentKind::Master
         || set.agent.id != session.as_str()
         || set.state != ChangeState::Updating
     {
@@ -225,10 +208,7 @@ fn set_project(db: &Connection, id: &ChangeSetId) -> Result<ProjectId, EngineErr
 }
 
 fn view(db: &Connection, id: &ChangeSetId) -> Result<Option<landing::ChangeSetView>, EngineError> {
-    let project = set_project(db, id)?;
-    Ok(landing::list(db, &project)?
-        .into_iter()
-        .find(|set| &set.id == id))
+    Ok(landing::change_set(db, id)?.map(|(_, set)| set))
 }
 
 /// Fits a resolve prompt within `RESOLVE_PROMPT_BYTES_MAX` with no control characters

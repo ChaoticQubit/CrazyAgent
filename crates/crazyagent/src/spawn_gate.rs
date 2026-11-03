@@ -75,14 +75,48 @@ pub fn output(command: &mut Command) -> io::Result<Output> {
 }
 
 /// Accepts one connection on a Tokio Unix listener, taking the gate only for
-/// each accept attempt, never while waiting.
-/// Input: the listener. Output: the stream and its peer address.
+/// each accept attempt, never while waiting. A failure a later accept outlives,
+/// such as an aborted peer or a full descriptor table, is logged and retried
+/// after a pause that doubles up to a second, so it never ends a server.
+/// Input: the listener. Output: the stream and its peer address, or a lasting error.
 #[cfg(unix)]
 #[allow(clippy::disallowed_methods)]
 pub async fn accept_unix(
     listener: &tokio::net::UnixListener,
 ) -> io::Result<(tokio::net::UnixStream, tokio::net::unix::SocketAddr)> {
-    std::future::poll_fn(|context| guarded(|| listener.poll_accept(context))).await
+    let mut pause = ACCEPT_PAUSE_MIN;
+    loop {
+        match std::future::poll_fn(|context| guarded(|| listener.poll_accept(context))).await {
+            Err(error) if passing(&error) => {
+                eprintln!("accept_retried: {error}");
+                tokio::time::sleep(pause).await;
+                pause = (pause * 2).min(ACCEPT_PAUSE_MAX);
+            }
+            accepted => return accepted,
+        }
+    }
+}
+
+#[cfg(unix)]
+const ACCEPT_PAUSE_MIN: std::time::Duration = std::time::Duration::from_millis(10);
+#[cfg(unix)]
+const ACCEPT_PAUSE_MAX: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Tells whether an accept failure belongs to one connection or to a resource
+/// that frees up, so a later accept can succeed on the same listener.
+/// Input: the accept error. Output: true to retry, false for a lasting failure.
+#[cfg(unix)]
+fn passing(error: &io::Error) -> bool {
+    use rustix::io::Errno;
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::Interrupted
+    ) || matches!(
+        Errno::from_io_error(error),
+        Some(Errno::MFILE | Errno::NFILE | Errno::NOBUFS | Errno::NOMEM | Errno::PROTO)
+    )
 }
 
 /// Accepts on the platform's stand-in listener where there are no Unix sockets;

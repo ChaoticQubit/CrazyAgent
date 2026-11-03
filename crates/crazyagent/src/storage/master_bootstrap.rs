@@ -1,14 +1,10 @@
 use super::{check_owner_admission, owner_lookup, owner_revision, random_id};
 use crate::engine::EngineError;
-use crate::engine::owner::{
-    Admission, OwnerMutation, OwnerOperation, OwnerProvenance, OwnerRequest, OwnerResult, is_hex_id,
-};
-use crate::master_session::{
-    MasterBootstrapAuth, MasterOwnerAction, MasterSessionPhase, MasterSessionView,
-};
+use crate::engine::owner::{Admission, OwnerProvenance, OwnerResult, is_hex_id};
+use crate::master_session::{MasterBootstrapAuth, MasterSessionPhase, MasterSessionView};
 use crate::protocol::{
-    ConfigId, Cursor, FRAME_BYTES_MAX, Outcome, PROTOCOL_VERSION, ProjectId, RequestId, SessionId,
-    StoredProject, TaskId,
+    ConfigId, Cursor, FRAME_BYTES_MAX, Outcome, ProjectId, RequestId, SessionId, StoredProject,
+    TaskId,
 };
 use crate::worktrees::{self, LeaseState, WorktreeLease};
 #[cfg(unix)]
@@ -156,24 +152,9 @@ fn committed_open(tx: &Transaction<'_>, session: &MasterSessionView) -> Result<(
     else {
         return Err(error("master_bootstrap_scope_conflict"));
     };
-    let request = OwnerRequest {
-        protocol_version: PROTOCOL_VERSION,
-        request_id: owner.operation_id.clone(),
-        expected_revision: owner.revision_before.clone(),
-        operation: OwnerOperation::Apply {
-            mutation: OwnerMutation::ProjectMaster {
-                action: MasterOwnerAction::Open {
-                    project_id: session.project_id.clone(),
-                    expected_config_id: session.config_id.clone(),
-                    expected_source_hash: session.source_hash.clone(),
-                    selection: Box::new(session.selection.clone()),
-                },
-            },
-        },
-    };
     if actual != *owner
         || serde_json::from_slice::<OwnerResult>(&result).map_err(error)? != OwnerResult::Applied
-        || request.mutation_hash()? != owner.request_hash
+        || !super::master_session::opened_by_owner(session)?
         || owner.revision_before.value().checked_add(1) != Some(owner.revision_after.value())
         || owner.event_cursor.as_ref() != Some(&owner.revision_after)
     {

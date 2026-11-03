@@ -84,6 +84,26 @@ pub fn read_paths_item(project: &ProjectId) -> Item {
     named(format!("read-paths:{}", project.as_str()))
 }
 
+/// Names the versioned item of one project's agent instruction settings: which instruction
+/// files its agents get and whether headless Claude runs keep their transcript. Input: the
+/// project. Output: the item.
+pub fn instruction_settings_item(project: &ProjectId) -> Item {
+    named(format!("instruction-settings:{}", project.as_str()))
+}
+
+/// Names the versioned item of one project's agent policy: its access level and toolchain
+/// switches. Input: the project. Output: the item.
+pub fn agent_policy_item(project: &ProjectId) -> Item {
+    named(format!("agent-policy:{}", project.as_str()))
+}
+
+/// Names the versioned item of one project's team settings: keep warm, the task and session
+/// time limits with the idle stop, the On harness switch, the live master switch and where
+/// finished agents show. Input: the project. Output: the item.
+pub fn team_settings_item(project: &ProjectId) -> Item {
+    named(format!("team-settings:{}", project.as_str()))
+}
+
 /// Names the versioned item of one wake-rule level. Inputs: the project, none for the app
 /// level, and the sub-agent id, 0 for the app or project level; team agent ids are never
 /// reused, so an agent's level needs no project. Output: the item.
@@ -363,6 +383,19 @@ pub fn forget(tx: &Transaction<'_>, item: &Item) -> Result<bool, EngineError> {
     assert!(removed <= 1);
     assert_eq!(current(tx, item)?.version, 0);
     Ok(removed == 1)
+}
+
+/// Moves one owner item's version past every version a screen could have read, for an item
+/// whose value goes away while its name can come back, such as a removed project's settings
+/// when a project is added again under the same id. A screen read before is then refused as
+/// stale instead of saving onto the new value. Inputs: an immediate transaction on
+/// `engine.db` and the item. Output: the new version, or `versioned_unavailable`.
+pub fn retire(tx: &Transaction<'_>, item: &Item) -> Result<u64, EngineError> {
+    let read = current(tx, item)?.version;
+    let moved = owner_write(tx, item, read)?;
+    assert!(moved.is_ok(), "no other write lands inside one transaction");
+    assert_eq!(current(tx, item)?.version, read + 1);
+    Ok(read + 1)
 }
 
 /// Opens the engine database for versioned writes without ever creating it, waiting up to

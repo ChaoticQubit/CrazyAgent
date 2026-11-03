@@ -149,8 +149,22 @@ test("Accept shows the proposed commit message to edit and sends only a usable o
   assert.doesNotMatch(html, /Write a commit message/);
   assert.doesNotMatch(html, /<button[^>]*disabled=""[^>]*>Accept/);
   const blank = renderToStaticMarkup(createElement(view.AcceptDialog, { set: set({ message: "" }), pending: false, onCancel() {}, onAccept() {} }));
-  assert.match(blank, /Write a commit message of up to 4096 bytes to accept\./);
+  assert.match(blank, /Write a commit message of up to 4096 bytes, with no hidden characters, to accept\./);
   assert.match(blank, /<button[^>]*disabled=""[^>]*>Accept<\/button>/);
+});
+
+test("Accept shows hidden characters in a proposed message as escapes and never sends them", () => {
+  assert.equal(model.commitMessage("Owner title\u{e0041}\u{e0042}"), null);
+  assert.equal(model.commitMessage("Zero\u200bwidth"), null);
+  assert.equal(model.commitMessage("Ship it \u{1f468}\u200d\u{1f4bb}"), "Ship it \u{1f468}\u200d\u{1f4bb}");
+  const hidden = set({ message: "Formats changed files.\u{e0041}\u{e0042}" });
+  const html = renderToStaticMarkup(createElement(view.AcceptDialog, { set: hidden, pending: false, onCancel() {}, onAccept() {} }));
+  assert.match(html, /<textarea[^>]*>Formats changed files\.\\u\{e0041\}\\u\{e0042\}<\/textarea>/);
+  assert.doesNotMatch(html, /[\u{e0000}-\u{e0fff}]/u);
+  assert.match(html, /The proposed message held characters you cannot see\. They are shown as escapes: check it before you accept\./);
+  assert.doesNotMatch(html, /<button[^>]*disabled=""[^>]*>Accept/);
+  const plain = renderToStaticMarkup(createElement(view.AcceptDialog, { set: set({ message: "Add a file" }), pending: false, onCancel() {}, onAccept() {} }));
+  assert.doesNotMatch(plain, /characters you cannot see/);
 });
 
 test("a set merged but not yet handed to its agent says so and can be asked again or discarded", () => {

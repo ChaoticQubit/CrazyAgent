@@ -36,6 +36,7 @@ const STOP_GRACE: Duration = Duration::from_secs(2);
 const RUN_TIME_SECS_MAX: u64 = 86_400;
 const HOST_WAIT: Duration = Duration::from_secs(10);
 const RESTARTS_MAX: usize = LIST_MAX;
+const HOSTED_ENTRIES_MAX: i64 = 1024;
 #[cfg(unix)]
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS agent_runs(
     id TEXT PRIMARY KEY CHECK(length(id) = 32),
@@ -262,6 +263,7 @@ impl AgentSpec {
             model: self.model.clone(),
             tools: self.tools,
             sandbox_profile: self.sandbox_profile.clone(),
+            unconfined: false,
             git_identity: None,
             limits: LaunchLimits {
                 run_time: Duration::from_secs(self.run_time_secs),
@@ -302,6 +304,44 @@ pub struct AgentView {
 struct HostedSpec {
     host: String,
     reference: String,
+}
+
+/// Finds, for each agent one engine part hosts in a project, the newest register entry
+/// recorded for it: the entry the owner's Stop and Restart act on. Reads at most the
+/// project's `HOSTED_ENTRIES_MAX` newest entries; a database the register never opened has
+/// none. Inputs: an engine database connection, the project and the host name. Output: the
+/// entry id keyed by the host's own reference.
+pub(crate) fn hosted_entries(
+    connection: &Connection,
+    project: &ProjectId,
+    host: &str,
+) -> rusqlite::Result<HashMap<String, String>> {
+    let mut entries = HashMap::new();
+    let opened: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='agent_runs')",
+        [],
+        |row| row.get(0),
+    )?;
+    if !opened {
+        return Ok(entries);
+    }
+    let mut statement = connection.prepare(
+        "SELECT id,spec FROM agent_runs WHERE project=?1 AND substr(spec,1,8)='{\"host\":'
+         ORDER BY started_ms DESC, rowid DESC LIMIT ?2",
+    )?;
+    let rows = statement.query_map(params![project.as_str(), HOSTED_ENTRIES_MAX], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (id, spec) = row?;
+        if let Ok(spec) = serde_json::from_str::<HostedSpec>(&spec)
+            && spec.host == host
+        {
+            entries.entry(spec.reference).or_insert(id);
+        }
+    }
+    assert!(entries.len() <= HOSTED_ENTRIES_MAX as usize);
+    Ok(entries)
 }
 
 /// What the register shows for one agent that another engine part starts and drives,
@@ -940,6 +980,7 @@ impl Agents {
             Some(crate::launch_context::for_project(
                 &*self.db()?,
                 &spec.project,
+                crate::agent_git::Layout::Linked,
             )?)
         } else {
             None

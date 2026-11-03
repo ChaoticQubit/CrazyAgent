@@ -260,6 +260,18 @@ pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
     encode_frame(&Reply::Rejected { code: code.into() }).map_err(|_| unknown())
 }
 
+/// A changes request read and checked once: the reply of a read already made, or a
+/// change still to admit, with the engine folder whose store it changes.
+enum Prepared {
+    Read(Box<Reply>),
+    Change(PathBuf, Action),
+}
+
+/// Serves one changes request. A list or diff is read first, then under the owner barrier
+/// the grant is checked again and the reply is written. A change is admitted under the
+/// barrier and made without it, and its reply is what it did.
+/// Inputs: the connection, engine, authority, packet, admission and request body.
+/// Output: done once the reply is written.
 pub(super) async fn serve(
     stream: &mut UnixStream,
     engine: &Arc<Engine>,
@@ -268,7 +280,21 @@ pub(super) async fn serve(
     admission: &Admission,
     bytes: &[u8],
 ) -> Result<(), EngineError> {
-    let reply = match handle(engine, authority, packet, admission, bytes).await {
+    let (answered, _barrier) = match prepare(engine, authority, packet, admission, bytes).await {
+        Ok(Prepared::Change(root, action)) => (
+            change(engine, authority, packet, admission, root, action).await,
+            None,
+        ),
+        Ok(Prepared::Read(reply)) => {
+            let barrier = engine.owner_egress.write().await;
+            (
+                checked(authority, packet, admission).map(|()| *reply),
+                Some(barrier),
+            )
+        }
+        Err(error) => (Err(error), None),
+    };
+    let reply = match answered {
         Ok(reply) => reply,
         Err(error) => Reply::Rejected { code: error.0 },
     };
@@ -279,16 +305,19 @@ pub(super) async fn serve(
         })
         .map_err(|_| unknown())?,
     };
-    stream.write_all(&frame).await.map_err(io_error)
+    write_reply(stream, &frame).await
 }
 
-async fn handle(
+/// Reads and checks a changes request, and makes a list or diff outside the owner barrier.
+/// Inputs: the engine, authority, packet, admission and request body.
+/// Output: the prepared request, or the refusal.
+async fn prepare(
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
     packet: &[u8; 37],
     admission: &Admission,
     bytes: &[u8],
-) -> Result<Reply, EngineError> {
+) -> Result<Prepared, EngineError> {
     if bytes.len() > REQUEST_BYTES_MAX {
         return Err(failure("changes_request_bounds"));
     }
@@ -302,66 +331,111 @@ async fn handle(
     }
     action.validate()?;
     let root = engine_root(authority)?;
-    let updated = match &action {
-        Action::Update { id } => Some((id.clone(), root.clone())),
-        _ => None,
-    };
-    let (reply, merged) = tokio::task::spawn_blocking(move || {
-        let db = landing::open(&root)?;
-        Ok::<_, EngineError>(match action {
-            Action::List { project } => {
-                let mut change_sets = landing::list(&db, &project)?;
-                change_sets.truncate(LIST_MAX);
-                (Reply::List { change_sets }, false)
-            }
-            Action::Diff { id, page } => (
-                Reply::Diff {
-                    diff: landing::diff(&db, &id, page)?,
-                },
-                false,
-            ),
-            Action::Accept {
-                id,
-                expected_head,
-                message,
-            } => {
-                let home = std::env::var_os("HOME")
-                    .map(PathBuf::from)
-                    .ok_or_else(|| failure("changes_owner_identity_missing"))?;
-                let outcome = landing::accept(&db, &home, &id, &expected_head, message.as_deref())?;
-                (Reply::Accepted { outcome }, false)
-            }
-            Action::Discard { id, expected_head } => (
-                Reply::Discarded {
-                    restorable_until_ms: landing::discard(&db, &id, &expected_head, now_ms()?)?,
-                },
-                false,
-            ),
-            Action::Restore { id } => {
-                landing::restore(&db, &id, now_ms()?)?;
-                (Reply::Done, false)
-            }
-            Action::Update { id } => (Reply::Done, crate::landing_turns::update(&db, &id)?),
-        })
+    if !matches!(action, Action::List { .. } | Action::Diff { .. }) {
+        return Ok(Prepared::Change(root, action));
+    }
+    tokio::task::spawn_blocking(move || {
+        run(&root, action).map(|(reply, _)| Prepared::Read(Box::new(reply)))
     })
     .await
-    .map_err(|_| failure("changes_unavailable"))??;
-    if let Some((id, root)) = updated {
-        let runtime = super::OwnerRuntimeHandle {
-            engine: engine.clone(),
-            authority: authority.clone(),
-        };
-        match runtime
-            .resolve_after_update(packet, admission, root, &id)
-            .await
-        {
-            Err(problem) if merged => {
-                eprintln!("resolve_not_started_after_update cause={}", problem.0);
-            }
-            started => started?,
+    .map_err(|_| failure("changes_unavailable"))?
+}
+
+/// Checks the grant again, under the owner barrier its caller holds, before a read's reply
+/// is written. Inputs: the authority, packet and admission. Output: Ok, or the refusal.
+fn checked(
+    authority: &Authority,
+    packet: &[u8; 37],
+    admission: &Admission,
+) -> Result<(), EngineError> {
+    if &authority.authenticate(packet)? != admission {
+        return Err(failure("owner_grant_stale_or_revoked"));
+    }
+    Ok(())
+}
+
+/// Makes one change: the grant is checked and the work handed over under the owner barrier,
+/// which is let go while it runs, so a long Accept stalls no owner request or revocation. A
+/// change admitted before a revocation finishes and answers what it did, unchecked; an
+/// Update then hands a master's resolve over. Inputs: the engine, authority, packet,
+/// admission, engine folder and change. Output: the reply, or the refusal.
+async fn change(
+    engine: &Arc<Engine>,
+    authority: &Arc<Authority>,
+    packet: &[u8; 37],
+    admission: &Admission,
+    root: PathBuf,
+    action: Action,
+) -> Result<Reply, EngineError> {
+    let updated = match &action {
+        Action::Update { id } => Some(id.clone()),
+        _ => None,
+    };
+    let work = {
+        let _barrier = engine.owner_egress.write().await;
+        checked(authority, packet, admission)?;
+        let store = root.clone();
+        tokio::task::spawn_blocking(move || run(&store, action))
+    };
+    let (reply, merged) = work.await.map_err(|_| failure("changes_unavailable"))??;
+    let Some(id) = updated else {
+        return Ok(reply);
+    };
+    let runtime = super::OwnerRuntimeHandle {
+        engine: engine.clone(),
+        authority: authority.clone(),
+    };
+    match runtime
+        .resolve_after_update(packet, admission, root, &id)
+        .await
+    {
+        Err(problem) if merged => {
+            eprintln!("resolve_not_started_after_update cause={}", problem.0);
         }
+        started => started?,
     }
     Ok(reply)
+}
+
+/// Runs one changes request on the change store of an engine folder.
+/// Inputs: the folder and the request. Output: the reply, and whether an Update merged.
+fn run(root: &Path, action: Action) -> Result<(Reply, bool), EngineError> {
+    let db = landing::open(root)?;
+    Ok(match action {
+        Action::List { project } => {
+            let mut change_sets = landing::list(&db, &project)?;
+            change_sets.truncate(LIST_MAX);
+            (Reply::List { change_sets }, false)
+        }
+        Action::Diff { id, page } => (
+            Reply::Diff {
+                diff: landing::diff(&db, &id, page)?,
+            },
+            false,
+        ),
+        Action::Accept {
+            id,
+            expected_head,
+            message,
+        } => {
+            let home = std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .ok_or_else(|| failure("changes_owner_identity_missing"))?;
+            let outcome = landing::accept(&db, &home, &id, &expected_head, message.as_deref())?;
+            (Reply::Accepted { outcome }, false)
+        }
+        Action::Discard { id, expected_head } => (
+            Reply::Discarded {
+                restorable_until_ms: landing::discard(&db, &id, &expected_head, now_ms()?)?,
+            },
+            false,
+        ),
+        Action::Restore { id } => {
+            landing::restore(&db, &id, now_ms()?)?;
+            (Reply::Done, false)
+        }
+        Action::Update { id } => (Reply::Done, crate::landing_turns::update(&db, &id)?),
+    })
 }
 
 /// Keeps change sets tidy while the owner server runs: at start, and once a day after,
