@@ -1657,6 +1657,57 @@ fn a_native_lead_s_team_pane_calls_never_reach_its_own_server_once_its_teammates
     host.close(&[]).unwrap();
 }
 
+/// PLC (c): the engine pins a native lead's teammates' server to the pid it first answered
+/// with. Once that server and the lead's own ended, another server started at the same
+/// socket under another pid, here by a second engine host, is refused for the lead's team
+/// panes, even though the first host dropped its client while nothing listened there.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_server_started_at_a_native_lead_s_teammates_socket_after_its_own_ended_is_refused() {
+    let lead = Lead::new();
+    let root = lead.path();
+    let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
+    let leader = AgentId::team(1).unwrap();
+    let command = lead.confined("lead$ ", &["/bin/sh"]);
+    host.spawn_own_server(&leader, &command).unwrap();
+    assert_eq!(host.panes(&leader).unwrap().len(), 1);
+    for socket in [&lead.socket, &lead.mates] {
+        let killed = crazyagent::spawn_gate::status(
+            Command::new(&lead.tmux)
+                .arg("-S")
+                .arg(socket)
+                .arg("kill-server")
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .unwrap();
+        assert!(killed.success());
+    }
+    assert!(
+        host.kill(&leader).is_err(),
+        "nothing listens for the lead, so the host drops its clients"
+    );
+    for socket in [&lead.socket, &lead.mates] {
+        match std::fs::remove_file(socket) {
+            Ok(()) => {}
+            Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound),
+        }
+    }
+    let other = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
+    other.spawn_own_server(&leader, &command).unwrap();
+    assert_eq!(other.panes(&leader).unwrap().len(), 1);
+
+    let replaced = "terminal_teammates_server_replaced";
+    assert_eq!(host.panes(&leader).unwrap_err().0, replaced);
+    assert_eq!(
+        host.input_pane(&leader, "%1", b"x\n").unwrap_err().0,
+        replaced
+    );
+    other.close(&[]).unwrap();
+}
+
 #[test]
 fn quiet_through_the_engine_host_answers_for_an_agent_on_the_engine_server() {
     let root = root();
