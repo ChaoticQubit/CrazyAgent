@@ -22,8 +22,9 @@ pub use transport::accounts::{AccountCheck, AccountPage};
 pub use transport::agents::{AGENT_CONTROL_CODES, AGENTS_PAGE, AgentPage, RELEASE_WAIT};
 pub use transport::changes::CHANGES_CODES;
 pub use transport::checks::{
-    CHECKS_CODES, CheckJobView, CheckRunView, ChecksReply, ChecksRequest, ChecksSettingsView,
-    RUNS_JOBS_MAX,
+    CHECKS_CODES, CheckGapView, CheckGateView, CheckJobView, CheckRunView, ChecksReply,
+    ChecksRequest, ChecksSettingsView, GATE_GAPS_MAX, GATE_PATHS_SHOWN, RUNS_JOBS_MAX,
+    RUNS_LATEST_MAX,
 };
 pub use transport::cleanup::CLEANUP_CODES;
 pub use transport::ide::IDE_CODES;

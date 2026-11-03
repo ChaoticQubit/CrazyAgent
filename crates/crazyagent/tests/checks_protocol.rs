@@ -4,6 +4,7 @@ mod e2e_support;
 
 use base64::Engine as _;
 use crazyagent::checks::queue::JobState;
+use crazyagent::checks::settings::{GateMode, RemovedTests};
 use crazyagent::checks::{ChecksChoice, ChecksSettings, ProfileState, Trigger};
 use crazyagent::engine::owner::{
     ChecksReply, ChecksRequest, OwnerClient, OwnerClientKind, OwnerResult, SettingsSaved,
@@ -20,8 +21,9 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 use trackwright_core::model::{OpKind, ProjectKey};
 
-const OPS: [&str; 11] = [
+const OPS: [&str; 12] = [
     "cancel",
+    "gate",
     "holdout_store",
     "profile_approve",
     "profile_propose",
@@ -51,6 +53,7 @@ fn op(request: &ChecksRequest) -> &'static str {
         ChecksRequest::Run { .. } => "run",
         ChecksRequest::Cancel { .. } => "cancel",
         ChecksRequest::Runs { .. } => "runs",
+        ChecksRequest::Gate { .. } => "gate",
     }
 }
 
@@ -261,7 +264,7 @@ async fn owner_checks_requests_round_trip_every_op() {
             assert_eq!(settings.values, ChecksChoice::default());
             assert_eq!(settings.below, ChecksSettings::default());
             assert_eq!(settings.effective, ChecksSettings::default());
-            assert_eq!(settings.choices.len(), 7, "{:?}", settings.choices);
+            assert_eq!(settings.choices.len(), 8, "{:?}", settings.choices);
         }
         other => panic!("{other:?}"),
     }
@@ -364,6 +367,49 @@ async fn owner_checks_requests_round_trip_every_op() {
             assert_eq!(envelope["ok"], true, "{envelope}");
         }
         state => panic!("{state:?}"),
+    }
+    match asking
+        .ask(ChecksRequest::Gate {
+            project: project.clone(),
+            change_set: change_set.clone(),
+        })
+        .await
+    {
+        Ok(ChecksReply::Gate { gate }) => {
+            assert_eq!(gate.gate, GateMode::Warn);
+            assert_eq!(gate.removed_tests, RemovedTests::Flag);
+            assert_eq!(gate.profile, Some(proposal.id.clone()));
+            assert_eq!(gate.head.len(), 40, "{gate:?}");
+            assert_eq!(
+                gate.refusal, None,
+                "warn lets a change with no passing run through"
+            );
+            assert_eq!((gate.gaps_total, gate.gaps.len()), (2, 2), "{gate:?}");
+            let slow = gate
+                .gaps
+                .iter()
+                .find(|gap| gap.check.as_deref() == Some("slow"));
+            let slow = slow.expect("the required check has a gap");
+            assert!(
+                ["checks_not_run", "checks_failed"].contains(&slow.code.as_str()),
+                "{slow:?}"
+            );
+            assert_eq!(
+                slow.run,
+                latest.first().map(|run| run.run_id.to_string()),
+                "{slow:?}"
+            );
+            let sealed = gate
+                .gaps
+                .iter()
+                .find(|gap| gap.check.as_deref() == Some("sealed"));
+            let sealed = sealed.expect("the owner sees the holdout's gap");
+            assert_eq!(
+                (sealed.code.as_str(), &sealed.run),
+                ("checks_not_run", &None)
+            );
+        }
+        other => panic!("{other:?}"),
     }
     assert_eq!(
         asking

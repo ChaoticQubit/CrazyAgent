@@ -1,7 +1,10 @@
 use super::tracker::{SettingChoices, SettingsSaved};
 use super::*;
+#[cfg(unix)]
+use crate::checks::gate;
 use crate::checks::profile::{HOLDOUT_FILE_BYTES_MAX, PROFILE_INPUT_BYTES_MAX};
 use crate::checks::queue::{self, JobState};
+use crate::checks::settings::{GateMode, RemovedTests};
 use crate::checks::{
     self as engine_checks, Actor, AdmittedProfile, ChecksChoice, ChecksSettings, ProfileId,
     ProfilePage, Proposal, Scope, StoredProfile, Trigger, record, settings,
@@ -20,6 +23,12 @@ pub(super) const CHECKS_TIMEOUT: Duration = Duration::from_secs(30);
 pub const RUNS_JOBS_MAX: usize = 64;
 /// The most checks a `runs` reply shows the newest run of, in check order.
 pub const RUNS_LATEST_MAX: usize = 48;
+/// The most gaps a `gate` reply lists: one per required check and holdout, one more each
+/// for the skips and removed tests of a passing one, and the change's own two.
+pub const GATE_GAPS_MAX: usize =
+    2 * (crate::checks::profile::CHECKS_MAX + crate::checks::profile::HOLDOUTS_MAX) + 2;
+/// The most paths or test names one gap of a `gate` reply names; `paths_total` counts all.
+pub const GATE_PATHS_SHOWN: usize = 2;
 
 const _: () = assert!(PROFILE_INPUT_BYTES_MAX + 4096 <= REQUEST_BYTES_MAX);
 const _: () = assert!(HOLDOUT_FILE_BYTES_MAX.div_ceil(3) * 4 + 1024 <= REQUEST_BYTES_MAX);
@@ -30,12 +39,20 @@ const _: () = assert!(
 );
 const _: () =
     assert!(RUNS_JOBS_MAX * 512 + RUNS_LATEST_MAX * 640 <= crate::protocol::FRAME_BYTES_MAX);
+#[cfg(unix)]
+const _: () = assert!(GATE_PATHS_SHOWN <= gate::PATHS_MAX);
+#[cfg(unix)]
+const _: () = assert!(
+    GATE_GAPS_MAX * (2 * GATE_PATHS_SHOWN * crate::checks::integrity::TEXT_BYTES_MAX + 384) + 1024
+        <= crate::protocol::FRAME_BYTES_MAX
+);
 
 /// Every code a Checks request can answer an owner client with: the checks store's, queue's
 /// and record's refusals and job reasons, the gate's, the owner questions a proposal raises,
 /// this protocol's own, and the owner connection's it travels on.
 pub const CHECKS_CODES: &[&str] = &[
     "changes_not_found",
+    "changes_stale",
     "changes_unavailable",
     "checks_batch_unknown",
     "checks_change_set_accepted",
@@ -82,6 +99,7 @@ pub const CHECKS_CODES: &[&str] = &[
     "checks_snapshot_store_invalid",
     "checks_snapshot_too_large",
     "checks_stale",
+    "checks_tests_removed",
     "checks_unavailable",
     "checks_unavailable_off_macos",
     "owner_authentication_failed",
@@ -118,7 +136,8 @@ pub const CHECKS_CODES: &[&str] = &[
 ];
 
 /// One owner Checks request, sent as `{"checks": {"op": <op>, "args": {...}}}`. Every op
-/// names its project; `run`, `cancel` and `runs` also name a change set of that project.
+/// names its project; `run`, `cancel`, `runs` and `gate` also name a change set of that
+/// project.
 /// A profile travels as its JSON text and a holdout file as base64; none of the owner's
 /// replies carries holdout bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -178,6 +197,10 @@ pub enum ChecksRequest {
         project: ProjectId,
         change_set: ChangeSetId,
     },
+    Gate {
+        project: ProjectId,
+        change_set: ChangeSetId,
+    },
 }
 
 /// What a checks settings screen shows for one scope (the app, or one project): the
@@ -233,6 +256,36 @@ pub struct CheckRunView {
     pub finished_ms: Option<i64>,
 }
 
+/// One gap the gate finds at a change set's head as the owner sees it: its code, the check
+/// it is about (None for the change or the project as a whole), the run it read as
+/// `<KEY>-R<n>`, at most `GATE_PATHS_SHOWN` of its paths or test names and how many there
+/// are in all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckGapView {
+    pub code: String,
+    pub check: Option<String>,
+    pub run: Option<String>,
+    pub paths: Vec<String>,
+    pub paths_total: u32,
+}
+
+/// What Accept would meet at a change set's head now, read without keeping a note: the gate
+/// and removed tests settings in effect, the head, the current profile, the code Accept
+/// would be refused with (None when it may proceed), at most `GATE_GAPS_MAX` gaps and how
+/// many there are.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CheckGateView {
+    pub gate: GateMode,
+    pub removed_tests: RemovedTests,
+    pub head: String,
+    pub profile: Option<ProfileId>,
+    pub refusal: Option<String>,
+    pub gaps: Vec<CheckGapView>,
+    pub gaps_total: u32,
+}
+
 /// The engine's answer to one Checks request, one kind per op.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -268,6 +321,9 @@ pub enum ChecksReply {
     Runs {
         jobs: Vec<CheckJobView>,
         latest: Vec<CheckRunView>,
+    },
+    Gate {
+        gate: CheckGateView,
     },
 }
 
@@ -462,19 +518,28 @@ fn run(root: &Path, request: ChecksRequest) -> Result<ChecksReply, EngineError> 
             of_project(&db, &project, &change_set)?;
             runs_view(&db, &change_set)?
         }
+        ChecksRequest::Gate {
+            project,
+            change_set,
+        } => {
+            let head = of_project(&db, &project, &change_set)?;
+            ChecksReply::Gate {
+                gate: gate_view(&db, &change_set, &head)?,
+            }
+        }
     })
 }
 
 /// Refuses a change set that is not the project's, so a request reaches a change set only
-/// under its own project. Inputs: the database, the project and the change set. Output: Ok,
-/// or `checks_change_set_unknown`.
+/// under its own project. Inputs: the database, the project and the change set. Output: the
+/// change set's head, or `checks_change_set_unknown`.
 fn of_project(
     db: &Connection,
     project: &ProjectId,
     change_set: &ChangeSetId,
-) -> Result<(), EngineError> {
+) -> Result<String, EngineError> {
     match landing::change_set(db, change_set)? {
-        Some((found, _)) if &found == project => Ok(()),
+        Some((found, view)) if &found == project => Ok(view.head),
         _ => Err(failure("checks_change_set_unknown")),
     }
 }
@@ -600,6 +665,52 @@ fn runs_view(db: &Connection, change_set: &ChangeSetId) -> Result<ChecksReply, E
         .collect::<Result<Vec<_>, EngineError>>()?;
     assert!(jobs.len() <= RUNS_JOBS_MAX && latest.len() <= RUNS_LATEST_MAX);
     Ok(ChecksReply::Runs { jobs, latest })
+}
+
+/// What Accept would meet at a change set's head, read through the gate without keeping a
+/// note, with at most `GATE_GAPS_MAX` gaps of at most `GATE_PATHS_SHOWN` paths each.
+/// Inputs: the database, the change set and its head. Output: the view, or
+/// `changes_not_found`, `changes_stale` or `checks_unavailable`.
+#[cfg(unix)]
+fn gate_view(
+    db: &Connection,
+    change_set: &ChangeSetId,
+    head: &str,
+) -> Result<CheckGateView, EngineError> {
+    let note = gate::assess(db, change_set, head)?;
+    assert_eq!(note.head, head);
+    let refusal = gate::refusal(&note).map(str::to_owned);
+    let gaps_total = u32::try_from(note.gaps.len()).map_err(|_| failure("checks_unavailable"))?;
+    let gaps: Vec<CheckGapView> = note
+        .gaps
+        .into_iter()
+        .take(GATE_GAPS_MAX)
+        .map(|gap| CheckGapView {
+            code: gap.code,
+            check: gap.check,
+            run: gap.run,
+            paths: gap.paths.into_iter().take(GATE_PATHS_SHOWN).collect(),
+            paths_total: gap.paths_total,
+        })
+        .collect();
+    assert!(gaps.len() <= GATE_GAPS_MAX);
+    assert!(gaps.iter().all(|gap| gap.paths.len() <= GATE_PATHS_SHOWN));
+    Ok(CheckGateView {
+        gate: note.gate,
+        removed_tests: note.removed_tests,
+        head: note.head,
+        profile: note.profile,
+        refusal,
+        gaps,
+        gaps_total,
+    })
+}
+
+/// The gate reads integrity blocks only on unix, so off unix no gate view exists. Inputs:
+/// unused. Output: `checks_unavailable`.
+#[cfg(not(unix))]
+fn gate_view(_: &Connection, _: &ChangeSetId, _: &str) -> Result<CheckGateView, EngineError> {
+    Err(failure("checks_unavailable"))
 }
 
 #[cfg(test)]

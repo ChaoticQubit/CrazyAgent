@@ -68,8 +68,20 @@ fn checks_codes_cover_every_refusal() {
         unlisted.is_empty(),
         "a proposal raises an owner question and travels on the owner connection: {unlisted:?}"
     );
-    for code in ["changes_not_found", "checks_not_run", "checks_failed"] {
+    for code in [
+        "changes_not_found",
+        "changes_stale",
+        "checks_not_run",
+        "checks_failed",
+    ] {
         assert!(listed.contains(code), "{code}");
+    }
+    #[cfg(unix)]
+    for code in crate::checks::gate::CODES {
+        assert!(
+            listed.contains(code),
+            "a gate gap is a refusal code too: {code}"
+        );
     }
 
     let oversized = vec![b' '; REQUEST_BYTES_MAX + 1];
