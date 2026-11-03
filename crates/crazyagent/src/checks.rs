@@ -5,7 +5,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub mod profile;
+pub mod runner;
 pub mod settings;
+pub mod snapshot;
 
 pub use profile::{
     AdmittedCheck, AdmittedProfile, CheckKind, CheckProfile, CheckSpec, HoldoutSpec, NetworkMode,
@@ -156,3 +158,7 @@ pub fn holdout_files(
     let _ = (db, project, check);
     todo!()
 }
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "checks/tests/runner.rs"]
+mod runner_tests;
