@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
-use trackwright_core::catalog::{self, FieldType};
+use trackwright_core::catalog::{self, FieldType, Shape};
 use trackwright_core::host::{
     Authority, CheckView, Evidence, EvidenceState, LinkKind, LinkState, Links, Paths, TicketView,
 };
@@ -502,6 +502,9 @@ fn sample(ty: FieldType) -> Value {
     match ty {
         FieldType::Project => json!("CA"),
         FieldType::Ticket => json!("CA-1"),
+        FieldType::Test(object) => json!(format!("CA-{}1", object.letter())),
+        FieldType::Line { .. } => json!("x"),
+        FieldType::Shape(shape) => sample_shape(shape),
         FieldType::Actor => json!("agent:w1"),
         FieldType::Text(_) => json!("x"),
         FieldType::Version => json!(1),
@@ -514,6 +517,34 @@ fn sample(ty: FieldType) -> Value {
         FieldType::Word => json!("evidence"),
         FieldType::Path => json!("roadmap.md"),
         FieldType::Keys => json!(["item-1"]),
+    }
+}
+
+fn sample_shape(shape: Shape) -> Value {
+    match shape {
+        Shape::Steps => json!(["x"]),
+        Shape::Results => json!([{"name": "t", "outcome": "passed"}]),
+        Shape::Source => json!({"kind": "declared", "ref": "local"}),
+        Shape::Policy => json!({
+            "profile": "d".repeat(64),
+            "profile_approved_ms": 0,
+            "check": "unit",
+            "kind": "unit",
+            "argv": [],
+            "toolchain": {"family": "none", "version": ""},
+            "sandbox": "e".repeat(64),
+            "network": "off",
+            "timeout_s": 0,
+            "environment": "f".repeat(64),
+        }),
+        Shape::Integrity => json!({
+            "executed": 0,
+            "inventory": {"baseline_run": null, "removed": [], "removed_total": 0},
+            "new_skips": [],
+            "protected_touched": [],
+            "holdouts_ran": false,
+            "build_ok": true,
+        }),
     }
 }
 

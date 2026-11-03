@@ -1,0 +1,36 @@
+ TW  Ready                                                                                                     2 ready  
+                                                                                                                        
+   ID    Title                                                                          Status      Pri Assignee        
+ > TW-6  Board view moves a ticket between columns and keeps the version it read for t… Todo        P1                  
+   TW-2  Ready queue orders by priority                                                 Todo        P2                  
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
