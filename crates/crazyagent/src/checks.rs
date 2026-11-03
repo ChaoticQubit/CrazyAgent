@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
+pub mod binding;
 #[cfg(unix)]
 pub mod integrity;
 pub mod markers;
@@ -157,12 +158,13 @@ impl Actor {
     }
 }
 
-/// Creates the check profile, holdout file and settings tables. Input: the engine
-/// connection. Output: Ok, or the storage error.
+/// Creates the check profile, holdout file, settings, queue and run binding tables. Input:
+/// the engine connection. Output: Ok, or the storage error.
 pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection
         .execute_batch(SCHEMA)
-        .map_err(|error| EngineError(error.to_string()))
+        .map_err(|error| EngineError(error.to_string()))?;
+    queue::initialize(connection)
 }
 
 /// Stores a proposed profile by content. A master's or agent's proposal of a profile that is

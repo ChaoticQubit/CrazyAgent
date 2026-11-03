@@ -8,6 +8,7 @@ use trackwright_core::host::{
     Authority, CheckView, Evidence, EvidenceState, LinkKind, LinkState, Links, TicketView,
 };
 use trackwright_core::model::{Actor, CheckKind, OpKind, ProjectKey, Refusal, codes};
+use trackwright_core::runs::SourceRef;
 use trackwright_core::standalone::Standalone;
 
 /// A target that exists in the host's tables but belongs to another project.
@@ -76,6 +77,17 @@ const WORKTREE: &str = "SELECT project, agent FROM team_worktrees WHERE worktree
 const WORKTREES: &str = "SELECT project, agent, git_dir FROM team_worktrees
     ORDER BY project = ?1 DESC, agent LIMIT ?2";
 const CHANGE_SET: &str = "SELECT project, state, pruned FROM landing_change_sets WHERE id = ?1";
+const CURRENT_SOURCE: &str = "WITH linked AS (
+    SELECT l.target FROM tk_links l
+      JOIN tk_tickets t ON t.id = l.ticket
+      JOIN tk_projects p ON p.id = t.project
+     WHERE p.key = ?1 AND t.number = ?2 AND l.kind = 'change_set'
+     ORDER BY l.created_ms DESC, l.target LIMIT 1)
+SELECT c.id, c.base, c.head,
+       (SELECT r.tree FROM check_runs r WHERE r.change_set = c.id AND r.commit_id = c.head
+         ORDER BY r.run DESC LIMIT 1)
+  FROM linked JOIN landing_change_sets c ON c.id = linked.target
+ WHERE c.project = ?3";
 const MEMORY: &str = "SELECT project FROM memory_library WHERE id = ?1";
 const KNOWLEDGE: &str = "SELECT project FROM knowledge_heads WHERE id = ?1";
 const QUESTION: &str = "SELECT project, status FROM owner_questions WHERE id = ?1";
@@ -344,6 +356,40 @@ impl Evidence for Host {
                 Ok(EvidenceState { satisfied, detail })
             }
         }
+    }
+
+    fn tracks_source(&self) -> bool {
+        true
+    }
+
+    /// The source a ticket's work is at: the head of the change set it links most recently,
+    /// with that head's tree as the engine's checks recorded it. Inputs: the transaction,
+    /// the project and the ticket. Output: the source, None when the ticket links no change
+    /// set of this project or no check has recorded its head yet, or `host_failed`.
+    fn current_source(
+        &self,
+        tx: &Transaction<'_>,
+        project: &ProjectKey,
+        ticket: &TicketView,
+    ) -> Result<Option<SourceRef>, Refusal> {
+        let engine = project_of(tx, project)?;
+        let row: Option<(String, String, String, Option<String>)> = tx
+            .query_row(
+                CURRENT_SOURCE,
+                params![project.as_str(), ticket.id.number(), engine.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(failed)?;
+        Ok(row.and_then(|(change_set, base, head, tree)| {
+            Some(SourceRef::Git {
+                repository: engine.as_str().to_owned(),
+                commit: head,
+                tree: tree?,
+                base: Some(base),
+                change_set: Some(change_set),
+            })
+        }))
     }
 }
 

@@ -17,6 +17,7 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 use trackwright_core::criteria;
+use trackwright_core::host::{Evidence, TicketView};
 use trackwright_core::model::{self as core, CheckKind as CoreCheck, ProjectKey, ShortId};
 use trackwright_core::ops;
 use trackwright_core::requests::Request;
@@ -580,4 +581,41 @@ fn the_environment_digest_covers_names_and_values_and_the_run_stores_no_value() 
         assert_eq!(found, 0, "{table} stores an environment value");
     }
     assert!(case.root.starts_with("/private/tmp"));
+}
+
+#[test]
+fn the_host_names_the_linked_change_set_head_as_the_current_source() {
+    let case = Case::new();
+    let id = case.change_set(&[("pass.sh", "exit 0\n")]);
+    case.approve(json!([check(
+        "unit",
+        &["sh", "pass.sh"],
+        "exit_code",
+        None
+    )]));
+    let ticket = case.ticket_on("unit");
+    let tx = Transaction::new_unchecked(&case.db, TransactionBehavior::Immediate).unwrap();
+    let args =
+        json!({"id": String::from(ticket.clone()), "kind": "change_set", "target": id.as_str()});
+    let request = Request::parse("link", &serde_json::to_vec(&args).unwrap()).unwrap();
+    let reply: Value =
+        serde_json::from_str(ops::dispatch(&tx, &Host, &owner(), request).json()).unwrap();
+    assert_eq!(reply["ok"], true, "{reply}");
+    let view = TicketView::of(&trackwright_core::store::ticket(&tx, &ticket).unwrap());
+    assert!(Host.tracks_source());
+    assert_eq!(
+        Host.current_source(&tx, &key(), &view).unwrap(),
+        None,
+        "no check has recorded the head's tree yet"
+    );
+    tx.commit().unwrap();
+    case.run(&id);
+    let recorded = case.view(&case.only(&id)).source;
+    let tx = case.db.unchecked_transaction().unwrap();
+    let current = Host.current_source(&tx, &key(), &view).unwrap();
+    assert_eq!(current, Some(recorded));
+    let Some(SourceRef::Git { commit, .. }) = current else {
+        panic!("the engine records git sources");
+    };
+    assert_eq!(commit, case.head(&id));
 }
