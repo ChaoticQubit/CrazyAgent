@@ -965,7 +965,7 @@ mod live {
     use crate::team::runtime::managed_agent::{
         AGENT, ManagedAgent, PROJECT, SignedIn, claude, codex,
     };
-    use crate::team::runtime::{Grant, Order, Plan, Report, TurnEnd, per_turn};
+    use crate::team::runtime::{Grant, Order, Plan, Report, TurnEnd, TurnRules, per_turn};
     use crate::terminal::tmux::{Tmux, installed};
     use crate::terminal::{AgentId, FOLDER, Host};
     use rusqlite::{Connection, params};
@@ -994,6 +994,10 @@ mod live {
             live: false,
             resume,
             continues: plan.continues,
+            native: plan.native,
+            tmux: plan.tmux.clone(),
+            hookless: plan.hookless,
+            scratch_pin: plan.scratch_pin,
         }
     }
 
@@ -1035,7 +1039,10 @@ mod live {
                     context,
                     access: crate::sandbox::policy::AgentAccess::Sandboxed,
                 })),
-                Some(TURN_TIME),
+                TurnRules {
+                    limit: Some(TURN_TIME),
+                    background: crate::team::BackgroundAtEnd::Wait,
+                },
             ))
             .unwrap();
         drop(orders);

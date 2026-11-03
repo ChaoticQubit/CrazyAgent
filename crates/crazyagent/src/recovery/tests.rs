@@ -178,6 +178,7 @@ impl Fixture {
         let role = match role {
             AgentRole::Master => "master",
             AgentRole::Sub => "sub",
+            AgentRole::Teammate => "teammate",
         };
         self.connection
             .execute(
