@@ -2419,6 +2419,14 @@ fn owner_read(
                 .map(|path| path.display().to_string())
                 .collect(),
         },
+        OwnerRead::ProjectHiddenPaths { project_id } => OwnerData::ProjectHiddenPaths {
+            project_id: project_id.clone(),
+            paths: crate::sandbox::hidden_paths::load(&tx, project_id.as_str())
+                .map_err(error)?
+                .into_iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+        },
         OwnerRead::ProjectAgentPolicy { project_id } => {
             let setup = crate::project_setup::load_setup(&tx, project_id)?
                 .ok_or_else(|| error("invalid_project"))?;

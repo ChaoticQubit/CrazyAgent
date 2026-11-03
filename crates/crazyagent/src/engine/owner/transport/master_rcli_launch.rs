@@ -555,6 +555,7 @@ fallback_allowed = false
             lease: prepared.lease.clone(),
             agent_project: prepared.agent_project.clone(),
             agent_policy: prepared.agent_policy.clone(),
+            hidden_paths: prepared.hidden_paths.clone(),
         }
     }
 
