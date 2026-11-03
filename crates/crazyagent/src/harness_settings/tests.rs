@@ -1,5 +1,6 @@
 use super::*;
 use serde_json::{Value, json};
+#[cfg(unix)]
 use std::time::Duration;
 
 const CODEX: &str = include_str!("../../tests/fixtures/harness-settings/codex.json");
