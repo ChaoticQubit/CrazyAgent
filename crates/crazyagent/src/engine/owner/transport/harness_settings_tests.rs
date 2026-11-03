@@ -1,6 +1,6 @@
 use super::*;
-use crate::harness_settings::tests::fixture;
-use crate::harness_settings::{Access, Scope, Source, store};
+use crate::harness_settings::tests::{fixture, fixture_json};
+use crate::harness_settings::{Access, Catalog, Scope, Source, catalog, store};
 use serde_json::{Value, json};
 
 const PROJECT: &str = "alpha";
@@ -30,12 +30,50 @@ fn engine() -> (tempfile::TempDir, PathBuf) {
 /// client's frame body, against the fixture Codex catalog. Inputs: the engine root, the
 /// installed Codex version and the body. Output: the reply, or the refusal.
 fn send(root: &Path, installed: Option<&str>, body: Value) -> Result<Reply, EngineError> {
+    send_with(root, &fixture("codex"), installed, body)
+}
+
+/// Sends one request as `send` does, against another catalog. Inputs: the engine root,
+/// the catalog, the installed version and the body. Output: the reply, or the refusal.
+fn send_with(
+    root: &Path,
+    catalog: &Catalog,
+    installed: Option<&str>,
+    body: Value,
+) -> Result<Reply, EngineError> {
     let bytes = serde_json::to_vec(&body).unwrap();
     assert!(matches!(
         protocol(&bytes).unwrap(),
         Protocol::HarnessSettings
     ));
-    run(root, &fixture("codex"), installed, parse(&bytes)?)
+    run(root, catalog, installed, parse(&bytes)?)
+}
+
+/// Reads every page of one scope's rows against a catalog. Inputs: the engine root, the
+/// catalog, the installed version and the project, none for the app. Output: the rows.
+fn every_value(
+    root: &Path,
+    catalog: &Catalog,
+    installed: Option<&str>,
+    project: Option<&str>,
+) -> Vec<Setting> {
+    let mut rows = Vec::new();
+    let mut after: Option<u32> = None;
+    loop {
+        let body = json!({"harness_settings": {"kind": "values", "harness": "codex",
+            "project": project, "after": after}});
+        match send_with(root, catalog, installed, body).unwrap() {
+            Reply::Values { page } => {
+                assert!(!page.settings.is_empty());
+                rows.extend(page.settings);
+                match page.next {
+                    Some(next) => after = Some(next),
+                    None => return rows,
+                }
+            }
+            other => panic!("expected values, got {other:?}"),
+        }
+    }
 }
 
 fn set_body(project: Option<&str>, key: &str, value: Value, version: u64) -> Value {
@@ -91,7 +129,7 @@ fn refused(reply: Result<Reply, EngineError>) -> (String, Setting) {
 
 fn stored(root: &Path, scope: &Scope) -> Vec<(String, Value)> {
     let db = crate::storage::versioned::open(root).unwrap();
-    store::stored(&db, "codex", scope)
+    store::stored(&db, &fixture("codex"), scope)
         .unwrap()
         .into_iter()
         .collect()
@@ -282,7 +320,7 @@ fn an_unknown_or_unqualified_key_is_read_only() {
             QUALIFIED,
             set_body(None, "retired_key", json!(false), 0),
         ),
-        send(&root, QUALIFIED, reset_body(None, "retired_key", 0)),
+        send(&root, QUALIFIED, reset_body(None, "never_listed", 0)),
         send(
             &root,
             QUALIFIED,
@@ -359,6 +397,238 @@ fn an_unknown_or_unqualified_key_is_read_only() {
         QUALIFIED,
         set_body(None, "tui.status_label", json!("x"), 0),
     ));
+}
+
+#[test]
+fn a_value_an_older_catalog_allowed_shows_with_a_reset_and_is_never_applied() {
+    let (_tmp, root) = engine();
+    for body in [
+        set_body(None, "model_reasoning_effort", json!("minimal"), 0),
+        set_body(Some(PROJECT), "model_reasoning_effort", json!("low"), 0),
+        set_body(None, "tui.status_label", json!("abcdefghij"), 0),
+        set_body(None, "hide_agent_reasoning", json!(true), 0),
+    ] {
+        saved(send(&root, QUALIFIED, body));
+    }
+    let mut later = fixture_json();
+    later["keys"][1]["options"] = json!(["medium", "high"]);
+    later["keys"][3]["max_bytes"] = json!(4);
+    let later = catalog::parse(&serde_json::to_vec(&later).unwrap()).unwrap();
+
+    let app = every_value(&root, &later, QUALIFIED, None);
+    for (key, here, effective, source) in [
+        (
+            "model_reasoning_effort",
+            json!("minimal"),
+            json!("medium"),
+            Source::Default,
+        ),
+        (
+            "tui.status_label",
+            json!("abcdefghij"),
+            json!(""),
+            Source::Default,
+        ),
+        (
+            "hide_agent_reasoning",
+            json!(true),
+            json!(true),
+            Source::App,
+        ),
+    ] {
+        let shown = row(&app, key);
+        assert_eq!(shown.access, Access::Editable, "{key}");
+        assert_eq!(shown.here.as_ref(), Some(&here), "{key}");
+        assert_eq!(
+            (&shown.effective, shown.source),
+            (&effective, source),
+            "{key}"
+        );
+        assert_eq!(shown.version, 1, "{key}");
+    }
+    let project = every_value(&root, &later, QUALIFIED, Some(PROJECT));
+    let effort = row(&project, "model_reasoning_effort");
+    assert_eq!(effort.access, Access::Editable);
+    assert_eq!(effort.here, Some(json!("low")));
+    assert_eq!(
+        (&effort.effective, effort.source),
+        (&json!("medium"), Source::Default)
+    );
+
+    let db = crate::storage::versioned::open(&root).unwrap();
+    let applied = |catalog: &Catalog| -> Vec<(String, Value, Source)> {
+        store::resolved(
+            &db,
+            catalog,
+            QUALIFIED,
+            Some(&ProjectId::new(PROJECT).unwrap()),
+        )
+        .unwrap()
+        .into_iter()
+        .filter(|value| value.source != Source::Engine)
+        .map(|value| (value.key, value.value, value.source))
+        .collect()
+    };
+    assert_eq!(
+        applied(&fixture("codex")),
+        [
+            ("hide_agent_reasoning".to_owned(), json!(true), Source::App),
+            (
+                "model_reasoning_effort".to_owned(),
+                json!("low"),
+                Source::Project
+            ),
+            (
+                "tui.status_label".to_owned(),
+                json!("abcdefghij"),
+                Source::App
+            ),
+        ]
+    );
+    assert_eq!(
+        applied(&later),
+        [("hide_agent_reasoning".to_owned(), json!(true), Source::App)]
+    );
+
+    let app_effort = saved(send_with(
+        &root,
+        &later,
+        QUALIFIED,
+        set_body(None, "model_reasoning_effort", json!("high"), 1),
+    ));
+    assert_eq!(app_effort.here, Some(json!("high")));
+    let effort = row(
+        &every_value(&root, &later, QUALIFIED, Some(PROJECT)),
+        "model_reasoning_effort",
+    )
+    .clone();
+    assert_eq!(effort.here, Some(json!("low")));
+    assert_eq!(
+        (&effort.effective, effort.source),
+        (&json!("high"), Source::App)
+    );
+    assert_eq!(
+        applied(&later),
+        [
+            ("hide_agent_reasoning".to_owned(), json!(true), Source::App),
+            (
+                "model_reasoning_effort".to_owned(),
+                json!("high"),
+                Source::App
+            ),
+        ]
+    );
+    let reset = saved(send_with(
+        &root,
+        &later,
+        QUALIFIED,
+        reset_body(Some(PROJECT), "model_reasoning_effort", 1),
+    ));
+    assert_eq!(reset.here, None);
+    assert_eq!(
+        (&reset.effective, reset.source, reset.version),
+        (&json!("high"), Source::App, 2)
+    );
+    let label = saved(send_with(
+        &root,
+        &later,
+        QUALIFIED,
+        reset_body(None, "tui.status_label", 1),
+    ));
+    assert_eq!((label.here, label.effective), (None, json!("")));
+    assert!(stored(&root, &alpha()).is_empty());
+}
+
+#[test]
+fn a_key_the_catalog_stopped_listing_can_be_reset_and_never_fills_the_page() {
+    let (_tmp, root) = engine();
+    for body in [
+        set_body(None, "hide_agent_reasoning", json!(true), 0),
+        set_body(None, "tui.status_label", json!("x"), 0),
+    ] {
+        saved(send(&root, QUALIFIED, body));
+    }
+    let unlisted = store::UNLISTED_MAX + 40;
+    let mut db = crate::storage::versioned::open(&root).unwrap();
+    let tx = db.transaction().unwrap();
+    for index in 0..unlisted {
+        tx.execute(
+            "INSERT INTO harness_settings(scope, project, harness, key, value_json, updated_ms)
+             VALUES ('app', '', 'codex', ?1, 'true', 1)",
+            [format!("a{index:03}")],
+        )
+        .unwrap();
+    }
+    tx.execute(
+        "INSERT INTO harness_settings(scope, project, harness, key, value_json, updated_ms)
+         VALUES ('project', ?1, 'codex', 'b_retired', '7', 1)",
+        [PROJECT],
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    drop(db);
+
+    let codex = fixture("codex");
+    let shown = every_value(&root, &codex, QUALIFIED, None);
+    assert_eq!(shown.len(), codex.keys.len() + store::UNLISTED_MAX);
+    let listed: Vec<&str> = shown[..codex.keys.len()]
+        .iter()
+        .map(|setting| setting.key.as_str())
+        .collect();
+    let catalog_keys: Vec<&str> = codex.keys.iter().map(|key| key.key.as_str()).collect();
+    assert_eq!(listed, catalog_keys);
+    for (index, setting) in shown[codex.keys.len()..].iter().enumerate() {
+        assert_eq!(setting.key, format!("a{index:03}"));
+        assert_eq!(setting.here, Some(json!(true)));
+        assert_eq!(setting.source, Source::NotApplied);
+        assert!(matches!(setting.access, Access::ReadOnly { .. }));
+    }
+    let hidden = row(&shown, "hide_agent_reasoning");
+    assert_eq!(
+        (&hidden.effective, hidden.source),
+        (&json!(true), Source::App)
+    );
+    assert_eq!(row(&shown, "tui.status_label").here, Some(json!("x")));
+    let db = crate::storage::versioned::open(&root).unwrap();
+    let applied: Vec<String> = store::resolved(&db, &codex, QUALIFIED, None)
+        .unwrap()
+        .into_iter()
+        .filter(|value| value.source == Source::App)
+        .map(|value| value.key)
+        .collect();
+    assert_eq!(applied, ["hide_agent_reasoning", "tui.status_label"]);
+    drop(db);
+
+    let first = saved(send(&root, QUALIFIED, reset_body(None, "a000", 0)));
+    assert_eq!((first.here, first.version), (None, 1));
+    assert_eq!(first.source, Source::NotApplied);
+    let unqualified = saved(send(&root, None, reset_body(None, "a001", 0)));
+    assert_eq!(unqualified.here, None);
+    let next = format!("a{:03}", store::UNLISTED_MAX);
+    let shown = every_value(&root, &codex, QUALIFIED, None);
+    assert_eq!(shown.len(), codex.keys.len() + store::UNLISTED_MAX);
+    assert_eq!(row(&shown, &next).here, Some(json!(true)));
+    assert!(shown.iter().all(|setting| setting.key != "a000"));
+
+    let project = saved(send(
+        &root,
+        QUALIFIED,
+        reset_body(Some(PROJECT), "b_retired", 0),
+    ));
+    assert_eq!(project.here, None);
+    assert!(stored(&root, &alpha()).is_empty());
+    for reply in [
+        send(&root, QUALIFIED, reset_body(None, "a000", 1)),
+        send(&root, QUALIFIED, reset_body(Some(PROJECT), "a002", 0)),
+        send(&root, QUALIFIED, set_body(None, "a003", json!(false), 0)),
+    ] {
+        let (code, _) = refused(reply);
+        assert_eq!(code, "harness_settings_key_not_qualified");
+    }
+    assert_eq!(
+        stale(send(&root, QUALIFIED, reset_body(None, "a004", 3))).here,
+        Some(json!(true))
+    );
 }
 
 #[test]
