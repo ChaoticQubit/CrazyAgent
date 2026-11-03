@@ -1238,6 +1238,62 @@ fn a_native_lead_s_teammates_get_their_own_config_home_and_the_lead_s_sign_in() 
     drop(installed);
 }
 
+/// A native lead's temp files are its own (TPH-2 residual): the lead's `TMPDIR` and zsh
+/// prefix name its own folder in the short temp folder, and the script its Claude Code runs
+/// for each teammate names the shared short temp folder in their place, never the lead's
+/// own. A script that would still name the lead's own folder is refused.
+#[test]
+fn a_native_lead_s_temp_folder_is_its_own_and_its_teammates_keep_the_shared_one() {
+    let case = Case::new();
+    let shared = toolchains::make_tmp(&case.home()).unwrap();
+    let own = toolchains::native_lead_tmp(&shared);
+    let request = case.request("claude-code", case.subscription(), true);
+    let tmux = case.executable("tmux", "#!/bin/sh\nexit 0\n");
+    let installed = project_context(&case, "data")
+        .with_native_team(&tmux, &case.path().join("work"))
+        .install("claude-code", &case.home(), true)
+        .unwrap();
+    let built = command(&request, Some(&installed), &run(None)).unwrap();
+    let value = |name: &str| {
+        built
+            .env
+            .iter()
+            .filter(|(known, _)| known == name)
+            .map(|(_, value)| value.as_str())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(value("TMPDIR"), [own.to_str().unwrap()]);
+    assert_eq!(value("TMPPREFIX"), [own.join("zsh").to_str().unwrap()]);
+    assert_ne!(own, shared);
+
+    write_teammate_command(&case.home(), &built, &request, installed.native().unwrap()).unwrap();
+    let script = crate::launch_context::teammate_command(&case.home());
+    let written = std::fs::read_to_string(&script).unwrap();
+    let word = |name: &str, value: &Path| format!(" '{name}={}' ", value.display());
+    assert!(written.contains(&word("TMPDIR", &shared)), "{written}");
+    assert!(
+        written.contains(&word("TMPPREFIX", &shared.join("zsh"))),
+        "{written}"
+    );
+    assert!(!written.contains(own.to_str().unwrap()), "{written}");
+
+    std::fs::remove_file(&script).unwrap();
+    let mut leaky = built.clone();
+    leaky.env.push((
+        "XDG_RUNTIME_DIR".to_owned(),
+        own.join("run").display().to_string(),
+    ));
+    assert_eq!(
+        write_teammate_command(&case.home(), &leaky, &request, installed.native().unwrap())
+            .unwrap_err()
+            .0,
+        "launch_teammate_command_invalid"
+    );
+    assert!(!script.exists());
+    drop(installed);
+    toolchains::remove_tmp(&case.home()).unwrap();
+}
+
 #[test]
 fn a_relayed_claude_launch_allows_hooks_and_a_plain_one_disables_them() {
     let case = Case::new();

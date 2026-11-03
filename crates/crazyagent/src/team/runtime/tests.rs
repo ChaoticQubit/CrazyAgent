@@ -13477,6 +13477,168 @@ fn a_native_teammate_writes_only_its_own_home_and_the_team_folders_its_lead_shar
     );
 }
 
+/// A native lead's temp files are out of its teammates' reach (TPH-2 residual). The lead
+/// starts with its own temp folder empty, though an earlier start left a file there, and in
+/// its installed profile stages a file in it. A teammate in its installed profile can
+/// neither read, list, change, remove nor move that folder or anything in it, nor make a
+/// file, a link or a folder there, and still writes the short temp folder it shares.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_teammate_cannot_read_or_plant_in_its_lead_s_own_temp_folder() {
+    use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    set_mode(
+        &fixture.connection,
+        &project,
+        HarnessKind::ClaudeCode,
+        SubagentMode::Native,
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        fixture.base.join("engine.db"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let host = crate::terminal::tmux_host(&fixture.base, Some(fixture.tmux.clone()));
+    let runtime = exiting_claude_runtime(&fixture)
+        .with_terminal(host.clone())
+        .unwrap();
+    let profile = reference("managed-profile");
+    let managed = runtime.custody.as_ref().unwrap().profile_home(&profile);
+    std::fs::create_dir_all(&managed).unwrap();
+    std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let account = TeamAccount {
+        connection: reference("managed-connection"),
+        reach: TeamReach::Managed {
+            profile_ref: profile,
+            model: None,
+        },
+    };
+    let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    let home = agent_home(&runtime.state, id);
+    let earlier = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let left = crate::sandbox::toolchains::native_lead_tmp(&earlier);
+    std::fs::create_dir(&left).unwrap();
+    std::fs::write(left.join("left.txt"), "earlier").unwrap();
+    let (_, plan, _) = runtime
+        .prepare(
+            &fixture.setup,
+            id,
+            AgentRole::Sub,
+            "claude-code",
+            true,
+            &account,
+            false,
+            Layout::Linked,
+        )
+        .unwrap();
+    assert!(plan.native, "the lead starts with native teammates");
+    let teammates = agent_teammates_profile(&runtime.state, id);
+    let work = plan.working_dir.clone();
+    let shared = crate::sandbox::toolchains::existing_tmp(&home).unwrap();
+    assert_eq!(shared, earlier);
+    let own = crate::sandbox::toolchains::native_lead_tmp(&shared);
+    let metadata = std::fs::symlink_metadata(&own).unwrap();
+    assert!(metadata.is_dir() && metadata.permissions().mode() & 0o777 == 0o700);
+    assert_eq!(
+        std::fs::read_dir(&own).unwrap().count(),
+        0,
+        "the lead's own temp folder kept what an earlier start left"
+    );
+
+    let staged = own.join("staged.txt");
+    let staging = crate::spawn_gate::output(
+        Command::new(crate::sandbox::SANDBOX_EXEC)
+            .arg("-f")
+            .arg(&plan.sandbox_profile)
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg(format!("printf staged > '{}'", staged.display()))
+            .current_dir(&work)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert!(staging.status.success(), "{staging:?}");
+    assert_eq!(std::fs::read_to_string(&staged).unwrap(), "staged");
+
+    let tried = work.join("tried.txt");
+    let mate = work.join("mate.sh");
+    std::fs::write(
+        &mate,
+        format!(
+            "try() {{ name=$1; shift; \"$@\" 2>/dev/null; echo \"$name=$?\" >> {tried}; }}\n\
+             try read cat '{own}/staged.txt'\n\
+             try list ls '{own}'\n\
+             try change sh -c \"printf planted > '{own}/staged.txt'\"\n\
+             try create sh -c \"printf planted > '{own}/planted.txt'\"\n\
+             try link ln -s '{home}/.zshenv' '{own}/link'\n\
+             try folder mkdir '{own}/sub'\n\
+             try remove rm -f '{own}/staged.txt'\n\
+             try move mv '{own}' '{shared}/away'\n\
+             try shared sh -c \"printf x > '{shared}/mate-tmp.txt'\"\n",
+            own = own.display(),
+            home = home.display(),
+            shared = shared.display(),
+            tried = tried.display(),
+        ),
+    )
+    .unwrap();
+    let mated = crate::spawn_gate::output(
+        Command::new(crate::sandbox::SANDBOX_EXEC)
+            .arg("-f")
+            .arg(&teammates)
+            .arg("/bin/sh")
+            .arg(&mate)
+            .current_dir(&work)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", home.with_file_name("mates-home"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    let attempts = std::fs::read_to_string(&tried).unwrap_or_default();
+    let exit = |attempt: &str| {
+        attempts
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{attempt}=")))
+            .map(str::to_owned)
+    };
+
+    assert!(mated.status.success(), "{mated:?}");
+    for attempt in [
+        "read", "list", "change", "create", "link", "folder", "remove", "move",
+    ] {
+        assert!(
+            exit(attempt).is_some_and(|code| code != "0"),
+            "a teammate's {attempt} in its lead's own temp folder succeeded: {attempts}"
+        );
+    }
+    assert_eq!(
+        exit("shared").as_deref(),
+        Some("0"),
+        "a teammate could not write the short temp folder it shares: {attempts}"
+    );
+    assert!(
+        !String::from_utf8_lossy(&mated.stdout).contains("staged"),
+        "a teammate read the lead's staged file"
+    );
+    assert_eq!(std::fs::read_to_string(&staged).unwrap(), "staged");
+    let mut names: Vec<String> = std::fs::read_dir(&own)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["staged.txt"]);
+}
+
 /// A native lead's teammate cannot change a hook its lead runs (brief residual 3). The
 /// project holds one owner hook, added through the plugin store as the owner adds one, and
 /// the lead's launch installs it into the lead's agent home as Claude Code reads it. The
