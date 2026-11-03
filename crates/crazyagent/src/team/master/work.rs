@@ -21,6 +21,7 @@ const BODY_SHOWN_MAX: usize = 600;
 const SENT_BODY_SHOWN_MAX: usize = 80;
 const TITLE_SHOWN_MAX: usize = 120;
 const CLAIMS_SHOWN_MAX: usize = 300;
+const WORKING_TEAMMATES_SHOWN_MAX: usize = 16;
 const WIDE_CLAIMS_CHECKED_MAX: usize = 4;
 const WIDE_CLAIMS_TIME: Duration = Duration::from_millis(1500);
 const SECTION_BYTES_MAX: usize = 6 * 1024;
@@ -539,6 +540,16 @@ pub(super) fn finish_work(
 ) -> Result<(String, bool), EngineError> {
     let project = &answering.stored.project_id;
     if outcome == Finish::Complete && !master {
+        let working = working_teammates(connection, project, agent)?;
+        if !working.is_empty() {
+            return Ok((
+                format!(
+                    "Not finished: these teammates still work: {}. CrazyAgent lands each teammate's work on your task branch once it rests and you are idle; finish again once they rest.",
+                    bound_text(&working.join(", "), CLAIMS_SHOWN_MAX)
+                ),
+                true,
+            ));
+        }
         match unmerged_for_finish(connection, answering, agent) {
             Ok(unmerged) if unmerged.is_empty() => {}
             Ok(unmerged) => {
@@ -610,6 +621,48 @@ pub(super) fn finish_work(
         ),
         false,
     ))
+}
+
+/// The names of a linked lead's native teammates that still work (OP-9b), which keep its
+/// work from Complete, since the engine lands each teammate's work on the lead's task
+/// branch only once it rests. Takes the database, the project and the lead. Returns the
+/// names, none for a lead in its own clone or with no worktree, or a SQLite failure.
+fn working_teammates(
+    connection: &Connection,
+    project: &ProjectId,
+    lead: i64,
+) -> Result<Vec<String>, EngineError> {
+    let place: Option<(String, String)> = connection
+        .query_row(
+            "SELECT worktree,git_dir FROM team_worktrees WHERE agent=?1 AND project=?2",
+            params![lead, project.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(state)?;
+    let Some((worktree, git_dir)) = place else {
+        return Ok(Vec::new());
+    };
+    if Path::new(&git_dir) == crate::agent_git::git_dir(Path::new(&worktree)) {
+        return Ok(Vec::new());
+    }
+    let mut statement = connection
+        .prepare(
+            "SELECT COALESCE(n.name,'teammate '||a.id) FROM team_agents a
+             LEFT JOIN team_teammate_names n ON n.agent=a.id
+             WHERE a.project=?1 AND a.parent=?2 AND a.role='teammate'
+             AND a.status IN ('starting','working') ORDER BY a.id LIMIT ?3",
+        )
+        .map_err(state)?;
+    let names: Vec<String> = statement
+        .query_map(
+            params![project.as_str(), lead, WORKING_TEAMMATES_SHOWN_MAX as i64],
+            |row| row.get(0),
+        )
+        .map_err(state)?
+        .collect::<Result<_, _>>()
+        .map_err(state)?;
+    Ok(names)
 }
 
 /// The branches of agents a lead leads that are not merged into its own branch yet, which

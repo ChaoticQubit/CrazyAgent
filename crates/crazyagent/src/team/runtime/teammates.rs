@@ -284,6 +284,31 @@ pub(super) fn name(connection: &Connection, teammate: i64) -> Option<String> {
         .flatten()
 }
 
+/// Lists a lead's running teammate rows with whether each rests, so the engine commits a
+/// resting teammate's turn and lands its work on the lead (OP-9b). Inputs: the connection,
+/// the project and the lead. Output: the rows, true for a resting one, or a SQLite failure.
+pub(super) fn resting(
+    connection: &Connection,
+    project: &ProjectId,
+    lead: i64,
+) -> Result<Vec<(i64, bool)>, EngineError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id,status='idle' FROM team_agents WHERE project=?1 AND parent=?2
+             AND role='teammate' AND status IN ('starting','idle','working')
+             ORDER BY id LIMIT ?3",
+        )
+        .map_err(error)?;
+    let rows: Vec<(i64, bool)> = statement
+        .query_map(params![project.as_str(), lead, MEMBERS_MAX as i64], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .map_err(error)?
+        .collect::<Result<_, _>>()
+        .map_err(error)?;
+    Ok(rows)
+}
+
 /// Lists a lead's running teammate rows with their pane ids, so the terminal host learns
 /// each teammate's own name for its pane (`Host::adopt_pane`) on every discovery pass.
 /// Inputs: the connection, the project and the lead. Output: the rows, or a SQLite failure.

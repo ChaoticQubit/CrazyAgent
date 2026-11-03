@@ -2,14 +2,14 @@ use super::AgentKind;
 use super::clone;
 use super::flow::{
     agent_branch, check_places, clone_branch, drop_branch, hold, holds_only, holds_only_except,
-    open_agent, shared,
+    linked_git_dir, open_agent, shared,
 };
 use super::git::{Repo, failure};
 use super::store;
 use crate::agent_git::{self, Layout};
 use crate::engine::EngineError;
 use rusqlite::{Connection, params};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const REMOVE_OUTPUT_BYTES_MAX: usize = 4096;
 const TIP_LISTING_BYTES_MAX: usize = 64 * 1024 * 1024;
@@ -170,6 +170,43 @@ pub(super) fn own_teammates(
         })
         .collect();
     Ok(named)
+}
+
+/// The linked worktree and git folder of one native teammate of a linked lead that works in
+/// its own worktree on its own branch (OP-9b), read as data with no git run. Inputs: the
+/// store, the lead's worktree and git folder and the teammate's name. Output: the
+/// teammate's worktree and git folder, None for a lead in its own clone or a teammate with
+/// no worktree on its own branch, or the code that kept them from being read.
+pub(super) fn linked_teammate_place(
+    db: &Connection,
+    worktree: &Path,
+    git_dir: &Path,
+    name: &str,
+) -> Result<Option<(PathBuf, PathBuf)>, EngineError> {
+    if git_dir == agent_git::git_dir(worktree) {
+        return Ok(None);
+    }
+    let repository = linked_repository(git_dir)?;
+    if check_places(repository, worktree, git_dir)? != Layout::Linked {
+        return Ok(None);
+    }
+    let branch = agent_branch(db, worktree, Layout::Linked)?.ok_or_else(invalid)?;
+    let folder = worktree.join(agent_git::TEAMMATES_FOLDER).join(name);
+    let own = clone::linked_teammates(repository, worktree, &branch)?
+        .into_iter()
+        .any(|teammate| {
+            teammate.folder == folder
+                && matches!(&teammate.head, clone::TeammateHead::Branch(head)
+                    if agent_git::is_teammates_own_branch(&branch, name, head))
+        });
+    if !own {
+        return Ok(None);
+    }
+    let own_git = linked_git_dir(&folder)?;
+    if check_places(repository, &folder, &own_git)? != Layout::Linked {
+        return Err(invalid());
+    }
+    Ok(Some((folder, own_git)))
 }
 
 /// The owner checkout root a linked worktree's git folder sits in,

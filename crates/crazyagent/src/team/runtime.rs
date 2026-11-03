@@ -464,6 +464,8 @@ pub struct TeamRuntime {
     watch: super::events::Watch,
     teammates_next: Option<Instant>,
     teammate_worktree_tries: BTreeMap<i64, BTreeMap<String, u8>>,
+    teammates_rested: BTreeMap<i64, BTreeSet<i64>>,
+    teammate_conflicts_told: BTreeMap<i64, BTreeMap<String, (String, String)>>,
     receipts_next: BTreeMap<ProjectId, Instant>,
     live_starts: BTreeMap<ProjectId, Vec<Instant>>,
     resuming: Option<(i64, Resume)>,
@@ -675,6 +677,8 @@ impl TeamRuntime {
             watch: super::events::Watch::default(),
             teammates_next: None,
             teammate_worktree_tries: BTreeMap::new(),
+            teammates_rested: BTreeMap::new(),
+            teammate_conflicts_told: BTreeMap::new(),
             receipts_next: BTreeMap::new(),
             live_starts: BTreeMap::new(),
             resuming: None,
@@ -1044,6 +1048,10 @@ impl TeamRuntime {
             .collect();
         self.teammate_worktree_tries
             .retain(|lead, _| harnesses.iter().any(|(agent, _)| agent == lead));
+        self.teammates_rested
+            .retain(|lead, _| harnesses.iter().any(|(agent, _)| agent == lead));
+        self.teammate_conflicts_told
+            .retain(|lead, _| harnesses.iter().any(|(agent, _)| agent == lead));
         for (agent, project) in harnesses {
             let cap = super::teammate_cap(&self.connection, &project)?;
             if let Some(cap) = cap {
@@ -1093,6 +1101,8 @@ impl TeamRuntime {
                 at,
             )?;
             self.make_teammate_worktrees(&project, agent)?;
+            self.record_teammate_turns(&project, agent)?;
+            self.land_teammates(&project, agent)?;
             for (teammate, pane) in teammates::working(&self.connection, &project, agent)? {
                 if !live.contains(&pane.as_str()) {
                     continue;
@@ -5241,17 +5251,222 @@ impl TeamRuntime {
         Ok((sandbox, profile))
     }
 
-    /// Commits each resting native teammate's turn of a linked lead in its own worktree on
-    /// its own branch (OP-9b). Takes the project and the lead. Returns Ok.
+    /// The owner checkout root, worktree and git folder of a lead in a linked worktree of
+    /// the project (OP-9b). Takes the project and the lead. Returns them, None for a lead in
+    /// its own clone or with no worktree, or a SQLite failure.
+    fn linked_lead(
+        &self,
+        project: &ProjectId,
+        lead: i64,
+    ) -> Result<Option<(PathBuf, PathBuf, PathBuf)>, EngineError> {
+        let place: Option<(String, String, String)> = self
+            .connection
+            .query_row(
+                "SELECT repository,worktree,git_dir FROM team_worktrees WHERE agent=?1 AND project=?2",
+                params![lead, project.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(error)?;
+        Ok(place
+            .map(|(repository, worktree, git_dir)| {
+                (
+                    PathBuf::from(repository),
+                    PathBuf::from(worktree),
+                    PathBuf::from(git_dir),
+                )
+            })
+            .filter(|(_, worktree, git_dir)| *git_dir != crate::agent_git::git_dir(worktree)))
+    }
+
+    /// Commits each resting native teammate's turn of a linked lead in its own linked
+    /// worktree on its own branch `<task branch>--<name>` (OP-9b), once each time it rests,
+    /// as a linked agent's turn end does, so its work waits as its own change set; a
+    /// teammate that works again is committed at its next rest. Takes the project and the
+    /// lead. Returns Ok, or a SQLite failure; a turn the engine could not commit stays in
+    /// the teammate's worktree.
     fn record_teammate_turns(&mut self, project: &ProjectId, lead: i64) -> Result<(), EngineError> {
-        let _ = (project, lead);
+        let Some((repository, worktree, git_dir)) = self.linked_lead(project, lead)? else {
+            self.teammates_rested.remove(&lead);
+            return Ok(());
+        };
+        let rows = teammates::resting(&self.connection, project, lead)?;
+        let rested = self.teammates_rested.entry(lead).or_default();
+        rested.retain(|teammate| rows.contains(&(*teammate, true)));
+        let due: Vec<i64> = rows
+            .iter()
+            .filter(|(teammate, resting)| *resting && !rested.contains(teammate))
+            .map(|(teammate, _)| *teammate)
+            .collect();
+        if due.is_empty() {
+            return Ok(());
+        }
+        let db = match crate::landing::open(&self.root) {
+            Ok(db) => db,
+            Err(problem) => {
+                eprintln!(
+                    "teammate_turn_failed cause={}",
+                    crate::protocol::plain_code(&problem.0)
+                );
+                return Ok(());
+            }
+        };
+        for teammate in due {
+            let Some(name) = teammates::name(&self.connection, teammate) else {
+                continue;
+            };
+            let Ok(Some((own, own_git))) =
+                crate::landing::linked_teammate_place(&db, &worktree, &git_dir, &name)
+            else {
+                continue;
+            };
+            let workspace = crate::landing::Workspace {
+                project: project.clone(),
+                agent: crate::landing::ChangeAgent {
+                    kind: crate::landing::AgentKind::Sub,
+                    id: teammate.to_string(),
+                    label: format!("{name} \u{b7} teammate"),
+                },
+                repository: repository.clone(),
+                worktree: own,
+                git_dir: own_git,
+            };
+            let ended = crate::landing::TurnEnd {
+                outcome: crate::landing::TurnOutcome::Succeeded,
+                turn: format!("rest-{}", now_ms()),
+                prompt_line: format!("Work of teammate {name}"),
+            };
+            if let Err(problem) = crate::landing_turns::record(&db, &workspace, &ended) {
+                eprintln!(
+                    "teammate_turn_failed cause={}",
+                    crate::landing::refusal_code(&problem)
+                );
+            }
+            self.teammates_rested
+                .entry(lead)
+                .or_default()
+                .insert(teammate);
+        }
         Ok(())
     }
 
-    /// Lands each resting native teammate's waiting change set on its idle linked lead's
-    /// task branch (OP-9b). Takes the project and the lead. Returns Ok.
+    /// Lands each resting native teammate's waiting change set on its linked lead's task
+    /// branch (OP-9b, leader 17:32 answer a) as one squash commit with the owner's identity,
+    /// as an owner's Accept onto that branch does, only while the lead is idle and the
+    /// owner lets a lead's workers land on it, then records the lead's change set again so
+    /// the landed work waits for the owner there. A conflicting set stays on the teammate's
+    /// branch and the lead is told its files once for each teammate head and lead tip.
+    /// Takes the project and the lead. Returns Ok, or a SQLite or coordination failure.
     fn land_teammates(&mut self, project: &ProjectId, lead: i64) -> Result<(), EngineError> {
-        let _ = (project, lead);
+        let Some((repository, worktree, git_dir)) = self.linked_lead(project, lead)? else {
+            self.teammate_conflicts_told.remove(&lead);
+            return Ok(());
+        };
+        let idle: bool = self
+            .connection
+            .query_row(
+                "SELECT status='idle' FROM team_agents WHERE id=?1 AND project=?2",
+                params![lead, project.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(error)?
+            .unwrap_or(false);
+        if !idle
+            || self
+                .workers
+                .get(&lead)
+                .is_some_and(|worker| worker.busy.is_some())
+            || super::nesting(&self.connection, project)?.lands != super::ChildLanding::Lead
+        {
+            return Ok(());
+        }
+        let resting: Vec<i64> = teammates::resting(&self.connection, project, lead)?
+            .into_iter()
+            .filter(|(_, resting)| *resting)
+            .map(|(teammate, _)| teammate)
+            .collect();
+        if resting.is_empty() {
+            return Ok(());
+        }
+        let opened = crate::landing::open(&self.root).and_then(|db| {
+            let sets = crate::landing::list(&db, project)?;
+            let branch = crate::landing::agent_branch(&db, &worktree, &git_dir)?;
+            Ok((db, sets, branch))
+        });
+        let (db, sets, branch) = match opened {
+            Ok((db, sets, Some(branch))) => (db, sets, branch),
+            Ok(_) => return Ok(()),
+            Err(problem) => {
+                eprintln!(
+                    "teammate_landing_failed cause={}",
+                    crate::protocol::plain_code(&problem.0)
+                );
+                return Ok(());
+            }
+        };
+        let mut landed = false;
+        for teammate in resting {
+            let id = teammate.to_string();
+            let Some(set) = sets.iter().find(|set| {
+                set.agent.kind == crate::landing::AgentKind::Sub
+                    && set.agent.id == id
+                    && matches!(
+                        set.state,
+                        crate::landing::ChangeState::Pending
+                            | crate::landing::ChangeState::Conflict
+                    )
+            }) else {
+                continue;
+            };
+            let tip = crate::landing::agent_tip(&db, &repository, &worktree, &git_dir)
+                .unwrap_or_default();
+            let seen = (set.head.clone(), tip);
+            let told = self.teammate_conflicts_told.entry(lead).or_default();
+            if told.get(set.id.as_str()) == Some(&seen) {
+                continue;
+            }
+            let outcome = crate::projects_home::owner_home().and_then(|home| {
+                crate::landing::accept_into(&db, &home, &set.id, &set.head, None, &branch)
+            });
+            match outcome {
+                Ok(crate::landing::AcceptOutcome::Landed { .. }) => {
+                    told.remove(set.id.as_str());
+                    landed = true;
+                }
+                Ok(crate::landing::AcceptOutcome::Conflict { files }) => {
+                    if told.len() >= TEAMMATE_WORKTREE_NAMES_MAX {
+                        told.clear();
+                    }
+                    told.insert(set.id.as_str().to_owned(), seen);
+                    let name = teammates::name(&self.connection, teammate)
+                        .unwrap_or_else(|| format!("teammate {teammate}"));
+                    let branch = bound_text(&branch, crate::landing::BRANCH_BYTES_MAX);
+                    self.note_lead(
+                        project,
+                        lead,
+                        format!(
+                            "CrazyAgent could not land teammate {name}'s work on your task branch {branch}: it conflicts in {}. It stays on {name}'s own branch {branch}--{name}. Ask {name} to make those files agree with yours; CrazyAgent lands its work again after its next rest.",
+                            bound_text(&files.join(", "), TEAMMATE_CONFLICT_FILES_SHOWN_MAX)
+                        ),
+                    )?;
+                }
+                Err(problem) => eprintln!(
+                    "teammate_landing_failed cause={}",
+                    crate::protocol::plain_code(&problem.0)
+                ),
+            }
+        }
+        if landed {
+            self.land_turn(
+                lead,
+                project,
+                format!("teammates-{}", now_ms()),
+                "Land the teammates' work".to_owned(),
+                "its teammates' work",
+                TurnEnd::Success,
+            )?;
+        }
         Ok(())
     }
 
@@ -7952,6 +8167,7 @@ const TEAMMATE_ROWS_KEPT: i64 = 32;
 /// The most times the engine runs git to make one native teammate's worktree (OP-9), so a
 /// worktree git refuses never costs a git run on every pass.
 const TEAMMATE_WORKTREE_TRIES: u8 = 3;
+const TEAMMATE_CONFLICT_FILES_SHOWN_MAX: usize = 400;
 /// The most teammate names of one lead whose worktree tries the engine counts.
 const TEAMMATE_WORKTREE_NAMES_MAX: usize = 64;
 const _: () = assert!(TEAMMATE_WORKTREE_NAMES_MAX >= TEAMMATE_ROWS_KEPT as usize);

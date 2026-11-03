@@ -1082,6 +1082,27 @@ pub fn teammate_worktrees(
     }
 }
 
+/// The linked worktree and git folder of one native teammate of a linked lead that works in
+/// its own worktree, `<worktree>/.worktrees/<name>`, on its own branch
+/// `<task branch>--<name>` (OP-9b), read as data with no git run, so the engine commits
+/// that teammate's turns there. Inputs: the store, the lead's worktree and git folder and
+/// the teammate's name. Output: the teammate's worktree and git folder, None for a lead in
+/// its own clone or a teammate with none, or the code that kept them from being read.
+pub fn linked_teammate_place(
+    db: &Connection,
+    worktree: &Path,
+    git_dir: &Path,
+    name: &str,
+) -> Result<Option<(PathBuf, PathBuf)>, EngineError> {
+    #[cfg(unix)]
+    return retire::linked_teammate_place(db, worktree, git_dir, name);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, worktree, git_dir, name);
+        Err(unavailable())
+    }
+}
+
 /// Makes one native teammate's own worktree inside its lead's worktree (OP-9, OP-9b):
 /// `<worktree>/.worktrees/<name>` on `<task branch>--<name>`, cut from the lead's HEAD for a
 /// new branch and checked out as it stands for one an earlier run left: a worktree of the
