@@ -50,7 +50,7 @@ impl NativeBridge {
         &self,
         offset_minutes: i32,
     ) -> Result<Unlocked<Scorecard>, BridgeError> {
-        if offset_minutes.abs() > OFFSET_MINUTES_MAX {
+        if !(-OFFSET_MINUTES_MAX..=OFFSET_MINUTES_MAX).contains(&offset_minutes) {
             return Err(failure("scorecard_request_invalid"));
         }
         let client = self.scorecard_client()?;

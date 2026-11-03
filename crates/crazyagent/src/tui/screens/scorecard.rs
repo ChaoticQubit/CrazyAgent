@@ -1,3 +1,4 @@
+use super::new_project_view::printable;
 use super::settings_accounts::{plain, send};
 use crate::engine::owner::ScorecardSaved;
 use crate::scorecard::{
@@ -231,10 +232,10 @@ fn task_lines(card: &Scorecard, offset_minutes: i32, theme: &Theme) -> Vec<Line<
         };
         let closed = scorecard::day_label(task.closed_ms, offset_minutes);
         let sets = task.change_sets.join(", ");
-        lines.push(Line::raw(format!(
+        lines.push(Line::raw(printable(format!(
             "  {} {}  closed {closed}  {sets}  {clean}",
             task.ticket, task.title
-        )));
+        ))));
     }
     let listed = card.tasks.len().min(ROWS_SHOWN);
     if usize::try_from(card.real).is_ok_and(|real| real > listed) {
@@ -280,12 +281,12 @@ fn record_lines(
     }
     for act in card.acts.iter().take(ROWS_SHOWN) {
         let project = projects.get(&act.project).unwrap_or(&act.project);
-        lines.push(Line::raw(format!(
+        lines.push(Line::raw(printable(format!(
             "  {}  {project}  {}  {}",
             act_text(act.kind),
             act.subject,
             ago(act.at_ms, now_ms, offset)
-        )));
+        ))));
     }
     if !card.days.is_empty() {
         lines.push(styled("Daily answers", Role::Heading, theme));

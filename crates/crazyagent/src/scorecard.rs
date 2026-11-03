@@ -65,7 +65,11 @@ const PRUNE: &str =
     "DELETE FROM scorecard_marks WHERE id <= (SELECT MAX(id) FROM scorecard_marks) - ?1";
 const REAL: &str = "t.status = 'done' AND t.closed_ms >= ?1 AND t.closed_ms < ?2 AND EXISTS (
     SELECT 1 FROM tk_links l JOIN scorecard_marks m ON m.kind = 'accept' AND m.subject = l.target
-    WHERE l.ticket = t.id AND l.kind = 'change_set')";
+    WHERE l.ticket = t.id AND l.kind = 'change_set' AND NOT EXISTS (
+        SELECT 1 FROM tk_links e JOIN tk_tickets o ON o.id = e.ticket
+        WHERE e.kind = 'change_set' AND e.target = l.target AND o.status = 'done'
+          AND (e.created_ms < l.created_ms
+               OR (e.created_ms = l.created_ms AND e.ticket < l.ticket))))";
 const LINKED: &str = "SELECT 1 FROM tk_links l JOIN scorecard_marks m ON m.subject = l.target
     WHERE l.ticket = t.id AND l.kind = 'change_set' AND ";
 const DISCARDED: &str = "m.kind = 'discard'";
@@ -211,8 +215,10 @@ pub enum Flaw {
     FirstBatchNotPassed,
 }
 
-/// One real task: a done ticket by its short id, its title, when it closed, the change sets
-/// it links (at most `CHANGE_SETS_LISTED_MAX`), whether it is clean and why not.
+/// One real task: a done ticket that is the first done ticket to link an accepted change
+/// set, so one set backs one task however many tickets link it, by its short id, its
+/// title, when it closed, the change sets it links (at most `CHANGE_SETS_LISTED_MAX`),
+/// whether it is clean and why not.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Task {
     pub ticket: String,
@@ -332,8 +338,9 @@ pub(crate) fn intervened(root: &std::path::Path, project: &ProjectId, kind: Kind
     logged(kind, written);
 }
 
-/// Logs a mark written after its act already took effect, such as an Accept, by its plain
-/// code, so the act's outcome stands. Inputs: the act and the write. Output: none.
+/// Logs a failed mark by its plain code, so the owner's act stands: the scorecard measures
+/// acts and never refuses or rolls one back, inside the act's transaction or after it.
+/// Inputs: the act and the write. Output: none.
 pub(crate) fn logged(kind: Kind, written: Result<(), EngineError>) {
     if let Err(problem) = written {
         eprintln!(
@@ -375,8 +382,9 @@ pub(crate) fn accepted(
 
 /// Writes the owner's settling of a question in the caller's transaction: a daily answer,
 /// yes when it reads "yes" in any case, for the scorecard's own question, else an answered
-/// question. Inputs: the transaction, the project, the stored asker, the question id, the
-/// answer text (none for one answered in a terminal) and the time. Output: Ok once written.
+/// question, logging a failed write so the settling stands. Inputs: the transaction, the
+/// project, the stored asker, the question id, the answer text (none for one answered in a
+/// terminal) and the time. Output: none.
 pub(crate) fn answered(
     tx: &Connection,
     project: &ProjectId,
@@ -384,18 +392,23 @@ pub(crate) fn answered(
     question: u64,
     answer: Option<&str>,
     at_ms: i64,
-) -> Result<(), EngineError> {
+) {
     assert!(question > 0);
     let subject = question.to_string();
     if Some(asker) != EngineSource::Scorecard.name().as_deref() {
-        return insert(tx, project, Kind::Answer, &subject, Facts::default(), at_ms);
+        let written = insert(tx, project, Kind::Answer, &subject, Facts::default(), at_ms);
+        logged(Kind::Answer, written);
+        return;
     }
     let yes = answer.is_some_and(|text| text.trim().eq_ignore_ascii_case("yes"));
     let facts = Facts {
         yes: Some(yes),
         ..Facts::default()
     };
-    insert(tx, project, Kind::Daily, &subject, facts, at_ms)
+    logged(
+        Kind::Daily,
+        insert(tx, project, Kind::Daily, &subject, facts, at_ms),
+    );
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -578,7 +591,7 @@ pub fn ask_daily(
 /// Inputs: the engine connection, the time and the reader's UTC offset in minutes, at most
 /// `OFFSET_MINUTES_MAX` either way. Output: the scorecard, or `scorecard_unavailable`.
 pub fn report(db: &Connection, now_ms: i64, offset_minutes: i32) -> Result<Scorecard, EngineError> {
-    assert!(offset_minutes.abs() <= OFFSET_MINUTES_MAX);
+    assert!((-OFFSET_MINUTES_MAX..=OFFSET_MINUTES_MAX).contains(&offset_minutes));
     let Stored { settings, version } = stored(db)?;
     let (window, baseline, measured) = spans(&settings, now_ms, offset_minutes);
     let tracked = table_exists(db, "tk_tickets")? && table_exists(db, "tk_links")?;

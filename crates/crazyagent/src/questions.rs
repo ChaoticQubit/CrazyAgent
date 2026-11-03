@@ -958,7 +958,7 @@ fn settle(
         QuestionStatus::Pending | QuestionStatus::Dismissed => false,
     };
     if counted {
-        crate::scorecard::answered(tx, &project, &question.asker, question.id, answer, at)?;
+        crate::scorecard::answered(tx, &project, &question.asker, question.id, answer, at);
     }
     prune(tx, &project)?;
     Ok(Settlement::Settled)

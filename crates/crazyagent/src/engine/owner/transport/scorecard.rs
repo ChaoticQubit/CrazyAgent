@@ -192,7 +192,7 @@ fn parse(bytes: &[u8]) -> Result<Action, EngineError> {
     let Envelope { scorecard } =
         serde_json::from_slice(bytes).map_err(|_| failure("scorecard_request_invalid"))?;
     if let Action::Report { offset_minutes } = scorecard
-        && offset_minutes.abs() > OFFSET_MINUTES_MAX
+        && !(-OFFSET_MINUTES_MAX..=OFFSET_MINUTES_MAX).contains(&offset_minutes)
     {
         return Err(failure("scorecard_request_invalid"));
     }
@@ -205,7 +205,7 @@ fn run(root: &Path, action: Action) -> Result<Reply, EngineError> {
     let db = crate::questions::open(root)?;
     match action {
         Action::Report { offset_minutes } => {
-            assert!(offset_minutes.abs() <= OFFSET_MINUTES_MAX);
+            assert!((-OFFSET_MINUTES_MAX..=OFFSET_MINUTES_MAX).contains(&offset_minutes));
             let scorecard = scorecard::report(&db, scorecard::now_ms(), offset_minutes)?;
             Ok(Reply::Report {
                 scorecard: Box::new(scorecard),

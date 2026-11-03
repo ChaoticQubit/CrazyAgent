@@ -2139,7 +2139,9 @@ fn perform(
                         owner_turn(tx, project, message)?;
                     }
                     let subject = message.to_string();
-                    crate::scorecard::mark(tx, project, Mark::OwnerMessage, &subject, now)?;
+                    let written =
+                        crate::scorecard::mark(tx, project, Mark::OwnerMessage, &subject, now);
+                    crate::scorecard::logged(Mark::OwnerMessage, written);
                     Outcome::Applied
                 }
                 Err(code) => rejected(code),
@@ -2397,6 +2399,9 @@ fn perform(
                 _ => {}
             }
             owner_stop(tx, project, *agent, now)?;
+            let subject = agent.to_string();
+            let written = crate::scorecard::mark(tx, project, Mark::OwnerStop, &subject, now);
+            crate::scorecard::logged(Mark::OwnerStop, written);
             Ok(Outcome::Applied)
         }
         TeamAction::MessageAgent { agent, text, .. } => {
@@ -3570,8 +3575,7 @@ pub(crate) fn owner_stop(
             params![agent, project.as_str(), now, DEPTH_WALK_MAX],
         )
         .map_err(error)?;
-    let subject = agent.to_string();
-    crate::scorecard::mark(connection, project, Mark::OwnerStop, &subject, now)
+    Ok(())
 }
 
 /// Clears the owner's stop of an agent the owner woke and of every agent it leads, so a
