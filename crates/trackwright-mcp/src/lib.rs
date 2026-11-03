@@ -250,7 +250,7 @@ fn call<H: Host>(params: Option<&Value>, session: &Session<H>) -> std::io::Resul
 fn run<H: Host>(session: &Session<H>, spec: &OpSpec, input: &[u8]) -> std::io::Result<Reply> {
     let request = match Request::parse(spec.kind.as_str(), input) {
         Ok(request) => request,
-        Err(refusal) => return Ok(Reply::from(refusal)),
+        Err(refusal) => return Ok(Reply::refused(&refusal)),
     };
     assert!(
         session.connection.is_autocommit(),
@@ -263,7 +263,7 @@ fn run<H: Host>(session: &Session<H>, spec: &OpSpec, input: &[u8]) -> std::io::R
     };
     let Ok(tx) = Transaction::new_unchecked(&session.connection, behavior) else {
         let why = "the tracker database is busy or unreadable; nothing was written";
-        return Ok(Reply::from(Refusal::new(codes::STORE_FAILED, why)));
+        return Ok(Reply::refused(&Refusal::new(codes::STORE_FAILED, why)));
     };
     let reply = dispatch(&tx, &session.host, &session.actor, request);
     let ended = if reply.is_ok() {
@@ -283,5 +283,5 @@ fn run<H: Host>(session: &Session<H>, spec: &OpSpec, input: &[u8]) -> std::io::R
         return Err(std::io::Error::other(why));
     }
     let why = "the tracker database could not finish the call; nothing was written";
-    Ok(Reply::from(Refusal::new(codes::STORE_FAILED, why)))
+    Ok(Reply::refused(&Refusal::new(codes::STORE_FAILED, why)))
 }
