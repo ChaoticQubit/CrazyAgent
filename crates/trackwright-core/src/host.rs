@@ -1,6 +1,6 @@
 use crate::model::{
-    Actor, CheckKind, Link, OpKind, ProjectKey, Refusal, ShortId, Ticket, TicketKind, TicketStatus,
-    codes,
+    Actor, CheckKind, Link, OpKind, PolicyKey, ProjectKey, Refusal, ShortId, Ticket, TicketKind,
+    TicketStatus, codes,
 };
 use crate::policy;
 use crate::runs::SourceRef;
@@ -153,6 +153,15 @@ pub trait Authority {
         actor: &Actor,
         check: &CheckView,
     ) -> Result<(), Refusal>;
+
+    /// Tells which value, if any, the host locks one policy setting to, for example
+    /// `run_writers = engine_only` where only the engine writes runs. `policy_set` refuses
+    /// any other value with `policy_locked`, even from the owner, and still takes the locked
+    /// value, so the host can store it at setup. Input: the setting. Output: the one value
+    /// word allowed, or None (the default) when the setting is free.
+    fn policy_locked(&self, _setting: PolicyKey) -> Option<&'static str> {
+        None
+    }
 }
 
 /// Everything a host supplies: links, evidence and authority. Any type with the three is

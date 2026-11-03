@@ -6,8 +6,8 @@ use crate::model::{
 };
 use crate::policy;
 use crate::runs::{
-    self, PAGE_BYTES_MAX, ResultOutcome, RunFinish, RunState, RunView, SourceRef, TestId,
-    TestObject, Verdict,
+    self, PAGE_BYTES_MAX, ResultOutcome, RunCancel, RunFinish, RunState, RunView, SourceRef,
+    TestId, TestObject, Verdict,
 };
 use crate::standalone::refusal_of;
 use crate::store::{self, StoreError};
@@ -103,8 +103,9 @@ pub struct CoveragePage {
     pub cursor: Option<CriterionRef>,
 }
 
-/// What a finished run left. Fields: the run and the open tickets it re-evaluated, in
-/// creation order; a ticket it closed under `close = evidence` is among them.
+/// What a finished or interrupted run left. Fields: the run and the open tickets it
+/// re-evaluated, in creation order; a ticket it closed under `close = evidence` is among
+/// them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Finished {
@@ -121,8 +122,9 @@ const OPEN_TEST_CHECKS: &str = "SELECT t.id, k.ref FROM tk_checks k \
      WHERE t.project = ?1 AND k.kind = 'test' AND t.status NOT IN ('done', 'cancelled') \
      ORDER BY t.id, k.id";
 const CASE_BY_NUMBER: &str = "SELECT id, title FROM tk_cases WHERE project = ?1 AND number = ?2";
-const CASE_LATEST: &str = "SELECT r.outcome, u.number, u.verdict FROM tk_results r \
-     JOIN tk_runs u ON u.id = r.run_id WHERE r.case_id = ?1 AND u.state = 'finished' \
+const CASE_LATEST: &str = "SELECT r.outcome, u.number, u.state, u.verdict FROM tk_results r \
+     JOIN tk_runs u ON u.id = r.run_id WHERE r.case_id = ?1 \
+     AND (u.state = 'finished' OR (?7 = 1 AND u.state = 'interrupted')) \
      AND (?2 = 0 OR r.outcome NOT IN ('skipped', 'not_run')) \
      AND (?3 IS NULL OR (json_extract(u.source_json, '$.kind') = ?3 \
      AND json_extract(u.source_json, ?4) = ?5)) \
@@ -158,6 +160,14 @@ enum Counted {
     Plan(i64),
 }
 
+/// A case's newest counted result: its outcome, its run, and that run's verdict, None for
+/// an interrupted run.
+struct Newest {
+    outcome: ResultOutcome,
+    run: TestId,
+    verdict: Option<Verdict>,
+}
+
 /// One criterion of a coverage page as stored: its row id, its ticket's number, its
 /// position, text and stored state.
 struct Found {
@@ -168,13 +178,11 @@ struct Found {
     state: String,
 }
 
-/// Tells whether a `test` check that names a case is satisfied, for a host's
-/// `Evidence::check`. The newest result of the case in a finished run that `test_evidence`
-/// counts decides, with `skipped` and `not_run` dropped under `skipped_counts = neutral`: it
-/// must be `passed`, in a run whose verdict is `passed` or `failed`. Inputs: the
-/// transaction, the host, the project and the check. Output: the state, None when the
-/// reference is not a case id so the host keeps its own rule, or the store's or host's
-/// refusal.
+/// Tells a host's `Evidence::check` whether a `test` check naming a case is satisfied: the
+/// case's newest result in an ended run `test_evidence` counts (`skipped`, `not_run` dropped
+/// under `skipped_counts = neutral`) must be `passed`, in a finished run whose verdict is
+/// `passed` or `failed`. Inputs: the transaction, host, project and check. Output: the
+/// state, None when the reference is no case id (the host keeps its rule), or a refusal.
 pub fn test_check(
     tx: &Transaction<'_>,
     host: &(impl Evidence + ?Sized),
@@ -198,9 +206,9 @@ pub fn test_check(
 
 /// Finishes a run through `runs::finish`, then re-evaluates in the same savepoint every
 /// open ticket holding a `test` check on a case the run reported, so the last passing run
-/// closes its ticket under `close = evidence`. Inputs: the transaction, the host, the
-/// writer, the finish and the time. Output: the run and the tickets re-evaluated, or an
-/// error that wrote nothing.
+/// closes its ticket under `close = evidence`. The `run_finish` op and every engine use
+/// this, not `runs::finish`. Inputs: the transaction, the host, the writer, the finish and
+/// the time. Output: the run and the tickets re-evaluated, or an error that wrote nothing.
 pub fn finish(
     tx: &Transaction<'_>,
     host: &impl Host,
@@ -212,11 +220,27 @@ pub fn finish(
         let run = runs::finish(tx, actor, input, now_ms)?;
         assert_eq!(run.state, RunState::Finished);
         assert!(run.verdict.is_some());
-        let tested = tested(tx, &run.id)?;
-        let change = format!("run {} finished", run.id);
-        let tickets = criteria::reevaluate(tx, host, &tested, &change, now_ms)?;
-        assert_eq!(tickets.len(), tested.len());
-        Ok(Finished { run, tickets })
+        reevaluated(tx, host, run, now_ms)
+    })
+}
+
+/// Interrupts a run through `runs::cancel`, then re-evaluates in the same savepoint every
+/// open ticket holding a `test` check on a case the run reported, so a newer interrupted
+/// result leaves those checks unsatisfied. The `run_cancel` op and every engine use this,
+/// not `runs::cancel`. Inputs: the transaction, the host, the writer, the cancel and the
+/// time. Output: the run and the tickets re-evaluated, or an error that wrote nothing.
+pub fn cancel(
+    tx: &Transaction<'_>,
+    host: &impl Host,
+    actor: &Actor,
+    input: &RunCancel,
+    now_ms: i64,
+) -> Result<Finished, StoreError> {
+    store::write(tx, || {
+        let run = runs::cancel(tx, actor, input, now_ms)?;
+        assert_eq!(run.state, RunState::Interrupted);
+        assert!(run.verdict.is_none());
+        reevaluated(tx, host, run, now_ms)
     })
 }
 
@@ -307,14 +331,20 @@ fn case_state(
         Err(why) => return Ok(unsatisfied(format!("{case} counts no run: {why}"))),
     };
     let neutral = policy.skipped_counts == SkippedCounts::Neutral;
-    let Some(found) = latest(tx, project, case_id, neutral, &counted)? else {
+    let Some(found) = newest(tx, project, case_id, neutral, &counted, true)? else {
         return Ok(unsatisfied(format!(
             "{case} has no result in a run that counts"
         )));
     };
+    let Some(verdict) = found.verdict else {
+        return Ok(unsatisfied(format!(
+            "{case} {} in {}, which was interrupted",
+            found.outcome, found.run
+        )));
+    };
     let satisfied = found.outcome == ResultOutcome::Passed
-        && matches!(found.verdict, Verdict::Passed | Verdict::Failed);
-    if found.verdict == Verdict::NoTests {
+        && matches!(verdict, Verdict::Passed | Verdict::Failed);
+    if verdict == Verdict::NoTests {
         assert_ne!(
             found.outcome,
             ResultOutcome::Passed,
@@ -323,10 +353,7 @@ fn case_state(
     }
     Ok(EvidenceState {
         satisfied,
-        detail: format!(
-            "{case} {} in {} ({})",
-            found.outcome, found.run, found.verdict
-        ),
+        detail: format!("{case} {} in {} ({verdict})", found.outcome, found.run),
     })
 }
 
@@ -376,13 +403,14 @@ fn counted(
     }
 }
 
-fn latest(
+fn newest(
     tx: &Transaction<'_>,
     key: &ProjectKey,
     case_id: i64,
     neutral: bool,
     counted: &Counted,
-) -> Result<Option<CoverageResult>, StoreError> {
+    interrupted: bool,
+) -> Result<Option<Newest>, StoreError> {
     let (kind, path, value, plan) = match counted {
         Counted::Any => (None, None, None, None),
         Counted::Source { kind, path, value } => {
@@ -390,28 +418,51 @@ fn latest(
         }
         Counted::Plan(id) => (None, None, None, Some(*id)),
     };
-    let found: Option<(String, u32, Option<String>)> = tx
+    let found: Option<(String, u32, String, Option<String>)> = tx
         .prepare(CASE_LATEST)?
-        .query_row(params![case_id, neutral, kind, path, value, plan], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
-        })
+        .query_row(
+            params![case_id, neutral, kind, path, value, plan, interrupted],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
         .optional()?;
-    let Some((outcome, number, verdict)) = found else {
+    let Some((outcome, number, state, verdict)) = found else {
         return Ok(None);
     };
     let outcome = ResultOutcome::parse(&outcome)
         .ok_or_else(|| StoreError::Corrupt("a stored result outcome is unknown".into()))?;
-    let verdict = verdict
-        .as_deref()
-        .and_then(Verdict::parse)
-        .ok_or_else(|| StoreError::Corrupt("a finished run has no known verdict".into()))?;
+    let verdict = match RunState::parse(&state) {
+        Some(RunState::Finished) => Some(
+            verdict
+                .as_deref()
+                .and_then(Verdict::parse)
+                .ok_or_else(|| StoreError::Corrupt("a finished run has no known verdict".into()))?,
+        ),
+        Some(RunState::Interrupted) => None,
+        Some(RunState::Running) => unreachable!("a running run is never counted"),
+        None => return Err(StoreError::Corrupt("a stored run state is unknown".into())),
+    };
+    assert!(interrupted || verdict.is_some());
     assert!(!neutral || !matches!(outcome, ResultOutcome::Skipped | ResultOutcome::NotRun));
     let run = TestId::new(key.clone(), TestObject::Run, number)?;
-    Ok(Some(CoverageResult {
+    Ok(Some(Newest {
         outcome,
         run,
         verdict,
     }))
+}
+
+fn reevaluated(
+    tx: &Transaction<'_>,
+    host: &impl Host,
+    run: RunView,
+    now_ms: i64,
+) -> Result<Finished, StoreError> {
+    assert_ne!(run.state, RunState::Running);
+    let tested = tested(tx, &run.id)?;
+    let change = format!("run {} {}", run.id, run.state);
+    let tickets = criteria::reevaluate(tx, host, &tested, &change, now_ms)?;
+    assert_eq!(tickets.len(), tested.len());
+    Ok(Finished { run, tickets })
 }
 
 fn tested(tx: &Transaction<'_>, run: &TestId) -> Result<Vec<i64>, StoreError> {
@@ -518,7 +569,11 @@ fn row(
             case: TestId::new(key.clone(), TestObject::Case, number)?,
             title: runs::cut(title, COVERAGE_TITLE_BYTES_MAX).0,
             proves,
-            latest: latest(tx, key, id, false, &Counted::Any)?,
+            latest: newest(tx, key, id, false, &Counted::Any, false)?.map(|found| CoverageResult {
+                outcome: found.outcome,
+                run: found.run,
+                verdict: found.verdict.expect("a finished run has a verdict"),
+            }),
         });
     }
     assert!(shown.len() <= COVERAGE_CASES_PER_ROW_MAX);

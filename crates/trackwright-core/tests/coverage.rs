@@ -16,19 +16,20 @@ use trackwright_core::model::{
 use trackwright_core::policy;
 use trackwright_core::runs::{
     self, NetworkMode, NewResult, PolicyRef, ResultOutcome, RunEnd, RunFinish, RunRecord, RunStart,
-    SourceRef, TestId, Toolchain, ToolchainFamily, Verdict,
+    RunState, SourceRef, TestId, Toolchain, ToolchainFamily, Verdict,
 };
 use trackwright_core::standalone::Standalone;
 use trackwright_core::store::{self, NewTicket, Store, StoreError};
 use trackwright_core::tests_model::{
-    CaseKind, CaseStatus, CriterionRef, PlanStatus, SkippedCounts, TestEvidence,
+    CaseKind, CaseStatus, CriterionRef, PlanStatus, RunWriters, SkippedCounts, TestEvidence,
     codes as test_codes,
 };
 use trackwright_core::tests_store::{self, NewCase, PlanFields};
 
 /// A host that keeps each ticket's current source tree in its own table in the tracker's
-/// database, read in the core's transaction. Its `test` checks follow runs through the core;
-/// links, authority and every other check kind follow the standalone host.
+/// database, read in the core's transaction, and locks `run_writers` to `engine_only`. Its
+/// `test` checks follow runs through the core; links, every other check kind and the rest
+/// of authority follow the standalone host.
 struct TreeHost;
 
 const TREE_TABLE: &str = "CREATE TABLE host_trees(ticket TEXT PRIMARY KEY, tree TEXT NOT NULL)";
@@ -110,6 +111,10 @@ impl Authority for TreeHost {
         check: &CheckView,
     ) -> Result<(), Refusal> {
         Standalone.evidence_may(tx, project, actor, check)
+    }
+
+    fn policy_locked(&self, setting: PolicyKey) -> Option<&'static str> {
+        (setting == PolicyKey::RunWriters).then_some(RunWriters::EngineOnly.as_str())
     }
 }
 
@@ -672,6 +677,143 @@ fn current_source_on_the_standalone_host_replies_option_needs_host() {
     assert_eq!(
         policy::load(&tx, &key()).unwrap().test_evidence,
         TestEvidence::CurrentSource
+    );
+    assert_eq!(
+        events::replay(&tx, &key()).unwrap(),
+        store::state(&tx, &key()).unwrap()
+    );
+}
+
+#[test]
+fn a_host_lock_refuses_every_other_value_even_from_the_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = opened(dir.path());
+    let tx = store.transaction().unwrap();
+    project(&tx);
+    let policies = count(&tx, "tk_policy");
+    let written = count(&tx, "tk_events");
+    let writers = |tx: &Transaction<'_>| policy::load(tx, &key()).unwrap().run_writers;
+
+    let attempt = policy::set(
+        &tx,
+        &TreeHost,
+        &owner(),
+        &key(),
+        PolicyKey::RunWriters,
+        "any",
+        0,
+        1_050,
+    );
+    match attempt {
+        Err(StoreError::Refused(refusal)) => {
+            assert_eq!(refusal.code, codes::POLICY_LOCKED);
+            assert!(refusal.message.contains("run_writers"));
+            assert!(refusal.message.contains("engine_only"));
+        }
+        other => panic!("expected policy_locked, got {other:?}"),
+    }
+    assert_eq!(count(&tx, "tk_policy"), policies);
+    assert_eq!(count(&tx, "tk_events"), written);
+    assert_eq!(writers(&tx), RunWriters::Any);
+
+    set_policy(&tx, &TreeHost, PolicyKey::RunWriters, "engine_only");
+    assert_eq!(writers(&tx), RunWriters::EngineOnly);
+    let again = policy::set(
+        &tx,
+        &TreeHost,
+        &owner(),
+        &key(),
+        PolicyKey::RunWriters,
+        "any",
+        1,
+        1_060,
+    );
+    assert_eq!(refused(again), codes::POLICY_LOCKED);
+    assert_eq!(writers(&tx), RunWriters::EngineOnly);
+
+    set_policy(&tx, &TreeHost, PolicyKey::SkippedCounts, "neutral");
+    assert_eq!(
+        policy::load(&tx, &key()).unwrap().skipped_counts,
+        SkippedCounts::Neutral
+    );
+    set_policy(&tx, &Standalone, PolicyKey::RunWriters, "any");
+    assert_eq!(writers(&tx), RunWriters::Any);
+    assert_eq!(
+        events::replay(&tx, &key()).unwrap(),
+        store::state(&tx, &key()).unwrap()
+    );
+}
+
+#[test]
+fn a_newer_interrupted_run_leaves_the_check_unsatisfied() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = opened(dir.path());
+    let tx = store.transaction().unwrap();
+    project(&tx);
+    let only = case(&tx, "Store runs", "runs::store");
+    let id = ticket(&tx, &owner(), "Runs are stored");
+    let position = criterion(&tx, &id, "Runs are stored");
+    add_test_check(&tx, &Standalone, &id, position, &only);
+    set_policy(&tx, &Standalone, PolicyKey::Close, "owner");
+    let check = view(&id, position, &only);
+    let cancel = |run: &runs::RunView, now_ms: i64| {
+        let input = runs::RunCancel {
+            id: run.id.clone(),
+            version: run.version,
+            reason: runs::StopReason::TimedOut,
+        };
+        coverage::cancel(&tx, &Standalone, &engine(), &input, now_ms).unwrap()
+    };
+
+    let passing = run(
+        &tx,
+        &[("runs::store", ResultOutcome::Passed)],
+        Some(0),
+        2_000,
+    );
+    assert_eq!(passing.tickets, [id.clone()]);
+    assert_eq!(state(&tx, &id, position), CriterionState::Met);
+
+    let empty = cancel(&started(&tx, &hex('b', 40), 3_000), 3_001);
+    assert_eq!(empty.run.state, RunState::Interrupted);
+    assert!(empty.tickets.is_empty());
+    assert_eq!(state(&tx, &id, position), CriterionState::Met);
+    assert!(evidence_on(&tx, &Standalone, &check).satisfied);
+
+    let hung = started(&tx, &hex('b', 40), 4_000);
+    let hung = recorded(&tx, hung, &[("runs::store", ResultOutcome::Failed)], 4_001);
+    let hung = cancel(&hung, 4_002);
+    assert_eq!(hung.run.state, RunState::Interrupted);
+    assert_eq!(hung.run.verdict, None);
+    assert_eq!(hung.tickets, [id.clone()]);
+    assert_eq!(state(&tx, &id, position), CriterionState::Open);
+    let masked = evidence_on(&tx, &Standalone, &check);
+    assert!(!masked.satisfied);
+    assert!(masked.detail.contains(&hung.run.id.to_string()));
+    assert!(masked.detail.contains("interrupted"));
+
+    let page = coverage::coverage(&tx, &query(CoverageOf::Ticket(id.clone()), None)).unwrap();
+    assert_eq!(
+        page.rows[0].cases[0].latest,
+        Some(CoverageResult {
+            outcome: ResultOutcome::Passed,
+            run: passing.run.id.clone(),
+            verdict: Verdict::Passed,
+        })
+    );
+
+    let again = run(
+        &tx,
+        &[("runs::store", ResultOutcome::Passed)],
+        Some(0),
+        5_000,
+    );
+    assert_eq!(again.tickets, [id.clone()]);
+    assert_eq!(state(&tx, &id, position), CriterionState::Met);
+    assert_eq!(status(&tx, &id), TicketStatus::Todo);
+    assert_eq!(
+        runs::stored(&tx, &key()).unwrap(),
+        runs::replay(&tx, &key()).unwrap()
     );
     assert_eq!(
         events::replay(&tx, &key()).unwrap(),

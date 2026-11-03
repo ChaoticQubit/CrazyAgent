@@ -115,8 +115,9 @@ pub fn describe(tx: &Transaction<'_>, key: &ProjectKey) -> Result<Vec<Setting>, 
 /// even at its default, at version 1. Inputs: the transaction, the host's authority, the
 /// actor, the project key, the setting, its new value as a word (an option's name, or a
 /// number of days for `cycle_days`), the version (0 for a key never set) and the time.
-/// `test_evidence = current_source` needs a host that tracks each ticket's source. Output:
-/// the policy now in force, or `owner_only`, `option_needs_host`, `policy_value_invalid` or
+/// A key the host locks takes only its locked value, and `test_evidence = current_source`
+/// needs a host that tracks each ticket's source. Output: the policy now in force, or
+/// `owner_only`, `policy_locked`, `option_needs_host`, `policy_value_invalid` or
 /// `stale_version`.
 #[allow(clippy::too_many_arguments)]
 pub fn set(
@@ -131,13 +132,7 @@ pub fn set(
 ) -> Result<Policy, StoreError> {
     host.actor_may(tx, key, actor, OpKind::PolicySet, None)
         .map_err(StoreError::Refused)?;
-    let current_source = TestEvidence::CurrentSource.as_str();
-    if setting == PolicyKey::TestEvidence && value == current_source && !host.tracks_source() {
-        return Err(store::refusal(
-            codes::OPTION_NEEDS_HOST,
-            format!("{setting} {current_source} needs a host that knows each ticket's source"),
-        ));
-    }
+    host_permits(host, setting, value)?;
     store::write(tx, || {
         let project = store::project(tx, key)?;
         let (before, versions) = stored(tx, project.id)?;
@@ -378,6 +373,31 @@ pub(crate) fn authorize(
         Some(&TicketView::of(ticket)),
     )
     .map_err(StoreError::Refused)
+}
+
+/// Checks a new value against what the host allows, before anything is written: a key the
+/// host locks takes only its locked value, and `test_evidence = current_source` needs a host
+/// that tracks each ticket's source. Inputs: the host, the setting and the value word.
+/// Output: Ok, or `policy_locked` or `option_needs_host`.
+fn host_permits(host: &impl Host, setting: PolicyKey, value: &str) -> Result<(), StoreError> {
+    if let Some(locked) = host.policy_locked(setting) {
+        assert!(!locked.is_empty(), "a host locks a key to a value word");
+        assert!(locked.len() <= POLICY_WORD_BYTES_MAX);
+        if value != locked {
+            return Err(store::refusal(
+                codes::POLICY_LOCKED,
+                format!("the host locks {setting} to {locked}"),
+            ));
+        }
+    }
+    let current_source = TestEvidence::CurrentSource.as_str();
+    if setting == PolicyKey::TestEvidence && value == current_source && !host.tracks_source() {
+        return Err(store::refusal(
+            codes::OPTION_NEEDS_HOST,
+            format!("{setting} {current_source} needs a host that knows each ticket's source"),
+        ));
+    }
+    Ok(())
 }
 
 fn close_permits(option: ClosePolicy, op: OpKind) -> Result<(), Refusal> {
