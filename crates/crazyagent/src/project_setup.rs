@@ -42,7 +42,6 @@ const RESEARCH_LOG_TAIL_BYTES: u64 = 64 * 1024;
 const RESEARCH_LOG_FILES: [&str; 3] = ["events.jsonl", "output.md", "stderr.log"];
 #[cfg(unix)]
 const RESEARCH_RUNS_SCANNED_MAX: usize = 4096;
-#[cfg(unix)]
 const SECRET_MARKERS: [&str; 10] = [
     "api_key",
     "api-key",
@@ -55,7 +54,6 @@ const SECRET_MARKERS: [&str; 10] = [
     "refresh_token",
     "id_token",
 ];
-#[cfg(unix)]
 const SECRET_PREFIXES: [&str; 13] = [
     "sk-",
     "sk_",
@@ -71,9 +69,7 @@ const SECRET_PREFIXES: [&str; 13] = [
     "AKIA",
     "eyJ",
 ];
-#[cfg(unix)]
 const HIDDEN_LINE: &str = "[hidden: this line may contain a secret]";
-#[cfg(unix)]
 const HIDDEN_WORD: &str = "[hidden]";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -3038,34 +3034,48 @@ fn event_text(event: &serde_json::Value) -> Option<String> {
         })
 }
 
-/// Hides words and lines that look like credentials before a log line leaves the engine.
-/// Takes one plain line. Returns it with token-like words replaced, or a fixed notice for a
-/// line that names a credential field.
-#[cfg(unix)]
-fn redact(line: &str) -> String {
-    let lower = line.to_ascii_lowercase();
-    if SECRET_MARKERS.iter().any(|marker| lower.contains(marker)) {
-        return HIDDEN_LINE.into();
-    }
-    line.split(' ')
-        .map(|word| if secret_like(word) { HIDDEN_WORD } else { word })
+/// Hides words and lines that look like credentials before text leaves the engine: a
+/// research log line, or a past conversation's message, tool input or tool output. Takes
+/// the text, one line or many. Returns it with the same line breaks and white space, each
+/// token-like word replaced, and each line that names a credential field a fixed notice.
+pub(crate) fn redact(text: &str) -> String {
+    text.split('\n')
+        .map(|line| {
+            let lower = line.to_ascii_lowercase();
+            if SECRET_MARKERS.iter().any(|marker| lower.contains(marker)) {
+                return HIDDEN_LINE.to_owned();
+            }
+            let mut kept = String::with_capacity(line.len());
+            for piece in line.split_inclusive(char::is_whitespace) {
+                let word = piece.trim_end_matches(char::is_whitespace);
+                kept.push_str(if secret_like(word) { HIDDEN_WORD } else { word });
+                kept.push_str(&piece[word.len()..]);
+            }
+            kept
+        })
         .collect::<Vec<_>>()
-        .join(" ")
+        .join("\n")
 }
 
-#[cfg(unix)]
+/// Whether a word looks like a credential: the word without the punctuation around it, or
+/// any run of letters, digits, `-` and `_` inside it (the value of `KEY=value` or
+/// `"key":"value"`), starting with a known token prefix and at least 16 bytes long, or an
+/// opaque run of at least 32 such bytes mixing letters and digits. Takes the word.
 fn secret_like(word: &str) -> bool {
-    let core = word.trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '-' && c != '_');
-    let prefixed = SECRET_PREFIXES
-        .iter()
-        .any(|prefix| core.starts_with(*prefix) && core.len() >= 16);
-    let opaque = core.len() >= 32
-        && core
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        && core.bytes().any(|b| b.is_ascii_digit())
-        && core.bytes().any(|b| b.is_ascii_alphabetic());
-    prefixed || opaque
+    let token = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
+    let core = word.trim_matches(|c: char| !token(c));
+    std::iter::once(core)
+        .chain(core.split(|c: char| !token(c)))
+        .any(|part| {
+            let prefixed = SECRET_PREFIXES
+                .iter()
+                .any(|prefix| part.starts_with(*prefix) && part.len() >= 16);
+            let opaque = part.len() >= 32
+                && part.chars().all(token)
+                && part.bytes().any(|b| b.is_ascii_digit())
+                && part.bytes().any(|b| b.is_ascii_alphabetic());
+            prefixed || opaque
+        })
 }
 
 #[cfg(all(test, unix))]

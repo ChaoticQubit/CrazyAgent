@@ -1,5 +1,5 @@
 use super::tool::{self, Call};
-use crate::harnesses::transcript::{Speaker, open_plain, record_message};
+use crate::harnesses::transcript::{open_plain, record_message};
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, params};
 use std::collections::HashMap;
@@ -500,11 +500,11 @@ fn millis(time: SystemTime) -> i64 {
         .unwrap_or(0)
 }
 
-/// Calls `each` for every message of one conversation in order, with its number from 0,
-/// who said it and its text, until it returns false or the budget is spent. A record line
-/// over `LINE_BYTES_MAX` is skipped, and with `prefilter` a line without every word is not
-/// parsed. Takes the database, project, conversation, budget, optional words and the
-/// callback.
+/// Calls `each` for every message, tool call and tool output of one conversation in order,
+/// with its number from 0, who said it and its text with secrets masked, until it returns
+/// false or the budget is spent. A record line over `LINE_BYTES_MAX` is skipped, and with
+/// `prefilter` a line without every word is not parsed. Takes the database, project,
+/// conversation, budget, optional words and the callback.
 fn each_message(
     connection: &Connection,
     project: &ProjectId,
@@ -513,11 +513,14 @@ fn each_message(
     prefilter: Option<&[String]>,
     each: &mut dyn FnMut(usize, &str, &str) -> bool,
 ) {
+    let mut masked = |index: usize, speaker: &str, text: &str| {
+        each(index, speaker, &crate::project_setup::redact(text))
+    };
     let rows = match &conversation.source {
         Source::Turns(session) => turn_messages(connection, project, session),
         Source::Team => team_messages(connection, project),
         Source::Record { harness, path } => {
-            return record_messages(harness, path, budget, prefilter, each);
+            return record_messages(harness, path, budget, prefilter, &mut masked);
         }
     };
     for (index, (speaker, text)) in rows.unwrap_or_default().iter().enumerate() {
@@ -525,7 +528,7 @@ fn each_message(
             return;
         }
         budget.spend(text.len());
-        if !each(index, speaker, text) {
+        if !masked(index, speaker, text) {
             return;
         }
     }
@@ -573,10 +576,6 @@ fn record_messages(
         let Some((speaker, text)) = record_message(harness, raw.as_bytes()) else {
             continue;
         };
-        let speaker = match speaker {
-            Speaker::Input => "typed",
-            Speaker::Agent => "agent",
-        };
         if !each(index, speaker, &text) {
             return;
         }
@@ -585,11 +584,14 @@ fn record_messages(
 }
 
 /// Tells cheaply, before any JSON is parsed, whether a record line can be a message: a
-/// Codex line naming a message, or a Claude Code `user` or `assistant` line. Takes the
-/// catalog harness id and the line. Returns false only for lines that are never messages.
+/// Codex line naming a message, a tool call or a tool's output, or a Claude Code `user` or
+/// `assistant` line. Takes the catalog harness id and the line. Returns false only for
+/// lines that are never messages.
 fn maybe_message(harness: &str, line: &str) -> bool {
     match harness {
-        "codex" => line.contains("\"message\""),
+        "codex" => ["\"message\"", "\"function_call", "\"custom_tool_call"]
+            .iter()
+            .any(|mark| line.contains(mark)),
         "claude-code" => [
             "\"type\":\"user\"",
             "\"type\":\"assistant\"",
