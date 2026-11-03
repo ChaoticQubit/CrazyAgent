@@ -22,6 +22,8 @@ const catalog = source("crates/trackwright-core/src/catalog.rs");
 const settingsSource = source("crates/crazyagent/src/checks/settings.rs");
 
 const hex = (char, length) => char.repeat(length);
+const markup = (text) => text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#x27;");
+const escapeRe = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const COMMIT_A = hex("a", 40);
 const PROFILE = hex("d", 64);
 const APPROVED_MS = 1_699_999_000_000;
@@ -383,6 +385,25 @@ test("profiles: approve and revoke follow the state, holdout files show digests 
   assert.ok(html.includes(hex("1", 64)) && html.includes("tests/holdout.rs"), "holdout files show path and digest");
   assert.ok(html.includes("secret\\u202e"), "agent-proposed ids show hidden characters as escapes");
   assert.ok(html.includes("Approve") && !html.includes(">Revoke<"));
+  const declared = structFields(source("crates/crazyagent/src/checks/profile.rs"), "CheckSpec");
+  assert.deepEqual(Object.keys(check), declared, "the fixture has every CheckSpec field");
+  for (const shown of [check, holdout]) {
+    const fields = api.checkRows(shown);
+    assert.deepEqual(fields.map((row) => row.field), declared, "every field Approve stands on has a row, in engine order");
+    for (const row of fields) {
+      const cell = new RegExp(`<dt>${row.label}</dt><dd[^>]*>${escapeRe(markup(row.value.replace("\u202e", "\\u202e")))}</dd>`);
+      assert.match(html, cell, `${shown.id} shows ${row.field}`);
+    }
+  }
+  const words = Object.fromEntries(api.checkRows(check).map((row) => [row.field, row.value]));
+  assert.deepEqual(words, {
+    id: "unit", kind: "Unit", toolchain: "Rust", argv: "cargo test", cwd: ".", format: "libtest text on standard output", report: "None",
+    timeout_s: "600 s", network: "None", when: "at an agent's turn end, before you accept", required: "Required to pass", protected: "Not protected",
+  });
+  const reach = { ...check, toolchain: null, format: "junit", report: "target/junit.xml", network: "remotes", when: [], required: false, protected: true };
+  assert.deepEqual(api.checkRows(reach).filter((row) => ["toolchain", "format", "report", "network", "when", "required", "protected"].includes(row.field)).map((row) => row.value),
+    ["None managed", "A JUnit XML file", "target/junit.xml", "The remotes of this project's sandbox", "Never on its own", "Not required", "Protected"]);
+  assert.ok(html.includes('Protected paths: <span class="pj-mono">tests/</span>'), "the protected paths are listed");
   const rows = [{ id: PROFILE, state: "current", proposed_by: "owner", proposed_ms: 1, approved_ms: APPROVED_MS, revoked_ms: null, question: null, checks: 2, holdouts: 1 }];
   const list = render(createElement(checks.ProfilesView, { profiles: { kind: "ok", value: { rows, next: null } }, selected: null, onSelect: () => {}, onRetry: () => {} }));
   assert.ok(list.includes("Approved, in use") && list.includes("2 checks, 1 holdout"));

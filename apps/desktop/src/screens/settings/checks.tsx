@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { Result } from "../../api";
 import {
-  approveProfile, argvLine, checksBelowLabel, checksChanged, checksKeyText, checksOptionText, checksRefusal, checksValues, holdoutFiles,
+  approveProfile, checkRows, checksBelowLabel, checksChanged, checksKeyText, checksOptionText, checksRefusal, checksValues, holdoutFiles,
   loadChecksSettings, loadProfile, loadProfiles, profileActions, profileStateText, profileTextProblem, proposeProfile, proposerText, revokeProfile,
   saveChecksSettings, whenText,
 } from "../../api-checks";
@@ -144,15 +144,16 @@ export function ProfilesView({ profiles, selected, onSelect, onRetry }: { profil
   </li>)}</ul>;
 }
 
+const MONO: readonly string[] = ["id", "argv", "cwd", "report"];
+
 function CheckLine({ check }: { check: CheckSpec }) {
-  const when = check.when.length === 0 ? "never on its own" : check.when.map((item) => item.replaceAll("_", " ")).join(", ");
   return <li className="tt-profile-check">
-    <span className="pj-row between"><strong>{displayText(check.id)}</strong><span className="pj-small">{[check.required ? "Required" : "Optional", check.protected ? "Protected" : null].filter(Boolean).join(", ")}</span></span>
-    <span className="pj-mono pj-small">{displayText(argvLine(check.argv))}</span>
-    <span className="pj-small pj-secondary">
-      {displayText(check.kind)} in {displayText(check.cwd)}, {displayText(check.format)}{check.report === null ? "" : ` at ${displayText(check.report)}`}, network {check.network}, {check.timeout_s} s, runs {when}
-      {check.toolchain === null ? "" : `, ${displayText(check.toolchain)} toolchain`}
-    </span>
+    <dl className="tt-covered">
+      {checkRows(check).map((row) => <div key={row.field} className="tt-covered-row">
+        <dt>{row.label}</dt>
+        <dd className={MONO.includes(row.field) ? "pj-mono" : undefined}>{displayText(row.value)}</dd>
+      </div>)}
+    </dl>
   </li>;
 }
 
@@ -222,7 +223,7 @@ function ProfileEditor({ projectId, onProposed }: { projectId: string; onPropose
   };
   return <div className="pj-stack-s">
     <TextArea id="cs-profile" label="New profile (JSON)" value={text} onValue={(value) => { setText(value); setNote(""); }} rows={10}
-      helper="The checks this project runs: each with its command, folder, report format, timeout, network and when it runs." error={problem ?? undefined} />
+      helper="The checks this project runs: each with its command, folder, report format, timeout, network and when it runs. This window doesn't store holdout files: a holdout names files already stored in the engine, by digest." error={problem ?? undefined} />
     <span className="row"><Button size="small" pending={busy} pendingLabel="Proposing..." disabled={text === "" || problem !== null} onClick={() => void propose()}>Propose</Button></span>
     {note && <p className="helper" role="status">{note}</p>}
   </div>;

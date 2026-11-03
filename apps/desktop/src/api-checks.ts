@@ -795,6 +795,49 @@ export interface CheckSpec {
   protected: boolean;
 }
 
+/** One field of a profile check as the owner reads it before Approve: the field, its label
+ * and its value in words. */
+export interface CheckRow { field: keyof CheckSpec; label: string; value: string }
+
+const KIND_TEXT: Readonly<Record<string, string>> = { unit: "Unit", integration: "Integration", e2e: "End to end", smoke: "Smoke", scenario: "Scenario" };
+const FORMAT_TEXT: Readonly<Record<string, string>> = {
+  libtest: "libtest text on standard output", junit: "A JUnit XML file", allure: "An Allure results folder", exit_code: "Only its exit status",
+};
+const TOOLCHAIN_TEXT: Readonly<Record<string, string>> = { rust: "Rust", node: "Node.js", python: "Python" };
+const NETWORK_TEXT: Readonly<Record<NetworkMode, string>> = {
+  off: "None", localhost: "Loopback on this Mac only", remotes: "The remotes of this project's sandbox",
+};
+const TRIGGER_TEXT: Readonly<Record<string, string>> = {
+  turn_end: "at an agent's turn end", before_accept: "before you accept", on_request: "when you or the change set's agent asks",
+};
+
+function wordOf(table: Readonly<Record<string, string>>, word: string): string {
+  return Object.hasOwn(table, word) ? table[word] : word;
+}
+
+/** Every field of a profile check in the order the engine declares them, in words: what
+ * Approve stands on, so none may go unshown. Input: the check. Output: one row per field. */
+export function checkRows(check: CheckSpec): CheckRow[] {
+  assert(check.argv.length > 0, "a check runs a command");
+  const runs = check.when.length === 0 ? "Never on its own" : check.when.map((trigger) => wordOf(TRIGGER_TEXT, trigger)).join(", ");
+  const rows: CheckRow[] = [
+    { field: "id", label: "Check", value: check.id },
+    { field: "kind", label: "Kind", value: wordOf(KIND_TEXT, check.kind) },
+    { field: "toolchain", label: "Toolchain", value: check.toolchain === null ? "None managed" : wordOf(TOOLCHAIN_TEXT, check.toolchain) },
+    { field: "argv", label: "Command", value: argvLine(check.argv) },
+    { field: "cwd", label: "Folder", value: check.cwd },
+    { field: "format", label: "Reports", value: wordOf(FORMAT_TEXT, check.format) },
+    { field: "report", label: "Report path", value: check.report ?? "None" },
+    { field: "timeout_s", label: "Time limit", value: `${check.timeout_s} s` },
+    { field: "network", label: "Network", value: wordOf(NETWORK_TEXT, check.network) },
+    { field: "when", label: "Runs", value: runs },
+    { field: "required", label: "Accept", value: check.required ? "Required to pass" : "Not required" },
+    { field: "protected", label: "Cases", value: check.protected ? "Protected" : "Not protected" },
+  ];
+  assert(new Set(rows.map((row) => row.field)).size === rows.length, "each field has one row");
+  return rows;
+}
+
 /** A stored profile with its body; holdout files are named by path and digest only. */
 export interface StoredProfile {
   id: string;
