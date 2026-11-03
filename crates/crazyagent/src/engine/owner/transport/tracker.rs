@@ -690,6 +690,6 @@ fn choices() -> Vec<SettingChoices> {
     all
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "tracker_tests.rs"]
 mod tests;
