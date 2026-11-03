@@ -3472,8 +3472,9 @@ impl TeamRuntime {
     /// cannot take it finishes the task with no reply text, as with the setting off; one on
     /// a rate-limited connection waits for it, as a task does, and a kept native lead waits
     /// while a teammate of it works or its app runs a turn of its own, as instruction edits
-    /// do (RER-L1). Takes the project setup, the live model access and the paused
-    /// connections. Returns any SQLite failure.
+    /// do (RER-L1). A message on its way to the lead does not hold it: typing that message
+    /// waits for the lead to be idle. Takes the project setup, the live model access and the
+    /// paused connections. Returns any SQLite failure.
     fn send_reasks(
         &mut self,
         stored: &StoredSetup,
@@ -3494,7 +3495,7 @@ impl TeamRuntime {
             .collect();
         for (agent, task) in due {
             assert_eq!(self.workers[&agent].busy, Some(Busy::Task(task)));
-            if self.workers[&agent].kept_session && self.lead_waits(agent)? {
+            if self.workers[&agent].kept_session && self.teammates_working(agent)? {
                 continue;
             }
             let handed = self.workers[&agent].kept_session && self.workers[&agent].briefed;
@@ -4331,12 +4332,26 @@ impl TeamRuntime {
     /// wake turn has carried to it yet. Takes the lead. Returns the answer, or any SQLite
     /// failure.
     fn lead_waits(&self, id: i64) -> Result<bool, EngineError> {
+        if self.teammates_working(id)? {
+            return Ok(true);
+        }
+        self.connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM coord_messages WHERE to_kind='agent' AND to_agent=?1
+                           AND receipt='sent')",
+                [id],
+                |row| row.get(0),
+            )
+            .map_err(error)
+    }
+
+    /// Whether a teammate of a kept native lead is still starting or working. Takes the
+    /// lead. Returns the answer, or any SQLite failure.
+    fn teammates_working(&self, id: i64) -> Result<bool, EngineError> {
         self.connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM team_agents WHERE parent=?1 AND role='teammate'
-                                AND status IN ('starting','working'))
-                 OR EXISTS(SELECT 1 FROM coord_messages WHERE to_kind='agent' AND to_agent=?1
-                           AND receipt='sent')",
+                                AND status IN ('starting','working'))",
                 [id],
                 |row| row.get(0),
             )
