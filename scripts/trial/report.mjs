@@ -18,6 +18,7 @@ const RESULTS = ["PASS", "FAIL", "UNKNOWN"];
 const IMAGES = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp", ".svg": "image/svg+xml" };
 const ACCOUNT_KINDS = { claude: "claude-subscription", chatgpt: "codex-chatgpt" };
 const FLAGGED = "the recorded TUI text held values the report masked; this image may show them";
+const LEFT_OUT = "left out: the masked frames show the same screens, and the GIF would show account labels and home paths unmasked";
 const USAGE = "report.mjs trial <trial folder> | live <live-pass folder> --script <live-pass.sh> [--repo <checkout>] | retro <leader/trial folder>, each with [--out <folder>] [--chrome <executable>]";
 const RETRO = [
   { trial: 1, audit: "audit.txt", plan: "trial-plan.md", timeline: "timeline.txt", tokens: "tokens.txt", limits: "limits-before.txt", frames: "frames", gif: "trial-1028.gif" },
@@ -52,6 +53,9 @@ const RULES = [
   [/\bacct_[A-Za-z0-9]{6,}/g, "acct_[masked]"],
   [/[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g, "[email]"],
   [/\b[A-Z0-9]{4}-[A-Z0-9]{4,5}\b/g, (code) => (/[A-Z]/.test(code) ? "[masked-code]" : code)],
+  [/[\\/](?:Users|home)[\\/][^\\/\s"'<>:|─-╿…]+/g, "~"],
+  [/-(Users|home)-[A-Za-z0-9._]+(?=-)/g, "-$1-[user]"],
+  [/\b(Claude|Codex|ChatGPT|OpenAI|Gemini)-(?!Code\b)[A-Z][A-Za-z0-9]*/g, "$1-[account]"],
   [/(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{24,}={0,2}(?![A-Za-z0-9+/_=-])/g, (run) => encoded(Buffer.from(run, "base64").toString("latin1"), run, true)],
   [/[^\s"'<>()[\]]*%[0-9A-Fa-f]{2}[^\s"'<>()[\]]*/g, (run) => encoded(run.replace(/\+/g, " ").replace(/%([0-9A-Fa-f]{2})/g, (all, hex) => String.fromCharCode(parseInt(hex, 16))), run, false)],
   [/^.*(?:\\u[0-9A-Fa-f]{4}|\\["/]).*$/gm, (line) => {
@@ -74,6 +78,8 @@ h3 { font-size: 12.5pt; margin: 16pt 0 6pt; }
 h4 { font-size: 11pt; margin: 10pt 0 4pt; }
 .cover { break-after: page; }
 .cover h2 { margin-top: 16pt; }
+.sharing { margin-top: 12pt; padding: 2pt 10pt 6pt; border: 1.5pt solid var(--warn); border-radius: 3pt; }
+.sharing h2 { margin-top: 6pt; border-bottom: 0; }
 .trial, .images, .live { break-before: page; }
 .generated, .note, .path, .source { color: var(--muted); font-size: 9pt; font-weight: 400; }
 dl { display: grid; grid-template-columns: max-content 1fr; gap: 2pt 12pt; margin: 6pt 0; }
@@ -220,6 +226,7 @@ function frameMask(value) {
 }
 
 function frameChains(lines) {
+  const width = Math.max(0, ...lines.map((line) => line.length));
   const open = new Map();
   const chains = [];
   for (const [row, line] of lines.entries()) {
@@ -229,9 +236,16 @@ function frameChains(lines) {
       const segment = line.slice(from, cut.index);
       const body = segment.trim();
       if (body) {
+        const full = segment.length - segment.trimEnd().length <= 1 && (cut[0] !== "" || line.length >= width - 1);
+        const part = { row, col: from + segment.length - segment.trimStart().length, body, full };
+        const chain = open.get(from);
+        if (chain?.at(-1).full) {
+          chain.push(part);
+        } else {
+          if (chain) chains.push(chain);
+          open.set(from, [part]);
+        }
         seen.add(from);
-        if (!open.has(from)) open.set(from, []);
-        open.get(from).push({ row, col: from + segment.length - segment.trimStart().length, body });
       }
       from = cut.index + cut[0].length;
     }
@@ -320,7 +334,7 @@ async function evidence(root, item, images, trial) {
 
 function flagRecordings(images, trial, parts) {
   if (!parts.some((part) => part.evidence.some((item) => item.masked))) return;
-  for (const image of images) if (image.trial === trial && image.path.toLowerCase().endsWith(".gif")) image.note = FLAGGED;
+  for (const image of images) if (image.trial === trial && !image.leftOut && image.path.toLowerCase().endsWith(".gif")) image.note = FLAGGED;
 }
 
 function kindOf(path) {
@@ -519,7 +533,10 @@ async function retroTrial(root, spec, images) {
     if (error.code !== "ENOENT") throw error;
   }
   for (const name of names) frames.push(await evidence(root, { kind: "frame", path: `${spec.frames}/${name}`, caption: `TUI frame ${name}` }, images, spec.trial));
-  const record = [...frames, await evidence(root, { kind: "gif", path: spec.gif, caption: `${spec.gif}, the TUI record` }, images, spec.trial)];
+  const record = [...frames];
+  const gif = await place(root, spec.gif);
+  if (!frames.length) record.push(await evidence(root, { kind: "gif", path: spec.gif, caption: `${spec.gif}, the TUI record` }, images, spec.trial));
+  else if (!gif.problem) images.push({ trial: spec.trial, path: spec.gif, kind: "gif", bytes: gif.bytes, sha256: "", note: LEFT_OUT, leftOut: true });
   flagRecordings(images, spec.trial, [{ evidence: record }]);
   return {
     trial: spec.trial,
@@ -748,9 +765,22 @@ function trialSection(trial, many) {
   return parts.join("\n");
 }
 
-function imagesSection(images) {
+function imageItem(image) {
+  return `<li>Trial ${text(image.trial)} ${text(image.kind)}: <code>${text(image.path)}</code>${image.note ? ` <span class="note">${text(image.note)}</span>` : ""}</li>`;
+}
+
+function sharing(images) {
+  const shown = images.filter((image) => !image.leftOut);
+  const left = images.filter((image) => image.leftOut);
+  const count = `${shown.length} image${shown.length === 1 ? "" : "s"}`;
+  return `<section class="sharing"><h2>Before sharing</h2><p><b>Not masked: ${count}.</b> Screenshots, image frames, GIFs and SVG files are not masked: they are pictures, and the report cannot mask what they show. Look at each one before this report is shared. Logs, rows, plans and the text TUI frames are masked, account labels and home paths included.</p>${shown.length ? `<ul>${shown.map(imageItem).join("")}</ul>` : ""}${left.length ? `<p>Left out of this report:</p><ul>${left.map(imageItem).join("")}</ul>` : ""}</section>`;
+}
+
+function imagesSection(all) {
+  const images = all.filter((image) => !image.leftOut);
+  const left = all.filter((image) => image.leftOut);
   const rows = images.map((image) => `<tr><td>${text(image.trial)}</td><td><code>${text(image.path)}</code></td><td>${text(image.bytes)}</td><td><code>${text(image.sha256)}</code></td><td>${text(image.note)}</td></tr>`);
-  return `<section class="images"><h2>Images embedded without masking</h2><p>Screenshots and GIFs are pictures, so the report cannot mask them. Look at each one below before this report is shared. Text TUI frames are drawn from masked text and are not listed. SVG files are listed: their text passed the mask check, but an SVG can carry pictures.</p>${rows.length ? `<table><thead><tr><th>Trial</th><th>Image</th><th>Bytes</th><th>SHA-256</th><th>Note</th></tr></thead><tbody>${rows.join("")}</tbody></table>` : "<p>None.</p>"}</section>`;
+  return `<section class="images"><h2>Images embedded without masking</h2><p>Screenshots and GIFs are pictures, so the report cannot mask them. Look at each one below before this report is shared. Text TUI frames are drawn from masked text and are not listed. SVG files are listed: their text passed the mask check, but an SVG can carry pictures.</p>${rows.length ? `<table><thead><tr><th>Trial</th><th>Image</th><th>Bytes</th><th>SHA-256</th><th>Note</th></tr></thead><tbody>${rows.join("")}</tbody></table>` : "<p>None.</p>"}${left.length ? `<h3>Left out</h3><ul>${left.map(imageItem).join("")}</ul>` : ""}</section>`;
 }
 
 function page(title, body) {
@@ -759,7 +789,7 @@ function page(title, body) {
 
 function renderTrials(model) {
   const many = model.trials.length > 1;
-  const head = `<header class="cover"><h1>${text(model.title)}</h1><p class="generated">Generated ${text(new Date().toISOString())} by scripts/trial/report.mjs.</p>${model.note ? `<p>${text(model.note)}</p>` : ""}${model.trials.map(cover).join("")}</header>`;
+  const head = `<header class="cover"><h1>${text(model.title)}</h1><p class="generated">Generated ${text(new Date().toISOString())} by scripts/trial/report.mjs.</p>${model.note ? `<p>${text(model.note)}</p>` : ""}${sharing(model.images)}${model.trials.map(cover).join("")}</header>`;
   return page(model.title, [head, ...model.trials.map((trial) => trialSection(trial, many)), imagesSection(model.images)].join("\n"));
 }
 
