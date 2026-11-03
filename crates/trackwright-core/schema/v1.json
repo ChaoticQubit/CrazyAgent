@@ -54,7 +54,21 @@
     "check_exists",
     "check_unknown",
     "link_kind_unknown",
-    "notify_too_wide"
+    "notify_too_wide",
+    "already_claimed",
+    "not_claimant",
+    "dependency_invalid",
+    "dependency_exists",
+    "dependency_unknown",
+    "dependency_cycle",
+    "dependencies_full",
+    "parent_invalid",
+    "version_unknown",
+    "versions_full",
+    "cycle_unknown",
+    "cycle_closed",
+    "cycles_full",
+    "cycle_overlaps"
   ],
   "ops": {
     "check_add": {
@@ -201,6 +215,12 @@
             "maxLength": 16384,
             "type": "string"
           },
+          "cycle": {
+            "description": "The open cycle it is planned for, by number.",
+            "maximum": 520,
+            "minimum": 1,
+            "type": "integer"
+          },
           "kind": {
             "description": "feature when absent.",
             "enum": [
@@ -209,6 +229,11 @@
               "chore",
               "spike"
             ],
+            "type": "string"
+          },
+          "parent": {
+            "description": "The parent ticket, open and in the same project.",
+            "pattern": "^[A-Z]{2,8}-[1-9][0-9]{0,9}$",
             "type": "string"
           },
           "priority": {
@@ -220,6 +245,14 @@
           "project": {
             "description": "The project's key, for example CA.",
             "pattern": "^[A-Z]{2,8}$",
+            "type": "string"
+          },
+          "release": {
+            "description": "The product version it ships in, by name.",
+            "maxBytes": 64,
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[^\\r\\n]*$",
             "type": "string"
           },
           "request_id": {
@@ -492,16 +525,10 @@
             "minLength": 1,
             "pattern": "^[A-Za-z0-9._:-]+$",
             "type": "string"
-          },
-          "version": {
-            "description": "The version you last read; a newer stored version refuses the write as stale.",
-            "minimum": 1,
-            "type": "integer"
           }
         },
         "required": [
           "id",
-          "version",
           "on"
         ],
         "type": "object"
@@ -519,6 +546,16 @@
             "maxLength": 16384,
             "type": "string"
           },
+          "cycle": {
+            "description": "The open cycle it is planned for, by number.",
+            "maximum": 520,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "cycle_clear": {
+            "description": "true takes it out of its cycle.",
+            "type": "boolean"
+          },
           "id": {
             "description": "The ticket's short id, for example CA-42.",
             "pattern": "^[A-Z]{2,8}-[1-9][0-9]{0,9}$",
@@ -534,11 +571,32 @@
             ],
             "type": "string"
           },
+          "parent": {
+            "description": "The parent ticket, open and in the same project.",
+            "pattern": "^[A-Z]{2,8}-[1-9][0-9]{0,9}$",
+            "type": "string"
+          },
+          "parent_clear": {
+            "description": "true takes it out of its parent.",
+            "type": "boolean"
+          },
           "priority": {
             "description": "The new priority.",
             "maximum": 4,
             "minimum": 0,
             "type": "integer"
+          },
+          "release": {
+            "description": "The product version it ships in, by name.",
+            "maxBytes": 64,
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[^\\r\\n]*$",
+            "type": "string"
+          },
+          "release_clear": {
+            "description": "true takes it out of its version.",
+            "type": "boolean"
           },
           "request_id": {
             "description": "Your key for this write; repeating it with the same fields returns the first reply.",
@@ -567,7 +625,7 @@
         ],
         "type": "object"
       },
-      "summary": "Changes a ticket's title, body, kind or priority.",
+      "summary": "Changes a ticket's title, body, kind, priority, parent, version or cycle.",
       "write": true
     },
     "evidence_record": {
@@ -1213,16 +1271,10 @@
             "minLength": 1,
             "pattern": "^[A-Za-z0-9._:-]+$",
             "type": "string"
-          },
-          "version": {
-            "description": "The version you last read; a newer stored version refuses the write as stale.",
-            "minimum": 1,
-            "type": "integer"
           }
         },
         "required": [
           "id",
-          "version",
           "on"
         ],
         "type": "object"

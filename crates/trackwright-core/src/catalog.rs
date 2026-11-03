@@ -140,6 +140,24 @@ const BODY: FieldType = FieldType::Text(TextField::Body);
 const PRIORITY: FieldType = FieldType::Integer { min: 0, max: 4 };
 const STATUS: FieldType = FieldType::Choice(Named::TicketStatus);
 const KIND: FieldType = FieldType::Choice(Named::TicketKind);
+const PARENT: FieldSpec = opt(
+    "parent",
+    FieldType::Ticket,
+    "The parent ticket, open and in the same project.",
+);
+const RELEASE: FieldSpec = opt(
+    "release",
+    FieldType::Text(TextField::VersionName),
+    "The product version it ships in, by name.",
+);
+const CYCLE: FieldSpec = opt(
+    "cycle",
+    FieldType::Integer {
+        min: 1,
+        max: CYCLES_PER_PROJECT_MAX as i64,
+    },
+    "The open cycle it is planned for, by number.",
+);
 
 const CATALOG: &[OpSpec] = &[
     OpSpec {
@@ -228,12 +246,15 @@ const CATALOG: &[OpSpec] = &[
                 "An open status to start in, backlog when absent; under create = triage an \
                  agent's ticket starts in triage.",
             ),
+            PARENT,
+            RELEASE,
+            CYCLE,
             REQUEST_ID,
         ],
     },
     OpSpec {
         kind: OpKind::Edit,
-        summary: "Changes a ticket's title, body, kind or priority.",
+        summary: "Changes a ticket's title, body, kind, priority, parent, version or cycle.",
         fields: &[
             ID,
             VERSION,
@@ -241,6 +262,24 @@ const CATALOG: &[OpSpec] = &[
             opt("body", BODY, "The new body."),
             opt("kind", KIND, "The new kind."),
             opt("priority", PRIORITY, "The new priority."),
+            PARENT,
+            RELEASE,
+            CYCLE,
+            opt(
+                "parent_clear",
+                FieldType::Flag,
+                "true takes it out of its parent.",
+            ),
+            opt(
+                "release_clear",
+                FieldType::Flag,
+                "true takes it out of its version.",
+            ),
+            opt(
+                "cycle_clear",
+                FieldType::Flag,
+                "true takes it out of its cycle.",
+            ),
             REQUEST_ID,
         ],
     },
@@ -273,7 +312,6 @@ const CATALOG: &[OpSpec] = &[
         summary: "Records that a ticket waits for another one to close.",
         fields: &[
             ID,
-            VERSION,
             req("on", FieldType::Ticket, "The ticket it waits for."),
             REQUEST_ID,
         ],
@@ -283,7 +321,6 @@ const CATALOG: &[OpSpec] = &[
         summary: "Removes a dependency.",
         fields: &[
             ID,
-            VERSION,
             req(
                 "on",
                 FieldType::Ticket,

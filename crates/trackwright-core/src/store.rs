@@ -57,7 +57,8 @@ const TICKET_INSERT: &str = "INSERT INTO tk_tickets(project, number, title, body
      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, 1)";
 const TICKET_UPDATE: &str = "UPDATE tk_tickets SET title = ?3, body = ?4, kind = ?5, status = ?6, \
      priority = ?7, assignee = ?8, updated_ms = ?9, closed_ms = ?10, closed_by = ?11, \
-     close_reason = ?12, version = version + 1 WHERE id = ?1 AND version = ?2";
+     close_reason = ?12, parent_id = ?13, version_id = ?14, cycle_id = ?15, \
+     version = version + 1 WHERE id = ?1 AND version = ?2";
 const CRITERION_BY_ID: &str = concat!(criterion_select!(), " WHERE c.id = ?1");
 pub(crate) const CRITERION_BY_POSITION: &str = concat!(
     criterion_select!(),
@@ -139,6 +140,32 @@ const STATEMENTS: &[&str] = &[
     crate::policy::POLICY_OF_PROJECT,
     crate::policy::POLICY_INSERT,
     crate::policy::POLICY_UPDATE,
+    crate::plan::VERSION_BY_NAME,
+    crate::plan::VERSION_TALLY,
+    crate::plan::VERSION_INSERT,
+    crate::plan::VERSION_UPDATE,
+    crate::plan::CYCLE_BY_NUMBER,
+    crate::plan::CYCLE_LATEST,
+    crate::plan::CYCLE_NEXT_OPEN,
+    crate::plan::CYCLE_FIRST_UPCOMING,
+    crate::plan::CYCLE_COUNT,
+    crate::plan::CYCLE_ACTIVE,
+    crate::plan::CYCLE_INSERT,
+    crate::plan::CYCLE_STATUS_SET,
+    crate::plan::CYCLE_OPEN_TICKETS,
+    crate::plan::PARENT_OF,
+    crate::plan::DEP_GET,
+    crate::plan::DEP_COUNT,
+    crate::plan::DEP_REACHES,
+    crate::plan::DEP_INSERT,
+    crate::plan::DEP_DELETE,
+    crate::ready::READY_PAGE,
+    crate::ready::VERSIONS_PAGE,
+    crate::ready::UNPLANNED_TALLY,
+    crate::ready::CYCLES_PAGE,
+    crate::ready::PLACEMENT_NAMES,
+    crate::ready::VERSION_NAME,
+    crate::ready::BLOCKERS_OPEN,
 ];
 
 /// Every SQL statement the core runs outside its migrations. A test prepares each against a
@@ -214,6 +241,24 @@ pub struct TicketChange {
     pub priority: Option<Priority>,
     pub assignee: Option<Option<Actor>>,
     pub close_reason: Option<Option<String>>,
+    pub placement: Placement,
+}
+
+/// Where a write puts a ticket in the plan: its parent ticket, product version and cycle,
+/// each by internal id. None keeps a field and `Some(None)` clears it. Only the core builds
+/// one, after checking every id belongs to the ticket's project, so ids never leave it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Placement {
+    pub(crate) parent_id: Option<Option<i64>>,
+    pub(crate) version_id: Option<Option<i64>>,
+    pub(crate) cycle_id: Option<Option<i64>>,
+}
+
+impl Placement {
+    /// Tells whether the placement changes nothing. Output: true when every field is kept.
+    pub fn is_empty(&self) -> bool {
+        self.parent_id.is_none() && self.version_id.is_none() && self.cycle_id.is_none()
+    }
 }
 
 /// The standalone tracker database: one SQLite file private to its user, migrated on open.
@@ -412,6 +457,9 @@ pub fn update_ticket(
             after.closed_ms,
             after.closed_by.as_ref().map(Actor::as_str),
             after.close_reason,
+            after.parent_id,
+            after.version_id,
+            after.cycle_id,
         ])?;
         assert_eq!(
             written, 1,
@@ -462,6 +510,16 @@ fn changed(
     }
     if let Some(reason) = &change.close_reason {
         after.close_reason.clone_from(reason);
+    }
+    if let Some(parent) = change.placement.parent_id {
+        assert_ne!(parent, Some(before.id), "a ticket is never its own parent");
+        after.parent_id = parent;
+    }
+    if let Some(version) = change.placement.version_id {
+        after.version_id = version;
+    }
+    if let Some(cycle) = change.placement.cycle_id {
+        after.cycle_id = cycle;
     }
     if after.status.is_closed() {
         if !before.status.is_closed() {
