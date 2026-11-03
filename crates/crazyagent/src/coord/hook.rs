@@ -307,6 +307,7 @@ pub(crate) fn identify(mailbox: &Path, agent: Option<&str>) -> Identity {
                 teammate: Some(name),
                 cwd: None,
                 unnamed: false,
+                part,
             }
         }
     };
