@@ -60,9 +60,10 @@ impl Bound {
 /// refusal means it never started, a report problem or a refused report makes it
 /// unreadable, a build failure with no result is a failed build, and otherwise the results
 /// are the parsed report (libtest reads standard error then standard output; an exit-code
-/// check records one result named after the check). A holdout run keeps no result message,
-/// so nothing its files printed is stored. Inputs: the admitted check and the execution.
-/// Output: the binding.
+/// check records one result named after the check). A holdout run keeps no result message
+/// and no artifact, so nothing its files printed is stored and a result linked to an
+/// unprotected case shows nothing more than its outcome. Inputs: the admitted check and the
+/// execution. Output: the binding.
 pub fn bind(check: &AdmittedCheck, execution: &CheckExecution) -> Bound {
     let stopped = |ending| Bound {
         results: Vec::new(),

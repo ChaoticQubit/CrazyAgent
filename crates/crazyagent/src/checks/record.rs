@@ -106,8 +106,11 @@ pub(crate) fn initialize(connection: &Connection) -> Result<(), CheckRefusal> {
 /// (interrupted for a timeout or cancel), the integrity evidence and the change set's
 /// binding to the run. The run ends through `coverage::finish` or `coverage::cancel`,
 /// which re-evaluate the tickets whose test checks it covers through the host in the same
-/// transaction, so a rolled-back transaction leaves no run and no ticket change. Inputs:
-/// the transaction, the host, the recording and the time. Output: the run as stored, or
+/// transaction, so a rolled-back transaction leaves no run and no ticket change. Results
+/// link to cases by stable name, so a holdout test the owner keeps as a protected case
+/// links to it; a holdout run's results keep no message and no artifact whatever case they
+/// link to, so no reader's view depends on that link to withhold them. Inputs: the
+/// transaction, the host, the recording and the time. Output: the run as stored, or
 /// `checks_record_invalid`, `project_not_attached` or a core refusal's code.
 pub fn store(
     tx: &Transaction<'_>,
@@ -130,6 +133,14 @@ pub fn store(
         landing::change_set(tx, change_set)?.ok_or_else(|| failure("checks_record_invalid"))?;
     let key = tracker::key_of(tx, &project)?.ok_or_else(|| failure("project_not_attached"))?;
     let bound = binding::bind(check, execution);
+    assert!(
+        !execution.holdout
+            || bound
+                .results
+                .iter()
+                .all(|result| result.message.is_none() && result.artifact.is_none()),
+        "a holdout run keeps no result message or artifact"
+    );
     let engine = CoreActor::new(ENGINE_ACTOR).expect("the engine actor is valid");
     let family = binding::family(check.spec.toolchain);
     let digest = |value: &str| {
