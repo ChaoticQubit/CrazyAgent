@@ -1,148 +1,96 @@
-const SCRATCH_URL = "http://127.0.0.1:9/v1";
-const LOOP_TEXT = "assigned to a project";
+import { click, menu, shown, texts, type } from "../settings-steps.mjs";
+import { closeDialog, confirmVerdict, dropScratch, findAccount, noLoop, rowNames, scratchAccount, scratchName, tidy, windowText } from "../trial4-accounts.mjs";
 
-/** Calls one of the app's own commands, as the app's screens do. Inputs: the command and its
- * arguments. Output: the answer, or { failed } with the plain error. */
-function invoke(command, args) {
-  return browser.executeAsync((name, given, done) => {
-    window.__TAURI_INTERNALS__.invoke(name, given).then(done, (failure) => done({ failed: String(failure) }));
-  }, command, args);
+const PICKER = "//div[@role=\"radiogroup\"][@aria-label=\"Pool\"]";
+const NO_POOL = "No pool";
+const CONFIRM = "dialog.dialog[open]";
+
+/** The pool names Settings, Pools lists now. Output: the names. */
+function poolNames() {
+  return texts(".pool-row button.name");
 }
 
-/** Presses the first element under the selector whose text is exactly the given text.
- * Inputs: the selector and the text. Output: whether one was pressed. */
-function press(selector, text) {
-  return browser.execute((query, wanted) => {
-    const found = [...document.querySelectorAll(query)].find((node) => node.textContent.trim() === wanted && !node.disabled);
-    found?.click();
-    return Boolean(found);
-  }, selector, text);
+/** Opens the trial project's Settings, Pool section and waits for its pool cards. Input: the kit. */
+async function poolSection(kit) {
+  await kit.tab("settings");
+  await click(`//nav[@aria-label="Project settings"]//button[normalize-space(.)="Pool"]`);
+  await kit.until(() => shown(`${PICKER}//label`), kit.UI_MS, "the project's Pool section never showed its pool cards");
 }
 
-/** Waits until an element with the exact text can be pressed, then presses it. Inputs: the
- * kit, the selector, the text and the failure label. */
-async function pressWhenShown(kit, selector, text, label) {
-  await kit.until(() => press(selector, text), kit.UI_MS, label);
+/** The pool card the project's Pool section has selected. Output: its name, "No pool" for none. */
+async function selectedPool() {
+  return (await texts("[role=\"radiogroup\"][aria-label=\"Pool\"] label.pj-radio-card.selected strong"))[0] ?? null;
 }
 
-/** Opens a row's More menu and picks one item. Inputs: the kit, the menu label and the item. */
-async function menuPick(kit, menu, item) {
-  await kit.until(() => browser.execute((label) => {
-    const button = [...document.querySelectorAll("button[aria-label]")].find((node) => node.getAttribute("aria-label") === label);
-    if (button && button.getAttribute("aria-expanded") !== "true") button.click();
-    return Boolean(button);
-  }, menu), kit.UI_MS, `no ${menu} menu`);
-  await pressWhenShown(kit, '[role="menu"] [role="menuitem"]', item, `the ${menu} menu has no ${item}`);
+/** Gives the trial project one pool, or none, as the owner does in its Settings, Pool section,
+ * and waits for the line that says so. Inputs: the kit and the card name. Output: the window text. */
+async function assignPool(kit, name) {
+  await poolSection(kit);
+  if ((await selectedPool()) === name) return windowText();
+  await click(`${PICKER}//label[.//strong[normalize-space(.)=${kit.lit(name)}]]`);
+  await click("//button[normalize-space(.)=\"Save pool\"]");
+  const line = name === NO_POOL ? "This project has no pool now." : `${name} is assigned.`;
+  await kit.until(async () => (await windowText()).includes(line), kit.UI_MS, `OP-56: the project never said "${line}"`);
+  return windowText();
 }
 
-/** Reads the open confirm dialog: its title, body and button labels. Output: the dialog or null. */
-function dialog() {
-  return browser.execute(() => {
-    const open = document.querySelector("dialog[open]");
-    if (!open) return null;
-    return { text: open.innerText, buttons: [...open.querySelectorAll("button")].map((button) => button.textContent.trim()) };
-  });
+/** Makes a scratch pool holding one account through Settings, Pools, New pool. Inputs: the
+ * kit, the pool name and the account name. */
+async function newPool(kit, name, member) {
+  await kit.go("#/settings/pools");
+  await click("button=New pool");
+  await type("#pool-name", name);
+  await type("main input[type=\"search\"][placeholder=\"Search accounts\"]", member);
+  await click(`//label[contains(concat(" ", normalize-space(@class), " "), " pick ")][.//span[normalize-space(.)=${kit.lit(member)}]]`);
+  await click("button=Save pool");
+  await kit.until(async () => (await poolNames()).includes(name), kit.UI_MS, `Settings, Pools never listed the new pool ${name}`);
 }
 
-/** Confirms the open dialog with its danger button after checking it names what changes.
- * Inputs: the kit, what the body must say and the confirm label. Output: the body text. */
-async function confirm(kit, says, label) {
-  const seen = JSON.parse(await kit.waitFor(async () => {
-    const open = await dialog();
-    return { done: open !== null, seen: JSON.stringify(open) };
-  }, kit.UI_MS, "no confirm dialog opened"));
-  if (!seen.text.includes(says)) throw new Error(`the confirm does not say "${says}": ${seen.text}`);
-  if (!seen.buttons.includes(label)) throw new Error(`the confirm offers ${seen.buttons.join(", ")}, not ${label}`);
-  await kit.screen();
-  await pressWhenShown(kit, "dialog[open] button", label, `${label} could not be pressed`);
-  await kit.until(async () => (await dialog()) === null, kit.UI_MS, "the confirm dialog stayed open");
-  return seen.text;
-}
-
-/** The text the window shows, read without a screenshot: the page, an open dialog and toasts.
- * Output: the text. */
-function text() {
-  return browser.execute(() => [...document.querySelectorAll("main, dialog[open], .toast")].map((node) => node.innerText).join("\n"));
-}
-
-/** Waits for the window to say a line, and fails on the old loop back to an assigned pool.
- * Inputs: the kit, the line and the failure label. */
-async function says(kit, line, label) {
-  const text = await kit.waitFor(async () => {
-    const shown = await text();
-    return { done: shown.includes(line) || shown.includes(LOOP_TEXT), seen: shown.slice(0, 600) };
-  }, kit.UI_MS, label);
-  if (!text.includes(line) && text.includes(LOOP_TEXT)) throw new Error(`looped back to "${LOOP_TEXT}": ${text}`);
-}
-
-/** Picks one Pool choice on the project's Settings and saves it. Inputs: the kit, the radio
- * value (empty for No pool) and the line the save shows. */
-async function choosePool(kit, value, line) {
-  await kit.go(`#/projects/${encodeURIComponent(kit.project())}/settings?section=pool`);
-  await kit.until(() => browser.execute((wanted) => {
-    const radio = [...document.querySelectorAll('input[type="radio"][name="ps-pool"]')].find((input) => input.value === wanted);
-    radio?.click();
-    return Boolean(radio?.checked);
-  }, value), kit.UI_MS, `no Pool choice ${value || "No pool"}`);
-  await pressWhenShown(kit, "main button.btn.primary", "Save pool", "Save pool could not be pressed");
-  await says(kit, line, `the project did not say ${line}`);
+/** Reads the open confirm and judges that it names what changes. Inputs: what it must name.
+ * Output: the verdict line. */
+async function confirmNames(wants) {
+  return confirmVerdict({ title: (await texts(`${CONFIRM} h2`))[0] ?? "", body: (await texts(`${CONFIRM} .dialog-body`))[0] ?? "", wants });
 }
 
 export const checks = [{
   id: "N-D32",
   op: ["OP-56"],
-  title: "A pool assigned to a project can be set to No pool and deleted, and an account that was in it deleted",
-  why: "owner: a pool assigned to a project cannot be unassigned or deleted; an account in a pool cannot be deleted",
+  title: "Unassign a pool, delete it, then delete its account",
+  why: "owner: \"I cannot unassign a pool from a project ... it's a dead loop\"",
   after: "end",
   run: async (kit) => {
-    const name = `ca-trial-scratch-${Date.now()}`;
-    const added = await invoke("desktop_add_account", { draft: { provider: "local", method: "url", name, url: SCRATCH_URL, model: "scratch" }, key: null });
-    const account = added?.value ?? added;
-    if (!account?.id) throw new Error(`the scratch account was not added: ${JSON.stringify(added).slice(0, 300)}`);
-    const original = { value: null };
-    const lines = [];
-    try {
-      await kit.go("#/settings/pools?action=new");
-      await (await $("#pool-name")).setValue(name);
-      await (await $('input[type="search"][placeholder="Search accounts"]')).setValue(name);
-      await kit.until(() => browser.execute((wanted) => {
-        const row = [...document.querySelectorAll("label.pick")].find((node) => node.textContent.includes(wanted));
-        const box = row?.querySelector('input[type="checkbox"]');
-        if (box && !box.checked) box.click();
-        return Boolean(box?.checked);
-      }, name), kit.UI_MS, "the scratch account could not be put in the pool");
-      await pressWhenShown(kit, 'main button[type="submit"]', "Save pool", "Save pool could not be pressed");
-      await kit.until(() => browser.execute((wanted) => [...document.querySelectorAll(".pool-row .name")].some((node) => node.textContent.trim() === wanted), name),
-        kit.UI_MS, "the scratch pool is not listed");
-      await kit.go(`#/projects/${encodeURIComponent(kit.project())}/settings?section=pool`);
-      const choices = JSON.parse(await kit.waitFor(async () => {
-        const seen = await browser.execute((wanted) => {
-          const radios = [...document.querySelectorAll('input[type="radio"][name="ps-pool"]')];
-          const mine = radios.find((input) => input.closest("label")?.textContent.includes(wanted));
-          return { checked: radios.find((input) => input.checked)?.value ?? null, pool: mine?.value ?? null };
-        }, name);
-        return { done: seen.pool !== null, seen: JSON.stringify(seen) };
-      }, kit.UI_MS, "the project's Pool choices do not list the scratch pool"));
-      original.value = choices.checked;
-      await choosePool(kit, choices.pool, `${name} is assigned.`);
-      lines.push("scratch pool assigned");
-      await choosePool(kit, "", "This project has no pool now.");
-      lines.push("set to No pool");
+    const account = await scratchAccount("pool");
+    const pool = scratchName("pool", Date.now());
+    let original = null;
+    return tidy(async () => {
+      await poolSection(kit);
+      original = await selectedPool();
+      if (!original) throw new Error("the project's Pool section shows no selected card");
+      await newPool(kit, pool, account.name);
+      await assignPool(kit, pool);
+      noLoop(await assignPool(kit, NO_POOL));
+      await kit.screen();
       await kit.go("#/settings/pools");
-      await menuPick(kit, `More for ${name}`, "Delete pool");
-      await confirm(kit, "Only the pool goes away.", "Delete pool");
-      await says(kit, `${name} deleted.`, "the pool delete was not confirmed");
-      lines.push("pool deleted after a confirm that names what stays");
-      await kit.go("#/settings/accounts");
-      await (await $('input[type="search"][placeholder="Search accounts"]')).setValue(name);
-      await menuPick(kit, `More for ${name}`, "Delete");
-      await confirm(kit, name, "Delete account");
-      await kit.until(() => browser.execute((label) => ![...document.querySelectorAll("button[aria-label]")].some((node) => node.getAttribute("aria-label") === label), `More for ${name}`),
-        kit.UI_MS, "the scratch account is still listed");
-      lines.push("account deleted after its confirm");
-      return lines.join("; ");
-    } finally {
-      if (original.value !== null && original.value !== "") await choosePool(kit, original.value, "is assigned.");
-    }
+      await menu(`More for ${pool}`, "Delete pool");
+      await kit.until(() => shown(CONFIRM), kit.UI_MS, `Delete pool on ${pool} never asked to confirm`);
+      const poolConfirm = await confirmNames([pool, "Only the pool goes away"]);
+      await click("//dialog[@open]//button[normalize-space(.)=\"Delete pool\"]");
+      await kit.until(async () => !(await poolNames()).includes(pool), kit.UI_MS, `OP-56: ${pool} is still listed after Delete pool`);
+      noLoop(await windowText());
+      await kit.screen();
+      await findAccount(kit, account.name);
+      await menu(`More for ${account.name}`, "Delete");
+      await kit.until(() => shown(CONFIRM), kit.UI_MS, `Delete on ${account.name} never asked to confirm`);
+      const accountConfirm = await confirmNames([account.name, "removed from CrazyAgent"]);
+      await click("//dialog[@open]//button[normalize-space(.)=\"Delete account\"]");
+      await kit.until(async () => !(await rowNames()).includes(account.name), kit.UI_MS, `OP-56: ${account.name} is still listed after Delete account`);
+      noLoop(await windowText());
+      await kit.screen();
+      return `the project took ${pool}, then No pool; deleted the pool after ${poolConfirm}; deleted ${account.name} after ${accountConfirm}`;
+    }, async () => {
+      await closeDialog(kit);
+      if (original && original !== pool) await assignPool(kit, original);
+      await dropScratch([account.id]);
+    });
   },
 }];

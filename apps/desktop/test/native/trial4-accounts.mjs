@@ -122,7 +122,7 @@ export function confirmVerdict({ title, body, wants }) {
   return `"${title}": ${body}`;
 }
 
-/** Fails when the window loops back to the old refusal (N-D31; OP-56). Input: the window
+/** Fails when the window loops back to the old refusal (N-D32; OP-56). Input: the window
  * text. Output: the same text. */
 export function noLoop(text) {
   assert(typeof text === "string");
