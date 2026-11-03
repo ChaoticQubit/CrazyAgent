@@ -700,12 +700,19 @@ fn the_live_server_needs_an_absolute_plain_mailbox_and_lists_the_tools_left_on()
         .into_iter()
         .filter(|name| *name != STOP_TOOL)
         .chain(QUESTION_TOOLS)
+        .chain(CHECKS_TOOLS)
         .collect();
     assert_eq!(names, left_on);
     let tools = answer["result"]["tools"].as_array().unwrap();
-    let ask = left_on.len() - QUESTION_TOOLS.len();
+    let ask = left_on.len() - QUESTION_TOOLS.len() - CHECKS_TOOLS.len();
     assert_eq!(tools[ask], ask_tool());
     assert_eq!(tools[ask + 1], record_tool());
+    assert_eq!(tools[ask + 2], checks::run_listing());
+    assert_eq!(tools[ask + 3], checks::results_listing());
+    assert_eq!(
+        tools[ask + 2]["inputSchema"]["properties"]["checks"]["maxItems"],
+        checks::CHECKS_NAMED_MAX
+    );
     assert_eq!(
         tools[ask]["inputSchema"]["properties"]["options"]["maxItems"],
         crate::questions::OPTIONS_MAX
@@ -1110,6 +1117,10 @@ fn only_known_team_tools_up_to_their_count_may_be_switched_off() {
     assert!(known_tools(&names(&[STOP_TOOL, MERGE_TOOL])));
     assert!(!known_tools(&names(&["status"])));
     assert!(!known_tools(&names(&[STOP_TOOL, "Stop"])));
-    assert!(known_tools(&names(&[STOP_TOOL; 12])));
-    assert!(!known_tools(&names(&[STOP_TOOL; 13])));
+    assert!(known_tools(&names(&QUESTION_TOOLS)));
+    assert!(known_tools(&names(&CHECKS_TOOLS)));
+    let every = TEAM_TOOLS.len() + QUESTION_TOOLS.len() + CHECKS_TOOLS.len();
+    assert_eq!(every, 16);
+    assert!(known_tools(&names(&vec![STOP_TOOL; every])));
+    assert!(!known_tools(&names(&vec![STOP_TOOL; every + 1])));
 }

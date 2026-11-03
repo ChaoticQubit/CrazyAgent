@@ -50,11 +50,12 @@ pub enum ProtectedChange {
 }
 
 /// What a test a passing run no longer reports against its inventory baseline does at the
-/// gate: a gap, kept in the note under `warn` and refused under `require`, or a refusal
-/// under `warn` too. A passing run whose integrity block is missing counts as one.
+/// gate: nothing; a gap, kept in the note under `warn` and refused under `require`; or a
+/// refusal under `warn` too. A passing run whose integrity block is missing counts as one.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RemovedTests {
+    Off,
     #[default]
     Flag,
     Refuse,
@@ -152,7 +153,7 @@ impl ProtectedChange {
 
 impl RemovedTests {
     /// Every option, in display order.
-    pub const ALL: [Self; 2] = [Self::Flag, Self::Refuse];
+    pub const ALL: [Self; 3] = [Self::Off, Self::Flag, Self::Refuse];
 }
 
 impl ChecksSettings {
