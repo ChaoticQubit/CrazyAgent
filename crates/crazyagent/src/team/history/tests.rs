@@ -591,3 +591,225 @@ fn only_plain_bounded_ids_are_valid() {
         assert!(!id_valid(id), "{id:?}");
     }
 }
+
+/// A Claude Code `assistant` record line holding one tool call, as Claude Code writes it.
+/// Inputs: the call id, the tool name and its input. Output: the JSON line.
+fn claude_call(id: &str, name: &str, input: serde_json::Value) -> String {
+    json!({"type": "assistant", "message": {"role": "assistant", "content": [
+        {"type": "tool_use", "id": id, "name": name, "input": input}], "stop_reason": "tool_use"}})
+    .to_string()
+}
+
+/// A Claude Code `user` record line holding one tool's result, as Claude Code writes it.
+/// Inputs: the call id and the output text. Output: the JSON line.
+fn claude_result(id: &str, output: &str) -> String {
+    json!({"type": "user", "message": {"role": "user", "content": [
+        {"tool_use_id": id, "type": "tool_result", "content": output, "is_error": false}]},
+        "toolUseResult": {"stdout": output, "stderr": "", "interrupted": false}})
+    .to_string()
+}
+
+/// OP-25: a word that is only in a tool's output finds that call in Claude Code and Codex
+/// records, and the conversation page shows the call's input and its output.
+#[test]
+fn a_word_only_in_a_tool_output_finds_the_call_and_the_page_shows_its_input_and_output() {
+    let fixture = Fixture::new();
+    let (claude_agent, claude_home) = fixture.agent("claude-code");
+    record(
+        &claude_home
+            .join("projects")
+            .join("proj")
+            .join("tools.jsonl"),
+        &[
+            claude("user", "Read today's note"),
+            claude_call(
+                "toolu_01A",
+                "Bash",
+                json!({"command": "cat notes/today.md", "description": "Read the note"}),
+            ),
+            claude_result("toolu_01A", "Meeting moved: quokkafern review at 3pm"),
+            claude("assistant", "The review moved to 3pm."),
+        ],
+    );
+    let (codex_agent, codex_home) = fixture.agent("codex");
+    record(
+        &codex_home
+            .join("sessions")
+            .join("2026")
+            .join("11")
+            .join("rollout-tools.jsonl"),
+        &[
+            json!({"timestamp": "2026-11-03T13:00:00.000Z", "type": "response_item", "payload": {
+                "type": "function_call", "name": "shell", "call_id": "call_9",
+                "arguments": "{\"command\":[\"bash\",\"-lc\",\"cat ledger.txt\"],\"workdir\":\"/work\"}"}})
+            .to_string(),
+            json!({"timestamp": "2026-11-03T13:00:01.000Z", "type": "response_item", "payload": {
+                "type": "function_call_output", "call_id": "call_9",
+                "output": "{\"output\":\"wombatlynx total 42\\nsecond line\\n\",\"metadata\":{\"exit_code\":0,\"duration_seconds\":0.1}}"}})
+            .to_string(),
+        ],
+    );
+
+    let claude_id = format!("agent-{claude_agent}/tools");
+    let found = fixture.sessions("quokkafern");
+    let hits = hit_lines(&found);
+    assert_eq!(hits.len(), 1, "{found}");
+    assert!(
+        hits[0].starts_with(&format!("- {claude_id} #2 tool ")),
+        "{found}"
+    );
+    let (page, missing) = fixture.session(&claude_id, 0);
+    assert!(!missing);
+    assert!(page.contains("#0 typed: Read today's note"), "{page}");
+    assert!(
+        page.contains(
+            "#1 agent: Tool call Bash:\ncommand: cat notes/today.md\ndescription: Read the note"
+        ),
+        "{page}"
+    );
+    assert!(
+        page.contains("#2 tool: Tool output:\nMeeting moved: quokkafern review at 3pm"),
+        "{page}"
+    );
+    assert!(
+        page.contains("#3 agent: The review moved to 3pm."),
+        "{page}"
+    );
+
+    let codex_id = format!("agent-{codex_agent}/rollout-tools");
+    let found = fixture.sessions("WOMBATLYNX");
+    let hits = hit_lines(&found);
+    assert_eq!(hits.len(), 1, "{found}");
+    assert!(
+        hits[0].starts_with(&format!("- {codex_id} #1 tool ")),
+        "{found}"
+    );
+    let (page, missing) = fixture.session(&codex_id, 0);
+    assert!(!missing);
+    assert!(
+        page.contains(
+            "#0 agent: Tool call shell:\ncommand: bash -lc cat ledger.txt\nworkdir: /work"
+        ),
+        "{page}"
+    );
+    assert!(
+        page.contains("#1 tool: Tool output:\nwombatlynx total 42\nsecond line\n\n"),
+        "{page}"
+    );
+}
+
+/// OP-25: secrets in tool inputs, tool outputs and messages are masked before a search
+/// reads them, so no search finds a secret and no page shows one.
+#[test]
+fn secrets_in_tool_inputs_outputs_and_messages_are_masked_before_search_and_paging() {
+    let token = "ghp_0123456789abcdefABCDEF0123456789abcd";
+    let key = "sk-proj-AbCdEfGhIjKlMnOpQrStUvWx";
+    let fixture = Fixture::new();
+    let (agent, home) = fixture.agent("claude-code");
+    record(
+        &home.join("projects").join("proj").join("secrets.jsonl"),
+        &[
+            claude(
+                "assistant",
+                &format!("Set GITHUB_TOKEN={token} for the push"),
+            ),
+            claude_call(
+                "toolu_02B",
+                "Bash",
+                json!({"command": format!("curl -H 'X-Key: {key}' https://example.com/api")}),
+            ),
+            claude_result(
+                "toolu_02B",
+                &format!("export GITHUB_TOKEN={token}\npassword: hunter2\nquokkafern done"),
+            ),
+        ],
+    );
+    let id = format!("agent-{agent}/secrets");
+
+    for secret in [token, key, "hunter2"] {
+        let found = fixture.sessions(secret);
+        assert!(hit_lines(&found).is_empty(), "{secret}: {found}");
+    }
+    let (page, missing) = fixture.session(&id, 0);
+    assert!(!missing);
+    for secret in [token, key, "hunter2"] {
+        assert!(!page.contains(secret), "{secret}: {page}");
+    }
+    assert!(
+        page.contains("#0 agent: Set [hidden] for the push"),
+        "{page}"
+    );
+    assert!(
+        page.contains("curl -H 'X-Key: [hidden] https://example.com/api"),
+        "{page}"
+    );
+    assert!(
+        page.contains("export [hidden]\n[hidden: this line may contain a secret]\nquokkafern done"),
+        "{page}"
+    );
+    assert_eq!(hit_lines(&fixture.sessions("quokkafern")).len(), 1);
+}
+
+/// OP-25: one tool output is kept up to its bound, so a word near its start is found and a
+/// word far past the bound is not.
+#[test]
+fn a_huge_tool_output_is_kept_only_up_to_its_bound() {
+    let fixture = Fixture::new();
+    let (_, home) = fixture.agent("claude-code");
+    let output = format!(
+        "quokkafern start {} wombatlynx end",
+        "filler ".repeat(30_000)
+    );
+    record(
+        &home.join("projects").join("proj").join("huge-tool.jsonl"),
+        &[
+            claude_call("toolu_03C", "Read", json!({"file_path": "/work/big.log"})),
+            claude_result("toolu_03C", &output),
+        ],
+    );
+
+    assert_eq!(hit_lines(&fixture.sessions("quokkafern")).len(), 1);
+    let far = fixture.sessions("wombatlynx");
+    assert!(hit_lines(&far).is_empty(), "{far}");
+}
+
+/// OP-25 security: rows the engine stored before this version, a master turn and a team
+/// message holding secrets in clear, are masked from the first read after the upgrade: no
+/// search finds a secret, no page shows one, and other words still find the turn.
+#[test]
+fn rows_stored_before_the_upgrade_are_masked_from_the_first_read() {
+    let token = "ghp_0123456789abcdefABCDEF0123456789abcd";
+    let key = "sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWx0123";
+    let fixture = Fixture::new();
+    fixture.turn(
+        "s9",
+        1,
+        &format!("Use GITHUB_TOKEN={token} quokkafern"),
+        &format!("Saved {key} for later"),
+        1_000,
+    );
+    fixture.team_message(
+        "engine",
+        &format!("Agent printed password: hunter2 and {token}"),
+        2_000,
+    );
+
+    for secret in [token, key, "hunter2"] {
+        let found = fixture.sessions(secret);
+        assert!(hit_lines(&found).is_empty(), "{secret}: {found}");
+    }
+    for id in ["session/s9", "team"] {
+        let (page, missing) = fixture.session(id, 0);
+        assert!(!missing, "{id}");
+        for secret in [token, key, "hunter2"] {
+            assert!(!page.contains(secret), "{id} {secret}: {page}");
+        }
+    }
+    let (page, _) = fixture.session("session/s9", 0);
+    assert!(page.contains("#0 owner: Use [hidden] quokkafern"), "{page}");
+    assert!(
+        page.contains("#1 master: Saved [hidden] for later"),
+        "{page}"
+    );
+    assert_eq!(hit_lines(&fixture.sessions("quokkafern")).len(), 1);
+}
