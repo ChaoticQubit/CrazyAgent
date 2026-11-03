@@ -565,8 +565,9 @@ fn live_native_lead_splits_teammates_into_mates_server() {
 /// A native lead's teammate cannot plant a command in the shell snapshot its lead's Claude
 /// Code runs before every Bash command (rv-audit TPH r1 F2). The real lead runs one Bash
 /// call, so its snapshot exists under its config home. A process in the installed teammates'
-/// profile appends a command to each snapshot there, and the lead's next Bash call must not
-/// run it.
+/// profile appends a command to each snapshot there and must be refused, so a snapshot the
+/// lead writes again cannot pass for the refusal, and the lead's next Bash call must not run
+/// it.
 #[test]
 #[ignore = "live qualification: needs a signed-in Claude account, CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
 fn live_a_teammate_cannot_plant_a_command_in_its_lead_s_shell_snapshot() {
@@ -640,6 +641,11 @@ fn live_a_teammate_cannot_plant_a_command_in_its_lead_s_shell_snapshot() {
         planted.status.code()
     );
     assert!(answered(&second, "TWO"), "{second:?}");
+    assert!(
+        !planted.status.success(),
+        "a teammate appended to its lead's shell snapshot: {}",
+        String::from_utf8_lossy(&planted.stderr)
+    );
     assert!(
         !marker.exists(),
         "a teammate's line in its lead's shell snapshot ran in the lead's next Bash call: {}",
