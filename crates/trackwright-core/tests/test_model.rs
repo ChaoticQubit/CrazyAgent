@@ -1149,3 +1149,116 @@ fn migrate_step_two_widens_the_policy_keys_and_keeps_every_policy_row() {
     schema::migrate(&tx).unwrap();
     assert_eq!(master(&tx), once, "a second migrate changes nothing");
 }
+
+#[test]
+fn a_release_has_at_most_one_active_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = actor("owner");
+    let agent = actor("agent:w1");
+    let mut store = opened(dir.path());
+    let tx = store.transaction().unwrap();
+    store::create_project(&tx, &owner, &key("CA"), "CrazyAgent", 1_000).unwrap();
+    tx.execute(
+        "INSERT INTO tk_versions(project, name, position, target_day, status, source, version)
+         VALUES (?1, '1.0', 0, NULL, 'planned', 'manual', 1)",
+        [project_id(&tx, "CA")],
+    )
+    .unwrap();
+    let active = PlanFields {
+        name: "Release 1.0".to_owned(),
+        release: Some("1.0".to_owned()),
+        cycle: None,
+        status: PlanStatus::Active,
+    };
+    let first = tests_store::upsert_plan(&tx, &owner, &key("CA"), None, &active, 1_001).unwrap();
+    let events = count(&tx, "tk_events");
+    for who in [&agent, &owner] {
+        assert_eq!(
+            refused(tests_store::upsert_plan(
+                &tx,
+                who,
+                &key("CA"),
+                None,
+                &active,
+                1_002
+            )),
+            codes::ACTIVE_PLAN_EXISTS,
+            "{who:?} cannot open a second active plan on 1.0"
+        );
+    }
+    let draft = PlanFields {
+        name: "Release 1.0 without the holdouts".to_owned(),
+        status: PlanStatus::Draft,
+        ..active.clone()
+    };
+    let second = tests_store::upsert_plan(&tx, &agent, &key("CA"), None, &draft, 1_003).unwrap();
+    let raised = PlanFields {
+        status: PlanStatus::Active,
+        ..draft.clone()
+    };
+    assert_eq!(
+        refused(tests_store::upsert_plan(
+            &tx,
+            &agent,
+            &key("CA"),
+            Some((&second.short_id, second.version)),
+            &raised,
+            1_004
+        )),
+        codes::ACTIVE_PLAN_EXISTS
+    );
+    assert_eq!(
+        count(&tx, "tk_events"),
+        events + 1,
+        "only the draft was recorded"
+    );
+    let first_id = row_id(&tx, "tk_plans", "CA", first.short_id.number());
+    let version_id: i64 = tx
+        .query_row(
+            "SELECT version_id FROM tk_plans WHERE id = ?1",
+            [first_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let forced = tx.execute(
+        "INSERT INTO tk_plans(project, number, name, version_id, cycle_id, status, version)
+         VALUES (?1, 9, 'forced', ?2, NULL, 'active', 1)",
+        [project_id(&tx, "CA"), version_id],
+    );
+    assert!(
+        forced.is_err(),
+        "the table keeps one active plan per release"
+    );
+
+    let closed = PlanFields {
+        status: PlanStatus::Closed,
+        ..active.clone()
+    };
+    let first = tests_store::upsert_plan(
+        &tx,
+        &owner,
+        &key("CA"),
+        Some((&first.short_id, first.version)),
+        &closed,
+        1_005,
+    )
+    .unwrap();
+    assert_eq!(first.status, PlanStatus::Closed);
+    let second = tests_store::upsert_plan(
+        &tx,
+        &agent,
+        &key("CA"),
+        Some((&second.short_id, second.version)),
+        &raised,
+        1_006,
+    )
+    .unwrap();
+    assert_eq!(second.status, PlanStatus::Active);
+    let unreleased = PlanFields {
+        release: None,
+        ..active.clone()
+    };
+    for at in [1_007, 1_008] {
+        tests_store::upsert_plan(&tx, &agent, &key("CA"), None, &unreleased, at).unwrap();
+    }
+}
