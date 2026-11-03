@@ -8795,6 +8795,87 @@ fn a_native_lead_s_task_prompt_keeps_the_native_teammates_paragraph() {
     team.shutdown().unwrap();
 }
 
+/// OP-9 (DEC-114), DEC-111 Q17: a native teammate working in its own worktree inside its
+/// lead's clone, on its own `<task branch>--<name>` branch, is recorded there, so the graph
+/// shows it with a worktree and the Process page names the folder. A teammate with no
+/// worktree yet, or one whose worktree is on another teammate's branch, has none recorded.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_teammate_in_its_own_worktree_on_its_own_branch_is_recorded_there() {
+    let fixture = Fixture::new(1);
+    let (lead, branch) =
+        lead_in_its_own_clone(&fixture, crate::coord::settings::SubagentMode::Native);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let clone = fixture.base.join(format!("agent-{lead}"));
+    let git_home = fixture.base.join("owner-home");
+    let folder = |name: &str| format!("{}/{name}", crate::agent_git::TEAMMATES_FOLDER);
+    for (name, on) in [("greet", "greet"), ("stray", "other")] {
+        let made = level_git(
+            &clone,
+            &git_home,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                &folder(name),
+                "-b",
+                &format!("{branch}--{on}"),
+            ],
+        );
+        assert!(made.status.success(), "{made:?}");
+    }
+    let home = fixture.base.join("lead-home");
+    let team = home.join("teams").join("session-1");
+    std::fs::create_dir_all(&team).unwrap();
+    std::fs::write(
+        team.join("config.json"),
+        r#"{"members":[{"name":"greet","tmuxPaneId":"%7"},{"name":"check","tmuxPaneId":"%8"},{"name":"stray","tmuxPaneId":"%9"}]}"#,
+    )
+    .unwrap();
+    crate::coord::ensure(&fixture.connection).unwrap();
+
+    super::teammates::register(
+        &fixture.connection,
+        &project,
+        lead,
+        &home,
+        &["%7", "%8", "%9"],
+        1,
+        5,
+    )
+    .unwrap();
+
+    let snapshot = crate::coord::snapshot(&fixture.connection, &project, 5).unwrap();
+    let recorded = |pane: &str| -> (Option<String>, bool) {
+        let (id, worktree): (i64, Option<String>) = fixture
+            .connection
+            .query_row(
+                "SELECT id,worktree FROM team_agents WHERE parent=?1 AND role='teammate' AND pane=?2",
+                params![lead, pane],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let state = snapshot
+            .agents
+            .iter()
+            .find(|state| state.agent == id)
+            .unwrap();
+        (worktree, state.has_worktree)
+    };
+    let own = clone.join(folder("greet"));
+    assert_eq!(
+        recorded("%7"),
+        (Some(own.to_str().unwrap().to_owned()), true),
+        "greet works in its own worktree on {branch}--greet"
+    );
+    assert_eq!(recorded("%8"), (None, false), "check made no worktree");
+    assert_eq!(
+        recorded("%9"),
+        (None, false),
+        "stray's worktree is on another teammate's branch"
+    );
+}
+
 /// DEC-111 Q10: a worker its lead started reads its own branch and that its lead merges
 /// it, never a lead's task-branch line, whatever the project's sub-agent mode says.
 #[cfg(target_os = "macos")]
