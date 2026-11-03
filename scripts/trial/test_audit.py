@@ -680,7 +680,7 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(record["result"], "FAIL")
         self.assertIn("ten-minute nudges sent under first_edit", record["detail"])
 
-    def reask(self, setting, asked):
+    def reask(self, setting, asked, reply="Added test_calc.py.", said=audit.REASK_EMPTY):
         w = self.world
         w.db.executescript("CREATE TABLE team_reask_empty (project TEXT PRIMARY KEY, reask INTEGER NOT NULL CHECK(reask IN (0,1)));")
         if setting is not None:
@@ -689,8 +689,8 @@ class AuditTests(unittest.TestCase):
         w.row("team_tasks", project=PROJECT, source="master", harness="claude-code", tools=1, prompt="add calc.py", status="done",
               agent=lead, result="", created_ms=w.now)
         w.row("team_tasks", project=PROJECT, source="master", harness="claude-code", tools=1, prompt="add a test", status="done",
-              agent=lead, result="Added test_calc.py.", created_ms=w.now)
-        w.transcript(lead, [prompt(w.now - 5000, "add calc.py")] + ([prompt(w.now, audit.REASK_EMPTY)] if asked else []))
+              agent=lead, result=reply, created_ms=w.now)
+        w.transcript(lead, [prompt(w.now - 5000, "add calc.py")] + ([prompt(w.now, said)] if asked else []))
 
     def test_t3_25_re_ask_fails_when_an_empty_reply_is_not_re_asked_as_the_setting_says(self):
         w = self.world
@@ -753,6 +753,27 @@ class AuditTests(unittest.TestCase):
         self.assertIn(done.returncode, (0, 1), done.stdout + done.stderr)
         self.assertEqual(sorted(p.stem for p in (w.out / "checks").glob("*.json")), [check["id"] for check in audit.CHECKS])
         self.assertIn("SUMMARY project=trial", done.stdout)
+
+    def test_secrets_across_a_cut_are_masked_before_the_cut(self):
+        w = self.world
+        jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c"
+        reply = "r" * (audit.VALUE_BYTES_MAX - 25) + " " + jwt + " " + "t" * 200
+        key = "sk-ant-api03-" + "K" * 40
+        start = json.dumps(prompt(w.now, f"{audit.REASK_EMPTY}  {key}")).index(key)
+        said = f"{audit.REASK_EMPTY} {'p' * (audit.EXCERPT_BYTES_MAX - 11 - start)} {key} {'t' * 200}"
+        self.reask(None, True, reply=reply, said=said)
+        record = w.audit("T3-25")
+        self.assertEqual(record["result"], "PASS", record["detail"])
+        self.assertIn(" chars)", (w.out / "db" / "T3-25.json").read_text())
+        self.assertIn(" chars)", record["log"])
+        files = sorted(p for p in w.out.rglob("*") if p.is_file())
+        leaks = [
+            (str(path.relative_to(w.out)), leaked)
+            for path in files
+            for leaked in ("eyJhbGciOiJIUzI1NiJ9", "sk-ant")
+            if leaked in path.read_text(encoding="utf-8", errors="replace")
+        ]
+        self.assertEqual(leaks, [])
 
     def test_masking_hides_keys_tokens_codes_ids_and_emails_and_keeps_plain_text(self):
         text = (

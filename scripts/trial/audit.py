@@ -411,9 +411,9 @@ class Trial:
         if self.reads is not None and len(self.reads) < READS_PER_CHECK_MAX:
             self.reads.append({
                 "sql": " ".join(sql.split()),
-                "args": [bounded(arg) for arg in args],
+                "args": [bounded(mask(arg)) for arg in args],
                 "count": len(rows),
-                "rows": [[bounded(value) for value in row] for row in rows[:ROWS_PER_READ_MAX]],
+                "rows": [[bounded(mask(value)) for value in row] for row in rows[:ROWS_PER_READ_MAX]],
             })
         return rows
 
@@ -1855,7 +1855,7 @@ def excerpt(path, number):
         with open(path, "r", encoding="utf-8", errors="replace") as handle:
             for at, line in enumerate(handle, 1):
                 if at == number:
-                    line = line.rstrip("\n")
+                    line = mask(line.rstrip("\n"))
                     return line[:EXCERPT_BYTES_MAX] + (f" ... (+{len(line) - EXCERPT_BYTES_MAX} chars)" if len(line) > EXCERPT_BYTES_MAX else "")
     except OSError:
         return None
