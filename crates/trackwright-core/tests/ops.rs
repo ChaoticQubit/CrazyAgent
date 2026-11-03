@@ -140,7 +140,7 @@ impl Authority for TableHost {
 }
 
 impl Paths for TableHost {
-    fn resolve(
+    fn resolve_path(
         &self,
         tx: &Transaction<'_>,
         project: &ProjectKey,
@@ -148,7 +148,7 @@ impl Paths for TableHost {
         op: OpKind,
         requested: &Path,
     ) -> Result<PathBuf, Refusal> {
-        Standalone.resolve(tx, project, actor, op, requested)
+        Standalone.resolve_path(tx, project, actor, op, requested)
     }
 }
 
