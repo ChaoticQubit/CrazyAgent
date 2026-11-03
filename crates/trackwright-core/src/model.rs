@@ -28,6 +28,21 @@ pub mod codes {
     pub const STORE_NOT_PRIVATE: &str = "store_not_private";
     pub const STORE_SCHEMA_NEWER: &str = "store_schema_newer";
     pub const STORE_FAILED: &str = "store_failed";
+    pub const TICKET_CLOSED: &str = "ticket_closed";
+    pub const TICKET_OPEN: &str = "ticket_open";
+    pub const STATUS_INVALID: &str = "status_invalid";
+    pub const CLOSE_NEEDS_EVIDENCE: &str = "close_needs_evidence";
+    pub const CLOSE_OWNER_ONLY: &str = "close_owner_only";
+    pub const CREATE_OWNER_ONLY: &str = "create_owner_only";
+    pub const AGENT_EDIT_REFUSED: &str = "agent_edit_refused";
+    pub const OWNER_ONLY: &str = "owner_only";
+    pub const POLICY_VALUE_INVALID: &str = "policy_value_invalid";
+    pub const CRITERION_HAS_CHECKS: &str = "criterion_has_checks";
+    pub const CHECKS_FULL: &str = "checks_full";
+    pub const CHECK_EXISTS: &str = "check_exists";
+    pub const CHECK_UNKNOWN: &str = "check_unknown";
+    pub const LINK_KIND_UNKNOWN: &str = "link_kind_unknown";
+    pub const NOTIFY_TOO_WIDE: &str = "notify_too_wide";
 }
 
 pub const ACTOR_BYTES_MAX: usize = 128;
