@@ -2334,7 +2334,7 @@ fn plan_roadmap(
 
 /// The tables whose rows belong to one project and go with it when it is removed.
 /// Live team agents are not listed: the team runtime stops them and keeps their rows.
-const REMOVED_WITH_PROJECT: [&str; 30] = [
+const REMOVED_WITH_PROJECT: [&str; 32] = [
     "research_jobs",
     "onboarding",
     "team_messages",
@@ -2342,6 +2342,8 @@ const REMOVED_WITH_PROJECT: [&str; 30] = [
     "team_owner_prompts",
     "team_settings",
     "team_wake_rules",
+    "team_nesting",
+    "team_new_folder_limit",
     "team_time_limits",
     "team_master_switch",
     "team_session_switches",
@@ -2465,7 +2467,8 @@ fn set_agent_policy(
 /// Removes a project from CrazyAgent and leaves its folder on disk where it is.
 /// Takes the transaction, the project and the revision before the removal. Its open master
 /// conversation ends in the same change; its onboarding, research jobs, team conversation,
-/// tasks, settings, wake rules and ended agents are deleted, so a waiting step is never
+/// tasks, settings (sub-agent nesting and the new folder limit among them), wake rules and
+/// ended agents are deleted, so a waiting step is never
 /// claimed and a running one stops; its read folders, agent access, agent settings and its
 /// agents' own instructions go too. Its project-scoped MCP servers, skills, secrets and
 /// per-project switches are cleared too, so a new project reusing the id never inherits

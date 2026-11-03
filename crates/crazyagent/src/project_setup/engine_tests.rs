@@ -1939,6 +1939,97 @@ async fn a_removed_projects_wake_rule_goes_with_it_and_a_screen_read_before_cann
 }
 
 #[tokio::test]
+async fn a_removed_projects_sub_agent_nesting_and_new_folder_limit_go_with_it() {
+    use crate::team::{ChildLanding, DEPTH_DEFAULT, NEW_FOLDER_FILES_DEFAULT, TeamAction};
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let settings = |status: &crate::team::TeamStatus| {
+        (
+            status.sub_agent_depth,
+            status.child_landing,
+            status.new_folder_files_max,
+        )
+    };
+    let defaults = (DEPTH_DEFAULT, ChildLanding::Lead, NEW_FOLDER_FILES_DEFAULT);
+    let chosen = (3, ChildLanding::Owner, 100);
+    assert_ne!(chosen.0, defaults.0);
+    assert_ne!(chosen.2, defaults.2);
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    assert_eq!(
+        settings(&owner.team_status(project.clone()).await.unwrap()),
+        defaults
+    );
+    for (action, generation) in [
+        (
+            TeamAction::SubAgentDepth {
+                project_id: project.clone(),
+                depth: chosen.0,
+            },
+            2,
+        ),
+        (
+            TeamAction::ChildLanding {
+                project_id: project.clone(),
+                mode: chosen.1,
+            },
+            3,
+        ),
+        (
+            TeamAction::NewFolderLimit {
+                project_id: project.clone(),
+                files: chosen.2,
+            },
+            4,
+        ),
+    ] {
+        let saved = owner.team_action(action, generation).await.unwrap();
+        assert_eq!(result(saved), OwnerResult::Applied);
+    }
+    assert_eq!(
+        settings(&owner.team_status(project.clone()).await.unwrap()),
+        chosen
+    );
+
+    let removed = owner.remove_project(project.clone(), 5).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    for table in ["team_nesting", "team_new_folder_limit"] {
+        assert_eq!(
+            engine.rows(&format!(
+                "SELECT COUNT(*) FROM {table} WHERE project='setup-pooled'"
+            )),
+            0,
+            "{table} goes with the project (V24-L1)"
+        );
+    }
+
+    let again = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner again"),
+            pooled_setup(vec![]),
+            6,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(again), OwnerResult::Applied);
+    assert_eq!(
+        settings(&owner.team_status(project).await.unwrap()),
+        defaults,
+        "the project added again starts with the default depth, child landing and new folder limit"
+    );
+}
+
+#[tokio::test]
 async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_policies() {
     use crate::sandbox::policy::{AgentAccess, AgentPolicy, ToolchainChoice};
     use crate::sandbox::toolchains::Toolchain;
