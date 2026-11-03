@@ -28,6 +28,8 @@ pub enum InventoryMode {
 }
 
 /// What an added skip marker in a change set does: flags the run, refuses it, or nothing.
+/// It also covers a test the baseline run executed that this run skips, which is seen
+/// only when `inventory` is not `off` and a matching baseline run exists.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SkipMarkers {

@@ -2,9 +2,9 @@ use super::*;
 use crate::checks::markers::{
     NODE_ONLY_CALL, NODE_ONLY_OPTION, NODE_SKIP_CALL, NODE_SKIP_OPTION, NODE_TODO_CALL,
     NODE_TODO_OPTION, NODE_XDESCRIBE_CALL, NODE_XIT_CALL, NODE_XTEST_CALL, PYTHON_EXPECTED_FAILURE,
-    PYTHON_IMPORTORSKIP, PYTHON_SKIP, PYTHON_SKIP_CALL, PYTHON_SKIP_TEST, PYTHON_SKIPIF,
-    PYTHON_UNITTEST_SKIP, PYTHON_UNITTEST_SKIP_IF, PYTHON_UNITTEST_SKIP_UNLESS, PYTHON_XFAIL,
-    RUST_IGNORE, RUST_SHOULD_PANIC,
+    PYTHON_IMPORTORSKIP, PYTHON_SKIP, PYTHON_SKIP_CALL, PYTHON_SKIP_EXCEPTION, PYTHON_SKIP_TEST,
+    PYTHON_SKIPIF, PYTHON_UNITTEST_SKIP, PYTHON_UNITTEST_SKIP_IF, PYTHON_UNITTEST_SKIP_UNLESS,
+    PYTHON_XFAIL, RUST_IGNORE, RUST_SHOULD_PANIC,
 };
 use crate::checks::{CheckKind, CheckSpec, NetworkMode, ProfileId, ReportFormat, Trigger};
 use crate::landing::{AgentKind, ChangeAgent, FileMark, TurnEnd, TurnOutcome, Workspace};
@@ -1179,4 +1179,103 @@ fn recorded_text_holds_no_line_break_or_hidden_character() {
     assert!(cut.len() <= TEXT_BYTES_MAX);
     assert!(cut.ends_with("..."));
     assert!(cut.starts_with(&"a".repeat(196)));
+}
+
+#[test]
+fn a_quote_inside_an_interpolation_does_not_hide_later_markers() {
+    let lines = |language: Language, text: &str| -> Vec<(u32, &'static str)> {
+        markers::added(language, "", text)
+            .expect("every literal closes")
+            .into_iter()
+            .map(|marker| (marker.line, marker.marker))
+            .collect()
+    };
+    let node = r##"const s = `${'`'}`; test.skip('one', () => {});
+const t = `${items.join(', ')} and ${a ? "b" : 'c'} ${`${x}`}`;
+test.skip('two');
+const u = `\${'` + "`";
+test.skip('three');
+"##;
+    assert_eq!(
+        lines(Language::Node, node),
+        [
+            (1, NODE_SKIP_CALL),
+            (3, NODE_SKIP_CALL),
+            (5, NODE_SKIP_CALL)
+        ]
+    );
+    let python = r##"s = f"{'"'}"; pytest.skip("one")
+label = f"{d['a']} {x:>{width}} {{braces}} {y!r:'^10}"
+pytest.skip("two")
+raw = rf'{d["k"]}' + b'\'' + F'''{"""x"""}'''
+pytest.skip("three")
+"##;
+    assert_eq!(
+        lines(Language::Python, python),
+        [
+            (1, PYTHON_SKIP_CALL),
+            (3, PYTHON_SKIP_CALL),
+            (5, PYTHON_SKIP_CALL)
+        ]
+    );
+}
+
+#[test]
+fn a_string_open_at_its_line_end_or_nested_past_the_bound_leaves_the_head_unscanned() {
+    assert_eq!(
+        markers::added(Language::Node, "", "const a = 'open\ntest.skip('x');\n"),
+        None
+    );
+    assert_eq!(
+        markers::added(Language::Python, "", "A = \"open\npytest.skip(\"x\")\n"),
+        None
+    );
+    assert_eq!(
+        markers::added(Language::Node, "", "const s = `${'`}`;\ntest.skip('x');\n"),
+        None
+    );
+    assert_eq!(
+        markers::added(
+            Language::Python,
+            "",
+            "s = f\"{'open}\"\npytest.skip(\"x\")\n"
+        ),
+        None
+    );
+    let deep_node = format!(
+        "const s = {}x{};\ntest.skip('x');\n",
+        "`${".repeat(40),
+        "}`".repeat(40)
+    );
+    assert_eq!(markers::added(Language::Node, "", &deep_node), None);
+    let deep_python = format!(
+        "s = {}x{}\npytest.skip('x')\n",
+        "f'{".repeat(40),
+        "}'".repeat(40)
+    );
+    assert_eq!(markers::added(Language::Python, "", &deep_python), None);
+}
+
+#[test]
+fn a_raised_skip_test_exception_is_a_python_marker_and_its_import_is_not() {
+    let text = "import unittest
+from unittest import SkipTest
+
+
+def test_adds():
+    raise unittest.SkipTest(\"later\")
+
+
+def test_subtracts():
+    raise SkipTest
+";
+    let found: Vec<(u32, &str)> = markers::added(Language::Python, "", text)
+        .expect("every literal closes")
+        .into_iter()
+        .map(|marker| (marker.line, marker.marker))
+        .collect();
+    assert_eq!(
+        found,
+        [(6, PYTHON_SKIP_EXCEPTION), (10, PYTHON_SKIP_EXCEPTION)]
+    );
 }
