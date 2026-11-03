@@ -1213,7 +1213,7 @@ fn native_teammates_neither_read_nor_change_the_leads_part_of_the_relay_mailbox(
     let shown = quoted(&part.join(format!("{:032x}.shown", 5)));
     let away = quoted(&mailbox.join("away"));
     let probed = team.teammate(&format!(
-        "/bin/cat {l}; echo read=$?\n/bin/cat {r}; echo roster=$?\n/bin/ls {p}; echo list=$?\n/bin/mv {l} {shown}; echo take=$?\n/usr/bin/touch {p}/planted; echo plant=$?\n/bin/rm -r {p}; echo rm=$?\n/bin/mv {p} {away}; echo move=$?\n"
+        "/bin/cat {l}; echo read=$?\n/bin/cat {r} >/dev/null; echo roster=$?\n/bin/ls {p}; echo list=$?\n/bin/mv {l} {shown}; echo take=$?\n/usr/bin/touch {p}/planted; echo plant=$?\n/bin/rm -r {p}; echo rm=$?\n/bin/mv {p} {away}; echo move=$?\n"
     ));
     let text = String::from_utf8_lossy(&probed.stdout).into_owned();
     let errors = String::from_utf8_lossy(&probed.stderr);
