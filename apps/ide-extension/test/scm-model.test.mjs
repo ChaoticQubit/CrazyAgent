@@ -60,11 +60,29 @@ test("each file opens VS Code's diff from its base text, a deleted one shows its
   assert.deepEqual([shown["notes/new.md"].open, shown["notes/new.md"].letter, shown["notes/new.md"].base], ["diff", "A", `/${ID}/notes/new.md`]);
   assert.deepEqual([shown["old.txt"].open, shown["old.txt"].letter, shown["old.txt"].strikeThrough], ["base", "D", true]);
   assert.deepEqual([shown["docs/guide.md"].letter, shown["docs/guide.md"].tooltip, shown["docs/guide.md"].base], ["R", "Renamed from guide.md", `/${ID}/docs/guide.md`]);
-  assert.deepEqual([shown["logo.png"].open, shown["logo.png"].base, shown["logo.png"].tooltip], ["file", null, "Added, Binary file, no text diff"]);
-  assert.equal(shown.latest.tooltip, "Added, Symbolic link: points to another path");
+  assert.deepEqual([shown["logo.png"].open, shown["logo.png"].base, shown["logo.png"].tooltip], ["file", null, `Added, Binary file, no text diff, ${model.LIVE_FILE}`]);
+  assert.equal(shown.latest.tooltip, `Added, Symbolic link: points to another path, ${model.LIVE_FILE}`);
   assert.equal(shown["bin/grow.sh"].tooltip, "Added, Can run as a program");
   assert.equal(shown[".gitmodules"].tooltip, "Modified, .gitmodules: changes the project's submodules");
   assert.deepEqual([shown["gone.bin"].open, shown["gone.bin"].base], ["none", null]);
+});
+
+test("a row that opens the agent's own file says Accept lands the version the set recorded", () => {
+  assert.equal(model.LIVE_FILE, "Opens the agent's current file: Accept lands the version it recorded");
+  const files = [
+    file(),
+    file({ path: "logo.png", kind: "binary" }),
+    file({ path: "core", status: "added", kind: "gitlink" }),
+    file({ path: "old.txt", status: "deleted" }),
+    file({ path: "gone.bin", status: "deleted", kind: "binary" }),
+  ];
+  const [group] = model.scmGroups([set({ files })], NOW);
+  for (const resource of group.resources) {
+    const live = resource.open === "file";
+    assert.equal(resource.tooltip.endsWith(`, ${model.LIVE_FILE}`), live, resource.path);
+    assert.equal(resource.tooltip.split(model.LIVE_FILE).length - 1, live ? 1 : 0, resource.path);
+  }
+  assert.deepEqual(group.resources.filter((resource) => resource.open === "file").map((resource) => resource.path), ["logo.png", "core"]);
 });
 
 test("an Accepted set has no group, a Discarded one keeps Restore only inside its window, and the other states say what they are", () => {

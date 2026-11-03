@@ -72,6 +72,11 @@ export const IDE_CONFIG = "ide_config";
  * which Accept lands, served by the engine and never the agent's live worktree. */
 export const HEAD_SCHEME = "crazyagent-head";
 
+/** What a row that opens the agent's worktree file adds to its tooltip: the engine serves
+ * only text at the recorded head, so a binary file, link or submodule opens as the agent
+ * has it now, which may have changed since the set was recorded. */
+export const LIVE_FILE = "Opens the agent's current file: Accept lands the version it recorded";
+
 const SET_ID = /^[0-9a-f]{32}$/;
 const CONFLICT_SHOWN = 5;
 const UNSAFE = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
@@ -217,7 +222,7 @@ function resource(set: IdeChangeSet, file: IdeFile): ScmResource {
     head: open === "diff" ? basePath(set.id, file.path) : null,
     open,
     letter: LETTERS[file.status],
-    tooltip: tooltip(file),
+    tooltip: open === "file" ? `${tooltip(file)}, ${LIVE_FILE}` : tooltip(file),
     strikeThrough: file.status === "deleted",
   };
 }
