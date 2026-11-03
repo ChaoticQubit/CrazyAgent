@@ -770,3 +770,25 @@ fn a_passing_run_without_an_integrity_block_counts_as_removing_tests() {
     assert!(note.gaps[0].paths.is_empty());
     assert_eq!(note.gaps[0].paths_total, 0);
 }
+
+#[test]
+fn removed_tests_off_leaves_removed_tests_out_of_the_gate() {
+    let case = Case::new();
+    let id = case.turn("turn-1", &[("pass.sh", "exit 0\n")]);
+    case.approve(json!([check("unit", "pass.sh", true)]), &[]);
+    case.run(&id);
+    case.removed(&id, "unit", Some(&["math::subtracts"]));
+    case.set(|choice| {
+        choice.gate = Some(GateMode::Require);
+        choice.removed_tests = Some(RemovedTests::Off);
+    });
+
+    let note = gate::assess(&case.db, &id, &case.head(&id)).unwrap();
+    assert_eq!(note.removed_tests, RemovedTests::Off);
+    assert!(note.gaps.is_empty(), "{note:?}");
+    case.removed(&id, "unit", None);
+    let note = gate::assess(&case.db, &id, &case.head(&id)).unwrap();
+    assert!(note.gaps.is_empty(), "{note:?}");
+    landed(case.accept(&id));
+    assert!(case.notes(&id).is_empty());
+}
