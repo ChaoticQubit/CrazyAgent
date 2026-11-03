@@ -73,11 +73,12 @@ fn create(cwd: &Path, key: &str, title: &str) -> (String, i64) {
     (id.to_owned(), version)
 }
 
-/// The ids a list or ready reply holds. Input: the envelope. Output: the ids in order.
+/// The ids a list or ready reply holds in `data.tickets`. Input: the envelope. Output: the
+/// ids in order.
 fn row_ids(reply: &Value) -> Vec<String> {
-    let rows = reply["data"]
+    let rows = reply["data"]["tickets"]
         .as_array()
-        .expect("a list reply's data is its rows");
+        .expect("a list reply carries data.tickets");
     rows.iter()
         .map(|row| row["id"].as_str().expect("every row has an id").to_owned())
         .collect()
@@ -116,7 +117,7 @@ fn the_built_binary_creates_a_ticket_and_lists_it_ready_in_json() {
     let reply = envelope(&ready);
     assert_eq!(reply["ok"], true, "{reply}");
     assert_eq!(row_ids(&reply), ["CA-1"]);
-    assert_eq!(reply["data"][0]["title"], "First ticket");
+    assert_eq!(reply["data"]["tickets"][0]["title"], "First ticket");
     assert!(ready.stderr.is_empty());
 }
 

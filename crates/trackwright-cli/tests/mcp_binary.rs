@@ -144,6 +144,6 @@ fn the_built_binary_serves_mcp_over_stdio() {
     );
     assert_eq!(shown.status.code(), Some(0), "{shown:?}");
     let shown: Value = serde_json::from_slice(&shown.stdout).unwrap();
-    assert_eq!(shown["data"]["title"], "Made over MCP");
-    assert_eq!(shown["data"]["created_by"], "agent:one");
+    assert_eq!(shown["data"]["ticket"]["title"], "Made over MCP");
+    assert_eq!(shown["data"]["ticket"]["created_by"], "agent:one");
 }
