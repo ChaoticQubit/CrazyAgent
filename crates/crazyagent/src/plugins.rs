@@ -306,6 +306,7 @@ pub struct ToolView {
 /// One hook as Settings lists it: the plugin it came from, the Claude Code event and
 /// matcher it runs on, its command, where it applies and whether it is on. `follows` names
 /// the skill or MCP server the hook came with; the hook runs only while that item is on.
+/// `version` is the hook's owner change version a project switch names, as for skills.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HookView {
@@ -321,6 +322,7 @@ pub struct HookView {
     pub on_here: Option<bool>,
     pub follows: Option<String>,
     pub source: String,
+    pub version: u64,
 }
 
 /// One hook an agent launch writes into its generated plugin: the plugin's stored folder

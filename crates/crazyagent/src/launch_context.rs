@@ -389,7 +389,7 @@ pub(crate) fn master_tools_section(setup: &StoredSetup, available: &[&str]) -> S
         crate::team::tool::SERVER_NAME,
         crate::team::DELEGATIONS_PER_REPLY_MAX
     );
-    let rule = ask_rule(AskReach::ReplyEnd);
+    let rule = ask_rule(AskReach::ReplyEnd, false);
     if setup.team.sub_harnesses.is_empty() {
         section.push_str(&crate::team::any_harness_text(&setup.team, available));
     } else {
@@ -577,10 +577,10 @@ impl AgentContext {
 
     /// Adds the engine's own MCP server that gives a live team master with tools on its team
     /// tools (DEC-104), answered by the engine at once through the mailbox folder, the
-    /// section that names them, and tells it to ask the owner only with that server's `ask`
-    /// tool. Input: the absolute canonical engine executable, the absolute mailbox in the
-    /// master's private temporary folder and the team tools left out. Output: the context,
-    /// or a plain code as for [`Self::with_team_tool`].
+    /// section that names them, and tells it to ask the owner with that server's `ask` tool
+    /// or a for me `update_work` question. Input: the absolute canonical engine executable,
+    /// the absolute mailbox in the master's private temporary folder and the team tools left
+    /// out. Output: the context, or a plain code as for [`Self::with_team_tool`].
     pub fn with_live_team_tool(
         self,
         executable: &Path,
@@ -599,10 +599,10 @@ impl AgentContext {
 
     /// Adds the engine's own MCP server that gives a sub-agent with tools its team tools
     /// (DEC-104) and the `ask` tool, answered by the engine through the mailbox folder, the
-    /// section that names them, and tells it to ask the owner only with `ask`. Input: the
-    /// absolute canonical engine executable, the absolute mailbox in the agent's private
-    /// temporary folder and the tools left out. Output: the context, or a plain code as for
-    /// [`Self::with_team_tool`].
+    /// section that names them, and tells it to ask the owner with `ask` or a for me
+    /// `update_work` question. Input: the absolute canonical engine executable, the absolute
+    /// mailbox in the agent's private temporary folder and the tools left out. Output: the
+    /// context, or a plain code as for [`Self::with_team_tool`].
     pub fn with_agent_team_tool(
         self,
         executable: &Path,
@@ -667,7 +667,11 @@ impl AgentContext {
             secrets: Vec::new(),
         });
         if !off.iter().any(|tool| tool == crate::team::tool::ASK_TOOL) {
-            self.instructions.push_str(&ask_rule(reach));
+            let for_me = reach != AskReach::ReplyEnd
+                && !off
+                    .iter()
+                    .any(|tool| tool == crate::team::tool::UPDATE_WORK_TOOL);
+            self.instructions.push_str(&ask_rule(reach, for_me));
         }
         assert!(self.instructions.len() <= MASTER_INSTRUCTIONS_BYTES_MAX);
         Ok(self)
@@ -1127,11 +1131,14 @@ pub(crate) enum AskReach {
     SubAgent,
 }
 
-/// Tells a conversation that holds the engine's `ask` tool how it asks the owner: only with
-/// that tool, one question per call, with its options and the one it recommends, never in
-/// reply text or with its harness's own question tools, and how the answer comes back.
-/// Input: how the answer reaches it. Output: at most `ASK_RULE_BYTES_MAX` bytes of markdown.
-pub(crate) fn ask_rule(reach: AskReach) -> String {
+/// Tells a conversation that holds the engine's `ask` tool how it asks the owner: with that
+/// tool, or also with a for me `update_work` question when it has the team tools section,
+/// one question per call, with its options and the one it recommends, never in reply text
+/// or with its harness's own question tools, and how the answer comes back. Input: how the
+/// answer reaches it and whether its for me `update_work` questions reach the owner too.
+/// Output: at most `ASK_RULE_BYTES_MAX` bytes of markdown.
+pub(crate) fn ask_rule(reach: AskReach, for_me: bool) -> String {
+    assert!(!for_me || reach != AskReach::ReplyEnd);
     let back = match reach {
         AskReach::Live => format!(
             "The owner's answer or dismissal comes to you once as a message from the owner. If the owner answers you here in chat instead, record it with `{}`, naming the question, its version and the owner's turn.",
@@ -1143,10 +1150,22 @@ pub(crate) fn ask_rule(reach: AskReach) -> String {
         ),
         AskReach::SubAgent => "Your master sees your questions too, and CrazyAgent types the owner's answer or dismissal into your terminal once.".to_owned(),
     };
+    let how = if for_me {
+        format!(
+            "Ask the owner a question with the `{}` tool of the `{}` MCP server, or as a for me question in `{}`; both reach the owner. Never ask in your reply text or with your harness's own question tools.",
+            crate::team::tool::ASK_TOOL,
+            crate::team::tool::SERVER_NAME,
+            crate::team::tool::UPDATE_WORK_TOOL
+        )
+    } else {
+        format!(
+            "Ask the owner a question only with the `{}` tool of the `{}` MCP server, never in your reply text and never with your harness's own question tools.",
+            crate::team::tool::ASK_TOOL,
+            crate::team::tool::SERVER_NAME
+        )
+    };
     let rule = format!(
-        "\n## Asking the owner\n\nAsk the owner a question only with the `{}` tool of the `{}` MCP server, never in your reply text and never with your harness's own question tools. Ask one question per call and wait for its answer before the next one. Put up to {} choices in `options`, the one you recommend in `recommended`, and what the owner needs to know in `context`. Answer what you can from the code and the project's documents first. {back}\n",
-        crate::team::tool::ASK_TOOL,
-        crate::team::tool::SERVER_NAME,
+        "\n## Asking the owner\n\n{how} Ask one question per call and wait for its answer before the next one. Put up to {} choices in `options`, the one you recommend in `recommended`, and what the owner needs to know in `context`. Answer what you can from the code and the project's documents first. {back}\n",
         crate::questions::OPTIONS_MAX
     );
     assert!(rule.len() <= ASK_RULE_BYTES_MAX);
