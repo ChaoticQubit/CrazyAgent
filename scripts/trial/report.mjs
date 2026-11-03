@@ -9,6 +9,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const TEXT_BYTES = 64 * 1024;
 const LOG_BYTES = 8 * 1024 * 1024;
 const IMAGE_BYTES = 15 * 1024 * 1024;
+const EMBED_BYTES = 40 * 1024 * 1024;
 const SOURCE_BYTES = 2 * 1024 * 1024;
 const EXCERPT_LINES = 30;
 const FRAME_LINES = 120;
@@ -187,7 +188,7 @@ async function place(root, path) {
 async function readBounded(full, limit) {
   const handle = await open(full, constants.O_RDONLY | constants.O_NOFOLLOW);
   try {
-    const buffer = Buffer.alloc(limit + 1);
+    const buffer = Buffer.alloc(Math.min((await handle.stat()).size, limit) + 1);
     let used = 0;
     while (used < buffer.length) {
       const { bytesRead } = await handle.read(buffer, used, buffer.length - used, used);
@@ -305,7 +306,11 @@ function pretty(raw) {
   }
 }
 
-async function evidence(root, item, images, trial) {
+function overCap(report, bytes) {
+  return report.embedded + bytes > EMBED_BYTES ? `refused: the report already embeds ${report.embedded} bytes of images; the total cap is ${EMBED_BYTES}` : "";
+}
+
+async function evidence(root, item, report, trial) {
   const kind = String(item?.kind ?? "log");
   const path = String(item?.path ?? "");
   const shown = { kind, path, caption: String(item?.caption ?? path) };
@@ -313,13 +318,16 @@ async function evidence(root, item, images, trial) {
   if (where.problem) return { ...shown, problem: where.problem };
   const type = IMAGES[extname(path).toLowerCase()];
   if (type && where.bytes > IMAGE_BYTES) return { ...shown, problem: `refused: larger than ${IMAGE_BYTES} bytes` };
+  if (type && overCap(report, where.bytes)) return { ...shown, problem: overCap(report, where.bytes) };
   const { bytes, truncated } = await readBounded(where.full, type ? IMAGE_BYTES : TEXT_BYTES);
   if (type === "image/svg+xml" && svgViews(bytes.toString("utf8")).some((view) => mask(view) !== view)) {
     return { ...shown, problem: "refused: the SVG holds text the report would mask, and SVG markup cannot be masked reliably" };
   }
   if (type) {
-    if (!images.some((image) => image.trial === trial && image.path === path)) {
-      images.push({ trial, path, kind, bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex").slice(0, 16), note: "" });
+    if (overCap(report, bytes.length)) return { ...shown, problem: overCap(report, bytes.length) };
+    report.embedded += bytes.length;
+    if (!report.images.some((image) => image.trial === trial && image.path === path)) {
+      report.images.push({ trial, path, kind, bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex").slice(0, 16), note: "" });
     }
     return { ...shown, image: dataUri(type, bytes) };
   }
@@ -327,7 +335,10 @@ async function evidence(root, item, images, trial) {
   if (kind === "frame") {
     const frame = maskFrame(raw);
     if (frame.residue) return { ...shown, problem: "refused: a value in this frame survived masking", masked: true };
-    return { ...shown, image: dataUri("image/svg+xml", Buffer.from(frameSvg(frame.lines))), masked: frame.changed };
+    const svg = Buffer.from(frameSvg(frame.lines));
+    if (overCap(report, svg.length)) return { ...shown, problem: overCap(report, svg.length), masked: frame.changed };
+    report.embedded += svg.length;
+    return { ...shown, image: dataUri("image/svg+xml", svg), masked: frame.changed };
   }
   return { ...shown, text: kind === "db" ? pretty(raw) : raw, truncated };
 }
@@ -376,7 +387,7 @@ export async function readTrial(folder) {
   const root = await realpath(folder);
   const manifest = await readJson(root, "manifest.json", "report_manifest_invalid");
   if (!manifest || typeof manifest !== "object" || !Number.isSafeInteger(manifest.trial)) fail("report_manifest_invalid: trial");
-  const images = [];
+  const report = { images: [], embedded: 0 };
   const steps = [];
   const stepsText = await optionalText(root, "steps.jsonl", TEXT_BYTES * 16);
   for (const [index, line] of stepsText.split("\n").filter((entry) => entry.trim()).entries()) {
@@ -387,7 +398,7 @@ export async function readTrial(folder) {
       fail(`report_steps_invalid: line ${index + 1}`);
     }
     const items = [];
-    for (const path of Array.isArray(step.evidence) ? step.evidence : []) items.push(await evidence(root, { kind: kindOf(path), path, caption: path }, images, manifest.trial));
+    for (const path of Array.isArray(step.evidence) ? step.evidence : []) items.push(await evidence(root, { kind: kindOf(path), path, caption: path }, report, manifest.trial));
     steps.push({ n: step.n ?? index + 1, at: step.at, surface: step.surface, title: step.title, why: step.why, ok: step.ok, detail: step.detail, evidence: items });
   }
   let names = [];
@@ -400,7 +411,7 @@ export async function readTrial(folder) {
   for (const name of names.sort(natural)) {
     const check = await readJson(root, `checks/${name}`, "report_check_invalid");
     const items = [];
-    for (const item of Array.isArray(check.evidence) ? check.evidence : []) items.push(await evidence(root, item, images, manifest.trial));
+    for (const item of Array.isArray(check.evidence) ? check.evidence : []) items.push(await evidence(root, item, report, manifest.trial));
     const valid = RESULTS.includes(check.result);
     checks.push({
       id: String(check.id ?? name.replace(/\.json$/, "")),
@@ -411,7 +422,7 @@ export async function readTrial(folder) {
     });
   }
   checks.sort((left, right) => natural(left.id, right.id));
-  flagRecordings(images, manifest.trial, [...steps, ...checks]);
+  flagRecordings(report.images, manifest.trial, [...steps, ...checks]);
   const started = Date.parse(manifest.started);
   const ended = Date.parse(manifest.ended);
   return {
@@ -435,7 +446,7 @@ export async function readTrial(folder) {
       checks,
       record: [],
     }],
-    images,
+    images: report.images,
   };
 }
 
@@ -495,7 +506,7 @@ function tokenTotals(raw) {
   return [`input ${totals.input}`, `output ${totals.output}`, `cache read ${totals.cache_read}`, `cache create ${totals.cache_create}`, `turns ${totals.turns} (${agents} agent${agents === 1 ? "" : "s"})`];
 }
 
-async function retroTrial(root, spec, images) {
+async function retroTrial(root, spec, report) {
   const auditText = await optionalText(root, spec.audit);
   if (!auditText) fail(`report_retro_missing: ${spec.audit}`);
   const plan = parsePlan(await optionalText(root, spec.plan));
@@ -532,12 +543,12 @@ async function retroTrial(root, spec, images) {
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   }
-  for (const name of names) frames.push(await evidence(root, { kind: "frame", path: `${spec.frames}/${name}`, caption: `TUI frame ${name}` }, images, spec.trial));
+  for (const name of names) frames.push(await evidence(root, { kind: "frame", path: `${spec.frames}/${name}`, caption: `TUI frame ${name}` }, report, spec.trial));
   const record = [...frames];
   const gif = await place(root, spec.gif);
-  if (!frames.length) record.push(await evidence(root, { kind: "gif", path: spec.gif, caption: `${spec.gif}, the TUI record` }, images, spec.trial));
-  else if (!gif.problem) images.push({ trial: spec.trial, path: spec.gif, kind: "gif", bytes: gif.bytes, sha256: "", note: LEFT_OUT, leftOut: true });
-  flagRecordings(images, spec.trial, [{ evidence: record }]);
+  if (!frames.length) record.push(await evidence(root, { kind: "gif", path: spec.gif, caption: `${spec.gif}, the TUI record` }, report, spec.trial));
+  else if (!gif.problem) report.images.push({ trial: spec.trial, path: spec.gif, kind: "gif", bytes: gif.bytes, sha256: "", note: LEFT_OUT, leftOut: true });
+  flagRecordings(report.images, spec.trial, [{ evidence: record }]);
   return {
     trial: spec.trial,
     build: sha ? `${version} (${sha})` : version,
@@ -564,15 +575,15 @@ async function retroTrial(root, spec, images) {
  */
 export async function readRetro(folder) {
   const root = await realpath(folder);
-  const images = [];
+  const report = { images: [], embedded: 0 };
   const trials = [];
-  for (const spec of RETRO) trials.push(await retroTrial(root, spec, images));
+  for (const spec of RETRO) trials.push(await retroTrial(root, spec, report));
   return {
     kind: "trial",
     title: "Trials 1 and 2, rebuilt from the saved evidence",
     note: "Results come from the saved audits, what each check proves and why from the trial plans, and the frames are the recorded TUI text drawn again after masking.",
     trials,
-    images,
+    images: report.images,
   };
 }
 
