@@ -25,8 +25,9 @@ struct Column {
 }
 
 /// The board page: one column per working status, each holding the first `list` page of
-/// that status, with a move to the next or previous column sent as `move` carrying the
-/// version `show` read when the card was selected.
+/// that status. A move to the next or previous column carries the version `show` read
+/// when the card was selected: into Done it is `close`, out of Done `reopen`, otherwise
+/// `move`, so the core's close policy decides the first two.
 pub struct Board {
     project: ProjectKey,
     columns: Vec<Column>,
@@ -94,11 +95,12 @@ impl Board {
     /// `>` move the selected card one column, Enter opens it. Inputs: the key and the
     /// client. Output: what happened.
     pub fn key(&mut self, key: Key, client: &mut dyn Client) -> Outcome {
+        let count = self.columns.len();
         let column = &mut self.columns[self.focus];
         let last = column.rows.len().saturating_sub(1);
         match key {
             Key::Left if self.focus > 0 => self.focus -= 1,
-            Key::Right if self.focus + 1 < self.columns.len() => self.focus += 1,
+            Key::Right if self.focus + 1 < count => self.focus += 1,
             Key::Up => column.selected = column.selected.saturating_sub(1),
             Key::Down => column.selected = (column.selected + 1).min(last),
             Key::Enter => {
@@ -148,12 +150,20 @@ impl Board {
                 safe(&card.id)
             )));
         };
+        let status = self.columns[to].status;
+        let op = if status.is_closed() {
+            OpKind::Close
+        } else if self.columns[from].status.is_closed() {
+            OpKind::Reopen
+        } else {
+            OpKind::Move
+        };
         let moved = ask::<serde_json::Value>(
             client,
-            OpKind::Move,
+            op,
             json!({
                 "id": card.id,
-                "status": self.columns[to].status.as_str(),
+                "status": status.as_str(),
                 "version": version,
             }),
         );
