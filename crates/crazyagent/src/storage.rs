@@ -948,6 +948,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     setup::initialize(connection)?;
     crate::assets::initialize(connection)?;
     crate::verification::initialize(connection)?;
+    crate::checks::initialize(connection)?;
     crate::worktrees::initialize(connection)?;
     crate::worktrees::reconcile(connection)?;
     worker_dispatch::initialize(connection)?;
