@@ -54,6 +54,12 @@ fn checks_codes_cover_every_refusal() {
     for file in sources() {
         quoted.extend(quoted_codes(&std::fs::read_to_string(&file).unwrap()));
     }
+    for tool in crate::team::tool::CHECKS_TOOLS {
+        assert!(
+            quoted.remove(tool),
+            "the agent tool names are quoted too: {tool}"
+        );
+    }
     assert!(quoted.len() >= 40, "{quoted:?}");
     let missing: Vec<&String> = quoted
         .iter()
