@@ -347,7 +347,7 @@ fn codex(
     cwd: &Path,
     key_file: Option<&str>,
 ) -> Result<Vec<String>, LaunchError> {
-    let folder = super::launch::codex_project(request, cwd)
+    let folder = super::launch::codex_project(request.trust, cwd)
         .ok_or_else(|| failure("launch_working_dir_unavailable"))?;
     let mut arguments = Vec::new();
     for setting in codex_configuration(request, context, key_file)

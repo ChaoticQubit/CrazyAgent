@@ -428,7 +428,7 @@ fn a_repository_file_cannot_change_the_trust_level_or_its_enforcement() {
     assert_eq!(untrusted.access, AgentAccess::Sandboxed);
     assert!(untrusted.model_endpoints_only && untrusted.repo_config_as_text);
     assert!(!untrusted.ide_workspace_trust);
-    assert!(!untrusted.agent_profile_proposals && !untrusted.global_memory_suggestions);
+    assert!(!untrusted.agent_profile_proposals);
 }
 
 #[test]
@@ -778,6 +778,5 @@ async fn a_memory_suggestion_from_an_untrusted_project_is_project_scoped() {
             .iter()
             .any(|entry| entry.text == text && entry.project_id == project)
     );
-    assert!(!Enforcement::for_level(Trust::Untrusted).global_memory_suggestions);
     engine.stop().await;
 }

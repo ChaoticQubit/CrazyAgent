@@ -508,6 +508,21 @@ impl ResearchJobs {
         crate::trust::level(&self.connection, project.as_str())
     }
 
+    /// Reads the level a read-only run over `folder` works under, see
+    /// [`crate::trust::of_folder`]. Takes the project, if any, and the folder. Returns the
+    /// level.
+    pub(crate) fn folder_trust(
+        &self,
+        project: Option<&crate::protocol::ProjectId>,
+        folder: &std::path::Path,
+    ) -> rusqlite::Result<crate::trust::Trust> {
+        crate::trust::of_folder(
+            &self.connection,
+            project.map(crate::protocol::ProjectId::as_str),
+            folder,
+        )
+    }
+
     /// Reads the agent policy the owner saved for a project, see
     /// [`crate::sandbox::policy::load`]. Takes the project. Returns the policy.
     pub fn agent_policy(

@@ -60,6 +60,9 @@ pub(crate) const CODEX_TOOLS_OFF: [&str; 13] = [
     "web_search=\"disabled\"",
     "mcp_servers={}",
 ];
+/// The Codex `-c` setting an untrusted project's launch passes so Codex reads no
+/// repository `AGENTS.md` or `AGENTS.override.md` as project docs.
+pub(crate) const CODEX_NO_PROJECT_DOCS: &str = "project_doc_max_bytes=0";
 const CODEX_TOOLS_ON: [&str; 8] = [
     "sandbox_mode=\"danger-full-access\"",
     "approval_policy=\"never\"",
@@ -510,7 +513,7 @@ fn codex_invocation(
     let folder = match request.trust {
         crate::trust::Trust::Reviewed => None,
         crate::trust::Trust::Untrusted => Some(
-            codex_project(request, &request.working_dir)
+            codex_project(request.trust, &request.working_dir)
                 .ok_or_else(|| failure("launch_working_dir_unavailable"))?,
         ),
     };
@@ -541,14 +544,14 @@ pub(super) fn key_file_text(path: &Path) -> Result<String, LaunchError> {
 
 /// The `-c` setting naming how far Codex trusts the launch folder: `trusted` for a
 /// reviewed project and `untrusted` for an untrusted one, never omitted for an untrusted
-/// launch (threat model H2). Inputs: the request and the folder. Output: the setting, or
-/// None when the folder has no plain text path.
-pub(super) fn codex_project(request: &LaunchRequest, folder: &Path) -> Option<String> {
+/// launch (threat model H2). Inputs: the project's level and the folder. Output: the
+/// setting, or None when the folder has no plain text path.
+pub(crate) fn codex_project(trust: crate::trust::Trust, folder: &Path) -> Option<String> {
     let text = folder
         .to_str()
         .filter(|text| !text.chars().any(char::is_control))?;
     let folder = serde_json::to_string(text).ok()?;
-    let level = match request.trust {
+    let level = match trust {
         crate::trust::Trust::Reviewed => "trusted",
         crate::trust::Trust::Untrusted => "untrusted",
     };
@@ -598,7 +601,7 @@ pub(super) fn codex_configuration(
             .map(|setting| (*setting).to_owned()),
     );
     if request.trust == crate::trust::Trust::Untrusted {
-        configuration.push("project_doc_max_bytes=0".into());
+        configuration.push(CODEX_NO_PROJECT_DOCS.into());
     }
     assert!(request.account.key().is_none_or(|key| {
         configuration
