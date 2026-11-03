@@ -187,23 +187,26 @@ fn ready_excludes_a_ticket_until_its_blocker_closes() {
     let tx = store.transaction().unwrap();
     let blocker = seed(&tx, "Blocker", TicketStatus::Todo, 2, 2_000);
     let waiting = seed(&tx, "Waiting", TicketStatus::Todo, 2, 2_001);
-    assert_eq!(ready_ids(&tx, "agent:a"), [&blocker, &waiting]);
+    assert_eq!(
+        ready_ids(&tx, "agent:a"),
+        [blocker.as_str(), waiting.as_str()]
+    );
 
     let depended = ok(&tx, OWNER, "depend", json!({"id": waiting, "on": blocker}));
     assert_eq!(depended["data"]["id"], waiting.as_str());
     assert_eq!(depended["data"]["on"], blocker.as_str());
     assert_eq!(depended["data"]["blocked"], true);
     assert_eq!(count(&tx, "SELECT count(*) FROM tk_deps"), 1);
-    assert_eq!(ready_ids(&tx, "agent:a"), [&blocker]);
+    assert_eq!(ready_ids(&tx, "agent:a"), [blocker.as_str()]);
     assert_eq!(shown(&tx, &waiting)["blocked_by"], json!([blocker]));
 
     close(&tx, &blocker, TicketStatus::Done);
-    assert_eq!(ready_ids(&tx, "agent:a"), [&waiting]);
+    assert_eq!(ready_ids(&tx, "agent:a"), [waiting.as_str()]);
     assert_eq!(shown(&tx, &waiting)["blocked_by"], json!([]));
 
     let reopened = seed(&tx, "Second blocker", TicketStatus::Todo, 2, 2_002);
     ok(&tx, OWNER, "depend", json!({"id": waiting, "on": reopened}));
-    assert_eq!(ready_ids(&tx, "agent:a"), [&reopened]);
+    assert_eq!(ready_ids(&tx, "agent:a"), [reopened.as_str()]);
     let undepended = ok(
         &tx,
         OWNER,
@@ -211,7 +214,10 @@ fn ready_excludes_a_ticket_until_its_blocker_closes() {
         json!({"id": waiting, "on": reopened}),
     );
     assert_eq!(undepended["data"]["removed"], true);
-    assert_eq!(ready_ids(&tx, "agent:a"), [&waiting, &reopened]);
+    assert_eq!(
+        ready_ids(&tx, "agent:a"),
+        [waiting.as_str(), reopened.as_str()]
+    );
     refused(
         &tx,
         OWNER,
@@ -258,7 +264,13 @@ fn ready_orders_by_priority_then_the_active_cycle_then_age() {
 
     assert_eq!(
         ready_ids(&tx, "agent:a"),
-        [&urgent, &planned, &old, &mine, &child]
+        [
+            urgent.as_str(),
+            planned.as_str(),
+            old.as_str(),
+            mine.as_str(),
+            child.as_str()
+        ]
     );
     let for_b = ready_ids(&tx, "agent:b");
     assert_eq!(
@@ -291,7 +303,16 @@ fn ready_orders_by_priority_then_the_active_cycle_then_age() {
     }
     let all = ready_ids(&tx, "agent:a");
     assert_eq!(all.len(), 65);
-    assert_eq!(all[..5], [&urgent, &planned, &old, &mine, &child]);
+    assert_eq!(
+        all[..5],
+        [
+            urgent.as_str(),
+            planned.as_str(),
+            old.as_str(),
+            mine.as_str(),
+            child.as_str()
+        ]
+    );
     assert_eq!(all[5], "CA-10");
     assert_eq!(all[64], "CA-69");
     refused(
@@ -969,7 +990,7 @@ fn a_parent_needs_authority_to_edit_it() {
     assert_eq!(shown(&tx, &mine)["parent"], Value::Null);
     assert_eq!(
         ready_ids(&tx, "agent:y"),
-        [&owners],
+        [owners.as_str()],
         "no agent took the owner's ticket out of ready"
     );
 
