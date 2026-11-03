@@ -224,6 +224,7 @@ struct Stamp {
     call: String,
     digest: [u8; DIGEST_BYTES],
     pane: String,
+    pid: u32,
     at: Instant,
 }
 
@@ -337,11 +338,12 @@ impl Callers {
     /// has not fully arrived waits, at most `PENDING_PER_PANE_MAX` of one pane at once, and
     /// is dropped with no full line within `PENDING_WAIT`. Takes the lead's panes as (pane
     /// id, pid), listed with the process table at most once a tick, only when a connection
-    /// arrives, and the lookup of who runs in a pane. Returns how many it named.
+    /// arrives, and the lookup of who runs in a pane by the pane process the connection was
+    /// found under. Returns how many it named.
     pub fn serve(
         &mut self,
         panes: &mut dyn FnMut() -> Vec<(String, u32)>,
-        whom: &mut dyn FnMut(&str) -> Option<Whom>,
+        whom: &mut dyn FnMut(&str, u32) -> Option<Whom>,
     ) -> usize {
         let now = Instant::now();
         self.stamps
@@ -420,16 +422,15 @@ impl Callers {
     ) -> bool {
         let fresh = !self.stamps.iter().any(|stamp| stamp.call == call);
         let pane = if fresh { pending.pane.take() } else { None };
-        let pane = pane
-            .filter(|(pane, pid)| self.pinned(pane, *pid))
-            .map(|(pane, _)| pane);
+        let pane = pane.filter(|(pane, pid)| self.pinned(pane, *pid));
         let named = pane.is_some();
-        if let Some(pane) = pane {
+        if let Some((pane, pid)) = pane {
             self.make_room(&pane);
             self.stamps.push(Stamp {
                 call,
                 digest,
                 pane,
+                pid,
                 at: now,
             });
         }
@@ -444,16 +445,15 @@ impl Callers {
     /// teammate <name>` (DEC-111 Q18, RH-2). A process in no pane, a pane respawned under
     /// another process, a pane id that is not plain, a pane the rows name no one by and a
     /// name that names no worktree get no. Takes the socket, the connection and the lookup.
-    fn tell(&mut self, mut pending: Pending, whom: &mut dyn FnMut(&str) -> Option<Whom>) {
+    fn tell(&mut self, mut pending: Pending, whom: &mut dyn FnMut(&str, u32) -> Option<Whom>) {
         let reply = pending
             .pane
             .take()
             .filter(|(pane, pid)| self.pinned(pane, *pid))
-            .map(|(pane, _)| pane)
-            .filter(|pane| {
+            .filter(|(pane, _)| {
                 crate::terminal::pane_id_valid(pane) && pane.len() < PANE_REPLY_BYTES_MAX
             })
-            .and_then(|pane| match whom(&pane)? {
+            .and_then(|(pane, pid)| match whom(&pane, pid)? {
                 Whom::Lead => Some(format!("{pane} lead\n")),
                 Whom::Teammate(name) => crate::agent_git::worktree_name_valid(&name)
                     .then(|| format!("{pane}{TEAMMATE_WORD}{name}\n")),
@@ -509,13 +509,14 @@ impl Callers {
         assert!(self.stamps.len() < STAMPS_MAX);
     }
 
-    /// Takes the name of one call, once: the pane the engine named it by, only when the
-    /// call file's bytes have the digest the caller sent. Takes the call id and the digest
-    /// of the file the engine read. Returns the pane id, or none.
-    pub fn take(&mut self, call: &str, digest: &[u8; DIGEST_BYTES]) -> Option<String> {
+    /// Takes the name of one call, once: the pane the engine named it by and the pane
+    /// process it found the caller under, only when the call file's bytes have the digest
+    /// the caller sent. Takes the call id and the digest of the file the engine read.
+    /// Returns the pane id and that process, or none.
+    pub fn take(&mut self, call: &str, digest: &[u8; DIGEST_BYTES]) -> Option<(String, u32)> {
         let at = self.stamps.iter().position(|stamp| stamp.call == call)?;
         let stamp = self.stamps.remove(at);
-        (stamp.digest == *digest).then_some(stamp.pane)
+        (stamp.digest == *digest).then_some((stamp.pane, stamp.pid))
     }
 }
 
