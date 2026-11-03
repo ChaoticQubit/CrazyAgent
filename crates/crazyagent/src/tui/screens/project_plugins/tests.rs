@@ -1375,6 +1375,50 @@ async fn keys_typed_into_the_hidden_folders_box_never_reach_the_plugins_list() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn quitting_with_the_hidden_box_open_warns_the_hidden_folders_are_unsaved() {
+    let engine = engine().await;
+    let mut connection = Connection::connect_paired(
+        Client::new(
+            engine.root.path().join("e.sock"),
+            crate::tui::test_home::ENGINE_WAIT,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut ctx = Ctx::new(
+        Depth::NoColor,
+        Colors::Dark,
+        Appearance::Dark,
+        &UNICODE,
+        "/private/tmp/engine.sock".into(),
+    );
+    ctx.width = 100;
+    ctx.height = 40;
+    let settings = Place::Project {
+        id: project(),
+        name: "Tidepool".into(),
+        tab: ProjectTab::Settings,
+    };
+    let screen = open(&settings, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    drive(&mut shell, &mut connection).await;
+
+    shell.key(Key::Char('p'));
+    assert!(
+        render(&mut shell, 100, 40).contains("Hidden folders"),
+        "the hidden box opens"
+    );
+
+    shell.key(Key::Ctrl('q'));
+    let shown = render(&mut shell, 100, 40);
+    assert!(
+        shown.contains("Your hidden folders will not be saved."),
+        "quit warns the open hidden box is a draft: {shown}"
+    );
+    assert_eq!(shell.place(), Some(settings));
+}
+
 #[test]
 fn l_asks_for_the_tools_page_with_every_server_starting_on_the_selected_one() {
     let mut view = loaded();
