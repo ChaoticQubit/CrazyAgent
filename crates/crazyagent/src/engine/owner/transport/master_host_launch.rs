@@ -2333,6 +2333,7 @@ mod tests {
                 &ModelEndpoint::Native {},
                 &policy,
                 crate::trust::Trust::Untrusted,
+                &[],
             )
             .unwrap_err();
             assert_eq!(refused.0, crate::trust::ACCESS_CODE, "{access:?}");
@@ -2347,6 +2348,7 @@ mod tests {
                     &ModelEndpoint::Native {},
                     &policy,
                     crate::trust::Trust::Reviewed,
+                    &[],
                 )
                 .is_ok(),
                 "{access:?} runs for a reviewed project"
@@ -2403,6 +2405,7 @@ mod tests {
                 &ModelEndpoint::Native {},
                 &AgentPolicy::default(),
                 trust,
+                &[],
             )
             .unwrap();
             assert_eq!(
