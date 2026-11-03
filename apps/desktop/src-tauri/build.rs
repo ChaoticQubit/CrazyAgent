@@ -23,6 +23,8 @@ fn main() {
         "desktop_delete_project_context",
         "desktop_project_read_paths",
         "desktop_set_project_read_paths",
+        "desktop_project_hidden_paths",
+        "desktop_set_project_hidden_paths",
         "desktop_project_agent_policy",
         "desktop_set_project_agent_policy",
         "desktop_project_files",

@@ -4575,6 +4575,73 @@ fn with_next_message_an_edit_past_the_input_limit_reaches_the_live_master_once_c
     assert!(text.contains("Plan the footer"), "{text}");
 }
 
+/// With the default choice, typed messages that leave the live master no room for an owner
+/// edit say so in one team note per edited text: task results filling its whole input three
+/// times in a row leave one note, and after a later edit to other text the next full input
+/// notes once again.
+#[cfg(target_os = "macos")]
+#[test]
+fn with_next_message_full_inputs_note_the_waiting_edit_once_per_edited_text() {
+    const NEWER_TEXT: &str = "## Style\n\nUse spaces.\n\n## Tests\n\nRun them last.\n";
+    let mut fixture = Fixture::new(1);
+    let host = fixture.host();
+    edit_settings(
+        &fixture,
+        crate::instruction_files::EditDelivery::NextMessage,
+    );
+    let mut team = live_runtime(&fixture, &host, &recording_codex());
+    let project = fixture.setup.project_id.clone();
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the live master's pane runs", |f| {
+        live_agent(&f.connection).is_some()
+    });
+    let master = masters(&fixture.connection)[0];
+    tell_master(&fixture, "Plan the page");
+    fixture.until(&mut team, "the live master's turn ends", |f| {
+        typed(f, master).contains("Plan the page") && live_turns(&f.connection) == (1, false)
+    });
+    let mut notes = Vec::new();
+    for (turns, edit) in [
+        (2, Some(EDITED_TEXT)),
+        (3, None),
+        (4, None),
+        (5, Some(NEWER_TEXT)),
+        (6, None),
+    ] {
+        if let Some(edit) = edit {
+            crate::agent_home::save_app(&fixture.base, edit).unwrap();
+        }
+        let label = format!("Results {turns}:");
+        let line = format!("{}\n", "Task done. ".repeat(50));
+        let results = format!("{label}\n{}", line.repeat(40));
+        assert!(results.len() > crate::team::master::INPUT_TEXT_MAX);
+        let tx = fixture.connection.transaction().unwrap();
+        append_message(
+            &tx,
+            &project,
+            MessageAuthor::Engine,
+            &results,
+            MessageState::Pending,
+            now_ms(),
+        )
+        .unwrap()
+        .unwrap();
+        tx.commit().unwrap();
+        fixture.until(&mut team, "the live master's turn ends", |f| {
+            typed(f, master).contains(&label) && live_turns(&f.connection) == (turns, false)
+        });
+        notes.push(noted(&fixture, INSTRUCTIONS_WAIT_FOR_ROOM));
+    }
+    let text = typed(&fixture, master);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    assert_eq!(notes, [1, 1, 1, 2, 2], "wait notes after each full input");
+    assert!(
+        !text.contains(CHANGED_HEADER),
+        "no full input carried a change block"
+    );
+}
+
 /// With Restart chosen, an idle live master stops after each owner edit and starts again
 /// in its own conversation with the new text, types nothing, and stays live: three
 /// restarts in a row never count as the start failures that turn the live master off.
@@ -8166,7 +8233,15 @@ fn a_native_teammate_keeps_the_name_it_was_first_seen_with() {
         )
         .unwrap();
     };
-    let whom = |pane: &str| super::pane_whom(&connection, None, &project, lead, pane);
+    let whom = |pane: &str| {
+        super::pane_whom(
+            &connection,
+            None,
+            &project,
+            lead,
+            (pane, std::process::id()),
+        )
+    };
     let named = |name: &str| Some(crate::team::caller::Whom::Teammate(name.to_owned()));
 
     config(r#"{"name":"greet","tmuxPaneId":"%7"}"#);
@@ -8923,15 +8998,16 @@ fn a_native_lead_s_call_is_answered_as_the_teammate_whose_pane_made_it() {
     let project = ProjectId::new(PROJECT).unwrap();
     let native = native_lead(&f, &host);
     let lead = native.lead;
-    let caller = |pane: Option<&str>| {
+    let under = |pane: Option<&str>, pid: u32| {
         team_caller(
             &f.connection,
             Some(host.as_ref()),
             &project,
             (lead, "Lead"),
-            pane,
+            pane.map(|pane| (pane, pid)),
         )
     };
+    let caller = |pane: Option<&str>| under(pane, native.record.pid);
     let as_lead = Some((lead, "Lead".to_owned()));
     let mode = |name: &str| {
         f.connection
@@ -8971,7 +9047,7 @@ fn a_native_lead_s_call_is_answered_as_the_teammate_whose_pane_made_it() {
             params![lead, unlisted.encode().unwrap()],
         )
         .unwrap();
-    assert_eq!(caller(Some(native.own.as_str())), None);
+    assert_eq!(under(Some(native.own.as_str()), unlisted.pid), None);
     f.connection
         .execute(
             "UPDATE team_panes SET record=?2 WHERE agent=?1",
@@ -8984,7 +9060,7 @@ fn a_native_lead_s_call_is_answered_as_the_teammate_whose_pane_made_it() {
             None,
             &project,
             (lead, "Lead"),
-            Some(native.own.as_str())
+            Some((native.own.as_str(), native.record.pid))
         ),
         None
     );
@@ -9125,7 +9201,9 @@ fn a_native_teammate_s_calls_are_its_own_and_it_starts_or_stops_no_agent() {
                     Some(host_ref),
                     &project,
                     (lead, "Lead"),
-                    named.get(call).map(String::as_str),
+                    named
+                        .get(call)
+                        .map(|pane| (pane.as_str(), native.record.pid)),
                 )
             },
             &mut |connection, caller, call| {
@@ -9289,7 +9367,7 @@ fn a_call_file_carrying_the_lead_s_pane_with_no_kernel_stamp_is_refused() {
                 Some(host_ref),
                 &project,
                 (lead, "Lead"),
-                pane.as_deref(),
+                pane.as_ref().map(|(pane, pid)| (pane.as_str(), *pid)),
             )
         },
         &mut |connection, caller, call| {
@@ -9332,7 +9410,7 @@ fn a_native_lead_whose_tmux_socket_file_is_gone_still_names_no_unstamped_caller(
             Some(host.as_ref()),
             &project,
             (lead, "Lead"),
-            pane,
+            pane.map(|pane| (pane, native.record.pid)),
         )
     };
     for pane in [None, Some("%999")] {
@@ -9347,8 +9425,8 @@ fn a_native_lead_whose_tmux_socket_file_is_gone_still_names_no_unstamped_caller(
 
 /// A teammate that rewrites a call file in the shared mailbox after the engine named it
 /// cannot keep the name: the bytes the engine reads no longer have the named digest, so
-/// the lead-only call is refused and no agent starts, while an unchanged named call is
-/// served as the lead's (DEC-111 Q18).
+/// the swapped call is refused as nobody's and no agent starts, while an unchanged named
+/// call is served as the teammate's whose pane made it (DEC-111 Q18).
 #[test]
 fn a_named_call_whose_file_changed_after_naming_is_refused() {
     use std::io::{Read, Write};
@@ -9396,7 +9474,7 @@ fn a_named_call_whose_file_changed_after_naming_is_refused() {
     }
     let own = std::process::id();
     assert_eq!(
-        callers.serve(&mut || vec![(native.own.clone(), own)], &mut |_| None),
+        callers.serve(&mut || vec![("%900".to_owned(), own)], &mut |_, _| None),
         2
     );
     for stream in &mut streams {
@@ -9428,7 +9506,7 @@ fn a_named_call_whose_file_changed_after_naming_is_refused() {
                 Some(host_ref),
                 &project,
                 (lead, "Lead"),
-                pane.as_deref(),
+                pane.as_ref().map(|(pane, pid)| (pane.as_str(), *pid)),
             )
         },
         &mut |connection, caller, call| {
@@ -9457,6 +9535,76 @@ fn a_named_call_whose_file_changed_after_naming_is_refused() {
         "{answered}"
     );
     assert_eq!(rows(&f.connection), before, "no agent was started");
+    host.kill(&AgentId::team(lead).unwrap()).unwrap();
+}
+
+/// A teammates' server that lists another process under the lead's pane id cannot make
+/// that process the lead (PLC): the engine names a call, and answers `who`, as the lead's
+/// only when the pane process it found the caller under is the lead's own pane process from
+/// the engine's record, so a call or a `who` from any other process is nobody's.
+#[test]
+fn a_caller_found_under_the_lead_s_pane_id_from_another_process_is_not_the_lead() {
+    use std::io::{Read, Write};
+    let f = Fixture::new(1);
+    let host = f.host();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let native = native_lead(&f, &host);
+    let lead = native.lead;
+    let folder = tempfile::Builder::new()
+        .prefix("ca-callers-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(folder.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let socket = folder.path().join(crate::team::caller::CALLER_SOCKET);
+    let mut callers = crate::team::caller::Callers::bind(&socket, None).unwrap();
+    let call = serde_json::to_vec(&crate::team::tool::Call::InspectWork).unwrap();
+    let digest = crate::team::tool::call_digest(&call);
+    let id = format!("{:032x}", 1);
+    let mut line = format!("{id} ");
+    for byte in digest {
+        line.push_str(&format!("{byte:02x}"));
+    }
+    line.push('\n');
+    let other = std::process::id();
+    assert_ne!(other, native.record.pid);
+    let mut named = crate::spawn_gate::connect_unix_std(&socket).unwrap();
+    named.write_all(line.as_bytes()).unwrap();
+    let mut asked = crate::spawn_gate::connect_unix_std(&socket).unwrap();
+    asked.write_all(b"who\n").unwrap();
+    let host_ref = host.as_ref();
+    assert_eq!(
+        callers.serve(
+            &mut || vec![(native.own.clone(), other)],
+            &mut |pane, pid| {
+                pane_whom(&f.connection, Some(host_ref), &project, lead, (pane, pid))
+            }
+        ),
+        1
+    );
+    let mut reply = Vec::new();
+    named.read_to_end(&mut reply).unwrap();
+    assert_eq!(reply, b"ok\n");
+    let pane = callers.take(&id, &digest);
+    assert_eq!(pane, Some((native.own.clone(), other)));
+
+    let mut told = Vec::new();
+    asked.read_to_end(&mut told).unwrap();
+    let named_as = team_caller(
+        &f.connection,
+        Some(host_ref),
+        &project,
+        (lead, "Lead"),
+        pane.as_ref().map(|(pane, pid)| (pane.as_str(), *pid)),
+    );
+    assert_eq!(
+        named_as, None,
+        "a call from a process that is not the lead's pane process was named as the lead's"
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&told),
+        "no\n",
+        "a `who` from a process that is not the lead's pane process was told it is the lead"
+    );
     host.kill(&AgentId::team(lead).unwrap()).unwrap();
 }
 
@@ -9558,13 +9706,13 @@ fn an_unlinked_caller_socket_is_bound_again_on_the_next_tick() {
         let asked = scope.spawn(|| crate::team::caller::name_call(&mailbox, &id, &digest));
         let deadline = Instant::now() + crate::team::caller::CALLER_WAIT;
         while !asked.is_finished() && Instant::now() < deadline {
-            callers.serve(&mut || vec![("%5".to_owned(), own)], &mut |_| None);
+            callers.serve(&mut || vec![("%5".to_owned(), own)], &mut |_, _| None);
             std::thread::sleep(Duration::from_millis(10));
         }
         asked.join().unwrap()
     });
     assert!(named);
-    assert_eq!(callers.take(&id, &digest), Some("%5".to_owned()));
+    assert_eq!(callers.take(&id, &digest), Some(("%5".to_owned(), own)));
 }
 
 /// Something an agent leaves at the caller socket's path, such as a folder, stops the
@@ -9616,12 +9764,15 @@ fn a_caller_socket_blocked_by_an_obstacle_is_bound_once_the_obstacle_is_gone() {
             let asked = scope.spawn(|| crate::team::caller::name_call(&mailbox, &id, &digest));
             let deadline = Instant::now() + crate::team::caller::CALLER_WAIT;
             while !asked.is_finished() && Instant::now() < deadline {
-                callers.serve(&mut || vec![(pane.to_owned(), pid)], &mut |_| None);
+                callers.serve(&mut || vec![(pane.to_owned(), pid)], &mut |_, _| None);
                 std::thread::sleep(Duration::from_millis(10));
             }
             asked.join().unwrap()
         });
-        named.then(|| callers.take(&id, &digest)).flatten()
+        named
+            .then(|| callers.take(&id, &digest))
+            .flatten()
+            .map(|(pane, _)| pane)
     };
     team.serve_agent_calls(&f.setup, &f.access);
     assert!(bound());
@@ -9697,6 +9848,57 @@ fn a_native_lead_without_the_team_tool_still_has_its_caller_socket_answered() {
     assert_eq!(
         reply, b"no\n",
         "a process in no pane of the lead is told so on the next tick"
+    );
+}
+
+/// A native lead that ends leaves its caller socket's node in its short temp folder while
+/// everything else there goes, which ends its own and its teammates' tmux servers. A
+/// teammate still running until then is refused when its hook asks, held as no one, and
+/// never takes the lead's place (rv-secreview RH2R2-1).
+#[test]
+fn a_teammate_asking_after_its_lead_ended_is_held_not_taken_for_the_lead() {
+    struct TmpRemoved(PathBuf);
+    impl Drop for TmpRemoved {
+        fn drop(&mut self) {
+            let _ = crate::sandbox::toolchains::remove_tmp(&self.0);
+        }
+    }
+    let f = Fixture::new(1);
+    let mut team = f.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let lead = f.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    f.connection
+        .execute("UPDATE team_agents SET mode='native' WHERE id=?1", [lead])
+        .unwrap();
+    team.workers
+        .insert(lead, between_turns(&project, AgentRole::Sub, true, true));
+    let home = agent_home(&team.state, lead);
+    let scratch = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let _scratch = TmpRemoved(home);
+    let socket = scratch.join(crate::team::caller::CALLER_SOCKET);
+    let bound = || {
+        std::fs::symlink_metadata(&socket)
+            .is_ok_and(|metadata| std::os::unix::fs::FileTypeExt::is_socket(&metadata.file_type()))
+    };
+    team.serve_agent_calls(&f.setup, &f.access);
+    assert!(bound());
+    let mates = scratch.join("teammates-0123456789abcdef.sock");
+    std::fs::write(&mates, b"").unwrap();
+    let work = scratch.join("work");
+    std::fs::create_dir(&work).unwrap();
+    std::fs::write(work.join("left"), b"agent data").unwrap();
+
+    team.collect().unwrap();
+    assert!(!team.workers.contains_key(&lead), "the lead ended");
+    assert!(
+        !mates.exists() && !work.exists(),
+        "the rest of the lead's temp folder is gone"
+    );
+    assert!(bound(), "the caller socket's node stays");
+    assert_eq!(
+        crate::team::caller::own_place(&team.mailbox(lead), Duration::from_secs(1)),
+        crate::team::caller::Place::Unplaced,
+        "a hook asking after the lead ended is held"
     );
 }
 

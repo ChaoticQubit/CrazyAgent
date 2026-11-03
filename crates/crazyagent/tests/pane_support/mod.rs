@@ -132,7 +132,7 @@ impl PaneCallers {
             let stop = Arc::clone(&stop);
             std::thread::spawn(move || {
                 while !stop.load(Ordering::Relaxed) {
-                    callers.serve(&mut || panes.lock().unwrap().clone(), &mut |pane| {
+                    callers.serve(&mut || panes.lock().unwrap().clone(), &mut |pane, _| {
                         Some(
                             names
                                 .iter()
