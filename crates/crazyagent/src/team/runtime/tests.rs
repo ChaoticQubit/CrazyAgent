@@ -8335,6 +8335,169 @@ fn a_rediscovered_native_teammate_keeps_the_idle_its_relay_read() {
     );
 }
 
+/// A native teammate is named only under the pane process the engine first named it by,
+/// and that pin is kept on its row, so it holds after the database is opened again as on an
+/// engine restart, when no caller socket pin is left: another process under the same pane
+/// id is no one, for `who` and for a team call alike (PLC (b)).
+#[test]
+fn a_native_teammate_is_named_only_under_the_pane_process_it_was_first_named_by() {
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("engine.db");
+    let connection = Connection::open(&database).unwrap();
+    super::super::initialize(&connection).unwrap();
+    crate::project_setup::initialize(&connection).unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    connection
+        .execute(
+            "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms,mode)
+             VALUES (?1,'sub','claude-code',1,?2,'working',1,1,'native')",
+            params![PROJECT, ENDPOINT],
+        )
+        .unwrap();
+    let lead = connection.last_insert_rowid();
+    let home = directory.path().join("home");
+    let team = home.join("teams").join("session-1");
+    std::fs::create_dir_all(&team).unwrap();
+    std::fs::write(
+        team.join("config.json"),
+        r#"{"members":[{"name":"team-lead","tmuxPaneId":"leader"},{"name":"greet","tmuxPaneId":"%7"}]}"#,
+    )
+    .unwrap();
+    super::teammates::register(&connection, &project, lead, &home, &["%7"], 1, 5).unwrap();
+    let mate: i64 = connection
+        .query_row(
+            "SELECT id FROM team_agents WHERE role='teammate'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let first = std::process::id();
+    let other = std::os::unix::process::parent_id();
+    assert_ne!(first, other);
+    let named = Some(crate::team::caller::Whom::Teammate("greet".to_owned()));
+    let whom = |connection: &Connection, pid: u32| {
+        super::pane_whom(connection, None, &project, lead, ("%7", pid))
+    };
+    let call = |connection: &Connection, pid: u32| {
+        team_caller(
+            connection,
+            None,
+            &project,
+            (lead, "Lead"),
+            Some(("%7", pid)),
+        )
+        .map(|(id, _)| id)
+    };
+
+    assert_eq!(
+        whom(&connection, first),
+        named,
+        "the first process named in the pane is the teammate"
+    );
+    assert_eq!(
+        whom(&connection, other),
+        None,
+        "another process under the same pane id is no one"
+    );
+    assert_eq!(
+        call(&connection, other),
+        None,
+        "nor is a team call from it the teammate's"
+    );
+    assert_eq!(call(&connection, first), Some(mate));
+    drop(connection);
+
+    let reopened = Connection::open(&database).unwrap();
+    super::super::initialize(&reopened).unwrap();
+    assert_eq!(
+        whom(&reopened, other),
+        None,
+        "the pin is the row's, so it outlives the engine"
+    );
+    assert_eq!(call(&reopened, other), None);
+    assert_eq!(whom(&reopened, first), named);
+}
+
+/// A teammate row a build kept before rows held their pane process gets the column when the
+/// database opens, holds no process yet, and is pinned at its next call like a new row
+/// (PLC (b)).
+#[test]
+fn a_teammate_row_kept_before_rows_held_their_pane_process_is_pinned_at_its_next_call() {
+    let directory = tempfile::tempdir().unwrap();
+    let connection = Connection::open(directory.path().join("engine.db")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE team_agents (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project TEXT NOT NULL,
+                role TEXT NOT NULL,
+                harness TEXT NOT NULL,
+                tools INTEGER NOT NULL,
+                connection TEXT,
+                worktree TEXT,
+                status TEXT NOT NULL,
+                task INTEGER,
+                process_group INTEGER,
+                turns INTEGER NOT NULL DEFAULT 0,
+                error TEXT,
+                created_ms INTEGER NOT NULL,
+                heartbeat_ms INTEGER NOT NULL,
+                stopped_ms INTEGER,
+                session TEXT,
+                parent INTEGER,
+                pane TEXT,
+                mode TEXT,
+                hookless INTEGER NOT NULL DEFAULT 0
+            )",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms,mode)
+             VALUES (?1,'sub','claude-code',1,?2,'working',1,1,'native')",
+            params![PROJECT, ENDPOINT],
+        )
+        .unwrap();
+    let lead = connection.last_insert_rowid();
+    connection
+        .execute(
+            "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms,parent,pane)
+             VALUES (?1,'teammate','claude-code',1,?2,'working',2,2,?3,'%7')",
+            params![PROJECT, ENDPOINT, lead],
+        )
+        .unwrap();
+    let mate = connection.last_insert_rowid();
+    super::super::initialize(&connection).unwrap();
+    crate::project_setup::initialize(&connection).unwrap();
+    let kept: Vec<Option<i64>> = connection
+        .prepare("SELECT pane_pid FROM team_agents WHERE id=?1")
+        .and_then(|mut statement| {
+            statement
+                .query_map([mate], |row| row.get(0))?
+                .collect::<Result<_, _>>()
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        kept,
+        vec![None],
+        "the row gets the column and holds no process yet"
+    );
+    let project = ProjectId::new(PROJECT).unwrap();
+    let call = |pid: u32| {
+        team_caller(
+            &connection,
+            None,
+            &project,
+            (lead, "Lead"),
+            Some(("%7", pid)),
+        )
+        .map(|(id, _)| id)
+    };
+    assert_eq!(call(std::process::id()), Some(mate));
+    assert_eq!(call(std::os::unix::process::parent_id()), None);
+    assert_eq!(call(std::process::id()), Some(mate));
+}
+
 /// A worker record for an agent that has no session thread, as a per-turn agent between
 /// turns. Takes the project, the role, whether it runs one session per turn and whether
 /// it keeps a native lead's session. Returns the worker, idle and not live.
