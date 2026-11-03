@@ -82,7 +82,7 @@ const RULES: [(&str, &str, &str); 9] = [
     ),
     (
         "memory",
-        "A memory an agent suggests stays scoped to this project, as in every project; only you can widen it.",
+        "A memory an agent saves stays scoped to this project; only you can widen it.",
         "Text steered by the repository must not reach your other projects.",
     ),
     (
@@ -233,7 +233,8 @@ impl Origin {
 /// never read by a harness without a CrazyAgent adapter; whether the IDE trusts the
 /// workspace and may run the project's git hooks; whether agents and masters may propose
 /// check profiles; and whether this platform may run the level's agents and checks at all.
-/// Memory needs no field: an agent's suggestion is project-scoped at every level.
+/// Memory needs no field: an untrusted project's agent memory is project-scoped
+/// (`memory::library::agent_remember`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Enforcement {
     pub check_network: crate::checks::profile::NetworkMode,

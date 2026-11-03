@@ -702,58 +702,40 @@ async fn a_memory_suggestion_from_an_untrusted_project_is_project_scoped() {
         .await
         .unwrap();
     assert_eq!(result(lowered), OwnerResult::Applied);
-    let config = crate::config::resolve_config(
-        &engine.root.path().join("global.toml"),
-        &engine.root.path().join("project.toml"),
-    )
-    .unwrap();
+    let other = create_project(&mut owner, "elsewhere", 4).await;
     let text = "Every project should run the repository's deploy script.";
     let mut db = Connection::open(engine.root.path().join("engine.db")).unwrap();
     db.busy_timeout(ENGINE_WAIT).unwrap();
-    let tx = db
-        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-        .unwrap();
-    let revision: i64 = tx
-        .query_row("SELECT revision FROM state WHERE id=1", [], |row| {
-            row.get(0)
-        })
-        .unwrap();
-    let written = crate::memory::library::agent_remember(
-        &tx,
-        &config,
-        &project,
-        &crate::terminal::AgentId::team(1).unwrap(),
-        None,
-        text,
-        u64::try_from(revision).unwrap(),
-    )
-    .unwrap();
-    let crate::memory::library::AgentWrite::Saved { id, .. } = written else {
-        panic!("the suggestion is saved: {written:?}");
-    };
-    tx.commit().unwrap();
-    let scoped: String = db
-        .query_row(
-            "SELECT project FROM knowledge_heads WHERE id=?1",
-            [id.as_str()],
-            |row| row.get(0),
-        )
-        .unwrap();
-    assert_eq!(scoped, project.as_str());
-    let global: i64 = db
-        .query_row("SELECT COUNT(*) FROM knowledge_globals", [], |row| {
-            row.get(0)
-        })
+    let written =
+        crate::memory::library::agent_remember(&mut db, &project, "team-1", true, text).unwrap();
+    assert_eq!(
+        written,
+        Ok(false),
+        "saved at once under the default setting"
+    );
+    let scopes: Vec<Option<String>> = db
+        .prepare("SELECT project FROM memory_library WHERE text=?1")
+        .unwrap()
+        .query_map([text], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
         .unwrap();
     assert_eq!(
-        global, 0,
-        "nothing reaches other projects without the owner"
+        scopes,
+        [Some(project.as_str().to_owned())],
+        "an app-wide memory asked for by an untrusted project's agent stays in the project"
     );
-    let inbox = owner.project_memories(project.clone(), None).await.unwrap();
+    let reach = |at: &ProjectId, db: &mut Connection| {
+        crate::memory::library::recall(db, at, "")
+            .unwrap()
+            .unwrap()
+            .into_iter()
+            .any(|memory| memory.text == text)
+    };
+    assert!(reach(&project, &mut db));
     assert!(
-        inbox
-            .iter()
-            .any(|entry| entry.text == text && entry.project_id == project)
+        !reach(&other, &mut db),
+        "nothing reaches other projects without the owner"
     );
     engine.stop().await;
 }
