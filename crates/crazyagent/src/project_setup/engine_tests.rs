@@ -1820,6 +1820,125 @@ async fn a_team_setting_read_before_a_projects_removal_is_refused_on_the_project
 }
 
 #[tokio::test]
+async fn a_removed_projects_wake_rule_goes_with_it_and_a_screen_read_before_cannot_save_it_again() {
+    use crate::team::events::{RuleTarget, WakeRule};
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let target = RuleTarget::Project {
+        project_id: project.clone(),
+    };
+    let quiet = WakeRule {
+        question: false,
+        finished: false,
+        failed: true,
+        change_set_ready: false,
+        progress: false,
+        hourly_cap: 7,
+    };
+    let wake = |rule: WakeRule, version: u64| crate::team::TeamAction::Wake {
+        target: target.clone(),
+        rule: Some(rule),
+        version,
+    };
+    let response = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            pooled_setup(vec![]),
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(response), OwnerResult::Applied);
+    let read = owner
+        .team_status(project.clone())
+        .await
+        .unwrap()
+        .events
+        .wake;
+    assert_eq!(read.project, None);
+    assert_eq!(read.project_version, 0, "no project rule was saved yet");
+    let saved = owner.team_action(wake(quiet, 0), 2).await.unwrap();
+    assert_eq!(result(saved), OwnerResult::Applied);
+    let before = owner
+        .team_status(project.clone())
+        .await
+        .unwrap()
+        .events
+        .wake;
+    assert_eq!(before.project, Some(quiet));
+    assert_eq!(before.project_version, 1);
+
+    let removed = owner.remove_project(project.clone(), 3).await.unwrap();
+    assert_eq!(result(removed), OwnerResult::Applied);
+    assert_eq!(
+        engine.rows("SELECT COUNT(*) FROM team_wake_rules WHERE project='setup-pooled'"),
+        0,
+        "the project's wake rules go with it"
+    );
+    assert_eq!(
+        engine.rows(
+            "SELECT version FROM versioned_items WHERE item='team-rule:project:setup-pooled'"
+        ),
+        2,
+        "removal moves the project rule version past every screen read before it (V2V-1)"
+    );
+
+    let again = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner again"),
+            pooled_setup(vec![]),
+            4,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(again), OwnerResult::Applied);
+    let readded = owner
+        .team_status(project.clone())
+        .await
+        .unwrap()
+        .events
+        .wake;
+    assert_eq!(
+        readded.project, None,
+        "the project added again starts with no rule of its own"
+    );
+    assert_eq!(readded.project_version, 2);
+    for (version, generation) in [(read.project_version, 5), (before.project_version, 6)] {
+        let refused = owner
+            .team_action(wake(quiet, version), generation)
+            .await
+            .unwrap();
+        assert_eq!(
+            result(refused),
+            rejected("stale_revision"),
+            "a wake screen read at version {version}, before the removal"
+        );
+    }
+    assert_eq!(
+        owner
+            .team_status(project.clone())
+            .await
+            .unwrap()
+            .events
+            .wake
+            .project,
+        None,
+        "no stale save reached the project added again"
+    );
+    let fresh = owner
+        .team_action(wake(quiet, readded.project_version), 7)
+        .await
+        .unwrap();
+    assert_eq!(result(fresh), OwnerResult::Applied);
+    let shown = owner.team_status(project).await.unwrap().events.wake;
+    assert_eq!(shown.project, Some(quiet));
+    assert_eq!(shown.project_version, 3);
+}
+
+#[tokio::test]
 async fn owner_saves_a_projects_agent_access_and_toolchains_and_refuses_bad_policies() {
     use crate::sandbox::policy::{AgentAccess, AgentPolicy, ToolchainChoice};
     use crate::sandbox::toolchains::Toolchain;
