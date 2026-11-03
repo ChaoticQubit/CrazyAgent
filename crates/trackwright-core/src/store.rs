@@ -4,6 +4,8 @@ use crate::model::{
     Priority, Project, ProjectKey, Refusal, ShortId, TICKETS_PER_PROJECT_MAX, Ticket, TicketKind,
     TicketStatus, codes,
 };
+use crate::ops;
+use crate::requests;
 use crate::schema;
 use crate::text::{self, TextField};
 use rusqlite::types::Type;
@@ -109,6 +111,22 @@ const STATEMENTS: &[&str] = &[
     events::EVENT_INSERT,
     events::EVENTS_OF_PROJECT,
     events::EVENTS_OF_TICKET,
+    requests::REQUEST_GET,
+    requests::REQUEST_INSERT,
+    requests::REQUESTS_EXPIRE,
+    requests::REQUESTS_COUNT,
+    requests::REQUESTS_TRIM,
+    ops::WRITES_RECENT,
+    ops::OPEN_CREATED,
+    ops::CRITERIA_TALLY,
+    ops::LIST_PAGE,
+    ops::CRITERIA_FROM,
+    ops::CHECKS_OF,
+    ops::EVIDENCE_LATEST,
+    ops::LINKS_FROM,
+    ops::EVENTS_RECENT,
+    ops::EVENTS_FROM,
+    ops::EVENTS_COUNT,
 ];
 
 /// Every SQL statement the core runs outside its migrations. A test prepares each against a

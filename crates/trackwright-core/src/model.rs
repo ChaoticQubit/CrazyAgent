@@ -28,6 +28,59 @@ pub mod codes {
     pub const STORE_NOT_PRIVATE: &str = "store_not_private";
     pub const STORE_SCHEMA_NEWER: &str = "store_schema_newer";
     pub const STORE_FAILED: &str = "store_failed";
+    pub const UNKNOWN_OP: &str = "unknown_op";
+    pub const ARGS_INVALID: &str = "args_invalid";
+    pub const UNKNOWN_FIELD: &str = "unknown_field";
+    pub const MISSING_FIELD: &str = "missing_field";
+    pub const FIELD_INVALID: &str = "field_invalid";
+    pub const REQUEST_TOO_LARGE: &str = "request_too_large";
+    pub const REQUEST_ID_REUSED: &str = "request_id_reused";
+    pub const CURSOR_INVALID: &str = "cursor_invalid";
+    pub const OP_UNAVAILABLE: &str = "op_unavailable";
+    pub const USE_CLOSE: &str = "use_close";
+    pub const RATE_LIMITED: &str = "rate_limited";
+    pub const OPEN_TICKETS_FULL: &str = "open_tickets_full";
+
+    /// Every code above, so a host can map each core refusal to its own vocabulary.
+    pub const ALL: &[&str] = &[
+        TEXT_EMPTY,
+        TEXT_TOO_LONG,
+        TEXT_LINE_BREAK,
+        TEXT_HIDDEN_CHARACTERS,
+        PROJECT_KEY_INVALID,
+        PROJECT_EXISTS,
+        PROJECT_UNKNOWN,
+        SHORT_ID_INVALID,
+        TICKET_UNKNOWN,
+        ACTOR_INVALID,
+        PRIORITY_INVALID,
+        CYCLE_DAYS_INVALID,
+        STALE_VERSION,
+        STATUS_CLOSED_AT_CREATE,
+        CLOSE_REASON_OPEN,
+        TICKETS_FULL,
+        CRITERIA_FULL,
+        CRITERION_UNKNOWN,
+        LINKS_FULL,
+        LINK_EXISTS,
+        LINK_UNKNOWN,
+        STORE_PATH_REFUSED,
+        STORE_NOT_PRIVATE,
+        STORE_SCHEMA_NEWER,
+        STORE_FAILED,
+        UNKNOWN_OP,
+        ARGS_INVALID,
+        UNKNOWN_FIELD,
+        MISSING_FIELD,
+        FIELD_INVALID,
+        REQUEST_TOO_LARGE,
+        REQUEST_ID_REUSED,
+        CURSOR_INVALID,
+        OP_UNAVAILABLE,
+        USE_CLOSE,
+        RATE_LIMITED,
+        OPEN_TICKETS_FULL,
+    ];
 }
 
 pub const ACTOR_BYTES_MAX: usize = 128;

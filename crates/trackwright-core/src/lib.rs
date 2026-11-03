@@ -1,6 +1,10 @@
+pub mod catalog;
 pub mod events;
 pub mod host;
 pub mod model;
+pub mod ops;
+pub mod reply;
+pub mod requests;
 #[path = "schema_sql.rs"]
 pub mod schema;
 pub mod store;
