@@ -2,8 +2,8 @@ use crate::criteria;
 use crate::host::{
     Authority, CheckView, Evidence, EvidenceState, LinkKind, LinkState, Links, TicketView,
 };
-use crate::model::{Actor, EvidenceResult, OpKind, ProjectKey, Refusal, codes};
-use crate::policy;
+use crate::model::{Actor, CheckKind, EvidenceResult, OpKind, ProjectKey, Refusal, codes};
+use crate::policy::{self, Role};
 use crate::store::StoreError;
 use crate::text::{self, TextField};
 use rusqlite::Transaction;
@@ -13,9 +13,9 @@ use rusqlite::Transaction;
 pub const LINK_STATE_UNKNOWN: &str = "unknown";
 
 /// The host a tracker runs with on its own: links are any bounded reference with state
-/// `unknown`, a check follows the latest evidence a user or CI recorded for it, and
-/// authority is the project's policy applied to the self-declared actor, so it binds honest
-/// agents only.
+/// `unknown`, a check follows the latest evidence a user or CI recorded for it, manual and
+/// ci evidence come from the owner or an engine only, and authority is the project's policy
+/// applied to the self-declared actor, so it binds honest agents only.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Standalone;
 
@@ -92,6 +92,31 @@ impl Authority for Standalone {
 
     fn actors_verified(&self) -> bool {
         false
+    }
+
+    fn evidence_may(
+        &self,
+        _tx: &Transaction<'_>,
+        project: &ProjectKey,
+        actor: &Actor,
+        check: &CheckView,
+    ) -> Result<(), Refusal> {
+        assert_eq!(
+            check.ticket.key(),
+            project,
+            "a check belongs to its project"
+        );
+        let witnessed = matches!(check.kind, CheckKind::Manual | CheckKind::Ci);
+        if witnessed && policy::role(actor) == Role::Agent {
+            return Err(Refusal::new(
+                codes::EVIDENCE_NOT_FOR_AGENTS,
+                format!(
+                    "only the owner or an engine records {} evidence, not {actor}",
+                    check.kind
+                ),
+            ));
+        }
+        Ok(())
     }
 }
 
