@@ -1369,6 +1369,10 @@ pub fn lock_only(home: &Path) -> Result<Installed, LaunchError> {
         arguments: Vec::new(),
         files: None,
         transcripts: false,
+        hooks: false,
+        relay: false,
+        denied: Vec::new(),
+        native: None,
         _lock: lock,
     })
 }

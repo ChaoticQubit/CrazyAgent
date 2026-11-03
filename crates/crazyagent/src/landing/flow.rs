@@ -2102,6 +2102,7 @@ pub(super) fn restore(db: &Connection, id: &ChangeSetId, now: u64) -> Result<(),
             &shared(&loaded.repository)?,
             &loaded.repository,
             &loaded.worktree,
+            &clone_branch(db, &loaded.worktree)?,
             &crate::worktrees::TREE_BOUNDS,
         )?)
     } else {

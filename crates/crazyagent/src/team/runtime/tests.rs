@@ -432,6 +432,7 @@ fn a_pane_taken_over_after_a_toolchain_was_turned_off_while_the_engine_was_down_
                 toolchain: Toolchain::Rust,
                 allowed: false,
             }],
+            network: crate::sandbox::policy::AgentNetwork::default(),
         },
     )
     .unwrap();
@@ -515,6 +516,7 @@ fn an_agent_stopped_for_an_unreadable_or_no_longer_allowed_toolchain_is_told_why
     let sandboxed = crate::sandbox::policy::AgentPolicy {
         access: AgentAccess::Sandboxed,
         toolchains: Vec::new(),
+        network: crate::sandbox::policy::AgentNetwork::default(),
     };
     crate::sandbox::policy::save(&fixture.connection, PROJECT, &sandboxed).unwrap();
     fixture
@@ -6957,6 +6959,7 @@ fn turning_a_toolchain_off_stops_the_agent_running_with_it_and_its_next_start_go
                 toolchain: crate::sandbox::toolchains::Toolchain::Rust,
                 allowed: false,
             }],
+            network: crate::sandbox::policy::AgentNetwork::default(),
         },
     )
     .unwrap();
@@ -8680,7 +8683,9 @@ fn between_turns(
         spawned: Instant::now(),
         handoff: None,
         access: AgentAccess::Sandboxed,
-        lowered: false,
+        toolchains: None,
+        checked: None,
+        narrowed: None,
         ran_before: Duration::ZERO,
         told_finished: BTreeSet::new(),
         parent: None,
@@ -10263,6 +10268,7 @@ fn hooks_plan(harness: &str, hookless: bool) -> Plan {
         tmux: None,
         hookless,
         scratch_pin: None,
+        toolchains: Vec::new(),
     }
 }
 
@@ -10800,6 +10806,7 @@ fn reap_keeps_a_kept_lead_past_its_idle_limit_while_its_teammate_works() {
                 executable: PathBuf::from("/bin/sh"),
             }),
             access: AgentAccess::Sandboxed,
+            toolchains: Some(Vec::new()),
         })),
         Seat {
             project: ProjectId::new(PROJECT).unwrap(),
@@ -10877,6 +10884,7 @@ fn kept_lead_with_a_task(fixture: &Fixture) -> (TeamRuntime, i64, i64) {
                 executable: PathBuf::from("/bin/sh"),
             }),
             access: AgentAccess::Sandboxed,
+            toolchains: Some(Vec::new()),
         })),
         Seat {
             project: ProjectId::new(PROJECT).unwrap(),
@@ -11011,6 +11019,7 @@ fn wiring_a_native_lead_adopted_without_its_account_is_killed() {
                 executable: PathBuf::from("/bin/sh"),
             }),
             access: AgentAccess::Sandboxed,
+            toolchains: Some(Vec::new()),
         };
         let (orders, ordered) = channel();
         let (reports, reported) = channel();
@@ -11308,6 +11317,7 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
         tmux: Some(PathBuf::from("/opt/homebrew/bin/tmux")),
         hookless: false,
         scratch_pin: None,
+        toolchains: Vec::new(),
     };
     let account = || AccountBinding::Subscription {
         home: PathBuf::from("/private/tmp/agent-1-home"),

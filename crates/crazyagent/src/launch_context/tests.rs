@@ -257,6 +257,9 @@ fn a_refused_keyed_launch_on_a_busy_home_keeps_the_running_agents_key_file() {
         instructions: "# Project context from CrazyAgent\n".into(),
         process: None,
         transcripts: true,
+        off_tools: Vec::new(),
+        native_team: None,
+        relay: None,
     };
     let held = context().install("codex", &home, false).unwrap();
     let key_path = home.join(".crazyagent-key");
@@ -305,6 +308,9 @@ fn a_refused_context_less_durable_launch_on_a_busy_home_keeps_the_running_agents
         instructions: "# Project context from CrazyAgent\n".into(),
         process: None,
         transcripts: true,
+        off_tools: Vec::new(),
+        native_team: None,
+        relay: None,
     };
     let held = context().install("codex", &home, false).unwrap();
     let key_path = home.join(".crazyagent-key");

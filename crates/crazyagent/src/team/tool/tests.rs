@@ -1052,7 +1052,7 @@ fn neither_team_tool_server_offers_the_owner_s_messages_timeline_or_its_settings
     }
     let delegate = by_id(&served(requests(&lines), &drop));
     let mut output = Vec::new();
-    serve_live(requests(&lines), &mut output, &mailbox).unwrap();
+    serve_live(requests(&lines), &mut output, &mailbox, &[]).unwrap();
     let live: Vec<Value> = output
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
@@ -1092,7 +1092,7 @@ fn neither_team_tool_server_offers_the_owner_s_messages_timeline_or_its_settings
     let taken = take_calls(&mailbox, CALLS_PER_TICK_MAX);
     assert_eq!(taken.len(), OWNER_ONLY_CALLS.len());
     assert!(
-        taken.iter().all(|(_, call)| call.is_none()),
+        taken.iter().all(|(_, call, _)| call.is_none()),
         "a planted timeline or settings call was read as a call: {taken:?}"
     );
 }

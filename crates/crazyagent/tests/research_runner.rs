@@ -376,6 +376,7 @@ fn turning_a_toolchain_off_stops_running_research_and_queues_it_again() {
             toolchain: Toolchain::Rust,
             allowed,
         }],
+        network: crazyagent::sandbox::policy::AgentNetwork::default(),
     };
     save(&connection, "project-a", &rust(true)).unwrap();
     let id = jobs

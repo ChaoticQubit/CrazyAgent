@@ -769,7 +769,7 @@ fn read_receipts(
         return Ok(());
     }
     let mut read = BTreeSet::new();
-    let records = crate::usage::capture::records(home, crate::usage::capture::Format::Claude);
+    let records = crate::usage::capture::records(home, crate::usage::capture::Format::Claude).0;
     for path in records.into_iter().take(TRANSCRIPTS_READ_MAX) {
         scan_transcript(&path, &unread, &mut read);
     }

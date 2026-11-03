@@ -4668,7 +4668,7 @@ fn teammate_worktrees_never_reach_the_change_set() {
         "the same clone tip fetches to the same head"
     );
     let id = case.turn(TurnOutcome::Succeeded).unwrap();
-    let mut files: Vec<String> = diff(&case.db, &id, 0)
+    let mut files: Vec<String> = diff(&case.db, &id, &case.view(&id).head, 0)
         .unwrap()
         .files
         .into_iter()
@@ -4920,7 +4920,7 @@ fn a_lead_worker_s_set_is_measured_against_its_lead_s_branch() {
         (1, 1, 0),
         "the owner view counted the lead's work"
     );
-    let page = diff(&case.db, &id, 0).unwrap();
+    let page = diff(&case.db, &id, &case.view(&id).head, 0).unwrap();
     let paths: Vec<&str> = page.files.iter().map(|file| file.path.as_str()).collect();
     assert_eq!(paths, ["worker.txt"], "the diff showed the lead's work");
 }
@@ -5386,7 +5386,7 @@ fn a_change_set_the_owner_landed_in_part_by_hand_shows_only_the_rest_until_all_o
         ),
         (ChangeState::Pending, false, 1, 1, 0)
     );
-    let page = diff(&case.db, &id, 0).unwrap();
+    let page = diff(&case.db, &id, &case.view(&id).head, 0).unwrap();
     let files: Vec<_> = page.files.iter().map(|file| file.path.as_str()).collect();
     assert_eq!(files, ["src/new.rs"]);
     assert!(!page.text.contains("+four"), "{}", page.text);
@@ -5541,7 +5541,7 @@ fn a_change_set_the_owner_has_not_landed_stays_open_with_its_whole_change() {
             before.removed
         )
     );
-    let page = diff(&case.db, &id, 0).unwrap();
+    let page = diff(&case.db, &id, &case.view(&id).head, 0).unwrap();
     assert!(page.text.contains("+four"), "{}", page.text);
 
     case.owner(&[

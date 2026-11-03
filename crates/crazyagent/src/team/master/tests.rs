@@ -3606,11 +3606,12 @@ fn a_live_master_can_neither_read_a_messages_timeline_nor_change_its_settings() 
         access: &access,
         stored: &setup,
         landing: &landing,
+        agents: &landing,
         events: Some(&EVENTS),
         host: None,
     };
     assert_eq!(
-        serve_calls(&mut fixture.connection, &answering, &mailbox).unwrap(),
+        serve_calls(&mut fixture.connection, &answering, MASTER, &mailbox).unwrap(),
         names.len()
     );
     for id in &planted {

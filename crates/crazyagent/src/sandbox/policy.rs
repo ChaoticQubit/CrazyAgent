@@ -199,6 +199,7 @@ impl AgentPolicy {
                     allowed: allowed.contains(&toolchain),
                 })
                 .collect(),
+            network: self.network,
         };
         assert!(pinned.validate().is_ok());
         pinned
@@ -468,6 +469,7 @@ mod tests {
                     allowed: *allowed,
                 })
                 .collect(),
+            network: AgentNetwork::default(),
         };
         let sandboxed = chose(AgentAccess::Sandboxed, &[]);
         let full = Some(AgentAccess::Full);

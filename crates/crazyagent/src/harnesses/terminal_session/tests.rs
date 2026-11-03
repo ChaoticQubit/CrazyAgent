@@ -249,7 +249,7 @@ mod own_turns {
             pane.own_facts(),
             vec![TranscriptEvent::TurnStarted, text("Own two"), DONE]
         );
-        assert_eq!(pane.session.stop(), None);
+        assert_eq!(pane.session.stop().unwrap(), None);
     }
 
     #[test]
@@ -265,7 +265,7 @@ mod own_turns {
             pane.own_facts().is_empty(),
             "facts read before following own turns are not kept"
         );
-        assert_eq!(pane.session.stop(), None);
+        assert_eq!(pane.session.stop().unwrap(), None);
     }
 
     #[test]

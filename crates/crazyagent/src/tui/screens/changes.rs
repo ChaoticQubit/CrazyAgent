@@ -1204,7 +1204,7 @@ fn landing_default(listed: &TargetBranches) -> Option<&String> {
 /// for the list read, which is about the whole page.
 fn about(query: &ChangesQuery) -> Option<&ChangeSetId> {
     match query {
-        ChangesQuery::List { .. } => None,
+        ChangesQuery::List { .. } | ChangesQuery::Waiting { .. } => None,
         ChangesQuery::Diff { id, .. }
         | ChangesQuery::Accept { id, .. }
         | ChangesQuery::AcceptInto { id, .. }
