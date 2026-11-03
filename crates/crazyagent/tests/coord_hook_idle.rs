@@ -40,6 +40,9 @@ impl Team {
         )
         .unwrap();
         let (mailbox, callers) = PaneCallers::new(root.path(), &[(MATE_PANE, "greet")]);
+        let part = mailbox.join(crazyagent::coord::relay::LEAD_PART);
+        std::fs::create_dir(&part).unwrap();
+        std::fs::set_permissions(&part, std::fs::Permissions::from_mode(0o700)).unwrap();
         Self {
             _root: root,
             config,
@@ -78,11 +81,15 @@ impl Team {
     }
 
     fn marks(&self) -> Vec<String> {
-        std::fs::read_dir(&self.mailbox)
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-            .filter(|name| name.ends_with(".idle"))
-            .collect()
+        [
+            self.mailbox.clone(),
+            self.mailbox.join(crazyagent::coord::relay::LEAD_PART),
+        ]
+        .iter()
+        .flat_map(|folder| std::fs::read_dir(folder).unwrap())
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.ends_with(".idle"))
+        .collect()
     }
 }
 

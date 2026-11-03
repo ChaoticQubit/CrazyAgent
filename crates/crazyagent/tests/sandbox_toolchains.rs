@@ -1657,6 +1657,9 @@ fn native_team_refuses_a_teammates_home_in_the_lead_s_or_a_lead_home_the_project
     let case = case();
     let tmux = crazyagent::terminal::tmux::installed(&case.project).expect("tmux is installed");
     let tmp = toolchains::make_tmp(&case.home).unwrap();
+    let mailbox = case.tmp.join(crazyagent::team::tool::MAILBOX_FOLDER);
+    fs::create_dir(&mailbox).unwrap();
+    fs::set_permissions(&mailbox, fs::Permissions::from_mode(0o700)).unwrap();
     let team = |home: &Path, mates_home: &Path| {
         ProjectSandbox::new(
             &case.project,

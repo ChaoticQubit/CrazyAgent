@@ -1,6 +1,6 @@
 use super::relay::{
     self, ANSWER, ANSWER_BYTES_MAX, ASK, ASKED, Answer, Ask, Held, IDLE, INBOX, INBOX_MAX,
-    LEAD_TAG, Letter, SHOWN, TOOLS, TOOLS_LOG_BYTES_MAX, TOUCH, WAITING,
+    LEAD_TAG, Letter, Part, SHOWN, TOOLS, TOOLS_LOG_BYTES_MAX, TOUCH, WAITING,
 };
 use super::settings::{Nudges, Overlaps};
 use super::{TOOL_BYTES_MAX, Waiting};
@@ -92,7 +92,8 @@ impl Event {
 /// session's main thread takes (none inside a subagent or in-process teammate), the tag its
 /// activity counts for, and, for a native teammate, its name, whose `.worktrees/<name>`
 /// its edits must stay in (Q17); `unnamed` when the engine placed the process nowhere, so
-/// it is nobody (DEC-111 Q18).
+/// it is nobody (DEC-111 Q18); and the part of the mailbox its entries sit in (relay
+/// mailbox forgery C1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Identity {
     pub inbox: Option<String>,
@@ -100,6 +101,7 @@ pub(crate) struct Identity {
     pub teammate: Option<String>,
     pub cwd: Option<PathBuf>,
     pub unnamed: bool,
+    pub part: Part,
 }
 
 /// One in-process member of a Claude Code agent team config: its name, `agentId` and
@@ -144,10 +146,13 @@ pub fn run(
     let Ok(input) = serde_json::from_slice::<Value>(&bytes) else {
         return Ok(());
     };
-    let Ok(folder) = Mailbox::open(mailbox) else {
+    let Ok(root) = Mailbox::open(mailbox) else {
         return Ok(());
     };
     let who = identify(mailbox, input["agent_id"].as_str());
+    let Ok(folder) = relay::part_folder(root, who.part) else {
+        return Ok(());
+    };
     let mate = who.teammate.as_ref().and(who.activity.as_deref());
     let answer = match event {
         Event::PostTool => {
@@ -224,30 +229,36 @@ pub fn run(
 /// agent that leads no native team, the session is the lead, an in-process teammate whose
 /// `agentId` the hook input carries as the config lists it, or a subagent of the lead. In
 /// a teammate's pane it is that teammate under the engine's name for it, or a subagent of
-/// it; a process the engine places nowhere is nobody, its edits held. Inputs: the mailbox
-/// and the hook's `agent_id`, none for the monitor. Output: the identity.
+/// it; a process the engine places nowhere is nobody, its edits held. A native lead's
+/// sessions use the lead's part of the mailbox and its teammates' the mailbox itself; an
+/// agent leading no native team keeps the one folder. Inputs: the mailbox and the hook's
+/// `agent_id`, none for the monitor. Output: the identity.
 pub(crate) fn identify(mailbox: &Path, agent: Option<&str>) -> Identity {
     #[cfg(unix)]
     let seat = {
         use crate::team::caller::{Place, Whom};
         match crate::team::caller::own_place(mailbox, PANE_WAIT) {
-            Place::Alone | Place::Placed(_, Whom::Lead) => Some(None),
-            Place::Placed(pane, Whom::Teammate(name)) => Some(Some((pane, name))),
+            Place::Alone => Some((Part::Single, None)),
+            Place::Placed(_, Whom::Lead) => Some((Part::Lead, None)),
+            Place::Placed(pane, Whom::Teammate(name)) => {
+                Some((Part::Teammates, Some((pane, name))))
+            }
             Place::Unplaced => None,
         }
     };
     #[cfg(not(unix))]
-    let seat: Option<Option<(String, String)>> = {
+    let seat: Option<(Part, Option<(String, String)>)> = {
         let _ = mailbox;
-        Some(None)
+        Some((Part::Single, None))
     };
-    let Some(seat) = seat else {
+    let Some((part, seat)) = seat else {
         return Identity {
             inbox: None,
             activity: None,
             teammate: None,
             cwd: None,
             unnamed: true,
+            part: Part::Teammates,
         };
     };
     let in_process = |agent: &str| {
@@ -267,6 +278,7 @@ pub(crate) fn identify(mailbox: &Path, agent: Option<&str>) -> Identity {
             teammate: None,
             cwd: None,
             unnamed: false,
+            part,
         },
         (None, Some(agent)) => match in_process(agent) {
             Some(member) => Identity {
@@ -275,6 +287,7 @@ pub(crate) fn identify(mailbox: &Path, agent: Option<&str>) -> Identity {
                 teammate: Some(member.name),
                 cwd: member.cwd.map(PathBuf::from),
                 unnamed: false,
+                part,
             },
             None => Identity {
                 inbox: None,
@@ -282,6 +295,7 @@ pub(crate) fn identify(mailbox: &Path, agent: Option<&str>) -> Identity {
                 teammate: None,
                 cwd: None,
                 unnamed: false,
+                part,
             },
         },
         (Some((pane, name)), agent) => {
@@ -507,7 +521,7 @@ fn edit_answer(folder: &Mailbox, who: &Identity, input: &Value) -> Option<Value>
 /// one), and only the first time, which an exclusive marker in the mailbox records. Takes
 /// the mailbox and the identity. Returns the reminder, or None.
 fn first_edit(folder: &Mailbox, who: &Identity) -> Option<&'static str> {
-    if relay::read_roster(folder)?.nudges != Nudges::FirstEdit {
+    if relay::read_roster(folder, who.part)?.nudges != Nudges::FirstEdit {
         return None;
     }
     let key = relay::tag_key(who.activity.as_deref()?)?;
@@ -535,7 +549,7 @@ fn guard(folder: &Mailbox, who: &Identity, input: &Value) -> Option<String> {
         .map(Path::new)
         .filter(|path| path.is_absolute())?;
     let target = resolved(path);
-    let roster = relay::read_roster(folder);
+    let roster = relay::read_roster(folder, who.part);
     let root = roster
         .as_ref()
         .and_then(|roster| roster.root.as_ref().map(PathBuf::from))

@@ -3301,10 +3301,11 @@ impl TeamRuntime {
 
     /// Runs the Claude Code relay (K2a) of each running Claude agent of a project whose home
     /// holds the relay plugin: delivers its and its native teammates' messages through the
-    /// mailbox, applies their reported activity and waits, answers their overlap questions
-    /// and, at most once each `events::SCAN_EVERY` per project, marks read receipts from
-    /// their transcripts. A relay that fails is skipped until the next tick, like the
-    /// agents' team calls. Takes the project.
+    /// mailbox, split into the lead's part and its teammates' for a native lead, applies
+    /// their reported activity and waits, answers their overlap questions and, at most once
+    /// each `events::SCAN_EVERY` per project, marks read receipts from their transcripts. A
+    /// relay that fails is skipped until the next tick, like the agents' team calls. Takes
+    /// the project.
     fn serve_relays(&mut self, project: &ProjectId) {
         let now = Instant::now();
         let receipts = self
@@ -3331,13 +3332,20 @@ impl TeamRuntime {
             if !crate::coord::relay::installed(&home) {
                 continue;
             }
+            let layout = if self.stored_mode(id).as_deref()
+                == Some(crate::coord::settings::SubagentMode::Native.as_str())
+            {
+                crate::coord::relay::Layout::Split
+            } else {
+                crate::coord::relay::Layout::Single
+            };
             let _ = crate::coord::relay::serve(
                 &self.connection,
                 project,
                 id,
                 &home,
                 &self.mailbox(id),
-                crate::coord::relay::Layout::Single,
+                layout,
                 receipts,
                 now_ms(),
             );
@@ -5210,7 +5218,7 @@ impl TeamRuntime {
         }
         let live = self.live_master(&stored.project_id, role, launch);
         let agent_tools = role == AgentRole::Sub && tools && self.delegation_tool.is_some();
-        if (live && tools) || agent_tools {
+        if (live && tools) || agent_tools || native {
             private_directory(&tmp.join(tool::MAILBOX_FOLDER)).map_err(|e| {
                 with_code("the master's tool mailbox could not be made", Some(&e.0))
             })?;

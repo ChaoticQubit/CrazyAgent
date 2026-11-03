@@ -25,27 +25,30 @@ const ANNOUNCED_MAX: usize = 1024;
 const _: () = assert!(ANNOUNCED_MAX >= 4 * INBOX_MAX);
 
 /// Runs the relay's monitor (K2a) for one Claude Code session: once a second it prints
-/// `[crazyagent msg <id>] from <name>: <first 200 bytes>` for each new message waiting in
-/// the mailbox for this session, which Claude Code hands the session as a notification
-/// that wakes it; the message itself arrives through the PostToolUse or Stop hook. It
-/// exits when its parent, the harness, is gone or its output closes. Inputs: the mailbox
-/// and the output. Output: Ok once the harness is gone, or the plain reason it stopped.
+/// `[crazyagent msg <id>] from <name>: <first 200 bytes>` for each new message waiting for
+/// this session in its part of the mailbox, which Claude Code hands the session as a
+/// notification that wakes it; the message itself arrives through the PostToolUse or
+/// Stop hook. It exits when its parent, the harness, is gone or its output closes. Inputs:
+/// the mailbox and the output. Output: Ok once the harness is gone, or the plain reason it
+/// stopped.
 #[cfg(unix)]
 pub fn run(mailbox: &Path, mut output: impl Write) -> Result<(), String> {
     let parent = std::os::unix::process::parent_id();
     if parent <= 1 {
         return Ok(());
     }
-    let mut tag = super::hook::identify(mailbox, None).inbox;
+    let seen = |who: super::hook::Identity| (who.inbox, who.part);
+    let (mut tag, mut part) = seen(super::hook::identify(mailbox, None));
     let mut announced: VecDeque<MessageId> = VecDeque::with_capacity(ANNOUNCED_MAX);
     let mut known: BTreeSet<MessageId> = BTreeSet::new();
     let mut polls: u32 = 0;
     while std::os::unix::process::parent_id() == parent {
         if polls % IDENTIFY_EVERY == IDENTIFY_EVERY - 1 {
-            tag = super::hook::identify(mailbox, None).inbox;
+            (tag, part) = seen(super::hook::identify(mailbox, None));
         }
         polls = polls.wrapping_add(1);
-        if let (Some(tag), Ok(folder)) = (&tag, Mailbox::open(mailbox)) {
+        let folder = Mailbox::open(mailbox).and_then(|root| relay::part_folder(root, part));
+        if let (Some(tag), Ok(folder)) = (&tag, folder) {
             for (_, stem) in folder.entries(INBOX).into_iter().take(INBOX_MAX) {
                 let Some(letter) = relay::read_letter(&folder, &format!("{stem}{INBOX}")) else {
                     continue;

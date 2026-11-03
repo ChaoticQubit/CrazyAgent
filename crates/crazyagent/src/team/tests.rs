@@ -3564,7 +3564,7 @@ fn a_native_teammate_row_reads_idle_while_its_session_rests_and_working_once_it_
             lead,
             directory.path(),
             &mailbox,
-            crate::coord::relay::Layout::Single,
+            crate::coord::relay::Layout::Split,
             false,
             now,
         )

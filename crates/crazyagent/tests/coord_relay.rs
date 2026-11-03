@@ -55,6 +55,9 @@ impl Team {
         )
         .unwrap();
         let (mailbox, callers) = PaneCallers::new(&path, &[(MATE_PANE, "greet")]);
+        let part = mailbox.join(crazyagent::coord::relay::LEAD_PART);
+        std::fs::create_dir(&part).unwrap();
+        std::fs::set_permissions(&part, std::fs::Permissions::from_mode(0o700)).unwrap();
         Self {
             _root: root,
             root: path,
@@ -99,8 +102,13 @@ impl Team {
     }
 
     fn letter(&self, id: i64, to: &str, body: &str) {
+        let name = format!("{id:032x}.inbox");
         std::fs::write(
-            self.entry(&format!("{id:032x}.inbox")),
+            if to == "leader" {
+                self.lead_entry(&name)
+            } else {
+                self.entry(&name)
+            },
             json!({
                 "id": id,
                 "to": to,
@@ -128,6 +136,10 @@ impl Team {
 
     fn text(&self, name: &str) -> Option<String> {
         std::fs::read_to_string(self.entry(name)).ok()
+    }
+
+    fn lead_text(&self, name: &str) -> Option<String> {
+        std::fs::read_to_string(self.lead_entry(name)).ok()
     }
 }
 
@@ -214,7 +226,7 @@ fn post_tool_hands_each_session_only_its_own_letters_and_logs_the_tool_for_its_t
         tool(MATE_SESSION, Some(HELPER_AGENT), "Read", json!({})),
     );
     assert_eq!(helper, "", "an in-process teammate takes no letter");
-    assert!(team.entry(&format!("{:032x}.inbox", 5)).is_file());
+    assert!(team.lead_entry(&format!("{:032x}.inbox", 5)).is_file());
 
     let lead = context(&team.hook(
         "post-tool",
@@ -237,10 +249,10 @@ fn post_tool_hands_each_session_only_its_own_letters_and_logs_the_tool_for_its_t
         "{lead}"
     );
     assert!(!lead.contains("For greet."));
-    assert!(team.entry(&format!("{:032x}.shown", 5)).is_file());
-    assert!(!team.entry(&format!("{:032x}.inbox", 5)).exists());
+    assert!(team.lead_entry(&format!("{:032x}.shown", 5)).is_file());
+    assert!(!team.lead_entry(&format!("{:032x}.inbox", 5)).exists());
     assert_eq!(
-        team.text(&format!("{LEAD_KEY}.tools")).as_deref(),
+        team.lead_text(&format!("{LEAD_KEY}.tools")).as_deref(),
         Some("Read\nBash\ngraphify\n"),
         "the subagent's call counts for the lead, the in-process teammate's for nobody"
     );
@@ -275,7 +287,7 @@ fn the_leads_stop_blocks_only_while_a_letter_waits_for_it() {
     let team = Team::new();
     let stop = json!({"session_id": LEAD_SESSION, "stop_hook_active": false});
     assert_eq!(team.hook("stop", None, stop.clone()), "");
-    assert!(team.entry(&format!("{LEAD_KEY}.touch")).is_file());
+    assert!(team.lead_entry(&format!("{LEAD_KEY}.touch")).is_file());
 
     team.letter(9, "leader", "Merge greet's branch.");
     let blocked = team.hook("stop", None, stop.clone());
@@ -294,8 +306,8 @@ fn the_leads_stop_blocks_only_while_a_letter_waits_for_it() {
 #[test]
 fn a_question_or_permission_prompt_sets_a_wait_that_the_next_tool_call_or_prompt_clears() {
     let team = Team::new();
-    let waiting = || team.text(&format!("{LEAD_KEY}.waiting"));
-    let asked = || team.entry(&format!("{LEAD_KEY}.asked")).is_file();
+    let waiting = || team.lead_text(&format!("{LEAD_KEY}.waiting"));
+    let asked = || team.lead_entry(&format!("{LEAD_KEY}.asked")).is_file();
 
     team.hook(
         "asked",
@@ -312,7 +324,7 @@ fn a_question_or_permission_prompt_sets_a_wait_that_the_next_tool_call_or_prompt
     assert_eq!(waiting().as_deref(), Some("none"));
     assert!(!asked());
 
-    std::fs::remove_file(team.entry(&format!("{LEAD_KEY}.waiting"))).unwrap();
+    std::fs::remove_file(team.lead_entry(&format!("{LEAD_KEY}.waiting"))).unwrap();
     team.hook(
         "notification",
         None,
@@ -455,7 +467,7 @@ fn under_overlaps_block_an_edit_on_another_agents_claim_is_denied_once_the_engin
             lead,
             &home,
             &team.mailbox,
-            Layout::Single,
+            Layout::Split,
             false,
             now_ms(),
         )
@@ -485,8 +497,9 @@ fn under_overlaps_block_an_edit_on_another_agents_claim_is_denied_once_the_engin
         )
     );
     assert_eq!(answered(repo.join("src").join("b.rs")), "");
-    let left: Vec<String> = std::fs::read_dir(&team.mailbox)
-        .unwrap()
+    let left: Vec<String> = [team.mailbox.clone(), team.lead_entry("")]
+        .iter()
+        .flat_map(|folder| std::fs::read_dir(folder).unwrap())
         .map(|entry| entry.unwrap().file_name().into_string().unwrap())
         .filter(|name| name.ends_with(".ask") || name.ends_with(".answer"))
         .collect();
@@ -650,7 +663,7 @@ fn nudged(team: &Team, nudges: Nudges) -> ([String; 2], Vec<String>) {
             lead,
             &home,
             &team.mailbox,
-            Layout::Single,
+            Layout::Split,
             false,
             now_ms(),
         )

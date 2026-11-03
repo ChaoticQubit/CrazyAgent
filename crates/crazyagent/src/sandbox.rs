@@ -618,6 +618,7 @@ pub struct ProjectSandbox {
     tool_files: Vec<PathBuf>,
     scratch: Option<PathBuf>,
     hidden: Vec<PathBuf>,
+    revealed: Vec<PathBuf>,
     network: SandboxNetwork,
     kept_ports: Vec<u16>,
     owner_home: PathBuf,
@@ -676,6 +677,7 @@ impl ProjectSandbox {
             tool_files: Vec::new(),
             scratch: None,
             hidden: Vec::new(),
+            revealed: Vec::new(),
             network,
             kept_ports: Vec::new(),
             owner_home: owner,
@@ -1104,9 +1106,12 @@ impl ProjectSandbox {
     /// shell snapshot and session scripts its Bash commands run first (TPH-2). The teammates
     /// run in their own home and only read the lead's, except the team folders Claude Code
     /// shares, where they make no link or folder but a lock, and never write the `git` on the
-    /// lead's path (TPH-2 C). Inputs: the three sockets, the canonical tmux program and the
-    /// teammates' home beside the lead's, its team folders already made. Output: the lead's
-    /// and the teammates' sandboxes, `Invalid`, or `Unavailable` off macOS.
+    /// lead's path (TPH-2 C). The lead's part of the relay mailbox is hidden from them but
+    /// for its `relay.json`, which they only read, and they never move or re-permission the
+    /// mailbox or the temp folder holding it (relay mailbox forgery C1). Inputs: the three
+    /// sockets, the canonical tmux program and the teammates' home beside the lead's, its
+    /// team folders already made, with the mailbox in the agent temp folder. Output: the
+    /// lead's and the teammates' sandboxes, `Invalid`, or `Unavailable` off macOS.
     pub fn native_team(
         self,
         own: &Path,
@@ -1127,13 +1132,17 @@ impl ProjectSandbox {
         for folder in &shared {
             granted_root(folder, &self.owner_home, &self.secret_paths())?;
         }
+        let mailbox = self.agent_tmp.join(crate::team::tool::MAILBOX_FOLDER);
+        let lead_part = mailbox.join(crate::coord::relay::LEAD_PART);
         let mut teammates = self
             .clone()
             .serve_tmux_server(mates, tmux)?
             .reach_unix_socket(callers)?
             .shut_unix_socket(own)?
-            .allow_read(&home)?;
+            .allow_read(&home)?
+            .hide(&lead_part)?;
         teammates.agent_home = mates_home.to_path_buf();
+        teammates.revealed = vec![lead_part.join(crate::coord::relay::ROSTER_FILE)];
         teammates.read_only = vec![
             home.join(crate::launch_context::STATE),
             home.join(crate::coord::relay::PLUGIN_FOLDER),
@@ -1146,7 +1155,7 @@ impl ProjectSandbox {
                 .iter()
                 .map(|scratch| scratch.join(toolchains::GIT_FOLDER)),
         );
-        teammates.fixed = vec![home.clone()];
+        teammates.fixed = vec![home.clone(), self.agent_tmp.clone(), mailbox];
         teammates.fixed.extend(shared.iter().cloned());
         teammates.shared = shared;
         if teammates.writes(&home) {
@@ -1373,6 +1382,12 @@ impl ProjectSandbox {
                 }
             }
             text.push_str(")\n");
+        }
+        for file in self.revealed.iter().filter(|file| clean_absolute(file)) {
+            text.push_str(&format!(
+                "(allow file-read* (literal \"{}\"))\n",
+                file.display()
+            ));
         }
         let project = self.project_root.display();
         text.push_str(&format!(

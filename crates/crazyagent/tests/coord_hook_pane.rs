@@ -155,6 +155,9 @@ impl Team {
         let mailbox = root.join("agent-1").join("tmp").join(MAILBOX_FOLDER);
         std::fs::create_dir_all(&mailbox).unwrap();
         std::fs::set_permissions(&mailbox, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let part = mailbox.join(crazyagent::coord::relay::LEAD_PART);
+        std::fs::create_dir(&part).unwrap();
+        std::fs::set_permissions(&part, std::fs::Permissions::from_mode(0o700)).unwrap();
         let socket = socket_for_mailbox(&mailbox).unwrap();
         let short = socket.parent().unwrap();
         assert!(!short.exists(), "{}", short.display());
@@ -242,7 +245,11 @@ impl Team {
     }
 
     fn lead_tools(&self) -> Option<String> {
-        std::fs::read_to_string(self.mailbox.join(format!("{:032x}.tools", 0))).ok()
+        std::fs::read_to_string(self.lead_part().join(format!("{:032x}.tools", 0))).ok()
+    }
+
+    fn lead_part(&self) -> PathBuf {
+        self.mailbox.join(crazyagent::coord::relay::LEAD_PART)
     }
 
     /// Overwrites the team config the way any agent of the team can. Takes the new config.
@@ -257,11 +264,17 @@ impl Team {
         .unwrap();
     }
 
-    /// Leaves one message in the mailbox for a delivery tag, as the engine does. Takes the
-    /// message id, the tag and the body.
+    /// Leaves one message in the mailbox for a delivery tag, as the engine does for a native
+    /// lead: the lead's in its part, its teammates' in the mailbox itself. Takes the message
+    /// id, the tag and the body.
     fn letter(&self, id: i64, to: &str, body: &str) {
+        let folder = if to == "leader" {
+            self.lead_part()
+        } else {
+            self.mailbox.clone()
+        };
         std::fs::write(
-            self.mailbox.join(format!("{id:032x}.inbox")),
+            folder.join(format!("{id:032x}.inbox")),
             json!({
                 "id": id,
                 "to": to,

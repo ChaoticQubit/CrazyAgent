@@ -264,11 +264,32 @@ pub fn installed(home: &Path) -> bool {
 
 /// How a lead's mailbox is laid out: one folder for every session of an agent that leads
 /// no native team, or, for a native lead, the lead's sessions in [`LEAD_PART`] apart from
-/// its teammates' in the mailbox itself (relay mailbox forgery C1).
+/// its teammates' in the mailbox itself, which the teammates' sandbox keeps them out of
+/// (relay mailbox forgery C1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Layout {
     Single,
     Split,
+}
+
+/// Where one session's entries sit in its mailbox, from where the engine placed it: the
+/// mailbox itself for an agent that leads no native team and for a native lead's
+/// teammates, [`LEAD_PART`] for a native lead's own sessions (relay mailbox forgery C1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Part {
+    Single,
+    Lead,
+    Teammates,
+}
+
+/// Opens the folder one part's entries sit in, never following a link. Takes the mailbox
+/// and the part. Returns the folder, the mailbox itself but for a native lead's own part,
+/// or the I/O error.
+pub(crate) fn part_folder(mailbox: Mailbox, part: Part) -> std::io::Result<Mailbox> {
+    match part {
+        Part::Lead => mailbox.folder(LEAD_PART),
+        Part::Single | Part::Teammates => Ok(mailbox),
+    }
 }
 
 /// Runs one engine tick of an agent's relay: refreshes `relay.json`, marks Delivered each
@@ -276,12 +297,16 @@ pub enum Layout {
 /// messages of the agent and its native teammates (none under the Typing only delivery
 /// setting, nor for a master, which K2b feeds through its engine input), applies the
 /// sessions' tool counts, activity and waits and each native teammate's Idle or Working,
-/// answers their overlap
-/// questions, and, when `receipts` is set, marks Read each delivered message its session
-/// answered after (from the home's newest transcripts). Everything a session wrote is
-/// validated; nothing from the mailbox is trusted. Inputs: the database, the project, the
-/// agent, its home, its mailbox, whether to scan transcripts and the time in ms. Output:
-/// Ok, or a SQLite failure; an unreadable mailbox is skipped.
+/// answers their overlap questions, and, when `receipts` is set, marks Read each delivered
+/// message its session answered after (from the home's newest transcripts). Under the
+/// split layout the lead's part, which the engine makes when it is missing, holds the
+/// roster and serves the lead's tag alone, and the mailbox itself serves the teammates'
+/// tags alone, so nothing a teammate writes there counts for the lead. Everything a
+/// session wrote is validated; nothing from the mailbox is trusted. Inputs: the database,
+/// the project, the agent, its home, its mailbox, its layout, whether to scan transcripts
+/// and the time in ms. Output: Ok, or a SQLite failure; an unreadable mailbox or lead's
+/// part is skipped.
+#[allow(clippy::too_many_arguments)]
 pub fn serve(
     db: &Connection,
     project: &ProjectId,
@@ -292,7 +317,6 @@ pub fn serve(
     receipts: bool,
     now: i64,
 ) -> Result<(), EngineError> {
-    let _ = layout;
     let Ok(folder) = Mailbox::open_for_engine(mailbox) else {
         return Ok(());
     };
@@ -307,7 +331,6 @@ pub fn serve(
         nudges: chosen.nudges,
         root: worktree(db, project, lead)?,
     };
-    write_roster(&folder, &roster);
     let master: bool = db
         .query_row(
             "SELECT role='master' FROM team_agents WHERE id=?1",
@@ -316,17 +339,52 @@ pub fn serve(
         )
         .map_err(state)?;
     let posts = delivery != Delivery::TypingOnly && !master;
-    collect_shown(db, &folder, &team, now)?;
-    sweep_letters(db, &folder, &team, posts)?;
-    if posts {
-        post_letters(db, &folder, &team)?;
+    match layout {
+        Layout::Single => {
+            write_roster(&folder, &roster);
+            serve_part(db, project, &folder, &team, posts, now)?;
+        }
+        Layout::Split => {
+            let Ok(own) = folder
+                .make_folder(LEAD_PART)
+                .and_then(|()| folder.folder(LEAD_PART))
+            else {
+                return Ok(());
+            };
+            let (alone, mates): (BTreeMap<String, AgentId>, BTreeMap<String, AgentId>) = team
+                .clone()
+                .into_iter()
+                .partition(|(tag, _)| tag == LEAD_TAG);
+            write_roster(&own, &roster);
+            serve_part(db, project, &own, &alone, posts, now)?;
+            serve_part(db, project, &folder, &mates, posts, now)?;
+        }
     }
-    take_activity(db, &folder, &team, now)?;
-    answer_asks(db, project, &folder, &team)?;
     if receipts {
         read_receipts(db, home, &team, now)?;
     }
     Ok(())
+}
+
+/// Runs the steps of one relay tick that read and write one folder of a mailbox, for the
+/// sessions whose entries sit there and no other: their claims, letters, reports and
+/// overlap questions. Takes the database, the project, the folder, its sessions by tag,
+/// whether letters are posted and the time in ms. Returns Ok, or a SQLite failure.
+fn serve_part(
+    db: &Connection,
+    project: &ProjectId,
+    folder: &Mailbox,
+    team: &BTreeMap<String, AgentId>,
+    posts: bool,
+    now: i64,
+) -> Result<(), EngineError> {
+    collect_shown(db, folder, team, now)?;
+    sweep_letters(db, folder, team, posts)?;
+    if posts {
+        post_letters(db, folder, team)?;
+    }
+    take_activity(db, folder, team, now)?;
+    answer_asks(db, project, folder, team)
 }
 
 /// The mailbox name stem of a delivery tag: 32 hex digits, zero for the lead and the pane
@@ -388,10 +446,16 @@ pub(crate) fn read_letter(folder: &Mailbox, name: &str) -> Option<Letter> {
     (letter.body.len() <= BODY_BYTES_MAX && letter.from.len() <= FROM_BYTES_MAX).then_some(letter)
 }
 
-/// Reads the engine's `relay.json`. Takes the mailbox. Returns the roster, or None
-/// before the engine wrote one.
-pub(crate) fn read_roster(folder: &Mailbox) -> Option<Roster> {
-    let bytes = read_entry(folder, ROSTER_FILE, ROSTER_BYTES_MAX)?;
+/// Reads the engine's `relay.json` from one part's folder: its own, but a native lead's
+/// teammates read the one in the lead's part, the only entry there their sandbox reads.
+/// Takes the part's folder and the part. Returns the roster, or None before the engine
+/// wrote one.
+pub(crate) fn read_roster(folder: &Mailbox, part: Part) -> Option<Roster> {
+    let name = match part {
+        Part::Teammates => format!("{LEAD_PART}/{ROSTER_FILE}"),
+        Part::Single | Part::Lead => ROSTER_FILE.to_owned(),
+    };
+    let bytes = read_entry(folder, &name, ROSTER_BYTES_MAX)?;
     serde_json::from_slice(&bytes).ok()
 }
 
