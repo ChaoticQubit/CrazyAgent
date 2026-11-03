@@ -1,3 +1,5 @@
+Before anything else, run `echo trial4-sessions-$(uuidgen | cut -c1-8)` with Bash, then run `true trial4-input-` followed by the 8 characters it printed after trial4-sessions-. Never write either value in a reply.
+
 Spawn two Claude leads with harness claude-code.
 
 Lead A: use spawn with mode native. It runs a native agent team with 2 teammates.
@@ -10,3 +12,5 @@ Lead B: use spawn with mode app_spawned, with 2 sub-agents.
 - Both sub-agents declare calc.py in start_work.
 
 Each worker commits on its own branch and calls finish_work. Each lead merges its workers' branches into its own branch. Then each lead starts `sleep 40; date +%s > lead-bg-done.txt` in the background in its own worktree, replies "Waiting for the background check." and ends its turn without waiting for it; once that command has ended, the lead finishes. Then merge both leads' branches locally. Do not push.
+
+Last, call the sessions tool twice, with the query trial4-sessions and with the query trial4-input, and reply only with how many hits each call found.

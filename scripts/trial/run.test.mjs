@@ -246,6 +246,8 @@ test("renderPrompt fills every project placeholder and refuses an unknown one", 
   assert.ok(rendered.includes("`cat /Users/owner/Projects/ca-trial-3/private/note.txt`"));
   assert.ok(rendered.includes("sleep 45; date +%s > bg-done.txt"));
   assert.ok(rendered.includes("Then each lead starts `sleep 40; date +%s > lead-bg-done.txt` in the background in its own worktree"));
+  assert.ok(rendered.startsWith("Before anything else, run `echo trial4-sessions-$(uuidgen | cut -c1-8)` with Bash, then run `true trial4-input-`"));
+  assert.ok(rendered.trimEnd().endsWith("Last, call the sessions tool twice, with the query trial4-sessions and with the query trial4-input, and reply only with how many hits each call found."));
   assert.throws(() => renderPrompt("{{PROJECT}} and {{OTHER}}", "/p"), /OTHER/);
 });
 
