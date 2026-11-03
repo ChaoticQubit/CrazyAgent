@@ -173,9 +173,10 @@ fn a_tools_on_claude_agent_cannot_change_its_managed_profile_home() {
     agent_cannot_change_the_profile_home("claude-code", &claude());
 }
 
-const LAUNCH_FILES: [(&str, &str); 6] = [
+const LAUNCH_FILES: [(&str, &str); 7] = [
     ("CLAUDE.md", "engine claude\n"),
     ("AGENTS.md", "engine codex\n"),
+    ("config.toml", "developer_instructions = \"engine\"\n"),
     ("crazyagent/instructions.md", "engine instructions\n"),
     ("crazyagent/plugin/hooks/hooks.json", "{\"hooks\":{}}\n"),
     ("crazyagent-relay/hooks/hooks.json", "{\"hooks\":{}}\n"),
@@ -185,16 +186,17 @@ const LAUNCH_FILES: [(&str, &str); 6] = [
     ),
 ];
 
-const LAUNCH_NAMES: [&str; 6] = [
-    "CLAUDE.md",
-    "AGENTS.md",
-    "AGENTS.override.md",
+const LAUNCH_NAMES: [&str; 7] = [
+    "claude.md",
+    "agents.md",
+    "agents.override.md",
+    "config.toml",
     "crazyagent",
     "crazyagent-relay",
     "skills/crazyagent",
 ];
 
-const LAUNCH_ATTEMPTS: [(&str, &str); 13] = [
+const LAUNCH_ATTEMPTS: [(&str, &str); 23] = [
     ("overwrite_claude", "printf planted > {p}/CLAUDE.md"),
     ("append_agents", "printf planted >> {p}/AGENTS.md"),
     ("create_override", "printf planted > {p}/AGENTS.override.md"),
@@ -226,6 +228,31 @@ const LAUNCH_ATTEMPTS: [(&str, &str); 13] = [
     ),
     ("chmod", "chmod 644 {p}/crazyagent/instructions.md"),
     ("touch", "touch {p}/AGENTS.md"),
+    ("overwrite_config", "printf planted > {p}/config.toml"),
+    ("case_config", "printf planted >> {p}/Config.TOML"),
+    ("case_claude", "printf planted > {p}/claude.md"),
+    (
+        "case_state",
+        "printf planted > {p}/Crazyagent/instructions.md",
+    ),
+    ("case_override", "printf planted > {p}/agents.OVERRIDE.md"),
+    (
+        "case_relay",
+        "printf planted > {p}/CrazyAgent-Relay/hooks/hooks.json",
+    ),
+    (
+        "case_skills_parent",
+        "printf planted > {p}/SKILLS/crazyagent/rules/SKILL.md",
+    ),
+    (
+        "case_skills",
+        "printf planted > {p}/skills/CrazyAgent/rules/SKILL.md",
+    ),
+    (
+        "skills_swap",
+        "mkdir -p {p}/ll2/crazyagent/rules && printf planted > {p}/ll2/crazyagent/rules/SKILL.md && mv {p}/skills {p}/skills-away && mv {p}/ll2 {p}/skills",
+    ),
+    ("case_skills_move", "mv {p}/Skills {p}/skills-moved"),
 ];
 
 const LAUNCH_ALLOWED: [(&str, &str); 3] = [
@@ -239,8 +266,9 @@ const LAUNCH_ALLOWED: [(&str, &str); 3] = [
 
 /// Seeds the agent's own home with the instruction, skill and hook files the engine writes
 /// there before each launch, lets a tools-on agent try to change them every way a shell
-/// can (LL-2), and requires every attempt refused, those files byte for byte unchanged
-/// and the agent still able to write the rest of its home and its worktree.
+/// can, in any letter case and by swapping in the folder above them (LL-2, r1), and
+/// requires every attempt refused, those files byte for byte unchanged and the agent
+/// still able to write the rest of its home and its worktree.
 /// Input: the launch harness and its real executable.
 fn agent_cannot_change_its_own_launch_files(harness: &'static str, executable: &Path) {
     let agent = ManagedAgent::new(harness, executable);
@@ -254,7 +282,10 @@ fn agent_cannot_change_its_own_launch_files(harness: &'static str, executable: &
     let launch = |entries: BTreeMap<PathBuf, Entry>| {
         entries
             .into_iter()
-            .filter(|(path, _)| LAUNCH_NAMES.iter().any(|name| path.starts_with(name)))
+            .filter(|(path, _)| {
+                let folded = PathBuf::from(path.to_string_lossy().to_lowercase());
+                LAUNCH_NAMES.iter().any(|name| folded.starts_with(name))
+            })
             .collect::<BTreeMap<_, _>>()
     };
     let before = launch(snapshot(home));
