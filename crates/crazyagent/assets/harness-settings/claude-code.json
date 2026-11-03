@@ -456,9 +456,10 @@
     {
       "key": "autoMemoryEnabled",
       "label": "Auto memory enabled",
-      "help": "Turn auto memory on or off. When `false`, Claude doesn't read from or write to the auto memory directory. You can also toggle it with `/memory` during a session, which writes this key to your user settings.",
+      "help": "Turn auto memory on or off. When `false`, Claude doesn't read from or write to the auto memory directory. You can also toggle it with `/memory` during a session, which writes this key to your user settings. CrazyAgent starts its agents and masters with this off, so no memory carries from one session into the next without review; Claude Code's own default is on.",
       "type": "bool",
-      "default": true,
+      "default": false,
+      "harness_default": true,
       "apply": "claude_settings",
       "scope": "app_and_project",
       "locked": null

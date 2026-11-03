@@ -1036,6 +1036,59 @@ fn every_key_a_claude_master_sets_is_locked_in_the_shipped_catalog() {
 }
 
 #[test]
+fn a_claude_master_starts_with_auto_memory_off_unless_the_owner_turns_it_on() {
+    use crate::harness_settings::{Source, Stored, apply::Applied, catalog, resolve};
+    let shipped = catalog::builtin("claude-code").unwrap().unwrap();
+    let version = shipped.qualified_versions.first().map(String::as_str);
+    let directories = Directories::new();
+    let on: Stored = [("autoMemoryEnabled".to_owned(), serde_json::json!(true))].into();
+    for (app, expected, source) in [
+        (Stored::new(), false, Source::Default),
+        (on, true, Source::App),
+    ] {
+        let settings = Applied::new(&shipped, resolve(&shipped, version, &app, None));
+        let value = settings
+            .values()
+            .iter()
+            .find(|value| value.key == "autoMemoryEnabled")
+            .unwrap();
+        assert_eq!(value.source, source);
+        let command = launch_command(
+            Path::new("/approved/claude"),
+            &directories.project,
+            &directories.home,
+            "native-default",
+            None,
+            &settings,
+        )
+        .unwrap();
+        let args = arguments(&command);
+        let at = args.iter().position(|arg| arg == "--settings").unwrap() + 1;
+        let document: serde_json::Value = serde_json::from_str(&args[at]).unwrap();
+        assert_eq!(document["autoMemoryEnabled"], serde_json::json!(expected));
+        assert_eq!(master_settings_of(&args[at]), Some(settings.clone()));
+    }
+    let unqualified = Applied::new(
+        &shipped,
+        resolve(&shipped, Some("2.1.0"), &Stored::new(), None),
+    );
+    let command = launch_command(
+        Path::new("/approved/claude"),
+        &directories.project,
+        &directories.home,
+        "native-default",
+        None,
+        &unqualified,
+    )
+    .unwrap();
+    let args = arguments(&command);
+    let at = args.iter().position(|arg| arg == "--settings").unwrap() + 1;
+    let document: serde_json::Value = serde_json::from_str(&args[at]).unwrap();
+    assert!(document.get("autoMemoryEnabled").is_none());
+    assert_eq!(master_settings_of(&args[at]), Some(unqualified.clone()));
+}
+
+#[test]
 fn the_host_runs_a_master_only_with_settings_the_shipped_catalog_allows() {
     use crate::engine::master_host_fixture::MasterFixture;
     use crate::harness_settings::apply::Applied;

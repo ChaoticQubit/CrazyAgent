@@ -42,8 +42,9 @@ impl Catalog {
 }
 
 /// One setting of a harness: its name, label and help, its type with options or bounds,
-/// the harness's own default, how a start applies it, whether a project may override it,
-/// and, for a key the engine enforces, the reason and the value the engine sets.
+/// the default a start uses, which is the harness's own unless `harness_default` names the
+/// harness's own beside the engine's choice, how a start applies it, whether a project may
+/// override it, and, for a key the engine enforces, the reason and the value the engine sets.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Key {
@@ -55,6 +56,8 @@ pub struct Key {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<String>,
     pub default: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub harness_default: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub min: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -213,6 +216,12 @@ fn key_ok(harness: &str, key: &Key) -> bool {
             && (locked.engine_value.is_null()
                 || (applied_at_launch(key.apply) && check_value(key, &locked.engine_value).is_ok()))
     });
+    let chosen = key.harness_default.as_ref().is_none_or(|own| {
+        key.locked.is_none()
+            && applied_at_launch(key.apply)
+            && *own != key.default
+            && check_value(key, own).is_ok()
+    });
     key_valid(&key.key)
         && line(&key.label, LABEL_BYTES_MAX)
         && line(&key.help, HELP_BYTES_MAX)
@@ -221,4 +230,5 @@ fn key_ok(harness: &str, key: &Key) -> bool {
         && applies
         && check_value(key, &key.default).is_ok()
         && locked
+        && chosen
 }

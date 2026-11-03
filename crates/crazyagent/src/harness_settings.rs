@@ -387,12 +387,12 @@ pub(crate) fn setting(
     row(here, effective, source, access)
 }
 
-/// Resolves what one harness start applies: for a qualified version, every unlocked key
-/// the owner set that a launch writes (catalog default, then app, then project), then every
-/// locked key with the engine's value, last; an unqualified version gets only the locked
-/// keys. Inputs: the
-/// catalog, the installed version, the app values and the project's, none for an app-level
-/// start. Output: the values in apply order.
+/// Resolves what one harness start applies: for a qualified version, every unlocked key a
+/// launch writes that the owner set, or whose default the engine picks over the harness's
+/// own (catalog default, then app, then project), then every locked key with the engine's
+/// value, last; an unqualified version gets only the locked keys. Inputs: the catalog, the
+/// installed version, the app values and the project's, none for an app-level start.
+/// Output: the values in apply order.
 pub fn resolve(
     catalog: &Catalog,
     installed: Option<&str>,
@@ -417,7 +417,7 @@ pub fn resolve(
             continue;
         }
         let (value, source) = layered(key, app, project);
-        if source != Source::Default {
+        if source != Source::Default || key.harness_default.is_some() {
             owner.push(resolved(value, source));
         }
     }

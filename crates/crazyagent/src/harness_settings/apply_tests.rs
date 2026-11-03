@@ -761,7 +761,18 @@ fn every_key_the_engine_sets_at_launch_is_locked_with_a_reason() {
         let shipped = catalog::builtin(harness).unwrap().unwrap();
         let version = shipped.qualified_versions.first().map(String::as_str);
         let settings = resolved(&case.db, &shipped, version, Some(&case.project)).unwrap();
-        assert!(settings.values().is_empty());
+        let chosen = shipped
+            .keys
+            .iter()
+            .filter(|key| key.harness_default.is_some())
+            .count();
+        assert_eq!(settings.values().len(), chosen);
+        assert!(settings.values().iter().all(|value| {
+            value.source == Source::Default
+                && shipped
+                    .key(&value.key)
+                    .is_some_and(|key| key.harness_default.is_some() && key.default == value.value)
+        }));
         assert_eq!(settings.harness(), Some(harness));
         let mut launched: std::collections::BTreeMap<String, Vec<Value>> = Default::default();
         let mut launches = 0;
@@ -822,6 +833,78 @@ fn every_key_the_engine_sets_at_launch_is_locked_with_a_reason() {
             );
         }
     }
+}
+
+#[test]
+fn auto_memory_starts_off_for_claude_agents_unless_the_owner_turns_it_on() {
+    let case = Case::new();
+    let shipped = catalog::builtin("claude-code").unwrap().unwrap();
+    let key = shipped.key("autoMemoryEnabled").unwrap();
+    assert!(key.locked.is_none());
+    assert_eq!(key.default, json!(false));
+    assert_eq!(key.harness_default, Some(json!(true)));
+    let chosen: Vec<String> = catalog::BUILTIN
+        .iter()
+        .flat_map(|(harness, _)| catalog::builtin(harness).unwrap().unwrap().keys)
+        .filter(|key| key.harness_default.is_some())
+        .map(|key| key.key)
+        .collect();
+    assert_eq!(chosen, ["autoMemoryEnabled"]);
+    let version = shipped.qualified_versions.first().map(String::as_str);
+    let request = case.request("claude-code", false);
+    let launched = |settings: &Applied| {
+        [
+            case.pane(&request, settings),
+            case.headless(&request, settings),
+        ]
+        .map(|arguments| settings_json(&arguments)["autoMemoryEnabled"].clone())
+    };
+    let off = resolved(&case.db, &shipped, version, Some(&case.project)).unwrap();
+    let value = off
+        .values()
+        .iter()
+        .find(|value| value.key == "autoMemoryEnabled")
+        .unwrap();
+    assert_eq!(
+        (&value.value, value.source),
+        (&json!(false), Source::Default)
+    );
+    assert_eq!(launched(&off), [json!(false), json!(false)]);
+    let empty = Stored::new();
+    let row = crate::harness_settings::setting(
+        &shipped,
+        version,
+        &case.here(),
+        "autoMemoryEnabled",
+        &empty,
+        &empty,
+        0,
+    );
+    assert_eq!(
+        (row.effective, row.source, row.access),
+        (json!(false), Source::Default, Access::Editable)
+    );
+    case.set(
+        &shipped,
+        version,
+        &Scope::App,
+        "autoMemoryEnabled",
+        json!(true),
+    );
+    let on = resolved(&case.db, &shipped, version, Some(&case.project)).unwrap();
+    assert_eq!(launched(&on), [json!(true), json!(true)]);
+    case.set(
+        &shipped,
+        version,
+        &case.here(),
+        "autoMemoryEnabled",
+        json!(false),
+    );
+    let project = resolved(&case.db, &shipped, version, Some(&case.project)).unwrap();
+    assert_eq!(launched(&project), [json!(false), json!(false)]);
+    let unqualified = resolved(&case.db, &shipped, Some("2.1.0"), Some(&case.project)).unwrap();
+    assert!(unqualified.values().is_empty());
+    assert_eq!(launched(&unqualified), [Value::Null, Value::Null]);
 }
 
 #[test]

@@ -167,6 +167,29 @@ fn a_catalog_that_breaks_the_contract_is_refused() {
             Box::new(|c| c["keys"][3]["key"] = json!("hide_agent_reasoning.label")),
         ),
         (
+            "a harness default equal to the default",
+            Box::new(|c| c["keys"][0]["harness_default"] = json!(false)),
+        ),
+        (
+            "a harness default of the wrong type",
+            Box::new(|c| c["keys"][0]["harness_default"] = json!("true")),
+        ),
+        (
+            "a harness default outside the options",
+            Box::new(|c| c["keys"][1]["harness_default"] = json!("extreme")),
+        ),
+        (
+            "a harness default on a locked key",
+            Box::new(|c| c["keys"][4]["harness_default"] = json!("workspace-write")),
+        ),
+        (
+            "a harness default on a key no launch writes",
+            Box::new(|c| {
+                c["keys"][0]["apply"] = json!("arg");
+                c["keys"][0]["harness_default"] = json!(true);
+            }),
+        ),
+        (
             "too many keys",
             Box::new(|c| {
                 let key = c["keys"][0].clone();
@@ -193,6 +216,13 @@ fn a_catalog_that_breaks_the_contract_is_refused() {
     let mut unlocked = fixture_json();
     unlocked["keys"][4]["locked"]["engine_value"] = Value::Null;
     assert!(catalog::parse(&serde_json::to_vec(&unlocked).unwrap()).is_ok());
+    let mut chosen = fixture_json();
+    chosen["keys"][0]["harness_default"] = json!(true);
+    let parsed = catalog::parse(&serde_json::to_vec(&chosen).unwrap()).unwrap();
+    assert_eq!(parsed.keys[0].harness_default, Some(json!(true)));
+    assert_eq!(parsed.keys[1].harness_default, None);
+    let written = serde_json::to_value(&parsed.keys[1]).unwrap();
+    assert!(written.get("harness_default").is_none());
     assert_eq!(
         catalog::parse(&vec![b' '; CATALOG_BYTES_MAX + 1])
             .unwrap_err()
@@ -349,11 +379,12 @@ pub(crate) fn codex_file_settings(text: &str) -> Vec<(String, Value)> {
 }
 
 /// Asserts that every setting one engine launch passes is locked in the shipped catalog of
-/// its harness: every catalog key on, inside or around it is locked with a reason; a scalar
-/// value has at least one such key, and a lock that names an engine value names this one; a
-/// table or list sits under a key the engine reserves, since no catalog type can hold one.
-/// Inputs: the harness and the launch's settings as dotted key and value. A failed check
-/// panics naming the key.
+/// its harness, or is an open key whose default the engine picks over the harness's own,
+/// set to that default: every catalog key on, inside or around it is locked with a reason; a
+/// scalar value has at least one such key, and a lock that names an engine value names this
+/// one; a table or list sits under a key the engine reserves, since no catalog type can hold
+/// one. Inputs: the harness and the launch's settings as dotted key and value, with no owner
+/// value among them. A failed check panics naming the key.
 pub(crate) fn assert_locked_in_shipped(harness: &str, settings: &[(String, Value)]) {
     let shipped = catalog::builtin(harness)
         .unwrap()
@@ -365,6 +396,16 @@ pub(crate) fn assert_locked_in_shipped(harness: &str, settings: &[(String, Value
     };
     assert!(!settings.is_empty());
     for (name, value) in settings {
+        if let Some(key) = shipped
+            .key(name)
+            .filter(|key| key.locked.is_none() && key.harness_default.is_some())
+        {
+            assert_eq!(
+                *value, key.default,
+                "{harness}: the engine starts {name} at another value than its catalog default"
+            );
+            continue;
+        }
         let near: Vec<&Key> = shipped
             .keys
             .iter()
@@ -417,7 +458,15 @@ fn the_launch_lock_check_trips_on_an_unlocked_or_missing_key() {
     );
     assert_locked_in_shipped("codex", &codex);
     assert_locked_in_shipped("claude-code", &claude);
+    assert_locked_in_shipped(
+        "claude-code",
+        &[("autoMemoryEnabled".to_owned(), json!(false))],
+    );
     for (harness, settings) in [
+        (
+            "claude-code",
+            vec![("autoMemoryEnabled".to_owned(), json!(true))],
+        ),
         (
             "codex",
             vec![("not_a_codex_setting".to_owned(), json!(true))],
@@ -574,6 +623,7 @@ fn no_catalog_key_can_carry_a_credential_or_environment_secret() {
                 .iter()
                 .map(String::as_str)
                 .chain(key.default.as_str())
+                .chain(key.harness_default.as_ref().and_then(Value::as_str))
                 .chain(lock.and_then(|lock| lock.engine_value.as_str()));
             for text in texts {
                 assert!(!secret_like(text), "{harness}: {} carries {text}", key.key);

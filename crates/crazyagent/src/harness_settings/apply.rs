@@ -6,11 +6,11 @@ use serde_json::{Map, Value};
 use std::path::Path;
 
 /// The owner's settings one harness start applies: only the unlocked keys the owner set,
-/// as the app value or the project override, in catalog order, and the locked keys whose
-/// engine value the catalog names, which every launch must already use. A locked key is
-/// never among the owner's values, and each launch builder writes its own values over
-/// these, last. The default applies nothing, so the harness starts with the engine's values
-/// only.
+/// as the app value or the project override, and those whose default the engine picks over
+/// the harness's own, in catalog order, and the locked keys whose engine value the catalog
+/// names, which every launch must already use. A locked key is never among the owner's
+/// values, and each launch builder writes its own values over these, last. The default
+/// applies nothing, so the harness starts with the engine's values only.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Applied {
     harness: Option<String>,
@@ -27,12 +27,13 @@ impl Applied {
             .into_iter()
             .partition(|value| value.source == Source::Engine);
         assert!(values.iter().all(|value| {
-            matches!(value.source, Source::App | Source::Project)
-                && catalog.key(&value.key).is_some_and(|key| {
-                    key.locked.is_none()
-                        && key.apply == value.apply
-                        && super::applied_at_launch(key.apply)
-                })
+            catalog.key(&value.key).is_some_and(|key| {
+                (matches!(value.source, Source::App | Source::Project)
+                    || (value.source == Source::Default && key.harness_default.is_some()))
+                    && key.locked.is_none()
+                    && key.apply == value.apply
+                    && super::applied_at_launch(key.apply)
+            })
         }));
         assert!(locked.iter().all(|value| {
             catalog.key(&value.key).is_some_and(|key| {
@@ -190,10 +191,11 @@ fn insert(map: &mut Map<String, Value>, key: &str, value: Value) {
 
 /// Reads back the owner's values a settings object carries, for a command verifier: every
 /// value must sit at an unlocked key of the catalog with this apply and pass its checks,
-/// and merging them over the engine's object must give the same object. The catalog's
-/// locked keys come with them, as a launch resolves them. Inputs: the shipped catalog, none
-/// when the harness has none, the engine's object, the apply, the reserved keys and the
-/// JSON text. Output: the settings, or none for any other text.
+/// and merging them over the engine's object must give the same object. A value equal to
+/// a default the engine picks over the harness's own reads back as that default. The
+/// catalog's locked keys come with them, as a launch resolves them. Inputs: the shipped
+/// catalog, none when the harness has none, the engine's object, the apply, the reserved
+/// keys and the JSON text. Output: the settings, or none for any other text.
 pub fn read_back(
     catalog: Option<&Catalog>,
     engine: &Value,
@@ -212,10 +214,11 @@ pub fn read_back(
                 .filter_map(|key| {
                     let value = at(&parsed, &key.key)?;
                     super::check_value(key, value).ok()?;
+                    let chosen = key.harness_default.is_some() && *value == key.default;
                     Some(Resolved {
                         key: key.key.clone(),
                         value: value.clone(),
-                        source: Source::App,
+                        source: if chosen { Source::Default } else { Source::App },
                         apply,
                     })
                 });
