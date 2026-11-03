@@ -141,6 +141,11 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
       if (!["waiting", "running"].includes(view.graph.kind) && !["waiting", "running"].includes(view.mapping.kind)) break;
       assert.ok(Date.now() < deadline, `onboarding still running: ${JSON.stringify(view)}`);
     }
+    assert.equal((await value(bridge, "desktop_open_project", { id: project })).project_id, project, "the new project opens");
+    const pools = await value(bridge, "desktop_model_access_page", { collection: "pools", next: false });
+    assert.equal(pools.writable, true, "the test engine's settings are writable");
+    const assigned = await value(bridge, "desktop_edit_model_access", { ticket: pools.ticket, edit: { kind: "assign_project_pool", project, pool: "local-pool" }, generation: 4 });
+    assert.equal(assigned.outcome, "applied", `the project gets the pool its sub-agents run on: ${JSON.stringify(assigned)}`);
     const status = () => value(bridge, "desktop_team_status", { id: project });
 
     const dist = join(root, "dist");
