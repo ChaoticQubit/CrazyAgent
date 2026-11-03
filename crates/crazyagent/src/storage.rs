@@ -956,7 +956,8 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::master_sessions::initialize(connection)?;
     native_auth::initialize(connection)?;
     master_bootstrap::initialize(connection)?;
-    harness_groups::initialize(connection)
+    harness_groups::initialize(connection)?;
+    crate::tracker::initialize(connection)
 }
 
 fn finish_native_auth_without_host(
