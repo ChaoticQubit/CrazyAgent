@@ -228,7 +228,7 @@ struct SettingsWriter;
 
 impl Links for SettingsWriter {
     fn kinds(&self) -> &[LinkKind] {
-        super::Host.kinds()
+        &super::host::KINDS
     }
 
     fn resolve(
