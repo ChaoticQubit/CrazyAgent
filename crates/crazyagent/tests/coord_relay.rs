@@ -120,6 +120,12 @@ impl Team {
         self.mailbox.join(name)
     }
 
+    fn lead_entry(&self, name: &str) -> PathBuf {
+        self.mailbox
+            .join(crazyagent::coord::relay::LEAD_PART)
+            .join(name)
+    }
+
     fn text(&self, name: &str) -> Option<String> {
         std::fs::read_to_string(self.entry(name)).ok()
     }
@@ -712,6 +718,30 @@ fn with_first_edit_the_hook_returns_the_reminder_once() {
         team.hook("edit", Some(MATE_PANE), edit(MATE_SESSION, &own)),
         "",
         "a session that queried the graph first gets no reminder"
+    );
+}
+
+/// Under the split layout the engine keeps `relay.json` in the lead's part alone, and a
+/// native teammate's hook, which never opens that part, still reads the project's nudges
+/// from it (DEC-111 relay mailbox forgery, C1).
+#[test]
+fn a_native_teammate_reads_the_roster_the_engine_keeps_in_the_leads_part() {
+    let team = Team::new();
+    nudged(&team, Nudges::FirstEdit);
+    assert!(
+        team.lead_entry("relay.json").is_file() && !team.entry("relay.json").exists(),
+        "the roster sits in the lead's part, where no teammate writes"
+    );
+    let own = team.root.join(".worktrees").join("greet").join("a.rs");
+    let answer: Value = serde_json::from_str(
+        team.hook("edit", Some(MATE_PANE), edit(MATE_SESSION, &own))
+            .trim(),
+    )
+    .unwrap();
+    assert_eq!(
+        answer["hookSpecificOutput"]["additionalContext"],
+        "You are editing before any code-graph query. Run graphify query first if this touches code you have not mapped.",
+        "the teammate's hook read the FirstEdit nudges from the lead's part"
     );
 }
 
