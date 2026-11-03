@@ -108,15 +108,15 @@ fn the_settings_line_names_the_level_and_the_allowed_toolchains() {
 }
 
 #[test]
-fn the_none_choice_says_port_443_to_any_host_and_full_access_makes_it_moot() {
+fn the_none_choice_says_it_limits_agents_to_their_models_port_and_full_access_makes_it_moot() {
     assert_eq!(
         network_help(AgentNetwork::None),
-        "None limits agents to port 443 (HTTPS to any host); it does not yet limit them to the model host. The plugin check reaches nothing."
+        "None limits agents to their model's port: port 443 to any host for a hosted model, or only the local model's port. It does not yet limit them to the model host. The plugin check reaches nothing."
     );
     for network in AgentNetwork::ALL {
         let help = network_help(network);
         assert!(
-            !help.contains("model's port") && !help.contains("only the model"),
+            !help.contains("only the model") && !help.contains("port 443 (HTTPS to any host)"),
             "{help}"
         );
     }
