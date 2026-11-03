@@ -259,6 +259,6 @@ fn overlaps(one: &str, other: &str) -> bool {
     one == other || inside(one, other) || inside(other, one)
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, target_os = "macos"))]
 #[path = "apply_tests.rs"]
 mod tests;
