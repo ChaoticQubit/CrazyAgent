@@ -1,7 +1,10 @@
 use super::*;
 use crate::checks::markers::{
-    NODE_SKIP_CALL, NODE_SKIP_OPTION, NODE_TODO_CALL, PYTHON_SKIP, PYTHON_SKIPIF, PYTHON_XFAIL,
-    RUST_IGNORE,
+    NODE_ONLY_CALL, NODE_ONLY_OPTION, NODE_SKIP_CALL, NODE_SKIP_OPTION, NODE_TODO_CALL,
+    NODE_TODO_OPTION, NODE_XDESCRIBE_CALL, NODE_XIT_CALL, NODE_XTEST_CALL, PYTHON_EXPECTED_FAILURE,
+    PYTHON_IMPORTORSKIP, PYTHON_SKIP, PYTHON_SKIP_CALL, PYTHON_SKIP_TEST, PYTHON_SKIPIF,
+    PYTHON_UNITTEST_SKIP, PYTHON_UNITTEST_SKIP_IF, PYTHON_UNITTEST_SKIP_UNLESS, PYTHON_XFAIL,
+    RUST_IGNORE, RUST_SHOULD_PANIC,
 };
 use crate::checks::{CheckKind, CheckSpec, NetworkMode, ProfileId, ReportFormat, Trigger};
 use crate::landing::{AgentKind, ChangeAgent, FileMark, TurnEnd, TurnOutcome, Workspace};
@@ -60,12 +63,19 @@ fn git_in(home: &Path, dir: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
-/// Creates the trackwright run and result tables with the columns of the test management
-/// contract's migration step 2, until `trackwright-core` is a dependency of this crate and
-/// its migration makes them. Input: the engine store.
+/// Creates the trackwright project, run and result tables with the columns of the core
+/// schema and the test management contract's migration step 2, and project 1 keyed `CA`,
+/// until `trackwright-core` is a dependency of this crate and its migration makes them.
+/// Input: the engine store.
 fn tracker_tables(db: &Connection) {
     db.execute_batch(
-        "CREATE TABLE tk_runs(
+        "CREATE TABLE tk_projects(
+            id INTEGER PRIMARY KEY,
+            key TEXT NOT NULL UNIQUE CHECK (length(key) BETWEEN 2 AND 8 AND key NOT GLOB '*[^A-Z]*'),
+            name TEXT NOT NULL, created_ms INTEGER NOT NULL, version INTEGER NOT NULL);
+        INSERT INTO tk_projects(id, key, name, created_ms, version)
+            VALUES (1, 'CA', 'Project one', 1, 1);
+        CREATE TABLE tk_runs(
             id INTEGER PRIMARY KEY, project INTEGER NOT NULL, number INTEGER NOT NULL,
             plan_id INTEGER, batch TEXT, title TEXT NOT NULL,
             state TEXT NOT NULL CHECK (state IN ('running', 'finished', 'interrupted')),
@@ -184,10 +194,9 @@ impl Case {
         assess(&self.db, &subject, reported)
     }
 
-    /// Records one finished run as the engine's recorder would: its source on a commit, its
-    /// policy naming the check, one passed result per name (the first failed when the
-    /// verdict is failed) and its integrity block. Inputs: the commit, the check id, the
-    /// verdict, the finish time, the names and the block. Output: the run row id.
+    /// Records one finished run with one passed result per name, the first failed when the
+    /// verdict is failed. Inputs: the commit, the check id, the verdict, the finish time,
+    /// the names and the block. Output: the run row id.
     fn seed_run(
         &self,
         commit: &str,
@@ -195,6 +204,34 @@ impl Case {
         verdict: &str,
         finished_ms: i64,
         names: &[&str],
+        integrity: Option<&str>,
+    ) -> i64 {
+        let results: Vec<(&str, &str)> = names
+            .iter()
+            .enumerate()
+            .map(|(index, name)| {
+                let outcome = if index == 0 && verdict == "failed" {
+                    "failed"
+                } else {
+                    "passed"
+                };
+                (*name, outcome)
+            })
+            .collect();
+        self.seed_outcomes(commit, check, verdict, finished_ms, &results, integrity)
+    }
+
+    /// Records one finished run as the engine's recorder would: its source on a commit, its
+    /// policy naming the check, its results with their outcomes and its integrity block.
+    /// Inputs: the commit, the check id, the verdict, the finish time, each result name
+    /// with its outcome, and the block. Output: the run row id.
+    fn seed_outcomes(
+        &self,
+        commit: &str,
+        check: &str,
+        verdict: &str,
+        finished_ms: i64,
+        results: &[(&str, &str)],
         integrity: Option<&str>,
     ) -> i64 {
         let number: i64 = self
@@ -214,15 +251,17 @@ impl Case {
             "argv": ["cargo", "test"], "toolchain": {"family": "rust", "version": "rustc 1.98.1"},
             "sandbox": PROFILE, "network": "off", "timeout_s": 600, "environment": PROFILE,
         });
-        let failed = i64::from(verdict == "failed");
-        let total = i64::try_from(names.len()).unwrap();
+        let count = |outcome: &str| {
+            i64::try_from(results.iter().filter(|(_, got)| *got == outcome).count()).unwrap()
+        };
+        let total = i64::try_from(results.len()).unwrap();
         self.db
             .execute(
                 "INSERT INTO tk_runs(project, number, title, state, verdict, source_json,
                      policy_json, integrity_json, started_ms, finished_ms, recorded_by, total,
                      passed, failed, skipped, errored, version)
                  VALUES (?1, ?2, ?3, 'finished', ?4, ?5, ?6, ?7, ?8, ?8, ?9, ?10, ?11, ?12,
-                     0, 0, 1)",
+                     ?13, ?14, 1)",
                 params![
                     TRACKER_PROJECT,
                     number,
@@ -234,18 +273,15 @@ impl Case {
                     finished_ms,
                     ENGINE_ACTOR,
                     total,
-                    total - failed,
-                    failed
+                    count("passed"),
+                    count("failed"),
+                    count("skipped") + count("not_run"),
+                    count("errored")
                 ],
             )
             .unwrap();
         let run = self.db.last_insert_rowid();
-        for (index, name) in names.iter().enumerate() {
-            let outcome = if index == 0 && failed == 1 {
-                "failed"
-            } else {
-                "passed"
-            };
+        for (index, (name, outcome)) in results.iter().enumerate() {
             self.db
                 .execute(
                     "INSERT INTO tk_results(run_id, position, name, outcome) VALUES (?1, ?2, ?3, ?4)",
@@ -254,6 +290,20 @@ impl Case {
                 .unwrap();
         }
         run
+    }
+
+    /// The short id `CA-R<n>` trackwright shows for a run row. Input: the row id.
+    /// Output: the short id.
+    fn short(&self, run: i64) -> String {
+        let number: i64 = self
+            .db
+            .query_row(
+                "SELECT number FROM tk_runs WHERE id = ?1",
+                params![run],
+                |row| row.get(0),
+            )
+            .unwrap();
+        format!("CA-R{number}")
     }
 }
 
@@ -281,9 +331,17 @@ fn check(id: &str, holdout: bool) -> AdmittedCheck {
 }
 
 fn passed<'a>(names: &[&'a str]) -> Reported<'a> {
+    reported(
+        &names
+            .iter()
+            .map(|name| (*name, ResultOutcome::Passed))
+            .collect::<Vec<_>>(),
+    )
+}
+
+fn reported<'a>(results: &[(&'a str, ResultOutcome)]) -> Reported<'a> {
     Reported {
-        names: names.to_vec(),
-        executed: u32::try_from(names.len()).unwrap(),
+        results: results.to_vec(),
         build_failed: false,
         exit: Some(0),
     }
@@ -342,7 +400,7 @@ fn a_change_set_that_deletes_a_test_records_the_removed_name() {
     assert_eq!(
         integrity.inventory,
         Inventory {
-            baseline_run: Some(baseline),
+            baseline_run: Some(case.short(baseline)),
             removed: vec!["math::subtracts".into()],
             removed_total: 1,
         }
@@ -357,7 +415,7 @@ fn a_change_set_that_deletes_a_test_records_the_removed_name() {
     );
     assert_eq!(
         block["inventory"]["baseline_run"],
-        serde_json::json!(baseline)
+        serde_json::json!("CA-R1")
     );
 }
 
@@ -392,7 +450,8 @@ fn run_base_compares_with_the_latest_finished_base_run_and_off_compares_nothing(
             &passed(&["math::adds"]),
         )
         .unwrap();
-    assert_eq!(integrity.inventory.baseline_run, Some(base_run));
+    assert_eq!(integrity.inventory.baseline_run, Some(case.short(base_run)));
+    assert_eq!(case.short(base_run), "CA-R2");
     assert_eq!(integrity.inventory.removed, ["math::multiplies"]);
     let off = with(|settings| settings.inventory = InventoryMode::Off);
     let integrity = case
@@ -423,8 +482,7 @@ fn a_build_failure_is_not_build_ok_and_never_counts_every_test_as_removed() {
         None,
     );
     let compile_error = Reported {
-        names: Vec::new(),
-        executed: 0,
+        results: Vec::new(),
         build_failed: true,
         exit: Some(101),
     };
@@ -445,8 +503,7 @@ fn a_build_failure_is_not_build_ok_and_never_counts_every_test_as_removed() {
     };
     assert!(!silent.build_ok());
     let failing_tests = Reported {
-        names: vec!["math::adds"],
-        executed: 1,
+        results: vec![("math::adds", ResultOutcome::Failed)],
         build_failed: false,
         exit: Some(101),
     };
@@ -669,7 +726,7 @@ fn a_test_file_git_reads_as_binary_is_unscanned_and_refused_under_refuse() {
     let integrity = case
         .assess(&check("unit", false), &[], &refuse, &passed(&["adds"]))
         .unwrap();
-    assert_eq!(integrity.new_skips, [skip("tests/math.rs", 0, UNSCANNED)]);
+    assert_eq!(integrity.new_skips, [skip("tests/math.rs", 1, UNSCANNED)]);
     assert_eq!(refusal(&integrity, &refuse), Some("checks_new_skips"));
 }
 
@@ -761,7 +818,7 @@ fn a_protected_path_counts_in_any_case_behind_attributes_parents_and_renames() {
             "fixtures/golden.json",
             "tests/.gitattributes",
             "tests/acceptance/flow.rs",
-            "tests/accep\u{200C}tance/hidden.rs",
+            "tests/accep\u{FFFD}tance/hidden.rs",
         ]
     );
 }
@@ -903,7 +960,7 @@ fn escaped() -> char { '\'' }
 # [ ignore ]
 fn spaced() {}
 "##;
-    let found = markers::added(Language::Rust, "", text);
+    let found = markers::added(Language::Rust, "", text).expect("every literal closes");
     let lines: Vec<u32> = found.iter().map(|marker| marker.line).collect();
     assert_eq!(lines, [2, 5, 9]);
     assert!(found.iter().all(|marker| marker.marker == RUST_IGNORE));
@@ -911,4 +968,215 @@ fn spaced() {}
     assert_eq!(Language::of_path("web/app.spec.TSX"), Some(Language::Node));
     assert_eq!(Language::of_path("tests/test_a.py"), Some(Language::Python));
     assert_eq!(Language::of_path("README"), None);
+}
+
+#[test]
+fn a_test_the_baseline_executed_that_this_run_skips_is_a_new_skip() {
+    let case = Case::new(
+        &[("tests/math.rs", MATH_BASE)],
+        &[("tests/math.rs", Some("#[test]\nfn adds() {}\n"))],
+    );
+    case.seed_outcomes(
+        &case.base,
+        "unit",
+        "passed",
+        100,
+        &[
+            ("math::adds", "passed"),
+            ("math::subtracts", "passed"),
+            ("math::divides", "failed"),
+            ("math::slow", "skipped"),
+        ],
+        None,
+    );
+    let now = reported(&[
+        ("math::adds", ResultOutcome::Passed),
+        ("math::subtracts", ResultOutcome::Skipped),
+        ("math::divides", ResultOutcome::NotRun),
+        ("math::slow", ResultOutcome::Skipped),
+        ("math::later", ResultOutcome::NotRun),
+    ]);
+    let flag = ChecksSettings::default();
+    let integrity = case
+        .assess(&check("unit", false), &[], &flag, &now)
+        .unwrap();
+    assert_eq!(
+        integrity.new_skips,
+        [
+            skip("math::divides", 1, SKIPPED_IN_RUN),
+            skip("math::subtracts", 1, SKIPPED_IN_RUN),
+        ]
+    );
+    assert_eq!(integrity.inventory.removed_total, 0);
+    assert_eq!(integrity.executed, 1);
+    assert_eq!(refusal(&integrity, &flag), None);
+    let refuse = with(|settings| settings.skip_markers = SkipMarkers::Refuse);
+    let integrity = case
+        .assess(&check("unit", false), &[], &refuse, &now)
+        .unwrap();
+    assert_eq!(refusal(&integrity, &refuse), Some("checks_new_skips"));
+    let off = with(|settings| settings.skip_markers = SkipMarkers::Off);
+    let integrity = case.assess(&check("unit", false), &[], &off, &now).unwrap();
+    assert_eq!(integrity.new_skips, Vec::<NewSkip>::new());
+    let no_baseline = with(|settings| settings.inventory = InventoryMode::Off);
+    let integrity = case
+        .assess(&check("unit", false), &[], &no_baseline, &now)
+        .unwrap();
+    assert_eq!(integrity.new_skips, Vec::<NewSkip>::new());
+}
+
+#[test]
+fn runtime_and_alias_skips_are_markers_and_should_panic_is_flagged_for_rust() {
+    let lines = |language: Language, text: &str| -> Vec<(u32, &'static str)> {
+        markers::added(language, "", text)
+            .expect("every literal closes")
+            .into_iter()
+            .map(|marker| (marker.line, marker.marker))
+            .collect()
+    };
+    let python = "import pytest
+import unittest
+
+
+def test_adds():
+    pytest.skip(\"later\")
+
+
+class Suite(unittest.TestCase):
+    @unittest.skip(\"later\")
+    def test_one(self):
+        pass
+
+    @unittest.skipIf(True, \"later\")
+    def test_two(self):
+        pass
+
+    @unittest.skipUnless(False, \"later\")
+    def test_three(self):
+        pass
+
+    @unittest.expectedFailure
+    def test_four(self):
+        self.skipTest(\"later\")
+
+
+numpy = pytest.importorskip(\"numpy\")
+";
+    assert_eq!(
+        lines(Language::Python, python),
+        [
+            (6, PYTHON_SKIP_CALL),
+            (10, PYTHON_UNITTEST_SKIP),
+            (14, PYTHON_UNITTEST_SKIP_IF),
+            (18, PYTHON_UNITTEST_SKIP_UNLESS),
+            (22, PYTHON_EXPECTED_FAILURE),
+            (24, PYTHON_SKIP_TEST),
+            (27, PYTHON_IMPORTORSKIP),
+        ]
+    );
+    let node = "import { test, describe, it } from 'node:test';
+
+test('adds', { todo: true }, () => {});
+xit('subtracts', () => {});
+xdescribe('suite', () => {});
+xtest('multiplies', () => {});
+test.only('divides', () => {});
+test('powers', { timeout: 5, only: true }, () => {});
+";
+    assert_eq!(
+        lines(Language::Node, node),
+        [
+            (3, NODE_TODO_OPTION),
+            (4, NODE_XIT_CALL),
+            (5, NODE_XDESCRIBE_CALL),
+            (6, NODE_XTEST_CALL),
+            (7, NODE_ONLY_CALL),
+            (8, NODE_ONLY_OPTION),
+        ]
+    );
+    let rust = "#[test]\n#[should_panic(expected = \"boom\")]\nfn adds() {}\n";
+    assert_eq!(lines(Language::Rust, rust), [(2, RUST_SHOULD_PANIC)]);
+    let python_base = "@pytest.mark.skip\ndef test_a():\n    pass\n";
+    assert_eq!(
+        markers::added(Language::Python, python_base, python_base),
+        Some(Vec::new())
+    );
+}
+
+#[test]
+fn a_js_regex_literal_with_a_quote_or_backtick_does_not_hide_later_markers() {
+    let text = "const a = /`/;
+test.skip('one', () => {});
+const b = /`/;
+const q = /'[\"/]'/g;
+test.skip('two', () => {});
+const c = x / y; test.skip('three'); const d = z / w;
+if (/\\/\\*/.test(s)) test.skip('four');
+function f() { return /`/; }
+test.skip('five');
+const e = (a) / 2; test.skip('six'); const g = (b) / 3;
+";
+    let found = markers::added(Language::Node, "", text).expect("every literal closes");
+    let lines: Vec<u32> = found.iter().map(|marker| marker.line).collect();
+    assert_eq!(lines, [2, 5, 6, 7, 9, 10]);
+    assert!(found.iter().all(|marker| marker.marker == NODE_SKIP_CALL));
+}
+
+#[test]
+fn an_unterminated_literal_leaves_the_head_unscanned() {
+    assert_eq!(
+        markers::added(Language::Node, "", "const t = `open\ntest.skip('x');\n"),
+        None
+    );
+    assert_eq!(
+        markers::added(
+            Language::Rust,
+            "",
+            "/* never closed\n#[ignore]\nfn a() {}\n"
+        ),
+        None
+    );
+    assert_eq!(
+        markers::added(Language::Rust, "", "const R: &str = r#\"open\n#[ignore]\n"),
+        None
+    );
+    assert_eq!(
+        markers::added(Language::Python, "", "DOC = \"\"\"\n@pytest.mark.skip\n"),
+        None
+    );
+    let closed_by_end = markers::added(Language::Rust, "", "#[ignore]\nfn a() {}\n// end")
+        .expect("a line comment may end the text");
+    assert_eq!(closed_by_end.len(), 1);
+    let open_base = markers::added(Language::Node, "const t = `open", "test.skip('x');\n")
+        .expect("only the head must close");
+    assert_eq!(open_base.len(), 1);
+    let case = Case::new(
+        &[("tests/app.test.mjs", "test('adds', () => {});\n")],
+        &[(
+            "tests/app.test.mjs",
+            Some("const t = `open\ntest.skip('adds', () => {});\n"),
+        )],
+    );
+    let refuse = with(|settings| settings.skip_markers = SkipMarkers::Refuse);
+    let integrity = case
+        .assess(&check("unit", false), &[], &refuse, &passed(&["adds"]))
+        .unwrap();
+    assert_eq!(
+        integrity.new_skips,
+        [skip("tests/app.test.mjs", 1, UNSCANNED)]
+    );
+    assert_eq!(refusal(&integrity, &refuse), Some("checks_new_skips"));
+}
+
+#[test]
+fn recorded_text_holds_no_line_break_or_hidden_character() {
+    assert_eq!(
+        recorded("tests/a\nb\u{200B}c\u{202E}d\te\r.rs"),
+        "tests/a\u{FFFD}b\u{FFFD}c\u{FFFD}d\u{FFFD}e\u{FFFD}.rs"
+    );
+    assert_eq!(recorded("plain/path.rs"), "plain/path.rs");
+    let cut = recorded(&format!("{}\u{e9}\u{e9}b", "a".repeat(196)));
+    assert!(cut.len() <= TEXT_BYTES_MAX);
+    assert!(cut.ends_with("..."));
+    assert!(cut.starts_with(&"a".repeat(196)));
 }
