@@ -69,10 +69,10 @@ impl Links for EngineLike {
         let found: Option<(String, i64)> = tx
             .query_row(sql, [target], |row| Ok((row.get(0)?, row.get(1)?)))
             .optional()
-            .map_err(|error| Refusal::new("host_failed", error.to_string()))?;
+            .map_err(|error| Refusal::host("host_failed", error.to_string()))?;
         match found {
-            None => Err(Refusal::new("link_broken", format!("no {kind} {target}"))),
-            Some((owner, _)) if owner != project.as_str() => Err(Refusal::new(
+            None => Err(Refusal::host("link_broken", format!("no {kind} {target}"))),
+            Some((owner, _)) if owner != project.as_str() => Err(Refusal::host(
                 "link_cross_project",
                 format!("{kind} {target} belongs to another project"),
             )),
@@ -102,7 +102,7 @@ impl Evidence for EngineLike {
                 |row| row.get(0),
             )
             .optional()
-            .map_err(|error| Refusal::new("host_failed", error.to_string()))?;
+            .map_err(|error| Refusal::host("host_failed", error.to_string()))?;
         Ok(match accepted {
             Some(1) => EvidenceState {
                 satisfied: true,
