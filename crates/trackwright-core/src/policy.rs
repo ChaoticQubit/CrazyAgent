@@ -108,10 +108,11 @@ pub fn describe(tx: &Transaction<'_>, key: &ProjectKey) -> Result<Vec<Setting>, 
 }
 
 /// Sets one policy key at the version the caller read, and records it. Only the owner sets
-/// policy. Setting the value in force writes nothing. Inputs: the transaction, the host's
-/// authority, the actor, the project key, the setting, its new value as a word (an option's
-/// name, or a number of days for `cycle_days`), the version (0 for a key never set) and the
-/// time. Output: the policy now in force, or `owner_only`, `policy_value_invalid` or
+/// policy. Setting the value a key already stores writes nothing; a key never set is stored
+/// even at its default, at version 1. Inputs: the transaction, the host's authority, the
+/// actor, the project key, the setting, its new value as a word (an option's name, or a
+/// number of days for `cycle_days`), the version (0 for a key never set) and the time.
+/// Output: the policy now in force, or `owner_only`, `policy_value_invalid` or
 /// `stale_version`.
 #[allow(clippy::too_many_arguments)]
 pub fn set(

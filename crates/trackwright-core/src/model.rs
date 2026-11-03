@@ -43,6 +43,7 @@ pub mod codes {
     pub const CHECK_UNKNOWN: &str = "check_unknown";
     pub const LINK_KIND_UNKNOWN: &str = "link_kind_unknown";
     pub const NOTIFY_TOO_WIDE: &str = "notify_too_wide";
+    pub const CRITERION_NEEDS_CHECK: &str = "criterion_needs_check";
 }
 
 pub const ACTOR_BYTES_MAX: usize = 128;

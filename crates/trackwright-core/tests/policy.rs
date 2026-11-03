@@ -920,3 +920,176 @@ fn notify_reevaluates_only_tickets_linked_to_that_target() {
     );
     tx.commit().unwrap();
 }
+
+#[test]
+fn under_evidence_only_the_owner_or_engine_proves_a_criterion_without_checks() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = opened(dir.path());
+    let tx = store.transaction().unwrap();
+    project(&tx);
+    let agent = actor("agent:w1");
+    let theirs = ticket(&tx, &owner(), "The owner's ticket");
+    let done = criteria::add_criterion(&tx, &Standalone, &agent, &theirs, "done", 1_200).unwrap();
+    let own = ticket(&tx, &agent, "The agent's own ticket");
+    let mine =
+        criteria::add_criterion(&tx, &Standalone, &agent, &own, "Mine works", 1_210).unwrap();
+    let before = count(&tx, "tk_events");
+    for (id, criterion) in [(&theirs, &done), (&own, &mine)] {
+        let by_hand = criteria::set_criterion(
+            &tx,
+            &Standalone,
+            &agent,
+            id,
+            criterion.position,
+            criterion.version,
+            CriterionState::Met,
+            1_300,
+        );
+        assert_eq!(refused(by_hand), codes::CRITERION_NEEDS_CHECK);
+        assert_eq!(store::ticket(&tx, id).unwrap().status, TicketStatus::Todo);
+        assert_eq!(
+            criteria::criteria(&tx, id).unwrap()[0].state,
+            CriterionState::Open
+        );
+    }
+    assert_eq!(
+        count(&tx, "tk_events"),
+        before,
+        "a refused set writes nothing"
+    );
+
+    let by_engine = criteria::set_criterion(
+        &tx,
+        &Standalone,
+        &actor("engine:ci"),
+        &theirs,
+        done.position,
+        done.version,
+        CriterionState::Met,
+        1_400,
+    )
+    .unwrap();
+    assert_eq!(by_engine.criterion.state, CriterionState::Met);
+    assert_eq!(by_engine.ticket.status, TicketStatus::Done);
+    assert_eq!(by_engine.ticket.closed_by, Some(Actor::host("evidence")));
+    let by_owner = criteria::set_criterion(
+        &tx,
+        &Standalone,
+        &owner(),
+        &own,
+        mine.position,
+        mine.version,
+        CriterionState::Met,
+        1_410,
+    )
+    .unwrap();
+    assert_eq!(by_owner.ticket.status, TicketStatus::Done);
+
+    set_policy(&tx, PolicyKey::Close, "agents");
+    let later = ticket(&tx, &owner(), "Agents close this one");
+    let it = criteria::add_criterion(&tx, &Standalone, &agent, &later, "done", 1_500).unwrap();
+    let set = criteria::set_criterion(
+        &tx,
+        &Standalone,
+        &agent,
+        &later,
+        it.position,
+        it.version,
+        CriterionState::Met,
+        1_510,
+    )
+    .unwrap();
+    assert_eq!(set.criterion.state, CriterionState::Met);
+    assert_eq!(
+        set.ticket.status,
+        TicketStatus::Todo,
+        "only close = evidence closes on its own"
+    );
+    assert_eq!(
+        events::replay(&tx, &key()).unwrap(),
+        store::state(&tx, &key()).unwrap()
+    );
+    tx.commit().unwrap();
+}
+
+#[test]
+fn only_the_owner_rewrites_a_waived_criterion() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = opened(dir.path());
+    let tx = store.transaction().unwrap();
+    project(&tx);
+    let id = ticket(&tx, &owner(), "Waived docs");
+    let docs =
+        criteria::add_criterion(&tx, &Standalone, &owner(), &id, "Docs updated", 1_200).unwrap();
+    let ships =
+        criteria::add_criterion(&tx, &Standalone, &owner(), &id, "It ships", 1_210).unwrap();
+    let waived = criteria::set_criterion(
+        &tx,
+        &Standalone,
+        &owner(),
+        &id,
+        docs.position,
+        docs.version,
+        CriterionState::Waived,
+        1_220,
+    )
+    .unwrap();
+    assert_eq!(waived.ticket.status, TicketStatus::Todo);
+    let before = count(&tx, "tk_events");
+    for who in [actor("agent:w1"), actor("engine:ci")] {
+        let rewrite = criteria::edit_criterion(
+            &tx,
+            &Standalone,
+            &who,
+            &id,
+            docs.position,
+            waived.criterion.version,
+            "Security review passed",
+            1_300,
+        );
+        assert_eq!(refused(rewrite), codes::OWNER_ONLY, "{who}");
+    }
+    assert_eq!(
+        count(&tx, "tk_events"),
+        before,
+        "a refused edit writes nothing"
+    );
+    let kept = &criteria::criteria(&tx, &id).unwrap()[0];
+    assert_eq!(kept.text, "Docs updated");
+    assert_eq!(kept.state, CriterionState::Waived);
+
+    let open = criteria::edit_criterion(
+        &tx,
+        &Standalone,
+        &actor("agent:w1"),
+        &id,
+        ships.position,
+        ships.version,
+        "It ships to users",
+        1_400,
+    )
+    .unwrap();
+    assert_eq!(open.state, CriterionState::Open);
+    let owned = criteria::edit_criterion(
+        &tx,
+        &Standalone,
+        &owner(),
+        &id,
+        docs.position,
+        waived.criterion.version,
+        "Docs and changelog updated",
+        1_410,
+    )
+    .unwrap();
+    assert_eq!(
+        owned.state,
+        CriterionState::Waived,
+        "the owner waives the new text"
+    );
+    assert_eq!(owned.text, "Docs and changelog updated");
+    assert_eq!(
+        events::replay(&tx, &key()).unwrap(),
+        store::state(&tx, &key()).unwrap()
+    );
+    tx.commit().unwrap();
+}
