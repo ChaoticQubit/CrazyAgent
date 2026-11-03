@@ -687,6 +687,35 @@ fn holding(files: &[PathBuf], word: &str) -> Vec<PathBuf> {
         .collect()
 }
 
+/// The lead's name in its Claude Code team, which names its inbox `inboxes/team-lead.json`.
+const LEAD_NAME: &str = "team-lead";
+
+/// The names and agent ids of the lead's teammates, read from every `config.json` among
+/// `shared`, the lead itself left out. Input: the files under the lead's `teams/`. Output:
+/// the names and ids.
+fn teammate_names(shared: &[PathBuf]) -> BTreeSet<String> {
+    shared
+        .iter()
+        .filter(|file| file.file_name().is_some_and(|name| name == "config.json"))
+        .filter_map(|file| std::fs::read(file).ok())
+        .filter_map(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .flat_map(|config| {
+            config
+                .get("members")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter(|member| member.get("name").and_then(serde_json::Value::as_str) != Some(LEAD_NAME))
+        .flat_map(|member| {
+            ["name", "agentId"]
+                .into_iter()
+                .filter_map(|key| member.get(key)?.as_str().map(str::to_owned))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
 /// The lead's one turn for the TPH-2 C live check: make a task, create one teammate that
 /// claims and completes it, send that teammate a word and pass its answer on. Input: the
 /// run's token. Output: the prompt.
@@ -700,11 +729,12 @@ fn own_home_prompt(token: &str) -> String {
 /// lead only through the team folders the lead shares. A real Claude Code lead, started by
 /// the runtime on the owner's account, makes a task, creates one teammate, messages it and
 /// waits for its answer. Checked: the teammate starts signed in and answers, past every
-/// first-run, trust and sign-in screen (1); its answer to the lead's message arrives through
-/// the linked `teams/` (2); it completes the lead's task in the linked `tasks/` (3); its
-/// transcript sits in the mates home, where the engine's record walk, which usage and the
-/// relay's read receipts use, finds it (4); and Seatbelt denied nothing under the lead's
-/// `teams/` or `tasks/` during the run (5).
+/// first-run, trust and sign-in screen (1); its answer to the lead's message lands in the
+/// lead's own inbox through the linked `teams/`, a file only a teammate writes that answer to
+/// (2); it, not the lead, completes the lead's task in the linked `tasks/`, so the task's
+/// owner is the teammate (3); its transcript sits in the mates home, where the engine's
+/// record walk, which usage and the relay's read receipts use, finds it (4); and Seatbelt
+/// denied nothing at or under the lead's `teams` or `tasks` folders during the run (5).
 #[test]
 #[ignore = "live qualification: needs a signed-in Claude account, CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
 fn live_native_teammates_work_from_their_own_home_through_the_lead_s_team_folders() {
@@ -748,7 +778,7 @@ fn live_native_teammates_work_from_their_own_home_through_the_lead_s_team_folder
     let denials = crate::spawn_gate::output(
         Command::new("/usr/bin/log")
             .args(["show", "--style", "compact", "--start", &started_at, "--predicate"])
-            .arg("eventMessage CONTAINS \"deny\" AND (eventMessage CONTAINS \"/teams/\" OR eventMessage CONTAINS \"/tasks/\")")
+            .arg("eventMessage CONTAINS \"deny\" AND (eventMessage CONTAINS \"/teams\" OR eventMessage CONTAINS \"/tasks\")")
             .env_clear()
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -768,8 +798,33 @@ fn live_native_teammates_work_from_their_own_home_through_the_lead_s_team_folder
         })
         .map(str::to_owned)
         .collect();
+    let inbox = format!("{LEAD_NAME}.json");
+    let lead_inboxes: Vec<PathBuf> = shared
+        .iter()
+        .filter(|file| {
+            file.file_name().is_some_and(|name| name == inbox.as_str())
+                && file
+                    .parent()
+                    .and_then(Path::file_name)
+                    .is_some_and(|folder| folder == "inboxes")
+        })
+        .cloned()
+        .collect();
+    let mates_names = teammate_names(&shared);
+    let completed_by_teammate = holding(&tasks, &format!("{token}TASK")).iter().any(|file| {
+        std::fs::read(file)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .is_some_and(|task| {
+                task.get("status").and_then(serde_json::Value::as_str) == Some("completed")
+                    && task
+                        .get("owner")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|owner| mates_names.contains(owner))
+            })
+    });
     println!(
-        "real claude native team in its own home: end={end:?} text={text:?} transcripts={transcripts:?} shared={shared:?} tasks={tasks:?} walked={walked:?} denied={denied:?} log_exit={:?} turns={:?}",
+        "real claude native team in its own home: end={end:?} text={text:?} transcripts={transcripts:?} shared={shared:?} lead_inboxes={lead_inboxes:?} teammates={mates_names:?} tasks={tasks:?} walked={walked:?} denied={denied:?} log_exit={:?} turns={:?}",
         denials.status.code(),
         finished(&reports)
     );
@@ -785,16 +840,16 @@ fn live_native_teammates_work_from_their_own_home_through_the_lead_s_team_folder
         "the teammate's own transcript holds no answer to the lead's message"
     );
     assert!(
-        shared
-            .iter()
-            .any(|file| file.components().any(|part| part.as_os_str() == "inboxes")),
-        "no inbox was written in the lead's own teams folder: {shared:?}"
+        !holding(&lead_inboxes, &answer).is_empty(),
+        "the teammate's answer did not reach the lead's own inbox in the lead's teams folder: {lead_inboxes:?} {shared:?}"
     );
     assert!(
-        holding(&tasks, &format!("{token}TASK"))
-            .iter()
-            .any(|file| std::fs::read_to_string(file).is_ok_and(|text| text.contains("completed"))),
-        "the lead's task was not completed in the lead's own tasks folder: {tasks:?}"
+        !mates_names.is_empty(),
+        "the lead's team config names no teammate: {shared:?}"
+    );
+    assert!(
+        completed_by_teammate,
+        "the lead's task was not completed by its teammate in the lead's own tasks folder: teammates={mates_names:?} tasks={tasks:?}"
     );
     assert!(
         walked

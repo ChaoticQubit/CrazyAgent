@@ -604,6 +604,35 @@ pub fn remove_tmp(home: &Path) -> io::Result<()> {
     fs::remove_dir_all(&path)
 }
 
+/// Removes everything in the agent's short temp folder but the socket named `kept`, which
+/// stays there with the folder; with no such socket in this user's folder the folder goes
+/// as [`remove_tmp`] removes it. A native lead's caller socket is kept this way as the lead
+/// ends, so a teammate still running asks a socket no engine answers on and is refused,
+/// never finding no socket (rv-secreview RH2R2-1). Input: the agent home and the kept name.
+/// Output: as [`remove_tmp`].
+#[cfg(unix)]
+pub fn remove_tmp_keeping(home: &Path, kept: &str) -> io::Result<()> {
+    let path = tmp_path(home);
+    let keeps = own_folder(&path)
+        && fs::symlink_metadata(path.join(kept))
+            .is_ok_and(|metadata| std::os::unix::fs::FileTypeExt::is_socket(&metadata.file_type()));
+    if !keeps {
+        return remove_tmp(home);
+    }
+    for entry in fs::read_dir(&path)? {
+        let entry = entry?;
+        if entry.file_name() == kept {
+            continue;
+        }
+        if entry.file_type()?.is_dir() {
+            fs::remove_dir_all(entry.path())?;
+        } else {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
 #[cfg(unix)]
 fn own_folder(path: &Path) -> bool {
     fs::symlink_metadata(path)
@@ -712,6 +741,13 @@ pub fn lead_git(_tmp: &Path) -> io::Result<()> {
 /// Nothing to remove outside Unix. Takes the agent home, unused. Returns done.
 #[cfg(not(unix))]
 pub fn remove_tmp(_home: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+/// Nothing to remove outside Unix. Takes the agent home and the kept name, unused. Returns
+/// done.
+#[cfg(not(unix))]
+pub fn remove_tmp_keeping(_home: &Path, _kept: &str) -> io::Result<()> {
     Ok(())
 }
 

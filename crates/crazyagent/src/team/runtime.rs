@@ -469,6 +469,7 @@ pub struct TeamRuntime {
     instruction_restarts: BTreeMap<i64, ProjectId>,
     master_restarts: BTreeSet<ProjectId>,
     restarted_for: BTreeMap<i64, u64>,
+    waited_for: BTreeMap<i64, u64>,
     #[cfg(unix)]
     callers: BTreeMap<i64, Option<super::caller::Callers>>,
     #[cfg(unix)]
@@ -684,6 +685,7 @@ impl TeamRuntime {
             instruction_restarts: BTreeMap::new(),
             master_restarts: BTreeSet::new(),
             restarted_for: BTreeMap::new(),
+            waited_for: BTreeMap::new(),
         })
     }
 
@@ -1471,9 +1473,11 @@ impl TeamRuntime {
         Ok(true)
     }
 
-    /// Marks stopped the native teammates of a lead that just ended, since they ran in the
-    /// lead's own terminal server and ended with it. Sub-agents a worker runs go on. Takes
-    /// the lead. Returns any SQLite failure.
+    /// Marks stopped the native teammates of a lead that just ended. They run on their own
+    /// tmux server, which ends itself once the engine clears the lead's short temp folder,
+    /// and may outlive the lead until then; the lead's caller socket node stays there, so a
+    /// teammate's hook meanwhile is refused and never takes the lead's place (rv-secreview
+    /// RH2R2-1). Sub-agents a worker runs go on. Takes the lead. Returns any SQLite failure.
     fn lead_ended(&self, lead: i64) -> Result<(), EngineError> {
         let children: Vec<i64> = {
             let mut statement = self
@@ -3224,11 +3228,17 @@ impl TeamRuntime {
                         .zip(digest)
                         .and_then(|(callers, digest)| callers.take(call, digest));
                     #[cfg(not(unix))]
-                    let pane: Option<String> = {
+                    let pane: Option<(String, u32)> = {
                         let _ = (call, digest);
                         None
                     };
-                    team_caller(connection, host, project, (id, &label), pane.as_deref())
+                    team_caller(
+                        connection,
+                        host,
+                        project,
+                        (id, &label),
+                        pane.as_ref().map(|(pane, pid)| (pane.as_str(), *pid)),
+                    )
                 },
                 &mut |connection, caller, call| {
                     super::master::answer_sub(connection, &answering, caller, call)
@@ -3292,9 +3302,10 @@ impl TeamRuntime {
         for id in leads {
             if let Some(callers) = self.callers.get_mut(&id).and_then(Option::as_mut) {
                 let lead = AgentId::team(id).ok();
-                callers.serve(&mut || listed_panes(host, lead.as_ref()), &mut |pane| {
-                    pane_whom(connection, host, project, id, pane)
-                });
+                callers.serve(
+                    &mut || listed_panes(host, lead.as_ref()),
+                    &mut |pane, pid| pane_whom(connection, host, project, id, (pane, pid)),
+                );
             }
         }
     }
@@ -3356,7 +3367,8 @@ impl TeamRuntime {
     /// and the owner is not typing, with the owner's prompts to sub-agents it has not heard,
     /// and under the Next task choice the owner's instruction edit first, once, cut to the
     /// room the input limit leaves beside the message; when not even the cut block fits, a
-    /// team note says the edit waits for a later message (DEC-111 QR1). Takes the project.
+    /// team note says the edit waits for a later message, once per edited text until it is
+    /// delivered (DEC-111 QR1). Takes the project.
     /// Returns any SQLite failure; a message that cannot be typed is failed with a team
     /// note, one that must wait stays pending.
     fn feed_live(&mut self, project: &ProjectId) -> Result<(), EngineError> {
@@ -3391,7 +3403,10 @@ impl TeamRuntime {
         let block = edit.as_ref().and_then(|edit| {
             edit.message_within(super::master::INPUT_TEXT_MAX.saturating_sub(typed.len()))
         });
-        let missed = edit.is_some() && block.is_none();
+        let missed = match (&edit, &block) {
+            (Some(edit), None) => Some(edit.text_hash()),
+            _ => None,
+        };
         let (edit, typed) = match block {
             Some(block) => (edit, format!("{block}{}", typed.trim_start())),
             None => (None, typed),
@@ -3423,8 +3438,14 @@ impl TeamRuntime {
         if let Some(edit) = &edit {
             let _ = crate::instruction_files::delivered(edit, &home);
         }
-        if missed {
-            self.note(project, INSTRUCTIONS_WAIT_FOR_ROOM)?;
+        match missed {
+            Some(hash) if self.waited_for.insert(id, hash) != Some(hash) => {
+                self.note(project, INSTRUCTIONS_WAIT_FOR_ROOM)?;
+            }
+            Some(_) => {}
+            None => {
+                self.waited_for.remove(&id);
+            }
         }
         if let Some(newest) = newest {
             super::direct::delivered(&self.connection, project, newest)?;
@@ -6049,6 +6070,7 @@ impl TeamRuntime {
             }
             Report::Ended { problem } => {
                 let mut worker = self.workers.remove(&id).expect("worker exists");
+                self.waited_for.remove(&id);
                 crate::coord::requeue_dead(&self.connection, id, now_ms())?;
                 if !worker.leave.load(Ordering::SeqCst) {
                     self.lead_ended(id)?;
@@ -6056,7 +6078,10 @@ impl TeamRuntime {
                 if worker.live {
                     super::master::pane_ended(&self.connection, &worker.project, id)?;
                 }
-                let _ = toolchains::remove_tmp(&self.agent_folder(id).join("home"));
+                let _ = toolchains::remove_tmp_keeping(
+                    &self.agent_folder(id).join("home"),
+                    super::caller::CALLER_SOCKET,
+                );
                 self.connection
                     .execute("DELETE FROM team_panes WHERE agent=?1", [id])
                     .map_err(error)?;
@@ -8298,17 +8323,18 @@ impl Drop for TeamService {
 
 /// Names who made a team call in a sub-agent's mailbox (DEC-104). A lead stored as leading
 /// native teammates shares that mailbox with them, so the pane the engine named the call
-/// by from the caller's process decides (DEC-111 Q18): the lead's own pane is the lead,
-/// the pane of one of its live teammate rows is that teammate, and anything else, no pane
-/// included, is nobody. Every other mailbox names its own agent. Inputs: the database, the
-/// terminal host, the project, the mailbox's agent with its label and the named pane.
-/// Output: the caller's id and label, or none, also when the lead's mode is unread.
+/// by from the caller's process decides (DEC-111 Q18): the lead's own pane, found under the
+/// lead's own pane process, is the lead, the pane of one of its live teammate rows is that
+/// teammate, and anything else, no pane included, is nobody (PLC). Every other mailbox
+/// names its own agent. Inputs: the database, the terminal host, the project, the
+/// mailbox's agent with its label and the named pane with the pane process it was found
+/// under. Output: the caller's id and label, or none, also when the lead's mode is unread.
 pub fn team_caller(
     connection: &Connection,
     host: Option<&dyn Host>,
     project: &ProjectId,
     (lead, label): (i64, &str),
-    pane: Option<&str>,
+    pane: Option<(&str, u32)>,
 ) -> Option<(i64, String)> {
     let mode: Option<String> = connection
         .query_row(
@@ -8338,17 +8364,18 @@ enum PaneMember {
 }
 
 /// Finds who runs in one pane of a native lead's team from the engine's own rows, never
-/// from a file the agents write (DEC-111 Q18): the lead when the pane is the one its pane
-/// record names and the host lists under the recorded process, or the newest live teammate
-/// row of the lead in that pane. Inputs: the database, the terminal host, the project, the
-/// lead and the pane. Output: the member, or none for a pane id that is not plain or a pane
-/// no row names.
+/// from a file the agents write (DEC-111 Q18): the lead when the caller was found under
+/// the process its pane record names and the host lists that pane under it (PLC), or the
+/// newest live teammate row of the lead in that pane. Inputs: the database, the terminal
+/// host, the project, the lead and the pane with the pane process the caller was found
+/// under. Output: the member, or none for a pane id that is not plain or a pane no row
+/// names.
 fn pane_member(
     connection: &Connection,
     host: Option<&dyn Host>,
     project: &ProjectId,
     lead: i64,
-    pane: &str,
+    (pane, pid): (&str, u32),
 ) -> Option<PaneMember> {
     if !crate::terminal::pane_id_valid(pane) {
         return None;
@@ -8376,6 +8403,9 @@ fn pane_member(
         .optional()
         .ok()?;
     let own = record.as_deref().and_then(PaneRecord::decode)?;
+    if pid != own.pid {
+        return None;
+    }
     host?
         .panes(&name)
         .ok()?
@@ -8387,15 +8417,16 @@ fn pane_member(
 /// Who runs in one pane of a native lead's team, for the lead's caller socket to answer
 /// `who` with, from the engine's own rows (DEC-111 Q18, RH-2): the lead, or a live teammate
 /// by the name the engine kept for it when it first saw it. Inputs: the database, the
-/// terminal host, the project, the lead and the pane. Output: the lead, the teammate's
-/// name, or none, also for a teammate with no name kept.
+/// terminal host, the project, the lead and the pane with the pane process the caller was
+/// found under. Output: the lead, the teammate's name, or none, also for a teammate with
+/// no name kept.
 #[cfg(unix)]
 pub(crate) fn pane_whom(
     connection: &Connection,
     host: Option<&dyn Host>,
     project: &ProjectId,
     lead: i64,
-    pane: &str,
+    pane: (&str, u32),
 ) -> Option<super::caller::Whom> {
     match pane_member(connection, host, project, lead, pane)? {
         PaneMember::Lead => Some(super::caller::Whom::Lead),

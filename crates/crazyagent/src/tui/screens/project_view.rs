@@ -1973,6 +1973,11 @@ fn hidden_line(screen: &ProjectScreen, look: &Look) -> Row {
     Row::of(text, look.fg).push("   d Edit hidden folders", look.muted)
 }
 
+/// The fewest rows the plugins section needs to show its heading, a row of content and its
+/// footer notice. The Settings separator before the plugins section is dropped when the body
+/// has no room to spare for it, so the notice stays visible at 80x24.
+const SETTINGS_PLUGINS_FLOOR: usize = 7;
+
 fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) -> Drawn {
     if let Some(general) = &screen.general {
         return general_form(general, content, look);
@@ -2027,8 +2032,10 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
             Row::of("Instructions for this project's agents", look.fg)
                 .push("   i Edit", look.muted),
         ),
-        Row::default(),
     ];
+    if room.saturating_sub(lines.len()) > SETTINGS_PLUGINS_FLOOR {
+        lines.push(Row::default());
+    }
     let (plugins, mut help) = screen
         .plugins
         .rows(content, room.saturating_sub(lines.len()), look);

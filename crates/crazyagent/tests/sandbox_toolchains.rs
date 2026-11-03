@@ -1278,6 +1278,72 @@ fn native_teammates_never_move_the_folders_holding_the_leads_part_of_the_relay_m
     );
 }
 
+/// Neither a native lead nor its teammates can place, remove or move a node at the name the
+/// engine binds its caller socket at before one rename moves it over the caller socket's
+/// path (rv-secreview RH2R2-1): with the name free, a listener, a folder or a file either
+/// places there is refused, and once the engine binds there, removing or moving its node
+/// is refused, so no agent swaps its own listener in for the one the engine moves.
+#[test]
+fn neither_a_native_lead_nor_its_teammates_touch_the_caller_socket_s_binding_name() {
+    let team = LiveTeam::start();
+    let binding = crazyagent::team::caller::binding_path(&team.callers);
+    assert!(binding != team.callers && binding.parent() == team.callers.parent());
+    let b = quoted(&binding);
+    let roles: [(&str, Probe); 2] = [
+        ("lead", LiveTeam::as_lead),
+        ("teammate", LiveTeam::teammate),
+    ];
+    for (role, run) in roles {
+        let free = run(
+            &team,
+            &format!(
+                "{}; echo bind=$?\nmkdir {b}; echo mkdir=$?\n/usr/bin/touch {b}; echo file=$?\n",
+                team.session(&binding, "planted")
+            ),
+        );
+        let _ = tmux_at(&team.tmux, &binding, &["kill-server"]);
+        let text = String::from_utf8_lossy(&free.stdout).into_owned();
+        for name in ["bind", "mkdir", "file"] {
+            assert_ne!(
+                status_of(&text, name),
+                "0",
+                "the {role}'s {name} at the free binding name succeeded: {}",
+                String::from_utf8_lossy(&free.stderr)
+            );
+        }
+        assert!(
+            fs::symlink_metadata(&binding).is_err(),
+            "the {role} left a node at the binding name"
+        );
+    }
+
+    let listener = crazyagent::spawn_gate::bind_unix_std(&binding).unwrap();
+    let node = || {
+        fs::symlink_metadata(&binding)
+            .ok()
+            .map(|meta| std::os::unix::fs::MetadataExt::ino(&meta))
+    };
+    let bound = node();
+    assert!(bound.is_some());
+    for (role, run) in roles {
+        let taken = run(
+            &team,
+            &format!("rm -f {b}; echo rm=$?\nmv -f {b} {b}.away; echo mv=$?\n"),
+        );
+        let text = String::from_utf8_lossy(&taken.stdout).into_owned();
+        let errors = String::from_utf8_lossy(&taken.stderr);
+        for name in ["rm", "mv"] {
+            assert_ne!(
+                status_of(&text, name),
+                "0",
+                "the {role}'s {name} at the binding name succeeded: {errors}"
+            );
+        }
+        assert_eq!(node(), bound, "the engine's node survives the {role}");
+    }
+    drop(listener);
+}
+
 /// Reads one `name=status` line a probe script printed. Takes the output text and the name.
 /// Returns the status, panicking when the line is missing.
 fn status_of(text: &str, name: &str) -> String {
