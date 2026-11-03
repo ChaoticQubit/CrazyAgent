@@ -448,12 +448,12 @@ test("with no --project the trial project goes in the owner's projects folder th
   assert.equal(options(argv).project, join(home, "ca-trial-4"));
 });
 
-test("the desktop run is told the Land on branch the runner seeded for its trial", async () => {
+test("the desktop run is told the Land on branch the runner seeded for its trial and the app's crazyagent binary for the TUI", async () => {
   const paths = fixture("ca-trial-land-");
   const seen = join(paths.root, "land-seen.json");
-  const desktop = [process.execPath, "--input-type=module", "-e", "import { writeFileSync } from \"node:fs\"; writeFileSync(process.env.TRIAL_EVIDENCE + \"/../land-seen.json\", JSON.stringify({ land: process.env.TRIAL_LAND_ON }));"];
+  const desktop = [process.execPath, "--input-type=module", "-e", "import { writeFileSync } from \"node:fs\"; writeFileSync(process.env.TRIAL_EVIDENCE + \"/../land-seen.json\", JSON.stringify({ land: process.env.TRIAL_LAND_ON, cli: process.env.TRIAL_CLI }));"];
   const result = await runner(args(paths, { commands: { desktop } }), paths.env);
   assert.ok([0, 1].includes(result.code), result.out);
-  assert.deepEqual(JSON.parse(readFileSync(seen, "utf8")), { land: "trial3-land" });
+  assert.deepEqual(JSON.parse(readFileSync(seen, "utf8")), { land: "trial3-land", cli: join(paths.app, "Contents", "MacOS", "crazyagent") });
   assert.match(git(paths.project, "branch", "--list", "trial3-land"), /trial3-land/);
 });

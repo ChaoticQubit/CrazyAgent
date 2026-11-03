@@ -30,7 +30,8 @@ export function segment(group, option) {
   return `//*[@role="radiogroup"][@aria-label=${lit(group)}]//button[normalize-space(.)=${lit(option)}]`;
 }
 
-/** Appends one masked desktop line to steps.jsonl, numbered after every line already there.
+/** Appends one masked line to steps.jsonl, a desktop line unless it names its surface,
+ * numbered after every line already there.
  * The runner (scripts/trial/run.mjs) writes its own lines only before it starts this
  * WebdriverIO run and after the run's process group is stopped, so the two writers never
  * append at once and every n is unique. Input: the line without its n. */
@@ -76,9 +77,10 @@ async function maskedShot(name) {
 
 /** Runs one owner step: the action, then a masked screenshot NN-<slug>.png on success or
  * failure, then its steps.jsonl line listing every screenshot the step took. Inputs: the
- * slug, the title, why the trial does it and the action, which returns what it saw. Throws
- * when the action or the screenshot failed. */
-export async function step(slug, title, why, action) {
+ * slug, the title, why the trial does it, the action, which returns what it saw, and the
+ * surface the step drives with how it saves its last proof (a TUI step saves a frame).
+ * Throws when the action or the last proof failed. */
+export async function step(slug, title, why, action, finish = { surface: "desktop", shoot: maskedShot }) {
   run.desktop += 1;
   const name = `${String(run.desktop).padStart(2, "0")}-${slug}`;
   assert.match(name, /^[a-z0-9-]{1,40}$/);
@@ -95,12 +97,12 @@ export async function step(slug, title, why, action) {
   const evidence = run.current.shots;
   run.current = null;
   try {
-    evidence.push(await maskedShot(name));
+    evidence.push(await finish.shoot(name));
   } catch (failure) {
     ok = false;
     detail = `${detail}; no screenshot: ${failure?.message ?? failure}`;
   }
-  record({ title, why, at, ok, detail, evidence });
+  record({ surface: finish.surface, title, why, at, ok, detail, evidence });
   if (!ok) {
     run.failed.push(slug);
     throw new Error(`${title}: ${mask(detail)}`);

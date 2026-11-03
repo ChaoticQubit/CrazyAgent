@@ -4,7 +4,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "nod
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { CHECKS, loadChecks, plan } from "./trial4-checks.mjs";
+import { CHECKS, TUI_CHECKS, loadChecks, plan } from "./trial4-checks.mjs";
 import { TRIAL3_STEPS } from "./trial3-steps.mjs";
 
 const DESKTOP = fileURLToPath(new URL("../..", import.meta.url));
@@ -33,6 +33,26 @@ test("every committed trial4 check module has a unique id, OP rows, a title, a w
   const checks = await loadChecks(CHECKS, SLUGS);
   t.diagnostic(`${checks.length} checks in ${CHECKS}`);
   for (const loaded of checks) assert.equal(typeof loaded.run, "function", loaded.id);
+});
+
+test("every committed tui4 check module in scripts/trial/tui4 passes the same convention, and no id is both a desktop and a TUI check", async (t) => {
+  assert.equal(TUI_CHECKS, fileURLToPath(new URL("../../../../scripts/trial/tui4/", import.meta.url)));
+  const tui = await loadChecks(TUI_CHECKS, SLUGS);
+  t.diagnostic(`${tui.length} TUI checks in ${TUI_CHECKS}`);
+  const desktop = await loadChecks(CHECKS, SLUGS);
+  assert.equal(plan(TRIAL3_STEPS, [...desktop, ...tui]).length, SLUGS.length + desktop.length + tui.length);
+});
+
+test("plan refuses an id that a desktop and a TUI module both use", async () => {
+  const desktop = modules({ "n-t1-a.mjs": check({ id: "N-T1" }) });
+  const tui = modules({ "n-t1-b.mjs": check({ id: "N-T1", after: "end" }) });
+  try {
+    const checks = [...await loadChecks(desktop, SLUGS), ...(await loadChecks(tui, SLUGS)).map((loaded) => ({ ...loaded, surface: "tui" }))];
+    assert.throws(() => plan(TRIAL3_STEPS, checks), /N-T1 is in n-t1-a\.mjs and n-t1-b\.mjs/);
+  } finally {
+    rmSync(desktop, { recursive: true, force: true });
+    rmSync(tui, { recursive: true, force: true });
+  }
 });
 
 test("checks run right after the trial 3 step they name, in file order, and end checks run last", async () => {

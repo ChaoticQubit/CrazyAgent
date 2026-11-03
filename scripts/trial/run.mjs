@@ -680,7 +680,7 @@ export async function main(argv) {
     finish();
     return 1;
   }
-  const env = childEnv({ TRIAL_EVIDENCE: opts.evidence, TRIAL_PROJECT: project, TRIAL_PROMPT: PROMPT, TRIAL_ENGINE: opts.engine, TRIAL_LAND_ON: `trial${opts.trial}-land` });
+  const env = childEnv({ TRIAL_EVIDENCE: opts.evidence, TRIAL_PROJECT: project, TRIAL_PROMPT: PROMPT, TRIAL_ENGINE: opts.engine, TRIAL_LAND_ON: `trial${opts.trial}-land`, TRIAL_CLI: join(opts.app, "Contents", "MacOS", "crazyagent") });
   const envNames = Object.keys(env).sort();
   let recorder = null;
   let snapshots = null;

@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const CHECKS = fileURLToPath(new URL("trial4/", import.meta.url));
+export const TUI_CHECKS = fileURLToPath(new URL("../../../../scripts/trial/tui4/", import.meta.url));
 const ID = /^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+$/;
 const OP = /^OP-[1-9][0-9]*$/;
 
@@ -48,9 +49,15 @@ export async function loadChecks(folder, slugs) {
 }
 
 /** Orders the trial 4 run: each trial 3 step, then the checks that run after it, then the
- * "end" checks. Inputs: the trial 3 steps and the loaded checks. Output: [{ slug, step } or
- * { slug, check }], a check's slug being its id in lower case. */
+ * "end" checks. Inputs: the trial 3 steps and the loaded desktop and TUI checks. Output:
+ * [{ slug, step } or { slug, check }], a check's slug being its id in lower case; throws
+ * when two checks share an id. */
 export function plan(steps, checks) {
+  const seen = new Map();
+  for (const check of checks) {
+    assert(!seen.has(check.id), `${check.id} is in ${seen.get(check.id)} and ${check.file}`);
+    seen.set(check.id, check.file);
+  }
   const after = (slug) => checks.filter((check) => check.after === slug).map((check) => ({ slug: check.id.toLowerCase(), check }));
   const order = steps.flatMap((step) => [{ slug: step.slug, step }, ...after(step.slug)]).concat(after("end"));
   assert.equal(order.length, steps.length + checks.length, "every check runs once");
