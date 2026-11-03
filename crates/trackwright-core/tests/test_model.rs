@@ -718,6 +718,33 @@ fn a_protected_case_shows_only_id_title_and_outcome_to_an_agent_actor() {
     )
     .unwrap();
     assert!(by_kind.is_empty(), "a hidden kind is never matched");
+    let set = tests_store::upsert_set(&tx, &owner, &key("CA"), None, "Holdouts", 1_004).unwrap();
+    tests_store::set_add(
+        &tx,
+        &owner,
+        &set.short_id,
+        set.version,
+        &held.short_id,
+        1_005,
+    )
+    .unwrap();
+    let by_set = tests_store::CaseFilter {
+        set: Some(set.short_id.clone()),
+        ..Default::default()
+    };
+    let unlinked = tests_store::CaseFilter {
+        unlinked: true,
+        ..Default::default()
+    };
+    for filter in [by_set, unlinked] {
+        let seen = tests_store::case_list(&tx, &agent, &key("CA"), &filter).unwrap();
+        assert!(
+            seen.iter().all(|row| row.id != held.short_id),
+            "{filter:?} never matches a hidden case, so it reveals no set or link"
+        );
+        let all = tests_store::case_list(&tx, &owner, &key("CA"), &filter).unwrap();
+        assert!(all.iter().any(|row| row.id == held.short_id));
+    }
     assert_eq!(
         refused(tests_store::edit_case(
             &tx,
@@ -800,4 +827,212 @@ fn test_ids_read_only_their_own_shape() {
     );
     let wire: TestId = serde_json::from_str("\"CA-P3\"").unwrap();
     assert_eq!(serde_json::to_string(&wire).unwrap(), "\"CA-P3\"");
+}
+
+#[test]
+fn a_non_owner_cannot_take_a_protected_case_out_of_a_set_or_plan() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = actor("owner");
+    let agent = actor("agent:w1");
+    let mut store = opened(dir.path());
+    let tx = store.transaction().unwrap();
+    store::create_project(&tx, &owner, &key("CA"), "CrazyAgent", 1_000).unwrap();
+    let mut secret = new_case("Holdout", None);
+    secret.protected = true;
+    let held = tests_store::create_case(&tx, &owner, &key("CA"), &secret, 1_001).unwrap();
+    let open =
+        tests_store::create_case(&tx, &owner, &key("CA"), &new_case("Open", None), 1_002).unwrap();
+    let set = tests_store::upsert_set(&tx, &owner, &key("CA"), None, "Holdouts", 1_003).unwrap();
+    let set = tests_store::set_add(
+        &tx,
+        &owner,
+        &set.short_id,
+        set.version,
+        &held.short_id,
+        1_004,
+    )
+    .unwrap();
+    let set = tests_store::set_add(
+        &tx,
+        &agent,
+        &set.short_id,
+        set.version,
+        &open.short_id,
+        1_005,
+    )
+    .unwrap();
+    let fields = PlanFields {
+        name: "Release 1".to_owned(),
+        release: None,
+        cycle: None,
+        status: PlanStatus::Active,
+    };
+    let plan = tests_store::upsert_plan(&tx, &owner, &key("CA"), None, &fields, 1_006).unwrap();
+    let by_case = PlanItemRef::Case(held.short_id.clone());
+    let by_set = PlanItemRef::Set(set.short_id.clone());
+    let plan =
+        tests_store::plan_add(&tx, &owner, &plan.short_id, plan.version, &by_case, 1_007).unwrap();
+    let plan =
+        tests_store::plan_add(&tx, &owner, &plan.short_id, plan.version, &by_set, 1_008).unwrap();
+    let events = count(&tx, "tk_events");
+
+    for item in [&by_case, &by_set] {
+        assert_eq!(
+            refused(tests_store::plan_remove(
+                &tx,
+                &agent,
+                &plan.short_id,
+                plan.version,
+                item,
+                1_009
+            )),
+            codes::CASE_PROTECTED,
+            "an agent cannot drop {item:?} from the plan"
+        );
+    }
+    assert_eq!(
+        refused(tests_store::set_remove(
+            &tx,
+            &agent,
+            &set.short_id,
+            set.version,
+            &held.short_id,
+            1_010
+        )),
+        codes::CASE_PROTECTED
+    );
+    for status in [PlanStatus::Draft, PlanStatus::Closed] {
+        let parked = PlanFields {
+            status,
+            ..fields.clone()
+        };
+        assert_eq!(
+            refused(tests_store::upsert_plan(
+                &tx,
+                &agent,
+                &key("CA"),
+                Some((&plan.short_id, plan.version)),
+                &parked,
+                1_011
+            )),
+            codes::CASE_PROTECTED,
+            "an agent cannot move a plan holding a protected case to {status}"
+        );
+    }
+    assert_eq!(
+        count(&tx, "tk_events"),
+        events,
+        "a refused change records no event"
+    );
+    assert_eq!(
+        tests_store::plan_show(&tx, &plan.short_id)
+            .unwrap()
+            .items
+            .len(),
+        2
+    );
+    assert_eq!(
+        tests_store::set_show(&tx, &set.short_id).unwrap().cases,
+        [held.short_id.clone(), open.short_id.clone()]
+    );
+
+    let set = tests_store::set_remove(
+        &tx,
+        &agent,
+        &set.short_id,
+        set.version,
+        &open.short_id,
+        1_012,
+    )
+    .unwrap();
+    let renamed = PlanFields {
+        name: "Release 1 checks".to_owned(),
+        ..fields.clone()
+    };
+    let plan = tests_store::upsert_plan(
+        &tx,
+        &agent,
+        &key("CA"),
+        Some((&plan.short_id, plan.version)),
+        &renamed,
+        1_013,
+    )
+    .unwrap();
+    assert_eq!(plan.name, "Release 1 checks");
+    let plan = tests_store::plan_remove(&tx, &owner, &plan.short_id, plan.version, &by_case, 1_014)
+        .unwrap();
+    tests_store::set_remove(
+        &tx,
+        &owner,
+        &set.short_id,
+        set.version,
+        &held.short_id,
+        1_015,
+    )
+    .unwrap();
+    let item = PlanItemView {
+        position: 2,
+        item: by_set,
+    };
+    assert_eq!(
+        tests_store::plan_show(&tx, &plan.short_id).unwrap().items,
+        [item]
+    );
+}
+
+#[test]
+fn a_ticket_history_never_carries_a_protected_cases_steps() {
+    let dir = tempfile::tempdir().unwrap();
+    let owner = actor("owner");
+    let mut store = opened(dir.path());
+    let tx = store.transaction().unwrap();
+    store::create_project(&tx, &owner, &key("CA"), "CrazyAgent", 1_000).unwrap();
+    let ticket =
+        store::create_ticket(&tx, &owner, &key("CA"), &new_ticket("Holdouts"), 1_001).unwrap();
+    store::add_criterion(&tx, &owner, &ticket.short_id, "holds out", 1_002).unwrap();
+    let criterion = CriterionRef {
+        ticket: ticket.short_id.clone(),
+        position: 1,
+    };
+    let mut secret = new_case("Holdout", Some("holdout::secret_name"));
+    secret.protected = true;
+    secret.steps = vec!["Open the secret door".to_owned()];
+    let held = tests_store::create_case(&tx, &owner, &key("CA"), &secret, 1_003).unwrap();
+    let held = tests_store::link_case(&tx, &owner, &held.short_id, held.version, &criterion, 1_004)
+        .unwrap();
+    tests_store::edit_case(
+        &tx,
+        &owner,
+        &held.short_id,
+        held.version,
+        &CaseChange {
+            title: Some("Holdout, renamed".to_owned()),
+            ..CaseChange::default()
+        },
+        1_005,
+    )
+    .unwrap();
+
+    let history = events::history(&tx, &ticket.short_id).unwrap();
+    assert!(!history.is_empty(), "the ticket's own events are there");
+    for event in &history {
+        assert!(
+            !tests_store::OPS.contains(&event.op.as_str()),
+            "{} is a test event in a ticket's history",
+            event.op
+        );
+        let rows = [&event.before, &event.after].map(|row| {
+            row.as_ref()
+                .map(serde_json::Value::to_string)
+                .unwrap_or_default()
+        });
+        for leaked in ["secret door", "holdout::secret_name"] {
+            assert!(
+                rows.iter().all(|row| !row.contains(leaked)),
+                "a ticket history read leaks {leaked}"
+            );
+        }
+    }
+    let shown = tests_store::case_show(&tx, &actor("agent:w1"), &held.short_id).unwrap();
+    assert_eq!(shown.detail, None, "the link stays behind the hidden view");
 }
