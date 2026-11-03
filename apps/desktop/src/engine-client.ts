@@ -881,6 +881,7 @@ export interface TeamStatus {
   land_on?: string | null;
   background_at_end?: BackgroundAtEnd;
   ask_before_merge?: boolean;
+  reask_empty_reply?: boolean;
   new_folder_files_max?: number;
   coordination?: CoordinationView | null;
   partial?: boolean;

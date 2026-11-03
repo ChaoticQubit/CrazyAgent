@@ -96,6 +96,9 @@ enum TurnBound {
     Session(Duration),
 }
 const EMPTY_REPLY_NOTE: &str = "The master replied with no text, so no work was handed out. Send the message again, or hand a task to a sub-agent yourself.";
+/// The one turn a sub-agent gets when its task turn ended with no reply text and the
+/// project's re-ask setting is on (DEC-111): the master asks it once for its reply.
+const REASK_EMPTY: &str = "Your master got no reply text from your last turn. Reply now with a short summary of what you did for your task.";
 
 /// Bounds every team agent obeys. The task, session and sub-agent idle limits are the
 /// owner's team settings, read per project when a turn or an agent starts or an idle agent
@@ -426,6 +429,8 @@ struct Worker {
     told_finished: BTreeSet<i64>,
     parent: Option<i64>,
     ready: bool,
+    reask: Option<i64>,
+    reasked: Option<i64>,
 }
 
 impl Worker {
@@ -1992,6 +1997,7 @@ impl TeamRuntime {
         self.hand_leads(project, access)?;
         self.wake_for_messages(&stored, access, &asleep)?;
         self.instruction_edits(&stored, access, &paused)?;
+        self.send_reasks(&stored, access, &paused)?;
         self.dispatch(&stored, access, &paused)?;
         self.keep_warm(&stored, access, &paused)?;
         self.reap_idle(&stored)
@@ -3495,6 +3501,111 @@ impl TeamRuntime {
         tx.commit().map_err(error)
     }
 
+    /// Tells whether a sub-agent's task turn that just ended is asked once more for its
+    /// reply: it ended well with no reply text, the project's re-ask setting is on and the
+    /// task has not had its re-ask yet (DEC-111). Takes the agent, its task, the turn's text
+    /// and how it ended. Returns the answer, or any SQLite failure.
+    fn reasks(&self, id: i64, task: i64, text: &str, end: TurnEnd) -> Result<bool, EngineError> {
+        let worker = &self.workers[&id];
+        if worker.role != AgentRole::Sub
+            || end != TurnEnd::Success
+            || !text.trim().is_empty()
+            || worker.reasked == Some(task)
+        {
+            return Ok(false);
+        }
+        super::reask_empty_reply(&self.connection, &worker.project)
+    }
+
+    /// Sends each of the project's sub-agents whose task turn ended with no reply text its
+    /// one re-ask turn, with the grant and turn rules a task turn gets. A sub-agent that
+    /// cannot take it finishes the task with no reply text, as with the setting off; one on
+    /// a rate-limited connection waits for it, as a task does, and a kept native lead waits
+    /// while its app runs a turn of its own, as instruction edits do (RER-L1). A kept lead
+    /// whose teammates still work is not asked or held: its task finishes as with the
+    /// setting off and it turns again when their results arrive (RER2-L1). A message on its
+    /// way to the lead does not hold the re-ask: typing that message waits for the lead to
+    /// be idle. Takes the project setup, the live model access and the paused connections.
+    /// Returns any SQLite failure.
+    fn send_reasks(
+        &mut self,
+        stored: &StoredSetup,
+        access: &ModelAccess,
+        paused: &BTreeSet<CredentialRef>,
+    ) -> Result<(), EngineError> {
+        let project = &stored.project_id;
+        let due: Vec<(i64, i64)> = self
+            .workers
+            .iter()
+            .filter(|(_, worker)| {
+                &worker.project == project
+                    && !worker.stopping
+                    && worker.own_turn.is_none()
+                    && !paused.contains(&worker.connection)
+            })
+            .filter_map(|(id, worker)| worker.reask.map(|task| (*id, task)))
+            .collect();
+        for (agent, task) in due {
+            assert_eq!(self.workers[&agent].busy, Some(Busy::Task(task)));
+            if self.workers[&agent].kept_session && self.teammates_working(agent)? {
+                self.finish_unasked(project, agent, task)?;
+                continue;
+            }
+            let handed = self.workers[&agent].kept_session && self.workers[&agent].briefed;
+            let grant = if self.workers[&agent].managed && !handed {
+                match self.grant(access, agent, project) {
+                    Ok(Some(grant)) => Some(grant),
+                    Ok(None) => continue,
+                    Err(_) => {
+                        self.finish_unasked(project, agent, task)?;
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+            let background = super::background_at_end(&self.connection, project)?;
+            let bound = turn_bound(
+                super::time_limits(&self.connection, project)?,
+                self.workers[&agent].ran(),
+            );
+            let rules = TurnRules {
+                limit: bound.map(|(limit, _)| limit),
+                background,
+            };
+            let worker = self.workers.get_mut(&agent).expect("worker exists");
+            if worker
+                .orders
+                .send(Order::Turn(REASK_EMPTY.to_owned(), grant, rules))
+                .is_err()
+            {
+                self.finish_unasked(project, agent, task)?;
+                continue;
+            }
+            worker.bound = bound.map(|(_, by)| by);
+            worker.reask = None;
+            worker.reasked = Some(task);
+        }
+        Ok(())
+    }
+
+    /// Finishes a task whose re-ask turn could not be sent, as a task turn with no reply
+    /// text finishes with the setting off: Done, its edits landed, the agent idle. Takes the
+    /// project, the agent and the task. Returns any SQLite failure.
+    fn finish_unasked(
+        &mut self,
+        project: &ProjectId,
+        agent: i64,
+        task: i64,
+    ) -> Result<(), EngineError> {
+        let worker = self.workers.get_mut(&agent).expect("worker exists");
+        worker.reask = None;
+        let busy = worker.busy.take();
+        self.finish_task(task, "", TurnEnd::Success, None)?;
+        self.land(agent, project, busy, TurnEnd::Success)?;
+        self.mark_agent(agent, AgentStatus::Idle, None)
+    }
+
     fn mark_agent(
         &mut self,
         id: i64,
@@ -4105,6 +4216,7 @@ impl TeamRuntime {
             }
             worker.bound = bound.map(|(_, by)| by);
             worker.busy = Some(Busy::Task(task));
+            worker.reasked = None;
             worker.briefed |= worker.kept_session;
             if let Some(edit) = &edit {
                 let _ = crate::instruction_files::delivered(edit, &home);
@@ -4273,12 +4385,26 @@ impl TeamRuntime {
     /// wake turn has carried to it yet. Takes the lead. Returns the answer, or any SQLite
     /// failure.
     fn lead_waits(&self, id: i64) -> Result<bool, EngineError> {
+        if self.teammates_working(id)? {
+            return Ok(true);
+        }
+        self.connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM coord_messages WHERE to_kind='agent' AND to_agent=?1
+                           AND receipt='sent')",
+                [id],
+                |row| row.get(0),
+            )
+            .map_err(error)
+    }
+
+    /// Whether a teammate of a kept native lead is still starting or working. Takes the
+    /// lead. Returns the answer, or any SQLite failure.
+    fn teammates_working(&self, id: i64) -> Result<bool, EngineError> {
         self.connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM team_agents WHERE parent=?1 AND role='teammate'
-                                AND status IN ('starting','working'))
-                 OR EXISTS(SELECT 1 FROM coord_messages WHERE to_kind='agent' AND to_agent=?1
-                           AND receipt='sent')",
+                                AND status IN ('starting','working'))",
                 [id],
                 |row| row.get(0),
             )
@@ -4824,6 +4950,8 @@ impl TeamRuntime {
                 told_finished: BTreeSet::new(),
                 parent,
                 ready: false,
+                reask: None,
+                reasked: None,
             },
         );
         assert!(self.panes(&self.workers[&id].project) <= PANES_PER_PROJECT_MAX);
@@ -5923,6 +6051,15 @@ impl TeamRuntime {
                 self.connection
                     .execute("UPDATE team_agents SET turns=turns+1 WHERE id=?1", [id])
                     .map_err(error)?;
+                if let Some(Busy::Task(task)) = busy
+                    && self.reasks(id, task, &text, end)?
+                {
+                    let worker = self.workers.get_mut(&id).expect("worker exists");
+                    worker.busy = Some(Busy::Task(task));
+                    worker.reask = Some(task);
+                    self.mark_agent(id, AgentStatus::Working, Some(task))?;
+                    return Ok(false);
+                }
                 match busy {
                     Some(busy) if held && end != TurnEnd::Success => self.release(id, busy)?,
                     Some(Busy::Task(task)) => {

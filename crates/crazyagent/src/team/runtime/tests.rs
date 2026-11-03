@@ -8384,6 +8384,8 @@ fn between_turns(
         told_finished: BTreeSet::new(),
         parent: None,
         ready: true,
+        reask: None,
+        reasked: None,
     }
 }
 
@@ -12217,6 +12219,292 @@ fn a_woken_agent_never_shows_the_process_group_its_stop_ended() {
     let pid = rustix::process::Pid::from_raw(i32::try_from(started).unwrap()).unwrap();
     assert!(rustix::process::test_kill_process_group(pid).is_ok());
     team.shutdown().unwrap();
+}
+
+/// A Codex stand-in whose task turns end with no reply text until it is asked again for
+/// its reply, which it answers with "pear"; every typed line goes to `typed` in its home.
+#[cfg(target_os = "macos")]
+const QUIET_ONCE_CODEX: &str = r#"#!/bin/sh
+[ "$1" = app-server ] && exit 0
+d="$CODEX_HOME/sessions/2026/11/02"
+/bin/mkdir -p "$d" || exit 1
+id=$(printf '%08x-0000-4000-8000-%012x' $$ $$)
+f="$d/rollout-2026-11-02T00-00-00-$id.jsonl"
+printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' "$id" "$(/bin/pwd -P)" > "$f"
+printf '\033[?2004hCodex stand-in ready\n'
+e=$(printf '\033')
+open=0
+while IFS= read -r line; do
+  case "$line" in
+    *"$e[201~"*) open=0; printf '%s\n' "$line" >> "$CODEX_HOME/typed" ;;
+    *"$e[200~"*) open=1; continue ;;
+    *) [ "$open" = 1 ] && { printf '%s\n' "$line" >> "$CODEX_HOME/typed"; continue; } ;;
+  esac
+  printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
+  /bin/sleep 0.3
+  case "$line" in
+    *"no reply text from your last turn"*) printf '{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"pear"}]}}\n' >> "$f" ;;
+  esac
+  printf '{"type":"event_msg","payload":{"type":"task_complete"}}\n' >> "$f"
+done
+"#;
+
+/// A Codex stand-in whose turns all end with no reply text; every typed line goes to
+/// `typed` in its home.
+#[cfg(target_os = "macos")]
+const QUIET_CODEX: &str = r#"#!/bin/sh
+[ "$1" = app-server ] && exit 0
+d="$CODEX_HOME/sessions/2026/11/02"
+/bin/mkdir -p "$d" || exit 1
+id=$(printf '%08x-0000-4000-8000-%012x' $$ $$)
+f="$d/rollout-2026-11-02T00-00-00-$id.jsonl"
+printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' "$id" "$(/bin/pwd -P)" > "$f"
+printf '\033[?2004hCodex stand-in ready\n'
+e=$(printf '\033')
+open=0
+while IFS= read -r line; do
+  case "$line" in
+    *"$e[201~"*) open=0; printf '%s\n' "$line" >> "$CODEX_HOME/typed" ;;
+    *"$e[200~"*) open=1; continue ;;
+    *) [ "$open" = 1 ] && { printf '%s\n' "$line" >> "$CODEX_HOME/typed"; continue; } ;;
+  esac
+  printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
+  /bin/sleep 0.3
+  printf '{"type":"event_msg","payload":{"type":"task_complete"}}\n' >> "$f"
+done
+"#;
+
+/// The task a re-ask test hands to its sub-agent.
+#[cfg(target_os = "macos")]
+const QUIET_TASK: &str = "Write pear.md";
+
+/// What a re-ask test reads once its task is finished: the task's status and result, how
+/// many times the re-ask reached its agent, and that agent's turns. Takes the fixture.
+#[cfg(target_os = "macos")]
+fn quiet_task(fixture: &Fixture) -> (String, Option<String>, usize, i64) {
+    let (status, result, agent): (String, Option<String>, i64) = fixture
+        .connection
+        .query_row(
+            "SELECT status,result,agent FROM team_tasks WHERE prompt=?1",
+            [QUIET_TASK],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    let turns: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT turns FROM team_agents WHERE id=?1",
+            [agent],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let asked = typed(fixture, agent).matches(super::REASK_EMPTY).count();
+    (status, result, asked, turns)
+}
+
+/// Runs one sub-agent task on a stand-in with the re-ask setting as given (None leaves the
+/// default) until the task is finished, then reads it. Takes the stand-in and the choice.
+/// Returns what `quiet_task` reads.
+#[cfg(target_os = "macos")]
+fn reask_run(script: &str, choice: Option<bool>) -> (String, Option<String>, usize, i64) {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, script, TeamLimits::default());
+    let mut actions = Vec::new();
+    if let Some(on) = choice {
+        actions.push(crate::team::TeamAction::ReaskEmptyReply {
+            project_id: fixture.setup.project_id.clone(),
+            on,
+        });
+    }
+    actions.push(hand_off(&fixture, QUIET_TASK));
+    owner(&fixture, &actions);
+    fixture.until(&mut team, "the task finishes", |f| {
+        task_of(f, QUIET_TASK).0 == "done"
+    });
+    idle_ticks(&mut team);
+    let read = quiet_task(&fixture);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    read
+}
+
+/// With Re-ask empty reply on, the default, a sub-agent whose task turn ends with no reply
+/// text is asked once more, and its second reply is the task's result (DEC-111).
+#[cfg(target_os = "macos")]
+#[test]
+fn reask_on_asks_a_quiet_sub_agent_once_and_its_reply_is_the_result() {
+    assert_eq!(
+        reask_run(QUIET_ONCE_CODEX, None),
+        ("done".to_owned(), Some("pear".to_owned()), 1, 2)
+    );
+}
+
+/// With Re-ask empty reply on, a sub-agent that stays quiet after its one re-ask finishes
+/// the task with no reply text, and is not asked a third time (DEC-111).
+#[cfg(target_os = "macos")]
+#[test]
+fn reask_on_reports_a_second_empty_reply_without_asking_again() {
+    assert_eq!(
+        reask_run(QUIET_CODEX, Some(true)),
+        ("done".to_owned(), None, 1, 2)
+    );
+}
+
+/// With Re-ask empty reply off, a sub-agent's task turn that ends with no reply text
+/// finishes the task at once, and the agent is never asked again (DEC-111).
+#[cfg(target_os = "macos")]
+#[test]
+fn reask_off_finishes_a_quiet_task_at_once() {
+    assert_eq!(
+        reask_run(QUIET_ONCE_CODEX, Some(false)),
+        ("done".to_owned(), None, 0, 1)
+    );
+}
+
+/// RER-L1: a re-ask is never typed into a kept native lead while the lead's app runs a turn
+/// of its own, as instruction edits wait; it goes once, when that turn is over. A message
+/// still on its way to the lead does not hold it: typing that message waits for the lead to
+/// be idle, so holding the re-ask for it would never end.
+#[test]
+fn a_reask_waits_for_a_kept_lead_s_own_turn_and_not_for_a_message_on_its_way() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let lead = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    let (orders, sent) = channel();
+    let mut worker = between_turns(&project, AgentRole::Sub, false, true);
+    worker.orders = orders;
+    worker.busy = Some(Busy::Task(7));
+    worker.reask = Some(7);
+    worker.own_turn = Some(1);
+    team.workers.insert(lead, worker);
+    let none = BTreeSet::new();
+    team.send_reasks(&fixture.setup, &fixture.access, &none)
+        .unwrap();
+    assert!(
+        sent.try_recv().is_err(),
+        "no re-ask while the lead's app runs a turn of its own"
+    );
+    assert_eq!(team.workers[&lead].reask, Some(7), "the re-ask still waits");
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let tx = connection.transaction().unwrap();
+    crate::coord::send(
+        &tx,
+        crate::coord::NewMessage {
+            project: project.clone(),
+            from: crate::coord::Party::Owner,
+            to: crate::coord::Party::Agent(lead),
+            kind: crate::coord::MessageKind::Prompt,
+            question: None,
+            work: None,
+            reply_to: None,
+            body: "Check the page".into(),
+            idempotency_key: None,
+        },
+        1,
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    assert!(
+        team.lead_waits(lead).unwrap(),
+        "a message is on its way to the lead"
+    );
+    team.workers.get_mut(&lead).unwrap().own_turn = None;
+    team.send_reasks(&fixture.setup, &fixture.access, &none)
+        .unwrap();
+    match sent.try_recv() {
+        Ok(Order::Turn(text, None, _)) => assert_eq!(text, REASK_EMPTY),
+        other => panic!(
+            "one re-ask once the lead is free, got one: {}",
+            other.is_ok()
+        ),
+    }
+    assert_eq!(
+        (team.workers[&lead].reask, team.workers[&lead].reasked),
+        (None, Some(7)),
+        "the re-ask went once"
+    );
+    team.send_reasks(&fixture.setup, &fixture.access, &none)
+        .unwrap();
+    assert!(sent.try_recv().is_err(), "no second re-ask");
+    team.workers.clear();
+}
+
+/// RER2-L1: a kept native lead whose task turn ends with no reply text while a teammate of
+/// it still works is not asked again and not held: its task finishes with no reply text as
+/// with the setting off, the lead is idle, and a message to it is typed into its terminal.
+/// The lead turns again on its own when its teammates' results arrive.
+#[test]
+fn a_kept_lead_with_working_teammates_gets_no_reask_and_takes_its_messages() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let lead = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,parent,pane)
+             VALUES (?1,'teammate','claude-code',1,'working',1,1,?2,'%3')",
+            params![PROJECT, lead],
+        )
+        .unwrap();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,created_ms)
+             VALUES (?1,'owner','claude-code',0,'Write page.md','running',?2,1)",
+            params![PROJECT, lead],
+        )
+        .unwrap();
+    let task = fixture.connection.last_insert_rowid();
+    fixture.pane(&host, lead);
+    let (orders, sent) = channel();
+    let mut worker = between_turns(&project, AgentRole::Sub, false, true);
+    worker.orders = orders;
+    worker.busy = Some(Busy::Task(task));
+    worker.reask = Some(task);
+    team.workers.insert(lead, worker);
+    team.send_reasks(&fixture.setup, &fixture.access, &BTreeSet::new())
+        .unwrap();
+    assert!(sent.try_recv().is_err(), "no re-ask is typed");
+    assert_eq!(
+        (team.workers[&lead].reask, team.workers[&lead].busy),
+        (None, None),
+        "the lead is not held for a re-ask"
+    );
+    let (status, result): (String, Option<String>) = fixture
+        .connection
+        .query_row(
+            "SELECT status,result FROM team_tasks WHERE id=?1",
+            [task],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        (status.as_str(), result),
+        ("done", None),
+        "the task finishes with no reply text"
+    );
+    assert_eq!(fixture.agent_status(lead).0, AgentStatus::Idle);
+    std::thread::sleep(crate::coord::delivery::typing::APP_QUIET + Duration::from_millis(500));
+    let owner = crate::team::master::OwnerTyping::new(fixture.base.join("typing-never-written.db"));
+    assert_eq!(
+        crate::coord::delivery::typing::type_into(
+            &fixture.connection,
+            host.as_ref(),
+            Some(&owner),
+            lead,
+            "[crazyagent msg 1] from the owner: check the page",
+            now_ms(),
+        )
+        .unwrap(),
+        crate::coord::delivery::typing::Typing::Typed,
+        "the owner's message reaches the lead"
+    );
+    team.workers.clear();
+    host.close(&[]).unwrap();
 }
 
 /// The tasks of a project in one state, oldest first. Takes the fixture and the state.

@@ -556,6 +556,7 @@ impl TeamView {
                 TeamReply::Handled
             }
             KeyCode::Char('g') => self.ask_before_merge(),
+            KeyCode::Char('R') => self.reask_empty_reply(),
             KeyCode::Char('F') => self.new_folder_limit(),
             KeyCode::Char('B') => self.background_at_end(),
             KeyCode::Char('G') => self.grace_time(),
@@ -1510,6 +1511,35 @@ impl TeamView {
         })
     }
 
+    /// Flips "Re-ask empty reply" between On and Off: whether a sub-agent that ends a task
+    /// with no reply text is asked once more for its reply (DEC-111). Output: the change to
+    /// send, or Handled with a notice while loading or saving.
+    fn reask_empty_reply(&mut self) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        if self.changing.is_some() {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+            return TeamReply::Handled;
+        }
+        let on = !status.reask_empty_reply;
+        self.changing = Some(
+            if on {
+                "A sub-agent that ends a task with no reply text is now asked once more for its reply."
+            } else {
+                "A sub-agent's task with no reply text is now reported without asking again."
+            }
+            .to_owned(),
+        );
+        TeamReply::Change(TeamAction::ReaskEmptyReply {
+            project_id: self.project.clone(),
+            on,
+        })
+    }
+
     /// Moves "New folder limit", the most files one new top-level folder may gain in a change
     /// set (DEC-107), to its next choice. Output: the change to send, or Handled with a
     /// notice while loading or saving.
@@ -2391,6 +2421,15 @@ impl TeamView {
                 if status.ask_before_merge { "On" } else { "Off" }.to_owned(),
             ),
             setting(
+                "Re-ask empty reply",
+                if status.reask_empty_reply {
+                    "On"
+                } else {
+                    "Off"
+                }
+                .to_owned(),
+            ),
+            setting(
                 "New folder limit",
                 format!("{} files", status.new_folder_files_max),
             ),
@@ -2724,6 +2763,7 @@ impl TeamView {
             ("m", "Master's branch"),
             ("L", "Land on"),
             ("g", "Ask before merge"),
+            ("R", "Re-ask empty reply"),
             ("F", "New folder limit"),
             ("B", "Background commands"),
             ("G", "Grace time"),
