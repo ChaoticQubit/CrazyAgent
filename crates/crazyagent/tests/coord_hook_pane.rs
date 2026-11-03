@@ -224,7 +224,7 @@ impl Team {
         let deadline = Instant::now() + Duration::from_secs(30);
         while !done.exists() && Instant::now() < deadline {
             if let Some(callers) = self.callers.as_mut() {
-                callers.serve(&mut || server.panes(), &mut |pane| {
+                callers.serve(&mut || server.panes(), &mut |pane, _| {
                     rows.iter()
                         .find(|(row, _)| *row == pane)
                         .map(|(_, whom)| whom.clone())

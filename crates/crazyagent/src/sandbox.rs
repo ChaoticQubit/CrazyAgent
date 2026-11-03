@@ -534,7 +534,7 @@ pub fn agent_command<'a>(
 
 /// Network reach of a sandboxed agent: open when the agent's tools are on, except that
 /// it never binds or listens on an [`OWNER_PORTS`] port or one [`ProjectSandbox::keep_ports`]
-/// keeps, otherwise only the listed model endpoints.
+/// keeps, otherwise only the listed remotes, each one port on loopback or on any host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SandboxNetwork {
     Open,
@@ -1104,9 +1104,11 @@ impl ProjectSandbox {
     /// shell snapshot and session scripts its Bash commands run first (TPH-2). The teammates
     /// run in their own home and only read the lead's, except the team folders Claude Code
     /// shares, where they make no link or folder but a lock, and never write the `git` on the
-    /// lead's path (TPH-2 C). Inputs: the three sockets, the canonical tmux program and the
-    /// teammates' home beside the lead's, its team folders already made. Output: the lead's
-    /// and the teammates' sandboxes, `Invalid`, or `Unavailable` off macOS.
+    /// lead's path (TPH-2 C). Both are shut out of the name the engine binds the caller
+    /// socket at before it moves it over `callers`, so neither swaps its own listener in
+    /// there (rv-secreview RH2R2-1). Inputs: the three sockets, the canonical tmux program
+    /// and the teammates' home beside the lead's, its team folders already made. Output: the
+    /// lead's and the teammates' sandboxes, `Invalid`, or `Unavailable` off macOS.
     pub fn native_team(
         self,
         own: &Path,
@@ -1127,11 +1129,13 @@ impl ProjectSandbox {
         for folder in &shared {
             granted_root(folder, &self.owner_home, &self.secret_paths())?;
         }
+        let binding = crate::team::caller::binding_path(callers);
         let mut teammates = self
             .clone()
             .serve_tmux_server(mates, tmux)?
             .reach_unix_socket(callers)?
             .shut_unix_socket(own)?
+            .shut_unix_socket(&binding)?
             .allow_read(&home)?;
         teammates.agent_home = mates_home.to_path_buf();
         teammates.read_only = vec![
@@ -1155,7 +1159,8 @@ impl ProjectSandbox {
         let lead = self
             .allow_tmux_server(own, tmux)?
             .reach_unix_socket(callers)?
-            .reach_unix_socket(mates)?;
+            .reach_unix_socket(mates)?
+            .shut_unix_socket(&binding)?;
         Ok((lead, teammates))
     }
 
