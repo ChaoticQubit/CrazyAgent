@@ -290,6 +290,29 @@ fn an_agents_proposals_evict_only_its_own_oldest_and_never_the_owners() {
 }
 
 #[test]
+fn an_owner_answer_to_a_profile_question_stays_when_the_profile_is_settled() {
+    let case = Case::new();
+    let first = case.propose(&case.alpha, &numbered(1), AGENT).unwrap();
+    let second = case.propose(&case.alpha, &numbered(2), AGENT).unwrap();
+    let answered = first.question.unwrap();
+    assert_eq!(
+        crate::questions::answer(
+            &case.db,
+            answered,
+            0,
+            &crate::questions::Answer::Text("Looks fine".into())
+        ),
+        Ok(crate::questions::Settlement::Settled)
+    );
+
+    approve(&case.db, &case.alpha, &first.id, Actor::Owner).unwrap();
+    assert_eq!(case.question_status(answered), "answered");
+    revoke(&case.db, &case.alpha, &second.id, Actor::Owner).unwrap();
+    assert_eq!(case.question_status(second.question.unwrap()), "dismissed");
+    assert_eq!(case.count(PENDING_CHECK_QUESTIONS), 0);
+}
+
+#[test]
 fn a_profile_over_a_bound_or_with_an_unsafe_path_is_refused() {
     let case = Case::new();
     let digest = hex(b"assert!(true);");
