@@ -1049,7 +1049,7 @@ fn ide_changes_reads_end_before_the_extension_stops_waiting_and_writes_keep_the_
     ];
     for call in &reads {
         let before = Instant::now();
-        let answered_by = bound(call, deadline);
+        let answered_by = bound(call, deadline, IDE_WRITE_TIME);
         assert!(answered_by >= before + READ_TIME, "{call:?}");
         assert!(answered_by <= Instant::now() + READ_TIME, "{call:?}");
     }
@@ -1067,22 +1067,22 @@ fn ide_changes_reads_end_before_the_extension_stops_waiting_and_writes_keep_the_
     ];
     for call in &writes {
         let before = Instant::now();
-        let answered_by = bound(call, deadline);
+        let answered_by = bound(call, deadline, IDE_WRITE_TIME);
         assert!(answered_by >= before + CHANGES_TIMEOUT, "{call:?}");
         assert!(answered_by <= Instant::now() + CHANGES_TIMEOUT, "{call:?}");
     }
     for call in [IdeCall::Workspace {}, IdeCall::Agents {}] {
-        assert_eq!(bound(&call, deadline), deadline, "{call:?}");
+        assert_eq!(bound(&call, deadline, IDE_WRITE_TIME), deadline, "{call:?}");
     }
     let late = Instant::now() + CHANGES_TIMEOUT + READ_TIME;
-    assert_eq!(bound(&IdeCall::ChangeSets {}, late), late);
+    assert_eq!(bound(&IdeCall::ChangeSets {}, late, IDE_WRITE_TIME), late);
 }
 
-/// A diff comment, an owner edit, a message to an agent and a memory or extension decision
-/// run under their own write bound, past the handshake deadline and within the extension's
-/// request timer, and past it each answers its own outcome-unknown code, which the IDE has
-/// a sentence for, as Accept, Discard and Restore answer theirs; reads and other calls
-/// write nothing and keep the plain timeout.
+/// A diff comment, an owner edit, a message to an agent, a memory or extension decision, an
+/// extension request and the show-all switch run under their own write bound, past the
+/// handshake deadline and within the extension's request timer, and past it each answers
+/// its own outcome-unknown code, which the IDE has a sentence for, as Accept, Discard and
+/// Restore answer theirs; reads and other calls write nothing and keep the plain timeout.
 #[test]
 fn ide_writes_run_under_their_own_bound_and_answer_an_unknown_outcome_past_it() {
     assert!(IDE_WRITE_TIME <= READ_TIME);
@@ -1129,10 +1129,21 @@ fn ide_writes_run_under_their_own_bound_and_answer_an_unknown_outcome_past_it() 
             },
             "ide_extension_decide_outcome_unknown",
         ),
+        (
+            IdeCall::ExtensionRequest {
+                id: "publisher.name".into(),
+                version: "1.0.0".into(),
+            },
+            "ide_extension_request_outcome_unknown",
+        ),
+        (
+            IdeCall::ShowAllAgents { on: true },
+            "ide_show_all_agents_outcome_unknown",
+        ),
     ];
     for (call, code) in &writes {
         let before = Instant::now();
-        let answered_by = bound(call, deadline);
+        let answered_by = bound(call, deadline, IDE_WRITE_TIME);
         assert!(answered_by >= before + IDE_WRITE_TIME, "{call:?}");
         assert!(answered_by <= Instant::now() + IDE_WRITE_TIME, "{call:?}");
         assert_eq!(outcome_unknown(call), Some(*code), "{call:?}");
@@ -1177,6 +1188,101 @@ fn ide_writes_run_under_their_own_bound_and_answer_an_unknown_outcome_past_it() 
     }
 }
 
+/// Takes the engine database's write lock on a connection of the test's own, as a long
+/// engine write or a slow disk would, so an IDE write waits on it within the busy timeout.
+/// Input: the engine root. Output: the connection, holding the lock until it rolls back.
+fn held_writes(root: &Path) -> rusqlite::Connection {
+    let held = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    held.busy_timeout(Duration::from_secs(5)).unwrap();
+    held.execute_batch("BEGIN IMMEDIATE").unwrap();
+    held
+}
+
+/// Over a real connection, a write still waiting on the engine database when its bound
+/// passes is answered with its own outcome-unknown code and nothing else, never the plain
+/// timeout, since it may still take effect.
+#[tokio::test]
+async fn a_write_past_its_bound_answers_its_unknown_outcome_over_the_connection() {
+    let mut case = Case::start().await;
+    let alpha = ProjectId::new("alpha").unwrap();
+    let path = issue(&case.runtime, &alpha).unwrap();
+    let socket = case.socket(&path);
+    let ide = packet(MAGIC, 0, &session(&socket, &path).await);
+    let held = held_writes(case.root.path());
+    let (mut client, server) = UnixStream::pair().unwrap();
+    let short = Duration::from_millis(300);
+    let serving = tokio::spawn(serve_within(
+        server,
+        ide,
+        case.runtime.clone(),
+        Instant::now() + short,
+        short,
+    ));
+    let body = request(
+        "alpha",
+        json!({ "name": "ide.show_all_agents", "args": { "on": true } }),
+    );
+    let mut frame = (body.len() as u32).to_be_bytes().to_vec();
+    frame.extend(body);
+    client.write_all(&frame).await.unwrap();
+    assert_eq!(
+        read_reply(&mut client).await,
+        rejected("ide_show_all_agents_outcome_unknown")
+    );
+    assert_eq!(
+        read_reply(&mut client).await,
+        None,
+        "one answer, then the end"
+    );
+    held.execute_batch("ROLLBACK").unwrap();
+    serving.await.unwrap();
+    case.stop().await;
+}
+
+/// A write that finishes after its capability was revoked still reports what it did over
+/// the owner socket, since it took effect; the test revokes once the handshake deadline
+/// passed while the write waits on the engine database, then lets it finish.
+#[tokio::test]
+async fn a_write_that_finishes_after_its_capability_was_revoked_still_reports_it() {
+    let mut case = Case::start().await;
+    let alpha = ProjectId::new("alpha").unwrap();
+    let path = issue(&case.runtime, &alpha).unwrap();
+    let socket = case.socket(&path);
+    let ide = packet(MAGIC, 0, &session(&socket, &path).await);
+    let past = handshake_timeout(&case) + Duration::from_secs(1);
+    assert!(
+        past < Duration::from_secs(5),
+        "the write still waits within the busy timeout"
+    );
+    let held = held_writes(case.root.path());
+    let body = request(
+        "alpha",
+        json!({ "name": "ide.show_all_agents", "args": { "on": true } }),
+    );
+    let mut stream = send(&socket, ide, &body).await;
+    tokio::time::sleep(past).await;
+    revoke(&case.runtime, &alpha).unwrap();
+    held.execute_batch("ROLLBACK").unwrap();
+    let file = case
+        .root
+        .path()
+        .join("ide")
+        .join("alpha")
+        .join("crazyagent.code-workspace");
+    assert_eq!(
+        read_reply(&mut stream).await,
+        Some(IdeReply::Ok {
+            data: json!({ "path": file, "hidden": 0, "show_all": true }),
+        })
+    );
+    assert_eq!(
+        exchange(&socket, ide, &request("alpha", workspace())).await,
+        rejected("ide_capability_refused"),
+        "a call after the revoke is refused"
+    );
+    case.stop().await;
+}
+
 /// An IDE git command runs under `GIT_TIME` and answers within its margin, before the
 /// extension's git relay stops waiting, so the relay always hands git the engine's answer
 /// or its refusal, never a timer of its own.
@@ -1198,7 +1304,7 @@ fn an_ide_git_command_answers_before_the_extension_relay_stops_waiting() {
     };
     let deadline = Instant::now() + Duration::from_secs(1);
     let before = Instant::now();
-    let answered_by = bound(&call, deadline);
+    let answered_by = bound(&call, deadline, IDE_WRITE_TIME);
     assert!(answered_by >= before + GIT_TIME + GIT_ANSWER_MARGIN);
     assert!(answered_by <= Instant::now() + GIT_TIME + GIT_ANSWER_MARGIN);
 }

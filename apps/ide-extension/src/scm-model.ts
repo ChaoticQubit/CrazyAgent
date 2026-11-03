@@ -139,6 +139,8 @@ const UNCONFIRMED: Record<string, string> = {
   ide_agent_message_outcome_unknown: "CrazyAgent couldn't confirm the agent got this message. Check its terminal before you send it again.",
   ide_memory_decide_outcome_unknown: "CrazyAgent couldn't confirm your decision on this memory. Check the CrazyAgent window before you decide again.",
   ide_extension_decide_outcome_unknown: "CrazyAgent couldn't confirm your decision on this update. Check the CrazyAgent app before you decide again.",
+  ide_extension_request_outcome_unknown: "CrazyAgent couldn't confirm it got your request for this extension. Check the CrazyAgent app before you ask again.",
+  ide_show_all_agents_outcome_unknown: "CrazyAgent couldn't confirm the agent folders changed. Check the Explorer before you try again.",
   ide_git_outcome_unknown: "CrazyAgent couldn't confirm this git command finished. It may have run, so check the branch and its remote before you run it again.",
 };
 
