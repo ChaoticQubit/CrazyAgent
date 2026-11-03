@@ -6,7 +6,7 @@ use crate::landing::{self, ChangeSetId, ChangedFile, FileKind, FileStatus};
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap};
 
 /// The most bytes one `integrity_json` block may hold, as the run binding contract bounds it.
 pub const INTEGRITY_BYTES_MAX: usize = 8 * 1024;
@@ -20,9 +20,13 @@ pub const SCAN_FILES_MAX: usize = 256;
 /// The most results one baseline run is read with, the contract's bound per run.
 pub const BASELINE_RESULTS_MAX: usize = 20_000;
 /// The marker recorded for a changed test file the engine could not read for markers: too
-/// large, not text, unreadable by name, or past `SCAN_FILES_MAX`. It counts as a new skip,
-/// so `refuse` fails closed.
+/// large, not text, unreadable by name, past `SCAN_FILES_MAX`, or a head that leaves a
+/// string, regular expression or comment open. It counts as a new skip, so `refuse` fails
+/// closed.
 pub const UNSCANNED: &str = "unscanned";
+/// The marker recorded for a test the baseline run executed that this run reports skipped
+/// or not run, whatever skipped it at run time.
+pub const SKIPPED_IN_RUN: &str = "skipped_in_run";
 /// The only actor whose runs an inventory compares with.
 pub const ENGINE_ACTOR: &str = "engine:checks";
 
@@ -48,13 +52,40 @@ pub struct Subject<'a> {
     pub settings: &'a ChecksSettings,
 }
 
+/// How one test result ended, as trackwright's `tk_results.outcome` names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResultOutcome {
+    Passed,
+    Failed,
+    Skipped,
+    Errored,
+    NotRun,
+}
+
+impl ResultOutcome {
+    /// Reads a stored outcome. Input: the text. Output: the outcome, or None for any other.
+    pub fn parse(text: &str) -> Option<Self> {
+        match text {
+            "passed" => Some(Self::Passed),
+            "failed" => Some(Self::Failed),
+            "skipped" => Some(Self::Skipped),
+            "errored" => Some(Self::Errored),
+            "not_run" => Some(Self::NotRun),
+            _ => None,
+        }
+    }
+
+    fn ran(self) -> bool {
+        matches!(self, Self::Passed | Self::Failed | Self::Errored)
+    }
+}
+
 /// What a finished check reported, as the recorder maps it from the parsed results: every
-/// result name in any outcome, how many passed or failed, whether the parser saw a build
-/// failure, and the process exit code, None when it was killed.
+/// result name with its outcome, whether the parser saw a build failure, and the process
+/// exit code, None when it was killed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Reported<'a> {
-    pub names: Vec<&'a str>,
-    pub executed: u32,
+    pub results: Vec<(&'a str, ResultOutcome)>,
     pub build_failed: bool,
     pub exit: Option<i32>,
 }
@@ -63,23 +94,37 @@ impl Reported<'_> {
     /// Tells a build failure apart from failing tests: the parser saw one, or the check
     /// exited nonzero without reporting a single result. Output: whether the build held.
     pub fn build_ok(&self) -> bool {
-        let silent_failure = self.exit.is_some_and(|code| code != 0) && self.names.is_empty();
+        let silent_failure = self.exit.is_some_and(|code| code != 0) && self.results.is_empty();
         !(self.build_failed || silent_failure)
+    }
+
+    /// Counts the results that executed, passed or failed, as the verdict rules count them.
+    /// Output: the count.
+    pub fn executed(&self) -> u32 {
+        let executed = self
+            .results
+            .iter()
+            .filter(|(_, outcome)| matches!(outcome, ResultOutcome::Passed | ResultOutcome::Failed))
+            .count();
+        u32::try_from(executed).unwrap_or(u32::MAX)
     }
 }
 
-/// Tests the base run reported that this run no longer does: the run compared with, at
-/// most `LIST_MAX` names in order, and how many there are in all.
+/// Tests the base run reported that this run no longer does: the run compared with, as
+/// trackwright's `<KEY>-R<n>` id, at most `LIST_MAX` names in order, and how many there
+/// are in all.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Inventory {
-    pub baseline_run: Option<i64>,
+    pub baseline_run: Option<String>,
     pub removed: Vec<String>,
     pub removed_total: u32,
 }
 
-/// One skip marker the change set adds: the head path, its 1-based line and the marker,
-/// or line 0 and `UNSCANNED` for a test file the engine could not read.
+/// One skip the change set brings: a marker it adds, with the head path, its 1-based line
+/// and the marker; a test file the engine could not read, line 1 and `UNSCANNED`; or a
+/// test the baseline run executed that this run reports skipped or not run, its name as
+/// the path, line 1 and `SKIPPED_IN_RUN`.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NewSkip {
@@ -145,26 +190,24 @@ pub fn assess(
     }
     let files = landing::ide::files(db, &project, subject.change_set)?;
     let protected_touched = bounded(protected(&files, subject.protected_paths), PROTECTED_BUDGET);
-    let new_skips = match subject.settings.skip_markers {
-        SkipMarkers::Off => Vec::new(),
-        SkipMarkers::Flag | SkipMarkers::Refuse => bounded(
-            skips(db, &project, subject.change_set, &files)?,
-            SKIPS_BUDGET,
-        ),
-    };
     let build_ok = reported.build_ok();
-    let inventory = if build_ok && !reported.names.is_empty() {
+    let compared = if build_ok && !reported.results.is_empty() {
         inventory(db, subject, &view.base, reported)?
     } else {
-        Inventory {
-            baseline_run: None,
-            removed: Vec::new(),
-            removed_total: 0,
+        Compared::none()
+    };
+    let new_skips = match subject.settings.skip_markers {
+        SkipMarkers::Off => Vec::new(),
+        SkipMarkers::Flag | SkipMarkers::Refuse => {
+            let mut found = skips(db, &project, subject.change_set, &files)?;
+            found.extend(compared.skipped);
+            found.sort();
+            bounded(found, SKIPS_BUDGET)
         }
     };
     let integrity = Integrity {
-        executed: reported.executed,
-        inventory,
+        executed: reported.executed(),
+        inventory: compared.inventory,
         new_skips,
         protected_touched,
         holdouts_ran: subject.check.holdout.is_some(),
@@ -174,6 +217,7 @@ pub fn assess(
     assert!(bytes.len() <= INTEGRITY_BYTES_MAX);
     assert!(integrity.inventory.removed.len() <= LIST_MAX);
     assert!(integrity.inventory.removed.len() <= integrity.inventory.removed_total as usize);
+    assert!(integrity.new_skips.iter().all(|skip| skip.line >= 1));
     Ok(integrity)
 }
 
@@ -223,38 +267,70 @@ pub fn sight(db: &Connection, run: i64, reader: Reader) -> Result<RunSight, Engi
     Ok(RunSight::Full)
 }
 
+/// What comparing a run with its baseline found: the inventory, and the tests the
+/// baseline executed that this run skipped.
+struct Compared {
+    inventory: Inventory,
+    skipped: Vec<NewSkip>,
+}
+
+impl Compared {
+    fn none() -> Self {
+        Self {
+            inventory: Inventory {
+                baseline_run: None,
+                removed: Vec::new(),
+                removed_total: 0,
+            },
+            skipped: Vec::new(),
+        }
+    }
+}
+
 fn inventory(
     db: &Connection,
     subject: &Subject<'_>,
     base: &str,
     reported: &Reported<'_>,
-) -> Result<Inventory, EngineError> {
-    let none = Inventory {
-        baseline_run: None,
-        removed: Vec::new(),
-        removed_total: 0,
-    };
+) -> Result<Compared, EngineError> {
     let any_finished = match subject.settings.inventory {
-        InventoryMode::Off => return Ok(none),
+        InventoryMode::Off => return Ok(Compared::none()),
         InventoryMode::LastKnown => false,
         InventoryMode::RunBase => true,
     };
-    let Some(baseline) = baseline_run(db, subject, base, any_finished)? else {
-        return Ok(none);
+    let Some((baseline, short)) = baseline_run(db, subject, base, any_finished)? else {
+        return Ok(Compared::none());
     };
-    let names = baseline_names(db, baseline)?;
-    let current: HashSet<&str> = reported.names.iter().copied().collect();
-    let removed: BTreeSet<&str> = names
-        .iter()
-        .map(String::as_str)
-        .filter(|name| !current.contains(name))
-        .collect();
+    let results = baseline_results(db, baseline)?;
+    let current: HashMap<&str, ResultOutcome> = reported.results.iter().copied().collect();
+    let mut removed = BTreeSet::new();
+    let mut skipped = Vec::new();
+    for (name, before) in &results {
+        match current.get(name.as_str()) {
+            None => {
+                removed.insert(name.as_str());
+            }
+            Some(ResultOutcome::Skipped | ResultOutcome::NotRun)
+                if before.is_some_and(ResultOutcome::ran) =>
+            {
+                skipped.push(NewSkip {
+                    path: recorded(name),
+                    line: 1,
+                    marker: SKIPPED_IN_RUN.into(),
+                });
+            }
+            Some(_) => {}
+        }
+    }
     let removed_total = u32::try_from(removed.len()).map_err(|_| failure("checks_unavailable"))?;
-    let removed = bounded(removed.into_iter().map(shortened).collect(), REMOVED_BUDGET);
-    Ok(Inventory {
-        baseline_run: Some(baseline),
-        removed,
-        removed_total,
+    let removed = bounded(removed.into_iter().map(recorded).collect(), REMOVED_BUDGET);
+    Ok(Compared {
+        inventory: Inventory {
+            baseline_run: Some(short),
+            removed,
+            removed_total,
+        },
+        skipped,
     })
 }
 
@@ -263,16 +339,17 @@ fn baseline_run(
     subject: &Subject<'_>,
     base: &str,
     any_finished: bool,
-) -> Result<Option<i64>, EngineError> {
+) -> Result<Option<(i64, String)>, EngineError> {
     db.query_row(
-        "SELECT id FROM tk_runs
-          WHERE project = ?1 AND state = 'finished' AND recorded_by = ?2
-            AND (verdict = 'passed' OR (?3 AND verdict = 'failed'))
-            AND CASE WHEN json_valid(source_json)
-                     THEN json_extract(source_json, '$.commit') END = ?4
-            AND CASE WHEN json_valid(policy_json)
-                     THEN json_extract(policy_json, '$.check') END = ?5
-          ORDER BY finished_ms DESC, id DESC LIMIT 1",
+        "SELECT r.id, p.key || '-R' || r.number FROM tk_runs r
+           JOIN tk_projects p ON p.id = r.project
+          WHERE r.project = ?1 AND r.state = 'finished' AND r.recorded_by = ?2
+            AND (r.verdict = 'passed' OR (?3 AND r.verdict = 'failed'))
+            AND CASE WHEN json_valid(r.source_json)
+                     THEN json_extract(r.source_json, '$.commit') END = ?4
+            AND CASE WHEN json_valid(r.policy_json)
+                     THEN json_extract(r.policy_json, '$.check') END = ?5
+          ORDER BY r.finished_ms DESC, r.id DESC LIMIT 1",
         params![
             subject.tracker_project,
             ENGINE_ACTOR,
@@ -280,24 +357,32 @@ fn baseline_run(
             base,
             subject.check.spec.id
         ],
-        |row| row.get(0),
+        |row| Ok((row.get(0)?, row.get(1)?)),
     )
     .optional()
     .map_err(|_| failure("checks_unavailable"))
 }
 
-fn baseline_names(db: &Connection, run: i64) -> Result<Vec<String>, EngineError> {
+fn baseline_results(
+    db: &Connection,
+    run: i64,
+) -> Result<Vec<(String, Option<ResultOutcome>)>, EngineError> {
     let mut statement = db
-        .prepare("SELECT name FROM tk_results WHERE run_id = ?1 ORDER BY position LIMIT ?2")
+        .prepare(
+            "SELECT name, outcome FROM tk_results WHERE run_id = ?1 ORDER BY position LIMIT ?2",
+        )
         .map_err(|_| failure("checks_unavailable"))?;
     let limit = i64::try_from(BASELINE_RESULTS_MAX).expect("the bound fits in i64");
-    let names = statement
-        .query_map(params![run, limit], |row| row.get::<_, String>(0))
+    let results = statement
+        .query_map(params![run, limit], |row| {
+            let outcome: String = row.get(1)?;
+            Ok((row.get::<_, String>(0)?, ResultOutcome::parse(&outcome)))
+        })
         .map_err(|_| failure("checks_unavailable"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| failure("checks_unavailable"))?;
-    assert!(names.len() <= BASELINE_RESULTS_MAX);
-    Ok(names)
+    assert!(results.len() <= BASELINE_RESULTS_MAX);
+    Ok(results)
 }
 
 /// Lists the changed paths a protected path covers, on either side of a rename: the
@@ -325,7 +410,7 @@ fn protected(files: &[ChangedFile], entries: &[String]) -> Vec<String> {
                     || attributes.is_some_and(|folder| entry.starts_with(folder))
             });
             if covered {
-                touched.insert(shortened(path));
+                touched.insert(recorded(path));
             }
         }
     }
@@ -360,8 +445,8 @@ fn skips(
             continue;
         };
         let unscanned = NewSkip {
-            path: shortened(&file.path),
-            line: 0,
+            path: recorded(&file.path),
+            line: 1,
             marker: UNSCANNED.into(),
         };
         if file.kind == FileKind::Binary || scanned >= SCAN_FILES_MAX {
@@ -370,46 +455,83 @@ fn skips(
         }
         scanned += 1;
         match added_in(db, project, id, file, language) {
-            Ok(markers) => found.extend(markers.into_iter().map(|marker| NewSkip {
-                path: shortened(&file.path),
+            Some(markers) => found.extend(markers.into_iter().map(|marker| NewSkip {
+                path: recorded(&file.path),
                 line: marker.line,
                 marker: marker.marker.into(),
             })),
-            Err(_) => found.push(unscanned),
+            None => found.push(unscanned),
         }
     }
     assert!(scanned <= SCAN_FILES_MAX);
-    found.sort();
     Ok(found)
 }
 
+/// Reads one changed test file at base and head and lists the markers its change adds.
+/// Inputs: the store, the project, the change set, the file and its language. Output:
+/// the markers, or None when either side cannot be read or the head leaves a string or
+/// comment open, so the file counts as unscanned.
 fn added_in(
     db: &Connection,
     project: &ProjectId,
     id: &ChangeSetId,
     file: &ChangedFile,
     language: Language,
-) -> Result<Vec<markers::Marker>, EngineError> {
-    let head = landing::ide::head_text(db, project, id, &file.path)?;
+) -> Option<Vec<markers::Marker>> {
+    let head = landing::ide::head_text(db, project, id, &file.path).ok()?;
     let base = if file.status == FileStatus::Added {
         std::sync::Arc::from("")
     } else {
-        landing::ide::base_text(db, project, id, &file.path)?
+        landing::ide::base_text(db, project, id, &file.path).ok()?
     };
-    Ok(markers::added(language, &base, &head))
+    markers::added(language, &base, &head)
 }
 
-fn shortened(text: &str) -> String {
-    if text.len() <= TEXT_BYTES_MAX {
-        return text.to_owned();
+/// Makes a name or path fit a trackwright run shape: every control character, line break
+/// and character a reader cannot see or that reorders text becomes U+FFFD, and a text past
+/// `TEXT_BYTES_MAX` keeps its head cut on a character boundary with `...`. Input: the text.
+/// Output: the recorded text.
+fn recorded(text: &str) -> String {
+    let plain: String = text
+        .chars()
+        .map(|c| if hidden(c) { '\u{FFFD}' } else { c })
+        .collect();
+    if plain.len() <= TEXT_BYTES_MAX {
+        return plain;
     }
     let mut end = TEXT_BYTES_MAX - ELIDED.len();
-    while !text.is_char_boundary(end) {
+    while !plain.is_char_boundary(end) {
         end -= 1;
     }
-    let cut = format!("{}{ELIDED}", &text[..end]);
+    let cut = format!("{}{ELIDED}", &plain[..end]);
     assert!(cut.len() <= TEXT_BYTES_MAX);
     cut
+}
+
+fn hidden(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{00ad}'
+                | '\u{034f}'
+                | '\u{061c}'
+                | '\u{115f}'
+                | '\u{1160}'
+                | '\u{17b4}'
+                | '\u{17b5}'
+                | '\u{180b}'..='\u{180f}'
+                | '\u{200b}'..='\u{200f}'
+                | '\u{2028}'..='\u{202e}'
+                | '\u{2060}'..='\u{206f}'
+                | '\u{3164}'
+                | '\u{fe00}'..='\u{fe0f}'
+                | '\u{feff}'
+                | '\u{ffa0}'
+                | '\u{fff0}'..='\u{fffb}'
+                | '\u{1bca0}'..='\u{1bca3}'
+                | '\u{1d173}'..='\u{1d17a}'
+                | '\u{e0000}'..='\u{e0fff}'
+        )
 }
 
 fn bounded<T: Serialize>(items: Vec<T>, budget: usize) -> Vec<T> {
