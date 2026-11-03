@@ -2,7 +2,7 @@ use super::{BridgeError, IntentReceipt, NativeBridge, bounded, caused, failure};
 use crazyagent::engine::owner::OwnerMutation;
 use crazyagent::protocol::ProjectId;
 use crazyagent::team::events::{AppEvents, RuleTarget, WakeRule};
-use crazyagent::team::{TeamAction, TeamStatus};
+use crazyagent::team::{SwitchMode, TeamAction, TeamStatus};
 
 pub(super) fn read_failure(code: &str) -> BridgeError {
     caused(
@@ -128,31 +128,111 @@ impl NativeBridge {
     }
 
     /// Turns keeping the plan's minimum sub-agents running on or off.
-    /// Takes the project id, the switch and the client generation.
-    /// Returns the actual commit receipt.
+    /// Takes the project id, the switch, the team settings version the client read and the
+    /// client generation. Returns the actual commit receipt; a save from an older read is
+    /// refused as `stale_revision`.
     pub async fn team_keep_warm(
         &mut self,
         id: &str,
         on: bool,
+        version: u64,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
         let project_id = project(id)?;
-        self.team_action(TeamAction::KeepWarm { project_id, on }, generation)
-            .await
+        let action = TeamAction::KeepWarm {
+            project_id,
+            on,
+            version,
+        };
+        self.team_action(action, generation).await
+    }
+
+    /// Sets the project team's task and session time limits and its sub-agent idle stop, in
+    /// seconds from the listed choices, none for no limit. Takes the project id, the three
+    /// limits, the team settings version the client read and the client generation. Returns
+    /// the actual commit receipt; a value outside the choices, or a session limit below a set
+    /// task limit, is refused as `team_action_invalid` with `team_time_limits_invalid` behind
+    /// it, and a save from an older read as `stale_revision`.
+    pub async fn team_time_limits(
+        &mut self,
+        id: &str,
+        turn_secs: Option<u32>,
+        session_secs: Option<u32>,
+        idle_secs: Option<u32>,
+        version: u64,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        let action = TeamAction::TimeLimits {
+            project_id,
+            turn_secs,
+            session_secs,
+            idle_secs,
+            version,
+        };
+        self.team_action(action, generation).await
+    }
+
+    /// Sets what the live master does with the conversation when the master harness changes:
+    /// `carry` hands the new harness the earlier turns and open tasks, `fresh` starts it
+    /// without them. Takes the project id, the mode, the team settings version the client read
+    /// and the client generation. Returns the actual commit receipt, `team_action_invalid` for
+    /// any other mode, or `stale_revision` for a save from an older read.
+    pub async fn team_on_harness_switch(
+        &mut self,
+        id: &str,
+        mode: &str,
+        version: u64,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        let mode = SwitchMode::named(mode).ok_or_else(|| failure("team_action_invalid"))?;
+        let action = TeamAction::OnHarnessSwitch {
+            project_id,
+            mode,
+            version,
+        };
+        self.team_action(action, generation).await
+    }
+
+    /// Sets where the project's finished agents show: in the agents list and team graph, or
+    /// only in their Finished fold-out. Takes the project id, true for Show, the team settings
+    /// version the client read and the client generation. Returns the actual commit receipt;
+    /// a save from an older read is refused as `stale_revision`.
+    pub async fn team_finished_agents(
+        &mut self,
+        id: &str,
+        show: bool,
+        version: u64,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        let action = TeamAction::FinishedAgents {
+            project_id,
+            show,
+            version,
+        };
+        self.team_action(action, generation).await
     }
 
     /// Turns a project's live master on or off: on, the engine keeps the master harness's own
-    /// app running in a terminal the owner types into. Takes the project id, the switch and
-    /// the client generation. Returns the actual commit receipt.
+    /// app running in a terminal the owner types into. Takes the project id, the switch, the
+    /// team settings version the client read and the client generation. Returns the actual
+    /// commit receipt; a save from an older read is refused as `stale_revision`.
     pub async fn team_live_master(
         &mut self,
         id: &str,
         on: bool,
+        version: u64,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
         let project_id = project(id)?;
-        self.team_action(TeamAction::LiveMaster { project_id, on }, generation)
-            .await
+        let action = TeamAction::LiveMaster {
+            project_id,
+            on,
+            version,
+        };
+        self.team_action(action, generation).await
     }
 
     /// Pauses every agent of a project's team, or resumes it.
@@ -214,6 +294,22 @@ impl NativeBridge {
         self.team_action(action, generation).await
     }
 
+    /// Wakes a finished sub-agent (DEC-102) as a team action by its id, which the team runtime
+    /// serves wherever team agents run: the same agent comes back under its own name, worktree
+    /// and harness session. Takes the project id, the team agent id and the client generation.
+    /// Returns the actual commit receipt; a running agent, a cleaned-up worktree or a system
+    /// where team agents cannot run is a plain rejection.
+    pub async fn team_wake_agent(
+        &mut self,
+        id: &str,
+        agent: i64,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::WakeAgent { project_id, agent }, generation)
+            .await
+    }
+
     async fn team_action(
         &mut self,
         action: TeamAction,
@@ -222,10 +318,10 @@ impl NativeBridge {
         self.ready_for_intent(generation)?;
         action
             .validate()
-            .map_err(|_| failure("team_action_invalid"))?;
+            .map_err(|error| caused("team_action_invalid", &error.0))?;
         if let Some(project_id) = action.project() {
             self.controller()?
-                .team_status(project_id.clone())
+                .project_setup(project_id.clone())
                 .await
                 .map_err(|e| read_failure(&e.0))?;
         }

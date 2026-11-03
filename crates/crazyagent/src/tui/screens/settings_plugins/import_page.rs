@@ -4,6 +4,7 @@ use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, hint};
 use crate::tui::keys::Key;
+use crate::tui::screens::new_project_view::printable;
 use crate::tui::screens::settings::draw_page;
 use crate::tui::screens::settings_accounts::{send, settings_event};
 use crate::tui::screens::{Flow, Place, Screen, SettingsSection};
@@ -173,7 +174,7 @@ impl ImportSkillsPage {
         };
         let room = limit.saturating_sub(word.len() + 4).max(8);
         let head = join([
-            Line::raw(cut(&tick, room, glyphs.ellipsis)),
+            Line::raw(cut(&printable(tick), room, glyphs.ellipsis)),
             Line::raw("  "),
             styled(word, role, theme),
         ]);
@@ -193,7 +194,7 @@ impl ImportSkillsPage {
         [
             list_row(head, limit, index == self.selected, true, theme, glyphs),
             styled(
-                cut(&format!("    {detail}"), limit, glyphs.ellipsis),
+                cut(&printable(format!("    {detail}")), limit, glyphs.ellipsis),
                 Role::Muted,
                 theme,
             ),
@@ -214,7 +215,7 @@ impl ImportSkillsPage {
         for (ok, outcome) in &self.outcomes {
             let role = if *ok { Role::Success } else { Role::Error };
             lines.extend(
-                wrap(outcome, limit)
+                wrap(&printable(outcome.clone()), limit)
                     .into_iter()
                     .map(|part| styled(part, role, theme)),
             );

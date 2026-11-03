@@ -1,3 +1,4 @@
+use super::new_project_view::printable;
 use super::settings::{draw_page, step};
 use super::settings_accounts::{plain, send, settings_event};
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection};
@@ -81,6 +82,12 @@ pub fn tilde(path: &str, ctx: &Ctx) -> String {
     }
 }
 
+/// Says that agents do not get a stored skill the engine refuses now, and why.
+/// Input: the refusal code. Output: the sentence.
+pub fn unused(code: &str) -> String {
+    format!("Agents don't get this skill. {}", plugin_plain(code))
+}
+
 /// A plain sentence for an engine problem code about skills and MCP servers.
 /// Input: the code. Output: the sentence.
 pub fn plugin_plain(code: &str) -> &'static str {
@@ -91,6 +98,9 @@ pub fn plugin_plain(code: &str) -> &'static str {
         "skill_frontmatter_missing" => "SKILL.md needs a name and a description at the top.",
         "skill_name_invalid" | "skill_description_invalid" => {
             "SKILL.md has a name or description CrazyAgent cannot use."
+        }
+        "skill_description_hidden" => {
+            "SKILL.md's description has characters you cannot see, so CrazyAgent will not use it."
         }
         "skill_name_taken" | "server_name_taken" => "Another one already uses this name.",
         "skill_too_large" | "skill_too_many_files" | "skill_too_deep" => {
@@ -555,9 +565,12 @@ impl Plugins {
                 .take(skill_window)
                 .map(|(index, skill)| {
                     let values = vec![
-                        styled(skill.name.clone(), Role::Accent, theme),
+                        styled(printable(skill.name.clone()), Role::Accent, theme),
                         Line::raw(if skill.enabled { "On" } else { "Off" }),
-                        Line::raw(tilde(&skill.source, ctx)),
+                        match &skill.refused {
+                            Some(code) => styled(unused(code), Role::Error, theme),
+                            None => Line::raw(printable(tilde(&skill.source, ctx))),
+                        },
                     ];
                     list_row(
                         cells(&widths, values, 2, glyphs),

@@ -4,7 +4,7 @@ import { checkForUpdate, installUpdate, linkCommandLineTool, loadUpdateSettings,
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, Icon, LoadError, NotReady, Segmented, Skeleton } from "../../ui";
 import { displayText } from "../conversation";
-import { CHECK_INTERVAL_MS, progressLabel, progressPercent, shouldAnnounce, updateMessage, updateStore, type UpdatePhase } from "./updates-state";
+import { blocking, CHECK_INTERVAL_MS, progressLabel, progressPercent, shouldAnnounce, updateMessage, updateStore, type UpdatePhase } from "./updates-state";
 import "../project/projects.css";
 import "../intake/intake.css";
 
@@ -75,23 +75,24 @@ function UpdateStatus({ phase, onCheck, onInstall, onRestart }: {
 }
 
 /** Restart engine with its outcome: the plain error of a failed restart above the button.
- * Inputs: the restart state, the handler and whether the button is the page's main action. */
-export function RestartEngine({ restart, onRestart, primary = false }: { restart: EngineRestart; onRestart: () => void; primary?: boolean }) {
+ * Inputs: the restart state, the handler, whether the button is the page's main action and
+ * whether an update install holds it off. */
+export function RestartEngine({ restart, onRestart, primary = false, disabled = false }: { restart: EngineRestart; onRestart: () => void; primary?: boolean; disabled?: boolean }) {
   return <>
     {restart.kind === "failed" && <p className="pj-error" role="alert">{restart.message}</p>}
-    <span><Button variant={primary ? "primary" : "secondary"} icon="refresh-cw" pending={restart.kind === "busy"} pendingLabel="Restarting..." onClick={onRestart}>Restart engine</Button></span>
+    <span><Button variant={primary ? "primary" : "secondary"} icon="refresh-cw" pending={restart.kind === "busy"} pendingLabel="Restarting..." disabled={disabled} onClick={onRestart}>Restart engine</Button></span>
   </>;
 }
 
 /** The engine's version under this app's and, when they differ, the engine's message with
- * Restart engine. Nothing shows until the version is read. Inputs: the read, the restart state
- * and the handler. */
-export function EngineVersionLine({ versions, restart, onRestart }: { versions: Loaded<EngineVersions>; restart: EngineRestart; onRestart: () => void }) {
+ * Restart engine, held off while an update installs. Nothing shows until the version is read.
+ * Inputs: the read, the restart state, the handler and whether an install is running. */
+export function EngineVersionLine({ versions, restart, onRestart, installing }: { versions: Loaded<EngineVersions>; restart: EngineRestart; onRestart: () => void; installing: boolean }) {
   if (versions.kind !== "ok") return null;
   const { engine, message } = versions.value;
   return <>
     <p className="pj-secondary">{engine === null ? "The engine isn't answering." : `Engine ${displayText(engine)}`}</p>
-    {message && <><p role="status">{displayText(message)}</p><RestartEngine restart={restart} onRestart={onRestart} /></>}
+    {message && <><p role="status">{displayText(message)}</p><RestartEngine restart={restart} onRestart={onRestart} disabled={installing} /></>}
   </>;
 }
 
@@ -138,11 +139,11 @@ export function UpdatesView({ settings, engine, phase, channelBusy, channelProbl
   if (settings.kind === "not_ready") return <NotReady what="Updates" />;
   if (settings.kind === "error") return <LoadError message={settings.code === "unknown" ? settings.message : updateMessage(settings.code)} onRetry={onRetry} />;
   const { current_version, channel } = settings.value;
-  const busy = phase.kind === "installing" || phase.kind === "installed";
+  const busy = blocking(phase);
   return <div className="pj pj-stack">
     <section className="pj-stack-s in-panel" aria-label="Version and channel">
       <h2 className="row"><Icon name="shield-check" size={16} />CrazyAgent {displayText(current_version)}</h2>
-      <EngineVersionLine versions={engine} restart={engineRestart} onRestart={onRestartEngine} />
+      <EngineVersionLine versions={engine} restart={engineRestart} onRestart={onRestartEngine} installing={busy} />
       <p className="pj-secondary">Stable gets tested releases. Dev gets every change as soon as it's merged.</p>
       {busy || channelBusy
         ? <p>Channel: {channel === "dev" ? "Dev" : "Stable"}</p>

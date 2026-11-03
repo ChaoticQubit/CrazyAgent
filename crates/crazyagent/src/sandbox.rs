@@ -17,6 +17,7 @@ pub mod extra_paths;
 pub mod ide_shell;
 #[cfg(target_os = "linux")]
 pub mod linux;
+pub mod policy;
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) mod test_agent;
 pub mod toolchains;
@@ -27,9 +28,48 @@ pub mod windows;
 /// The macOS Seatbelt launcher every project agent process runs under.
 pub const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 
+/// The fixed ports the owner's tools listen on, which no tools-on agent may bind or listen
+/// on at any address: the Codex sign-in callback and Ollama's local model server. Seatbelt
+/// matches a local address by port only (`localhost` there matches every local address), so
+/// it cannot keep an agent's listener on loopback; it can keep these ports free.
+pub const OWNER_PORTS: [u16; 2] = [1455, 11434];
+
+/// The most ports of the owner's configured local model endpoints one tools-on sandbox keeps
+/// free beside [`OWNER_PORTS`], which bounds the profile's deny rules.
+pub const KEPT_PORTS_MAX: usize = 64;
+
+/// The loopback ports the owner's configured model endpoints listen on, which a tools-on
+/// agent must not bind before the owner's model server does. An endpoint URL that does not
+/// parse names no port. Input: the model access settings. Output: the ports, sorted, once
+/// each.
+pub fn owner_ports(access: &crate::config::ModelAccess) -> Vec<u16> {
+    let mut ports: Vec<u16> = access
+        .connections
+        .iter()
+        .filter_map(|connection| match &connection.endpoint {
+            crate::config::ModelEndpoint::Http { url } => url::Url::parse(url).ok(),
+            crate::config::ModelEndpoint::Native {} => None,
+        })
+        .filter(|url| match url.host() {
+            Some(url::Host::Ipv4(address)) => address.is_loopback(),
+            Some(url::Host::Ipv6(address)) => address.is_loopback(),
+            Some(url::Host::Domain(name)) => name.eq_ignore_ascii_case("localhost"),
+            None => false,
+        })
+        .filter_map(|url| url.port_or_known_default())
+        .collect();
+    ports.sort_unstable();
+    ports.dedup();
+    assert!(ports.len() <= access.connections.len());
+    ports
+}
+
 /// Why a sandbox with hidden folders does not start on Linux or Windows: their boundaries
 /// grant whole roots and cannot keep a folder inside one out of reach.
 pub const HIDDEN_NEEDS_SEATBELT: &str = "hidden folders need the macOS sandbox";
+
+/// Why a Full access boundary cannot run off macOS: only macOS qualifies Full access in V1.
+pub const FULL_ACCESS_NEEDS_MACOS: &str = "Full access agents run only on macOS in this version";
 
 const PATH_BYTES_MAX: usize = 1024;
 const READ_ROOTS_MAX: usize = 16;
@@ -292,10 +332,17 @@ pub fn agent_variable_allowed(name: &OsStr, value: &OsStr) -> bool {
     !agent_env_refused(name)
 }
 
+/// The zsh temp-file prefix inside an agent's temp folder. zsh writes here-documents to
+/// `$TMPPREFIX`, `/tmp/zsh` by default, which no agent sandbox can write, so every agent
+/// shell gets its own. Input: the agent's temp folder. Output: the prefix path.
+pub fn shell_tmp_prefix(tmp: &Path) -> PathBuf {
+    tmp.join("zsh")
+}
+
 /// Builds the environment of every agent process in launch order: `base`, then the
 /// harness's variables (a later value replaces an earlier one and None removes it, but
-/// `HOME` and `TMPDIR` always stay as `base` set them), then [`AGENT_GIT_ENV`] and
-/// [`AGENT_TLS_ENV`].
+/// `HOME`, `TMPDIR` and `TMPPREFIX` always stay as `base` set them), then `TMPPREFIX` from
+/// [`shell_tmp_prefix`] when `TMPDIR` is set, then [`AGENT_GIT_ENV`] and [`AGENT_TLS_ENV`].
 /// Inputs: the base and harness variables. Output: the variables, or `Invalid` when any
 /// one fails [`agent_variable_allowed`].
 pub fn agent_env<'a>(
@@ -325,10 +372,17 @@ pub fn agent_env<'a>(
         if value.is_some_and(|value| !agent_variable_allowed(name, value)) {
             return Err(refused());
         }
-        if name == "HOME" || name == "TMPDIR" {
+        if name == "HOME" || name == "TMPDIR" || name == "TMPPREFIX" {
             continue;
         }
         set(&mut env, name, value);
+    }
+    let prefix = env
+        .iter()
+        .find(|(name, _)| name == "TMPDIR")
+        .map(|(_, tmp)| shell_tmp_prefix(Path::new(tmp)));
+    if let Some(prefix) = prefix {
+        set(&mut env, OsStr::new("TMPPREFIX"), Some(prefix.as_os_str()));
     }
     for (name, value) in AGENT_GIT_ENV.into_iter().chain(AGENT_TLS_ENV) {
         set(&mut env, OsStr::new(name), Some(OsStr::new(value)));
@@ -391,6 +445,51 @@ pub fn agent_command<'a>(
     Ok(command)
 }
 
+/// Builds the command a Full access agent process starts from (DEC-102): the
+/// [`SESSION_SHIM`] and `<program>` with no `sandbox-exec` and no profile, so the agent has
+/// the owner's user permissions, yet the same cleared environment holding exactly
+/// [`agent_env`] and its own process group as a sandboxed agent. Inputs: the absolute
+/// program, the base variables and the harness's variables (None removes one). Output: the
+/// command, or `Invalid` when a variable fails [`agent_variable_allowed`].
+#[cfg(unix)]
+pub fn unconfined_command<'a>(
+    program: &Path,
+    base: &[(&str, &OsStr)],
+    harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
+) -> Result<Command, SandboxError> {
+    if !clean_absolute(program) {
+        return Err(invalid("agent program must be an absolute plain path"));
+    }
+    let env = agent_env(base, harness)?;
+    let mut command = Command::new(SESSION_SHIM[0]);
+    command
+        .args(&SESSION_SHIM[1..])
+        .arg(program)
+        .env_clear()
+        .envs(env.iter().map(|(name, value)| (name, value)))
+        .process_group(0);
+    assert_eq!(command.get_program(), SESSION_SHIM[0]);
+    assert_eq!(
+        command.get_args().nth(SESSION_SHIM.len() - 1),
+        Some(program.as_os_str())
+    );
+    assert_eq!(command.get_envs().count(), env.len());
+    Ok(command)
+}
+
+/// Refuses a Full access agent on Windows (DEC-102): the level is unavailable there, so no
+/// command starts without the Windows boundary. Inputs: as the Unix version. Output:
+/// always `Unavailable` with [`FULL_ACCESS_NEEDS_MACOS`].
+#[cfg(target_os = "windows")]
+pub fn unconfined_command<'a>(
+    program: &Path,
+    base: &[(&str, &OsStr)],
+    harness: impl IntoIterator<Item = (&'a OsStr, Option<&'a OsStr>)>,
+) -> Result<Command, SandboxError> {
+    let _ = (program, base, harness.into_iter().count());
+    Err(SandboxError::Unavailable(FULL_ACCESS_NEEDS_MACOS.into()))
+}
+
 /// Builds the one command every Windows agent process starts from: the boundary helper next
 /// to the engine's executable with `--profile <profile> -- <program>`, and a cleared
 /// environment holding exactly [`agent_env`]. Inputs: the installed boundary profile, the
@@ -406,8 +505,9 @@ pub fn agent_command<'a>(
     windows::agent_command(profile, program, base, harness)
 }
 
-/// Network reach of a sandboxed agent: open when the agent's tools are on,
-/// otherwise only the listed model endpoints.
+/// Network reach of a sandboxed agent: open when the agent's tools are on, except that
+/// it never binds or listens on an [`OWNER_PORTS`] port or one [`ProjectSandbox::keep_ports`]
+/// keeps, otherwise only the listed model endpoints.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SandboxNetwork {
     Open,
@@ -492,9 +592,11 @@ pub struct ProjectSandbox {
     scratch: Option<PathBuf>,
     hidden: Vec<PathBuf>,
     network: SandboxNetwork,
+    kept_ports: Vec<u16>,
     owner_home: PathBuf,
     engine_secrets: Vec<PathBuf>,
     checkout: Option<Checkout>,
+    clone: Option<PathBuf>,
 }
 
 /// The one git worktree a confined agent writes in place of the whole project folder,
@@ -541,10 +643,34 @@ impl ProjectSandbox {
             scratch: None,
             hidden: Vec::new(),
             network,
+            kept_ports: Vec::new(),
             owner_home: owner,
             engine_secrets: Vec::new(),
             checkout: None,
+            clone: None,
         })
+    }
+
+    /// Keeps the ports of the owner's configured local model endpoints free of this agent's
+    /// listeners, beside [`OWNER_PORTS`], when its network is open. Input: the ports, as
+    /// [`owner_ports`] lists them. Output: the sandbox, or a refusal for port 0 or more than
+    /// `KEPT_PORTS_MAX` ports.
+    pub fn keep_ports(mut self, ports: &[u16]) -> Result<Self, SandboxError> {
+        if ports.contains(&0) {
+            return Err(invalid("kept ports must be nonzero"));
+        }
+        self.kept_ports.extend(
+            ports
+                .iter()
+                .copied()
+                .filter(|port| !OWNER_PORTS.contains(port)),
+        );
+        self.kept_ports.sort_unstable();
+        self.kept_ports.dedup();
+        if self.kept_ports.len() > KEPT_PORTS_MAX {
+            return Err(invalid("at most 64 kept ports"));
+        }
+        Ok(self)
     }
 
     /// Names the engine runtime folder whose secrets this agent must never read or write:
@@ -594,13 +720,14 @@ impl ProjectSandbox {
         Ok(self)
     }
 
-    /// Confines the agent's writes to its own git worktree of the project: the worktree,
-    /// its admin folder in `.git/worktrees` and the shared object store, beside its home,
-    /// temp dir and extra worktrees. The project folder stays readable. Input: a canonical
-    /// worktree in the project's `worktrees/` folder whose `.git` link and admin folder
-    /// name each other. Output: the confined sandbox, or `Invalid`.
+    /// Confines the agent's writes to its own worktree, its `.git/worktrees` admin folder
+    /// except its HEAD, which only the engine moves, and the object store, beside its home,
+    /// temp dir and extra worktrees; the project stays readable. Makes the admin folder's
+    /// `modules` store so every platform guards a real folder there. Input: a canonical
+    /// worktree in `worktrees/` whose `.git` link and admin folder name each other.
+    /// Output: the confined sandbox, `Invalid` or the disk error.
     pub fn confine_to_worktree(mut self, worktree: &Path) -> Result<Self, SandboxError> {
-        if self.checkout.is_some() {
+        if self.checkout.is_some() || self.clone.is_some() {
             return Err(invalid("the sandbox is already confined to a worktree"));
         }
         if self.read_roots.len() >= READ_ROOTS_MAX {
@@ -639,12 +766,52 @@ impl ProjectSandbox {
                 .iter()
                 .all(|root| root.starts_with(&self.project_root) && *root != self.project_root)
         );
+        ensure_store(&admin.join("modules")).map_err(|problem| match problem.kind() {
+            io::ErrorKind::InvalidData => {
+                invalid("the worktree's submodule store must be a plain folder")
+            }
+            _ => SandboxError::Io(problem),
+        })?;
         self.read_roots.push(self.project_root.clone());
         self.checkout = Some(Checkout {
             worktree: worktree.to_path_buf(),
             admin,
             objects,
         });
+        Ok(self)
+    }
+
+    /// Confines an Own branch or Full access agent (DEC-102) to its own clone of the project:
+    /// the clone, with its git folder inside it, is the agent's only writable project path,
+    /// so it commits on its own branch with full git while the project folder, its `.git`
+    /// and the object store the clone borrows through `objects/info/alternates` stay
+    /// read-only. Input: a canonical folder in the project's `worktrees/` folder whose
+    /// `.git` is a real folder, not a link. Output: the confined sandbox, or `Invalid`.
+    pub fn confine_to_clone(mut self, worktree: &Path) -> Result<Self, SandboxError> {
+        if self.checkout.is_some() || self.clone.is_some() {
+            return Err(invalid("the sandbox is already confined to a worktree"));
+        }
+        if self.read_roots.len() >= READ_ROOTS_MAX {
+            return Err(invalid("too many read roots"));
+        }
+        let worktrees = crate::projects_home::state_folder(&self.project_root).join("worktrees");
+        if !clean_absolute(worktree)
+            || worktree.parent() != Some(worktrees.as_path())
+            || canonical(worktree)? != worktree
+        {
+            return Err(invalid(
+                "the worktree must be a canonical folder in worktrees/",
+            ));
+        }
+        let git = worktree.join(".git");
+        let metadata = fs::symlink_metadata(&git)?;
+        if !metadata.is_dir() || canonical(&git)? != git {
+            return Err(invalid("the clone's git folder must be a real folder"));
+        }
+        clear_of_secrets(worktree, &self.secret_paths())?;
+        assert!(worktree.starts_with(&self.project_root) && worktree != self.project_root);
+        self.read_roots.push(self.project_root.clone());
+        self.clone = Some(worktree.to_path_buf());
         Ok(self)
     }
 
@@ -790,31 +957,37 @@ impl ProjectSandbox {
         &self.network
     }
 
-    /// Paths inside the project folder no agent may write although the folder is writable:
-    /// the `context/` folder at the project root and inside `.crazyagent/`, the git hooks,
-    /// the git config with its lock file, and `.git/modules`, where git keeps submodule
-    /// repositories. Every platform boundary keeps these read-only, except that Windows
-    /// guards the config but not its lock (`windows::GIT_CONFIG_LOCK`).
-    pub fn protected_paths(&self) -> [PathBuf; 6] {
+    /// Paths no agent may write although they sit in a writable root: both `context/`
+    /// folders, the git hooks, config and its lock, `.git/modules` and, for an agent confined
+    /// to a worktree, its admin folder's `modules`, where git keeps submodule repositories.
+    /// Every platform boundary keeps these read-only, except that Windows guards the config
+    /// but not its lock (`windows::GIT_CONFIG_LOCK`).
+    pub fn protected_paths(&self) -> Vec<PathBuf> {
         let git = self.project_root.join(".git");
-        [
+        let mut paths = vec![
             self.project_root.join("context"),
             self.project_root.join(".crazyagent").join("context"),
             git.join("hooks"),
             git.join("config"),
             git.join("config.lock"),
             git.join("modules"),
-        ]
+        ];
+        if let Some(checkout) = &self.checkout {
+            paths.push(checkout.admin.join("modules"));
+        }
+        paths
     }
 
     /// Every folder this sandbox lets the agent write: the project folder, or for a
     /// confined agent its worktree, that worktree's git admin folder and the git object
-    /// store, then its own home and temp dirs, its short temp folder, then its extra
-    /// worktrees.
+    /// store, or for a clone-confined agent its clone alone, then its own home and temp
+    /// dirs, its short temp folder, then its extra worktrees.
     pub fn writable_roots(&self) -> impl Iterator<Item = &PathBuf> {
-        let project: Vec<&PathBuf> = match &self.checkout {
-            Some(checkout) => vec![&checkout.worktree, &checkout.admin, &checkout.objects],
-            None => vec![&self.project_root],
+        assert!(self.checkout.is_none() || self.clone.is_none());
+        let project: Vec<&PathBuf> = match (&self.checkout, &self.clone) {
+            (Some(checkout), _) => vec![&checkout.worktree, &checkout.admin, &checkout.objects],
+            (None, Some(clone)) => vec![clone],
+            (None, None) => vec![&self.project_root],
         };
         project
             .into_iter()
@@ -918,6 +1091,13 @@ impl ProjectSandbox {
         text.push_str(&self.nested_git_denies());
         if let Some(checkout) = &self.checkout {
             text.push_str(&checkout.object_denies());
+            text.push_str(&format!(
+                "(deny file-write*\n  (literal \"{}/HEAD\"))\n",
+                checkout.admin.display()
+            ));
+        }
+        if let Some(clone) = &self.clone {
+            text.push_str(&clone_store_denies(clone));
         }
         text.push_str(
             "(allow file-read*\n  (literal \"/dev\")\n  (literal \"/dev/random\")\n  (literal \"/dev/urandom\")\n  (literal \"/dev/stdin\")\n  (literal \"/dev/stdout\")\n  (literal \"/dev/stderr\"))\n(allow file-read* file-write-data file-ioctl\n  (literal \"/dev/null\")\n  (literal \"/dev/zero\")\n  (literal \"/dev/tty\")\n  (literal \"/dev/ptmx\")\n  (literal \"/dev/dtracehelper\")\n  (subpath \"/dev/fd\"))\n(allow file-read-metadata file-ioctl\n  (regex #\"^/dev/ttys[0-9]+$\"))\n(allow file-read* file-write-data\n  (require-all\n    (regex #\"^/dev/ttys[0-9]+$\")\n    (extension \"com.apple.sandbox.pty\")))\n",
@@ -928,6 +1108,14 @@ impl ProjectSandbox {
                 text.push_str(
                     "(allow network-outbound (remote ip \"*:*\"))\n(allow network-inbound (local ip \"*:*\"))\n(allow network-bind (local ip \"*:*\"))\n(allow network-outbound (literal \"/private/var/run/mDNSResponder\"))\n",
                 );
+                let owner = OWNER_PORTS
+                    .iter()
+                    .chain(&self.kept_ports)
+                    .map(|port| format!(" (local ip \"*:{port}\")"))
+                    .collect::<String>();
+                text.push_str(&format!(
+                    "(deny network-bind{owner})\n(deny network-inbound{owner})\n"
+                ));
                 text.push_str(
                     "(allow system-socket (require-all (socket-domain AF_SYSTEM) (socket-protocol 2)))\n",
                 );
@@ -1020,24 +1208,25 @@ impl ProjectSandbox {
     /// No entry named `.git`, in any letter case, as a folder, file or link, may be created
     /// below a writable working tree, except that tree's own top-level `.git` and the
     /// engine's worktree links. The project's own `.git` and each worktree's own `.git` sit
-    /// at a tree's root, not below it, so the `.+/` guard never matches them. A `.git`
-    /// placed directly or by renaming onto that name is denied; renaming a whole folder
-    /// that already holds a `.git` in is a path-blind move Seatbelt cannot see and stays a
-    /// residual. Input: the policy. Output: the rule text.
+    /// at a tree's root, not below it, so the `.+/` guard never matches them. A whole folder
+    /// already holding a `.git` could once be renamed in as a path-blind move Seatbelt
+    /// cannot inspect; that source is removed by also denying `.git` at any depth, top level
+    /// included, in every non-working-tree writable root (the admin folder, object store,
+    /// home, temp and scratch), so no agent can create a repository anywhere to rename from
+    /// (SM1-R). Input: the policy. Output: the rule text.
     fn nested_git_denies(&self) -> String {
         let dot_git = "\\.[gG][iI][tT]";
-        let roots: Vec<&Path> = match &self.checkout {
-            Some(checkout) => std::iter::once(checkout.worktree.as_path())
-                .chain(self.worktrees.iter().map(PathBuf::as_path))
-                .collect(),
-            None => std::iter::once(self.project_root.as_path())
-                .chain(self.worktrees.iter().map(PathBuf::as_path))
-                .collect(),
-        };
+        let (working, other) = self.git_deny_roots();
         let mut nested = String::new();
-        for root in &roots {
+        for root in &working {
             nested.push_str(&format!(
                 "\n      (regex #\"^{}/.+/{dot_git}(/.*)?$\")",
+                seatbelt_pattern(root)
+            ));
+        }
+        for root in &other {
+            nested.push_str(&format!(
+                "\n      (regex #\"^{}/(.+/)?{dot_git}(/.*)?$\")",
                 seatbelt_pattern(root)
             ));
         }
@@ -1052,9 +1241,39 @@ impl ProjectSandbox {
         }
         let text =
             format!("(deny file-write*\n  (require-all\n    (require-any{nested}){exempt}))\n");
-        assert!(text.matches("(regex #\"^/").count() == roots.len() + 1);
+        assert!(text.matches("(regex #\"^/").count() == working.len() + other.len() + 1);
         assert!(text.ends_with(")\n"));
         text
+    }
+
+    /// Splits the agent's writable roots into the working-tree roots, where the root's own
+    /// top-level `.git` is a legitimate repository link the engine adds, and every other
+    /// writable root, where no `.git` may ever appear. A `.git` anywhere below a working
+    /// tree, and a `.git` at any depth (top level included) in an admin folder, object
+    /// store, home, temp or scratch root, is denied so no agent can create a repository to
+    /// rename whole into a worktree.
+    fn git_deny_roots(&self) -> (Vec<&Path>, Vec<&Path>) {
+        let mut working: Vec<&Path> = Vec::new();
+        let mut other: Vec<&Path> = Vec::new();
+        assert!(self.checkout.is_none() || self.clone.is_none());
+        match (&self.checkout, &self.clone) {
+            (Some(checkout), _) => {
+                working.push(checkout.worktree.as_path());
+                other.push(checkout.admin.as_path());
+                other.push(checkout.objects.as_path());
+            }
+            (None, Some(clone)) => working.push(clone.as_path()),
+            (None, None) => working.push(self.project_root.as_path()),
+        }
+        other.push(self.agent_home.as_path());
+        other.push(self.agent_tmp.as_path());
+        if let Some(scratch) = &self.scratch {
+            other.push(scratch.as_path());
+        }
+        for worktree in &self.worktrees {
+            working.push(worktree.as_path());
+        }
+        (working, other)
     }
 
     /// Writes the profile with mode 0600 at `path`, replacing any earlier one
@@ -1146,6 +1365,40 @@ impl ProjectSandbox {
     /// runs under the installed profile. HOME and TMPDIR always point at the
     /// agent's own dirs, whatever the harness set.
     pub fn wrap(&self, profile: &Path, harness: &Command) -> Result<Command, SandboxError> {
+        let (program, cwd) = self.harness_start(harness)?;
+        let base = self.base_env();
+        let mut command = agent_command(profile, program, &borrowed(&base), harness.get_envs())?;
+        command.args(harness.get_args()).current_dir(cwd);
+        assert_eq!(command.get_program(), SANDBOX_EXEC);
+        Ok(command)
+    }
+
+    /// Rebuilds a harness launch command for a Full access agent (DEC-102) as [`Self::wrap`]
+    /// does, with the same checks and environment, but started by [`unconfined_command`]
+    /// with no Seatbelt profile. Input: the harness command. Output: the command, or
+    /// `Invalid` for an unsafe command.
+    #[cfg(unix)]
+    pub fn wrap_unconfined(&self, harness: &Command) -> Result<Command, SandboxError> {
+        let (program, cwd) = self.harness_start(harness)?;
+        let base = self.base_env();
+        let mut command = unconfined_command(program, &borrowed(&base), harness.get_envs())?;
+        command.args(harness.get_args()).current_dir(cwd);
+        assert_ne!(command.get_program(), SANDBOX_EXEC);
+        Ok(command)
+    }
+
+    /// Refuses a Full access harness command on Windows, where the level is unavailable.
+    /// Input: the harness command. Output: always `Unavailable`.
+    #[cfg(not(unix))]
+    pub fn wrap_unconfined(&self, harness: &Command) -> Result<Command, SandboxError> {
+        let _ = harness;
+        Err(SandboxError::Unavailable(FULL_ACCESS_NEEDS_MACOS.into()))
+    }
+
+    fn harness_start<'a>(
+        &'a self,
+        harness: &'a Command,
+    ) -> Result<(&'a Path, &'a Path), SandboxError> {
         let program = Path::new(harness.get_program());
         if !clean_absolute(program) {
             return Err(invalid("harness program must be an absolute plain path"));
@@ -1160,11 +1413,7 @@ impl ProjectSandbox {
                 "harness must start inside the project folder or its worktree",
             ));
         }
-        let base = self.base_env();
-        let mut command = agent_command(profile, program, &borrowed(&base), harness.get_envs())?;
-        command.args(harness.get_args()).current_dir(cwd);
-        assert_eq!(command.get_program(), SANDBOX_EXEC);
-        Ok(command)
+        Ok((program, cwd))
     }
 }
 
@@ -1188,6 +1437,7 @@ pub trait Sandbox: Send + Sync {
 pub struct InstalledSandbox {
     sandbox: ProjectSandbox,
     profile: PathBuf,
+    unconfined: bool,
     #[cfg(target_os = "linux")]
     linux: linux::LinuxSandbox,
     #[cfg(target_os = "windows")]
@@ -1218,6 +1468,7 @@ impl InstalledSandbox {
             Ok(Self {
                 sandbox,
                 profile: profile.to_path_buf(),
+                unconfined: false,
                 windows,
             })
         }
@@ -1233,15 +1484,36 @@ impl InstalledSandbox {
             Ok(Self {
                 sandbox,
                 profile: profile.to_path_buf(),
+                unconfined: false,
                 #[cfg(target_os = "linux")]
                 linux,
             })
         }
     }
 
-    /// The program every wrapped command starts: `sandbox-exec` on macOS, the Landlock
-    /// helper or bwrap on Linux, the boundary helper on Windows.
+    /// Marks this boundary as a Full access project's (DEC-102): every command it wraps then
+    /// starts with no Seatbelt profile (see [`ProjectSandbox::wrap_unconfined`]), keeping
+    /// the agent environment, the worktree start and the process group. Only macOS runs
+    /// Full access; elsewhere [`Self::wrap`] refuses an unconfined boundary. Output: the
+    /// marked boundary.
+    pub fn unconfined(mut self) -> Self {
+        self.unconfined = true;
+        self
+    }
+
+    /// Whether this boundary runs its commands with no Seatbelt profile.
+    pub fn is_unconfined(&self) -> bool {
+        self.unconfined
+    }
+
+    /// The program every wrapped command starts: `sandbox-exec` on macOS, or the session
+    /// shim's `perl` for a Full access boundary, the Landlock helper or bwrap on Linux, the
+    /// boundary helper on Windows.
     pub fn launcher(&self) -> &Path {
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        if self.unconfined {
+            return Path::new(SESSION_SHIM[0]);
+        }
         #[cfg(target_os = "linux")]
         {
             self.linux.launcher()
@@ -1270,6 +1542,16 @@ impl InstalledSandbox {
     /// Rebuilds a harness command to run inside this boundary; see [`ProjectSandbox::wrap`]
     /// on macOS, [`linux::LinuxSandbox`] on Linux and [`windows::WindowsSandbox`] on Windows.
     pub fn wrap(&self, harness: &Command) -> Result<Command, SandboxError> {
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        if self.unconfined {
+            return Err(SandboxError::Unavailable(FULL_ACCESS_NEEDS_MACOS.into()));
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        if self.unconfined {
+            let command = self.sandbox.wrap_unconfined(harness)?;
+            assert_eq!(command.get_program(), self.launcher().as_os_str());
+            return Ok(command);
+        }
         #[cfg(target_os = "linux")]
         let command = Sandbox::wrap(&self.linux, harness)?;
         #[cfg(target_os = "windows")]
@@ -1345,6 +1627,57 @@ pub(crate) fn seatbelt_pattern(path: &Path) -> String {
     regex_escape(&text)
 }
 
+/// The Seatbelt rules that keep an Own branch agent from repointing the object store its
+/// clone borrows (AL-1, DEC102-F1): no write to its `objects/info/alternates` or
+/// `http-alternates`, its git folder's `commondir` or the git folder entry itself, which
+/// it may never replace, rename or relink, no move or removal of its `objects` or
+/// `objects/info` folder, no symlink in its store, and nothing at `.git.git` beside its
+/// git folder, the fallback repository git's upload-pack serves when the git folder fails
+/// git's repository test (RL-1), no `objects/pack/multi-pack-index` file, folder or
+/// companion, which can name a pack outside the store (RL-2), and no write to the
+/// `objects/pack` or `objects/<xx>` folder entries, so no folder built elsewhere is moved
+/// in over one with its contents (RL-3), each name in any letter case, while its own loose
+/// objects and packs inside those folders stay writable. The engine makes those folders
+/// before each launch (`landing::ready_agent_clone`). The engine's fetch checks the same
+/// store before it runs (w-landing). Input: the clone. Output: the rule text.
+fn clone_store_denies(clone: &Path) -> String {
+    let fallback = format!("{}/{}", seatbelt_pattern(clone), any_case(".git.git"));
+    let git = format!("{}/{}", seatbelt_pattern(clone), any_case(".git"));
+    let objects = format!("{git}/{}", any_case("objects"));
+    let info = format!("{objects}/{}", any_case("info"));
+    let pack = format!("{objects}/{}", any_case("pack"));
+    let index = format!("{pack}/{}", any_case("multi-pack-index"));
+    let text = format!(
+        "(deny file-write*\n  (regex #\"^{git}$\")\n  (regex #\"^{fallback}(/.*)?$\")\n  (regex #\"^{pack}$\")\n  (regex #\"^{objects}/[0-9a-fA-F][0-9a-fA-F]$\")\n  (regex #\"^{index}\")\n  (regex #\"^{info}/({}|{})$\")\n  (regex #\"^{git}/{}$\"))\n(deny file-write-unlink\n  (regex #\"^{objects}$\")\n  (regex #\"^{info}$\"))\n(deny file-write-create\n  (require-all (regex #\"^{objects}/\") (vnode-type SYMLINK)))\n",
+        any_case("alternates"),
+        any_case("http-alternates"),
+        any_case("commondir")
+    );
+    assert_eq!(text.matches("(regex #\"^/").count(), 10);
+    assert!(text.contains("(vnode-type SYMLINK)"));
+    text
+}
+
+/// Spells plain text as a Seatbelt regex that matches it in any letter case, for names a
+/// case-insensitive volume finds however they are typed. Input: text without a quote or
+/// backslash. Output: the pattern text, without anchors.
+fn any_case(text: &str) -> String {
+    regex_escape(text)
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphabetic() {
+                format!(
+                    "[{}{}]",
+                    character.to_ascii_lowercase(),
+                    character.to_ascii_uppercase()
+                )
+            } else {
+                character.to_string()
+            }
+        })
+        .collect()
+}
+
 /// Escapes plain text for a Seatbelt regex, so every character matches itself. Input: text
 /// without a quote or backslash. Output: the pattern text, without anchors.
 fn regex_escape(text: &str) -> String {
@@ -1367,6 +1700,31 @@ fn borrowed<'a>(env: &'a [(&'static str, OsString)]) -> Vec<(&'static str, &'a O
 
 fn invalid(reason: &str) -> SandboxError {
     SandboxError::Invalid(reason.into())
+}
+
+/// Makes sure a store a profile keeps read-only is a plain folder the engine made: creates
+/// it empty, mode 0700 on unix, or keeps an entry already there only when it is a real
+/// folder, never a file or a link. Disk state is input here, so a wrong entry is an error.
+/// Input: the store path. Output: Ok, or `InvalidData` for any other entry at the path.
+pub(crate) fn ensure_store(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    let created =
+        std::os::unix::fs::DirBuilderExt::mode(&mut fs::DirBuilder::new(), 0o700).create(path);
+    #[cfg(not(unix))]
+    let created = fs::DirBuilder::new().create(path);
+    match created {
+        Err(problem) if problem.kind() == io::ErrorKind::AlreadyExists => {
+            if fs::symlink_metadata(path)?.is_dir() {
+                Ok(())
+            } else {
+                Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "a submodule store must be a plain folder",
+                ))
+            }
+        }
+        made => made,
+    }
 }
 
 /// The owner's home folder from the user profile, canonical when it resolves, which

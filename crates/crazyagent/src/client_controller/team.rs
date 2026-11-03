@@ -60,7 +60,7 @@ impl OwnerController {
     ) -> Result<OwnerResponse, EngineError> {
         action.validate()?;
         if let Some(project) = action.project() {
-            self.team_status(project.clone()).await?;
+            self.project_setup(project.clone()).await?;
         }
         self.begin_mutation(OwnerMutation::Team { action }, generation)?;
         self.send_pending().await

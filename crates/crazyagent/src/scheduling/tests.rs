@@ -28,7 +28,7 @@ fn managed(id: &str) -> ModelConnection {
     }
 }
 
-fn access(members: &[&str]) -> ModelAccess {
+pub(crate) fn access(members: &[&str]) -> ModelAccess {
     let connections: Vec<_> = members.iter().map(|id| managed(id)).collect();
     ModelAccess {
         accounts: connections.iter().map(|c| c.account_ref.clone()).collect(),
@@ -45,7 +45,7 @@ fn access(members: &[&str]) -> ModelAccess {
     }
 }
 
-fn database() -> (tempfile::TempDir, Connection) {
+pub(crate) fn database() -> (tempfile::TempDir, Connection) {
     let directory = tempfile::tempdir().unwrap();
     let connection = Connection::open(directory.path().join("engine.db")).unwrap();
     initialize(&connection).unwrap();

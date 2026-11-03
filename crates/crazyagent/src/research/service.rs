@@ -223,7 +223,8 @@ pub fn start_for_engine(
         return Err("engine database must be a private file".into());
     }
     let mut runner = ResearchRunner::new(&database, &state, codex, ResearchLimits::default())
-        .map_err(|error| error.to_string())?;
+        .map_err(|error| error.to_string())?
+        .with_settings(global, project);
     if let Some(claude) = claude {
         runner = runner
             .with_claude(claude)

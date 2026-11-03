@@ -472,9 +472,11 @@ pub fn dismiss(db: &Connection, id: u64, version: u64) -> Result<Settlement, Eng
 /// message and may record only a question it asked itself; the answer is that message's
 /// text, never the master's own words, and the message must be an owner turn the engine
 /// recorded when the owner typed it in the question's project after the question was
-/// asked, never a settle notice or a framed IDE comment. Nothing is delivered back, since
-/// the master read it. Inputs: the engine connection, the master's project, its team agent
-/// id, the question id, the version the master read and the owner message id. Output:
+/// asked, never a settle notice or a framed IDE comment. Each owner turn answers at most one
+/// question: recording it uses the turn up, so one "Yes" never settles a list of questions
+/// the master picked. Nothing is delivered back, since the master read it. Inputs: the
+/// engine connection, the master's project, its team agent id, the question id, the
+/// version the master read and the owner message id. Output:
 /// Settled, Stale, or `questions_not_found` (also for a question it did not ask),
 /// `questions_owner_turn_invalid`, `questions_answer_invalid` or `questions_text_invalid`.
 pub fn record_from_chat(
@@ -508,6 +510,15 @@ pub fn record_from_chat(
     let text = answer_text(&turn)?;
     let how = How::Answer(&text, AnsweredBy::Chat);
     let settled = settle(&tx, question, how, &Writer::Agent(agent), version)?;
+    if settled == Settlement::Settled {
+        let used = tx
+            .execute(
+                "DELETE FROM team_owner_turns WHERE message=?1 AND project=?2",
+                params![owner_turn, project.as_str()],
+            )
+            .map_err(unavailable)?;
+        assert_eq!(used, 1);
+    }
     finish(db, tx, project, settled)
 }
 
@@ -547,19 +558,37 @@ pub fn record_from_session(
     finish(db, tx, project, settled)
 }
 
-/// Marks a box asked in an agent's terminal as answered there, once its screen watch saw
-/// it leave after owner input; nothing is delivered, since the harness has the answer.
-/// Inputs: the engine connection and the question id. Output: Settled, Stale when it was
-/// already settled, or `questions_not_found` or `questions_not_terminal`.
-pub fn terminal_settled(db: &Connection, id: u64) -> Result<Settlement, EngineError> {
+/// Settles a box asked in an agent's terminal once its screen watch saw it leave: answered
+/// there by the owner when the owner typed into that terminal since it was asked, otherwise
+/// dismissed with that agent as the writer, since no owner answer is known. Nothing is
+/// delivered, since the harness has whatever answer it got. Inputs: the engine connection,
+/// the question id and when the owner last typed into the asker's terminal, if ever.
+/// Output: Settled, Stale, or `questions_not_found` or `questions_not_terminal`.
+pub fn terminal_settled(
+    db: &Connection,
+    id: u64,
+    owner_key_ms: Option<i64>,
+) -> Result<Settlement, EngineError> {
     let tx = immediate(db)?;
     let question = found(&tx, id)?;
-    if !is_terminal(&question.asker) {
+    let Some(agent) = question
+        .asker
+        .strip_prefix("terminal:")
+        .and_then(|agent| agent.parse::<i64>().ok())
+        .and_then(|agent| AgentId::team(agent).ok())
+    else {
         return Err(failure("questions_not_terminal"));
-    }
+    };
     let project = question.project.clone();
     let version = question.version;
-    let settled = settle(&tx, question, How::Terminal, &owner(), version)?;
+    let owner_answered = owner_key_ms
+        .and_then(|at| u64::try_from(at).ok())
+        .is_some_and(|at| at >= question.created_ms);
+    let settled = if owner_answered {
+        settle(&tx, question, How::Terminal, &owner(), version)?
+    } else {
+        settle(&tx, question, How::Dismiss, &Writer::Agent(agent), version)?
+    };
     finish(db, tx, &project, settled)
 }
 
@@ -753,6 +782,19 @@ pub fn count_pending(db: &Connection) -> Result<Vec<(ProjectId, u32)>, EngineErr
             Ok((ProjectId::new(project).map_err(unavailable)?, count))
         })
         .collect()
+}
+
+/// Forgets every question of a removed project inside the removal's transaction, so the
+/// badge, notifications and pages never count it again. Inputs: the transaction and the
+/// project. Output: Ok, or `questions_unavailable`.
+pub fn forget_project(tx: &Transaction<'_>, project: &ProjectId) -> Result<(), EngineError> {
+    ensure(tx)?;
+    tx.execute(
+        "DELETE FROM owner_questions WHERE project=?1",
+        [project.as_str()],
+    )
+    .map_err(unavailable)?;
+    Ok(())
 }
 
 /// Logs one checked question inside the caller's transaction and notifies the owner.

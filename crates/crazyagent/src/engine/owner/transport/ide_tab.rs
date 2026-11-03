@@ -11,9 +11,10 @@ pub(super) const IDE_TAB_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Every code an IDE tab request can answer an owner client with: this protocol's own, the
 /// IDE server register's, workspace writer's, settings lock's and sandbox's, the extension
-/// installs and the capability issue every open runs, and the owner connection's it
-/// travels on.
+/// installs, the capability issue and the agents exclude line every open runs, and the
+/// owner connection's it travels on.
 pub const IDE_TAB_CODES: &[&str] = &[
+    "git_exclude_invalid",
     "ide_agent_invalid",
     "ide_build_invalid",
     "ide_build_not_ready",
@@ -301,13 +302,15 @@ async fn open(
     if unqualified().is_some() {
         return Err(failure("ide_platform_unqualified"));
     }
-    let (build, written, folder) = tokio::task::spawn_blocking({
+    let (build, written, folder, hooks) = tokio::task::spawn_blocking({
         let project = project.clone();
         move || match fetch::state(&root) {
             BuildState::Ready { root: build, .. } => {
                 let written = crate::ide::workspace::write(&root, &project)?;
                 let folder = crate::ide::workspace::folder(&root, &project)?;
-                Ok((build, written, folder))
+                crate::projects_home::exclude_agents(&folder)?;
+                let hooks = crate::ide::workspace::project_hooks(&root, &project)?;
+                Ok((build, written, folder, hooks))
             }
             _ => Err(failure("ide_build_not_ready")),
         }
@@ -316,7 +319,7 @@ async fn open(
     .map_err(|_| unknown())??;
     let info = authority
         .ide_servers
-        .open(&project, &folder, &build)
+        .open(&project, &folder, &build, hooks)
         .await?;
     if !info.url.starts_with("http://127.0.0.1:") {
         return Err(failure("ide_server_not_loopback"));

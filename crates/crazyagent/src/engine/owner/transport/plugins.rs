@@ -9,8 +9,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 const SECRET_MAX: usize = 8192;
 const CHECKS_MAX: usize = 4;
 const CHECK_POLL: Duration = Duration::from_millis(200);
-const CHECK_FOLDER: &str = "mcp-checks";
-const IMPORT_TIMEOUT: Duration = Duration::from_secs(60);
+pub(super) const CHECK_FOLDER: &str = crate::storage::plugins::CHECK_FOLDER;
+pub(super) const CHECK_PROFILES: &str = "profiles";
+pub(super) const IMPORT_TIMEOUT: Duration = Duration::from_secs(60);
 const CATALOG_PAGES_MAX: usize = 64;
 static CHECKS: AtomicUsize = AtomicUsize::new(0);
 
@@ -206,6 +207,32 @@ impl Action {
                 crate::plugins::validate_secret_name(name)
             }
             _ => Ok(()),
+        }
+    }
+
+    /// Whether this request changes plugin state or starts work, and so runs under the
+    /// owner barrier. Output: true for a change, false for a read.
+    fn changes(&self) -> bool {
+        match self {
+            Self::Skills { .. }
+            | Self::SkillDetail { .. }
+            | Self::Servers { .. }
+            | Self::Server { .. }
+            | Self::ImportScan
+            | Self::Effective { .. } => false,
+            Self::AddSkill { .. }
+            | Self::ImportSkill { .. }
+            | Self::SetSkill { .. }
+            | Self::RemoveSkill { .. }
+            | Self::AddServer { .. }
+            | Self::UpdateServer { .. }
+            | Self::Approve { .. }
+            | Self::SetServer { .. }
+            | Self::RemoveServer { .. }
+            | Self::Switch { .. }
+            | Self::SetSecret { .. }
+            | Self::RemoveSecret { .. }
+            | Self::Check { .. } => true,
         }
     }
 }
@@ -610,6 +637,31 @@ pub(super) fn refusal(code: &str) -> Result<Vec<u8>, EngineError> {
     encode_frame(&Reply::Rejected { code: code.into() }).map_err(|_| unknown())
 }
 
+/// Tells whether a Plugins request is a skill import scan or import, which copies skill
+/// folders and is served past the owner exchange deadline within `IMPORT_TIMEOUT`.
+/// Input: the request body. Output: true for those two; false for any other or an
+/// unreadable request, which the inline path refuses.
+pub(super) fn imports(bytes: &[u8]) -> bool {
+    serde_json::from_slice::<Envelope>(bytes).is_ok_and(|envelope| {
+        matches!(
+            envelope.plugins,
+            Action::ImportScan | Action::ImportSkill { .. }
+        )
+    })
+}
+
+/// A plugins request read and checked once: the reply of a read already made, or a change
+/// still to make under the owner barrier, with the secret it carries.
+enum Prepared {
+    Read(Box<Reply>),
+    Change(Action, Option<AccountSecret>),
+}
+
+/// Serves one plugins request. A read is made first; then, under the owner barrier, the
+/// grant is checked again, any change is made and the reply is written, so a revocation
+/// that returned saw every change and reply admitted before it and lets none through after.
+/// Inputs: the connection, engine, authority, packet, admission and request body.
+/// Output: done once the reply is written.
 pub(super) async fn serve(
     stream: &mut UnixStream,
     engine: &Arc<Engine>,
@@ -625,7 +677,7 @@ pub(super) async fn serve(
     } else {
         None
     };
-    let reply = match handle(
+    let prepared = prepare(
         engine,
         authority,
         packet,
@@ -633,8 +685,9 @@ pub(super) async fn serve(
         envelope.plugins,
         secret,
     )
-    .await
-    {
+    .await;
+    let _barrier = engine.owner_egress.write().await;
+    let reply = match finish(engine, authority, packet, admission, prepared).await {
         Ok(reply) => reply,
         Err(error) => Reply::Rejected {
             code: public_code(error),
@@ -647,7 +700,52 @@ pub(super) async fn serve(
         })
         .map_err(|_| unknown())?,
     };
-    stream.write_all(&frame).await.map_err(io_error)
+    write_reply(stream, &frame).await
+}
+
+/// Checks the grant of a plugins request, and makes a read outside the owner barrier.
+/// Inputs: the engine, authority, packet, admission, request and its secret.
+/// Output: the prepared request, or the refusal.
+async fn prepare(
+    engine: &Arc<Engine>,
+    authority: &Arc<Authority>,
+    packet: &[u8; 37],
+    admission: &Admission,
+    action: Action,
+    secret: Option<AccountSecret>,
+) -> Result<Prepared, EngineError> {
+    {
+        let _barrier = engine.owner_egress.write().await;
+        if &authority.authenticate(packet)? != admission {
+            return Err(failure("owner_grant_stale_or_revoked"));
+        }
+    }
+    if action.changes() {
+        return Ok(Prepared::Change(action, secret));
+    }
+    handle(engine, authority, action, secret)
+        .await
+        .map(|reply| Prepared::Read(Box::new(reply)))
+}
+
+/// Answers a prepared request under the owner barrier its caller holds: checks the grant
+/// again, then makes any change. Inputs: the engine, authority, packet, admission and the
+/// prepared request. Output: the reply, or the refusal.
+async fn finish(
+    engine: &Arc<Engine>,
+    authority: &Arc<Authority>,
+    packet: &[u8; 37],
+    admission: &Admission,
+    prepared: Result<Prepared, EngineError>,
+) -> Result<Reply, EngineError> {
+    let prepared = prepared?;
+    if &authority.authenticate(packet)? != admission {
+        return Err(failure("owner_grant_stale_or_revoked"));
+    }
+    match prepared {
+        Prepared::Read(reply) => Ok(*reply),
+        Prepared::Change(action, secret) => handle(engine, authority, action, secret).await,
+    }
 }
 
 fn engine_root(authority: &Authority) -> Result<PathBuf, EngineError> {
@@ -660,20 +758,36 @@ fn engine_root(authority: &Authority) -> Result<PathBuf, EngineError> {
         .ok_or_else(|| failure("plugin_store_unavailable"))
 }
 
+/// Names the sandbox profile file the checks of one server run under.
+/// Inputs: the engine's check folder and the server id. Output: the profile path.
+fn check_profile(checks: &Path, id: &str) -> PathBuf {
+    checks.join(CHECK_PROFILES).join(format!("{id}.sb"))
+}
+
+/// Deletes a removed server's check folder, with whatever its checks wrote there while
+/// they held the server's secrets, and its check profile, on a blocking thread of its own,
+/// so a storage answer that comes after the owner's wait still clears them. Inputs: the
+/// engine's check folder and the server id. A failure other than a missing entry is logged.
+fn remove_check_folder(checks: PathBuf, id: String) {
+    drop(tokio::task::spawn_blocking(move || {
+        let removed = [
+            std::fs::remove_dir_all(checks.join(&id)),
+            std::fs::remove_file(check_profile(&checks, &id)),
+        ];
+        for problem in removed.into_iter().filter_map(Result::err) {
+            if problem.kind() != std::io::ErrorKind::NotFound {
+                eprintln!("plugin_check_folder_not_removed cause={problem}");
+            }
+        }
+    }));
+}
+
 async fn handle(
     engine: &Arc<Engine>,
     authority: &Arc<Authority>,
-    packet: &[u8; 37],
-    admission: &Admission,
     action: Action,
     secret: Option<AccountSecret>,
 ) -> Result<Reply, EngineError> {
-    {
-        let _barrier = engine.owner_egress.write().await;
-        if &authority.authenticate(packet)? != admission {
-            return Err(failure("owner_grant_stale_or_revoked"));
-        }
-    }
     action.validate()?;
     if secret.is_some() != matches!(action, Action::SetSecret { .. }) {
         return Err(failure("server_secret_invalid"));
@@ -770,14 +884,17 @@ async fn handle(
             Reply::ImportScan { list }
         }
         Action::ImportSkill { folder, replace } => {
-            let ResultValue::Imported(skill, skipped, total) = actor(
-                engine,
-                Command::ImportSkill {
-                    source: folder,
-                    replace,
-                },
-            )
-            .await?
+            let ResultValue::Imported(skill, skipped, total) = engine
+                .storage_job_within(IMPORT_TIMEOUT, |reply| {
+                    Job::Plugins(
+                        Command::ImportSkill {
+                            source: folder,
+                            replace,
+                        },
+                        reply,
+                    )
+                })
+                .await?
             else {
                 return Err(unknown());
             };
@@ -837,30 +954,26 @@ async fn handle(
             .await?,
         )?,
         Action::RemoveServer { id, version } => {
-            let ResultValue::Removed(references) = actor(
-                engine,
-                Command::RemoveServer {
-                    id: id.clone(),
-                    version,
-                },
-            )
-            .await?
-            else {
+            let root = engine_root(authority)?;
+            let checks = root.join(CHECK_FOLDER);
+            let server = id.clone();
+            let removed = engine
+                .settled_job(
+                    move |reply| Job::Plugins(Command::RemoveServer { id, version }, reply),
+                    move |result| match result {
+                        Ok(ResultValue::Removed(references)) => {
+                            let secrets =
+                                crate::storage::plugins::remove_secrets(&root, references);
+                            remove_check_folder(checks, server);
+                            secrets
+                        }
+                        _ => Ok(()),
+                    },
+                )
+                .await?;
+            let ResultValue::Removed(_) = removed else {
                 return Err(unknown());
             };
-            let root = engine_root(authority)?;
-            for reference in references {
-                crate::storage::plugins::remove_secret(&root, &reference)?;
-            }
-            let checked = root.join(CHECK_FOLDER).join(&id);
-            let removed = tokio::task::spawn_blocking(move || std::fs::remove_dir_all(checked))
-                .await
-                .map_err(|_| unknown())?;
-            if let Err(problem) = removed
-                && problem.kind() != std::io::ErrorKind::NotFound
-            {
-                eprintln!("plugin_check_folder_not_removed cause={problem}");
-            }
             Reply::Done
         }
         Action::Switch {
@@ -917,14 +1030,21 @@ async fn handle(
             Reply::Server { server: *view }
         }
         Action::RemoveSecret { id, name } => {
-            let ResultValue::Secret(view, removed) =
-                actor(engine, Command::DetachSecret { id, name }).await?
-            else {
+            let root = engine_root(authority)?;
+            let detached = engine
+                .settled_job(
+                    |reply| Job::Plugins(Command::DetachSecret { id, name }, reply),
+                    move |result| match result {
+                        Ok(ResultValue::Secret(_, Some(reference))) => {
+                            crate::storage::plugins::remove_secret(&root, reference)
+                        }
+                        _ => Ok(()),
+                    },
+                )
+                .await?;
+            let ResultValue::Secret(view, _) = detached else {
                 return Err(unknown());
             };
-            if let Some(reference) = removed {
-                crate::storage::plugins::remove_secret(&engine_root(authority)?, &reference)?;
-            }
             Reply::Server { server: *view }
         }
         Action::Check { id } => start_check(engine, authority, id).await?,
@@ -995,8 +1115,10 @@ async fn start_check(
     tokio::spawn(async move {
         let _slot = slot;
         let folder = id.clone();
+        let settings = engine.clone();
         let outcome = tokio::task::spawn_blocking(move || {
-            let outcome = boundary_check(&root, &folder, &command, &args, &values);
+            let kept = settings.owner_ports();
+            let outcome = boundary_check(&root, &folder, &command, &args, &values, &kept);
             for (_, value) in values.iter_mut() {
                 value.fill(0);
             }
@@ -1026,9 +1148,10 @@ async fn start_check(
 
 /// Checks an approved command server inside the boundary agents run it in: its own
 /// project, home and temp folders under `mcp-checks/<id>` in the engine folder, reads of
-/// system paths and the command's folder only, open network, and only its own secrets.
-/// Inputs: the engine folder, server id, command, arguments and secret values. Output:
-/// the tool names, or a plain rejection code.
+/// system paths and the command's folder only, open network without binding the owner's
+/// ports, and only its own secrets. Inputs: the engine folder, server id, command,
+/// arguments, secret values and the configured local model ports to keep. Output: the
+/// tool names, or a plain rejection code.
 #[cfg(unix)]
 fn boundary_check(
     root: &Path,
@@ -1036,6 +1159,7 @@ fn boundary_check(
     command: &str,
     args: &[String],
     secrets: &[(String, Vec<u8>)],
+    kept: &[u16],
 ) -> Result<Vec<String>, &'static str> {
     use crate::sandbox::{InstalledSandbox, ProjectSandbox, SandboxNetwork};
     use std::os::unix::ffi::OsStrExt;
@@ -1074,7 +1198,7 @@ fn boundary_check(
         }
         folders.push(plain);
     }
-    let profiles = checks.join("profiles");
+    let profiles = checks.join(CHECK_PROFILES);
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
@@ -1082,9 +1206,10 @@ fn boundary_check(
         .map_err(|error| refused(&error))?;
     let reads = program.parent().ok_or("server_command_not_runnable")?;
     let sandbox = ProjectSandbox::new(&folders[0], &folders[1], &folders[2], SandboxNetwork::Open)
+        .and_then(|sandbox| sandbox.keep_ports(kept))
         .and_then(|sandbox| sandbox.guard_engine(root))
         .and_then(|sandbox| sandbox.allow_read(reads))
-        .and_then(|sandbox| InstalledSandbox::install(sandbox, &profiles.join(format!("{id}.sb"))))
+        .and_then(|sandbox| InstalledSandbox::install(sandbox, &check_profile(&checks, id)))
         .map_err(|error| refused(&error))?;
     let mut server = std::process::Command::new(program);
     server.args(args).current_dir(&folders[0]);
@@ -1097,7 +1222,7 @@ fn boundary_check(
 }
 
 /// Refuses to check a command server where no process group can be stopped. Takes the
-/// engine folder, server id, command, arguments and secrets, all unused. Returns
+/// engine folder, server id, command, arguments, secrets and kept ports, all unused. Returns
 /// `server_check_unavailable`, like [`check::check_stdio`] on this system.
 #[cfg(not(unix))]
 fn boundary_check(
@@ -1106,6 +1231,7 @@ fn boundary_check(
     _command: &str,
     _args: &[String],
     _secrets: &[(String, Vec<u8>)],
+    _kept: &[u16],
 ) -> Result<Vec<String>, &'static str> {
     Err("server_check_unavailable")
 }

@@ -1,14 +1,15 @@
 import { nextGeneration } from "../../api";
 import type { HarnessEntry } from "../../api";
 import { useEffect, useState } from "react";
-import { cancelTeamTask, failureCopy, loadTeamStatus, receiptState, renameTeamAgent } from "../../api-projects";
+import type { ReactNode } from "react";
+import { cancelTeamTask, failureCopy, loadTeamStatus, receiptState, renameTeamAgent, wakeTeamAgent } from "../../api-projects";
 import { ConfirmDialog, Icon, StatusBadge } from "../../ui";
 import { displayText } from "../conversation";
 import { harnessName } from "../new-project/team-editor";
 import { useLinkOpener } from "./links";
 import { MarkdownView } from "./markdown";
-import { teamPanel } from "./research";
-import type { TeamFilter, TeamTaskRow } from "./research";
+import { finishedLabel, finishedRows, teamPanel } from "./research";
+import type { FinishedRow, TeamFilter, TeamTaskRow } from "./research";
 import { NotReady } from "./shared";
 import type { ProjectData, TeamRead } from "./shared";
 
@@ -132,4 +133,63 @@ export function TeamPanel({ data, team, filter, harnesses, accounts, reload }: {
       {displayText(stopping?.prompt ?? "")}
     </ConfirmDialog>
   </section>;
+}
+
+/** The Finished fold-out under the Team panel (DEC-102): finished sub-agents, newest first, each
+ * with its last task, that task's full result, how many tasks it ran and a Wake button that
+ * wakes the same agent by its team id, or says why it can't; the worktree cleanup sits inside.
+ * Nothing shows while no agent is finished.
+ * Inputs: the project data, the latest team read, the harness catalog, a reload and the cleanup.
+ * Output: the fold-out, or nothing. */
+export function FinishedAgentsPanel({ data, team, harnesses, reload, children }: {
+  data: ProjectData; team: TeamRead; harnesses: HarnessEntry[] | null; reload: () => void; children?: ReactNode;
+}) {
+  const [shown, setShown] = useState<string | null>(null);
+  const [waking, setWaking] = useState<number | null>(null);
+  const [note, setNote] = useState("");
+  const openLink = useLinkOpener(data.notify);
+  if (team.result?.kind !== "ok") return null;
+  const rows = finishedRows(team.result.value, (id) => harnessName(harnesses, id), team.at || data.now);
+  if (rows.length === 0) return null;
+
+  async function wake(row: FinishedRow) {
+    if (!row.wakeable) return;
+    setWaking(row.agent);
+    const result = await wakeTeamAgent(data.id, row.agent, nextGeneration());
+    setWaking(null);
+    if (result.kind !== "ok") {
+      setNote(result.kind === "not_ready" ? "Not ready yet: waking agents isn't in this build." : failureCopy(result));
+      return reload();
+    }
+    const state = receiptState(result.value);
+    if (state.kind === "applied") {
+      setNote("");
+      data.notify(`Waking ${displayText(row.name)}.`);
+    } else setNote(state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm the wake. Check the list before trying again.");
+    reload();
+  }
+
+  return <details className="pj-stack-s" aria-label="Finished agents">
+    <summary><strong>{finishedLabel(rows.length)}</strong> <span className="pj-small pj-muted">Idle, stopped and failed agents. Their results and worktrees stay until you clean them up.</span></summary>
+    {note && <p className="pj-note warn" role="alert">{displayText(note)}</p>}
+    <ul className="pj-rows" aria-label="Finished agents">{rows.map((row) => <li key={row.key} className="pj-task">
+      <span className="pj-row between">
+        <span className="pj-kind"><Icon name="bot" size={16} />{displayText(row.name)} <span className="pj-small pj-secondary">{displayText(row.harness)}</span></span>
+        <span className="pj-row"><StatusBadge word={row.word} />
+          {row.ended && <span className="pj-small pj-muted">{row.ended}</span>}
+          <button type="button" className="btn small" disabled={!row.wakeable || waking !== null}
+            title={row.wakeNote ?? undefined}
+            onClick={() => void wake(row)}>{waking === row.agent ? "Waking..." : "Wake"}</button></span>
+      </span>
+      {row.wakeNote !== null && <span className="pj-small pj-muted">{displayText(row.wakeNote)}</span>}
+      <span className="pj-secondary">{displayText(row.task)}</span>
+      <span className="pj-small pj-muted">{row.tasks} {row.tasks === 1 ? "task" : "tasks"} run.</span>
+      {row.result !== null && <span>
+        <button type="button" className="btn quiet small" aria-expanded={shown === row.key} aria-controls={`pj-finished-${row.key}`}
+          onClick={() => setShown(shown === row.key ? null : row.key)}>{shown === row.key ? "Hide result" : "Show result"}</button>
+      </span>}
+      {row.result !== null && shown === row.key && <div className="pj-md" id={`pj-finished-${row.key}`}><MarkdownView source={row.result} onOpenLink={openLink} /></div>}
+    </li>)}</ul>
+    {children}
+  </details>;
 }

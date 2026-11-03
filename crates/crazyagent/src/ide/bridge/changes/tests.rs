@@ -46,34 +46,31 @@ fn git_in(home: &Path, dir: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
-/// The master's worktree as the engine leases it: the repository admitted for the project,
-/// a master bootstrap lease reserved and checked out on its own `crazyagent/` branch, the
-/// only HEAD a master change set may be recorded from. Inputs: the store, the engine root,
-/// the project and the repository. Output: the worktree and its git folder.
+/// The master's worktree as the engine leases it: the project created and the repository
+/// admitted for it through the engine's own paths, a master bootstrap lease reserved and
+/// checked out on its own `crazyagent/` branch, the only HEAD a master change set may be
+/// recorded from. Inputs: the store, the engine root, the project and the repository.
+/// Output: the worktree and its git folder.
 fn master_lease(
     db: &Connection,
     engine: &Path,
     project: &ProjectId,
     repo: &Path,
 ) -> (PathBuf, PathBuf) {
-    use crate::protocol::{Outcome, ProjectSpec, SessionId, StoredProject, TaskId};
+    use crate::protocol::{Outcome, ProjectSpec, SessionId, TaskId};
     crate::storage::initialize_authority_schemas(db).unwrap();
     let repository = repo.to_str().unwrap();
-    let stored = StoredProject {
-        project_id: project.clone(),
-        spec: ProjectSpec {
-            name: "Project one".into(),
-            repositories: vec![repository.into()],
-        },
+    let spec = ProjectSpec {
+        name: "Project one".into(),
+        repositories: vec![repository.into()],
     };
-    db.execute(
-        "INSERT INTO projects VALUES (?1,?2)",
-        rusqlite::params![project.as_str(), serde_json::to_string(&stored).unwrap()],
-    )
-    .unwrap();
     let task = TaskId::new("master-bootstrap-1").unwrap();
     let session = SessionId::new("session-1").unwrap();
     let tx = db.unchecked_transaction().unwrap();
+    assert_eq!(
+        crate::storage::create_project(&tx, project, &spec).unwrap(),
+        Outcome::Applied
+    );
     assert_eq!(
         crate::worktrees::admit(&tx, project, repository).unwrap(),
         Outcome::Applied

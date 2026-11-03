@@ -393,6 +393,135 @@ async fn keys_typed_into_a_sub_agent_never_reach_the_engine_database() {
     sub.stop().await;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn a_revoked_viewer_cannot_type_one_more_key_into_the_terminal() {
+    use crazyagent::engine::owner::{OwnerControl, OwnerDecision};
+    use crazyagent::protocol::RequestId;
+    let mut sub = SubAgent::start().await;
+    let TerminalSession {
+        mut output,
+        mut control,
+        ..
+    } = sub
+        .controller
+        .terminal_attach(sub.agent.clone())
+        .await
+        .unwrap();
+    let mut seen = Vec::new();
+    assert!(read_until(&mut output, &mut seen, b"ready$ ").await);
+
+    let host = sub.service.owner_runtime().unwrap();
+    host.control(OwnerControl {
+        operation_id: RequestId::new("revoke-terminal-viewer").unwrap(),
+        target: OwnerClientKind::Desktop,
+        expected_epoch: host.epoch(OwnerClientKind::Desktop).unwrap(),
+        decision: OwnerDecision::Revoke,
+    })
+    .await
+    .unwrap();
+    let _ = control.input(b"echo leaked-after-revoke\r".to_vec()).await;
+    let _ = control.resize(100, 30).await;
+    assert_eq!(closed(&mut output).await, "owner_grant_stale_or_revoked");
+
+    let mut tui = OwnerController::attach(
+        sub.root.path(),
+        OwnerClientKind::Tui,
+        Duration::from_secs(5),
+    )
+    .await
+    .unwrap();
+    let TerminalSession {
+        cols,
+        rows,
+        mut output,
+        mut control,
+        ..
+    } = tui.terminal_attach(sub.agent.clone()).await.unwrap();
+    assert_eq!(
+        (cols, rows),
+        (80, 24),
+        "the revoked viewer's resize never reached the terminal"
+    );
+    let mut screen = Vec::new();
+    control
+        .input(b"echo still-served\r".to_vec())
+        .await
+        .unwrap();
+    assert!(
+        read_until(&mut output, &mut screen, b"\r\nstill-served\r\n").await,
+        "{}",
+        String::from_utf8_lossy(&screen)
+    );
+    assert!(
+        !contains(&screen, b"leaked-after-revoke"),
+        "a key the revoked viewer typed never reached the terminal: {}",
+        String::from_utf8_lossy(&screen)
+    );
+    control.detach().await.unwrap();
+    assert_eq!(closed(&mut output).await, "terminal_detached");
+    drop(tui);
+    sub.stop().await;
+}
+
+/// A full scrollback replayed to a viewer that starts reading only after the attach deadline
+/// arrives whole and in order, then live output follows and the view ends with its detach
+/// reason, instead of a rejection written into a session that already opened.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_long_scrollback_replay_outlives_the_attach_deadline_and_stays_whole() {
+    let mut sub = SubAgent::start().await;
+    let TerminalSession {
+        mut output,
+        mut control,
+        ..
+    } = sub
+        .controller
+        .terminal_attach(sub.agent.clone())
+        .await
+        .unwrap();
+    let mut seen = Vec::new();
+    assert!(read_until(&mut output, &mut seen, b"ready$ ").await);
+    control
+        .input(
+            b"seq -f 'row-%04g-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' 1 4000; echo filled-up\r"
+                .to_vec(),
+        )
+        .await
+        .unwrap();
+    assert!(read_until(&mut output, &mut seen, b"\r\nfilled-up\r\n").await);
+    control.detach().await.unwrap();
+    assert_eq!(closed(&mut output).await, "terminal_detached");
+
+    let TerminalSession {
+        mut output,
+        mut control,
+        ..
+    } = sub
+        .controller
+        .terminal_attach(sub.agent.clone())
+        .await
+        .unwrap();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let mut replayed = Vec::new();
+    for wanted in [&b"row-0001-"[..], b"row-3950-", b"\r\nfilled-up\r\n"] {
+        assert!(
+            read_until(&mut output, &mut replayed, wanted).await,
+            "the replay after the attach deadline holds {:?}",
+            String::from_utf8_lossy(wanted)
+        );
+    }
+    control
+        .input(b"echo live-after-replay\r".to_vec())
+        .await
+        .unwrap();
+    assert!(
+        read_until(&mut output, &mut replayed, b"\r\nlive-after-replay\r\n").await,
+        "live output follows the whole replay"
+    );
+    control.detach().await.unwrap();
+    assert_eq!(closed(&mut output).await, "terminal_detached");
+    sub.stop().await;
+}
+
 fn prompts(database: &std::path::Path) -> Vec<String> {
     let connection = rusqlite::Connection::open(database).unwrap();
     connection.busy_timeout(Duration::from_secs(5)).unwrap();

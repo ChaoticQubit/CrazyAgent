@@ -382,7 +382,7 @@ impl LinuxSandbox {
     /// or `Unavailable` for a network limit on bubblewrap or for a policy confined to one
     /// worktree, whose git denies neither backend can hold.
     pub fn new(sandbox: ProjectSandbox, backend: LinuxBackend) -> Result<Self, SandboxError> {
-        if sandbox.checkout.is_some() {
+        if sandbox.checkout.is_some() || sandbox.clone.is_some() {
             return Err(SandboxError::Unavailable(CONFINED_UNAVAILABLE.into()));
         }
         let executable = match &backend {

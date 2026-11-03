@@ -23,7 +23,7 @@ const LOCALES_MAX: usize = 16;
 const VALUE_BYTES_MAX: usize = 16 * 1024;
 
 /// The most variables the IDE server's environment holds.
-pub const ENV_MAX: usize = ALLOWED.len() + LOCALES_MAX + 3 + super::git::CONFIG_ENV.len();
+pub const ENV_MAX: usize = ALLOWED.len() + LOCALES_MAX + 4 + super::git::CONFIG_ENV.len();
 
 /// Tells whether the IDE server may inherit a variable of this name: one of [`ALLOWED`], or
 /// `LC_` followed by capital letters. Input: the name. Output: the answer.
@@ -43,15 +43,18 @@ pub fn allowed(name: &OsStr) -> bool {
 /// [`allowed`] passes, each value at most 16 KiB, at most 16 locale variables, then
 /// [`CAPABILITY_VARIABLE`] naming the capability file, [`SOCKET_VARIABLE`] naming the owner
 /// socket and the AI lock's [`super::settings::LOCKED_VARIABLE`] naming the locked-keys file,
-/// then the IDE git configuration [`super::git::CONFIG_ENV`]; none is ever taken from the
-/// engine's own variables. The server starts from a cleared environment holding exactly
-/// this. Inputs: the engine's variables, such as `std::env::vars_os()`, the capability file
-/// path, the owner socket path and the locked-keys file path. Output: the variables in order.
+/// then git's search ceiling [`super::git::CEILING_VARIABLE`] and the IDE git configuration
+/// [`super::git::CONFIG_ENV`]; none is ever taken from the engine's own variables. The
+/// server starts from a cleared environment holding exactly this. Inputs: the engine's
+/// variables, such as `std::env::vars_os()`, the capability file path, the owner socket
+/// path, the locked-keys file path and the project's ceiling ([`super::git::ceiling`]).
+/// Output: the variables in order.
 pub fn server_env(
     source: impl IntoIterator<Item = (OsString, OsString)>,
     capability: &Path,
     socket: &Path,
     locked: &Path,
+    ceiling: &OsStr,
 ) -> Vec<(OsString, OsString)> {
     let mut env: Vec<(OsString, OsString)> = Vec::new();
     let mut locales = 0;
@@ -82,6 +85,10 @@ pub fn server_env(
         OsString::from(super::settings::LOCKED_VARIABLE),
         locked.as_os_str().to_owned(),
     ));
+    env.push((
+        OsString::from(super::git::CEILING_VARIABLE),
+        ceiling.to_owned(),
+    ));
     env.extend(
         super::git::CONFIG_ENV
             .iter()
@@ -93,6 +100,7 @@ pub fn server_env(
             || name == CAPABILITY_VARIABLE
             || name == SOCKET_VARIABLE
             || name == super::settings::LOCKED_VARIABLE
+            || name == super::git::CEILING_VARIABLE
             || super::git::CONFIG_ENV
                 .iter()
                 .any(|(fixed, _)| name == *fixed)
