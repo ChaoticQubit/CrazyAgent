@@ -6,7 +6,9 @@ pub mod host;
 pub mod import;
 pub mod model;
 pub mod ops;
+pub mod plan;
 pub mod policy;
+pub mod ready;
 pub mod reply;
 pub mod requests;
 #[path = "schema_sql.rs"]

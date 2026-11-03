@@ -4,7 +4,7 @@ use crate::protocol::ProjectId;
 use crate::storage::versioned::{self, Item, Stale};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
-use trackwright_core::host::{Authority, TicketView};
+use trackwright_core::host::{Authority, CheckView, TicketView};
 use trackwright_core::model::{
     Actor, AgentEditPolicy, ClosePolicy, CreatePolicy, CycleDays, ImportPolicy, OpKind, Policy,
     ProjectKey, Refusal, RolloverPolicy,
@@ -207,7 +207,8 @@ pub fn set(
 
 /// The authority `sync` writes the core's policy keys through. The engine host refuses
 /// the core's `policy_set` for every caller, so the ticket settings are the one writer of
-/// `tk_policy`; only this module, writing the settings the owner saved, passes it.
+/// `tk_policy`; only this module, writing the settings the owner saved, passes it. It
+/// records no evidence.
 struct SettingsWriter;
 
 impl Authority for SettingsWriter {
@@ -224,6 +225,19 @@ impl Authority for SettingsWriter {
 
     fn actors_verified(&self) -> bool {
         true
+    }
+
+    fn evidence_may(
+        &self,
+        _: &Transaction<'_>,
+        _: &ProjectKey,
+        _: &Actor,
+        _: &CheckView,
+    ) -> Result<(), Refusal> {
+        Err(Refusal::host(
+            super::host::HOST_FAILED,
+            "the ticket settings writer records no evidence",
+        ))
     }
 }
 
