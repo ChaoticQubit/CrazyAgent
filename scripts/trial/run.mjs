@@ -18,6 +18,7 @@ const REAP_MS = 10000;
 const CLOSE_MS = 5000;
 const POLL_MS = 200;
 const READ_MS = 10000;
+const TOOL_MS = 30000;
 const AUDIT_MS = 10 * 60 * 1000;
 const REPORT_MS = 10 * 60 * 1000;
 const RENDER_MS = 5 * 60 * 1000;
@@ -45,6 +46,9 @@ const MASKS = [
   [/\b((?:claude|chatgpt|codex|openai|anthropic)-account-)[0-9A-Za-z_-]+/gi, "$1[masked]"],
   [/(?<![-\w])[A-Z0-9]{4}-[A-Z0-9]{4,5}(?![-\w])/g, "[code]"],
 ];
+const CHILD_ENV = /^(PATH|HOME|USER|LOGNAME|SHELL|LANG|TMPDIR|TERM|CRAZYAGENT_DESKTOP_SOCKET|LC_[A-Z0-9_]+|TRIAL[0-9]*_[A-Z0-9_]+|WD_[A-Z0-9_]+|V1_[A-Z0-9_]+)$/;
+const SECRET_ENV = /KEY|TOKEN|SECRET|PASS|CRED|COOKIE|AUTH/i;
+const LIVE = new Set();
 const KINDS = new Map([
   ["claude/claude/native_managed", "claude-subscription"],
   ["codex/chatgpt/native_managed", "codex-chatgpt"],
@@ -185,7 +189,7 @@ function refuseReuse(opts) {
   }
 }
 
-/** Opens the steps.jsonl writer of a run folder; each step takes the next line number so desktop spec lines interleave in order. Input: the run folder. Output: an object with add and a running ok flag. */
+/** Opens the steps.jsonl writer of a run folder; each step takes the next line number so desktop spec lines interleave in order, and a failed write counts as a failed step instead of throwing. Input: the run folder. Output: an object with add and a running ok flag. */
 function stepWriter(folder) {
   const path = join(folder, "steps.jsonl");
   let failed = 0;
@@ -194,8 +198,13 @@ function stepWriter(folder) {
       const prior = existsSync(path) ? readFileSync(path, "utf8").split("\n").filter(Boolean).length : 0;
       const present = evidence.filter((relative) => existsSync(join(folder, relative)));
       const step = { n: prior + 1, surface, title, why, at: new Date().toISOString(), ok, detail: mask(detail), evidence: present };
-      appendFileSync(path, `${JSON.stringify(step)}\n`);
       if (!ok) failed += 1;
+      try {
+        appendFileSync(path, `${JSON.stringify(step)}\n`);
+      } catch (error) {
+        failed += 1;
+        console.error(mask(`steps.jsonl: ${error.message}`));
+      }
       console.log(`step ${step.n} ${surface} ${title}: ${ok ? "ok" : "FAILED"} ${step.detail}`);
     },
     get ok() {
@@ -204,9 +213,10 @@ function stepWriter(folder) {
   };
 }
 
-/** Runs git in a folder and fails on a non-zero exit. Input: the folder and git arguments. Output: stdout text. */
+/** Runs git in a folder with no system or global config, no prompts, a fixed trial identity and a deadline, and fails on a non-zero exit. Input: the folder and git arguments. Output: stdout text. */
 function git(folder, args) {
-  const result = spawnSync("git", args, { cwd: folder, encoding: "utf8" });
+  const env = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: process.env.HOME ?? folder, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", GIT_TERMINAL_PROMPT: "0" };
+  const result = spawnSync("git", ["-c", "user.name=CrazyAgent Trial", "-c", "user.email=trial@invalid", ...args], { cwd: folder, env, encoding: "utf8", timeout: TOOL_MS, killSignal: "SIGKILL" });
   if (result.status !== 0) throw new Error(`git ${args.join(" ")} failed: ${result.error?.message ?? result.stderr.trim()}`);
   return result.stdout;
 }
@@ -271,7 +281,7 @@ function accountKinds(engine) {
 
 /** Reads the app's short version string with plutil. Input: the app bundle path. Output: the version, or "unknown" when plutil cannot read it. */
 function appVersion(app) {
-  const result = spawnSync("plutil", ["-extract", "CFBundleShortVersionString", "raw", join(app, "Contents", "Info.plist")], { encoding: "utf8" });
+  const result = spawnSync("plutil", ["-extract", "CFBundleShortVersionString", "raw", join(app, "Contents", "Info.plist")], { encoding: "utf8", timeout: TOOL_MS, killSignal: "SIGKILL" });
   const version = result.status === 0 ? result.stdout.trim() : "";
   return /^[0-9A-Za-z.+-]{1,32}$/.test(version) ? version : "unknown";
 }
@@ -289,13 +299,20 @@ function exec(argv, ms) {
   });
 }
 
-/** Opens one output stream of a log file: its own line buffer and key-block state, so stdout and stderr chunks never mix inside a line before masking. Input: the log path, created by the caller. Output: write and end functions for streamed text. */
-function maskedStream(path) {
+/** Opens one output stream of a log file: its own line buffer and key-block state, so stdout and stderr chunks never mix inside a line before masking. A failed write is reported once and later text is dropped. Input: the log path, created by the caller, and the failure callback. Output: write and end functions for streamed text. */
+function maskedStream(path, onError) {
   const line = lineMasker();
   let rest = "";
+  let broken = false;
   const flush = (text) => {
-    assert.ok(text.endsWith("\n"), "a flush holds whole lines only");
-    appendFileSync(path, `${text.slice(0, -1).split("\n").map(line).join("\n")}\n`);
+    if (broken) return;
+    try {
+      assert.ok(text.endsWith("\n"), "a flush holds whole lines only");
+      appendFileSync(path, `${text.slice(0, -1).split("\n").map(line).join("\n")}\n`);
+    } catch (error) {
+      broken = true;
+      onError(error);
+    }
   };
   return {
     write(chunk) {
@@ -337,6 +354,36 @@ function signalGroup(pgid, signal) {
   }
 }
 
+/** Last resort when the runner process exits: SIGKILL every supervised group still recorded as live, so no desktop run outlives its supervisor. Input: none. Output: none. */
+function killLive() {
+  for (const pgid of LIVE) {
+    try {
+      process.kill(-pgid, "SIGKILL");
+    } catch (error) {
+      if (error.code !== "ESRCH") console.error(`could not stop group ${pgid}: ${error.code}`);
+    }
+  }
+}
+
+/** Stops every supervised group still live, reporting a group that cannot be stopped instead of throwing. Input: none. Output: none. */
+async function stopLive() {
+  for (const pgid of [...LIVE]) {
+    try {
+      await stopGroup(pgid);
+    } catch (error) {
+      console.error(mask(`could not stop group ${pgid}: ${error.message}`));
+    }
+    LIVE.delete(pgid);
+  }
+}
+
+/** Builds the environment of every supervised child: the allowlisted names of the runner's own environment, minus any name that looks like a credential, plus the given TRIAL_* values. Input: the extra values. Output: the environment object. */
+function childEnv(extra) {
+  const env = {};
+  for (const [name, value] of Object.entries(process.env)) if (CHILD_ENV.test(name) && !SECRET_ENV.test(name)) env[name] = value;
+  return { ...env, ...extra };
+}
+
 /** Stops a process group: SIGTERM, then SIGKILL after the grace period. Input: the group id. Output: null when the group was already empty, else how it was stopped, naming members that outlived SIGKILL. */
 async function stopGroup(pgid) {
   if (!groupAlive(pgid)) return null;
@@ -353,13 +400,14 @@ async function stopGroup(pgid) {
   return groupAlive(pgid) ? `${how}, members still present` : how;
 }
 
-/** Runs one long command in its own process group with a deadline and the run's stop signal, streaming masked output to a log. Input: argv, working folder, environment, log path, deadline in ms and an AbortSignal. Output: exit code, signal, cause ("deadline" or "interrupt" when the runner stopped it), how the runner stopped the group and any members left after exit, and elapsed ms. */
-async function supervise(argv, { cwd, env, log, ms, stop }) {
+/** Runs one long command in its own process group with a deadline and a stop signal, streaming masked output to a log; the group is recorded as live until it is stopped. Input: argv, working folder, environment, log path, deadline in ms, an AbortSignal and the failure callback for log writes. Output: exit code, signal, cause ("deadline", or "stop" with the stop reason), how the runner stopped the group and any members left after exit, and elapsed ms. */
+async function supervise(argv, { cwd, env, log, ms, stop, onError }) {
   writeFileSync(log, "");
-  const out = maskedStream(log);
-  const err = maskedStream(log);
+  const out = maskedStream(log, onError);
+  const err = maskedStream(log, onError);
   const started = Date.now();
   const child = spawn(argv[0], argv.slice(1), { cwd, env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+  if (child.pid !== undefined) LIVE.add(child.pid);
   const closed = new Promise((done) => child.once("close", done));
   const exited = new Promise((done) => {
     child.once("exit", (code, signal) => done({ code, signal }));
@@ -369,21 +417,22 @@ async function supervise(argv, { cwd, env, log, ms, stop }) {
   child.stderr.setEncoding("utf8").on("data", err.write);
   const timer = new AbortController();
   const deadline = pause(ms, "deadline", { signal: timer.signal }).catch(() => null);
-  const interrupt = new Promise((done) => {
-    if (stop.aborted) done("interrupt");
-    else stop.addEventListener("abort", () => done("interrupt"), { once: true });
+  const stopped = new Promise((done) => {
+    if (stop.aborted) done("stop");
+    else stop.addEventListener("abort", () => done("stop"), { once: true });
   });
-  const first = await Promise.race([exited, deadline, interrupt]);
+  const first = await Promise.race([exited, deadline, stopped]);
   const cause = typeof first === "string" ? first : null;
-  const stopped = cause && child.pid !== undefined ? await stopGroup(child.pid) : null;
+  const how = cause && child.pid !== undefined ? await stopGroup(child.pid) : null;
   const result = cause ? await exited : first;
   timer.abort();
   const stray = child.pid !== undefined ? await stopGroup(child.pid) : null;
+  LIVE.delete(child.pid);
   await Promise.race([closed, pause(CLOSE_MS)]);
   if (result.error) err.write(`could not start ${argv[0]}: ${result.error}\n`);
   out.end();
   err.end();
-  return { ...result, cause, stopped, stray, ms: Date.now() - started };
+  return { ...result, cause, reason: cause === "stop" ? stop.reason : null, stopped: how, stray, ms: Date.now() - started };
 }
 
 /** Describes how a supervised command ended. Input: its result and the deadline in ms. Output: one line for a step detail. */
@@ -392,7 +441,7 @@ function ending(result, ms) {
   const parts = [];
   const group = result.stopped ? `process group stopped with ${result.stopped}` : "process group already empty";
   if (result.cause === "deadline") parts.push(`deadline of ${+(ms / 60000).toFixed(2)} min passed; ${group}`);
-  else if (result.cause === "interrupt") parts.push(`interrupted; ${group}`);
+  else if (result.cause === "stop") parts.push(`${result.reason instanceof Error ? "runner failure" : `interrupted by ${result.reason}`}; ${group}`);
   else if (result.error) parts.push(`could not start: ${result.error}`);
   else if (result.signal) parts.push(`killed by ${result.signal}`);
   else parts.push(`exit ${result.code}`);
@@ -521,8 +570,7 @@ async function buildGif(evidence) {
     const gif = join(evidence, "trial.gif");
     const encode = await exec(["ffmpeg", "-loglevel", "error", "-y", "-framerate", "1", "-pattern_type", "glob", "-i", join(work, "f*.svg.png"), "-vf", "crop=1600:1000:0:0,scale=1200:-1:flags=lanczos,split[a][b];[a]palettegen[p];[b][p]paletteuse", gif], RENDER_MS);
     if (encode.code !== 0 || !existsSync(gif)) return { ok: false, detail: `ffmpeg failed: ${encode.err.trim()}` };
-    const header = readFileSync(gif).subarray(0, 4).toString("latin1");
-    assert.equal(header, "GIF8", "ffmpeg wrote something other than a GIF");
+    if (readFileSync(gif).subarray(0, 4).toString("latin1") !== "GIF8") return { ok: false, detail: "ffmpeg wrote something other than a GIF" };
     return { ok: true, detail: `${frames.length} frames, ${statSync(gif).size} bytes` };
   } finally {
     rmSync(work, { recursive: true, force: true });
@@ -543,7 +591,7 @@ function recordUsage(opts, steps, when) {
   }
 }
 
-/** Runs the trial: seed, recorder, WebdriverIO run with a deadline, manifest, then audit and report. Input: argv after the script. Output: the exit code (0 every step ok, 1 a step failed, 2 refused, 130 interrupted). */
+/** Runs the trial: seed, recorder, WebdriverIO run with a deadline, manifest, then audit and report. A runner failure stops the desktop group and the recorder, is recorded in the manifest and a step, and the audit and report still run. Input: argv after the script. Output: the exit code (0 every step ok, 1 a step or the runner failed, 2 refused, 130 interrupted). */
 export async function main(argv) {
   process.umask(0o077);
   let opts;
@@ -556,10 +604,19 @@ export async function main(argv) {
     return 2;
   }
   const halt = new AbortController();
+  const crash = new AbortController();
+  const fail = (error) => {
+    console.error(mask(`runner failure: ${error?.stack ?? error}`));
+    if (!crash.signal.aborted) crash.abort(error instanceof Error ? error : new Error(String(error)));
+  };
   const onSignal = (signal) => {
     if (!halt.signal.aborted) halt.abort(signal);
   };
   for (const signal of STOP_SIGNALS) process.on(signal, onSignal);
+  process.on("uncaughtException", fail);
+  process.on("unhandledRejection", fail);
+  process.on("exit", killLive);
+  const stop = AbortSignal.any([halt.signal, crash.signal]);
   for (const folder of FOLDERS) mkdirSync(join(opts.evidence, folder), { recursive: true });
   const started = new Date();
   const steps = stepWriter(opts.evidence);
@@ -573,15 +630,26 @@ export async function main(argv) {
   })();
   const tokens = { before: null, after: null };
   let project = opts.project;
+  let crashReported = false;
   const finish = () => {
     const manifest = { trial: opts.trial, build: opts.build, app_version: appVersion(opts.app), started: started.toISOString(), ended: new Date().toISOString(), project, accounts, tokens };
-    writeFileSync(join(opts.evidence, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+    if (crash.signal.aborted) manifest.failure = mask(crash.signal.reason.message);
+    try {
+      writeFileSync(join(opts.evidence, "manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+    } catch (error) {
+      console.error(mask(`manifest.json: ${error.message}`));
+    }
   };
   const interrupted = () => {
     if (!halt.signal.aborted) return false;
     steps.add("engine", "Run interrupted", "the owner stopped the runner, so the audit and report did not run", false, `stopped by ${halt.signal.reason}`);
     if (!existsSync(join(opts.evidence, "manifest.json"))) finish();
     return true;
+  };
+  const reportCrash = () => {
+    if (!crash.signal.aborted || crashReported) return;
+    crashReported = true;
+    steps.add("engine", "Runner failed", "a runner failure stopped the desktop run; the audit and report still run on what exists", false, crash.signal.reason.message);
   };
 
   try {
@@ -594,39 +662,54 @@ export async function main(argv) {
     finish();
     return 1;
   }
-  writeFileSync(join(opts.evidence, "logs", "prompt.txt"), renderPrompt(readFileSync(PROMPT, "utf8"), project));
-  tokens.before = recordUsage(opts, steps, "before");
-  if (interrupted()) return 130;
-
-  const recorder = await startRecorder(opts.commands.frames, opts.evidence, opts.frameGapMs);
-  steps.add("tui", "Start the TUI recorder", "the TUI check reads the frames and the GIF the owner would have seen", recorder.first, recorder.first ? "first frame read" : "the first pane read failed; the recorder keeps trying", ["frames/f00000.txt"]);
-  const env = { ...process.env, TRIAL_EVIDENCE: opts.evidence, TRIAL_PROJECT: project, TRIAL_PROMPT: PROMPT, TRIAL_ENGINE: opts.engine };
-  const snapshots = startSnapshots(opts.evidence, [opts.app, project, opts.engine], opts.psAfterMs, opts.psEveryMs);
-  const desktop = await supervise(opts.commands.desktop, { cwd: opts.desktopCwd, env, log: join(opts.evidence, "logs", "desktop.log"), ms: opts.deadlineMs, stop: halt.signal });
-  const shots = await snapshots.stop();
-  const recorded = await recorder.stop();
-  const desktopOk = desktop.code === 0 && desktop.cause === null && !desktop.error;
-  steps.add("desktop", "WebdriverIO run ended", "the desktop spec drives every owner action; its exit says whether it reached the end", desktopOk, `${ending(desktop, opts.deadlineMs)}; ${shots} process snapshots`, ["logs/desktop.log"]);
+  const env = childEnv({ TRIAL_EVIDENCE: opts.evidence, TRIAL_PROJECT: project, TRIAL_PROMPT: PROMPT, TRIAL_ENGINE: opts.engine });
+  const envNames = Object.keys(env).sort();
+  let recorder = null;
+  let snapshots = null;
+  let desktop = null;
+  let shots = 0;
+  let recorded = { frames: 0, failed: 0 };
+  try {
+    writeFileSync(join(opts.evidence, "logs", "prompt.txt"), renderPrompt(readFileSync(PROMPT, "utf8"), project));
+    tokens.before = recordUsage(opts, steps, "before");
+    if (interrupted()) return 130;
+    recorder = await startRecorder(opts.commands.frames, opts.evidence, opts.frameGapMs);
+    steps.add("tui", "Start the TUI recorder", "the TUI check reads the frames and the GIF the owner would have seen", recorder.first, recorder.first ? "first frame read" : "the first pane read failed; the recorder keeps trying", ["frames/f00000.txt"]);
+    writeFileSync(join(opts.evidence, "logs", "env.txt"), `${envNames.join("\n")}\n`);
+    snapshots = startSnapshots(opts.evidence, [opts.app, project, opts.engine], opts.psAfterMs, opts.psEveryMs);
+    if (!stop.aborted) desktop = await supervise(opts.commands.desktop, { cwd: opts.desktopCwd, env, log: join(opts.evidence, "logs", "desktop.log"), ms: opts.deadlineMs, stop, onError: fail });
+  } catch (error) {
+    fail(error);
+  } finally {
+    await stopLive();
+    if (snapshots) shots = await snapshots.stop();
+    if (recorder) recorded = await recorder.stop();
+  }
+  const desktopOk = desktop !== null && desktop.code === 0 && desktop.cause === null && !desktop.error;
+  const desktopDetail = desktop === null ? "not started" : `${ending(desktop, opts.deadlineMs)}; ${shots} process snapshots; ${envNames.length} environment names in logs/env.txt`;
+  steps.add("desktop", "WebdriverIO run ended", "the desktop spec drives every owner action; its exit says whether it reached the end", desktopOk, desktopDetail, ["logs/desktop.log", "logs/env.txt"]);
   const frameNames = [0, recorded.frames - 1].filter((index) => index >= 0).map((index) => `frames/f${String(index).padStart(5, "0")}.txt`);
   steps.add("tui", "Stop the TUI recorder", "the frames are the TUI evidence", recorded.frames > 0, `${recorded.frames} frames, ${recorded.failed} failed reads`, [...new Set(frameNames)]);
   if (interrupted()) return 130;
+  reportCrash();
 
-  const gif = await buildGif(opts.evidence);
+  const gif = await buildGif(opts.evidence).catch((error) => ({ ok: false, detail: error.message }));
   steps.add("tui", "Build the TUI GIF", "the report shows the TUI as one animation", gif.ok, gif.detail, ["trial.gif"]);
   tokens.after = recordUsage(opts, steps, "after");
   finish();
   if (interrupted()) return 130;
 
-  const audit = await supervise(opts.commands.audit, { cwd: REPO, env, log: join(opts.evidence, "logs", "audit.log"), ms: AUDIT_MS, stop: halt.signal });
+  const audit = await supervise(opts.commands.audit, { cwd: REPO, env, log: join(opts.evidence, "logs", "audit.log"), ms: AUDIT_MS, stop: halt.signal, onError: fail }).catch((error) => ({ code: null, error: error.message, cause: null, ms: 0 }));
   const audited = audit.cause === null && (audit.code === 0 || audit.code === 1);
   const verdict = audit.code === 0 ? "no FAIL" : audit.code === 1 ? "at least one FAIL, see checks/" : "the audit could not run";
   steps.add("engine", "Run the audit", "the checks decide what the trial proved", audited, `${ending(audit, AUDIT_MS)}: ${verdict}`, ["logs/audit.log"]);
   if (interrupted()) return 130;
 
-  const report = await supervise(opts.commands.report, { cwd: REPO, env, log: join(opts.evidence, "logs", "report.log"), ms: REPORT_MS, stop: halt.signal });
-  steps.add("engine", "Build the report", "the owner reads the trial as one report", report.code === 0 && report.cause === null, ending(report, REPORT_MS), ["logs/report.log", "report.html", "report.pdf"]);
+  const report = await supervise(opts.commands.report, { cwd: REPO, env, log: join(opts.evidence, "logs", "report.log"), ms: REPORT_MS, stop: halt.signal, onError: fail }).catch((error) => ({ code: null, error: error.message, cause: null, ms: 0 }));
+  steps.add("engine", "Build the report", "the owner reads the trial as one report", report.code === 0 && report.cause === null && !report.error, ending(report, REPORT_MS), ["logs/report.log", "report.html", "report.pdf"]);
   if (interrupted()) return 130;
-  return steps.ok ? 0 : 1;
+  reportCrash();
+  return steps.ok && !crash.signal.aborted ? 0 : 1;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {

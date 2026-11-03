@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -72,6 +72,10 @@ const KINDS = ["claude-subscription", "codex-chatgpt", "rcli-anthropic-api-key",
 const USAGE = [[100, 20, 3000, 400], [5, 1, 0, 0]];
 const ADDED = [10, 2, 300, 40];
 const total = (rows) => rows.flat().reduce((sum, value) => sum + value, 0);
+const ALLOWED_ENV = /^(PATH|HOME|USER|LOGNAME|SHELL|LANG|TMPDIR|TERM|CRAZYAGENT_DESKTOP_SOCKET|LC_[A-Z0-9_]+|TRIAL[0-9]*_[A-Z0-9_]+|WD_[A-Z0-9_]+|V1_[A-Z0-9_]+)$/;
+const PLANTED_ENV = { ANTHROPIC_API_KEY: SECRETS.anthropic, GITHUB_TOKEN: SECRETS.github, CRAZYAGENT_OWNER_TOKEN: SECRETS.sessionToken, TRIAL_PLANTED_TOKEN: SECRETS.bearer, NODE_OPTIONS: "--no-warnings" };
+const MACOS_EXEC_ENV = "__CF_USER_TEXT_ENCODING";
+const PASSED_ENV = { WD_PORT: "4444", TRIAL_ANSWER: "Hello", V1_ROOT: "/v1-root", CRAZYAGENT_DESKTOP_SOCKET: "/engine.sock" };
 
 const FRAMES = `import { readFileSync } from "node:fs";
 process.stdout.write(readFileSync(process.argv[2], "utf8"));
@@ -87,7 +91,7 @@ const evidence = process.env.TRIAL_EVIDENCE;
 const steps = join(evidence, "steps.jsonl");
 const prior = readFileSync(steps, "utf8").split("\\n").filter(Boolean).length;
 writeFileSync(seen, JSON.stringify({
-  pid: process.pid, prior, project, evidence,
+  pid: process.pid, prior, project, evidence, keys: Object.keys(process.env).sort(),
   env: { project: process.env.TRIAL_PROJECT, prompt: process.env.TRIAL_PROMPT, engine: process.env.TRIAL_ENGINE },
   seeded: existsSync(join(project, ".git")) && existsSync(join(project, "private", "note.txt")),
 }));
@@ -107,7 +111,7 @@ const AUDIT = `import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 const [seen, leaky] = process.argv.slice(2);
 const evidence = process.env.TRIAL_EVIDENCE;
-writeFileSync(seen, JSON.stringify({ manifest: existsSync(join(evidence, "manifest.json")), env: process.env.TRIAL_PROJECT }));
+writeFileSync(seen, JSON.stringify({ manifest: existsSync(join(evidence, "manifest.json")), env: process.env.TRIAL_PROJECT, keys: Object.keys(process.env).sort() }));
 mkdirSync(join(evidence, "checks"), { recursive: true });
 writeFileSync(join(evidence, "checks", "T3-01.json"), JSON.stringify({ id: "T3-01", result: "FAIL" }));
 process.stdout.write("audit " + leaky + "\\n");
@@ -119,7 +123,7 @@ import { join } from "node:path";
 writeFileSync(join(process.env.TRIAL_EVIDENCE, "report.html"), "<html>stand-in report</html>");
 `;
 
-/** Creates the fixture folders of one runner test: an engine root with engine.db, a stand-in app bundle, an empty evidence folder and stand-in scripts. Input: a name prefix. Output: the paths. */
+/** Creates the fixture folders of one runner test: an engine root with engine.db, a stand-in app bundle, an empty evidence folder, stand-in scripts, and a runner environment with planted secrets and a hostile global git config whose pre-commit hook fails. Input: a name prefix. Output: the paths and that environment. */
 function fixture(prefix) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), prefix)));
   const engine = join(root, "engine");
@@ -143,7 +147,13 @@ CREATE TABLE usage_tokens (hour_ms INTEGER NOT NULL, kind TEXT NOT NULL, project
   for (const [name, text] of [["frames.mjs", FRAMES], ["desktop.mjs", DESKTOP], ["audit.mjs", AUDIT], ["report.mjs", REPORT]]) writeFileSync(join(scripts, name), text);
   const screen = join(root, "screen.txt");
   writeFileSync(screen, `frame A: the master pane\n${LEAKY}\n`);
-  return { root, engine, app, evidence, project, scripts, screen };
+  const hooks = join(root, "hostile-hooks");
+  mkdirSync(hooks);
+  writeFileSync(join(hooks, "pre-commit"), `#!/bin/sh\necho hostile > "${join(root, "hostile-hook-ran")}"\nexit 1\n`);
+  chmodSync(join(hooks, "pre-commit"), 0o755);
+  writeFileSync(join(root, "hostile.gitconfig"), `[user]\n\tname = Hostile Owner\n\temail = ${SECRETS.email}\n[core]\n\thooksPath = ${hooks}\n`);
+  const env = { ...process.env, ...PLANTED_ENV, ...PASSED_ENV, GIT_CONFIG_GLOBAL: join(root, "hostile.gitconfig") };
+  return { root, engine, app, evidence, project, scripts, screen, env };
 }
 
 /** Builds the runner arguments for a fixture, with stand-in commands unless a test passes its own. Input: the fixture and overrides. Output: the argv after run.mjs. */
@@ -165,10 +175,10 @@ function args(paths, overrides = {}) {
   ];
 }
 
-/** Runs run.mjs as a real child process and collects its output. Input: argv and an optional hook called with the child. Output: exit code, signal and output text. */
-function runner(argv, hook) {
+/** Runs run.mjs as a real child process and collects its output. Input: argv, the runner environment and an optional hook called with the child. Output: exit code, signal and output text. */
+function runner(argv, env, hook) {
   return new Promise((done) => {
-    const child = spawn(process.execPath, [RUN, ...argv], { stdio: ["ignore", "pipe", "pipe"] });
+    const child = spawn(process.execPath, [RUN, ...argv], { env, stdio: ["ignore", "pipe", "pipe"] });
     let out = "";
     child.stdout.setEncoding("utf8").on("data", (chunk) => { out += chunk; });
     child.stderr.setEncoding("utf8").on("data", (chunk) => { out += chunk; });
@@ -240,10 +250,12 @@ test("renderPrompt fills every project placeholder and refuses an unknown one", 
 
 test("a full fixture run seeds, records, launches, writes the manifest, then audits and reports", async () => {
   const paths = fixture("ca-trial-run-");
-  const result = await runner(args(paths));
+  const result = await runner(args(paths), paths.env);
   assert.equal(result.code, 0, result.out);
 
   assert.equal(git(paths.project, "branch", "--show-current"), "main");
+  assert.equal(git(paths.project, "log", "--format=%an <%ae> %cn <%ce>"), "CrazyAgent Trial <trial@invalid> CrazyAgent Trial <trial@invalid>");
+  assert.ok(!existsSync(join(paths.root, "hostile-hook-ran")));
   assert.equal(git(paths.project, "log", "--format=%s"), "Initial trial repo");
   const seed = git(paths.project, "rev-parse", "main");
   assert.equal(git(paths.project, "rev-parse", "trial3-land"), seed);
@@ -262,6 +274,11 @@ test("a full fixture run seeds, records, launches, writes the manifest, then aud
   assert.ok(seen.seeded);
   assert.equal(seen.evidence, paths.evidence);
   assert.deepEqual(seen.env, { project: paths.project, prompt: join(TRIAL, "prompt.md"), engine: paths.engine });
+  const keys = seen.keys.filter((name) => name !== MACOS_EXEC_ENV);
+  assert.ok(keys.every((name) => ALLOWED_ENV.test(name)), keys.join(" "));
+  for (const name of ["PATH", "HOME", "TRIAL_EVIDENCE", "TRIAL_PROJECT", "TRIAL_PROMPT", "TRIAL_ENGINE", ...Object.keys(PASSED_ENV)]) assert.ok(keys.includes(name), name);
+  for (const name of [...Object.keys(PLANTED_ENV), "GIT_CONFIG_GLOBAL"]) assert.ok(!keys.includes(name), name);
+  assert.equal(readFileSync(join(paths.evidence, "logs", "env.txt"), "utf8"), `${keys.join("\n")}\n`);
 
   const frames = readdirSync(join(paths.evidence, "frames")).sort();
   assert.deepEqual(frames, ["f00000.txt", "f00001.txt", "f00002.txt"]);
@@ -299,6 +316,7 @@ test("a full fixture run seeds, records, launches, writes the manifest, then aud
   assert.ok(all.every((step) => step.ok === true), JSON.stringify(all.filter((step) => !step.ok)));
   assert.ok(all.every((step) => step.why.length > 0 && !Number.isNaN(Date.parse(step.at))));
   assert.ok(all[0].detail.includes(seed));
+  assert.deepEqual(all[4].evidence, ["logs/desktop.log", "logs/env.txt"]);
   assert.deepEqual(all[5].evidence, ["frames/f00000.txt", "frames/f00002.txt"]);
   assert.match(all[8].detail, /exit 1/);
   for (const step of all) for (const path of step.evidence) assert.ok(existsSync(join(paths.evidence, path)), path);
@@ -312,7 +330,8 @@ test("a full fixture run seeds, records, launches, writes the manifest, then aud
   assert.equal(manifest.project, paths.project);
   assert.deepEqual(manifest.accounts, KINDS);
   assert.deepEqual(manifest.tokens, { before: total(USAGE), after: total(USAGE) + total(ADDED) });
-  assert.deepEqual(JSON.parse(readFileSync(join(paths.root, "audit-seen.json"), "utf8")), { manifest: true, env: paths.project });
+  const audited = JSON.parse(readFileSync(join(paths.root, "audit-seen.json"), "utf8"));
+  assert.deepEqual([audited.manifest, audited.env, audited.keys], [true, paths.project, seen.keys]);
   assert.ok(existsSync(join(paths.evidence, "report.html")));
 
   assertNoSecret(paths.evidence);
@@ -323,7 +342,7 @@ test("a desktop run past its deadline is stopped with its whole process group an
   const paths = fixture("ca-trial-deadline-");
   const pidFile = join(paths.root, "desktop.pid");
   const stubborn = ["/bin/sh", "-c", "echo $$ > \"$0\"; trap '' TERM; while :; do sleep 1; done", pidFile];
-  const result = await runner(args(paths, { deadline: "0.05", commands: { desktop: stubborn } }));
+  const result = await runner(args(paths, { deadline: "0.05", commands: { desktop: stubborn } }), paths.env);
   assert.equal(result.code, 1, result.out);
   const pgid = Number(readFileSync(pidFile, "utf8"));
   assert.ok(!groupAlive(pgid), `group ${pgid} still has members`);
@@ -338,14 +357,14 @@ test("an interrupt stops the desktop group, writes the manifest and skips the au
   const paths = fixture("ca-trial-interrupt-");
   const pidFile = join(paths.root, "desktop.pid");
   const waiting = ["/bin/sh", "-c", "echo $$ > \"$0\"; sleep 300", pidFile];
-  const result = await runner(args(paths, { commands: { desktop: waiting } }), async (child) => {
+  const result = await runner(args(paths, { commands: { desktop: waiting } }), paths.env, async (child) => {
     while (child.exitCode === null && (!existsSync(pidFile) || readFileSync(pidFile, "utf8").trim() === "")) await pause(100);
     if (child.exitCode === null) child.kill("SIGINT");
   });
   assert.equal(result.code, 130, result.out);
   assert.ok(!groupAlive(Number(readFileSync(pidFile, "utf8"))));
   const all = steps(paths.evidence);
-  assert.match(all.find((step) => step.title === "WebdriverIO run ended").detail, /^interrupted; process group stopped with SIGTERM, after /);
+  assert.match(all.find((step) => step.title === "WebdriverIO run ended").detail, /^interrupted by SIGINT; process group stopped with SIGTERM, after /);
   assert.deepEqual(all.at(-1).title, "Run interrupted");
   assert.equal(all.at(-1).ok, false);
   assert.match(all.at(-1).detail, /SIGINT/);
@@ -357,7 +376,7 @@ test("the runner refuses an existing project, a finished run folder or a used on
   const taken = fixture("ca-trial-taken-");
   mkdirSync(taken.project, { recursive: true });
   writeFileSync(join(taken.project, "owner-file.txt"), "keep me\n");
-  const first = await runner(args(taken));
+  const first = await runner(args(taken), taken.env);
   assert.equal(first.code, 2, first.out);
   assert.match(first.out, /BLOCKED: .*ca-trial-3 already exists/);
   assert.deepEqual(readdirSync(taken.project), ["owner-file.txt"]);
@@ -365,7 +384,7 @@ test("the runner refuses an existing project, a finished run folder or a used on
 
   const finished = fixture("ca-trial-finished-");
   writeFileSync(join(finished.evidence, "manifest.json"), "{\"trial\": 3}\n");
-  const second = await runner(args(finished));
+  const second = await runner(args(finished), finished.env);
   assert.equal(second.code, 2, second.out);
   assert.match(second.out, /BLOCKED: .*trial-3 is not empty/);
   assert.equal(readFileSync(join(finished.evidence, "manifest.json"), "utf8"), "{\"trial\": 3}\n");
@@ -373,7 +392,29 @@ test("the runner refuses an existing project, a finished run folder or a used on
 
   const used = fixture("ca-trial-used-");
   writeFileSync(join(used.evidence, "steps.jsonl"), "");
-  const third = await runner(args(used));
+  const third = await runner(args(used), used.env);
   assert.equal(third.code, 2, third.out);
   assert.ok(!existsSync(used.project));
+});
+
+test("a runner failure mid-run stops the desktop group, records the failure in the manifest and still audits and reports", async () => {
+  const paths = fixture("ca-trial-crash-");
+  const pidFile = join(paths.root, "desktop.pid");
+  const breaking = ["/bin/sh", "-c", "echo $$ > \"$0\"; chmod 400 \"$TRIAL_EVIDENCE/logs/desktop.log\"; echo the log is read-only now; sleep 300", pidFile];
+  const result = await runner(args(paths, { commands: { desktop: breaking } }), paths.env);
+  assert.equal(result.code, 1, result.out);
+  assert.ok(!groupAlive(Number(readFileSync(pidFile, "utf8"))));
+  const all = steps(paths.evidence);
+  const ended = all.find((step) => step.title === "WebdriverIO run ended");
+  assert.equal(ended.ok, false);
+  assert.match(ended.detail, /^runner failure; process group stopped with SIGTERM, after /);
+  const failed = all.find((step) => step.title === "Runner failed");
+  assert.equal(failed.ok, false);
+  assert.match(failed.detail, /EACCES.*desktop\.log/);
+  assert.deepEqual(all.slice(-2).map((step) => [step.title, step.ok]), [["Run the audit", true], ["Build the report", true]]);
+  const manifest = JSON.parse(readFileSync(join(paths.evidence, "manifest.json"), "utf8"));
+  assert.match(manifest.failure, /EACCES.*desktop\.log/);
+  assert.ok(existsSync(join(paths.root, "audit-seen.json")));
+  assert.ok(existsSync(join(paths.evidence, "report.html")));
+  assertNoSecret(paths.evidence);
 });
