@@ -2937,3 +2937,20 @@ async fn settings_plan_roadmap_now_starts_the_job() {
         "an edit drafted before the plan cannot cancel it"
     );
 }
+
+#[test]
+fn h_on_the_settings_tab_opens_the_project_harness_list() {
+    let look = Look::plain();
+    let project = ProjectId::new("harnesses").unwrap();
+    let mut screen = loaded(&project);
+    assert_ne!(screen.key(key(KeyCode::Char('h'))), ProjectReply::Harnesses);
+    screen.open(Tab::Settings);
+    assert_eq!(screen.key(key(KeyCode::Char('h'))), ProjectReply::Harnesses);
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    let team = text(&drawn.rows)
+        .lines()
+        .find(|line| line.trim_start().starts_with("Team"))
+        .map(|line| line.trim_end().to_owned())
+        .unwrap_or_default();
+    assert!(team.ends_with("   h Harness settings"), "{team}");
+}

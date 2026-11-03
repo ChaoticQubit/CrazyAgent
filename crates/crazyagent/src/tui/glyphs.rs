@@ -73,7 +73,16 @@ const STATUS_WORDS: [(Status, &[&str]); 9] = [
             "Not set up",
         ],
     ),
-    (Status::Off, &["Not installed", "Turned off", "Stopped"]),
+    (
+        Status::Off,
+        &[
+            "Not installed",
+            "Turned off",
+            "Stopped",
+            "Locked",
+            "Read-only",
+        ],
+    ),
     (Status::Limited, &["Limited control"]),
     (Status::Unknown, &["Unknown"]),
     (Status::Suggested, &["Suggested"]),
