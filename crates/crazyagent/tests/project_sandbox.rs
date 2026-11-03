@@ -2156,6 +2156,122 @@ fn an_agent_cannot_exec_an_app_bundle_binary_in_any_case_but_bundle_tools_still_
     }
 }
 
+/// OP-9 r1 (leader 14:29): a native lead's teammates write only the teammates' folder of the
+/// lead's clone and the git parts their own commits need. A teammate commits in the worktree
+/// the engine made for it on its own `<task>--<name>` branch, but never writes the lead's
+/// files, the clone's hooks, config or HEAD, the lead's task branch, the links that tie a
+/// teammate worktree to the clone, or a new worktree record.
+#[test]
+fn a_native_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_clone() {
+    use std::os::unix::fs::PermissionsExt;
+    assert!(Path::new(AGENT_GIT).is_file());
+    let (case, clone, _head) = clone_case();
+    let task = "crazyagent/write-the-page";
+    let switched = owner_git(&clone, &case.home, &["switch", "-q", "-c", task]);
+    assert!(switched.status.success(), "{switched:?}");
+    let tmux = crazyagent::terminal::tmux::installed(&case.project).expect("tmux is installed");
+    let tmp = crazyagent::sandbox::toolchains::make_tmp(&case.home).unwrap();
+    for folder in crazyagent::sandbox::CLAUDE_TEAM_SHARED {
+        fs::create_dir_all(case.home.join(folder)).unwrap();
+    }
+    let mates_home = case.home.with_file_name("mates-home");
+    fs::create_dir_all(&mates_home).unwrap();
+    fs::set_permissions(&mates_home, fs::Permissions::from_mode(0o700)).unwrap();
+    let (lead, teammates) = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .allow_scratch(&tmp)
+        .unwrap()
+        .confine_to_clone(&clone)
+        .unwrap()
+        .native_team(
+            &tmp.join("tmux.sock"),
+            &tmp.join("teammates-0123456789abcdef.sock"),
+            &tmp.join(crazyagent::team::caller::CALLER_SOCKET),
+            &tmux,
+            &mates_home,
+        )
+        .unwrap();
+    let (lead_profile, teammates_profile) = (
+        case.profiles.join("lead.sb"),
+        case.profiles.join("teammates.sb"),
+    );
+    let greet = clone
+        .join(crazyagent::agent_git::TEAMMATES_FOLDER)
+        .join("greet");
+    let added = run(
+        &lead,
+        &lead_profile,
+        &format!(
+            "cd {} && {AGENT_GIT} -c core.hooksPath=/dev/null worktree add -q -b {task}--greet {} HEAD",
+            quoted(&clone),
+            quoted(&greet)
+        ),
+    );
+    assert!(added.status.success(), "{added:?}");
+    let committed = run(
+        &teammates,
+        &teammates_profile,
+        &format!(
+            "cd {} && printf 'hello\\n' > greet.txt && {AGENT_GIT} add greet.txt && {AGENT_GIT} -c user.name=greet -c user.email=greet@local -c core.hooksPath=/dev/null commit -q -m greet",
+            quoted(&greet)
+        ),
+    );
+    assert!(
+        committed.status.success(),
+        "a teammate commits in its own worktree: {}",
+        String::from_utf8_lossy(&committed.stderr)
+    );
+    let teammate_tip = owner_git(
+        &clone,
+        &case.home,
+        &["log", "-1", "--format=%s", &format!("{task}--greet")],
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&teammate_tip.stdout).trim(),
+        "greet"
+    );
+    let git = clone.join(".git");
+    let kept: Vec<(PathBuf, Vec<u8>)> = [
+        git.join("config"),
+        git.join("HEAD"),
+        git.join("refs").join("heads").join(task),
+        greet.join(".git"),
+        git.join("worktrees").join("greet").join("gitdir"),
+    ]
+    .into_iter()
+    .map(|file| {
+        let bytes = fs::read(&file).unwrap();
+        (file, bytes)
+    })
+    .collect();
+    for (file, before) in &kept {
+        let output = run(
+            &teammates,
+            &teammates_profile,
+            &format!("printf 'x\\n' >> {}", quoted(file)),
+        );
+        assert!(!output.status.success(), "{}", file.display());
+        assert_eq!(&fs::read(file).unwrap(), before, "{}", file.display());
+    }
+    for target in [
+        clone.join("lead.txt"),
+        git.join("hooks").join("post-commit"),
+    ] {
+        write_refused(
+            &teammates,
+            &teammates_profile,
+            &format!("printf x > {}", quoted(&target)),
+            &target,
+        );
+    }
+    let admin = git.join("worktrees").join("other");
+    write_refused(
+        &teammates,
+        &teammates_profile,
+        &format!("mkdir {}", quoted(&admin)),
+        &admin,
+    );
+}
+
 #[test]
 fn a_teammate_worktree_is_added_in_the_clone_but_no_other_git_lands_below_it() {
     assert!(Path::new(AGENT_GIT).is_file());

@@ -365,6 +365,10 @@ fn a_teammate_edit_outside_its_own_worktree_is_denied_whatever_the_path_says() {
             "{}: {reason}",
             outside.display()
         );
+        assert!(
+            reason.ends_with(", on your own branch <task branch>--greet, which CrazyAgent makes for you when you start. If it does not exist yet, wait a few seconds and try again; do not make it yourself."),
+            "OP-9: the engine makes a teammate's worktree: {reason}"
+        );
     }
     let notebook = team.hook(
         "edit",

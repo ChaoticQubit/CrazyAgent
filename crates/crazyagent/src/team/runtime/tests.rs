@@ -8777,7 +8777,7 @@ fn an_app_spawned_lead_s_task_prompt_has_no_native_teammates_paragraph() {
 
 /// DEC-111 Q10: a native lead's task prompt keeps the native-teammates paragraph: each
 /// teammate works in its own worktree under the teammates folder, on `<task branch>--<name>`,
-/// merged into the task branch before the lead reports done.
+/// which the engine makes (OP-9), merged into the task branch before the lead reports done.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_native_lead_s_task_prompt_keeps_the_native_teammates_paragraph() {
@@ -8788,7 +8788,7 @@ fn a_native_lead_s_task_prompt_keeps_the_native_teammates_paragraph() {
     assert_eq!(
         team.branch_line(&fixture.setup.project_id, lead),
         format!(
-            "\nYour task branch is {branch}, checked out in your worktree: commit your work there. Each teammate of your agent team works in its own worktree and branch inside your worktree, made with git worktree add {folder}/<name> -b {branch}--<name>, and only there. Merge each finished teammate branch into {branch} before you report done; nothing under {folder} lands by itself.",
+            "\nYour task branch is {branch}, checked out in your worktree: commit your work there. Each teammate of your agent team works only in its own worktree {folder}/<name> inside your worktree, on its own branch {branch}--<name>, which CrazyAgent makes for it when it starts. Merge each finished teammate branch into {branch} before you report done; nothing under {folder} lands by itself.",
             folder = crate::agent_git::TEAMMATES_FOLDER
         )
     );
@@ -8803,10 +8803,8 @@ fn a_native_lead_s_task_prompt_keeps_the_native_teammates_paragraph() {
 #[test]
 fn a_native_teammate_in_its_own_worktree_on_its_own_branch_is_recorded_there() {
     let fixture = Fixture::new(1);
-    let (lead, branch) =
-        lead_in_its_own_clone(&fixture, crate::coord::settings::SubagentMode::Native);
+    let (lead, branch, clone) = native_lead_clone_in_the_project(&fixture);
     let project = ProjectId::new(PROJECT).unwrap();
-    let clone = fixture.base.join(format!("agent-{lead}"));
     let git_home = fixture.base.join("owner-home");
     let folder = |name: &str| format!("{}/{name}", crate::agent_git::TEAMMATES_FOLDER);
     for (name, on) in [("greet", "greet"), ("stray", "other")] {
@@ -8862,11 +8860,16 @@ fn a_native_teammate_in_its_own_worktree_on_its_own_branch_is_recorded_there() {
             .unwrap();
         (worktree, state.has_worktree)
     };
-    let own = clone.join(folder("greet"));
     assert_eq!(
         recorded("%7"),
-        (Some(own.to_str().unwrap().to_owned()), true),
-        "greet works in its own worktree on {branch}--greet"
+        (
+            Some(format!(
+                ".crazyagent/worktrees/agent-{lead}/{}",
+                folder("greet")
+            )),
+            true
+        ),
+        "greet works in its own worktree on {branch}--greet, kept project relative"
     );
     assert_eq!(recorded("%8"), (None, false), "check made no worktree");
     assert_eq!(
@@ -8874,6 +8877,175 @@ fn a_native_teammate_in_its_own_worktree_on_its_own_branch_is_recorded_there() {
         (None, false),
         "stray's worktree is on another teammate's branch"
     );
+}
+
+/// A Claude Code lead in native mode in its own clone inside the project's worktrees folder,
+/// on the task branch the engine claimed for it, with the profile the engine installs for
+/// it confining it to that clone, as a native lead's launch leaves it. Takes the fixture.
+/// Returns the lead, its task branch and its clone.
+#[cfg(target_os = "macos")]
+fn native_lead_clone_in_the_project(fixture: &Fixture) -> (i64, String, PathBuf) {
+    use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
+    let project = ProjectId::new(PROJECT).unwrap();
+    set_mode(
+        &fixture.connection,
+        &project,
+        HarnessKind::ClaudeCode,
+        SubagentMode::Native,
+    )
+    .unwrap();
+    committed_project(fixture);
+    let repository = fixture.base.join("project");
+    let lead = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    let db = crate::landing::open(&fixture.base).unwrap();
+    let worktrees = crate::projects_home::state_folder(&repository).join("worktrees");
+    std::fs::create_dir_all(&worktrees).unwrap();
+    let clone = worktrees.join(format!("agent-{lead}"));
+    let branch =
+        crate::landing::claim_task_branch(&db, &repository, &clone, "write-the-page").unwrap();
+    crate::landing::add_agent_clone_on(&repository, &clone, None, &branch).unwrap();
+    let git_dir = crate::agent_git::git_dir(&clone);
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,?3,?4,?5)",
+            params![
+                lead,
+                PROJECT,
+                repository.to_str().unwrap(),
+                clone.to_str().unwrap(),
+                git_dir.to_str().unwrap()
+            ],
+        )
+        .unwrap();
+    let state = fixture.base.join("team");
+    let home = agent_home(&state, lead);
+    let tmp = state
+        .join("agents")
+        .join(format!("agent-{lead}"))
+        .join("tmp");
+    let profiles = state.join("profiles");
+    for folder in [&home, &tmp, &profiles] {
+        std::fs::create_dir_all(folder).unwrap();
+    }
+    crate::sandbox::ProjectSandbox::new(
+        &repository,
+        &home,
+        &tmp,
+        crate::sandbox::SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .confine_to_clone(&clone)
+    .unwrap()
+    .install(&agent_profile(&state, lead))
+    .unwrap();
+    (lead, branch, clone)
+}
+
+/// OP-9 r1 F1 (leader 14:29, option 1): the engine makes each live native teammate's own
+/// worktree in its lead's clone, `.worktrees/<name>` on `<task branch>--<name>` cut from the
+/// lead's commit, running git there under the lead's installed profile, and records it on
+/// the teammate's row project relative (F2). A teammate branch an earlier run left is
+/// checked out as it stands, never reset to the lead's commit.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_engine_makes_each_native_teammate_s_own_worktree_on_its_own_branch() {
+    let fixture = Fixture::new(1);
+    let (lead, branch, clone) = native_lead_clone_in_the_project(&fixture);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let git_home = fixture.base.join("owner-home");
+    let git = |arguments: &[&str]| -> String {
+        let done = level_git(&clone, &git_home, arguments);
+        assert!(done.status.success(), "{arguments:?}: {done:?}");
+        String::from_utf8(done.stdout).unwrap().trim().to_owned()
+    };
+    let start = git(&["rev-parse", "HEAD"]);
+    let check = format!("{branch}--check");
+    git(&["switch", "-q", "-c", &check]);
+    std::fs::write(clone.join("check.txt"), "checked\n").unwrap();
+    git(&["add", "check.txt"]);
+    git(&[
+        "-c",
+        "user.name=check",
+        "-c",
+        "user.email=check@local",
+        "commit",
+        "-q",
+        "-m",
+        "check's earlier work",
+    ]);
+    let earlier = git(&["rev-parse", "HEAD"]);
+    git(&["switch", "-q", &branch]);
+    let home = agent_home(&fixture.base.join("team"), lead);
+    let team_folder = home.join("teams").join("session-1");
+    std::fs::create_dir_all(&team_folder).unwrap();
+    std::fs::write(
+        team_folder.join("config.json"),
+        r#"{"members":[{"name":"greet","tmuxPaneId":"%7"},{"name":"check","tmuxPaneId":"%8"}]}"#,
+    )
+    .unwrap();
+    crate::coord::ensure(&fixture.connection).unwrap();
+    super::teammates::register(
+        &fixture.connection,
+        &project,
+        lead,
+        &home,
+        &["%7", "%8"],
+        1,
+        5,
+    )
+    .unwrap();
+    let mut team = fixture.runtime();
+
+    team.make_teammate_worktrees(&project, lead).unwrap();
+
+    let folder = |name: &str| clone.join(crate::agent_git::TEAMMATES_FOLDER).join(name);
+    let head = |name: &str| {
+        std::fs::read_to_string(clone.join(".git").join("worktrees").join(name).join("HEAD"))
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        head("greet"),
+        format!("ref: refs/heads/{branch}--greet\n"),
+        "greet's own worktree is on its own branch"
+    );
+    assert!(folder("greet").join("notes.txt").is_file());
+    assert_eq!(
+        git(&["rev-parse", &format!("refs/heads/{branch}--greet")]),
+        start
+    );
+    assert_eq!(head("check"), format!("ref: refs/heads/{check}\n"));
+    assert_eq!(
+        git(&["rev-parse", &format!("refs/heads/{check}")]),
+        earlier,
+        "check's earlier branch is kept, never reset"
+    );
+    assert!(folder("check").join("check.txt").is_file());
+    let snapshot = crate::coord::snapshot(&fixture.connection, &project, 5).unwrap();
+    for (pane, name) in [("%7", "greet"), ("%8", "check")] {
+        let (id, worktree): (i64, Option<String>) = fixture
+            .connection
+            .query_row(
+                "SELECT id,worktree FROM team_agents WHERE parent=?1 AND role='teammate' AND pane=?2",
+                params![lead, pane],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            worktree,
+            Some(format!(
+                ".crazyagent/worktrees/agent-{lead}/{}/{name}",
+                crate::agent_git::TEAMMATES_FOLDER
+            ))
+        );
+        assert!(
+            snapshot
+                .agents
+                .iter()
+                .any(|state| state.agent == id && state.has_worktree)
+        );
+    }
+    team.shutdown().unwrap();
 }
 
 /// DEC-111 Q10: a worker its lead started reads its own branch and that its lead merges

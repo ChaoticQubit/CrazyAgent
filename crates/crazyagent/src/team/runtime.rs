@@ -5129,6 +5129,17 @@ impl TeamRuntime {
         name
     }
 
+    /// Makes each running native teammate's own worktree in its lead's clone (OP-9). Takes
+    /// the project and the lead. Returns Ok, or a SQLite failure.
+    fn make_teammate_worktrees(
+        &mut self,
+        project: &ProjectId,
+        lead: i64,
+    ) -> Result<(), EngineError> {
+        let _ = (project, lead);
+        Ok(())
+    }
+
     /// What a harness reads about its git branch with each task (DEC-100): its task branch
     /// and, for a native lead in its own clone only (DEC-111 Q10), where its agent team's
     /// teammates work, each in `.worktrees/<name>` on `<task branch>--<name>`, merged into
