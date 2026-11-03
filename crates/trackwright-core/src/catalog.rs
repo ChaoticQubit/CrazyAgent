@@ -144,7 +144,8 @@ const KIND: FieldType = FieldType::Choice(Named::TicketKind);
 const CATALOG: &[OpSpec] = &[
     OpSpec {
         kind: OpKind::Ready,
-        summary: "Lists unblocked work you may take: unclaimed or yours, by priority, active cycle and age.",
+        summary: "Lists unblocked work you may take: unclaimed or yours, by priority, active \
+                  cycle and age.",
         fields: &[PROJECT, CURSOR],
     },
     OpSpec {
@@ -164,7 +165,8 @@ const CATALOG: &[OpSpec] = &[
     },
     OpSpec {
         kind: OpKind::Show,
-        summary: "Shows one ticket: body, criteria with checks and latest evidence, links and recent events.",
+        summary: "Shows one ticket: body, criteria with checks and latest evidence, links and \
+                  recent events.",
         fields: &[ID, CURSOR],
     },
     OpSpec {
@@ -223,7 +225,8 @@ const CATALOG: &[OpSpec] = &[
             opt(
                 "status",
                 STATUS,
-                "An open status to start in; the project's create policy decides when absent.",
+                "An open status to start in, backlog when absent; under create = triage an \
+                 agent's ticket starts in triage.",
             ),
             REQUEST_ID,
         ],
@@ -323,7 +326,8 @@ const CATALOG: &[OpSpec] = &[
     },
     OpSpec {
         kind: OpKind::CheckAdd,
-        summary: "Adds a check that proves a criterion: a test, a change, a manual check or a CI run.",
+        summary: "Adds a check that proves a criterion: a test, a change, a manual check or a \
+                  CI run.",
         fields: &[
             ID,
             POSITION,
@@ -514,7 +518,8 @@ const CATALOG: &[OpSpec] = &[
     },
     OpSpec {
         kind: OpKind::CycleClose,
-        summary: "Closes a cycle; unfinished work rolls over as the project's rollover policy says.",
+        summary: "Closes a cycle; unfinished work rolls over as the project's rollover policy \
+                  says.",
         fields: &[
             PROJECT,
             req(

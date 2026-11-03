@@ -4,6 +4,7 @@ use crate::model::{
     Actor, LINKS_PER_TICKET_MAX, OPEN_TICKETS_CREATED_PER_ACTOR_MAX, OpKind, Priority, ProjectKey,
     Refusal, ShortId, Ticket, TicketKind, TicketStatus, WRITES_PER_ACTOR_MINUTE_MAX, codes,
 };
+use crate::policy;
 use crate::reply::{
     self, LISTED_TITLE_BYTES_MAX, NEXT_MAX, Next, PAGE_ROWS_MAX, Page, Reply, WHY_BYTES_MAX,
 };
@@ -224,7 +225,16 @@ fn attempt<H: Host>(
     at_ms: i64,
 ) -> Result<Reply, Failure> {
     match requests::remembered(tx, actor, request)? {
-        Remembered::Repeat(reply) => return Ok(reply),
+        Remembered::Repeat(reply) => {
+            if reply.json().len() > request.reply_bytes_max() {
+                return Err(Failure::new(
+                    codes::REQUEST_ID_REUSED,
+                    "this request id's first reply is over this call's reply bound; repeat it \
+                     with the reply bound of the first call",
+                ));
+            }
+            return Ok(reply);
+        }
         Remembered::Reused => {
             return Err(Failure::new(
                 codes::REQUEST_ID_REUSED,
@@ -567,10 +577,7 @@ fn create<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
             .args
             .get::<TicketKind>("kind")
             .unwrap_or(TicketKind::Feature),
-        status: cx
-            .args
-            .get::<TicketStatus>("status")
-            .unwrap_or(TicketStatus::Backlog),
+        status: start_status(cx)?,
         priority: match cx.args.get::<i64>("priority") {
             Some(value) => priority(value)?,
             None => Priority::new(PRIORITY_DEFAULT)?,
@@ -579,6 +586,23 @@ fn create<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
     let ticket = store::create_ticket(cx.tx, cx.actor, cx.project(), &new, cx.at_ms)?;
     assert_eq!(ticket.version, 1);
     written(cx, &ticket)
+}
+
+fn start_status<H: Host>(cx: &Cx<'_, '_, H>) -> Result<TicketStatus, Failure> {
+    let requested = cx
+        .args
+        .get::<TicketStatus>("status")
+        .unwrap_or(TicketStatus::Backlog);
+    if requested.is_closed() {
+        return Err(Failure::new(
+            codes::STATUS_CLOSED_AT_CREATE,
+            format!("{requested} is a closed status; a ticket starts open"),
+        ));
+    }
+    let status = policy::start_status(&policy::load(cx.tx, cx.project())?, cx.actor, requested);
+    assert!(!status.is_closed());
+    assert!(status == requested || status == TicketStatus::Triage);
+    Ok(status)
 }
 
 fn update<H: Host>(
@@ -612,6 +636,17 @@ fn edit<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
 fn move_to<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
     let ticket = cx.ticket();
     let status = cx.args.need::<TicketStatus>("status");
+    if ticket.status.is_closed() {
+        return Err(Failure::new(
+            codes::TICKET_CLOSED,
+            format!("{} is closed; reopen opens it", ticket.short_id),
+        )
+        .with_next(vec![Candidate::ticket(
+            OpKind::Reopen,
+            ticket,
+            "reopen it to work on it again",
+        )]));
+    }
     if status.is_closed() {
         return Err(Failure::new(
             codes::USE_CLOSE,
