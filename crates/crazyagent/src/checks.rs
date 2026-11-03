@@ -6,6 +6,10 @@ use std::collections::BTreeMap;
 
 pub mod profile;
 pub mod settings;
+#[cfg(all(test, unix))]
+mod tests {
+    mod profile;
+}
 
 pub use profile::{
     AdmittedCheck, AdmittedProfile, CheckKind, CheckProfile, CheckSpec, HoldoutSpec, NetworkMode,
