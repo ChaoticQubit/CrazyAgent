@@ -16,10 +16,9 @@ use std::fmt;
 use std::io::{IsTerminal, Write};
 use std::path::Path;
 use trackwright_core::model::{Actor, OpKind, ProjectKey, codes};
-use trackwright_core::ops::dispatch;
-use trackwright_core::requests::Request;
 use trackwright_core::standalone::Standalone;
 use trackwright_core::store::{Store, StoreError};
+use trackwright_core::{Request, dispatch};
 
 /// Why the standalone TUI could not start or stopped: one line for the person.
 #[derive(Debug)]
@@ -33,11 +32,11 @@ impl fmt::Display for TuiError {
 
 impl std::error::Error for TuiError {}
 
-/// The views' client on a standalone database: each call runs `dispatch` with the
-/// standalone host in its own transaction, committed only when the reply is ok.
+/// The views' client on a standalone database: each call parses the input with the
+/// core's bounded request parser and runs `dispatch` with the standalone host in its own
+/// transaction, committed only when the reply is ok.
 pub struct Local {
     store: Store,
-    host: Standalone,
     actor: Actor,
 }
 
@@ -47,7 +46,6 @@ impl Local {
     pub fn open(path: &Path, actor: Actor) -> Result<Self, StoreError> {
         Ok(Self {
             store: Store::open(path)?,
-            host: Standalone::default(),
             actor,
         })
     }
@@ -55,7 +53,8 @@ impl Local {
 
 impl Client for Local {
     fn call(&mut self, op: OpKind, input: Value) -> Value {
-        let request = match Request::from_wire(op, input) {
+        let args = input.to_string();
+        let request = match Request::parse(op.as_str(), args.as_bytes()) {
             Ok(request) => request,
             Err(refusal) => return failed(refusal.code, &refusal.message),
         };
@@ -63,12 +62,13 @@ impl Client for Local {
             Ok(tx) => tx,
             Err(error) => return failed(codes::STORE_FAILED, &error.to_string()),
         };
-        let reply = dispatch(&tx, &self.host, &self.actor, request);
-        let wire = match serde_json::to_value(&reply) {
+        let reply = dispatch(&tx, &Standalone, &self.actor, request);
+        let wire: Value = match serde_json::from_str(&reply.json) {
             Ok(wire) => wire,
             Err(error) => return failed(codes::STORE_FAILED, &error.to_string()),
         };
-        if wire["ok"] != json!(true) {
+        assert_eq!(wire["ok"].as_bool(), Some(reply.ok));
+        if !reply.ok {
             return wire;
         }
         match tx.commit() {
