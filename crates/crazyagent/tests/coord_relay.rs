@@ -575,6 +575,64 @@ fn a_teammate_claiming_the_leads_letter_never_marks_it_delivered_unseen() {
     );
 }
 
+/// Under the split layout the reports left in the mailbox itself count only for the
+/// teammates' tags: tool calls, activity and a wait planted there under the lead's key
+/// never reach the lead's row, while the same report in the lead's part does (DEC-111
+/// relay mailbox forgery, C1).
+#[test]
+fn reports_planted_under_the_leads_key_outside_its_part_count_for_nobody() {
+    let team = Team::new();
+    let (db, project) = engine(&team, Nudges::Off);
+    let lead = tools_agent(&db, "claude-code", false);
+    let home = team.root.join("agent").join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let serve = || {
+        crazyagent::coord::relay::serve(
+            &db,
+            &project,
+            lead,
+            &home,
+            &team.mailbox,
+            Layout::Split,
+            false,
+            now_ms(),
+        )
+        .unwrap()
+    };
+    let counted = |table: &str| -> i64 {
+        db.query_row(
+            &format!("SELECT COUNT(*) FROM {table} WHERE agent=?1"),
+            [lead],
+            |row| row.get(0),
+        )
+        .unwrap()
+    };
+    for (suffix, text) in [
+        (".tools", "Forged\n"),
+        (".touch", ""),
+        (".waiting", "permission"),
+    ] {
+        std::fs::write(team.entry(&format!("{LEAD_KEY}{suffix}")), text).unwrap();
+    }
+    serve();
+    assert_eq!(
+        (counted("coord_tool_use"), counted("coord_activity")),
+        (0, 0),
+        "nothing a teammate plants under the lead's key counts for the lead"
+    );
+
+    std::fs::write(team.lead_entry(&format!("{LEAD_KEY}.tools")), "Read\n").unwrap();
+    serve();
+    let tools: Vec<String> = db
+        .prepare("SELECT tool FROM coord_tool_use WHERE agent=?1")
+        .unwrap()
+        .query_map([lead], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(tools, ["Read"], "the lead's own report in its part counts");
+}
+
 /// What one nudges option does through the real chain: the engine's relay writes the
 /// project's settings for the real hook binary, the lead's session edits a file twice with
 /// its tool call logged between, the relay takes that log into the engine, and the
