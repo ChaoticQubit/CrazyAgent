@@ -116,6 +116,7 @@ pub(in crate::tui) enum SettingsJob {
         generation: u64,
     },
     Ranking,
+    Tracker(Box<super::tracker::TrackerJob>),
 }
 
 /// One change to skills and MCP servers, from Settings or from a project's
@@ -219,6 +220,7 @@ impl std::fmt::Debug for SettingsJob {
             Self::Schedule => "Schedule",
             Self::SetSchedule { .. } => "SetSchedule",
             Self::Ranking => "Ranking",
+            Self::Tracker(job) => super::tracker::job_name(job),
         })
     }
 }
@@ -340,6 +342,7 @@ pub(in crate::tui) enum SettingsEvent {
     Schedule(Result<crate::scheduling::Schedule, String>),
     ScheduleSet(u64, Result<(), String>),
     Ranking(Result<Vec<crate::scheduling::PoolRanking>, String>),
+    Tracker(Box<super::tracker::TrackerEvent>),
 }
 
 impl SettingsEvent {
@@ -397,6 +400,9 @@ impl SettingsEvent {
                 Self::ScheduleSet(*generation, Err(problem))
             }
             SettingsJob::Ranking => Self::Ranking(Err(problem)),
+            SettingsJob::Tracker(job) => {
+                Self::Tracker(Box::new(super::tracker::TrackerEvent::unavailable(job)))
+            }
         }
     }
 }
@@ -644,6 +650,9 @@ impl NativeOwner {
                     .map_err(|error| problem(&error, lost)),
                 Err(error) => Err(error),
             }),
+            SettingsJob::Tracker(job) => {
+                SettingsEvent::Tracker(Box::new(self.tracker(*job, lost).await))
+            }
             SettingsJob::Ranking => SettingsEvent::Ranking(match self.settings_controller() {
                 Ok(controller) => controller
                     .account_ranking()

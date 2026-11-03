@@ -12,6 +12,7 @@ use super::project_time::local_offset;
 use super::project_view::project_screen;
 use super::settings_accounts::send as send_settings;
 use super::settings_plugins::{AddPlugin, EditServer, SkillDetailPage, ToolsPage};
+use super::tickets::TicketsReply;
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection};
 use crate::engine::owner::{ImportFile, OwnerResponse, OwnerResult};
 use crate::ide::bridge::reveal::RevealTarget;
@@ -1151,6 +1152,11 @@ impl ProjectPage {
         {
             ctx.request(Request::Questions(Box::new(query)));
         }
+        if self.screen.tab == Tab::Tickets
+            && let Some(job) = self.screen.tickets.next_job()
+        {
+            send_settings(ctx, SettingsJob::Tracker(Box::new(job)));
+        }
         if self.screen.tab == Tab::Settings
             && let Some(job) = self.screen.plugins.next_job()
         {
@@ -1387,6 +1393,10 @@ impl ProjectPage {
             && self.screen.review.is_none()
     }
 
+    fn tickets_have_keys(&self) -> bool {
+        self.screen.tab == Tab::Tickets && !self.screen.boxed()
+    }
+
     fn plugins_have_keys(&self) -> bool {
         self.screen.tab == Tab::Settings && !self.screen.boxed()
     }
@@ -1460,6 +1470,7 @@ impl Screen for ProjectPage {
             || (self.screen.tab == Tab::Conversation && self.screen.typing)
             || (self.changes_have_keys() && self.screen.changes.editing())
             || (self.questions_have_keys() && self.screen.questions.editing())
+            || (self.tickets_have_keys() && self.screen.tickets.editing())
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
@@ -1500,6 +1511,23 @@ impl Screen for ProjectPage {
             self.pump(ctx);
             self.redraw(ctx);
             return Flow::Handled;
+        }
+        if self.tickets_have_keys()
+            && let Some(event) = key_event(key)
+        {
+            match self.screen.tickets.key(event) {
+                TicketsReply::Ignored => {}
+                TicketsReply::Handled => {
+                    self.pump(ctx);
+                    self.redraw(ctx);
+                    return Flow::Handled;
+                }
+                TicketsReply::Settings => {
+                    return Flow::Open(Place::TicketSettings {
+                        project: Some((self.screen.project.clone(), self.screen.name.clone())),
+                    });
+                }
+            }
         }
         if self.plugins_have_keys()
             && let Some(event) = key_event(key)
@@ -1564,6 +1592,7 @@ impl Screen for ProjectPage {
                 OwnerEvent::Settings(event) => {
                     self.schedule_arrived(event, ctx);
                     self.screen.plugins.apply(event);
+                    self.screen.tickets.apply(event);
                 }
                 OwnerEvent::Changes(event) => self.screen.changes.apply(event),
                 OwnerEvent::Questions(event) => self.screen.questions.apply(event),
@@ -1599,6 +1628,7 @@ impl Screen for ProjectPage {
                 self.screen.plugins.forget_reads();
                 self.screen.changes.forget_reads();
                 self.screen.questions.forget_reads();
+                self.screen.tickets.forget_reads();
                 self.screen.recovery.forget_reads();
                 self.master_sent
                     .retain(|sent| matches!(sent, MasterSent::Mutation(_)));
@@ -1769,6 +1799,7 @@ impl Screen for ProjectPage {
             || self.screen.plugins.busy()
             || self.screen.changes.busy()
             || self.screen.questions.busy()
+            || self.screen.tickets.busy()
             || self.screen.recovery.busy()
     }
 

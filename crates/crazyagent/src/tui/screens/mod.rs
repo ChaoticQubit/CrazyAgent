@@ -36,6 +36,7 @@ pub mod settings_memory;
 pub mod settings_plugins;
 pub mod startup;
 pub mod team;
+pub(in crate::tui) mod tickets;
 pub(in crate::tui) mod usage;
 pub mod welcome;
 
@@ -132,18 +133,20 @@ pub enum ProjectTab {
     Changes,
     Questions,
     Context,
+    Tickets,
     Settings,
 }
 
 impl ProjectTab {
     /// Every tab in order.
-    pub const ALL: [ProjectTab; 7] = [
+    pub const ALL: [ProjectTab; 8] = [
         Self::Overview,
         Self::Conversation,
         Self::Agents,
         Self::Changes,
         Self::Questions,
         Self::Context,
+        Self::Tickets,
         Self::Settings,
     ];
 
@@ -157,6 +160,7 @@ impl ProjectTab {
             Self::Changes => "Changes",
             Self::Questions => "Questions",
             Self::Context => "Context",
+            Self::Tickets => "Tickets",
             Self::Settings => "Settings",
         }
     }
@@ -209,6 +213,9 @@ pub enum Place {
         path: String,
         name: String,
         project: Option<ProjectId>,
+    },
+    TicketSettings {
+        project: Option<(ProjectId, String)>,
     },
 }
 
@@ -367,6 +374,15 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
         Place::AddFolder => Box::new(add_folder::AddFolder::new(ctx)),
         Place::CloneRepo => Box::new(clone_repo::CloneRepo::new()),
         Place::Usage => Box::new(usage::UsagePage::new()),
+        Place::TicketSettings { project } => {
+            Box::new(settings::tickets::TicketSettingsPage::new(match project {
+                None => process::Scope::App,
+                Some((id, name)) => process::Scope::Project {
+                    id: id.clone(),
+                    name: name.clone(),
+                },
+            }))
+        }
         Place::Onboarding {
             path,
             name,
