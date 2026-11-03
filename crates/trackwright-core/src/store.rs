@@ -10,8 +10,8 @@ use crate::schema;
 use crate::text::{self, TextField};
 use rusqlite::types::Type;
 use rusqlite::{
-    CachedStatement, Connection, OpenFlags, OptionalExtension, Row, Transaction,
-    TransactionBehavior, params,
+    Connection, OpenFlags, OptionalExtension, Row, Statement, Transaction, TransactionBehavior,
+    params,
 };
 use std::fmt;
 use std::fs;
@@ -712,14 +712,15 @@ pub fn state(tx: &Transaction<'_>, key: &ProjectKey) -> Result<State, StoreError
     })
 }
 
-/// Prepares one of the core's listed statements through the connection's cache. Inputs: the
-/// transaction and the statement. Output: the prepared statement.
+/// Prepares one of the core's listed statements. Plain `prepare`, because the core builds
+/// rusqlite without its statement cache feature. Inputs: the transaction and the statement.
+/// Output: the prepared statement.
 pub(crate) fn prepare<'t>(
     tx: &'t Transaction<'_>,
     sql: &'static str,
-) -> rusqlite::Result<CachedStatement<'t>> {
+) -> rusqlite::Result<Statement<'t>> {
     assert!(STATEMENTS.contains(&sql), "every core statement is listed");
-    tx.prepare_cached(sql)
+    tx.prepare(sql)
 }
 
 /// Builds the refusal error for one code. Inputs: the code and the message. Output: the
