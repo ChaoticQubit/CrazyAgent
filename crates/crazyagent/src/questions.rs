@@ -96,13 +96,15 @@ pub enum Asker {
 }
 
 /// The engine steps that raise their own questions, stored as `engine:mapping`,
-/// `engine:research:<kind>`, `engine:landing:<change set>` and `engine:planning`.
+/// `engine:research:<kind>`, `engine:landing:<change set>`, `engine:planning` and
+/// `engine:checks`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineSource {
     Mapping,
     Research(String),
     Landing(String),
     Planning,
+    Checks,
 }
 
 /// Where a question stands. It waits for the owner until answered or dismissed; a box the
@@ -228,6 +230,7 @@ impl EngineSource {
         match self {
             Self::Mapping => Some("engine:mapping".into()),
             Self::Planning => Some("engine:planning".into()),
+            Self::Checks => Some("engine:checks".into()),
             Self::Research(kind) if named(kind) => Some(format!("engine:research:{kind}")),
             Self::Landing(set) if named(set) => Some(format!("engine:landing:{set}")),
             Self::Research(_) | Self::Landing(_) => None,
@@ -340,6 +343,7 @@ pub fn asker_label(asker: &str) -> String {
         ("terminal", id) => format!("the terminal of agent {id}"),
         ("engine", "mapping") => "project mapping".into(),
         ("engine", "planning") => "roadmap planning".into(),
+        ("engine", "checks") => "check profiles".into(),
         ("engine", rest) => match rest.split_once(':') {
             Some(("research", kind)) => format!("research ({})", kind.replace('_', " ")),
             Some(("landing", set)) => format!("landing change set {set}"),

@@ -1,4 +1,5 @@
 pub mod catalog;
+pub mod coverage;
 pub mod criteria;
 pub mod events;
 pub mod export;
@@ -11,8 +12,12 @@ pub mod policy;
 pub mod ready;
 pub mod reply;
 pub mod requests;
+pub mod results;
+pub mod runs;
 #[path = "schema_sql.rs"]
 pub mod schema;
 pub mod standalone;
 pub mod store;
+pub mod tests_model;
+pub mod tests_store;
 pub mod text;

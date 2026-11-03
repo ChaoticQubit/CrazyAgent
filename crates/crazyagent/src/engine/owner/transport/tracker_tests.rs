@@ -320,6 +320,11 @@ async fn owner_tracker_requests_round_trip_every_catalog_op() {
             "cycle_days",
             "rollover",
             "import",
+            "test_evidence",
+            "skipped_counts",
+            "case_protected_visibility",
+            "run_writers",
+            "run_retention",
             "manual_evidence",
             "ci_evidence"
         ]
@@ -336,7 +341,7 @@ async fn owner_tracker_requests_round_trip_every_catalog_op() {
     assert_eq!(cycle.proposed, json!(14));
     assert_eq!(cycle.custom, Some(CustomBounds { min: 1, max: 90 }));
     assert_eq!(
-        app.choices[7].options,
+        app.choices[12].options,
         [json!("engine"), json!("owner"), json!("agents")]
     );
 
