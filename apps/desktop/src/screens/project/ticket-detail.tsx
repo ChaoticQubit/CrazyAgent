@@ -182,7 +182,7 @@ export function TicketDetail({ data, id, onBack }: { data: ProjectData; id: stri
 
   if (detail === undefined) return <p className="pj-muted pj-small" role="status">Loading the ticket...</p>;
   if (notReady(detail)) return <NotReady what="tickets aren't in this engine yet." />;
-  if (detail.kind === "error") return <div className="pj-stack-s">
+  if (detail.kind !== "ok") return <div className="pj-stack-s">
     <span><Button variant="quiet" icon="arrow-left" onClick={onBack}>Back to tickets</Button></span>
     <p className="pj-error" role="alert">{`Couldn't load ${id}. ${displayText(refusalOf(detail))}`}</p>
   </div>;

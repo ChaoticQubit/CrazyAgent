@@ -266,7 +266,7 @@ export function TicketsTab({ data }: { data: ProjectData }) {
   }, [data.id, round]);
   if (projects === undefined) return <p className="pj-muted pj-small" role="status">Loading tickets...</p>;
   if (notReady(projects)) return <NotReady what="tickets aren't in this engine yet." />;
-  if (projects.kind === "error") return <p className="pj-error" role="alert">{`Couldn't load tickets. ${displayText(refusalOf(projects))}`}</p>;
+  if (projects.kind !== "ok") return <p className="pj-error" role="alert">{`Couldn't load tickets. ${displayText(refusalOf(projects))}`}</p>;
   const tracked = trackedProject(projects.value, data.id);
   if (tracked === null) return <AttachTickets data={data} onAttached={() => setRound((value) => value + 1)} />;
   return <TrackedTickets key={tracked.key} data={data} tracked={tracked} />;
