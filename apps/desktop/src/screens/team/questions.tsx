@@ -84,7 +84,11 @@ function OpenTerminal({ row, onOpen }: { row: Pick<OwnerQuestion | WaitingAgent,
   return <Button size="small" variant="quiet" icon="square-terminal" onClick={() => onOpen(node)}>Open terminal</Button>;
 }
 
-function QuestionRow({ projectId, question, onOpen, onAnswered }: {
+/** One question in the owner's inbox: its urgency, who asked, whom the asker meant it for
+ * (For: Me, or the master's or lead's name), the question, its assumption, Open terminal and
+ * Answer. Takes the project, the question and the open and answered callbacks. Returns the
+ * row. */
+export function QuestionRow({ projectId, question, onOpen, onAnswered }: {
   projectId: string;
   question: OwnerQuestion;
   onOpen: (node: GraphNode) => void;
@@ -122,6 +126,7 @@ function QuestionRow({ projectId, question, onOpen, onAnswered }: {
     <div className="pj-row">
       <StatusBadge word={copy.word} tone={copy.tone} />
       <strong>{label}</strong>
+      <span className="pj-secondary pj-small">For: {displayText(question.for_label)}</span>
       <span className="pj-secondary pj-small grow">{copy.note}</span>
       <OpenTerminal row={question} onOpen={onOpen} />
     </div>
