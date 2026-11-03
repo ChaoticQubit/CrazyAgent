@@ -605,8 +605,9 @@ impl From<io::Error> for SandboxError {
 
 /// The Seatbelt boundary for one agent of one project: writes only inside the
 /// project folder (never its `context/` or git hooks and config), the agent's
-/// worktrees and its own home and temp dirs, reads of system paths plus those
-/// roots, and network per [`SandboxNetwork`].
+/// worktrees and its own home and temp dirs, never the launch files the engine
+/// writes in that home, reads of system paths plus those roots, and network per
+/// [`SandboxNetwork`].
 #[derive(Debug, Clone)]
 pub struct ProjectSandbox {
     project_root: PathBuf,
@@ -1432,7 +1433,8 @@ impl ProjectSandbox {
                 "(deny file-write*\n  (literal \"{path}\")\n  (literal \"{path}.lock\"))\n"
             ));
         }
-        for folder in &self.read_only {
+        let launch = launch_files(&self.agent_home);
+        for folder in self.read_only.iter().chain(&launch) {
             text.push_str(&format!(
                 "(deny file-write* (subpath \"{}\"))\n",
                 folder.display()
@@ -1455,7 +1457,7 @@ impl ProjectSandbox {
             .rfind("(allow file-write*")
             .max(text.rfind("(allow file-read* file-write*"));
         assert!(
-            self.read_only.iter().all(|folder| {
+            self.read_only.iter().chain(&launch).all(|folder| {
                 text.rfind(&format!(
                     "(deny file-write* (subpath \"{}\"))",
                     folder.display()
@@ -2271,6 +2273,25 @@ fn clear_of_secrets(root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError
         return Err(invalid(SECRET_ROOT_REFUSED));
     }
     Ok(())
+}
+
+/// Lists the paths in an agent's own home that the engine writes before each launch and its
+/// harness reads as instructions, skills or hooks: the launch folder, the relay plugin, the
+/// Codex skill copies, and the global instruction files of Claude Code and Codex with the
+/// Codex override that would replace them. The agent reads but never writes them, so its own
+/// run cannot change the text it runs with until the next launch rewrites it (LL-2).
+/// Input: the agent's home. Output: the paths.
+fn launch_files(home: &Path) -> [PathBuf; 6] {
+    use crate::agent_home::Harness;
+    use crate::launch_context::STATE;
+    [
+        home.join(STATE),
+        home.join(crate::coord::relay::PLUGIN_FOLDER),
+        home.join("skills").join(STATE),
+        home.join(Harness::Claude.instruction_file()),
+        home.join(Harness::Codex.instruction_file()),
+        home.join("AGENTS.override.md"),
+    ]
 }
 
 /// The Seatbelt rules that keep a shared team folder free of links and moved-in folders: no
