@@ -22,6 +22,7 @@ const FIXTURE_INSTRUCTIONS = "# Mandatory workflow\n\nFixture instruction set fo
 const INSTRUCTIONS = { first: "# Mandatory workflow", bytes: MODE === "fixture" ? Buffer.byteLength(FIXTURE_INSTRUCTIONS) : 12848 };
 const SETTINGS = { landOn: "trial3-land", background: "wait", worker: "Chosen skills", nudges: "First edit", finished: "Show", network: "https", input: "Both" };
 const RUNNING = ["starting", "idle", "working"];
+const WORKER_BOX = "//*[@role=\"group\"][@aria-label=\"Skills per role\"]/div[.//*[@aria-label=\"Worker skills\"]]//label[.//input[@type=\"checkbox\"]]";
 const STATE_WORDS = ["Ready to review", "Conflicts with your branch", "Agent is updating", "Accepted", "Discarded", "Landed outside the app"];
 assert(["live", "fixture"].includes(MODE), "TRIAL3_MODE is live or fixture");
 assert(Number.isFinite(TEAM_MS) && TEAM_MS > 0 && Number.isFinite(SETUP_MS) && SETUP_MS > 0, "the trial deadlines are positive");
@@ -214,6 +215,23 @@ async function choose(where, group, option) {
   return `${group} reads ${option} after reopening the tab${was ? " (it already was)" : ""}`;
 }
 
+/** Reads the worker skill boxes the Agents tab shows. Output: [{ name, on }] in screen order. */
+async function workerSkills() {
+  const boxes = [];
+  for (const label of await $$(WORKER_BOX)) boxes.push({ name: (await label.getText()).trim(), on: await label.$("input").isSelected() });
+  return boxes;
+}
+
+/** Ticks or unticks one worker skill and waits until the box reads that way with its save
+ * done. Inputs: the skill name and whether it should be ticked. */
+async function tick(name, on) {
+  const label = `${WORKER_BOX}[normalize-space(.)=${lit(name)}]`;
+  const box = `${label}//input`;
+  if (await $(box).isSelected() === on) return;
+  await click(label);
+  await until(async () => await $(box).isSelected() === on && await $(box).isEnabled(), UI_MS, `${name} did not read ${on ? "ticked" : "unticked"}`);
+}
+
 /** Reads the project's team graph from the engine through the app's own command and the
  * cards the Agents tab draws. Output: the nodes and the card counts by kind. */
 async function graph() {
@@ -361,16 +379,23 @@ describe(`CrazyAgent trial 3 owner actions on the desktop app (${MODE})`, () => 
       return `Background commands reads Wait for them after reopening${changed ? "" : " (it already was; no row also means Wait)"}`;
     }));
 
-  it("sets skills per role", () => step("skills-per-role", "Set Worker skills to Chosen skills",
-    "18.13 skills per role (R3): each role gets only its chosen approved skills", async () => {
-      await tab("agents");
+  it("sets skills per role", () => step("skills-per-role", "Set Worker skills to Chosen skills with one skill",
+    "18.13 skills per role (R3): workers get only the one approved skill the owner ticks, a real subset the audit checks", async () => {
       const done = await choose("agents", "Worker skills", SETTINGS.worker);
-      const boxes = "//*[@role=\"group\"][@aria-label=\"Skills per role\"]/div[.//*[@aria-label=\"Worker skills\"]]//input[@type=\"checkbox\"]";
-      const states = [];
-      for (const box of await $$(boxes)) states.push(await box.isSelected());
+      const none = "//*[@role=\"group\"][@aria-label=\"Skills per role\"]/div[.//*[@aria-label=\"Worker skills\"]]//*[normalize-space(.)=\"No approved skills for this project yet.\"]";
+      await until(async () => (await workerSkills()).length > 0 || await shown(none), UI_MS, "the worker skill boxes were never shown");
+      const boxes = await workerSkills();
+      if (boxes.length === 0) throw new Error("no approved skill to choose: Chosen skills for workers needs at least one");
+      const keep = boxes[0].name;
+      for (const box of boxes) await tick(box.name, box.name === keep);
+      await reopen("agents");
+      await until(async () => (await workerSkills()).length === boxes.length, UI_MS, "the worker skill boxes did not come back after reopening");
+      const after = await workerSkills();
+      assert.deepEqual(after.filter((box) => box.on).map((box) => box.name), [keep], `workers read only ${keep} after reopening`);
       const master = await $(segment("Master skills", "All approved skills")).getAttribute("aria-checked");
       const lead = await $(segment("Lead skills", "All approved skills")).getAttribute("aria-checked");
-      return `${done}; worker ticks ${states.filter(Boolean).length} of ${states.length} approved skills; master all: ${master}, lead all: ${lead}`;
+      const only = after.length === 1 ? " (the only approved skill, so this cannot show a subset)" : "";
+      return `${done}; workers get only ${keep}: 1 of ${after.length} approved skills ticked after reopening${only}; master all: ${master}, lead all: ${lead}`;
     }));
 
   it("sets workflow nudges", () => step("nudges", "Set Workflow nudges to First edit",

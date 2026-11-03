@@ -23,6 +23,7 @@ const GIT = "/usr/bin/git";
 const SEED_MS = 900000;
 const POLL_MS = 500;
 const QUESTION = "Which greeting should greet.py print?";
+const FIXTURE_SKILLS = ["trial3-alpha", "trial3-beta"];
 let engine;
 let seeding;
 
@@ -161,9 +162,10 @@ async function seedTeam() {
   return { project, leads: leads.map(({ lead }) => lead), sets, question };
 }
 
-/** Gives the fixture engine what the owner's profile already holds, a saved profile and the
- * projects folder, through the desktop bridge's own commands, so the app opens on Home as it
- * does on the owner's profile. Input: the engine folder and the environment of its children. */
+/** Gives the fixture engine what the owner's profile already holds, a saved profile, the
+ * projects folder and two approved skills, through the desktop bridge's own commands, so the
+ * app opens on Home as it does on the owner's profile and workers can be given a real subset
+ * of skills. Input: the engine folder and the environment of its children. */
 async function onboardOwner(runtime, env) {
   const { child, match } = await start(process.env.TRIAL3_BRIDGE, [join(runtime, "engine.sock")], env, join(fixture, "logs"), "bridge", /^ready (\d+) ([0-9a-f]{64})$/m);
   try {
@@ -171,6 +173,13 @@ async function onboardOwner(runtime, env) {
     assert.equal((await value(bridge, "desktop_connect")).connected, true, "the bridge connects to the fixture engine");
     assert.equal((await value(bridge, "desktop_save_owner_profile", { profile: { name: "Trial Owner" }, generation: 1 })).outcome, "applied", "the fixture owner has a profile");
     assert.equal((await value(bridge, "desktop_set_projects_home", { path: join(fixture, "home", "Projects"), generation: 2 })).outcome, "applied", "the fixture owner has a projects folder");
+    for (const name of FIXTURE_SKILLS) {
+      const folder = join(fixture, "skills", name);
+      mkdirSync(folder, { recursive: true, mode: 0o700 });
+      writeFileSync(join(folder, "SKILL.md"), `---\nname: ${name}\ndescription: Teaches ${name}.\n---\n\nSteps for ${name}.\n`);
+      const added = await value(bridge, "desktop_add_skill", { scope: { kind: "global" }, folder });
+      assert.equal(added.name, name, `the fixture owner approves ${name}: ${JSON.stringify(added).slice(0, 300)}`);
+    }
   } finally {
     await stop(child);
   }
