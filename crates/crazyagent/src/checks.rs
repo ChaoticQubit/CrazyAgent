@@ -12,6 +12,8 @@ use std::collections::BTreeMap;
 pub mod integrity;
 pub mod markers;
 pub mod profile;
+pub mod queue;
+pub mod record;
 pub mod runner;
 pub mod settings;
 pub mod snapshot;
