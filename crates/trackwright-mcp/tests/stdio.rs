@@ -377,7 +377,7 @@ fn an_oversized_line_is_answered_with_its_top_level_id_wherever_it_stands() {
             ),
             oversized(
                 r#"{"jsonrpc":"2.0","method":"ping","params":{"note":""#,
-                r#""},"id":"a"}b"}"#,
+                r#""},"id":"a\"}b"}"#,
             ),
             oversized(
                 r#"{"jsonrpc":"2.0","method":"ping","params":{"id":9,"pad":""#,
