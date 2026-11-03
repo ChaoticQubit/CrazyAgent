@@ -1,11 +1,13 @@
-use super::{Host, engine_error, key_of, owner, unavailable};
+use super::{engine_error, key_of, owner, unavailable};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use crate::storage::versioned::{self, Item, Stale};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
+use trackwright_core::host::{Authority, TicketView};
 use trackwright_core::model::{
-    AgentEditPolicy, ClosePolicy, CreatePolicy, CycleDays, ImportPolicy, Policy, RolloverPolicy,
+    Actor, AgentEditPolicy, ClosePolicy, CreatePolicy, CycleDays, ImportPolicy, OpKind, Policy,
+    ProjectKey, Refusal, RolloverPolicy,
 };
 use trackwright_core::policy;
 
@@ -30,13 +32,32 @@ impl ManualEvidence {
     pub const ALL: [ManualEvidence; 2] = [ManualEvidence::Owner, ManualEvidence::Agents];
 }
 
+/// Who may record evidence on a `ci` check: the engine's own actors and the owner (the
+/// proposed default, since a CI result comes from a run, not an agent's word), only the
+/// owner, or every actor the policy lets record evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CiEvidence {
+    #[default]
+    Engine,
+    Owner,
+    Agents,
+}
+
+impl CiEvidence {
+    /// Every option, the default first.
+    pub const ALL: [CiEvidence; 3] = [CiEvidence::Engine, CiEvidence::Owner, CiEvidence::Agents];
+}
+
 /// One project's ticket settings with every key set: the core policy keys and the
-/// engine's own `manual_evidence`. `Default` is the proposed default of each key.
+/// engine's own `manual_evidence` and `ci_evidence`. `Default` is the proposed default of
+/// each key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TicketSettings {
     pub policy: Policy,
     pub manual_evidence: ManualEvidence,
+    pub ci_evidence: CiEvidence,
 }
 
 /// The keys one scope sets: the app values or one project's override. A key left None
@@ -58,6 +79,8 @@ pub struct TicketOverride {
     pub import: Option<ImportPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub manual_evidence: Option<ManualEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ci_evidence: Option<CiEvidence>,
 }
 
 impl TicketOverride {
@@ -74,6 +97,7 @@ impl TicketOverride {
                 import: self.import.unwrap_or(below.policy.import),
             },
             manual_evidence: self.manual_evidence.unwrap_or(below.manual_evidence),
+            ci_evidence: self.ci_evidence.unwrap_or(below.ci_evidence),
         }
     }
 }
@@ -181,6 +205,28 @@ pub fn set(
     Ok(Ok(version))
 }
 
+/// The authority `sync` writes the core's policy keys through. The engine host refuses
+/// the core's `policy_set` for every caller, so the ticket settings are the one writer of
+/// `tk_policy`; only this module, writing the settings the owner saved, passes it.
+struct SettingsWriter;
+
+impl Authority for SettingsWriter {
+    fn actor_may(
+        &self,
+        _: &Transaction<'_>,
+        _: &ProjectKey,
+        _: &Actor,
+        _: OpKind,
+        _: Option<&TicketView>,
+    ) -> Result<(), Refusal> {
+        Ok(())
+    }
+
+    fn actors_verified(&self) -> bool {
+        true
+    }
+}
+
 /// Writes a project's effective core policy keys into the core's `tk_policy` as the owner,
 /// one key at a time and only the keys that differ, so the core's own decisions (the
 /// evidence close, `next`) read the values the engine enforces. Inputs: the transaction,
@@ -211,7 +257,7 @@ pub(crate) fn sync(
         };
         policy::set(
             tx,
-            &Host,
+            &SettingsWriter,
             &owner(),
             &key,
             entry.key,

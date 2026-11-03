@@ -1,5 +1,5 @@
 use super::project_of;
-use super::settings::{self, ManualEvidence};
+use super::settings::{self, CiEvidence, ManualEvidence};
 use crate::protocol::ProjectId;
 use rusqlite::{OptionalExtension, Transaction, params};
 use std::io::Read;
@@ -7,15 +7,13 @@ use std::path::Path;
 use trackwright_core::host::{
     Authority, CheckView, Evidence, EvidenceState, LinkKind, LinkState, Links, TicketView,
 };
-use trackwright_core::model::{Actor, CheckKind, OpKind, ProjectKey, Refusal};
+use trackwright_core::model::{Actor, CheckKind, OpKind, ProjectKey, Refusal, codes};
 use trackwright_core::standalone::Standalone;
 
 /// A target that exists in the host's tables but belongs to another project.
 pub const LINK_CROSS_PROJECT: &str = "link_cross_project";
 /// A target this project does not have and never linked.
 pub const LINK_BROKEN: &str = "link_broken";
-/// A link kind the engine does not declare.
-pub const LINK_KIND_UNKNOWN: &str = "link_kind_unknown";
 /// The engine could not read its own tables.
 pub const HOST_FAILED: &str = "host_failed";
 /// A tracker project with no engine project behind it.
@@ -24,10 +22,15 @@ pub const PROJECT_NOT_ATTACHED: &str = "project_not_attached";
 pub const ACTOR_NOT_ENGINE: &str = "actor_not_engine";
 /// An engine agent or master acting on another project's tickets.
 pub const ACTOR_OTHER_PROJECT: &str = "actor_other_project";
-/// Evidence on a manual check from anyone but the owner while `manual_evidence` is `owner`.
+/// Evidence on a manual or ci check from anyone but the owner while its setting is `owner`.
 pub const EVIDENCE_OWNER_ONLY: &str = "evidence_owner_only";
+/// Evidence on a ci check from an agent while `ci_evidence` is `engine`.
+pub const EVIDENCE_ENGINE_ONLY: &str = "evidence_engine_only";
+/// The core's `policy_set`: ticket policy changes through the engine's ticket settings.
+pub const POLICY_IN_SETTINGS: &str = "policy_in_settings";
 
 const OWNER: &str = "owner";
+const ENGINE_PREFIX: &str = "engine:";
 const GONE: &str = "gone";
 const HEAD_BYTES_MAX: u64 = 512;
 const WORKTREES_SCANNED_MAX: i64 = 4096;
@@ -96,15 +99,15 @@ struct Found {
 }
 
 fn failed(_: rusqlite::Error) -> Refusal {
-    Refusal::new(HOST_FAILED, "the engine could not read its own records")
+    Refusal::host(HOST_FAILED, "the engine could not read its own records")
 }
 
 fn not_engine() -> Refusal {
-    Refusal::new(ACTOR_NOT_ENGINE, "CrazyAgent sets every tracker actor")
+    Refusal::host(ACTOR_NOT_ENGINE, "CrazyAgent sets every tracker actor")
 }
 
 fn other_project() -> Refusal {
-    Refusal::new(
+    Refusal::host(
         ACTOR_OTHER_PROJECT,
         "this agent works on another project's tickets",
     )
@@ -246,7 +249,7 @@ impl Host {
             }
             _ => {
                 return Err(Refusal::new(
-                    LINK_KIND_UNKNOWN,
+                    codes::LINK_KIND_UNKNOWN,
                     format!("CrazyAgent links no {kind}"),
                 ));
             }
@@ -268,7 +271,7 @@ impl Links for Host {
     ) -> Result<LinkState, Refusal> {
         if !KINDS.iter().any(|declared| declared.name == kind) {
             return Err(Refusal::new(
-                LINK_KIND_UNKNOWN,
+                codes::LINK_KIND_UNKNOWN,
                 format!("CrazyAgent links no {kind}"),
             ));
         }
@@ -297,12 +300,12 @@ impl Links for Host {
                 })
             }
             Some(_) if linked => Ok(gone()),
-            Some(_) => Err(Refusal::new(
+            Some(_) => Err(Refusal::host(
                 LINK_CROSS_PROJECT,
                 format!("that {kind} belongs to another project"),
             )),
             None if linked => Ok(gone()),
-            None => Err(Refusal::new(
+            None => Err(Refusal::host(
                 LINK_BROKEN,
                 format!("this project has no {kind} {target}"),
             )),
@@ -352,7 +355,7 @@ fn member(tx: &Transaction<'_>, engine: &ProjectId, actor: &Actor) -> Result<(),
     if text == OWNER {
         return Ok(());
     }
-    if let Some(source) = text.strip_prefix("engine:") {
+    if let Some(source) = text.strip_prefix(ENGINE_PREFIX) {
         return if source.is_empty() {
             Err(not_engine())
         } else {
@@ -391,6 +394,12 @@ impl Authority for Host {
         op: OpKind,
         ticket: Option<&TicketView>,
     ) -> Result<(), Refusal> {
+        if op == OpKind::PolicySet {
+            return Err(Refusal::host(
+                POLICY_IN_SETTINGS,
+                "ticket policy is set in CrazyAgent's ticket settings",
+            ));
+        }
         let engine = project_of(tx, project)?;
         member(tx, &engine, actor)?;
         Standalone.actor_may(tx, project, actor, op, ticket)
@@ -407,18 +416,31 @@ impl Authority for Host {
         actor: &Actor,
         check: &CheckView,
     ) -> Result<(), Refusal> {
-        if check.kind != CheckKind::Manual || actor.as_str() == OWNER {
+        let kind = check.kind;
+        if actor.as_str() == OWNER || matches!(kind, CheckKind::Change | CheckKind::Test) {
             return Ok(());
         }
         let engine = project_of(tx, project)?;
         let chosen = settings::effective(tx, &engine)
-            .map_err(|_| Refusal::new(HOST_FAILED, "the engine could not read its settings"))?;
-        match chosen.manual_evidence {
-            ManualEvidence::Owner => Err(Refusal::new(
+            .map_err(|_| Refusal::host(HOST_FAILED, "the engine could not read its settings"))?;
+        let owner_only = || {
+            Err(Refusal::host(
                 EVIDENCE_OWNER_ONLY,
-                "only the owner records evidence for a manual check",
-            )),
-            ManualEvidence::Agents => Ok(()),
+                format!("only the owner records evidence for a {kind} check"),
+            ))
+        };
+        match (kind, chosen.manual_evidence, chosen.ci_evidence) {
+            (CheckKind::Manual, ManualEvidence::Owner, _) => owner_only(),
+            (CheckKind::Ci, _, CiEvidence::Owner) => owner_only(),
+            (CheckKind::Ci, _, CiEvidence::Engine)
+                if !actor.as_str().starts_with(ENGINE_PREFIX) =>
+            {
+                Err(Refusal::host(
+                    EVIDENCE_ENGINE_ONLY,
+                    "only CrazyAgent's own runs record evidence for a ci check",
+                ))
+            }
+            _ => Ok(()),
         }
     }
 }

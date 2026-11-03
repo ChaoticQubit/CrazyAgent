@@ -1,5 +1,8 @@
-use super::host::{ACTOR_OTHER_PROJECT, EVIDENCE_OWNER_ONLY, LINK_CROSS_PROJECT};
-use super::settings::{ManualEvidence, Scope, TicketOverride};
+use super::host::{
+    ACTOR_OTHER_PROJECT, EVIDENCE_ENGINE_ONLY, EVIDENCE_OWNER_ONLY, LINK_CROSS_PROJECT,
+    POLICY_IN_SETTINGS,
+};
+use super::settings::{CiEvidence, ManualEvidence, Scope, TicketOverride};
 use super::*;
 use crate::landing::{AgentKind, ChangeAgent, ChangeSetId, TurnEnd, TurnOutcome, Workspace};
 use rusqlite::{TransactionBehavior, params};
@@ -8,7 +11,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use trackwright_core::criteria::{self, NewEvidence};
 use trackwright_core::model::{
-    AgentEditPolicy, CheckKind, ClosePolicy, CreatePolicy, EvidenceResult, ShortId, TicketStatus,
+    AgentEditPolicy, CheckKind, ClosePolicy, CreatePolicy, EvidenceResult, PolicyKey, ShortId,
+    TicketStatus,
 };
 use trackwright_core::ops;
 use trackwright_core::policy;
@@ -237,6 +241,60 @@ fn set(tx: &Transaction<'_>, scope: &Scope, values: TicketOverride) -> u64 {
         .unwrap()
 }
 
+/// Creates an owner ticket in `CA` with one criterion that has one check. Inputs: the
+/// transaction, the title, the check's kind and reference. Output: the ticket and the
+/// criterion's position.
+fn checked(tx: &Transaction<'_>, title: &str, kind: CheckKind, reference: &str) -> (ShortId, u32) {
+    let (id, _) = create(tx, "owner", "CA", title);
+    let id = ShortId::parse(&id).unwrap();
+    let criterion =
+        criteria::add_criterion(tx, &Host, &actor("owner"), &id, "The check passed", NOW).unwrap();
+    criteria::add_check(
+        tx,
+        &Host,
+        &actor("owner"),
+        &id,
+        criterion.position,
+        kind,
+        reference,
+        NOW + 1,
+    )
+    .unwrap();
+    (id, criterion.position)
+}
+
+/// Records a passing result on a ticket's check through the core with the engine host.
+/// Inputs: the transaction, the actor, the ticket, the criterion, the check's kind and
+/// reference. Output: the core's result.
+fn record(
+    tx: &Transaction<'_>,
+    who: &str,
+    id: &ShortId,
+    criterion: u32,
+    kind: CheckKind,
+    reference: &str,
+) -> Result<(), StoreError> {
+    criteria::record_evidence(
+        tx,
+        &Host,
+        &actor(who),
+        &NewEvidence {
+            ticket: id.clone(),
+            criterion,
+            kind,
+            check: reference.to_owned(),
+            result: EvidenceResult::Pass,
+            reference: Some(format!("seen by {who}")),
+        },
+        NOW + 10,
+    )
+    .map(|_| ())
+}
+
+fn closed_by(tx: &Transaction<'_>, id: &ShortId) -> Option<Actor> {
+    store::ticket(tx, id).unwrap().closed_by
+}
+
 #[test]
 fn an_agent_link_to_another_projects_worktree_is_refused_in_engine_db() {
     let case = Case::new();
@@ -344,7 +402,7 @@ fn a_removed_change_set_shows_gone_and_the_ticket_still_reads() {
     assert_eq!(link["live"], false, "{shown}");
     assert_eq!(link["state"], "gone", "{shown}");
     let listed = ok(&tx, "owner", "list", json!({"project": "CA"}));
-    assert_eq!(listed["data"]["rows"][0]["id"], id.as_str());
+    assert_eq!(listed["data"]["tickets"][0]["id"], id.as_str());
     tx.commit().unwrap();
 }
 
@@ -469,60 +527,20 @@ fn an_agent_cannot_record_owner_evidence() {
     case.agent(1, &one, "sub");
     case.agent(3, &one, "master");
     let tx = case.tx();
-    let evidence = |who: &str, id: &ShortId, criterion: u32| {
-        criteria::record_evidence(
-            &tx,
-            &Host,
-            &actor(who),
-            &NewEvidence {
-                ticket: id.clone(),
-                criterion,
-                kind: CheckKind::Manual,
-                check: "review:owner".to_owned(),
-                result: EvidenceResult::Pass,
-                reference: Some(format!("looked at by {who}")),
-            },
-            NOW + 10,
-        )
-    };
-    let manual = |title: &str| {
-        let (id, _) = create(&tx, "owner", "CA", title);
-        let id = ShortId::parse(&id).unwrap();
-        let criterion = criteria::add_criterion(
-            &tx,
-            &Host,
-            &actor("owner"),
-            &id,
-            "The owner reviewed it",
-            NOW,
-        )
-        .unwrap();
-        criteria::add_check(
-            &tx,
-            &Host,
-            &actor("owner"),
-            &id,
-            criterion.position,
-            CheckKind::Manual,
-            "review:owner",
-            NOW + 1,
-        )
-        .unwrap();
-        (id, criterion.position)
-    };
+    let (manual, review) = (CheckKind::Manual, "review:owner");
 
-    let (id, position) = manual("Reviewed by the owner");
+    let (id, position) = checked(&tx, "Reviewed by the owner", manual, review);
     let rows = case.count("SELECT count(*) FROM tk_evidence");
-    for who in ["agent:1", "master:3"] {
+    for who in ["agent:1", "master:3", "engine:review"] {
         assert_eq!(
-            store_refusal(evidence(who, &id, position)),
+            store_refusal(record(&tx, who, &id, position, manual, review)),
             EVIDENCE_OWNER_ONLY,
             "{who}"
         );
     }
     assert_eq!(case.count("SELECT count(*) FROM tk_evidence"), rows);
-    assert_eq!(store::ticket(&tx, &id).unwrap().closed_by, None);
-    evidence("owner", &id, position).unwrap();
+    assert_eq!(closed_by(&tx, &id), None);
+    record(&tx, "owner", &id, position, manual, review).unwrap();
     let closed = store::ticket(&tx, &id).unwrap();
     assert_eq!(closed.status, TicketStatus::Done);
     assert_eq!(closed.closed_by, Some(Actor::host("evidence")));
@@ -535,11 +553,121 @@ fn an_agent_cannot_record_owner_evidence() {
             ..TicketOverride::default()
         },
     );
-    let (id, position) = manual("Reviewed by an agent");
-    evidence("agent:1", &id, position).unwrap();
+    let (id, position) = checked(&tx, "Reviewed by an agent", manual, review);
+    record(&tx, "agent:1", &id, position, manual, review).unwrap();
+    assert_eq!(closed_by(&tx, &id), Some(Actor::host("evidence")));
+    tx.commit().unwrap();
+}
+
+#[test]
+fn an_agent_cannot_record_its_own_ci_evidence() {
+    let case = Case::new();
+    let one = project("project-1");
+    case.agent(1, &one, "sub");
+    let tx = case.tx();
+    let (ci, build) = (CheckKind::Ci, "ci:build");
     assert_eq!(
-        store::ticket(&tx, &id).unwrap().closed_by,
-        Some(Actor::host("evidence"))
+        settings::effective(&tx, &one).unwrap().ci_evidence,
+        CiEvidence::Engine,
+        "the proposed default"
+    );
+
+    let (id, position) = checked(&tx, "Built by CI", ci, build);
+    let rows = case.count("SELECT count(*) FROM tk_evidence");
+    assert_eq!(
+        store_refusal(record(&tx, "agent:1", &id, position, ci, build)),
+        EVIDENCE_ENGINE_ONLY
+    );
+    assert_eq!(case.count("SELECT count(*) FROM tk_evidence"), rows);
+    assert_eq!(closed_by(&tx, &id), None, "no CI run, no close");
+    record(&tx, "engine:ci", &id, position, ci, build).unwrap();
+    assert_eq!(closed_by(&tx, &id), Some(Actor::host("evidence")));
+    let (id, position) = checked(&tx, "Built and read by the owner", ci, build);
+    record(&tx, "owner", &id, position, ci, build).unwrap();
+    assert_eq!(closed_by(&tx, &id), Some(Actor::host("evidence")));
+
+    set(
+        &tx,
+        &Scope::Project(one.clone()),
+        TicketOverride {
+            ci_evidence: Some(CiEvidence::Owner),
+            ..TicketOverride::default()
+        },
+    );
+    let (id, position) = checked(&tx, "Only the owner reads CI", ci, build);
+    let rows = case.count("SELECT count(*) FROM tk_evidence");
+    for who in ["engine:ci", "agent:1"] {
+        assert_eq!(
+            store_refusal(record(&tx, who, &id, position, ci, build)),
+            EVIDENCE_OWNER_ONLY,
+            "{who}"
+        );
+    }
+    assert_eq!(case.count("SELECT count(*) FROM tk_evidence"), rows);
+    record(&tx, "owner", &id, position, ci, build).unwrap();
+    assert_eq!(closed_by(&tx, &id), Some(Actor::host("evidence")));
+
+    set(
+        &tx,
+        &Scope::Project(one.clone()),
+        TicketOverride {
+            ci_evidence: Some(CiEvidence::Agents),
+            ..TicketOverride::default()
+        },
+    );
+    let (id, position) = checked(&tx, "Agents report CI", ci, build);
+    record(&tx, "agent:1", &id, position, ci, build).unwrap();
+    assert_eq!(closed_by(&tx, &id), Some(Actor::host("evidence")));
+    tx.commit().unwrap();
+}
+
+#[test]
+fn the_core_policy_set_op_is_refused_so_ticket_settings_stay_the_one_writer() {
+    let case = Case::new();
+    let one = project("project-1");
+    case.agent(1, &one, "sub");
+    let tx = case.tx();
+    let before = policy::load(&tx, &key("CA")).unwrap();
+    let rows = case.count("SELECT count(*) FROM tk_policy");
+    let events = case.count("SELECT count(*) FROM tk_events");
+    for who in ["owner", "agent:1", "engine:settings"] {
+        let code = refused(
+            &tx,
+            who,
+            "policy_set",
+            json!({"project": "CA", "key": "close", "value": "agents"}),
+        );
+        assert_eq!(code, POLICY_IN_SETTINGS, "{who}");
+    }
+    assert_eq!(
+        store_refusal(policy::set(
+            &tx,
+            &Host,
+            &actor("owner"),
+            &key("CA"),
+            PolicyKey::Close,
+            "agents",
+            0,
+            NOW
+        )),
+        POLICY_IN_SETTINGS
+    );
+    assert_eq!(policy::load(&tx, &key("CA")).unwrap(), before);
+    assert_eq!(case.count("SELECT count(*) FROM tk_policy"), rows);
+    assert_eq!(case.count("SELECT count(*) FROM tk_events"), events);
+
+    set(
+        &tx,
+        &Scope::Project(one.clone()),
+        TicketOverride {
+            close: Some(ClosePolicy::Agents),
+            ..TicketOverride::default()
+        },
+    );
+    assert_eq!(
+        policy::load(&tx, &key("CA")).unwrap().close,
+        ClosePolicy::Agents,
+        "the ticket settings still reach the core"
     );
     tx.commit().unwrap();
 }

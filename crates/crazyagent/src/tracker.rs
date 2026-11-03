@@ -109,13 +109,13 @@ pub(crate) fn project_of(tx: &Transaction<'_>, key: &ProjectKey) -> Result<Proje
     let project: Option<String> = tx
         .query_row(PROJECT_OF_KEY, [key.as_str()], |row| row.get(0))
         .optional()
-        .map_err(|_| Refusal::new(host::HOST_FAILED, "the engine could not read its projects"))?;
+        .map_err(|_| Refusal::host(host::HOST_FAILED, "the engine could not read its projects"))?;
     let project = project.ok_or_else(|| {
-        Refusal::new(
+        Refusal::host(
             host::PROJECT_NOT_ATTACHED,
             format!("{} is not a CrazyAgent project", key.as_str()),
         )
     })?;
     ProjectId::new(project)
-        .map_err(|_| Refusal::new(host::HOST_FAILED, "the engine stores a bad project id"))
+        .map_err(|_| Refusal::host(host::HOST_FAILED, "the engine stores a bad project id"))
 }
