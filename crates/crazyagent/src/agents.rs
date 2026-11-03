@@ -257,6 +257,7 @@ impl AgentSpec {
         };
         Ok(LaunchRequest {
             harness: self.harness.clone(),
+            trust: crate::trust::Trust::Reviewed,
             executable: self.executable.clone(),
             working_dir: self.working_dir.clone(),
             account,

@@ -6,7 +6,7 @@ use super::clock;
 use super::ctx::{Ctx, Link, Load};
 use super::frame::{
     Hint, MIN_HEIGHT, MIN_WIDTH, Message, Modal, bands, draw_lines, footer, header, hint,
-    strip_bidi, too_small,
+    strip_controls, too_small,
 };
 use super::keys::{Global, Key, global};
 use super::screens::intake::not_ready;
@@ -790,7 +790,7 @@ impl Shell {
     /// Input: the ratatui frame. Output: none.
     pub fn draw(&mut self, frame: &mut Frame) {
         self.paint(frame);
-        strip_bidi(frame.buffer_mut());
+        strip_controls(frame.buffer_mut());
     }
 
     /// Paints background, header, rule, body, message line, help line, then any modal and

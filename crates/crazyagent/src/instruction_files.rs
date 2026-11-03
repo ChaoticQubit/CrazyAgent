@@ -10,8 +10,10 @@ pub const FILES_MAX: usize = SOURCES.len();
 const NAME_BYTES_MAX: usize = 32;
 const HEADING: &str = "\n## Instruction files\n\nThe owner's instruction files, read by CrazyAgent from the project's committed files and, when the owner chose so, from the owner's own files. Follow them as you would follow these files in your harness.\n";
 const FILE_HEADING: &str = "\n### \n\n";
-pub const SECTION_BYTES_MAX: usize =
-    HEADING.len() + FILES_MAX * (FILE_HEADING.len() + NAME_BYTES_MAX + 1) + FILES_BYTES_MAX;
+pub const SECTION_BYTES_MAX: usize = HEADING.len()
+    + crate::trust::repo_config::HEADING.len()
+    + FILES_MAX * (FILE_HEADING.len() + NAME_BYTES_MAX + 1)
+    + FILES_BYTES_MAX;
 const TABLE: &str = "agent_instruction_settings";
 
 /// Where one instruction file comes from: committed in the owner's checkout at its HEAD,
@@ -23,10 +25,14 @@ enum Source {
     Home(&'static str),
 }
 
-const SOURCES: [(&str, Source); 6] = [
+const SOURCES: [(&str, Source); 7] = [
     ("CLAUDE.md", Source::Committed("CLAUDE.md")),
     (".claude/CLAUDE.md", Source::Committed(".claude/CLAUDE.md")),
     ("AGENTS.md", Source::Committed("AGENTS.md")),
+    (
+        crate::trust::repo_config::PROJECT_INSTRUCTIONS,
+        Source::Committed(crate::trust::repo_config::PROJECT_INSTRUCTIONS),
+    ),
     ("CLAUDE.local.md", Source::Checkout("CLAUDE.local.md")),
     ("~/.claude/CLAUDE.md", Source::Home(".claude/CLAUDE.md")),
     ("~/.codex/AGENTS.md", Source::Home(".codex/AGENTS.md")),
@@ -142,11 +148,14 @@ pub struct Record {
 }
 
 /// The instruction files one launch hands its agent: the prompt section holding every
-/// given file, empty when none was given, and the record of each file found.
+/// given file, empty when none was given, the record of each file found, and whether an
+/// untrusted repository commits the project instructions file, which then is repository
+/// text and never the owner's instructions.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Delivery {
     pub text: String,
     pub records: Vec<Record>,
+    pub repository_instructions: bool,
 }
 
 /// Tells whether a name is one this module records, so a record read back from an agent
@@ -248,32 +257,57 @@ pub(crate) fn owner_home() -> Option<PathBuf> {
 /// and for "Project and user files" the owner's `~/.claude/CLAUDE.md` and
 /// `~/.codex/AGENTS.md`. Each file is at most `FILE_BYTES_MAX` bytes and all given files at
 /// most `FILES_BYTES_MAX`; hidden characters are shown as visible escapes; a file that
-/// cannot be given is recorded with the reason and never stops the launch.
-/// Inputs: the owner's checkout folder, the owner's home and the choice.
+/// cannot be given is recorded with the reason and never stops the launch. For an untrusted
+/// repository every project file, a committed `.crazyagent/instructions.md` among them, is
+/// quoted line by line under the untrusted repository text heading after the owner's own
+/// files, never under the owner's instruction files heading, and a committed project
+/// instructions file is reported even when the choice gives no files.
+/// Inputs: the owner's checkout folder, the owner's home, the choice and the project's trust.
 /// Output: the section and the records.
-pub fn read(checkout: Option<&Path>, home: Option<&Path>, choice: Choice) -> Delivery {
+pub fn read(
+    checkout: Option<&Path>,
+    home: Option<&Path>,
+    choice: Choice,
+    trust: crate::trust::Trust,
+) -> Delivery {
+    let untrusted = crate::trust::Enforcement::for_level(trust).repo_config_as_text;
     let mut delivery = Delivery::default();
-    let mut given: Vec<(&str, String)> = Vec::new();
+    let mut given: Vec<(&str, String, bool)> = Vec::new();
     let mut total = 0;
-    let mut committed_found = match (choice, checkout) {
-        (Choice::None, _) | (_, None) => Vec::new(),
-        (_, Some(checkout)) => committed(checkout),
+    let reads_committed = choice != Choice::None || untrusted;
+    let mut committed_found = match (reads_committed, checkout) {
+        (true, Some(checkout)) => committed(checkout),
+        _ => Vec::new(),
     }
     .into_iter();
     for (name, source) in SOURCES {
-        let found = match (source, choice, checkout, home) {
-            (_, Choice::None, _, _) => continue,
-            (Source::Committed(_), _, Some(_), _) => committed_found
-                .next()
-                .expect("one committed read per committed source"),
-            (Source::Checkout(path), _, Some(checkout), _) => {
+        let found = match (source, checkout, home) {
+            (Source::Committed(path), Some(_), _) if reads_committed => {
+                let found = committed_found
+                    .next()
+                    .expect("one committed read per committed source");
+                if path == crate::trust::repo_config::PROJECT_INSTRUCTIONS {
+                    delivery.repository_instructions =
+                        untrusted && !matches!(found, Found::Missing);
+                    if !untrusted {
+                        continue;
+                    }
+                }
+                found
+            }
+            _ if choice == Choice::None => continue,
+            (Source::Checkout(path), Some(checkout), _) => {
                 plain(&checkout.join(path), crate::platform::open_plain)
             }
-            (Source::Home(path), Choice::ProjectAndUser, _, Some(home)) => {
+            (Source::Home(path), _, Some(home)) if choice == Choice::ProjectAndUser => {
                 plain(&home.join(path), open_following)
             }
             _ => continue,
         };
+        if choice == Choice::None {
+            continue;
+        }
+        let repository = untrusted && !matches!(source, Source::Home(_));
         let (bytes, state) = match found {
             Found::Missing => continue,
             Found::Refused(bytes, state) => (bytes, state),
@@ -282,13 +316,17 @@ pub fn read(checkout: Option<&Path>, home: Option<&Path>, choice: Choice) -> Del
                 if text.trim().is_empty() {
                     continue;
                 }
+                let text = match repository {
+                    true => crate::trust::repo_config::quote(&text),
+                    false => text,
+                };
                 let state = if text.len() > FILE_BYTES_MAX || total + text.len() > FILES_BYTES_MAX {
                     State::TooLarge
-                } else if given.iter().any(|(_, earlier)| *earlier == text) {
+                } else if given.iter().any(|(_, earlier, _)| *earlier == text) {
                     State::Same
                 } else {
                     total += text.len();
-                    given.push((name, text));
+                    given.push((name, text, repository));
                     State::Given
                 };
                 (bytes, state)
@@ -300,9 +338,17 @@ pub fn read(checkout: Option<&Path>, home: Option<&Path>, choice: Choice) -> Del
             state,
         });
     }
-    if !given.is_empty() {
-        delivery.text.push_str(HEADING);
-        for (name, text) in &given {
+    for (heading, from_repository) in [(HEADING, false), (crate::trust::repo_config::HEADING, true)]
+    {
+        let mut files = given
+            .iter()
+            .filter(|(_, _, repository)| *repository == from_repository)
+            .peekable();
+        if files.peek().is_none() {
+            continue;
+        }
+        delivery.text.push_str(heading);
+        for (name, text, _) in files {
             delivery.text.push_str("\n### ");
             delivery.text.push_str(name);
             delivery.text.push_str("\n\n");
@@ -310,6 +356,7 @@ pub fn read(checkout: Option<&Path>, home: Option<&Path>, choice: Choice) -> Del
             delivery.text.push('\n');
         }
     }
+    assert!(!delivery.repository_instructions || untrusted);
     assert!(committed_found.next().is_none());
     assert!(total <= FILES_BYTES_MAX);
     assert!(delivery.text.len() <= SECTION_BYTES_MAX);

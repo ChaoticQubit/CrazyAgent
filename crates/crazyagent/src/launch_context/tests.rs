@@ -629,6 +629,7 @@ fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
         folder: Some(folder),
         files: crate::instruction_files::Choice::Project,
         owner_home: None,
+        trust: crate::trust::Trust::Reviewed,
     };
     let given = crate::agent_home::text(&project).unwrap();
     let context = AgentContext {

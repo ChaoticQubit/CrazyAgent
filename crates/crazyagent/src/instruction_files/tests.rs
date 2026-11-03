@@ -124,7 +124,12 @@ impl Case {
     }
 
     fn read(&self, choice: Choice) -> Delivery {
-        read(Some(&self.checkout), Some(&self.home), choice)
+        read(
+            Some(&self.checkout),
+            Some(&self.home),
+            choice,
+            crate::trust::Trust::Reviewed,
+        )
     }
 }
 
@@ -204,7 +209,12 @@ fn each_choice_gives_only_its_files_as_committed_at_the_checkouts_head() {
         &folder.join("CLAUDE.local.md"),
         &format!("{PROJECT_LOCAL}\n"),
     );
-    let plain = read(Some(&folder), None, Choice::Project);
+    let plain = read(
+        Some(&folder),
+        None,
+        Choice::Project,
+        crate::trust::Trust::Reviewed,
+    );
     assert_eq!(
         given(&plain),
         ["CLAUDE.local.md"],
@@ -216,22 +226,37 @@ fn each_choice_gives_only_its_files_as_committed_at_the_checkouts_head() {
     git(&case.home, &unborn, &["init", "-q"]);
     write(&unborn.join("CLAUDE.md"), "UNCOMMITTED-RULE\n");
     assert_eq!(
-        read(Some(&unborn), None, Choice::Project),
+        read(
+            Some(&unborn),
+            None,
+            Choice::Project,
+            crate::trust::Trust::Reviewed
+        ),
         Delivery::default(),
         "a checkout with no commit has no committed files"
     );
 
     assert_eq!(
-        read(None, Some(&case.home), Choice::ProjectAndUser)
-            .records
-            .len(),
+        read(
+            None,
+            Some(&case.home),
+            Choice::ProjectAndUser,
+            crate::trust::Trust::Reviewed
+        )
+        .records
+        .len(),
         2,
         "a project with no recorded folder still gets the owner's own files"
     );
     assert_eq!(
-        read(Some(&case.checkout), None, Choice::ProjectAndUser)
-            .records
-            .len(),
+        read(
+            Some(&case.checkout),
+            None,
+            Choice::ProjectAndUser,
+            crate::trust::Trust::Reviewed
+        )
+        .records
+        .len(),
         4
     );
 }
@@ -417,6 +442,7 @@ mod launch {
         fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
         LaunchRequest {
             harness: harness.into(),
+            trust: crate::trust::Trust::Reviewed,
             executable: PathBuf::from("/usr/bin/true"),
             working_dir: case.checkout.clone(),
             account: AccountBinding::Url {
@@ -564,7 +590,13 @@ mod launch {
                 Some(0),
                 "{choice:?}: Codex never reads AGENTS.md from the agent's worktree itself"
             );
-            let expected = read(Some(&case.checkout), Some(&case.home), choice).records;
+            let expected = read(
+                Some(&case.checkout),
+                Some(&case.home),
+                choice,
+                crate::trust::Trust::Reviewed,
+            )
+            .records;
             assert_eq!(launched.claude_record, expected, "{choice:?}");
             assert_eq!(launched.codex_record, expected, "{choice:?}");
             let count = match choice {

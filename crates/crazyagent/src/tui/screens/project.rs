@@ -7,6 +7,7 @@ use super::planning_line::{Planning, planning, planning_key};
 use super::project_access::{AccessEdit, AccessKey};
 use super::project_markdown::{MdLine, render, sanitize};
 use super::project_plugins::ProjectPlugins;
+use super::project_trust::{TrustEdit, TrustKey};
 use super::questions::ProjectQuestions;
 use super::recovery_banner::ProjectRecovery;
 use super::sessions::{Sessions, SessionsAction, SessionsReply};
@@ -575,6 +576,8 @@ pub(in crate::tui) struct ProjectScreen {
     pub read_paths: Option<crate::project_setup::ReadPaths>,
     pub access: Option<AccessEdit>,
     pub agent_policy: Option<crate::sandbox::policy::PolicyView>,
+    pub trust_edit: Option<TrustEdit>,
+    pub repository_trust: Option<crate::trust::TrustView>,
     pub schedule: Option<crate::scheduling::Schedule>,
     pub general: Option<GeneralEdit>,
     pub removed: bool,
@@ -594,6 +597,8 @@ pub(in crate::tui) struct ProjectScreen {
     folders_stale: bool,
     agent_policy_read_ms: Option<i64>,
     access_stale: bool,
+    repository_trust_read_ms: Option<i64>,
+    trust_stale: bool,
     memories_read_ms: Option<i64>,
     setup_failed_ms: Option<i64>,
     setup_due: bool,
@@ -651,6 +656,8 @@ impl ProjectScreen {
             read_paths: None,
             access: None,
             agent_policy: None,
+            trust_edit: None,
+            repository_trust: None,
             schedule: None,
             general: None,
             removed: false,
@@ -665,6 +672,8 @@ impl ProjectScreen {
             folders_stale: false,
             agent_policy_read_ms: None,
             access_stale: false,
+            repository_trust_read_ms: None,
+            trust_stale: false,
             memories_read_ms: None,
             setup_failed_ms: None,
             setup_due: false,
@@ -685,6 +694,7 @@ impl ProjectScreen {
         self.adding = None;
         self.folders = None;
         self.access = None;
+        self.trust_edit = None;
         self.general = None;
         self.typing = tab == Tab::Conversation;
         if tab == Tab::Changes {
@@ -728,6 +738,11 @@ impl ProjectScreen {
             && due(self.agent_policy_read_ms)
         {
             SetupQuery::AgentPolicy { project }
+        } else if self.repository_trust.is_none()
+            && self.tab == Tab::Settings
+            && due(self.repository_trust_read_ms)
+        {
+            SetupQuery::RepositoryTrust { project }
         } else if due(self.memories_read_ms)
             && (self.memories.is_none() || matches!(self.tab, Tab::Overview))
         {
@@ -852,6 +867,9 @@ impl ProjectScreen {
                     SetupQuery::AgentPolicy { .. } => {
                         self.agent_policy_read_ms = Some(self.now_ms);
                     }
+                    SetupQuery::RepositoryTrust { .. } => {
+                        self.repository_trust_read_ms = Some(self.now_ms);
+                    }
                     SetupQuery::Memories { .. } => self.memories_read_ms = Some(self.now_ms),
                     SetupQuery::Item { path, .. } => {
                         if let Some(preview) = self.preview.as_mut().filter(|p| &p.path == path) {
@@ -928,6 +946,19 @@ impl ProjectScreen {
                 }
                 self.agent_policy = Some(view);
                 self.agent_policy_read_ms = Some(self.now_ms);
+            }
+            SetupView::RepositoryTrust(view) => {
+                if std::mem::take(&mut self.trust_stale)
+                    && let Some(edit) = self.trust_edit.as_mut()
+                {
+                    edit.view = (*view).clone();
+                    edit.error = Some(format!(
+                        "Saved now: {}. {KEEP_MINE}",
+                        super::project_trust::summary(Some(&view))
+                    ));
+                }
+                self.repository_trust = Some(*view);
+                self.repository_trust_read_ms = Some(self.now_ms);
             }
             SetupView::Item(chunk) => {
                 if let Some(preview) = self.preview.as_mut().filter(|p| p.path == chunk.path) {
@@ -1006,6 +1037,18 @@ impl ProjectScreen {
                 }
                 true
             }
+            SetupAction::SetRepositoryTrust { .. } if self.trust_edit.is_some() => {
+                if let Some(edit) = self.trust_edit.as_mut() {
+                    edit.busy = false;
+                    edit.error = reason;
+                }
+                if stale {
+                    self.trust_stale = true;
+                    self.repository_trust = None;
+                    self.repository_trust_read_ms = None;
+                }
+                true
+            }
             SetupAction::Update { .. } if self.general.is_some() => {
                 if let Some(general) = self.general.as_mut() {
                     general.busy = false;
@@ -1074,6 +1117,18 @@ impl ProjectScreen {
                 self.agent_policy_read_ms = None;
                 if applied {
                     self.access = None;
+                }
+            }
+            SetupQuery::Change {
+                action: SetupAction::SetRepositoryTrust { .. },
+                ..
+            } => {
+                self.repository_trust = None;
+                self.repository_trust_read_ms = None;
+                self.agent_policy = None;
+                self.agent_policy_read_ms = None;
+                if applied {
+                    self.trust_edit = None;
                 }
             }
             SetupQuery::Change {
@@ -1231,6 +1286,7 @@ impl ProjectScreen {
             || self.adding.is_some()
             || self.folders.is_some()
             || self.access.is_some()
+            || self.trust_edit.is_some()
             || self.general.is_some()
             || self.confirm_remove
             || self.pool_picker.is_some()
@@ -1257,6 +1313,9 @@ impl ProjectScreen {
         }
         if self.access.is_some() {
             return self.access_key(key);
+        }
+        if self.trust_edit.is_some() {
+            return self.trust_key(key);
         }
         if self.general.is_some() {
             return self.general_key(key);
@@ -2146,6 +2205,19 @@ impl ProjectScreen {
                 }
                 ProjectReply::Handled
             }
+            KeyCode::Char('k') => {
+                match &self.repository_trust {
+                    Some(view) => {
+                        self.trust_edit = Some(TrustEdit::of(view));
+                        self.trust_stale = false;
+                    }
+                    None => {
+                        self.problem =
+                            Some("Still loading the repository trust. Try again.".into());
+                    }
+                }
+                ProjectReply::Handled
+            }
             KeyCode::Char('i') => ProjectReply::Process,
             KeyCode::Char('u') => match &self.schedule {
                 Some(schedule) => ProjectReply::AccountOrder(
@@ -2314,6 +2386,36 @@ impl ProjectScreen {
         }
     }
 
+    /// Handles one key in the Repository trust box (see [`TrustEdit::key`]): a save sends
+    /// the level with the owner's raise confirm and keeps the box busy until the engine
+    /// answers. Takes the key event. Returns the change to send, or what the box did.
+    fn trust_key(&mut self, key: KeyEvent) -> ProjectReply {
+        let Some(edit) = self.trust_edit.as_mut() else {
+            return ProjectReply::Ignored;
+        };
+        match edit.key(key) {
+            TrustKey::Handled => ProjectReply::Handled,
+            TrustKey::Close => {
+                self.trust_edit = None;
+                ProjectReply::Handled
+            }
+            TrustKey::Save {
+                trust,
+                confirm_raise,
+            } => {
+                assert!(confirm_raise || !trust.raises(edit.view.trust));
+                edit.busy = true;
+                edit.error = None;
+                ProjectReply::Change(Box::new(SetupAction::SetRepositoryTrust {
+                    project_id: self.project.clone(),
+                    version: edit.view.version,
+                    trust,
+                    confirm_raise,
+                }))
+            }
+        }
+    }
+
     fn add_key(&mut self, key: KeyEvent) -> ProjectReply {
         let Some(adding) = self.adding.as_mut() else {
             return ProjectReply::Ignored;
@@ -2421,6 +2523,7 @@ impl ProjectScreen {
             self.adding.is_some(),
             self.folders.is_some(),
             self.access.is_some(),
+            self.trust_edit.is_some(),
             self.general.is_some(),
             self.confirm_remove,
         ];
@@ -2438,6 +2541,7 @@ impl ProjectScreen {
             || self.confirm_remove
             || self.folders.is_some()
             || self.access.is_some()
+            || self.trust_edit.is_some()
         {
             assert_eq!(self.tab, Tab::Settings);
         }
@@ -2513,6 +2617,13 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "context_item_protected" => "The project brief can't be deleted.",
         "read_path_not_absolute" => "Type the full path of each folder, starting with /.",
         "agent_access_unavailable" => "That access level can't run agents on this computer.",
+        "agent_access_untrusted" => crate::trust::UNTRUSTED_ACCESS,
+        "trust_raise_unconfirmed" => "Confirm the raise to Reviewed first.",
+        "trust_platform_unqualified" => crate::trust::UNQUALIFIED_PLATFORM,
+        "launch_harness_untrusted" => crate::trust::PLAIN_HARNESS,
+        "repository_trust_unreadable" => {
+            "CrazyAgent couldn't read this project's repository trust."
+        }
         "agent_policy_invalid" => "Each toolchain can be listed once.",
         "agent_policy_unreadable" => "CrazyAgent couldn't read this project's agent access.",
         "read_path_missing" => "One of those folders doesn't exist on this computer.",

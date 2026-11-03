@@ -697,7 +697,8 @@ fn checked_build(build: &Path) -> Result<PathBuf, EngineError> {
 /// written stops the start. The build's launcher on 127.0.0.1 at the server port, the token
 /// file (never the token), its own server data folder, the user data folder inside it whose
 /// Remote settings folder is locked, the locked-keys file readable, the extensions folder
-/// read only, license accepted, telemetry off, workspace trust off and a 30 s reconnection
+/// read only, license accepted, telemetry off, workspace trust off for a reviewed project and
+/// on for an untrusted one, which VS Code then opens in Restricted Mode, and a 30 s reconnection
 /// grace; a cleared environment holding only [`env::server_env`], with the owner `socket`
 /// the built-in extension connects to and TMPDIR at its short temp folder, its server data
 /// folder as the working directory (the profile lets it read no folder above), stdout and
@@ -724,6 +725,10 @@ fn command(
         .and_then(Path::parent)
         .ok_or_else(|| failure("ide_state_unavailable"))?;
     let home = folder.join(SERVER_DATA);
+    let trusted =
+        crate::trust::Enforcement::for_level(super::workspace::project_trust(data, project)?)
+            .ide_workspace_trust;
+    let project_hooks = project_hooks && trusted;
     let written = settings::write(folder, &home, data, project_hooks.then_some(root))?;
     let older_agents = super::workspace::older_agents(data, project, root)?;
     let ceiling = super::git::ceiling(root, older_agents)?;
@@ -763,7 +768,7 @@ fn command(
         .arg(&extensions)
         .arg("--accept-server-license-terms")
         .args(["--telemetry-level", "off"])
-        .arg("--disable-workspace-trust")
+        .args(trusted.then_some("--disable-workspace-trust"))
         .arg("--reconnection-grace-time")
         .arg(RECONNECTION_GRACE.as_secs().to_string())
         .current_dir(&home)
@@ -787,6 +792,12 @@ fn command(
     );
     assert!(command.get_envs().count() <= env::ENV_MAX);
     assert_eq!(command.get_program(), crate::sandbox::SANDBOX_EXEC);
+    assert_eq!(
+        command
+            .get_args()
+            .any(|arg| arg == "--disable-workspace-trust"),
+        trusted
+    );
     Ok(command)
 }
 

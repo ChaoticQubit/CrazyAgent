@@ -339,7 +339,8 @@ fn real_dir(path: &Path) -> bool {
 /// retries only failed steps; an onboarding left by a removed project starts
 /// over as a new project, also when it was left at another folder with the
 /// same name that is gone, and is refused as `onboarding_project_mismatch`
-/// while that folder is still there. Takes the transaction, configuration, engine
+/// while that folder is still there. A folder CrazyAgent cloned from a URL starts at the
+/// untrusted repository level. Takes the transaction, configuration, engine
 /// database path and action. Returns Applied or a plain rejection.
 pub(crate) fn execute(
     tx: &Transaction<'_>,
@@ -447,6 +448,7 @@ pub(crate) fn execute(
     if outcome != Outcome::Applied {
         return Ok(outcome);
     }
+    crate::trust::record_onboarded(tx, &project_id, &repo).map_err(error)?;
     let stored = crate::project_setup::load_setup(tx, &project_id)?
         .ok_or_else(|| failure("project_setup_missing"))?;
     crate::project_setup::write_brief_at(&layout, &stored).map_err(failure)?;

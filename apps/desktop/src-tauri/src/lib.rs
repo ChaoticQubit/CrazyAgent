@@ -667,6 +667,33 @@ async fn desktop_set_project_agent_policy(
 }
 
 #[tauri::command]
+async fn desktop_project_trust(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<crazyagent::trust::TrustView, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.project_trust(&id).await
+}
+
+#[tauri::command]
+async fn desktop_set_project_trust(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    version: u64,
+    trust: crazyagent::trust::Trust,
+    confirm_raise: bool,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .set_project_trust(&id, version, trust, confirm_raise, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_project_files(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2861,6 +2888,8 @@ pub fn run() {
             desktop_set_project_read_paths,
             desktop_project_agent_policy,
             desktop_set_project_agent_policy,
+            desktop_project_trust,
+            desktop_set_project_trust,
             desktop_team_status,
             desktop_team_message,
             desktop_team_delegate,

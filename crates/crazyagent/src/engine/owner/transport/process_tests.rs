@@ -819,6 +819,7 @@ fn each_team_agent_shows_what_its_last_launch_left_in_its_home() {
         folder: Some(folder.clone()),
         files: crate::instruction_files::Choice::Project,
         owner_home: None,
+        trust: crate::trust::Trust::Reviewed,
     };
     let text = |text: &str| crate::agent_home::Given {
         text: text.into(),
@@ -955,6 +956,7 @@ fn an_agent_cannot_change_the_instruction_files_its_card_lists() {
         folder: Some(folder.clone()),
         files: Choice::Project,
         owner_home: None,
+        trust: crate::trust::Trust::Reviewed,
     };
     prepare(&home, Harness::Claude, &launch, &given).unwrap();
     assert_eq!(

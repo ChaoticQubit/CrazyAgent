@@ -793,7 +793,12 @@ impl ResearchRunner {
         private_directory(&agent)?;
         let tmp = agent.join("tmp");
         private_directory(&tmp)?;
-        let network = if job.tools {
+        let trust = jobs
+            .trust(&project)
+            .map_err(|_| RunError::Invalid("project repository trust unreadable".into()))?;
+        let enforcement = crate::trust::Enforcement::for_level(trust);
+        let open = job.tools && !enforcement.model_endpoints_only;
+        let network = if open {
             SandboxNetwork::Open
         } else {
             SandboxNetwork::Only(vec![model_remote(account)?])
@@ -804,11 +809,14 @@ impl ResearchRunner {
         if let Some(reason) = policy.access.unavailable() {
             return Err(RunError::Invalid(reason.into()));
         }
+        if let Some((line, _)) = enforcement.refusal(policy.access) {
+            return Err(RunError::Invalid(line.into()));
+        }
         let unconfined = policy.access == AgentAccess::Full;
         let homes = ToolHomes::owner()?;
         let scratch = toolchains::ScopedTmp::make(&home)?;
         toolchains::prepare_cargo_home(&home, &homes)?;
-        let kept = match (&self.settings, job.tools) {
+        let kept = match (&self.settings, open) {
             (Some((global, local)), true) => crate::config::resolve_config(global, local)
                 .ok()
                 .and_then(|config| config.settings.model_access)
@@ -834,7 +842,13 @@ impl ResearchRunner {
         let setup = self.setup.lock().unwrap_or_else(PoisonError::into_inner);
         ensure_repository(&root, &tmp)?;
         add_worktree(&sandbox, &profile, &worktree)?;
-        let sandbox = sandbox.confine_to_worktree(&worktree)?;
+        let mut sandbox = sandbox.confine_to_worktree(&worktree)?;
+        if enforcement.repo_config_as_text {
+            sandbox = sandbox.hide_repository_config(&root)?;
+        }
+        assert!(
+            !enforcement.model_endpoints_only || !matches!(sandbox.network(), SandboxNetwork::Open)
+        );
         sandbox.install(&profile)?;
         drop(setup);
         still_held(jobs, job)?;
@@ -848,6 +862,7 @@ impl ResearchRunner {
             let (binding, model) = pane_account(account, &home);
             let request = LaunchRequest {
                 harness: harness.id().to_owned(),
+                trust,
                 executable: executable.to_path_buf(),
                 working_dir: worktree.clone(),
                 account: binding,

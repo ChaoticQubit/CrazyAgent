@@ -5,6 +5,7 @@ use std::path::PathBuf;
 fn claude_driver() -> Driver {
     let request = LaunchRequest {
         harness: "claude".into(),
+        trust: crate::trust::Trust::Reviewed,
         executable: PathBuf::from("/usr/bin/true"),
         working_dir: std::env::temp_dir(),
         account: AccountBinding::Url {
@@ -206,6 +207,7 @@ fn team_launch(harness: &str) -> TeamLaunch {
         _directory: directory,
         request: LaunchRequest {
             harness: harness.into(),
+            trust: crate::trust::Trust::Reviewed,
             executable: std::fs::canonicalize(entry).unwrap(),
             working_dir: work.clone(),
             account: AccountBinding::Subscription { home },
@@ -456,6 +458,7 @@ fn codex_driver_in_a_turn() -> Driver {
     let cwd = working_dir.to_str().unwrap().to_owned();
     let request = LaunchRequest {
         harness: "codex".into(),
+        trust: crate::trust::Trust::Reviewed,
         executable: PathBuf::from("/usr/bin/true"),
         working_dir,
         account: AccountBinding::Url {
@@ -577,6 +580,7 @@ fn a_team_agent_commits_as_the_owner_and_its_claude_settings_turn_attribution_of
     assert!(super::GitIdentity::new(" ".into(), email.clone()).is_err());
     let request = LaunchRequest {
         harness: "claude-code".into(),
+        trust: crate::trust::Trust::Reviewed,
         executable: PathBuf::from("/usr/bin/true"),
         working_dir: work.clone(),
         account: AccountBinding::Subscription { home },
@@ -629,5 +633,80 @@ fn a_team_agent_commits_as_the_owner_and_its_claude_settings_turn_attribution_of
     assert_eq!(
         git(&["log", "-1", "--format=%an|%ae|%cn|%ce"]),
         "Repo Owner|owner@example.invalid|Repo Owner|owner@example.invalid\n"
+    );
+}
+
+fn codex_request(trust: crate::trust::Trust, working_dir: PathBuf) -> LaunchRequest {
+    LaunchRequest {
+        harness: "codex".into(),
+        trust,
+        executable: PathBuf::from("/usr/bin/true"),
+        working_dir,
+        account: AccountBinding::Subscription {
+            home: std::env::temp_dir().join("launch-test-home"),
+        },
+        model: None,
+        tools: true,
+        sandbox_profile: None,
+        unconfined: false,
+        git_identity: None,
+        limits: LaunchLimits::default(),
+    }
+}
+
+fn codex_arguments(request: &LaunchRequest) -> Vec<String> {
+    let (arguments, _) = super::codex_invocation(request, false, None).unwrap();
+    arguments
+        .into_iter()
+        .map(|argument| argument.into_string().unwrap())
+        .collect()
+}
+
+#[test]
+fn an_untrusted_headless_codex_names_its_folder_untrusted_and_reads_no_project_docs() {
+    let folder = PathBuf::from("/private/tmp/untrusted-project");
+    let untrusted = codex_arguments(&codex_request(
+        crate::trust::Trust::Untrusted,
+        folder.clone(),
+    ));
+    let entry = "projects={\"/private/tmp/untrusted-project\"={trust_level=\"untrusted\"}}";
+    assert!(
+        untrusted.windows(2).any(|pair| pair == ["-c", entry]),
+        "{untrusted:?}"
+    );
+    assert!(
+        untrusted
+            .windows(2)
+            .any(|pair| pair == ["-c", "project_doc_max_bytes=0"])
+    );
+    assert!(
+        untrusted
+            .iter()
+            .all(|argument| !argument.contains("trust_level=\"trusted\""))
+    );
+    assert_eq!(
+        untrusted[untrusted.len() - 3..],
+        ["app-server", "--listen", "stdio://"]
+    );
+
+    let reviewed = codex_arguments(&codex_request(crate::trust::Trust::Reviewed, folder));
+    assert!(
+        reviewed
+            .iter()
+            .all(|argument| !argument.contains("trust_level")
+                && argument != "project_doc_max_bytes=0"),
+        "a reviewed headless launch is unchanged"
+    );
+
+    let control = codex_request(
+        crate::trust::Trust::Untrusted,
+        PathBuf::from("/private/tmp/bad\nfolder"),
+    );
+    assert_eq!(
+        super::codex_invocation(&control, false, None)
+            .unwrap_err()
+            .0,
+        "launch_working_dir_unavailable",
+        "an untrusted folder Codex cannot be told about is never launched as trusted"
     );
 }

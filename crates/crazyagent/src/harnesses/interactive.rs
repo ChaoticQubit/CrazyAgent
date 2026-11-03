@@ -347,15 +347,12 @@ fn codex(
     cwd: &Path,
     key_file: Option<&str>,
 ) -> Result<Vec<String>, LaunchError> {
-    let folder = serde_json::to_string(&text(cwd)?)
-        .map_err(|_| failure("launch_working_dir_unavailable"))?;
+    let folder = super::launch::codex_project(request, cwd)
+        .ok_or_else(|| failure("launch_working_dir_unavailable"))?;
     let mut arguments = Vec::new();
     for setting in codex_configuration(request, context, key_file)
         .into_iter()
-        .chain([
-            "check_for_update_on_startup=false".to_owned(),
-            format!("projects={{{folder}={{trust_level=\"trusted\"}}}}"),
-        ])
+        .chain(["check_for_update_on_startup=false".to_owned(), folder])
     {
         arguments.push("-c".to_owned());
         arguments.push(setting);
@@ -465,6 +462,9 @@ fn plain(
         .iter()
         .find(|plain| plain.id == id)
         .ok_or_else(|| failure("launch_harness_unsupported"))?;
+    if crate::trust::Enforcement::for_level(request.trust).repo_config_as_text {
+        return Err(failure(crate::trust::PLAIN_HARNESS_CODE));
+    }
     if !matches!(request.account, AccountBinding::Subscription { .. }) {
         return Err(failure("launch_account_unsupported"));
     }

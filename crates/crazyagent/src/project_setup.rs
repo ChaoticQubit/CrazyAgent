@@ -649,6 +649,9 @@ pub enum SetupQuery {
     AgentPolicy {
         project: ProjectId,
     },
+    RepositoryTrust {
+        project: ProjectId,
+    },
     Item {
         project: ProjectId,
         path: String,
@@ -691,6 +694,7 @@ pub enum SetupView {
     Context(ProjectContext),
     ReadPaths(ReadPaths),
     AgentPolicy(crate::sandbox::policy::PolicyView),
+    RepositoryTrust(Box<crate::trust::TrustView>),
     Item(ContextChunk),
     Log(Vec<String>),
     Changed(crate::engine::owner::OwnerResult),
@@ -749,6 +753,12 @@ pub enum SetupAction {
         project_id: ProjectId,
         version: u64,
         policy: crate::sandbox::policy::AgentPolicy,
+    },
+    SetRepositoryTrust {
+        project_id: ProjectId,
+        version: u64,
+        trust: crate::trust::Trust,
+        confirm_raise: bool,
     },
 }
 
@@ -816,7 +826,9 @@ impl SetupAction {
                 }
                 setup.validate()
             }
-            Self::Remove { .. } | Self::PlanRoadmap { .. } => Ok(()),
+            Self::Remove { .. } | Self::PlanRoadmap { .. } | Self::SetRepositoryTrust { .. } => {
+                Ok(())
+            }
             Self::CancelResearch { job, .. } | Self::RetryResearch { job, .. } => {
                 if *job <= 0 {
                     return Err(failure("research_job_missing"));
@@ -1816,6 +1828,12 @@ pub(crate) fn execute(
             version,
             policy,
         } => set_agent_policy(tx, project_id, *version, policy),
+        SetupAction::SetRepositoryTrust {
+            project_id,
+            version,
+            trust,
+            confirm_raise,
+        } => crate::trust::set(tx, project_id, *version, *trust, *confirm_raise),
         SetupAction::RetryResearch { project_id, job } => {
             retry_research(tx, config, project_id, *job)
         }
@@ -2370,8 +2388,9 @@ fn set_read_paths(
 /// Saves a project's agent policy (DEC-101, DEC-102): its access level and toolchain
 /// choices, when the owner's screen showed the current version. Takes the transaction,
 /// project, the version the screen read and the policy. Returns Applied, or a plain
-/// rejection for an unknown project, an invalid policy, a level this computer cannot run or
-/// a policy that changed since it was read (`stale_revision`).
+/// rejection for an unknown project, an invalid policy, a level this computer cannot run, a
+/// level wider than the project's repository trust allows (`agent_access_untrusted`) or a
+/// policy that changed since it was read (`stale_revision`).
 fn set_agent_policy(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
@@ -2394,6 +2413,11 @@ fn set_agent_policy(
     if policy.access.unavailable().is_some() {
         return Ok(rejected("agent_access_unavailable"));
     }
+    let trust = crate::trust::level(tx, project_id.as_str())
+        .map_err(|_| failure("repository_trust_unreadable"))?;
+    if !crate::trust::Enforcement::for_level(trust).allows(policy.access) {
+        return Ok(rejected(crate::trust::ACCESS_CODE));
+    }
     let item = crate::storage::versioned::agent_policy_item(project_id);
     if crate::storage::versioned::owner_write(tx, &item, version)?.is_err() {
         return Ok(rejected(crate::storage::versioned::STALE_CODE));
@@ -2407,8 +2431,8 @@ fn set_agent_policy(
 /// conversation ends in the same change; its onboarding, research jobs, team conversation,
 /// tasks, settings and ended agents are deleted, so a waiting step is never claimed and a
 /// running one stops; its read folders, agent access, agent settings and its agents' own
-/// instructions go too. The versions of its read folders, agent access, agent settings,
-/// project instructions and team settings move on once more, so a project added again under
+/// instructions go too, and its repository trust. The versions of its read folders, agent
+/// access, agent settings, project instructions, team settings and trust move on once more, so a project added again under
 /// the same id refuses a save from a screen read before the removal (V2V-1, V2SYNC-2); agent
 /// ids are never reused, so its agents' instruction versions are dropped. Returns
 /// `invalid_project` for an unknown project.
@@ -2439,12 +2463,14 @@ fn remove(
     crate::storage::agent_text::forget_project(tx, project_id)?;
     crate::questions::forget_project(tx, project_id)?;
     crate::sandbox::policy::remove(tx, project_id.as_str()).map_err(error)?;
+    crate::trust::remove(tx, project_id.as_str()).map_err(error)?;
     for item in [
         crate::storage::versioned::read_paths_item(project_id),
         crate::storage::versioned::agent_policy_item(project_id),
         crate::storage::versioned::instruction_settings_item(project_id),
         crate::storage::versioned::process_text_item(Some(project_id)),
         crate::storage::versioned::team_settings_item(project_id),
+        crate::trust::item(project_id),
     ] {
         crate::storage::versioned::retire(tx, &item)?;
     }

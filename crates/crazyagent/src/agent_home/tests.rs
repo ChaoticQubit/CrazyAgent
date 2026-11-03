@@ -17,6 +17,7 @@ fn project(root: &Path) -> AgentProject {
         folder: Some(folder),
         files: crate::instruction_files::Choice::Project,
         owner_home: None,
+        trust: crate::trust::Trust::Reviewed,
     }
 }
 
