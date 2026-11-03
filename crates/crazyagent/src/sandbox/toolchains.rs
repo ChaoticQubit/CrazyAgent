@@ -20,6 +20,8 @@ const RUSTUP_BINS: &[&str] = &["/opt/homebrew/opt/rustup/bin", "/usr/local/opt/r
 const TMP_PARENT: &str = "/private/tmp";
 const TMP_PREFIX: &str = "ca-";
 const TMP_HASH_BYTES: usize = 8;
+/// The folder of a native lead's short temp folder that is the lead's own temp folder.
+const NATIVE_LEAD_TMP: &str = "lead";
 /// The folder of an agent's short temp folder that holds its own `git`, and that program.
 pub(super) const GIT_FOLDER: &str = "bin";
 const GIT_PROGRAM: &str = "git";
@@ -584,6 +586,39 @@ pub fn existing_tmp(home: &Path) -> Option<PathBuf> {
     private_folder(&path).then_some(path)
 }
 
+/// A native lead's own temp folder, its `TMPDIR`: `lead` in its short temp folder, which its
+/// teammates share for their tmux socket and temp files but never reach inside (TPH-2
+/// residual). Input: the lead's short temp folder. Output: the path, which may not exist.
+pub fn native_lead_tmp(scratch: &Path) -> PathBuf {
+    scratch.join(NATIVE_LEAD_TMP)
+}
+
+/// Makes a native lead's own temp folder empty and private for one start: whatever holds
+/// the name, a link, a file or a folder, is removed without following a link, then the
+/// folder is made with mode 0700, so nothing a teammate left there under an earlier build
+/// reaches the lead. Input: the lead's short temp folder. Output: the folder, or the error,
+/// also when something takes the name in between or the temp folder is not private.
+#[cfg(unix)]
+pub fn fresh_native_lead_tmp(scratch: &Path) -> io::Result<PathBuf> {
+    if !private_folder(scratch) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the agent temp path is not a private folder of this user",
+        ));
+    }
+    let path = native_lead_tmp(scratch);
+    match fs::symlink_metadata(&path) {
+        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(&path)?,
+        Ok(_) => fs::remove_file(&path)?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    fs::DirBuilder::new().mode(0o700).create(&path)?;
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
+    assert!(private_folder(&path));
+    Ok(path)
+}
+
 /// Removes the agent's short temp folder with everything in it. Input: the agent home.
 /// Output: done when it is gone or never existed, or a refusal when the path is not this
 /// user's folder.
@@ -729,6 +764,13 @@ pub fn existing_tmp(_home: &Path) -> Option<PathBuf> {
 /// unused. Returns `Unsupported`.
 #[cfg(not(unix))]
 pub fn make_tmp(_home: &Path) -> io::Result<PathBuf> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
+/// No native lead's own temp folder outside Unix, where no native team runs. Takes the
+/// short temp folder, unused. Returns `Unsupported`.
+#[cfg(not(unix))]
+pub fn fresh_native_lead_tmp(_scratch: &Path) -> io::Result<PathBuf> {
     Err(io::ErrorKind::Unsupported.into())
 }
 
