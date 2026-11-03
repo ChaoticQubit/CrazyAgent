@@ -20,8 +20,8 @@ pub const PROTECTED_CHANGE: &str = "checks_protected_change";
 /// `warn` and `require`.
 pub const NEW_SKIPS: &str = "checks_new_skips";
 /// The gap of a required check whose current passing run no longer reports tests its
-/// inventory baseline had, or has no readable integrity block; it refuses Accept under
-/// `require`, and under `warn` too with `removed_tests refuse`.
+/// inventory baseline had, or has no readable integrity block, unless `removed_tests` is
+/// `off`; it refuses Accept under `require`, and under `warn` too with `removed_tests refuse`.
 pub const TESTS_REMOVED: &str = "checks_tests_removed";
 /// The gap of a required check whose run on the reviewed head ended without passing.
 pub const FAILED: &str = "checks_failed";
@@ -252,7 +252,9 @@ pub fn assess(
             note.gaps
                 .push(Gap::new(NEW_SKIPS, Some(&run.check), Some(run), names));
         }
-        if let Some((names, total)) = removed_in(block.as_ref(), run) {
+        if settings.removed_tests != RemovedTests::Off
+            && let Some((names, total)) = removed_in(block.as_ref(), run)
+        {
             let mut gap = Gap::new(TESTS_REMOVED, Some(&run.check), Some(run), names);
             gap.paths_total = gap.paths_total.max(total);
             note.gaps.push(gap);
