@@ -90,11 +90,9 @@ impl Tracker {
     }
 
     fn connection(&self) -> Connection {
-        let connection = Connection::open(&self.path).expect("the server's connection opens");
-        connection
-            .pragma_update(None, "foreign_keys", true)
-            .expect("foreign keys turn on as the store's own connection has them");
-        connection
+        Store::open(&self.path)
+            .expect("the standalone store reopens")
+            .into_connection()
     }
 
     fn session(&self, actor: &str) -> Session<OpenHost> {
