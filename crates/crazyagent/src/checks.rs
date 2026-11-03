@@ -21,8 +21,9 @@ pub use profile::{
 };
 pub use settings::{ChecksChoice, ChecksSettings, Scope};
 
-/// The most profiles one project keeps. Past it the oldest profile never approved nor
-/// revoked makes room; approved and revoked profiles stay as the record of admissions.
+/// The most profiles one project keeps. Past it the oldest waiting master or agent proposal
+/// makes room; the owner's proposals and approved and revoked profiles stay as the record of
+/// admissions.
 pub const PROFILES_KEPT_MAX: i64 = 256;
 /// The most holdout files one project stores.
 pub const HOLDOUT_FILES_STORED_MAX: i64 = 1024;
@@ -57,6 +58,8 @@ CREATE TABLE IF NOT EXISTS check_settings (
     body TEXT NOT NULL,
     version INTEGER NOT NULL
 );";
+/// The questions refusals that mean the owner already has the most questions waiting.
+const QUESTIONS_FULL: [&str; 2] = ["questions_asker_full", "questions_full"];
 
 /// A refused checks request: one plain code such as `checks_profile_invalid`, never protected
 /// check material.
@@ -109,6 +112,13 @@ struct ProfileRow {
     current: bool,
 }
 
+/// What a proposal does about its owner question once stored: nothing, or ask, returning the
+/// profile's earlier question instead while that one still waits.
+enum Asking {
+    No,
+    Ask(Option<u64>),
+}
+
 /// The outcome of a proposal: the profile's identity, and the owner question it raised when
 /// a master or agent proposed it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -146,11 +156,13 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
 }
 
 /// Stores a proposed profile by content. A master's or agent's proposal of a profile that is
-/// not the current one raises one owner question, asked again only once the last one is
-/// settled; the owner's own proposal raises none. Inputs: the engine connection, the project,
-/// the profile JSON and the actor. Output: the proposal, or `checks_profile_invalid`,
-/// `checks_holdout_missing`, `checks_profile_revoked`, `checks_profiles_full`,
-/// `checks_project_missing`, a questions refusal, or `checks_unavailable`.
+/// not the current one raises one owner question, kept on the profile until approve, revoke
+/// or eviction settles it; a later proposal while it waits returns it. When the owner already
+/// has the most questions waiting, the profile is stored without one. The owner's own
+/// proposal raises none. Inputs: the engine connection, the project, the profile JSON and the
+/// actor. Output: the proposal, or `checks_profile_invalid`, `checks_holdout_missing`,
+/// `checks_profile_revoked`, `checks_profiles_full`, `checks_project_missing`, another
+/// questions refusal, or `checks_unavailable`.
 pub fn propose(
     db: &Connection,
     project: &ProjectId,
@@ -171,13 +183,15 @@ pub fn propose(
             return Err(failure("checks_holdout_missing"));
         }
     }
-    let ask = match stored(&tx, project, &id)? {
+    let mut evicted = Vec::new();
+    let asking = match stored(&tx, project, &id)? {
         Some(known) if known.state == ProfileState::Revoked && actor != Actor::Owner => {
             return Err(failure("checks_profile_revoked"));
         }
-        Some(known) => actor != Actor::Owner && known.state != ProfileState::Current,
+        Some(known) if actor == Actor::Owner || known.state == ProfileState::Current => Asking::No,
+        Some(known) => Asking::Ask(known.question),
         None => {
-            make_room(&tx, project)?;
+            evicted = make_room(&tx, project, actor)?;
             tx.execute(
                 "INSERT INTO check_profiles(project,id,body,proposed_by,proposed_ms) VALUES (?1,?2,?3,?4,?5)",
                 params![
@@ -189,24 +203,29 @@ pub fn propose(
                 ],
             )
             .map_err(unavailable)?;
-            actor != Actor::Owner
+            if actor == Actor::Owner {
+                Asking::No
+            } else {
+                Asking::Ask(None)
+            }
         }
     };
     tx.commit().map_err(unavailable)?;
-    let question = if ask {
-        Some(ask_owner(db, project, &id, &profile, actor)?)
-    } else {
-        None
+    dismiss_all(db, &evicted);
+    let question = match asking {
+        Asking::No => None,
+        Asking::Ask(Some(earlier)) if question_waiting(db, project, earlier)? => Some(earlier),
+        Asking::Ask(_) => ask_owner(db, project, &id, &profile, actor)?,
     };
     assert!(question.is_none() || actor != Actor::Owner);
     Ok(Proposal { id, question })
 }
 
 /// Approves a stored profile as the project's current one, as a new admission whose time is
-/// later than every earlier approval in the project. Approving the current profile again
-/// changes nothing; approving a revoked one restores it. Inputs: the engine connection, the
-/// project, the profile id and the actor. Output: the admitted profile, or
-/// `checks_owner_only`, `checks_profile_unknown` or `checks_unavailable`.
+/// later than every earlier approval in the project, and settles its owner question.
+/// Approving the current profile again changes nothing; approving a revoked one restores it.
+/// Inputs: the engine connection, the project, the profile id and the actor. Output: the
+/// admitted profile, or `checks_owner_only`, `checks_profile_unknown` or `checks_unavailable`.
 pub fn approve(
     db: &Connection,
     project: &ProjectId,
@@ -246,6 +265,7 @@ pub fn approve(
     .map_err(unavailable)?;
     tx.commit().map_err(unavailable)?;
     assert!(approved_ms > last);
+    dismiss_all(db, known.question.as_slice());
     Ok(AdmittedProfile {
         id: known.id,
         project: known.project,
@@ -254,9 +274,9 @@ pub fn approve(
     })
 }
 
-/// Revokes a stored profile; a revoked current profile leaves the project with none.
-/// Inputs: the engine connection, the project, the profile id and the actor. Output: Ok, or
-/// `checks_owner_only`, `checks_profile_unknown` or `checks_unavailable`.
+/// Revokes a stored profile and settles its owner question; a revoked current profile leaves
+/// the project with none. Inputs: the engine connection, the project, the profile id and the
+/// actor. Output: Ok, or `checks_owner_only`, `checks_profile_unknown` or `checks_unavailable`.
 pub fn revoke(
     db: &Connection,
     project: &ProjectId,
@@ -265,15 +285,13 @@ pub fn revoke(
 ) -> Result<(), CheckRefusal> {
     owner_only(actor)?;
     let tx = immediate(db)?;
+    let known = stored(&tx, project, id)?.ok_or_else(|| failure("checks_profile_unknown"))?;
     let changed = tx
         .execute(
             "UPDATE check_profiles SET revoked_ms=COALESCE(revoked_ms,?3) WHERE project=?1 AND id=?2",
             params![project.as_str(), id.as_str(), now_ms()],
         )
         .map_err(unavailable)?;
-    if changed == 0 {
-        return Err(failure("checks_profile_unknown"));
-    }
     tx.execute(
         "DELETE FROM check_profile_current WHERE project=?1 AND profile=?2",
         params![project.as_str(), id.as_str()],
@@ -281,6 +299,7 @@ pub fn revoke(
     .map_err(unavailable)?;
     tx.commit().map_err(unavailable)?;
     assert_eq!(changed, 1);
+    dismiss_all(db, known.question.as_slice());
     Ok(())
 }
 
@@ -396,15 +415,18 @@ pub fn holdout_files(
 
 /// Raises the owner question for a master's or agent's proposal: where to review it, what it
 /// runs, and that an answer here changes nothing. Holdouts are counted, never described,
-/// since the questions page sits in the project folder. Inputs: the connection, the project,
-/// the profile, its id and the proposer. Output: the question id, or the questions refusal.
+/// since the questions page sits in the project folder. The question is kept on the profile,
+/// and dismissed at once when the profile was revoked, made current or removed meanwhile.
+/// Inputs: the connection, the project, the profile, its id and the proposer. Output: the
+/// question id, none when the owner already has the most questions waiting, or the other
+/// questions refusals.
 fn ask_owner(
     db: &Connection,
     project: &ProjectId,
     id: &ProfileId,
     profile: &CheckProfile,
     actor: Actor,
-) -> Result<u64, CheckRefusal> {
+) -> Result<Option<u64>, CheckRefusal> {
     let checks: Vec<String> = profile
         .checks
         .iter()
@@ -426,7 +448,58 @@ fn ask_owner(
         recommended: None,
         context: Some(bound_text(&context, crate::questions::CONTEXT_BYTES_MAX)),
     };
-    crate::questions::raise(db, project, &EngineSource::Checks, &ask)
+    let question = match crate::questions::raise(db, project, &EngineSource::Checks, &ask) {
+        Ok(question) => question,
+        Err(problem) if QUESTIONS_FULL.contains(&problem.0.as_str()) => return Ok(None),
+        Err(problem) => return Err(problem),
+    };
+    let linked = db
+        .execute(
+            "UPDATE check_profiles SET question=?3 WHERE project=?1 AND id=?2 AND revoked_ms IS NULL
+             AND NOT EXISTS(SELECT 1 FROM check_profile_current c WHERE c.project=?1 AND c.profile=?2)",
+            params![
+                project.as_str(),
+                id.as_str(),
+                i64::try_from(question).map_err(unavailable)?
+            ],
+        )
+        .map_err(unavailable)?;
+    if linked == 0 {
+        dismiss_all(db, &[question]);
+        return Ok(None);
+    }
+    assert_eq!(linked, 1);
+    Ok(Some(question))
+}
+
+/// Whether one of the project's owner questions still waits for the owner, read outside any
+/// open transaction since the questions log opens its own. Inputs: the connection, the
+/// project and the question id. Output: true while pending, or the questions refusal.
+fn question_waiting(
+    db: &Connection,
+    project: &ProjectId,
+    question: u64,
+) -> Result<bool, CheckRefusal> {
+    Ok(crate::questions::pending(db, project)?
+        .iter()
+        .any(|waiting| waiting.id == question))
+}
+
+/// Dismisses owner questions whose profile was settled, after the change committed. A
+/// question already answered, dismissed or pruned stays as it is; any other failure is
+/// logged, never returned, since the change it follows is already stored. Inputs: the
+/// connection and the question ids. Output: none.
+fn dismiss_all(db: &Connection, questions: &[u64]) {
+    for &question in questions {
+        match crate::questions::dismiss(db, question, 0) {
+            Ok(_) => {}
+            Err(problem) if problem.0 == "questions_not_found" => {}
+            Err(problem) => eprintln!(
+                "checks_question_unsettled question={question} code={}",
+                problem.0
+            ),
+        }
+    }
 }
 
 /// Reads one stored profile inside the caller's connection or transaction. Inputs: the
@@ -488,10 +561,33 @@ fn stored(
     }))
 }
 
-/// Makes room for one more profile in the project by removing its oldest profile that was
-/// never approved nor revoked, when the project holds `PROFILES_KEPT_MAX`. Inputs: the
-/// transaction and the project. Output: Ok, or `checks_profiles_full` when nothing may go.
-fn make_room(tx: &Transaction<'_>, project: &ProjectId) -> Result<(), CheckRefusal> {
+/// Makes room for one more profile in the project: a master or agent at
+/// `PENDING_PER_PROPOSER_MAX` waiting proposals loses its own oldest, and a project at
+/// `PROFILES_KEPT_MAX` loses its oldest waiting master or agent proposal. Inputs: the
+/// transaction, the project and the proposer. Output: the owner questions of the removed
+/// proposals, or `checks_profiles_full` when the project is full and nothing may go.
+fn make_room(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    actor: Actor,
+) -> Result<Vec<u64>, CheckRefusal> {
+    let mut questions = Vec::new();
+    if actor != Actor::Owner {
+        let name = actor.name();
+        let waiting: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM check_profiles WHERE project=?1 AND proposed_by=?2
+                 AND approved_ms IS NULL AND revoked_ms IS NULL",
+                params![project.as_str(), name],
+                |row| row.get(0),
+            )
+            .map_err(unavailable)?;
+        if waiting >= PENDING_PER_PROPOSER_MAX {
+            let removed = evict(tx, project, Some(name.as_str()))?
+                .expect("a proposer at its bound has a waiting proposal");
+            questions.extend(removed);
+        }
+    }
     let kept: i64 = tx
         .query_row(
             "SELECT COUNT(*) FROM check_profiles WHERE project=?1",
@@ -499,22 +595,46 @@ fn make_room(tx: &Transaction<'_>, project: &ProjectId) -> Result<(), CheckRefus
             |row| row.get(0),
         )
         .map_err(unavailable)?;
-    if kept < PROFILES_KEPT_MAX {
-        return Ok(());
+    if kept >= PROFILES_KEPT_MAX {
+        let removed = evict(tx, project, None)?.ok_or_else(|| failure("checks_profiles_full"))?;
+        questions.extend(removed);
     }
-    let removed = tx
-        .execute(
-            "DELETE FROM check_profiles WHERE rowid=(SELECT rowid FROM check_profiles
+    assert!(questions.len() <= 2);
+    Ok(questions)
+}
+
+/// Removes the project's oldest waiting master or agent proposal, of one proposer when named;
+/// the owner's proposals never go. Inputs: the transaction, the project and the proposer's
+/// stored name. Output: none when nothing may go, else the removed proposal's owner question.
+fn evict(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    proposer: Option<&str>,
+) -> Result<Option<Option<u64>>, CheckRefusal> {
+    let oldest: Option<(i64, Option<i64>)> = tx
+        .query_row(
+            "SELECT rowid, question FROM check_profiles
              WHERE project=?1 AND approved_ms IS NULL AND revoked_ms IS NULL
-             ORDER BY proposed_ms, rowid LIMIT 1)",
-            [project.as_str()],
+             AND proposed_by<>'owner' AND (?2 IS NULL OR proposed_by=?2)
+             ORDER BY proposed_ms, rowid LIMIT 1",
+            params![project.as_str(), proposer],
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
+        .optional()
         .map_err(unavailable)?;
-    if removed == 0 {
-        return Err(failure("checks_profiles_full"));
-    }
+    let Some((rowid, question)) = oldest else {
+        return Ok(None);
+    };
+    let removed = tx
+        .execute("DELETE FROM check_profiles WHERE rowid=?1", [rowid])
+        .map_err(unavailable)?;
     assert_eq!(removed, 1);
-    Ok(())
+    Ok(Some(
+        question
+            .map(u64::try_from)
+            .transpose()
+            .map_err(unavailable)?,
+    ))
 }
 
 fn holdout_stored(
