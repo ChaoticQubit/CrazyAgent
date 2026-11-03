@@ -1218,15 +1218,14 @@ fn export_and_import_answer_through_dispatch_inside_the_hosts_folder() {
         json!({"project": "CA", "path": path, "accept": accept}),
     );
     let data = answered(&applied);
-    let names: Vec<&Value> = data["versions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|version| &version["name"])
-        .collect();
-    assert_eq!(names, [&json!("V1"), &json!("V2")]);
-    assert_eq!(data["versions"][0]["target_day"], "2026-12-01");
+    assert_eq!(data["versions"], json!(["V1", "V2"]));
     assert_eq!(data["tickets"], json!(["CA-2", "CA-3", "CA-4"]));
+    let roadmap = call(&tx, &me, "roadmap", json!({"project": "CA"}));
+    assert_eq!(answered(&roadmap)["versions"][0]["name"], "V1");
+    assert_eq!(
+        answered(&roadmap)["versions"][0]["target_day"],
+        "2026-12-01"
+    );
     let again = import::preview(&tx, &Standalone, &me, &key(), &roadmap).unwrap();
     assert!(again.items.is_empty(), "{:?}", again.items);
     assert_eq!(
