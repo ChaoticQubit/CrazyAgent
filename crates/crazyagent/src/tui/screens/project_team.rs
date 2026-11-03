@@ -2850,8 +2850,9 @@ fn next_limit(choices: &[u32], current: Option<u32>) -> Option<u32> {
 }
 
 /// Which agents Background commands at task end acts on, said with every choice in the
-/// TUI and the desktop alike: only where the engine sees or ends background commands.
-const BACKGROUND_SCOPE: &str = "It applies to Claude agents and to agents run per turn; a kept Codex pane keeps its background commands whatever the choice.";
+/// TUI and the desktop alike: Wait and a grace time only where the engine sees background
+/// commands, a Claude Code pane, and turn-end stops only where it ends them (rv-code BHT-M1).
+const BACKGROUND_SCOPE: &str = "Wait and a grace time act on Claude Code panes. Other agents run per turn have their background commands stopped when the turn ends, and other kept agents, such as a kept Codex pane, keep theirs whatever the choice.";
 
 /// The summary words for Background commands at task end (DEC-111 Q13). Input: the
 /// choice. Output: the words.
