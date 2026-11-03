@@ -243,6 +243,8 @@ fn main() {
         "desktop_engine_versions",
         "desktop_restart_engine",
         "desktop_ide_focus",
+        "desktop_ticket_settings",
+        "desktop_save_ticket_settings",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("desktop build configuration failed");

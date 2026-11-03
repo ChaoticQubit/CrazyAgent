@@ -247,6 +247,8 @@
     "allow-desktop-link-cli",
     "allow-desktop-engine-versions",
     "allow-desktop-restart-engine",
-    "allow-desktop-ide-focus"
+    "allow-desktop-ide-focus",
+    "allow-desktop-ticket-settings",
+    "allow-desktop-save-ticket-settings"
   ]
 }
