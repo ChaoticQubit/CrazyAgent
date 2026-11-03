@@ -7,6 +7,7 @@ use std::process::{Command, Output};
 use tempfile::TempDir;
 use trackwright_core::catalog::catalog;
 use trackwright_core::model::OpKind;
+use trackwright_core::reply::REPLY_BYTES_DEFAULT;
 
 const BIN: &str = env!("CARGO_BIN_EXE_trackwright");
 
@@ -416,4 +417,99 @@ fn a_bad_flag_exits_2_with_one_line() {
         fs::read_dir(root.path()).unwrap().next().is_none(),
         "usage errors write nothing"
     );
+}
+
+#[test]
+fn trackwright_schema_prints_schema_v1_json() {
+    let root = TempDir::new().unwrap();
+    let output = run(root.path(), &["schema"]);
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(output.stderr.is_empty(), "{output:?}");
+    let published = include_str!("../../trackwright-core/schema/v1.json");
+    assert_eq!(std::str::from_utf8(&output.stdout).unwrap(), published);
+    assert!(
+        fs::read_dir(root.path()).unwrap().next().is_none(),
+        "the plain schema reads no database"
+    );
+}
+
+#[test]
+fn schema_json_replies_the_core_schema_op_like_every_front_end() {
+    let root = TempDir::new().unwrap();
+    let anonymous = run(root.path(), &["schema", "--json"]);
+    assert_eq!(anonymous.status.code(), Some(2), "{anonymous:?}");
+    assert!(anonymous.stdout.is_empty(), "{anonymous:?}");
+    init(root.path(), "CA");
+    let listed = run(root.path(), &["schema", "--actor", "owner", "--json"]);
+    assert_eq!(listed.status.code(), Some(0), "{listed:?}");
+    assert!(listed.stdout.len() <= REPLY_BYTES_DEFAULT + 1, "{listed:?}");
+    let listed = envelope(&listed);
+    assert_eq!(listed["ok"], true, "{listed}");
+    assert_eq!(listed["data"]["api"], 1, "{listed}");
+    let ops: BTreeSet<&str> = listed["data"]["ops"]
+        .as_array()
+        .expect("the schema op lists the operations")
+        .iter()
+        .map(|entry| entry["op"].as_str().expect("every entry names its op"))
+        .collect();
+    let catalog_ops: BTreeSet<&str> = catalog().iter().map(|spec| spec.kind.as_str()).collect();
+    assert!(ops.is_subset(&catalog_ops), "{listed}");
+    assert!(ops.contains("create"), "{listed}");
+    let one = run(
+        root.path(),
+        &["schema", "--op", "create", "--actor", "owner", "--json"],
+    );
+    let one = envelope(&one);
+    assert_eq!(one["ok"], true, "{one}");
+    assert_eq!(one["data"]["op"]["op"], "create", "{one}");
+}
+
+#[test]
+fn init_below_a_database_refuses_and_names_it() {
+    let root = TempDir::new().unwrap();
+    init(root.path(), "CA");
+    let sub = root.path().join("sub");
+    fs::create_dir(&sub).unwrap();
+    let nested = run(&sub, &["init", "--key", "XY", "--actor", "owner", "--json"]);
+    assert_eq!(nested.status.code(), Some(1), "{nested:?}");
+    let refusal = envelope(&nested);
+    assert_eq!(refusal["code"], "store_exists_above", "{refusal}");
+    let above = root
+        .path()
+        .canonicalize()
+        .unwrap()
+        .join(".trackwright/tracker.db");
+    let message = refusal["message"].as_str().unwrap();
+    assert!(message.contains(above.to_str().unwrap()), "{refusal}");
+    assert!(
+        !sub.join(".trackwright").exists(),
+        "a refused init writes nothing"
+    );
+
+    let added = run(
+        &sub,
+        &[
+            "init",
+            "--key",
+            "XY",
+            "--db",
+            above.to_str().unwrap(),
+            "--actor",
+            "owner",
+            "--json",
+        ],
+    );
+    assert_eq!(added.status.code(), Some(0), "{added:?}");
+    for key in ["CA", "XY"] {
+        let listed = run(
+            &sub,
+            &["list", "--project", key, "--actor", "owner", "--json"],
+        );
+        assert_eq!(envelope(&listed)["ok"], true, "{key}: {listed:?}");
+    }
+    let again = run(
+        root.path(),
+        &["init", "--key", "ZZ", "--actor", "owner", "--json"],
+    );
+    assert_eq!(envelope(&again)["ok"], true, "{again:?}");
 }
