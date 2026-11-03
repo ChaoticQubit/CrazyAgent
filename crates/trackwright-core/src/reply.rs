@@ -148,8 +148,9 @@ pub(crate) fn data_bytes_max(bound: usize) -> usize {
         .map(|op| op.as_str())
         .max_by_key(|name| name.len())
         .unwrap_or("schema");
+    let why = "w".repeat(WHY_BYTES_MAX);
     let next: Vec<Value> = (0..NEXT_MAX)
-        .map(|_| json!({"op": longest_op, "id": "ABCDEFGH-4294967295", "why": "w".repeat(WHY_BYTES_MAX)}))
+        .map(|_| json!({"op": longest_op, "id": "ABCDEFGH-4294967295", "why": why}))
         .collect();
     let envelope = json!({
         "api": API,

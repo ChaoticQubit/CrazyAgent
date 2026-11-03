@@ -5,18 +5,20 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
 use trackwright_core::catalog::{self, FieldType};
 use trackwright_core::host::{
-    Authority, CheckView, Evidence, EvidenceState, LinkKind, LinkState, Links, TicketView,
+    Authority, CheckView, Evidence, EvidenceState, LinkKind, LinkState, Links, Paths, TicketView,
 };
 use trackwright_core::model::{
     ACTOR_BYTES_MAX, Actor, CRITERIA_PER_TICKET_MAX, HOST_CODE_BYTES_MAX,
-    OPEN_TICKETS_CREATED_PER_ACTOR_MAX, OpKind, Priority, ProjectKey, REQUEST_BYTES_MAX, Refusal,
-    ShortId, TicketKind, TicketStatus, WRITES_PER_ACTOR_MINUTE_MAX, codes,
+    OPEN_TICKETS_CREATED_PER_ACTOR_MAX, OpKind, PolicyKey, Priority, ProjectKey, REQUEST_BYTES_MAX,
+    Refusal, ShortId, TicketKind, TicketStatus, WRITES_PER_ACTOR_MINUTE_MAX, codes,
 };
 use trackwright_core::ops;
+use trackwright_core::policy;
 use trackwright_core::reply::{
     LISTED_TITLE_BYTES_MAX, NEXT_MAX, PAGE_ROWS_MAX, REPLY_BYTES_DEFAULT, REPLY_BYTES_MAX, Reply,
 };
 use trackwright_core::requests::Request;
+use trackwright_core::standalone::Standalone;
 use trackwright_core::store::{self, NewTicket, Store, TicketChange};
 use trackwright_core::text::{BODY_BYTES_MAX, CRITERION_BYTES_MAX, TITLE_BYTES_MAX};
 
@@ -40,7 +42,7 @@ const KINDS: &[LinkKind] = &[
 
 /// A host whose links, evidence and grants live in its own tables of the same database, read
 /// in the core's transaction: `host_targets`, `host_results` and `host_grants` (`*` grants
-/// every op).
+/// every op). File paths follow the standalone host.
 struct TableHost;
 
 impl Links for TableHost {
@@ -124,6 +126,29 @@ impl Authority for TableHost {
 
     fn actors_verified(&self) -> bool {
         true
+    }
+
+    fn evidence_may(
+        &self,
+        _tx: &Transaction<'_>,
+        _project: &ProjectKey,
+        _actor: &Actor,
+        _check: &CheckView,
+    ) -> Result<(), Refusal> {
+        Ok(())
+    }
+}
+
+impl Paths for TableHost {
+    fn resolve(
+        &self,
+        tx: &Transaction<'_>,
+        project: &ProjectKey,
+        actor: &Actor,
+        op: OpKind,
+        requested: &Path,
+    ) -> Result<PathBuf, Refusal> {
+        Standalone.resolve(tx, project, actor, op, requested)
     }
 }
 
@@ -905,6 +930,117 @@ fn move_keeps_to_open_statuses_and_names_close_for_the_rest() {
         store::ticket(&tx, &id("CA-1")).unwrap().status,
         TicketStatus::InProgress
     );
+
+    let closed = store::update_ticket(
+        &tx,
+        &actor("owner"),
+        &id("CA-1"),
+        2,
+        &TicketChange {
+            status: Some(TicketStatus::Done),
+            ..TicketChange::default()
+        },
+        5_000,
+    )
+    .unwrap();
+    assert_eq!(closed.version, 3);
+    let events = count(&tx, "SELECT count(*) FROM tk_events");
+    for status in ["in_progress", "todo", "done"] {
+        let reopening = refused(
+            &tx,
+            "owner",
+            "move",
+            json!({"id": "CA-1", "version": 3, "status": status}),
+        );
+        assert_eq!(reopening["code"], codes::TICKET_CLOSED, "{status}");
+        assert_eq!(next_ops(&reopening), ["reopen"], "{status}");
+    }
+    let stored = store::ticket(&tx, &id("CA-1")).unwrap();
+    assert_eq!(stored.status, TicketStatus::Done);
+    assert_eq!(stored.closed_by, Some(actor("owner")));
+    assert_eq!(stored.closed_ms, Some(5_000));
+    assert_eq!(stored.version, 3);
+    assert_eq!(count(&tx, "SELECT count(*) FROM tk_events"), events);
+}
+
+#[test]
+fn create_starts_where_the_create_policy_says() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = setup(dir.path());
+    let tx = store.transaction().unwrap();
+    grant(&tx, "agent:w1", &["create"]);
+    let status_of = |who: &str, args: Value| -> Value {
+        ok(&tx, who, "create", args)["data"]["status"].clone()
+    };
+    let todo = json!({"project": "CA", "title": "Asked for todo", "status": "todo"});
+    let plain = json!({"project": "CA", "title": "No status"});
+
+    assert_eq!(status_of("agent:w1", todo.clone()), "triage");
+    assert_eq!(status_of("agent:w1", plain.clone()), "triage");
+    assert_eq!(status_of("owner", todo.clone()), "todo");
+    assert_eq!(status_of("owner", plain.clone()), "backlog");
+
+    policy::set(
+        &tx,
+        &TableHost,
+        &actor("owner"),
+        &key(),
+        PolicyKey::Create,
+        "direct",
+        0,
+        3_000,
+    )
+    .unwrap();
+    assert_eq!(status_of("agent:w1", todo.clone()), "todo");
+    assert_eq!(status_of("agent:w1", plain), "backlog");
+    assert_eq!(status_of("owner", todo), "todo");
+
+    let tickets = count(&tx, "SELECT count(*) FROM tk_tickets");
+    for status in ["done", "cancelled"] {
+        let closed = refused(
+            &tx,
+            "agent:w1",
+            "create",
+            json!({"project": "CA", "title": "Closed at birth", "status": status}),
+        );
+        assert_eq!(closed["code"], codes::STATUS_CLOSED_AT_CREATE, "{status}");
+    }
+    assert_eq!(count(&tx, "SELECT count(*) FROM tk_tickets"), tickets);
+}
+
+#[test]
+fn a_repeat_whose_first_reply_is_over_its_bound_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = setup(dir.path());
+    let tx = store.transaction().unwrap();
+    let args = json!({"project": "CA", "title": "Big reply", "request_id": "big-1"});
+    let first = raw_bounded(&tx, "owner", "create", args.clone(), REPLY_BYTES_MAX);
+    assert!(first.is_ok());
+
+    let padded = format!(
+        "{{\"api\":1,\"ok\":true,\"data\":{{\"pad\":\"{}\"}},\"next\":[],\"cursor\":null}}",
+        "x".repeat(REPLY_BYTES_DEFAULT + 1_000)
+    );
+    assert!(padded.len() > REPLY_BYTES_DEFAULT);
+    assert!(padded.len() < REPLY_BYTES_MAX);
+    let stored = tx
+        .execute(
+            "UPDATE tk_requests SET reply_json = ?1 WHERE actor = 'owner' AND request_id = 'big-1'",
+            [&padded],
+        )
+        .unwrap();
+    assert_eq!(stored, 1);
+
+    let small = raw(&tx, "owner", "create", args.clone());
+    let small: Value = serde_json::from_str(small.json()).unwrap();
+    assert_eq!(small["ok"], false);
+    assert_eq!(small["code"], codes::REQUEST_ID_REUSED);
+    assert!(small["message"].as_str().unwrap().contains("reply bound"));
+
+    let large = raw_bounded(&tx, "owner", "create", args, REPLY_BYTES_MAX);
+    assert!(large.is_ok());
+    assert_eq!(large.json(), padded, "the first reply, byte for byte");
+    assert_eq!(count(&tx, "SELECT count(*) FROM tk_tickets"), 1);
 }
 
 #[test]

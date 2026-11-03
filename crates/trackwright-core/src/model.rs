@@ -56,6 +56,31 @@ pub mod codes {
     pub const CHECK_UNKNOWN: &str = "check_unknown";
     pub const LINK_KIND_UNKNOWN: &str = "link_kind_unknown";
     pub const NOTIFY_TOO_WIDE: &str = "notify_too_wide";
+    pub const CRITERION_NEEDS_CHECK: &str = "criterion_needs_check";
+    pub const EVIDENCE_NOT_FOR_AGENTS: &str = "evidence_not_for_agents";
+    pub const EXPORT_PATH_REFUSED: &str = "export_path_refused";
+    pub const EXPORT_TOO_LARGE: &str = "export_too_large";
+    pub const IMPORT_PATH_REFUSED: &str = "import_path_refused";
+    pub const IMPORT_TOO_LARGE: &str = "import_too_large";
+    pub const IMPORT_NOT_TEXT: &str = "import_not_text";
+    pub const IMPORT_FORMAT_UNKNOWN: &str = "import_format_unknown";
+    pub const IMPORT_ITEM_UNKNOWN: &str = "import_item_unknown";
+    pub const IMPORT_ITEM_NEEDS_VERSION: &str = "import_item_needs_version";
+    pub const IMPORT_KEYS_COLLIDE: &str = "import_keys_collide";
+    pub const VERSIONS_FULL: &str = "versions_full";
+    pub const ALREADY_CLAIMED: &str = "already_claimed";
+    pub const NOT_CLAIMANT: &str = "not_claimant";
+    pub const DEPENDENCY_INVALID: &str = "dependency_invalid";
+    pub const DEPENDENCY_EXISTS: &str = "dependency_exists";
+    pub const DEPENDENCY_UNKNOWN: &str = "dependency_unknown";
+    pub const DEPENDENCY_CYCLE: &str = "dependency_cycle";
+    pub const DEPENDENCIES_FULL: &str = "dependencies_full";
+    pub const PARENT_INVALID: &str = "parent_invalid";
+    pub const VERSION_UNKNOWN: &str = "version_unknown";
+    pub const CYCLE_UNKNOWN: &str = "cycle_unknown";
+    pub const CYCLE_CLOSED: &str = "cycle_closed";
+    pub const CYCLES_FULL: &str = "cycles_full";
+    pub const CYCLE_OVERLAPS: &str = "cycle_overlaps";
 
     /// Every code above, so a host can map each core refusal to its own vocabulary.
     pub const ALL: &[&str] = &[
@@ -111,6 +136,31 @@ pub mod codes {
         CHECK_UNKNOWN,
         LINK_KIND_UNKNOWN,
         NOTIFY_TOO_WIDE,
+        CRITERION_NEEDS_CHECK,
+        EVIDENCE_NOT_FOR_AGENTS,
+        EXPORT_PATH_REFUSED,
+        EXPORT_TOO_LARGE,
+        IMPORT_PATH_REFUSED,
+        IMPORT_TOO_LARGE,
+        IMPORT_NOT_TEXT,
+        IMPORT_FORMAT_UNKNOWN,
+        IMPORT_ITEM_UNKNOWN,
+        IMPORT_ITEM_NEEDS_VERSION,
+        IMPORT_KEYS_COLLIDE,
+        VERSIONS_FULL,
+        ALREADY_CLAIMED,
+        NOT_CLAIMANT,
+        DEPENDENCY_INVALID,
+        DEPENDENCY_EXISTS,
+        DEPENDENCY_UNKNOWN,
+        DEPENDENCY_CYCLE,
+        DEPENDENCIES_FULL,
+        PARENT_INVALID,
+        VERSION_UNKNOWN,
+        CYCLE_UNKNOWN,
+        CYCLE_CLOSED,
+        CYCLES_FULL,
+        CYCLE_OVERLAPS,
     ];
 }
 
@@ -363,6 +413,7 @@ impl OpKind {
                 | OpKind::Roadmap
                 | OpKind::PolicyGet
                 | OpKind::Export
+                | OpKind::ImportPreview
                 | OpKind::Schema
         )
     }
