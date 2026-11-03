@@ -5407,13 +5407,17 @@ impl TeamRuntime {
             .and_then(|sandbox| sandbox.allow_scratch(&scratch))
             .and_then(|sandbox| sandbox.allow_extra_reads(&extra))
             .map_err(sandboxed)?;
-        let install = executable
+        let program = executable
             .canonicalize()
-            .map_err(|e| with_code("the harness install could not be found", Some(io_code(&e))))?
+            .map_err(|e| with_code("the harness install could not be found", Some(io_code(&e))))?;
+        let install = program
             .parent()
             .map(Path::to_path_buf)
             .ok_or("harness install folder")?;
-        sandbox = sandbox.allow_read(&install).map_err(sandboxed)?;
+        sandbox = sandbox
+            .allow_read(&install)
+            .and_then(|sandbox| sandbox.allow_exec(&program))
+            .map_err(sandboxed)?;
         (sandbox, _) = sandbox
             .allow_extra_reads(&toolchains::graphify(&homes))
             .map_err(sandboxed)?;

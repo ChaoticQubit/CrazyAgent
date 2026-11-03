@@ -1324,7 +1324,10 @@ impl ProjectSandbox {
     pub fn profile(&self) -> String {
         let mut text = String::from("(version 1)\n(deny default)\n");
         text.push_str("(allow process-exec)\n(allow process-fork)\n");
-        text.push_str(&app_exec_denies(self.writable_roots()));
+        text.push_str(&app_exec_denies(
+            self.writable_roots(),
+            self.execs.iter().filter(|program| !self.writes(program)),
+        ));
         text.push_str("(allow signal (target same-sandbox))\n");
         text.push_str("(allow process-info* (target same-sandbox))\n");
         text.push_str("(allow sysctl-read)\n");
@@ -2064,9 +2067,13 @@ fn seatbelt_pattern(path: &Path) -> String {
 /// Resources/Python.app/Contents/MacOS/Python`, stays allowed, except in the folders the
 /// agent can write, where it could plant a bundle under that name; their Data volume path
 /// is denied too. Command-line tools a bundle ships under `Contents/Resources` or
-/// `Contents/Developer` stay allowed. It must follow the exec allow, since the last
-/// matching rule wins. Input: the agent's writable roots. Output: the rule text.
-fn app_exec_denies<'a>(writable: impl Iterator<Item = &'a PathBuf>) -> String {
+/// `Contents/Developer` stay allowed, as does each exact program the engine launches from
+/// outside those folders. It must follow the exec allow, since the last matching rule
+/// wins. Inputs: the agent's writable roots and those programs. Output: the rule text.
+fn app_exec_denies<'a>(
+    writable: impl Iterator<Item = &'a PathBuf>,
+    launched: impl Iterator<Item = &'a PathBuf>,
+) -> String {
     let data = format!(
         "/{}/{}/{}",
         any_case("System"),
@@ -2090,6 +2097,14 @@ fn app_exec_denies<'a>(writable: impl Iterator<Item = &'a PathBuf>) -> String {
         ));
     }
     rule.push_str(")\n");
+    let launched: Vec<&PathBuf> = launched.collect();
+    if !launched.is_empty() {
+        rule.push_str("(allow process-exec");
+        for program in launched {
+            rule.push_str(&format!("\n  (literal \"{}\")", program.display()));
+        }
+        rule.push_str(")\n");
+    }
     rule
 }
 
