@@ -24,21 +24,15 @@ use rusqlite::{OptionalExtension, Row, Transaction};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
-/// The refusal codes of runs: the test model's run and plan codes plus the ones runs add.
+/// The refusal codes of runs, declared once in `model::codes`: the test model's run and plan
+/// codes plus the ones runs add.
 pub mod codes {
-    pub use crate::tests_model::codes::{PLAN_UNKNOWN, RUN_UNKNOWN, TEST_ID_INVALID};
-    pub const RUN_CLOSED: &str = "run_closed";
-    pub const RUN_WRITER_REFUSED: &str = "run_writer_refused";
-    pub const RUN_SOURCE_INVALID: &str = "run_source_invalid";
-    pub const RUN_POLICY_INVALID: &str = "run_policy_invalid";
-    pub const RUN_INTEGRITY_INVALID: &str = "run_integrity_invalid";
-    pub const RUN_FINISH_INVALID: &str = "run_finish_invalid";
-    pub const RUN_BATCH_INVALID: &str = "run_batch_invalid";
-    pub const RUN_RESULTS_FULL: &str = "run_results_full";
-    pub const RUNS_FULL: &str = "runs_full";
-    pub const RESULTS_EMPTY: &str = "results_empty";
-    pub const RESULTS_TOO_MANY: &str = "results_too_many";
-    pub const RESULT_NAME_REPEATED: &str = "result_name_repeated";
+    pub use crate::model::codes::{
+        PLAN_UNKNOWN, RESULT_NAME_REPEATED, RESULTS_EMPTY, RESULTS_TOO_MANY, RUN_BATCH_INVALID,
+        RUN_CLOSED, RUN_FINISH_INVALID, RUN_INTEGRITY_INVALID, RUN_POLICY_INVALID,
+        RUN_RESULTS_FULL, RUN_SOURCE_INVALID, RUN_UNKNOWN, RUN_WRITER_REFUSED, RUNS_FULL,
+        TEST_ID_INVALID,
+    };
 }
 
 pub const RUN_START: &str = "run.start";
