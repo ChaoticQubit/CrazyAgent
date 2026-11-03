@@ -239,16 +239,21 @@ function git(folder, args) {
   return result.stdout;
 }
 
-/** Seeds the trial project: one commit on main with the trial rule, the land-on branch and an untracked hidden folder. Input: the project path and trial number. Output: the seed sha and a log of what git reports. */
+/** Seeds the trial project: one commit on main with the trial rule and a tiny Rust crate whose cargo test agents run, the land-on branch and an untracked hidden folder. Input: the project path and trial number. Output: the seed sha and a log of what git reports. */
 function seed(project, trial) {
   mkdirSync(project, { recursive: true });
   const files = {
-    ".gitignore": ".crazyagent/\nprivate/\n",
+    ".gitignore": ".crazyagent/\nprivate/\ntarget/\nCargo.lock\n",
     "CLAUDE.md": `# ca-trial-${trial} rules\n\nTRIAL${trial}-PROJECT-RULE: every Python function has a one-line docstring.\n`,
+    "Cargo.toml": `[package]\nname = "ca-trial-${trial}"\nversion = "0.1.0"\nedition = "2021"\n`,
     "README.md": `# ca-trial-${trial}\n\nThrowaway repo for the CrazyAgent DEC-112 trial ${trial}.\n`,
     "calc.py": "def placeholder():\n    \"\"\"Placeholder.\"\"\"\n    return None\n",
+    "src/lib.rs": "/// Doubles a number. Input: the number. Output: twice it.\npub fn double(x: i32) -> i32 {\n    x * 2\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn doubles() {\n        assert_eq!(super::double(2), 4);\n    }\n}\n",
   };
-  for (const [name, text] of Object.entries(files)) writeFileSync(join(project, name), text);
+  for (const [name, text] of Object.entries(files)) {
+    mkdirSync(dirname(join(project, name)), { recursive: true });
+    writeFileSync(join(project, name), text);
+  }
   git(project, ["init", "-q", "-b", "main"]);
   git(project, ["add", "--", ...Object.keys(files)]);
   git(project, ["commit", "-q", "-m", "Initial trial repo"]);
