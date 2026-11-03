@@ -1202,6 +1202,42 @@ fn a_native_lead_runs_agent_teams_and_its_teammates_get_a_plain_quoted_script() 
     drop(installed);
 }
 
+/// A native lead's teammates run in their own config home beside the lead's (TPH-2 C): the
+/// script the lead's Claude Code runs for each teammate names that home in place of the
+/// lead's for Claude Code's config and temp folders, `HOME` and the cargo home, and keeps the
+/// lead's sign-in folder, where the engine keeps the account's copy the teammates read.
+#[test]
+fn a_native_lead_s_teammates_get_their_own_config_home_and_the_lead_s_sign_in() {
+    let case = Case::new();
+    let request = case.request("claude-code", case.subscription(), true);
+    let tmux = case.executable("tmux", "#!/bin/sh\nexit 0\n");
+    let installed = project_context(&case, "data")
+        .with_native_team(&tmux, &case.path().join("work"))
+        .install("claude-code", &case.home(), true)
+        .unwrap();
+    let built = command(&request, Some(&installed), &run(None)).unwrap();
+    write_teammate_command(&case.home(), &built, &request, installed.native().unwrap()).unwrap();
+    let written =
+        std::fs::read_to_string(crate::launch_context::teammate_command(&case.home())).unwrap();
+    let home = case.home();
+    let mates = home.with_file_name("mates-home");
+    let word = |name: &str, value: &Path| format!(" '{name}={}' ", value.display());
+
+    for name in ["CLAUDE_CONFIG_DIR", "CLAUDE_CODE_TMPDIR", "HOME"] {
+        assert!(written.contains(&word(name, &mates)), "{name}: {written}");
+        assert!(!written.contains(&word(name, &home)), "{name}: {written}");
+    }
+    assert!(
+        written.contains(&word("CARGO_HOME", &mates.join(".cargo"))),
+        "{written}"
+    );
+    assert!(
+        written.contains(&word("CLAUDE_SECURESTORAGE_CONFIG_DIR", &home)),
+        "{written}"
+    );
+    drop(installed);
+}
+
 #[test]
 fn a_relayed_claude_launch_allows_hooks_and_a_plain_one_disables_them() {
     let case = Case::new();

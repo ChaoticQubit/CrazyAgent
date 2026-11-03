@@ -13129,6 +13129,354 @@ fn a_native_teammate_cannot_type_into_its_lead_s_pane() {
     );
 }
 
+/// A native lead's teammate cannot put a command where its lead's Claude Code runs it ahead
+/// of every Bash command (rv-audit TPH r1 F2). Claude Code 2.1.309 sources
+/// `<CLAUDE_CONFIG_DIR>/shell-snapshots/snapshot-*.sh` before each Bash command and runs the
+/// hook scripts under `<CLAUDE_CONFIG_DIR>/session-env/<session>`. The lead's snapshot stands
+/// in its home as Claude Code leaves it, and its session folder is not made yet. The
+/// teammate, in its installed profile, appends to, replaces and adds a snapshot, moves the
+/// folder away and back, and makes a session hook script. The lead then runs both the way
+/// Claude Code's Bash prefix does, in its own profile: only its own snapshot line runs.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_teammate_cannot_plant_a_command_in_its_lead_s_shell_snapshot_or_session_env() {
+    use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    set_mode(
+        &fixture.connection,
+        &project,
+        HarnessKind::ClaudeCode,
+        SubagentMode::Native,
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        fixture.base.join("engine.db"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let host = crate::terminal::tmux_host(&fixture.base, Some(fixture.tmux.clone()));
+    let runtime = exiting_claude_runtime(&fixture)
+        .with_terminal(host.clone())
+        .unwrap();
+    let profile = reference("managed-profile");
+    let managed = runtime.custody.as_ref().unwrap().profile_home(&profile);
+    std::fs::create_dir_all(&managed).unwrap();
+    std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let account = TeamAccount {
+        connection: reference("managed-connection"),
+        reach: TeamReach::Managed {
+            profile_ref: profile,
+            model: None,
+        },
+    };
+    let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    let (_, plan, _) = runtime
+        .prepare(
+            &fixture.setup,
+            id,
+            AgentRole::Sub,
+            "claude-code",
+            true,
+            &account,
+            false,
+            Layout::Linked,
+        )
+        .unwrap();
+    assert!(plan.native, "the lead starts with native teammates");
+    let teammates = agent_teammates_profile(&runtime.state, id);
+    assert!(teammates.is_file());
+    let home = agent_home(&runtime.state, id);
+    let work = plan.working_dir.clone();
+    let snapshots = home.join("shell-snapshots");
+    std::fs::create_dir_all(&snapshots).unwrap();
+    let snapshot = snapshots.join("snapshot-zsh-1793192731382-81mk5z.sh");
+    let own = format!("echo ran > {}\n", work.join("lead-ran.txt").display());
+    std::fs::write(&snapshot, &own).unwrap();
+    let session = home
+        .join("session-env")
+        .join("0b6f1c2e-5d4a-4f3e-9a8b-7c6d5e4f3a2b");
+    let hook = session.join("sessionstart-hook-0.sh");
+
+    let marker = work.join("planted.txt");
+    let tried = work.join("tried.txt");
+    let mate = work.join("mate.sh");
+    let plant = format!("echo planted > {}", marker.display());
+    std::fs::write(
+        &mate,
+        format!(
+            "printf '{plant}\\n' >> '{snapshot}'; echo append=$? > {tried}\n\
+             rm -f '{snapshot}' && printf '{plant}\\n' > '{snapshot}'; echo replace=$? >> {tried}\n\
+             printf '{plant}\\n' > '{snapshots}/snapshot-zsh-1793192731383-added.sh'; echo add=$? >> {tried}\n\
+             mv '{snapshots}' '{snapshots}.away'; echo move=$? >> {tried}\n\
+             if [ -d '{snapshots}.away' ]; then mv '{snapshots}.away' '{snapshots}'; fi\n\
+             mkdir -p '{session}' && printf '{plant}\\n' > '{hook}'; echo session_env=$? >> {tried}\n",
+            snapshot = snapshot.display(),
+            snapshots = snapshots.display(),
+            session = session.display(),
+            hook = hook.display(),
+            tried = tried.display(),
+        ),
+    )
+    .unwrap();
+    let mated = crate::spawn_gate::output(
+        Command::new(crate::sandbox::SANDBOX_EXEC)
+            .arg("-f")
+            .arg(&teammates)
+            .arg("/bin/sh")
+            .arg(&mate)
+            .current_dir(&work)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    let attempts = std::fs::read_to_string(&tried).unwrap_or_default();
+    let ran = crate::spawn_gate::output(
+        Command::new(crate::sandbox::SANDBOX_EXEC)
+            .arg("-f")
+            .arg(&plan.sandbox_profile)
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg(format!(
+                "source '{snapshot}' 2>/dev/null || true; for f in '{session}'/*-hook-*.sh; do if [ -f \"$f\" ]; then . \"$f\"; fi; done",
+                snapshot = snapshot.display(),
+                session = session.display(),
+            ))
+            .current_dir(&work)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home)
+            .env("CLAUDE_CONFIG_DIR", &home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+
+    assert!(ran.status.success(), "{ran:?}");
+    assert!(
+        !marker.exists(),
+        "a teammate planted a command its lead's Bash runs: {attempts} {}",
+        String::from_utf8_lossy(&mated.stderr)
+    );
+    assert!(
+        work.join("lead-ran.txt").is_file(),
+        "the lead ran its own snapshot"
+    );
+    assert_eq!(std::fs::read_to_string(&snapshot).unwrap(), own);
+    for attempt in ["append", "replace", "add", "move", "session_env"] {
+        assert!(
+            attempts
+                .lines()
+                .any(|line| line.starts_with(&format!("{attempt}=")) && !line.ends_with("=0")),
+            "a teammate's {attempt} write in its lead's config home succeeded: {attempts}"
+        );
+    }
+}
+
+/// A native lead's teammates run in their own home and only read the lead's (TPH-2 C). A
+/// teammate in its installed profile cannot write the files the lead's shell, git, cargo
+/// and Claude Code read from the lead's home, nor the `git` first on the lead's path, nor
+/// leave a link in the team folders Claude Code shares, where the lead writes too. It still
+/// writes a mailbox, a lock, a task, its own home and its worktree. The lead's shell then
+/// starts in the lead's profile as Claude Code starts it, and runs nothing planted.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_teammate_writes_only_its_own_home_and_the_team_folders_its_lead_shares() {
+    use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    set_mode(
+        &fixture.connection,
+        &project,
+        HarnessKind::ClaudeCode,
+        SubagentMode::Native,
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        fixture.base.join("engine.db"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let host = crate::terminal::tmux_host(&fixture.base, Some(fixture.tmux.clone()));
+    let runtime = exiting_claude_runtime(&fixture)
+        .with_terminal(host.clone())
+        .unwrap();
+    let profile = reference("managed-profile");
+    let managed = runtime.custody.as_ref().unwrap().profile_home(&profile);
+    std::fs::create_dir_all(&managed).unwrap();
+    std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let account = TeamAccount {
+        connection: reference("managed-connection"),
+        reach: TeamReach::Managed {
+            profile_ref: profile,
+            model: None,
+        },
+    };
+    let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    let (_, plan, _) = runtime
+        .prepare(
+            &fixture.setup,
+            id,
+            AgentRole::Sub,
+            "claude-code",
+            true,
+            &account,
+            false,
+            Layout::Linked,
+        )
+        .unwrap();
+    assert!(plan.native, "the lead starts with native teammates");
+    let teammates = agent_teammates_profile(&runtime.state, id);
+    let home = agent_home(&runtime.state, id);
+    let mates = home.with_file_name("mates-home");
+    let work = plan.working_dir.clone();
+    let scratch = crate::sandbox::toolchains::existing_tmp(&home).unwrap();
+    let inboxes = home.join("teams").join("crazy-team").join("inboxes");
+    std::fs::create_dir_all(&inboxes).unwrap();
+    std::fs::write(inboxes.join("team-lead.json"), "[]").unwrap();
+    let tasks = home.join("tasks").join("crazy-team");
+    std::fs::create_dir_all(&tasks).unwrap();
+
+    let marker = work.join("planted.txt");
+    let tried = work.join("tried.txt");
+    let mate = work.join("mate.sh");
+    let plant = format!("echo planted > {}", marker.display());
+    std::fs::write(
+        &mate,
+        format!(
+            "try() {{ name=$1; shift; \"$@\" 2>/dev/null; echo \"$name=$?\" >> {tried}; }}\n\
+             try zshenv sh -c \"printf '{plant}\\n' >> '{home}/.zshenv'\"\n\
+             try gitconfig sh -c \"printf '[core]\\n\\tfsmonitor = {plant}\\n' >> '{home}/.gitconfig'\"\n\
+             try cargo sh -c \"printf '[build]\\nrustc-wrapper = \\\"/bin/sh\\\"\\n' > '{home}/.cargo/config.toml'\"\n\
+             try claude_json sh -c \"printf '{{}}' > '{home}/.claude.json'\"\n\
+             try transcript sh -c \"mkdir -p '{home}/projects/planted' && printf '{{}}\\n' > '{home}/projects/planted/s.jsonl'\"\n\
+             try path_git sh -c \"printf '#!/bin/sh\\n{plant}\\n' > '{scratch}/bin/git'\"\n\
+             try link ln -s '{home}/.zshenv' '{inboxes}/planted.json'\n\
+             mkdir -p '{work}/moved/inboxes' && ln -s '{home}/.zshenv' '{work}/moved/inboxes/team-lead.json'\n\
+             try moved_folder mv '{work}/moved' '{home}/teams/moved-team'\n\
+             try shared_folder mv '{home}/teams' '{work}/teams-away'\n\
+             try inbox sh -c \"printf '[]' > '{inboxes}/mate.json'\"\n\
+             try lock mkdir '{inboxes}/team-lead.json.lock'\n\
+             try task sh -c \"printf '{{}}' > '{tasks}/1.json'\"\n\
+             try own_home sh -c \"printf x > '{mates}/own.txt'\"\n\
+             try worktree sh -c \"printf x > '{work}/mate-wrote.txt'\"\n",
+            home = home.display(),
+            mates = mates.display(),
+            scratch = scratch.display(),
+            inboxes = inboxes.display(),
+            tasks = tasks.display(),
+            work = work.display(),
+            tried = tried.display(),
+        ),
+    )
+    .unwrap();
+    let mated = crate::spawn_gate::output(
+        Command::new(crate::sandbox::SANDBOX_EXEC)
+            .arg("-f")
+            .arg(&teammates)
+            .arg("/bin/sh")
+            .arg(&mate)
+            .current_dir(&work)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &mates)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    let attempts = std::fs::read_to_string(&tried).unwrap_or_default();
+    let ran = crate::spawn_gate::output(
+        Command::new(crate::sandbox::SANDBOX_EXEC)
+            .arg("-f")
+            .arg(&plan.sandbox_profile)
+            .arg("/bin/zsh")
+            .arg("-c")
+            .arg("git --version >/dev/null 2>&1; true")
+            .current_dir(&work)
+            .env_clear()
+            .env(
+                "PATH",
+                format!("{}:/usr/bin:/bin", scratch.join("bin").display()),
+            )
+            .env("HOME", &home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+
+    assert!(mated.status.success(), "{mated:?}");
+    assert!(ran.status.success(), "{ran:?}");
+    assert!(
+        !marker.exists(),
+        "a teammate planted a command its lead's shell runs: {attempts}"
+    );
+    let exit = |attempt: &str| {
+        attempts
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{attempt}=")))
+            .map(str::to_owned)
+    };
+    for attempt in [
+        "zshenv",
+        "gitconfig",
+        "cargo",
+        "claude_json",
+        "transcript",
+        "path_git",
+        "link",
+        "moved_folder",
+        "shared_folder",
+    ] {
+        assert!(
+            exit(attempt).is_some_and(|code| code != "0"),
+            "a teammate's {attempt} write in its lead's home succeeded: {attempts}"
+        );
+    }
+    for attempt in ["inbox", "lock", "task", "own_home", "worktree"] {
+        assert_eq!(
+            exit(attempt).as_deref(),
+            Some("0"),
+            "a teammate could not make its {attempt} write: {attempts}"
+        );
+    }
+    assert_eq!(
+        std::fs::symlink_metadata(&mates)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    for folder in ["teams", "tasks"] {
+        assert_eq!(
+            std::fs::read_link(mates.join(folder)).unwrap(),
+            home.join(folder)
+        );
+        assert!(
+            std::fs::symlink_metadata(home.join(folder))
+                .unwrap()
+                .is_dir()
+        );
+    }
+    let config: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(mates.join(".claude.json")).unwrap()).unwrap();
+    assert_eq!(
+        config["hasCompletedOnboarding"],
+        serde_json::Value::Bool(true)
+    );
+    assert_eq!(
+        config["projects"][work.to_str().unwrap()]["hasTrustDialogAccepted"],
+        serde_json::Value::Bool(true)
+    );
+}
+
 /// A native lead's teammate cannot change a hook its lead runs (brief residual 3). The
 /// project holds one owner hook, added through the plugin store as the owner adds one, and
 /// the lead's launch installs it into the lead's agent home as Claude Code reads it. The
