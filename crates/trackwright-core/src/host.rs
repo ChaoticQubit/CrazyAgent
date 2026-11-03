@@ -1,6 +1,10 @@
 use crate::model::{
-    Actor, CheckKind, OpKind, ProjectKey, Refusal, ShortId, Ticket, TicketKind, TicketStatus,
+    Actor, CheckKind, Link, OpKind, ProjectKey, Refusal, ShortId, Ticket, TicketKind, TicketStatus,
+    codes,
 };
+use crate::policy;
+use crate::store::{self, StoreError};
+use crate::text::{self, TextField};
 use rusqlite::Transaction;
 
 /// One link kind a host declares, for example `branch` or `change_set`. Fields: the stored
@@ -73,7 +77,8 @@ pub struct HostEvent {
 /// Resolves the links a host declares. Every method gets the open transaction, so a host
 /// reads its own tables in the same transaction as the core's write.
 pub trait Links {
-    /// The link kinds this host accepts. Output: the kinds.
+    /// The link kinds this host accepts. Output: the kinds; an empty list accepts any bounded
+    /// kind, as the standalone host does.
     fn kinds(&self) -> &[LinkKind];
 
     /// Checks one target. Inputs: the transaction, the project, the kind and the target.
@@ -111,6 +116,22 @@ pub trait Authority {
         op: OpKind,
         ticket: Option<&TicketView>,
     ) -> Result<(), Refusal>;
+
+    /// Tells whether the host sets every actor from its own knowledge of the caller. Output:
+    /// false when actors declare themselves, as in the standalone host, so policy binds
+    /// honest agents only; a `policy_get` reply says which.
+    fn actors_verified(&self) -> bool;
+
+    /// Checks one actor recording evidence for one check, before anything is written. It
+    /// has no default, so every host decides who may prove its checks. Inputs: the
+    /// transaction, the project, the actor and the check. Output: Ok, or the refusal.
+    fn evidence_may(
+        &self,
+        tx: &Transaction<'_>,
+        project: &ProjectKey,
+        actor: &Actor,
+        check: &CheckView,
+    ) -> Result<(), Refusal>;
 }
 
 /// Everything a host supplies: links, evidence and authority. Any type with the three is
@@ -118,3 +139,57 @@ pub trait Authority {
 pub trait Host: Links + Evidence + Authority {}
 
 impl<T: Links + Evidence + Authority> Host for T {}
+
+/// Links a ticket to a host target: the text is checked, the actor authorized, the kind
+/// matched against the host's kinds and the target resolved by the host in the same
+/// transaction before anything is written, so a refused link writes nothing. A closed
+/// ticket still takes links. Inputs: the transaction, the host, the actor, the ticket, the
+/// kind, the target and the time. Output: the link and what the host knows of its target.
+pub fn link(
+    tx: &Transaction<'_>,
+    host: &impl Host,
+    actor: &Actor,
+    id: &ShortId,
+    kind: &str,
+    target: &str,
+    now_ms: i64,
+) -> Result<(Link, LinkState), StoreError> {
+    text::check(TextField::LinkKind, kind)?;
+    text::check(TextField::LinkTarget, target)?;
+    let ticket = store::ticket(tx, id)?;
+    policy::authorize(tx, host, actor, OpKind::Link, &ticket)?;
+    let kinds = host.kinds();
+    if !kinds.is_empty() && !kinds.iter().any(|declared| declared.name == kind) {
+        return Err(store::refusal(
+            codes::LINK_KIND_UNKNOWN,
+            format!("this tracker links no {kind}"),
+        ));
+    }
+    let state = host
+        .resolve(tx, id.key(), kind, target)
+        .map_err(StoreError::Refused)?;
+    let link = store::add_link(tx, actor, id, kind, target, now_ms)?;
+    assert_eq!(link.kind, kind);
+    assert_eq!(link.target, target);
+    Ok((link, state))
+}
+
+/// Removes a ticket's link after authorizing the actor. Inputs: the transaction, the host,
+/// the actor, the ticket, the kind, the target and the time. Output: the removed link, or
+/// `link_unknown` or the refusal.
+pub fn unlink(
+    tx: &Transaction<'_>,
+    host: &impl Host,
+    actor: &Actor,
+    id: &ShortId,
+    kind: &str,
+    target: &str,
+    now_ms: i64,
+) -> Result<Link, StoreError> {
+    let ticket = store::ticket(tx, id)?;
+    policy::authorize(tx, host, actor, OpKind::Unlink, &ticket)?;
+    let removed = store::remove_link(tx, actor, id, kind, target, now_ms)?;
+    assert_eq!(removed.kind, kind);
+    assert_eq!(removed.target, target);
+    Ok(removed)
+}

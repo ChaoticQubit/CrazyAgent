@@ -68,6 +68,7 @@ CREATE TABLE tk_tickets(
     version INTEGER NOT NULL CHECK (version >= 1),
     UNIQUE (project, number)
 );
+CREATE INDEX tk_tickets_created_by ON tk_tickets(created_by, status);
 CREATE TABLE tk_deps(
     ticket INTEGER NOT NULL REFERENCES tk_tickets(id),
     blocks INTEGER NOT NULL REFERENCES tk_tickets(id),
@@ -122,6 +123,7 @@ CREATE TABLE tk_events(
 );
 CREATE INDEX tk_events_ticket ON tk_events(ticket, id);
 CREATE INDEX tk_events_project ON tk_events(project, id);
+CREATE INDEX tk_events_actor ON tk_events(actor, at_ms);
 CREATE TABLE tk_requests(
     actor TEXT NOT NULL,
     request_id TEXT NOT NULL,

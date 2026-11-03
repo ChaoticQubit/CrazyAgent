@@ -1,4 +1,4 @@
-use crate::model::{Actor, Criterion, Event, Link, ProjectKey, ShortId, Ticket};
+use crate::model::{Actor, Check, Criterion, Event, Evidence, Link, ProjectKey, ShortId, Ticket};
 use crate::runs;
 use crate::store::{self, State, StoreError};
 use crate::tests_store;
@@ -14,6 +14,10 @@ pub const CRITERION_ADD: &str = "criterion.add";
 pub const CRITERION_SET: &str = "criterion.set";
 pub const LINK_ADD: &str = "link.add";
 pub const LINK_REMOVE: &str = "link.remove";
+pub const CRITERION_EDIT: &str = "criterion.edit";
+pub const CHECK_ADD: &str = "check.add";
+pub const EVIDENCE_RECORD: &str = "evidence.record";
+pub const POLICY_SET: &str = "policy.set";
 
 /// Every event op the core writes and replays.
 pub const OPS: &[&str] = &[
@@ -24,6 +28,10 @@ pub const OPS: &[&str] = &[
     CRITERION_SET,
     LINK_ADD,
     LINK_REMOVE,
+    CRITERION_EDIT,
+    CHECK_ADD,
+    EVIDENCE_RECORD,
+    POLICY_SET,
 ];
 
 pub(crate) const EVENT_INSERT: &str = "INSERT INTO tk_events(ticket, project, at_ms, actor, op, \
@@ -81,28 +89,38 @@ pub fn history(tx: &Transaction<'_>, id: &ShortId) -> Result<Vec<Event>, StoreEr
     read(tx, EVENTS_OF_TICKET, ticket.id)
 }
 
-/// Rebuilds a project's tickets, criteria and links from its events alone, in the order
-/// `store::state` reads the tables. Inputs: the transaction and the key. Output: the
-/// state, or `project_unknown`, or `Corrupt` for an event this core cannot apply.
+/// Rebuilds a project's tickets, criteria, links, checks and evidence from its events alone,
+/// in the order `store::state` reads the tables. Inputs: the transaction and the key.
+/// Output: the state, or `project_unknown`, or `Corrupt` for an event this core cannot apply.
 pub fn replay(tx: &Transaction<'_>, key: &ProjectKey) -> Result<State, StoreError> {
     let project = store::project(tx, key)?;
     let mut tickets: BTreeMap<i64, Ticket> = BTreeMap::new();
     let mut criteria: BTreeMap<(i64, u32), Criterion> = BTreeMap::new();
     let mut links: BTreeMap<(i64, String, String), Link> = BTreeMap::new();
+    let mut checks: BTreeMap<i64, Check> = BTreeMap::new();
+    let mut evidence: BTreeMap<i64, Evidence> = BTreeMap::new();
     for event in read(tx, EVENTS_OF_PROJECT, project.id)? {
         match event.op.as_str() {
-            PROJECT_CREATE => {}
+            PROJECT_CREATE | POLICY_SET => {}
             TICKET_CREATE | TICKET_UPDATE => {
                 let ticket: Ticket = row(event.after)?;
                 tickets.insert(ticket.id, ticket);
             }
-            CRITERION_ADD | CRITERION_SET => {
+            CRITERION_ADD | CRITERION_SET | CRITERION_EDIT => {
                 let criterion: Criterion = row(event.after)?;
                 criteria.insert((criterion.ticket, criterion.position), criterion);
             }
             LINK_ADD => {
                 let link: Link = row(event.after)?;
                 links.insert((link.ticket, link.kind.clone(), link.target.clone()), link);
+            }
+            CHECK_ADD => {
+                let check: Check = row(event.after)?;
+                checks.insert(check.id, check);
+            }
+            EVIDENCE_RECORD => {
+                let recorded: Evidence = row(event.after)?;
+                evidence.insert(recorded.id, recorded);
             }
             LINK_REMOVE => {
                 let link: Link = row(event.before)?;
@@ -126,6 +144,8 @@ pub fn replay(tx: &Transaction<'_>, key: &ProjectKey) -> Result<State, StoreErro
         tickets,
         criteria: criteria.into_values().collect(),
         links: links.into_values().collect(),
+        checks: checks.into_values().collect(),
+        evidence: evidence.into_values().collect(),
     })
 }
 
