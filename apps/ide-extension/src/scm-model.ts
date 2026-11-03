@@ -72,6 +72,11 @@ export const IDE_CONFIG = "ide_config";
  * which Accept lands, served by the engine and never the agent's live worktree. */
 export const HEAD_SCHEME = "crazyagent-head";
 
+/** What a row that opens the agent's worktree file adds to its tooltip: the engine serves
+ * only text at the recorded head, so a binary file, link or submodule opens as the agent
+ * has it now, which may have changed since the set was recorded. */
+export const LIVE_FILE = "Opens the agent's current file: Accept lands the version it recorded";
+
 const SET_ID = /^[0-9a-f]{32}$/;
 const CONFLICT_SHOWN = 5;
 const UNSAFE = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
@@ -134,6 +139,8 @@ const UNCONFIRMED: Record<string, string> = {
   ide_agent_message_outcome_unknown: "CrazyAgent couldn't confirm the agent got this message. Check its terminal before you send it again.",
   ide_memory_decide_outcome_unknown: "CrazyAgent couldn't confirm your decision on this memory. Check the CrazyAgent window before you decide again.",
   ide_extension_decide_outcome_unknown: "CrazyAgent couldn't confirm your decision on this update. Check the CrazyAgent app before you decide again.",
+  ide_extension_request_outcome_unknown: "CrazyAgent couldn't confirm it got your request for this extension. Check the CrazyAgent app before you ask again.",
+  ide_show_all_agents_outcome_unknown: "CrazyAgent couldn't confirm the agent folders changed. Check the Explorer before you try again.",
   ide_git_outcome_unknown: "CrazyAgent couldn't confirm this git command finished. It may have run, so check the branch and its remote before you run it again.",
 };
 
@@ -217,7 +224,7 @@ function resource(set: IdeChangeSet, file: IdeFile): ScmResource {
     head: open === "diff" ? basePath(set.id, file.path) : null,
     open,
     letter: LETTERS[file.status],
-    tooltip: tooltip(file),
+    tooltip: open === "file" ? `${tooltip(file)}, ${LIVE_FILE}` : tooltip(file),
     strikeThrough: file.status === "deleted",
   };
 }

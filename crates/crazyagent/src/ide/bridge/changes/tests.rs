@@ -556,32 +556,39 @@ fn the_head_side_of_a_diff_is_the_recorded_head_while_the_agent_works_on() {
     );
 }
 
+/// IDE Accept lands the head the set recorded, which its diff shows, while the agent's
+/// worktree already holds its next turn, as the desktop's Accept does: the newer edits stay
+/// out of the landed commit and stay in the worktree.
 #[test]
-fn ide_accept_waits_while_the_agent_worktree_holds_more_than_the_reviewed_head() {
+fn ide_accept_lands_the_reviewed_head_while_the_agent_worktree_holds_more() {
     let case = Case::new();
     let set = case.only(NOW);
     let start = case.owner_head();
-    let landing = || {
-        accept(
-            &case.db,
-            &case.home,
-            &case.project,
-            &set.id,
-            &set.head,
-            "Land it",
-        )
-    };
     std::fs::write(case.worktree.join("README"), "dos\n").unwrap();
-    assert_eq!(landing().unwrap_err().0, "changes_agent_busy");
-    std::fs::write(case.worktree.join("README"), "uno\ntwo\nthree\n").unwrap();
     std::fs::write(case.worktree.join("SCRATCH"), "the next turn\n").unwrap();
-    assert_eq!(landing().unwrap_err().0, "changes_agent_busy");
-    assert_eq!(case.owner_head(), start);
-    assert_eq!(case.only(NOW).state, ChangeState::Pending);
-    std::fs::remove_file(case.worktree.join("SCRATCH")).unwrap();
-    let landed = landing().unwrap();
+    let landed = accept(
+        &case.db,
+        &case.home,
+        &case.project,
+        &set.id,
+        &set.head,
+        "Land it",
+    )
+    .unwrap();
     assert!(matches!(landed, AcceptOutcome::Landed { .. }), "{landed:?}");
-    assert_ne!(case.owner_head(), start);
+    let head = case.owner_head();
+    assert_ne!(head, start);
+    let landed_text =
+        |path: &str| git_in(&case.home, &case.repo, &["show", &format!("{head}:{path}")]);
+    assert_eq!(landed_text("README"), "uno\ntwo\nthree\n");
+    assert_eq!(landed_text("NOTES"), "added by the agent\n");
+    let names = git_in(&case.home, &case.repo, &["ls-tree", "--name-only", &head]);
+    assert!(!names.lines().any(|name| name == "SCRATCH"), "{names}");
+    assert_eq!(
+        std::fs::read_to_string(case.worktree.join("README")).unwrap(),
+        "dos\n"
+    );
+    assert!(case.worktree.join("SCRATCH").exists());
 }
 
 #[test]

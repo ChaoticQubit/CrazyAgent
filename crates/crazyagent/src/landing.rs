@@ -283,6 +283,10 @@ pub const BRANCHES_MAX: usize = 256;
 /// The longest branch name an Accept target may have, in bytes.
 pub const BRANCH_BYTES_MAX: usize = 255;
 
+/// How long a change set store statement waits on another engine connection's write lock
+/// before it fails.
+pub(crate) const BUSY_WAIT: Duration = Duration::from_secs(5);
+
 fn unavailable() -> EngineError {
     EngineError("changes_unavailable".into())
 }
@@ -294,8 +298,7 @@ pub fn open(runtime: &Path) -> Result<Connection, EngineError> {
         return Err(unavailable());
     }
     let db = Connection::open(runtime.join("engine.db")).map_err(|_| unavailable())?;
-    db.busy_timeout(Duration::from_secs(5))
-        .map_err(|_| unavailable())?;
+    db.busy_timeout(BUSY_WAIT).map_err(|_| unavailable())?;
     #[cfg(unix)]
     store::initialize(&db)?;
     Ok(db)
