@@ -16,6 +16,10 @@ use trackwright_core::model::{ClosePolicy, codes};
 const PROJECT: &str = "alpha";
 const KEY: &str = "CA";
 const OWNER_WAIT_MS: u64 = 5000;
+const PLANNED: &str = "# Roadmap\n## V1: first release\nScope:\n- Sign in with a magic link\n\n\
+    ## Risks\n- The board may be slow on phones.\n\n# Release process\n\
+    ## Before the tag\n- [ ] Run the full suite\n\n# Open questions\n\
+    - Which payment provider should V1 use?\n";
 
 fn key() -> ProjectKey {
     ProjectKey::new(KEY).unwrap()
@@ -412,12 +416,8 @@ fn tracker_codes_cover_every_core_code() {
 fn an_unparsed_roadmap_section_becomes_one_question() {
     let (_tmp, root, folder) = engine();
     attached(&root);
-    let reply = "# Roadmap\n## V1: first release\nScope:\n- Sign in with a magic link\n\n\
-        ## Risks\n- The board may be slow on phones.\n\n# Release process\n\
-        ## Before the tag\n- [ ] Run the full suite\n\n# Open questions\n\
-        - Which payment provider should V1 use?\n";
     let state = folder.join(".crazyagent");
-    let plan = crate::planning::publish(&state, reply, "codex").unwrap();
+    let plan = crate::planning::publish(&state, PLANNED, "codex").unwrap();
     let database = root.join("engine.db");
     assert_eq!(
         crate::planning::raise(&database, PROJECT, &plan)
@@ -545,4 +545,91 @@ fn tickets_md_is_rewritten_escaped_and_follows_no_link() {
         true
     );
     assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+}
+
+/// Saves one project's ticket settings over the owner protocol. Inputs: the engine root,
+/// the values and the version read. Output: the saved version.
+fn saved(root: &Path, values: serde_json::Value, version: u64) -> u64 {
+    let body = json!({"tracker": {"kind": "save_settings", "project": PROJECT,
+        "values": values, "version": version}});
+    match send(root, body).unwrap() {
+        Reply::Saved {
+            saved: SettingsSaved::Saved { version },
+        } => version,
+        other => panic!("expected a saved version, got {other:?}"),
+    }
+}
+
+/// Counts what an import leaves behind: the project's tickets, its import marks and its
+/// pending owner questions. Input: the engine root. Output: the three counts.
+fn left_behind(root: &Path) -> (usize, i64, usize) {
+    let listed = op(root, "list", json!({"project": KEY}));
+    let tickets = listed["data"]["tickets"].as_array().unwrap().len();
+    let db = questions::open(root).unwrap();
+    let marks: i64 = db
+        .query_row("SELECT count(*) FROM tracker_context_imports", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let asked = questions::page(&db, &project(), None).unwrap().items.len();
+    (tickets, marks, asked)
+}
+
+#[test]
+fn an_on_request_project_imports_nothing_after_planning() {
+    let (_tmp, root, folder) = engine();
+    attached(&root);
+    assert_eq!(saved(&root, json!({"import": "on_request"}), 0), 1);
+    crate::planning::publish(&folder.join(".crazyagent"), PLANNED, "codex").unwrap();
+    let database = root.join("engine.db");
+
+    let skipped = context_import::after_planning(&database, PROJECT).unwrap();
+    assert_eq!(skipped, Imported::Skipped);
+    assert_eq!(left_behind(&root), (0, 0, 0));
+
+    assert_eq!(saved(&root, json!({"import": "auto_once"}), 1), 2);
+    let imported = context_import::after_planning(&database, PROJECT).unwrap();
+    assert_eq!(
+        imported,
+        Imported::Applied {
+            items: 3,
+            questions: 1
+        }
+    );
+    assert_eq!(left_behind(&root), (2, 1, 1));
+}
+
+#[test]
+fn a_context_file_the_tracker_refuses_becomes_one_question() {
+    let (_tmp, root, folder) = engine();
+    attached(&root);
+    let state = folder.join(".crazyagent");
+    crate::planning::publish(&state, PLANNED, "codex").unwrap();
+    std::fs::remove_file(state.join("context/release-process.md")).unwrap();
+
+    let imported = context_import::after_planning(&root.join("engine.db"), PROJECT).unwrap();
+    assert_eq!(
+        imported,
+        Imported::Applied {
+            items: 2,
+            questions: 2
+        }
+    );
+    assert_eq!(left_behind(&root), (1, 1, 2));
+    let db = questions::open(&root).unwrap();
+    let page = questions::page(&db, &project(), None).unwrap();
+    let refused: Vec<_> = page
+        .items
+        .iter()
+        .filter(|q| q.question.contains("did not apply release-process.md"))
+        .collect();
+    assert_eq!(refused.len(), 1, "{:?}", page.items);
+    assert!(
+        refused[0].question.contains(codes::IMPORT_PATH_REFUSED),
+        "{}",
+        refused[0].question
+    );
+    assert_eq!(refused[0].asker, "engine:planning");
+    let context = refused[0].context.as_deref().unwrap();
+    assert!(context.contains("context/release-process.md"), "{context}");
 }
