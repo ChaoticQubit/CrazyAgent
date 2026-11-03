@@ -7,6 +7,7 @@ use serde_json::Value;
 use std::collections::BTreeMap;
 use std::ops::Range;
 
+pub mod apply;
 pub mod catalog;
 pub mod installed;
 pub mod store;

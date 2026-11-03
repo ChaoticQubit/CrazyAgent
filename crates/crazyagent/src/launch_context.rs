@@ -1,4 +1,5 @@
 use crate::agent_git::Layout;
+use crate::harness_settings::apply::Applied;
 use crate::harnesses::launch::LaunchError;
 use crate::plugins::{
     EffectivePlugins, EffectiveSkill, LaunchPlugins, LaunchSecret, LaunchServer, ServerSpec,
@@ -92,14 +93,15 @@ fn skill_unavailable<E>(_: E) -> LaunchError {
 
 /// What every agent the engine launches for one project receives: the approved skills and
 /// MCP servers with their secret values, one bounded startup instruction holding the
-/// project brief, an index of its context files and the owner-approved memories, and
-/// whether a headless Claude run keeps its transcript.
+/// project brief, an index of its context files and the owner-approved memories, whether
+/// a headless Claude run keeps its transcript, and the owner's harness settings.
 #[derive(Debug)]
 pub struct AgentContext {
     plugins: LaunchPlugins,
     instructions: String,
     process: Option<Box<Process>>,
     transcripts: bool,
+    settings: Applied,
 }
 
 /// The owner's app and project instructions and the instruction files one launch writes
@@ -111,14 +113,16 @@ struct Process {
 }
 
 /// The files one launch wrote into its agent home, whether a headless Claude run keeps its
-/// transcript, and the lock that keeps a second launch out of that home. Dropping it
-/// deletes every file holding a secret and the copied skills.
+/// transcript, the owner's settings for its harness, and the lock that keeps a second
+/// launch out of that home. Dropping it deletes every file holding a secret and the copied
+/// skills.
 #[derive(Debug)]
 pub struct Installed {
     arguments: Vec<OsString>,
     removals: Vec<PathBuf>,
     copies: Option<PathBuf>,
     transcripts: bool,
+    settings: Applied,
     _lock: File,
 }
 
@@ -155,6 +159,7 @@ pub fn for_project(
             given,
         })),
         transcripts,
+        settings: Applied::default(),
     })
 }
 
@@ -455,6 +460,27 @@ impl AgentContext {
         self
     }
 
+    /// Gives every launch of this context the owner's settings for one harness, from
+    /// [`crate::harness_settings::apply::for_launch`]. Input: the settings. Output: the
+    /// context, which then installs only for that harness.
+    pub fn with_harness_settings(mut self, settings: Applied) -> Self {
+        self.settings = settings;
+        self
+    }
+
+    /// Builds a context with no skills, MCP servers, process files or owner settings,
+    /// for tests that need a real `install`. Output: the context.
+    #[cfg(test)]
+    pub(crate) fn empty() -> Self {
+        Self {
+            plugins: LaunchPlugins::default(),
+            instructions: "# Project context from CrazyAgent\n".into(),
+            process: None,
+            transcripts: false,
+            settings: Applied::default(),
+        }
+    }
+
     /// Reports whether any MCP secret value occurs in `text`, so launchers can prove a
     /// command line or environment never carries one.
     pub fn exposes_secret(&self, text: &[u8]) -> bool {
@@ -484,11 +510,13 @@ impl AgentContext {
         crate::harnesses::launch::validate_home(home)?;
         let lock = lock(home)?;
         let state = home.join(STATE);
+        assert!(self.settings.harness().is_none_or(|harness| harness == id));
         let mut installed = Installed {
             arguments: Vec::new(),
             removals: vec![state.clone()],
             copies: None,
             transcripts: self.transcripts,
+            settings: self.settings.clone(),
             _lock: lock,
         };
         remove(&state);
@@ -605,6 +633,12 @@ impl Installed {
     /// project's "Keep transcripts for headless Claude runs" setting says.
     pub fn keeps_transcript(&self) -> bool {
         self.transcripts
+    }
+
+    /// Returns the owner's settings this launch's harness starts with, see
+    /// [`crate::harness_settings::apply`].
+    pub fn harness_settings(&self) -> &Applied {
+        &self.settings
     }
 }
 

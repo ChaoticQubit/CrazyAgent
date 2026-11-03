@@ -85,6 +85,21 @@ pub(crate) const CLAUDE_BUILT_IN_AGENTS: [&str; 3] = ["Agent", "Workflow", "Team
 /// the turn's result, which the engine would read as the next task's reply.
 const CLAUDE_BACKGROUND_TASKS_OFF: (&str, &str) = ("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1");
 const CLAUDE_SETTINGS: &str = "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"disableAllHooks\":true,\"includeCoAuthoredBy\":false}";
+/// Claude Code settings the engine sets on some launches only, such as the key helper of a
+/// keyed account; no owner value ever takes one.
+pub(crate) const CLAUDE_ENGINE_KEYS: [&str; 2] =
+    ["apiKeyHelper", "skipDangerousModePermissionPrompt"];
+/// Codex settings the engine sets on some launches only or writes into the agent's
+/// `config.toml`: the account's provider and model, the project's MCP servers and a pane's
+/// trusted folder; no owner value ever takes one.
+pub(crate) const CODEX_ENGINE_KEYS: [&str; 6] = [
+    "mcp_servers",
+    "model",
+    "model_provider",
+    "model_providers",
+    "projects",
+    "check_for_update_on_startup",
+];
 const CLAUDE_COMMON: [&str; 12] = [
     "--print",
     "--verbose",
@@ -430,7 +445,7 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         .map(|_| key_file_text(&home.join(KEY_FILE)))
         .transpose()?;
     let (arguments, environment) = match harness_id(request) {
-        "codex" => codex_invocation(request, installed.is_some(), key_file.as_deref()),
+        "codex" => codex_invocation(request, installed, key_file.as_deref()),
         "claude-code" => claude_invocation(request, installed, key_file.as_deref()),
         _ => return Err(failure("launch_harness_unsupported")),
     };
@@ -497,11 +512,23 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
     Ok(command)
 }
 
-fn codex_invocation(request: &LaunchRequest, context: bool, key_file: Option<&str>) -> Invocation {
+fn codex_invocation(
+    request: &LaunchRequest,
+    installed: Option<&Installed>,
+    key_file: Option<&str>,
+) -> Invocation {
     let home = request.account.home().as_os_str().to_owned();
     let environment = vec![("CODEX_HOME", home)];
+    let engine = codex_configuration(request, installed.is_some(), key_file);
+    let owner = installed.map_or_else(Vec::new, |installed| {
+        crate::harness_settings::apply::codex_lines(
+            &engine,
+            &CODEX_ENGINE_KEYS,
+            installed.harness_settings(),
+        )
+    });
     let mut arguments = Vec::new();
-    for setting in codex_configuration(request, context, key_file) {
+    for setting in owner.into_iter().chain(engine) {
         arguments.push(OsString::from("-c"));
         arguments.push(OsString::from(setting));
     }
@@ -573,15 +600,29 @@ pub(super) fn codex_configuration(
 }
 
 /// Claude Code's `--settings` for one launch: the fixed settings, plus for a keyed account
-/// an `apiKeyHelper` that prints its relay token from `key_file` (see [`key_file_text`]).
-/// Input: the key file of a keyed account. Output: the settings JSON.
-fn claude_settings(key_file: Option<&str>) -> String {
-    let Some(key_file) = key_file else {
+/// an `apiKeyHelper` that prints its relay token from `key_file` (see [`key_file_text`]),
+/// merged over the owner's Claude Code settings of the installed context. Inputs: the key
+/// file of a keyed account and the installed context. Output: the settings JSON.
+fn claude_settings(key_file: Option<&str>, installed: Option<&Installed>) -> String {
+    let owner = installed
+        .map(Installed::harness_settings)
+        .filter(|owner| !owner.values().is_empty());
+    if key_file.is_none() && owner.is_none() {
         return CLAUDE_SETTINGS.to_owned();
-    };
+    }
     let mut settings: serde_json::Value =
         serde_json::from_str(CLAUDE_SETTINGS).expect("fixed Claude settings are JSON");
-    settings["apiKeyHelper"] = format!("/bin/cat '{key_file}'").into();
+    if let Some(key_file) = key_file {
+        settings["apiKeyHelper"] = format!("/bin/cat '{key_file}'").into();
+    }
+    if let Some(owner) = owner {
+        settings = crate::harness_settings::apply::json_settings(
+            &settings,
+            owner,
+            crate::harness_settings::Apply::ClaudeSettings,
+            &CLAUDE_ENGINE_KEYS,
+        );
+    }
     settings.to_string()
 }
 
@@ -592,7 +633,7 @@ fn claude_invocation(
 ) -> Invocation {
     assert_eq!(request.account.key().is_some(), key_file.is_some());
     let home = request.account.home().as_os_str().to_owned();
-    let settings = claude_settings(key_file);
+    let settings = claude_settings(key_file, installed);
     let keep = installed.is_some_and(Installed::keeps_transcript);
     let mut arguments: Vec<OsString> = CLAUDE_COMMON
         .iter()

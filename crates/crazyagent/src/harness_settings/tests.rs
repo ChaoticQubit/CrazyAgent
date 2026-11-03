@@ -3,15 +3,24 @@ use serde_json::{Value, json};
 use std::time::Duration;
 
 const CODEX: &str = include_str!("../../tests/fixtures/harness-settings/codex.json");
+const CLAUDE_CODE: &str = include_str!("../../tests/fixtures/harness-settings/claude-code.json");
+const RCLI: &str = include_str!("../../tests/fixtures/harness-settings/rcli.json");
 
-/// Parses one fixture catalog the HS-2 and HS-3 tests share. Input: the harness id, `codex`.
-/// Output: the catalog; a fixture that breaks the contract fails the calling test.
-pub(crate) fn fixture(harness: &str) -> Catalog {
-    let text = match harness {
+/// Reads one fixture catalog the HS-2 and HS-3 tests share, as its JSON text. Input: the
+/// harness id, `codex`, `claude-code` or `rcli`. Output: the text.
+pub(crate) fn fixture_text(harness: &str) -> &'static str {
+    match harness {
         "codex" => CODEX,
+        "claude-code" => CLAUDE_CODE,
+        "rcli" => RCLI,
         other => panic!("no fixture catalog for {other}"),
-    };
-    catalog::parse(text.as_bytes()).unwrap()
+    }
+}
+
+/// Parses one fixture catalog. Input: the harness id, as for `fixture_text`. Output: the
+/// catalog; a fixture that breaks the contract fails the calling test.
+pub(crate) fn fixture(harness: &str) -> Catalog {
+    catalog::parse(fixture_text(harness).as_bytes()).unwrap()
 }
 
 fn fixture_json() -> Value {
@@ -141,6 +150,10 @@ fn a_catalog_that_breaks_the_contract_is_refused() {
         (
             "apply of another harness",
             Box::new(|c| c["keys"][0]["apply"] = json!("claude_settings")),
+        ),
+        (
+            "a key inside another key",
+            Box::new(|c| c["keys"][3]["key"] = json!("hide_agent_reasoning.label")),
         ),
         (
             "too many keys",

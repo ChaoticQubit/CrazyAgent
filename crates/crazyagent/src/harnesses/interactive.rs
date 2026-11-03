@@ -1,8 +1,10 @@
 use super::launch::{
-    AccountBinding, CLAUDE_BUILT_IN_AGENTS, CLAUDE_DENY_FLAG, CLAUDE_NO_MCP, LOCAL_PLACEHOLDER_KEY,
-    LaunchError, LaunchRequest, SANDBOX_EXEC, Secret, TOOLS_OFF_PATH, TOOLS_ON_PATH,
-    codex_configuration, failure, harness_id, key_file_text, validate,
+    AccountBinding, CLAUDE_BUILT_IN_AGENTS, CLAUDE_DENY_FLAG, CLAUDE_ENGINE_KEYS, CLAUDE_NO_MCP,
+    CODEX_ENGINE_KEYS, LOCAL_PLACEHOLDER_KEY, LaunchError, LaunchRequest, SANDBOX_EXEC, Secret,
+    TOOLS_OFF_PATH, TOOLS_ON_PATH, codex_configuration, failure, harness_id, key_file_text,
+    validate,
 };
+use crate::harness_settings::{Apply, apply};
 use crate::launch_context::Installed;
 use crate::sandbox::toolchains::{self, ToolHomes};
 use std::ffi::OsStr;
@@ -247,12 +249,7 @@ pub fn command(
     let transcript = match harness_id(request) {
         "codex" => {
             argv.push(executable);
-            argv.extend(codex(
-                request,
-                installed.is_some(),
-                &cwd,
-                key_file.as_deref(),
-            )?);
+            argv.extend(codex(request, installed, &cwd, key_file.as_deref())?);
             if run.resume {
                 argv.extend([
                     "resume".to_owned(),
@@ -343,20 +340,24 @@ fn text(path: &Path) -> Result<String, LaunchError> {
 
 fn codex(
     request: &LaunchRequest,
-    context: bool,
+    installed: Option<&Installed>,
     cwd: &Path,
     key_file: Option<&str>,
 ) -> Result<Vec<String>, LaunchError> {
     let folder = serde_json::to_string(&text(cwd)?)
         .map_err(|_| failure("launch_working_dir_unavailable"))?;
-    let mut arguments = Vec::new();
-    for setting in codex_configuration(request, context, key_file)
+    let engine: Vec<String> = codex_configuration(request, installed.is_some(), key_file)
         .into_iter()
         .chain([
             "check_for_update_on_startup=false".to_owned(),
             format!("projects={{{folder}={{trust_level=\"trusted\"}}}}"),
         ])
-    {
+        .collect();
+    let owner = installed.map_or_else(Vec::new, |installed| {
+        apply::codex_lines(&engine, &CODEX_ENGINE_KEYS, installed.harness_settings())
+    });
+    let mut arguments = Vec::new();
+    for setting in owner.into_iter().chain(engine) {
         arguments.push("-c".to_owned());
         arguments.push(setting);
     }
@@ -377,6 +378,14 @@ fn claude(
     });
     if let Some(key_file) = key_file {
         settings["apiKeyHelper"] = format!("/bin/cat '{key_file}'").into();
+    }
+    if let Some(installed) = installed {
+        settings = apply::json_settings(
+            &settings,
+            installed.harness_settings(),
+            Apply::ClaudeSettings,
+            &CLAUDE_ENGINE_KEYS,
+        );
     }
     let mut arguments = vec![
         "--strict-mcp-config".to_owned(),

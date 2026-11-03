@@ -136,8 +136,20 @@ fn valid(catalog: &Catalog) -> bool {
         });
     let keys = (1..=KEYS_MAX).contains(&catalog.keys.len())
         && distinct(catalog.keys.iter().map(|key| &key.key))
+        && !nested(&catalog.keys)
         && catalog.keys.iter().all(|key| key_ok(harness, key));
     known && versions && sources && keys
+}
+
+/// Tells whether one key names a table another key sits in, such as `tui` and
+/// `tui.theme`: a start could not set both. Input: the keys. Output: the answer.
+fn nested(keys: &[Key]) -> bool {
+    let names: BTreeSet<&str> = keys.iter().map(|key| key.key.as_str()).collect();
+    keys.iter().any(|key| {
+        key.key
+            .match_indices('.')
+            .any(|(end, _)| names.contains(&key.key[..end]))
+    })
 }
 
 fn distinct<'a>(items: impl Iterator<Item = &'a String>) -> bool {

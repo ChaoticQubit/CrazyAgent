@@ -3444,7 +3444,16 @@ impl TeamRuntime {
             private_directory(&tmp.join(tool::MAILBOX_FOLDER))
                 .map_err(|e| with_code("the agent's tool mailbox could not be made", Some(&e.0)))?;
         }
-        let context = self.context(&stored.project_id, id, role, tools, layout)?;
+        let settings = crate::harness_settings::apply::for_launch(
+            &self.connection,
+            launch,
+            executable,
+            Some(&stored.project_id),
+        )
+        .map_err(|e| with_code("the harness settings could not be read", Some(&e.0)))?;
+        let context = self
+            .context(&stored.project_id, id, role, tools, layout)?
+            .with_harness_settings(settings);
         let network = if tools {
             SandboxNetwork::Open
         } else {

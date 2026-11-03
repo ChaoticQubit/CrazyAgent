@@ -202,6 +202,7 @@ fn a_home_is_free_once_its_launch_ends_even_while_a_child_shares_its_lock() {
         instructions: "# Project context from CrazyAgent\n".into(),
         process: None,
         transcripts: true,
+        settings: Applied::default(),
     };
     let installed = context.install("codex", &home, false).unwrap();
     let mut child = crate::spawn_gate::spawn(
@@ -240,6 +241,7 @@ fn a_team_master_with_tools_on_gets_the_engine_delegate_tool() {
         instructions: "# Project context from CrazyAgent\n".into(),
         process: None,
         transcripts: true,
+        settings: Applied::default(),
     };
     let context = fresh().with_team_tool(engine, &record).unwrap();
     assert_eq!(
@@ -344,6 +346,7 @@ fn a_team_master_with_tools_off_hears_the_team_plugin_names() {
         instructions: "# Project context from CrazyAgent\n".into(),
         process: None,
         transcripts: true,
+        settings: Applied::default(),
     }
     .with_index(&plugins);
     let home = root.join("codex");
@@ -383,6 +386,7 @@ fn a_skills_link_a_sandboxed_agent_plants_never_steers_a_removal_outside_its_hom
         instructions: String::new(),
         process: None,
         transcripts: true,
+        settings: Applied::default(),
     };
 
     agents.shell(&plant);
@@ -525,6 +529,7 @@ fn every_master_and_sub_agent_with_the_team_server_is_told_to_ask_through_ask() 
         instructions,
         process: None,
         transcripts: false,
+        settings: Applied::default(),
     };
     let start = "# Project context from CrazyAgent\n";
     assert!(!fresh(start.into()).instructions().contains(rule));
@@ -636,6 +641,7 @@ fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
         instructions: "# Project context from CrazyAgent\n".into(),
         process: Some(Box::new(Process { project, given })),
         transcripts: true,
+        settings: Applied::default(),
     };
     let home = |name: &str| {
         let home = root.join(name);
@@ -727,6 +733,7 @@ fn every_claude_and_codex_launch_is_told_how_its_work_lands_in_its_layout() {
             instructions: render(&setup.project_id, Some(&setup), "", layout),
             process: None,
             transcripts: false,
+            settings: Applied::default(),
         };
         let claude = home(&format!("claude-{layout:?}"));
         let installed = context.install("claude-code", &claude, false).unwrap();
