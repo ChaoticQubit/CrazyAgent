@@ -33,7 +33,7 @@ export const checks = [{
 
     await kit.go("#/projects/add/folder");
     await kit.until(() => shown("button=Choose folder"), UI_MS, "the Add folder page offered no Choose folder");
-    await kit.chooseFolder(made.repo);
+    await kit.chooseFolder(made.repo, "project");
     await click("button=Choose folder");
     await kit.until(async () => (await text("main")).includes("stays where it is."), UI_MS, `the Add folder page never took ${made.repo}`);
     await kit.until(() => shown(way("Copy")), UI_MS, "the ways to add the folder were never shown");
