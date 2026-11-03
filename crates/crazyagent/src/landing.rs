@@ -886,15 +886,32 @@ pub fn accept(
     message: Option<&str>,
 ) -> Result<AcceptOutcome, EngineError> {
     #[cfg(unix)]
-    {
-        crate::checks::gate::admit(db, id, expected_head)?;
-        owner::accept(db, owner_home, id, expected_head, message, &|_| false)
-    }
+    return owner::accept(db, owner_home, id, expected_head, message, &|_| false);
     #[cfg(not(unix))]
     {
         let _ = (db, owner_home, id, expected_head, message);
         Err(unavailable())
     }
+}
+
+/// Lands a change set as [`accept`] does with the proposed message, running `between`
+/// once its files are written and before its branch moves, where a test changes what the
+/// accept gate reads. Inputs: as [`accept`] without the message, plus `between`. Output:
+/// as [`accept`].
+#[cfg(all(test, unix))]
+pub(crate) fn accept_between(
+    db: &Connection,
+    owner_home: &Path,
+    id: &ChangeSetId,
+    expected_head: &str,
+    between: &dyn Fn(),
+) -> Result<AcceptOutcome, EngineError> {
+    owner::accept(db, owner_home, id, expected_head, None, &|step| {
+        if step == owner::Step::FilesWritten {
+            between();
+        }
+        false
+    })
 }
 
 /// Lands a change set as one squash commit on a chosen local branch: the owner's
@@ -914,18 +931,15 @@ pub fn accept_into(
     target_branch: &str,
 ) -> Result<AcceptOutcome, EngineError> {
     #[cfg(unix)]
-    {
-        crate::checks::gate::admit(db, id, expected_head)?;
-        owner::accept_to(
-            db,
-            owner_home,
-            id,
-            expected_head,
-            message,
-            Some(target_branch),
-            &|_| false,
-        )
-    }
+    return owner::accept_to(
+        db,
+        owner_home,
+        id,
+        expected_head,
+        message,
+        Some(target_branch),
+        &|_| false,
+    );
     #[cfg(not(unix))]
     {
         let _ = (db, owner_home, id, expected_head, message, target_branch);
