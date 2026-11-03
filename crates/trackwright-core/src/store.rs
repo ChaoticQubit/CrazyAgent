@@ -1,9 +1,11 @@
 use crate::events::{self, Recorded};
 use crate::model::{
-    Actor, CRITERIA_PER_TICKET_MAX, Criterion, CriterionState, LINKS_PER_TICKET_MAX, Link,
-    Priority, Project, ProjectKey, Refusal, ShortId, TICKETS_PER_PROJECT_MAX, Ticket, TicketKind,
-    TicketStatus, codes,
+    Actor, CRITERIA_PER_TICKET_MAX, Check, Criterion, CriterionState, Evidence,
+    LINKS_PER_TICKET_MAX, Link, Priority, Project, ProjectKey, Refusal, ShortId,
+    TICKETS_PER_PROJECT_MAX, Ticket, TicketKind, TicketStatus, codes,
 };
+use crate::ops;
+use crate::requests;
 use crate::schema;
 use crate::text::{self, TextField};
 use rusqlite::types::Type;
@@ -57,7 +59,7 @@ const TICKET_UPDATE: &str = "UPDATE tk_tickets SET title = ?3, body = ?4, kind =
      priority = ?7, assignee = ?8, updated_ms = ?9, closed_ms = ?10, closed_by = ?11, \
      close_reason = ?12, version = version + 1 WHERE id = ?1 AND version = ?2";
 const CRITERION_BY_ID: &str = concat!(criterion_select!(), " WHERE c.id = ?1");
-const CRITERION_BY_POSITION: &str = concat!(
+pub(crate) const CRITERION_BY_POSITION: &str = concat!(
     criterion_select!(),
     " WHERE c.ticket = ?1 AND c.position = ?2"
 );
@@ -109,6 +111,34 @@ const STATEMENTS: &[&str] = &[
     events::EVENT_INSERT,
     events::EVENTS_OF_PROJECT,
     events::EVENTS_OF_TICKET,
+    requests::REQUEST_GET,
+    requests::REQUEST_INSERT,
+    requests::REQUESTS_EXPIRE,
+    requests::REQUESTS_COUNT,
+    requests::REQUESTS_TRIM,
+    ops::WRITES_RECENT,
+    ops::OPEN_CREATED,
+    ops::CRITERIA_TALLY,
+    ops::LIST_PAGE,
+    ops::CRITERIA_FROM,
+    ops::CHECKS_OF,
+    ops::EVIDENCE_LATEST,
+    ops::LINKS_FROM,
+    ops::EVENTS_RECENT,
+    ops::EVENTS_FROM,
+    ops::EVENTS_COUNT,
+    crate::criteria::CRITERIA_OF_TICKET,
+    crate::criteria::CRITERION_TEXT_UPDATE,
+    crate::criteria::CHECKS_OF_CRITERION,
+    crate::criteria::CHECK_INSERT,
+    crate::criteria::CHECKS_OF_PROJECT,
+    crate::criteria::EVIDENCE_INSERT,
+    crate::criteria::EVIDENCE_LATEST,
+    crate::criteria::EVIDENCE_OF_PROJECT,
+    crate::criteria::TICKETS_LINKED_OPEN,
+    crate::policy::POLICY_OF_PROJECT,
+    crate::policy::POLICY_INSERT,
+    crate::policy::POLICY_UPDATE,
 ];
 
 /// Every SQL statement the core runs outside its migrations. A test prepares each against a
@@ -150,13 +180,16 @@ impl From<Refusal> for StoreError {
     }
 }
 
-/// One project's tickets, criteria and links, each in a fixed order: tickets by number,
-/// criteria by ticket and position, links by ticket, kind and target.
+/// One project's tickets, criteria, links, checks and evidence, each in a fixed order:
+/// tickets by number, criteria by ticket and position, links by ticket, kind and target,
+/// checks and evidence in the order they were added.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct State {
     pub tickets: Vec<Ticket>,
     pub criteria: Vec<Criterion>,
     pub links: Vec<Link>,
+    pub checks: Vec<Check>,
+    pub evidence: Vec<Evidence>,
 }
 
 /// A new ticket's fields. The core sets its number, actor and times.
@@ -655,8 +688,8 @@ pub fn remove_link(
     })
 }
 
-/// Reads one project's stored tickets, criteria and links. Inputs: the transaction and the
-/// key. Output: the state, or `project_unknown`.
+/// Reads one project's stored tickets, criteria, links, checks and evidence. Inputs: the
+/// transaction and the key. Output: the state, or `project_unknown`.
 pub fn state(tx: &Transaction<'_>, key: &ProjectKey) -> Result<State, StoreError> {
     let owner = project(tx, key)?;
     let tickets = prepare(tx, TICKETS_OF_PROJECT)?
@@ -668,10 +701,14 @@ pub fn state(tx: &Transaction<'_>, key: &ProjectKey) -> Result<State, StoreError
     let links = prepare(tx, LINKS_OF_PROJECT)?
         .query_map([owner.id], link_row_of)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    let checks = crate::criteria::project_checks(tx, owner.id)?;
+    let evidence = crate::criteria::project_evidence(tx, owner.id)?;
     Ok(State {
         tickets,
         criteria,
         links,
+        checks,
+        evidence,
     })
 }
 
@@ -691,7 +728,9 @@ pub(crate) fn refusal(code: &'static str, message: impl Into<String>) -> StoreEr
     StoreError::Refused(Refusal::new(code, message))
 }
 
-fn write<T>(
+/// Runs one write inside a savepoint, so a refusal or error anywhere in it leaves no row and
+/// no event; writes nest. Inputs: the transaction and the write. Output: the write's result.
+pub(crate) fn write<T>(
     tx: &Transaction<'_>,
     body: impl FnOnce() -> Result<T, StoreError>,
 ) -> Result<T, StoreError> {
@@ -713,7 +752,9 @@ fn write<T>(
     }
 }
 
-fn current(what: &str, stored: i64, expected: i64) -> Result<(), StoreError> {
+/// Refuses a write made at a version other than the stored one. Inputs: what is written,
+/// the stored version and the caller's. Output: Ok, or `stale_version`.
+pub(crate) fn current(what: &str, stored: i64, expected: i64) -> Result<(), StoreError> {
     if stored == expected {
         return Ok(());
     }
@@ -738,7 +779,8 @@ fn project_row(tx: &Transaction<'_>, key: &ProjectKey) -> Result<Option<Project>
         .optional()?)
 }
 
-fn ticket_by_id(tx: &Transaction<'_>, id: i64) -> Result<Ticket, StoreError> {
+/// Reads a ticket by its row id. Inputs: the transaction and the id. Output: the ticket.
+pub(crate) fn ticket_by_id(tx: &Transaction<'_>, id: i64) -> Result<Ticket, StoreError> {
     Ok(prepare(tx, TICKET_BY_ID)?.query_row([id], ticket_row)?)
 }
 
@@ -784,7 +826,9 @@ fn ticket_row(row: &Row<'_>) -> rusqlite::Result<Ticket> {
     })
 }
 
-fn criterion_row(row: &Row<'_>) -> rusqlite::Result<Criterion> {
+/// Reads a criterion from a row of `criterion_select!`'s columns. Input: the row. Output:
+/// the criterion.
+pub(crate) fn criterion_row(row: &Row<'_>) -> rusqlite::Result<Criterion> {
     Ok(Criterion {
         id: row.get(0)?,
         ticket: row.get(1)?,
@@ -818,7 +862,13 @@ fn optional_actor(row: &Row<'_>, index: usize) -> rusqlite::Result<Option<Actor>
         .map_err(|refused| conversion(index, refused))
 }
 
-fn named<T>(row: &Row<'_>, index: usize, parse: fn(&str) -> Option<T>) -> rusqlite::Result<T> {
+/// Reads a stored name of a closed set. Inputs: the row, the column and the set's parser.
+/// Output: the value, or a conversion error for a name this core does not know.
+pub(crate) fn named<T>(
+    row: &Row<'_>,
+    index: usize,
+    parse: fn(&str) -> Option<T>,
+) -> rusqlite::Result<T> {
     let stored: String = row.get(index)?;
     parse(&stored).ok_or_else(|| {
         conversion(
