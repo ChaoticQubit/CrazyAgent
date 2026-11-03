@@ -155,6 +155,7 @@ fn team() -> TeamStatus {
         land_on: None,
         background_at_end: crate::team::BackgroundAtEnd::Wait,
         ask_before_merge: false,
+        reask_empty_reply: true,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
         coordination: None,
         live_switch: None,
@@ -1937,6 +1938,55 @@ fn g_turns_ask_before_merge_on_and_off() {
         view.notice,
         Some(Notice::plain(
             "The master now merges a finished harness without asking."
+        ))
+    );
+}
+
+/// R flips Re-ask empty reply: On is shown for a team that has made no choice, R sends Off
+/// and then On, each with its plain notice (DEC-111).
+#[test]
+fn capital_r_turns_reask_empty_reply_off_and_on() {
+    let mut view = TeamView::new(project());
+    assert_eq!(view.key(press(KeyCode::Char('R'))), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("The team is still loading."))
+    );
+    let mut view = loaded();
+    assert!(view.help().contains(&("R", "Re-ask empty reply")));
+    assert!(shows(&view, "Re-ask empty reply  On"));
+    let reply = view.key(press(KeyCode::Char('R')));
+    assert_eq!(
+        reply,
+        TeamReply::Change(TeamAction::ReaskEmptyReply {
+            project_id: project(),
+            on: false,
+        })
+    );
+    applied(&mut view, reply);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "A sub-agent's task with no reply text is now reported without asking again."
+        ))
+    );
+    let mut off = team();
+    off.reask_empty_reply = false;
+    reread(&mut view, off, NOW + 10);
+    assert!(shows(&view, "Re-ask empty reply  Off"));
+    let reply = view.key(press(KeyCode::Char('R')));
+    assert_eq!(
+        reply,
+        TeamReply::Change(TeamAction::ReaskEmptyReply {
+            project_id: project(),
+            on: true,
+        })
+    );
+    applied(&mut view, reply);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "A sub-agent that ends a task with no reply text is now asked once more for its reply."
         ))
     );
 }

@@ -8309,6 +8309,8 @@ fn between_turns(
         told_finished: BTreeSet::new(),
         parent: None,
         ready: true,
+        reask: None,
+        reasked: None,
     }
 }
 
@@ -12015,6 +12017,147 @@ fn a_woken_agent_never_shows_the_process_group_its_stop_ended() {
     let pid = rustix::process::Pid::from_raw(i32::try_from(started).unwrap()).unwrap();
     assert!(rustix::process::test_kill_process_group(pid).is_ok());
     team.shutdown().unwrap();
+}
+
+/// A Codex stand-in whose task turns end with no reply text until it is asked again for
+/// its reply, which it answers with "pear"; every typed line goes to `typed` in its home.
+#[cfg(target_os = "macos")]
+const QUIET_ONCE_CODEX: &str = r#"#!/bin/sh
+[ "$1" = app-server ] && exit 0
+d="$CODEX_HOME/sessions/2026/11/02"
+/bin/mkdir -p "$d" || exit 1
+id=$(printf '%08x-0000-4000-8000-%012x' $$ $$)
+f="$d/rollout-2026-11-02T00-00-00-$id.jsonl"
+printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' "$id" "$(/bin/pwd -P)" > "$f"
+printf '\033[?2004hCodex stand-in ready\n'
+e=$(printf '\033')
+open=0
+while IFS= read -r line; do
+  case "$line" in
+    *"$e[201~"*) open=0; printf '%s\n' "$line" >> "$CODEX_HOME/typed" ;;
+    *"$e[200~"*) open=1; continue ;;
+    *) [ "$open" = 1 ] && { printf '%s\n' "$line" >> "$CODEX_HOME/typed"; continue; } ;;
+  esac
+  printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
+  /bin/sleep 0.3
+  case "$line" in
+    *"no reply text from your last turn"*) printf '{"type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"pear"}]}}\n' >> "$f" ;;
+  esac
+  printf '{"type":"event_msg","payload":{"type":"task_complete"}}\n' >> "$f"
+done
+"#;
+
+/// A Codex stand-in whose turns all end with no reply text; every typed line goes to
+/// `typed` in its home.
+#[cfg(target_os = "macos")]
+const QUIET_CODEX: &str = r#"#!/bin/sh
+[ "$1" = app-server ] && exit 0
+d="$CODEX_HOME/sessions/2026/11/02"
+/bin/mkdir -p "$d" || exit 1
+id=$(printf '%08x-0000-4000-8000-%012x' $$ $$)
+f="$d/rollout-2026-11-02T00-00-00-$id.jsonl"
+printf '{"type":"session_meta","payload":{"id":"%s","cwd":"%s"}}\n' "$id" "$(/bin/pwd -P)" > "$f"
+printf '\033[?2004hCodex stand-in ready\n'
+e=$(printf '\033')
+open=0
+while IFS= read -r line; do
+  case "$line" in
+    *"$e[201~"*) open=0; printf '%s\n' "$line" >> "$CODEX_HOME/typed" ;;
+    *"$e[200~"*) open=1; continue ;;
+    *) [ "$open" = 1 ] && { printf '%s\n' "$line" >> "$CODEX_HOME/typed"; continue; } ;;
+  esac
+  printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
+  /bin/sleep 0.3
+  printf '{"type":"event_msg","payload":{"type":"task_complete"}}\n' >> "$f"
+done
+"#;
+
+/// The task a re-ask test hands to its sub-agent.
+#[cfg(target_os = "macos")]
+const QUIET_TASK: &str = "Write pear.md";
+
+/// What a re-ask test reads once its task is finished: the task's status and result, how
+/// many times the re-ask reached its agent, and that agent's turns. Takes the fixture.
+#[cfg(target_os = "macos")]
+fn quiet_task(fixture: &Fixture) -> (String, Option<String>, usize, i64) {
+    let (status, result, agent): (String, Option<String>, i64) = fixture
+        .connection
+        .query_row(
+            "SELECT status,result,agent FROM team_tasks WHERE prompt=?1",
+            [QUIET_TASK],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .unwrap();
+    let turns: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT turns FROM team_agents WHERE id=?1",
+            [agent],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let asked = typed(fixture, agent).matches(super::REASK_EMPTY).count();
+    (status, result, asked, turns)
+}
+
+/// Runs one sub-agent task on a stand-in with the re-ask setting as given (None leaves the
+/// default) until the task is finished, then reads it. Takes the stand-in and the choice.
+/// Returns what `quiet_task` reads.
+#[cfg(target_os = "macos")]
+fn reask_run(script: &str, choice: Option<bool>) -> (String, Option<String>, usize, i64) {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, script, TeamLimits::default());
+    let mut actions = Vec::new();
+    if let Some(on) = choice {
+        actions.push(crate::team::TeamAction::ReaskEmptyReply {
+            project_id: fixture.setup.project_id.clone(),
+            on,
+        });
+    }
+    actions.push(hand_off(&fixture, QUIET_TASK));
+    owner(&fixture, &actions);
+    fixture.until(&mut team, "the task finishes", |f| {
+        task_of(f, QUIET_TASK).0 == "done"
+    });
+    idle_ticks(&mut team);
+    let read = quiet_task(&fixture);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    read
+}
+
+/// With Re-ask empty reply on, the default, a sub-agent whose task turn ends with no reply
+/// text is asked once more, and its second reply is the task's result (DEC-111).
+#[cfg(target_os = "macos")]
+#[test]
+fn reask_on_asks_a_quiet_sub_agent_once_and_its_reply_is_the_result() {
+    assert_eq!(
+        reask_run(QUIET_ONCE_CODEX, None),
+        ("done".to_owned(), Some("pear".to_owned()), 1, 2)
+    );
+}
+
+/// With Re-ask empty reply on, a sub-agent that stays quiet after its one re-ask finishes
+/// the task with no reply text, and is not asked a third time (DEC-111).
+#[cfg(target_os = "macos")]
+#[test]
+fn reask_on_reports_a_second_empty_reply_without_asking_again() {
+    assert_eq!(
+        reask_run(QUIET_CODEX, Some(true)),
+        ("done".to_owned(), None, 1, 2)
+    );
+}
+
+/// With Re-ask empty reply off, a sub-agent's task turn that ends with no reply text
+/// finishes the task at once, and the agent is never asked again (DEC-111).
+#[cfg(target_os = "macos")]
+#[test]
+fn reask_off_finishes_a_quiet_task_at_once() {
+    assert_eq!(
+        reask_run(QUIET_ONCE_CODEX, Some(false)),
+        ("done".to_owned(), None, 0, 1)
+    );
 }
 
 /// The tasks of a project in one state, oldest first. Takes the fixture and the state.
