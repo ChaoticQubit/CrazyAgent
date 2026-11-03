@@ -1,7 +1,8 @@
 use crate::criteria;
+use crate::host::Paths;
 use crate::import;
 use crate::model::{
-    Cycle, CycleStatus, Evidence, ProjectKey, ReleaseVersion, ShortId, Ticket, codes,
+    Actor, Cycle, CycleStatus, Evidence, OpKind, ProjectKey, ReleaseVersion, ShortId, Ticket, codes,
 };
 use crate::store::{self, StoreError};
 use rusqlite::{Row, Transaction};
@@ -127,8 +128,9 @@ impl Plan {
 
 /// Renders a project's open tickets as Markdown, by version (in roadmap order, then none),
 /// cycle (by number, then none) and ticket number, each with its criteria, checks, latest
-/// evidence and links. The text holds no time and escapes every stored text, so the same
-/// state always gives the same bytes. Inputs: the transaction and the project. Output: the
+/// evidence and links. The text holds no time, escapes every stored text and starts no line
+/// with one, so the same state always gives the same bytes and stored text never shapes
+/// the document. Inputs: the transaction and the project. Output: the
 /// text, or `project_unknown` or `export_too_large`.
 pub fn project(tx: &Transaction<'_>, key: &ProjectKey) -> Result<String, StoreError> {
     let owner = store::project(tx, key)?;
@@ -142,7 +144,7 @@ pub fn project(tx: &Transaction<'_>, key: &ProjectKey) -> Result<String, StoreEr
     }
     tickets.sort_by_key(|ticket| plan.rank(ticket));
     let mut out = format!(
-        "{EXPORT_HEADER}project {key}\n\n{}: open tickets by version and cycle. The tracker \
+        "{EXPORT_HEADER}project {key}\n\nOpen tickets of {}, by version and cycle. The tracker \
          writes this file and never reads it back.\n",
         inline(&owner.name)
     );
@@ -179,7 +181,8 @@ pub fn ticket(tx: &Transaction<'_>, id: &ShortId) -> Result<String, StoreError> 
     let plan = Plan::read(tx, ticket.project)?;
     assert_eq!(ticket.closed_by.is_some(), ticket.status.is_closed());
     let mut out = format!(
-        "{EXPORT_HEADER}ticket {}\n\n{}\n\n",
+        "{EXPORT_HEADER}ticket {}\n\n{}: {}\n\n",
+        ticket.short_id,
         ticket.short_id,
         inline(&ticket.title)
     );
@@ -218,11 +221,26 @@ pub fn ticket(tx: &Transaction<'_>, id: &ShortId) -> Result<String, StoreError> 
     Ok(out)
 }
 
-/// Writes an export to a `.md` file through a private temporary file renamed over it, so a
-/// link at the path is never followed. Refuses a path that is not `.md`, a folder that is a
-/// link or missing, a link or folder at the path, and a file there that is not an export.
-/// Inputs: the path and the export. Output: Ok, or `export_path_refused` or `store_failed`.
-pub fn write(path: &Path, text: &str) -> Result<(), StoreError> {
+/// Writes an export to the `.md` file the host confines the requested path to, through a
+/// private temporary file renamed over it, so a link at the path is never followed. Refuses
+/// a path the host refuses, a path that is not `.md`, a folder that is a link or missing, a
+/// link or folder at the path, and a file there that is not an export. Inputs: the
+/// transaction, the host, the actor, the project, the requested path and the export.
+/// Output: Ok, or `export_path_refused`, the host's refusal or `store_failed`.
+pub fn write(
+    tx: &Transaction<'_>,
+    host: &impl Paths,
+    actor: &Actor,
+    key: &ProjectKey,
+    requested: &Path,
+    text: &str,
+) -> Result<(), StoreError> {
+    assert!(text.starts_with(EXPORT_HEADER), "only an export is written");
+    let path = host.resolve(tx, key, actor, OpKind::Export, requested)?;
+    write_file(&path, text)
+}
+
+fn write_file(path: &Path, text: &str) -> Result<(), StoreError> {
     assert!(text.starts_with(EXPORT_HEADER), "only an export is written");
     assert!(text.len() <= EXPORT_BYTES_MAX);
     if !import::markdown(path) {

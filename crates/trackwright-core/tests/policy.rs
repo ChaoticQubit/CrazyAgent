@@ -1,11 +1,11 @@
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde_json::json;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use trackwright_core::criteria::{self, NewEvidence};
 use trackwright_core::events;
 use trackwright_core::host::{
     self, Authority, CheckView, Evidence, EvidenceState, HostEvent, LinkKind, LinkState, Links,
-    TicketView,
+    Paths, TicketView,
 };
 use trackwright_core::model::{
     Actor, AgentEditPolicy, CheckKind, ClosePolicy, CreatePolicy, CriterionState, EvidenceResult,
@@ -17,7 +17,8 @@ use trackwright_core::store::{self, NewTicket, Store, StoreError};
 
 /// A host shaped like an engine: branches and change sets live in its own tables in the
 /// tracker's database and are read in the core's transaction, so nobody records evidence
-/// for a change check; authority and every other check kind follow the standalone host.
+/// for a change check; authority, file paths and every other check kind follow the
+/// standalone host.
 struct EngineLike;
 
 const ENGINE_KINDS: [LinkKind; 2] = [
@@ -153,6 +154,19 @@ impl Authority for EngineLike {
             ));
         }
         Standalone.evidence_may(tx, project, actor, check)
+    }
+}
+
+impl Paths for EngineLike {
+    fn resolve(
+        &self,
+        tx: &Transaction<'_>,
+        project: &ProjectKey,
+        actor: &Actor,
+        op: OpKind,
+        requested: &Path,
+    ) -> Result<PathBuf, Refusal> {
+        Standalone.resolve(tx, project, actor, op, requested)
     }
 }
 

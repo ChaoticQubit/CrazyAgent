@@ -1,6 +1,6 @@
 # Trackwright export: ticket CA-1
 
-Sign in with a magic link
+CA-1: Sign in with a magic link
 
 - feature, todo, priority 2, assigned to nobody
 - version V1, cycle 1

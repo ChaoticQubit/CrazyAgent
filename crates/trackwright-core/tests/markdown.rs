@@ -8,8 +8,8 @@ use trackwright_core::export::{self, EXPORT_HEADER};
 use trackwright_core::host;
 use trackwright_core::import::{self, Change, IMPORT_BYTES_MAX, Preview, Unparsed, Why};
 use trackwright_core::model::{
-    Actor, CheckKind, EvidenceResult, PolicyKey, Priority, ProjectKey, ShortId, TicketKind,
-    TicketStatus, VersionStatus, codes,
+    Actor, CheckKind, EvidenceResult, OPEN_TICKETS_CREATED_PER_ACTOR_MAX, PolicyKey, Priority,
+    ProjectKey, ShortId, TicketKind, TicketStatus, VersionStatus, codes,
 };
 use trackwright_core::policy;
 use trackwright_core::standalone::Standalone;
@@ -208,10 +208,13 @@ fn counts(tx: &Transaction<'_>) -> [i64; 3] {
     })
 }
 
+fn tracker(dir: &Path) -> PathBuf {
+    dir.join("tracker")
+}
+
 fn written(dir: &Path, name: &str, text: &str) -> PathBuf {
-    let path = dir.join(name);
-    fs::write(&path, text).unwrap();
-    path
+    fs::write(tracker(dir).join(name), text).unwrap();
+    PathBuf::from(name)
 }
 
 fn changes(preview: &Preview) -> Vec<Change> {
@@ -344,11 +347,59 @@ fn export_escapes_agent_text_and_follows_no_symlink() {
         1_300,
     )
     .unwrap();
+    let shaped = [
+        "---",
+        "1. Step one",
+        "    four spaces",
+        "+ plus",
+        "=== under",
+    ];
+    let shaped: Vec<(ShortId, &str)> = shaped
+        .into_iter()
+        .map(|title| {
+            let id = ticket(
+                &tx,
+                title,
+                TicketKind::Feature,
+                TicketStatus::Todo,
+                2,
+                "",
+                1_400,
+            );
+            (id, title)
+        })
+        .collect();
 
     let project = export::project(&tx, &key()).unwrap();
     assert!(project.starts_with(
-        "# Trackwright export: project CA\n\nCrazy \\<b\\>Agent\\</b\\>: open tickets"
+        "# Trackwright export: project CA\n\nOpen tickets of Crazy \\<b\\>Agent\\</b\\>, \
+         by version"
     ));
+    let starts = [
+        "# Trackwright export: ",
+        "Open tickets of ",
+        "## No version",
+        "### No cycle",
+        "#### CA-",
+        "- feature, ",
+        "- criterion ",
+        "- link ",
+    ];
+    for line in project.lines().filter(|line| !line.is_empty()) {
+        assert!(
+            starts.iter().any(|start| line.starts_with(start)),
+            "{line:?} starts with stored text"
+        );
+    }
+    for (id, title) in &shaped {
+        assert!(
+            project.contains(&format!("\n#### {id}: {title}\n")),
+            "{title}"
+        );
+        let file = export::ticket(&tx, id).unwrap();
+        assert!(file.contains(&format!("\n\n{id}: {title}\n\n")), "{title}");
+        assert!(!file.lines().any(|line| line == *title), "{title}");
+    }
     assert!(project.contains(
         "\n#### CA-1: \\# Heading \\*\\*bold\\*\\* \\[x\\](http://e.test) \\<img src=x\\> \
          \\| \\~\\~gone\\~\\~ \\& \\`code\\` \\!\n"
@@ -362,7 +413,7 @@ fn export_escapes_agent_text_and_follows_no_symlink() {
             "# Trackwright export: ",
             "## No version",
             "### No cycle",
-            "#### CA-1: ",
+            "#### CA-",
         ];
         assert!(core.iter().any(|start| line.starts_with(start)), "{line}");
     }
@@ -375,28 +426,65 @@ fn export_escapes_agent_text_and_follows_no_symlink() {
 
     let file = export::ticket(&tx, &forged).unwrap();
     assert!(file.contains("\n## Body\n\n~~~~~~\nline\n~~~~~ inside\n## not a heading\n~~~~~~\n"));
-    assert!(file.contains("\n\\# Heading \\*\\*bold\\*\\*"));
+    assert!(file.contains("\n\nCA-1: \\# Heading \\*\\*bold\\*\\*"));
 
-    let out = dir.path().join("tickets.md");
-    export::write(&out, &project).unwrap();
-    assert_eq!(fs::read_to_string(&out).unwrap(), project);
+    let folder = tracker(dir.path());
+    let write =
+        |path: &Path, text: &str| export::write(&tx, &Standalone, &owner(), &key(), path, text);
+    let out = PathBuf::from("tickets.md");
+    write(&out, &project).unwrap();
+    assert_eq!(fs::read_to_string(folder.join(&out)).unwrap(), project);
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mode = fs::metadata(&out).unwrap().permissions().mode();
+        let mode = fs::metadata(folder.join(&out))
+            .unwrap()
+            .permissions()
+            .mode();
         assert_eq!(mode & 0o777, 0o600);
     }
-    export::write(&out, &file).unwrap();
-    assert_eq!(fs::read_to_string(&out).unwrap(), file);
+    write(&out, &file).unwrap();
+    assert_eq!(fs::read_to_string(folder.join(&out)).unwrap(), file);
+    fs::create_dir(folder.join("exports")).unwrap();
+    write(Path::new("exports/tickets.md"), &project).unwrap();
+    assert_eq!(
+        fs::read_to_string(folder.join("exports").join("tickets.md")).unwrap(),
+        project
+    );
+
+    let outside = dir.path().join("outside.md");
+    fs::write(&outside, "keep me\n").unwrap();
+    let escapes = [
+        outside.clone(),
+        folder.join("inside.md"),
+        PathBuf::from("../outside.md"),
+        PathBuf::from("../escape.md"),
+        PathBuf::from("exports/../../escape.md"),
+        PathBuf::from("./here.md"),
+        PathBuf::from("missing/tickets.md"),
+        PathBuf::from("a/b/c/d/e/f/g/h/tickets.md"),
+        PathBuf::new(),
+    ];
+    for path in &escapes {
+        assert_eq!(
+            refused(write(path, &project)),
+            codes::EXPORT_PATH_REFUSED,
+            "{}",
+            path.display()
+        );
+    }
+    assert_eq!(fs::read_to_string(&outside).unwrap(), "keep me\n");
+    assert!(!dir.path().join("escape.md").exists());
+    assert!(!folder.join("inside.md").exists());
+    assert!(!folder.join("here.md").exists());
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::symlink;
-        let outside = written(dir.path(), "outside.md", "keep me\n");
-        let linked = dir.path().join("linked.md");
+        let linked = folder.join("linked.md");
         symlink(&outside, &linked).unwrap();
         assert_eq!(
-            refused(export::write(&linked, &project)),
+            refused(write(Path::new("linked.md"), &project)),
             codes::EXPORT_PATH_REFUSED
         );
         assert_eq!(fs::read_to_string(&outside).unwrap(), "keep me\n");
@@ -408,32 +496,30 @@ fn export_escapes_agent_text_and_follows_no_symlink() {
         );
         let real = dir.path().join("real");
         fs::create_dir(&real).unwrap();
-        let folder = dir.path().join("folder");
-        symlink(&real, &folder).unwrap();
+        symlink(&real, folder.join("folder")).unwrap();
         assert_eq!(
-            refused(export::write(&folder.join("tickets.md"), &project)),
+            refused(write(Path::new("folder/tickets.md"), &project)),
             codes::EXPORT_PATH_REFUSED
         );
         assert!(!real.join("tickets.md").exists());
     }
     let notes = written(dir.path(), "notes.md", "# Notes\n");
+    assert_eq!(refused(write(&notes, &project)), codes::EXPORT_PATH_REFUSED);
     assert_eq!(
-        refused(export::write(&notes, &project)),
+        fs::read_to_string(folder.join(&notes)).unwrap(),
+        "# Notes\n"
+    );
+    assert_eq!(
+        refused(write(Path::new("tickets.txt"), &project)),
         codes::EXPORT_PATH_REFUSED
     );
-    assert_eq!(fs::read_to_string(&notes).unwrap(), "# Notes\n");
+    fs::create_dir(folder.join("folder.md")).unwrap();
     assert_eq!(
-        refused(export::write(&dir.path().join("tickets.txt"), &project)),
+        refused(write(Path::new("folder.md"), &project)),
         codes::EXPORT_PATH_REFUSED
     );
-    let folder_md = dir.path().join("folder.md");
-    fs::create_dir(&folder_md).unwrap();
-    assert_eq!(
-        refused(export::write(&folder_md, &project)),
-        codes::EXPORT_PATH_REFUSED
-    );
-    assert!(!dir.path().join("tickets.txt").exists());
-    for entry in fs::read_dir(dir.path()).unwrap() {
+    assert!(!folder.join("tickets.txt").exists());
+    for entry in fs::read_dir(&folder).unwrap() {
         let name = entry.unwrap().file_name().into_string().unwrap();
         assert!(!name.ends_with(".tmp"), "{name}");
     }
@@ -442,12 +528,12 @@ fn export_escapes_agent_text_and_follows_no_symlink() {
 #[test]
 fn import_turns_versions_and_scope_items_into_versions_and_backlog_tickets() {
     let dir = tempfile::tempdir().unwrap();
-    let roadmap = written(dir.path(), "roadmap.md", ROADMAP);
     let mut store = opened(dir.path());
+    let roadmap = written(dir.path(), "roadmap.md", ROADMAP);
     let tx = store.transaction().unwrap();
     project(&tx);
 
-    let preview = import::preview(&tx, &key(), &roadmap).unwrap();
+    let preview = import::preview(&tx, &Standalone, &owner(), &key(), &roadmap).unwrap();
     assert_eq!(
         changes(&preview),
         vec![
@@ -470,7 +556,7 @@ fn import_turns_versions_and_scope_items_into_versions_and_backlog_tickets() {
     let accept = keys(&preview);
     let before = counts(&tx);
     assert_eq!(
-        import::preview(&tx, &key(), &roadmap).unwrap(),
+        import::preview(&tx, &Standalone, &owner(), &key(), &roadmap).unwrap(),
         preview,
         "a preview is the same for the same file and state"
     );
@@ -516,7 +602,7 @@ fn import_turns_versions_and_scope_items_into_versions_and_backlog_tickets() {
         ]
     );
 
-    let again = import::preview(&tx, &key(), &roadmap).unwrap();
+    let again = import::preview(&tx, &Standalone, &owner(), &key(), &roadmap).unwrap();
     assert!(again.items.is_empty(), "{:?}", again.items);
     assert_eq!(again.unparsed, preview.unparsed);
     let view = export::project(&tx, &key()).unwrap();
@@ -557,7 +643,7 @@ fn import_turns_versions_and_scope_items_into_versions_and_backlog_tickets() {
         3_200,
     )
     .unwrap();
-    let theirs = import::preview(&tx, &other(), &roadmap).unwrap();
+    let theirs = import::preview(&tx, &Standalone, &owner(), &other(), &roadmap).unwrap();
     assert_eq!(
         keys(&theirs),
         accept,
@@ -577,11 +663,11 @@ fn import_turns_versions_and_scope_items_into_versions_and_backlog_tickets() {
 #[test]
 fn reimport_shows_a_diff_and_applies_only_accepted_items() {
     let dir = tempfile::tempdir().unwrap();
-    let roadmap = written(dir.path(), "roadmap.md", ROADMAP);
     let mut store = opened(dir.path());
+    let roadmap = written(dir.path(), "roadmap.md", ROADMAP);
     let tx = store.transaction().unwrap();
     project(&tx);
-    let first = import::preview(&tx, &key(), &roadmap).unwrap();
+    let first = import::preview(&tx, &Standalone, &owner(), &key(), &roadmap).unwrap();
     import::apply(
         &tx,
         &Standalone,
@@ -604,7 +690,7 @@ fn reimport_shows_a_diff_and_applies_only_accepted_items() {
     let export_item = feature("V1", "Export a week as Markdown");
     let teams = version_add("V3", 2, None);
     let invite = feature("V3", "Invite a teammate");
-    let diff = import::preview(&tx, &key(), &roadmap).unwrap();
+    let diff = import::preview(&tx, &Standalone, &owner(), &key(), &roadmap).unwrap();
     assert_eq!(
         changes(&diff),
         vec![
@@ -659,7 +745,7 @@ fn reimport_shows_a_diff_and_applies_only_accepted_items() {
     assert_eq!(applied.tickets[0].short_id, id(4));
     assert_eq!(applied.tickets[0].title, "Export a week as Markdown");
 
-    let rest = import::preview(&tx, &key(), &roadmap).unwrap();
+    let rest = import::preview(&tx, &Standalone, &owner(), &key(), &roadmap).unwrap();
     assert_eq!(changes(&rest), vec![teams, invite]);
     assert_eq!(counts(&tx)[..2], [2, 4]);
     let view = export::project(&tx, &key()).unwrap();
@@ -678,6 +764,7 @@ fn an_unparsed_section_is_returned_not_guessed() {
          Scope:\n- Sign in with a magic link\n{long}\n\n## V1: again\nScope:\n\
          - Plan a week on one board\n"
     );
+    let mut store = opened(dir.path());
     let messy = written(dir.path(), "messy.md", &messy);
     let checklist = written(dir.path(), "checklist.md", CHECKLIST);
     let process = written(
@@ -686,11 +773,10 @@ fn an_unparsed_section_is_returned_not_guessed() {
         "# Release process\n\n> Written by the CrazyAgent engine on 2026-10-27.\n\n\
          ## Branches\nTrunk with short branches and one review.\n",
     );
-    let mut store = opened(dir.path());
     let tx = store.transaction().unwrap();
     project(&tx);
 
-    let preview = import::preview(&tx, &key(), &messy).unwrap();
+    let preview = import::preview(&tx, &Standalone, &owner(), &key(), &messy).unwrap();
     assert_eq!(
         changes(&preview),
         vec![
@@ -729,7 +815,7 @@ fn an_unparsed_section_is_returned_not_guessed() {
         ]
     );
 
-    let preview = import::preview(&tx, &key(), &checklist).unwrap();
+    let preview = import::preview(&tx, &Standalone, &owner(), &key(), &checklist).unwrap();
     let chore = ticket_add(None, TicketKind::Chore, "Run the full suite");
     assert_eq!(changes(&preview), vec![chore]);
     assert_eq!(
@@ -761,7 +847,7 @@ fn an_unparsed_section_is_returned_not_guessed() {
             .contains("\n## No version\n\n### No cycle\n\n#### CA-1: Run the full suite\n")
     );
 
-    let preview = import::preview(&tx, &key(), &process).unwrap();
+    let preview = import::preview(&tx, &Standalone, &owner(), &key(), &process).unwrap();
     assert!(preview.items.is_empty(), "{:?}", preview.items);
     assert_eq!(
         preview.unparsed,
@@ -782,7 +868,7 @@ fn import_refuses_a_link_and_a_file_over_the_bound() {
     let tx = store.transaction().unwrap();
     project(&tx);
     let roadmap = written(dir.path(), "roadmap.md", ROADMAP);
-    let accept = keys(&import::preview(&tx, &key(), &roadmap).unwrap());
+    let accept = keys(&import::preview(&tx, &Standalone, &owner(), &key(), &roadmap).unwrap());
     let before = counts(&tx);
     let apply = |path: &Path| {
         refused(import::apply(
@@ -798,13 +884,46 @@ fn import_refuses_a_link_and_a_file_over_the_bound() {
 
     #[cfg(unix)]
     {
-        let linked = dir.path().join("linked.md");
-        std::os::unix::fs::symlink(&roadmap, &linked).unwrap();
+        let folder = tracker(dir.path());
+        let linked = PathBuf::from("linked.md");
+        std::os::unix::fs::symlink(folder.join(&roadmap), folder.join(&linked)).unwrap();
         assert_eq!(
-            refused(import::preview(&tx, &key(), &linked)),
+            refused(import::preview(&tx, &Standalone, &owner(), &key(), &linked)),
             codes::IMPORT_PATH_REFUSED
         );
         assert_eq!(apply(&linked), codes::IMPORT_PATH_REFUSED);
+        let real = dir.path().join("real");
+        fs::create_dir(&real).unwrap();
+        fs::write(real.join("roadmap.md"), ROADMAP).unwrap();
+        std::os::unix::fs::symlink(&real, folder.join("plans")).unwrap();
+        let through = Path::new("plans/roadmap.md");
+        assert_eq!(
+            refused(import::preview(&tx, &Standalone, &owner(), &key(), through)),
+            codes::IMPORT_PATH_REFUSED
+        );
+        assert_eq!(apply(through), codes::IMPORT_PATH_REFUSED);
+    }
+
+    let outside = dir.path().join("outside.md");
+    fs::write(&outside, ROADMAP).unwrap();
+    for path in [
+        outside.clone(),
+        tracker(dir.path()).join(&roadmap),
+        PathBuf::from("../outside.md"),
+        PathBuf::from("./roadmap.md"),
+    ] {
+        assert_eq!(
+            refused(import::preview(&tx, &Standalone, &owner(), &key(), &path)),
+            codes::IMPORT_PATH_REFUSED,
+            "{}",
+            path.display()
+        );
+        assert_eq!(
+            apply(&path),
+            codes::IMPORT_PATH_REFUSED,
+            "{}",
+            path.display()
+        );
     }
 
     let head = "# Roadmap\n\n## V1\n";
@@ -812,23 +931,23 @@ fn import_refuses_a_link_and_a_file_over_the_bound() {
     assert_eq!(full.len(), IMPORT_BYTES_MAX);
     let at_bound = written(dir.path(), "full.md", &full);
     assert_eq!(
-        changes(&import::preview(&tx, &key(), &at_bound).unwrap()),
+        changes(&import::preview(&tx, &Standalone, &owner(), &key(), &at_bound).unwrap()),
         vec![version_add("V1", 0, None)]
     );
     let over = written(dir.path(), "over.md", &format!("{full}x"));
     assert_eq!(
-        refused(import::preview(&tx, &key(), &over)),
+        refused(import::preview(&tx, &Standalone, &owner(), &key(), &over)),
         codes::IMPORT_TOO_LARGE
     );
     assert_eq!(apply(&over), codes::IMPORT_TOO_LARGE);
 
-    let folder = dir.path().join("folder.md");
-    fs::create_dir(&folder).unwrap();
+    let folder = PathBuf::from("folder.md");
+    fs::create_dir(tracker(dir.path()).join(&folder)).unwrap();
     let text = written(dir.path(), "roadmap.txt", ROADMAP);
-    let missing = dir.path().join("missing.md");
+    let missing = PathBuf::from("missing.md");
     for path in [&folder, &text, &missing] {
         assert_eq!(
-            refused(import::preview(&tx, &key(), path)),
+            refused(import::preview(&tx, &Standalone, &owner(), &key(), path)),
             codes::IMPORT_PATH_REFUSED,
             "{}",
             path.display()
@@ -836,7 +955,7 @@ fn import_refuses_a_link_and_a_file_over_the_bound() {
     }
 
     let secret = written(dir.path(), "notes.md", "# Notes\nhunter2 is the password\n");
-    match import::preview(&tx, &key(), &secret) {
+    match import::preview(&tx, &Standalone, &owner(), &key(), &secret) {
         Err(StoreError::Refused(refusal)) => {
             assert_eq!(refusal.code, codes::IMPORT_FORMAT_UNKNOWN);
             assert!(!refusal.message.contains("hunter2"), "{}", refusal.message);
@@ -844,10 +963,14 @@ fn import_refuses_a_link_and_a_file_over_the_bound() {
         }
         other => panic!("expected import_format_unknown, got {other:?}"),
     }
-    let binary = dir.path().join("binary.md");
-    fs::write(&binary, [b'#', b' ', 0xff, 0xfe, b'\n']).unwrap();
+    let binary = PathBuf::from("binary.md");
+    fs::write(
+        tracker(dir.path()).join(&binary),
+        [b'#', b' ', 0xff, 0xfe, b'\n'],
+    )
+    .unwrap();
     assert_eq!(
-        refused(import::preview(&tx, &key(), &binary)),
+        refused(import::preview(&tx, &Standalone, &owner(), &key(), &binary)),
         codes::IMPORT_NOT_TEXT
     );
     let hidden = written(
@@ -856,9 +979,72 @@ fn import_refuses_a_link_and_a_file_over_the_bound() {
         "# Roadmap\n\n## V1\nScope:\n- Sign in \u{202e}gnihton\n",
     );
     assert_eq!(
-        refused(import::preview(&tx, &key(), &hidden)),
+        refused(import::preview(&tx, &Standalone, &owner(), &key(), &hidden)),
         codes::TEXT_HIDDEN_CHARACTERS
     );
     assert_eq!(apply(&hidden), codes::TEXT_HIDDEN_CHARACTERS);
     assert_eq!(counts(&tx), before, "a refused import writes nothing");
+}
+
+#[test]
+fn import_counts_its_tickets_against_the_actors_open_ticket_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = opened(dir.path());
+    let tx = store.transaction().unwrap();
+    project(&tx);
+    policy::set(
+        &tx,
+        &Standalone,
+        &owner(),
+        &key(),
+        PolicyKey::AgentEdit,
+        "any",
+        0,
+        1_050,
+    )
+    .unwrap();
+    let agent = actor("agent:planner");
+    let bound = OPEN_TICKETS_CREATED_PER_ACTOR_MAX;
+    let scope: String = (1..=bound + 1)
+        .map(|number| format!("- Item {number}\n"))
+        .collect();
+    let roadmap = written(
+        dir.path(),
+        "roadmap.md",
+        &format!("# Roadmap\n\n## V1: first release\nScope:\n{scope}"),
+    );
+    let preview = import::preview(&tx, &Standalone, &agent, &key(), &roadmap).unwrap();
+    let all = keys(&preview);
+    assert_eq!(all.len(), bound + 2, "one version and every scope item");
+    let before = counts(&tx);
+    let apply = |who: &Actor, accept: &[String], at_ms: i64| {
+        import::apply(&tx, &Standalone, who, &key(), &roadmap, accept, at_ms)
+    };
+
+    assert_eq!(
+        refused(apply(&agent, &all, 2_000)),
+        codes::OPEN_TICKETS_FULL
+    );
+    assert_eq!(counts(&tx), before, "a refused import writes nothing");
+
+    let applied = apply(&agent, &all[..bound + 1], 2_100).unwrap();
+    assert_eq!(applied.versions.len(), 1);
+    assert_eq!(applied.tickets.len(), bound);
+    let rest = import::preview(&tx, &Standalone, &agent, &key(), &roadmap).unwrap();
+    let last = keys(&rest);
+    assert_eq!(
+        changes(&rest),
+        vec![feature("V1", &format!("Item {}", bound + 1))]
+    );
+    let full = counts(&tx);
+    assert_eq!(
+        refused(apply(&agent, &last, 2_200)),
+        codes::OPEN_TICKETS_FULL
+    );
+    assert_eq!(counts(&tx), full);
+
+    let by_owner = apply(&owner(), &last, 2_300).unwrap();
+    assert_eq!(by_owner.tickets.len(), 1);
+    assert_eq!(by_owner.tickets[0].created_by, owner());
+    replayed(&tx, &key());
 }

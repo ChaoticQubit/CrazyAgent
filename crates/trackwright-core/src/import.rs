@@ -1,9 +1,10 @@
 use crate::events::{self, Recorded};
-use crate::host::Authority;
+use crate::host::{Authority, Paths};
 use crate::model::{
-    Actor, OpKind, Priority, ProjectKey, ReleaseVersion, Ticket, TicketKind, TicketStatus,
-    VERSIONS_PER_PROJECT_MAX, VersionStatus, codes,
+    Actor, OPEN_TICKETS_CREATED_PER_ACTOR_MAX, OpKind, Priority, ProjectKey, ReleaseVersion,
+    Ticket, TicketKind, TicketStatus, VERSIONS_PER_PROJECT_MAX, VersionStatus, codes,
 };
+use crate::ops;
 use crate::policy;
 use crate::store::{self, NewTicket, StoreError};
 use crate::text::{self, TextField};
@@ -13,7 +14,7 @@ use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// The largest roadmap or checklist file an import reads.
 pub const IMPORT_BYTES_MAX: usize = 1024 * 1024;
@@ -156,11 +157,23 @@ struct Section<'a> {
     body: Vec<(u32, &'a str)>,
 }
 
-/// Reads a roadmap or release checklist and lists what importing it would change, writing
-/// nothing. Inputs: the transaction, the project and the file. Output: the preview, or
-/// `project_unknown` or the file's refusal (`import_path_refused`, `import_too_large`,
-/// `import_not_text`, `text_hidden_characters`, `import_format_unknown`).
-pub fn preview(tx: &Transaction<'_>, key: &ProjectKey, path: &Path) -> Result<Preview, StoreError> {
+/// Reads a roadmap or release checklist at the path the host confines the requested one
+/// to, and lists what importing it would change, writing nothing. Inputs: the transaction,
+/// the host, the actor, the project and the requested file. Output: the preview, or
+/// `project_unknown`, the host's refusal or the file's (`import_path_refused`,
+/// `import_too_large`, `import_not_text`, `text_hidden_characters`, `import_format_unknown`).
+pub fn preview(
+    tx: &Transaction<'_>,
+    host: &impl Paths,
+    actor: &Actor,
+    key: &ProjectKey,
+    requested: &Path,
+) -> Result<Preview, StoreError> {
+    let path = host.resolve(tx, key, actor, OpKind::ImportPreview, requested)?;
+    preview_at(tx, key, &path)
+}
+
+fn preview_at(tx: &Transaction<'_>, key: &ProjectKey, path: &Path) -> Result<Preview, StoreError> {
     let project = store::project(tx, key)?;
     let text = read(path)?;
     let parsed = parse(&text)?;
@@ -179,18 +192,19 @@ pub fn preview(tx: &Transaction<'_>, key: &ProjectKey, path: &Path) -> Result<Pr
 
 /// Applies the accepted items of a fresh preview of the file in one savepoint: versions
 /// first as the file orders them, each ticket after its version. The actor needs
-/// `import_apply`, plus `version_upsert` for version items and `create` for tickets; tickets
-/// start in the backlog, or where `create` puts the actor's tickets. Inputs: the
-/// transaction, the host's authority, the actor, the project, the file, the accepted keys
-/// and the time. Output: what was written, or `import_item_unknown`,
-/// `import_item_needs_version`, `versions_full`, the file's or the policy's refusal.
+/// `import_apply`, plus `version_upsert` for version items and `create` for tickets, and
+/// the new tickets count against its open tickets like a `create`; tickets start in the
+/// backlog, or where `create` puts the actor's tickets. Inputs: the transaction, the host,
+/// the actor, the project, the requested file, the accepted keys and the time. Output: what
+/// was written, or `import_item_unknown`, `import_item_needs_version`, `versions_full`,
+/// `open_tickets_full`, the host's, the file's or the policy's refusal.
 #[allow(clippy::too_many_arguments)]
 pub fn apply(
     tx: &Transaction<'_>,
-    host: &impl Authority,
+    host: &(impl Authority + Paths),
     actor: &Actor,
     key: &ProjectKey,
-    path: &Path,
+    requested: &Path,
     accept: &[String],
     now_ms: i64,
 ) -> Result<Applied, StoreError> {
@@ -202,7 +216,8 @@ pub fn apply(
     }
     let project = store::project(tx, key)?;
     host.actor_may(tx, key, actor, OpKind::ImportApply, None)?;
-    let preview = preview(tx, key, path)?;
+    let path: PathBuf = host.resolve(tx, key, actor, OpKind::ImportApply, requested)?;
+    let preview = preview_at(tx, key, &path)?;
     let wanted: BTreeSet<&str> = accept.iter().map(String::as_str).collect();
     let chosen: Vec<&Change> = preview
         .items
@@ -218,6 +233,7 @@ pub fn apply(
     }
     authorize(tx, host, actor, key, &chosen)?;
     placed(tx, project.id, &chosen)?;
+    within_open_bound(tx, actor, &chosen)?;
     store::write(tx, || {
         let start = policy::start_status(&policy::load(tx, key)?, actor, TicketStatus::Backlog);
         let mut applied = Applied {
@@ -749,6 +765,33 @@ fn authorize(
     }
     if tickets {
         host.actor_may(tx, key, actor, OpKind::Create, None)?;
+    }
+    Ok(())
+}
+
+fn within_open_bound(
+    tx: &Transaction<'_>,
+    actor: &Actor,
+    chosen: &[&Change],
+) -> Result<(), StoreError> {
+    let added = chosen.iter().filter(|change| is_ticket(change)).count();
+    assert!(added <= IMPORT_ACCEPT_MAX);
+    if added == 0 {
+        return Ok(());
+    }
+    let open_max = OPEN_TICKETS_CREATED_PER_ACTOR_MAX as i64;
+    let open: i64 = store::prepare(tx, ops::OPEN_CREATED)?
+        .query_row(params![actor.as_str(), open_max], |row| row.get(0))?;
+    assert!((0..=open_max).contains(&open));
+    if open + added as i64 > open_max {
+        return Err(store::refusal(
+            codes::OPEN_TICKETS_FULL,
+            format!(
+                "{actor} has {open} open tickets it created and the bound is {open_max}; \
+                 accept at most {} ticket items, or close some first",
+                open_max - open
+            ),
+        ));
     }
     Ok(())
 }

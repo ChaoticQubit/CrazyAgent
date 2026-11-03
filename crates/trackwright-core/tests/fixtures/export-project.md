@@ -1,6 +1,6 @@
 # Trackwright export: project CA
 
-CrazyAgent: open tickets by version and cycle. The tracker writes this file and never reads it back.
+Open tickets of CrazyAgent, by version and cycle. The tracker writes this file and never reads it back.
 
 ## Version V1 (planned, target 2026-12-01)
 
