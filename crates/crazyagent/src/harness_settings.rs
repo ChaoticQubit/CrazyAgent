@@ -281,25 +281,33 @@ pub(crate) fn refusal(
     }
 }
 
+/// Picks one unlocked key's value: the project override, then the app value, then the
+/// catalog default. A stored value the catalog in force refuses, such as one saved under
+/// an older catalog, is passed over. Inputs: the key, the app values and the project's,
+/// none at app scope. Output: the value and where it comes from.
 fn layered(key: &Key, app: &Stored, project: Option<&Stored>) -> (Value, Source) {
+    let allowed = |value: &&Value| check_value(key, value).is_ok();
     let overridable = key.scope == KeyScope::AppAndProject;
     if let Some(value) = project
         .and_then(|values| values.get(&key.key))
         .filter(|_| overridable)
+        .filter(allowed)
     {
         return (value.clone(), Source::Project);
     }
-    if let Some(value) = app.get(&key.key) {
+    if let Some(value) = app.get(&key.key).filter(allowed) {
         return (value.clone(), Source::App);
     }
+    assert!(check_value(key, &key.default).is_ok());
     (key.default.clone(), Source::Default)
 }
 
 /// Builds one key's row at one scope: catalog default, then the app value, then the
 /// project override, with the engine's value for a locked key; a key the catalog does not
-/// list, or any unlocked key of an unqualified version, shows read-only. Inputs: the
-/// catalog, the installed version, the scope, the key, the app and project values and the
-/// key's version at this scope. Output: the row.
+/// list, or any unlocked key of an unqualified version, shows read-only. A stored value
+/// the catalog refuses stays shown here, with set and reset open, but is not in force.
+/// Inputs: the catalog, the installed version, the scope, the key, the app and project
+/// values and the key's version at this scope. Output: the row.
 pub(crate) fn setting(
     catalog: &Catalog,
     installed: Option<&str>,

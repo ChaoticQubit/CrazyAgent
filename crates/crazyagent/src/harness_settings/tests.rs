@@ -23,7 +23,9 @@ pub(crate) fn fixture(harness: &str) -> Catalog {
     catalog::parse(fixture_text(harness).as_bytes()).unwrap()
 }
 
-fn fixture_json() -> Value {
+/// Reads the fixture Codex catalog as JSON, so a test can build a later catalog from it.
+/// Output: the document.
+pub(crate) fn fixture_json() -> Value {
     serde_json::from_str(CODEX).unwrap()
 }
 
@@ -350,4 +352,80 @@ fn a_real_executable_reports_its_version_within_the_limit() {
         installed::version_of(&tmp.path().join("missing"), limit),
         None
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_executable_file_is_asked_for_its_version_once() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("tool");
+    let count = tmp.path().join("tool.count");
+    let write = |body: &str| {
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\necho asked >> \"$0.count\"\n{body}\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    };
+    let asked = || std::fs::read_to_string(&count).unwrap().lines().count();
+    let limit = Duration::from_secs(20);
+    write("echo \"tool 3.4.5\"");
+    for _ in 0..3 {
+        assert_eq!(
+            installed::version_cached(&path, limit).as_deref(),
+            Some("3.4.5")
+        );
+    }
+    assert_eq!(asked(), 1);
+    write("echo \"tool 3.4.10\"");
+    assert_eq!(
+        installed::version_cached(&path, limit).as_deref(),
+        Some("3.4.10")
+    );
+    assert_eq!(
+        installed::version_cached(&path, limit).as_deref(),
+        Some("3.4.10")
+    );
+    assert_eq!(asked(), 2);
+    write("echo \"tool 3.4.11\"; exit 3");
+    assert_eq!(installed::version_cached(&path, limit), None);
+    assert_eq!(installed::version_cached(&path, limit), None);
+    assert_eq!(asked(), 4);
+    assert_eq!(
+        installed::version_cached(&tmp.path().join("missing"), limit),
+        None
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_probe_past_its_limit_leaves_no_process_behind() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("hangs");
+    std::fs::write(
+        &path,
+        "#!/bin/sh\n/bin/sleep 30 &\necho $! > \"$0.child\"\nexec /bin/sleep 30\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let started = std::time::Instant::now();
+    assert_eq!(installed::version_of(&path, Duration::from_secs(2)), None);
+    assert!(started.elapsed() < Duration::from_secs(10));
+    let child: i32 = std::fs::read_to_string(tmp.path().join("hangs.child"))
+        .expect("the probe was stopped before it started its own child")
+        .trim()
+        .parse()
+        .unwrap();
+    let child = rustix::process::Pid::from_raw(child).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while rustix::process::test_kill_process(child).is_ok() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the probe's own child still runs after the probe was stopped"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
