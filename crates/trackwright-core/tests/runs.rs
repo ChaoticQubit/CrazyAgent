@@ -1047,7 +1047,7 @@ fn evidence_on(tx: &Transaction<'_>, ticket: &trackwright_core::model::ShortId, 
     .unwrap();
     tx.execute(
         "INSERT INTO tk_evidence(check_id, result, ref, recorded_by, recorded_ms)
-         VALUES (last_insert_rowid(), 'pass', ?1, 'ci', 3_001)",
+         VALUES (last_insert_rowid(), 'pass', ?1, 'ci', 3001)",
         [reference],
     )
     .unwrap();
@@ -1180,7 +1180,7 @@ fn retention_past_the_count_prunes_the_oldest_unreferenced_runs_first() {
              source_json, policy_json, integrity_json, started_ms, finished_ms, recorded_by,
              total, passed, failed, skipped, errored, version)
          SELECT r.project, n.i, NULL, r.batch, r.title, r.state, r.verdict, NULL,
-             r.source_json, r.policy_json, NULL, 2_000 + n.i, 2_000 + n.i, r.recorded_by,
+             r.source_json, r.policy_json, NULL, 2000 + n.i, 2000 + n.i, r.recorded_by,
              0, 0, 0, 0, 0, 1
          FROM n, tk_runs r WHERE r.number = 1",
         [filler],
