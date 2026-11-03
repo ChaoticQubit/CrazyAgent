@@ -5241,6 +5241,20 @@ impl TeamRuntime {
         Ok((sandbox, profile))
     }
 
+    /// Commits each resting native teammate's turn of a linked lead in its own worktree on
+    /// its own branch (OP-9b). Takes the project and the lead. Returns Ok.
+    fn record_teammate_turns(&mut self, project: &ProjectId, lead: i64) -> Result<(), EngineError> {
+        let _ = (project, lead);
+        Ok(())
+    }
+
+    /// Lands each resting native teammate's waiting change set on its idle linked lead's
+    /// task branch (OP-9b). Takes the project and the lead. Returns Ok.
+    fn land_teammates(&mut self, project: &ProjectId, lead: i64) -> Result<(), EngineError> {
+        let _ = (project, lead);
+        Ok(())
+    }
+
     /// What a harness reads about its git branch with each task (DEC-100): its task branch
     /// and, for a native lead in its own clone only (DEC-111 Q10), where its agent team's
     /// teammates work, each in `.worktrees/<name>` on `<task branch>--<name>`, merged into

@@ -9055,10 +9055,347 @@ fn the_engine_makes_each_native_teammate_s_own_worktree_on_its_own_branch() {
     team.shutdown().unwrap();
 }
 
+/// A linked native lead in the project whose native teammates greet (`%7`) and check
+/// (`%8`) are registered, both working, each in the linked worktree the engine made for it
+/// on `<task branch>--<name>`, as a live lead's discovery pass leaves them.
+#[cfg(target_os = "macos")]
+struct LinkedTeam {
+    project: ProjectId,
+    lead: i64,
+    branch: String,
+    worktree: PathBuf,
+    git_home: PathBuf,
+}
+
+#[cfg(target_os = "macos")]
+impl LinkedTeam {
+    fn new(fixture: &Fixture, team: &mut TeamRuntime) -> Self {
+        let (lead, branch, worktree, git_home) = native_lead_linked_in_the_project(fixture);
+        let project = ProjectId::new(PROJECT).unwrap();
+        let home = agent_home(&fixture.base.join("team"), lead);
+        let team_folder = home.join("teams").join("session-1");
+        std::fs::create_dir_all(&team_folder).unwrap();
+        std::fs::write(
+            team_folder.join("config.json"),
+            r#"{"members":[{"name":"greet","tmuxPaneId":"%7"},{"name":"check","tmuxPaneId":"%8"}]}"#,
+        )
+        .unwrap();
+        crate::coord::ensure(&fixture.connection).unwrap();
+        super::teammates::register(
+            &fixture.connection,
+            &project,
+            lead,
+            &home,
+            &["%7", "%8"],
+            1,
+            5,
+        )
+        .unwrap();
+        team.make_teammate_worktrees(&project, lead).unwrap();
+        let linked = Self {
+            project,
+            lead,
+            branch,
+            worktree,
+            git_home,
+        };
+        for name in ["greet", "check"] {
+            assert!(
+                linked.teammate(name).join("notes.txt").is_file(),
+                "the engine made {name}'s worktree"
+            );
+        }
+        linked
+    }
+
+    fn teammate(&self, name: &str) -> PathBuf {
+        self.worktree
+            .join(crate::agent_git::TEAMMATES_FOLDER)
+            .join(name)
+    }
+
+    fn id(&self, fixture: &Fixture, name: &str) -> i64 {
+        fixture
+            .connection
+            .query_row(
+                "SELECT a.id FROM team_agents a JOIN team_teammate_names n ON n.agent=a.id
+                 WHERE a.parent=?1 AND a.role='teammate' AND n.name=?2",
+                params![self.lead, name],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn tip(&self, branch: &str) -> String {
+        self.commit(&format!("refs/heads/{branch}"))
+    }
+
+    fn commit(&self, revision: &str) -> String {
+        let done = level_git(
+            &self.worktree,
+            &self.git_home,
+            &["rev-parse", "--verify", "-q", revision],
+        );
+        assert!(done.status.success(), "{revision}: {done:?}");
+        String::from_utf8(done.stdout).unwrap().trim().to_owned()
+    }
+
+    fn files(&self, from: &str, to: &str) -> String {
+        let done = level_git(
+            &self.worktree,
+            &self.git_home,
+            &["diff", "--name-only", from, to],
+        );
+        assert!(done.status.success(), "{done:?}");
+        String::from_utf8(done.stdout).unwrap().trim().to_owned()
+    }
+
+    fn mark(&self, fixture: &Fixture, agent: i64, status: &str) {
+        fixture
+            .connection
+            .execute(
+                "UPDATE team_agents SET status=?2 WHERE id=?1",
+                params![agent, status],
+            )
+            .unwrap();
+    }
+
+    fn notes(&self, fixture: &Fixture) -> Vec<String> {
+        let mut statement = fixture
+            .connection
+            .prepare(
+                "SELECT body FROM coord_messages WHERE project=?1 AND from_kind='engine'
+                 AND to_agent=?2 ORDER BY id",
+            )
+            .unwrap();
+        statement
+            .query_map(params![PROJECT, self.lead], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+}
+
+/// OP-9b step 4 (leader 17:32): when a linked lead's native teammate rests, the engine
+/// commits what its turn changed in its own linked worktree on its own branch
+/// `<task branch>--<name>` and keeps it as that teammate's waiting change set, as a linked
+/// agent's turn end does; a teammate that still works gets no commit.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_resting_linked_teammate_s_turn_is_committed_on_its_own_branch() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let linked = LinkedTeam::new(&fixture, &mut team);
+    let start = linked.tip(&linked.branch);
+    std::fs::write(linked.teammate("greet").join("hello.txt"), "Hello.\n").unwrap();
+    std::fs::write(linked.teammate("check").join("check.txt"), "Checked.\n").unwrap();
+    linked.mark(&fixture, linked.id(&fixture, "greet"), "idle");
+
+    team.record_teammate_turns(&linked.project, linked.lead)
+        .unwrap();
+
+    let greet = linked.tip(&format!("{}--greet", linked.branch));
+    assert_ne!(
+        greet, start,
+        "greet's rest committed its turn on its own branch"
+    );
+    assert_eq!(linked.files(&start, &greet), "hello.txt");
+    assert_eq!(
+        linked.tip(&format!("{}--check", linked.branch)),
+        start,
+        "check still works, so nothing of it is committed"
+    );
+    let db = crate::landing::open(&fixture.base).unwrap();
+    let set = crate::landing::open_change_set(&db, &linked.teammate("greet"))
+        .unwrap()
+        .expect("greet's turn waits as its change set");
+    assert_eq!(
+        (set.head.as_str(), set.base.as_str(), set.agent.id.as_str()),
+        (
+            greet.as_str(),
+            start.as_str(),
+            linked.id(&fixture, "greet").to_string().as_str()
+        )
+    );
+    assert!(
+        crate::landing::open_change_set(&db, &linked.teammate("check"))
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        linked.tip(&linked.branch),
+        start,
+        "nothing lands on the lead's task branch at a teammate's rest"
+    );
+}
+
+/// OP-9b step 5 (leader 17:32, answer a): the engine lands each resting teammate's waiting
+/// change set on its linked lead's task branch as one squash commit with the owner's
+/// identity, only while the lead is idle and the owner lets a lead's workers land on the
+/// lead, then records the lead's change set again so the landed work waits for the owner
+/// in the lead's set. Nothing lands during a lead turn or under the owner's own Accept.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_idle_linked_lead_gets_each_resting_teammate_s_work_on_its_task_branch() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let linked = LinkedTeam::new(&fixture, &mut team);
+    let start = linked.tip(&linked.branch);
+    std::fs::write(linked.teammate("greet").join("hello.txt"), "Hello.\n").unwrap();
+    linked.mark(&fixture, linked.id(&fixture, "greet"), "idle");
+    team.record_teammate_turns(&linked.project, linked.lead)
+        .unwrap();
+    let db = crate::landing::open(&fixture.base).unwrap();
+    let waiting = crate::landing::open_change_set(&db, &linked.teammate("greet"))
+        .unwrap()
+        .expect("greet's turn waits as its change set");
+
+    team.land_teammates(&linked.project, linked.lead).unwrap();
+    assert_eq!(
+        linked.tip(&linked.branch),
+        start,
+        "nothing lands during the lead's turn"
+    );
+    linked.mark(&fixture, linked.lead, "idle");
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_nesting(project,depth,lands) VALUES (?1,?2,?3)",
+            params![
+                PROJECT,
+                crate::team::DEPTH_DEFAULT,
+                crate::team::ChildLanding::Owner.name()
+            ],
+        )
+        .unwrap();
+    team.land_teammates(&linked.project, linked.lead).unwrap();
+    assert_eq!(
+        linked.tip(&linked.branch),
+        start,
+        "the owner's own Accept keeps the teammate's work off the lead's branch"
+    );
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_nesting SET lands=?2 WHERE project=?1",
+            params![PROJECT, crate::team::ChildLanding::Lead.name()],
+        )
+        .unwrap();
+
+    team.land_teammates(&linked.project, linked.lead).unwrap();
+
+    let landed = linked.tip(&linked.branch);
+    assert_ne!(
+        landed, start,
+        "greet's work landed on the lead's task branch"
+    );
+    assert_eq!(
+        linked.commit(&format!("{landed}^")),
+        start,
+        "as one squash commit"
+    );
+    assert_eq!(linked.files(&start, &landed), "hello.txt");
+    assert_eq!(
+        std::fs::read_to_string(linked.worktree.join("hello.txt")).unwrap(),
+        "Hello.\n"
+    );
+    let author = level_git(
+        &linked.worktree,
+        &linked.git_home,
+        &["log", "-1", "--format=%an <%ae>", &landed],
+    );
+    assert_eq!(
+        String::from_utf8(author.stdout).unwrap().trim(),
+        "owner <owner@local>"
+    );
+    let (_, greet) = crate::landing::change_set(&db, &waiting.id)
+        .unwrap()
+        .expect("greet's change set is kept");
+    assert_eq!(greet.state, crate::landing::ChangeState::Accepted);
+    let lead = crate::landing::open_change_set(&db, &linked.worktree)
+        .unwrap()
+        .expect("the lead's change set holds the landed work for the owner");
+    assert_eq!(
+        (lead.head.as_str(), lead.base.as_str()),
+        (landed.as_str(), start.as_str())
+    );
+}
+
+/// OP-9b step 5 (leader 17:32, answer a): a resting teammate's change set that conflicts
+/// with its idle linked lead's task branch stays on `<task branch>--<name>`, the lead's
+/// branch is left as it was and the lead is told the files once, not at every pass.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_linked_teammate_s_conflicting_work_stays_on_its_branch_and_the_lead_is_told_the_files() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let linked = LinkedTeam::new(&fixture, &mut team);
+    std::fs::write(linked.worktree.join("notes.txt"), "Lead notes.\n").unwrap();
+    let db = crate::landing::open(&fixture.base).unwrap();
+    crate::landing::record_turn_end(
+        &db,
+        &crate::landing::Workspace {
+            project: linked.project.clone(),
+            agent: crate::landing::ChangeAgent {
+                kind: crate::landing::AgentKind::Sub,
+                id: linked.lead.to_string(),
+                label: format!("Sub-agent {}", linked.lead),
+            },
+            repository: fixture.base.join("project"),
+            worktree: linked.worktree.clone(),
+            git_dir: fixture
+                .base
+                .join("project")
+                .join(".git")
+                .join("worktrees")
+                .join(format!("agent-{}", linked.lead)),
+        },
+        &crate::landing::TurnEnd {
+            outcome: crate::landing::TurnOutcome::Succeeded,
+            turn: "task-1".into(),
+            prompt_line: "Write the notes".into(),
+        },
+    )
+    .unwrap()
+    .expect("the lead's notes wait in its change set");
+    let lead_tip = linked.tip(&linked.branch);
+    std::fs::write(linked.teammate("greet").join("notes.txt"), "Greet notes.\n").unwrap();
+    linked.mark(&fixture, linked.id(&fixture, "greet"), "idle");
+    team.record_teammate_turns(&linked.project, linked.lead)
+        .unwrap();
+    let greet_tip = linked.tip(&format!("{}--greet", linked.branch));
+    linked.mark(&fixture, linked.lead, "idle");
+
+    team.land_teammates(&linked.project, linked.lead).unwrap();
+    team.land_teammates(&linked.project, linked.lead).unwrap();
+
+    assert_eq!(
+        linked.tip(&linked.branch),
+        lead_tip,
+        "the lead's branch is kept"
+    );
+    assert_eq!(
+        linked.tip(&format!("{}--greet", linked.branch)),
+        greet_tip,
+        "greet's work stays on its own branch"
+    );
+    let set = crate::landing::open_change_set(&db, &linked.teammate("greet"))
+        .unwrap()
+        .expect("greet's change set stays open");
+    assert_eq!(set.state, crate::landing::ChangeState::Conflict);
+    let told: Vec<String> = linked
+        .notes(&fixture)
+        .into_iter()
+        .filter(|note| note.contains("greet") && note.contains("notes.txt"))
+        .collect();
+    assert_eq!(told.len(), 1, "the lead is told the files once: {told:?}");
+}
+
 /// A Claude Code lead in native mode in a linked worktree of the project repository, as
-/// the Sandboxed default gives it, on the task branch the engine named for it, with its
-/// private home, temp and profiles folders. Takes the fixture. Returns the lead, its task
-/// branch, its worktree and the owner's git home.
+/// the Sandboxed default gives it, on the task branch the engine named for it, with the
+/// start the engine records for a new worktree and its private home, temp and profiles
+/// folders. Takes the fixture. Returns the lead, its task branch, its worktree and the
+/// owner's git home.
 #[cfg(target_os = "macos")]
 fn native_lead_linked_in_the_project(fixture: &Fixture) -> (i64, String, PathBuf, PathBuf) {
     use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
@@ -9128,6 +9465,7 @@ fn native_lead_linked_in_the_project(fixture: &Fixture) -> (i64, String, PathBuf
             .create(folder)
             .unwrap();
     }
+    crate::landing::record_worktree_start(&db, &repository, &worktree, &git_dir).unwrap();
     (lead, branch, worktree, git_home)
 }
 

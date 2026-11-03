@@ -3039,6 +3039,104 @@ impl Clones {
     }
 }
 
+/// OP-9b (leader 17:32, answer a): a linked lead cannot report its work Complete while one
+/// of its native teammates still works, since the engine lands each teammate's work on the
+/// lead's task branch only once it rests; finish_work names the working teammate, then
+/// completes once every teammate rests.
+#[test]
+fn a_linked_lead_finishes_only_once_its_native_teammates_rest() {
+    let mut fixture = Fixture::new();
+    let (home, project) = owner_repository(&fixture);
+    let lead = project
+        .join(".crazyagent/worktrees")
+        .join(format!("agent-{LEAD}"));
+    git_in(
+        &home,
+        &project,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            lead.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    let git_dir = project.join(".git/worktrees").join(format!("agent-{LEAD}"));
+    let db = crate::landing::open(&fixture.base).unwrap();
+    let branch = crate::landing::claim_task_branch(&db, &project, &lead, "lead").unwrap();
+    assert_eq!(
+        crate::landing::name_agent_branch(&db, &project, &lead, &git_dir).unwrap(),
+        branch
+    );
+    team_agent(&fixture, LEAD, "claude-code", "working", None);
+    fixture
+        .connection
+        .execute_batch(&format!(
+            "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES ({LEAD},'{PROJECT}','{}','{}','{}');
+             INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms,parent,pane)
+             VALUES ({WORKER},'{PROJECT}','teammate','claude-code',1,'working',{NOW},{NOW},{LEAD},'%7');
+             INSERT INTO team_teammate_names(agent,name) VALUES ({WORKER},'greet');",
+            project.display(),
+            lead.display(),
+            git_dir.display()
+        ))
+        .unwrap();
+    let agents = fixture.base.join("team/agents");
+    let access = ModelAccess::default();
+    let (answer, error) = lead_call(
+        &mut fixture,
+        &access,
+        &agents,
+        LEAD,
+        Call::StartWork {
+            title: "Lead the greeting".into(),
+            claims: vec!["hello.txt".into()],
+        },
+    );
+    assert!(!error, "{answer}");
+    let work: i64 = answer
+        .strip_prefix("Started work #")
+        .and_then(|rest| rest.split_once(' '))
+        .and_then(|(id, _)| id.parse().ok())
+        .unwrap_or_else(|| panic!("no work id in {answer}"));
+    let finish = |fixture: &mut Fixture| {
+        lead_call(
+            fixture,
+            &access,
+            &agents,
+            LEAD,
+            Call::FinishWork {
+                work,
+                version: 1,
+                outcome: crate::coord::Finish::Complete,
+                evidence: "Greeted.".into(),
+            },
+        )
+    };
+
+    let (answer, error) = finish(&mut fixture);
+    assert_eq!(
+        (answer.as_str(), error),
+        (
+            "Not finished: these teammates still work: greet. CrazyAgent lands each teammate's work on your task branch once it rests and you are idle; finish again once they rest.",
+            true
+        )
+    );
+    fixture
+        .connection
+        .execute("UPDATE team_agents SET status='idle' WHERE id=?1", [WORKER])
+        .unwrap();
+    let (answer, error) = finish(&mut fixture);
+    assert_eq!(
+        (answer.as_str(), error),
+        (
+            format!("Work #{work} is complete at version 2.").as_str(),
+            false
+        )
+    );
+}
+
 /// A lead cannot report its work Complete while a worker's branch holds a commit its task
 /// branch does not: finish_work names the worker's branch until the lead merges it, then
 /// completes (feat/coord-spawn 4f372a7e).
