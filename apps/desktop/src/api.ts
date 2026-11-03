@@ -1213,6 +1213,13 @@ export function setAskBeforeMerge(id: string, on: boolean): Promise<Result<Inten
   return call<IntentReceipt>("desktop_team_ask_before_merge", { id, on, generation: nextGeneration() });
 }
 
+/** Turns the project's "Re-ask a sub-agent's empty reply" setting on or off; on, a
+ * sub-agent whose task ends with no reply text is asked once more for its reply. Inputs:
+ * the project id and the switch. Output: the engine receipt, not ready, or a plain error. */
+export function setReaskEmptyReply(id: string, on: boolean): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_reask_empty_reply", { id, on, generation: nextGeneration() });
+}
+
 /** Sets the most files one new top-level folder, a folder the owner's branch does not have,
  * may gain in a project's change set before the engine refuses the set. Inputs: the project id
  * and the limit. Output: the engine receipt, not ready, or a plain error. */

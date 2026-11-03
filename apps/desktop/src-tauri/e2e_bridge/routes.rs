@@ -735,6 +735,21 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state) .await? .team_ask_before_merge(&id, on, generation) .await }.await;
             routed(result)
         }
+        "desktop_team_reask_empty_reply" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                on: bool,
+                generation: u64,
+            }
+            let Args { id, on, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .team_reask_empty_reply(&id, on, generation) .await }.await;
+            routed(result)
+        }
         "desktop_team_new_folder_limit" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
