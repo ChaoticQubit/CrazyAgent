@@ -118,7 +118,8 @@ export interface ContextChunk {
 export type AgentAccess = "sandboxed" | "own_branch" | "full";
 
 /** How far a project's tools-on agents and the plugin check may reach on the network: open is
- * the whole network, https is port 443 only, none is nothing beyond the model. It does not
+ * the whole network, https is port 443 only, none is the model's port alone, on loopback for a
+ * local model, otherwise on any host, not yet the model host alone. It does not
  * widen or narrow the live master, which always reaches the model's port only. */
 export type AgentNetwork = "open" | "https" | "none";
 
@@ -522,6 +523,18 @@ export function loadProjectFiles(id: string, query: string): Promise<Result<stri
  * Inputs: project id, the folders and a generation. Output: the receipt. */
 export function saveReadPaths(id: string, paths: string[], generation: number): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_set_project_read_paths", { id, paths, generation });
+}
+
+/** Reads the folders this project's agents are kept out of, read, write and run.
+ * Input: project id. Output: the folders in saved order. */
+export function loadHiddenPaths(id: string): Promise<Result<string[]>> {
+  return call<string[]>("desktop_project_hidden_paths", { id });
+}
+
+/** Replaces the folders this project's agents are kept out of; the engine refuses a path
+ * outside the project. Inputs: project id, the folders and a generation. Output: the receipt. */
+export function saveHiddenPaths(id: string, paths: string[], generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_set_project_hidden_paths", { id, paths, generation });
 }
 
 /** Reads this project's agent access level and the toolchains its agents may use.

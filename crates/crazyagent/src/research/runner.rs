@@ -822,7 +822,16 @@ impl ResearchRunner {
         let setup = self.setup.lock().unwrap_or_else(PoisonError::into_inner);
         ensure_repository(&root, &tmp)?;
         add_worktree(&sandbox, &profile, &worktree)?;
-        let sandbox = sandbox.confine_to_worktree(&worktree)?;
+        let mut sandbox = sandbox.confine_to_worktree(&worktree)?;
+        let hidden = jobs
+            .hidden_paths(&project)
+            .map_err(|_| RunError::Invalid("project hidden folders unreadable".into()))?;
+        if let Err(code) = crate::sandbox::hidden_paths::none_tracked(&root, &hidden) {
+            return Err(RunError::Invalid(code.into()));
+        }
+        for folder in &hidden {
+            sandbox = sandbox.hide(folder)?;
+        }
         sandbox.install(&profile)?;
         drop(setup);
         still_held(jobs, job)?;
@@ -1309,6 +1318,18 @@ impl ResearchRunner {
         if let Some(parent) = executable.canonicalize()?.parent() {
             sandbox = sandbox.allow_read(parent)?;
         }
+        let hidden = match run.project {
+            Some(project) => ResearchJobs::open(&self.database)?
+                .hidden_paths(project)
+                .map_err(|_| RunError::Invalid("project hidden folders unreadable".into()))?,
+            None => Vec::new(),
+        };
+        if let Err(code) = crate::sandbox::hidden_paths::none_tracked(&folder, &hidden) {
+            return Err(RunError::Invalid(code.into()));
+        }
+        for sub in hidden.iter().filter(|path| path.starts_with(&folder)) {
+            sandbox = sandbox.hide(sub)?;
+        }
         let profile = self.state.join("profiles").join(format!("{}.sb", run.name));
         sandbox.install(&profile)?;
         write_private(&agent, &agent.join("prompt.md"), run.prompt.as_bytes())?;
@@ -1473,9 +1494,10 @@ fn read_folders(
 }
 
 /// The sandbox network a research job runs under (DEC-111 Q17, S4R1-2): a tools-off job
-/// reaches only its model endpoint, and a tools-on job follows the project's network choice
-/// with the model still reachable. Inputs: the project's agent policy, whether the job has
-/// tools, and the model endpoint. Output: the sandbox network.
+/// reaches only its model endpoint's port, on loopback for a local model, otherwise on any
+/// host, and a tools-on job follows the project's network choice with the model still
+/// reachable. Inputs: the project's agent policy, whether the job has tools, and the model
+/// endpoint. Output: the sandbox network.
 pub(crate) fn job_network(
     policy: &crate::sandbox::policy::AgentPolicy,
     tools: bool,

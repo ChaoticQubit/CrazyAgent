@@ -396,7 +396,7 @@ impl LinuxSandbox {
             && matches!(sandbox.network(), SandboxNetwork::Only(remotes) if !remotes.is_empty())
         {
             return Err(SandboxError::Unavailable(
-                "limiting an agent to its model endpoints needs Landlock network rules \
+                "limiting an agent's network to a few ports needs Landlock network rules \
                  (Linux 6.7 or newer); bubblewrap cannot limit ports"
                     .into(),
             ));

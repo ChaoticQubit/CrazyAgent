@@ -100,11 +100,13 @@ fn read_roots(graphify: &Path) -> Vec<PathBuf> {
 /// name, the time limit and `stop`, polled while it runs. Returns how it
 /// ended; its process group is stopped on every path.
 #[cfg(unix)]
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn update(
     graphify: &Path,
     repo: &Path,
     state: &Path,
     name: &str,
+    hidden: &[std::path::PathBuf],
     limit: Duration,
     stop: &dyn Fn() -> bool,
 ) -> Result<GraphEnding, RunError> {
@@ -144,6 +146,12 @@ pub(crate) fn update(
         sandbox = sandbox.allow_read(&root)?;
     }
     sandbox = sandbox.hide(&repo.join(crate::projects_home::CRAZYAGENT_DIRECTORY))?;
+    if let Err(code) = crate::sandbox::hidden_paths::none_tracked(repo, hidden) {
+        return Ok(GraphEnding::Failed(code));
+    }
+    for folder in hidden {
+        sandbox = sandbox.hide(folder)?;
+    }
     let profile = state.join("profiles").join(format!("{name}.sb"));
     sandbox.install(&profile)?;
     let mut command = sandbox.command(&profile, &graphify);
