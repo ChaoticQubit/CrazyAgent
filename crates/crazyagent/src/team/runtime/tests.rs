@@ -12926,3 +12926,152 @@ fn a_native_teammate_cannot_type_into_its_lead_s_pane() {
         "the lead's teammate pane is listed for it: {listed:?}"
     );
 }
+
+/// A native lead's teammate cannot put a command where its lead's Claude Code runs it ahead
+/// of every Bash command (rv-audit TPH r1 F2). Claude Code 2.1.309 sources
+/// `<CLAUDE_CONFIG_DIR>/shell-snapshots/snapshot-*.sh` before each Bash command and runs the
+/// hook scripts under `<CLAUDE_CONFIG_DIR>/session-env/<session>`. The lead's snapshot stands
+/// in its home as Claude Code leaves it, and its session folder is not made yet. The
+/// teammate, in its installed profile, appends to, replaces and adds a snapshot, moves the
+/// folder away and back, and makes a session hook script. The lead then runs both the way
+/// Claude Code's Bash prefix does, in its own profile: only its own snapshot line runs.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_teammate_cannot_plant_a_command_in_its_lead_s_shell_snapshot_or_session_env() {
+    use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    set_mode(
+        &fixture.connection,
+        &project,
+        HarnessKind::ClaudeCode,
+        SubagentMode::Native,
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        fixture.base.join("engine.db"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let host = crate::terminal::tmux_host(&fixture.base, Some(fixture.tmux.clone()));
+    let runtime = exiting_claude_runtime(&fixture)
+        .with_terminal(host.clone())
+        .unwrap();
+    let profile = reference("managed-profile");
+    let managed = runtime.custody.as_ref().unwrap().profile_home(&profile);
+    std::fs::create_dir_all(&managed).unwrap();
+    std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let account = TeamAccount {
+        connection: reference("managed-connection"),
+        reach: TeamReach::Managed {
+            profile_ref: profile,
+            model: None,
+        },
+    };
+    let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    let (_, plan, _) = runtime
+        .prepare(
+            &fixture.setup,
+            id,
+            AgentRole::Sub,
+            "claude-code",
+            true,
+            &account,
+            false,
+            Layout::Linked,
+        )
+        .unwrap();
+    assert!(plan.native, "the lead starts with native teammates");
+    let teammates = agent_teammates_profile(&runtime.state, id);
+    assert!(teammates.is_file());
+    let home = agent_home(&runtime.state, id);
+    let work = plan.working_dir.clone();
+    let snapshots = home.join("shell-snapshots");
+    std::fs::create_dir_all(&snapshots).unwrap();
+    let snapshot = snapshots.join("snapshot-zsh-1793192731382-81mk5z.sh");
+    let own = format!("echo ran > {}\n", work.join("lead-ran.txt").display());
+    std::fs::write(&snapshot, &own).unwrap();
+    let session = home
+        .join("session-env")
+        .join("0b6f1c2e-5d4a-4f3e-9a8b-7c6d5e4f3a2b");
+    let hook = session.join("sessionstart-hook-0.sh");
+
+    let marker = work.join("planted.txt");
+    let tried = work.join("tried.txt");
+    let mate = work.join("mate.sh");
+    let plant = format!("echo planted > {}", marker.display());
+    std::fs::write(
+        &mate,
+        format!(
+            "printf '{plant}\\n' >> '{snapshot}'; echo append=$? > {tried}\n\
+             rm -f '{snapshot}' && printf '{plant}\\n' > '{snapshot}'; echo replace=$? >> {tried}\n\
+             printf '{plant}\\n' > '{snapshots}/snapshot-zsh-1793192731383-added.sh'; echo add=$? >> {tried}\n\
+             mv '{snapshots}' '{snapshots}.away'; echo move=$? >> {tried}\n\
+             if [ -d '{snapshots}.away' ]; then mv '{snapshots}.away' '{snapshots}'; fi\n\
+             mkdir -p '{session}' && printf '{plant}\\n' > '{hook}'; echo session_env=$? >> {tried}\n",
+            snapshot = snapshot.display(),
+            snapshots = snapshots.display(),
+            session = session.display(),
+            hook = hook.display(),
+            tried = tried.display(),
+        ),
+    )
+    .unwrap();
+    let mated = crate::spawn_gate::output(
+        Command::new(crate::sandbox::SANDBOX_EXEC)
+            .arg("-f")
+            .arg(&teammates)
+            .arg("/bin/sh")
+            .arg(&mate)
+            .current_dir(&work)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    let attempts = std::fs::read_to_string(&tried).unwrap_or_default();
+    let ran = crate::spawn_gate::output(
+        Command::new(crate::sandbox::SANDBOX_EXEC)
+            .arg("-f")
+            .arg(&plan.sandbox_profile)
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg(format!(
+                "source '{snapshot}' 2>/dev/null || true; for f in '{session}'/*-hook-*.sh; do if [ -f \"$f\" ]; then . \"$f\"; fi; done",
+                snapshot = snapshot.display(),
+                session = session.display(),
+            ))
+            .current_dir(&work)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home)
+            .env("CLAUDE_CONFIG_DIR", &home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+
+    assert!(ran.status.success(), "{ran:?}");
+    assert!(
+        !marker.exists(),
+        "a teammate planted a command its lead's Bash runs: {attempts} {}",
+        String::from_utf8_lossy(&mated.stderr)
+    );
+    assert!(
+        work.join("lead-ran.txt").is_file(),
+        "the lead ran its own snapshot"
+    );
+    assert_eq!(std::fs::read_to_string(&snapshot).unwrap(), own);
+    for attempt in ["append", "replace", "add", "move", "session_env"] {
+        assert!(
+            attempts
+                .lines()
+                .any(|line| line.starts_with(&format!("{attempt}=")) && !line.ends_with("=0")),
+            "a teammate's {attempt} write in its lead's config home succeeded: {attempts}"
+        );
+    }
+}

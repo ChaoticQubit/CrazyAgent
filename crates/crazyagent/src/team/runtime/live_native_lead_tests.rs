@@ -16,6 +16,8 @@ const STOP: Duration = Duration::from_secs(30);
 const ONE: &str = "Reply with exactly the word ONE and nothing else.";
 const TWO: &str = "Reply with exactly the word TWO and nothing else.";
 const COUNT: &str = "Write every whole number from 1 to 600 in order, one per line, then a last line with only the word COUNTED. Use no tools.";
+const BASH_ONE: &str = "Use your Bash tool to run the command `echo snapshot-check`, then reply with exactly the word ONE and nothing else.";
+const BASH_TWO: &str = "Use your Bash tool to run the command `echo snapshot-check`, then reply with exactly the word TWO and nothing else.";
 const TEAM_TURN: Duration = Duration::from_secs(420);
 const POLL: Duration = Duration::from_millis(250);
 const GRACE: Duration = Duration::from_secs(30);
@@ -558,4 +560,89 @@ fn live_native_lead_splits_teammates_into_mates_server() {
     team.order(Order::Stop);
     let (_, problem) = team.until_ended(STOP);
     assert_eq!(problem, None);
+}
+
+/// A native lead's teammate cannot plant a command in the shell snapshot its lead's Claude
+/// Code runs before every Bash command (rv-audit TPH r1 F2). The real lead runs one Bash
+/// call, so its snapshot exists under its config home. A process in the installed teammates'
+/// profile appends a command to each snapshot there, and the lead's next Bash call must not
+/// run it.
+#[test]
+#[ignore = "live qualification: needs a signed-in Claude account, CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
+fn live_a_teammate_cannot_plant_a_command_in_its_lead_s_shell_snapshot() {
+    let mut signed_in = SignedIn::claude();
+    let lead = ManagedAgent::engine_native_lead(&claude());
+    let team = lead.into_native_worker(
+        signed_in.acquire("claude-live-snapshot"),
+        BASH_ONE,
+        TURN,
+        AgentAccess::Sandboxed,
+        None,
+    );
+    let first = finished(&team.until_finished(TURN));
+    assert!(answered(&first, "ONE"), "{first:?}");
+    let folder = team.home.join("shell-snapshots");
+    let snapshots: Vec<PathBuf> = std::fs::read_dir(&folder)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("snapshot-") && name.ends_with(".sh"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        !snapshots.is_empty(),
+        "the lead's Claude Code keeps its shell snapshot in {}",
+        folder.display()
+    );
+    let teammates = super::agent_teammates_profile(&team.runtime.state, AGENT);
+    assert!(
+        teammates.is_file(),
+        "the native lead's launch installed its teammates' profile"
+    );
+    let marker = team.home.join("snapshot-planted.txt");
+    let planted = crate::spawn_gate::output(
+        Command::new(crate::sandbox::SANDBOX_EXEC)
+            .arg("-f")
+            .arg(&teammates)
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg(format!(
+                "for f in '{folder}'/snapshot-*.sh; do printf 'echo planted > {marker}\\n' >> \"$f\" || exit 1; done",
+                folder = folder.display(),
+                marker = marker.display(),
+            ))
+            .current_dir(&team.home)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &team.home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    team.order(Order::Turn(
+        BASH_TWO.to_owned(),
+        None,
+        TurnRules {
+            limit: Some(TURN),
+            background: crate::team::BackgroundAtEnd::Wait,
+        },
+    ));
+    let second = finished(&team.until_finished(TURN));
+    println!(
+        "real claude lead after a teammate's snapshot write: append={:?} turns={second:?}",
+        planted.status.code()
+    );
+    assert!(answered(&second, "TWO"), "{second:?}");
+    assert!(
+        !marker.exists(),
+        "a teammate's line in its lead's shell snapshot ran in the lead's next Bash call: {}",
+        String::from_utf8_lossy(&planted.stderr)
+    );
 }
