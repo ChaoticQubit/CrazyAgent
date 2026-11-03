@@ -47,6 +47,7 @@ mod scheduling;
 mod team;
 pub mod terminal;
 pub mod ticket_settings;
+pub mod tracker;
 mod usage;
 pub use account_profile::{AccountProfileView, ConfiguredAccountPlan};
 pub use account_setup::ManagedAccountPlan;

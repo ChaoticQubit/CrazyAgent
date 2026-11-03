@@ -24,6 +24,7 @@ import { RoadmapTab } from "./roadmap";
 import { valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 import { SettingsTab } from "./settings";
+import { TicketsTab } from "./tickets";
 import { TeamActivity } from "./team-activity";
 import { useTeam } from "./team";
 import "./projects.css";
@@ -34,6 +35,7 @@ export const TABS = [
   { id: "agents", label: "Agents", icon: "bot" },
   { id: "changes", label: "Changes", icon: "git-branch" },
   { id: "questions", label: "Questions", icon: "inbox" },
+  { id: "tickets", label: "Tickets", icon: "layout-template" },
   { id: "context", label: "Context", icon: "folder-open" },
   { id: "process", label: "Process", icon: "list-checks" },
   { id: "roadmap", label: "Roadmap", icon: "layout-template" },
@@ -261,6 +263,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       {active === "agents" && <AgentsTab data={data} />}
       {active === "changes" && <ChangesTab data={data} />}
       {active === "questions" && <QuestionsTab data={data} />}
+      {active === "tickets" && <TicketsTab data={data} />}
       {active === "context" && <ContextTab data={data} />}
       {active === "process" && <ProcessEditor key={data.id} scope={{ kind: "project", id: data.id, name: data.name }} />}
       {active === "roadmap" && <RoadmapTab data={data} />}
