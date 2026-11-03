@@ -1010,8 +1010,8 @@ impl TeamView {
         });
     }
 
-    /// Opens the Messages list of the focused sub-agent. On the master it says where the
-    /// master's own conversation is; on the tasks list it asks for an agent.
+    /// Opens the Messages list of the focused sub-agent or teammate. On the master it says
+    /// where the master's own conversation is; on the tasks list it asks for an agent.
     /// Takes the view. Returns nothing; the list's first read comes from `next_query`.
     fn open_messages(&mut self) {
         let picked = match self.focus {
@@ -1028,7 +1028,7 @@ impl TeamView {
                 ));
             }
             Some((_, AgentRole::Master, _)) => self.notice = Some(Notice::plain(MASTER_ELSEWHERE)),
-            Some((agent, AgentRole::Sub, label)) => {
+            Some((agent, AgentRole::Sub | AgentRole::Teammate, label)) => {
                 self.notice = None;
                 self.messages = Some(Messages::new(
                     self.project.clone(),

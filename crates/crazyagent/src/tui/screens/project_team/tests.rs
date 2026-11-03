@@ -2795,6 +2795,42 @@ fn capital_m_opens_the_focused_sub_agents_messages_and_esc_returns_at_120_and_80
     find(&frame(&view, 120, 36), "Tasks  3");
 }
 
+/// B19L merge (18.13 native teammates, b19 Messages): a teammate in the agents list opens
+/// its Messages as a sub-agent does, as on the Team graph screen.
+#[test]
+fn capital_m_opens_a_focused_teammates_messages() {
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    let mut status = team();
+    status.agents.push(agent(
+        7,
+        AgentRole::Teammate,
+        "claude-code",
+        AgentStatus::Working,
+        None,
+    ));
+    view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+    let at = view
+        .agents()
+        .iter()
+        .position(|agent| agent.id == 7)
+        .unwrap();
+    for _ in 0..at {
+        view.key(press(KeyCode::Down));
+    }
+
+    assert_eq!(view.key(press(KeyCode::Char('M'))), TeamReply::Handled);
+    assert_eq!(view.notice, None);
+    assert_eq!(
+        view.next_query(NOW + 1),
+        Some(SetupQuery::TeamMessages {
+            project: project(),
+            agent: 7,
+            before: None,
+        })
+    );
+}
+
 #[test]
 fn capital_m_on_the_master_says_where_its_conversation_is_and_on_a_task_asks_for_an_agent() {
     let mut view = loaded();
