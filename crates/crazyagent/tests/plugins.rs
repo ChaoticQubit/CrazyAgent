@@ -788,7 +788,7 @@ async fn a_server_whose_check_home_holds_many_files_answers_its_removal_at_once(
     }
 
     controller
-        .remove_mcp_server(server.id.clone())
+        .remove_mcp_server(server.id.clone(), server.version)
         .await
         .expect("a committed removal answers Done however much its check home holds");
     assert!(
