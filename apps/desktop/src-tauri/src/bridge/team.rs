@@ -3,7 +3,9 @@ use crazyagent::coord::settings::{CoordSettings, Delivery, HarnessKind, Subagent
 use crazyagent::engine::owner::OwnerMutation;
 use crazyagent::protocol::ProjectId;
 use crazyagent::team::events::{AppEvents, RuleTarget, WakeRule};
-use crazyagent::team::{BranchMode, ChildLanding, SwitchMode, TeamAction, TeamStatus};
+use crazyagent::team::{
+    BackgroundAtEnd, BranchMode, ChildLanding, SwitchMode, TeamAction, TeamStatus,
+};
 
 pub(super) fn read_failure(code: &str) -> BridgeError {
     caused(
@@ -268,6 +270,24 @@ impl NativeBridge {
             .filter(|branch| !branch.is_empty());
         self.team_action(TeamAction::LandOn { project_id, branch }, generation)
             .await
+    }
+
+    /// Sets what a project's tasks do at their turn end while commands their agents started
+    /// in the background still run (DEC-111 Q13): wait, a grace time, or stop. Takes the
+    /// project id, the choice and the client generation. Returns the actual commit receipt;
+    /// the engine refuses a grace time outside 10 to 3600 s.
+    pub async fn team_background(
+        &mut self,
+        id: &str,
+        choice: BackgroundAtEnd,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(
+            TeamAction::BackgroundAtEnd { project_id, choice },
+            generation,
+        )
+        .await
     }
 
     /// Turns a project's "Ask me before merging into the master's branch" setting on or

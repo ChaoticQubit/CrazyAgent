@@ -1,12 +1,16 @@
 use super::managed_agent::{ManagedAgent, SignedIn, claude};
-use super::{Report, TurnEnd};
+use super::{BACKGROUND_STOPPED, Report, TurnEnd};
 use crate::harnesses::terminal_session::Resume;
-use crate::team::AgentRole;
+use crate::team::{AgentRole, BackgroundAtEnd};
 use crate::terminal::tmux::{Tmux, installed};
 use crate::terminal::{FOLDER, Host};
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
+
+const TURN: Duration = Duration::from_secs(180);
+const REAPED: Duration = Duration::from_secs(10);
 
 const RESUME_TURN: Duration = Duration::from_secs(180);
 const FIRST_CODEWORD: &str = "HERON-4417";
@@ -157,5 +161,99 @@ fn a_resumed_claude_agent_keeps_its_conversation_and_sees_an_edit_only_as_the_en
     assert!(
         given.contains(SECOND_CODEWORD),
         "the engine records the edited text as given at the relaunch"
+    );
+}
+
+/// The running processes whose command line holds `needle`, as `ps` lists them.
+/// Input: the text. Output: each process's pid and command line.
+fn processes_with(needle: &str) -> Vec<String> {
+    let listed = crate::spawn_gate::output(std::process::Command::new("/bin/ps").args([
+        "-axww",
+        "-o",
+        "pid=,command=",
+    ]))
+    .unwrap();
+    assert!(listed.status.success());
+    String::from_utf8_lossy(&listed.stdout)
+        .lines()
+        .filter(|line| line.contains(needle))
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Under Stop, a real Claude Code sub-agent's command started in the background ends with
+/// its task (rv-audit S3 F3). On the owner's signed-in account, in a pane as the owner's
+/// agents run, the agent starts a long sleep with its Bash tool in the background and ends
+/// its turn: the task ends with the turn and says first that the command was stopped, and
+/// no process of that command or of the agent's home is left. Runs in a live window only.
+#[test]
+#[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
+fn under_stop_a_real_claude_agent_s_background_command_ends_with_its_task() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-live-bg-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = root.path().canonicalize().unwrap();
+    let tmux = installed(&base).expect("BLOCKED: tmux must be installed");
+    let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &base.join(FOLDER)));
+    let mut agent = ManagedAgent::in_pane("claude-code", &claude(), host.clone(), AgentRole::Sub);
+    agent.background = BackgroundAtEnd::Stop;
+    let mut signed_in = SignedIn::claude();
+    let marker = format!("sleep 300.{:05}", std::process::id() % 100_000);
+    let home = agent.home.to_str().unwrap().to_owned();
+    let seen = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicBool::new(false));
+    let watcher = {
+        let (seen, done, marker) = (seen.clone(), done.clone(), marker.clone());
+        std::thread::spawn(move || {
+            while !done.load(Ordering::SeqCst) {
+                if !processes_with(&marker).is_empty() {
+                    seen.store(true, Ordering::SeqCst);
+                }
+                std::thread::sleep(Duration::from_millis(200));
+            }
+        })
+    };
+    let prompt = format!(
+        "Use your Bash tool with run_in_background set to true to start the command `{marker}`. Do not wait for it or check on it. Then reply with exactly the word STARTED and end your turn."
+    );
+    let turns = vec![(
+        prompt.as_str(),
+        signed_in.acquire("claude-live-background-stop"),
+    )];
+    let (reports, problem) = agent.run_turns(None, turns, TURN);
+    done.store(true, Ordering::SeqCst);
+    watcher.join().unwrap();
+    let (text, end, cause) = reports
+        .iter()
+        .find_map(|report| match report {
+            Report::Finished { text, end, cause } => Some((text.clone(), *end, cause.clone())),
+            _ => None,
+        })
+        .expect("the turn finished");
+    println!("real claude background stop: end={end:?} cause={cause:?} reply={text:?}");
+    let deadline = Instant::now() + REAPED;
+    let left = loop {
+        let mut left = processes_with(&marker);
+        left.extend(processes_with(&home));
+        if left.is_empty() || Instant::now() >= deadline {
+            break left;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    host.close(&[]).unwrap();
+    assert_eq!(problem, None);
+    assert_eq!(end, TurnEnd::Success, "{cause:?}");
+    assert!(
+        seen.load(Ordering::SeqCst),
+        "the agent's background command never ran: {text}"
+    );
+    assert!(
+        text.starts_with(BACKGROUND_STOPPED) && text.contains("STARTED"),
+        "{text}"
+    );
+    assert!(
+        left.is_empty(),
+        "processes of the agent outlived its task: {left:?}"
     );
 }
