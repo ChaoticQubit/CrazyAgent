@@ -1,3 +1,6 @@
+use crate::tests_model::{
+    CaseProtectedVisibility, RunRetention, RunWriters, SkippedCounts, TestEvidence,
+};
 use serde::{Deserialize, Deserializer, Serialize, de};
 use std::fmt;
 
@@ -393,6 +396,11 @@ named_enum! {
         CycleDays => "cycle_days",
         Rollover => "rollover",
         Import => "import",
+        TestEvidence => "test_evidence",
+        SkippedCounts => "skipped_counts",
+        CaseProtectedVisibility => "case_protected_visibility",
+        RunWriters => "run_writers",
+        RunRetention => "run_retention",
     }
 }
 
@@ -811,6 +819,11 @@ pub struct Policy {
     pub cycle_days: CycleDays,
     pub rollover: RolloverPolicy,
     pub import: ImportPolicy,
+    pub test_evidence: TestEvidence,
+    pub skipped_counts: SkippedCounts,
+    pub case_protected_visibility: CaseProtectedVisibility,
+    pub run_writers: RunWriters,
+    pub run_retention: RunRetention,
 }
 
 impl Default for Policy {
@@ -822,6 +835,11 @@ impl Default for Policy {
             cycle_days: CycleDays(14),
             rollover: RolloverPolicy::Auto,
             import: ImportPolicy::AutoOnce,
+            test_evidence: TestEvidence::Latest,
+            skipped_counts: SkippedCounts::Fail,
+            case_protected_visibility: CaseProtectedVisibility::Hidden,
+            run_writers: RunWriters::Any,
+            run_retention: RunRetention::PruneCount,
         }
     }
 }

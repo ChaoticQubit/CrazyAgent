@@ -1,3 +1,4 @@
+use crate::coverage;
 use crate::criteria;
 use crate::host::{
     Authority, CheckView, Evidence, EvidenceState, LinkKind, LinkState, Links, TicketView,
@@ -13,8 +14,9 @@ use rusqlite::Transaction;
 pub const LINK_STATE_UNKNOWN: &str = "unknown";
 
 /// The host a tracker runs with on its own: links are any bounded reference with state
-/// `unknown`, a check follows the latest evidence a user or CI recorded for it, manual and
-/// ci evidence come from the owner or an engine only, and authority is the project's policy
+/// `unknown`, a `test` check naming a case follows that case's runs, any other check follows
+/// the latest evidence a user or CI recorded for it, manual and ci evidence come from the
+/// owner or an engine only, and authority is the project's policy
 /// applied to the self-declared actor, so it binds honest agents only.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Standalone;
@@ -53,6 +55,11 @@ impl Evidence for Standalone {
             project,
             "a check belongs to its project"
         );
+        if check.kind == CheckKind::Test
+            && let Some(state) = coverage::test_check(tx, self, project, check)?
+        {
+            return Ok(state);
+        }
         let latest = criteria::latest_evidence(tx, check).map_err(refusal_of)?;
         let state = match latest {
             None => EvidenceState {
@@ -120,7 +127,9 @@ impl Authority for Standalone {
     }
 }
 
-fn refusal_of(error: StoreError) -> Refusal {
+/// The refusal a host gives for a store error: the core's own refusal as it is, any other
+/// failure as `store_failed`. Input: the error. Output: the refusal.
+pub(crate) fn refusal_of(error: StoreError) -> Refusal {
     match error {
         StoreError::Refused(refusal) => refusal,
         other => Refusal::new(codes::STORE_FAILED, other.to_string()),
