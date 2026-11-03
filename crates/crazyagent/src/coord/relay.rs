@@ -25,6 +25,9 @@ pub const PLUGIN_FOLDER: &str = "crazyagent-relay";
 /// The delivery tag of a lead's own session: Claude Code's `tmuxPaneId` for the lead in
 /// its team config. A teammate's tag is its tmux pane id, such as `%5`.
 pub(crate) const LEAD_TAG: &str = "leader";
+/// The folder inside a native lead's mailbox that holds what the lead's own sessions and
+/// the engine exchange, kept from its teammates (relay mailbox forgery C1).
+pub const LEAD_PART: &str = "lead";
 /// The text that opens every message a session reads, followed by the id and `]`, which
 /// the read receipt scan finds in the session's transcript.
 pub(crate) const MARK: &str = "[crazyagent msg ";
@@ -259,6 +262,15 @@ pub fn installed(home: &Path) -> bool {
     .is_ok_and(|metadata| metadata.is_file())
 }
 
+/// How a lead's mailbox is laid out: one folder for every session of an agent that leads
+/// no native team, or, for a native lead, the lead's sessions in [`LEAD_PART`] apart from
+/// its teammates' in the mailbox itself (relay mailbox forgery C1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Layout {
+    Single,
+    Split,
+}
+
 /// Runs one engine tick of an agent's relay: refreshes `relay.json`, marks Delivered each
 /// message a session took, drops letters no longer waiting, writes the next waiting
 /// messages of the agent and its native teammates (none under the Typing only delivery
@@ -276,9 +288,11 @@ pub fn serve(
     lead: AgentId,
     home: &Path,
     mailbox: &Path,
+    layout: Layout,
     receipts: bool,
     now: i64,
 ) -> Result<(), EngineError> {
+    let _ = layout;
     let Ok(folder) = Mailbox::open_for_engine(mailbox) else {
         return Ok(());
     };

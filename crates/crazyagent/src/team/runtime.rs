@@ -3337,6 +3337,7 @@ impl TeamRuntime {
                 id,
                 &home,
                 &self.mailbox(id),
+                crate::coord::relay::Layout::Single,
                 receipts,
                 now_ms(),
             );

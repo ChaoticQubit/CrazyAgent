@@ -1190,6 +1190,64 @@ fn neither_a_native_lead_nor_its_teammates_bind_block_or_take_the_caller_socket(
     assert_eq!(engine.join().unwrap(), roles.len());
 }
 
+/// A native lead's teammates neither read nor change the lead's part of the relay mailbox,
+/// where the engine keeps the lead's letters, reports, asks and answers: reading a letter,
+/// listing the part, taking a letter by rename, planting an entry, and removing or moving
+/// the part are all refused, and only the roster the engine keeps there is readable. The
+/// lead reads and takes its own letters (DEC-111 relay mailbox forgery, C1).
+#[test]
+fn native_teammates_neither_read_nor_change_the_leads_part_of_the_relay_mailbox() {
+    let team = LiveTeam::start();
+    let mailbox = team.case.tmp.join(crazyagent::team::tool::MAILBOX_FOLDER);
+    let part = mailbox.join(crazyagent::coord::relay::LEAD_PART);
+    fs::create_dir(&part).unwrap();
+    fs::set_permissions(&part, fs::Permissions::from_mode(0o700)).unwrap();
+    let letter = part.join(format!("{:032x}.inbox", 5));
+    fs::write(&letter, b"letter for the lead").unwrap();
+    fs::write(part.join("relay.json"), b"{}").unwrap();
+    let (l, r, p) = (
+        quoted(&letter),
+        quoted(&part.join("relay.json")),
+        quoted(&part),
+    );
+    let shown = quoted(&part.join(format!("{:032x}.shown", 5)));
+    let away = quoted(&mailbox.join("away"));
+    let probed = team.teammate(&format!(
+        "/bin/cat {l}; echo read=$?\n/bin/cat {r}; echo roster=$?\n/bin/ls {p}; echo list=$?\n/bin/mv {l} {shown}; echo take=$?\n/usr/bin/touch {p}/planted; echo plant=$?\n/bin/rm -rf {p}; echo rm=$?\n/bin/mv {p} {away}; echo move=$?\n"
+    ));
+    let text = String::from_utf8_lossy(&probed.stdout).into_owned();
+    let errors = String::from_utf8_lossy(&probed.stderr);
+    assert!(
+        !text.contains("letter for the lead"),
+        "a teammate read the lead's letter: {text}"
+    );
+    for name in ["read", "list", "take", "plant", "rm", "move"] {
+        assert_ne!(
+            status_of(&text, name),
+            "0",
+            "the teammate's {name} in the lead's part succeeded: {errors}"
+        );
+    }
+    assert_eq!(status_of(&text, "roster"), "0", "{errors}");
+    assert!(
+        letter.is_file() && !part.join("planted").exists(),
+        "the lead's part is as the engine left it"
+    );
+
+    let lead = team.as_lead(&format!(
+        "/bin/cat {l} >/dev/null; echo read=$?\n/bin/mv {l} {shown}; echo take=$?\n"
+    ));
+    let text = String::from_utf8_lossy(&lead.stdout).into_owned();
+    for name in ["read", "take"] {
+        assert_eq!(
+            status_of(&text, name),
+            "0",
+            "{}",
+            String::from_utf8_lossy(&lead.stderr)
+        );
+    }
+}
+
 /// Reads one `name=status` line a probe script printed. Takes the output text and the name.
 /// Returns the status, panicking when the line is missing.
 fn status_of(text: &str, name: &str) -> String {
@@ -1314,6 +1372,9 @@ impl LiveTeam {
         let mates = tmp.join("teammates-0123456789abcdef.sock");
         let callers = tmp.join(crazyagent::team::caller::CALLER_SOCKET);
         let mates_home = team_homes(&case.home);
+        let mailbox = case.tmp.join(crazyagent::team::tool::MAILBOX_FOLDER);
+        fs::create_dir(&mailbox).unwrap();
+        fs::set_permissions(&mailbox, fs::Permissions::from_mode(0o700)).unwrap();
         let (lead, teammates) = ProjectSandbox::new(
             &case.project,
             &case.home,

@@ -3,6 +3,7 @@
 mod pane_support;
 
 use crazyagent::coord::adoption::Flag;
+use crazyagent::coord::relay::Layout;
 use crazyagent::coord::settings::{CoordSettings, Nudges, Overlaps};
 use crazyagent::protocol::ProjectId;
 use crazyagent::usage::capture::{Attribution, Format, RunKind};
@@ -442,8 +443,17 @@ fn under_overlaps_block_an_edit_on_another_agents_claim_is_denied_once_the_engin
     let home = team.root.join("agent-1").join("home");
     std::fs::create_dir_all(&home).unwrap();
     let serve = || {
-        crazyagent::coord::relay::serve(&db, &project, lead, &home, &team.mailbox, false, now_ms())
-            .unwrap()
+        crazyagent::coord::relay::serve(
+            &db,
+            &project,
+            lead,
+            &home,
+            &team.mailbox,
+            Layout::Single,
+            false,
+            now_ms(),
+        )
+        .unwrap()
     };
     serve();
     let answered = |path: PathBuf| {
@@ -477,6 +487,88 @@ fn under_overlaps_block_an_edit_on_another_agents_claim_is_denied_once_the_engin
     assert!(left.is_empty(), "{left:?}");
 }
 
+/// A native teammate writes the relay mailbox itself, never the lead's part, where the
+/// engine keeps the lead's letters. A claim it plants in the mailbox for the lead's letter,
+/// as one `touch` from its shell does, is not the lead's session taking it: the engine still
+/// holds the message for the lead and the lead's next tool call gets it, never Delivered
+/// unseen (DEC-111 relay mailbox forgery, C1).
+#[test]
+fn a_teammate_claiming_the_leads_letter_never_marks_it_delivered_unseen() {
+    let team = Team::new();
+    let (db, project) = engine(&team, Nudges::Off);
+    let lead = tools_agent(&db, "claude-code", false);
+    let other = tools_agent(&db, "claude-code", false);
+    db.execute(
+        "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,parent,pane)
+         VALUES ('alpha','teammate','claude-code',1,'working',0,0,?1,?2)",
+        params![lead, MATE_PANE],
+    )
+    .unwrap();
+    let home = team.root.join("agent").join("home");
+    std::fs::create_dir_all(&home).unwrap();
+    let serve = || {
+        crazyagent::coord::relay::serve(
+            &db,
+            &project,
+            lead,
+            &home,
+            &team.mailbox,
+            Layout::Split,
+            false,
+            now_ms(),
+        )
+        .unwrap()
+    };
+    let to_lead = crazyagent::coord::send(
+        &db,
+        crazyagent::coord::NewMessage {
+            project: project.clone(),
+            from: crazyagent::coord::Party::Agent(other),
+            to: crazyagent::coord::Party::Agent(lead),
+            kind: crazyagent::coord::MessageKind::Note,
+            question: None,
+            work: None,
+            reply_to: None,
+            body: "Stop the release, the owner found a bug.".to_owned(),
+            idempotency_key: None,
+        },
+        now_ms(),
+    )
+    .unwrap();
+    serve();
+
+    let forged = crazyagent::spawn_gate::output(
+        Command::new("/usr/bin/touch")
+            .arg(team.entry(&format!("{to_lead:032x}.shown")))
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    assert!(
+        forged.status.success(),
+        "{}",
+        String::from_utf8_lossy(&forged.stderr)
+    );
+    serve();
+    assert_eq!(
+        crazyagent::coord::message(&db, to_lead).unwrap().receipt,
+        crazyagent::coord::Receipt::Sent,
+        "a claim the lead's session never made leaves the message waiting for the lead"
+    );
+    serve();
+    let seen = context(&team.hook(
+        "post-tool",
+        None,
+        tool(LEAD_SESSION, None, "Read", json!({})),
+    ));
+    assert!(
+        seen.ends_with(":\nStop the release, the owner found a bug."),
+        "{seen}"
+    );
+}
+
 /// What one nudges option does through the real chain: the engine's relay writes the
 /// project's settings for the real hook binary, the lead's session edits a file twice with
 /// its tool call logged between, the relay takes that log into the engine, and the
@@ -488,8 +580,17 @@ fn nudged(team: &Team, nudges: Nudges) -> ([String; 2], Vec<String>) {
     let home = team.root.join("agent-1").join("home");
     std::fs::create_dir_all(&home).unwrap();
     let serve = || {
-        crazyagent::coord::relay::serve(&db, &project, lead, &home, &team.mailbox, false, now_ms())
-            .unwrap()
+        crazyagent::coord::relay::serve(
+            &db,
+            &project,
+            lead,
+            &home,
+            &team.mailbox,
+            Layout::Single,
+            false,
+            now_ms(),
+        )
+        .unwrap()
     };
     serve();
     let file = team.root.join("src").join("a.rs");
