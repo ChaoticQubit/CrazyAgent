@@ -4575,6 +4575,73 @@ fn with_next_message_an_edit_past_the_input_limit_reaches_the_live_master_once_c
     assert!(text.contains("Plan the footer"), "{text}");
 }
 
+/// With the default choice, typed messages that leave the live master no room for an owner
+/// edit say so in one team note per edited text: task results filling its whole input three
+/// times in a row leave one note, and after a later edit to other text the next full input
+/// notes once again.
+#[cfg(target_os = "macos")]
+#[test]
+fn with_next_message_full_inputs_note_the_waiting_edit_once_per_edited_text() {
+    const NEWER_TEXT: &str = "## Style\n\nUse spaces.\n\n## Tests\n\nRun them last.\n";
+    let mut fixture = Fixture::new(1);
+    let host = fixture.host();
+    edit_settings(
+        &fixture,
+        crate::instruction_files::EditDelivery::NextMessage,
+    );
+    let mut team = live_runtime(&fixture, &host, &recording_codex());
+    let project = fixture.setup.project_id.clone();
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the live master's pane runs", |f| {
+        live_agent(&f.connection).is_some()
+    });
+    let master = masters(&fixture.connection)[0];
+    tell_master(&fixture, "Plan the page");
+    fixture.until(&mut team, "the live master's turn ends", |f| {
+        typed(f, master).contains("Plan the page") && live_turns(&f.connection) == (1, false)
+    });
+    let mut notes = Vec::new();
+    for (turns, edit) in [
+        (2, Some(EDITED_TEXT)),
+        (3, None),
+        (4, None),
+        (5, Some(NEWER_TEXT)),
+        (6, None),
+    ] {
+        if let Some(edit) = edit {
+            crate::agent_home::save_app(&fixture.base, edit).unwrap();
+        }
+        let label = format!("Results {turns}:");
+        let line = format!("{}\n", "Task done. ".repeat(50));
+        let results = format!("{label}\n{}", line.repeat(40));
+        assert!(results.len() > crate::team::master::INPUT_TEXT_MAX);
+        let tx = fixture.connection.transaction().unwrap();
+        append_message(
+            &tx,
+            &project,
+            MessageAuthor::Engine,
+            &results,
+            MessageState::Pending,
+            now_ms(),
+        )
+        .unwrap()
+        .unwrap();
+        tx.commit().unwrap();
+        fixture.until(&mut team, "the live master's turn ends", |f| {
+            typed(f, master).contains(&label) && live_turns(&f.connection) == (turns, false)
+        });
+        notes.push(noted(&fixture, INSTRUCTIONS_WAIT_FOR_ROOM));
+    }
+    let text = typed(&fixture, master);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    assert_eq!(notes, [1, 1, 1, 2, 2], "wait notes after each full input");
+    assert!(
+        !text.contains(CHANGED_HEADER),
+        "no full input carried a change block"
+    );
+}
+
 /// With Restart chosen, an idle live master stops after each owner edit and starts again
 /// in its own conversation with the new text, types nothing, and stays live: three
 /// restarts in a row never count as the start failures that turn the live master off.
