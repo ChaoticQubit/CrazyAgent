@@ -27,8 +27,8 @@ const SECRET_KEYS = "token|secret|password|passwd|api[_-]?key|apikey|access[_-]?
 const RULES = [
   [/-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g, "[masked-private-key]"],
   [/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/:@]+:[^\s/@]+@/gi, "$1[masked]@"],
-  [/^([ \t]*(?:set-)?cookie[ \t]*:)(?![ \t]*\[masked\][ \t]*$)([ \t]*).+$/gim, "$1$2[masked]"],
-  [/^([ \t]*(?:proxy-)?authorization[ \t]*:)(?![ \t]*\[masked\][ \t]*$)([ \t]*).+$/gim, "$1$2[masked]"],
+  [/(\b(?:set-)?cookie["']?[ \t]*[:=])(?![ \t]*["']?\[masked\])([ \t]*["']?)[^\n"'\\]+/gi, "$1$2[masked]"],
+  [/(\b(?:proxy-)?authorization["']?[ \t]*[:=])(?![ \t]*["']?\[masked\])([ \t]*["']?)[^\n"'\\]+/gi, "$1$2[masked]"],
   [/\bsk-ant-[A-Za-z0-9_-]{6,}/g, "sk-ant-[masked]"],
   [/\bsk-[A-Za-z0-9_-]{16,}/g, "sk-[masked]"],
   [/\b(gh[pousr]_)[A-Za-z0-9]{16,}/g, "$1[masked]"],
@@ -37,7 +37,7 @@ const RULES = [
   [/\bAKIA[0-9A-Z]{16}\b/g, "AKIA[masked]"],
   [/\bAIza[0-9A-Za-z_-]{30,}/g, "AIza[masked]"],
   [/\bya29\.[A-Za-z0-9._-]{10,}/g, "ya29.[masked]"],
-  [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}/g, "[masked-jwt]"],
+  [/\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]*){0,2}/g, "[masked-jwt]"],
   [/\b(Bearer)(\s+)([A-Za-z0-9._~+/=-]{8,})/gi, (all, scheme, space, value) => (/\d/.test(value) || value.length >= 20 ? `${scheme}${space}[masked]` : all)],
   [
     new RegExp(`(?<q>["']?)(?<key>[A-Za-z0-9_.-]*?(?:${SECRET_KEYS}))\\k<q>(?<sep>\\s*[:=]\\s*)(?!["']?\\[masked)(?<value>"[^"\\n]*"|'[^'\\n]*'|(?:\\[masked(?:-[a-z]+)?\\]|[^\\s"',;}\\[\\])])+)`, "gi"),
