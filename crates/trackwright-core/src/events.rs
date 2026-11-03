@@ -1,5 +1,6 @@
 use crate::model::{Actor, Criterion, Event, Link, ProjectKey, ShortId, Ticket};
 use crate::store::{self, State, StoreError};
+use crate::tests_store;
 use rusqlite::{Row, Transaction, params};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -47,7 +48,10 @@ pub(crate) struct Recorded<'a> {
 /// roll back together. Inputs: the transaction and the event. Output: Ok, or the SQLite
 /// error that aborts the write.
 pub(crate) fn record(tx: &Transaction<'_>, event: Recorded<'_>) -> Result<(), StoreError> {
-    assert!(OPS.contains(&event.op), "every recorded op is listed");
+    assert!(
+        OPS.contains(&event.op) || tests_store::OPS.contains(&event.op),
+        "every recorded op is listed"
+    );
     assert!(event.before.is_some() || event.after.is_some());
     store::prepare(tx, EVENT_INSERT)?.execute(params![
         event.ticket,
@@ -107,6 +111,7 @@ pub fn replay(tx: &Transaction<'_>, key: &ProjectKey) -> Result<State, StoreErro
                         StoreError::Corrupt("an event removes a link no event added".into())
                     })?;
             }
+            op if tests_store::OPS.contains(&op) => {}
             _ => {
                 return Err(StoreError::Corrupt(
                     "an event names an op this core does not know".into(),
