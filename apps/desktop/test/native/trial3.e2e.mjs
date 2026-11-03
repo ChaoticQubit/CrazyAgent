@@ -267,7 +267,7 @@ describe(`CrazyAgent trial 3 owner actions on the desktop app (${MODE})`, () => 
     }));
 
   it("adds the scratch project", () => step("add-project", `Add the scratch project ${NAME}`,
-    "Trial 3 runs on a fresh scratch project the runner seeded in the projects folder; the owner sets it up from Home", async () => {
+    "Trial 3 runs on a fresh scratch project the runner seeded in the projects folder; the owner sets it up from Home and leaves the instruction import's CLAUDE.md move uncommitted, so main stays at the seed commit the audit's Land on check reads", async () => {
       const row = `//li[contains(concat(" ", normalize-space(@class), " "), " in-row ")][.//strong[normalize-space(.)=${lit(NAME)}]]`;
       await until(() => shown(row), 60000, `Home never listed ${NAME} in the projects folder`);
       const action = (await $(`${row}//button`).getText()).trim();
