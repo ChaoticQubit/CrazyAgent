@@ -1739,19 +1739,21 @@ impl Host for Tmux {
             .map(drop)
     }
     fn pane_pid(&self, agent: &AgentId) -> Result<Option<u32>, HostError> {
-        let control = self.live_control()?;
-        let window = self.agent_target(&control, agent)?;
-        let lines = control.ask(&format!(
-            "list-panes -t {window} -F '#{{pane_pid}}{FORMAT_END}'"
-        ))?;
-        let [line] = lines.as_slice() else {
-            return Err(failure("terminal_command_failed"));
+        let pane = if self.confined.is_some() {
+            self.own_pane(agent)?
+        } else {
+            self.panes(agent)?
+                .into_iter()
+                .min_by_key(|pane| {
+                    pane.id
+                        .get(1..)
+                        .and_then(|digits| digits.parse::<u32>().ok())
+                        .unwrap_or(u32::MAX)
+                })
+                .ok_or_else(|| failure("terminal_command_failed"))?
         };
-        std::str::from_utf8(line)
-            .ok()
-            .and_then(|text| text.parse::<u32>().ok())
-            .filter(|pid| *pid > 1)
-            .map(Some)
+        (pane.pid > 1)
+            .then_some(Some(pane.pid))
             .ok_or_else(|| failure("terminal_command_failed"))
     }
 
