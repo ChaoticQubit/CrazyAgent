@@ -17,6 +17,8 @@ use trackwright_core::tests_model::ALLURE_RESULT_BYTES_MAX;
 
 const BIN: &str = env!("CARGO_BIN_EXE_trackwright");
 const JUNIT: &str = "node-test.junit.xml";
+const LIBTEST_BUILD_FAILED: &str = "libtest-build-failed.txt";
+const CARGO_TEST: &[&str] = &["cargo", "test", "--locked"];
 
 fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -179,6 +181,55 @@ fn run_import_refuses_a_report_over_its_format_bound() {
     );
 }
 
+#[test]
+fn run_import_into_a_running_run_refuses_a_build_failed_report() {
+    let folder = initialized();
+    let source = json!({"kind": "declared", "ref": "ci"}).to_string();
+    let policy = run_start_input(CARGO_TEST)["policy"].to_string();
+    let started = owner(
+        folder.path(),
+        &[
+            "run_start",
+            "--project",
+            "TW",
+            "--title",
+            "ci",
+            "--source",
+            &source,
+            "--policy",
+            &policy,
+        ],
+    );
+    let reply = envelope(&started);
+    assert_eq!(reply["ok"], true, "{reply}");
+    assert_eq!(reply["data"]["run"]["id"], "TW-R1");
+    let report = folder.path().join(LIBTEST_BUILD_FAILED);
+    fs::copy(fixture(LIBTEST_BUILD_FAILED), &report).expect("the real report copies");
+    let path = report.to_str().expect("a UTF-8 path");
+    let imported = owner(
+        folder.path(),
+        &[
+            "run", "import", "--run", "TW-R1", "--format", "libtest", "--file", path,
+        ],
+    );
+    assert_eq!(imported.status.code(), Some(1), "{imported:?}");
+    let reply = envelope(&imported);
+    assert_eq!(
+        reply["ok"], false,
+        "a build failure never imports as ok: {reply}"
+    );
+    assert_eq!(reply["code"], "import_report_refused", "{reply}");
+    let message = reply["message"].as_str().expect("a refusal message");
+    assert!(message.contains("build_failed"), "{message}");
+
+    let shown = envelope(&owner(folder.path(), &["run_show", "--id", "TW-R1"]));
+    assert_eq!(shown["data"]["run"]["state"], "running", "{shown}");
+    assert_eq!(
+        shown["data"]["run"]["totals"]["total"], 0,
+        "nothing was recorded"
+    );
+}
+
 fn local(folder: &TempDir) -> Local {
     let path = folder.path().join("tracker.db");
     let mut store = trackwright_core::store::Store::open(&path).expect("the store opens");
@@ -214,7 +265,7 @@ fn hex(digit: char, len: usize) -> String {
     std::iter::repeat_n(digit, len).collect()
 }
 
-fn run_start_input() -> Value {
+fn run_start_input(argv: &[&str]) -> Value {
     json!({
         "project": "TW",
         "title": "unit on CS-12",
@@ -232,7 +283,7 @@ fn run_start_input() -> Value {
             "profile_approved_ms": 1_000,
             "check": "unit",
             "kind": "unit",
-            "argv": ["cargo", "test", "--locked"],
+            "argv": argv,
             "toolchain": {"family": "rust", "version": "rustc 1.98.1"},
             "sandbox": hex('e', 64),
             "network": "off",
@@ -242,7 +293,7 @@ fn run_start_input() -> Value {
     })
 }
 
-fn seed_run(client: &mut dyn Client) {
+fn seed_run(client: &mut dyn Client, argv: &[&str]) {
     data(
         client,
         OpKind::CaseCreate,
@@ -253,7 +304,7 @@ fn seed_run(client: &mut dyn Client) {
             "stable_name": "sum::adds_two_numbers",
         }),
     );
-    let started = data(client, OpKind::RunStart, run_start_input());
+    let started = data(client, OpKind::RunStart, run_start_input(argv));
     assert_eq!(started["run"]["id"], "TW-R1");
     let recorded = data(
         client,
@@ -326,7 +377,7 @@ fn check(name: &str, actual: &[String]) {
 fn the_run_view_renders_the_binding_block_at_80_columns() {
     let folder = tempfile::tempdir().expect("a temporary folder");
     let mut client = local(&folder);
-    seed_run(&mut client);
+    seed_run(&mut client, CARGO_TEST);
     let detail = RunDetail::load("TW-R1", &mut client).expect("the run loads");
     let frame = screen(80, 24, |frame| {
         let area = frame.area();
@@ -339,7 +390,7 @@ fn the_run_view_renders_the_binding_block_at_80_columns() {
 fn the_run_view_widens_the_result_names_at_120_columns() {
     let folder = tempfile::tempdir().expect("a temporary folder");
     let mut client = local(&folder);
-    seed_run(&mut client);
+    seed_run(&mut client, CARGO_TEST);
     let detail = RunDetail::load("TW-R1", &mut client).expect("the run loads");
     let frame = screen(120, 24, |frame| {
         let area = frame.area();
@@ -393,5 +444,26 @@ fn the_coverage_view_marks_uncovered_criteria() {
     assert!(
         frame[0].contains("1 of 2 uncovered"),
         "the title counts the uncovered criteria: {frame:#?}"
+    );
+}
+
+#[test]
+fn the_binding_block_quotes_arguments_that_hold_spaces_or_quotes() {
+    let folder = tempfile::tempdir().expect("a temporary folder");
+    let mut client = local(&folder);
+    seed_run(&mut client, &["sh", "-c", "echo it's done"]);
+    let detail = RunDetail::load("TW-R1", &mut client).expect("the run loads");
+    let frame = screen(120, 24, |frame| {
+        let area = frame.area();
+        detail.render(area, frame.buffer_mut(), &Theme::plain());
+    });
+    let command = frame
+        .iter()
+        .find(|line| line.contains("Command"))
+        .unwrap_or_else(|| panic!("a command row: {frame:#?}"));
+    assert_eq!(
+        command.trim_end(),
+        r"   Command      sh -c 'echo it'\''s done'",
+        "one argument with a space stays one quoted argument"
     );
 }

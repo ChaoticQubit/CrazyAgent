@@ -2,12 +2,15 @@ use serde_json::{Value, json};
 use std::io::Cursor;
 use tempfile::TempDir;
 use trackwright_core::catalog::{catalog, op_schema, schema_v1};
-use trackwright_core::model::{Actor, OpKind, ProjectKey};
+use trackwright_core::model::{Actor, OpKind, PolicyKey, ProjectKey};
+use trackwright_core::policy;
 use trackwright_core::standalone::Standalone;
 use trackwright_core::store::{self, Store};
 use trackwright_mcp::{Session, serve};
 
 const OWNER: &str = "owner";
+const AGENT: &str = "agent:7";
+const ORACLE: &str = "expected 42, got 41";
 
 const TEST_OPS: [&str; 22] = [
     "case_list",
@@ -207,4 +210,124 @@ fn tools_list_includes_the_test_ops_and_schema_v1_stays_compatible() {
     assert_eq!(shown["case"]["title"], "Adds two numbers");
     let listed = ok(&session, "case_list", json!({"project": "CA"}));
     assert_eq!(listed["cases"][0]["id"], "CA-T1");
+}
+
+fn session_as(folder: &TempDir, actor: &str) -> Session<Standalone> {
+    let path = folder.path().join("tracker.db");
+    let store = Store::open(&path).expect("the standalone store reopens");
+    let actor = Actor::new(actor).expect("a valid actor");
+    Session::new(store.into_connection(), Standalone, actor)
+}
+
+fn show_protected_cases_fully(folder: &TempDir) {
+    let mut store = Store::open(&folder.path().join("tracker.db")).expect("the store reopens");
+    let tx = store.transaction().expect("a write transaction");
+    let owner = Actor::new(OWNER).expect("a valid actor");
+    let key = ProjectKey::new("CA").expect("a valid key");
+    let setting = PolicyKey::CaseProtectedVisibility;
+    policy::set(&tx, &Standalone, &owner, &key, setting, "full", 0, 1).expect("the owner sets it");
+    tx.commit().expect("the policy commits");
+}
+
+fn digest(digit: char) -> String {
+    std::iter::repeat_n(digit, 64).collect()
+}
+
+fn seed_protected_run(owner: &Session<Standalone>) {
+    let case = ok(
+        owner,
+        "case_create",
+        json!({
+            "project": "CA",
+            "title": "Holdout sum",
+            "kind": "unit",
+            "stable_name": "oracle::sum",
+            "protected": true,
+        }),
+    );
+    assert_eq!(case["case"]["id"], "CA-T1");
+    let policy = json!({
+        "profile": digest('d'),
+        "profile_approved_ms": 0,
+        "check": "holdout",
+        "kind": "unit",
+        "argv": [],
+        "toolchain": {"family": "none", "version": ""},
+        "sandbox": digest('e'),
+        "network": "off",
+        "timeout_s": 0,
+        "environment": digest('f'),
+    });
+    let started = ok(
+        owner,
+        "run_start",
+        json!({
+            "project": "CA",
+            "title": "holdouts",
+            "source": {"kind": "declared", "ref": "ci"},
+            "policy": policy,
+        }),
+    );
+    let result = json!({
+        "name": "oracle::sum",
+        "outcome": "failed",
+        "message": ORACLE,
+        "artifact": "logs/oracle-sum.txt",
+    });
+    ok(
+        owner,
+        "run_record",
+        json!({"id": "CA-R1", "version": started["run"]["version"], "results": [result]}),
+    );
+}
+
+fn first_result(session: &Session<Standalone>) -> Value {
+    let shown = ok(session, "run_show", json!({"id": "CA-R1"}));
+    assert_eq!(
+        shown["results"].as_array().map(Vec::len),
+        Some(1),
+        "{shown}"
+    );
+    shown["results"][0].clone()
+}
+
+#[test]
+fn a_protected_case_result_message_is_withheld_from_an_agent_in_run_show() {
+    let folder = tempfile::tempdir().expect("a temporary folder");
+    let owner = session(&folder);
+    seed_protected_run(&owner);
+
+    let seen = first_result(&owner);
+    assert_eq!(
+        seen["case"], "CA-T1",
+        "the result maps to the protected case"
+    );
+    assert_eq!(seen["message"], ORACLE, "the owner reads the message");
+    assert_eq!(seen["artifact"], "logs/oracle-sum.txt");
+    assert!(seen.get("withheld").is_none(), "{seen}");
+
+    let agent = session_as(&folder, AGENT);
+    let narrowed = first_result(&agent);
+    assert_eq!(narrowed["name"], "oracle::sum");
+    assert_eq!(narrowed["outcome"], "failed");
+    assert_eq!(narrowed["case"], "CA-T1");
+    assert_eq!(
+        narrowed["message"],
+        Value::Null,
+        "hidden withholds the message"
+    );
+    assert_eq!(
+        narrowed["artifact"],
+        Value::Null,
+        "hidden withholds the artifact"
+    );
+    assert_eq!(narrowed["withheld"], true);
+
+    show_protected_cases_fully(&folder);
+    let full = first_result(&session_as(&folder, AGENT));
+    assert_eq!(
+        full["message"], ORACLE,
+        "full shows protected results to agents"
+    );
+    assert!(full.get("withheld").is_none(), "{full}");
 }
