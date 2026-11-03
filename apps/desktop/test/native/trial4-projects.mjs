@@ -42,17 +42,36 @@ export function outsideFolder(home, minute) {
   return folder;
 }
 
+/** The folder N-D15 seeds, removes and adds again: its own project in the projects folder, so
+ * the trial project stays as it is. Inputs: the projects folder and the minute stamp. Output:
+ * the folder path. */
+export function readdFolder(home, minute) {
+  assert.match(minute, /^[0-9]{12}$/);
+  assert(isAbsolute(home), `the projects folder is an absolute path: ${home}`);
+  const folder = join(home, `ca-trial-4-readd-${minute}`);
+  assert(inside(folder, home) && folder !== home, `${folder} is not inside the projects folder ${home}`);
+  return folder;
+}
+
+/** Makes a git repository with one commit on main. Inputs: the new folder, which must not
+ * exist, and the README text. Output: the folder's real path. */
+export function seedRepo(folder, readme) {
+  assert(!existsSync(folder), `${folder} already exists`);
+  mkdirSync(folder);
+  git(folder, ["init", "-q", "-b", "main"]);
+  writeFileSync(join(folder, "README.md"), readme);
+  git(folder, ["add", "README.md"]);
+  git(folder, ["commit", "-q", "-m", "Seed the trial 4 scratch folder"]);
+  return realpathSync(folder);
+}
+
 /** Makes a scratch git repository with one commit and one linked worktree on its own branch,
  * the shape whose move LB-8 lost. Input: the new folder, which must not exist. Output: the
  * real paths of the repository and of its linked worktree. */
 export function scratchRepo(folder) {
   const worktree = `${folder}-wt`;
   assert(!existsSync(folder) && !existsSync(worktree), `${folder} or its worktree already exists`);
-  mkdirSync(folder);
-  git(folder, ["init", "-q", "-b", "main"]);
-  writeFileSync(join(folder, "README.md"), "# Trial 4 outside folder\n\nA scratch repository outside the projects folder.\n");
-  git(folder, ["add", "README.md"]);
-  git(folder, ["commit", "-q", "-m", "Seed the trial 4 outside folder"]);
+  seedRepo(folder, "# Trial 4 outside folder\n\nA scratch repository outside the projects folder.\n");
   git(folder, ["worktree", "add", "-q", "-b", "trial4-side", worktree]);
   assert.equal(linkedWorktrees(folder).length, 1, "the scratch repository has one linked worktree");
   return { repo: realpathSync(folder), worktree: realpathSync(worktree) };

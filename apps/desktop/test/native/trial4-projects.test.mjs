@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { appPaths, commitOutside, couldNotStart, git, inside, linkedWorktrees, outsideFolder, pathGap, scratchRepo, setTruth, stamp } from "./trial4-projects.mjs";
+import { appPaths, commitOutside, couldNotStart, git, inside, linkedWorktrees, outsideFolder, pathGap, readdFolder, scratchRepo, seedRepo, setTruth, stamp } from "./trial4-projects.mjs";
 
 /** Makes a scratch folder and removes it after the body. Input: the body, given the folder. */
 function inScratch(body) {
@@ -57,6 +57,21 @@ test("a scratch repository has one commit and one linked worktree, and an existi
   assert.equal(git(made.repo, ["rev-list", "--count", "HEAD"]), "1");
   assert.equal(git(made.worktree, ["branch", "--show-current"]), "trial4-side");
   assert.throws(() => scratchRepo(made.repo), /already exists/);
+}));
+
+test("the re-add folder sits inside the projects folder and is a git repository with one commit and no worktree", () => inScratch((folder) => {
+  const minute = stamp(new Date("2026-11-03T16:40:00Z"));
+  assert.equal(readdFolder("/Users/o/CrazyAgent", minute), "/Users/o/CrazyAgent/ca-trial-4-readd-202611031640");
+  assert(inside(readdFolder("/Users/o/CrazyAgent", minute), "/Users/o/CrazyAgent"));
+  assert.throws(() => readdFolder("CrazyAgent", minute), /absolute path/);
+  assert.throws(() => readdFolder("/Users/o/CrazyAgent", "2026"));
+  const repo = seedRepo(readdFolder(folder, minute), "# readd\n");
+  assert.equal(repo, join(folder, "ca-trial-4-readd-202611031640"));
+  assert.equal(git(repo, ["rev-list", "--count", "HEAD"]), "1");
+  assert.equal(git(repo, ["branch", "--show-current"]), "main");
+  assert.equal(git(repo, ["status", "--porcelain"]), "");
+  assert.deepEqual(linkedWorktrees(repo), []);
+  assert.throws(() => seedRepo(repo, "# again\n"), /already exists/);
 }));
 
 test("git's paths of a change set match the app's, with a rename as two paths, and a stale base is told apart", () => inScratch((folder) => {
@@ -118,6 +133,12 @@ test("the projects checks N-D6, N-D13 and N-D15 have the trial 4 shape and run a
 test("N-D6 says it is not run without the folder chooser helper, before it makes any folder", async () => {
   const { checks: [check] } = await import("./trial4/n-d6-add-folder-in-place.mjs");
   await assert.rejects(check.run({}), { message: /^not run: needs kit\.chooseFolder\(path\)/ });
+});
+
+test("N-D15 seeds its own project and never reads or replaces the trial project", () => {
+  const source = readFileSync(new URL("./trial4/n-d15-readd-project.mjs", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /TRIAL_PROJECT|kit\.project\(|kit\.tab\(|run\.project/);
+  assert.match(source, /seedRepo\(readdFolder\(home, stamp\(new Date\(\)\)\)/);
 });
 
 test("a could not start message is found in any of its spellings", () => {
