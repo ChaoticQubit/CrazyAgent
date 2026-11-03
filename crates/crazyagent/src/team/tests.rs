@@ -2121,6 +2121,15 @@ fn a_master_with_tools_on_starts_with_the_engine_delegate_tool() {
         std::fs::symlink_metadata(&mailbox).is_ok_and(|metadata| metadata.is_dir()),
         "the engine made the mailbox the master's memory tools write to"
     );
+    assert_eq!(
+        std::fs::symlink_metadata(&mailbox)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700,
+        "only the engine's user can read or write the master's memory calls"
+    );
     team.shutdown().unwrap();
 }
 
