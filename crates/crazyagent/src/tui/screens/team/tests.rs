@@ -2398,6 +2398,7 @@ fn the_instructions_box_lists_each_instruction_file_the_engine_recorded() {
 /// Serves one request the Questions box sends with a real engine through the owner
 /// controller, as the TUI's owner worker does. Inputs: the controller and the request.
 /// Output: the arrival the Team screen receives.
+#[cfg(unix)]
 async fn served(
     controller: &mut crate::client_controller::OwnerController,
     request: Request,
@@ -2429,6 +2430,7 @@ async fn served(
     ))))
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn q_lists_the_engines_questions_an_answer_reaches_the_asker_and_enter_opens_a_waiting_terminal()
  {

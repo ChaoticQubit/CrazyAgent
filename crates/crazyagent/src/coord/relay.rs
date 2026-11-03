@@ -856,13 +856,12 @@ fn real_folder(path: &Path) -> bool {
 /// checks it is a real folder afterwards. Takes the path. Returns Ok or
 /// `coord_relay_unwritable`.
 fn private_folder(path: &Path) -> Result<(), EngineError> {
-    let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    match builder.create(path) {
+    let created =
+        std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700).create(path);
+    #[cfg(not(unix))]
+    let created = std::fs::DirBuilder::new().create(path);
+    match created {
         Ok(()) => {}
         Err(problem) if problem.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(_) => return Err(failure("coord_relay_unwritable")),
