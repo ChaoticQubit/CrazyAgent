@@ -1,13 +1,14 @@
 use rusqlite::{OptionalExtension, Transaction};
 use serde_json::json;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use trackwright_core::coverage::{
     self, CoverageCase, CoverageOf, CoverageQuery, CoverageResult, Finished,
 };
 use trackwright_core::criteria::{self, NewEvidence};
 use trackwright_core::events;
 use trackwright_core::host::{
-    Authority, CheckView, Evidence, EvidenceState, Host, LinkKind, LinkState, Links, TicketView,
+    Authority, CheckView, Evidence, EvidenceState, Host, LinkKind, LinkState, Links, Paths,
+    TicketView,
 };
 use trackwright_core::model::{
     Actor, CheckKind, ClosePolicy, CriterionState, EvidenceResult, OpKind, PolicyKey, Priority,
@@ -29,7 +30,7 @@ use trackwright_core::tests_store::{self, NewCase, PlanFields};
 /// A host that keeps each ticket's current source tree in its own table in the tracker's
 /// database, read in the core's transaction, and locks `run_writers` to `engine_only`. Its
 /// `test` checks follow runs through the core; links, every other check kind and the rest
-/// of authority follow the standalone host.
+/// of authority follow the standalone host. It opens no file.
 struct TreeHost;
 
 const TREE_TABLE: &str = "CREATE TABLE host_trees(ticket TEXT PRIMARY KEY, tree TEXT NOT NULL)";
@@ -115,6 +116,26 @@ impl Authority for TreeHost {
 
     fn policy_locked(&self, setting: PolicyKey) -> Option<&'static str> {
         (setting == PolicyKey::RunWriters).then_some(RunWriters::EngineOnly.as_str())
+    }
+}
+
+impl Paths for TreeHost {
+    /// Refuses every file: the coverage tests export and import nothing. Inputs: the
+    /// transaction, key, actor and path (unused) and the operation. Output:
+    /// `export_path_refused` for an export, `import_path_refused` otherwise.
+    fn resolve_path(
+        &self,
+        _: &Transaction<'_>,
+        _: &ProjectKey,
+        _: &Actor,
+        op: OpKind,
+        _: &Path,
+    ) -> Result<PathBuf, Refusal> {
+        let code = match op {
+            OpKind::Export => codes::EXPORT_PATH_REFUSED,
+            _ => codes::IMPORT_PATH_REFUSED,
+        };
+        Err(Refusal::new(code, "the coverage test host opens no file"))
     }
 }
 
