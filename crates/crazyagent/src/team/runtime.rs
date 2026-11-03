@@ -5418,6 +5418,12 @@ impl TeamRuntime {
             .allow_read(&install)
             .and_then(|sandbox| sandbox.allow_exec(&program))
             .map_err(sandboxed)?;
+        if let Some(engine) = &self.delegation_tool {
+            let engine = engine
+                .verified_path()
+                .map_err(|e| with_code("the delegate engine changed", Some(&e.0)))?;
+            sandbox = sandbox.allow_engine(engine).map_err(sandboxed)?;
+        }
         (sandbox, _) = sandbox
             .allow_extra_reads(&toolchains::graphify(&homes))
             .map_err(sandboxed)?;

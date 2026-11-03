@@ -999,7 +999,7 @@ impl ProjectSandbox {
         let folder = engine
             .parent()
             .ok_or_else(|| invalid("the engine must sit in a folder"))?;
-        self.allow_read(folder)
+        self.allow_read(folder)?.allow_exec(engine)
     }
 
     /// Grants a project's toolchains read-only (see [`toolchains::Toolchains::detect`]):
