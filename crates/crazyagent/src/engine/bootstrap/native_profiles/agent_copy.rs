@@ -222,9 +222,9 @@ impl NativeProfileUse {
     }
 }
 
-/// Runs blocking account work, such as a renewal of up to two minutes or a keeper's join,
-/// so it never stalls the async runtime: on a multi-thread tokio runtime the worker first
-/// hands its other tasks to another thread; anywhere else the work runs in place.
+/// Runs blocking account work, such as a renewal of up to two minutes, so it never stalls
+/// the async runtime: on a multi-thread tokio runtime the worker first hands its other
+/// tasks to another thread; anywhere else the work runs in place.
 /// Input: the work. Output: its result.
 pub(super) fn off_worker<R>(work: impl FnOnce() -> R) -> R {
     match tokio::runtime::Handle::try_current() {

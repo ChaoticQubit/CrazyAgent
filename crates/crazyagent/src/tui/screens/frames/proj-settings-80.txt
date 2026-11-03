@@ -10,6 +10,7 @@
   Accounts  Loading...   u Change order
   Team      Codex leads. Codex x3. Tools on.
   Folders   Loading...   f Edit read-only folders
+  Hidden    Loading...   d Edit hidden folders
   Access    Loading...   c Agent access
   Trust     Loading...   k Repository trust
   Process   Instructions for this project's agents   i Edit
@@ -17,7 +18,6 @@
 
   Skills  0                                   From Settings, plus this project
     Loading...
-
 
 
 

@@ -574,6 +574,8 @@ pub(in crate::tui) struct ProjectScreen {
     pub adding: Option<AddFile>,
     pub folders: Option<AddFile>,
     pub read_paths: Option<crate::project_setup::ReadPaths>,
+    pub hidden: Option<AddFile>,
+    pub hidden_paths: Option<Vec<String>>,
     pub access: Option<AccessEdit>,
     pub agent_policy: Option<crate::sandbox::policy::PolicyView>,
     pub trust_edit: Option<TrustEdit>,
@@ -595,6 +597,7 @@ pub(in crate::tui) struct ProjectScreen {
     read_paths_read_ms: Option<i64>,
     folders_version: u64,
     folders_stale: bool,
+    hidden_paths_read_ms: Option<i64>,
     agent_policy_read_ms: Option<i64>,
     access_stale: bool,
     repository_trust_read_ms: Option<i64>,
@@ -654,6 +657,8 @@ impl ProjectScreen {
             adding: None,
             folders: None,
             read_paths: None,
+            hidden: None,
+            hidden_paths: None,
             access: None,
             agent_policy: None,
             trust_edit: None,
@@ -670,6 +675,7 @@ impl ProjectScreen {
             read_paths_read_ms: None,
             folders_version: 0,
             folders_stale: false,
+            hidden_paths_read_ms: None,
             agent_policy_read_ms: None,
             access_stale: false,
             repository_trust_read_ms: None,
@@ -733,6 +739,11 @@ impl ProjectScreen {
             && due(self.read_paths_read_ms)
         {
             SetupQuery::ReadPaths { project }
+        } else if self.hidden_paths.is_none()
+            && self.tab == Tab::Settings
+            && due(self.hidden_paths_read_ms)
+        {
+            SetupQuery::HiddenPaths { project }
         } else if self.agent_policy.is_none()
             && self.tab == Tab::Settings
             && due(self.agent_policy_read_ms)
@@ -864,6 +875,7 @@ impl ProjectScreen {
                     SetupQuery::Jobs { .. } => self.jobs_read_ms = Some(self.now_ms),
                     SetupQuery::Context { .. } => self.context_read_ms = Some(self.now_ms),
                     SetupQuery::ReadPaths { .. } => self.read_paths_read_ms = Some(self.now_ms),
+                    SetupQuery::HiddenPaths { .. } => self.hidden_paths_read_ms = Some(self.now_ms),
                     SetupQuery::AgentPolicy { .. } => {
                         self.agent_policy_read_ms = Some(self.now_ms);
                     }
@@ -934,6 +946,10 @@ impl ProjectScreen {
                 self.read_paths = Some(saved);
                 self.read_paths_read_ms = Some(self.now_ms);
             }
+            SetupView::HiddenPaths(paths) => {
+                self.hidden_paths = Some(paths);
+                self.hidden_paths_read_ms = Some(self.now_ms);
+            }
             SetupView::AgentPolicy(view) => {
                 if std::mem::take(&mut self.access_stale)
                     && let Some(access) = self.access.as_mut()
@@ -982,7 +998,10 @@ impl ProjectScreen {
                 }
             }
             SetupView::Changed(result) => self.changed(query, result),
-            SetupView::Catalog(_) | SetupView::Team(_) | SetupView::Library(_) => {}
+            SetupView::Catalog(_)
+            | SetupView::Team(_)
+            | SetupView::CoordQuestions(_)
+            | SetupView::Library(_) => {}
         }
         self.assert_consistent();
     }
@@ -1022,6 +1041,13 @@ impl ProjectScreen {
                     self.folders_stale = true;
                     self.read_paths = None;
                     self.read_paths_read_ms = None;
+                }
+                true
+            }
+            SetupAction::SetHiddenPaths { .. } if self.hidden.is_some() => {
+                if let Some(hidden) = self.hidden.as_mut() {
+                    hidden.busy = false;
+                    hidden.error = reason;
                 }
                 true
             }
@@ -1107,6 +1133,16 @@ impl ProjectScreen {
                 self.read_paths_read_ms = None;
                 if applied {
                     self.folders = None;
+                }
+            }
+            SetupQuery::Change {
+                action: SetupAction::SetHiddenPaths { .. },
+                ..
+            } => {
+                self.hidden_paths = None;
+                self.hidden_paths_read_ms = None;
+                if applied {
+                    self.hidden = None;
                 }
             }
             SetupQuery::Change {
@@ -1285,6 +1321,7 @@ impl ProjectScreen {
             || self.review.is_some()
             || self.adding.is_some()
             || self.folders.is_some()
+            || self.hidden.is_some()
             || self.access.is_some()
             || self.trust_edit.is_some()
             || self.general.is_some()
@@ -1310,6 +1347,9 @@ impl ProjectScreen {
         }
         if self.folders.is_some() {
             return self.folders_key(key);
+        }
+        if self.hidden.is_some() {
+            return self.hidden_key(key);
         }
         if self.access.is_some() {
             return self.access_key(key);
@@ -1443,6 +1483,11 @@ impl ProjectScreen {
             folders.error = None;
             return ProjectReply::Handled;
         }
+        if let Some(hidden) = self.hidden.as_mut().filter(|hidden| !hidden.busy) {
+            hidden.input.insert_str(text);
+            hidden.error = None;
+            return ProjectReply::Handled;
+        }
         if let Some(general) = self.general.as_mut().filter(|general| !general.busy) {
             if let Some(field) = general.text() {
                 field.insert_str(text);
@@ -1528,6 +1573,7 @@ impl ProjectScreen {
                 ProjectReply::Send(text)
             }
             KeyCode::Char('x') if control => ProjectReply::StopTurn,
+            KeyCode::Char('t') if control => ProjectReply::Team,
             KeyCode::PageUp => self.scroll_transcript(5),
             KeyCode::PageDown => self.scroll_transcript(-5),
             _ => {
@@ -2193,6 +2239,23 @@ impl ProjectScreen {
                 }
                 ProjectReply::Handled
             }
+            KeyCode::Char('d') => {
+                match &self.hidden_paths {
+                    Some(paths) => {
+                        let mut input = TextInput::single(FOLDERS_BYTES_MAX);
+                        input.set(&paths.join(":"));
+                        self.hidden = Some(AddFile {
+                            input,
+                            busy: false,
+                            error: None,
+                        });
+                    }
+                    None => {
+                        self.problem = Some("Still loading the hidden folders. Try again.".into());
+                    }
+                }
+                ProjectReply::Handled
+            }
             KeyCode::Char('c') => {
                 match &self.agent_policy {
                     Some(view) => {
@@ -2349,6 +2412,50 @@ impl ProjectScreen {
             _ => {
                 if folders.input.handle(key) {
                     folders.error = None;
+                }
+                ProjectReply::Handled
+            }
+        }
+    }
+
+    /// Handles one key in the hidden folders box: Enter saves the folders typed between colons,
+    /// an empty box clears them, Esc closes it.
+    /// Takes the key event.
+    /// Returns the change to send, or what the box did with the key.
+    fn hidden_key(&mut self, key: KeyEvent) -> ProjectReply {
+        let Some(hidden) = self.hidden.as_mut() else {
+            return ProjectReply::Ignored;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                self.hidden = None;
+                ProjectReply::Handled
+            }
+            _ if hidden.busy => ProjectReply::Handled,
+            KeyCode::Enter => {
+                let paths: Vec<String> = hidden
+                    .input
+                    .value()
+                    .split(':')
+                    .map(str::trim)
+                    .filter(|path| !path.is_empty())
+                    .map(str::to_owned)
+                    .collect();
+                let action = SetupAction::SetHiddenPaths {
+                    project_id: self.project.clone(),
+                    paths,
+                };
+                if let Err(error) = action.validate() {
+                    hidden.error = Some(plain_problem(&error.0));
+                    return ProjectReply::Handled;
+                }
+                hidden.busy = true;
+                hidden.error = None;
+                ProjectReply::Change(Box::new(action))
+            }
+            _ => {
+                if hidden.input.handle(key) {
+                    hidden.error = None;
                 }
                 ProjectReply::Handled
             }
@@ -2522,6 +2629,7 @@ impl ProjectScreen {
             self.review.is_some(),
             self.adding.is_some(),
             self.folders.is_some(),
+            self.hidden.is_some(),
             self.access.is_some(),
             self.trust_edit.is_some(),
             self.general.is_some(),
@@ -2540,6 +2648,7 @@ impl ProjectScreen {
         if self.general.is_some()
             || self.confirm_remove
             || self.folders.is_some()
+            || self.hidden.is_some()
             || self.access.is_some()
             || self.trust_edit.is_some()
         {
@@ -2639,6 +2748,22 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "read_paths_too_many" | "read_paths_invalid" => {
             "Share at most 8 folders, each one plain path of up to 1024 characters."
         }
+        "hidden_paths_too_many" => "Hide at most 8 folders.",
+        "hidden_paths_invalid" | "hidden_path_not_absolute" => {
+            "Each folder must be one plain path of up to 1024 characters."
+        }
+        "hidden_path_missing" => "That folder can't be found. Pick a folder that exists.",
+        "hidden_path_not_folder" => "That path isn't a folder. Pick a folder.",
+        "hidden_path_outside_project" => {
+            "A hidden folder must sit inside the project. Pick a folder within it."
+        }
+        "hidden_path_not_plain" => {
+            "A folder path can't hold quotes, backslashes or control characters."
+        }
+        "hidden_path_tracked" => {
+            "git tracks a file in that folder. Only folders git does not track can be hidden."
+        }
+        "hidden_path_unchecked" => "CrazyAgent couldn't check that folder against git. Try again.",
         "context_item_missing" => "That file is already gone.",
         "project_folder_missing" => "The project folder is missing. Check it in Finder.",
         "project_folder_unwritable" => {

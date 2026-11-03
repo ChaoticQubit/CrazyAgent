@@ -141,6 +141,7 @@ impl Hooked {
                     access: view.access,
                     toolchains: Vec::new(),
                     ide_git_hooks: on,
+                    network: crazyagent::sandbox::policy::AgentNetwork::default(),
                 },
                 generation,
             )

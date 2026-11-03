@@ -6,7 +6,7 @@ use crazyagent::client_controller::OwnerController;
 use crazyagent::engine::owner::{
     InstructionSettings, OwnerClientKind, OwnerResult, ProcessText, SavedText,
 };
-use crazyagent::instruction_files::Choice;
+use crazyagent::instruction_files::{EditDelivery, Mode};
 use crazyagent::protocol::ProjectId;
 use crazyagent::storage::versioned::{self, LastWriter};
 use e2e_support::{Engine, Owner, profile, scratch};
@@ -194,8 +194,9 @@ async fn a_stale_agent_settings_save_is_refused_and_the_re_read_settings_save() 
     );
 
     let quiet = InstructionSettings {
-        files: Choice::None,
+        mode: Mode::ProjectOnly,
         transcripts: false,
+        edits: EditDelivery::Badge,
     };
     let saved = desk
         .save_instruction_settings(project.clone(), quiet, Some(opened.version))
@@ -205,8 +206,9 @@ async fn a_stale_agent_settings_save_is_refused_and_the_re_read_settings_save() 
     assert_eq!(saved.version, opened.version + 1);
 
     let both = InstructionSettings {
-        files: Choice::ProjectAndUser,
+        mode: Mode::AppOnly,
         transcripts: true,
+        edits: EditDelivery::Restart,
     };
     assert_eq!(
         tui.controller

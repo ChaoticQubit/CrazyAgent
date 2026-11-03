@@ -698,12 +698,12 @@ impl State {
     /// running reply may be stopped, set only after the owner confirms a
     /// `master_turn_running` refusal. Output: the intent is queued, or why it cannot be.
     pub fn new_session(&mut self, cancel_running: bool) -> Result<(), String> {
-        let session = self
-            .view
-            .as_ref()
-            .filter(|_| self.ready)
-            .and_then(|view| view.session.as_ref())
-            .ok_or("No master session yet; send a message to start one")?;
+        if !self.ready {
+            return Err("Waiting for actual master state; Ctrl-R reconnects".into());
+        }
+        let Some(session) = self.view.as_ref().and_then(|view| view.session.as_ref()) else {
+            return self.open();
+        };
         let (config_id, source_hash) = match &self.catalog {
             Some(catalog) => (catalog.config_id.clone(), catalog.source_hash.clone()),
             None => {
@@ -743,6 +743,44 @@ impl State {
             cancel_running,
         };
         self.enqueue(action, self.generation)
+    }
+
+    /// Deletes a session that is not live: the engine removes its stored turns and the
+    /// harness transcript in its master's private home. Input: a session from the Sessions
+    /// list. Output: the intent is queued, or why it cannot be.
+    pub fn delete_session(&mut self, session_id: &SessionId) -> Result<(), String> {
+        let project = self
+            .project
+            .clone()
+            .filter(|_| self.ready)
+            .ok_or("Waiting for actual master state; Ctrl-R reconnects")?;
+        let listed = self
+            .sessions()
+            .and_then(|sessions| sessions.iter().find(|item| &item.session_id == session_id))
+            .ok_or("That session is not in the Sessions list")?;
+        if listed.phase == MasterSessionPhase::Configured {
+            return Err("The live session cannot be deleted".into());
+        }
+        let action = MasterOwnerAction::DeleteSession {
+            project_id: project,
+            session_id: session_id.clone(),
+        };
+        self.enqueue(action, self.generation)
+    }
+
+    /// Tells whether the live session has no owner turn yet: the master shows a live
+    /// session the engine's Sessions list leaves out. Output: false before a list read.
+    pub fn live_session_unused(&self) -> bool {
+        let Some(view) = self.view.as_ref() else {
+            return false;
+        };
+        let (Some(session), Some(listed)) = (view.session.as_ref(), view.sessions.as_ref()) else {
+            return false;
+        };
+        session.phase == MasterSessionPhase::Configured
+            && listed
+                .iter()
+                .all(|item| item.session_id != session.session_id)
     }
 
     /// Shows or hides the Sessions list. While shown, each master read also reads the
@@ -1454,6 +1492,12 @@ impl View {
                                 .is_some_and(|request| request.change_set == *change_set)
                     })
             }
+            MasterOwnerAction::DeleteSession { session_id, .. } => {
+                session.session_id != *session_id
+                    && self.sessions.as_ref().is_none_or(|listed| {
+                        listed.iter().all(|item| item.session_id != *session_id)
+                    })
+            }
             MasterOwnerAction::RegisterRcliProfile { registration } => {
                 session == &registration.expected_session
                     && session.phase == MasterSessionPhase::Configured
@@ -1843,7 +1887,8 @@ pub(super) fn action_project(action: &MasterOwnerAction) -> &ProjectId {
         | MasterOwnerAction::Submit { project_id, .. }
         | MasterOwnerAction::Cancel { project_id, .. }
         | MasterOwnerAction::Close { project_id, .. }
-        | MasterOwnerAction::Resolve { project_id, .. } => project_id,
+        | MasterOwnerAction::Resolve { project_id, .. }
+        | MasterOwnerAction::DeleteSession { project_id, .. } => project_id,
         MasterOwnerAction::RegisterRcliProfile { registration } => {
             &registration.expected_session.project_id
         }
@@ -3142,3 +3187,6 @@ mod turn_line_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod tests;

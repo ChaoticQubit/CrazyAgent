@@ -54,8 +54,25 @@ fn request(id: &str, revision: u64, command: Command) -> WireRequest {
     }
 }
 
+/// Sends one request the way the engine's contract asks a client to: while it answers
+/// outcome_unknown_retry_same_identity (its wait ended and the write may still commit),
+/// the same request goes again, and storage replays a recorded mutation's reply. Gives up
+/// after 30 s. Inputs: the engine and the request. Output: the reply.
+async fn send(engine: &Engine, request: WireRequest) -> WireReply {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    loop {
+        match engine.apply(request.clone()).await {
+            Ok(reply) => return reply,
+            Err(error)
+                if error.0 == "outcome_unknown_retry_same_identity"
+                    && std::time::Instant::now() < until => {}
+            Err(error) => panic!("engine apply failed: {error:?}"),
+        }
+    }
+}
+
 async fn apply(engine: &Engine, id: &str, revision: u64, command: Command) -> WireReply {
-    engine.apply(request(id, revision, command)).await.unwrap()
+    send(engine, request(id, revision, command)).await
 }
 
 async fn setup(root: &Path, repo: &Path) -> (Engine, crazyagent::config::EffectiveConfig) {
@@ -159,9 +176,9 @@ async fn dirty_work_is_preserved_and_writer_is_unique() {
         3,
         allocate(&repo, "owner", Some("native-child")),
     );
-    let first = engine.apply(operation.clone()).await.unwrap();
+    let first = send(&engine, operation.clone()).await;
     assert_eq!(first.outcome, Outcome::Applied);
-    assert_eq!(engine.apply(operation.clone()).await.unwrap(), first);
+    assert_eq!(send(&engine, operation.clone()).await, first);
     let lease = leases(&engine).await.remove(0);
     assert_eq!(
         std::fs::read(Path::new(&lease.path).join("tracked")).unwrap(),
@@ -179,7 +196,7 @@ async fn dirty_work_is_preserved_and_writer_is_unique() {
         recovered.state,
         crazyagent::worktrees::LeaseState::RecoveryRequired
     );
-    assert_eq!(engine.apply(operation).await.unwrap(), first);
+    assert_eq!(send(&engine, operation).await, first);
     let release = apply(
         &engine,
         "release",
@@ -242,14 +259,16 @@ async fn concurrent_requests_have_one_writer_and_independent_task_branches() {
     let (engine, config) = setup(&root, &repo).await;
     admit(&engine, &repo).await;
     let (first, second) = tokio::join!(
-        engine.apply(request("one", 3, allocate(&repo, "owner-one", None))),
-        engine.apply(request(
-            "two",
-            3,
-            allocate(&repo, "owner-two", Some("native-two"))
-        ))
+        send(
+            &engine,
+            request("one", 3, allocate(&repo, "owner-one", None))
+        ),
+        send(
+            &engine,
+            request("two", 3, allocate(&repo, "owner-two", Some("native-two")))
+        )
     );
-    let results = [first.unwrap(), second.unwrap()];
+    let results = [first, second];
     assert_eq!(
         results
             .iter()
@@ -1297,4 +1316,217 @@ async fn submodule_entries_and_content_git_would_convert_retain_ownership_withou
         ));
         engine.close().await.unwrap();
     }
+}
+
+fn pin(task: &str, config: &crazyagent::config::EffectiveConfig) -> Command {
+    Command::PinTask {
+        context: ExecutionContext {
+            project_id: ProjectId::new("project").unwrap(),
+            task_id: TaskId::new(task).unwrap(),
+            config_id: config.id.clone(),
+            snapshot_id: SnapshotId::new("snapshot").unwrap(),
+            baseline_id: BaselineId::new("baseline").unwrap(),
+            allowed_destinations: vec![],
+            budget_ref: CredentialRef::new("budget").unwrap(),
+        },
+    }
+}
+
+async fn leases_of(engine: &Engine, task: &str) -> Vec<crazyagent::worktrees::WorktreeLease> {
+    let reply = apply(
+        engine,
+        &format!("leases-{task}"),
+        0,
+        Command::WorktreeLeases {
+            task_id: TaskId::new(task).unwrap(),
+        },
+    )
+    .await;
+    let Outcome::Worktrees { leases } = reply.outcome else {
+        panic!("leases required")
+    };
+    leases
+}
+
+fn volume(path: &Path) -> u64 {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).unwrap().dev()
+}
+
+fn set_devices(value: &mut serde_json::Value, device: u64) {
+    match value {
+        serde_json::Value::Object(fields) => {
+            for (key, field) in fields.iter_mut() {
+                if key == "device" {
+                    *field = serde_json::Value::from(device);
+                } else {
+                    set_devices(field, device);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            items.iter_mut().for_each(|item| set_devices(item, device))
+        }
+        _ => {}
+    }
+}
+
+enum Renumber {
+    Volume(u64),
+    VolumeBesideTheLeaseDirectory(u64),
+    LeaseDirectoryOnly(u64),
+    Nothing,
+}
+
+fn rewrite_rows(database: &Path, renumber: Renumber, uncertain: bool) {
+    let db = rusqlite::Connection::open(database).unwrap();
+    for table in ["repository_admissions", "worktree_leases"] {
+        let rows: Vec<(i64, String)> = db
+            .prepare(&format!("SELECT rowid, body FROM {table}"))
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(!rows.is_empty(), "{table}");
+        for (rowid, body) in rows {
+            let mut value: serde_json::Value = serde_json::from_str(&body).unwrap();
+            let lease = table == "worktree_leases";
+            match renumber {
+                Renumber::Volume(device) => set_devices(&mut value, device),
+                Renumber::VolumeBesideTheLeaseDirectory(device) => {
+                    let kept = value.get("directory").cloned();
+                    set_devices(&mut value, device);
+                    if let Some(kept) = kept.filter(|_| lease) {
+                        value["directory"] = kept;
+                    }
+                }
+                Renumber::LeaseDirectoryOnly(device) if lease => {
+                    set_devices(&mut value["directory"], device)
+                }
+                Renumber::LeaseDirectoryOnly(_) | Renumber::Nothing => {}
+            }
+            if lease && uncertain {
+                value["lease"]["state"] = serde_json::Value::from("Uncertain");
+            }
+            db.execute(
+                &format!("UPDATE {table} SET body=?2 WHERE rowid=?1"),
+                rusqlite::params![rowid, serde_json::to_string(&value).unwrap()],
+            )
+            .unwrap();
+        }
+    }
+}
+
+async fn ready_lease(
+    root: &Path,
+) -> (
+    PathBuf,
+    crazyagent::config::EffectiveConfig,
+    crazyagent::worktrees::WorktreeLease,
+) {
+    let repo = repository(root, "repo");
+    let (engine, config) = setup(root, &repo).await;
+    admit(&engine, &repo).await;
+    assert_eq!(
+        apply(&engine, "allocate", 3, allocate(&repo, "owner", None))
+            .await
+            .outcome,
+        Outcome::Applied
+    );
+    let lease = leases(&engine).await.remove(0);
+    assert_eq!(lease.state, crazyagent::worktrees::LeaseState::Ready);
+    std::fs::write(Path::new(&lease.path).join("scratch"), b"worker scratch").unwrap();
+    engine.close().await.unwrap();
+    (repo, config, lease)
+}
+
+#[tokio::test]
+async fn a_reboot_that_renumbers_the_volume_keeps_leases_and_admissions() {
+    use crazyagent::worktrees::LeaseState;
+    let temporary = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(temporary.path()).unwrap();
+    let (repo, config, lease) = ready_lease(&root).await;
+    let live = volume(&repo);
+    assert_eq!(volume(Path::new(&lease.path)), live);
+    rewrite_rows(&root.join("db"), Renumber::Volume(live ^ 1), true);
+
+    let engine = Engine::open(&root.join("db"), config.clone())
+        .await
+        .unwrap();
+    assert_eq!(leases(&engine).await[0].state, LeaseState::RecoveryRequired);
+    assert_eq!(
+        apply(&engine, "pin-second", 4, pin("second-task", &config))
+            .await
+            .outcome,
+        Outcome::Applied
+    );
+    let second = Command::AllocateWorktree {
+        task_id: TaskId::new("second-task").unwrap(),
+        repository: repo.to_str().unwrap().into(),
+        owner_session: SessionId::new("second-owner").unwrap(),
+        native_descendant: None,
+    };
+    assert_eq!(
+        apply(&engine, "allocate-second", 5, second).await.outcome,
+        Outcome::Applied
+    );
+    let second_lease = leases_of(&engine, "second-task").await.remove(0);
+    assert_eq!(second_lease.state, LeaseState::Ready);
+    engine.close().await.unwrap();
+
+    rewrite_rows(&root.join("db"), Renumber::Volume(live ^ 2), false);
+    let engine = Engine::open(&root.join("db"), config).await.unwrap();
+    assert_eq!(leases(&engine).await[0].state, LeaseState::RecoveryRequired);
+    assert_eq!(
+        leases_of(&engine, "second-task").await[0].state,
+        LeaseState::RecoveryRequired
+    );
+    engine.close().await.unwrap();
+    assert_eq!(
+        std::fs::read(Path::new(&lease.path).join("scratch")).unwrap(),
+        b"worker scratch"
+    );
+    assert_eq!(std::fs::read(repo.join("tracked")).unwrap(), b"committed\n");
+    assert!(Path::new(&second_lease.path).join("tracked").is_file());
+}
+
+#[tokio::test]
+async fn a_mixed_device_lease_record_is_still_refused() {
+    use crazyagent::worktrees::LeaseState;
+    for (renumber, uncertain) in [
+        (Renumber::LeaseDirectoryOnly as fn(u64) -> Renumber, false),
+        (
+            Renumber::VolumeBesideTheLeaseDirectory as fn(u64) -> Renumber,
+            true,
+        ),
+    ] {
+        let temporary = tempfile::tempdir().unwrap();
+        let root = std::fs::canonicalize(temporary.path()).unwrap();
+        let (repo, config, lease) = ready_lease(&root).await;
+        rewrite_rows(&root.join("db"), renumber(volume(&repo) ^ 1), uncertain);
+        let engine = Engine::open(&root.join("db"), config).await.unwrap();
+        assert_eq!(
+            leases(&engine).await[0].state,
+            LeaseState::Uncertain,
+            "uncertain: {uncertain}"
+        );
+        engine.close().await.unwrap();
+        assert_eq!(
+            std::fs::read(Path::new(&lease.path).join("scratch")).unwrap(),
+            b"worker scratch"
+        );
+    }
+}
+
+#[tokio::test]
+async fn an_uncertain_lease_on_an_unrenumbered_volume_stays_uncertain() {
+    use crazyagent::worktrees::LeaseState;
+    let temporary = tempfile::tempdir().unwrap();
+    let root = std::fs::canonicalize(temporary.path()).unwrap();
+    let (_, config, _) = ready_lease(&root).await;
+    rewrite_rows(&root.join("db"), Renumber::Nothing, true);
+    let engine = Engine::open(&root.join("db"), config).await.unwrap();
+    assert_eq!(leases(&engine).await[0].state, LeaseState::Uncertain);
+    engine.close().await.unwrap();
 }
