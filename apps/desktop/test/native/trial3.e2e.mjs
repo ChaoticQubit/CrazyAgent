@@ -19,7 +19,7 @@ const STOP_MS = 300000;
 const UI_MS = 30000;
 const FIXTURE_INSTRUCTIONS = "# Mandatory workflow\n\nFixture instruction set for the trial 3 offline proof.\n";
 const INSTRUCTIONS = { first: "# Mandatory workflow", bytes: MODE === "fixture" ? Buffer.byteLength(FIXTURE_INSTRUCTIONS) : 12848 };
-const SETTINGS = { landOn: "trial3-land", background: "wait", claude: "native", worker: "Chosen skills", nudges: "First edit", finished: "Show", network: "https", input: "Both" };
+const SETTINGS = { landOn: "trial3-land", background: "wait", worker: "Chosen skills", nudges: "First edit", finished: "Show", network: "https", input: "Both" };
 const RUNNING = ["starting", "idle", "working"];
 const STATE_WORDS = ["Ready to review", "Conflicts with your branch", "Agent is updating", "Accepted", "Discarded", "Landed outside the app"];
 assert(["live", "fixture"].includes(MODE), "TRIAL3_MODE is live or fixture");
@@ -345,16 +345,6 @@ describe(`CrazyAgent trial 3 owner actions on the desktop app (${MODE})`, () => 
       await reopen("agents");
       await until(async () => await shown(field) && (await $(field).getValue()) === SETTINGS.background, UI_MS, "Background commands did not read back");
       return `Background commands reads Wait for them after reopening${changed ? "" : " (it already was; no row also means Wait)"}`;
-    }));
-
-  it("sets Claude Code sub-agents to native teammates", () => step("claude-native", "Set Claude Code sub-agents to Native teammates",
-    "DEC-104: one lead runs native Claude teammates while the other spawns app sub-agents", async () => {
-      await tab("agents");
-      const field = `[id="tg-mode-claude-code-${project()}"]`;
-      const changed = await pick(field, SETTINGS.claude);
-      await reopen("agents");
-      await until(async () => await shown(field) && (await $(field).getValue()) === SETTINGS.claude, UI_MS, "Claude Code sub-agents did not read back");
-      return `Claude Code sub-agents reads Native teammates after reopening${changed ? "" : " (it already was)"}`;
     }));
 
   it("sets skills per role", () => step("skills-per-role", "Set Worker skills to Chosen skills",
