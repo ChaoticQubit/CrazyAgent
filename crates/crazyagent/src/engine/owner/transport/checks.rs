@@ -1,10 +1,10 @@
-use super::*;
 use super::tracker::{SettingChoices, SettingsSaved};
+use super::*;
 use crate::checks::profile::{HOLDOUT_FILE_BYTES_MAX, PROFILE_INPUT_BYTES_MAX};
 use crate::checks::queue::JobState;
 use crate::checks::{
-    AdmittedProfile, ChecksChoice, ChecksSettings, ProfileId, ProfilePage, Proposal,
-    StoredProfile, Trigger,
+    AdmittedProfile, ChecksChoice, ChecksSettings, ProfileId, ProfilePage, Proposal, StoredProfile,
+    Trigger,
 };
 use crate::landing::ChangeSetId;
 use crate::protocol::encode_frame;
@@ -300,6 +300,13 @@ pub(super) async fn serve(
     admission: &Admission,
     bytes: &[u8],
 ) -> Result<(), EngineError> {
+    todo!()
+}
+
+/// Reads one Checks request from an owner frame body, at most REQUEST_BYTES_MAX bytes.
+/// Input: the body. Output: the request, or `checks_request_bounds` or
+/// `checks_request_invalid`.
+fn parse(bytes: &[u8]) -> Result<ChecksRequest, EngineError> {
     todo!()
 }
 

@@ -1,5 +1,6 @@
 use super::Call;
 use crate::checks::Actor;
+use crate::landing::ChangeSetId;
 use crate::protocol::ProjectId;
 use rusqlite::Connection;
 use serde_json::Value;
@@ -41,16 +42,37 @@ pub(super) fn results_call(arguments: Option<&Value>) -> Option<Call> {
     todo!()
 }
 
-/// Answers a master's or sub-agent's checks call on its own change set in the project: the
-/// newest one whose agent is the caller, never one the call names. Inputs: the engine
-/// database, the project, the caller as the engine named it and the call, `checks_run` or
-/// `checks_results`. Output: the sentence the caller reads and whether it is an error.
-pub(in crate::team) fn answer(
+/// What a checks call answered: the sentence the caller reads, whether it is an error, and
+/// for a queued run the change set whose runners the engine starts next.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Answered {
+    pub text: String,
+    pub error: bool,
+    pub queued: Option<ChangeSetId>,
+}
+
+/// Answers a master's or sub-agent's checks call and starts the runners of a run it
+/// queued. Inputs and output: as `answer`, without the queued change set.
+pub(in crate::team) fn serve(
     db: &Connection,
     project: &ProjectId,
     caller: Actor,
     call: Call,
 ) -> (String, bool) {
+    todo!()
+}
+
+/// Answers a master's or sub-agent's checks call on its own change set in the project: the
+/// newest one whose agent is the caller, never one the call names. A holdout check is never
+/// named to the caller, and an id it names that only a holdout has is refused as unknown.
+/// Inputs: the engine database, the project, the caller as the engine named it and the
+/// call, `checks_run` or `checks_results`. Output: the answer.
+pub(in crate::team) fn answer(
+    db: &Connection,
+    project: &ProjectId,
+    caller: Actor,
+    call: Call,
+) -> Answered {
     todo!()
 }
 
