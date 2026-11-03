@@ -551,17 +551,19 @@ class AuditTests(unittest.TestCase):
         self.background("grace", grace)
         self.assertEqual(self.verdict("T3-20"), "PASS")
 
-    def hidden(self, denied):
+    def hidden(self, denied, folders=1):
         w = self.world
         w.db.executescript(
             "CREATE TABLE project_hidden_paths (project TEXT NOT NULL, position INTEGER NOT NULL, path TEXT NOT NULL, PRIMARY KEY (project, position));"
         )
-        secret = str(w.base / "repo" / "private")
-        w.row("project_hidden_paths", project=PROJECT, position=0, path=secret)
+        secrets = [str(w.base / "repo" / f"private-{n}") for n in range(folders)]
+        for position, secret in enumerate(secrets):
+            w.row("project_hidden_paths", project=PROJECT, position=position, path=secret)
         lead = w.agent("sub", mode="app_spawned")
         profiles = w.root / "team" / "profiles"
         profiles.mkdir(parents=True)
-        rule = f'(deny file-read* file-write* process-exec file-link file-clone\n  (subpath "{secret}"))\n' if denied else ""
+        subpaths = "".join(f'\n  (subpath "{secret}")' for secret in secrets)
+        rule = f"(deny file-read* file-write* process-exec file-link file-clone{subpaths})\n" if denied else ""
         (profiles / f"agent-{lead}.sb").write_text(f'(version 1)\n(allow default)\n{rule}(deny file-write*\n  (subpath "{w.repo}/context"))\n')
 
     def test_t3_21_hidden_folders_pass_when_every_profile_denies_them_and_fail_when_one_does_not(self):
@@ -576,6 +578,13 @@ class AuditTests(unittest.TestCase):
         record = self.world.audit("T3-21")
         self.assertEqual(record["result"], "FAIL")
         self.assertIn("denies 0/1", record["detail"])
+        for folders in (2, 3):
+            self.tearDown()
+            self.setUp()
+            self.hidden(denied=True, folders=folders)
+            record = self.world.audit("T3-21")
+            self.assertEqual(record["result"], "PASS", record["detail"])
+            self.assertIn(f"denies {folders}/{folders}", record["detail"])
 
     def given(self, agent, text, kind="agent-instructions-given"):
         w = self.world

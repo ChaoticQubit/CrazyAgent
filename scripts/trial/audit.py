@@ -63,6 +63,7 @@ SKILL_ROLES = ("master", "lead", "worker")
 DEPTH_DEFAULT = 2
 EMPTY_REPLY_NOTE = "The master replied with no text, so no work was handed out."
 HIDDEN_RULE = "(deny file-read* file-write* process-exec file-link file-clone"
+SUBPATH = re.compile(r'\(subpath "([^"]+)"\)(\))?')
 MAILBOX = "crazyagent-team-calls"
 GIT_ENV = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0")
 GIT_SAFE = ("-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false")
@@ -1399,6 +1400,24 @@ def check_background(t):
     return verdict("UNKNOWN", detail + ("; mode wait: tasks wait for their background commands" if mode == "wait" else "; no task ended with a background command running"))
 
 
+def hidden_denied(text):
+    at = text.find(HIDDEN_RULE)
+    if at < 0:
+        return set()
+    lines = text[at:].split("\n")
+    if lines[0].strip() != HIDDEN_RULE:
+        return set()
+    found = set()
+    for line in lines[1:]:
+        match = SUBPATH.fullmatch(line.strip())
+        if match is None:
+            break
+        found.add(match.group(1))
+        if match.group(2):
+            break
+    return found
+
+
 def check_hidden(t):
     if not t.columns("project_hidden_paths"):
         return verdict("UNKNOWN", "not in this build: no project_hidden_paths table (feat/agent-hidden-folders is not merged)")
@@ -1413,9 +1432,7 @@ def check_hidden(t):
         if text is None:
             bad.append(f"{name} no profile {shown_path(t, path)}")
             continue
-        at = text.find(HIDDEN_RULE)
-        block = text[at:text.find(")\n", text.find("\n", at))] if at >= 0 else ""
-        denied_folders = set(re.findall(r'\(subpath "([^"]+)"\)', block))
+        denied_folders = hidden_denied(text)
         missing = [folder for folder in hidden if folder not in denied_folders]
         line = f"{name} {shown_path(t, path)} denies {len(hidden) - len(missing)}/{len(hidden)}" + (f" missing {listed(missing)}" if missing else "")
         (bad if missing else notes).append(line)
