@@ -12362,6 +12362,71 @@ fn reask_off_finishes_a_quiet_task_at_once() {
     );
 }
 
+/// RER-L1: a re-ask is never typed into a kept native lead while a teammate of it still
+/// works or the lead's app runs a turn of its own, as instruction edits wait; it goes once,
+/// when both are over.
+#[test]
+fn a_reask_waits_for_a_kept_lead_s_working_teammates_and_its_own_turn() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let lead = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,parent,pane)
+             VALUES (?1,'teammate','claude-code',1,'working',1,1,?2,'%3')",
+            params![PROJECT, lead],
+        )
+        .unwrap();
+    let teammate = fixture.connection.last_insert_rowid();
+    let (orders, sent) = channel();
+    let mut worker = between_turns(&project, AgentRole::Sub, false, true);
+    worker.orders = orders;
+    worker.busy = Some(Busy::Task(7));
+    worker.reask = Some(7);
+    team.workers.insert(lead, worker);
+    let none = BTreeSet::new();
+    team.send_reasks(&fixture.setup, &fixture.access, &none)
+        .unwrap();
+    assert!(
+        sent.try_recv().is_err(),
+        "no re-ask while a teammate of the lead works"
+    );
+    assert_eq!(team.workers[&lead].reask, Some(7), "the re-ask waits");
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET status='idle' WHERE id=?1",
+            [teammate],
+        )
+        .unwrap();
+    team.workers.get_mut(&lead).unwrap().own_turn = Some(1);
+    team.send_reasks(&fixture.setup, &fixture.access, &none)
+        .unwrap();
+    assert!(
+        sent.try_recv().is_err(),
+        "no re-ask while the lead's app runs a turn of its own"
+    );
+    assert_eq!(team.workers[&lead].reask, Some(7), "the re-ask still waits");
+    team.workers.get_mut(&lead).unwrap().own_turn = None;
+    team.send_reasks(&fixture.setup, &fixture.access, &none)
+        .unwrap();
+    match sent.try_recv() {
+        Ok(Order::Turn(text, None, _)) => assert_eq!(text, REASK_EMPTY),
+        other => panic!("one re-ask once the lead is free, got one: {}", other.is_ok()),
+    }
+    assert_eq!(
+        (team.workers[&lead].reask, team.workers[&lead].reasked),
+        (None, Some(7)),
+        "the re-ask went once"
+    );
+    team.send_reasks(&fixture.setup, &fixture.access, &none)
+        .unwrap();
+    assert!(sent.try_recv().is_err(), "no second re-ask");
+    team.workers.clear();
+}
+
 /// The tasks of a project in one state, oldest first. Takes the fixture and the state.
 #[cfg(target_os = "macos")]
 fn tasks_in(fixture: &Fixture, status: &str) -> Vec<String> {
