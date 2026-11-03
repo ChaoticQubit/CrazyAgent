@@ -3059,6 +3059,7 @@ fn a_refused_live_master_start_says_why_in_words_not_its_code() {
                 action: crate::team::TeamAction::LiveMaster {
                     project_id: project(),
                     on: true,
+                    version: 0,
                 },
                 generation: 1,
             },
