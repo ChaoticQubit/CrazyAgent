@@ -175,7 +175,7 @@ fn command(scan: &Scan<'_>, catalog: &'static [OpSpec]) -> Result<Command, Usage
         _ => {
             let spec = catalog
                 .iter()
-                .find(|spec| spec.op.as_str() == op)
+                .find(|spec| spec.kind.as_str() == op)
                 .ok_or_else(|| {
                     Usage::new(format!(
                         "unknown operation {}; trackwright --help lists them",
@@ -214,7 +214,7 @@ fn init(fields: &[(String, &str)]) -> Result<Command, Usage> {
 }
 
 fn arguments(spec: &OpSpec, fields: &[(String, &str)]) -> Result<Map<String, Value>, Usage> {
-    let op = spec.op.as_str();
+    let op = spec.kind.as_str();
     let mut args = Map::new();
     for (name, text) in fields {
         let field = spec
@@ -228,7 +228,7 @@ fn arguments(spec: &OpSpec, fields: &[(String, &str)]) -> Result<Map<String, Val
                 ))
             })?;
         let value = value_of(field, text)?;
-        if matches!(field.ty, FieldType::TextList) {
+        if matches!(field.ty, FieldType::Keys) {
             let list = args
                 .entry(field.name)
                 .or_insert_with(|| Value::Array(Vec::new()));
@@ -245,31 +245,37 @@ fn arguments(spec: &OpSpec, fields: &[(String, &str)]) -> Result<Map<String, Val
 
 fn value_of(field: &FieldSpec, text: &str) -> Result<Value, Usage> {
     let value = match field.ty {
-        FieldType::Text | FieldType::ShortId | FieldType::Choice(_) | FieldType::TextList => {
-            Value::String(text.to_owned())
-        }
-        FieldType::Integer => text
+        FieldType::Project
+        | FieldType::Ticket
+        | FieldType::Actor
+        | FieldType::Text(_)
+        | FieldType::Choice(_)
+        | FieldType::Day
+        | FieldType::Cursor
+        | FieldType::RequestId
+        | FieldType::Word
+        | FieldType::Path
+        | FieldType::Keys => Value::String(text.to_owned()),
+        FieldType::Version | FieldType::Integer { .. } => text
             .parse::<i64>()
             .map(Value::from)
             .map_err(|_| Usage::new(format!("--{} takes an integer", field.name)))?,
-        FieldType::Boolean => match text {
+        FieldType::Flag => match text {
             "true" => Value::Bool(true),
             "false" => Value::Bool(false),
             _ => return Err(Usage::new(format!("--{} takes true or false", field.name))),
         },
-        FieldType::Json => {
-            serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.to_owned()))
-        }
     };
+    assert!(value.is_string() || value.is_i64() || value.is_boolean());
     Ok(value)
 }
 
 fn assert_catalog_leaves_cli_names_free(catalog: &[OpSpec]) {
     for spec in catalog {
         assert!(
-            !COMMANDS.contains(&spec.op.as_str()),
+            !COMMANDS.contains(&spec.kind.as_str()),
             "{} is a CLI command",
-            spec.op
+            spec.kind
         );
         for field in spec.fields {
             assert!(

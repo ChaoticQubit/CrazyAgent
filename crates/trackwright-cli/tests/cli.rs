@@ -108,7 +108,10 @@ fn the_built_binary_creates_a_ticket_and_lists_it_ready_in_json() {
     );
     assert_eq!(moved.status.code(), Some(0), "{moved:?}");
     assert_eq!(envelope(&moved)["ok"], true);
-    let ready = run(root.path(), &["ready", "--actor", "agent:one", "--json"]);
+    let ready = run(
+        root.path(),
+        &["ready", "--project", "CA", "--actor", "agent:one", "--json"],
+    );
     assert_eq!(ready.status.code(), Some(0), "{ready:?}");
     let reply = envelope(&ready);
     assert_eq!(reply["ok"], true, "{reply}");
@@ -120,7 +123,7 @@ fn the_built_binary_creates_a_ticket_and_lists_it_ready_in_json() {
 #[test]
 fn every_catalog_op_has_a_subcommand_with_its_fields() {
     let root = TempDir::new().unwrap();
-    let names: BTreeSet<&str> = catalog().iter().map(|spec| spec.op.as_str()).collect();
+    let names: BTreeSet<&str> = catalog().iter().map(|spec| spec.kind.as_str()).collect();
     let kinds: BTreeSet<&str> = OpKind::ALL.iter().map(|kind| kind.as_str()).collect();
     assert_eq!(names, kinds, "the catalog holds every operation once");
     assert_eq!(names.len(), catalog().len());
@@ -128,7 +131,7 @@ fn every_catalog_op_has_a_subcommand_with_its_fields() {
     assert_eq!(top.status.code(), Some(0), "{top:?}");
     let top = String::from_utf8(top.stdout).unwrap();
     for spec in catalog() {
-        let op = spec.op.as_str();
+        let op = spec.kind.as_str();
         assert!(
             top.lines()
                 .any(|line| line.trim_start().starts_with(&format!("{op} "))),

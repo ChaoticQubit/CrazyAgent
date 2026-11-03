@@ -108,7 +108,7 @@ fn the_built_binary_serves_mcp_over_stdio() {
         .iter()
         .map(|tool| tool["name"].as_str().expect("every tool has a name"))
         .collect();
-    let ops: BTreeSet<&str> = catalog().iter().map(|spec| spec.op.as_str()).collect();
+    let ops: BTreeSet<&str> = catalog().iter().map(|spec| spec.kind.as_str()).collect();
     assert_eq!(tools, ops);
 
     let created = call(

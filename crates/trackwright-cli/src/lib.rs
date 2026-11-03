@@ -13,9 +13,9 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
-use trackwright_core::catalog::{OpSpec, catalog};
-use trackwright_core::dispatch;
+use trackwright_core::catalog::{self, OpSpec, catalog};
 use trackwright_core::model::{Actor, OpKind, ProjectKey, Refusal, codes};
+use trackwright_core::ops;
 use trackwright_core::reply::Reply;
 use trackwright_core::requests::Request;
 use trackwright_core::standalone::Standalone;
@@ -92,7 +92,9 @@ pub fn run(args: &[OsString]) -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(failure) => stderr_exit(&failure),
         },
-        Command::Op { spec, .. } if spec.op == OpKind::Schema => schema(invocation.json),
+        Command::Op { spec, args } if spec.kind == OpKind::Schema && args.is_empty() => {
+            schema(invocation.json)
+        }
         Command::Init { .. } | Command::Mcp | Command::Op { .. } => as_actor(invocation),
     }
 }
@@ -167,10 +169,10 @@ fn operation(
 ) -> Result<Value, Failure> {
     let actor = Actor::new(actor)?;
     let bytes = serde_json::to_vec(&Value::Object(args)).expect("a JSON object serializes");
-    let request = Request::parse(spec.op.as_str(), &bytes)?;
+    let request = Request::parse(spec.kind.as_str(), &bytes)?;
     let mut store = Store::open(&place.existing()?)?;
     let transaction = store.transaction()?;
-    let envelope = envelope_of(dispatch(&transaction, &Standalone, &actor, request));
+    let envelope = envelope_of(ops::dispatch(&transaction, &Standalone, &actor, request));
     if envelope["ok"] == true {
         transaction.commit().map_err(StoreError::from)?;
     } else {
@@ -209,12 +211,13 @@ fn serve(actor: &str, place: &Place) -> Result<(), Failure> {
 }
 
 fn schema(json: bool) -> ExitCode {
-    let text = trackwright_core::schema_v1();
+    let schema = catalog::schema_v1();
+    assert_eq!(schema["api"], 1, "the published schema is API version 1");
     if json {
-        let data: Value = serde_json::from_str(&text).expect("schema v1 is JSON");
-        let envelope = json!({"api": 1, "ok": true, "data": data, "next": [], "cursor": null});
+        let envelope = json!({"api": 1, "ok": true, "data": schema, "next": [], "cursor": null});
         return reply(true, &envelope);
     }
+    let text = serde_json::to_string_pretty(&schema).expect("a JSON value serializes") + "\n";
     match write_stdout(&text) {
         Ok(()) => ExitCode::SUCCESS,
         Err(failure) => stderr_exit(&failure),
@@ -222,7 +225,7 @@ fn schema(json: bool) -> ExitCode {
 }
 
 fn envelope_of(reply: Reply) -> Value {
-    let envelope: Value = serde_json::from_str(&reply.to_json()).expect("the core replies JSON");
+    let envelope: Value = serde_json::from_str(reply.json()).expect("the core replies JSON");
     assert_eq!(envelope["api"], 1, "the core replies api 1");
     assert_eq!(
         envelope["ok"].as_bool(),

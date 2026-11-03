@@ -74,7 +74,7 @@ fn overview(out: &mut String, catalog: &[OpSpec]) {
          Operations:\n",
     );
     for spec in catalog {
-        writeln!(out, "  {:<16} {}", spec.op.as_str(), spec.summary).unwrap();
+        writeln!(out, "  {:<16} {}", spec.kind.as_str(), spec.summary).unwrap();
     }
     writeln!(
         out,
@@ -90,7 +90,7 @@ fn operation(out: &mut String, spec: &OpSpec) {
     writeln!(
         out,
         "trackwright {} [--field value ...] [--json] [--db PATH] [--actor ACTOR]\n{}\nFields:",
-        spec.op.as_str(),
+        spec.kind.as_str(),
         spec.summary
     )
     .unwrap();
@@ -108,13 +108,20 @@ fn operation(out: &mut String, spec: &OpSpec) {
 
 fn shape(field: &FieldSpec) -> String {
     match field.ty {
-        FieldType::Text => "text".to_owned(),
-        FieldType::Integer => "integer".to_owned(),
-        FieldType::Boolean => "true|false".to_owned(),
-        FieldType::Choice(choices) => choices.join("|"),
-        FieldType::ShortId => "KEY-N".to_owned(),
-        FieldType::TextList => "text, repeat the flag".to_owned(),
-        FieldType::Json => "json, or plain text".to_owned(),
+        FieldType::Project => "KEY".to_owned(),
+        FieldType::Ticket => "KEY-N".to_owned(),
+        FieldType::Actor => "actor".to_owned(),
+        FieldType::Text(_) => "text".to_owned(),
+        FieldType::Version => "version".to_owned(),
+        FieldType::Integer { min, max } => format!("{min}..{max}"),
+        FieldType::Choice(named) => named.names().join("|"),
+        FieldType::Day => "YYYY-MM-DD".to_owned(),
+        FieldType::Flag => "true|false".to_owned(),
+        FieldType::Cursor => "cursor".to_owned(),
+        FieldType::RequestId => "request id".to_owned(),
+        FieldType::Word => "word".to_owned(),
+        FieldType::Path => "path".to_owned(),
+        FieldType::Keys => "key, repeat the flag".to_owned(),
     }
 }
 
