@@ -185,9 +185,10 @@ pub fn set(
 }
 
 /// Decides whether a policy lets an actor run an operation. The owner runs all; reads, test
-/// ops and `import_preview` are open to all, the test store deciding protected cases and run
-/// writers. `close` and `reopen` follow `close`, `create` follows `create`, `policy_set` is the
-/// owner's; engines make other writes; `agent_edit` rules agents on others' tickets and plans.
+/// ops, `import_preview` and `export` are open to all, the test store deciding protected
+/// cases and run writers. `close` and `reopen` follow `close`, `create` follows `create`,
+/// `policy_set` is the owner's; engines make other writes; agents follow `agent_edit` on
+/// tickets they did not create and may run planning writes only under `agent_edit = any`.
 /// Inputs: the policy, the actor, the operation and its ticket. Output: Ok, or the refusal.
 pub fn permits(
     policy: &Policy,

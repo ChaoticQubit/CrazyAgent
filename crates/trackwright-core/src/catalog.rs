@@ -223,7 +223,7 @@ const STABLE_NAME: FieldType = FieldType::Line {
 const BATCH: FieldType = FieldType::Line {
     bytes_max: RUN_BATCH_BYTES_MAX,
 };
-const VERSION_NAME: FieldType = FieldType::Text(TextField::VersionName);
+const RELEASE_NAME: FieldType = FieldType::Text(TextField::VersionName);
 const CASE_ID: FieldSpec = req("id", CASE, "The case's id, for example CA-T3.");
 const SET_ID: FieldSpec = req("id", SET, "The set's id, for example CA-S1.");
 const PLAN_ID: FieldSpec = req("id", PLAN, "The plan's id, for example CA-P2.");
@@ -787,7 +787,7 @@ const CATALOG: &[OpSpec] = &[
             ),
             opt(
                 "release",
-                VERSION_NAME,
+                RELEASE_NAME,
                 "Cover the criteria of this release's tickets; give ticket or release.",
             ),
             CURSOR,
@@ -894,7 +894,7 @@ const CATALOG: &[OpSpec] = &[
             req("name", TITLE, "One line naming the plan."),
             opt(
                 "release",
-                VERSION_NAME,
+                RELEASE_NAME,
                 "The project's release version the plan is for.",
             ),
             opt(
