@@ -1248,6 +1248,36 @@ fn native_teammates_neither_read_nor_change_the_leads_part_of_the_relay_mailbox(
     }
 }
 
+#[test]
+fn native_teammates_never_move_the_folders_holding_the_leads_part_of_the_relay_mailbox() {
+    let team = LiveTeam::start();
+    let mailbox = team.case.tmp.join(crazyagent::team::tool::MAILBOX_FOLDER);
+    let part = mailbox.join(crazyagent::coord::relay::LEAD_PART);
+    fs::create_dir(&part).unwrap();
+    fs::set_permissions(&part, fs::Permissions::from_mode(0o700)).unwrap();
+    let letter = part.join(format!("{:032x}.inbox", 5));
+    fs::write(&letter, b"letter for the lead").unwrap();
+    let (m, t) = (quoted(&mailbox), quoted(&team.case.tmp));
+    let shifted = quoted(&team.case.tmp.join("shifted"));
+    let uprooted = quoted(&team.case.project.join("uprooted"));
+    let probed = team.teammate(&format!(
+        "/bin/mv {m} {shifted}; echo shift=$?\n/bin/mv {t} {uprooted}; echo uproot=$?\n"
+    ));
+    let text = String::from_utf8_lossy(&probed.stdout).into_owned();
+    let errors = String::from_utf8_lossy(&probed.stderr);
+    for name in ["shift", "uproot"] {
+        assert_ne!(
+            status_of(&text, name),
+            "0",
+            "the teammate's {name} of a folder holding the lead's part succeeded: {errors}"
+        );
+    }
+    assert!(
+        letter.is_file(),
+        "the lead's letter stays where the engine left it"
+    );
+}
+
 /// Reads one `name=status` line a probe script printed. Takes the output text and the name.
 /// Returns the status, panicking when the line is missing.
 fn status_of(text: &str, name: &str) -> String {
