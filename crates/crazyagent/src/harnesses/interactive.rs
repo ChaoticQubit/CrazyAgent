@@ -56,6 +56,16 @@ const CLAUDE_TEAMMATE_COMMAND: &str = "CLAUDE_CODE_TEAMMATE_COMMAND";
 const CLAUDE_INSTRUCTIONS_FLAG: &str = "--append-system-prompt-file";
 const CLAUDE_BARE: &str = "--bare";
 const TEAMMATE_SCRIPT_BYTES_MAX: usize = 64 * 1024;
+/// The variables of a native lead's command that name a place in its home, which its
+/// teammates get at the same place in their own home (TPH-2 C).
+/// `CLAUDE_SECURESTORAGE_CONFIG_DIR` stays the lead's, where the engine keeps the
+/// account's sign-in copy that teammates read.
+const TEAMMATE_HOME_VARIABLES: [&str; 4] = [
+    "CLAUDE_CONFIG_DIR",
+    "CLAUDE_CODE_TMPDIR",
+    "HOME",
+    "CARGO_HOME",
+];
 
 /// What the terminal host runs for one interactive agent: the full argument list, starting
 /// with the project sandbox wrapper, the working folder and the environment, plus where the
@@ -695,6 +705,7 @@ fn tmux_on_path(env: &mut [(String, String)], tmux: &Path) -> Result<(), LaunchE
 /// denied. Claude Code 2.1.309 appends the lead's `--mcp-config`, `--strict-mcp-config`,
 /// `--plugin-dir`, `--settings`, deny rules and tools itself, so the script repeats none of
 /// them and no MCP server loads twice. It runs in the lead's pane, inside the lead's sandbox.
+/// The variables naming the lead's home name the teammates' own home instead (TPH-2 C).
 /// Inputs: the agent home, the lead's built command, its request and what its teammates get.
 /// Output: Ok, or a plain code.
 #[cfg(unix)]
@@ -712,13 +723,21 @@ pub fn write_teammate_command(
     };
     let executable = built.argv.get(start).ok_or_else(refused)?;
     let instructions = text(&team.instructions)?;
+    let mates = crate::launch_context::mates_home(home);
     let mut words = vec!["/usr/bin/env".to_owned()];
-    words.extend(
-        built
-            .env
-            .iter()
-            .map(|(name, value)| format!("{name}={value}")),
-    );
+    for (name, value) in &built.env {
+        let value = match Path::new(value).strip_prefix(home) {
+            Ok(rest) if TEAMMATE_HOME_VARIABLES.contains(&name.as_str()) => {
+                if rest.as_os_str().is_empty() {
+                    text(&mates)?
+                } else {
+                    text(&mates.join(rest))?
+                }
+            }
+            _ => value.clone(),
+        };
+        words.push(format!("{name}={value}"));
+    }
     words.extend([
         executable.clone(),
         CLAUDE_INSTRUCTIONS_FLAG.to_owned(),

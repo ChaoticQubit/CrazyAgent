@@ -1313,6 +1313,7 @@ impl LiveTeam {
         let own = tmp.join("tmux.sock");
         let mates = tmp.join("teammates-0123456789abcdef.sock");
         let callers = tmp.join(crazyagent::team::caller::CALLER_SOCKET);
+        let mates_home = team_homes(&case.home);
         let (lead, teammates) = ProjectSandbox::new(
             &case.project,
             &case.home,
@@ -1322,7 +1323,7 @@ impl LiveTeam {
         .unwrap()
         .allow_scratch(&tmp)
         .unwrap()
-        .native_team(&own, &mates, &callers, &tmux)
+        .native_team(&own, &mates, &callers, &tmux, &mates_home)
         .unwrap();
         let team = Self {
             case,
@@ -1541,4 +1542,69 @@ fn a_link_at_the_caller_socket_path_never_reaches_the_lead_s_server() {
         );
     }
     assert_eq!(team.sessions(&team.own), "lead\n");
+}
+
+/// Makes the folders a native lead's two sandboxes need beside its home, as the engine makes
+/// them: the team folders Claude Code shares in the lead's home and the teammates' private
+/// home beside it. Takes the lead's home. Returns the teammates' home.
+fn team_homes(home: &Path) -> PathBuf {
+    for folder in crazyagent::sandbox::CLAUDE_TEAM_SHARED {
+        fs::create_dir_all(home.join(folder)).unwrap();
+    }
+    let mates = home.with_file_name("mates-home");
+    fs::create_dir_all(&mates).unwrap();
+    fs::set_permissions(&mates, fs::Permissions::from_mode(0o700)).unwrap();
+    mates
+}
+
+/// A native lead's teammates' home sits beside the lead's, and no root the teammates write
+/// holds the lead's home (TPH-2 C): `native_team` refuses a teammates' home inside the
+/// lead's, and a lead's home inside the project folder its teammates write, and builds the
+/// engine's shape.
+#[test]
+fn native_team_refuses_a_teammates_home_in_the_lead_s_or_a_lead_home_the_project_holds() {
+    let case = case();
+    let tmux = crazyagent::terminal::tmux::installed(&case.project).expect("tmux is installed");
+    let tmp = toolchains::make_tmp(&case.home).unwrap();
+    let team = |home: &Path, mates_home: &Path| {
+        ProjectSandbox::new(
+            &case.project,
+            home,
+            &case.tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap()
+        .allow_scratch(&tmp)
+        .unwrap()
+        .native_team(
+            &tmp.join("tmux.sock"),
+            &tmp.join("teammates-0123456789abcdef.sock"),
+            &tmp.join(crazyagent::team::caller::CALLER_SOCKET),
+            &tmux,
+            mates_home,
+        )
+    };
+    let beside = team_homes(&case.home);
+    let inside = case.home.join("mates-home");
+    fs::create_dir_all(&inside).unwrap();
+    fs::set_permissions(&inside, fs::Permissions::from_mode(0o700)).unwrap();
+    let held = case.project.join("agent").join("home");
+    fs::create_dir_all(&held).unwrap();
+    fs::set_permissions(&held, fs::Permissions::from_mode(0o700)).unwrap();
+    let held_mates = team_homes(&held);
+
+    let refused = |made: Result<(ProjectSandbox, ProjectSandbox), SandboxError>| match made {
+        Err(SandboxError::Invalid(reason)) => reason,
+        other => panic!("expected a refusal, got {:?}", other.map(|_| ())),
+    };
+    assert_eq!(
+        refused(team(&case.home, &inside)),
+        "the teammates' home must sit beside the lead's"
+    );
+    assert_eq!(
+        refused(team(&held, &held_mates)),
+        "a teammates' writable root holds the lead's home"
+    );
+    assert!(team(&case.home, &beside).is_ok());
+    toolchains::remove_tmp(&case.home).unwrap();
 }
