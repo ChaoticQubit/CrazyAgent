@@ -65,6 +65,7 @@ pub(in crate::tui) struct ProjectTickets {
     attach: Option<ProjectKey>,
     shot: Vec<Row>,
     notice: Option<Notice>,
+    detail: bool,
 }
 
 impl ProjectTickets {
@@ -83,6 +84,7 @@ impl ProjectTickets {
             attach: None,
             shot: Vec::new(),
             notice: None,
+            detail: false,
         }
     }
 
@@ -219,6 +221,7 @@ impl ProjectTickets {
         };
         self.steps.clear();
         self.steps.push_back(Step::Open(self.page));
+        self.detail = false;
     }
 
     fn queue(&mut self, step: Step) {
@@ -233,7 +236,12 @@ impl ProjectTickets {
         let Some((input, error)) = self.turning_on.as_mut() else {
             return false;
         };
-        input.insert_str(&text.to_ascii_uppercase());
+        let letters: String = text
+            .chars()
+            .filter(char::is_ascii_alphabetic)
+            .map(|letter| letter.to_ascii_uppercase())
+            .collect();
+        input.insert_str(&letters);
         *error = None;
         true
     }
@@ -295,6 +303,9 @@ impl ProjectTickets {
             }
             KeyCode::Esc => {
                 if self.sent.is_some() || !self.steps.is_empty() {
+                    if !self.detail {
+                        return TicketsReply::Ignored;
+                    }
                     self.queue(Step::Key(ViewKey::Back));
                     return TicketsReply::Handled;
                 }
@@ -302,6 +313,7 @@ impl ProjectTickets {
                     return TicketsReply::Handled;
                 };
                 return if views.key(ViewKey::Back, &mut Unreached) {
+                    self.detail = false;
                     TicketsReply::Handled
                 } else {
                     TicketsReply::Ignored
@@ -447,6 +459,10 @@ impl ProjectTickets {
                     .iter()
                     .map(|hint| (hint.key, hint.label))
                     .collect();
+                self.detail = shown.iter().any(|(key, _)| *key == "Esc");
+                if self.detail {
+                    help.retain(|(key, _)| *key != "Esc");
+                }
                 shown.append(&mut help);
                 help = shown;
             }

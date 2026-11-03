@@ -144,6 +144,7 @@ fn esc_closes_a_ticket_before_it_leaves_the_tab() {
     let (rows, _, help) = tickets.rows(76, 18, &Look::plain());
     assert!(text(&rows).contains("Sync notes when the signal returns"));
     assert!(help.contains(&("Esc", "Back")), "{help:?}");
+    assert!(!help.contains(&("Esc", "Home")), "{help:?}");
 
     assert_eq!(tickets.key(key(KeyCode::Esc)), TicketsReply::Handled);
     assert!(
@@ -152,7 +153,49 @@ fn esc_closes_a_ticket_before_it_leaves_the_tab() {
     );
     let (_, _, help) = tickets.rows(76, 18, &Look::plain());
     assert!(help.contains(&("Enter", "Open")), "{help:?}");
+    assert!(help.contains(&("Esc", "Home")), "{help:?}");
     assert_eq!(tickets.key(key(KeyCode::Esc)), TicketsReply::Ignored);
+}
+
+#[test]
+fn esc_while_the_views_are_away_closes_an_open_ticket_or_goes_home() {
+    let mut engine = Engine::seeded();
+    let mut tickets = tab(&mut engine);
+    tickets.key(key(KeyCode::Enter));
+    settle(&mut tickets, &mut engine);
+    tickets.rows(76, 18, &Look::plain());
+    assert_eq!(tickets.key(key(KeyCode::Down)), TicketsReply::Handled);
+    let Some(TrackerJob::Views { views, steps, .. }) = tickets.next_job() else {
+        panic!("Down goes to the worker");
+    };
+    assert_eq!(tickets.key(key(KeyCode::Esc)), TicketsReply::Handled);
+    run(&views, &steps, &mut engine);
+    tickets.apply(&SettingsEvent::Tracker(Box::new(TrackerEvent::Views {
+        project: fieldnotes(),
+        problem: None,
+    })));
+    let Some(TrackerJob::Views { views, steps, .. }) = tickets.next_job() else {
+        panic!("the queued Back follows");
+    };
+    assert_eq!(steps, vec![Step::Key(ViewKey::Back)]);
+    run(&views, &steps, &mut engine);
+    tickets.apply(&SettingsEvent::Tracker(Box::new(TrackerEvent::Views {
+        project: fieldnotes(),
+        problem: None,
+    })));
+    let (_, _, help) = tickets.rows(76, 18, &Look::plain());
+    assert!(
+        help.contains(&("Enter", "Open")),
+        "the ticket closed: {help:?}"
+    );
+
+    assert_eq!(tickets.key(key(KeyCode::Down)), TicketsReply::Handled);
+    assert!(tickets.next_job().is_some());
+    assert_eq!(
+        tickets.key(key(KeyCode::Esc)),
+        TicketsReply::Ignored,
+        "with no ticket open, Esc goes Home while the views are away"
+    );
 }
 
 #[test]
@@ -169,7 +212,7 @@ fn keys_wait_their_turn_while_the_views_are_away() {
     assert_eq!(help[0], ("", "Working..."));
 
     assert_eq!(tickets.key(key(KeyCode::Down)), TicketsReply::Handled);
-    assert_eq!(tickets.key(key(KeyCode::Esc)), TicketsReply::Handled);
+    assert_eq!(tickets.key(key(KeyCode::Up)), TicketsReply::Handled);
     assert!(tickets.next_job().is_none(), "one job at a time");
     run(&views, &steps, &mut engine);
     tickets.apply(&SettingsEvent::Tracker(Box::new(TrackerEvent::Views {
@@ -181,7 +224,22 @@ fn keys_wait_their_turn_while_the_views_are_away() {
     };
     assert_eq!(
         steps,
-        vec![Step::Key(ViewKey::Down), Step::Key(ViewKey::Back)]
+        vec![Step::Key(ViewKey::Down), Step::Key(ViewKey::Up)]
+    );
+}
+
+#[test]
+fn a_pasted_key_keeps_its_letters_only() {
+    let mut engine = Engine::bare();
+    let mut tickets = tab(&mut engine);
+    assert!(!tickets.paste("FM"), "no field, no paste");
+    tickets.key(key(KeyCode::Char('t')));
+    assert!(tickets.paste("n-1 b\u{1b}["));
+    let (rows, _, _) = tickets.rows(76, 18, &Look::plain());
+    assert!(
+        rows.iter().any(|row| row.text().starts_with("Key [ FMNB ")),
+        "{}",
+        text(&rows)
     );
 }
 
