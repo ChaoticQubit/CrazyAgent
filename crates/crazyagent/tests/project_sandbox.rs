@@ -2272,6 +2272,125 @@ fn a_native_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_clone() {
     );
 }
 
+/// OP-9b (plan step 2): a native lead in a linked worktree (the Sandboxed default) has
+/// teammates who write only the teammates' folder of the lead's worktree, where the engine
+/// made each one's linked worktree. The engine commits their turns, so they never write the
+/// lead's files, the lead's or their own worktree records, the object store or the links
+/// that tie a teammate worktree to the repository.
+#[test]
+fn a_linked_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_worktree() {
+    use std::os::unix::fs::PermissionsExt;
+    assert!(Path::new(AGENT_GIT).is_file());
+    let case = case();
+    for arguments in [
+        &["init", "-q"][..],
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+    ] {
+        let made = owner_git(&case.project, &case.home, arguments);
+        assert!(made.status.success(), "{made:?}");
+    }
+    let worktrees = case.project.join(".crazyagent").join("worktrees");
+    fs::create_dir_all(&worktrees).unwrap();
+    let lead_worktree = worktrees.join("agent-1");
+    let greet = lead_worktree
+        .join(crazyagent::agent_git::TEAMMATES_FOLDER)
+        .join("greet");
+    for arguments in [
+        vec![
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            lead_worktree.to_str().unwrap(),
+            "HEAD",
+        ],
+        vec![
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "crazyagent/write-the-page--greet",
+            greet.to_str().unwrap(),
+            "HEAD",
+        ],
+    ] {
+        let added = owner_git(&case.project, &case.home, &arguments);
+        assert!(added.status.success(), "{added:?}");
+    }
+    let tmux = crazyagent::terminal::tmux::installed(&case.project).expect("tmux is installed");
+    let tmp = crazyagent::sandbox::toolchains::make_tmp(&case.home).unwrap();
+    for folder in crazyagent::sandbox::CLAUDE_TEAM_SHARED {
+        fs::create_dir_all(case.home.join(folder)).unwrap();
+    }
+    let mates_home = case.home.with_file_name("mates-home");
+    fs::create_dir_all(&mates_home).unwrap();
+    fs::set_permissions(&mates_home, fs::Permissions::from_mode(0o700)).unwrap();
+    let (_lead, teammates) = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .allow_scratch(&tmp)
+        .unwrap()
+        .confine_to_worktree(&lead_worktree)
+        .unwrap()
+        .native_team(
+            &tmp.join("tmux.sock"),
+            &tmp.join("teammates-0123456789abcdef.sock"),
+            &tmp.join(crazyagent::team::caller::CALLER_SOCKET),
+            &tmux,
+            &mates_home,
+        )
+        .unwrap();
+    let profile = case.profiles.join("teammates.sb");
+    let wrote = run(
+        &teammates,
+        &profile,
+        &format!(
+            "printf 'hello\\n' > {} && mkdir -p {} && printf 'x\\n' > {}",
+            quoted(&greet.join("greet.txt")),
+            quoted(&greet.join("src")),
+            quoted(&greet.join("src").join("a.txt"))
+        ),
+    );
+    assert!(
+        wrote.status.success(),
+        "a teammate writes in its own worktree: {}",
+        String::from_utf8_lossy(&wrote.stderr)
+    );
+    let git = case.project.join(".git");
+    let kept: Vec<(PathBuf, Vec<u8>)> = [
+        greet.join(".git"),
+        git.join("worktrees").join("greet").join("gitdir"),
+        git.join("worktrees").join("greet").join("HEAD"),
+        git.join("worktrees").join("agent-1").join("commondir"),
+    ]
+    .into_iter()
+    .map(|file| {
+        let bytes = fs::read(&file).unwrap();
+        (file, bytes)
+    })
+    .collect();
+    for (file, before) in &kept {
+        let output = run(
+            &teammates,
+            &profile,
+            &format!("printf 'x\\n' >> {}", quoted(file)),
+        );
+        assert!(!output.status.success(), "{}", file.display());
+        assert_eq!(&fs::read(file).unwrap(), before, "{}", file.display());
+    }
+    for target in [
+        lead_worktree.join("lead.txt"),
+        git.join("worktrees").join("agent-1").join("ORIG_HEAD"),
+        git.join("worktrees").join("greet").join("index.lock"),
+        git.join("objects").join("teammate-probe"),
+    ] {
+        write_refused(
+            &teammates,
+            &profile,
+            &format!("printf x > {}", quoted(&target)),
+            &target,
+        );
+    }
+}
+
 #[test]
 fn a_teammate_worktree_is_added_in_the_clone_but_no_other_git_lands_below_it() {
     assert!(Path::new(AGENT_GIT).is_file());
