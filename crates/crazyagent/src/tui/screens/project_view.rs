@@ -84,6 +84,7 @@ pub(in crate::tui) fn project_screen(
         Tab::Agents => agents(screen, width, content, room, look),
         Tab::Changes => screen.changes.rows(content, room, screen.now_ms, look),
         Tab::Questions => screen.questions.rows(content, room, screen.offset, look),
+        Tab::Tests => screen.tests.rows(content, room, look),
         Tab::Context => {
             if screen.reading
                 && width < 100

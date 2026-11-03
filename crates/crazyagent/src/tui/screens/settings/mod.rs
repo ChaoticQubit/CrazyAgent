@@ -1,4 +1,5 @@
 pub mod account_choice;
+pub mod checks;
 pub mod pool_editor;
 pub mod pools;
 pub mod profile;
