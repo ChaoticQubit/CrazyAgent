@@ -370,6 +370,7 @@ jobs:
           fi
           tar -xzf "$work/vscodium.tgz" -C "$build"
           test -f "$build/out/server-main.js"
+          find "$RUNNER_TOOL_CACHE/vscodium-reh-web" -mindepth 1 -maxdepth 1 ! -name "$IDE_VERSION" -exec rm -rf {} +
       - name: Test engine and desktop crates
         run: make test-rust-selected ENGINE_TESTS_EXCLUDE="$ENGINE_TESTS_EXCLUDE $PLATFORM_TESTS_EXCLUDE" DESKTOP_TESTS_EXCLUDE="$DESKTOP_TESTS_EXCLUDE"
       - name: Test Node suites
