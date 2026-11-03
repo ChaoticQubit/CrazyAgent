@@ -928,7 +928,14 @@ fn prune(
     Ok(())
 }
 
-fn fill<T: Serialize>(rows: Vec<T>, rows_max: usize, bytes_max: usize) -> (Vec<T>, bool) {
+/// Fills a page in order to at most `rows_max` rows and `bytes_max` bytes of compact JSON,
+/// keeping at least one row. Inputs: the rows fetched, one more than a page when there are
+/// more, and the bounds. Output: the rows kept and whether rows were left over.
+pub(crate) fn fill<T: Serialize>(
+    rows: Vec<T>,
+    rows_max: usize,
+    bytes_max: usize,
+) -> (Vec<T>, bool) {
     assert!(rows_max >= 1);
     assert!(bytes_max >= 1);
     let fetched = rows.len();
@@ -1174,7 +1181,9 @@ fn list_row(key: &ProjectKey, row: &Row<'_>) -> rusqlite::Result<RunRow> {
     })
 }
 
-fn cut(mut text: String, bytes_max: usize) -> (String, bool) {
+/// Cuts a text to at most `bytes_max` bytes on a character boundary. Inputs: the text and
+/// the bound. Output: the text and whether it was cut.
+pub(crate) fn cut(mut text: String, bytes_max: usize) -> (String, bool) {
     if text.len() <= bytes_max {
         return (text, false);
     }
