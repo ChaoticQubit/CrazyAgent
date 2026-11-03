@@ -12,6 +12,7 @@ import argparse
 from collections import Counter
 from datetime import datetime
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -27,7 +28,9 @@ SHELL_TOOLS = ("Bash", "shell", "shell_command", "exec_command", "local_shell_ca
 SEVERITIES = ("high", "normal", "low")
 RESULTS = ("PASS", "FAIL", "UNKNOWN")
 SLUG = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
-CHECK_ID = re.compile(r"^T3-[0-9]{2}$")
+CHECK_ID = re.compile(r"^[A-Z][A-Z0-9]*(-[A-Z0-9]+)+$")
+OP_ROW = re.compile(r"^OP-[1-9][0-9]*$")
+AUDIT4 = Path(__file__).resolve().parent / "audit4"
 OFFLOAD = "so CrazyAgent wrote it to `"
 COMMAND_BYTES_MAX = 16 * 1024
 LISTED_MAX = 8
@@ -1850,6 +1853,61 @@ CHECKS = (
 )
 
 
+def audit4_run(module):
+    """Wraps one audit4 module's check(t) as a trial check run. Takes the module. Returns a
+    function of t giving the verdict; it raises ValueError when check(t) does not return a
+    known result and a non-empty detail, which run_checks records as UNKNOWN."""
+
+    def run(t):
+        outcome = module.check(t)
+        if not (isinstance(outcome, tuple) and len(outcome) == 2 and outcome[0] in RESULTS and isinstance(outcome[1], str) and outcome[1]):
+            raise ValueError(f"{module.ID} check must return (result, detail) with result in {', '.join(RESULTS)}")
+        return verdict(*outcome)
+
+    return run
+
+
+def load_audit4(folder, taken):
+    """Loads the trial 4 audit checks, one per scripts/trial/audit4/*.py module (files starting
+    with _ are helpers), in file name order. Takes the folder, which may be missing, and the
+    ids already in use. Writes no bytecode next to them. Returns check entries shaped like
+    CHECKS; raises ValueError naming the file and the rule of leader/trial/TRIAL4-CONVENTION.md
+    it breaks."""
+    sys.modules.setdefault("audit", sys.modules[__name__])
+    sys.dont_write_bytecode = True
+    checks = []
+    for path in sorted(folder.glob("*.py")) if folder.is_dir() else []:
+        if path.name.startswith("_"):
+            continue
+        spec = importlib.util.spec_from_file_location(f"audit4_{len(checks)}_{re.sub(r'[^A-Za-z0-9_]', '_', path.stem)}", path)
+        module = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(module)
+        except Exception as failure:
+            raise ValueError(f"{path.name}: does not load: {type(failure).__name__}: {failure}") from None
+        cid = getattr(module, "ID", None)
+        if not (isinstance(cid, str) and CHECK_ID.match(cid) and not cid.startswith("T3-")):
+            raise ValueError(f"{path.name}: ID must look like N-E1, got {cid!r}")
+        if cid in taken:
+            raise ValueError(f"{path.name}: {cid} is already a check")
+        rows = getattr(module, "OP", None)
+        if not (isinstance(rows, list) and rows and all(isinstance(row, str) and OP_ROW.match(row) for row in rows)):
+            raise ValueError(f"{path.name}: {cid} OP must list OP-<n> rows of owner-problems-v1.md")
+        title = getattr(module, "TITLE", None)
+        if not (isinstance(title, str) and title.strip()):
+            raise ValueError(f"{path.name}: {cid} TITLE must be a non-empty string")
+        if not callable(getattr(module, "check", None)):
+            raise ValueError(f"{path.name}: {cid} check must be a function")
+        taken.add(cid)
+        checks.append({
+            "id": cid, "name": path.stem, "run": audit4_run(module), "title": title,
+            "proves": getattr(module, "PROVES", title),
+            "why": f"Owner problems {', '.join(rows)} (owner-problems-v1.md, DEC-114). {getattr(module, 'WHY', '')}".strip(),
+            "how": getattr(module, "HOW", f"scripts/trial/audit4/{path.name}"),
+        })
+    return tuple(checks)
+
+
 def excerpt(path, number):
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as handle:
@@ -1951,13 +2009,19 @@ def main(argv):
     parser.add_argument("--project-mark", default="TRIAL3-PROJECT-RULE", help="a line of the seeded repo CLAUDE.md")
     parser.add_argument("--answer", default="Hello", help="the owner's answer to the For: Me question")
     parser.add_argument("--only", action="append", help="run only this check id; repeatable")
+    parser.add_argument("--checks", default=str(AUDIT4), help="folder of trial 4 audit check modules (ID, OP, TITLE, check(t))")
     args = parser.parse_args(argv)
     root = Path(os.path.abspath(args.engine))
     store = Path(os.path.abspath(args.db)) if args.db else root / "engine.db"
     if not store.is_file():
         print(f"UNKNOWN T3-00 engine: no engine.db at {store}")
         return 2
-    chosen = [check for check in CHECKS if not args.only or check["id"] in args.only]
+    try:
+        extra = load_audit4(Path(os.path.abspath(args.checks)), {check["id"] for check in CHECKS})
+    except ValueError as failure:
+        print(f"audit4 check refused: {failure}", file=sys.stderr)
+        return 2
+    chosen = [check for check in CHECKS + extra if not args.only or check["id"] in args.only]
     if args.only and len(chosen) != len(set(args.only)):
         print(f"unknown check id in {args.only}", file=sys.stderr)
         return 2
