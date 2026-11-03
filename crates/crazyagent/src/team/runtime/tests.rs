@@ -8958,6 +8958,7 @@ fn native_lead_clone_in_the_project(fixture: &Fixture) -> (i64, String, PathBuf)
 #[test]
 fn the_engine_makes_each_native_teammate_s_own_worktree_on_its_own_branch() {
     let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
     let (lead, branch, clone) = native_lead_clone_in_the_project(&fixture);
     let project = ProjectId::new(PROJECT).unwrap();
     let git_home = fixture.base.join("owner-home");
@@ -9002,7 +9003,6 @@ fn the_engine_makes_each_native_teammate_s_own_worktree_on_its_own_branch() {
         5,
     )
     .unwrap();
-    let mut team = fixture.runtime();
 
     team.make_teammate_worktrees(&project, lead).unwrap();
 
