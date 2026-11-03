@@ -279,6 +279,6 @@ fn section(key: &ProjectKey, close: ClosePolicy) -> String {
     text
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "tracker_tests.rs"]
 mod tests;

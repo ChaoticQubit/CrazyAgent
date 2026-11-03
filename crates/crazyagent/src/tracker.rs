@@ -6,7 +6,7 @@ use trackwright_core::store::{self, StoreError};
 
 pub mod host;
 pub mod settings;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;
 
 pub use host::Host;

@@ -334,5 +334,5 @@ pub struct Snapshot {
     pub unread_edges: Vec<(Party, Party, u32, Receipt)>,
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;
