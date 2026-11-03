@@ -1567,6 +1567,84 @@ fn an_adopted_teammate_pane_is_reached_and_ended_by_its_own_name_even_after_a_re
     restarted.close(&[]).unwrap();
 }
 
+/// PLC (d): a native lead's team panes live only on the teammates' server its start named.
+/// Its own server numbers panes from the same `%0`, so once the teammates' server ends no
+/// team pane call goes to the lead's own server: a pane the lead split there is neither
+/// listed, typed into nor adopted as a teammate under a teammate pane's id.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_lead_s_team_pane_calls_never_reach_its_own_server_once_its_teammates_server_ended() {
+    let lead = Lead::new();
+    let root = lead.path();
+    let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
+    let leader = AgentId::team(1).unwrap();
+    let [ann, bob] = [2, 3].map(|id| AgentId::team(id).unwrap());
+    host.spawn_own_server(&leader, &lead.confined("lead$ ", &["/bin/sh"]))
+        .unwrap();
+    let ann_pane = lead.new_pane(host.as_ref(), &leader, "split-window -d", "sleep 600");
+    host.adopt_pane(&ann, &leader, &ann_pane).unwrap();
+    let own_out = root.join("own.txt");
+    let own_id = root.join("own-id.txt");
+    let line = format!(
+        "{} -S {} split-window -d -P -F '#{{pane_id}}' 'cat > {}' > {}\n",
+        lead.tmux.display(),
+        lead.socket.display(),
+        own_out.display(),
+        own_id.display()
+    );
+    host.input(&leader, line.as_bytes()).unwrap();
+    let own_split = wait_text(&own_id).trim().to_owned();
+    assert_eq!(
+        own_split, ann_pane,
+        "the lead's own server numbers its first split as the teammates' server does"
+    );
+
+    let killed = crazyagent::spawn_gate::status(
+        Command::new(&lead.tmux)
+            .arg("-S")
+            .arg(&lead.mates)
+            .arg("kill-server")
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    assert!(killed.success());
+    assert_eq!(
+        crazyagent::spawn_gate::connect_unix_std(&lead.mates)
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::ConnectionRefused
+    );
+
+    let ended = "terminal_teammates_server_ended";
+    assert_eq!(host.panes(&leader).unwrap_err().0, ended);
+    assert_eq!(
+        host.input_pane(&leader, &ann_pane, b"to-own\n")
+            .unwrap_err()
+            .0,
+        ended
+    );
+    assert_eq!(
+        host.adopt_pane(&bob, &leader, &own_split).unwrap_err().0,
+        ended
+    );
+    let routed = root.join("routed.txt");
+    host.input(
+        &leader,
+        format!("echo lead-$((40 + 2)) > {}\n", routed.display()).as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(wait_text(&routed), "lead-42\n");
+    assert!(
+        !std::fs::read_to_string(&own_out)
+            .unwrap_or_default()
+            .contains("to-own")
+    );
+    host.close(&[]).unwrap();
+}
+
 #[test]
 fn quiet_through_the_engine_host_answers_for_an_agent_on_the_engine_server() {
     let root = root();
