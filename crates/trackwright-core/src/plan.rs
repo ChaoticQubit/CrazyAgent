@@ -1,12 +1,12 @@
 use crate::events::{self, Recorded};
-use crate::host::Host;
+use crate::host::{Host, TicketView};
 use crate::model::{
     CYCLES_PER_PROJECT_MAX, Cycle, CycleStatus, DEPENDENCIES_PER_TICKET_MAX, OpKind, Project,
     ProjectKey, ReleaseVersion, RolloverPolicy, ShortId, TICKETS_PER_PROJECT_MAX, Ticket,
     VERSIONS_PER_PROJECT_MAX, VersionStatus, codes,
 };
 use crate::ops::{self, Candidate, Cx, Failure, Outcome};
-use crate::policy::{self, Role};
+use crate::policy;
 use crate::ready;
 use crate::reply::{NEXT_MAX, PAGE_ROWS_MAX, Page};
 use crate::requests;
@@ -277,8 +277,9 @@ pub(crate) fn claim<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
     Ok(outcome)
 }
 
-/// Gives up a claim. Only the claimant or the owner may release it; an unclaimed ticket
-/// refuses `not_claimant`. Input: the context. Output: the ticket.
+/// Gives up a claim. The claimant may release it; anyone else needs the host's authority
+/// to edit the ticket, as the owner and engines have under the standalone policy. An
+/// unclaimed ticket refuses `not_claimant`. Input: the context. Output: the ticket.
 pub(crate) fn release<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
     let ticket = cx.ticket();
     let Some(assignee) = &ticket.assignee else {
@@ -287,11 +288,17 @@ pub(crate) fn release<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
             format!("{} is not claimed", ticket.short_id),
         ));
     };
-    if assignee != cx.actor && policy::role(cx.actor) != Role::Owner {
+    let view = TicketView::of(ticket);
+    if assignee != cx.actor
+        && cx
+            .host
+            .actor_may(cx.tx, cx.project(), cx.actor, OpKind::Edit, Some(&view))
+            .is_err()
+    {
         return Err(Failure::new(
             codes::NOT_CLAIMANT,
             format!(
-                "{} is claimed by {assignee}; only they or the owner release it",
+                "{} is claimed by {assignee}; only they or an actor who may edit it release it",
                 ticket.short_id
             ),
         )
@@ -453,7 +460,7 @@ pub(crate) fn placement<H: Host>(
     if let Some(by_value) = wanted(cx, "parent")? {
         placement.parent_id = Some(
             match cx.args.get::<&ShortId>("parent").filter(|_| by_value) {
-                Some(id) => Some(parent_id(cx.tx, &project, ticket, id)?),
+                Some(id) => Some(parent_id(cx, &project, ticket, id)?),
                 None => None,
             },
         );
@@ -499,12 +506,13 @@ fn wanted<H: Host>(cx: &Cx<'_, '_, H>, name: &str) -> Result<Option<bool>, Failu
     }
 }
 
-fn parent_id(
-    tx: &Transaction<'_>,
+fn parent_id<H: Host>(
+    cx: &Cx<'_, '_, H>,
     project: &Project,
     ticket: Option<&Ticket>,
     id: &ShortId,
 ) -> Result<i64, Failure> {
+    let tx = cx.tx;
     let parent = store::ticket(tx, id)?;
     let invalid = |why: String| Err(Failure::new(codes::PARENT_INVALID, why));
     if parent.project != project.id {
@@ -513,6 +521,10 @@ fn parent_id(
     if parent.status.is_closed() {
         return invalid(format!("{id} is closed; a parent is open"));
     }
+    let view = TicketView::of(&parent);
+    assert_eq!(view.id.key(), &project.key);
+    cx.host
+        .actor_may(tx, &project.key, cx.actor, OpKind::Edit, Some(&view))?;
     let own = ticket.map(|ticket| ticket.id);
     let mut at = Some(parent.id);
     for _ in 0..PARENT_DEPTH_MAX {
@@ -753,7 +765,7 @@ fn new_cycle<H: Host>(
         .map(|cycle| stored_day(&cycle.ends_day))
         .transpose()?;
     let today = cx.at_ms.div_euclid(DAY_MS);
-    let starts = starts.unwrap_or_else(|| after.map_or(today, |after| after + 1));
+    let starts = starts.unwrap_or_else(|| after.map_or(today, |after| (after + 1).max(today)));
     if let Some(after) = after.filter(|after| starts <= *after) {
         return Err(Failure::new(
             codes::CYCLE_OVERLAPS,

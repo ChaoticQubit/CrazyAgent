@@ -261,7 +261,11 @@ const CATALOG: &[OpSpec] = &[
             opt("title", TITLE, "The new title."),
             opt("body", BODY, "The new body."),
             opt("kind", KIND, "The new kind."),
-            opt("priority", PRIORITY, "The new priority."),
+            opt(
+                "priority",
+                PRIORITY,
+                "The new priority, 0 most urgent to 4 least.",
+            ),
             PARENT,
             RELEASE,
             CYCLE,
@@ -299,7 +303,7 @@ const CATALOG: &[OpSpec] = &[
     },
     OpSpec {
         kind: OpKind::Claim,
-        summary: "Assigns an unclaimed ticket to you; one claimer wins.",
+        summary: "Assigns an unclaimed ticket to you, ready or not; one claimer wins.",
         fields: &[ID, VERSION, REQUEST_ID],
     },
     OpSpec {
@@ -538,7 +542,8 @@ const CATALOG: &[OpSpec] = &[
             opt(
                 "starts_day",
                 FieldType::Day,
-                "Its first day, YYYY-MM-DD; today when absent.",
+                "Its first day, YYYY-MM-DD; when absent, the day after the latest cycle or \
+                 today in UTC, whichever is later.",
             ),
             opt(
                 "days",

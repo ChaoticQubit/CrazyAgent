@@ -494,6 +494,18 @@ fn two_claims_race_and_one_wins() {
         Value::Null,
         "the owner frees a stuck claim"
     );
+    ok(&tx, loser, "claim", json!({"id": ticket, "version": 5}));
+    let unstuck = ok(
+        &tx,
+        "engine:supervisor",
+        "release",
+        json!({"id": ticket, "version": 6}),
+    );
+    assert_eq!(
+        unstuck["data"]["assignee"],
+        Value::Null,
+        "an engine the host lets edit the ticket frees a stuck claim"
+    );
 
     close(&tx, &ticket, TicketStatus::Done);
     refused(
@@ -527,11 +539,11 @@ fn closing_a_cycle_rolls_unfinished_work_per_policy() {
             &tx,
             OWNER,
             "cycle_start",
-            json!({"project": "CA", "starts_day": "2026-11-02", "days": 14}),
+            json!({"project": "CA", "starts_day": "2099-11-02", "days": 14}),
         );
         assert_eq!(started["data"]["cycle"]["number"], 1);
         assert_eq!(started["data"]["cycle"]["status"], "active");
-        assert_eq!(started["data"]["cycle"]["ends_day"], "2026-11-15");
+        assert_eq!(started["data"]["cycle"]["ends_day"], "2099-11-15");
         let unfinished = seed(&tx, "Unfinished", TicketStatus::Todo, 2, 2_000);
         let finished = seed(&tx, "Finished", TicketStatus::Todo, 2, 2_001);
         let outside = seed(&tx, "In no cycle", TicketStatus::Todo, 2, 2_002);
@@ -569,8 +581,8 @@ fn closing_a_cycle_rolls_unfinished_work_per_policy() {
                 let cycles = roadmap["data"]["cycles"].as_array().unwrap();
                 assert_eq!(cycles[1]["number"], 2);
                 assert_eq!(cycles[1]["status"], "active");
-                assert_eq!(cycles[1]["starts_day"], "2026-11-16");
-                assert_eq!(cycles[1]["ends_day"], "2026-11-29", "the policy's 14 days");
+                assert_eq!(cycles[1]["starts_day"], "2099-11-16");
+                assert_eq!(cycles[1]["ends_day"], "2099-11-29", "the policy's 14 days");
 
                 let third = ok(&tx, OWNER, "cycle_start", json!({"project": "CA"}));
                 assert_eq!(third["data"]["cycle"]["number"], 3);
@@ -835,25 +847,29 @@ fn planning_fields_place_a_ticket_and_clear_it() {
     assert_eq!(created["data"]["parent"], parent.as_str());
     assert_eq!(created["data"]["release"], "v1");
     assert_eq!(created["data"]["cycle"], 1);
-    assert_eq!(created["data"]["version"], 2, "created, then placed");
+    assert_eq!(created["data"]["version"], 1, "created already placed");
 
     let cleared = ok(
         &tx,
         OWNER,
         "edit",
-        json!({"id": child, "version": 2, "cycle_clear": true, "title": "Child, renamed"}),
+        json!({"id": child, "version": 1, "cycle_clear": true, "title": "Child, renamed"}),
     );
     assert_eq!(cleared["data"]["cycle"], Value::Null);
     assert_eq!(cleared["data"]["release"], "v1");
     assert_eq!(cleared["data"]["title"], "Child, renamed");
-    assert_eq!(cleared["data"]["version"], 3, "one edit, one version");
+    assert_eq!(cleared["data"]["version"], 2, "one edit, one version");
 
     let history = ok(&tx, OWNER, "history", json!({"id": child}));
     let events = history["data"]["events"].as_array().unwrap();
-    let last = &events[events.len() - 1];
-    assert_eq!(last["fields"], json!(["cycle", "title"]));
-    let placed = &events[events.len() - 2];
-    assert_eq!(placed["fields"], json!(["cycle", "parent", "release"]));
+    assert_eq!(
+        events.len(),
+        2,
+        "one event for the create, one for the edit"
+    );
+    assert_eq!(events[0]["op"], "ticket.create");
+    assert_eq!(events[1]["op"], "ticket.update");
+    assert_eq!(events[1]["fields"], json!(["cycle", "title"]));
 
     let refusals = [
         (
@@ -865,7 +881,7 @@ fn planning_fields_place_a_ticket_and_clear_it() {
         (json!({"cycle": 7}), codes::CYCLE_UNKNOWN),
     ];
     for (fields, code) in refusals {
-        let mut args = json!({"id": child, "version": 3});
+        let mut args = json!({"id": child, "version": 2});
         for (name, value) in fields.as_object().unwrap() {
             args[name] = value.clone();
         }
@@ -885,7 +901,7 @@ fn planning_fields_place_a_ticket_and_clear_it() {
         &tx,
         OWNER,
         "edit",
-        json!({"id": child, "version": 3, "parent": "XY-1"}),
+        json!({"id": child, "version": 2, "parent": "XY-1"}),
         codes::PARENT_INVALID,
     );
     close(&tx, &parent, TicketStatus::Done);
@@ -912,8 +928,94 @@ fn planning_fields_place_a_ticket_and_clear_it() {
     );
     assert_eq!(
         version_of(&tx, &child),
-        3,
+        2,
         "every refusal left the ticket as it was"
     );
     assert_eq!(shown(&tx, &child)["parent"], parent.as_str());
+}
+
+#[test]
+fn a_parent_needs_authority_to_edit_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = setup(dir.path());
+    let tx = store.transaction().unwrap();
+    let owners = seed(&tx, "Owner's work", TicketStatus::Todo, 2, 2_000);
+    let events = count(&tx, "SELECT count(*) FROM tk_events");
+    refused(
+        &tx,
+        "agent:x",
+        "create",
+        json!({"project": "CA", "title": "Mine", "parent": owners}),
+        codes::AGENT_EDIT_REFUSED,
+    );
+    assert_eq!(count(&tx, "SELECT count(*) FROM tk_tickets"), 1);
+    assert_eq!(count(&tx, "SELECT count(*) FROM tk_events"), events);
+    let mine = ok(
+        &tx,
+        "agent:x",
+        "create",
+        json!({"project": "CA", "title": "Mine"}),
+    )["data"]["id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    refused(
+        &tx,
+        "agent:x",
+        "edit",
+        json!({"id": mine, "version": 1, "parent": owners}),
+        codes::AGENT_EDIT_REFUSED,
+    );
+    assert_eq!(shown(&tx, &mine)["parent"], Value::Null);
+    assert_eq!(
+        ready_ids(&tx, "agent:y"),
+        [&owners],
+        "no agent took the owner's ticket out of ready"
+    );
+
+    policy::set(
+        &tx,
+        &Standalone,
+        &actor(OWNER),
+        &key(),
+        PolicyKey::AgentEdit,
+        "any",
+        0,
+        3_000,
+    )
+    .unwrap();
+    let placed = ok(
+        &tx,
+        "agent:x",
+        "edit",
+        json!({"id": mine, "version": 1, "parent": owners}),
+    );
+    assert_eq!(placed["data"]["parent"], owners.as_str());
+    assert!(
+        ready_ids(&tx, "agent:y").is_empty(),
+        "a parent with open work waits"
+    );
+}
+
+#[test]
+fn a_default_cycle_start_is_never_in_the_past() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = setup(dir.path());
+    let tx = store.transaction().unwrap();
+    let old = ok(
+        &tx,
+        OWNER,
+        "cycle_start",
+        json!({"project": "CA", "starts_day": "2020-01-01", "days": 7}),
+    );
+    assert_eq!(old["data"]["cycle"]["ends_day"], "2020-01-07");
+    let before = today();
+    let next = ok(&tx, OWNER, "cycle_start", json!({"project": "CA"}));
+    let after = today();
+    let starts = next["data"]["cycle"]["starts_day"].as_str().unwrap();
+    assert!(
+        starts == day_text(before) || starts == day_text(after),
+        "a cycle after a pause starts today (UTC), not on 2020-01-08: {starts}"
+    );
+    assert_eq!(next["data"]["cycle"]["status"], "upcoming");
 }

@@ -593,18 +593,11 @@ fn create<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
             None => Priority::new(PRIORITY_DEFAULT)?,
         },
     };
-    let ticket = store::create_ticket(cx.tx, cx.actor, cx.project(), &new, cx.at_ms)?;
+    let ticket =
+        store::create_ticket_placed(cx.tx, cx.actor, cx.project(), &new, placement, cx.at_ms)?;
     assert_eq!(ticket.version, 1);
-    if placement.is_empty() {
-        return written(cx, &ticket);
-    }
-    let change = TicketChange {
-        placement,
-        ..TicketChange::default()
-    };
-    let placed = store::update_ticket(cx.tx, cx.actor, &ticket.short_id, 1, &change, cx.at_ms)?;
-    assert_eq!(placed.version, 2, "a placed ticket is created, then placed");
-    written(cx, &placed)
+    assert_eq!(ticket.version_id, placement.version_id.flatten());
+    written(cx, &ticket)
 }
 
 fn start_status<H: Host>(cx: &Cx<'_, '_, H>) -> Result<TicketStatus, Failure> {

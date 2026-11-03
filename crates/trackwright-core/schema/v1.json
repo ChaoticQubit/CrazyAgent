@@ -151,7 +151,7 @@
         ],
         "type": "object"
       },
-      "summary": "Assigns an unclaimed ticket to you; one claimer wins.",
+      "summary": "Assigns an unclaimed ticket to you, ready or not; one claimer wins.",
       "write": true
     },
     "close": {
@@ -491,7 +491,7 @@
             "type": "string"
           },
           "starts_day": {
-            "description": "Its first day, YYYY-MM-DD; today when absent.",
+            "description": "Its first day, YYYY-MM-DD; when absent, the day after the latest cycle or today in UTC, whichever is later.",
             "format": "date",
             "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$",
             "type": "string"
@@ -581,7 +581,7 @@
             "type": "boolean"
           },
           "priority": {
-            "description": "The new priority.",
+            "description": "The new priority, 0 most urgent to 4 least.",
             "maximum": 4,
             "minimum": 0,
             "type": "integer"

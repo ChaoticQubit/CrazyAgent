@@ -53,8 +53,8 @@ const TICKETS_OF_PROJECT: &str =
 const TICKET_COUNT: &str =
     "SELECT count(*), coalesce(max(number), 0) FROM tk_tickets WHERE project = ?1";
 const TICKET_INSERT: &str = "INSERT INTO tk_tickets(project, number, title, body, kind, status, \
-     priority, created_by, created_ms, updated_ms, version) \
-     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, 1)";
+     priority, created_by, created_ms, updated_ms, version, parent_id, version_id, cycle_id) \
+     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?9, 1, ?10, ?11, ?12)";
 const TICKET_UPDATE: &str = "UPDATE tk_tickets SET title = ?3, body = ?4, kind = ?5, status = ?6, \
      priority = ?7, assignee = ?8, updated_ms = ?9, closed_ms = ?10, closed_by = ?11, \
      close_reason = ?12, parent_id = ?13, version_id = ?14, cycle_id = ?15, \
@@ -365,6 +365,21 @@ pub fn create_ticket(
     new: &NewTicket,
     now_ms: i64,
 ) -> Result<Ticket, StoreError> {
+    create_ticket_placed(tx, actor, key, new, Placement::default(), now_ms)
+}
+
+/// Creates a ticket already placed under a parent, in a product version and in a cycle,
+/// with one event at version 1. The core checks every placement id belongs to the project
+/// before it calls this. Inputs: as `create_ticket`, plus the placement. Output: as
+/// `create_ticket`.
+pub(crate) fn create_ticket_placed(
+    tx: &Transaction<'_>,
+    actor: &Actor,
+    key: &ProjectKey,
+    new: &NewTicket,
+    placement: Placement,
+    now_ms: i64,
+) -> Result<Ticket, StoreError> {
     text::check(TextField::Title, &new.title)?;
     text::check(TextField::Body, &new.body)?;
     if new.status.is_closed() {
@@ -395,9 +410,14 @@ pub fn create_ticket(
             new.priority.get(),
             actor.as_str(),
             now_ms,
+            placement.parent_id.flatten(),
+            placement.version_id.flatten(),
+            placement.cycle_id.flatten(),
         ])?;
         let created = ticket_by_id(tx, tx.last_insert_rowid())?;
         assert_eq!(i64::from(created.short_id.number()), number);
+        assert_eq!(created.parent_id, placement.parent_id.flatten());
+        assert_eq!(created.cycle_id, placement.cycle_id.flatten());
         events::record(
             tx,
             Recorded {
