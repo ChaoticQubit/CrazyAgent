@@ -241,6 +241,13 @@ impl Store {
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?)
     }
+
+    /// Gives up the store for its connection, already migrated, with foreign keys on and the
+    /// busy timeout set, so a session can own it like a host's connection. Output: the
+    /// connection.
+    pub fn into_connection(self) -> Connection {
+        self.connection
+    }
 }
 
 /// Creates a project and its event. Inputs: the transaction, the actor, the key, the name
