@@ -40,8 +40,10 @@ function segment(group, option) {
   return `//*[@role="radiogroup"][@aria-label=${lit(group)}]//button[normalize-space(.)=${lit(option)}]`;
 }
 
-/** Appends one masked desktop line to steps.jsonl, numbered after every line already there,
- * so the TUI recorder's lines and these share one order. Input: the line without its n. */
+/** Appends one masked desktop line to steps.jsonl, numbered after every line already there.
+ * The runner (scripts/trial/run.mjs) writes its own lines only before it starts this
+ * WebdriverIO run and after the run's process group is stopped, so the two writers never
+ * append at once and every n is unique. Input: the line without its n. */
 function record(line) {
   const before = existsSync(STEPS) ? readFileSync(STEPS, "utf8").split("\n").filter(Boolean).length : 0;
   appendFileSync(STEPS, `${JSON.stringify({ n: before + 1, surface: "desktop", ...line, detail: mask(line.detail) })}\n`, { mode: 0o600 });
