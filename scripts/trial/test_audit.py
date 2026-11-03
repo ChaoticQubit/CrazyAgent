@@ -724,6 +724,58 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(record["result"], "UNKNOWN")
         self.assertIn("not exercised", record["detail"])
 
+    def finished(self, shown, drawn="Master", ok=True, show=0):
+        w = self.world
+        w.db.executescript("CREATE TABLE team_finished_view (project TEXT PRIMARY KEY, show INTEGER NOT NULL);")
+        w.row("team_finished_view", project=PROJECT, show=show)
+        w.agent("master", status="idle")
+        lead = w.agent("sub", mode="app_spawned", stopped_ms=w.now - 60_000)
+        worker = w.agent("sub", parent=lead, stopped_ms=w.now - 900_000)
+        for agent, handle in ((lead, "lead-ada"), (worker, "worker-bo")):
+            w.row("team_names", agent=agent, project=PROJECT, persona=handle.title(), handle=handle)
+        for prompt in ("Write a.md", "Write b.md"):
+            w.row("team_tasks", project=PROJECT, source="master", harness="claude-code", tools=1, prompt=prompt, status="done",
+                  agent=worker, result="Done.", created_ms=w.now)
+        (w.out / "screenshots").mkdir(parents=True, exist_ok=True)
+        (w.out / "screenshots" / "20-finished-hide.png").write_bytes(b"\x89PNG")
+        steps = [
+            {"n": 18, "surface": "desktop", "title": "Stop all", "at": iso(w.now - 300_000), "ok": True},
+            {"n": 20, "surface": "desktop", "title": audit.FINISHED_HIDE_STEP, "at": iso(w.now), "ok": ok,
+             "detail": f"Finished ({shown}); drawn: {drawn}", "evidence": ["screenshots/20-finished-hide.png"]},
+        ]
+        (w.out / "steps.jsonl").write_text("".join(json.dumps(step) + "\n" for step in steps))
+
+    def test_t3_26_finished_agents_pass_when_hide_lists_every_stopped_agent_in_finished_and_draws_none(self):
+        record = self.world.audit("T3-26")
+        self.assertEqual(record["result"], "UNKNOWN")
+        self.assertIn("not in this build", record["detail"])
+        self.finished(shown=2)
+        record = self.world.audit("T3-26")
+        self.assertEqual(record["result"], "PASS", record["detail"])
+        self.assertIn("finished in the store=2", record["detail"])
+        self.assertIn("left on their own before Stop all=1", record["detail"])
+        self.assertIn("agents given more than one task=1", record["detail"])
+        self.assertIn("screenshots/20-finished-hide.png", [item["path"] for item in record["evidence"] if item["kind"] == "screenshot"])
+        cases = (
+            (dict(shown=1), "Finished (1) shown, 2 finished in the store"),
+            (dict(shown=2, drawn="Master, worker-bo"), "drawn while finished: worker-bo"),
+            (dict(shown=2, ok=False), "the step failed"),
+            (dict(shown=2, show=1), "Finished agents is Show"),
+        )
+        for given, shown in cases:
+            self.tearDown()
+            self.setUp()
+            self.finished(**given)
+            record = self.world.audit("T3-26")
+            self.assertEqual(record["result"], "FAIL", (given, record["detail"]))
+            self.assertIn(shown, record["detail"])
+        self.tearDown()
+        self.setUp()
+        self.world.db.executescript("CREATE TABLE team_finished_view (project TEXT PRIMARY KEY, show INTEGER NOT NULL);")
+        record = self.world.audit("T3-26")
+        self.assertEqual(record["result"], "UNKNOWN")
+        self.assertIn("not exercised", record["detail"])
+
     def test_every_check_writes_its_contract_record_with_evidence(self):
         w = self.world
         w.agent("sub", mode="app_spawned")
@@ -734,7 +786,7 @@ class AuditTests(unittest.TestCase):
         self.assertIn(done.returncode, (0, 1), done.stderr)
         written = sorted(p.stem for p in (w.out / "checks").glob("*.json"))
         self.assertEqual(written, [check["id"] for check in audit.CHECKS])
-        self.assertEqual(len(written), 25)
+        self.assertEqual(len(written), 26)
         for name in written:
             record = json.loads((w.out / "checks" / f"{name}.json").read_text())
             self.assertEqual(set(record), {"id", "title", "proves", "why", "how", "result", "detail", "evidence"})
