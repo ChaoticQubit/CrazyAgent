@@ -287,8 +287,9 @@ fn unavailable() -> EngineError {
     EngineError("changes_unavailable".into())
 }
 
-/// Opens the change set store in the engine database, adding its table when missing.
-/// Input: the engine root holding `engine.db`. Output: the connection.
+/// Opens the change set store in the engine database, adding its table when missing, and
+/// the tracker's tables a change set write links and notifies through. Input: the engine
+/// root holding `engine.db`. Output: the connection.
 pub fn open(runtime: &Path) -> Result<Connection, EngineError> {
     if !runtime.is_absolute() {
         return Err(unavailable());
@@ -298,6 +299,8 @@ pub fn open(runtime: &Path) -> Result<Connection, EngineError> {
         .map_err(|_| unavailable())?;
     #[cfg(unix)]
     store::initialize(&db)?;
+    #[cfg(unix)]
+    crate::tracker::initialize(&db)?;
     Ok(db)
 }
 

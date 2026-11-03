@@ -2,7 +2,7 @@ use super::git::failure;
 use super::{AgentKind, ChangeAgent, ChangeSetId, ChangeSetView, ChangeState, TurnOutcome};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
-use rusqlite::{Connection, OptionalExtension, Row, params};
+use rusqlite::{Connection, OptionalExtension, Row, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -303,10 +303,58 @@ fn signed(value: u64) -> Result<i64, EngineError> {
     i64::try_from(value).map_err(|_| failure("changes_unavailable"))
 }
 
-/// Writes a change set, adding it or updating every column of the row with its id.
-/// Inputs: the store and the record. Output: Ok once stored; a second open change set
-/// for the same worktree is refused with `changes_agent_has_pending` and both rows stay.
+/// Writes a change set in its own transaction, adding it or updating every column of the
+/// row with its id, together with what the tracker takes from that write: a sub-agent's
+/// set gets its task's tickets linked when it is new or now holds another task's turn, and
+/// a set that becomes accepted or discarded re-evaluates its linked tickets. Inputs: the
+/// store, outside any transaction, and the record. Output: Ok once stored; a second open
+/// change set for the same worktree is refused with `changes_agent_has_pending` and both
+/// rows stay, and a tracker failure stores nothing.
 pub(super) fn save(db: &Connection, record: &Record) -> Result<(), EngineError> {
+    assert!(
+        db.is_autocommit(),
+        "a change set is saved in its own transaction"
+    );
+    let tx = Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(storage)?;
+    let before: Option<(String, String)> = tx
+        .query_row(
+            "SELECT state, turn FROM landing_change_sets WHERE id=?1",
+            [record.id.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(storage)?;
+    upsert(&tx, record)?;
+    tracked(&tx, record, before.as_ref())?;
+    tx.commit().map_err(storage)?;
+    assert!(db.is_autocommit());
+    Ok(())
+}
+
+/// Tells the tracker what one change set write means for it, in the write's transaction.
+/// Inputs: the transaction, the record and the state and turn the row held before, None
+/// for a new set. Output: Ok, or the tracker's failure.
+fn tracked(
+    tx: &Transaction<'_>,
+    record: &Record,
+    before: Option<&(String, String)>,
+) -> Result<(), EngineError> {
+    let now_ms = signed(record.updated_ms)?;
+    let id = record.id.as_str();
+    let state = state_name(record.state);
+    let closed = matches!(record.state, ChangeState::Accepted | ChangeState::Discarded);
+    if closed && before.is_none_or(|(was, _)| was != state) {
+        return crate::tracker::hooks::change_set_closed(tx, &record.project, id, now_ms);
+    }
+    let turned = before.is_none_or(|(_, turn)| *turn != record.turn);
+    if record.is_open() && record.agent.kind == AgentKind::Sub && turned {
+        let turn = record.turn.as_str();
+        return crate::tracker::hooks::change_set_saved(tx, &record.project, id, turn, now_ms);
+    }
+    Ok(())
+}
+
+fn upsert(tx: &Transaction<'_>, record: &Record) -> Result<(), EngineError> {
     let intent = record
         .intent
         .as_ref()
@@ -319,7 +367,7 @@ pub(super) fn save(db: &Connection, record: &Record) -> Result<(), EngineError> 
         .map(|column| format!("{column}=excluded.{column}"))
         .collect::<Vec<_>>()
         .join(",");
-    db.execute(
+    tx.execute(
         &format!(
             "INSERT INTO landing_change_sets({COLUMNS}) VALUES \
              (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27) \

@@ -103,6 +103,13 @@ const _: () = assert!(
     MASTER_INSTRUCTIONS_BYTES_MAX <= crate::adapters::codex::DEVELOPER_INSTRUCTIONS_BYTES_MAX
 );
 const _: () = assert!(INSTRUCTIONS_BYTES_MAX + ASK_RULE_BYTES_MAX <= MASTER_INSTRUCTIONS_BYTES_MAX);
+const _: () = assert!(
+    INSTRUCTIONS_BYTES_MAX
+        + ASK_RULE_BYTES_MAX
+        + TOOLS_SECTION_BYTES_MAX
+        + crate::team::tool::tracker::RULES_BYTES_MAX
+        <= MASTER_INSTRUCTIONS_BYTES_MAX
+);
 
 fn failure(code: &str) -> LaunchError {
     LaunchError(code.into())
@@ -617,6 +624,27 @@ impl AgentContext {
             AskReach::SubAgent,
         )
         .map(|context| context.with_tools_section(off))
+    }
+
+    /// Adds the ticket section after a live master's or a sub-agent's team tools (TI-3): the
+    /// default pack's ticket rule and the project's key and close setting, so it plans and
+    /// works through the ticket tools. A project with no tickets is told nothing. Input: a
+    /// connection to `engine.db` and the project. Output: the context, or a plain code.
+    pub fn with_ticket_rules(
+        mut self,
+        connection: &Connection,
+        project: &ProjectId,
+    ) -> Result<Self, LaunchError> {
+        let before = self.instructions.len();
+        let section = crate::team::tool::tracker::rules(connection, project)
+            .map_err(|problem| LaunchError(problem.0))?;
+        if let Some(section) = section {
+            assert!(section.len() <= crate::team::tool::tracker::RULES_BYTES_MAX);
+            self.instructions.push_str(&section);
+        }
+        assert!(self.instructions.len() >= before);
+        assert!(self.instructions.len() <= MASTER_INSTRUCTIONS_BYTES_MAX);
+        Ok(self)
     }
 
     fn with_tools_section(mut self, off: &[String]) -> Self {

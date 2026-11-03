@@ -2681,6 +2681,7 @@ fn delegate_refuses_past_sub_agent_depth() {
                     harness: None,
                     role: None,
                     mode: None,
+                    ticket: None,
                 },
             )
             .unwrap()
@@ -2922,6 +2923,7 @@ fn delegate(task: &str) -> Call {
         harness: None,
         role: None,
         mode: None,
+        ticket: None,
     }
 }
 

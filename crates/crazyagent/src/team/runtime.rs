@@ -4256,12 +4256,18 @@ impl TeamRuntime {
                 let _ = crate::instruction_files::delivered(edit, &home);
             }
             crate::coord::delivery::delivered(&self.connection, &carried, now_ms())?;
-            self.connection
+            let taken = self
+                .connection
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(error)?;
+            taken
                 .execute(
                     "UPDATE team_tasks SET status='running', agent=?2, attempts=attempts+1, started_ms=?3, error=NULL WHERE id=?1",
                     params![task, agent, now_ms()],
                 )
                 .map_err(error)?;
+            crate::tracker::hooks::task_taken(&taken, project, task, agent, now_ms())?;
+            taken.commit().map_err(error)?;
             self.connection
                 .execute(
                     "UPDATE team_agents SET session=(SELECT session FROM team_tasks WHERE id=?1) WHERE id=?2 AND session IS NULL",
@@ -5741,9 +5747,10 @@ impl TeamRuntime {
     /// Reads what one team agent launch receives: the project context and approved
     /// memories, the approved skills and MCP servers with tools on, the engine's `delegate`
     /// tool for a master with tools on, served by the captured engine while the file at its
-    /// path is still that one, and the team's skill and server names for a master with tools
-    /// off. Takes the project, the agent id, its role, tools switch and git layout, which
-    /// picks how its work lands.
+    /// path is still that one, the ticket rules after a live master's or sub-agent's team
+    /// tools, and the team's skill and server names for a master with tools off. Takes the
+    /// project, the agent id, its role, tools switch and git layout, which picks how its
+    /// work lands.
     fn context(
         &self,
         project: &ProjectId,
@@ -5781,6 +5788,7 @@ impl TeamRuntime {
                 })?;
                 context
                     .with_live_team_tool(engine, &self.mailbox(id), &off)
+                    .and_then(|context| context.with_ticket_rules(&self.connection, project))
                     .map_err(unread)
             }
             Some(engine) if master && tools => {
@@ -5803,6 +5811,7 @@ impl TeamRuntime {
                 })?;
                 context
                     .with_agent_team_tool(engine, &self.mailbox(id), &off)
+                    .and_then(|context| context.with_ticket_rules(&self.connection, project))
                     .map_err(unread)
             }
             _ => Ok(context),

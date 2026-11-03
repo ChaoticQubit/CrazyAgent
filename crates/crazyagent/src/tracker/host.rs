@@ -122,7 +122,7 @@ fn number(text: &str) -> Option<i64> {
 
 /// Reads the branch a worktree's HEAD names, at most `HEAD_BYTES_MAX` bytes of it. Input:
 /// the worktree's git folder. Output: the branch, or None for a detached or unreadable HEAD.
-fn checked_out(git_dir: &Path) -> Option<String> {
+pub(super) fn checked_out(git_dir: &Path) -> Option<String> {
     let mut head = String::new();
     std::fs::File::open(git_dir.join("HEAD"))
         .ok()?

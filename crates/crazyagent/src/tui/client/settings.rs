@@ -1978,7 +1978,7 @@ mod tests {
             crate::memory::library::agent_remember(
                 &mut db,
                 &ProjectId::new("alpha").unwrap(),
-                "Ada (@lead-a)",
+                (None, "Ada (@lead-a)"),
                 true,
                 "Ship on Fridays.",
             )

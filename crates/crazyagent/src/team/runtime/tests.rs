@@ -10311,6 +10311,7 @@ fn a_native_teammate_s_calls_are_its_own_and_it_starts_or_stops_no_agent() {
                 harness: None,
                 role: None,
                 mode: None,
+                ticket: None,
             },
         ),
         (
@@ -10359,6 +10360,7 @@ fn a_native_teammate_s_calls_are_its_own_and_it_starts_or_stops_no_agent() {
                 harness: None,
                 role: None,
                 mode: None,
+                ticket: None,
             },
         ),
         ("%77", crate::team::tool::Call::InspectWork),
@@ -10376,6 +10378,7 @@ fn a_native_teammate_s_calls_are_its_own_and_it_starts_or_stops_no_agent() {
                 harness: None,
                 role: None,
                 mode: None,
+                ticket: None,
             },
         ),
     ];
@@ -10552,6 +10555,7 @@ fn a_call_file_carrying_the_lead_s_pane_with_no_kernel_stamp_is_refused() {
         harness: None,
         role: None,
         mode: None,
+        ticket: None,
     })
     .unwrap();
     call.as_object_mut()
@@ -10675,6 +10679,7 @@ fn a_named_call_whose_file_changed_after_naming_is_refused() {
         harness: None,
         role: None,
         mode: None,
+        ticket: None,
     })
     .unwrap();
     let swapped = format!("{:032x}", 1);
@@ -10996,6 +11001,175 @@ fn a_native_lead_without_the_team_tool_still_has_its_caller_socket_answered() {
     );
 }
 
+/// Attaches the fixture's project to the tracker as `TP`, as the owner's Tickets setup
+/// does. Input: the fixture.
+fn attach_tickets(f: &Fixture) {
+    let tx = rusqlite::Transaction::new_unchecked(
+        &f.connection,
+        rusqlite::TransactionBehavior::Immediate,
+    )
+    .unwrap();
+    crate::tracker::attach(
+        &tx,
+        &f.setup.project_id,
+        &trackwright_core::model::ProjectKey::new("TP").unwrap(),
+        "Panes",
+        1,
+    )
+    .unwrap();
+    tx.commit().unwrap();
+}
+
+/// Reads the instructions one team agent's launch would write, from the runtime's own
+/// launch context with tools on. Takes the runtime, the agent and its role. Returns the
+/// instructions and how often the default pack's ticket rule appears in them.
+fn ticket_rules_told(team: &TeamRuntime, id: i64, role: AgentRole) -> (String, usize) {
+    std::fs::create_dir_all(team.mailbox(id).parent().unwrap()).unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let told = team
+        .context(&project, id, role, true, Layout::Linked)
+        .unwrap()
+        .instructions()
+        .to_owned();
+    let rules = crate::setup::bundled::TICKET_RULES;
+    let count = told.matches(rules).count();
+    (told, count)
+}
+
+/// A sub-agent's launch with tools on gets the ticket rule and its project's key once the
+/// project has tickets, and no ticket text before.
+#[test]
+fn a_sub_agent_launch_gets_the_ticket_rules_once_its_project_has_tickets() {
+    let f = Fixture::new(1);
+    let folder = f.base.join("engine-bin");
+    std::fs::create_dir(&folder).unwrap();
+    let engine = folder.join("crazyagent");
+    engine_file(&engine);
+    let team = f.runtime().with_delegation_tool(&engine).unwrap();
+    let sub = f.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    let (told, count) = ticket_rules_told(&team, sub, AgentRole::Sub);
+    assert_eq!(count, 0, "{told}");
+    assert!(
+        !told.contains("This project's tickets use the key"),
+        "{told}"
+    );
+    attach_tickets(&f);
+    let (told, count) = ticket_rules_told(&team, sub, AgentRole::Sub);
+    assert_eq!(count, 1, "{told}");
+    assert!(
+        told.contains("This project's tickets use the key `TP`."),
+        "{told}"
+    );
+}
+
+/// The live master's launch gets the ticket rule and its project's key once the project
+/// has tickets, and no ticket text before.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_master_launch_gets_the_ticket_rules_once_its_project_has_tickets() {
+    let f = Fixture::new(1);
+    let folder = f.base.join("engine-bin");
+    std::fs::create_dir(&folder).unwrap();
+    let engine = folder.join("crazyagent");
+    engine_file(&engine);
+    let host = f.host();
+    let team = live_runtime(&f, &host, LIVE_CODEX)
+        .with_delegation_tool(&engine)
+        .unwrap();
+    super::super::master::set_live(&f.connection, &f.setup.project_id, true).unwrap();
+    let master = f.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let (told, count) = ticket_rules_told(&team, master, AgentRole::Master);
+    assert_eq!(count, 0, "{told}");
+    assert!(
+        told.contains(tool::SPAWN_TOOL),
+        "the live team tools are there: {told}"
+    );
+    attach_tickets(&f);
+    let (told, count) = ticket_rules_told(&team, master, AgentRole::Master);
+    assert_eq!(count, 1, "{told}");
+    assert!(
+        told.contains("This project's tickets use the key `TP`."),
+        "{told}"
+    );
+}
+
+/// A task handed off with a ticket is linked, in the transaction the runtime starts it in,
+/// to the sub-agent that takes it and to that agent's worktree and checked-out branch.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_ticket_task_the_runtime_starts_links_its_agent_worktree_and_branch() {
+    let fixture = Fixture::new(1);
+    attach_tickets(&fixture);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, WORKING_CODEX, TeamLimits::default());
+    owner(
+        &fixture,
+        &[hand_off(&fixture, "Write page.md for a long time")],
+    );
+    let task: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT id FROM team_tasks WHERE prompt='Write page.md for a long time'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let tx = rusqlite::Transaction::new_unchecked(
+        &fixture.connection,
+        rusqlite::TransactionBehavior::Immediate,
+    )
+    .unwrap();
+    let create = br#"{"project": "TP", "title": "Write the page"}"#;
+    let request = trackwright_core::requests::Request::parse("create", create).unwrap();
+    let by = trackwright_core::model::Actor::new("owner").unwrap();
+    assert!(trackwright_core::ops::dispatch(&tx, &crate::tracker::Host, &by, request).is_ok());
+    let project = &fixture.setup.project_id;
+    crate::team::tool::tracker::link_task(&tx, project, "TP-1", task, 1)
+        .unwrap()
+        .unwrap();
+    tx.commit().unwrap();
+    fixture.until(&mut team, "the sub-agent works on the ticket's task", |f| {
+        task_of(f, "Write page.md for a long time").0 == "running"
+    });
+    let agent: i64 = fixture
+        .connection
+        .query_row("SELECT agent FROM team_tasks WHERE id=?1", [task], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let mut wanted = vec![("agent".to_owned(), agent.to_string())];
+    let place: Option<(String, String)> = fixture
+        .connection
+        .query_row(
+            "SELECT worktree, git_dir FROM team_worktrees WHERE agent=?1",
+            [agent],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .unwrap();
+    if let Some((worktree, git_dir)) = place {
+        wanted.push(("worktree".to_owned(), worktree));
+        let head = std::fs::read_to_string(Path::new(&git_dir).join("HEAD")).unwrap();
+        if let Some(branch) = head.trim_end().strip_prefix("ref: refs/heads/") {
+            wanted.push(("branch".to_owned(), branch.to_owned()));
+        }
+    }
+    let mut linked: Vec<(String, String)> = fixture
+        .connection
+        .prepare("SELECT kind, target FROM tk_links WHERE created_by=?1")
+        .unwrap()
+        .query_map([crate::tracker::hooks::HOOK_ACTOR], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    linked.sort();
+    wanted.sort();
+    assert_eq!(linked, wanted);
+    team.shutdown().unwrap();
+}
+
 /// A worker at the owner's Sub-agent depth gets a team server without spawn, stop and
 /// merge, a tool the owner switched off is left out for every agent and both sections
 /// say so; the same calls planted in the worker's mailbox anyway are refused.
@@ -11080,6 +11254,7 @@ fn a_worker_at_the_depth_and_a_switched_off_tool_are_left_out_and_refused_if_pla
             harness: None,
             role: None,
             mode: None,
+            ticket: None,
         },
         tool::Call::Remember {
             text: "The docs live in docs/guide.".into(),
@@ -12594,6 +12769,7 @@ fn lead_spawns(fixture: &Fixture, lead: i64, task: &str) -> String {
             harness: None,
             role: None,
             mode: None,
+            ticket: None,
         },
     )
     .unwrap()

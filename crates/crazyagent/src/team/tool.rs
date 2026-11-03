@@ -166,8 +166,9 @@ const _: () = assert!(
 /// verbs `start_work`, `inspect_work`, `update_work`, `transfer_work` and `finish_work`,
 /// the lead verbs `spawn`, `stop` and `merge`, and `sessions`, `session`, `remember` and
 /// `recall` over past conversations and saved memory, and `ask` and `record_answer` for
-/// the owner's questions log (DEC-099 A). The engine names the caller from the mailbox it
-/// read the call from, never from the call.
+/// the owner's questions log (DEC-099 A), and the `ticket_` tools that each run one
+/// tracker operation (TI-3). The engine names the caller from the mailbox it read the
+/// call from, never from the call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "tool", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Call {
@@ -204,6 +205,7 @@ pub enum Call {
         harness: Option<String>,
         role: Option<String>,
         mode: Option<crate::coord::settings::SubagentMode>,
+        ticket: Option<String>,
     },
     Stop {
         agent: String,
@@ -236,11 +238,15 @@ pub enum Call {
         version: u64,
         owner_turn: i64,
     },
+    Ticket {
+        op: trackwright_core::model::OpKind,
+        arguments: Value,
+    },
 }
 
 impl Call {
     /// The tool this call came from, the name the owner's tool switches use. Takes the
-    /// call. Returns one of `TEAM_TOOLS` or `QUESTION_TOOLS`.
+    /// call. Returns one of `TEAM_TOOLS` or `QUESTION_TOOLS`, or a ticket tool's name.
     pub fn name(&self) -> &'static str {
         let name = match self {
             Self::StartWork { .. } => START_WORK_TOOL,
@@ -257,8 +263,15 @@ impl Call {
             Self::Recall { .. } => RECALL_TOOL,
             Self::Ask { .. } => ASK_TOOL,
             Self::RecordAnswer { .. } => RECORD_TOOL,
+            Self::Ticket { op, .. } => {
+                tracker::tool_name(*op).expect("a ticket call names an offered operation")
+            }
         };
-        assert!(TEAM_TOOLS.contains(&name) || QUESTION_TOOLS.contains(&name));
+        assert!(
+            TEAM_TOOLS.contains(&name)
+                || QUESTION_TOOLS.contains(&name)
+                || name.starts_with(tracker::TOOL_PREFIX)
+        );
         name
     }
 }
@@ -454,8 +467,8 @@ fn answer(request: &Value, drop: &Path) -> Option<Value> {
     Some(json!({"jsonrpc": "2.0", "id": id, "result": result}))
 }
 
-/// The team tools a server lists, in `BUILTIN_TOOLS` order, without the ones left out.
-/// Takes the tools left out. Returns the MCP `tools/list` result.
+/// The team tools a server lists, in `BUILTIN_TOOLS` order, without the ones left out,
+/// then the ticket tools. Takes the tools left out. Returns the MCP `tools/list` result.
 fn team_tools(off: &[String]) -> Value {
     let on = |name: &str| !off.iter().any(|tool| tool == name);
     let mut tools: Vec<Value> = TEAM_TOOLS
@@ -469,7 +482,11 @@ fn team_tools(off: &[String]) -> Value {
     if on(RECORD_TOOL) {
         tools.push(record_tool());
     }
-    assert!(tools.len() <= TEAM_TOOLS.len() + QUESTION_TOOLS.len());
+    tools.extend(tracker::tools());
+    assert!(
+        tools.len()
+            <= TEAM_TOOLS.len() + QUESTION_TOOLS.len() + trackwright_core::catalog::catalog().len()
+    );
     json!({ "tools": tools })
 }
 
@@ -530,6 +547,7 @@ fn spec(name: &str) -> Value {
                 "harness": {"type": "string", "description": "Optional harness, such as codex or claude-code."},
                 "role": {"type": "string", "description": "Optional short role such as onboarding-fix; the agent is then @onboarding-fix."},
                 "mode": {"type": "string", "enum": ["native", "app_spawned"], "description": "Master only, fixed for the lead's life: native (its sub-agents are its own Claude Code teammates) or app_spawned (it starts them with spawn); left out, the owner's setting for that harness."},
+                "ticket": {"type": "string", "pattern": "^[A-Z]{2,8}-[1-9][0-9]{0,9}$", "description": "Optional ticket this task works on, such as CA-12; the engine links the task to it."},
             }, "required": ["task"], "additionalProperties": false}),
         ),
         STOP_TOOL => (
@@ -784,28 +802,7 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
             }
             _ => Err(FINISH_INVALID),
         },
-        SPAWN_TOOL => {
-            let Some(proposed) = delegation(
-                argument("harness").unwrap_or_default(),
-                argument("task").unwrap_or_default(),
-            ) else {
-                return Some(Err(SPAWN_INVALID));
-            };
-            let role = match argument("role").map(role_handle) {
-                Some(Err(())) => return Some(Err(ROLE_INVALID)),
-                Some(Ok(role)) => role,
-                None => None,
-            };
-            let Some(mode) = named(arguments, "mode") else {
-                return Some(Err(MODE_INVALID));
-            };
-            Ok(Call::Spawn {
-                task: proposed.prompt,
-                harness: proposed.harness,
-                role,
-                mode,
-            })
-        }
+        SPAWN_TOOL => spawn_call(arguments),
         STOP_TOOL | MERGE_TOOL => match argument("agent") {
             Some(agent) if agent_name_valid(agent) => {
                 let agent = agent.trim().to_owned();
@@ -878,7 +875,49 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
         },
         ASK_TOOL => ask_call(arguments).ok_or(ASK_INVALID),
         RECORD_TOOL => record_call(arguments).ok_or(RECORD_INVALID),
-        _ => return None,
+        _ => return tracker::call(name, arguments),
+    })
+}
+
+/// Reads one `spawn` call: a task, and if chosen a harness, a role, a mode and the ticket
+/// the task works on, each checked as the engine checks it again. Takes the arguments.
+/// Returns the call, or the sentence the agent reads when an argument is refused.
+fn spawn_call(arguments: Option<&Value>) -> Result<Call, &'static str> {
+    let argument = |key: &str| {
+        arguments
+            .and_then(|arguments| arguments.get(key))
+            .and_then(Value::as_str)
+    };
+    let Some(proposed) = delegation(
+        argument("harness").unwrap_or_default(),
+        argument("task").unwrap_or_default(),
+    ) else {
+        return Err(SPAWN_INVALID);
+    };
+    let role = match argument("role").map(role_handle) {
+        Some(Err(())) => return Err(ROLE_INVALID),
+        Some(Ok(role)) => role,
+        None => None,
+    };
+    let Some(mode) = named(arguments, "mode") else {
+        return Err(MODE_INVALID);
+    };
+    let ticket = match arguments.and_then(|arguments| arguments.get("ticket")) {
+        None | Some(Value::Null) => None,
+        Some(Value::String(text)) => match trackwright_core::model::ShortId::parse(text.trim()) {
+            Ok(id) => Some(id.to_string()),
+            Err(_) => return Err(tracker::TICKET_ID_INVALID),
+        },
+        Some(_) => return Err(tracker::TICKET_ID_INVALID),
+    };
+    assert!(!proposed.prompt.is_empty());
+    assert!(ticket.as_deref().is_none_or(|id| !id.is_empty()));
+    Ok(Call::Spawn {
+        task: proposed.prompt,
+        harness: proposed.harness,
+        role,
+        mode,
+        ticket,
     })
 }
 
@@ -982,7 +1021,10 @@ pub fn checked(call: Call) -> Result<Call, &'static str> {
             harness,
             role,
             mode,
-        } => json!({"task": task, "harness": harness, "role": role, "mode": mode}),
+            ticket,
+        } => {
+            json!({"task": task, "harness": harness, "role": role, "mode": mode, "ticket": ticket})
+        }
         Call::Stop { agent } | Call::Merge { agent } => json!({"agent": agent}),
         Call::Sessions { query } => json!({"query": query}),
         Call::Session { id, offset } => json!({"id": id, "offset": offset}),
@@ -1001,6 +1043,12 @@ pub fn checked(call: Call) -> Result<Call, &'static str> {
             version,
             owner_turn,
         } => json!({"question": question, "version": version, "owner_turn": owner_turn}),
+        Call::Ticket { op, arguments } => {
+            if tracker::tool_name(*op).is_none() {
+                return Err(CALL_INVALID);
+            }
+            arguments.clone()
+        }
     };
     let again = live_call(call.name(), Some(&arguments)).expect("every call names a team tool")?;
     if again != call {
@@ -1646,6 +1694,7 @@ fn remove_drop(drop: &Path) {
 }
 
 pub mod questions;
+pub mod tracker;
 
 #[cfg(all(test, unix))]
 #[path = "tool/tests.rs"]
