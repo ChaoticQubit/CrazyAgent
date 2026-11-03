@@ -990,6 +990,18 @@ impl ProjectSandbox {
         Ok(self)
     }
 
+    /// Lets the agent run the engine executable that serves its team tools, relay hooks and
+    /// monitor: the engine's folder read-only and, by [`Self::allow_exec`], the file itself
+    /// startable by exact path, even from `CrazyAgent.app/Contents/MacOS` where the macOS
+    /// service runs it (OP24R2-1). Input: the engine's canonical path. Output: the widened
+    /// sandbox, or `Invalid`.
+    pub fn allow_engine(self, engine: &Path) -> Result<Self, SandboxError> {
+        let folder = engine
+            .parent()
+            .ok_or_else(|| invalid("the engine must sit in a folder"))?;
+        self.allow_read(folder)
+    }
+
     /// Grants a project's toolchains read-only (see [`toolchains::Toolchains::detect`]):
     /// each folder as [`Self::allow_read`] checks it, with every credential name below it
     /// denied, and each file when it is a canonical regular file clear of
