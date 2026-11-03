@@ -9141,6 +9141,7 @@ fn native_lead_linked_in_the_project(fixture: &Fixture) -> (i64, String, PathBuf
 #[test]
 fn the_engine_makes_each_native_teammate_s_linked_worktree_on_its_own_branch() {
     let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
     let (lead, branch, worktree, git_home) = native_lead_linked_in_the_project(&fixture);
     let project = ProjectId::new(PROJECT).unwrap();
     let git = |folder: &Path, arguments: &[&str]| -> String {
@@ -9187,7 +9188,6 @@ fn the_engine_makes_each_native_teammate_s_linked_worktree_on_its_own_branch() {
         5,
     )
     .unwrap();
-    let mut team = fixture.runtime();
 
     team.make_teammate_worktrees(&project, lead).unwrap();
 
