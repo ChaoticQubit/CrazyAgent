@@ -698,10 +698,11 @@ fn a_word_only_in_a_tool_output_finds_the_call_and_the_page_shows_its_input_and_
     );
 }
 
-/// OP-25: secrets in tool inputs, tool outputs and messages are masked before a search
-/// reads them, so no search finds a secret and no page shows one.
+/// OP-25: credential-shaped values in tool inputs, tool outputs and messages (a prefixed
+/// token, a key header, a password field) are masked before a search reads them, so no
+/// search finds these values and no page shows them. Masking covers known shapes only.
 #[test]
-fn secrets_in_tool_inputs_outputs_and_messages_are_masked_before_search_and_paging() {
+fn credential_shaped_values_in_tool_io_and_messages_are_masked_before_search_and_paging() {
     let token = "ghp_0123456789abcdefABCDEF0123456789abcd";
     let key = "sk-proj-AbCdEfGhIjKlMnOpQrStUvWx";
     let fixture = Fixture::new();
@@ -774,8 +775,9 @@ fn a_huge_tool_output_is_kept_only_up_to_its_bound() {
 }
 
 /// OP-25 security: rows the engine stored before this version, a master turn and a team
-/// message holding secrets in clear, are masked from the first read after the upgrade: no
-/// search finds a secret, no page shows one, and other words still find the turn.
+/// message holding credential-shaped values in clear, are masked from the first read after
+/// the upgrade: no search finds these values, no page shows them, and other words still
+/// find the turn.
 #[test]
 fn rows_stored_before_the_upgrade_are_masked_from_the_first_read() {
     let token = "ghp_0123456789abcdefABCDEF0123456789abcd";
@@ -812,4 +814,237 @@ fn rows_stored_before_the_upgrade_are_masked_from_the_first_read() {
         "{page}"
     );
     assert_eq!(hit_lines(&fixture.sessions("quokkafern")).len(), 1);
+}
+
+/// Writes one Claude Code record whose tool output is `output`, then reads it through the
+/// real search and page: no value in `secrets` is found or shown, and the plain word `kept`
+/// still finds the output. Inputs: the output text, the values and the plain word.
+fn assert_masked(output: &str, secrets: &[&str], kept: &str) {
+    let fixture = Fixture::new();
+    let (agent, home) = fixture.agent("claude-code");
+    record(
+        &home.join("projects").join("proj").join("shapes.jsonl"),
+        &[
+            claude_call("toolu_09S", "Bash", json!({"command": "cat notes.txt"})),
+            claude_result("toolu_09S", output),
+        ],
+    );
+    let (page, missing) = fixture.session(&format!("agent-{agent}/shapes"), 0);
+    assert!(!missing, "{page}");
+    for secret in secrets {
+        let found = fixture.sessions(secret);
+        assert!(hit_lines(&found).is_empty(), "{secret} is found: {found}");
+        assert!(!page.contains(secret), "{secret} is shown: {page}");
+    }
+    let found = fixture.sessions(kept);
+    assert_eq!(
+        hit_lines(&found).len(),
+        1,
+        "{kept} is not found: {found} {page}"
+    );
+}
+
+/// OP-25 F1: a password in a URL's user part, as in a clone or database URL, and a
+/// `.pgpass`-style line are masked, and the host stays searchable.
+#[test]
+fn a_password_in_a_url_user_part_or_a_pgpass_line_is_masked() {
+    assert_masked(
+        "remote: https://alice:Tr0ub4dor3x@git.example.com/acme/app.git\n\
+         postgres://svc:Zq8WmP2v@db.internal:5432/shop\n\
+         db.internal:5432:shop:svc:Pg9pass7x",
+        &["Tr0ub4dor3x", "alice:Tr0ub4dor3x", "Zq8WmP2v", "Pg9pass7x"],
+        "git.example.com",
+    );
+}
+
+/// OP-25 F1: passwords given as command flags, `-p<password>` and `-u user:password`, are
+/// masked, and the command stays searchable.
+#[test]
+fn passwords_in_command_flags_are_masked() {
+    assert_masked(
+        "$ mysql -u root -pS3cretPw9 shop\n$ curl -u deploy:Hunter22x https://api.example.com/v1",
+        &["S3cretPw9", "Hunter22x"],
+        "mysql",
+    );
+}
+
+/// OP-25 F1: short values of keys named like a token, a password or a credential
+/// (`NPM_TOKEN=`, `DB_PASS=`, `--token <value>`, `"credentials": "<value>"`) are masked.
+#[test]
+fn short_token_password_and_credential_values_are_masked() {
+    assert_masked(
+        "NPM_TOKEN=npm7Qx2 npm publish\n\
+         export DB_PASS=letmein7\n\
+         gh auth login --token gq7RtY2\n\
+         {\"credentials\": \"cr3dVal9\"}",
+        &["npm7Qx2", "letmein7", "gq7RtY2", "cr3dVal9"],
+        "publish",
+    );
+}
+
+/// OP-25 F1: auth headers and fields, cookies and session ids are masked.
+#[test]
+fn auth_cookie_and_session_id_values_are_masked() {
+    assert_masked(
+        "< Set-Cookie: sid=c00k1eVal; Path=/\n\
+         > X-Auth-Token: xat9K2m\n\
+         auth: q9w8e7\n\
+         sessionid=s3ss10nV\n\
+         quokkafern done",
+        &["c00k1eVal", "xat9K2m", "q9w8e7", "s3ss10nV"],
+        "quokkafern",
+    );
+}
+
+/// OP-25 F1: the base64 of a short credential, on a line with no marker word, is masked.
+#[test]
+fn base64_of_a_short_credential_is_masked() {
+    assert_masked(
+        "upstream X-Upstream dXNlcm5hbWU6cGFzc3dvcmQ=\nquokkafern done",
+        &["dXNlcm5hbWU6cGFzc3dvcmQ"],
+        "quokkafern",
+    );
+}
+
+/// OP-25 F1: AWS-style secrets holding `/` and `+`, on lines with no marker word, are
+/// masked.
+#[test]
+fn slash_and_plus_bearing_aws_style_secrets_are_masked() {
+    assert_masked(
+        "default Xk9pQ2rT7vLm/Bn4Hs8Jd/Wq3Ze6Yc1Ua5Gf0Ri2\n\
+         ci W8+e7Rq2Lp4Zx9/Mn1Bv6Cy3Tk5Hd0Js8Fg2Ka\n\
+         quokkafern done",
+        &[
+            "Xk9pQ2rT7vLm",
+            "Bn4Hs8Jd",
+            "Wq3Ze6Yc1Ua5Gf0Ri2",
+            "e7Rq2Lp4Zx9",
+            "Mn1Bv6Cy3Tk5Hd0Js8Fg2Ka",
+        ],
+        "quokkafern",
+    );
+}
+
+/// OP-25 F1: paths to the credential files and folders the sandbox guards, as a tool reads
+/// or lists them, are masked.
+#[test]
+fn credential_file_paths_are_masked() {
+    assert_masked(
+        "cat /Users/alice/.aws/credentials\n\
+         ls ~/.ssh/id_ed25519_work\n\
+         source ~/.netrc\n\
+         quokkafern done",
+        &[".aws/credentials", "id_ed25519_work", ".netrc"],
+        "quokkafern",
+    );
+}
+
+/// OP-25 F1: a private key block is masked from its BEGIN line to its END line, body lines
+/// full of `/` and `+` and a short last line included, and the text after it stays
+/// searchable.
+#[test]
+fn a_private_key_block_is_masked_from_begin_to_end() {
+    assert_masked(
+        "-----BEGIN OPENSSH PRIVATE KEY-----\n\
+         b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW\n\
+         Qy/Nm+Ab/Zx+Pq/Lm+Kd/Rt+Yw/Hs+Fe/Gv+Bn/Jc+Ux/Ka+Wd/Mi+Op/Ql+Vs/Ty+Ib\n\
+         AAAEC4k9w=\n\
+         -----END OPENSSH PRIVATE KEY-----\n\
+         quokkafern done",
+        &[
+            "OPENSSH",
+            "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW",
+            "Ab/Zx",
+            "AAAEC4k9w",
+        ],
+        "quokkafern",
+    );
+}
+
+/// OP-25 F1: a token wrapped across two lines of one output is masked whole: the tail at
+/// the next line's start goes with the masked first piece.
+#[test]
+fn the_wrapped_tail_of_a_masked_token_is_masked() {
+    assert_masked(
+        "config ghp_0123456789abcdefABCD\nEF0123456789abcd\nquokkafern done",
+        &["EF0123456789abcd"],
+        "quokkafern",
+    );
+}
+
+/// OP-25: plain words next to the masking rules stay searchable: token counts, an author
+/// field, a path holding digits, a Rust path through an `auth` module and a sha-free
+/// command line.
+#[test]
+fn plain_counts_paths_and_code_next_to_masked_shapes_stay_searchable() {
+    let fixture = Fixture::new();
+    let (_, home) = fixture.agent("claude-code");
+    record(
+        &home.join("projects").join("proj").join("plain.jsonl"),
+        &[
+            claude_call("toolu_05E", "Bash", json!({"command": "git log -1"})),
+            claude_result(
+                "toolu_05E",
+                "Input tokens: 1234\n\
+                 author: alice\n\
+                 cd Projects/CrazyAgent/apps/desktop/test/native/trial4\n\
+                 crate::auth::login(user)\n\
+                 mkdir -p build/out",
+            ),
+        ],
+    );
+    for word in [
+        "tokens: 1234",
+        "author: alice",
+        "native/trial4",
+        "crate::auth::login",
+        "build/out",
+    ] {
+        let found = fixture.sessions(word);
+        assert_eq!(hit_lines(&found).len(), 1, "{word}: {found}");
+    }
+}
+
+/// OP-25 F2: a native teammate's record, kept in the home its lead's teammates run with
+/// beside the lead's own (TPH-2 C), is found by a word in its tool output and read by its
+/// id, labelled as the lead's native teammates.
+#[test]
+fn a_native_teammates_record_in_the_mates_home_is_found_and_read() {
+    let fixture = Fixture::new();
+    let (lead, home) = fixture.agent("claude-code");
+    fixture
+        .db
+        .execute(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,parent,pane)
+             VALUES (?1,'teammate','claude-code',1,'idle',1,1,?2,'%7')",
+            params![PROJECT, lead],
+        )
+        .unwrap();
+    record(
+        &crate::launch_context::mates_home(&home)
+            .join("projects")
+            .join("proj")
+            .join("mate.jsonl"),
+        &[
+            claude_call("toolu_04D", "Bash", json!({"command": "cat todo.txt"})),
+            claude_result("toolu_04D", "quokkafern list ready"),
+        ],
+    );
+
+    let id = format!("agent-{lead}/mates/mate");
+    let found = fixture.sessions("quokkafern");
+    let hits = hit_lines(&found);
+    assert_eq!(hits.len(), 1, "{found}");
+    assert!(
+        hits[0].starts_with(&format!(
+            "- {id} #1 tool (native teammates of agent-{lead} "
+        )),
+        "{found}"
+    );
+    let (page, missing) = fixture.session(&id, 0);
+    assert!(!missing, "{page}");
+    assert!(
+        page.contains("#1 tool: Tool output:\nquokkafern list ready"),
+        "{page}"
+    );
 }
