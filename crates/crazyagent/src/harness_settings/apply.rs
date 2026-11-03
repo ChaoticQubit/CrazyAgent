@@ -6,32 +6,56 @@ use serde_json::{Map, Value};
 use std::path::Path;
 
 /// The owner's settings one harness start applies: only the unlocked keys the owner set,
-/// as the app value or the project override, in catalog order. A locked key never appears,
-/// and each launch builder writes its own values over these, last. The default applies
-/// nothing, so the harness starts with the engine's values only.
+/// as the app value or the project override, in catalog order, and the locked keys whose
+/// engine value the catalog names, which every launch must already use. A locked key is
+/// never among the owner's values, and each launch builder writes its own values over
+/// these, last. The default applies nothing, so the harness starts with the engine's values
+/// only.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Applied {
     harness: Option<String>,
     values: Vec<Resolved>,
+    locked: Vec<Resolved>,
 }
 
 impl Applied {
-    /// Keeps the owner's values of one resolution and drops the locked keys it ends with.
-    /// Inputs: the catalog and its `resolve` output. Output: the settings.
+    /// Splits one resolution into the owner's values and the locked keys it ends with,
+    /// keeping only the locked keys that name an engine value. Inputs: the catalog and its
+    /// `resolve` output. Output: the settings.
     pub fn new(catalog: &Catalog, resolved: Vec<Resolved>) -> Self {
-        let values: Vec<Resolved> = resolved
+        let (locked, values): (Vec<Resolved>, Vec<Resolved>) = resolved
             .into_iter()
-            .filter(|value| value.source != Source::Engine)
-            .collect();
+            .partition(|value| value.source == Source::Engine);
         assert!(values.iter().all(|value| {
             matches!(value.source, Source::App | Source::Project)
-                && catalog
-                    .key(&value.key)
-                    .is_some_and(|key| key.locked.is_none() && key.apply == value.apply)
+                && catalog.key(&value.key).is_some_and(|key| {
+                    key.locked.is_none()
+                        && key.apply == value.apply
+                        && super::applied_at_launch(key.apply)
+                })
         }));
+        assert!(locked.iter().all(|value| {
+            catalog.key(&value.key).is_some_and(|key| {
+                key.apply == value.apply
+                    && key
+                        .locked
+                        .as_ref()
+                        .is_some_and(|lock| lock.engine_value == value.value)
+            })
+        }));
+        let locked: Vec<Resolved> = locked
+            .into_iter()
+            .filter(|value| !value.value.is_null())
+            .collect();
+        assert!(
+            locked
+                .iter()
+                .all(|value| super::applied_at_launch(value.apply))
+        );
         Self {
             harness: Some(catalog.harness.clone()),
             values,
+            locked,
         }
     }
 
@@ -47,6 +71,10 @@ impl Applied {
 
     fn of(&self, apply: Apply) -> impl Iterator<Item = &Resolved> {
         self.values.iter().filter(move |value| value.apply == apply)
+    }
+
+    fn locked(&self, apply: Apply) -> impl Iterator<Item = &Resolved> {
+        self.locked.iter().filter(move |value| value.apply == apply)
     }
 }
 
@@ -67,8 +95,21 @@ pub fn for_launch(
     let Some(catalog) = catalog::builtin(id)? else {
         return Ok(Applied::default());
     };
-    let version = installed::version_of(executable, installed::LIMIT);
-    resolved(db, &catalog, version.as_deref(), project)
+    for_catalog(db, &catalog, executable, project)
+}
+
+/// Reads the settings one start of a known catalog applies, asking the executable for its
+/// version once per file (`installed::version_cached`). Inputs: the engine database, the
+/// catalog, the executable and the project. Output: the settings, or a
+/// `HARNESS_SETTINGS_CODES` refusal.
+pub fn for_catalog(
+    db: &Connection,
+    catalog: &Catalog,
+    executable: &Path,
+    project: Option<&ProjectId>,
+) -> Result<Applied, EngineError> {
+    let version = installed::version_cached(executable, installed::LIMIT);
+    resolved(db, catalog, version.as_deref(), project)
 }
 
 /// Reads the settings one start of a known catalog and version applies. Inputs: the
@@ -84,13 +125,14 @@ pub fn resolved(
     Ok(Applied::new(catalog, values))
 }
 
-/// Merges the owner's values into a settings object the engine built, such as Claude
-/// Code's `--settings` JSON: each dotted key becomes nested objects, a key whose first part
-/// the engine sets or reserves is dropped, and every engine key is written last, so it keeps
-/// the engine's value. Inputs: the engine's object, the settings, which keys apply here and
-/// the top-level keys the engine sets on other launches. Output: the merged object.
+/// Merges the owner's values into Claude Code's `--settings` JSON the engine built: each
+/// dotted key becomes nested objects, a key whose first part the engine sets or reserves
+/// is dropped, and every engine key is written last, so it keeps the engine's value. Every
+/// locked key that names an engine value must then hold it. Inputs: the engine's object,
+/// the settings, which keys apply here and the top-level keys the engine sets on other
+/// launches. Output: the merged object.
 pub fn json_settings(engine: &Value, applied: &Applied, apply: Apply, reserved: &[&str]) -> Value {
-    assert!(matches!(apply, Apply::ClaudeSettings | Apply::RcliConfig));
+    assert_eq!(apply, Apply::ClaudeSettings);
     assert!(engine.is_object());
     let empty = Map::new();
     let fixed = engine.as_object().unwrap_or(&empty);
@@ -114,7 +156,18 @@ pub fn json_settings(engine: &Value, applied: &Applied, apply: Apply, reserved: 
             .iter()
             .all(|key| merged.get(*key) == fixed.get(*key))
     );
-    Value::Object(merged)
+    let merged = Value::Object(merged);
+    for lock in applied.locked(apply) {
+        assert_eq!(at(&merged, &lock.key), Some(&lock.value), "{}", lock.key);
+    }
+    merged
+}
+
+/// Finds the value at one dotted key of a JSON object. Inputs: the object and the key.
+/// Output: the value, none when a part is missing.
+pub fn at<'a>(document: &'a Value, key: &str) -> Option<&'a Value> {
+    key.split('.')
+        .try_fold(document, |value, part| value.get(part))
 }
 
 fn insert(map: &mut Map<String, Value>, key: &str, value: Value) {
@@ -138,8 +191,9 @@ fn insert(map: &mut Map<String, Value>, key: &str, value: Value) {
 /// Renders the owner's Codex values as `-c` settings, one `key=value` each in TOML, for
 /// the launch to pass before the engine's own: a key that equals, contains or sits inside
 /// a key the engine sets or reserves is dropped, so no engine setting is ever overridden.
-/// Inputs: the engine's settings, the keys the engine sets on other launches and the
-/// owner's settings. Output: the owner's settings.
+/// Every locked key that names an engine value must be one of the engine's settings with
+/// that value. Inputs: the engine's settings, the keys the engine sets on other launches
+/// and the owner's settings. Output: the owner's settings.
 pub fn codex_lines(engine: &[String], reserved: &[&str], applied: &Applied) -> Vec<String> {
     let taken: Vec<&str> = engine
         .iter()
@@ -158,6 +212,15 @@ pub fn codex_lines(engine: &[String], reserved: &[&str], applied: &Applied) -> V
         let key = line_key(line);
         !taken.iter().any(|taken| overlaps(taken, key))
     }));
+    for lock in applied.locked(Apply::CodexConfig) {
+        let set = engine
+            .iter()
+            .rev()
+            .find(|line| line_key(line) == lock.key)
+            .and_then(|line| line.split_once('='))
+            .map(|(_, value)| value.trim());
+        assert_eq!(set, Some(lock.value.to_string().as_str()), "{}", lock.key);
+    }
     lines
 }
 

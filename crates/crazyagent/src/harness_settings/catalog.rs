@@ -1,7 +1,7 @@
 use super::{
     CATALOG_BYTES_MAX, HARNESS_BYTES_MAX, HELP_BYTES_MAX, KEYS_MAX, LABEL_BYTES_MAX,
     OPTION_BYTES_MAX, OPTIONS_MAX, REASON_BYTES_MAX, SOURCE_BYTES_MAX, SOURCES_MAX,
-    STRING_BYTES_MAX, VERSIONS_MAX, check_value, installed, key_valid,
+    STRING_BYTES_MAX, VERSIONS_MAX, applied_at_launch, check_value, installed, key_valid,
 };
 use crate::engine::EngineError;
 use crate::engine::owner::failure;
@@ -199,7 +199,8 @@ fn key_ok(harness: &str, key: &Key) -> bool {
     };
     let locked = key.locked.as_ref().is_none_or(|locked| {
         line(&locked.reason, REASON_BYTES_MAX)
-            && (locked.engine_value.is_null() || check_value(key, &locked.engine_value).is_ok())
+            && (locked.engine_value.is_null()
+                || (applied_at_launch(key.apply) && check_value(key, &locked.engine_value).is_ok()))
     });
     key_valid(&key.key)
         && line(&key.label, LABEL_BYTES_MAX)

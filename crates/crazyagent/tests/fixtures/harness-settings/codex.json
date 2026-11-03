@@ -58,7 +58,7 @@
       "scope": "app_and_project",
       "locked": {
         "reason": "CrazyAgent runs every agent in its own sandbox.",
-        "engine_value": "workspace-write"
+        "engine_value": null
       }
     },
     {

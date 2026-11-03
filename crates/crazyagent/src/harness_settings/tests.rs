@@ -57,7 +57,7 @@ fn the_fixture_catalog_parses_in_its_own_order() {
         locked.reason,
         "CrazyAgent runs every agent in its own sandbox."
     );
-    assert_eq!(locked.engine_value, json!("workspace-write"));
+    assert_eq!(locked.engine_value, Value::Null);
     assert!(qualified(&catalog, Some("0.51.0")));
     assert!(!qualified(&catalog, Some("0.50")));
     assert!(!qualified(&catalog, None));
@@ -154,6 +154,13 @@ fn a_catalog_that_breaks_the_contract_is_refused() {
             Box::new(|c| c["keys"][0]["apply"] = json!("claude_settings")),
         ),
         (
+            "an engine value on a key no launch writes",
+            Box::new(|c| {
+                c["keys"][0]["apply"] = json!("arg");
+                c["keys"][0]["locked"] = json!({"reason": "Fixture.", "engine_value": false});
+            }),
+        ),
+        (
             "a key inside another key",
             Box::new(|c| c["keys"][3]["key"] = json!("hide_agent_reasoning.label")),
         ),
@@ -197,6 +204,19 @@ fn every_built_in_catalog_parses_for_its_own_harness() {
     for (harness, _) in catalog::BUILTIN {
         let parsed = catalog::builtin(harness).unwrap().unwrap();
         assert_eq!(parsed.harness, *harness);
+        let reserved: &[&str] = match *harness {
+            "codex" => &crate::harnesses::launch::CODEX_ENGINE_KEYS,
+            "claude-code" => &crate::harnesses::launch::CLAUDE_ENGINE_KEYS,
+            _ => &[],
+        };
+        for key in parsed.keys.iter().filter(|key| key.locked.is_none()) {
+            let taken = reserved.iter().any(|name| {
+                key.key == *name
+                    || key.key.starts_with(&format!("{name}."))
+                    || name.starts_with(&format!("{}.", key.key))
+            });
+            assert!(!taken, "{harness} lists {} unlocked", key.key);
+        }
     }
     assert!(catalog::builtin("codex-not-a-harness").unwrap().is_none());
 }

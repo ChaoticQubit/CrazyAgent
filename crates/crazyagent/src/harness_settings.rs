@@ -48,6 +48,9 @@ pub const CATALOG_BYTES_MAX: usize = 1024 * 1024;
 pub const PAGE_BYTES_MAX: usize = 48 * 1024;
 /// The reason a key set once for the whole app shows on a project's page.
 pub const APP_ONLY: &str = "Set once for the whole app in Settings > Harnesses";
+/// The reason a key whose apply no CrazyAgent launch writes yet, such as an rcli or
+/// command-line key, shows on a page.
+pub const NOT_APPLIED: &str = "CrazyAgent does not apply this setting yet";
 
 const ITEM_PREFIX: &str = "harness-setting";
 const KEY_JSON_MAX: usize = 2
@@ -174,6 +177,14 @@ enum Standing {
     Locked,
     NotQualified,
     AppOnly,
+    NotApplied,
+}
+
+/// Tells whether a CrazyAgent launch writes keys of one apply: Claude Code's settings JSON
+/// and Codex's `-c` lines. rcli's profile and command-line keys are not written yet.
+/// Input: the apply. Output: true when a launch writes it.
+pub fn applied_at_launch(apply: Apply) -> bool {
+    matches!(apply, Apply::ClaudeSettings | Apply::CodexConfig)
 }
 
 /// Tells whether the installed harness version is one the catalog was qualified for.
@@ -257,6 +268,7 @@ fn standing(catalog: &Catalog, installed: Option<&str>, scope: &Scope, name: &st
     match catalog.key(name) {
         None => Standing::NotQualified,
         Some(key) if key.locked.is_some() => Standing::Locked,
+        Some(key) if !applied_at_launch(key.apply) => Standing::NotApplied,
         Some(_) if !qualified(catalog, installed) => Standing::NotQualified,
         Some(key) if matches!(scope, Scope::Project(_)) && key.scope == KeyScope::App => {
             Standing::AppOnly
@@ -276,7 +288,7 @@ pub(crate) fn refusal(
     match standing(catalog, installed, scope, name) {
         Standing::Editable => None,
         Standing::Locked => Some("harness_settings_key_locked"),
-        Standing::NotQualified => Some("harness_settings_key_not_qualified"),
+        Standing::NotQualified | Standing::NotApplied => Some("harness_settings_key_not_qualified"),
         Standing::AppOnly => Some("harness_settings_key_app_only"),
     }
 }
@@ -304,8 +316,9 @@ fn layered(key: &Key, app: &Stored, project: Option<&Stored>) -> (Value, Source)
 
 /// Builds one key's row at one scope: catalog default, then the app value, then the
 /// project override, with the engine's value for a locked key; a key the catalog does not
-/// list, or any unlocked key of an unqualified version, shows read-only. A stored value
-/// the catalog refuses stays shown here, with set and reset open, but is not in force.
+/// list, an unlocked key no launch writes yet, or any unlocked key of an unqualified
+/// version, shows read-only. A stored value the catalog refuses stays shown here, with set
+/// and reset open, but is not in force.
 /// Inputs: the catalog, the installed version, the scope, the key, the app and project
 /// values and the key's version at this scope. Output: the row.
 pub(crate) fn setting(
@@ -347,6 +360,12 @@ pub(crate) fn setting(
     };
     let standing = standing(catalog, installed, scope, name);
     assert_ne!(standing, Standing::Locked);
+    if standing == Standing::NotApplied {
+        let access = Access::ReadOnly {
+            reason: NOT_APPLIED.into(),
+        };
+        return row(here, Value::Null, Source::NotApplied, access);
+    }
     if standing == Standing::NotQualified {
         let access = Access::ReadOnly {
             reason: not_qualified(catalog, installed),
@@ -369,8 +388,9 @@ pub(crate) fn setting(
 }
 
 /// Resolves what one harness start applies: for a qualified version, every unlocked key
-/// the owner set (catalog default, then app, then project), then every locked key with
-/// the engine's value, last; an unqualified version gets only the locked keys. Inputs: the
+/// the owner set that a launch writes (catalog default, then app, then project), then every
+/// locked key with the engine's value, last; an unqualified version gets only the locked
+/// keys. Inputs: the
 /// catalog, the installed version, the app values and the project's, none for an app-level
 /// start. Output: the values in apply order.
 pub fn resolve(
@@ -393,7 +413,7 @@ pub fn resolve(
             locked.push(resolved(lock.engine_value.clone(), Source::Engine));
             continue;
         }
-        if !qualified {
+        if !qualified || !applied_at_launch(key.apply) {
             continue;
         }
         let (value, source) = layered(key, app, project);

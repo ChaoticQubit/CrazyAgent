@@ -156,7 +156,7 @@ fn a_set_on_a_locked_key_is_refused_with_its_reason() {
                     reason: SANDBOX_REASON.into()
                 }
             );
-            assert_eq!(setting.effective, json!("workspace-write"));
+            assert_eq!(setting.effective, Value::Null);
             assert_eq!(setting.source, Source::Engine);
             assert_eq!(setting.here, None);
             assert_eq!(setting.version, 0);
@@ -176,7 +176,7 @@ fn a_set_on_a_locked_key_is_refused_with_its_reason() {
             reason: SANDBOX_REASON.into()
         }
     );
-    assert_eq!(sandbox.effective, json!("workspace-write"));
+    assert_eq!(sandbox.effective, Value::Null);
     assert_eq!(
         row(&shown, "approval_policy").access,
         Access::Locked {
@@ -235,11 +235,7 @@ fn project_override_beats_app_default_and_reset_falls_back() {
     );
     assert_eq!(stored(&root, &alpha()), [(key.to_owned(), json!("low"))]);
     let locked = [
-        (
-            "sandbox_mode".to_owned(),
-            json!("workspace-write"),
-            Source::Engine,
-        ),
+        ("sandbox_mode".to_owned(), Value::Null, Source::Engine),
         ("approval_policy".to_owned(), json!("never"), Source::Engine),
     ];
     let launch = |installed: Option<&str>, project: Option<&ProjectId>| {
