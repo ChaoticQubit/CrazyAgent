@@ -82,7 +82,7 @@ const RULES: [(&str, &str, &str); 9] = [
     ),
     (
         "memory",
-        "A memory suggested in this project stays scoped to this project; only you can widen it.",
+        "A memory an agent suggests stays scoped to this project, as in every project; only you can widen it.",
         "Text steered by the repository must not reach your other projects.",
     ),
     (
@@ -232,8 +232,8 @@ impl Origin {
 /// whether repository harness files are only labelled text, hidden from the harness and
 /// never read by a harness without a CrazyAgent adapter; whether the IDE trusts the
 /// workspace and may run the project's git hooks; whether agents and masters may propose
-/// check profiles; whether a memory suggestion may ask for global scope; and whether this
-/// platform may run the level's agents and checks at all.
+/// check profiles; and whether this platform may run the level's agents and checks at all.
+/// Memory needs no field: an agent's suggestion is project-scoped at every level.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Enforcement {
     pub check_network: crate::checks::profile::NetworkMode,
@@ -242,7 +242,6 @@ pub struct Enforcement {
     pub repo_config_as_text: bool,
     pub ide_workspace_trust: bool,
     pub agent_profile_proposals: bool,
-    pub global_memory_suggestions: bool,
     pub platform_refusal: Option<&'static str>,
 }
 
@@ -258,7 +257,6 @@ impl Enforcement {
                 repo_config_as_text: false,
                 ide_workspace_trust: true,
                 agent_profile_proposals: true,
-                global_memory_suggestions: true,
                 platform_refusal: None,
             },
             Trust::Untrusted => Self {
@@ -268,7 +266,6 @@ impl Enforcement {
                 repo_config_as_text: true,
                 ide_workspace_trust: false,
                 agent_profile_proposals: false,
-                global_memory_suggestions: false,
                 platform_refusal: (!cfg!(target_os = "macos")).then_some(UNQUALIFIED_PLATFORM),
             },
         }
@@ -539,6 +536,27 @@ pub(crate) fn record_onboarded(
         return Ok(());
     }
     save(tx, project.as_str(), Trust::CLONED, Origin::Cloned)
+}
+
+/// The level an agent run over a folder works under, whether or not it is a project yet:
+/// the level saved for the project when there is one, else the clone default of
+/// [`record_onboarded`], so onboarding maps a fresh clone untrusted before its project
+/// exists. Inputs: the connection, the project if any and its folder. Output: the level, or
+/// the database error for an unreadable row.
+pub(crate) fn of_folder(
+    connection: &Connection,
+    project: Option<&str>,
+    folder: &Path,
+) -> rusqlite::Result<Trust> {
+    let saved = match project {
+        Some(project) => stored(connection, project)?,
+        None => None,
+    };
+    Ok(match saved {
+        Some((trust, _)) => trust,
+        None if cloned(folder) => Trust::CLONED,
+        None => Trust::Reviewed,
+    })
 }
 
 /// Tells whether the engine cloned this folder: its `.git` is a real folder holding the

@@ -10,13 +10,16 @@ pub const PROJECT_INSTRUCTIONS: &str = ".crazyagent/instructions.md";
 /// The repository files and folders a harness reads on its own as settings, hooks, MCP
 /// servers, permissions or instructions. An untrusted launch's Seatbelt profile denies each
 /// one at any depth of the project folder, the agent's worktree with it, whatever the
-/// harness flags say (threat model H3, G7).
-pub const HARNESS_NAMES: [&str; 6] = [
+/// harness flags say (threat model H3, G7). Codex 0.164 also reads `AGENTS.override.md`
+/// before `AGENTS.md` and repository skills under `.agents/`.
+pub const HARNESS_NAMES: [&str; 8] = [
     "CLAUDE.md",
     "CLAUDE.local.md",
     "AGENTS.md",
+    "AGENTS.override.md",
     ".claude",
     ".codex",
+    ".agents",
     ".mcp.json",
 ];
 

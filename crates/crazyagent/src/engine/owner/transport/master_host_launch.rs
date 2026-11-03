@@ -2267,6 +2267,14 @@ mod tests {
             worktree.join(".claude").join("commands").join("run.md"),
             worktree.join(".mcp.json"),
             worktree.join(".crazyagent").join("instructions.md"),
+            repository.join("AGENTS.override.md"),
+            worktree.join("src").join("AGENTS.override.md"),
+            repository
+                .join(".agents")
+                .join("skills")
+                .join("deploy")
+                .join("SKILL.md"),
+            worktree.join(".agents").join("skills").join("SKILL.md"),
         ];
         let plain = [
             worktree.join("README.md"),
