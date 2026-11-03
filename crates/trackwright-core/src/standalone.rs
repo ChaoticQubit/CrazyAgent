@@ -18,9 +18,9 @@ pub const LINK_STATE_UNKNOWN: &str = "unknown";
 /// The host a tracker runs with on its own: links are any bounded reference with state
 /// `unknown`, a `test` check naming a case follows that case's runs, any other check follows
 /// the latest evidence a user or CI recorded for it, manual and ci evidence come from the
-/// owner or an engine only, export and import stay inside the folder that holds the
-/// tracker database, and authority is the project's policy applied to the self-declared
-/// actor, so it binds honest agents only.
+/// owner or an engine only, export and import stay inside the folder that holds the tracker
+/// database, and authority is the project's policy applied to the self-declared actor, so it
+/// binds honest agents only.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Standalone;
 

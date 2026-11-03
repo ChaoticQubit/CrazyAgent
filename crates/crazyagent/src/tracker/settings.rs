@@ -4,15 +4,19 @@ use crate::protocol::ProjectId;
 use crate::storage::versioned::{self, Item, Stale};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use trackwright_core::host::{
-    Authority, CheckView, Evidence, EvidenceState, LinkKind, LinkState, Links, TicketView,
+    Authority, CheckView, Evidence, EvidenceState, LinkKind, LinkState, Links, Paths, TicketView,
 };
 use trackwright_core::model::{
     Actor, AgentEditPolicy, ClosePolicy, CreatePolicy, CycleDays, ImportPolicy, OpKind, Policy,
-    PolicyKey, ProjectKey, Refusal, RolloverPolicy,
+    PolicyKey, ProjectKey, Refusal, RolloverPolicy, codes,
 };
 use trackwright_core::policy;
 use trackwright_core::runs::{RunWriters, SourceRef};
+use trackwright_core::tests_model::{
+    CaseProtectedVisibility, RunRetention, SkippedCounts, TestEvidence,
+};
 
 const STORED: &str = "SELECT body FROM tracker_settings WHERE scope = ?1";
 const STORE: &str = "INSERT INTO tracker_settings(scope, body) VALUES (?1, ?2)
@@ -78,6 +82,7 @@ impl Default for TicketSettings {
 
 /// The keys one scope sets: the app values or one project's override. A key left None
 /// takes the value of the scope below (project, then app, then the proposed default).
+/// `run_writers` is no key of a scope: the host locks it to `engine_only`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct TicketOverride {
@@ -94,14 +99,23 @@ pub struct TicketOverride {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub import: Option<ImportPolicy>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub test_evidence: Option<TestEvidence>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub skipped_counts: Option<SkippedCounts>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub case_protected_visibility: Option<CaseProtectedVisibility>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_retention: Option<RunRetention>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub manual_evidence: Option<ManualEvidence>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ci_evidence: Option<CiEvidence>,
 }
 
 impl TicketOverride {
-    /// Lays these values over the settings below them. Input: the settings below.
-    /// Output: the settings with every key this scope sets replaced.
+    /// Lays these values over the settings below them, keeping the locked `run_writers`
+    /// from below. Input: the settings below. Output: the settings with every key this
+    /// scope sets replaced.
     pub fn over(&self, below: &TicketSettings) -> TicketSettings {
         TicketSettings {
             policy: Policy {
@@ -111,11 +125,13 @@ impl TicketOverride {
                 cycle_days: self.cycle_days.unwrap_or(below.policy.cycle_days),
                 rollover: self.rollover.unwrap_or(below.policy.rollover),
                 import: self.import.unwrap_or(below.policy.import),
-                test_evidence: below.policy.test_evidence,
-                skipped_counts: below.policy.skipped_counts,
-                case_protected_visibility: below.policy.case_protected_visibility,
+                test_evidence: self.test_evidence.unwrap_or(below.policy.test_evidence),
+                skipped_counts: self.skipped_counts.unwrap_or(below.policy.skipped_counts),
+                case_protected_visibility: self
+                    .case_protected_visibility
+                    .unwrap_or(below.policy.case_protected_visibility),
                 run_writers: below.policy.run_writers,
-                run_retention: below.policy.run_retention,
+                run_retention: self.run_retention.unwrap_or(below.policy.run_retention),
             },
             manual_evidence: self.manual_evidence.unwrap_or(below.manual_evidence),
             ci_evidence: self.ci_evidence.unwrap_or(below.ci_evidence),
@@ -222,13 +238,13 @@ pub fn set(
 /// The host `sync` writes the core's policy keys through. The engine host refuses the
 /// core's `policy_set` for every caller, so the ticket settings are the one writer of
 /// `tk_policy`; only this module, writing the settings the owner saved, passes it. It
-/// records no evidence, holds the engine host's policy locks and answers links and
-/// evidence as the engine host does.
+/// records no evidence, opens no file, holds the engine host's policy locks and answers
+/// links and evidence as the engine host does.
 struct SettingsWriter;
 
 impl Links for SettingsWriter {
     fn kinds(&self) -> &[LinkKind] {
-        super::Host.kinds()
+        &super::host::KINDS
     }
 
     fn resolve(
@@ -263,6 +279,29 @@ impl Evidence for SettingsWriter {
         ticket: &TicketView,
     ) -> Result<Option<SourceRef>, Refusal> {
         super::Host.current_source(tx, project, ticket)
+    }
+}
+
+impl Paths for SettingsWriter {
+    /// Refuses every file: the settings writer only writes policy keys and opens none.
+    /// Inputs: the transaction, key, actor and path (unused) and the operation. Output:
+    /// `export_path_refused` for an export, `import_path_refused` otherwise.
+    fn resolve_path(
+        &self,
+        _: &Transaction<'_>,
+        _: &ProjectKey,
+        _: &Actor,
+        op: OpKind,
+        _: &Path,
+    ) -> Result<PathBuf, Refusal> {
+        let code = match op {
+            OpKind::Export => codes::EXPORT_PATH_REFUSED,
+            _ => codes::IMPORT_PATH_REFUSED,
+        };
+        Err(Refusal::new(
+            code,
+            "the ticket settings writer opens no file",
+        ))
     }
 }
 

@@ -16,6 +16,9 @@ use trackwright_core::policy::CYCLE_DAYS_CUSTOM;
 use trackwright_core::reply::Reply as CoreReply;
 use trackwright_core::requests::Request;
 use trackwright_core::store;
+use trackwright_core::tests_model::{
+    CaseProtectedVisibility, RunRetention, RunWriters, SkippedCounts, TestEvidence,
+};
 
 const REQUEST_BYTES_MAX: usize = 16 * 1024;
 pub(super) const TRACKER_TIMEOUT: Duration = Duration::from_secs(30);
@@ -685,7 +688,9 @@ fn named<T: Serialize>(all: &[T]) -> Vec<serde_json::Value> {
 }
 
 /// Every ticket setting's choices: the core policy keys in their order, then the engine's
-/// `manual_evidence` and `ci_evidence`. Output: the eight settings.
+/// `manual_evidence` and `ci_evidence`. `run_writers` lists only the value the host locks
+/// it to, so it shows locked and no save can change it. Output: every setting, one per core
+/// key and two.
 fn choices() -> Vec<SettingChoices> {
     let proposed =
         serde_json::to_value(TicketSettings::default()).expect("settings are plain data");
@@ -698,6 +703,11 @@ fn choices() -> Vec<SettingChoices> {
             PolicyKey::CycleDays => named(&CycleDays::PRESETS),
             PolicyKey::Rollover => named(RolloverPolicy::ALL),
             PolicyKey::Import => named(ImportPolicy::ALL),
+            PolicyKey::TestEvidence => named(TestEvidence::ALL),
+            PolicyKey::SkippedCounts => named(SkippedCounts::ALL),
+            PolicyKey::CaseProtectedVisibility => named(CaseProtectedVisibility::ALL),
+            PolicyKey::RunWriters => named(&[RunWriters::EngineOnly]),
+            PolicyKey::RunRetention => named(RunRetention::ALL),
         };
         all.push(SettingChoices {
             key: key.as_str().to_owned(),
@@ -720,7 +730,11 @@ fn choices() -> Vec<SettingChoices> {
             custom: None,
         });
     }
-    assert_eq!(all.len(), 8);
+    assert_eq!(all.len(), PolicyKey::ALL.len() + 2);
+    assert_eq!(
+        crate::tracker::host::locked(PolicyKey::RunWriters),
+        Some(RunWriters::EngineOnly.as_str())
+    );
     assert!(
         all.iter()
             .all(|choice| choice.options.contains(&choice.proposed))
