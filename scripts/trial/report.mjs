@@ -52,7 +52,17 @@ const RULES = [
   [/\bacct_[A-Za-z0-9]{6,}/g, "acct_[masked]"],
   [/[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g, "[email]"],
   [/\b[A-Z0-9]{4}-[A-Z0-9]{4,5}\b/g, (code) => (/[A-Z]/.test(code) ? "[masked-code]" : code)],
+  [/(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{24,}={0,2}(?![A-Za-z0-9+/_=-])/g, (run) => encoded(Buffer.from(run, "base64").toString("latin1"), run, true)],
+  [/[^\s"'<>()[\]]*%[0-9A-Fa-f]{2}[^\s"'<>()[\]]*/g, (run) => encoded(run.replace(/\+/g, " ").replace(/%([0-9A-Fa-f]{2})/g, (all, hex) => String.fromCharCode(parseInt(hex, 16))), run, false)],
+  [/^.*(?:\\u[0-9A-Fa-f]{4}|\\["/]).*$/gm, (line) => {
+    const plain = line.replace(/\\u([0-9A-Fa-f]{4})/g, (all, hex) => String.fromCharCode(parseInt(hex, 16))).replace(/\\(["/\\])/g, "$1");
+    const masked = mask(plain);
+    return masked === plain ? line : masked;
+  }],
 ];
+const OPAQUE = /(?<![A-Za-z0-9_-])(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_][A-Za-z0-9_-]{31,}(?![A-Za-z0-9_-])/g;
+const BOX = /[─-╿]+/g;
+const WRAPPED = "•";
 const CSS = `
 @page { size: Letter; margin: 14mm 12mm; }
 :root { --ink: #1d232a; --muted: #5d6873; --line: #d5dbe1; --wash: #f4f6f8; --ok: #1b7f3b; --bad: #b3261e; --warn: #8a6100; --idle: #7d8590; }
@@ -93,13 +103,19 @@ function fail(message) {
 
 /**
  * Masks secrets in one text: API keys, sk-ant-/sk- keys, Bearer values, OAuth and session tokens,
- * device codes, cookies, emails and account ids. Input: any value, read as a string.
- * Output: the text with each secret replaced by a [masked] marker; masking twice changes nothing.
+ * device codes, cookies, emails and account ids, also inside base64, URL-encoded and JSON-escaped forms.
+ * Input: any value, read as a string. Output: the text with each secret replaced by a [masked] marker;
+ * masking twice changes nothing.
  */
 export function mask(value) {
   let out = String(value ?? "");
   for (const [pattern, replacement] of RULES) out = out.replace(pattern, replacement);
   return out;
+}
+
+function encoded(decoded, run, printable) {
+  if (printable && !/^[\t\n\r\x20-\x7e]+$/.test(decoded)) return run;
+  return mask(decoded) === decoded ? run : "[masked-encoded]";
 }
 
 function escape(value) {
@@ -110,18 +126,36 @@ function decode(value) {
   return value.replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&amp;/g, "&");
 }
 
+function entities(value) {
+  const named = { lt: "<", gt: ">", quot: '"', apos: "'", amp: "&" };
+  return value.replace(/&(?:#(\d{1,7})|#[xX]([0-9A-Fa-f]{1,6})|(lt|gt|quot|apos|amp));/g, (all, decimal, hex, name) => {
+    if (name) return named[name];
+    const point = decimal ? Number(decimal) : parseInt(hex, 16);
+    return point <= 0x10ffff ? String.fromCodePoint(point) : all;
+  });
+}
+
+function svgViews(svg) {
+  const bare = svg.replace(/data:[\w+./-]+;base64,[A-Za-z0-9+/=\s]*/g, "data:");
+  return [entities(bare), entities(bare.replace(/<\/text\s*>/gi, "\n").replace(/<[^>]*>/g, ""))];
+}
+
 function text(value) {
   return escape(mask(value ?? ""));
 }
 
 /**
- * Checks a finished report: its text, outside embedded images, must hold nothing the mask would change.
- * Input: the report HTML. Output: the same HTML.
- * Throws report_mask_residue when any secret pattern is still in the text.
+ * Checks a finished report: its text and the text of every embedded SVG, entities decoded and split
+ * text runs joined, must hold nothing the mask would change. Raster images are not read.
+ * Input: the report HTML. Output: the same HTML. Throws report_mask_residue on any residue.
  */
 export function assertMasked(html) {
-  const plain = decode(String(html).replace(/data:[\w+./-]+;base64,[A-Za-z0-9+/=]*/g, "data:"));
-  if (mask(plain) !== plain) fail("report_mask_residue");
+  const views = [];
+  const page = String(html).replace(/data:([\w+./-]+);base64,([A-Za-z0-9+/=]*)/g, (all, type, body) => {
+    if (type === "image/svg+xml") views.push(...svgViews(Buffer.from(body, "base64").toString("utf8")));
+    return "data:";
+  });
+  for (const view of [decode(page), ...views]) if (mask(view) !== view) fail("report_mask_residue");
   return html;
 }
 
@@ -181,8 +215,67 @@ function dataUri(type, bytes) {
   return `data:${type};base64,${bytes.toString("base64")}`;
 }
 
-function frameSvg(raw) {
-  const lines = mask(raw).replace(/\s+$/, "").split("\n").slice(0, FRAME_LINES);
+function frameMask(value) {
+  return mask(value).replace(OPAQUE, "[masked]");
+}
+
+function frameChains(lines) {
+  const open = new Map();
+  const chains = [];
+  for (const [row, line] of lines.entries()) {
+    const seen = new Set();
+    let from = 0;
+    for (const cut of [...line.matchAll(BOX), { index: line.length, 0: "" }]) {
+      const segment = line.slice(from, cut.index);
+      const body = segment.trim();
+      if (body) {
+        seen.add(from);
+        if (!open.has(from)) open.set(from, []);
+        open.get(from).push({ row, col: from + segment.length - segment.trimStart().length, body });
+      }
+      from = cut.index + cut[0].length;
+    }
+    for (const [key, chain] of open) {
+      if (seen.has(key)) continue;
+      chains.push(chain);
+      open.delete(key);
+    }
+  }
+  return [...chains, ...open.values()].filter((chain) => chain.length > 1);
+}
+
+function joinedResidue(lines) {
+  return frameChains(lines).some((chain) => {
+    const joined = chain.map((part) => part.body).join("");
+    return frameMask(joined) !== joined;
+  });
+}
+
+/**
+ * Masks one recorded TUI frame. A pane's lines are joined as the TUI wrapped them, so a secret cut across
+ * lines is blotted out where it lies; each line is then masked, long opaque runs included.
+ * Input: the frame text. Output: { lines, changed, residue }; residue means a value survived and the frame must not be shown.
+ */
+export function maskFrame(raw) {
+  const lines = String(raw ?? "").replace(/\s+$/, "").split("\n").slice(0, FRAME_LINES);
+  const cells = lines.map((line) => line.split(""));
+  for (const chain of frameChains(lines)) {
+    const joined = chain.map((part) => part.body).join("");
+    const at = chain.flatMap((part) => Array.from({ length: part.body.length }, (unit, index) => [part.row, part.col + index]));
+    for (const pattern of [...RULES.map(([rule]) => rule), OPAQUE]) {
+      for (const match of joined.matchAll(pattern)) {
+        const end = match.index + match[0].length - 1;
+        if (!match[0] || at[match.index][0] === at[end][0] || frameMask(match[0]) === match[0]) continue;
+        for (let index = match.index; index <= end; index += 1) cells[at[index][0]][at[index][1]] = WRAPPED;
+      }
+    }
+  }
+  const masked = cells.map((row) => frameMask(row.join("")));
+  const residue = masked.some((line) => frameMask(line) !== line) || joinedResidue(masked);
+  return { lines: masked, changed: masked.join("\n") !== lines.join("\n"), residue };
+}
+
+function frameSvg(lines) {
   const columns = Math.max(40, ...lines.map((line) => [...line].length));
   const width = Math.ceil(16 + columns * 7.9);
   const height = 16 + lines.length * 16;
@@ -207,7 +300,9 @@ async function evidence(root, item, images, trial) {
   const type = IMAGES[extname(path).toLowerCase()];
   if (type && where.bytes > IMAGE_BYTES) return { ...shown, problem: `refused: larger than ${IMAGE_BYTES} bytes` };
   const { bytes, truncated } = await readBounded(where.full, type ? IMAGE_BYTES : TEXT_BYTES);
-  if (type === "image/svg+xml") return { ...shown, image: dataUri(type, Buffer.from(mask(bytes.toString("utf8")))) };
+  if (type === "image/svg+xml" && svgViews(bytes.toString("utf8")).some((view) => mask(view) !== view)) {
+    return { ...shown, problem: "refused: the SVG holds text the report would mask, and SVG markup cannot be masked reliably" };
+  }
   if (type) {
     if (!images.some((image) => image.trial === trial && image.path === path)) {
       images.push({ trial, path, kind, bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex").slice(0, 16), note: "" });
@@ -215,7 +310,11 @@ async function evidence(root, item, images, trial) {
     return { ...shown, image: dataUri(type, bytes) };
   }
   const raw = bytes.toString("utf8");
-  if (kind === "frame") return { ...shown, image: dataUri("image/svg+xml", Buffer.from(frameSvg(raw))), masked: mask(raw) !== raw };
+  if (kind === "frame") {
+    const frame = maskFrame(raw);
+    if (frame.residue) return { ...shown, problem: "refused: a value in this frame survived masking", masked: true };
+    return { ...shown, image: dataUri("image/svg+xml", Buffer.from(frameSvg(frame.lines))), masked: frame.changed };
+  }
   return { ...shown, text: kind === "db" ? pretty(raw) : raw, truncated };
 }
 
@@ -651,7 +750,7 @@ function trialSection(trial, many) {
 
 function imagesSection(images) {
   const rows = images.map((image) => `<tr><td>${text(image.trial)}</td><td><code>${text(image.path)}</code></td><td>${text(image.bytes)}</td><td><code>${text(image.sha256)}</code></td><td>${text(image.note)}</td></tr>`);
-  return `<section class="images"><h2>Images embedded without masking</h2><p>Screenshots and GIFs are pictures, so the report cannot mask them. Look at each one below before this report is shared. TUI frames and SVG images are drawn from masked text and are not listed.</p>${rows.length ? `<table><thead><tr><th>Trial</th><th>Image</th><th>Bytes</th><th>SHA-256</th><th>Note</th></tr></thead><tbody>${rows.join("")}</tbody></table>` : "<p>None.</p>"}</section>`;
+  return `<section class="images"><h2>Images embedded without masking</h2><p>Screenshots and GIFs are pictures, so the report cannot mask them. Look at each one below before this report is shared. Text TUI frames are drawn from masked text and are not listed. SVG files are listed: their text passed the mask check, but an SVG can carry pictures.</p>${rows.length ? `<table><thead><tr><th>Trial</th><th>Image</th><th>Bytes</th><th>SHA-256</th><th>Note</th></tr></thead><tbody>${rows.join("")}</tbody></table>` : "<p>None.</p>"}</section>`;
 }
 
 function page(title, body) {
