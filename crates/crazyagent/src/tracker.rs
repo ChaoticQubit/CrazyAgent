@@ -41,16 +41,19 @@ pub(crate) fn engine_error(error: StoreError) -> EngineError {
     }
 }
 
-/// Migrates trackwright's tables and the engine's tracker tables into `engine.db`, in one
-/// transaction, forward only and idempotent. Input: the engine database, not inside a
-/// transaction. Output: Ok once both are current, or `tracker_unavailable`, or the core's
-/// `store_schema_newer` for a database a newer tracker wrote.
+/// Migrates trackwright's tables and the engine's tracker tables into `engine.db`, then
+/// writes every attached project's effective policy into the core, so a project attached
+/// before a host lock (`run_writers`) takes it; all in one transaction, forward only and
+/// idempotent. Input: the engine database, not inside a transaction. Output: Ok once all
+/// are current, or `tracker_unavailable`, or the core's `store_schema_newer` for a
+/// database a newer tracker wrote.
 #[cfg(unix)]
 pub(crate) fn initialize(connection: &rusqlite::Connection) -> Result<(), EngineError> {
     assert!(connection.is_autocommit());
     let tx = connection.unchecked_transaction().map_err(unavailable)?;
     trackwright_core::schema::migrate(&tx).map_err(engine_error)?;
     tx.execute_batch(SCHEMA).map_err(unavailable)?;
+    settings::sync_attached(&tx, crate::team::now_ms())?;
     tx.commit().map_err(unavailable)
 }
 

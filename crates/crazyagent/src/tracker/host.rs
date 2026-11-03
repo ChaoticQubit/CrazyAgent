@@ -4,11 +4,12 @@ use crate::protocol::ProjectId;
 use rusqlite::{OptionalExtension, Transaction, params};
 use std::io::Read;
 use std::path::Path;
+use trackwright_core::coverage;
 use trackwright_core::host::{
     Authority, CheckView, Evidence, EvidenceState, LinkKind, LinkState, Links, TicketView,
 };
-use trackwright_core::model::{Actor, CheckKind, OpKind, ProjectKey, Refusal, codes};
-use trackwright_core::runs::SourceRef;
+use trackwright_core::model::{Actor, CheckKind, OpKind, PolicyKey, ProjectKey, Refusal, codes};
+use trackwright_core::runs::{RunWriters, SourceRef};
 use trackwright_core::standalone::Standalone;
 
 /// A target that exists in the host's tables but belongs to another project.
@@ -334,10 +335,12 @@ impl Evidence for Host {
     ) -> Result<EvidenceState, Refusal> {
         match check.kind {
             CheckKind::Manual | CheckKind::Ci => Standalone.check(tx, project, check),
-            CheckKind::Test => Ok(EvidenceState {
-                satisfied: false,
-                detail: "test checks wait for test runs".to_owned(),
-            }),
+            CheckKind::Test => Ok(coverage::test_check(tx, self, project, check)?.unwrap_or(
+                EvidenceState {
+                    satisfied: false,
+                    detail: "a test check names a test case".to_owned(),
+                },
+            )),
             CheckKind::Change => {
                 let engine = project_of(tx, project)?;
                 let row: Option<(String, String, bool)> = tx
@@ -489,4 +492,15 @@ impl Authority for Host {
             _ => Ok(()),
         }
     }
+
+    fn policy_locked(&self, setting: PolicyKey) -> Option<&'static str> {
+        locked(setting)
+    }
+}
+
+/// The one value the engine allows for a core policy key: `run_writers` is `engine_only`,
+/// since only the engine's checks record automated runs and the gate counts only those.
+/// Every other key is free. Input: the key. Output: the locked value word, or None.
+pub(crate) fn locked(setting: PolicyKey) -> Option<&'static str> {
+    (setting == PolicyKey::RunWriters).then(|| RunWriters::EngineOnly.as_str())
 }

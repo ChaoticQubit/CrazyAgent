@@ -7,6 +7,7 @@ use crate::engine::owner::failure;
 use crate::landing::{self, ChangeSetId};
 use crate::tracker::{self, Host};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use trackwright_core::coverage;
 use trackwright_core::model::Actor as CoreActor;
 use trackwright_core::runs::{
     self, ENGINE_ACTOR, IntegrityRef, PolicyRef, RunCancel, RunEnd, RunFinish, RunRecord, RunStart,
@@ -103,18 +104,17 @@ pub(crate) fn initialize(connection: &Connection) -> Result<(), CheckRefusal> {
 /// family and version, sandbox and environment digests, network, timeout), its results
 /// parsed from the report or the exit status, its end and verdict by the core's rules
 /// (interrupted for a timeout or cancel), the integrity evidence and the change set's
-/// binding to the run. Finishing the run re-evaluates the tickets whose test checks it
-/// covers in the same transaction, so a rolled-back transaction leaves no run and no
-/// ticket change. Inputs: the transaction, the host, the recording and the time. Output:
-/// the run as stored, or `checks_record_invalid`, `project_not_attached` or a core
-/// refusal's code.
+/// binding to the run. The run ends through `coverage::finish` or `coverage::cancel`,
+/// which re-evaluate the tickets whose test checks it covers through the host in the same
+/// transaction, so a rolled-back transaction leaves no run and no ticket change. Inputs:
+/// the transaction, the host, the recording and the time. Output: the run as stored, or
+/// `checks_record_invalid`, `project_not_attached` or a core refusal's code.
 pub fn store(
     tx: &Transaction<'_>,
     host: &Host,
     recording: &Recording<'_>,
     now_ms: i64,
 ) -> Result<RunView, CheckRefusal> {
-    let _ = host;
     let Recording {
         change_set,
         batch,
@@ -197,27 +197,28 @@ pub fn store(
                 version: view.version,
                 reason,
             };
-            runs::cancel(tx, &engine, &cancel, now_ms)
+            coverage::cancel(tx, host, &engine, &cancel, now_ms)
         }
         Ending::NotStarted(code) => {
             let mut input = finish(RunEnd::NotStarted, None, Some(code));
             input.integrity = None;
-            runs::finish(tx, &engine, &input, now_ms)
+            coverage::finish(tx, host, &engine, &input, now_ms)
         }
         Ending::ReportUnreadable(reason) => {
             let input = finish(RunEnd::ReportUnreadable, execution.exit, Some(reason));
-            runs::finish(tx, &engine, &input, now_ms)
+            coverage::finish(tx, host, &engine, &input, now_ms)
         }
         Ending::BuildFailed => {
             let input = finish(RunEnd::BuildFailed, execution.exit, None);
-            runs::finish(tx, &engine, &input, now_ms)
+            coverage::finish(tx, host, &engine, &input, now_ms)
         }
         Ending::Completed => {
             let input = finish(RunEnd::Completed, execution.exit, None);
-            runs::finish(tx, &engine, &input, now_ms)
+            coverage::finish(tx, host, &engine, &input, now_ms)
         }
     }
-    .map_err(core)?;
+    .map_err(core)?
+    .run;
     assert_ne!(ended.state, RunState::Running);
     assert_eq!(ended.id, view.id);
     let run = row_of(tx, &ended.id)?;
