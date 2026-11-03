@@ -1,6 +1,6 @@
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use serde_json::{Map, Value, json};
-use std::io::{BufRead, ErrorKind, Write};
+use std::io::{BufRead, ErrorKind, Read, Write};
 use trackwright_core::catalog::{OpSpec, catalog, op_schema};
 use trackwright_core::host::Host;
 use trackwright_core::model::{Actor, REQUEST_BYTES_MAX, Refusal, codes};
@@ -101,10 +101,7 @@ enum Line {
 
 fn read_line(input: &mut impl BufRead, line: &mut Vec<u8>) -> std::io::Result<Line> {
     line.clear();
-    let read = input
-        .by_ref()
-        .take(LINE_BYTES_MAX as u64 + 1)
-        .read_until(b'\n', line)?;
+    let read = Read::take(&mut *input, LINE_BYTES_MAX as u64 + 1).read_until(b'\n', line)?;
     assert_eq!(read, line.len());
     assert!(line.len() <= LINE_BYTES_MAX + 1);
     if read == 0 {

@@ -217,15 +217,16 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
 }
 
 /// Queues one run of each check of the change set's current profile that `trigger` names,
-/// holdouts included, as one batch: every such check when `only` is empty, else just the
-/// ones it names. Each agent's or master's request counts against its own
-/// `agent_requests` per hour in the project, and a change set whose head already has a
-/// queued or running job of a check gets no second one. Inputs: the engine connection, the change set, the
-/// trigger, the actor the engine set and the check ids. Output: the batch, or
+/// holdouts included, as one batch: every such check when `only` is empty, else just the ones
+/// it names, where an agent or master may name only checks whose `when` holds the trigger and
+/// the owner any check. Each agent's or master's request counts against its own
+/// `agent_requests` per hour in the project, and a change set whose head already has a queued
+/// or running job of a check gets no second one. Inputs: the engine connection, the change set,
+/// the trigger, the actor the engine set and the check ids. Output: the batch, or
 /// `checks_change_set_unknown`, `checks_change_set_discarded`, `checks_change_set_accepted`,
-/// `checks_no_profile`, `checks_check_unknown`, `checks_nothing_to_run`,
-/// `checks_requests_off`, `checks_rate_limited`, `checks_queue_full` or
-/// `checks_unavailable`.
+/// `checks_no_profile`, `checks_check_unknown`, `checks_not_on_request`,
+/// `checks_nothing_to_run`, `checks_requests_off`, `checks_rate_limited`, `checks_queue_full`
+/// or `checks_unavailable`.
 pub fn submit(
     db: &Connection,
     change_set: &ChangeSetId,
@@ -257,11 +258,25 @@ pub fn submit(
         {
             return Err(failure("checks_check_unknown"));
         }
-        checks
+        let chosen: Vec<&AdmittedCheck> = checks
             .iter()
             .filter(|check| named.contains(check.spec.id.as_str()))
-            .collect()
+            .collect();
+        if actor != Actor::Owner
+            && chosen
+                .iter()
+                .any(|check| !check.spec.when.contains(&trigger))
+        {
+            return Err(failure("checks_not_on_request"));
+        }
+        chosen
     };
+    assert!(
+        actor == Actor::Owner
+            || chosen
+                .iter()
+                .all(|check| check.spec.when.contains(&trigger))
+    );
     let now = now_ms();
     if trigger == Trigger::OnRequest && actor != Actor::Owner {
         let allowed = settings::effective(&tx, &project)?.agent_requests;

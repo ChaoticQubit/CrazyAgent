@@ -36,6 +36,7 @@ const NO_CHANGE_SET: &str = "Not done: you have no change set in this project ye
 const NO_PROFILE: &str = "Not run: this project has no approved check profile. The owner approves one in Project Settings > Checks.";
 const REQUESTS_OFF: &str = "Not run: the owner turned agent check requests off for this project. The owner's own runs and the turn-end checks still run.";
 const UNKNOWN_CHECK: &str = "Not run: name checks of the project's current profile, or leave checks out for every check it runs on request.";
+const NOT_ON_REQUEST: &str = "Not run: a check you named runs only at turn end or before the owner accepts, not on request. Leave checks out to ask for every check you may request, or name only those.";
 const NOTHING_TO_RUN: &str = "Not run: every check you named already waits or runs on your current changes, or the profile runs no check on request. Call checks_results once they finish.";
 const QUEUE_FULL: &str =
     "Not run: the project's check queue is full. Try again once some runs finish.";
@@ -272,6 +273,7 @@ fn run(
                 "checks_requests_off" => refused(REQUESTS_OFF),
                 "checks_no_profile" => refused(NO_PROFILE),
                 "checks_check_unknown" => refused(UNKNOWN_CHECK),
+                "checks_not_on_request" => refused(NOT_ON_REQUEST),
                 "checks_nothing_to_run" => refused(NOTHING_TO_RUN),
                 "checks_queue_full" => refused(QUEUE_FULL),
                 "checks_change_set_discarded"

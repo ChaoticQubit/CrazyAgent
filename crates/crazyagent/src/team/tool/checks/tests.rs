@@ -391,6 +391,75 @@ fn the_seventh_agent_request_in_an_hour_is_refused_at_the_default() {
 }
 
 #[test]
+fn an_agent_cannot_name_a_check_the_profile_does_not_run_on_request() {
+    let team = Team::new();
+    let own = team.change_set(7, &[("seven.txt", "seven\n")]);
+    let mut accept_only = check("e2e", &["true"], "exit_code");
+    accept_only["when"] = json!(["before_accept"]);
+    accept_only["network"] = json!("remotes");
+    let mut turn_only = check("turn", &["true"], "exit_code");
+    turn_only["when"] = json!(["turn_end"]);
+    team.approve(
+        json!([
+            check("unit", &["true"], "exit_code"),
+            accept_only,
+            turn_only
+        ]),
+        json!([]),
+    );
+
+    let answers = team.call(
+        Actor::Agent(7),
+        &[
+            (CHECKS_RUN_TOOL, json!({"checks": ["e2e"]})),
+            (CHECKS_RUN_TOOL, json!({"checks": ["unit", "turn"]})),
+        ],
+    );
+    for (text, error) in &answers {
+        assert!(*error, "{answers:?}");
+        assert!(text.contains("not on request"), "{text}");
+    }
+    assert!(team.jobs(&own).is_empty(), "{:?}", team.jobs(&own));
+    for actor in [Actor::Agent(7), Actor::Master(1)] {
+        let refused = queue::submit(
+            &team.db,
+            &own,
+            Trigger::OnRequest,
+            actor,
+            &["e2e".to_owned()],
+        );
+        assert_eq!(refused.unwrap_err().0, "checks_not_on_request", "{actor:?}");
+    }
+    assert!(team.jobs(&own).is_empty());
+
+    let answers = team.call(Actor::Agent(7), &[(CHECKS_RUN_TOOL, json!({}))]);
+    assert!(!answers[0].1, "{answers:?}");
+    let jobs = team.jobs(&own);
+    assert_eq!(
+        jobs.iter()
+            .map(|job| job.check.as_str())
+            .collect::<Vec<_>>(),
+        ["unit"],
+        "leaving checks out asks only for the on-request ones: {jobs:?}"
+    );
+
+    queue::submit(
+        &team.db,
+        &own,
+        Trigger::OnRequest,
+        Actor::Owner,
+        &["e2e".to_owned()],
+    )
+    .unwrap();
+    let jobs = team.jobs(&own);
+    assert!(
+        jobs.iter()
+            .any(|job| job.check == "e2e" && job.actor == Actor::Owner),
+        "the owner still names any check: {jobs:?}"
+    );
+}
+
+#[test]
 fn checks_results_hides_holdout_detail_from_an_agent() {
     let team = Team::new();
     let own = team.change_set(7, &[("oracle.sh", ORACLE_FAILS)]);

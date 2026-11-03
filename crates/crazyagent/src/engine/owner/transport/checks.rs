@@ -70,6 +70,7 @@ pub const CHECKS_CODES: &[&str] = &[
     "checks_holdouts_full",
     "checks_new_skips",
     "checks_no_profile",
+    "checks_not_on_request",
     "checks_not_run",
     "checks_nothing_to_run",
     "checks_outcome_unknown",
