@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { appendFileSync, existsSync, readFileSync, realpathSync } from "node:fs";
 import { basename, join } from "node:path";
 import { SECRET_SOURCES, mask } from "./trial3-mask.mjs";
+import { teamWait } from "./trial3-team.mjs";
 import { click, says, shot, shown, text, texts, type, until } from "./settings-steps.mjs";
 
 const MODE = process.env.TRIAL3_MODE;
@@ -24,7 +25,7 @@ const RUNNING = ["starting", "idle", "working"];
 const STATE_WORDS = ["Ready to review", "Conflicts with your branch", "Agent is updating", "Accepted", "Discarded", "Landed outside the app"];
 assert(["live", "fixture"].includes(MODE), "TRIAL3_MODE is live or fixture");
 assert(Number.isFinite(TEAM_MS) && TEAM_MS > 0 && Number.isFinite(SETUP_MS) && SETUP_MS > 0, "the trial deadlines are positive");
-const run = { desktop: 0, project: null, leads: [], input: null };
+const run = { desktop: 0, project: null, leads: [], input: null, failed: [], teamBy: null };
 
 /** Quotes text as an XPath string literal. Input: text without a double quote. Output: it quoted. */
 function lit(value) {
@@ -98,7 +99,10 @@ async function step(slug, title, why, action) {
     detail = `${detail}; no screenshot: ${failure?.message ?? failure}`;
   }
   record({ title, why, at, ok, detail, evidence });
-  if (!ok) throw new Error(`${title}: ${mask(detail)}`);
+  if (!ok) {
+    run.failed.push(slug);
+    throw new Error(`${title}: ${mask(detail)}`);
+  }
 }
 
 /** Waits for a condition with a deadline and fails with the last thing it observed.
@@ -132,6 +136,14 @@ async function go(route) {
 function project() {
   assert(run.project, "needs the project id from the add-project step");
   return run.project;
+}
+
+/** The time the next team step may wait, from the one deadline the team steps share; throws
+ * a not-run failure when the project or, live, the prompt failed. Output: the wait in ms. */
+function team() {
+  const next = teamWait({ mode: MODE, failed: run.failed, teamBy: run.teamBy, now: Date.now(), teamMs: TEAM_MS, floorMs: Math.min(UI_MS, TEAM_MS) });
+  run.teamBy = next.teamBy;
+  return next.wait;
 }
 
 /** Opens one tab of the trial project. Input: the tab id. */
@@ -435,24 +447,26 @@ describe(`CrazyAgent trial 3 owner actions on the desktop app (${MODE})`, () => 
 
   it("shows the team tree", () => step("team-tree", "Team tree shows the master, two leads and two sub-agents each",
     "The prompt's team: a native Claude lead with teammates and an app-spawned lead with sub-agents (DEC-104)", async () => {
+      const wait = team();
       await tab("agents");
       let shape = { leads: [] };
       const seen = await waitFor(async () => {
         shape = teamShape(await graph());
         return shape;
-      }, TEAM_MS, "the team tree never showed the trial team");
+      }, wait, "the team tree never showed the trial team");
       run.leads = shape.leads;
       return seen;
     }));
 
   it("answers the agent's question", () => step("question", "Questions panel shows the agent's question; answer it",
     "A For: Me question reaches only the owner (trial 2 check 4); the answer goes back to the asker", async () => {
+      const wait = team();
       await tab("agents");
       const items = "ul[aria-label=\"Open questions\"] li.tg-question";
       await waitFor(async () => {
         const count = (await texts(items)).length;
         return { done: count > 0, seen: `${count} open questions` };
-      }, TEAM_MS, "no agent question reached the Questions panel");
+      }, wait, "no agent question reached the Questions panel");
       const before = (await texts(items)).length;
       const asked = (await texts(`${items} p.pj-pre`))[0] ?? "";
       await click("(//ul[@aria-label=\"Open questions\"]//li[contains(@class, \"tg-question\")])[1]//button[normalize-space(.)=\"Answer\"]");
@@ -464,6 +478,7 @@ describe(`CrazyAgent trial 3 owner actions on the desktop app (${MODE})`, () => 
 
   it("shows the merges in Changes", () => step("changes", "Changes shows the merges",
     "Each lead's merged work shows as a change set that lands on trial3-land (Land on, DEC-095)", async () => {
+      const wait = team();
       await tab("changes");
       const rows = "ul[aria-label=\"Change sets\"] > li";
       return waitFor(async () => {
@@ -471,7 +486,7 @@ describe(`CrazyAgent trial 3 owner actions on the desktop app (${MODE})`, () => 
         const words = STATE_WORDS.concat("no state").map((word) => [word, all.filter((row) => (STATE_WORDS.find((state) => row.includes(state)) ?? "no state") === word).length])
           .filter(([, count]) => count > 0).map(([word, count]) => `${word} x${count}`).join(", ");
         return { done: all.length >= 2 && !all.some((row) => row.includes("Agent is updating")), seen: `${all.length} change sets: ${words || "none"}; leads ${run.leads.join(", ") || "unknown"}` };
-      }, TEAM_MS, "Changes never showed a settled change set for each lead");
+      }, wait, "Changes never showed a settled change set for each lead");
     }));
 
   it("stops every agent", () => step("stop-all", "Stop all",
