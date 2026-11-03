@@ -682,3 +682,86 @@ fn a_caller_cannot_pose_as_the_core_s_own_actor() {
         "the core's own actors still read back from rows and events"
     );
 }
+
+#[test]
+fn the_core_runs_sql_only_through_its_listed_statements() {
+    let allowed = [
+        ("store.rs", "tx.prepare(sql)"),
+        ("store.rs", "tx.execute_batch(\"SAVEPOINTtk_write\")"),
+        ("store.rs", "tx.execute_batch(\"RELEASEtk_write\")"),
+        (
+            "store.rs",
+            "tx.execute_batch(\"ROLLBACKTOtk_write;RELEASEtk_write\")",
+        ),
+        ("schema_sql.rs", "tx.execute_batch(META)"),
+        ("schema_sql.rs", "tx.execute_batch(migration)"),
+    ];
+    let receivers = ["tx", "connection", "transaction", "conn", "db"];
+    let methods = [
+        "execute",
+        "execute_batch",
+        "query_row",
+        "query_row_and_then",
+        "prepare",
+        "prepare_cached",
+        "prepare_with_flags",
+        "pragma_query",
+        "pragma_query_value",
+    ];
+    let mut folders = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+    let mut found: Vec<(String, String)> = Vec::new();
+    let mut files = 0;
+    while let Some(folder) = folders.pop() {
+        for entry in fs::read_dir(&folder).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                folders.push(path);
+                continue;
+            }
+            if path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
+                continue;
+            }
+            files += 1;
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let compact: String = fs::read_to_string(&path)
+                .unwrap()
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            for receiver in receivers {
+                for method in methods {
+                    let call = format!("{receiver}.{method}(");
+                    for (at, _) in compact.match_indices(&call) {
+                        let before = compact[..at].chars().next_back();
+                        if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                            continue;
+                        }
+                        let end = compact[at..]
+                            .find(')')
+                            .map_or(compact.len(), |close| at + close + 1);
+                        found.push((name.clone(), compact[at..end].to_owned()));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        files >= 6,
+        "the scan read the core's sources ({files} files)"
+    );
+    let direct: Vec<&(String, String)> = found
+        .iter()
+        .filter(|(file, call)| !allowed.contains(&(file.as_str(), call.as_str())))
+        .collect();
+    assert!(
+        direct.is_empty(),
+        "SQL outside store::prepare and its STATEMENTS list: {direct:?}"
+    );
+    for (file, call) in allowed {
+        let seen = found
+            .iter()
+            .filter(|(at, text)| at == file && text == call)
+            .count();
+        assert_eq!(seen, 1, "{file}: {call}");
+    }
+}
