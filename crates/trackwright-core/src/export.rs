@@ -247,7 +247,7 @@ pub fn write(
     text: &str,
 ) -> Result<(), StoreError> {
     assert!(text.starts_with(EXPORT_HEADER), "only an export is written");
-    let path = host.resolve(tx, key, actor, OpKind::Export, requested)?;
+    let path = host.resolve_path(tx, key, actor, OpKind::Export, requested)?;
     if instruction_file(&path) {
         return Err(path_refused(
             "an export never takes the name of an agent instruction file",
