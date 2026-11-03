@@ -18,8 +18,8 @@ pub const HELPER_NAME: &str = "crazyagent-win-boundary.exe";
 /// Why a Windows launch is refused when the boundary helper is missing, in plain words.
 pub const APPCONTAINER_MISSING: &str = "Windows agents start through crazyagent-win-boundary.exe next to the engine, which is missing, so no agent starts unconfined";
 
-/// Why a Windows agent limited to its model endpoints is refused, in plain words.
-pub const FIREWALL_RULE_MISSING: &str = "limiting a Windows agent to its model endpoints needs a firewall rule for its AppContainer, which this build does not have, so the agent does not start rather than reach more";
+/// Why a Windows agent whose network is limited to a few ports is refused, in plain words.
+pub const FIREWALL_RULE_MISSING: &str = "limiting a Windows agent's network to a few ports needs a firewall rule for its AppContainer, which this build does not have, so the agent does not start rather than reach more";
 
 /// Why a Seatbelt profile is refused on Windows, in plain words.
 pub const SEATBELT_MISSING: &str =

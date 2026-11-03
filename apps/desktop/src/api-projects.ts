@@ -118,7 +118,8 @@ export interface ContextChunk {
 export type AgentAccess = "sandboxed" | "own_branch" | "full";
 
 /** How far a project's tools-on agents and the plugin check may reach on the network: open is
- * the whole network, https is port 443 only, none is nothing beyond the model. It does not
+ * the whole network, https is port 443 only, none is the model's port alone, on loopback for a
+ * local model, otherwise on any host, not yet the model host alone. It does not
  * widen or narrow the live master, which always reaches the model's port only. */
 export type AgentNetwork = "open" | "https" | "none";
 
