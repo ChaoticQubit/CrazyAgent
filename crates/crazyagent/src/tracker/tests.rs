@@ -5,7 +5,7 @@ use super::host::{
 use super::settings::{CiEvidence, ManualEvidence, Scope, TicketOverride};
 use super::*;
 use crate::landing::{AgentKind, ChangeAgent, ChangeSetId, TurnEnd, TurnOutcome, Workspace};
-use rusqlite::{TransactionBehavior, params};
+use rusqlite::{Connection, TransactionBehavior, params};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
