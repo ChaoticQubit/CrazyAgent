@@ -12,6 +12,7 @@ use crazyagent::instruction_files::{self, Choice, Delivery, State};
 use crazyagent::landing::{
     self, AgentKind, ChangeAgent, ChangeSetId, TurnEnd, TurnOutcome, Workspace,
 };
+use crazyagent::project_setup::SetupAction;
 use crazyagent::protocol::{
     ClientId, Command, Cursor, Outcome, PROTOCOL_VERSION, ProjectId, ProjectSpec, RequestId,
     WireRequest,
@@ -379,11 +380,13 @@ impl Hostile {
         assert_eq!(created, Outcome::Applied);
         let version = trust::view(&case.db, &project()).unwrap().version;
         let lowered = case
-            .apply(Command::SetRepositoryTrust {
-                project_id: project(),
-                version,
-                trust: Trust::Untrusted,
-                confirm_raise: false,
+            .apply(Command::ProjectSetup {
+                action: SetupAction::SetRepositoryTrust {
+                    project_id: project(),
+                    version,
+                    trust: Trust::Untrusted,
+                    confirm_raise: false,
+                },
             })
             .await;
         assert_eq!(lowered, Outcome::Applied, "lowering trust needs no confirm");
@@ -522,16 +525,16 @@ impl Hostile {
 
     /// The Seatbelt profile an agent of this untrusted project runs under, built as the
     /// launch builds it: confined to its worktree, its own home and temp, the engine
-    /// runtime guarded, the repository's agent config hidden and the network the untrusted
-    /// level allows for the given model endpoints. Input: the endpoints. Output: the
-    /// installed profile and the agent home.
-    fn agent_profile(&self, endpoints: &[SandboxRemote]) -> (PathBuf, PathBuf) {
+    /// runtime guarded, the repository's harness files hidden and the network the untrusted
+    /// level gives a tools-on agent whose model endpoint is the Anthropic API on 443.
+    /// Output: the installed profile and the agent home.
+    fn agent_profile(&self) -> (PathBuf, PathBuf) {
         let agent_home = self.root.join("agent-home");
         let agent_tmp = self.root.join("agent-tmp");
         private(&agent_home);
         private(&agent_tmp);
-        let enforcement = Enforcement::for_level(self.trust());
-        let network = trust::agent_network(&enforcement, endpoints);
+        let model = SandboxRemote::for_endpoint("https://api.anthropic.com").unwrap();
+        let network = Enforcement::for_level(self.trust()).agent_network(true, model);
         assert_ne!(
             network,
             SandboxNetwork::Open,
@@ -542,8 +545,10 @@ impl Hostile {
             .confine_to_worktree(&self.workspace.worktree)
             .unwrap()
             .guard_engine(&self.runtime)
+            .unwrap()
+            .hide_repository_config(&self.repo)
             .unwrap();
-        let sandbox = trust::repo_config::confine(sandbox, &self.workspace.worktree).unwrap();
+        assert!(sandbox.hides_repository_config());
         let profile = self.root.join("agent.sb");
         sandbox.install(&profile).unwrap();
         (profile, agent_home)
@@ -1021,7 +1026,7 @@ async fn a_repository_mcp_json_naming_a_local_server_never_starts_it() {
         ("src/lib.rs", Entry::Text("pub fn ordinary() {}\n")),
     ])
     .await;
-    let (profile, home) = case.agent_profile(&[]);
+    let (profile, home) = case.agent_profile();
     let output = confined(
         &profile,
         &case.workspace.worktree,
@@ -1275,7 +1280,7 @@ async fn a_repository_claude_settings_hook_and_skill_never_load_in_an_untrusted_
         ("src/lib.rs", Entry::Text("pub fn ordinary() {}\n")),
     ])
     .await;
-    let (profile, home) = case.agent_profile(&[]);
+    let (profile, home) = case.agent_profile();
     let mut script = String::new();
     for path in hidden.iter().chain(std::iter::once(&"src/lib.rs")) {
         script.push_str(&format!(
@@ -1363,8 +1368,7 @@ async fn a_repository_vscode_task_and_settings_never_run_in_the_untrusted_ide() 
 #[tokio::test]
 async fn an_untrusted_agent_cannot_reach_a_non_model_host() {
     let case = Hostile::new(&[]).await;
-    let model = SandboxRemote::for_endpoint("https://api.anthropic.com").unwrap();
-    let (profile, home) = case.agent_profile(&[model]);
+    let (profile, home) = case.agent_profile();
     let output = confined(
         &profile,
         &case.workspace.worktree,
@@ -1494,7 +1498,7 @@ async fn a_repository_that_commits_a_crazyagent_folder_gives_the_engine_no_state
 #[tokio::test]
 async fn agent_terminal_output_with_osc_52_never_reaches_the_owner_clipboard() {
     let case = Hostile::new(&[]).await;
-    let (profile, home) = case.agent_profile(&[]);
+    let (profile, home) = case.agent_profile();
     let script = "printf '\\033]52;c;VVIzLUNMSVBCT0FSRA==\\007'\n\
                   printf '\\033]8;;https://evil.invalid/\\033\\\\click\\033]8;;\\033\\\\\\n'\n\
                   printf '\\033]0;UR3 TITLE\\007\\033]2;UR3 TITLE\\007'\n\
