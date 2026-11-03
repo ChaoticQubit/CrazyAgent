@@ -140,7 +140,7 @@ fn valid(catalog: &Catalog) -> bool {
     known && versions && sources && keys
 }
 
-fn distinct<'a>(items: impl Iterator<Item = &'a String>) -> bool {
+fn distinct<'a>(mut items: impl Iterator<Item = &'a String>) -> bool {
     let mut seen = BTreeSet::new();
     items.all(|item| seen.insert(item))
 }
