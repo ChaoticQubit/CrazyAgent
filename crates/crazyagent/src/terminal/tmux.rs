@@ -2,8 +2,8 @@ use super::buffer::{Feed, buffer, skipped_marker};
 pub use super::harness_socket;
 use super::{
     AgentId, Host, HostError, INPUT_BYTES_MAX, OWN_SERVER_UNAVAILABLE, PANES_LISTED_MAX, PaneInfo,
-    PaneRef, SCROLLBACK_LINES, SIZE_MAX, SIZE_MIN, TerminalStream, VIEWERS_MAX, end_except,
-    failure, pane_id_valid,
+    PaneRef, SCROLLBACK_LINES, SIZE_MAX, SIZE_MIN, TEAMMATES_SERVER_REPLACED, TerminalStream,
+    VIEWERS_MAX, end_except, failure, pane_id_valid,
 };
 use crate::harnesses::interactive::InteractiveCommand;
 pub use servers::Servers;
@@ -28,6 +28,10 @@ const HOLDER_COMMAND: &str =
 /// may be fish, csh or nushell, none of which can read the holder.
 const HOLDER_SHELL: [&str; 2] = ["/bin/sh", "-c"];
 const SERVER_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+
+/// The pid a native lead's teammates' server first answered with, none until then, shared by
+/// every engine client on that server's socket (PLC c).
+type ServerPin = Arc<Mutex<Option<u32>>>;
 const ENV_PROGRAM: &str = "/usr/bin/env -i";
 /// The program a native-mode lead's own server starts the lead with: it runs the command in
 /// the environment the server hands every pane, the lead's own variables plus the tmux
@@ -80,6 +84,7 @@ pub struct Tmux {
     socket: PathBuf,
     confined: Option<PathBuf>,
     starts_in: Option<PathBuf>,
+    pin: Option<ServerPin>,
     control: Mutex<Option<Arc<Control>>>,
     spawning: Mutex<()>,
 }
@@ -141,6 +146,7 @@ impl Tmux {
             socket: folder.join(SOCKET),
             confined: None,
             starts_in: None,
+            pin: None,
             control: Mutex::new(None),
             spawning: Mutex::new(()),
         }
@@ -166,6 +172,7 @@ impl Tmux {
             socket: socket.to_path_buf(),
             confined: Some(profile.to_path_buf()),
             starts_in: None,
+            pin: None,
             control: Mutex::new(None),
             spawning: Mutex::new(()),
         })
@@ -175,20 +182,23 @@ impl Tmux {
     /// [`super::teammates_socket`], rv-audit S1 F1): the server starts inside the teammates'
     /// profile, which cannot reach its socket, and each engine client connects inside the
     /// lead's profile and never starts a server, so no server runs in the lead's profile with
-    /// teammate panes. Nothing starts until the first call. Takes the tmux program, the
-    /// socket, the lead's installed profile and the teammates'. Returns the host, or
+    /// teammate panes. Each client it connects checks the server's pid against `pin`.
+    /// Nothing starts until the first call. Takes the tmux program, the socket, the lead's
+    /// installed profile, the teammates' and the socket's pin. Returns the host, or
     /// `terminal_folder_unsafe` for a socket path with no folder.
-    pub fn teammates(
+    fn teammates(
         executable: Option<PathBuf>,
         socket: &Path,
         profile: &Path,
         server_profile: &Path,
+        pin: ServerPin,
     ) -> Result<Self, HostError> {
         if !server_profile.is_absolute() || server_profile == profile {
             return Err(failure("terminal_folder_unsafe"));
         }
         Ok(Self {
             starts_in: Some(server_profile.to_path_buf()),
+            pin: Some(pin),
             ..Self::confined(executable, socket, profile)?
         })
     }
@@ -458,6 +468,12 @@ impl Tmux {
             return Err(failure("terminal_tmux_unsupported"));
         };
         control.capture = capture;
+        if let Some(pin) = &self.pin
+            && let Err(refused) = pinned(&control, pin)
+        {
+            control.stop();
+            return Err(refused);
+        }
         for option in [
             format!("set-option -g default-terminal {TERMINAL_TYPE}"),
             "set-option -gw allow-rename off".into(),
@@ -694,6 +710,29 @@ fn variable_names(lines: &[Vec<u8>]) -> Vec<String> {
         .filter_map(|line| line.split_once('=').map(|(name, _)| name.to_owned()))
         .filter(|name| !name.is_empty())
         .collect()
+}
+
+/// Pins a teammates' server to the pid it first answered with (PLC c): a server under
+/// another pid at the same socket, such as one a process bound there after the teammates'
+/// server ended, is refused, so no listing or input of its is taken for the lead's team.
+/// Takes the new control and the socket's pin. Returns Ok, `terminal_command_failed` for an
+/// unreadable pid, or `terminal_teammates_server_replaced`.
+fn pinned(control: &Control, pin: &Mutex<Option<u32>>) -> Result<(), HostError> {
+    let lines = control.ask(&format!("display-message -p '#{{pid}}{FORMAT_END}'"))?;
+    let pid = lines
+        .first()
+        .and_then(|line| std::str::from_utf8(line).ok())
+        .and_then(|text| text.trim().parse::<u32>().ok())
+        .filter(|pid| *pid > 0)
+        .ok_or_else(|| failure("terminal_command_failed"))?;
+    let mut kept = pin.lock().map_err(|_| failure("terminal_unavailable"))?;
+    match *kept {
+        None => *kept = Some(pid),
+        Some(first) if first != pid => return Err(failure(TEAMMATES_SERVER_REPLACED)),
+        Some(_) => {}
+    }
+    assert_eq!(*kept, Some(pid));
+    Ok(())
 }
 
 impl Drop for Control {

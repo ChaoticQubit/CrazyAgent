@@ -3,7 +3,7 @@ use super::super::{
     AgentId, Host, HostError, OWN_SERVER_UNAVAILABLE, PANES_LISTED_MAX, PaneInfo, PaneRef,
     TEAMMATES_SERVER_ENDED, TerminalStream, failure,
 };
-use super::{Tmux, harness_socket, user};
+use super::{ServerPin, Tmux, harness_socket, user};
 use crate::harnesses::interactive::InteractiveCommand;
 use std::collections::BTreeMap;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
@@ -34,6 +34,7 @@ pub struct Servers {
     leads: Mutex<BTreeMap<AgentId, Arc<Tmux>>>,
     mates: Mutex<BTreeMap<AgentId, Arc<Tmux>>>,
     members: Mutex<BTreeMap<AgentId, AgentId>>,
+    pins: Mutex<BTreeMap<AgentId, (PathBuf, ServerPin)>>,
 }
 
 /// Whether a lead's own socket is a live socket of this user, read without following a link.
@@ -115,6 +116,7 @@ impl Servers {
             leads: Mutex::new(BTreeMap::new()),
             mates: Mutex::new(BTreeMap::new()),
             members: Mutex::new(BTreeMap::new()),
+            pins: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -185,10 +187,41 @@ impl Servers {
             socket,
             &profile_of(&self.root, lead)?,
             &teammates_profile_of(&self.root, lead)?,
+            self.pin(lead, socket)?,
         )?);
         mates.insert(lead.clone(), server.clone());
         assert!(mates.len() <= LEADS_KEPT_MAX);
         Ok(server)
+    }
+
+    /// The pin a native lead's teammates' server pid is kept in for the socket its latest
+    /// start named (PLC c): one per socket while the engine runs, kept across the clients it
+    /// opens and drops there, so a server under another pid is refused even after a client
+    /// was dropped while none listened; a new socket gets a new pin. Takes the lead and the
+    /// socket. Returns the pin, or `terminal_unavailable` when too many are kept.
+    fn pin(&self, lead: &AgentId, socket: &Path) -> Result<ServerPin, HostError> {
+        let mut pins = self
+            .pins
+            .lock()
+            .map_err(|_| failure("terminal_unavailable"))?;
+        if let Some((kept, pin)) = pins.get(lead)
+            && kept == socket
+        {
+            return Ok(pin.clone());
+        }
+        pins.remove(lead);
+        if pins.len() >= LEADS_KEPT_MAX {
+            pins.retain(|known, _| {
+                harness_socket(&self.root, known).is_ok_and(|socket| listening(&socket))
+            });
+            if pins.len() >= LEADS_KEPT_MAX {
+                return Err(failure("terminal_unavailable"));
+            }
+        }
+        let pin = ServerPin::default();
+        pins.insert(lead.clone(), (socket.to_path_buf(), pin.clone()));
+        assert!(pins.len() <= LEADS_KEPT_MAX);
+        Ok(pin)
     }
 
     /// A native lead's teammates' server when one accepts connections at the socket its
@@ -233,6 +266,9 @@ impl Servers {
         }
         if let Ok(mut members) = self.members.lock() {
             members.retain(|_, known| known != lead);
+        }
+        if let Ok(mut pins) = self.pins.lock() {
+            pins.remove(lead);
         }
     }
 

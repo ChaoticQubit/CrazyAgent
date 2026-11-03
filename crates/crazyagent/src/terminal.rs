@@ -342,6 +342,10 @@ pub const OWN_SERVER_UNAVAILABLE: &str = "terminal_own_server_unavailable";
 /// server that no longer accepts connections; its pane ids are never read on another server.
 pub const TEAMMATES_SERVER_ENDED: &str = "terminal_teammates_server_ended";
 
+/// The refusal for a native lead's teammates' socket answered by a server under another pid
+/// than the one the engine first reached there (PLC c).
+pub const TEAMMATES_SERVER_REPLACED: &str = "terminal_teammates_server_replaced";
+
 /// A host that starts each agent through `Host::spawn_own_server`, in a tmux server of its
 /// own inside the agent's sandbox; every other call goes to the host unchanged.
 struct OwnServer(Arc<dyn Host>);
