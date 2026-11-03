@@ -249,6 +249,13 @@ struct StandIn {
 /// Starts `script` as a stand-in Claude Code in a pane named `name` of a fresh tmux server,
 /// under the sandbox profile text `profile_text`. Output: the running stand-in.
 fn stand_in(script: &str, name: &str, profile_text: &str) -> StandIn {
+    stand_in_at(script, name, Some(profile_text))
+}
+
+/// Starts `script` as a stand-in Claude Code in a pane named `name` of a fresh tmux server,
+/// under the sandbox profile text `profile_text`, or at Full access (unconfined, no
+/// profile) for none. Output: the running stand-in.
+fn stand_in_at(script: &str, name: &str, profile_text: Option<&str>) -> StandIn {
     let root = tempfile::Builder::new()
         .prefix("ca-pane-")
         .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -271,8 +278,11 @@ fn stand_in(script: &str, name: &str, profile_text: &str) -> StandIn {
     let executable = bin.join("claude");
     std::fs::write(&executable, script).unwrap();
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let profile = root_path.join("agent.sb");
-    std::fs::write(&profile, profile_text).unwrap();
+    let profile = profile_text.map(|text| {
+        let profile = root_path.join("agent.sb");
+        std::fs::write(&profile, text).unwrap();
+        profile
+    });
     let request = LaunchRequest {
         harness: "claude-code".into(),
         executable,
@@ -284,8 +294,8 @@ fn stand_in(script: &str, name: &str, profile_text: &str) -> StandIn {
         },
         model: None,
         tools: true,
-        sandbox_profile: Some(profile),
-        unconfined: false,
+        unconfined: profile.is_none(),
+        sandbox_profile: profile,
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -576,4 +586,119 @@ fn stopping_a_full_access_pane_names_what_it_left_running() {
         report.ends_with("Its account stays held until they end or you sign it out"),
         "{report}"
     );
+}
+
+/// The longest a pane's keeper is given to end its sandbox before a stop counts as
+/// uncertain; a pane with no keeper never waits for it.
+const KEEPER_WAIT: Duration = Duration::from_secs(6);
+
+/// A stand-in that stays the pane's first process while its reader runs, and says so once
+/// it is ready.
+const FIRST_PROCESS_STAND_IN: &str = "#!/bin/sh\n/bin/stty raw -echo\nprintf '\\033[?2004hstand-in ready\\n'\n: > \"$HOME/ready\"\n/bin/cat > \"$HOME/typed\"\n";
+
+/// The same stand-in ignoring hangup and terminate, which its reader inherits.
+const DEAF_STAND_IN: &str = "#!/bin/sh\ntrap '' HUP TERM\n/bin/stty raw -echo\nprintf '\\033[?2004hstand-in ready\\n'\n: > \"$HOME/ready\"\n/bin/cat > \"$HOME/typed\"\n";
+
+/// A stand-in that records its parent and whether it may signal it, then reads its input.
+const PARENT_STAND_IN: &str = "#!/bin/sh\nif kill -0 \"$PPID\" 2>/dev/null; then may=open; else may=confined; fi\necho \"$PPID $may\" > \"$HOME/parent.new\"\n/bin/mv \"$HOME/parent.new\" \"$HOME/parent\"\n/bin/stty raw -echo\nprintf '\\033[?2004hstand-in ready\\n'\nexec /bin/cat > \"$HOME/typed\"\n";
+
+/// The command line `ps` shows for one process. Input: the pid. Output: the line.
+fn command_of(pid: Pid) -> String {
+    let listed = crazyagent::spawn_gate::output(
+        Command::new("/bin/ps")
+            .args(["-o", "command=", "-p"])
+            .arg(pid.as_raw_nonzero().get().to_string()),
+    )
+    .unwrap();
+    assert!(listed.status.success(), "ps lists the pane's first process");
+    String::from_utf8_lossy(&listed.stdout).trim().to_owned()
+}
+
+/// Waits for a stand-in's ready mark in its home. Takes the stand-in.
+fn ready(pane: &StandIn) {
+    assert!(
+        within(Duration::from_secs(15), || pane.home.join("ready").exists()),
+        "the stand-in never became ready"
+    );
+}
+
+/// fix/pane-keeper-unconfined@76d15a92: a Full access (unconfined) pane starts with its
+/// harness argv as before build 19, with no keeper and no `launch_sandbox_required`: the
+/// pane's first process is the harness itself, and the stop is clean without the keeper's
+/// terminate wait.
+#[test]
+fn a_full_access_pane_runs_its_harness_as_its_first_process_and_stops_without_a_keeper() {
+    let pane = stand_in_at(FIRST_PROCESS_STAND_IN, "stand-in-8", None);
+    ready(&pane);
+    let group = Pid::from_raw(i32::try_from(pane.session.process_group()).unwrap()).unwrap();
+    let first = command_of(group);
+    let harness = pane.root.join("bin/claude");
+    assert!(
+        first.contains(harness.to_str().unwrap()),
+        "the harness is the pane's first process: {first}"
+    );
+    assert!(
+        !first.starts_with(crazyagent::sandbox::KEEPER[0]),
+        "no keeper runs first: {first}"
+    );
+
+    let stopping = Instant::now();
+    assert_eq!(pane.session.stop().unwrap(), None);
+    assert!(
+        stopping.elapsed() < KEEPER_WAIT,
+        "the stop took {:?}",
+        stopping.elapsed()
+    );
+    assert!(!pane.host.alive().unwrap().contains(&pane.agent));
+    assert!(test_kill_process_group(group).is_err());
+}
+
+/// fix/pane-keeper-unconfined@76d15a92: a Full access harness that ignores terminate still
+/// stops: the window and group kills end it, with no keeper wait and no false Uncertain.
+#[test]
+fn a_full_access_harness_that_ignores_terminate_stops_clean_without_the_keeper_wait() {
+    let pane = stand_in_at(DEAF_STAND_IN, "stand-in-9", None);
+    ready(&pane);
+    let group = Pid::from_raw(i32::try_from(pane.session.process_group()).unwrap()).unwrap();
+
+    let stopping = Instant::now();
+    let stopped = pane.session.stop();
+    let took = stopping.elapsed();
+    assert!(
+        matches!(stopped, Ok(None)),
+        "the stop of a Full access pane that ignores terminate was {stopped:?}"
+    );
+    assert!(took < KEEPER_WAIT, "the stop took {took:?}");
+    assert!(!pane.host.alive().unwrap().contains(&pane.agent));
+    assert!(test_kill_process_group(group).is_err());
+}
+
+/// fix/pane-keeper-unconfined@76d15a92: a Sandboxed pane still starts as `KEEPER --
+/// sandbox-exec -f <profile> PANE_SHIM -- <harness>`: its first process is the keeper, and
+/// the harness it runs is the keeper's child inside the confining profile, which keeps it
+/// from signalling the keeper.
+#[test]
+fn a_sandboxed_pane_runs_its_harness_under_the_keeper_inside_the_profile() {
+    let pane = stand_in(PARENT_STAND_IN, "stand-in-10", CONFINED);
+    let written = pane.home.join("parent");
+    assert!(
+        within(Duration::from_secs(15), || written.exists()),
+        "the stand-in never wrote its parent"
+    );
+    let group = Pid::from_raw(i32::try_from(pane.session.process_group()).unwrap()).unwrap();
+    let first = command_of(group);
+    let keeper = crazyagent::sandbox::KEEPER[..4].join(" ");
+    assert!(
+        first.starts_with(&keeper),
+        "the keeper is the pane's first process: {first}"
+    );
+    let parent = std::fs::read_to_string(&written).unwrap();
+    assert_eq!(
+        parent.trim(),
+        format!("{} confined", group.as_raw_nonzero().get()),
+        "the harness runs under the keeper and sandbox-exec's profile"
+    );
+
+    assert_eq!(pane.session.stop().unwrap(), None);
+    assert!(!pane.host.alive().unwrap().contains(&pane.agent));
 }
