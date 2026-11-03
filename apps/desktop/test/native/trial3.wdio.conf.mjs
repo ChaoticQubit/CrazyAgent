@@ -6,7 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { setTimeout as pause } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { SevereServiceError } from "webdriverio";
-import { closedPort, start, stop } from "./e2e-harness.mjs";
+import { closedPort, start, stop, value } from "./e2e-harness.mjs";
 
 process.umask(0o077);
 const mode = process.env.TRIAL3_MODE;
@@ -162,8 +162,24 @@ async function seedTeam() {
   return { project, leads: leads.map(({ lead }) => lead), sets, question };
 }
 
+/** Gives the fixture engine what the owner's profile already holds, a saved profile and the
+ * projects folder, through the desktop bridge's own commands, so the app opens on Home as it
+ * does on the owner's profile. Input: the engine folder and the environment of its children. */
+async function onboardOwner(runtime, env) {
+  const { child, match } = await start(process.env.TRIAL3_BRIDGE, [join(runtime, "engine.sock")], env, join(fixture, "logs"), "bridge", /^ready (\d+) ([0-9a-f]{64})$/m);
+  try {
+    const bridge = { port: Number(match[1]), token: match[2] };
+    assert.equal((await value(bridge, "desktop_connect")).connected, true, "the bridge connects to the fixture engine");
+    assert.equal((await value(bridge, "desktop_save_owner_profile", { profile: { name: "Trial Owner" }, generation: 1 })).outcome, "applied", "the fixture owner has a profile");
+    assert.equal((await value(bridge, "desktop_set_projects_home", { path: join(fixture, "home", "Projects"), generation: 2 })).outcome, "applied", "the fixture owner has a projects folder");
+  } finally {
+    await stop(child);
+  }
+}
+
 /** Builds the fixture: its folders, the seeded project, settings, the stand-in harness and a
- * prompt with the project placeholder, then starts the engine and the team seeder. */
+ * prompt with the project placeholder, then starts the engine, onboards the owner and starts
+ * the team seeder. */
 async function prepareFixture() {
   try {
     mkdirSync(fixture, { mode: 0o700 });
@@ -178,9 +194,11 @@ async function prepareFixture() {
     writeFileSync(process.env.TRIAL_PROMPT, "Fixture trial prompt for {{PROJECT}}.\nTwo leads, two sub-agents each, one question for the owner.\n");
   }
   const runtime = join(fixture, "engine");
+  const env = { PATH: process.env.PATH, HOME: join(fixture, "home"), TMPDIR: join(fixture, "tmp"), LANG: "en_US.UTF-8" };
   ({ child: engine } = await start(process.env.TRIAL3_ENGINE,
     ["engine", runtime, join(runtime, "global.toml"), join(runtime, "project.toml"), "engine.sock", "--writable-settings", "--codex-executable", standInHarness(fixture)],
-    { PATH: process.env.PATH, HOME: join(fixture, "home"), TMPDIR: join(fixture, "tmp"), LANG: "en_US.UTF-8" }, join(fixture, "logs"), "engine", /^ready$/m));
+    env, join(fixture, "logs"), "engine", /^ready$/m));
+  await onboardOwner(runtime, env);
   seeding = seedTeam().then(
     (seeded) => writeFileSync(join(fixture, "logs", "seeded.json"), `${JSON.stringify(seeded, null, 2)}\n`),
     (failure) => writeFileSync(join(fixture, "logs", "seeded.json"), `${JSON.stringify({ failed: String(failure.stack ?? failure) }, null, 2)}\n`));

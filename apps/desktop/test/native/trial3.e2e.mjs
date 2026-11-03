@@ -172,8 +172,10 @@ async function paste(selector, value) {
 }
 
 /** Picks one option of a segmented control and checks it reads as chosen after the tab is
- * opened again. Inputs: the tab, the control's label and the option. Output: what was done. */
+ * opened again. Inputs: the tab it is on, the control's label and the option. Output: what
+ * was done. */
 async function choose(where, group, option) {
+  await tab(where);
   await until(() => shown(segment(group, option)), UI_MS, `${group} was never shown`);
   const was = await $(segment(group, option)).getAttribute("aria-checked") === "true";
   if (!was) await click(segment(group, option));
@@ -221,22 +223,6 @@ function teamShape({ nodes, cards }) {
   return { done, seen, leads: native && spawned ? [native.lead.label, spawned.lead.label] : [] };
 }
 
-/** Goes through first run on the fixture's empty profile: saves a profile, keeps the
- * suggested projects folder and skips tools and accounts. */
-async function firstRun() {
-  await type("#profile-name", "Trial Owner");
-  await type("#profile-role", "Founder");
-  await type("#profile-bio", "Runs the trial 3 offline proof.");
-  await click("button=Save and continue");
-  await until(() => says("h1", "Choose your projects folder"), UI_MS, "the projects folder step did not open");
-  await click("button=Continue");
-  await until(() => says("h1", "Set up tools"), UI_MS, "the tools step did not open");
-  await until(async () => await shown("button=Skip for now") || await shown("button=Continue"), UI_MS, "the tools step offered no way on");
-  await click(await shown("button=Skip for now") ? "button=Skip for now" : "button=Continue");
-  await until(() => says("h1", "Add an account"), UI_MS, "the accounts step did not open");
-  await click("button=Skip for now");
-}
-
 /** Finishes the setup page: waits for the mapping agent's draft or its failure, fills a
  * missing name and confirms. Output: the setup line the page showed. */
 async function finishSetup() {
@@ -276,11 +262,8 @@ describe(`CrazyAgent trial 3 owner actions on the desktop app (${MODE})`, () => 
   it("opens the app on Home", () => step("open-app", "Open the app on Home",
     "DEC-112: every owner action of trial 3 runs in the real desktop app, starting from Home", async () => {
       await until(async () => await shown("#profile-name") || await shown("section.in-found"), 120000, "the app showed neither first run nor Home");
-      if (!(await shown("#profile-name"))) return "Home is shown with the projects folder";
-      if (MODE === "live") throw new Error("first run is showing: the app is not on the owner's profile");
-      await firstRun();
-      await until(() => shown("section.in-found"), UI_MS, "Home did not open after first run");
-      return "fixture only: first run saved a profile, kept the projects folder and skipped tools and accounts; Home is shown";
+      if (await shown("#profile-name")) throw new Error("first run is showing: the app is not on an onboarded owner profile");
+      return "Home is shown with the projects folder";
     }));
 
   it("adds the scratch project", () => step("add-project", `Add the scratch project ${NAME}`,
