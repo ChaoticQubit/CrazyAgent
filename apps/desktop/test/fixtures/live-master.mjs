@@ -40,14 +40,23 @@ function page() {
   return document.getElementById("panel");
 }
 
-function data(master, on, team = undefined) {
+/** Builds one ready harness catalog entry. Inputs: the id, the name and its aliases.
+ * Output: the entry as the engine lists it. */
+const entry = (id, name, aliases = []) => ({ id, name, status: { kind: "ready" }, status_label: "Ready", executable: null, headless: "", tools: { kind: "switchable" },
+  model_selection: false, account_kinds: [], team: { kind: "available" }, aliases });
+
+/** The engine's harness catalog as the project page reads it: Claude Code answers to its
+ * alias "claude", as plans saved by older builds store it. */
+const CATALOG = [entry("codex", "Codex"), entry("claude-code", "Claude Code", ["claude"]), entry("rcli", "RCLI")];
+
+function data(master, on, team = undefined, catalog = undefined) {
   const setup = master === undefined ? undefined : {
     kind: "ok",
     value: { project_id: "alpha", name: "Alpha", about: "", tech_stack: [], platforms: [], research: [], pool: null, documents: [], folder: "/tmp/alpha", created_ms: 0, revision: 1,
       team: { master, master_tools: true, sub_harnesses: [] } },
   };
   return {
-    id: "alpha", name: "Alpha", setup, research: undefined, context: undefined, pools: undefined, harnesses: undefined,
+    id: "alpha", name: "Alpha", setup, research: undefined, context: undefined, pools: undefined, harnesses: catalog === undefined ? undefined : { kind: "ok", value: catalog },
     assigned: null, now: 0, navigate: () => {}, notify: () => {}, reload: () => {}, reloadPools: () => {},
     team: team !== undefined ? { result: team, at: 0 } : on === undefined ? { result: undefined, at: 0 } : { result: { kind: "ok", value: status(on) }, at: 1 },
     reloadTeam: () => { reloads += 1; },
@@ -62,11 +71,12 @@ const node = { id: "team-1", kind: "master", parent: null, label: "Master", harn
 
 /** Mounts the project's master area for a team plan whose master is the given harness, or
  * whose setup is still loading when it is undefined, with the engine's live switch read as
- * `on` (true, false or null for never set), or the team not read yet when it is undefined. */
-export function mountArea(master, on) {
+ * `on` (true, false or null for never set), or the team not read yet when it is undefined,
+ * and the harness catalog read unless `catalog` is false. */
+export function mountArea(master, on, catalog = true) {
   const panel = page();
   root = createRoot(panel);
-  flushSync(() => root.render(createElement(MasterArea, { data: data(master, on) })));
+  flushSync(() => root.render(createElement(MasterArea, { data: data(master, on, undefined, catalog ? CATALOG : undefined) })));
 }
 
 /** Mounts the live master view in one of its states: running with the master's terminal,
