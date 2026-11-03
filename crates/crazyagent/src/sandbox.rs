@@ -84,6 +84,9 @@ const SOCKETS_MAX: usize = 2;
 /// The most exact Unix socket grants one agent holds, of every use together: a native lead's
 /// own tmux server, its caller socket and its teammates' tmux server.
 const SOCKET_GRANTS_MAX: usize = 4;
+/// The writes that move, remove, replace or re-permission a folder's own node while its
+/// contents stay writable: the scratch root's and a native lead's home for its teammates.
+const FIXED_WRITES: &str = "file-write-unlink file-write-create file-write-mode file-write-acl";
 /// The longest Unix socket path macOS binds, `sun_path` less its closing NUL.
 const SOCKET_PATH_BYTES_MAX: usize = 103;
 const TOOL_ROOTS_MAX: usize = 24;
@@ -521,7 +524,7 @@ pub fn agent_command<'a>(
 
 /// Network reach of a sandboxed agent: open when the agent's tools are on, except that
 /// it never binds or listens on an [`OWNER_PORTS`] port or one [`ProjectSandbox::keep_ports`]
-/// keeps, otherwise only the listed model endpoints.
+/// keeps, otherwise only the listed remotes, each one port on loopback or on any host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SandboxNetwork {
     Open,
@@ -615,6 +618,8 @@ pub struct ProjectSandbox {
     served: Vec<PathBuf>,
     reached: Vec<PathBuf>,
     shut: Vec<PathBuf>,
+    read_only: Vec<PathBuf>,
+    fixed: Vec<PathBuf>,
 }
 
 /// The one git worktree a confined agent writes in place of the whole project folder,
@@ -670,6 +675,8 @@ impl ProjectSandbox {
             served: Vec::new(),
             reached: Vec::new(),
             shut: Vec::new(),
+            read_only: Vec::new(),
+            fixed: Vec::new(),
         })
     }
 
@@ -1079,8 +1086,13 @@ impl ProjectSandbox {
     /// teammates serve `mates`, only reach `callers` and are shut out of `own`, so no agent
     /// binds, blocks or replaces the caller socket the engine answers on (DEC-111 Q18,
     /// rv-secreview RH-1) and no teammate holds a listener or places a node where the lead
-    /// connects. Inputs: the three sockets and the canonical tmux program. Output: the lead's
-    /// and the teammates' sandboxes, `Invalid`, or `Unavailable` off macOS.
+    /// connects. They read but never write the launch folders the engine installs in the
+    /// lead's home, its hooks, skills and relay plugin, which the lead's Claude Code runs
+    /// (TPH), nor move, replace or re-permission that home itself (TPH r1 F1). Both are shut
+    /// out of the name the engine binds the caller socket at before it moves it over
+    /// `callers`, so neither swaps its own listener in there (rv-secreview RH2R2-1). Inputs:
+    /// the three sockets and the canonical tmux program. Output: the lead's and the
+    /// teammates' sandboxes, `Invalid`, or `Unavailable` off macOS.
     pub fn native_team(
         self,
         own: &Path,
@@ -1088,15 +1100,23 @@ impl ProjectSandbox {
         callers: &Path,
         tmux: &Path,
     ) -> Result<(Self, Self), SandboxError> {
-        let teammates = self
+        let binding = crate::team::caller::binding_path(callers);
+        let mut teammates = self
             .clone()
             .serve_tmux_server(mates, tmux)?
             .reach_unix_socket(callers)?
-            .shut_unix_socket(own)?;
+            .shut_unix_socket(own)?
+            .shut_unix_socket(&binding)?;
+        teammates.read_only = vec![
+            self.agent_home.join(crate::launch_context::STATE),
+            self.agent_home.join(crate::coord::relay::PLUGIN_FOLDER),
+        ];
+        teammates.fixed = vec![self.agent_home.clone()];
         let lead = self
             .allow_tmux_server(own, tmux)?
             .reach_unix_socket(callers)?
-            .reach_unix_socket(mates)?;
+            .reach_unix_socket(mates)?
+            .shut_unix_socket(&binding)?;
         Ok((lead, teammates))
     }
 
@@ -1319,7 +1339,7 @@ impl ProjectSandbox {
         ));
         if let Some(scratch) = &self.scratch {
             text.push_str(&format!(
-                "(deny file-write-unlink file-write-create file-write-mode file-write-acl\n  (literal \"{}\"))\n",
+                "(deny {FIXED_WRITES}\n  (literal \"{}\"))\n",
                 scratch.display()
             ));
         }
@@ -1366,9 +1386,38 @@ impl ProjectSandbox {
                 "(deny file-write*\n  (literal \"{path}\")\n  (literal \"{path}.lock\"))\n"
             ));
         }
+        for folder in &self.read_only {
+            text.push_str(&format!(
+                "(deny file-write* (subpath \"{}\"))\n",
+                folder.display()
+            ));
+        }
+        for folder in &self.fixed {
+            text.push_str(&format!(
+                "(deny {FIXED_WRITES} (literal \"{}\"))\n",
+                folder.display()
+            ));
+        }
         assert_eq!(
             text.matches("unix-socket").count(),
             2 * self.sockets.len() + self.served.len() + self.reached.len()
+        );
+        let last_write_allow = text
+            .rfind("(allow file-write*")
+            .max(text.rfind("(allow file-read* file-write*"));
+        assert!(
+            self.read_only.iter().all(|folder| {
+                text.rfind(&format!(
+                    "(deny file-write* (subpath \"{}\"))",
+                    folder.display()
+                )) > last_write_allow
+            }) && self.fixed.iter().all(|folder| {
+                text.rfind(&format!(
+                    "(deny {FIXED_WRITES} (literal \"{}\"))",
+                    folder.display()
+                )) > last_write_allow
+            }),
+            "a read-only or fixed folder's write deny must follow every write allow, since the last match wins"
         );
         let denied_last = |operations: &str, socket: &PathBuf| {
             text.rfind(&format!(

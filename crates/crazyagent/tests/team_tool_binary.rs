@@ -337,9 +337,14 @@ fn served_in_a_teammate_pane(
     let mut names = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(20);
     let answered = loop {
-        callers.serve(&mut listed, &mut |_| None);
+        callers.serve(&mut listed, &mut |_, _| None);
         for (id, call, digest) in take_calls(&mailbox, CALLS_PER_TICK_MAX) {
-            names.push(digest.as_ref().and_then(|digest| callers.take(&id, digest)));
+            names.push(
+                digest
+                    .as_ref()
+                    .and_then(|digest| callers.take(&id, digest))
+                    .map(|(pane, _)| pane),
+            );
             taken.push(call);
             answer_call(&mailbox, &id, "Taken.", false).unwrap();
         }
@@ -516,7 +521,7 @@ fn the_agent_binary_remembers_and_recalls_under_the_sub_agents_name_and_refuses_
                         pane.map(|pane| vec![(pane.to_owned(), pid)])
                             .unwrap_or_default()
                     },
-                    &mut |_| None,
+                    &mut |_, _| None,
                 );
             }
             crazyagent::team::history::serve_agent_calls(
@@ -530,7 +535,13 @@ fn the_agent_binary_remembers_and_recalls_under_the_sub_agents_name_and_refuses_
                         .as_mut()
                         .zip(digest)
                         .and_then(|(callers, digest)| callers.take(call, digest));
-                    team_caller(connection, None, &project, (sub, &label), named.as_deref())
+                    team_caller(
+                        connection,
+                        None,
+                        &project,
+                        (sub, &label),
+                        named.as_ref().map(|(pane, pid)| (pane.as_str(), *pid)),
+                    )
                 },
                 &mut |_, _, _| None,
             );
