@@ -584,7 +584,9 @@ fn criterion_at(
     Ok(found)
 }
 
-fn criteria_of(tx: &Transaction<'_>, ticket: i64) -> Result<Vec<Criterion>, StoreError> {
+/// A ticket's criteria by position. Inputs: the transaction and the ticket's row id.
+/// Output: the criteria.
+pub(crate) fn criteria_of(tx: &Transaction<'_>, ticket: i64) -> Result<Vec<Criterion>, StoreError> {
     let criteria = store::prepare(tx, CRITERIA_OF_TICKET)?
         .query_map([ticket], store::criterion_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -592,7 +594,9 @@ fn criteria_of(tx: &Transaction<'_>, ticket: i64) -> Result<Vec<Criterion>, Stor
     Ok(criteria)
 }
 
-fn checks_of(tx: &Transaction<'_>, criterion: i64) -> Result<Vec<Check>, StoreError> {
+/// A criterion's checks in the order they were added. Inputs: the transaction and the
+/// criterion's row id. Output: the checks.
+pub(crate) fn checks_of(tx: &Transaction<'_>, criterion: i64) -> Result<Vec<Check>, StoreError> {
     let checks = store::prepare(tx, CHECKS_OF_CRITERION)?
         .query_map([criterion], check_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -617,7 +621,9 @@ fn check_of(
         })
 }
 
-fn latest_of(tx: &Transaction<'_>, check: i64) -> Result<Option<Evidence>, StoreError> {
+/// The latest evidence of one check. Inputs: the transaction and the check's row id.
+/// Output: the latest record, or none.
+pub(crate) fn latest_of(tx: &Transaction<'_>, check: i64) -> Result<Option<Evidence>, StoreError> {
     Ok(store::prepare(tx, EVIDENCE_LATEST)?
         .query_row([check], evidence_row)
         .optional()?)

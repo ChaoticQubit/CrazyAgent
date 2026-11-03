@@ -121,6 +121,16 @@ const STATEMENTS: &[&str] = &[
     crate::policy::POLICY_OF_PROJECT,
     crate::policy::POLICY_INSERT,
     crate::policy::POLICY_UPDATE,
+    crate::export::OPEN_TICKETS_OF_PROJECT,
+    crate::export::CYCLES_OF_PROJECT,
+    crate::export::LINK_TARGETS_OF_TICKET,
+    crate::import::VERSIONS_OF_PROJECT,
+    crate::import::VERSION_BY_ID,
+    crate::import::VERSION_BY_NAME,
+    crate::import::VERSION_INSERT,
+    crate::import::VERSION_UPDATE,
+    crate::import::TICKET_TITLES_OF_PROJECT,
+    crate::import::TICKET_VERSION_SET,
 ];
 
 /// Every SQL statement the core runs outside its migrations. A test prepares each against a
