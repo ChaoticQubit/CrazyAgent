@@ -129,7 +129,7 @@ impl Speaker {
             Self::Master => "master",
             Self::Owner => "owner",
             Self::Agent => "agent",
-            Self::Engine => "engine",
+            Self::Engine => super::graph::ENGINE_PARTY,
         }
     }
 
@@ -251,21 +251,71 @@ pub struct AgentMessages {
     pub settings: MessageSettings,
 }
 
+/// The kept messages table's columns: an entry is said by the master, the owner or the
+/// engine, as a message, an answer or a prompt. Takes nothing. Returns the column list.
+fn message_columns() -> String {
+    let engine = super::graph::ENGINE_PARTY;
+    format!(
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,
+         project TEXT NOT NULL,
+         agent INTEGER NOT NULL,
+         author TEXT NOT NULL CHECK(author IN ('master','owner','{engine}')),
+         kind TEXT NOT NULL CHECK(kind IN ('message','answer','prompt')),
+         text TEXT,
+         created_ms INTEGER NOT NULL"
+    )
+}
+
+/// Rebuilds a kept messages table made before engine notices (B19R3-H1), whose author check
+/// allows only the master and the owner: a new table takes every row with its id and the
+/// id sequence, then replaces the old one, all in one savepoint, so a failure leaves the old
+/// table whole. A table that allows the engine, or none, is left alone. Takes the
+/// connection. Returns unit.
+fn widen_authors(connection: &Connection) -> Result<(), EngineError> {
+    let sql: Option<String> = connection
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE type='table' AND name='team_agent_messages'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    let engine = super::graph::ENGINE_PARTY;
+    let Some(sql) = sql else {
+        return Ok(());
+    };
+    if sql.contains(&format!("'{engine}'")) {
+        return Ok(());
+    }
+    let rebuilt = connection.execute_batch(&format!(
+        "SAVEPOINT widen_authors;
+         CREATE TABLE team_agent_messages_widened ({columns});
+         INSERT INTO team_agent_messages_widened(id,project,agent,author,kind,text,created_ms)
+             SELECT id,project,agent,author,kind,text,created_ms FROM team_agent_messages;
+         DELETE FROM sqlite_sequence WHERE name='team_agent_messages_widened';
+         INSERT INTO sqlite_sequence(name,seq)
+             SELECT 'team_agent_messages_widened',seq FROM sqlite_sequence
+             WHERE name='team_agent_messages';
+         DROP TABLE team_agent_messages;
+         ALTER TABLE team_agent_messages_widened RENAME TO team_agent_messages;
+         RELEASE widen_authors;",
+        columns = message_columns()
+    ));
+    if let Err(failure) = rebuilt {
+        let _ = connection.execute_batch("ROLLBACK TO widen_authors; RELEASE widen_authors;");
+        return Err(error(failure));
+    }
+    Ok(())
+}
+
 /// Creates the kept messages and the settings tables and the indexes that read one agent's
-/// tasks, pinned tasks, events and messages by time. Takes a connection with the team and event tables.
-/// Returns unit.
+/// tasks, pinned tasks, events and messages by time, after widening an older kept messages
+/// table's authors. Takes a connection with the team and event tables. Returns unit.
 pub(super) fn initialize(connection: &Connection) -> Result<(), EngineError> {
+    widen_authors(connection)?;
     connection
-        .execute_batch(
-            "CREATE TABLE IF NOT EXISTS team_agent_messages (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                project TEXT NOT NULL,
-                agent INTEGER NOT NULL,
-                author TEXT NOT NULL CHECK(author IN ('master','owner')),
-                kind TEXT NOT NULL CHECK(kind IN ('message','answer','prompt')),
-                text TEXT,
-                created_ms INTEGER NOT NULL
-            );
+        .execute_batch(&format!(
+            "CREATE TABLE IF NOT EXISTS team_agent_messages ({columns});
             CREATE INDEX IF NOT EXISTS team_agent_messages_agent ON team_agent_messages(project, agent, created_ms);
             CREATE INDEX IF NOT EXISTS team_events_agent ON team_events(project, agent, created_ms);
             CREATE INDEX IF NOT EXISTS team_tasks_agent ON team_tasks(project, agent, created_ms);
@@ -279,7 +329,8 @@ pub(super) fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 owner_items INTEGER NOT NULL,
                 page_size INTEGER NOT NULL
             );",
-        )
+            columns = message_columns()
+        ))
         .map_err(error)
 }
 
@@ -360,9 +411,9 @@ pub(super) fn save_settings(
 
 /// Keeps what the master, the owner or the engine said to a sub-agent once its terminal took
 /// it: the text made plain, or no text for a master's message or answer when the project
-/// keeps none. The project's
-/// oldest kept messages make room first, down to its kept count. Takes the transaction, the
-/// project, the agent, what was said, the text and the time. Returns the row id.
+/// keeps none. The project's oldest kept messages make room first, down to its kept count.
+/// Takes the transaction, the project, the agent, what was said, the text and the time.
+/// Returns the row id.
 pub(super) fn record(
     tx: &Transaction<'_>,
     project: &ProjectId,
