@@ -342,9 +342,6 @@ impl ProjectPage {
         ));
     }
 
-    /// Reads the team graph for the panel beside the master, while this page is on top on
-    /// the Conversation tab: at most one read out at a time, at most one every
-    /// `TEAM_READ_MS`, and a read lost for `TEAM_WAIT_MS` is asked again. Takes the context.
     /// Asks the engine, once per opening, which instruction files wait to be copied into the
     /// project's instructions.md (DEC-106). Input: the context. Output: none; the list arrives
     /// as a process event and shows as a prompt when it isn't empty.
@@ -564,6 +561,9 @@ impl ProjectPage {
         )
     }
 
+    /// Reads the team graph for the panel beside the master, while this page is on top on
+    /// the Conversation tab: at most one read out at a time, at most one every
+    /// `TEAM_READ_MS`, and a read lost for `TEAM_WAIT_MS` is asked again. Takes the context.
     fn ask_team(&mut self, ctx: &mut Ctx) {
         if self.covered || self.screen.tab != Tab::Conversation || ctx.link != Link::Ready {
             return;
