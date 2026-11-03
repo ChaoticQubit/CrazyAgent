@@ -262,7 +262,7 @@ pub fn coverage(tx: &Transaction<'_>, query: &CoverageQuery) -> Result<CoverageP
             ));
         }
     };
-    let number_at = key.as_str().len() + "-T".len() + 1;
+    let number_at = runs::sql_count(key.as_str().len() + "-T".len() + 1)?;
     let (criteria_total, uncovered_total): (u32, u32) = tx.prepare(CRITERIA_COUNTS)?.query_row(
         params![project.id, ticket, release, number_at, key.as_str()],
         |row| Ok((row.get(0)?, row.get(1)?)),
@@ -277,7 +277,7 @@ pub fn coverage(tx: &Transaction<'_>, query: &CoverageQuery) -> Result<CoverageP
                 release,
                 after_ticket,
                 after_position,
-                COVERAGE_PAGE_ROWS + 1
+                runs::sql_count(COVERAGE_PAGE_ROWS + 1)?
             ],
             |row| {
                 Ok(Found {
