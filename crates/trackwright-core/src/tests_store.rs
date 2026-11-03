@@ -11,7 +11,7 @@ use crate::tests_model::{
     sees_protected,
 };
 use crate::text;
-use rusqlite::{CachedStatement, OptionalExtension, Params, Row, Transaction, params};
+use rusqlite::{OptionalExtension, Params, Row, Statement, Transaction, params};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -1745,12 +1745,12 @@ fn record<T: Serialize>(
 fn prepare<'t>(
     tx: &'t Transaction<'_>,
     sql: &'static str,
-) -> rusqlite::Result<CachedStatement<'t>> {
+) -> rusqlite::Result<Statement<'t>> {
     assert!(
         STATEMENTS.contains(&sql),
         "every test model statement is listed"
     );
-    tx.prepare_cached(sql)
+    tx.prepare(sql)
 }
 
 fn count<P: Params>(tx: &Transaction<'_>, sql: &'static str, args: P) -> Result<usize, StoreError> {
