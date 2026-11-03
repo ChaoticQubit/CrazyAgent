@@ -194,9 +194,18 @@ pub(crate) fn claude() -> PathBuf {
     installed("CRAZYAGENT_CLAUDE", "claude")
 }
 
+/// Where a prepared agent's harness app runs: as its worker's child, in a pane on a given
+/// host, or as a native-mode Claude Code lead on the engine's own terminal host at this
+/// engine's root, the project's Claude Code agents set to native teammates.
+enum Placement {
+    Child,
+    Pane(Arc<dyn Host>),
+    NativeLead,
+}
+
 impl ManagedAgent {
     pub(crate) fn new(harness: &'static str, executable: &Path) -> Self {
-        Self::open(harness, executable, None, AgentRole::Sub)
+        Self::open(harness, executable, Placement::Child, AgentRole::Sub)
     }
 
     /// The same agent, or the project's master when `role` says so, with its harness app in
@@ -208,15 +217,30 @@ impl ManagedAgent {
         host: Arc<dyn Host>,
         role: AgentRole,
     ) -> Self {
-        Self::open(harness, executable, Some(host), role)
+        Self::open(harness, executable, Placement::Pane(host), role)
+    }
+
+    /// A Claude Code lead the runtime itself plans as a native-mode lead (DEC-104, TTDL): the
+    /// project's Claude Code agents run native teammates and the terminal host is the
+    /// engine's own, so `prepare` installs the teammates' profile and names their server,
+    /// and starting the lead gives its pane that server's anchor as `TMUX` and `TMUX_PANE`.
+    /// Input: the real Claude Code executable. Output: the prepared lead.
+    pub(crate) fn engine_native_lead(executable: &Path) -> Self {
+        Self::open(
+            "claude-code",
+            executable,
+            Placement::NativeLead,
+            AgentRole::Sub,
+        )
     }
 
     fn open(
         harness: &'static str,
         executable: &Path,
-        pane: Option<Arc<dyn Host>>,
+        placement: Placement,
         role: AgentRole,
     ) -> Self {
+        let native = matches!(placement, Placement::NativeLead);
         let root = tempfile::Builder::new()
             .prefix("ca-dec-090-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -274,6 +298,16 @@ impl ManagedAgent {
                 params![PROJECT, serde_json::to_string(&setup).unwrap()],
             )
             .unwrap();
+        if native {
+            use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
+            set_mode(
+                &connection,
+                &setup.project_id,
+                HarnessKind::ClaudeCode,
+                SubagentMode::Native,
+            )
+            .unwrap();
+        }
         drop(connection);
         let (provider, harness_ref) = match harness {
             "codex" => ("openai", "codex"),
@@ -317,6 +351,17 @@ impl ManagedAgent {
             TeamLimits::default(),
         )
         .unwrap();
+        let pane = match placement {
+            Placement::Child => None,
+            Placement::Pane(host) => Some(host),
+            Placement::NativeLead => Some(crate::terminal::tmux_host(
+                &base,
+                Some(
+                    crate::terminal::tmux::installed(&base)
+                        .expect("BLOCKED: tmux must be installed"),
+                ),
+            )),
+        };
         if let Some(pane) = pane {
             runtime = runtime.with_terminal(pane).unwrap();
         }
@@ -368,6 +413,10 @@ impl ManagedAgent {
                 crate::agent_git::Layout::Linked,
             )
             .unwrap();
+        assert_eq!(
+            plan.native, native,
+            "the runtime plans a native lead exactly when the project runs native teammates"
+        );
         let home = match mode {
             Mode::PerTurn { home, .. } => home,
             Mode::Kept { .. } => panic!("a managed agent keeps no process across turns"),
@@ -661,15 +710,15 @@ impl ManagedAgent {
     /// runtime's first dispatch to a kept session does: the project saves `access`, the
     /// worker starts from the agent's plan at that level, its first turn carries the held
     /// profile and the worker then counts as briefed. Inputs: the profile, the first prompt,
-    /// the turn's time, the saved level and the folder of the lead's terminal host, kept
-    /// until the lead stopped. Output: the running team.
+    /// the turn's time, the saved level and the folder of the lead's terminal host when the
+    /// caller made one, kept until the lead stopped. Output: the running team.
     pub(super) fn into_native_worker(
         mut self,
         profile: NativeProfileUse,
         prompt: &str,
         turn_time: Duration,
         access: AgentAccess,
-        folder: tempfile::TempDir,
+        folder: Option<tempfile::TempDir>,
     ) -> NativeTeam {
         self.make_native();
         crate::sandbox::policy::save(
@@ -773,7 +822,7 @@ pub(super) struct NativeTeam {
     pub(super) home: PathBuf,
     pane: (Arc<dyn Host>, AgentId),
     _root: tempfile::TempDir,
-    _folder: tempfile::TempDir,
+    _folder: Option<tempfile::TempDir>,
 }
 
 impl NativeTeam {

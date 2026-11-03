@@ -61,6 +61,12 @@ impl NativeOwner {
                     .await
                     .map_err(problem)?,
             ),
+            SetupQuery::HiddenPaths { project } => SetupView::HiddenPaths(
+                controller
+                    .project_hidden_paths(project)
+                    .await
+                    .map_err(problem)?,
+            ),
             SetupQuery::AgentPolicy { project } => SetupView::AgentPolicy(
                 controller
                     .project_agent_policy(project)
@@ -198,6 +204,11 @@ impl NativeOwner {
                     SetupAction::SetReadPaths { project_id, paths } => {
                         controller
                             .set_project_read_paths(project_id, paths, generation)
+                            .await
+                    }
+                    SetupAction::SetHiddenPaths { project_id, paths } => {
+                        controller
+                            .set_project_hidden_paths(project_id, paths, generation)
                             .await
                     }
                     SetupAction::SetAgentPolicy { project_id, policy } => {

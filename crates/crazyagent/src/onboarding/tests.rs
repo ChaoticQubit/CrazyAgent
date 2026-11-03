@@ -486,6 +486,13 @@ fn the_graph_leaves_out_the_engine_files_in_the_project() {
     )
     .unwrap();
     std::fs::write(repo.join(".crazyagent/overview.md"), "# Overview\n").unwrap();
+    let secret = repo.join("secret");
+    std::fs::create_dir(&secret).unwrap();
+    std::fs::write(
+        secret.join("vault.py"),
+        "def owner_vault_key():\n    return 1\n",
+    )
+    .unwrap();
     let scratch = tempfile::Builder::new()
         .prefix("ca-state-")
         .tempdir_in("/tmp")
@@ -500,6 +507,7 @@ fn the_graph_leaves_out_the_engine_files_in_the_project() {
         &repo,
         &state,
         "onboard-g-hide",
+        std::slice::from_ref(&secret),
         std::time::Duration::from_secs(300),
         &|| false,
     )
@@ -514,8 +522,13 @@ fn the_graph_leaves_out_the_engine_files_in_the_project() {
             !text.contains(".crazyagent") && !text.contains("crazyagent_probe"),
             "{name}: {text}"
         );
+        assert!(
+            !text.contains("owner_vault_key"),
+            "the hidden owner folder leaked into {name}: {text}"
+        );
     }
     assert!(engine.join("probe.py").is_file());
+    assert!(secret.join("vault.py").is_file());
 }
 
 #[test]
