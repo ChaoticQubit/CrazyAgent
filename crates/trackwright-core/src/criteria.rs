@@ -5,7 +5,7 @@ use crate::model::{
     Criterion, CriterionState, Evidence, EvidenceResult, OpKind, ShortId, TICKETS_PER_PROJECT_MAX,
     Ticket, TicketStatus, codes,
 };
-use crate::ops::{self, Cx, Failure};
+use crate::ops::{self, Candidate, Cx, Failure};
 use crate::policy::{self, Role};
 use crate::store::{self, StoreError, TicketChange};
 use crate::text::{self, CLOSE_REASON_BYTES_MAX, TextField};
@@ -733,6 +733,42 @@ fn criterion_written<H: Host>(cx: &Cx<'_, '_, H>, data: Value) -> Result<ops::Ou
     })
 }
 
+/// Refuses a criterion write unless it carries the version of the criterion this
+/// transaction read, as `ops::fresh` does for a ticket; a position with no criterion is left
+/// to the store's refusal. Inputs: the context, the position and the version sent. Output:
+/// Ok, or `stale_version` naming the current version with `show` next.
+fn criterion_fresh<H: Host>(cx: &Cx<'_, '_, H>, at: u32, version: i64) -> Result<(), Failure> {
+    let ticket = cx.ticket();
+    let criteria = criteria_of(cx.tx, ticket.id)?;
+    assert!(criteria.len() <= CRITERIA_PER_TICKET_MAX);
+    let Some(found) = criteria
+        .into_iter()
+        .find(|criterion| criterion.position == at)
+    else {
+        return Ok(());
+    };
+    if found.version == version {
+        return Ok(());
+    }
+    Err(Failure::new(
+        codes::STALE_VERSION,
+        format!(
+            "criterion {at} of {} is at version {}, not {version}; show it and retry",
+            ticket.short_id, found.version
+        ),
+    )
+    .with_data(json!({
+        "id": ticket.short_id.to_string(),
+        "position": at,
+        "version": found.version,
+    }))
+    .with_next(vec![Candidate::ticket(
+        OpKind::Show,
+        ticket,
+        "read the criterion's current version, then retry",
+    )]))
+}
+
 /// Runs `criterion_add` for dispatch. Input: the context. Output: the ticket's id and the
 /// new criterion.
 pub(crate) fn criterion_add<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Failure> {
@@ -753,6 +789,7 @@ pub(crate) fn criterion_edit<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome
     let id = &cx.ticket().short_id;
     let (at, version) = (position(cx), cx.args.need::<i64>("version"));
     let text = cx.args.need::<&str>("text");
+    criterion_fresh(cx, at, version)?;
     let edited = edit_criterion(cx.tx, cx.host, cx.actor, id, at, version, text, cx.at_ms)?;
     assert_eq!(edited.position, at);
     assert!(edited.version >= version);
@@ -820,6 +857,7 @@ pub(crate) fn criterion_set<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome,
     let id = &cx.ticket().short_id;
     let (at, version) = (position(cx), cx.args.need::<i64>("version"));
     let state = cx.args.need::<CriterionState>("state");
+    criterion_fresh(cx, at, version)?;
     let outcome = set_criterion(cx.tx, cx.host, cx.actor, id, at, version, state, cx.at_ms)?;
     assert_eq!(outcome.criterion.position, at);
     assert_eq!(outcome.ticket.id, cx.ticket().id);

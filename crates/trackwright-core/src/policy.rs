@@ -4,7 +4,7 @@ use crate::model::{
     Actor, AgentEditPolicy, ClosePolicy, CreatePolicy, CycleDays, ImportPolicy, OpKind, Policy,
     PolicyKey, ProjectKey, Refusal, RolloverPolicy, ShortId, Ticket, TicketStatus, codes,
 };
-use crate::ops::{self, Cx, Failure};
+use crate::ops::{self, Candidate, Cx, Failure};
 use crate::store::{self, StoreError, TicketChange};
 use rusqlite::{Transaction, params};
 use serde::Serialize;
@@ -179,11 +179,12 @@ pub fn set(
 }
 
 /// Decides whether a policy lets an actor run an operation. The owner may run every
-/// operation. Reads and `import_preview` are open to all. `close` and `reopen` follow
-/// `close`; `create` follows `create`; `policy_set` is the owner's. Engine actors may make
-/// every other write. Agents follow `agent_edit` on tickets they did not create and may run
-/// planning writes only under `agent_edit = any`. Inputs: the policy, the actor, the
-/// operation and the ticket it acts on, if any. Output: Ok, or the refusal.
+/// operation. Reads, `import_preview` and `export` among them, are open to all. `close`
+/// and `reopen` follow `close`; `create` follows `create`; `policy_set` is the owner's.
+/// Engine actors may make every other write. Agents follow `agent_edit` on tickets they
+/// did not create and may run planning writes only under `agent_edit = any`. Inputs: the
+/// policy, the actor, the operation and the ticket it acts on, if any. Output: Ok, or the
+/// refusal.
 pub fn permits(
     policy: &Policy,
     actor: &Actor,
@@ -540,6 +541,25 @@ pub(crate) fn policy_set<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Fa
     let setting = cx.args.need::<PolicyKey>("key");
     let value = cx.args.need::<&str>("value");
     let version = cx.args.get::<i64>("version").unwrap_or(0);
+    let read = describe(cx.tx, cx.project())?
+        .into_iter()
+        .find(|entry| entry.key == setting)
+        .expect("describe lists every policy key");
+    if read.version != version {
+        return Err(Failure::new(
+            codes::STALE_VERSION,
+            format!(
+                "policy {setting} is at version {}, not {version}; read the policy and retry",
+                read.version
+            ),
+        )
+        .with_data(json!({"key": setting.as_str(), "version": read.version}))
+        .with_next(vec![Candidate::project(
+            OpKind::PolicyGet,
+            cx.project(),
+            "read the policy's current versions, then retry",
+        )]));
+    }
     set(
         cx.tx,
         cx.host,
@@ -562,9 +582,23 @@ pub(crate) fn policy_set<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Fa
     })
 }
 
-/// Runs `close` for dispatch: done when no status is named. Input: the context. Output:
-/// the ticket as closed.
+/// Runs `close` for dispatch: done when no status is named. A closed ticket proposes
+/// `reopen`, and a version other than the one read proposes `show`, as other ticket writes
+/// do. Input: the context. Output: the ticket as closed.
 pub(crate) fn close_ticket<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Failure> {
+    let ticket = cx.ticket();
+    if ticket.status.is_closed() {
+        return Err(Failure::new(
+            codes::TICKET_CLOSED,
+            format!("{} is already closed", ticket.short_id),
+        )
+        .with_next(vec![Candidate::ticket(
+            OpKind::Reopen,
+            ticket,
+            "reopen it to work on it again",
+        )]));
+    }
+    let version = ops::fresh(cx, ticket)?;
     let status = cx
         .args
         .get::<TicketStatus>("status")
@@ -573,8 +607,8 @@ pub(crate) fn close_ticket<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, 
         cx.tx,
         cx.host,
         cx.actor,
-        &cx.ticket().short_id,
-        cx.args.need::<i64>("version"),
+        &ticket.short_id,
+        version,
         status,
         cx.args.get::<&str>("reason"),
         cx.at_ms,
@@ -584,9 +618,23 @@ pub(crate) fn close_ticket<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, 
     ops::written(cx, &closed)
 }
 
-/// Runs `reopen` for dispatch: todo when no status is named. Input: the context. Output:
-/// the ticket as reopened.
+/// Runs `reopen` for dispatch: todo when no status is named. An open ticket proposes
+/// `close`, and a version other than the one read proposes `show`. Input: the context.
+/// Output: the ticket as reopened.
 pub(crate) fn reopen_ticket<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Failure> {
+    let ticket = cx.ticket();
+    if !ticket.status.is_closed() {
+        return Err(
+            Failure::new(codes::TICKET_OPEN, format!("{} is open", ticket.short_id)).with_next(
+                vec![Candidate::ticket(
+                    OpKind::Close,
+                    ticket,
+                    "close it as done or cancelled",
+                )],
+            ),
+        );
+    }
+    let version = ops::fresh(cx, ticket)?;
     let status = cx
         .args
         .get::<TicketStatus>("status")
@@ -595,8 +643,8 @@ pub(crate) fn reopen_ticket<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome,
         cx.tx,
         cx.host,
         cx.actor,
-        &cx.ticket().short_id,
-        cx.args.need::<i64>("version"),
+        &ticket.short_id,
+        version,
         status,
         cx.at_ms,
     )?;

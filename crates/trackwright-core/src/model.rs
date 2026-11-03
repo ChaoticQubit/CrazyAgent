@@ -413,6 +413,7 @@ impl OpKind {
                 | OpKind::Roadmap
                 | OpKind::PolicyGet
                 | OpKind::Export
+                | OpKind::ImportPreview
                 | OpKind::Schema
         )
     }
