@@ -1863,15 +1863,15 @@ def open_store(path, immutable):
 def main(argv):
     parser = argparse.ArgumentParser(description="Audit one CrazyAgent trial run from the engine store, read only.")
     parser.add_argument("project", help="project folder or id")
-    parser.add_argument("--out", required=True, help="trial run folder; checks/, db/ and logs/ are written in it")
-    parser.add_argument("--root", default=os.environ.get("CRAZYAGENT_ENGINE_ROOT", str(Path.home() / "Library/Application Support/CrazyAgent/engine")))
-    parser.add_argument("--db", help="engine.db to read instead of <root>/engine.db, such as a saved copy")
+    parser.add_argument("--evidence", required=True, help="trial run folder; checks/, db/ and logs/ are written in it")
+    parser.add_argument("--engine", default=os.environ.get("CRAZYAGENT_ENGINE_ROOT", str(Path.home() / "Library/Application Support/CrazyAgent/engine")), help="engine root folder")
+    parser.add_argument("--db", help="engine.db to read instead of <engine>/engine.db, such as a saved copy")
     parser.add_argument("--immutable", action="store_true", help="read a saved store that no engine writes")
     parser.add_argument("--project-mark", default="TRIAL3-PROJECT-RULE", help="a line of the seeded repo CLAUDE.md")
     parser.add_argument("--answer", default="Hello", help="the owner's answer to the For: Me question")
     parser.add_argument("--only", action="append", help="run only this check id; repeatable")
     args = parser.parse_args(argv)
-    root = Path(os.path.abspath(args.root))
+    root = Path(os.path.abspath(args.engine))
     store = Path(os.path.abspath(args.db)) if args.db else root / "engine.db"
     if not store.is_file():
         print(f"UNKNOWN T3-00 engine: no engine.db at {store}")
@@ -1880,7 +1880,7 @@ def main(argv):
     if args.only and len(chosen) != len(set(args.only)):
         print(f"unknown check id in {args.only}", file=sys.stderr)
         return 2
-    out = Path(os.path.abspath(args.out))
+    out = Path(os.path.abspath(args.evidence))
     t = Trial(open_store(store, args.immutable), root, args.project, args.project_mark, args.answer)
     if t.pid is None:
         detail = f"no project with id or repository {args.project}"

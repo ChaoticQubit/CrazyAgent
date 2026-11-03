@@ -129,7 +129,7 @@ class World:
     def audit(self, check, *extra):
         before = hashlib.sha256(self.store.read_bytes()).hexdigest()
         done = subprocess.run(
-            [sys.executable, "-I", str(HERE / "audit.py"), PROJECT, "--root", str(self.root), "--out", str(self.out),
+            [sys.executable, "-I", str(HERE / "audit.py"), PROJECT, "--engine", str(self.root), "--evidence", str(self.out),
              "--only", check, "--project-mark", MARK, *extra],
             capture_output=True, text=True, env=self.env, timeout=120,
         )
@@ -667,7 +667,7 @@ class AuditTests(unittest.TestCase):
         w = self.world
         w.agent("sub", mode="app_spawned")
         done = subprocess.run(
-            [sys.executable, "-I", str(HERE / "audit.py"), PROJECT, "--root", str(w.root), "--out", str(w.out)],
+            [sys.executable, "-I", str(HERE / "audit.py"), PROJECT, "--engine", str(w.root), "--evidence", str(w.out)],
             capture_output=True, text=True, env=w.env, timeout=120,
         )
         self.assertIn(done.returncode, (0, 1), done.stderr)
@@ -684,6 +684,15 @@ class AuditTests(unittest.TestCase):
                 self.assertTrue((w.out / item["path"]).is_file(), item)
         self.assertIn("SUMMARY project=trial", done.stdout)
 
+    def test_the_runner_argv_from_the_evidence_contract_runs_the_audit(self):
+        w = self.world
+        w.agent("sub", mode="app_spawned")
+        argv = ["python3", "-I", str(HERE / "audit.py"), PROJECT, "--engine", str(w.root), "--evidence", str(w.out), "--project-mark", MARK]
+        done = subprocess.run(argv, capture_output=True, text=True, env=w.env, timeout=120)
+        self.assertIn(done.returncode, (0, 1), done.stdout + done.stderr)
+        self.assertEqual(sorted(p.stem for p in (w.out / "checks").glob("*.json")), [check["id"] for check in audit.CHECKS])
+        self.assertIn("SUMMARY project=trial", done.stdout)
+
     def test_masking_hides_keys_tokens_codes_ids_and_emails_and_keeps_plain_text(self):
         text = (
             'sk-ant-api03-abcdefghijklmnopqrstu Bearer abc.def-123 "access_token": "tok123" account_id=9f3c '
@@ -698,7 +707,7 @@ class AuditTests(unittest.TestCase):
     def test_a_missing_project_is_a_failed_check_with_its_own_record(self):
         w = self.world
         done = subprocess.run(
-            [sys.executable, "-I", str(HERE / "audit.py"), "no-such-project", "--root", str(w.root), "--out", str(w.out)],
+            [sys.executable, "-I", str(HERE / "audit.py"), "no-such-project", "--engine", str(w.root), "--evidence", str(w.out)],
             capture_output=True, text=True, env=w.env, timeout=60,
         )
         self.assertEqual(done.returncode, 1, done.stdout + done.stderr)
