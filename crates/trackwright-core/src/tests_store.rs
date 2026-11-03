@@ -11,7 +11,7 @@ use crate::tests_model::{
     sees_protected,
 };
 use crate::text;
-use rusqlite::{CachedStatement, OptionalExtension, Params, Row, Transaction, params};
+use rusqlite::{OptionalExtension, Params, Row, Statement, Transaction, params};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -98,6 +98,8 @@ CREATE TABLE tk_plans(
     version INTEGER NOT NULL CHECK (version >= 1),
     UNIQUE (project, number)
 );
+CREATE UNIQUE INDEX tk_plans_active_release ON tk_plans(project, version_id)
+    WHERE status = 'active' AND version_id IS NOT NULL;
 CREATE TABLE tk_plan_items(
     plan_id INTEGER NOT NULL REFERENCES tk_plans(id),
     position INTEGER NOT NULL CHECK (position >= 1),
@@ -298,6 +300,8 @@ const ITEMS_OF_PLAN: &str = "SELECT i.position, c.number, s.number FROM tk_plan_
 const PLAN_ITEMS_OF_PROJECT: &str = "SELECT i.plan_id, i.position, i.case_id, i.set_id \
      FROM tk_plan_items i JOIN tk_plans l ON l.id = i.plan_id WHERE l.project = ?1 \
      ORDER BY i.plan_id, i.position";
+const ACTIVE_PLAN_OF_RELEASE: &str = "SELECT number FROM tk_plans WHERE project = ?1 \
+     AND version_id = ?2 AND status = 'active' AND id IS NOT ?3";
 const PLAN_HOLDS_PROTECTED: &str = "SELECT EXISTS (SELECT 1 FROM tk_plan_items i \
      LEFT JOIN tk_set_cases m ON m.set_id = i.set_id \
      JOIN tk_cases c ON c.id = coalesce(i.case_id, m.case_id) \
@@ -365,6 +369,7 @@ const STATEMENTS: &[&str] = &[
     PLAN_ITEM_DELETE,
     ITEMS_OF_PLAN,
     PLAN_ITEMS_OF_PROJECT,
+    ACTIVE_PLAN_OF_RELEASE,
     PLAN_HOLDS_PROTECTED,
     ITEM_HOLDS_PROTECTED,
     TEST_EVENTS_OF_PROJECT,
@@ -807,10 +812,11 @@ fn set_slot(
     })
 }
 
-/// Creates a plan, or changes one at the version the caller read. Inputs: the transaction,
-/// the actor, the project key, the plan and its version when it exists, the fields and the
-/// time. Output: the plan, or `plans_full`, `release_unknown`, `cycle_unknown`,
-/// `stale_version` or a name refusal.
+/// Creates a plan, or changes one at the version the caller read; a release holds at most
+/// one active plan. Inputs: the transaction, the actor, the key, the plan and its version
+/// when it exists, the fields and the time. Output: the plan, or `plans_full`,
+/// `active_plan_exists`, `release_unknown`, `cycle_unknown`, `stale_version` or a name
+/// refusal.
 pub fn upsert_plan(
     tx: &Transaction<'_>,
     actor: &Actor,
@@ -828,6 +834,7 @@ pub fn upsert_plan(
             if count(tx, PLAN_COUNT, [project.id])? >= PLANS_PER_PROJECT_MAX {
                 return Err(full(codes::PLANS_FULL, "plans", PLANS_PER_PROJECT_MAX));
             }
+            active_plan_free(tx, project.id, (release, fields.status), None)?;
             let number = next(tx, PLAN_NEXT, project.id)?;
             prepare(tx, PLAN_INSERT)?.execute(params![
                 project.id,
@@ -865,6 +872,12 @@ fn change_plan(
 ) -> Result<TestPlan, StoreError> {
     let before = plan(tx, id)?;
     store::current(&format!("plan {id}"), before.version, version)?;
+    active_plan_free(
+        tx,
+        before.project,
+        (release, fields.status),
+        Some(before.id),
+    )?;
     let reaimed =
         before.status != fields.status || before.version_id != release || before.cycle_id != cycle;
     if reaimed && !sees_protected(actor) && holds_protected(tx, PLAN_HOLDS_PROTECTED, [before.id])?
@@ -1013,6 +1026,26 @@ fn plan_slot(
     let position = next(tx, PLAN_ITEM_NEXT, plan_id)?;
     prepare(tx, PLAN_ITEM_INSERT)?.execute(params![plan_id, position, case_id, set_id])?;
     Ok(number_of(position))
+}
+
+fn active_plan_free(
+    tx: &Transaction<'_>,
+    project: i64,
+    (release, status): (Option<i64>, PlanStatus),
+    except: Option<i64>,
+) -> Result<(), StoreError> {
+    let (Some(release), PlanStatus::Active) = (release, status) else {
+        return Ok(());
+    };
+    let holder: Option<u32> = prepare(tx, ACTIVE_PLAN_OF_RELEASE)?
+        .query_row(params![project, release, except], |row| row.get(0))
+        .optional()?;
+    let Some(number) = holder else {
+        return Ok(());
+    };
+    assert!(number >= 1, "plan numbers start at 1");
+    let message = format!("plan {number} is already the active plan of that release");
+    Err(store::refusal(codes::ACTIVE_PLAN_EXISTS, message))
 }
 
 fn holds_protected<P: Params>(
@@ -1742,15 +1775,12 @@ fn record<T: Serialize>(
     )
 }
 
-fn prepare<'t>(
-    tx: &'t Transaction<'_>,
-    sql: &'static str,
-) -> rusqlite::Result<CachedStatement<'t>> {
+fn prepare<'t>(tx: &'t Transaction<'_>, sql: &'static str) -> rusqlite::Result<Statement<'t>> {
     assert!(
         STATEMENTS.contains(&sql),
         "every test model statement is listed"
     );
-    tx.prepare_cached(sql)
+    tx.prepare(sql)
 }
 
 fn count<P: Params>(tx: &Transaction<'_>, sql: &'static str, args: P) -> Result<usize, StoreError> {
