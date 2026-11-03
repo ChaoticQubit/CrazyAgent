@@ -87,6 +87,10 @@ const SOCKET_GRANTS_MAX: usize = 4;
 /// The writes that move, remove, replace or re-permission a folder's own node while its
 /// contents stay writable: the scratch root's and a native lead's home for its teammates.
 const FIXED_WRITES: &str = "file-write-unlink file-write-create file-write-mode file-write-acl";
+/// The writes that move, remove or re-permission a folder's own node but still let it be made
+/// where it is missing: an agent home's `skills` folder, which Codex makes in a fresh home for
+/// its own skills, while no folder built elsewhere replaces the one holding the engine's copies.
+const PINNED_WRITES: &str = "file-write-unlink file-write-mode file-write-acl";
 /// The folders of a Claude Code config home whose scripts Claude Code 2.1.309 runs ahead of
 /// every Bash command: its shell snapshot and the session hook scripts (TPH-2).
 const CLAUDE_BASH_PRELUDES: [&str; 2] = ["shell-snapshots", "session-env"];
@@ -1433,13 +1437,14 @@ impl ProjectSandbox {
                 "(deny file-write*\n  (literal \"{path}\")\n  (literal \"{path}.lock\"))\n"
             ));
         }
-        let launch = launch_files(&self.agent_home);
-        for folder in self.read_only.iter().chain(&launch) {
+        for folder in &self.read_only {
             text.push_str(&format!(
                 "(deny file-write* (subpath \"{}\"))\n",
                 folder.display()
             ));
         }
+        let launch = launch_denies(&self.agent_home);
+        text.push_str(&launch);
         for folder in &self.fixed {
             text.push_str(&format!(
                 "(deny {FIXED_WRITES} (literal \"{}\"))\n",
@@ -1457,20 +1462,22 @@ impl ProjectSandbox {
             .rfind("(allow file-write*")
             .max(text.rfind("(allow file-read* file-write*"));
         assert!(
-            self.read_only.iter().chain(&launch).all(|folder| {
+            self.read_only.iter().all(|folder| {
                 text.rfind(&format!(
                     "(deny file-write* (subpath \"{}\"))",
                     folder.display()
                 )) > last_write_allow
-            }) && self.fixed.iter().all(|folder| {
-                text.rfind(&format!(
-                    "(deny {FIXED_WRITES} (literal \"{}\"))",
-                    folder.display()
-                )) > last_write_allow
-            }) && self
-                .shared
-                .iter()
-                .all(|folder| text.rfind(&shared_denies(folder)) > last_write_allow),
+            }) && text.rfind(&launch) > last_write_allow
+                && self.fixed.iter().all(|folder| {
+                    text.rfind(&format!(
+                        "(deny {FIXED_WRITES} (literal \"{}\"))",
+                        folder.display()
+                    )) > last_write_allow
+                })
+                && self
+                    .shared
+                    .iter()
+                    .all(|folder| text.rfind(&shared_denies(folder)) > last_write_allow),
             "a read-only, fixed or shared folder's write deny must follow every write allow, since the last match wins"
         );
         let denied_last = |operations: &str, socket: &PathBuf| {
@@ -2275,23 +2282,42 @@ fn clear_of_secrets(root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError
     Ok(())
 }
 
-/// Lists the paths in an agent's own home that the engine writes before each launch and its
-/// harness reads as instructions, skills or hooks: the launch folder, the relay plugin, the
-/// Codex skill copies, and the global instruction files of Claude Code and Codex with the
-/// Codex override that would replace them. The agent reads but never writes them, so its own
-/// run cannot change the text it runs with until the next launch rewrites it (LL-2).
-/// Input: the agent's home. Output: the paths.
-fn launch_files(home: &Path) -> [PathBuf; 6] {
+/// The Seatbelt rules that keep an agent from changing what the engine writes in its own home
+/// before each launch and its harness reads as instructions, skills or hooks (LL-2): no write
+/// in the launch folder, the relay plugin or the Codex skill copies, none to the global
+/// instruction files of Claude Code and Codex, the Codex override that would replace them or
+/// the Codex `config.toml` holding its developer instructions, and no move or removal of the
+/// `skills` folder, so no folder built elsewhere is moved in over the copies, each name in
+/// any letter case. Its own run cannot change the text it runs with until the next launch
+/// rewrites it. They must follow every write allow. Input: the home. Output: the rule text.
+fn launch_denies(home: &Path) -> String {
     use crate::agent_home::Harness;
     use crate::launch_context::STATE;
-    [
-        home.join(STATE),
-        home.join(crate::coord::relay::PLUGIN_FOLDER),
-        home.join("skills").join(STATE),
-        home.join(Harness::Claude.instruction_file()),
-        home.join(Harness::Codex.instruction_file()),
-        home.join("AGENTS.override.md"),
-    ]
+    let home = seatbelt_pattern(home);
+    let skills = format!("{home}/{}", any_case("skills"));
+    let folders = [
+        format!("{home}/{}", any_case(STATE)),
+        format!("{home}/{}", any_case(crate::coord::relay::PLUGIN_FOLDER)),
+        format!("{skills}/{}", any_case(STATE)),
+    ];
+    let files = [
+        Harness::Claude.instruction_file(),
+        Harness::Codex.instruction_file(),
+        "AGENTS.override.md",
+        "config.toml",
+    ];
+    let mut text = String::from("(deny file-write*\n");
+    for folder in &folders {
+        text.push_str(&format!("  (regex #\"^{folder}(/.*)?$\")\n"));
+    }
+    for file in files {
+        text.push_str(&format!("  (regex #\"^{home}/{}$\")\n", any_case(file)));
+    }
+    text.push_str(&format!(
+        "  )\n(deny {PINNED_WRITES} (regex #\"^{skills}$\"))\n"
+    ));
+    assert_eq!(text.matches("(regex #\"^/").count(), 8);
+    text
 }
 
 /// The Seatbelt rules that keep a shared team folder free of links and moved-in folders: no
