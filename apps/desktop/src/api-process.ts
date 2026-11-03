@@ -1,7 +1,7 @@
 import { call } from "./api";
 import type { Result } from "./api";
 import { failureCopy } from "./api-projects";
-import type { GraphNode } from "./engine-client";
+import type { GraphNode, ImportCommit, ImportFile, Nudges } from "./engine-client";
 import { formatRoute } from "./ui/router";
 
 /** The most bytes one instructions text may hold; the engine refuses more. */
@@ -27,7 +27,19 @@ const REFUSALS: Record<string, string> = {
   process_text_unwritable: "The instructions couldn't be saved. Check the folder, then try again.",
   process_project_folder_missing: "This project keeps its files without a .crazyagent folder, so it can't hold project instructions.",
   process_project_unknown: "This project has no setup yet, so it can't hold instructions.",
-  process_import_missing: "There is no ~/.claude/CLAUDE.md to import.",
+  process_import_missing: "That file no longer exists. Pick another one.",
+  process_import_unsafe: "That file isn't a plain file you own, so CrazyAgent won't read it.",
+  process_import_unreadable: "That file couldn't be read. Check it, then try again.",
+  process_import_outside: "That file links outside the project folder, so it stays where it is.",
+  process_import_unmovable: "The instruction files couldn't be moved aside, so nothing changed. Check the project folder, then try again.",
+  process_request_invalid: "CrazyAgent couldn't read that path. Pick the file again.",
+  process_commit_staged: "Other files are staged in this project's checkout, so nothing was committed. Unstage or commit them, then try again.",
+  process_commit_none: "No moved instruction file waits for a commit.",
+  process_commit_busy: "Git is busy in this project's checkout (a merge, a rebase or a locked index), so nothing was committed. Finish it, then try again.",
+  process_commit_detached: "This project's checkout isn't on a branch, so nothing was committed. Check out a branch, then try again.",
+  process_commit_moved: "The branch changed while committing, so nothing was committed. Try again.",
+  process_commit_identity: "Git has no user.name or user.email for this project, so nothing was committed. Set them, then try again.",
+  process_commit_failed: "Git couldn't commit the move. Check the project's checkout, then try again.",
   process_folder_missing: "CrazyAgent's data folder is missing. Restart the engine, then try again.",
   process_folder_unsafe: "CrazyAgent's data folder isn't a plain folder, so nothing was saved.",
   process_unavailable: "Instructions aren't ready in this engine yet.",
@@ -40,6 +52,7 @@ const REFUSALS: Record<string, string> = {
   agent_instructions_unreadable: "This agent's instructions file couldn't be read. Try again.",
   instruction_settings_invalid: "This project's agent settings hold a value CrazyAgent doesn't know. Pick an option to replace it.",
   instruction_settings_unavailable: "This project's agent settings couldn't be read. Try again.",
+  process_adoption_unavailable: "Workflow adoption couldn't be read. Try again.",
 };
 
 /** The refusal codes of the process protocol that have their own sentence. */
@@ -90,10 +103,50 @@ export function savedMessage(saved: ProcessSaved): string {
   return `Instructions saved, but a project's agents now get ${size(saved.bytes)} of app and project instructions and a Claude master takes only ${size(saved.claude_bytes_max)}. Shorten them before a Claude master's next turn.`;
 }
 
-/** Reads the owner's ~/.claude/CLAUDE.md for a preview. Only the owner's Import click calls
- * this; nothing is saved until the owner saves. Output: the text. */
-export function importGlobalInstructions(): Promise<Result<string>> {
-  return call<string>("desktop_import_global_instructions");
+/** Opens the native chooser for one instructions file and reads the picked file's text for a
+ * preview. Only the owner's Import click calls this; nothing is saved until the owner saves.
+ * Output: the text, or null when the owner closed the chooser. */
+export function importInstructionsFile(): Promise<Result<string | null>> {
+  return call<string | null>("desktop_import_instructions_file");
+}
+
+/** Lists a project's own instruction files an import would copy into its instructions and
+ * move into .crazyagent/imported/; nothing changes. Input: the project id. Output: the files,
+ * empty when there is nothing to import. */
+export function loadInstructionImport(projectId: string): Promise<Result<ImportFile[]>> {
+  return call<ImportFile[]>("desktop_instruction_import", { projectId });
+}
+
+/** Copies a project's own instruction files into its instructions and moves them into
+ * .crazyagent/imported/, on the owner's confirm only. Input: the project id. Output: the
+ * moved files. */
+export function confirmInstructionImport(projectId: string): Promise<Result<ImportFile[]>> {
+  return call<ImportFile[]>("desktop_confirm_instruction_import", { projectId });
+}
+
+/** Lists the moved instruction files whose move the project's checkout has not committed.
+ * Input: the project id. Output: the paths, empty when no move waits for a commit. */
+export function loadUncommittedImport(projectId: string): Promise<Result<string[]>> {
+  return call<string[]>("desktop_uncommitted_instruction_import", { projectId });
+}
+
+/** Commits the instruction import's move as one local commit on the checkout's current branch
+ * holding only the moved files, never pushed, on the owner's click only. Input: the project id.
+ * Output: the commit, its branch and its files. */
+export function commitInstructionImport(projectId: string): Promise<Result<ImportCommit>> {
+  return call<ImportCommit>("desktop_commit_instruction_import", { projectId });
+}
+
+/** The toast after a committed move, naming the branch and files. Input: the commit.
+ * Output: the sentence. */
+export function committedMessage(commit: ImportCommit): string {
+  return `Committed the move on ${commit.branch}: ${commit.files.join(", ")}. Nothing was pushed.`;
+}
+
+/** Why one found instruction file stays in place, in plain words. Input: its refusal code.
+ * Output: the sentence. */
+export function importRefusal(code: string): string {
+  return Object.hasOwn(REFUSALS, code) ? REFUSALS[code] : "CrazyAgent won't import this file.";
 }
 
 /** Reads the CrazyAgent default process for a preview. Output: the text. */
@@ -159,24 +212,36 @@ export interface LoadedFile {
   path: string;
 }
 
-/** Which instruction files the engine hands a project's agents. */
-export type InstructionChoice = "project" | "project_and_user" | "none";
+/** Which of the owner's two instruction texts a project's agents get (DEC-106). */
+export type InstructionMode = "project_only" | "app_only" | "both";
 
-/** One project's agent settings: the instruction files its agents get and whether headless
- * Claude runs keep their transcript. */
+/** How an edit to the instructions reaches agents that already run (DEC-111 QR1). */
+export type EditDelivery = "next_message" | "restart" | "badge";
+
+/** One project's agent settings: which instructions its agents get, whether headless
+ * Claude runs keep their transcript and how an instruction edit reaches running agents. */
 export interface InstructionSettings {
-  files: InstructionChoice;
+  mode: InstructionMode;
   transcripts: boolean;
+  edits?: EditDelivery;
 }
 
 /** The settings of a project the owner never changed. */
-export const DEFAULT_INSTRUCTION_SETTINGS: InstructionSettings = { files: "project", transcripts: true };
+export const DEFAULT_INSTRUCTION_SETTINGS: InstructionSettings = { mode: "both", transcripts: true, edits: "next_message" };
 
-/** Every instruction files option in the order the page lists them, with what it hands agents. */
-export const INSTRUCTION_CHOICES: readonly { value: InstructionChoice; label: string; note: string }[] = [
-  { value: "project", label: "Project files", note: "Agents get the project's CLAUDE.md, .claude/CLAUDE.md and AGENTS.md as committed in your checkout, and its CLAUDE.local.md. An agent's own edits to them never change what the next agent gets." },
-  { value: "project_and_user", label: "Project and user files", note: "Agents get the project's files and also your ~/.claude/CLAUDE.md and ~/.codex/AGENTS.md." },
-  { value: "none", label: "None", note: "Agents get no instruction files, only the project's Process instructions." },
+/** Every way an instruction edit can reach running agents, in the order the page lists
+ * them, with what each does. */
+export const EDIT_DELIVERIES: readonly { value: EditDelivery; label: string; note: string }[] = [
+  { value: "next_message", label: "Next task", note: "A running agent's next task starts with the sections you changed, sent once." },
+  { value: "restart", label: "Restart when idle", note: "A running agent restarts when it is next idle and resumes its conversation with the new text." },
+  { value: "badge", label: "Badge only", note: "Nothing is sent. A running agent shows Instructions changed until it starts again." },
+];
+
+/** Every instructions option in the order the page lists them, with what it hands agents. */
+export const INSTRUCTION_MODES: readonly { value: InstructionMode; label: string; note: string }[] = [
+  { value: "project_only", label: "Project only", note: "Agents get only this project's instructions, from its .crazyagent/instructions.md." },
+  { value: "app_only", label: "App only", note: "Agents get only the app instructions from Settings > Process." },
+  { value: "both", label: "Both (app, then project appended)", note: "Agents get the app instructions, then this project's appended. An empty project text gives the app text as it is." },
 ];
 
 /** Reads one project's agent settings. Input: the project id. Output: the settings, the
@@ -203,7 +268,7 @@ export interface InstructionRecord {
 
 const FILE_STATES: Record<InstructionState, string> = {
   given: "given",
-  same: "left out: the same text as a file above",
+  same: "left out: the same text as the instructions or a file above",
   too_large: "left out: larger than CrazyAgent gives",
   unsafe: "left out: a link or not a plain file",
   invalid: "left out: not plain text",
@@ -250,19 +315,74 @@ export function reportedLine(value: Pick<AgentInstructions, "harness" | "session
   return `Instructions: ${files} - Skills used: ${used}`;
 }
 
-const TEAM_AGENT = /^team-([1-9][0-9]{0,14})$/u;
-
 /** Names the team agent whose instructions a graph card shows. Input: the card's node.
  * Output: null for the master card, which the engine reads as the project's newest master,
- * the agent id for an agent card, or undefined for a card with no agent. */
-export function agentOf(node: Pick<GraphNode, "id" | "kind">): number | null | undefined {
+ * the agent id for a lead, sub-agent or teammate card, or undefined for a card with no agent,
+ * such as a native teammate known only by its pane, or one whose agent id is missing, null
+ * or not a positive safe integer. */
+export function agentOf(node: Pick<GraphNode, "kind" | "agent">): number | null | undefined {
   if (node.kind === "master") return null;
-  const id = node.kind === "agent" ? TEAM_AGENT.exec(node.id)?.[1] : undefined;
-  return id === undefined ? undefined : Number(id);
+  return typeof node.agent === "number" && Number.isSafeInteger(node.agent) && node.agent > 0 ? node.agent : undefined;
 }
 
 /** Reads what one team agent received at its last launch. Inputs: the project id and the
  * agent id, or null for the project's master. Output: the read-only view. */
 export function loadAgentInstructions(projectId: string, agent: number | null): Promise<Result<AgentInstructions>> {
   return call<AgentInstructions>("desktop_agent_instructions", { projectId, agent });
+}
+
+/** A workflow habit an agent missed: editing files with no declared work, or working ten
+ * minutes with no code-graph query and no context-mode call. */
+export type AdoptionFlag = "edits_without_start_work" | "no_graphify_or_context_mode";
+
+const FLAG_WORDS: Record<AdoptionFlag, string> = {
+  edits_without_start_work: "Edits without start_work",
+  no_graphify_or_context_mode: "10+ min without graphify or context-mode",
+};
+
+/** A flag in the owner's words. Input: the flag. Output: the words. */
+export function flagWords(flag: AdoptionFlag): string {
+  return FLAG_WORDS[flag];
+}
+
+/** One skill an agent called by name, with how many times. */
+export interface SkillCount {
+  name: string;
+  count: number;
+}
+
+/** One agent's adoption row: who it is, whether it still runs, its count for each counted
+ * tool in the settings' order, its calls of each enabled skill in the view's skill order
+ * (zero included), the skills it called that the project has not enabled, its graphify and
+ * ctx_* calls, its flags now and the flags it was already reminded of, and whether its
+ * launch fires no hooks, so no counts or flags exist. */
+export interface AgentAdoption {
+  agent: number;
+  role: string;
+  harness: string;
+  active: boolean;
+  counts: number[];
+  skills?: number[];
+  other_skills?: SkillCount[];
+  graphify?: number;
+  context_mode?: number;
+  flags: AdoptionFlag[];
+  reminded: AdoptionFlag[];
+  hookless?: boolean;
+}
+
+/** A project's workflow adoption: its nudges option, the counted tools that name the
+ * count columns, the skills its agents receive, its newest agents, and how many older agents
+ * the view's size limit left out. */
+export interface Adoption {
+  nudges: Nudges;
+  counted: string[];
+  skills?: string[];
+  agents: AgentAdoption[];
+  hidden?: number;
+}
+
+/** Reads one project's workflow adoption. Input: the project id. Output: the view. */
+export function loadAdoption(projectId: string): Promise<Result<Adoption>> {
+  return call<Adoption>("desktop_adoption", { projectId });
 }

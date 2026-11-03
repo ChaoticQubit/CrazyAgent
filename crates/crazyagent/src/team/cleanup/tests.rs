@@ -372,6 +372,37 @@ fn a_clean_finished_agent_is_listed_with_its_size_and_removed_with_its_folders()
     assert!(case.listed().is_empty());
 }
 
+/// The owner's list of finished agents to remove names one whose name a running sub-agent
+/// shares by its number only (DEC-111 Q19), since that name reaches the running one; an
+/// unshared name shows as the engine names the agent everywhere else.
+#[test]
+fn a_finished_agent_sharing_a_running_agent_s_name_is_offered_by_number_only() {
+    let case = Case::new();
+    case.agent(1, "sub", "stopped");
+    case.agent(2, "sub", "stopped");
+    case.agent(3, "sub", "working");
+    for (id, persona, handle) in [
+        (1, "Ada", None),
+        (2, "Bo", Some("docs")),
+        (3, "ada", Some("charts")),
+    ] {
+        case.db
+            .execute(
+                "INSERT INTO team_names(agent,project,persona,handle) VALUES (?1,?2,?3,?4)",
+                params![id, case.project.as_str(), persona, handle],
+            )
+            .unwrap();
+    }
+    let listed = finished(&case.db, &case.team, &case.project, NOW).unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .map(|agent| (agent.id, agent.label.as_str()))
+            .collect::<Vec<_>>(),
+        [(2, "Bo (@docs)"), (1, "Sub-agent 1")]
+    );
+}
+
 #[test]
 fn unlanded_or_live_work_keeps_the_agent_and_says_why() {
     let case = Case::new();
@@ -918,6 +949,34 @@ fn a_clone_with_a_huge_file_at_a_tracked_path_is_kept_as_dirty_without_hashing_i
         "{elapsed:?}"
     );
     assert!(case.kept(1) && case.base_known(1));
+}
+
+/// A removed native lead's teammates' profile and the record of its teammates' socket name
+/// go with its own profile (rv-audit TTDL F2), and an agent left in place keeps its own.
+#[test]
+fn a_removed_native_lead_takes_its_teammates_profile_and_socket_record_with_it() {
+    let case = Case::new();
+    case.agent(1, "sub", "stopped");
+    case.agent(2, "sub", "stopped");
+    let teammates = |id: i64| {
+        [
+            crate::team::runtime::agent_teammates_profile(&case.team, id),
+            crate::team::runtime::agent_teammates_socket_name(&case.team, id),
+        ]
+    };
+    for id in [1, 2] {
+        for file in teammates(id) {
+            write(&file, b"written by the engine\n");
+        }
+    }
+    assert_eq!(case.remove(&[1]), removed(&[1]));
+    assert!(!case.profile(1).exists());
+    for file in teammates(1) {
+        assert!(!file.exists(), "{} was left behind", file.display());
+    }
+    for file in teammates(2).into_iter().chain([case.profile(2)]) {
+        assert!(file.exists(), "{} went with another agent", file.display());
+    }
 }
 
 /// Sets or clears the user immutable flag on one file with the system's `chflags`.

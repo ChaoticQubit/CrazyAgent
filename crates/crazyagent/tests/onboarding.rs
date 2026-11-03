@@ -2093,6 +2093,118 @@ async fn a_home_move_points_a_nested_project_and_its_repository_at_the_moved_fol
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn starting_onboarding_moves_the_instruction_files_and_the_view_lists_them_and_a_rejected_start_moves_nothing()
+ {
+    const CLAUDE: &str = "# Rules\n\nONBOARD-CLAUDE-RULE-83\n";
+    const AGENTS: &str = "ONBOARD-AGENTS-RULE-84\n";
+    let mut bench = Bench::start_without_graphify(|repo| {
+        fs::write(repo.join("CLAUDE.md"), CLAUDE).unwrap();
+        git(repo, &["add", "CLAUDE.md"]);
+        git(repo, &["commit", "-q", "-m", "rules"]);
+        fs::write(repo.join("AGENTS.md"), AGENTS).unwrap();
+    })
+    .await;
+    bench.use_repos_as_home().await;
+    let imported = bench.repo.join(".crazyagent").join("imported");
+    let link = bench.root.join("repo-link");
+    std::os::unix::fs::symlink(&bench.repo, &link).unwrap();
+    let refused = bench.start_onboarding_at(&link).await;
+    assert_eq!(
+        rejection(&refused).as_deref(),
+        Some("onboarding_folder_missing")
+    );
+    assert_eq!(
+        fs::read_to_string(bench.repo.join("CLAUDE.md")).unwrap(),
+        CLAUDE
+    );
+    assert_eq!(
+        fs::read_to_string(bench.repo.join("AGENTS.md")).unwrap(),
+        AGENTS
+    );
+    assert!(fs::symlink_metadata(&imported).is_err());
+    let project = bench.start_onboarding().await;
+    let view = bench.view(&project).await;
+    let file =
+        |path: &str, bytes: usize, tracked: bool| crazyagent::instruction_files::ImportFile {
+            path: path.to_owned(),
+            bytes: bytes as u64,
+            tracked,
+            refused: None,
+            uncommitted: tracked,
+        };
+    assert_eq!(
+        view.imported,
+        [
+            file("CLAUDE.md", CLAUDE.len(), true),
+            file("AGENTS.md", AGENTS.len(), false)
+        ]
+    );
+    assert!(fs::symlink_metadata(bench.repo.join("CLAUDE.md")).is_err());
+    assert!(fs::symlink_metadata(bench.repo.join("AGENTS.md")).is_err());
+    assert_eq!(
+        fs::read_to_string(imported.join("CLAUDE.md")).unwrap(),
+        CLAUDE
+    );
+    assert_eq!(
+        fs::read_to_string(imported.join("AGENTS.md")).unwrap(),
+        AGENTS
+    );
+    assert_eq!(
+        fs::read_to_string(bench.repo.join(".crazyagent").join("instructions.md")).unwrap(),
+        "## Imported from CLAUDE.md\n\n# Rules\n\nONBOARD-CLAUDE-RULE-83\n\n## Imported from AGENTS.md\n\nONBOARD-AGENTS-RULE-84\n"
+    );
+    assert_eq!(
+        git(&bench.repo, &["status", "--porcelain"]),
+        " D CLAUDE.md\n"
+    );
+    bench.stop().await;
+}
+
+/// A project onboarded from an existing folder runs its agents in their own clones, as a
+/// New Project does: onboarding saves the New Project access level wherever this computer
+/// can run it, and starting the same folder's onboarding again keeps the level the owner
+/// chose since (fix/own-clones-and-lead-landing 6e60b198).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_onboarding_saves_own_branch_access_and_a_restart_keeps_the_owners_level() {
+    use crazyagent::sandbox::policy::{AgentAccess, AgentPolicy};
+    let mut bench = Bench::start(|_| {}).await;
+    let project = bench.start_onboarding().await;
+    let saved = bench
+        .owner
+        .project_agent_policy(project.clone())
+        .await
+        .unwrap();
+    let expected = match AgentAccess::NEW_PROJECT.unavailable() {
+        None => AgentAccess::NEW_PROJECT,
+        Some(_) => AgentAccess::Sandboxed,
+    };
+    assert_eq!(saved.access, expected);
+    #[cfg(target_os = "macos")]
+    assert_eq!(saved.access, AgentAccess::OwnBranch);
+    bench.generation += 1;
+    let response = bench
+        .owner
+        .set_project_agent_policy(
+            project.clone(),
+            AgentPolicy {
+                access: AgentAccess::Sandboxed,
+                network: crazyagent::sandbox::policy::AgentNetwork::default(),
+                toolchains: Vec::new(),
+            },
+            bench.generation,
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejection(&response), None, "{response:?}");
+    let repo = bench.repo.clone();
+    let restarted = bench.start_onboarding_at(&repo).await;
+    assert_eq!(rejection(&restarted), None, "{restarted:?}");
+    let kept = bench.owner.project_agent_policy(project).await.unwrap();
+    assert_eq!(kept.access, AgentAccess::Sandboxed);
+    bench.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_own_branch_change_set_still_lands_when_the_owner_asks_to_move_the_home() {
     let mut bench = Bench::start(|_| {}).await;
     bench.use_repos_as_home().await;

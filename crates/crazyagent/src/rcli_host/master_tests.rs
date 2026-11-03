@@ -42,6 +42,7 @@ impl Case {
             home_dir,
             cwd,
             profile_config_sha256: String::new(),
+            instructions: None,
         };
         let mut case = Self {
             _root: root,
@@ -319,4 +320,59 @@ fn bounded_config_input_never_uses_unpinned_or_oversized_fallback() {
     case.launch.executable = PathBuf::from("rcli");
     assert!(case.launch.command().is_err());
     assert!(!Path::new("rcli").is_absolute());
+}
+
+#[test]
+fn an_instructions_file_adds_one_flag_and_only_a_private_single_link_file_outside_both_folders_passes()
+ {
+    let mut case = Case::new();
+    assert_eq!(case.launch.command().unwrap().get_args().count(), 8);
+    let runtime = case.launch.cwd.parent().unwrap().join("master-runtime");
+    fs::create_dir(&runtime).unwrap();
+    fs::set_permissions(&runtime, fs::Permissions::from_mode(0o700)).unwrap();
+    let private = |path: &Path, text: &str| {
+        fs::write(path, text).unwrap();
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
+    };
+    let file = runtime.join("instructions.md");
+    private(&file, "OWNER-RULE-86\n");
+    case.launch.instructions = Some(file.clone());
+    let command = case.launch.command().unwrap();
+    let args: Vec<_> = command.get_args().map(|value| value.to_owned()).collect();
+    assert_eq!(args.len(), 10);
+    assert_eq!(args[8], "--instructions-file");
+    assert_eq!(args[9], file.as_os_str());
+    assert_eq!(
+        command.get_envs().count(),
+        1,
+        "the file adds no environment"
+    );
+    for inside in [
+        case.launch.cwd.join("instructions.md"),
+        case.launch.home_dir.join("instructions.md"),
+    ] {
+        private(&inside, "OWNER-RULE-86\n");
+        case.launch.instructions = Some(inside);
+        rejection(case.launch.command(), "rcli_master_paths_rejected");
+    }
+    let linked = runtime.join("linked.md");
+    symlink(&file, &linked).unwrap();
+    case.launch.instructions = Some(linked);
+    rejection(case.launch.command(), "rcli_master_paths_rejected");
+    case.launch.instructions = Some(runtime.join("missing.md"));
+    rejection(case.launch.command(), "rcli_master_paths_rejected");
+    case.launch.instructions = Some(file.clone());
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).unwrap();
+    rejection(case.launch.command(), "rcli_master_file_rejected");
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+    let second = runtime.join("second.md");
+    fs::hard_link(&file, &second).unwrap();
+    rejection(case.launch.command(), "rcli_master_file_rejected");
+    fs::remove_file(&second).unwrap();
+    let empty = runtime.join("empty.md");
+    private(&empty, "");
+    case.launch.instructions = Some(empty);
+    rejection(case.launch.command(), "rcli_master_file_rejected");
+    case.launch.instructions = Some(file);
+    assert_eq!(case.launch.command().unwrap().get_args().count(), 10);
 }

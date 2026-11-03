@@ -13,8 +13,8 @@ const SKILLS = [
   { id: "skill-000000000000000000000002", name: "code-review", description: "Review a diff for bugs." },
 ];
 
-function node(id, kind) {
-  return { id, kind, parent: null, label: id, harness: "codex", status: null, status_label: null, account: null, agents: null, terminal: null };
+function node(id, kind, extra = {}) {
+  return { id, kind, parent: null, label: id, harness: "codex", status: null, status_label: null, account: null, terminal: null, ...extra };
 }
 
 function panel(read) {
@@ -22,10 +22,14 @@ function panel(read) {
 }
 
 test("the master and each agent card name the team agent the engine reads", () => {
-  assert.equal(client.agentOf(node("master", "master")), null);
-  assert.equal(client.agentOf(node("team-12", "agent")), 12);
-  for (const shown of [node("group:codex", "harness_group"), node("team-0", "agent"), node("team--3", "agent"), node("team-1x", "agent"), node("team:12", "agent"), node("team-012", "agent"),
-    node("team-99999999999999999999", "agent"), node("master", "agent")]) {
+  assert.equal(client.agentOf(node("master", "master", { agent: 4 })), null);
+  assert.equal(client.agentOf(node("team-12", "lead", { agent: 12 })), 12);
+  assert.equal(client.agentOf(node("team-12", "sub", { agent: 12 })), 12);
+  assert.equal(client.agentOf(node("team-12", "sub", { agent: 7 })), 7, "the node's own agent id wins over its card id");
+  assert.equal(client.agentOf(node("team-9", "teammate", { agent: 9, pane: "%12" })), 9);
+  for (const shown of [node("team-12", "lead"), node("team-12", "sub"), node("teammate-3-12", "teammate", { agent: null, pane: "%12" }), node("team-3", "teammate"), node("team-0", "sub"), node("team--3", "sub"), node("team-1x", "lead"),
+    node("team:12", "sub"), node("team-012", "sub"), node("team-99999999999999999999", "sub"), node("master", "lead"), node("team-5", "sub", { agent: 0 }),
+    node("team-5x", "sub", { agent: 1.5 }), node("team-5y", "sub", { agent: -2 }), node("team-5", "sub", { agent: null })]) {
     assert.equal(client.agentOf(shown), undefined, shown.id);
   }
 });
@@ -79,7 +83,7 @@ test("the view lists each instruction file the engine recorded with its size and
   const markup = panel({ kind: "ok", value: { agent: 3, harness: "claude-code", launched: true, text: "Use tdd.\n", skills: [], sessions: 0, loaded: [], skills_used: [], files } });
   for (const shown of [
     /CLAUDE\.md<\/span> 1\.2 KB, given/,
-    /AGENTS\.md<\/span> 300 bytes, left out: the same text as a file above/,
+    /AGENTS\.md<\/span> 300 bytes, left out: the same text as the instructions or a file above/,
     /CLAUDE\.local\.md<\/span> 0 bytes, left out: a link or not a plain file/,
     /~\/\.claude\/CLAUDE\.md<\/span> 39\.1 KB, left out: larger than CrazyAgent gives/,
     /~\/\.codex\/AGENTS\.md<\/span> 12 bytes, left out: not plain text/,

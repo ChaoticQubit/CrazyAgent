@@ -1,4 +1,5 @@
 use super::{DELEGATIONS_PER_REPLY_MAX, Delegation, TASK_PROMPT_BYTES_MAX, delegation, names};
+use crate::coord::{Finish, QuestionFor, Severity};
 #[cfg(unix)]
 use rustix::fs::{AtFlags, FileType, Mode, OFlags};
 use serde::{Deserialize, Serialize};
@@ -25,12 +26,43 @@ const _: () = assert!(DROP_BYTES_MAX as usize >= DELEGATIONS_PER_REPLY_MAX * TAS
 const _: () = assert!(TASK_PROMPT_BYTES_MAX == 4000 && DELEGATIONS_PER_REPLY_MAX == 8);
 
 pub const LIVE_SERVER_COMMAND: &str = "team-mcp-live";
-pub const MESSAGE_TOOL: &str = "message";
-pub const ANSWER_TOOL: &str = "answer";
-pub const STATUS_TOOL: &str = "status";
-pub const CHANGES_TOOL: &str = "changes";
-pub const ESCALATE_TOOL: &str = "escalate";
-pub const WAKE_TOOL: &str = "wake";
+/// The engine subcommand that serves a sub-agent's team tools; it lists the same tools as
+/// the live master's server, and the engine answers each by the caller's place in the team.
+pub const AGENT_SERVER_COMMAND: &str = "team-mcp-agent";
+pub const START_WORK_TOOL: &str = "start_work";
+pub const INSPECT_WORK_TOOL: &str = "inspect_work";
+pub const UPDATE_WORK_TOOL: &str = "update_work";
+pub const TRANSFER_WORK_TOOL: &str = "transfer_work";
+pub const FINISH_WORK_TOOL: &str = "finish_work";
+pub const SPAWN_TOOL: &str = "spawn";
+pub const STOP_TOOL: &str = "stop";
+/// The tool that merges a finished agent's work into its lead's branch: a harness's task
+/// branch into the Master's branch for the master (DEC-100), a worker's work into the
+/// lead's own branch for a lead.
+pub const MERGE_TOOL: &str = "merge";
+pub const REMEMBER_TOOL: &str = "remember";
+pub const RECALL_TOOL: &str = "recall";
+pub const SESSIONS_TOOL: &str = "sessions";
+pub const SESSION_TOOL: &str = "session";
+/// The team tools a live master and a sub-agent with tools get (DEC-104), in the order of
+/// `coord::tool_switches::BUILTIN_TOOLS`, which the owner switches each one by.
+pub const TEAM_TOOLS: [&str; 12] = [
+    START_WORK_TOOL,
+    INSPECT_WORK_TOOL,
+    UPDATE_WORK_TOOL,
+    TRANSFER_WORK_TOOL,
+    FINISH_WORK_TOOL,
+    SPAWN_TOOL,
+    STOP_TOOL,
+    MERGE_TOOL,
+    REMEMBER_TOOL,
+    RECALL_TOOL,
+    SESSIONS_TOOL,
+    SESSION_TOOL,
+];
+/// The team tools only an agent that leads others uses, left out of the list of a
+/// sub-agent the owner's Sub-agent depth setting keeps from leading.
+pub const LEAD_TOOLS: [&str; 3] = [SPAWN_TOOL, STOP_TOOL, MERGE_TOOL];
 pub const MAILBOX_FOLDER: &str = "crazyagent-team-calls";
 pub const CALLS_PER_TICK_MAX: usize = 8;
 pub const CALLS_PENDING_MAX: usize = 16;
@@ -43,53 +75,201 @@ const CALL_SUFFIX: &str = ".call";
 const TAKEN_SUFFIX: &str = ".taken";
 const REPLY_SUFFIX: &str = ".reply";
 const PART_SUFFIX: &str = ".part";
+const PANE_KEY: &str = "pane";
 const REPLY_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
 const REPLY_POLL: std::time::Duration = std::time::Duration::from_millis(50);
 const REPLY_STALE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
-const LIVE_INVALID: &str = "Not handed off: give a task of plain text up to 4000 bytes and, if you choose one, a harness name from the team plan.";
-const ROLE_INVALID: &str = "Not handed off: give a short role of letters and digits up to 64 bytes, such as onboarding-fix.";
-const ESCALATE_INVALID: &str = "Not sent: give the owner one plain question of up to 2000 bytes.";
-const TYPED_INVALID: &str = "Not sent: name the sub-agent and give plain text up to 4000 bytes.";
+const SPAWN_INVALID: &str = "Not started: give a task of plain text up to 4000 bytes and, if you choose one, a harness name such as codex or claude-code.";
+const MODE_INVALID: &str =
+    "Not started: mode is native or app_spawned, or left out for the owner's setting.";
+const ROLE_INVALID: &str =
+    "Not started: give a short role of letters and digits up to 64 bytes, such as onboarding-fix.";
+const START_INVALID: &str = "Not started: give a title of one plain line up to 200 bytes and at most 32 claims, each a file, folder/, glob, module:<name> or domain:<name> of up to 512 bytes.";
+const UPDATE_INVALID: &str = "Not sent: give plain text up to 4000 bytes; to names an agent by its name, @role handle or number, or master or lead.";
+const QUESTION_INVALID: &str = "Not sent: a question needs for (me, master or lead) and severity (high, normal or low), and no to: its for tag decides who gets it.";
+const REPLY_INVALID: &str =
+    "Not sent: a reply names the message it answers in reply_to, and no to, for or severity.";
+const MESSAGE_INVALID: &str = "Not sent: a message or note names who gets it in to, and carries no for or severity; ask a question with kind question.";
+const KEY_INVALID: &str = "Not sent: a key is up to 128 letters, digits, '-', '_', '.' or ':'.";
+const TRANSFER_INVALID: &str = "Not changed: give the work number, the version inspect_work shows and an action (assign, accept, decline, release, handoff or reopen); assign and handoff also name the agent in to.";
+const FINISH_INVALID: &str = "Not finished: give the work number, the version inspect_work shows, an outcome (review_ready, complete or closed) and evidence of plain text up to 4000 bytes.";
+const AGENT_INVALID: &str =
+    "Not done: name the agent by its persona name, its @role handle or its number.";
+const SESSIONS_INVALID: &str =
+    "Not searched: give plain words up to 256 bytes, or nothing to list the conversations.";
+const SESSION_INVALID: &str =
+    "Not read: give a conversation id from sessions() and a message number from 0.";
+const REMEMBER_INVALID: &str =
+    "Not saved: give one plain fact of up to 2000 bytes, and a scope of project or app.";
+const RECALL_INVALID: &str = "Not searched: give plain words on one line of up to 100 bytes, or none for the newest memories.";
+const CALL_INVALID: &str = "Not done: the engine could not read this call. Call the tool again.";
+const SWITCHED_OFF: &str = "Not done: the owner switched this tool off.";
 const BUSY: &str = "Not sent: 16 team calls already wait for the engine. Try again in a moment.";
 const UNSENT: &str = "Not sent: the call could not be written for the engine.";
 const NOT_TAKEN: &str =
     "Not sent: the engine did not take the call within a minute, so nothing was done.";
-const NOT_ANSWERED: &str = "The engine took the call but did not answer within a minute. Check status() before trying again.";
+#[cfg(unix)]
+const UNNAMED: &str =
+    "Not sent: the engine could not tell which agent made the call. Try again in a moment.";
+const NOT_ANSWERED: &str = "The engine took the call but did not answer within a minute. Check inspect_work() before trying again.";
 
 const _: () = assert!(REPLY_BYTES_MAX < REQUEST_BYTES_MAX as u64);
 const _: () = assert!(CALLS_PER_TICK_MAX <= CALLS_PENDING_MAX);
-const _: () = assert!(super::events::ESCALATION_BYTES_MAX == 2000);
+const _: () = assert!(crate::coord::KEY_BYTES_MAX == 128);
+const _: () = {
+    let builtin = crate::coord::tool_switches::BUILTIN_TOOLS;
+    assert!(builtin.len() == TEAM_TOOLS.len());
+    let mut at = 0;
+    while at < TEAM_TOOLS.len() {
+        assert!(same_name(TEAM_TOOLS[at], builtin[at].0));
+        at += 1;
+    }
+};
 
-/// One team tool call a live master made, as its server writes it into the mailbox for the
-/// engine to answer: `delegate` admits a task now, `message` and `answer` type into a
-/// sub-agent's terminal, `wake` starts a finished sub-agent again with a message, `status`
-/// and `changes` read the team and its pending change sets, and `escalate` raises an app
-/// notification for a decision only the owner makes.
+/// Compares two tool names byte by byte where a const check needs it. Takes both names.
+/// Returns whether they are the same.
+const fn same_name(a: &str, b: &str) -> bool {
+    let (a, b) = (a.as_bytes(), b.as_bytes());
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut at = 0;
+    while at < a.len() {
+        if a[at] != b[at] {
+            return false;
+        }
+        at += 1;
+    }
+    true
+}
+
+/// One team tool call a live master or a sub-agent made (DEC-104), as its server writes it
+/// into the mailbox for the engine to answer by the caller's place in the team: the work
+/// verbs `start_work`, `inspect_work`, `update_work`, `transfer_work` and `finish_work`,
+/// the lead verbs `spawn`, `stop` and `merge`, and `sessions`, `session`, `remember` and
+/// `recall` over past conversations and saved memory. The engine names the caller from
+/// the mailbox it read the call from, never from the call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "tool", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Call {
-    Delegate {
+    StartWork {
+        title: String,
+        claims: Vec<String>,
+    },
+    InspectWork,
+    UpdateWork {
+        kind: Update,
+        text: String,
+        to: Option<String>,
+        #[serde(rename = "for")]
+        question_for: Option<QuestionFor>,
+        severity: Option<Severity>,
+        reply_to: Option<i64>,
+        work: Option<i64>,
+        key: Option<String>,
+    },
+    TransferWork {
+        work: i64,
+        version: i64,
+        action: Handover,
+        to: Option<String>,
+    },
+    FinishWork {
+        work: i64,
+        version: i64,
+        outcome: Finish,
+        evidence: String,
+    },
+    Spawn {
         task: String,
         harness: Option<String>,
         role: Option<String>,
+        mode: Option<crate::coord::settings::SubagentMode>,
     },
-    Message {
+    Stop {
         agent: String,
-        text: String,
     },
-    Answer {
+    Merge {
         agent: String,
-        text: String,
     },
-    Wake {
-        agent: String,
-        text: String,
+    Sessions {
+        query: String,
     },
-    Status,
-    Changes,
-    Escalate {
-        text: String,
+    Session {
+        id: String,
+        offset: u64,
     },
+    Remember {
+        text: String,
+        scope: MemoryReach,
+    },
+    Recall {
+        query: String,
+    },
+}
+
+impl Call {
+    /// The tool this call came from, the name the owner's tool switches use. Takes the
+    /// call. Returns one of `TEAM_TOOLS`.
+    pub fn name(&self) -> &'static str {
+        let name = match self {
+            Self::StartWork { .. } => START_WORK_TOOL,
+            Self::InspectWork => INSPECT_WORK_TOOL,
+            Self::UpdateWork { .. } => UPDATE_WORK_TOOL,
+            Self::TransferWork { .. } => TRANSFER_WORK_TOOL,
+            Self::FinishWork { .. } => FINISH_WORK_TOOL,
+            Self::Spawn { .. } => SPAWN_TOOL,
+            Self::Stop { .. } => STOP_TOOL,
+            Self::Merge { .. } => MERGE_TOOL,
+            Self::Sessions { .. } => SESSIONS_TOOL,
+            Self::Session { .. } => SESSION_TOOL,
+            Self::Remember { .. } => REMEMBER_TOOL,
+            Self::Recall { .. } => RECALL_TOOL,
+        };
+        assert!(TEAM_TOOLS.contains(&name));
+        name
+    }
+}
+
+/// What an `update_work` call sends: a message that asks something of its recipient, a
+/// note that asks nothing, a tagged question (Q14b) or a reply to an earlier message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Update {
+    Message,
+    Note,
+    Question,
+    Reply,
+}
+
+/// The ownership change a `transfer_work` call asks for; assign and handoff also name the
+/// agent the work goes to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Handover {
+    Assign,
+    Accept,
+    Decline,
+    Release,
+    Handoff,
+    Reopen,
+}
+
+/// Where a memory an agent saves applies: its own project, or every project of the app.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MemoryReach {
+    Project,
+    App,
+}
+
+impl MemoryReach {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Project => "project",
+            Self::App => "app",
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -113,19 +293,33 @@ pub fn serve(input: impl BufRead, output: impl Write, drop: &Path) -> std::io::R
     rpc(input, output, |request| answer(request, drop))
 }
 
-/// Serves a live master's team tools as an MCP server over stdio until its client closes
-/// input: each call goes into the mailbox folder in the master's private temporary folder
-/// and its result is the engine's answer, so `delegate` takes effect at once.
-/// Takes the client's input and output and the absolute mailbox folder the engine made.
-/// Returns an input or output failure, or a refusal when the mailbox is not a plain folder.
-pub fn serve_live(input: impl BufRead, output: impl Write, mailbox: &Path) -> std::io::Result<()> {
+/// Serves a live master's or a sub-agent's team tools, `TEAM_TOOLS` less the ones switched
+/// off, as an MCP server over stdio until its client closes input: each call goes into the
+/// mailbox folder in the agent's private temporary folder, and its result is the engine's
+/// answer. A native lead's servers first have the engine name each call by their process
+/// (DEC-111 Q18); nothing the server or its environment says names the caller. Takes the
+/// client's input and output, the absolute mailbox folder the engine made and the tools
+/// left out. Returns an input or output failure, or a refusal when the mailbox is not a
+/// plain folder.
+pub fn serve_live(
+    input: impl BufRead,
+    output: impl Write,
+    mailbox: &Path,
+    off: &[String],
+) -> std::io::Result<()> {
     let plain = std::fs::symlink_metadata(mailbox).is_ok_and(|metadata| metadata.is_dir());
     if !mailbox.is_absolute() || !plain {
         return Err(std::io::Error::other(
             "the mailbox must be an absolute plain folder",
         ));
     }
-    rpc(input, output, |request| answer_live(request, mailbox))
+    rpc(input, output, |request| answer_live(request, mailbox, off))
+}
+
+/// Says whether every name is one of the team tools, as the engine subcommands check the
+/// tools they are told to leave out. Takes the names. Returns the answer.
+pub fn known_tools(names: &[String]) -> bool {
+    names.len() <= TEAM_TOOLS.len() && names.iter().all(|name| TEAM_TOOLS.contains(&name.as_str()))
 }
 
 fn rpc(
@@ -222,78 +416,132 @@ fn answer(request: &Value, drop: &Path) -> Option<Value> {
     Some(json!({"jsonrpc": "2.0", "id": id, "result": result}))
 }
 
-fn live_tools() -> Value {
-    let agent = json!({"type": "string", "description": "The sub-agent: its @role handle, its persona name or its number."});
-    let text = json!({"type": "string", "description": "What to type into the sub-agent's terminal, in plain words."});
-    let none = json!({"type": "object", "properties": {}, "additionalProperties": false});
-    json!({"tools": [
-        {
-            "name": TOOL_NAME,
-            "description": "Hand one task to a sub-agent of this project's team now. The engine checks it against the team plan, runs it in its own git worktree and tells you when it ends.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "task": {"type": "string", "description": "What the sub-agent should do, in plain words."},
-                    "harness": {"type": "string", "description": "Optional sub-agent harness from the team plan, such as codex or claude-code."},
-                    "role": {"type": "string", "description": "Optional short role handle for the sub-agent's job, such as @onboarding-fix."},
-                },
-                "required": ["task"],
-                "additionalProperties": false,
-            },
-        },
-        {
-            "name": MESSAGE_TOOL,
-            "description": "Type a message into one sub-agent's terminal, such as a correction or more detail.",
-            "inputSchema": {"type": "object", "properties": {"agent": agent, "text": text}, "required": ["agent", "text"], "additionalProperties": false},
-        },
-        {
-            "name": ANSWER_TOOL,
-            "description": "Answer the question a sub-agent is waiting on; the answer is typed into its terminal.",
-            "inputSchema": {"type": "object", "properties": {"agent": agent, "text": text}, "required": ["agent", "text"], "additionalProperties": false},
-        },
-        {
-            "name": WAKE_TOOL,
-            "description": "Wake a finished sub-agent by its name: it starts again under the same name in its own worktree, continuing its own conversation where its harness can, and gets your text as its next task.",
-            "inputSchema": {"type": "object", "properties": {"agent": {"type": "string", "description": "The finished sub-agent: its persona name, its @role handle or its number."}, "text": text}, "required": ["agent", "text"], "additionalProperties": false},
-        },
-        {
-            "name": STATUS_TOOL,
-            "description": "Read the team: each sub-agent, its job and state, and the tasks waiting or running.",
-            "inputSchema": none,
-        },
-        {
-            "name": CHANGES_TOOL,
-            "description": "List the change sets waiting for the owner's review in Changes.",
-            "inputSchema": none,
-        },
-        {
-            "name": ESCALATE_TOOL,
-            "description": "Ask the owner for a decision only they make: security, destructive or irreversible actions, spending, product or scope. The owner gets an app notification; wait for their answer in this terminal.",
-            "inputSchema": {"type": "object", "properties": {"text": {"type": "string", "description": "The decision the owner should make, in one plain question."}}, "required": ["text"], "additionalProperties": false},
-        },
-    ]})
+/// The team tools a server lists, in `BUILTIN_TOOLS` order, without the ones left out.
+/// Takes the tools left out. Returns the MCP `tools/list` result.
+fn team_tools(off: &[String]) -> Value {
+    let tools: Vec<Value> = TEAM_TOOLS
+        .iter()
+        .filter(|name| !off.iter().any(|tool| tool == *name))
+        .map(|name| spec(name))
+        .collect();
+    assert!(tools.len() <= TEAM_TOOLS.len());
+    json!({ "tools": tools })
 }
 
-fn answer_live(request: &Value, mailbox: &Path) -> Option<Value> {
+/// One team tool's MCP description and input schema. Takes one of `TEAM_TOOLS`. Returns
+/// its `tools/list` entry.
+fn spec(name: &str) -> Value {
+    let agent = json!({"type": "string", "description": "The agent: its persona name, its @role handle or its number."});
+    let work = json!({"type": "integer", "minimum": 1, "description": "The work number start_work or inspect_work gave."});
+    let version = json!({"type": "integer", "minimum": 1, "description": "The work's version inspect_work shows; a stale one is refused so the first change wins."});
+    let none = json!({"type": "object", "properties": {}, "additionalProperties": false});
+    let (description, schema) = match name {
+        START_WORK_TOOL => (
+            "Start a unit of work before you edit, with a short title, and claim what it touches: each claim a file, a folder ending in /, a glob, module:<name> or domain:<name>. The engine tells you and the other agents when a claim overlaps theirs and notes a claim too broad to share. Returns the work number and version.",
+            json!({"type": "object", "properties": {
+                "title": {"type": "string", "description": "What the work is, on one line of up to 200 bytes."},
+                "claims": {"type": "array", "maxItems": 32, "items": {"type": "string"}, "description": "What the work touches, such as src/login.rs, docs/, src/**/*.ts or module:auth."},
+            }, "required": ["title"], "additionalProperties": false}),
+        ),
+        INSPECT_WORK_TOOL => (
+            "Read your work with its number and version, the messages and questions waiting for you (reading them here marks them read), what you sent and how far each got, and claims that overlap yours. A lead or the master also reads the agents it leads, their work and the change sets waiting.",
+            none,
+        ),
+        UPDATE_WORK_TOOL => (
+            "Send to another agent of this project. kind message asks the agent in to for something, note tells it something, question asks with for (me for the owner, master, or lead) and severity (high, normal or low) and the engine routes it, reply answers a question or a message (work for you) whose number is in reply_to. A note takes no reply: to answer one, send kind note with to its sender. A for me question reaches the owner only. Pass a question on up the chain as a question whose reply_to names it, at the same or a higher severity. A message to a finished agent you lead wakes it with your text.",
+            json!({"type": "object", "properties": {
+                "text": {"type": "string", "description": "What you send, in plain words, up to 4000 bytes."},
+                "kind": {"type": "string", "enum": ["message", "note", "question", "reply"], "description": "message when left out, question with for, reply with reply_to to a question or work for you, never to a note."},
+                "to": {"type": "string", "description": "For a message or note: the agent's persona name, @role handle or number, or master, or lead for your own lead."},
+                "for": {"type": "string", "enum": ["me", "master", "lead"], "description": "For a question: me for the owner, master, or lead for your own lead."},
+                "severity": {"type": "string", "enum": ["high", "normal", "low"], "description": "For a question: how urgent it is. It never changes who gets it."},
+                "reply_to": {"type": "integer", "minimum": 1, "description": "The question or message (work for you) this answers or passes on, or the message a note or message refers to."},
+                "work": {"type": "integer", "minimum": 1, "description": "The work number this is about."},
+                "key": {"type": "string", "description": "Optional key so a retried send is stored once."},
+            }, "required": ["text"], "additionalProperties": false}),
+        ),
+        TRANSFER_WORK_TOOL => (
+            "Change who owns a unit of work: assign or handoff it to the agent in to, accept or decline work assigned to you, release your own, or reopen finished work. The master and your lead may assign and reopen your work.",
+            json!({"type": "object", "properties": {
+                "work": work,
+                "version": version,
+                "action": {"type": "string", "enum": ["assign", "accept", "decline", "release", "handoff", "reopen"]},
+                "to": agent,
+            }, "required": ["work", "version", "action"], "additionalProperties": false}),
+        ),
+        FINISH_WORK_TOOL => (
+            "Finish a unit of work with evidence, such as the commands you ran and what they showed. review_ready asks your lead or the master to check it; complete and closed end it and release its claims. A lead cannot complete its work while a teammate's or sub-agent's branch is not merged into its own; this names them.",
+            json!({"type": "object", "properties": {
+                "work": work,
+                "version": version,
+                "outcome": {"type": "string", "enum": ["review_ready", "complete", "closed"]},
+                "evidence": {"type": "string", "description": "What shows the work is done, in plain words, up to 4000 bytes."},
+            }, "required": ["work", "version", "outcome", "evidence"], "additionalProperties": false}),
+        ),
+        SPAWN_TOOL => (
+            "Start an agent for one task in its own worktree and branch: the master starts a lead, and a lead starts a sub-agent of its own within the owner's Sub-agent depth setting. The engine tells you when it ends.",
+            json!({"type": "object", "properties": {
+                "task": {"type": "string", "description": "What the agent should do, in plain words."},
+                "harness": {"type": "string", "description": "Optional harness, such as codex or claude-code."},
+                "role": {"type": "string", "description": "Optional short role such as onboarding-fix; the agent is then @onboarding-fix."},
+                "mode": {"type": "string", "enum": ["native", "app_spawned"], "description": "Master only, fixed for the lead's life: native (its sub-agents are its own Claude Code teammates) or app_spawned (it starts them with spawn); left out, the owner's setting for that harness."},
+            }, "required": ["task"], "additionalProperties": false}),
+        ),
+        STOP_TOOL => (
+            "Stop an agent you lead: the master may stop any agent, a lead only its own sub-agents. Only the owner wakes a stopped agent again.",
+            json!({"type": "object", "properties": {"agent": agent}, "required": ["agent"], "additionalProperties": false}),
+        ),
+        MERGE_TOOL => (
+            "Merge a finished agent's work locally, never pushed: the master merges a lead's task branch into the Master's branch, and a lead merges one of its own sub-agents' work into its own branch. The owner's settings may keep it for the owner's Accept in Changes instead; then this says so.",
+            json!({"type": "object", "properties": {"agent": agent}, "required": ["agent"], "additionalProperties": false}),
+        ),
+        SESSIONS_TOOL => (
+            "Search every past master and sub-agent conversation of this project, of any age: each hit gives the conversation id, the message number and an excerpt. With no query it lists the conversations, newest first.",
+            json!({"type": "object", "properties": {"query": {"type": "string", "description": "Words that must all appear in one message; leave empty to list the conversations."}}, "additionalProperties": false}),
+        ),
+        SESSION_TOOL => (
+            "Read one past conversation of this project from a message number on, one page at a time; the page ends with the number to read next.",
+            json!({"type": "object", "properties": {"id": {"type": "string", "description": "The conversation id that sessions gave."}, "offset": {"type": "integer", "minimum": 0, "description": "The message number to start from; 0 when left out."}}, "required": ["id"], "additionalProperties": false}),
+        ),
+        REMEMBER_TOOL => (
+            "Save one fact, decision or lesson that agents should know in later sessions. Scope project keeps it to this project; app shares it with every project. The owner sees it with your name in the Memory tab, can delete it, and may have to approve it first.",
+            json!({"type": "object", "properties": {"text": {"type": "string", "description": "The memory in plain words, up to 2000 bytes."}, "scope": {"type": "string", "enum": ["project", "app"], "description": "project (the default) or app."}}, "required": ["text"], "additionalProperties": false}),
+        ),
+        RECALL_TOOL => (
+            "Search the saved memories of this project and the app-wide ones, newest first. Leave the query empty for the newest.",
+            json!({"type": "object", "properties": {"query": {"type": "string", "description": "Words the memory holds, on one line of up to 100 bytes."}}, "additionalProperties": false}),
+        ),
+        other => unreachable!("{other} is not a team tool"),
+    };
+    json!({"name": name, "description": description, "inputSchema": schema})
+}
+
+fn answer_live(request: &Value, mailbox: &Path, off: &[String]) -> Option<Value> {
     let method = request.get("method")?.as_str();
     let id = request.get("id")?.clone();
     let params = request.get("params");
     let result = match method {
         Some("initialize") => initialized(params),
         Some("ping") => json!({}),
-        Some("tools/list") => live_tools(),
+        Some("tools/list") => team_tools(off),
         Some("tools/call") => {
             let name = params
                 .and_then(|params| params.get("name"))
                 .and_then(Value::as_str);
             let arguments = params.and_then(|params| params.get("arguments"));
-            match name.map(|name| live_call(name, arguments)) {
-                Some(Some(Ok(call))) => {
-                    let (text, error) = ask(mailbox, &call, REPLY_WAIT);
-                    tool_result(&text, error)
+            match name {
+                Some(name) if off.iter().any(|tool| tool == name) => {
+                    tool_result(SWITCHED_OFF, true)
                 }
-                Some(Some(Err(refused))) => tool_result(refused, true),
-                _ => return Some(failure(id, -32602, "Unknown tool")),
+                Some(name) => match live_call(name, arguments) {
+                    Some(Ok(call)) => {
+                        let (text, error) = ask(mailbox, &call, REPLY_WAIT);
+                        tool_result(&text, error)
+                    }
+                    Some(Err(refused)) => tool_result(refused, true),
+                    None => return Some(failure(id, -32602, "Unknown tool")),
+                },
+                None => return Some(failure(id, -32602, "Unknown tool")),
             }
         }
         _ => return Some(failure(id, -32601, "Method not found")),
@@ -301,57 +549,248 @@ fn answer_live(request: &Value, mailbox: &Path) -> Option<Value> {
     Some(json!({"jsonrpc": "2.0", "id": id, "result": result}))
 }
 
-/// Reads one live tool call from its MCP name and arguments, checking every bound the
+/// Reads one team tool call from its MCP name and arguments, checking every bound the
 /// engine checks again. Takes the tool name and arguments. Returns none for an unknown
-/// tool, or the call, or the plain sentence the master reads when an argument is refused.
+/// tool, or the call, or the plain sentence the agent reads when an argument is refused.
 pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &'static str>> {
     let argument = |key: &str| {
         arguments
             .and_then(|arguments| arguments.get(key))
             .and_then(Value::as_str)
     };
-    let typed = |agent: Option<&str>, text: Option<&str>| match (agent, text) {
-        (Some(agent), Some(text))
-            if agent_name_valid(agent) && super::text_valid(text, TASK_PROMPT_BYTES_MAX) =>
-        {
-            Ok((agent.trim().to_owned(), text.trim().to_owned()))
-        }
-        _ => Err(TYPED_INVALID),
+    let number = |key: &str| match arguments.and_then(|arguments| arguments.get(key)) {
+        None | Some(Value::Null) => Some(None),
+        Some(value) => value
+            .as_i64()
+            .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok()))
+            .filter(|number| *number > 0)
+            .map(Some),
     };
     Some(match name {
-        TOOL_NAME => {
+        START_WORK_TOOL => {
+            let claims = match arguments.and_then(|arguments| arguments.get("claims")) {
+                None | Some(Value::Null) => Some(Vec::new()),
+                Some(Value::String(one)) => claim(one).map(|one| vec![one]),
+                Some(Value::Array(items)) if items.len() <= crate::coord::CLAIMS_PER_WORK_MAX => {
+                    items
+                        .iter()
+                        .map(|item| item.as_str().and_then(claim))
+                        .collect()
+                }
+                Some(_) => None,
+            };
+            match (argument("title").map(str::trim), claims) {
+                (Some(title), Some(claims))
+                    if super::text_valid(title, crate::coord::TITLE_BYTES_MAX)
+                        && !title.contains(['\n', '\t']) =>
+                {
+                    Ok(Call::StartWork {
+                        title: title.to_owned(),
+                        claims,
+                    })
+                }
+                _ => Err(START_INVALID),
+            }
+        }
+        INSPECT_WORK_TOOL => Ok(Call::InspectWork),
+        UPDATE_WORK_TOOL => {
+            let to = match argument("to").map(str::trim) {
+                None | Some("") => Some(None),
+                Some(to) if agent_name_valid(to) => Some(Some(to.to_owned())),
+                Some(_) => None,
+            };
+            let key = match argument("key").map(str::trim) {
+                None | Some("") => None,
+                Some(key) if key_valid(key) => Some(key.to_owned()),
+                Some(_) => return Some(Err(KEY_INVALID)),
+            };
+            let (
+                Some(text),
+                Some(to),
+                Some(question_for),
+                Some(severity),
+                Some(reply_to),
+                Some(work),
+                Some(kind),
+            ) = (
+                argument("text")
+                    .filter(|text| super::text_valid(text, crate::coord::BODY_BYTES_MAX)),
+                to,
+                named::<QuestionFor>(arguments, "for"),
+                named::<Severity>(arguments, "severity"),
+                number("reply_to"),
+                number("work"),
+                named::<Update>(arguments, "kind"),
+            )
+            else {
+                return Some(Err(UPDATE_INVALID));
+            };
+            let kind = kind.unwrap_or(match (question_for, reply_to) {
+                (Some(_), _) => Update::Question,
+                (None, Some(_)) => Update::Reply,
+                (None, None) => Update::Message,
+            });
+            let tagged = question_for.is_some() || severity.is_some();
+            let refused = match kind {
+                Update::Question
+                    if question_for.is_none() || severity.is_none() || to.is_some() =>
+                {
+                    Some(QUESTION_INVALID)
+                }
+                Update::Reply if reply_to.is_none() || to.is_some() || tagged => {
+                    Some(REPLY_INVALID)
+                }
+                Update::Message | Update::Note if to.is_none() || tagged => Some(MESSAGE_INVALID),
+                _ => None,
+            };
+            if let Some(refused) = refused {
+                return Some(Err(refused));
+            }
+            Ok(Call::UpdateWork {
+                kind,
+                text: text.trim().to_owned(),
+                to,
+                question_for,
+                severity,
+                reply_to,
+                work,
+                key,
+            })
+        }
+        TRANSFER_WORK_TOOL => {
+            let to = match argument("to").map(str::trim) {
+                None | Some("") => Some(None),
+                Some(to) if agent_name_valid(to) => Some(Some(to.to_owned())),
+                Some(_) => None,
+            };
+            match (
+                number("work"),
+                number("version"),
+                named::<Handover>(arguments, "action"),
+                to,
+            ) {
+                (Some(Some(work)), Some(Some(version)), Some(Some(action)), Some(to))
+                    if matches!(action, Handover::Assign | Handover::Handoff) == to.is_some() =>
+                {
+                    Ok(Call::TransferWork {
+                        work,
+                        version,
+                        action,
+                        to,
+                    })
+                }
+                _ => Err(TRANSFER_INVALID),
+            }
+        }
+        FINISH_WORK_TOOL => match (
+            number("work"),
+            number("version"),
+            named::<Finish>(arguments, "outcome"),
+            argument("evidence"),
+        ) {
+            (Some(Some(work)), Some(Some(version)), Some(Some(outcome)), Some(evidence))
+                if super::text_valid(evidence, crate::coord::BODY_BYTES_MAX) =>
+            {
+                Ok(Call::FinishWork {
+                    work,
+                    version,
+                    outcome,
+                    evidence: evidence.trim().to_owned(),
+                })
+            }
+            _ => Err(FINISH_INVALID),
+        },
+        SPAWN_TOOL => {
             let Some(proposed) = delegation(
                 argument("harness").unwrap_or_default(),
                 argument("task").unwrap_or_default(),
             ) else {
-                return Some(Err(LIVE_INVALID));
+                return Some(Err(SPAWN_INVALID));
             };
             let role = match argument("role").map(role_handle) {
                 Some(Err(())) => return Some(Err(ROLE_INVALID)),
                 Some(Ok(role)) => role,
                 None => None,
             };
-            Ok(Call::Delegate {
+            let Some(mode) = named(arguments, "mode") else {
+                return Some(Err(MODE_INVALID));
+            };
+            Ok(Call::Spawn {
                 task: proposed.prompt,
                 harness: proposed.harness,
                 role,
+                mode,
             })
         }
-        MESSAGE_TOOL => typed(argument("agent"), argument("text"))
-            .map(|(agent, text)| Call::Message { agent, text }),
-        ANSWER_TOOL => typed(argument("agent"), argument("text"))
-            .map(|(agent, text)| Call::Answer { agent, text }),
-        WAKE_TOOL => typed(argument("agent"), argument("text"))
-            .map(|(agent, text)| Call::Wake { agent, text }),
-        STATUS_TOOL => Ok(Call::Status),
-        CHANGES_TOOL => Ok(Call::Changes),
-        ESCALATE_TOOL => match argument("text") {
-            Some(text) if super::text_valid(text, super::events::ESCALATION_BYTES_MAX) => {
-                Ok(Call::Escalate {
-                    text: text.trim().to_owned(),
+        STOP_TOOL | MERGE_TOOL => match argument("agent") {
+            Some(agent) if agent_name_valid(agent) => {
+                let agent = agent.trim().to_owned();
+                Ok(if name == STOP_TOOL {
+                    Call::Stop { agent }
+                } else {
+                    Call::Merge { agent }
                 })
             }
-            _ => Err(ESCALATE_INVALID),
+            _ => Err(AGENT_INVALID),
+        },
+        SESSIONS_TOOL => match argument("query").unwrap_or_default() {
+            query
+                if query.len() <= super::history::QUERY_BYTES_MAX
+                    && !query.chars().any(char::is_control) =>
+            {
+                Ok(Call::Sessions {
+                    query: query.trim().to_owned(),
+                })
+            }
+            _ => Err(SESSIONS_INVALID),
+        },
+        SESSION_TOOL => {
+            let offset = match arguments.and_then(|arguments| arguments.get("offset")) {
+                None | Some(Value::Null) => Some(0),
+                Some(value) => value
+                    .as_u64()
+                    .or_else(|| value.as_str().and_then(|text| text.trim().parse().ok())),
+            };
+            match (argument("id").map(str::trim), offset) {
+                (Some(id), Some(offset))
+                    if super::history::id_valid(id) && offset <= super::history::OFFSET_MAX =>
+                {
+                    Ok(Call::Session {
+                        id: id.to_owned(),
+                        offset,
+                    })
+                }
+                _ => Err(SESSION_INVALID),
+            }
+        }
+        REMEMBER_TOOL => {
+            let scope = match argument("scope").map(str::trim) {
+                None | Some("" | "project") => Some(MemoryReach::Project),
+                Some("app") => Some(MemoryReach::App),
+                Some(_) => None,
+            };
+            match (argument("text"), scope) {
+                (Some(text), Some(scope))
+                    if super::text_valid(text, crate::memory::library::NOTE_BYTES_MAX) =>
+                {
+                    Ok(Call::Remember {
+                        text: text.trim().to_owned(),
+                        scope,
+                    })
+                }
+                _ => Err(REMEMBER_INVALID),
+            }
+        }
+        RECALL_TOOL => match argument("query").unwrap_or_default() {
+            query
+                if query.len() <= crate::memory::library::SEARCH_BYTES_MAX
+                    && !query.chars().any(char::is_control) =>
+            {
+                Ok(Call::Recall {
+                    query: query.trim().to_owned(),
+                })
+            }
+            _ => Err(RECALL_INVALID),
         },
         _ => return None,
     })
@@ -360,27 +799,90 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
 /// Checks a call the engine read from a mailbox, which the agent's side could have written.
 /// Takes the call. Returns it, or the plain sentence it was refused with.
 pub fn checked(call: Call) -> Result<Call, &'static str> {
-    let (name, arguments) = match &call {
-        Call::Delegate {
+    let arguments = match &call {
+        Call::StartWork { title, claims } => json!({"title": title, "claims": claims}),
+        Call::InspectWork => json!({}),
+        Call::UpdateWork {
+            kind,
+            text,
+            to,
+            question_for,
+            severity,
+            reply_to,
+            work,
+            key,
+        } => json!({
+            "kind": kind, "text": text, "to": to, "for": question_for, "severity": severity,
+            "reply_to": reply_to, "work": work, "key": key,
+        }),
+        Call::TransferWork {
+            work,
+            version,
+            action,
+            to,
+        } => json!({"work": work, "version": version, "action": action, "to": to}),
+        Call::FinishWork {
+            work,
+            version,
+            outcome,
+            evidence,
+        } => json!({"work": work, "version": version, "outcome": outcome, "evidence": evidence}),
+        Call::Spawn {
             task,
             harness,
             role,
-        } => (
-            TOOL_NAME,
-            json!({"task": task, "harness": harness, "role": role}),
-        ),
-        Call::Message { agent, text } => (MESSAGE_TOOL, json!({"agent": agent, "text": text})),
-        Call::Answer { agent, text } => (ANSWER_TOOL, json!({"agent": agent, "text": text})),
-        Call::Wake { agent, text } => (WAKE_TOOL, json!({"agent": agent, "text": text})),
-        Call::Status => (STATUS_TOOL, json!({})),
-        Call::Changes => (CHANGES_TOOL, json!({})),
-        Call::Escalate { text } => (ESCALATE_TOOL, json!({"text": text})),
+            mode,
+        } => json!({"task": task, "harness": harness, "role": role, "mode": mode}),
+        Call::Stop { agent } | Call::Merge { agent } => json!({"agent": agent}),
+        Call::Sessions { query } => json!({"query": query}),
+        Call::Session { id, offset } => json!({"id": id, "offset": offset}),
+        Call::Remember { text, scope } => json!({"text": text, "scope": scope.as_str()}),
+        Call::Recall { query } => json!({"query": query}),
     };
-    let again = live_call(name, Some(&arguments)).expect("every call names a live tool")?;
+    let again = live_call(call.name(), Some(&arguments)).expect("every call names a team tool")?;
     if again != call {
-        return Err(LIVE_INVALID);
+        return Err(CALL_INVALID);
     }
     Ok(call)
+}
+
+/// Reads one of a call's fixed choices, such as a kind, tag, action or outcome, in any
+/// case and with `-` for `_`. Takes the arguments and the key. Returns None for a choice
+/// the tool does not offer, else the choice, None when left out or blank.
+fn named<T: serde::de::DeserializeOwned>(
+    arguments: Option<&Value>,
+    key: &str,
+) -> Option<Option<T>> {
+    match arguments.and_then(|arguments| arguments.get(key)) {
+        None | Some(Value::Null) => Some(None),
+        Some(Value::String(text)) if text.trim().is_empty() => Some(None),
+        Some(Value::String(text)) => serde_json::from_value(Value::String(
+            text.trim().to_ascii_lowercase().replace('-', "_"),
+        ))
+        .ok()
+        .map(Some),
+        Some(_) => None,
+    }
+}
+
+/// Reads one claim of `start_work` before the engine normalizes it: plain text on one
+/// line of up to `PATTERN_BYTES_MAX` bytes. Takes the text. Returns it trimmed, or None.
+fn claim(text: &str) -> Option<String> {
+    let text = text.trim();
+    (!text.is_empty()
+        && text.len() <= crate::coord::PATTERN_BYTES_MAX
+        && !text.chars().any(char::is_control))
+    .then(|| text.to_owned())
+}
+
+/// Says whether an idempotency key is 1 to `KEY_BYTES_MAX` letters, digits, `-`, `_`, `.`
+/// or `:`, as the coordination store keeps it. Takes the key. Returns the answer.
+fn key_valid(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= crate::coord::KEY_BYTES_MAX
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
 }
 
 fn agent_name_valid(agent: &str) -> bool {
@@ -406,8 +908,10 @@ fn role_handle(text: &str) -> Result<Option<String>, ()> {
 /// Writes one call into the mailbox under a part name and renames it into place, so the
 /// engine never takes half a call, then waits for the engine's answer. A call still in the
 /// mailbox at the deadline is withdrawn, so the engine never runs it; one the engine has
-/// claimed is reported as taken but unanswered. Takes the mailbox, the call and the wait.
-/// Returns the answer text and whether it is an error.
+/// claimed is reported as taken but unanswered. Before writing, a native lead's server has
+/// the engine name the call by the call id and the digest of its bytes, and sends nothing
+/// the engine did not name. Takes the mailbox, the call and the wait. Returns the answer
+/// text and whether it is an error.
 fn ask(mailbox: &Path, call: &Call, wait: std::time::Duration) -> (String, bool) {
     let pending = calls(mailbox, CALL_SUFFIX).len();
     if pending >= CALLS_PENDING_MAX {
@@ -420,6 +924,12 @@ fn ask(mailbox: &Path, call: &Call, wait: std::time::Duration) -> (String, bool)
         return (UNSENT.into(), true);
     };
     line.push(b'\n');
+    #[cfg(unix)]
+    {
+        if !super::caller::name_call(mailbox, &id, &call_digest(&line)) {
+            return (UNNAMED.into(), true);
+        }
+    }
     let part = mailbox.join(format!("{id}{PART_SUFFIX}"));
     let request = mailbox.join(format!("{id}{CALL_SUFFIX}"));
     if create_private(&part)
@@ -463,7 +973,7 @@ fn read_reply(path: &Path) -> Option<(String, bool)> {
     Some((reply.text, reply.error))
 }
 
-fn call_id() -> std::io::Result<String> {
+pub(crate) fn call_id() -> std::io::Result<String> {
     let mut bytes = [0_u8; 16];
     getrandom::fill(&mut bytes).map_err(|_| std::io::Error::other("no random bytes"))?;
     let id: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
@@ -471,7 +981,7 @@ fn call_id() -> std::io::Result<String> {
     Ok(id)
 }
 
-fn call_id_valid(id: &str) -> bool {
+pub(crate) fn call_id_valid(id: &str) -> bool {
     id.len() == 32
         && id
             .bytes()
@@ -491,12 +1001,12 @@ fn calls(mailbox: &Path, suffix: &str) -> Vec<(std::time::SystemTime, String)> {
 /// claim, answer and removal then goes through this handle, so a link the master swaps in
 /// for the folder's path afterwards is never followed.
 #[cfg(unix)]
-struct Mailbox(rustix::fd::OwnedFd);
+pub(crate) struct Mailbox(rustix::fd::OwnedFd);
 
 /// A live master's mailbox where no directory-relative no-follow open exists; it cannot be
 /// opened, so every use is unreachable by construction.
 #[cfg(not(unix))]
-enum Mailbox {}
+pub(crate) enum Mailbox {}
 
 #[cfg(unix)]
 impl Mailbox {
@@ -506,7 +1016,7 @@ impl Mailbox {
 
     /// Opens a mailbox folder, refusing a link at its own name. Takes its path. Returns
     /// the handle or the I/O error.
-    fn open(path: &Path) -> std::io::Result<Self> {
+    pub(crate) fn open(path: &Path) -> std::io::Result<Self> {
         Ok(Self(rustix::fs::open(
             path,
             Self::folder_flags(),
@@ -517,7 +1027,7 @@ impl Mailbox {
     /// Opens a live master's mailbox for the engine from the folder above the master's
     /// temporary folder, refusing a link at the temporary folder or the mailbox: the master
     /// can replace both. Takes the mailbox path. Returns the handle or the I/O error.
-    fn open_for_engine(path: &Path) -> std::io::Result<Self> {
+    pub(crate) fn open_for_engine(path: &Path) -> std::io::Result<Self> {
         let refused = || std::io::Error::other("the mailbox is not inside a folder");
         let mailbox = path.file_name().ok_or_else(refused)?;
         let holder = path.parent().ok_or_else(refused)?;
@@ -536,7 +1046,7 @@ impl Mailbox {
 
     /// Lists the entries with one suffix whose names carry a valid call id and that are
     /// plain files, oldest first, never more than `MAILBOX_SCAN_MAX` entries looked at.
-    fn entries(&self, suffix: &str) -> Vec<(std::time::SystemTime, String)> {
+    pub(crate) fn entries(&self, suffix: &str) -> Vec<(std::time::SystemTime, String)> {
         let Ok(listed) = rustix::fs::Dir::read_from(&self.0) else {
             return Vec::new();
         };
@@ -563,7 +1073,7 @@ impl Mailbox {
 
     /// Creates a new entry 0600 for writing, failing when anything, a link included, is
     /// there. Takes its name. Returns the open file or the I/O error.
-    fn create(&self, name: &str) -> std::io::Result<File> {
+    pub(crate) fn create(&self, name: &str) -> std::io::Result<File> {
         Ok(File::from(rustix::fs::openat(
             &self.0,
             name,
@@ -572,9 +1082,25 @@ impl Mailbox {
         )?))
     }
 
+    /// Opens an entry to append to, creating it 0600 when missing, without following a link
+    /// or blocking on a FIFO. Takes its name. Returns the open file or the I/O error.
+    pub(crate) fn append(&self, name: &str) -> std::io::Result<File> {
+        Ok(File::from(rustix::fs::openat(
+            &self.0,
+            name,
+            OFlags::WRONLY
+                | OFlags::CREATE
+                | OFlags::APPEND
+                | OFlags::NOFOLLOW
+                | OFlags::NONBLOCK
+                | OFlags::CLOEXEC,
+            Mode::RUSR | Mode::WUSR,
+        )?))
+    }
+
     /// Opens an entry to read without following a link or blocking on a FIFO. Takes its
     /// name. Returns the open file or the I/O error.
-    fn read(&self, name: &str) -> std::io::Result<File> {
+    pub(crate) fn read(&self, name: &str) -> std::io::Result<File> {
         Ok(File::from(rustix::fs::openat(
             &self.0,
             name,
@@ -585,13 +1111,13 @@ impl Mailbox {
 
     /// Renames an entry within the mailbox; a link is moved, never followed. Takes both
     /// names. Returns the I/O error.
-    fn rename(&self, from: &str, to: &str) -> std::io::Result<()> {
+    pub(crate) fn rename(&self, from: &str, to: &str) -> std::io::Result<()> {
         rustix::fs::renameat(&self.0, from, &self.0, to).map_err(std::io::Error::from)
     }
 
     /// Removes an entry; a link is removed, never followed. Takes its name. Returns the
     /// I/O error.
-    fn remove(&self, name: &str) -> std::io::Result<()> {
+    pub(crate) fn remove(&self, name: &str) -> std::io::Result<()> {
         rustix::fs::unlinkat(&self.0, name, AtFlags::empty()).map_err(std::io::Error::from)
     }
 }
@@ -601,34 +1127,38 @@ impl Mailbox {
 /// cannot be reached.
 #[cfg(not(unix))]
 impl Mailbox {
-    fn open(_path: &Path) -> std::io::Result<Self> {
+    pub(crate) fn open(_path: &Path) -> std::io::Result<Self> {
         Err(std::io::Error::new(
             std::io::ErrorKind::Unsupported,
             "team_mailbox_unavailable",
         ))
     }
 
-    fn open_for_engine(path: &Path) -> std::io::Result<Self> {
+    pub(crate) fn open_for_engine(path: &Path) -> std::io::Result<Self> {
         Self::open(path)
     }
 
-    fn entries(&self, _suffix: &str) -> Vec<(std::time::SystemTime, String)> {
+    pub(crate) fn entries(&self, _suffix: &str) -> Vec<(std::time::SystemTime, String)> {
         match *self {}
     }
 
-    fn create(&self, _name: &str) -> std::io::Result<File> {
+    pub(crate) fn create(&self, _name: &str) -> std::io::Result<File> {
         match *self {}
     }
 
-    fn read(&self, _name: &str) -> std::io::Result<File> {
+    pub(crate) fn append(&self, _name: &str) -> std::io::Result<File> {
         match *self {}
     }
 
-    fn rename(&self, _from: &str, _to: &str) -> std::io::Result<()> {
+    pub(crate) fn read(&self, _name: &str) -> std::io::Result<File> {
         match *self {}
     }
 
-    fn remove(&self, _name: &str) -> std::io::Result<()> {
+    pub(crate) fn rename(&self, _from: &str, _to: &str) -> std::io::Result<()> {
+        match *self {}
+    }
+
+    pub(crate) fn remove(&self, _name: &str) -> std::io::Result<()> {
         match *self {}
     }
 }
@@ -654,8 +1184,12 @@ fn modified(stat: &rustix::fs::Stat) -> std::time::SystemTime {
 /// claims left for `REPLY_STALE`. Links and other non-files, the mailbox and the master's
 /// temporary folder included, are never followed; a call past `CALL_BYTES_MAX` is removed
 /// unread. Takes the mailbox and how many to take. Returns each call id with its call, or
-/// none when the file did not hold a valid call.
-pub fn take_calls(mailbox: &Path, max: usize) -> Vec<(String, Option<Call>)> {
+/// none when the file did not hold a valid call, and the digest of the bytes read, which
+/// the engine checks against the name it gave the call.
+pub fn take_calls(
+    mailbox: &Path,
+    max: usize,
+) -> Vec<(String, Option<Call>, Option<[u8; CALL_DIGEST_BYTES]>)> {
     let Ok(mailbox) = Mailbox::open_for_engine(mailbox) else {
         return Vec::new();
     };
@@ -686,13 +1220,35 @@ pub fn take_calls(mailbox: &Path, max: usize) -> Vec<(String, Option<Call>)> {
             }
             let mut bytes = Vec::new();
             (&file).take(CALL_BYTES_MAX).read_to_end(&mut bytes).ok()?;
-            serde_json::from_slice::<Call>(bytes.trim_ascii()).ok()
+            Some((read_call(bytes.trim_ascii())?, call_digest(&bytes)))
         });
         let _ = mailbox.remove(&claimed);
-        taken.push((id, call));
+        taken.push(match call {
+            Some((call, digest)) => (id, Some(call), Some(digest)),
+            None => (id, None, None),
+        });
     }
     assert!(taken.len() <= max);
     taken
+}
+
+/// Reads one call file. A pane an older server wrote beside the call is dropped unread:
+/// the engine names a caller only by its process (DEC-111 Q18). Takes the bytes. Returns
+/// the call, or none for anything else.
+fn read_call(bytes: &[u8]) -> Option<Call> {
+    let mut value: Value = serde_json::from_slice(bytes).ok()?;
+    value.as_object_mut()?.remove(PANE_KEY);
+    serde_json::from_value::<Call>(value).ok()
+}
+
+/// The bytes of a call digest: SHA-256.
+pub const CALL_DIGEST_BYTES: usize = 32;
+
+/// The SHA-256 of a call file's exact bytes, which binds the engine's name for a call to
+/// the call it names. Takes the bytes. Returns the digest.
+pub fn call_digest(bytes: &[u8]) -> [u8; CALL_DIGEST_BYTES] {
+    use sha2::Digest as _;
+    sha2::Sha256::digest(bytes).into()
 }
 
 /// Answers one call in the mailbox: the answer is written beside it under a part name and

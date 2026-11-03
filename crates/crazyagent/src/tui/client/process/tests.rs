@@ -362,7 +362,7 @@ async fn the_tui_saves_both_texts_through_the_engine_and_every_launch_reads_them
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_tui_reads_and_stores_every_agent_setting_through_the_engine() {
     use crate::engine::owner::InstructionSettings;
-    use crate::instruction_files::Choice;
+    use crate::instruction_files::Mode;
     let root = private_root("ca-tsettings-");
     let work = private_root("ca-tsettings-work-");
     let folder = std::fs::canonicalize(work.path()).unwrap().join("project");
@@ -395,11 +395,22 @@ async fn the_tui_reads_and_stores_every_agent_setting_through_the_engine() {
             .await
             .result,
         Ok(ProcessReply::Settings(InstructionSettings::default())),
-        "a project the owner never changed gets the project's files and keeps transcripts"
+        "a project the owner never changed gets both texts and keeps transcripts"
     );
-    for files in [Choice::ProjectAndUser, Choice::None, Choice::Project] {
-        for transcripts in [false, true] {
-            let settings = InstructionSettings { files, transcripts };
+    let every = [Mode::ProjectOnly, Mode::AppOnly, Mode::Both]
+        .into_iter()
+        .flat_map(|mode| [false, true].map(|transcripts| (mode, transcripts)));
+    for (mode, transcripts) in every {
+        for edits in [
+            crate::instruction_files::EditDelivery::NextMessage,
+            crate::instruction_files::EditDelivery::Restart,
+            crate::instruction_files::EditDelivery::Badge,
+        ] {
+            let settings = InstructionSettings {
+                mode,
+                transcripts,
+                edits,
+            };
             assert_eq!(
                 native
                     .process(ProcessQuery::SaveSettings {
@@ -428,8 +439,8 @@ async fn the_tui_reads_and_stores_every_agent_setting_through_the_engine() {
             assert_eq!(
                 crate::launch_context::agent_project(&tx, &project)
                     .unwrap()
-                    .files,
-                files,
+                    .mode,
+                mode,
                 "the next launch reads the stored choice"
             );
             drop(tx);

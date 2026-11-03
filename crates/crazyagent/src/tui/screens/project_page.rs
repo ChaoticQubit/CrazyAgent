@@ -5,30 +5,34 @@ use super::project::{
     MasterStatus, OpenRequest, ProjectReply, ProjectScreen, Speaker, Tab, Transcript,
     plain_problem, project_pool,
 };
+use super::project_markdown::sanitize;
 use super::project_master::{MasterRead, master_problem, transcript_from};
 use super::project_plugins::PluginsReply;
 use super::project_time::local_offset;
 use super::project_view::project_screen;
 use super::settings_accounts::send as send_settings;
-use super::settings_plugins::{AddPlugin, EditServer, SkillDetailPage};
+use super::settings_plugins::{AddPlugin, EditServer, SkillDetailPage, ToolsPage};
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection};
-use crate::engine::owner::{OwnerResponse, OwnerResult};
+use crate::engine::owner::{ImportFile, OwnerResponse, OwnerResult};
 use crate::master_session::{MasterBackend, MasterOwnerAction};
 use crate::project_setup::{ProjectSetup, SetupAction, SetupQuery, SetupView};
 use crate::protocol::{CredentialRef, ProjectId};
 use crate::sandbox::policy::{AgentAccess, AgentPolicy};
 use crate::tui::app::UiEvent;
+use crate::tui::client::process::{ProcessEvent, ProcessQuery, ProcessReply};
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::client::{OwnerEvent, SetupEvent};
 use crate::tui::clock::now_ms;
 use crate::tui::ctx::{Ctx, Link, Load};
-use crate::tui::frame::{Hint, Message};
+use crate::tui::frame::{Hint, Message, Modal, draw_lines, hint};
 use crate::tui::keys::Key;
 use crate::tui::master_session::{
     Context as MasterContext, Event as MasterEvent, Job as MasterJob, State as MasterState,
     Submission as MasterSubmission,
 };
 use crate::tui::seam::{Arrival, NOT_READY, PoolChange, Request};
+use crate::tui::text::{styled, wrap};
+use crate::tui::theme::Role;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
@@ -39,6 +43,9 @@ const SENT_MAX: usize = 8;
 const MASTER_SENT_MAX: usize = 4;
 const TEAM_READ_MS: i64 = 3_000;
 const TEAM_WAIT_MS: i64 = 15_000;
+const IMPORT_MODAL_WIDTH: u16 = 72;
+const IMPORT_ROWS_MAX: usize = 12;
+const BANNER_ROWS_MAX: usize = 3;
 
 #[derive(PartialEq)]
 enum MasterSent {
@@ -191,6 +198,40 @@ pub(in crate::tui) struct ProjectPage {
     team_asked: Option<(i64, bool)>,
     files_asked: Option<String>,
     covered: bool,
+    from_master: bool,
+    reopen_master: bool,
+    import: Option<Vec<ImportFile>>,
+    import_asked: bool,
+    import_sent: Option<ProcessQuery>,
+    moved: Option<Vec<ImportFile>>,
+    uncommitted: Vec<String>,
+    uncommitted_asked: bool,
+}
+
+/// Says in a few words why the engine leaves one instruction file in place (DEC-106).
+/// Input: the refusal code from the pending import list. Output: the reason, read after
+/// "stays in place,".
+fn import_reason(code: &str) -> &'static str {
+    match code {
+        "process_import_outside" => "it links outside the project folder",
+        "process_import_unsafe" => "it isn't a plain file you own",
+        "process_import_unreadable" => "it couldn't be read",
+        "process_text_too_large" => "it is over 64 KB",
+        "process_text_invalid" => "it has characters CrazyAgent can't keep",
+        _ => "CrazyAgent can't import it",
+    }
+}
+
+/// Words a whole refusal of the confirmed import, when nothing was moved (DEC-106).
+/// Input: the refusal code. Output: the message for the status line.
+fn import_problem(code: &str) -> String {
+    match code {
+        "process_text_too_large" => {
+            "Together these files are over 64 KB, so nothing moved. Shorten one, then try again."
+                .into()
+        }
+        other => super::process::message(other),
+    }
 }
 
 impl ProjectPage {
@@ -219,6 +260,14 @@ impl ProjectPage {
             team_asked: None,
             files_asked: None,
             covered: false,
+            from_master: false,
+            reopen_master: false,
+            import: None,
+            import_asked: false,
+            import_sent: None,
+            moved: None,
+            uncommitted: Vec::new(),
+            uncommitted_asked: false,
         };
         page.refresh_pool(ctx);
         page.select_master(ctx);
@@ -241,6 +290,7 @@ impl ProjectPage {
                     policy: AgentPolicy {
                         access,
                         toolchains: Vec::new(),
+                        network: crate::sandbox::policy::AgentNetwork::default(),
                     },
                 },
                 generation,
@@ -252,6 +302,225 @@ impl ProjectPage {
     /// Reads the team graph for the panel beside the master, while this page is on top on
     /// the Conversation tab: at most one read out at a time, at most one every
     /// `TEAM_READ_MS`, and a read lost for `TEAM_WAIT_MS` is asked again. Takes the context.
+    /// Asks the engine, once per opening, which instruction files wait to be copied into the
+    /// project's instructions.md (DEC-106). Input: the context. Output: none; the list arrives
+    /// as a process event and shows as a prompt when it isn't empty.
+    fn ask_import(&mut self, ctx: &mut Ctx) {
+        if self.import_asked || self.import_sent.is_some() {
+            return;
+        }
+        let query = ProcessQuery::PendingImport {
+            project: self.screen.project.clone(),
+        };
+        if ctx.try_request(Request::Process(Box::new(query.clone()))) {
+            self.import_asked = true;
+            self.import_sent = Some(query);
+        }
+    }
+
+    /// Reads which moved instruction files still wait for a commit, for the banner shown
+    /// while the move stays uncommitted (DEC-106 addendum). Input: the context. Output:
+    /// none; the paths arrive as a process event.
+    fn ask_uncommitted(&mut self, ctx: &mut Ctx) {
+        if self.uncommitted_asked {
+            return;
+        }
+        let query = ProcessQuery::Uncommitted {
+            project: self.screen.project.clone(),
+        };
+        self.uncommitted_asked = ctx.try_request(Request::Process(Box::new(query)));
+    }
+
+    /// Asks the engine to commit the instruction import's move: one local commit on the
+    /// checkout's current branch holding only the moved files, never pushed. Only the owner's
+    /// key calls this. Input: the context. Output: none; the commit arrives as a process event.
+    fn commit_move(&mut self, ctx: &mut Ctx) {
+        if self.import_sent.is_some() {
+            return;
+        }
+        let query = ProcessQuery::CommitImport {
+            project: self.screen.project.clone(),
+        };
+        if ctx.try_request(Request::Process(Box::new(query.clone()))) {
+            self.import_sent = Some(query);
+        } else {
+            ctx.say(Message::error(
+                "The move wasn't committed: too many requests are waiting.",
+                "",
+            ));
+        }
+    }
+
+    /// Applies the engine's answer to the pending-import read, the confirmed move, the
+    /// uncommitted-move read or the commit. Inputs: the process event and the context.
+    /// Output: none; a list shows the prompt, a move with uncommitted files offers Commit the
+    /// move or Leave it, any other move closes it and names the moved files, a commit names
+    /// its branch and files, and a refusal says why.
+    fn import_arrived(&mut self, event: &ProcessEvent, ctx: &mut Ctx) {
+        if let (ProcessQuery::Uncommitted { project }, result) = (&event.query, &event.result)
+            && *project == self.screen.project
+        {
+            self.uncommitted_asked = false;
+            if let Ok(ProcessReply::Paths(paths)) = result {
+                self.uncommitted = paths.clone();
+            }
+            return;
+        }
+        if self.import_sent.as_ref() != Some(&event.query) {
+            return;
+        }
+        self.import_sent = None;
+        match (&event.query, &event.result) {
+            (ProcessQuery::PendingImport { .. }, Ok(ProcessReply::Files(files))) => {
+                self.import = (!files.is_empty()).then(|| files.clone());
+            }
+            (ProcessQuery::PendingImport { .. }, _) => self.import_asked = false,
+            (ProcessQuery::ConfirmImport { .. }, Ok(ProcessReply::Files(moved))) => {
+                self.import = None;
+                if moved.iter().any(|file| file.uncommitted) {
+                    self.moved = Some(moved.clone());
+                } else {
+                    let names: Vec<String> =
+                        moved.iter().map(|file| sanitize(&file.path)).collect();
+                    ctx.say(Message::success(
+                        "Moved to .crazyagent/imported/:",
+                        &names.join(", "),
+                    ));
+                }
+                self.ask_uncommitted(ctx);
+            }
+            (ProcessQuery::ConfirmImport { .. }, Err(code)) => {
+                ctx.say(Message::error(&import_problem(code), ""));
+            }
+            (ProcessQuery::CommitImport { .. }, Ok(ProcessReply::Committed(commit))) => {
+                self.moved = None;
+                let files: Vec<String> = commit.files.iter().map(|path| sanitize(path)).collect();
+                ctx.say(Message::success(
+                    &format!("Committed the move on {}:", sanitize(&commit.branch)),
+                    &format!("{}. Nothing was pushed.", files.join(", ")),
+                ));
+                self.ask_uncommitted(ctx);
+            }
+            (ProcessQuery::CommitImport { .. }, Err(code)) => {
+                if code == "process_commit_none" {
+                    self.moved = None;
+                }
+                ctx.say(Message::error(&super::process::message(code), ""));
+                self.ask_uncommitted(ctx);
+            }
+            _ => {}
+        }
+    }
+
+    /// Handles a key while the moved files still wait for a commit after the confirm: Enter
+    /// or y commits the move, Esc or n leaves it for the project page banner. Inputs: the key
+    /// and the context. Output: handled, so no key reaches the page meanwhile.
+    fn moved_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        match key {
+            Key::Enter | Key::Char('y') => self.commit_move(ctx),
+            Key::Esc | Key::Char('n') if self.import_sent.is_none() => {
+                self.moved = None;
+                self.ask_uncommitted(ctx);
+            }
+            _ => {}
+        }
+        Flow::Handled
+    }
+
+    /// The banner rows shown above the tabs while an instruction import's move stays
+    /// uncommitted: the files, why it matters and the Ctrl-G action. Inputs: the width and
+    /// the context. Output: the rows, none when no move waits.
+    fn banner(&self, width: usize, ctx: &Ctx) -> Vec<Line<'static>> {
+        if self.uncommitted.is_empty() || width < 8 {
+            return Vec::new();
+        }
+        let files: Vec<String> = self.uncommitted.iter().map(|path| sanitize(path)).collect();
+        let text = format!(
+            "Git still shows {} as deleted after the instruction import, so merges into this branch are refused. Ctrl-G Commit the move makes one local commit holding only that move; it is never pushed.",
+            files.join(", ")
+        );
+        wrap(&text, width - 2)
+            .into_iter()
+            .take(BANNER_ROWS_MAX)
+            .map(|line| styled(format!(" {line}"), Role::Warning, &ctx.theme))
+            .collect()
+    }
+
+    /// Handles a key while the pending-import prompt shows: Enter or y copies the files into
+    /// instructions.md and moves them aside, Esc or n closes it until the next opening.
+    /// Inputs: the key and the context. Output: handled, so no key reaches the page meanwhile.
+    fn import_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        let movable = self
+            .import
+            .as_ref()
+            .is_some_and(|files| files.iter().any(|file| file.refused.is_none()));
+        match key {
+            Key::Enter | Key::Char('y') if movable && self.import_sent.is_none() => {
+                let query = ProcessQuery::ConfirmImport {
+                    project: self.screen.project.clone(),
+                };
+                if ctx.try_request(Request::Process(Box::new(query.clone()))) {
+                    self.import_sent = Some(query);
+                } else {
+                    ctx.say(Message::error(
+                        "The files weren't moved: too many requests are waiting.",
+                        "",
+                    ));
+                }
+            }
+            Key::Esc | Key::Char('n') if self.import_sent.is_none() => self.import = None,
+            _ => {}
+        }
+        Flow::Handled
+    }
+
+    /// The step after a confirmed import whose moved files git still shows as deleted: the
+    /// moved files, which of them wait for a commit, and Commit the move or Leave it.
+    /// Inputs: the moved files and the context. Output: the modal and its keys.
+    fn moved_modal(&self, moved: &[ImportFile], ctx: &Ctx) -> (Modal, Vec<Hint>) {
+        let theme = &ctx.theme;
+        let room = usize::from(IMPORT_MODAL_WIDTH) - 4;
+        let mut body: Vec<Line<'static>> = wrap(
+            "Their text is in this project's .crazyagent/instructions.md. Moved:",
+            room,
+        )
+        .into_iter()
+        .map(Line::raw)
+        .collect();
+        for file in moved.iter().take(IMPORT_ROWS_MAX) {
+            let path = sanitize(&file.path);
+            let text = if file.uncommitted {
+                format!("- {path} (git shows it as deleted)")
+            } else {
+                format!("- {path}")
+            };
+            body.extend(wrap(&text, room).into_iter().map(Line::raw));
+        }
+        body.push(Line::default());
+        body.extend(
+            wrap(
+                "Merges into this branch are refused until the move is committed. Commit the move makes one local commit on your current branch holding only that move; it is never pushed. Leave it keeps a banner on the project page.",
+                room,
+            )
+            .into_iter()
+            .map(|text| styled(text, Role::Warning, theme)),
+        );
+        let hints = if self.import_sent.is_none() {
+            vec![hint("Enter", "Commit the move"), hint("Esc", "Leave it")]
+        } else {
+            Vec::new()
+        };
+        (
+            Modal {
+                width: IMPORT_MODAL_WIDTH,
+                title: "Moved to .crazyagent/imported/".into(),
+                body,
+                top: None,
+            },
+            hints,
+        )
+    }
+
     fn ask_team(&mut self, ctx: &mut Ctx) {
         if self.covered || self.screen.tab != Tab::Conversation || ctx.link != Link::Ready {
             return;
@@ -487,6 +756,13 @@ impl ProjectPage {
         {
             return;
         }
+        if code == "master_session_unused" {
+            ctx.say(Message::warning(
+                "This session has no messages yet, so it already is a new session.",
+                "",
+            ));
+            return;
+        }
         let lead = match &submission.action {
             MasterOwnerAction::Submit { text, .. } => {
                 if self.screen.input.value().is_empty() {
@@ -501,6 +777,7 @@ impl ProjectPage {
             MasterOwnerAction::Cancel { .. } => "The master's turn did not stop.",
             MasterOwnerAction::Close { .. } => "The conversation did not end.",
             MasterOwnerAction::Resolve { .. } => "The master did not start resolving the update.",
+            MasterOwnerAction::DeleteSession { .. } => "The session was not deleted.",
         };
         let problem = master_problem(code);
         if self.waiting.is_some() {
@@ -511,10 +788,23 @@ impl ProjectPage {
     }
 
     /// Carries on after the engine confirmed a master request: an opened master takes the
-    /// waiting message, and a conversation ended for a renewal opens a new one.
-    /// Takes the confirmed action.
+    /// waiting message, a conversation ended for a renewal opens a new one, a session
+    /// switch the owner started from the live master view opens that view again, and a new
+    /// session of a master that runs live turns the live switch on, so the live master
+    /// starts on the fresh session. Takes the confirmed action and the context.
     fn confirmed(&mut self, action: &MasterOwnerAction, ctx: &mut Ctx) {
         match action {
+            MasterOwnerAction::NewSession { .. } | MasterOwnerAction::Resume { .. } => {
+                if self.from_master {
+                    self.from_master = false;
+                    self.reopen_master = true;
+                }
+                if matches!(action, MasterOwnerAction::NewSession { .. })
+                    && self.screen.live_master()
+                {
+                    self.turn_live_on(ctx);
+                }
+            }
             MasterOwnerAction::Open { .. } => {
                 let Some(waiting) = self.waiting.take() else {
                     return;
@@ -537,6 +827,19 @@ impl ProjectPage {
             }
             _ => {}
         }
+    }
+
+    /// Turns the project's live master switch on, for a new session the owner asked for.
+    /// Takes the context; the change goes out with a fresh generation.
+    fn turn_live_on(&self, ctx: &mut Ctx) {
+        let generation = ctx.next_generation();
+        ctx.request(Request::Setup(SetupQuery::TeamChange {
+            action: crate::team::TeamAction::LiveMaster {
+                project_id: self.screen.project.clone(),
+                on: true,
+            },
+            generation,
+        }));
     }
 
     fn advance_open(&mut self, event: &MasterEvent, stopped: bool, ctx: &mut Ctx) {
@@ -883,8 +1186,17 @@ impl ProjectPage {
                 Flow::Handled
             }
             ProjectReply::Session(action) => {
+                let in_view = self
+                    .master
+                    .transcript()
+                    .is_some_and(|(session, _, _)| session.is_some());
                 if let Err(problem) = super::sessions::act(&mut self.master, &action) {
                     ctx.say(Message::error("The session did not switch.", &problem));
+                } else if matches!(action, super::sessions::SessionsAction::New { .. })
+                    && !in_view
+                    && self.screen.live_master()
+                {
+                    self.turn_live_on(ctx);
                 }
                 Flow::Handled
             }
@@ -981,6 +1293,9 @@ impl ProjectPage {
             PluginsReply::AddServer => {
                 return Flow::Replace(Box::new(AddPlugin::server().for_project(project, name)));
             }
+            PluginsReply::AddHooks => {
+                return Flow::Replace(Box::new(AddPlugin::hooks().for_project(project, name)));
+            }
             PluginsReply::OpenSkill { id, name: skill } => {
                 return Flow::Replace(Box::new(
                     SkillDetailPage::new(id, skill).for_project(project, name),
@@ -989,6 +1304,11 @@ impl ProjectPage {
             PluginsReply::Edit(server) => {
                 return Flow::Replace(Box::new(
                     EditServer::new(*server).for_project(project, name),
+                ));
+            }
+            PluginsReply::Tools { servers, at } => {
+                return Flow::Replace(Box::new(
+                    ToolsPage::new(servers, at).for_project(project, name),
                 ));
             }
         };
@@ -1008,11 +1328,17 @@ impl Screen for ProjectPage {
     }
 
     fn hints(&self, _ctx: &Ctx) -> Vec<Hint> {
-        hints_of(&self.view)
+        let mut hints = hints_of(&self.view);
+        if !self.uncommitted.is_empty() {
+            hints.insert(0, hint("Ctrl-G", "Commit the move"));
+        }
+        hints
     }
 
     fn typing(&self) -> bool {
-        self.screen.edit.is_some()
+        self.import.is_some()
+            || self.moved.is_some()
+            || self.screen.edit.is_some()
             || self.screen.adding.is_some()
             || self.screen.folders.is_some()
             || self.screen.access.is_some()
@@ -1022,6 +1348,16 @@ impl Screen for ProjectPage {
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        if self.moved.is_some() {
+            return self.moved_key(key, ctx);
+        }
+        if self.import.is_some() {
+            return self.import_key(key, ctx);
+        }
+        if !self.uncommitted.is_empty() && *key == Key::Ctrl('g') {
+            self.commit_move(ctx);
+            return Flow::Handled;
+        }
         self.screen.width = ctx.width;
         if self.changes_have_keys()
             && let Some(event) = key_event(key)
@@ -1096,6 +1432,10 @@ impl Screen for ProjectPage {
                     self.screen.plugins.apply(event);
                 }
                 OwnerEvent::Changes(event) => self.screen.changes.apply(event),
+                OwnerEvent::Process(event) => {
+                    self.import_arrived(event, ctx);
+                    return Flow::Handled;
+                }
                 _ => return Flow::Handled,
             },
             Arrival::PoolEdited(result) => self.assigned(result, ctx),
@@ -1103,8 +1443,14 @@ impl Screen for ProjectPage {
             Arrival::Connected(_) => {
                 self.select_master(ctx);
                 self.master.access();
+                self.ask_import(ctx);
+                self.ask_uncommitted(ctx);
             }
             Arrival::Disconnected(_) => {
+                if let Some(ProcessQuery::PendingImport { .. }) = self.import_sent.take() {
+                    self.import_asked = false;
+                }
+                self.uncommitted_asked = false;
                 self.sent.clear();
                 self.screen.schedule = None;
                 self.schedule_asked = false;
@@ -1128,6 +1474,12 @@ impl Screen for ProjectPage {
         self.say_problem(ctx);
         self.ask_team(ctx);
         self.redraw(ctx);
+        if std::mem::take(&mut self.reopen_master) && !self.covered && self.screen.live_master() {
+            return Flow::Open(Place::Master {
+                id: self.screen.project.clone(),
+                name: self.screen.name.clone(),
+            });
+        }
         Flow::Handled
     }
 
@@ -1141,6 +1493,7 @@ impl Screen for ProjectPage {
             .take_if(|(project, _)| *project == self.screen.project)
         {
             assert!(matches!(code, 'n' | 'l'));
+            self.from_master = true;
             self.screen.open(Tab::Conversation);
             self.screen.typing = false;
             let reply = self
@@ -1149,6 +1502,8 @@ impl Screen for ProjectPage {
             let _ = self.reply(reply, ctx);
         }
         self.ask_team(ctx);
+        self.ask_import(ctx);
+        self.ask_uncommitted(ctx);
         self.refresh_pool(ctx);
         self.sync_master(ctx);
         self.pump(ctx);
@@ -1157,6 +1512,26 @@ impl Screen for ProjectPage {
     }
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
+        let banner = self.banner(usize::from(area.width), ctx);
+        let rows = u16::try_from(banner.len())
+            .unwrap_or(u16::MAX)
+            .min(area.height / 2);
+        if rows > 0 {
+            draw_lines(
+                frame.buffer_mut(),
+                Rect {
+                    height: rows,
+                    ..area
+                },
+                &banner,
+            );
+        }
+        let area = Rect {
+            y: area.y + rows,
+            height: area.height - rows,
+            ..area
+        };
+        assert!(rows == 0 || !self.uncommitted.is_empty());
         self.screen.width = area.width;
         self.screen.now_ms = now_ms();
         self.view = project_screen(
@@ -1168,8 +1543,87 @@ impl Screen for ProjectPage {
         paint(frame, area, &self.view)
     }
 
+    fn modal(&self, ctx: &Ctx) -> Option<(Modal, Vec<Hint>)> {
+        if let Some(moved) = &self.moved {
+            return Some(self.moved_modal(moved, ctx));
+        }
+        let files = self.import.as_ref()?;
+        let theme = &ctx.theme;
+        let room = usize::from(IMPORT_MODAL_WIDTH) - 4;
+        let mut body: Vec<Line<'static>> = wrap(
+            "CrazyAgent keeps this project's instructions in .crazyagent/instructions.md and no longer reads these files when agents start:",
+            room,
+        )
+        .into_iter()
+        .map(Line::raw)
+        .collect();
+        for file in files.iter().take(IMPORT_ROWS_MAX) {
+            let size = if file.bytes < 1024 {
+                format!("{} bytes", file.bytes)
+            } else {
+                format!("{} KB", file.bytes.div_ceil(1024))
+            };
+            let path = sanitize(&file.path);
+            let text = match &file.refused {
+                None if file.tracked => format!("- {path} ({size}, tracked by git)"),
+                None => format!("- {path} ({size})"),
+                Some(code) => format!("- {path}: stays in place, {}", import_reason(code)),
+            };
+            body.extend(wrap(&text, room).into_iter().map(Line::raw));
+        }
+        if files.len() > IMPORT_ROWS_MAX {
+            body.push(styled(
+                format!("and {} more", files.len() - IMPORT_ROWS_MAX),
+                Role::Muted,
+                theme,
+            ));
+        }
+        body.push(Line::default());
+        if files
+            .iter()
+            .any(|file| file.refused.is_none() && file.tracked)
+        {
+            body.extend(
+                wrap(
+                    "Git tracks some of them, so after the move git shows them as deleted.",
+                    room,
+                )
+                .into_iter()
+                .map(|text| styled(text, Role::Warning, theme)),
+            );
+        }
+        let movable = files.iter().any(|file| file.refused.is_none());
+        let note = if movable {
+            "Enter copies them into instructions.md and moves them to .crazyagent/imported/. Not now asks again the next time you open the project."
+        } else {
+            "None of them can be moved. Not now asks again the next time you open the project."
+        };
+        body.extend(
+            wrap(note, room)
+                .into_iter()
+                .map(|text| styled(text, Role::Muted, theme)),
+        );
+        let mut hints = Vec::new();
+        if self.import_sent.is_none() {
+            if movable {
+                hints.push(hint("Enter", "Copy into instructions.md and move aside"));
+            }
+            hints.push(hint("Esc", "Not now"));
+        }
+        Some((
+            Modal {
+                width: IMPORT_MODAL_WIDTH,
+                title: "Instruction files found".into(),
+                body,
+                top: None,
+            },
+            hints,
+        ))
+    }
+
     fn busy(&self, _ctx: &Ctx) -> bool {
-        self.screen.counts().0 > 0
+        self.import_sent.is_some()
+            || self.screen.counts().0 > 0
             || self.master.has_pending()
             || self.waiting.is_some()
             || self.screen.plugins.busy()

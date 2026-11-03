@@ -2,6 +2,8 @@ use super::*;
 #[cfg(all(test, unix))]
 mod barrier_tests;
 #[cfg(all(test, unix))]
+mod dispatch_identity_tests;
+#[cfg(all(test, unix))]
 mod master_auto_dispatch_tests;
 mod master_dispatch;
 #[cfg(all(test, unix))]
@@ -480,6 +482,7 @@ struct Authority {
     deferred: std::sync::atomic::AtomicUsize,
     master_dispatch: tokio::sync::Mutex<master_dispatch::MasterDispatch>,
     reproof: tokio::sync::Mutex<()>,
+    reproving: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Authority {
@@ -1189,6 +1192,7 @@ impl OwnerServer {
                 deferred: std::sync::atomic::AtomicUsize::new(0),
                 master_dispatch: tokio::sync::Mutex::new(master_dispatch::MasterDispatch::new()),
                 reproof: tokio::sync::Mutex::new(()),
+                reproving: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             });
             Ok::<_, EngineError>((listener, authority))
         })();
@@ -1323,6 +1327,12 @@ impl OwnerServer {
         let mut tasks = Tasks::default();
         let mut handshakes = tokio::task::JoinSet::new();
         let upkeep = tokio::spawn(changes::upkeep(Arc::downgrade(&self.authority)));
+        let backfill = setup::engine_root(&self.authority).ok().map(|root| {
+            tokio::spawn(setup::backfill_hooks(
+                self.engine.storage.sender.clone(),
+                root,
+            ))
+        });
         let result = loop {
             let expiry = self.authority.native_auth_deadline();
             let dispatching = self.authority.native_auth_dispatch_pending();
@@ -1381,6 +1391,9 @@ impl OwnerServer {
             assert!(tasks.terminals.len() <= crate::terminal::VIEWERS_MAX);
         };
         upkeep.abort();
+        if let Some(backfill) = backfill {
+            backfill.abort();
+        }
         if let Err(error) = self.authority.master_dispatch.lock().await.shutdown().await {
             eprintln!("{}", master_dispatch_shutdown_line(&error));
         }

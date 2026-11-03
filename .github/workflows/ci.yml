@@ -20,12 +20,13 @@ env:
   TMUX_VERSION: "3.8"
   TMUX_SHA256: e79c699c7e949dccd0a4a125e17b8d1261e311b16979dbc8eb34542f3966d82e
   CLAUDE_CODE_VERSION: "2.1.309"
+  CODEX_VERSION: "0.164.0"
   CARGO_INCREMENTAL: "0"
   CARGO_TERM_COLOR: never
   ENGINE_TESTS_EXCLUDE: >-
-    e2e_tui research_engine team_engine onboarding research_runner research_service research_managed tui_v1_e2e codex_app_server_live launch_context_live
-    qualification_boundary worker_engine_boundary accounts_binary e2e_add_existing setup_network
-  DESKTOP_TESTS_EXCLUDE: conversation_native picker_windows
+    e2e_tui research_engine team_engine onboarding research_runner research_service research_managed tui_v1_e2e codex_app_server_live launch_context_live codex_bridge_live agents_live
+    qualification_boundary worker_engine_boundary accounts_binary e2e_add_existing setup_network harness_catalog_bundled_rcli
+  DESKTOP_TESTS_EXCLUDE: picker_windows
   NODE_TESTS_EXCLUDE: apps/desktop/test/native/zero-retry-tauri-service.test.mjs apps/desktop/test/native/zero-retry-tauri-service-constructor.test.mjs
   BUN_TESTS_EXCLUDE: scripts/rcli/host.construction.test.ts
 
@@ -262,6 +263,28 @@ jobs:
           tar -xzf "$work/claude.tgz" -C "$work" package/claude
           install -m 0755 "$work/package/claude" "$work/bin/claude"
           test "$("$work/bin/claude" --version | cut -d' ' -f1)" = "$CLAUDE_CODE_VERSION"
+          echo "$work/bin" >> "$GITHUB_PATH"
+      - name: Install Codex
+        env:
+          CODEX_PACKAGE: codex-package-aarch64-apple-darwin.tar.gz
+          CODEX_SHA256: dd99e9092270691a67bdde7be04ac283dea9da8e86cbde356c2cc851a79205fa
+        run: |
+          set -euo pipefail
+          prefix="$RUNNER_TOOL_CACHE/codex/$CODEX_VERSION/arm64"
+          work="$RUNNER_TEMP/codex"
+          rm -rf "$work"
+          mkdir -p "$prefix" "$work"
+          if [ -f "$prefix/codex.tgz" ]; then
+            cp "$prefix/codex.tgz" "$work/codex.tgz"
+          fi
+          if ! echo "$CODEX_SHA256  $work/codex.tgz" | shasum -a 256 -s -c - 2>/dev/null; then
+            curl -fsSL --proto '=https' --tlsv1.2 -o "$work/codex.tgz" "https://github.com/openai/codex/releases/download/rust-v$CODEX_VERSION/$CODEX_PACKAGE"
+            echo "$CODEX_SHA256  $work/codex.tgz" | shasum -a 256 -c -
+            cp "$work/codex.tgz" "$prefix/codex.tgz.$$"
+            mv "$prefix/codex.tgz.$$" "$prefix/codex.tgz"
+          fi
+          tar -xzf "$work/codex.tgz" -C "$work"
+          test "$("$work/bin/codex" --version)" = "codex-cli $CODEX_VERSION"
           echo "$work/bin" >> "$GITHUB_PATH"
       - if: runner.environment == 'github-hosted'
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9

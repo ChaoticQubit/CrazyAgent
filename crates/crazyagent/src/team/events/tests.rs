@@ -607,6 +607,74 @@ fn a_numbered_name_reaches_that_agent_not_one_whose_handle_reads_as_it() {
     );
 }
 
+/// A name a finished and a running sub-agent share reaches the running one (DEC-111 Q19), so
+/// the master's finished list names the finished one by its number only, whether they share
+/// the persona or the handle in any case, or one's persona is the other's handle. A name only
+/// it carries, or one only a stopped agent or another project's agent also carries, still
+/// shows with its number.
+#[test]
+fn a_finished_agent_sharing_a_running_agent_s_name_is_listed_by_number_only() {
+    let fixture = Fixture::new();
+    let name = |agent: i64, project: &str, persona: &str, handle: Option<&str>| {
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_names(agent,project,persona,handle) VALUES (?1,?2,?3,?4)",
+                params![agent, project, persona, handle],
+            )
+            .unwrap();
+    };
+    let finished = |persona: &str, handle: Option<&str>| {
+        let id = fixture.agent(PROJECT, "sub", "codex", "stopped");
+        fixture
+            .connection
+            .execute(
+                "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,'/repo',?3,'/repo/.git')",
+                params![id, PROJECT, format!("/repo/agent-{id}")],
+            )
+            .unwrap();
+        name(id, PROJECT, persona, handle);
+        id
+    };
+    let other = |project: &str, status: &str, persona: &str, handle: Option<&str>| {
+        let id = fixture.agent(project, "sub", "codex", status);
+        name(id, project, persona, handle);
+    };
+    let ada = finished("Ada", None);
+    let cy = finished("Cy", Some("charts"));
+    let di = finished("Di", Some("api"));
+    let bo = finished("Bo", Some("docs"));
+    let fay = finished("Fay", None);
+    let gus = finished("Gus", Some("maps"));
+    let ivy = finished("Ivy", Some("kit"));
+    other(PROJECT, "working", "Ada", None);
+    other(PROJECT, "idle", "cy", Some("login"));
+    other(PROJECT, "starting", "Eve", Some("API"));
+    other(PROJECT, "stopped", "Bo", Some("docs"));
+    other(OTHER, "working", "Fay", None);
+    other(PROJECT, "working", "Hal", Some("gus"));
+    other(PROJECT, "idle", "Kit", None);
+    let lines: std::collections::BTreeMap<i64, String> =
+        finished_agents(&fixture.connection, &project(), 1)
+            .unwrap()
+            .into_iter()
+            .collect();
+    let line = |named: String| format!("- {named} (Codex): no task yet; finished");
+    assert_eq!(
+        lines,
+        std::collections::BTreeMap::from([
+            (ada, line(format!("Sub-agent {ada}"))),
+            (cy, line(format!("Sub-agent {cy}"))),
+            (di, line(format!("Sub-agent {di}"))),
+            (bo, line(format!("Bo (@docs), Sub-agent {bo}"))),
+            (fay, line(format!("Fay, Sub-agent {fay}"))),
+            (gus, line(format!("Sub-agent {gus}"))),
+            (ivy, line(format!("Sub-agent {ivy}"))),
+        ])
+    );
+    assert!(!lines[&ada].contains("Ada"), "{}", lines[&ada]);
+}
+
 #[test]
 fn a_task_end_records_finished_or_failed_whatever_its_last_line_asks_and_master_delegations_are_carried()
  {
@@ -1854,7 +1922,7 @@ fn queued_questions_count_per_agent_until_they_reach_the_master_and_show_on_the_
         }))
         .unwrap();
         status.events.questions = questions;
-        crate::team::graph(&status)
+        crate::team::graph(&status, &Default::default())
             .nodes
             .into_iter()
             .find(|node| node.id == format!("team-{agent}"))
@@ -1868,6 +1936,142 @@ fn queued_questions_count_per_agent_until_they_reach_the_master_and_show_on_the_
     let delivered = view(connection, &project()).unwrap().questions;
     assert!(delivered.is_empty(), "{delivered:?}");
     assert_eq!(node(delivered, ada), Some(0));
+}
+
+fn event_state(connection: &Connection, id: i64) -> String {
+    connection
+        .query_row("SELECT state FROM team_events WHERE id=?1", [id], |row| {
+            row.get(0)
+        })
+        .unwrap()
+}
+
+/// K2b: a worker's queued events go to its own lead as one engine note keyed `events-<first
+/// id>` and end Delivered; a kind its wake rule mutes ends Muted; the master's wake check
+/// never sees a worker's events, only its leads'.
+#[test]
+fn a_workers_events_reach_its_lead_as_one_note_and_never_wake_the_master() {
+    let fixture = Fixture::new();
+    crate::coord::ensure(&fixture.connection).unwrap();
+    let connection = &fixture.connection;
+    let master = fixture.agent(PROJECT, "master", "claude-code", "idle");
+    let lead = fixture.agent(PROJECT, "sub", "claude-code", "idle");
+    let worker = fixture.agent(PROJECT, "sub", "codex", "idle");
+    connection
+        .execute(
+            "UPDATE team_agents SET parent=?1 WHERE id=?2",
+            [lead, worker],
+        )
+        .unwrap();
+    let finished = record(
+        connection,
+        &project(),
+        worker,
+        None,
+        EventKind::Finished,
+        "Wrote page.md",
+        10,
+    )
+    .unwrap()
+    .unwrap();
+    let failed = record(
+        connection,
+        &project(),
+        worker,
+        None,
+        EventKind::Failed,
+        "Tests did not build",
+        11,
+    )
+    .unwrap()
+    .unwrap();
+    let progress = record(
+        connection,
+        &project(),
+        worker,
+        None,
+        EventKind::Progress,
+        "Half way",
+        12,
+    )
+    .unwrap()
+    .unwrap();
+
+    let tx = immediate(connection).unwrap();
+    assert_eq!(due(&tx, &project(), 13).unwrap(), None);
+    drop(tx);
+
+    forward_to_parents(connection, &project(), 14).unwrap();
+    assert_eq!(event_state(connection, finished), "delivered");
+    assert_eq!(event_state(connection, failed), "delivered");
+    assert_eq!(event_state(connection, progress), "muted");
+    let notes = crate::coord::pending(connection, lead, crate::coord::PENDING_MAX).unwrap();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert_eq!(notes[0].from, crate::coord::Party::Engine);
+    assert_eq!(notes[0].kind, crate::coord::MessageKind::Note);
+    assert!(notes[0].body.contains("Wrote page.md"), "{}", notes[0].body);
+    assert!(
+        notes[0].body.contains("Tests did not build"),
+        "{}",
+        notes[0].body
+    );
+    let key: String = connection
+        .query_row(
+            "SELECT idem_key FROM coord_messages WHERE id=?1",
+            [notes[0].id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        key,
+        format!("{}{finished}", crate::coord::delivery::EVENTS_KEY)
+    );
+    assert!(
+        crate::coord::pending(connection, master, crate::coord::PENDING_MAX)
+            .unwrap()
+            .is_empty()
+    );
+
+    let own = record(
+        connection,
+        &project(),
+        lead,
+        None,
+        EventKind::Finished,
+        "Merged both workers",
+        15,
+    )
+    .unwrap()
+    .unwrap();
+    forward_to_parents(connection, &project(), 16).unwrap();
+    assert_eq!(event_state(connection, own), "queued");
+    let tx = immediate(connection).unwrap();
+    let wake = due(&tx, &project(), 17)
+        .unwrap()
+        .expect("the lead's event wakes the master");
+    assert_eq!(wake.events, [own]);
+}
+
+/// K2b: a task a lead handed to its worker ends Carried, since its result reaches the lead,
+/// while a task the owner gave an agent with no lead is queued for the master.
+#[test]
+fn a_task_a_lead_delegated_ends_carried() {
+    let fixture = Fixture::new();
+    let connection = &fixture.connection;
+    let lead = fixture.agent(PROJECT, "sub", "claude-code", "idle");
+    let worker = fixture.agent(PROJECT, "sub", "codex", "idle");
+    let delegated = fixture.task(worker, "lead", "done", Some("Wrote page.md"));
+    connection
+        .execute(
+            "UPDATE team_tasks SET parent=?1 WHERE id=?2",
+            [lead, delegated],
+        )
+        .unwrap();
+    let owned = fixture.task(lead, "owner", "done", Some("Merged"));
+    let carried = task_ended(connection, delegated, 20).unwrap().unwrap();
+    let queued = task_ended(connection, owned, 21).unwrap().unwrap();
+    assert_eq!(event_state(connection, carried), "carried");
+    assert_eq!(event_state(connection, queued), "queued");
 }
 
 /// What the master typed into a sub-agent is kept for the agent's Messages timeline only once

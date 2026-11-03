@@ -1,29 +1,33 @@
-use super::{Grant, Mode, Order, Plan, Report, TeamLimits, TeamRuntime, TurnEnd, per_turn};
+use super::{
+    Adoption, Grant, Launch, Managed, Mode, Order, Plan, Report, Seat, TeamLimits, TeamRuntime,
+    TurnEnd, TurnRules, per_turn,
+};
 use crate::config::{
     AccountPool, ModelAccess, ModelAuthentication, ModelConnection, ModelEndpoint, ModelReference,
 };
 use crate::engine::NativeProfileCustody;
 use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
 use crate::engine::owner::{HostStamp, NativeProfileBinding};
-use crate::harnesses::terminal_session::Resume;
+use crate::harnesses::terminal_session::{PaneRecord, Resume, paste};
 use crate::project_setup::{HarnessSlot, StoredSetup, TeamPlan};
 use crate::protocol::{ConfigId, CredentialRef, Cursor, ProjectId, RequestId};
-use crate::team::{AgentRole, TeamAccount, TeamReach};
-use crate::terminal::Host;
+use crate::sandbox::policy::{AgentAccess, AgentPolicy};
+use crate::team::{AgentRole, TaskSource, TeamAccount, TeamReach};
+use crate::terminal::{AgentId, Host};
 use rusqlite::{Connection, params};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
-use std::sync::mpsc::channel;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{RecvTimeoutError, channel};
+use std::time::{Duration, Instant};
 
 const PROJECT: &str = "dec-090";
-const AGENT: i64 = 1;
+pub(super) const AGENT: i64 = 1;
 const SIGNED_IN_CLAUDE: &str = "CRAZYAGENT_MANAGED_CLAUDE_PROFILE";
 const SIGNED_IN_CODEX: &str = "CRAZYAGENT_MANAGED_CODEX_PROFILE";
 
@@ -158,6 +162,7 @@ pub(crate) struct ManagedAgent {
     pub(crate) project: PathBuf,
     pub(crate) working_dir: PathBuf,
     pub(crate) sandbox_profile: PathBuf,
+    pub(crate) background: crate::team::BackgroundAtEnd,
     role: AgentRole,
     stamp: HostStamp,
     binding: NativeProfileBinding,
@@ -189,9 +194,18 @@ pub(crate) fn claude() -> PathBuf {
     installed("CRAZYAGENT_CLAUDE", "claude")
 }
 
+/// Where a prepared agent's harness app runs: as its worker's child, in a pane on a given
+/// host, or as a native-mode Claude Code lead on the engine's own terminal host at this
+/// engine's root, the project's Claude Code agents set to native teammates.
+enum Placement {
+    Child,
+    Pane(Arc<dyn Host>),
+    NativeLead,
+}
+
 impl ManagedAgent {
     pub(crate) fn new(harness: &'static str, executable: &Path) -> Self {
-        Self::open(harness, executable, None, AgentRole::Sub)
+        Self::open(harness, executable, Placement::Child, AgentRole::Sub)
     }
 
     /// The same agent, or the project's master when `role` says so, with its harness app in
@@ -203,15 +217,30 @@ impl ManagedAgent {
         host: Arc<dyn Host>,
         role: AgentRole,
     ) -> Self {
-        Self::open(harness, executable, Some(host), role)
+        Self::open(harness, executable, Placement::Pane(host), role)
+    }
+
+    /// A Claude Code lead the runtime itself plans as a native-mode lead (DEC-104, TTDL): the
+    /// project's Claude Code agents run native teammates and the terminal host is the
+    /// engine's own, so `prepare` installs the teammates' profile and names their server,
+    /// and starting the lead gives its pane that server's anchor as `TMUX` and `TMUX_PANE`.
+    /// Input: the real Claude Code executable. Output: the prepared lead.
+    pub(crate) fn engine_native_lead(executable: &Path) -> Self {
+        Self::open(
+            "claude-code",
+            executable,
+            Placement::NativeLead,
+            AgentRole::Sub,
+        )
     }
 
     fn open(
         harness: &'static str,
         executable: &Path,
-        pane: Option<Arc<dyn Host>>,
+        placement: Placement,
         role: AgentRole,
     ) -> Self {
+        let native = matches!(placement, Placement::NativeLead);
         let root = tempfile::Builder::new()
             .prefix("ca-dec-090-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -269,6 +298,16 @@ impl ManagedAgent {
                 params![PROJECT, serde_json::to_string(&setup).unwrap()],
             )
             .unwrap();
+        if native {
+            use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
+            set_mode(
+                &connection,
+                &setup.project_id,
+                HarnessKind::ClaudeCode,
+                SubagentMode::Native,
+            )
+            .unwrap();
+        }
         drop(connection);
         let (provider, harness_ref) = match harness {
             "codex" => ("openai", "codex"),
@@ -312,6 +351,17 @@ impl ManagedAgent {
             TeamLimits::default(),
         )
         .unwrap();
+        let pane = match placement {
+            Placement::Child => None,
+            Placement::Pane(host) => Some(host),
+            Placement::NativeLead => Some(crate::terminal::tmux_host(
+                &base,
+                Some(
+                    crate::terminal::tmux::installed(&base)
+                        .expect("BLOCKED: tmux must be installed"),
+                ),
+            )),
+        };
         if let Some(pane) = pane {
             runtime = runtime.with_terminal(pane).unwrap();
         }
@@ -339,6 +389,18 @@ impl ManagedAgent {
                 model: None,
             },
         };
+        runtime
+            .connection
+            .execute(
+                "INSERT INTO team_agents(id,project,role,harness,tools,connection,status,created_ms,heartbeat_ms)
+                 VALUES (?1,?2,?3,?4,1,?5,'starting',1,1)",
+                params![AGENT, PROJECT, role.name(), harness, model.id.as_str()],
+            )
+            .unwrap();
+        if role == AgentRole::Sub {
+            crate::team::names::assign_persona(&runtime.connection, &setup.project_id, AGENT)
+                .unwrap();
+        }
         let (_, plan, mode) = runtime
             .prepare(
                 &setup,
@@ -351,6 +413,10 @@ impl ManagedAgent {
                 crate::agent_git::Layout::Linked,
             )
             .unwrap();
+        assert_eq!(
+            plan.native, native,
+            "the runtime plans a native lead exactly when the project runs native teammates"
+        );
         let home = match mode {
             Mode::PerTurn { home, .. } => home,
             Mode::Kept { .. } => panic!("a managed agent keeps no process across turns"),
@@ -368,6 +434,7 @@ impl ManagedAgent {
             project: project.canonicalize().unwrap(),
             working_dir,
             sandbox_profile,
+            background: crate::team::BackgroundAtEnd::Wait,
             role,
             stamp: host,
             binding,
@@ -393,9 +460,10 @@ impl ManagedAgent {
     }
 
     /// Runs one per-turn worker over several turns the way the runtime runs a managed
-    /// agent, continuing `resume` when a wake gives one. Inputs: the conversation to
-    /// continue, each turn's prompt with the profile held for it and the turn's time.
-    /// Output: every report the worker sent and the problem that ended it, if any.
+    /// agent, continuing `resume` when a wake gives one, under the agent's Background
+    /// commands at task end choice. Inputs: the conversation to continue, each turn's
+    /// prompt with the profile held for it and the turn's time. Output: every report the
+    /// worker sent and the problem that ended it, if any.
     pub(super) fn run_turns(
         &mut self,
         resume: Option<Resume>,
@@ -424,7 +492,10 @@ impl ManagedAgent {
                         context,
                         access: crate::sandbox::policy::AgentAccess::Sandboxed,
                     })),
-                    Some(turn_time),
+                    TurnRules {
+                        limit: Some(turn_time),
+                        background: self.background,
+                    },
                 ))
                 .unwrap();
         }
@@ -471,7 +542,10 @@ impl ManagedAgent {
                     context,
                     access: crate::sandbox::policy::AgentAccess::Sandboxed,
                 })),
-                Some(turn_time),
+                TurnRules {
+                    limit: Some(turn_time),
+                    background: crate::team::BackgroundAtEnd::Wait,
+                },
             ))
             .unwrap();
         drop(orders);
@@ -486,6 +560,222 @@ impl ManagedAgent {
             _ => None,
         });
         finished.unwrap_or_else(|| panic!("the turn never finished: {problem:?}"))
+    }
+
+    /// Makes this agent a native-mode lead (DEC-104) that runs in a tmux server of its own,
+    /// as the runtime plans a native lead on a signed-in account. Input: none. Output: none.
+    fn make_native(&mut self) {
+        if self.plan.native {
+            return;
+        }
+        let (host, agent) = self
+            .plan
+            .pane
+            .clone()
+            .expect("a native lead runs in a pane");
+        self.plan.native = true;
+        self.plan.tmux =
+            Some(crate::terminal::tmux::installed(&self.base).expect("tmux must be installed"));
+        self.plan.pane = Some((crate::terminal::own_server(host), agent));
+    }
+
+    /// The first order of a signed-in native lead: a turn carrying the held profile, the
+    /// project context and the saved access level. Inputs: the profile, the prompt, the
+    /// turn's time and the saved level. Output: the order.
+    fn granted_turn(
+        &self,
+        profile: NativeProfileUse,
+        prompt: &str,
+        turn_time: Duration,
+        access: AgentAccess,
+    ) -> Order {
+        let project = ProjectId::new(PROJECT).unwrap();
+        let context = self
+            .runtime
+            .context(
+                &project,
+                AGENT,
+                self.role,
+                true,
+                crate::agent_git::Layout::Linked,
+            )
+            .unwrap();
+        Order::Turn(
+            prompt.to_owned(),
+            Some(Box::new(Grant {
+                profile,
+                context,
+                access,
+            })),
+            TurnRules {
+                limit: Some(turn_time),
+                background: crate::team::BackgroundAtEnd::Wait,
+            },
+        )
+    }
+
+    /// Runs this agent as a native-mode lead on one kept session the way the runtime runs a
+    /// signed-in native lead: its own tmux server, the first turn carrying the held profile
+    /// and later turns none, then a Stop, leaving the pane running when `leave` is set.
+    /// Inputs: the profile, the prompts, each turn's time and whether the engine leaves the
+    /// pane. Output: every report the lead's worker sent and the problem that ended it.
+    pub(super) fn run_native_lead(
+        &mut self,
+        profile: NativeProfileUse,
+        prompts: &[&str],
+        turn_time: Duration,
+        leave: bool,
+    ) -> (Vec<Report>, Option<String>) {
+        assert!(!prompts.is_empty());
+        self.make_native();
+        let (orders, ordered) = channel();
+        let (reports, reported) = channel();
+        orders
+            .send(self.granted_turn(profile, prompts[0], turn_time, AgentAccess::Sandboxed))
+            .unwrap();
+        for prompt in &prompts[1..] {
+            orders
+                .send(Order::Turn(
+                    (*prompt).to_owned(),
+                    None,
+                    TurnRules {
+                        limit: Some(turn_time),
+                        background: crate::team::BackgroundAtEnd::Wait,
+                    },
+                ))
+                .unwrap();
+        }
+        orders.send(Order::Stop).unwrap();
+        let problem = super::native_session(
+            &self.plan,
+            &self.home,
+            &ordered,
+            &reports,
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+            &AtomicBool::new(leave),
+        );
+        drop(reports);
+        (reported.iter().collect(), problem)
+    }
+
+    /// Takes over the native lead a run with `leave` set left in its pane, as the next engine
+    /// adopts it as Managed: the first turn carries a fresh held profile, whose credential is
+    /// handed to the lead's home again, then a Stop. Inputs: the lead's pane record, the
+    /// profile, the prompt and the turn's time. Output: every report and the ending problem.
+    pub(super) fn adopt_native_lead(
+        &mut self,
+        record: PaneRecord,
+        profile: NativeProfileUse,
+        prompt: &str,
+        turn_time: Duration,
+    ) -> (Vec<Report>, Option<String>) {
+        self.make_native();
+        let (host, agent) = self
+            .plan
+            .pane
+            .clone()
+            .expect("a native lead runs in a pane");
+        let adoption = Adoption {
+            host,
+            agent,
+            record,
+            limits: self.plan.limits,
+            live: false,
+            managed: Some(Managed {
+                home: self.home.clone(),
+                executable: self.plan.executable.clone(),
+            }),
+            access: crate::sandbox::policy::AgentAccess::Sandboxed,
+        };
+        let (orders, ordered) = channel();
+        let (reports, reported) = channel();
+        orders
+            .send(self.granted_turn(profile, prompt, turn_time, AgentAccess::Sandboxed))
+            .unwrap();
+        orders.send(Order::Stop).unwrap();
+        let problem = super::native_adopted(
+            adoption,
+            &ordered,
+            &reports,
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+            &AtomicBool::new(false),
+        );
+        drop(reports);
+        (reported.iter().collect(), problem)
+    }
+
+    /// Starts this agent as a native-mode lead in a real worker of its team runtime, as the
+    /// runtime's first dispatch to a kept session does: the project saves `access`, the
+    /// worker starts from the agent's plan at that level, its first turn carries the held
+    /// profile and the worker then counts as briefed. Inputs: the profile, the first prompt,
+    /// the turn's time, the saved level and the folder of the lead's terminal host when the
+    /// caller made one, kept until the lead stopped. Output: the running team.
+    pub(super) fn into_native_worker(
+        mut self,
+        profile: NativeProfileUse,
+        prompt: &str,
+        turn_time: Duration,
+        access: AgentAccess,
+        folder: Option<tempfile::TempDir>,
+    ) -> NativeTeam {
+        self.make_native();
+        crate::sandbox::policy::save(
+            &self.runtime.connection,
+            PROJECT,
+            &AgentPolicy {
+                access,
+                ..AgentPolicy::default()
+            },
+        )
+        .unwrap();
+        self.plan.access = access;
+        let first = self.granted_turn(profile, prompt, turn_time, access);
+        let pane = self
+            .plan
+            .pane
+            .clone()
+            .expect("a native lead runs in a pane");
+        let seat = Seat {
+            project: ProjectId::new(PROJECT).unwrap(),
+            role: self.role,
+            harness: self.plan.harness.clone(),
+            connection: self.binding.connection.id.clone(),
+            tools: true,
+            hosted: None,
+        };
+        let Self {
+            mut runtime,
+            plan,
+            home,
+            _root,
+            ..
+        } = self;
+        runtime
+            .run_worker(
+                AGENT,
+                Launch::Fresh(
+                    Box::new(plan),
+                    Box::new(Mode::PerTurn { home: home.clone() }),
+                ),
+                seat,
+            )
+            .unwrap();
+        let worker = runtime
+            .workers
+            .get_mut(&AGENT)
+            .expect("the lead's worker runs");
+        assert!(worker.managed && worker.kept_session && !worker.briefed);
+        worker.orders.send(first).unwrap();
+        worker.briefed |= worker.kept_session;
+        NativeTeam {
+            runtime,
+            home,
+            pane,
+            _root,
+            _folder: folder,
+        }
     }
 
     /// Builds a command that runs `program` the way the agent's harness runs its tools:
@@ -518,5 +808,193 @@ impl ManagedAgent {
     /// Output: the finished process with its captured output.
     pub(crate) fn shell(&self, script: &str) -> Output {
         crate::spawn_gate::output(&mut self.command(Path::new("/bin/sh"), &["-c", script])).unwrap()
+    }
+}
+
+/// A native lead running as a real worker of its team runtime, started by
+/// [`ManagedAgent::into_native_worker`]: the runtime, the lead's home, its pane on its own
+/// server and the test folders. Dropping it stops the lead before the folders go, so no
+/// signed-in app outlives its test. Its methods call the runtime's own admission, dispatch
+/// and access-level steps; the lead's reports are read here and never reach the runtime's
+/// report handling, so task rows and the worker's busy state stay as dispatch left them.
+pub(super) struct NativeTeam {
+    pub(super) runtime: TeamRuntime,
+    pub(super) home: PathBuf,
+    pane: (Arc<dyn Host>, AgentId),
+    _root: tempfile::TempDir,
+    _folder: Option<tempfile::TempDir>,
+}
+
+impl NativeTeam {
+    /// The lead's worker as the runtime records it. Output: the worker.
+    pub(super) fn lead(&self) -> &super::Worker {
+        &self.runtime.workers[&AGENT]
+    }
+
+    /// Waits for the lead's reports until one matches `last`. Inputs: the longest wait and
+    /// the match. Output: every report up to and with the match, or a panic that says what
+    /// ended the wait when the worker ended or the wait passed first.
+    pub(super) fn reports_until(
+        &self,
+        wait: Duration,
+        last: impl Fn(&Report) -> bool,
+    ) -> Vec<Report> {
+        let deadline = Instant::now() + wait;
+        let mut seen = Vec::new();
+        let mut ended = None;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            match self.lead().reports.recv_timeout(left) {
+                Ok(report) => {
+                    let done = last(&report);
+                    if let Report::Ended { problem } = &report {
+                        ended = Some(problem.clone());
+                    }
+                    seen.push(report);
+                    if done {
+                        return seen;
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => {
+                    panic!(
+                        "no awaited report from the lead in {wait:?}, after {} others",
+                        seen.len()
+                    )
+                }
+                Err(RecvTimeoutError::Disconnected) => panic!(
+                    "the lead's worker ended before the awaited report, problem {ended:?}, after {} others",
+                    seen.len()
+                ),
+            }
+        }
+    }
+
+    /// Every report of the lead through its next finished turn. Input: the longest wait.
+    /// Output: the reports, the finished turn last.
+    pub(super) fn until_finished(&self, wait: Duration) -> Vec<Report> {
+        self.reports_until(wait, |report| matches!(report, Report::Finished { .. }))
+    }
+
+    /// Every report of the lead until its worker ended. Input: the longest wait. Output:
+    /// the reports before the end and the problem the worker ended with.
+    pub(super) fn until_ended(&self, wait: Duration) -> (Vec<Report>, Option<String>) {
+        let mut reports = self.reports_until(wait, |report| matches!(report, Report::Ended { .. }));
+        let Some(Report::Ended { problem }) = reports.pop() else {
+            unreachable!("the wait ends on the worker's end");
+        };
+        (reports, problem)
+    }
+
+    /// Sends the lead's worker one order, as the runtime does. Input: the order.
+    pub(super) fn order(&self, order: Order) {
+        self.lead().orders.send(order).unwrap();
+    }
+
+    fn setup(&self) -> (StoredSetup, ModelAccess) {
+        let tx = self.runtime.connection.unchecked_transaction().unwrap();
+        let stored = crate::project_setup::load_setup(&tx, &ProjectId::new(PROJECT).unwrap())
+            .unwrap()
+            .expect("the project's setup");
+        drop(tx);
+        (stored, (self.runtime.access)().expect("the team's pool"))
+    }
+
+    /// Queues one owner task for the team's sub-agents through the engine's own admission.
+    /// Input: the prompt. Output: the task id, or a panic with the refusal code.
+    pub(super) fn queue(&self, prompt: &str) -> i64 {
+        let (stored, access) = self.setup();
+        let tx = self.runtime.connection.unchecked_transaction().unwrap();
+        let task = crate::team::admit(
+            &tx,
+            &access,
+            &stored,
+            Some(&self.lead().harness),
+            prompt,
+            TaskSource::Owner,
+            None,
+            super::now_ms(),
+        )
+        .unwrap()
+        .unwrap_or_else(|code| panic!("the task was refused: {code}"));
+        tx.commit().unwrap();
+        task
+    }
+
+    /// Runs one pass of the runtime's task dispatch, as each engine tick does.
+    pub(super) fn dispatch(&mut self) {
+        let (stored, access) = self.setup();
+        self.runtime
+            .dispatch(&stored, &access, &BTreeSet::new())
+            .unwrap();
+    }
+
+    /// The status, agent and error the engine recorded for one task. Input: the task id.
+    /// Output: them.
+    pub(super) fn task(&self, task: i64) -> (String, Option<i64>, Option<String>) {
+        self.runtime
+            .connection
+            .query_row(
+                "SELECT status,agent,error FROM team_tasks WHERE id=?1",
+                [task],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap()
+    }
+
+    /// The owner saves a new access level for the project, and the runtime's next tick
+    /// retires every agent whose running process started at a wider one (AL-2).
+    /// Input: the new level.
+    pub(super) fn save_access(&mut self, access: AgentAccess) {
+        crate::sandbox::policy::save(
+            &self.runtime.connection,
+            PROJECT,
+            &AgentPolicy {
+                access,
+                ..AgentPolicy::default()
+            },
+        )
+        .unwrap();
+        self.runtime
+            .retire_lowered(&ProjectId::new(PROJECT).unwrap());
+    }
+
+    /// Types one prompt into the lead's pane as a person at its terminal does, outside the
+    /// engine's turns, so its app starts a turn by itself. Input: the prompt.
+    pub(super) fn type_into_pane(&self, prompt: &str) {
+        let (host, agent) = &self.pane;
+        for part in paste(prompt) {
+            host.input(agent, part.as_bytes()).unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        host.input(agent, b"\r").unwrap();
+    }
+
+    /// Whether the lead's pane still runs on its own server. Output: true while it does,
+    /// false once it or its server ended.
+    pub(super) fn pane_alive(&self) -> bool {
+        let (host, agent) = &self.pane;
+        host.alive().is_ok_and(|alive| alive.contains(agent))
+    }
+}
+
+impl Drop for NativeTeam {
+    /// Stops the lead and waits, at most a minute, for its worker, so a test that ends
+    /// early leaves no signed-in app running. Takes the team. Returns nothing.
+    fn drop(&mut self) {
+        let Some(worker) = self.runtime.workers.get_mut(&AGENT) else {
+            return;
+        };
+        worker.cancel.store(true, Ordering::SeqCst);
+        let _ = worker.orders.send(Order::Stop);
+        let Some(thread) = worker.thread.take() else {
+            return;
+        };
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while !thread.is_finished() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        if thread.is_finished() {
+            let _ = thread.join();
+        }
     }
 }

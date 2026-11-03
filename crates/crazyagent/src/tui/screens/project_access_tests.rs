@@ -1,9 +1,12 @@
 use super::project_access::{
-    AccessEdit, LOWERING_STOPS_AGENTS, TOOLCHAIN_OFF_STOPS_AGENTS, summary,
+    AccessEdit, LOWERING_STOPS_AGENTS, NETWORK_IGNORED_UNDER_FULL, TOOLCHAIN_OFF_STOPS_AGENTS,
+    network_help, summary,
 };
 #[cfg(target_os = "macos")]
 use super::project_access::{AccessKey, FULL_ACCESS_WARNING};
-use crate::sandbox::policy::{AgentAccess, LevelView, PolicyView, ToolchainView};
+use crate::sandbox::policy::{
+    AgentAccess, AgentNetwork, LevelView, NetworkView, PolicyView, ToolchainView,
+};
 use crate::sandbox::toolchains::Toolchain;
 #[cfg(target_os = "macos")]
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -16,12 +19,20 @@ fn key(code: KeyCode) -> KeyEvent {
 fn view() -> PolicyView {
     PolicyView {
         access: AgentAccess::Sandboxed,
+        network: AgentNetwork::default(),
         levels: AgentAccess::ALL
             .into_iter()
             .map(|access| LevelView {
                 access,
                 label: access.label().to_owned(),
                 unavailable: access.unavailable().map(str::to_owned),
+            })
+            .collect(),
+        networks: AgentNetwork::ALL
+            .into_iter()
+            .map(|network| NetworkView {
+                network,
+                label: network.label().to_owned(),
             })
             .collect(),
         toolchains: vec![
@@ -95,6 +106,37 @@ fn the_settings_line_names_the_level_and_the_allowed_toolchains() {
         ..view()
     };
     assert_eq!(summary(Some(&none)), "Own branch · no toolchains");
+}
+
+#[test]
+fn the_network_choice_explains_the_none_overlap_and_notes_full_access_makes_it_moot() {
+    assert!(
+        network_help(AgentNetwork::None).contains("same as Port 443 only"),
+        "{}",
+        network_help(AgentNetwork::None)
+    );
+    let look = super::new_project_view::Look::plain();
+    let note_shows = |access: AgentAccess| {
+        let shown = AccessEdit::of(&PolicyView { access, ..view() })
+            .body(&look)
+            .iter()
+            .map(|row| row.text())
+            .collect::<Vec<_>>()
+            .join(" ");
+        shown
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .contains(NETWORK_IGNORED_UNDER_FULL)
+    };
+    assert!(
+        note_shows(AgentAccess::Full),
+        "the note must show under Full"
+    );
+    assert!(
+        !note_shows(AgentAccess::Sandboxed),
+        "the note must not show under Sandboxed"
+    );
 }
 
 #[test]

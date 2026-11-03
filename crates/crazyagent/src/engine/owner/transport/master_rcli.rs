@@ -183,7 +183,7 @@ impl OwnerRuntimeHandle {
             current.ordinal,
             NativeProfileUsePurpose::Execution,
         )?;
-        let launch = self.prepare_rcli_master_host(prepared, &profile)?;
+        let mut launch = self.prepare_rcli_master_host(prepared, &profile)?;
         if launch.binding.project_id != prepared.session.project_id
             || launch.binding.session_id != prepared.session.session_id
             || launch.binding.connection != prepared.attempt.connection
@@ -194,6 +194,8 @@ impl OwnerRuntimeHandle {
         {
             return Err(failure("master_runtime_binding"));
         }
+        let given = crate::agent_home::text(&prepared.agent_project)
+            .map_err(|problem| EngineError(problem.0))?;
         launch.command().map_err(|error| EngineError(error.0))?;
         let (runtime_ref, capture_ref, file) = self.allocate_master_capture()?;
         let _folder =
@@ -207,7 +209,16 @@ impl OwnerRuntimeHandle {
             &launch.executable,
             &prepared.attempt.connection.endpoint,
             &prepared.agent_policy,
+            &prepared.hidden_paths,
         )?;
+        if !given.text.is_empty() {
+            launch.instructions = Some(super::master_host_launch::write_master_instructions(
+                &self.authority.root,
+                &runtime_ref,
+                &given.text,
+            )?);
+        }
+        assert_eq!(launch.instructions.is_some(), !given.text.is_empty());
         let capture = Capture::new(file, resources.output_bytes)?;
         let launching = self
             .inspect_master_turn(

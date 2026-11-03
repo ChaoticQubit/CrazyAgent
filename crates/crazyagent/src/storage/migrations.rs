@@ -56,6 +56,14 @@ pub(crate) const STEPS: &[Step] = &[
         to: 6,
         run: sweep_orphan_project_plugins,
     },
+    Step {
+        to: 7,
+        run: widen_hook_kinds,
+    },
+    Step {
+        to: 8,
+        run: nest_team_agents,
+    },
 ];
 
 /// Says whether a table of that name exists. Inputs: the open transaction and the name.
@@ -89,6 +97,27 @@ fn widen_file_trash_kinds(tx: &Transaction<'_>) -> Result<(), EngineError> {
          ALTER TABLE file_trash_new RENAME TO file_trash;",
     )
     .map_err(error)
+}
+
+/// Step 8 (N1): a sub-agent can lead workers of its own, so team tasks and agents record
+/// the lead that started them.
+fn nest_team_agents(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    crate::team::add_parent_columns(tx)
+}
+
+/// Step 7 (H2): hooks are plugin items, and their stored folder copies go through the file
+/// trash, so `plugin_items` must take the `hook` kind and `file_trash` the `hook_folder`
+/// kind. Each existing table is rebuilt with the current check, keeping its rows; a missing
+/// one gets the current schema when the engine opens it.
+fn widen_hook_kinds(tx: &Transaction<'_>) -> Result<(), EngineError> {
+    if has_table(tx, "plugin_items")? {
+        tx.execute_batch(super::plugins::WIDEN_ITEMS)
+            .map_err(error)?;
+    }
+    if has_table(tx, "file_trash")? {
+        tx.execute_batch(super::trash::WIDEN).map_err(error)?;
+    }
+    Ok(())
 }
 
 /// Step 6 (PP-1): clears plugin rows that removals before `remove_project` held them left

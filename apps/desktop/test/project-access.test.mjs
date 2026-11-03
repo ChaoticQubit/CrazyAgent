@@ -10,10 +10,16 @@ const api = await import("../src/api.ts");
 
 const view = {
   access: "sandboxed",
+  network: "open",
   levels: [
     { access: "sandboxed", label: "Sandboxed", unavailable: null },
     { access: "own_branch", label: "Own branch", unavailable: null },
     { access: "full", label: "Full access", unavailable: null },
+  ],
+  networks: [
+    { network: "open", label: "Open" },
+    { network: "https", label: "Port 443 only" },
+    { network: "none", label: "None" },
   ],
   toolchains: [
     { toolchain: "rust", label: "Rust", installed: true, used: true, allowed: true },
@@ -21,13 +27,14 @@ const view = {
   ],
 };
 
-test("Save sends the level and only the toolchain switches that differ from the project's own use", () => {
-  assert.deepEqual(access.policyOf(view, "own_branch", [true, false]), { access: "own_branch", toolchains: [] });
-  assert.deepEqual(access.policyOf(view, "sandboxed", [false, true]), {
+test("Save sends the level, the network choice and only the toolchain switches that differ from the project's own use", () => {
+  assert.deepEqual(access.policyOf(view, "own_branch", "open", [true, false]), { access: "own_branch", network: "open", toolchains: [] });
+  assert.deepEqual(access.policyOf(view, "sandboxed", "https", [false, true]), {
     access: "sandboxed",
+    network: "https",
     toolchains: [{ toolchain: "rust", allowed: false }, { toolchain: "node", allowed: true }],
   });
-  assert.throws(() => access.policyOf(view, "full", [true]), /one switch per toolchain/);
+  assert.throws(() => access.policyOf(view, "full", "none", [true]), /one switch per toolchain/);
 });
 
 test("Full access asks for the plain warning first, and the project page names the level and toolchains", () => {
@@ -65,6 +72,32 @@ test("Settings says beside the level choice that lowering it stops agents runnin
   assert.ok(!page.includes("keep the access they started with"));
   const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/project_access.rs", import.meta.url), "utf8");
   assert.ok(tui.includes(`"${access.LOWERING_STOPS_AGENTS}"`));
+});
+
+test("None explains the Port 443 overlap and Full access annotates the network choice as moot", () => {
+  const none = access.NETWORK_CHOICES.find((choice) => choice.network === "none");
+  assert.match(none.help, /same as Port 443 only/);
+  assert.equal(access.NETWORK_IGNORED_UNDER_FULL, "Full access runs agents without a sandbox, so this choice does not apply.");
+  const card = readFileSync(new URL("../src/screens/project/access.tsx", import.meta.url), "utf8");
+  assert.match(card, /access === "full"[^\n]*NETWORK_IGNORED_UNDER_FULL/);
+  const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
+  assert.match(page, /<NetworkChoices[^>]*access=\{access\}/);
+});
+
+test("Hiding a folder takes an absolute path, rejects duplicates and caps at the engine's limit", () => {
+  assert.deepEqual(settings.addHiddenPath([], "/Users/you/project/secrets"), { paths: ["/Users/you/project/secrets"] });
+  assert.ok("error" in settings.addHiddenPath([], "secrets"));
+  assert.ok("error" in settings.addHiddenPath([], "/Users/you/a\"b"));
+  assert.ok("error" in settings.addHiddenPath([], "/Users/you/a\\b"));
+  assert.ok("error" in settings.addHiddenPath([], "/Users/you/a'b"));
+  assert.ok("error" in settings.addHiddenPath(["/a"], "/a"));
+  const full = Array.from({ length: settings.HIDDEN_PATHS_MAX }, (_, index) => `/dir${index}`);
+  assert.ok("error" in settings.addHiddenPath(full, "/one-more"));
+  const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
+  assert.match(page, /<HiddenSection data=\{data\} \/>/);
+  for (const code of ["hidden_paths_too_many", "hidden_paths_invalid", "hidden_path_not_absolute", "hidden_path_not_plain", "hidden_path_missing", "hidden_path_not_folder", "hidden_path_outside_project", "hidden_path_tracked", "hidden_path_unchecked"]) {
+    assert.ok(api.KNOWN_ERROR_CODES.includes(code), code);
+  }
 });
 
 test("Settings says beside the toolchain switches that turning one off stops agents, research jobs and master turns running with it, in both UIs", () => {

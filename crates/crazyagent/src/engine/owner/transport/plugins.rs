@@ -1,6 +1,9 @@
 use super::*;
+use crate::coord::tool_switches::Switch;
 use crate::engine::owner::AccountSecret;
-use crate::plugins::{EffectivePlugins, Scope, ServerSpec, ServerView, SkillView, check};
+use crate::plugins::{
+    EffectivePlugins, HookView, Scope, ServerSpec, ServerView, SkillView, ToolView, check,
+};
 use crate::protocol::encode_frame;
 use crate::storage::plugins::{Command, ResultValue};
 use serde::{Deserialize, Serialize};
@@ -50,6 +53,18 @@ enum Action {
     RemoveSkill {
         id: String,
     },
+    Hooks {
+        project: Option<ProjectId>,
+        offset: u16,
+    },
+    AddHooks {
+        scope: Scope,
+        folder: String,
+    },
+    SetHook {
+        id: String,
+        enabled: bool,
+    },
     AddServer {
         scope: Scope,
         name: String,
@@ -91,6 +106,20 @@ enum Action {
     Effective {
         project: ProjectId,
     },
+    Tools {
+        project: Option<ProjectId>,
+        server: Option<String>,
+    },
+    SetTool {
+        project: Option<ProjectId>,
+        server: Option<String>,
+        tool: String,
+        switch: Switch,
+    },
+    RestoreTools {
+        project: Option<ProjectId>,
+        server: Option<String>,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -114,6 +143,14 @@ pub struct ServerPage {
     pub next: Option<u16>,
 }
 
+/// One page of hooks as Settings lists them, with the offset of the next page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HookPage {
+    pub hooks: Vec<HookView>,
+    pub next: Option<u16>,
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 enum Reply {
@@ -125,6 +162,12 @@ enum Reply {
     },
     Servers {
         page: ServerPage,
+    },
+    Hooks {
+        page: HookPage,
+    },
+    Hook {
+        hook: HookView,
     },
     Skill {
         skill: SkillView,
@@ -141,6 +184,9 @@ enum Reply {
     Done,
     Effective {
         plugins: EffectivePlugins,
+    },
+    Tools {
+        tools: Vec<ToolView>,
     },
     Rejected {
         code: String,
@@ -172,6 +218,7 @@ impl Action {
             | Self::SkillDetail { id, .. }
             | Self::SetSkill { id, .. }
             | Self::RemoveSkill { id }
+            | Self::SetHook { id, .. }
             | Self::UpdateServer { id, .. }
             | Self::Approve { id, .. }
             | Self::SetServer { id, .. }
@@ -185,8 +232,30 @@ impl Action {
         if id.is_some_and(|id| !valid_id(id)) {
             return Err(failure("plugin_not_found"));
         }
+        if let Self::Tools {
+            server: Some(id), ..
+        }
+        | Self::SetTool {
+            server: Some(id), ..
+        }
+        | Self::RestoreTools {
+            server: Some(id), ..
+        } = self
+            && !valid_id(id)
+        {
+            return Err(failure("server_not_found"));
+        }
         match self {
-            Self::AddSkill { folder, .. } | Self::ImportSkill { folder, .. }
+            Self::SetTool { tool, .. }
+                if tool.is_empty()
+                    || tool.len() > crate::plugins::TOOL_NAME_BYTES_MAX
+                    || tool.chars().any(char::is_control) =>
+            {
+                Err(failure("tool_unknown"))
+            }
+            Self::AddSkill { folder, .. }
+            | Self::ImportSkill { folder, .. }
+            | Self::AddHooks { folder, .. }
                 if !valid_folder(folder) =>
             {
                 Err(failure("skill_folder_not_found"))
@@ -222,11 +291,15 @@ impl Action {
             | Self::Servers { .. }
             | Self::Server { .. }
             | Self::ImportScan
-            | Self::Effective { .. } => false,
+            | Self::Hooks { .. }
+            | Self::Effective { .. }
+            | Self::Tools { .. } => false,
             Self::AddSkill { .. }
             | Self::ImportSkill { .. }
             | Self::SetSkill { .. }
             | Self::RemoveSkill { .. }
+            | Self::AddHooks { .. }
+            | Self::SetHook { .. }
             | Self::AddServer { .. }
             | Self::UpdateServer { .. }
             | Self::Approve { .. }
@@ -235,7 +308,9 @@ impl Action {
             | Self::Switch { .. }
             | Self::SetSecret { .. }
             | Self::RemoveSecret { .. }
-            | Self::Check { .. } => true,
+            | Self::Check { .. }
+            | Self::SetTool { .. }
+            | Self::RestoreTools { .. } => true,
         }
     }
 }
@@ -372,6 +447,50 @@ impl OwnerClient {
         self.done_reply(Action::RemoveSkill { id }).await
     }
 
+    /// Reads one page of hooks, with the same inputs as `plugin_skills`. Output: each hook
+    /// with its plugin, event, matcher, command, scope, On flags and the item it follows.
+    pub async fn plugin_hooks(
+        &self,
+        project: Option<ProjectId>,
+        offset: u16,
+    ) -> Result<HookPage, EngineError> {
+        match self
+            .plugins_exchange(Action::Hooks { project, offset }, Vec::new(), self.timeout)
+            .await?
+        {
+            Reply::Hooks { page } => Ok(page),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Adds the command hooks a Claude Code plugin folder defines, turned on, copying the
+    /// files they run from into the engine's store; nothing in the folder runs. Inputs:
+    /// global or project scope and the absolute plugin folder. Output: the added hooks.
+    pub async fn add_hooks(&self, scope: Scope, folder: String) -> Result<HookPage, EngineError> {
+        match self
+            .plugins_exchange(Action::AddHooks { scope, folder }, Vec::new(), self.timeout)
+            .await?
+        {
+            Reply::Hooks { page } => Ok(page),
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Turns a hook on or off where it was added. Inputs: hook id and the new state.
+    pub async fn set_hook_enabled(
+        &self,
+        id: String,
+        enabled: bool,
+    ) -> Result<HookView, EngineError> {
+        match self
+            .plugins_exchange(Action::SetHook { id, enabled }, Vec::new(), self.timeout)
+            .await?
+        {
+            Reply::Hook { hook } => Ok(hook),
+            _ => Err(unknown()),
+        }
+    }
+
     /// Adds an MCP server that waits for approval, with its secrets in the same request:
     /// each value goes in a private frame of its own, and the engine keeps the server with
     /// every secret or keeps none of them. Inputs: scope, a plain name, the command or URL
@@ -482,6 +601,57 @@ impl OwnerClient {
                 return Err(failure("server_check_timeout"));
             }
             tokio::time::sleep(CHECK_POLL).await;
+        }
+    }
+
+    /// Reads one server's tools with their switches: the CrazyAgent built-in tools (no server
+    /// id) or one MCP server's checked tools, for every project (no project) or one project.
+    /// Output: each tool with its every-project switch and the project's own switch.
+    pub async fn tool_switches(
+        &self,
+        project: Option<ProjectId>,
+        server: Option<String>,
+    ) -> Result<Vec<ToolView>, EngineError> {
+        self.tools_reply(Action::Tools { project, server }).await
+    }
+
+    /// Sets one tool's switch for every project (no project) or one project; Hidden deletes a
+    /// built-in tool until its defaults are restored. Inputs: project, server id (none for the
+    /// built-in tools), tool and switch. Output: the server's tools after the change.
+    pub async fn set_tool_switch(
+        &self,
+        project: Option<ProjectId>,
+        server: Option<String>,
+        tool: String,
+        switch: Switch,
+    ) -> Result<Vec<ToolView>, EngineError> {
+        self.tools_reply(Action::SetTool {
+            project,
+            server,
+            tool,
+            switch,
+        })
+        .await
+    }
+
+    /// Clears every stored switch of one server in that scope. Inputs: project (none for every
+    /// project) and server id (none for the built-in tools). Output: the server's tools.
+    pub async fn restore_tool_switches(
+        &self,
+        project: Option<ProjectId>,
+        server: Option<String>,
+    ) -> Result<Vec<ToolView>, EngineError> {
+        self.tools_reply(Action::RestoreTools { project, server })
+            .await
+    }
+
+    async fn tools_reply(&self, action: Action) -> Result<Vec<ToolView>, EngineError> {
+        match self
+            .plugins_exchange(action, Vec::new(), self.timeout)
+            .await?
+        {
+            Reply::Tools { tools } => Ok(tools),
+            _ => Err(unknown()),
         }
     }
 
@@ -1019,6 +1189,29 @@ async fn handle(
             actor(engine, Command::Switch { project, id, on }).await?;
             Reply::Done
         }
+        Action::Tools { project, server } => {
+            tools(actor(engine, Command::Tools { project, server }).await?)?
+        }
+        Action::SetTool {
+            project,
+            server,
+            tool,
+            switch,
+        } => tools(
+            actor(
+                engine,
+                Command::SetTool {
+                    project,
+                    server,
+                    tool,
+                    switch,
+                },
+            )
+            .await?,
+        )?,
+        Action::RestoreTools { project, server } => {
+            tools(actor(engine, Command::RestoreTools { project, server }).await?)?
+        }
         Action::SetSecret { id, name } => {
             let secret = secrets
                 .into_iter()
@@ -1079,7 +1272,48 @@ async fn handle(
         Action::Effective { project } => Reply::Effective {
             plugins: engine.project_plugins(&project).await?,
         },
+        Action::Hooks { project, offset } => {
+            let ResultValue::Hooks(hooks, next) =
+                actor(engine, Command::Hooks { project, offset }).await?
+            else {
+                return Err(unknown());
+            };
+            Reply::Hooks {
+                page: HookPage { hooks, next },
+            }
+        }
+        Action::AddHooks { scope, folder } => {
+            let ResultValue::HooksAdded(hooks, _) = actor(
+                engine,
+                Command::AddHooks {
+                    scope,
+                    source: folder,
+                    follows: None,
+                },
+            )
+            .await?
+            else {
+                return Err(unknown());
+            };
+            Reply::Hooks {
+                page: HookPage { hooks, next: None },
+            }
+        }
+        Action::SetHook { id, enabled } => {
+            let ResultValue::Hook(hook) = actor(engine, Command::SetHook { id, enabled }).await?
+            else {
+                return Err(unknown());
+            };
+            Reply::Hook { hook: *hook }
+        }
     })
+}
+
+fn tools(value: ResultValue) -> Result<Reply, EngineError> {
+    match value {
+        ResultValue::Tools(tools) => Ok(Reply::Tools { tools }),
+        _ => Err(unknown()),
+    }
 }
 
 fn server(value: ResultValue) -> Result<Reply, EngineError> {
@@ -1113,7 +1347,7 @@ async fn start_check(
     authority: &Authority,
     id: String,
 ) -> Result<Reply, EngineError> {
-    let ResultValue::Check(spec, secrets) =
+    let ResultValue::Check(spec, secrets, network) =
         actor(engine, Command::GetServer { id: id.clone() }).await?
     else {
         return Err(unknown());
@@ -1146,7 +1380,7 @@ async fn start_check(
         let settings = engine.clone();
         let outcome = tokio::task::spawn_blocking(move || {
             let kept = settings.owner_ports();
-            let outcome = boundary_check(&root, &folder, &command, &args, &values, &kept);
+            let outcome = boundary_check(&root, &folder, &command, &args, &values, &kept, network);
             for (_, value) in values.iter_mut() {
                 value.fill(0);
             }
@@ -1188,8 +1422,9 @@ fn boundary_check(
     args: &[String],
     secrets: &[(String, Vec<u8>)],
     kept: &[u16],
+    network: crate::sandbox::SandboxNetwork,
 ) -> Result<Vec<String>, &'static str> {
-    use crate::sandbox::{InstalledSandbox, ProjectSandbox, SandboxNetwork};
+    use crate::sandbox::{InstalledSandbox, ProjectSandbox};
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
     assert!(valid_id(id));
@@ -1233,7 +1468,7 @@ fn boundary_check(
         .create(&profiles)
         .map_err(|error| refused(&error))?;
     let reads = program.parent().ok_or("server_command_not_runnable")?;
-    let sandbox = ProjectSandbox::new(&folders[0], &folders[1], &folders[2], SandboxNetwork::Open)
+    let sandbox = ProjectSandbox::new(&folders[0], &folders[1], &folders[2], network)
         .and_then(|sandbox| sandbox.keep_ports(kept))
         .and_then(|sandbox| sandbox.guard_engine(root))
         .and_then(|sandbox| sandbox.allow_read(reads))
@@ -1260,6 +1495,7 @@ fn boundary_check(
     _args: &[String],
     _secrets: &[(String, Vec<u8>)],
     _kept: &[u16],
+    _network: crate::sandbox::SandboxNetwork,
 ) -> Result<Vec<String>, &'static str> {
     Err("server_check_unavailable")
 }
@@ -1319,3 +1555,6 @@ fn public_code(error: EngineError) -> String {
         "plugins_outcome_unknown".into()
     }
 }
+
+#[cfg(test)]
+mod tests;

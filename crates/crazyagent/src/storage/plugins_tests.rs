@@ -804,6 +804,448 @@ fn the_largest_server_the_checks_accept_fits_one_reply_frame() {
     assert_eq!(view.secrets.len(), SECRETS_PER_SERVER_MAX);
 }
 
+fn tools(
+    connection: &mut Connection,
+    root: &Path,
+    command: Command,
+) -> Result<Vec<ToolView>, String> {
+    match execute(connection, root, command) {
+        Ok(ResultValue::Tools(views)) => Ok(views),
+        Ok(_) => panic!("tool views required"),
+        Err(error) => Err(error.0),
+    }
+}
+
+fn set_tool(
+    connection: &mut Connection,
+    root: &Path,
+    project: Option<&ProjectId>,
+    server: Option<&str>,
+    tool: &str,
+    switch: Switch,
+) -> Result<Vec<ToolView>, String> {
+    tools(
+        connection,
+        root,
+        Command::SetTool {
+            project: project.cloned(),
+            server: server.map(str::to_owned),
+            tool: tool.into(),
+            switch,
+        },
+    )
+}
+
+fn one<'a>(views: &'a [ToolView], tool: &str) -> &'a ToolView {
+    views.iter().find(|view| view.tool == tool).unwrap()
+}
+
+/// Adds a project row to the plugin test database, as a created project leaves it.
+/// Input: the connection and the id. Output: the project id.
+fn add_project(connection: &Connection, id: &str) -> ProjectId {
+    let project = ProjectId::new(id).unwrap();
+    let body = serde_json::to_string(&crate::protocol::StoredProject {
+        project_id: project.clone(),
+        spec: crate::protocol::ProjectSpec {
+            name: id.into(),
+            repositories: vec![],
+        },
+    })
+    .unwrap();
+    connection
+        .execute(
+            "INSERT INTO projects(id, body) VALUES(?1, ?2)",
+            [id, body.as_str()],
+        )
+        .unwrap();
+    project
+}
+
+/// Adds an MCP server in a scope and records a real check of the stdio MCP fixture as its
+/// tool list. Inputs: the connection, store root, scope and name. Output: the server id.
+fn checked_server(connection: &mut Connection, root: &Path, scope: Scope, name: &str) -> String {
+    let path = root.join(format!("{name}-mcp.py"));
+    std::fs::write(&path, include_str!("../../tests/fixtures/mcp_fixture.py")).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let first = crate::spawn_gate::first_run(
+        std::process::Command::new(&path)
+            .arg("exit")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin"),
+    );
+    assert_eq!(first.code(), Some(3));
+    let command = path.to_str().unwrap().to_owned();
+    let spec = ServerSpec::Stdio {
+        command: command.clone(),
+        args: vec![],
+    };
+    let ResultValue::Server(view) = execute(
+        connection,
+        root,
+        Command::AddServer {
+            scope,
+            name: name.into(),
+            spec: spec.clone(),
+            secrets: Vec::new(),
+        },
+    )
+    .unwrap() else {
+        panic!("server view required");
+    };
+    let listed =
+        crate::plugins::check::check_stdio(&command, &[], &[], std::time::Duration::from_secs(10))
+            .unwrap();
+    assert_eq!(listed, ["echo", "anonymous"]);
+    execute(
+        connection,
+        root,
+        Command::RecordCheck {
+            id: view.id.clone(),
+            digest: spec.digest(),
+            outcome: Ok(listed),
+        },
+    )
+    .unwrap();
+    view.id
+}
+
+#[test]
+fn tool_views_lists_builtins_with_global_and_project_rows() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let app = ProjectId::new("app").unwrap();
+    let global = tools(
+        &mut connection,
+        root,
+        Command::Tools {
+            project: None,
+            server: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        global
+            .iter()
+            .map(|view| view.tool.as_str())
+            .collect::<Vec<_>>(),
+        BUILTIN_TOOLS
+            .iter()
+            .map(|(tool, _)| *tool)
+            .collect::<Vec<_>>()
+    );
+    assert!(global.iter().all(|view| view.builtin
+        && view.server == CRAZYAGENT_SERVER
+        && view.server_id.is_none()
+        && view.global == Switch::On
+        && view.here.is_none()
+        && !view.description.is_empty()));
+
+    set_tool(&mut connection, root, None, None, "start_work", Switch::Off).unwrap();
+    let set = set_tool(
+        &mut connection,
+        root,
+        Some(&app),
+        None,
+        "start_work",
+        Switch::On,
+    )
+    .unwrap();
+    assert_eq!(one(&set, "start_work").here, Some(Switch::On));
+
+    let global = tools(
+        &mut connection,
+        root,
+        Command::Tools {
+            project: None,
+            server: None,
+        },
+    )
+    .unwrap();
+    let start = one(&global, "start_work");
+    assert_eq!((start.global, start.here), (Switch::Off, None));
+    let here = tools(
+        &mut connection,
+        root,
+        Command::Tools {
+            project: Some(app.clone()),
+            server: None,
+        },
+    )
+    .unwrap();
+    let start = one(&here, "start_work");
+    assert_eq!((start.global, start.here), (Switch::Off, Some(Switch::On)));
+    assert!(
+        here.iter()
+            .filter(|view| view.tool != "start_work")
+            .all(|view| view.here.is_none())
+    );
+    assert_eq!(
+        tools(
+            &mut connection,
+            root,
+            Command::Tools {
+                project: Some(ProjectId::new("absent").unwrap()),
+                server: None,
+            },
+        )
+        .unwrap_err(),
+        "plugin_project_unknown"
+    );
+}
+
+#[test]
+fn set_tool_refuses_unknown_tool_and_hidden_mcp_tool() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let id = checked_server(&mut connection, root, Scope::Global, "fixture");
+    let listed = tools(
+        &mut connection,
+        root,
+        Command::Tools {
+            project: None,
+            server: Some(id.clone()),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        listed
+            .iter()
+            .map(|view| view.tool.as_str())
+            .collect::<Vec<_>>(),
+        ["echo", "anonymous"]
+    );
+    assert!(listed.iter().all(|view| !view.builtin
+        && view.server == "fixture"
+        && view.server_id.as_deref() == Some(id.as_str())));
+    assert_eq!(
+        set_tool(
+            &mut connection,
+            root,
+            None,
+            Some(&id),
+            "echo",
+            Switch::Hidden
+        )
+        .unwrap_err(),
+        "tool_delete_builtin_only"
+    );
+    assert_eq!(
+        set_tool(&mut connection, root, None, Some(&id), "nope", Switch::Off).unwrap_err(),
+        "tool_unknown"
+    );
+    assert_eq!(
+        set_tool(&mut connection, root, None, None, "nope", Switch::Off).unwrap_err(),
+        "tool_unknown"
+    );
+    let off = set_tool(&mut connection, root, None, Some(&id), "echo", Switch::Off).unwrap();
+    assert_eq!(one(&off, "echo").global, Switch::Off);
+    assert_eq!(one(&off, "anonymous").global, Switch::On);
+    let hidden = set_tool(
+        &mut connection,
+        root,
+        None,
+        None,
+        "start_work",
+        Switch::Hidden,
+    )
+    .unwrap();
+    assert_eq!(one(&hidden, "start_work").global, Switch::Hidden);
+}
+
+#[test]
+fn project_only_server_is_not_found_from_another_project() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let app = ProjectId::new("app").unwrap();
+    let other = add_project(&connection, "other");
+    let id = checked_server(
+        &mut connection,
+        root,
+        Scope::Project {
+            project_id: app.clone(),
+        },
+        "local",
+    );
+    let own = tools(
+        &mut connection,
+        root,
+        Command::Tools {
+            project: Some(app.clone()),
+            server: Some(id.clone()),
+        },
+    )
+    .unwrap();
+    assert_eq!(own.len(), 2);
+    for project in [Some(other), None] {
+        assert_eq!(
+            tools(
+                &mut connection,
+                root,
+                Command::Tools {
+                    project: project.clone(),
+                    server: Some(id.clone()),
+                },
+            )
+            .unwrap_err(),
+            "server_not_found",
+            "{project:?}"
+        );
+    }
+}
+
+#[test]
+fn restore_tools_clears_only_that_scope() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let app = ProjectId::new("app").unwrap();
+    let id = checked_server(&mut connection, root, Scope::Global, "fixture");
+    set_tool(&mut connection, root, None, None, "start_work", Switch::Off).unwrap();
+    set_tool(
+        &mut connection,
+        root,
+        Some(&app),
+        None,
+        "start_work",
+        Switch::On,
+    )
+    .unwrap();
+    set_tool(
+        &mut connection,
+        root,
+        Some(&app),
+        None,
+        "finish_work",
+        Switch::Hidden,
+    )
+    .unwrap();
+    set_tool(
+        &mut connection,
+        root,
+        Some(&app),
+        Some(&id),
+        "echo",
+        Switch::Off,
+    )
+    .unwrap();
+
+    let restored = tools(
+        &mut connection,
+        root,
+        Command::RestoreTools {
+            project: Some(app.clone()),
+            server: None,
+        },
+    )
+    .unwrap();
+    assert!(restored.iter().all(|view| view.here.is_none()));
+    assert_eq!(one(&restored, "start_work").global, Switch::Off);
+    let mcp = tools(
+        &mut connection,
+        root,
+        Command::Tools {
+            project: Some(app.clone()),
+            server: Some(id.clone()),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        one(&mcp, "echo").here,
+        Some(Switch::Off),
+        "a restore of the built-ins leaves the MCP server's rows"
+    );
+
+    let global = tools(
+        &mut connection,
+        root,
+        Command::RestoreTools {
+            project: None,
+            server: None,
+        },
+    )
+    .unwrap();
+    assert!(global.iter().all(|view| view.global == Switch::On));
+}
+
+#[test]
+fn a_project_server_check_is_refused_when_the_project_network_cannot_be_read() {
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    let spec = ServerSpec::Stdio {
+        command: "/bin/true".into(),
+        args: vec![],
+    };
+    let ResultValue::Server(view) = execute(
+        &mut connection,
+        root,
+        Command::AddServer {
+            scope: Scope::Project {
+                project_id: ProjectId::new("app").unwrap(),
+            },
+            name: "p".into(),
+            spec,
+            secrets: Vec::new(),
+        },
+    )
+    .unwrap() else {
+        panic!("server view required");
+    };
+    crate::sandbox::policy::save(
+        &connection,
+        "app",
+        &crate::sandbox::policy::AgentPolicy::default(),
+    )
+    .unwrap();
+    connection
+        .execute(
+            "UPDATE project_agent_policy SET body=?1 WHERE project='app'",
+            [r#"{"access":"sandboxed","toolchains":[],"network":"proxy"}"#],
+        )
+        .unwrap();
+    let refused = execute(&mut connection, root, Command::GetServer { id: view.id });
+    let Err(error) = refused else {
+        panic!("the project server check must be refused");
+    };
+    assert_eq!(error.0, "project_network_unreadable");
+}
+
+#[test]
+fn a_global_server_check_uses_the_strictest_network_among_projects_that_enable_it() {
+    use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+    let (dir, mut connection) = database();
+    let root = dir.path();
+    connection
+        .execute("INSERT INTO projects(id, body) VALUES('beta','{}')", [])
+        .unwrap();
+    crate::sandbox::policy::save(
+        &connection,
+        "app",
+        &AgentPolicy {
+            network: AgentNetwork::Open,
+            ..AgentPolicy::default()
+        },
+    )
+    .unwrap();
+    crate::sandbox::policy::save(
+        &connection,
+        "beta",
+        &AgentPolicy {
+            network: AgentNetwork::None,
+            ..AgentPolicy::default()
+        },
+    )
+    .unwrap();
+    let spec = ServerSpec::Stdio {
+        command: "/bin/true".into(),
+        args: vec![],
+    };
+    let id = server(&mut connection, root, "fixture", &spec);
+    let ResultValue::Check(_, _, network) =
+        execute(&mut connection, root, Command::GetServer { id }).unwrap()
+    else {
+        panic!("check value required");
+    };
+    assert_eq!(network, crate::sandbox::SandboxNetwork::Only(vec![]));
+}
 #[test]
 fn a_case_variant_project_id_is_refused_and_keeps_the_first_projects_skills() {
     let (dir, mut connection) = database();

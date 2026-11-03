@@ -313,6 +313,7 @@ fn send(
         Request::TeamGraph { project } => connection.team_graph(project),
         Request::ProjectFiles { project, query } => connection.project_files(project, query),
         request @ (Request::TerminalAttach { .. }
+        | Request::TerminalAttachPane { .. }
         | Request::TerminalInput { .. }
         | Request::TerminalResize { .. }
         | Request::TerminalDetach { .. }) => {

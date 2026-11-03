@@ -42,7 +42,14 @@ CREATE INDEX IF NOT EXISTS landing_change_sets_project
 CREATE TABLE IF NOT EXISTS landing_bases (
     worktree TEXT PRIMARY KEY,
     base TEXT NOT NULL
-);";
+);
+CREATE TABLE IF NOT EXISTS landing_agent_branches (
+    worktree TEXT PRIMARY KEY,
+    repository TEXT NOT NULL,
+    branch TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS landing_agent_branches_repository
+    ON landing_agent_branches(repository, branch);";
 
 const COLUMNS: &str = "id,project,agent_kind,agent_id,label,repository,worktree,git_dir,base,head,\
     state,last_outcome,turn,prompt_line,files,added,removed,conflicts,created_ms,updated_ms,\
@@ -389,6 +396,74 @@ pub(super) fn base_of(db: &Connection, worktree: &str) -> Result<Option<String>,
     }
 }
 
+/// Stores the task branch the engine named for an agent worktree, which its clone or
+/// linked worktree then commits on in place of the branch its folder names. Inputs: the
+/// store, the owner checkout root, the worktree and the branch, one
+/// `agent_git::is_agent_branch` accepts. Output: Ok once stored.
+pub(super) fn set_agent_branch(
+    db: &Connection,
+    repository: &std::path::Path,
+    worktree: &std::path::Path,
+    branch: &str,
+) -> Result<(), EngineError> {
+    assert!(crate::agent_git::is_agent_branch(branch));
+    db.execute(
+        "INSERT OR REPLACE INTO landing_agent_branches(worktree,repository,branch) VALUES (?1,?2,?3)",
+        params![path_text(worktree)?, path_text(repository)?, branch],
+    )
+    .map_err(storage)?;
+    Ok(())
+}
+
+/// Reads the task branch stored for an agent worktree. Inputs: the store and the worktree
+/// path. Output: the branch, None when none is stored, or `changes_unavailable` for a
+/// stored value that is not a branch the engine names.
+pub(super) fn agent_branch(db: &Connection, worktree: &str) -> Result<Option<String>, EngineError> {
+    let branch: Option<String> = db
+        .query_row(
+            "SELECT branch FROM landing_agent_branches WHERE worktree=?1",
+            [worktree],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage)?;
+    match branch {
+        Some(branch) if !crate::agent_git::is_agent_branch(&branch) => {
+            Err(failure("changes_unavailable"))
+        }
+        branch => Ok(branch),
+    }
+}
+
+/// Says whether another agent worktree of the same owner repository already holds a task
+/// branch name; a row left for the asking worktree itself does not count. Inputs: the
+/// store, the owner checkout root, the asking worktree and the branch. Output: the answer.
+pub(super) fn agent_branch_taken(
+    db: &Connection,
+    repository: &std::path::Path,
+    worktree: &std::path::Path,
+    branch: &str,
+) -> Result<bool, EngineError> {
+    db.query_row(
+        "SELECT COUNT(*) FROM landing_agent_branches WHERE repository=?1 AND branch=?2 AND worktree<>?3",
+        params![path_text(repository)?, branch, path_text(worktree)?],
+        |row| row.get::<_, i64>(0),
+    )
+    .map(|count| count > 0)
+    .map_err(storage)
+}
+
+/// Forgets the task branch of an agent worktree that is gone. Inputs: the store and the
+/// worktree path. Output: Ok.
+pub(super) fn forget_agent_branch(db: &Connection, worktree: &str) -> Result<(), EngineError> {
+    db.execute(
+        "DELETE FROM landing_agent_branches WHERE worktree=?1",
+        [worktree],
+    )
+    .map_err(storage)?;
+    Ok(())
+}
+
 /// Reads one change set. Inputs: the store and the id. Output: the record, or
 /// `changes_not_found`.
 pub(super) fn load(db: &Connection, id: &ChangeSetId) -> Result<Record, EngineError> {
@@ -407,6 +482,32 @@ pub(super) fn find(db: &Connection, id: &ChangeSetId) -> Result<Option<Record>, 
     .map_err(storage)
 }
 
+/// Reads the commit the engine landed for the newest accepted change set of a project's
+/// repository whose head is the given commit, so a later set starting there is known to
+/// start from work already landed. Inputs: the store, the project, the repository and the
+/// head. Output: the landed commit, None when no accepted set has that head.
+pub(super) fn landed_head(
+    db: &Connection,
+    project: &ProjectId,
+    repository: &std::path::Path,
+    head: &str,
+) -> Result<Option<String>, EngineError> {
+    let landed: Option<Option<String>> = db
+        .query_row(
+            "SELECT landed FROM landing_change_sets WHERE project=?1 AND repository=?2 \
+             AND head=?3 AND state='accepted' AND landed IS NOT NULL \
+             ORDER BY updated_ms DESC LIMIT 1",
+            params![project.as_str(), path_text(repository)?, head],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(storage)?;
+    match landed.flatten() {
+        Some(landed) if !super::git::is_object_id(&landed) => Err(failure("changes_unavailable")),
+        landed => Ok(landed),
+    }
+}
+
 /// Reads the open change set of one worktree. Inputs: the store and the worktree path.
 /// Output: the record, or None when nothing is open there.
 pub(super) fn open_for(db: &Connection, worktree: &str) -> Result<Option<Record>, EngineError> {
@@ -416,6 +517,25 @@ pub(super) fn open_for(db: &Connection, worktree: &str) -> Result<Option<Record>
              AND state IN ('pending','conflict','updating')"
         ),
         [worktree],
+        read,
+    )
+    .optional()
+    .map_err(storage)
+}
+
+/// Reads the change set of one team sub-agent of a project changed last. Inputs: the
+/// store, the project and the agent id. Output: the record, None when it has none.
+pub(super) fn newest_of(
+    db: &Connection,
+    project: &ProjectId,
+    agent_id: &str,
+) -> Result<Option<Record>, EngineError> {
+    db.query_row(
+        &format!(
+            "SELECT {COLUMNS} FROM landing_change_sets WHERE project=?1 AND agent_kind='sub' \
+             AND agent_id=?2 ORDER BY updated_ms DESC LIMIT 1"
+        ),
+        params![project.as_str(), agent_id],
         read,
     )
     .optional()

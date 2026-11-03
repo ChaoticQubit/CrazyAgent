@@ -2,7 +2,7 @@ import { nextGeneration } from "../../api";
 import type { HarnessEntry } from "../../api";
 import { Fragment, useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { cancelTeamTask, failureCopy, loadTeamStatus, receiptState, renameTeamAgent, wakeTeamAgent } from "../../api-projects";
+import { cancelTeamTask, failureCopy, loadTeamStatus, receiptState, renameTeamAgent, stopTeamAgent, stopTeammate, wakeTeamAgent } from "../../api-projects";
 import { ConfirmDialog, Icon, StatusBadge } from "../../ui";
 import { displayText } from "../conversation";
 import { harnessName } from "../new-project/team-editor";
@@ -10,7 +10,7 @@ import { AgentMessages } from "../team/agent-messages";
 import { useLinkOpener } from "./links";
 import { MarkdownView } from "./markdown";
 import { agentKey, finishedLabel, finishedRows, liveAgent, teamPanel } from "./research";
-import type { FinishedRow, TeamFilter, TeamTaskRow } from "./research";
+import type { FinishedRow, TeamAgentRow, TeamFilter, TeamTaskRow, TeammateRow } from "./research";
 import { NotReady } from "./shared";
 import type { ProjectData, TeamRead } from "./shared";
 
@@ -50,6 +50,7 @@ export function TeamPanel({ data, team, filter, harnesses, accounts, reload }: {
   const [shown, setShown] = useState<string | null>(null);
   const [note, setNote] = useState("");
   const [renaming, setRenaming] = useState<{ agent: number; text: string } | null>(null);
+  const [halting, setHalting] = useState<TeamAgentRow | null>(null);
   const [messages, setMessages] = useState<string | null>(null);
   const openLink = useLinkOpener(data.notify);
 
@@ -77,6 +78,29 @@ export function TeamPanel({ data, team, filter, harnesses, accounts, reload }: {
     reload();
   }
 
+  async function haltHarness(row: TeamAgentRow) {
+    if (!row.stop) return;
+    setBusy(true);
+    const result = await stopTeamAgent(data.id, row.stop.agent, nextGeneration());
+    setBusy(false);
+    setHalting(null);
+    if (result.kind !== "ok") return setNote(result.kind === "not_ready" ? "Not ready yet: stopping a harness isn't in this build." : failureCopy(result));
+    const state = receiptState(result.value);
+    setNote(state.kind === "applied" ? "" : state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check the list before trying again.");
+    reload();
+  }
+
+  async function haltTeammate(row: TeammateRow) {
+    if (!row.stop) return;
+    setBusy(true);
+    const result = await stopTeammate(data.id, row.stop.agent, row.stop.pane, nextGeneration());
+    setBusy(false);
+    if (result.kind !== "ok") return setNote(result.kind === "not_ready" ? "Not ready yet: stopping a teammate isn't in this build." : failureCopy(result));
+    const state = receiptState(result.value);
+    setNote(state.kind === "applied" ? "" : state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check the list before trying again.");
+    reload();
+  }
+
   if (team.result === undefined) return <p className="pj-muted" role="status">Loading the team...</p>;
   if (team.result.kind === "not_ready") return <NotReady what="the live team isn't in this build." />;
   if (team.result.kind === "error") return <p className="pj-error" role="alert">Couldn't load the team. {failureCopy(team.result)}</p>;
@@ -94,7 +118,7 @@ export function TeamPanel({ data, team, filter, harnesses, accounts, reload }: {
       <caption className="pj-sr">Team agents</caption>
       <thead><tr><th scope="col">Agent</th><th scope="col">Harness</th><th scope="col">Account</th><th scope="col">Status</th><th scope="col">Current task</th></tr></thead>
       <tbody>{panel.agents.map((row) => { const sub = subs.get(row.key); return <Fragment key={row.key}><tr>
-        <th scope="row">{renaming && row.rename?.agent === renaming.agent
+        <th scope="row" style={row.depth > 0 ? { paddingInlineStart: `${row.depth * 1.5}rem` } : undefined}>{renaming && row.rename?.agent === renaming.agent
           ? <form className="pj-row" onSubmit={(event) => { event.preventDefault(); void rename(); }}>
             <label htmlFor={`pj-rename-${row.key}`} className="pj-sr">New @name for {displayText(row.name)}</label>
             <span aria-hidden="true">@</span>
@@ -107,12 +131,22 @@ export function TeamPanel({ data, team, filter, harnesses, accounts, reload }: {
             {row.rename && <button type="button" className="btn quiet small" aria-label={`Rename ${displayText(row.name)}`}
               onClick={() => { const target = row.rename; if (target) setRenaming({ agent: target.agent, text: target.handle }); }}>Rename</button>}</span>}
           {row.role !== row.name && <span className="pj-small pj-muted pj-block">{row.role}</span>}
+          {row.lead && <span className="pj-small pj-muted pj-block">Worker of {displayText(row.lead)}</span>}
           {row.folder && <span className="pj-small pj-muted pj-block">{displayText(row.folder)}</span>}
+          {row.teammates.length > 0 && <ul className="pj-rows" aria-label={`Teammates of ${displayText(row.name)}`}>{row.teammates.map((mate) => <li key={mate.key} className="pj-row">
+            <span className="pj-small pj-secondary">Teammate in pane {displayText(mate.pane)}</span>
+            <StatusBadge word={mate.word} />
+            {mate.stop && <button type="button" className="btn danger-text" disabled={busy} aria-label={`Stop the teammate in pane ${displayText(mate.pane)}`}
+              onClick={() => void haltTeammate(mate)}>Stop</button>}
+          </li>)}</ul>}
           {sub && <span className="pj-block"><button type="button" className="btn quiet small" aria-label={`Messages for ${displayText(row.name)}`}
             aria-expanded={messages === row.key} onClick={() => setMessages(messages === row.key ? null : row.key)}>Messages</button></span>}</th>
         <td>{displayText(row.harness)}</td>
         <td>{displayText(row.account)}</td>
-        <td><StatusBadge word={row.word} /></td>
+        <td><StatusBadge word={row.word} />
+          {row.stoppedByYou && <span className="pj-small pj-muted pj-block">Stopped by you. Its task waits until you wake it.</span>}
+          {row.stop && <button type="button" className="btn danger-text" disabled={busy} aria-label={row.lead ? `Stop ${displayText(row.name)}` : `Stop ${displayText(row.name)} and every agent it leads`}
+            onClick={() => setHalting(row)}>Stop</button>}</td>
         <td className="pj-secondary">{displayText(row.task)}</td>
       </tr>
       {sub && messages === row.key && <tr><td colSpan={5}>
@@ -139,6 +173,12 @@ export function TeamPanel({ data, team, filter, harnesses, accounts, reload }: {
       confirmLabel={stopping?.stop?.label === "Cancel" ? "Cancel task" : "Stop task"} cancelLabel="Keep it" pending={busy}
       onCancel={() => setStopping(null)} onConfirm={() => { if (stopping) void stop(stopping); }}>
       {displayText(stopping?.prompt ?? "")}
+    </ConfirmDialog>
+    <ConfirmDialog open={halting !== null} title={`Stop ${displayText(halting?.name ?? "")}?`} confirmLabel={halting?.lead ? "Stop sub-agent" : "Stop harness"} cancelLabel="Keep it running" pending={busy}
+      onCancel={() => setHalting(null)} onConfirm={() => { if (halting) void haltHarness(halting); }}>
+      {halting?.lead
+        ? `This sub-agent of ${displayText(halting.lead)} stops now, app-spawned or a native teammate, and stays stopped across app and engine restarts. Its lead is told. Its task waits for it until you wake it.`
+        : "This harness, every sub-agent it leads and every teammate in its terminal stop now, and stay stopped across app and engine restarts. Its task waits for it, in its own worktree, until you wake it."}
     </ConfirmDialog>
   </section>;
 }
@@ -179,7 +219,7 @@ export function FinishedAgentsPanel({ data, team, harnesses, reload, children }:
   }
 
   return <details className="pj-stack-s" aria-label="Finished agents">
-    <summary><strong>{finishedLabel(rows.length)}</strong> <span className="pj-small pj-muted">Idle, stopped and failed agents. Their results and worktrees stay until you clean them up.</span></summary>
+    <summary><strong>{finishedLabel(rows.length)}</strong> <span className="pj-small pj-muted">Stopped and failed agents. Their results and worktrees stay until you clean them up.</span></summary>
     {note && <p className="pj-note warn" role="alert">{displayText(note)}</p>}
     <ul className="pj-rows" aria-label="Finished agents">{rows.map((row) => <li key={row.key} className="pj-task">
       <span className="pj-row between">

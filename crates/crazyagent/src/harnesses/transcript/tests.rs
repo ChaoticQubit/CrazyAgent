@@ -187,6 +187,76 @@ fn claude_finish_after_end_turn_is_reported_once() {
     );
 }
 
+/// A Bash call Claude Code runs in the background reports its task id, and the task
+/// notification that later starts a turn reports each id it names as ended. An id with a
+/// control character is not kept. The record shapes are copied from a real lead's transcript.
+#[test]
+fn claude_background_commands_are_followed_by_task_id() {
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    append(
+        &file,
+        concat!(
+            r#"{"type":"user","message":{"content":"Run the check"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"Command running in background with ID: bub9bmz4a."}]},"toolUseResult":{"backgroundTaskId":"bub9bmz4a"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Waiting"}],"stop_reason":"end_turn"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":"<task-notification>\n<task-id>bub9bmz4a</task-id>\n<task-id>bad\u0007id</task-id>\n<status>completed</status>\n</task-notification>"}}"#,
+            "\n",
+        ),
+    );
+    assert_eq!(
+        reader.read().unwrap(),
+        vec![
+            TranscriptEvent::TurnStarted,
+            TranscriptEvent::BackgroundStarted {
+                id: "bub9bmz4a".into()
+            },
+            text("Waiting\n"),
+            TranscriptEvent::TurnFinished { success: true },
+            TranscriptEvent::BackgroundEnded {
+                id: "bub9bmz4a".into()
+            },
+            TranscriptEvent::TurnStarted,
+        ]
+    );
+    assert_eq!(
+        notified_tasks("<task-id>x</task-id> with no notification"),
+        Vec::<String>::new()
+    );
+}
+
+/// A background command the agent stops itself with TaskStop gets no task notification, so
+/// the stop's tool result, which names the task, ends it (w-review LTK-H1, the record shape
+/// a real Claude Code session wrote on 2026-10-29).
+#[test]
+fn claude_a_background_command_the_agent_stops_ends_by_its_task_id() {
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    append(
+        &file,
+        concat!(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"Command running in background with ID: b20nv1bx6."}]},"toolUseResult":{"backgroundTaskId":"b20nv1bx6"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":"Successfully stopped task: b20nv1bx6 (npm run dev)"}]},"toolUseResult":{"message":"Successfully stopped task: b20nv1bx6 (npm run dev)","task_id":"b20nv1bx6","task_type":"local_bash"}}"#,
+            "\n",
+        ),
+    );
+    assert_eq!(
+        reader.read().unwrap(),
+        vec![
+            TranscriptEvent::BackgroundStarted {
+                id: "b20nv1bx6".into()
+            },
+            TranscriptEvent::BackgroundEnded {
+                id: "b20nv1bx6".into()
+            },
+        ]
+    );
+}
+
 #[test]
 fn claude_transcript_behind_a_symlink_is_not_followed() {
     let case = Case::new();

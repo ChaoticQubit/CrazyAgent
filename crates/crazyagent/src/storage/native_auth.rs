@@ -1179,13 +1179,7 @@ pub(crate) fn stale_sign_ins(
         {
             continue;
         }
-        let due = match earlier_run(&tx, connection, host)? {
-            Some((earlier, generation)) => {
-                master_session::sign_in_at(&tx, &earlier, connection, generation).is_ok()
-            }
-            None => doubted_here(&tx, connection, host)?,
-        };
-        if !due {
+        if !reproof_due(&tx, connection, host)? {
             continue;
         }
         starts.push(NativeAuthStart {
@@ -1202,6 +1196,51 @@ pub(crate) fn stale_sign_ins(
     drop(tx);
     assert!(starts.len() <= connections.len());
     Ok(starts)
+}
+
+/// Tells whether a new engine run re-proves a connection's sign-in before trusting it: its
+/// newest sign-in finished authenticated under an earlier run and passes every other launch
+/// check under that run, or it is held for an account check. Inputs: the transaction, the
+/// managed connection and the running host. Output: true when the re-proof checks it.
+fn reproof_due(
+    tx: &Transaction<'_>,
+    connection: &crate::config::ModelConnection,
+    host: &HostStamp,
+) -> Result<bool, EngineError> {
+    match earlier_run(tx, connection, host)? {
+        Some((earlier, generation)) => {
+            Ok(master_session::sign_in_at(tx, &earlier, connection, generation).is_ok())
+        }
+        None => doubted_here(tx, connection, host),
+    }
+}
+
+/// Tells whether a connection's sign-in waits for a re-check of this engine run rather than
+/// having settled: the re-proof lists it, or a check of its profile is still running or
+/// still holds the profile (DEC-108). Inputs: the transaction, the running host and the
+/// connection. Output: true while unsettled; false for a connection that is not managed.
+pub(crate) fn sign_in_rechecking(
+    tx: &Transaction<'_>,
+    host: &HostStamp,
+    connection: &crate::config::ModelConnection,
+) -> Result<bool, EngineError> {
+    if !matches!(
+        connection.auth,
+        crate::config::ModelAuthentication::NativeManaged { .. }
+    ) {
+        return Ok(false);
+    }
+    let key = profile_key(connection)?;
+    let running: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM native_auth_fences WHERE profile_key=?1)
+             OR COALESCE((SELECT phase IN ('starting','awaiting_owner','checking_account','cancelling')
+                FROM native_auth_operations WHERE profile_key=?1 ORDER BY generation DESC LIMIT 1), 0)",
+            [&key],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    Ok(running || reproof_due(tx, connection, host)?)
 }
 
 /// The earlier engine run a connection's newest sign-in was proved under, when it finished

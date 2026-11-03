@@ -11,6 +11,8 @@ import { copyKey, encodeBinary, encodeTyped, endCopy, inputLanes, inputMode, job
 
 const COPIED_MS = 2000;
 const COPY_REFUSED = "The clipboard refused the copy.";
+const FOLLOW_MS = 1000;
+const FOLLOW_TRIES = 30;
 const RESIZE_PAUSE_MS = 120;
 const SCROLLBACK_LINES = 5000;
 const STOPPED_TYPING = "Typing stopped reaching this agent. Open the terminal again to reconnect.";
@@ -63,12 +65,19 @@ export function terminalOptions(): ITerminalOptions {
   };
 }
 
-/** The note under a live terminal: who reads what the owner types. Input: the node.
- * Output: one sentence. */
+/** The pane a terminal view shows instead of the whole terminal: a native teammate known
+ * only by its pane in its lead's terminal. Input: the node. Output: the pane id, or null. */
+export function teammatePane(node: GraphNode): string | null {
+  return node.kind === "teammate" && typeof node.agent !== "number" && node.pane ? node.pane : null;
+}
+
+/** The note under a live terminal: who reads what the owner types. A native teammate known
+ * only by its pane gets it in that pane, with no master told. Input: the node. Output: one
+ * sentence. */
 export function typingNote(node: GraphNode): string {
-  return node.kind === "master"
-    ? "Typing goes straight to the master."
-    : "Typing goes straight to this agent and is not kept. Only a prompt you send below is also told to its master.";
+  if (node.kind === "master") return "Typing goes straight to the master.";
+  if (teammatePane(node)) return "Typing goes straight to this teammate's pane and is not kept or told to the master.";
+  return "Typing goes straight to this agent and is not kept. Only a prompt you send below is also told to its master.";
 }
 
 /** The status line's note on where the owner's typing goes. Inputs: the node and the input
@@ -81,9 +90,9 @@ export function inputNote(node: GraphNode, input: InputChoice): string {
 
 /** The composer's label and placeholder for one agent. Input: the node. Output: both texts. */
 export function promptCopy(node: GraphNode): { label: string; placeholder: string } {
-  return node.kind === "master"
-    ? { label: "Prompt the master", placeholder: "Tell the master what to do next" }
-    : { label: `Prompt ${node.label}`, placeholder: `Tell ${node.label} what to do. Its master is told what you send.` };
+  if (node.kind === "master") return { label: "Prompt the master", placeholder: "Tell the master what to do next" };
+  if (teammatePane(node)) return { label: `Prompt ${node.label}`, placeholder: `Tell ${node.label} what to do. It goes to its pane only.` };
+  return { label: `Prompt ${node.label}`, placeholder: `Tell ${node.label} what to do. Its master is told what you send.` };
 }
 
 /** The prompt box under an agent's terminal: Enter sends the text as one message, Shift+Enter
@@ -260,17 +269,22 @@ export function TerminalMenu({ terminal, at, onDone }: { terminal: Terminal; at:
  * status line. Closing it detaches the view; the agent keeps running.
  * Inputs: the graph node, a harness name lookup, the close action when the panel can be
  * closed, `embedded` when a console around it owns the head, where the owner types (the
- * terminal, the message box under it, or both) and the one-line report of what the agent's
- * harness loaded and invoked, shown in the head. Output: the panel. */
-export function TerminalPanel({ node, harness, onClose, embedded = false, input = "both", reported }: {
+ * terminal, the message box under it, or both), `follow` when an ended terminal opens
+ * again on its own, cleared, for an agent that restarts in a new pane, and the one-line
+ * report of what the agent's harness loaded and invoked, shown in the head. Output: the panel. */
+export function TerminalPanel({ node, harness, onClose, embedded = false, input = "both", follow = false, reported }: {
   node: GraphNode;
   harness?: (id: string) => string;
   onClose?: () => void;
   embedded?: boolean;
   input?: InputChoice;
+  follow?: boolean;
   reported?: string;
 }) {
   const mode = inputMode(input);
+  const following = useRef(follow);
+  following.current = follow;
+  const tries = useRef(0);
   const keys = useRef(mode.keys);
   keys.current = mode.keys;
   const screen = useRef<HTMLDivElement>(null);
@@ -295,6 +309,7 @@ export function TerminalPanel({ node, harness, onClose, embedded = false, input 
   }).current;
   const [round, setRound] = useState(0);
   const name = node.terminal;
+  const pane = teammatePane(node);
 
   useEffect(() => {
     const element = screen.current;
@@ -303,6 +318,7 @@ export function TerminalPanel({ node, harness, onClose, embedded = false, input 
     setMenu(null);
     let disposed = false;
     let serial: number | null = null;
+    let again = 0;
     let release = () => {};
     void (async () => {
       const [{ Terminal }, { FitAddon }] = await Promise.all([
@@ -322,7 +338,16 @@ export function TerminalPanel({ node, harness, onClose, embedded = false, input 
       let frame = 0;
       const end = (copy: string) => {
         live = false;
-        if (!disposed) setView({ kind: "ended", copy });
+        if (disposed) return;
+        if (following.current && tries.current < FOLLOW_TRIES) {
+          tries.current += 1;
+          terminal.reset();
+          setView({ kind: "connecting" });
+          window.clearTimeout(again);
+          again = window.setTimeout(() => setRound((value) => value + 1), FOLLOW_MS);
+          return;
+        }
+        setView({ kind: "ended", copy });
       };
       const sendSize = () => {
         const size = terminalSize(terminal.cols, terminal.rows);
@@ -370,6 +395,7 @@ export function TerminalPanel({ node, harness, onClose, embedded = false, input 
         } else if (event.kind === "attached") {
           const size = terminalSize(event.cols, event.rows);
           if (size) terminal.resize(size.cols, size.rows);
+          tries.current = 0;
           live = true;
           setView({ kind: "live" });
           terminal.focus();
@@ -391,7 +417,7 @@ export function TerminalPanel({ node, harness, onClose, embedded = false, input 
         unsettle();
         terminal.dispose();
       };
-      const result = await attachTerminal(name, channel);
+      const result = await attachTerminal(name, channel, pane);
       if (disposed) {
         if (result.kind === "ok") void detachTerminal(name, result.value);
         return;
@@ -402,10 +428,11 @@ export function TerminalPanel({ node, harness, onClose, embedded = false, input 
     })();
     return () => {
       disposed = true;
+      window.clearTimeout(again);
       release();
       if (serial !== null) void detachTerminal(name, serial);
     };
-  }, [name, round]);
+  }, [name, pane, round]);
 
   return <section className={embedded ? "tg-terminal embedded" : "tg-terminal"} aria-label={`${node.label} terminal`}>
     {!embedded && <div className="tg-terminal-head">
@@ -419,7 +446,7 @@ export function TerminalPanel({ node, harness, onClose, embedded = false, input 
     {view.kind === "connecting" && name && <p className="tg-terminal-state" role="status"><Icon name="loader-circle" size={14} spin />Connecting to the terminal...</p>}
     {view.kind === "ended" && <div className="tg-terminal-state" role="alert">
       <span>{view.copy}</span>
-      <Button size="small" icon="refresh-cw" onClick={() => setRound((value) => value + 1)}>Open again</Button>
+      <Button size="small" icon="refresh-cw" onClick={() => { tries.current = 0; setRound((value) => value + 1); }}>Open again</Button>
     </div>}
     <div className="tg-terminal-screen" ref={screen} hidden={!name || view.kind === "not_ready"} onContextMenu={(event) => {
       if (!term.current) return;

@@ -216,24 +216,42 @@ pub enum RuleLevel {
     Agent,
 }
 
-/// Why the owner gets an app notification: the master escalated an owner-only decision, or
-/// auto-wake stopped at its hourly cap.
+/// Why the owner gets an app notification: the master escalated an owner-only decision,
+/// auto-wake stopped at its hourly cap, the event queue filled, or the project's token
+/// budget stopped its team; or an agent asked the owner an urgent (High) or a Normal
+/// question, or waits on the owner in its own terminal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NotificationKind {
     Escalation,
     WakePaused,
     QueueFull,
+    BudgetStopped,
+    UrgentQuestion,
+    Question,
+    WaitingOnYou,
 }
 
 impl NotificationKind {
-    const ALL: [Self; 3] = [Self::Escalation, Self::WakePaused, Self::QueueFull];
+    const ALL: [Self; 7] = [
+        Self::Escalation,
+        Self::WakePaused,
+        Self::QueueFull,
+        Self::BudgetStopped,
+        Self::UrgentQuestion,
+        Self::Question,
+        Self::WaitingOnYou,
+    ];
 
     fn name(self) -> &'static str {
         match self {
             Self::Escalation => "escalation",
             Self::WakePaused => "wake_paused",
             Self::QueueFull => "queue_full",
+            Self::BudgetStopped => "budget_stopped",
+            Self::UrgentQuestion => "urgent_question",
+            Self::Question => "question",
+            Self::WaitingOnYou => "waiting_on_you",
         }
     }
 
@@ -303,8 +321,8 @@ impl EventsStatus {
         }
         if !self.finished.is_empty() {
             text.push_str(&format!(
-                "Finished sub-agents you can wake with {}(agent, text), newest first:\n",
-                super::tool::WAKE_TOOL
+                "Finished sub-agents you can wake with {}(to, text), newest first:\n",
+                super::tool::UPDATE_WORK_TOOL
             ));
             for line in &self.finished {
                 text.push_str(line);
@@ -585,7 +603,7 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
     Ok(())
 }
 
-fn immediate(connection: &Connection) -> Result<Transaction<'_>, EngineError> {
+pub(super) fn immediate(connection: &Connection) -> Result<Transaction<'_>, EngineError> {
     Transaction::new_unchecked(connection, TransactionBehavior::Immediate).map_err(error)
 }
 
@@ -792,10 +810,11 @@ pub fn task_ended(
         String,
         Option<String>,
         Option<String>,
+        Option<i64>,
     );
     let row: Option<Row> = connection
         .query_row(
-            "SELECT project,agent,source,status,result,error FROM team_tasks WHERE id=?1",
+            "SELECT project,agent,source,status,result,error,parent FROM team_tasks WHERE id=?1",
             [task],
             |row| {
                 Ok((
@@ -805,12 +824,13 @@ pub fn task_ended(
                     row.get(3)?,
                     row.get(4)?,
                     row.get(5)?,
+                    row.get(6)?,
                 ))
             },
         )
         .optional()
         .map_err(error)?;
-    let Some((project, Some(agent), source, status, result, problem)) = row else {
+    let Some((project, Some(agent), source, status, result, problem, lead)) = row else {
         return Ok(None);
     };
     clear_waiting(connection, agent)?;
@@ -833,7 +853,7 @@ pub fn task_ended(
         ),
         _ => return Ok(None),
     };
-    let state = if source == "master" {
+    let state = if source == "master" || lead.is_some() {
         EventState::Carried
     } else {
         EventState::Queued
@@ -1035,6 +1055,112 @@ pub fn send_to(
     Ok(Ok(id))
 }
 
+/// The most queued worker events one tick forwards to their leads.
+pub const FORWARDED_PER_TICK_MAX: i64 = 64;
+
+/// Sends the queued events of a project's workers to each worker's own lead instead of
+/// the master, which hears only its leads' events (DEC-104 K2b): one coordination note per
+/// lead from the engine, holding the event lines up to the message body bound, under each
+/// worker's wake rule, so a muted kind stays muted. Events the layer refuses are dropped,
+/// never sent elsewhere. Takes the connection, the project and the time. Returns any failure.
+pub fn forward_to_parents(
+    connection: &Connection,
+    project: &ProjectId,
+    now: i64,
+) -> Result<(), EngineError> {
+    let queued: Vec<(i64, i64, i64)> = {
+        let mut statement = connection
+            .prepare(
+                "SELECT e.id,e.agent,a.parent FROM team_events e JOIN team_agents a ON a.id=e.agent
+                 WHERE e.project=?1 AND e.state='queued' AND a.parent IS NOT NULL ORDER BY e.id LIMIT ?2",
+            )
+            .map_err(error)?;
+        statement
+            .query_map(params![project.as_str(), FORWARDED_PER_TICK_MAX], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+            })
+            .map_err(error)?
+            .collect::<Result<_, _>>()
+            .map_err(error)?
+    };
+    let mut full = connection
+        .prepare(&format!(
+            "SELECT {EVENT_COLUMNS} FROM team_events WHERE id=?1"
+        ))
+        .map_err(error)?;
+    let mut by_lead: BTreeMap<i64, Vec<TeamEvent>> = BTreeMap::new();
+    for (id, agent, lead) in queued {
+        let event = full
+            .query_row([id], |row| event_row(connection, row))
+            .map_err(error)?;
+        if rule(connection, Some(project), Some(agent))?
+            .0
+            .wakes(event.kind)
+        {
+            by_lead.entry(lead).or_default().push(event);
+        } else {
+            connection
+                .execute(
+                    "UPDATE team_events SET state='muted' WHERE id=?1 AND state='queued'",
+                    [id],
+                )
+                .map_err(error)?;
+        }
+    }
+    for (lead, events) in by_lead {
+        let mut text = String::new();
+        let mut carried = Vec::new();
+        for event in &events {
+            let next = line(event);
+            if !text.is_empty() && text.len() + 1 + next.len() > crate::coord::BODY_BYTES_MAX {
+                break;
+            }
+            if !text.is_empty() {
+                text.push('\n');
+            }
+            text.push_str(&next);
+            carried.push(event.id);
+        }
+        assert!(!carried.is_empty() && text.len() <= crate::coord::BODY_BYTES_MAX);
+        let tx = immediate(connection)?;
+        let sent = crate::coord::send(
+            &tx,
+            crate::coord::NewMessage {
+                project: project.clone(),
+                from: crate::coord::Party::Engine,
+                to: crate::coord::Party::Agent(lead),
+                kind: crate::coord::MessageKind::Note,
+                question: None,
+                work: None,
+                reply_to: None,
+                body: text,
+                idempotency_key: Some(format!(
+                    "{}{}",
+                    crate::coord::delivery::EVENTS_KEY,
+                    carried[0]
+                )),
+            },
+            now,
+        );
+        let state = match sent {
+            Ok(_) => EventState::Delivered,
+            Err(problem) if problem.0.starts_with("coord_state_unavailable") => {
+                return Err(problem);
+            }
+            Err(_) => EventState::Dropped,
+        };
+        for id in &carried {
+            tx.execute(
+                "UPDATE team_events SET state=?2, delivered_ms=?3 WHERE id=?1 AND state='queued'",
+                params![id, state.name(), now],
+            )
+            .map_err(error)?;
+        }
+        tx.commit().map_err(error)?;
+    }
+    Ok(())
+}
+
 /// The handlers the live master's `message`, `answer` and `status` tools call, set on the
 /// team runtime with `TeamRuntime::with_events`.
 pub const HANDLERS: super::master::TeamEvents = super::master::TeamEvents {
@@ -1119,7 +1245,7 @@ pub fn escalate(
     Ok(Ok(id))
 }
 
-fn notify(
+pub(super) fn notify(
     tx: &Transaction<'_>,
     project: &ProjectId,
     kind: NotificationKind,
@@ -1327,8 +1453,8 @@ pub(crate) fn finished_agents(
                     stopped.map_or_else(|| "finished".to_owned(), |at| finished_ago(at, now));
                 let label = label(connection, id)?;
                 let number = AgentRole::Sub.agent_label(id);
-                let named = if label == number {
-                    label
+                let named = if label == number || name_reaches_running(connection, project, id)? {
+                    number
                 } else {
                     format!("{label}, {number}")
                 };
@@ -1342,6 +1468,30 @@ pub(crate) fn finished_agents(
             },
         )
         .collect()
+}
+
+/// Says whether a sub-agent's persona or handle, ignoring case, is also the persona or handle
+/// of another running sub-agent of the project, so a message sent by that name reaches the
+/// running agent and the finished one is listed by its number only (DEC-111 Q19).
+/// Takes the database, the project and the agent id. Returns true when such an agent runs.
+pub(crate) fn name_reaches_running(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+) -> Result<bool, EngineError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM team_names f
+                 JOIN team_names r ON r.project=f.project AND r.agent<>f.agent
+                 JOIN team_agents a ON a.id=r.agent AND a.project=r.project
+                 WHERE f.project=?1 AND f.agent=?2
+                   AND a.role='sub' AND a.status IN ('starting','idle','working')
+                   AND (f.persona=r.persona COLLATE NOCASE OR f.persona=r.handle COLLATE NOCASE
+                        OR f.handle=r.persona COLLATE NOCASE OR f.handle=r.handle COLLATE NOCASE))",
+            params![project.as_str(), agent],
+            |row| row.get(0),
+        )
+        .map_err(error)
 }
 
 /// Says how long ago an agent finished in whole units: "finished just now", "finished 4 min
@@ -1923,7 +2073,9 @@ pub fn due(
     let queued: Vec<(i64, i64, EventKind)> = {
         let mut statement = tx
             .prepare(
-                "SELECT id,agent,kind FROM team_events WHERE project=?1 AND state='queued' ORDER BY id LIMIT ?2",
+                "SELECT id,agent,kind FROM team_events WHERE project=?1 AND state='queued'
+                 AND agent NOT IN (SELECT id FROM team_agents WHERE parent IS NOT NULL)
+                 ORDER BY id LIMIT ?2",
             )
             .map_err(error)?;
         statement
@@ -2078,7 +2230,8 @@ pub fn deliver_by_message(
     let (waiting, asking): (i64, bool) = tx
         .query_row(
             "SELECT (SELECT COUNT(*) FROM team_messages WHERE project=?1 AND state IN ('pending','sent')),
-                    EXISTS(SELECT 1 FROM team_events WHERE project=?1 AND state='queued' AND kind='question')",
+                    EXISTS(SELECT 1 FROM team_events WHERE project=?1 AND state='queued' AND kind='question'
+                           AND agent NOT IN (SELECT id FROM team_agents WHERE parent IS NOT NULL))",
             [project.as_str()],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )

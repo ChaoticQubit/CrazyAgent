@@ -309,131 +309,181 @@ fn the_server_needs_an_absolute_drop_file() {
 
 #[test]
 fn live_calls_keep_only_bounded_plain_arguments_and_a_valid_role() {
-    let delegate = |arguments: Value| live_call(TOOL_NAME, Some(&arguments)).unwrap();
+    let spawn = |arguments: Value| live_call(SPAWN_TOOL, Some(&arguments)).unwrap();
     assert_eq!(
-        delegate(json!({"task": " Write page.md ", "harness": "Codex", "role": "@page-writer"})),
-        Ok(Call::Delegate {
+        spawn(json!({"task": " Write page.md ", "harness": "Codex", "role": "@page-writer"})),
+        Ok(Call::Spawn {
             task: "Write page.md".into(),
             harness: Some("codex".into()),
             role: Some("page-writer".into()),
+            mode: None,
         })
     );
     assert_eq!(
-        delegate(json!({"task": "Write page.md", "role": "Page Writer"})),
-        Ok(Call::Delegate {
-            task: "Write page.md".into(),
-            harness: None,
-            role: Some("page-writer".into()),
-        })
-    );
-    assert_eq!(
-        delegate(json!({"task": "Write page.md", "role": "  "})),
-        Ok(Call::Delegate {
+        spawn(json!({"task": "Write page.md", "role": "  "})),
+        Ok(Call::Spawn {
             task: "Write page.md".into(),
             harness: None,
             role: None,
+            mode: None,
         })
     );
     for role in ["@", "???", &"r".repeat(65)] {
         assert_eq!(
-            delegate(json!({"task": "Write page.md", "role": role})),
+            spawn(json!({"task": "Write page.md", "role": role})),
             Err(ROLE_INVALID),
             "{role}"
         );
     }
-    assert_eq!(delegate(json!({"task": "   "})), Err(LIVE_INVALID));
+    assert_eq!(spawn(json!({"task": "   "})), Err(SPAWN_INVALID));
     assert_eq!(
-        delegate(json!({"task": "x".repeat(TASK_PROMPT_BYTES_MAX + 1)})),
-        Err(LIVE_INVALID)
+        spawn(json!({"task": "x".repeat(TASK_PROMPT_BYTES_MAX + 1)})),
+        Err(SPAWN_INVALID)
     );
+    let update = |arguments: Value| live_call(UPDATE_WORK_TOOL, Some(&arguments)).unwrap();
     assert_eq!(
-        live_call(
-            MESSAGE_TOOL,
-            Some(&json!({"agent": " @page-writer ", "text": "Use the old header.\n"}))
-        )
-        .unwrap(),
-        Ok(Call::Message {
-            agent: "@page-writer".into(),
+        update(json!({"to": " @page-writer ", "text": "Use the old header.\n"})),
+        Ok(Call::UpdateWork {
+            kind: Update::Message,
             text: "Use the old header.".into(),
+            to: Some("@page-writer".into()),
+            question_for: None,
+            severity: None,
+            reply_to: None,
+            work: None,
+            key: None,
         })
     );
-    for arguments in [
-        json!({"agent": "@a", "text": "bell \u{7}"}),
-        json!({"agent": "", "text": "hi"}),
-        json!({"agent": "a".repeat(65), "text": "hi"}),
-        json!({"text": "hi"}),
+    assert_eq!(
+        update(json!({"for": "me", "severity": "high", "text": "May Ada force-push main?"})),
+        Ok(Call::UpdateWork {
+            kind: Update::Question,
+            text: "May Ada force-push main?".into(),
+            to: None,
+            question_for: Some(QuestionFor::Me),
+            severity: Some(Severity::High),
+            reply_to: None,
+            work: None,
+            key: None,
+        })
+    );
+    assert_eq!(
+        update(json!({"reply_to": 7, "text": "Yes."})),
+        Ok(Call::UpdateWork {
+            kind: Update::Reply,
+            text: "Yes.".into(),
+            to: None,
+            question_for: None,
+            severity: None,
+            reply_to: Some(7),
+            work: None,
+            key: None,
+        })
+    );
+    for (arguments, refused) in [
+        (json!({"to": "@a", "text": "bell \u{7}"}), UPDATE_INVALID),
+        (json!({"to": "a".repeat(65), "text": "hi"}), UPDATE_INVALID),
+        (json!({"text": "hi"}), MESSAGE_INVALID),
+        (json!({"for": "me", "text": "hi"}), QUESTION_INVALID),
+        (
+            json!({"for": "me", "severity": "low", "to": "Ada", "text": "hi"}),
+            QUESTION_INVALID,
+        ),
+        (
+            json!({"reply_to": 3, "to": "Ada", "text": "hi"}),
+            REPLY_INVALID,
+        ),
+        (
+            json!({"to": "Ada", "key": "a b", "text": "hi"}),
+            KEY_INVALID,
+        ),
     ] {
-        assert_eq!(
-            live_call(ANSWER_TOOL, Some(&arguments)).unwrap(),
-            Err(TYPED_INVALID),
-            "{arguments}"
-        );
+        assert_eq!(update(arguments.clone()), Err(refused), "{arguments}");
     }
     assert_eq!(
         live_call(
-            ESCALATE_TOOL,
-            Some(&json!({"text": " Ada wants to force-push main. Allow it? "}))
+            START_WORK_TOOL,
+            Some(&json!({"title": " Fix the footer ", "claims": ["src/page.md"]}))
         )
         .unwrap(),
-        Ok(Call::Escalate {
-            text: "Ada wants to force-push main. Allow it?".into(),
+        Ok(Call::StartWork {
+            title: "Fix the footer".into(),
+            claims: vec!["src/page.md".into()],
         })
     );
-    for arguments in [
-        json!({"text": "  "}),
-        json!({"text": "x".repeat(super::super::events::ESCALATION_BYTES_MAX + 1)}),
-        json!({"text": "bell \u{7}"}),
-        json!({}),
-    ] {
-        assert_eq!(
-            live_call(ESCALATE_TOOL, Some(&arguments)).unwrap(),
-            Err(ESCALATE_INVALID),
-            "{arguments}"
-        );
-    }
+    assert_eq!(
+        live_call(START_WORK_TOOL, Some(&json!({"title": "a\nb"}))).unwrap(),
+        Err(START_INVALID)
+    );
     assert_eq!(
         live_call(
-            WAKE_TOOL,
-            Some(&json!({"agent": " Ada ", "text": "Add a footer.\n"}))
+            TRANSFER_WORK_TOOL,
+            Some(&json!({"work": 2, "version": 3, "action": "assign"}))
         )
         .unwrap(),
-        Ok(Call::Wake {
-            agent: "Ada".into(),
-            text: "Add a footer.".into(),
+        Err(TRANSFER_INVALID)
+    );
+    assert_eq!(
+        live_call(
+            FINISH_WORK_TOOL,
+            Some(
+                &json!({"work": 2, "version": 3, "outcome": "complete", "evidence": "Tests pass."})
+            )
+        )
+        .unwrap(),
+        Ok(Call::FinishWork {
+            work: 2,
+            version: 3,
+            outcome: crate::coord::Finish::Complete,
+            evidence: "Tests pass.".into(),
         })
     );
     assert_eq!(
-        live_call(WAKE_TOOL, Some(&json!({"agent": "Ada"}))).unwrap(),
-        Err(TYPED_INVALID)
+        live_call(STOP_TOOL, Some(&json!({"agent": " Ada "}))).unwrap(),
+        Ok(Call::Stop {
+            agent: "Ada".into()
+        })
     );
-    assert_eq!(live_call(STATUS_TOOL, None).unwrap(), Ok(Call::Status));
     assert_eq!(
-        live_call(CHANGES_TOOL, Some(&json!({}))).unwrap(),
-        Ok(Call::Changes)
+        live_call(MERGE_TOOL, Some(&json!({}))).unwrap(),
+        Err(AGENT_INVALID)
+    );
+    assert_eq!(
+        live_call(INSPECT_WORK_TOOL, None).unwrap(),
+        Ok(Call::InspectWork)
     );
     assert_eq!(live_call("shell", None), None);
+    assert_eq!(live_call(TOOL_NAME, None), None);
 }
 
 #[test]
 fn the_engine_checks_again_every_call_read_from_a_mailbox() {
-    assert_eq!(checked(Call::Status), Ok(Call::Status));
-    let planted = Call::Delegate {
+    assert_eq!(checked(Call::InspectWork), Ok(Call::InspectWork));
+    let planted = Call::Spawn {
         task: "Write page.md".into(),
         harness: Some("Codex".into()),
         role: None,
+        mode: None,
     };
-    assert_eq!(checked(planted), Err(LIVE_INVALID));
-    let planted = Call::Message {
-        agent: "@a".into(),
+    assert_eq!(checked(planted), Err(CALL_INVALID));
+    let planted = Call::UpdateWork {
+        kind: Update::Message,
         text: "x".repeat(TASK_PROMPT_BYTES_MAX + 1),
+        to: Some("@a".into()),
+        question_for: None,
+        severity: None,
+        reply_to: None,
+        work: None,
+        key: None,
     };
-    assert_eq!(checked(planted), Err(TYPED_INVALID));
-    let planted = Call::Delegate {
+    assert!(checked(planted).is_err());
+    let planted = Call::Spawn {
         task: "Write page.md".into(),
         harness: None,
         role: Some("Page".into()),
+        mode: None,
     };
-    assert_eq!(checked(planted), Err(LIVE_INVALID));
+    assert_eq!(checked(planted), Err(CALL_INVALID));
 }
 
 #[test]
@@ -449,7 +499,7 @@ fn the_mailbox_takes_calls_in_order_answers_them_whole_and_never_follows_a_link(
     let second = "1".repeat(32);
     std::fs::write(
         mailbox.join(format!("{first}{CALL_SUFFIX}")),
-        b"{\"tool\":\"status\"}\n",
+        b"{\"tool\":\"inspect_work\"}\n",
     )
     .unwrap();
     std::thread::sleep(std::time::Duration::from_millis(20));
@@ -461,7 +511,7 @@ fn the_mailbox_takes_calls_in_order_answers_them_whole_and_never_follows_a_link(
         mailbox.join(format!("{}{CALL_SUFFIX}", "2".repeat(32))),
     )
     .unwrap();
-    std::fs::write(mailbox.join("notes.call"), b"{\"tool\":\"status\"}").unwrap();
+    std::fs::write(mailbox.join("notes.call"), b"{\"tool\":\"inspect_work\"}").unwrap();
     std::fs::write(
         mailbox.join(format!("{}{CALL_SUFFIX}", "3".repeat(32))),
         vec![b' '; CALL_BYTES_MAX as usize + 1],
@@ -470,9 +520,16 @@ fn the_mailbox_takes_calls_in_order_answers_them_whole_and_never_follows_a_link(
 
     let taken = take_calls(&mailbox, CALLS_PER_TICK_MAX);
     assert_eq!(taken.len(), 3, "{taken:?}");
-    assert_eq!(taken[0], (first.clone(), Some(Call::Status)));
-    assert_eq!(taken[1], (second.clone(), None));
-    assert_eq!(taken[2], ("3".repeat(32), None));
+    assert_eq!(
+        taken[0],
+        (
+            first.clone(),
+            Some(Call::InspectWork),
+            Some(call_digest(b"{\"tool\":\"inspect_work\"}\n"))
+        )
+    );
+    assert_eq!(taken[1], (second.clone(), None, None));
+    assert_eq!(taken[2], ("3".repeat(32), None, None));
     assert!(take_calls(&mailbox, CALLS_PER_TICK_MAX).is_empty());
     assert!(
         std::fs::symlink_metadata(mailbox.join(format!("{}{CALL_SUFFIX}", "2".repeat(32)))).is_ok()
@@ -509,7 +566,7 @@ fn the_engine_follows_no_link_swapped_in_for_the_mailbox_or_the_folder_holding_i
         std::fs::create_dir(&folder).unwrap();
         std::fs::write(
             folder.join(format!("{id}{CALL_SUFFIX}")),
-            b"{\"tool\":\"status\"}\n",
+            b"{\"tool\":\"inspect_work\"}\n",
         )
         .unwrap();
         let reply = folder.join(format!("{stale}{REPLY_SUFFIX}"));
@@ -561,7 +618,11 @@ fn the_engine_follows_no_link_swapped_in_for_the_mailbox_or_the_folder_holding_i
     std::fs::rename(&inner, &mailbox).unwrap();
     assert_eq!(
         take_calls(&mailbox, CALLS_PER_TICK_MAX),
-        vec![(id.clone(), Some(Call::Status))]
+        vec![(
+            id.clone(),
+            Some(Call::InspectWork),
+            Some(call_digest(b"{\"tool\":\"inspect_work\"}\n"))
+        )]
     );
     assert!(
         !mailbox.join(format!("{stale}{REPLY_SUFFIX}")).exists(),
@@ -588,14 +649,14 @@ fn the_engine_never_takes_a_call_its_server_is_still_writing() {
             let mailbox = mailbox.clone();
             std::thread::spawn(move || {
                 (0..16)
-                    .map(|_| ask(&mailbox, &Call::Status, REPLY_WAIT))
+                    .map(|_| ask(&mailbox, &Call::InspectWork, REPLY_WAIT))
                     .collect::<Vec<_>>()
             })
         })
         .collect();
     let mut unread = 0;
     while askers.iter().any(|asker| !asker.is_finished()) {
-        for (id, call) in take_calls(&mailbox, CALLS_PER_TICK_MAX) {
+        for (id, call, _) in take_calls(&mailbox, CALLS_PER_TICK_MAX) {
             unread += usize::from(call.is_none());
             answer_call(&mailbox, &id, "Taken.", call.is_none()).unwrap();
         }
@@ -616,16 +677,16 @@ fn the_engine_never_takes_a_call_its_server_is_still_writing() {
 }
 
 #[test]
-fn the_live_server_needs_an_absolute_plain_mailbox_and_lists_seven_tools() {
+fn the_live_server_needs_an_absolute_plain_mailbox_and_lists_the_tools_left_on() {
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let list = requests(&[json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})]);
-    assert!(serve_live(list.clone(), Vec::new(), Path::new("relative")).is_err());
+    assert!(serve_live(list.clone(), Vec::new(), Path::new("relative"), &[]).is_err());
     let linked = base.join("linked");
     symlink(&base, &linked).unwrap();
-    assert!(serve_live(list.clone(), Vec::new(), &linked).is_err());
+    assert!(serve_live(list.clone(), Vec::new(), &linked, &[]).is_err());
     let mut output = Vec::new();
-    serve_live(list, &mut output, &base).unwrap();
+    serve_live(list, &mut output, &base, &[STOP_TOOL.to_owned()]).unwrap();
     let answer: Value = serde_json::from_slice(output.trim_ascii()).unwrap();
     let names: Vec<&str> = answer["result"]["tools"]
         .as_array()
@@ -633,18 +694,11 @@ fn the_live_server_needs_an_absolute_plain_mailbox_and_lists_seven_tools() {
         .iter()
         .map(|tool| tool["name"].as_str().unwrap())
         .collect();
-    assert_eq!(
-        names,
-        [
-            TOOL_NAME,
-            MESSAGE_TOOL,
-            ANSWER_TOOL,
-            WAKE_TOOL,
-            STATUS_TOOL,
-            CHANGES_TOOL,
-            ESCALATE_TOOL
-        ]
-    );
+    let left_on: Vec<&str> = TEAM_TOOLS
+        .into_iter()
+        .filter(|name| *name != STOP_TOOL)
+        .collect();
+    assert_eq!(names, left_on);
 }
 
 #[test]
@@ -654,7 +708,7 @@ fn the_engine_runs_only_a_call_it_claimed_and_a_claimed_call_is_never_reported_u
     let blocked = "c".repeat(32);
     std::fs::write(
         mailbox.join(format!("{blocked}{CALL_SUFFIX}")),
-        br#"{"tool":"status"}"#,
+        br#"{"tool":"inspect_work"}"#,
     )
     .unwrap();
     std::fs::create_dir(mailbox.join(format!("{blocked}{TAKEN_SUFFIX}"))).unwrap();
@@ -667,7 +721,7 @@ fn the_engine_runs_only_a_call_it_claimed_and_a_claimed_call_is_never_reported_u
     let server = std::thread::spawn(move || {
         ask(
             &served,
-            &Call::Status,
+            &Call::InspectWork,
             std::time::Duration::from_millis(800),
         )
     });
@@ -687,6 +741,269 @@ fn the_engine_runs_only_a_call_it_claimed_and_a_claimed_call_is_never_reported_u
     assert_eq!(server.join().unwrap(), (NOT_ANSWERED.to_owned(), true));
 }
 
+/// S1: `sessions` takes plain words up to `QUERY_BYTES_MAX` bytes or nothing; `session` takes
+/// a plain id and a message number given as a number, as text or left out, and the engine
+/// reads both the same way again from a mailbox.
+#[test]
+fn past_conversation_calls_keep_plain_ids_bounded_words_and_any_offset_form() {
+    let sessions = |arguments: Value| live_call(SESSIONS_TOOL, Some(&arguments));
+    assert_eq!(
+        sessions(json!({"query": "  zebra plan "})),
+        Some(Ok(Call::Sessions {
+            query: "zebra plan".into()
+        }))
+    );
+    assert_eq!(
+        live_call(SESSIONS_TOOL, None),
+        Some(Ok(Call::Sessions {
+            query: String::new()
+        }))
+    );
+    assert_eq!(
+        sessions(json!({"query": "x".repeat(super::super::history::QUERY_BYTES_MAX)})),
+        Some(Ok(Call::Sessions {
+            query: "x".repeat(super::super::history::QUERY_BYTES_MAX)
+        }))
+    );
+    for refused in [
+        json!({"query": "x".repeat(super::super::history::QUERY_BYTES_MAX + 1)}),
+        json!({"query": "zebra\u{7}"}),
+        json!({"query": "line\nbreak"}),
+    ] {
+        assert_eq!(sessions(refused), Some(Err(SESSIONS_INVALID)));
+    }
+
+    let session = |arguments: Value| live_call(SESSION_TOOL, Some(&arguments));
+    let read = |offset| {
+        Some(Ok(Call::Session {
+            id: "agent-3/rollout-1".into(),
+            offset,
+        }))
+    };
+    assert_eq!(
+        session(json!({"id": " agent-3/rollout-1 ", "offset": 7})),
+        read(7)
+    );
+    assert_eq!(
+        session(json!({"id": "agent-3/rollout-1", "offset": " 12 "})),
+        read(12)
+    );
+    assert_eq!(session(json!({"id": "agent-3/rollout-1"})), read(0));
+    assert_eq!(
+        session(json!({"id": "agent-3/rollout-1", "offset": null})),
+        read(0)
+    );
+    assert_eq!(
+        session(json!({"id": "agent-3/rollout-1", "offset": super::super::history::OFFSET_MAX})),
+        read(super::super::history::OFFSET_MAX)
+    );
+    for refused in [
+        json!({"id": "agent-3/../../etc/passwd"}),
+        json!({"id": "x".repeat(super::super::history::ID_BYTES_MAX + 1)}),
+        json!({"id": "agent-3/roll\u{1b}out"}),
+        json!({"id": "agent 3"}),
+        json!({"offset": 1}),
+        json!({"id": "agent-3/rollout-1", "offset": -1}),
+        json!({"id": "agent-3/rollout-1", "offset": "seven"}),
+        json!({"id": "agent-3/rollout-1", "offset": super::super::history::OFFSET_MAX + 1}),
+    ] {
+        assert_eq!(
+            session(refused.clone()),
+            Some(Err(SESSION_INVALID)),
+            "{refused}"
+        );
+    }
+
+    for call in [
+        Call::Sessions {
+            query: "zebra plan".into(),
+        },
+        Call::Session {
+            id: "session/abc".into(),
+            offset: 40,
+        },
+    ] {
+        assert_eq!(checked(call.clone()), Ok(call));
+    }
+    assert_eq!(
+        checked(Call::Session {
+            id: "agent-3/../x".into(),
+            offset: 0,
+        }),
+        Err(SESSION_INVALID)
+    );
+    assert_eq!(
+        checked(Call::Sessions {
+            query: "a\u{0}b".into()
+        }),
+        Err(SESSIONS_INVALID)
+    );
+}
+
+#[test]
+fn a_spawn_names_its_lead_s_mode_only_as_native_or_app_spawned() {
+    use crate::coord::settings::SubagentMode;
+    let spawn = |arguments: Value| live_call(SPAWN_TOOL, Some(&arguments)).unwrap();
+    let mode = |given: Value| match spawn(json!({"task": "Lead the docs", "mode": given})) {
+        Ok(Call::Spawn { mode, .. }) => Ok(mode),
+        Ok(other) => panic!("not a spawn: {other:?}"),
+        Err(refused) => Err(refused),
+    };
+    assert_eq!(mode(json!("native")), Ok(Some(SubagentMode::Native)));
+    assert_eq!(
+        mode(json!("app_spawned")),
+        Ok(Some(SubagentMode::AppSpawned))
+    );
+    assert_eq!(
+        mode(json!(" App-Spawned ")),
+        Ok(Some(SubagentMode::AppSpawned))
+    );
+    assert_eq!(mode(json!("")), Ok(None));
+    assert_eq!(mode(Value::Null), Ok(None));
+    assert_eq!(
+        spawn(json!({"task": "Lead the docs"})),
+        Ok(Call::Spawn {
+            task: "Lead the docs".into(),
+            harness: None,
+            role: None,
+            mode: None,
+        })
+    );
+    for refused in [json!("teams"), json!(3), json!(["native"])] {
+        assert_eq!(mode(refused), Err(MODE_INVALID));
+    }
+    let planted = Call::Spawn {
+        task: "Lead the docs".into(),
+        harness: Some("claude-code".into()),
+        role: None,
+        mode: Some(SubagentMode::Native),
+    };
+    assert_eq!(checked(planted.clone()), Ok(planted));
+    let line =
+        br#"{"tool":"spawn","task":"Lead the docs","harness":null,"role":null,"mode":"teams"}"#;
+    assert_eq!(read_call(line), None);
+    let schema = &spec(SPAWN_TOOL)["inputSchema"]["properties"]["mode"];
+    assert_eq!(schema["enum"], json!(["native", "app_spawned"]));
+    assert!(
+        schema["description"]
+            .as_str()
+            .unwrap()
+            .starts_with("Master only, fixed for the lead's life")
+    );
+}
+
+#[test]
+fn update_work_says_a_reply_answers_a_question_or_work_and_a_note_takes_none() {
+    let tool = spec(UPDATE_WORK_TOOL);
+    assert!(
+        tool["description"]
+            .as_str()
+            .unwrap()
+            .contains("reply answers a question or a message (work for you) whose number is in reply_to. A note takes no reply: to answer one, send kind note with to its sender."),
+        "{tool}"
+    );
+    let properties = &tool["inputSchema"]["properties"];
+    assert_eq!(
+        properties["kind"]["description"],
+        "message when left out, question with for, reply with reply_to to a question or work for you, never to a note."
+    );
+    assert_eq!(
+        properties["reply_to"]["description"],
+        "The question or message (work for you) this answers or passes on, or the message a note or message refers to."
+    );
+}
+
+/// A call file carries the call alone, and the engine reads back the digest of its exact
+/// bytes; a pane any writer planted beside a call is dropped unread (DEC-111 Q18).
+#[test]
+fn a_call_carries_no_pane_and_a_planted_pane_is_dropped_unread() {
+    let directory = tempfile::tempdir().unwrap();
+    let mailbox = directory.path().canonicalize().unwrap();
+    let asked = mailbox.clone();
+    let asker = std::thread::spawn(move || ask(&asked, &Call::InspectWork, REPLY_WAIT));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let id = loop {
+        if let Some((_, id)) = calls(&mailbox, CALL_SUFFIX).pop() {
+            break id;
+        }
+        assert!(std::time::Instant::now() < deadline, "no call was written");
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    let bytes = std::fs::read(mailbox.join(format!("{id}{CALL_SUFFIX}"))).unwrap();
+    let written: Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(written, json!({"tool": "inspect_work"}));
+    assert_eq!(
+        take_calls(&mailbox, CALLS_PER_TICK_MAX),
+        vec![(
+            id.clone(),
+            Some(Call::InspectWork),
+            Some(call_digest(&bytes))
+        )]
+    );
+    answer_call(&mailbox, &id, "Taken.", false).unwrap();
+    assert_eq!(asker.join().unwrap(), ("Taken.".to_owned(), false));
+
+    let planted = [
+        br#"{"tool":"inspect_work"}"#.as_slice(),
+        br#"{"tool":"inspect_work","pane":3}"#.as_slice(),
+        br#"{"tool":"inspect_work","pane":"%x1"}"#.as_slice(),
+        br#"{"tool":"inspect_work","pane":null}"#.as_slice(),
+        br#"{"tool":"inspect_work","pane":"%1;rm"}"#.as_slice(),
+    ];
+    for (index, bytes) in planted.into_iter().enumerate() {
+        let id = format!("{index}").repeat(32);
+        std::fs::write(mailbox.join(format!("{id}{CALL_SUFFIX}")), bytes).unwrap();
+        assert_eq!(
+            take_calls(&mailbox, CALLS_PER_TICK_MAX),
+            vec![(id, Some(Call::InspectWork), Some(call_digest(bytes)))],
+            "{}",
+            String::from_utf8_lossy(bytes)
+        );
+    }
+    assert_ne!(
+        call_digest(br#"{"tool":"inspect_work"}"#),
+        call_digest(br#"{"tool":"inspect_work","pane":"%7"}"#)
+    );
+    assert_eq!(
+        read_call(br#"{"tool":"inspect_work","pane":"%7"}"#),
+        Some(Call::InspectWork)
+    );
+}
+
+#[test]
+fn a_switched_off_tool_is_refused_by_its_server_and_never_reaches_the_mailbox() {
+    let directory = tempfile::tempdir().unwrap();
+    let mailbox = directory.path().canonicalize().unwrap();
+    let input = requests(&[json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "method": "tools/call",
+        "params": {"name": STOP_TOOL, "arguments": {"agent": "3"}}
+    })]);
+    let mut output = Vec::new();
+    serve_live(input, &mut output, &mailbox, &[STOP_TOOL.to_owned()]).unwrap();
+    let answer: Value = serde_json::from_slice(output.trim_ascii()).unwrap();
+    assert_eq!(answer["result"]["isError"], json!(true), "{answer}");
+    assert_eq!(
+        answer["result"]["content"][0]["text"],
+        json!(SWITCHED_OFF),
+        "{answer}"
+    );
+    assert_eq!(std::fs::read_dir(&mailbox).unwrap().count(), 0);
+}
+
+#[test]
+fn only_known_team_tools_up_to_their_count_may_be_switched_off() {
+    let names =
+        |list: &[&str]| -> Vec<String> { list.iter().map(|name| (*name).to_owned()).collect() };
+    assert!(known_tools(&[]));
+    assert!(known_tools(&names(&TEAM_TOOLS)));
+    assert!(known_tools(&names(&[STOP_TOOL, MERGE_TOOL])));
+    assert!(!known_tools(&names(&["status"])));
+    assert!(!known_tools(&names(&[STOP_TOOL, "Stop"])));
+    assert!(known_tools(&names(&[STOP_TOOL; 12])));
+    assert!(!known_tools(&names(&[STOP_TOOL; 13])));
+}
 /// The words a tool name, description or schema field of the owner's Messages timeline read
 /// or its settings write would carry, lowercased.
 const OWNER_ONLY: [&str; 12] = [

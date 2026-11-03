@@ -518,7 +518,7 @@ impl OwnerRuntimeHandle {
             Ok(crate::landing_turns::Landed::Added(_)) => CHANGES_WAITING.to_owned(),
             Err(error) => format!(
                 "{CHANGES_NOT_KEPT} ({})",
-                crate::protocol::plain_code(&error.0)
+                crate::landing::refusal_code(&error)
             ),
         };
         let noted = when_storage_frees(|| {

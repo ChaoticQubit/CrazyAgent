@@ -7,6 +7,11 @@ import "./load-source.mjs";
 
 const controls = await import("../src/screens/team/controls.tsx");
 
+const picked = (html, id) => {
+  const select = html.match(new RegExp(`<select[^>]*id="${id}"[^>]*>([\\s\\S]*?)</select>`));
+  assert.ok(select, id);
+  return [...select[1].matchAll(/<option value="([^"]*)" selected="">/g)].map((found) => found[1]);
+};
 const harness = (name, role, extra = {}) => ({ harness: name, role, agents_max: 2, tools: true, live: 0, delegation: null, delegation_label: null, runnable: true, ...extra });
 const status = (extra = {}) => ({
   project_id: "chores", keep_warm: false, idle_stop_secs: 600, paused: false, min_agents: 1, max_agents: 3,
@@ -66,7 +71,9 @@ test("each time limit offers Off and 30 min to 8 h, with Off the default", () =>
   const html = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status(), reload() {} }));
   assert.match(html, /<label for="tg-turn-limit-chores">Each task may run<\/label>/);
   assert.match(html, /<label for="tg-session-limit-chores">Each agent session may run<\/label>/);
-  assert.equal(html.match(/<option value="off" selected="">Off<\/option>/g)?.length, 2, "both limits are Off until the owner sets one");
+  for (const id of ["tg-turn-limit-chores", "tg-session-limit-chores"]) {
+    assert.deepEqual(picked(html, id), ["off"], `${id}: both limits are Off until the owner sets one`);
+  }
   const set = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status({ turn_limit_secs: 3600, session_limit_secs: 14_400 }), reload() {} }));
   assert.match(set, /<option value="3600" selected="">1 h<\/option>/);
   assert.match(set, /<option value="14400" selected="">4 h<\/option>/);
@@ -80,7 +87,9 @@ test("the idle stop offers Off, 2 min, 10 min and 1 h, and shows the engine's 10
   assert.match(html, /<label for="tg-idle-stop-chores">Stop an idle sub-agent after<\/label>/);
   assert.match(html, /<option value="600" selected="">10 min<\/option>/);
   const off = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status({ idle_stop_secs: null }), reload() {} }));
-  assert.equal(off.match(/<option value="off" selected="">Off<\/option>/g)?.length, 3, "the idle stop Off with both time limits Off");
+  for (const id of ["tg-idle-stop-chores", "tg-turn-limit-chores", "tg-session-limit-chores"]) {
+    assert.deepEqual(picked(off, id), ["off"], `${id}: the idle stop Off with both time limits Off`);
+  }
 });
 
 test("a changed limit keeps the session limit not below the task limit", () => {
@@ -104,6 +113,36 @@ test("the On master harness switch setting offers Carry over first and shows the
   assert.match(fresh, /<option value="carry">Carry conversation over<\/option><option value="fresh" selected="">Start fresh<\/option>/);
 });
 
+test("Land on offers the master's branch by default and a named branch, and shows the engine's choice", () => {
+  const render = (extra) => renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status(extra), reload() {} }));
+  const field = (value) => `<input id="tg-land-on-chores" class="pj-input" placeholder="The master&#x27;s branch" aria-describedby="tg-land-on-help-chores" value="${value}"/>`;
+  const unset = render();
+  assert.match(unset, /<form class="pj-row" aria-label="Land on"><label for="tg-land-on-chores">Land on<\/label>/);
+  assert.ok(unset.includes(field("")), "no branch named shows the master's branch as the default");
+  assert.ok(unset.includes('<button type="button" class="btn small" disabled="">Use the master&#x27;s branch</button>'), "with no branch named there is nothing to clear");
+  const named = render({ land_on: "stage" });
+  assert.ok(named.includes(field("stage")), "a named branch shows as the engine keeps it");
+  assert.ok(named.includes('<button type="button" class="btn small">Use the master&#x27;s branch</button>'), "a named branch can go back to the master's branch");
+});
+
+test("Background commands at task end offers Wait first, a grace time and Stop, and shows the engine's choice", () => {
+  const render = (extra) => renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status(extra), reload() {} }));
+  const wait = render();
+  assert.match(wait, /<label for="tg-background-chores">Background commands at task end<\/label>/);
+  assert.match(wait, /<option value="wait" selected="">Wait for them<\/option><option value="grace">Stop them after a grace time<\/option><option value="stop">Stop them when the turn ends<\/option>/);
+  assert.doesNotMatch(wait, /id="tg-grace-chores"/, "no grace time to type while Wait is on");
+  const grace = render({ background_at_end: { mode: "grace", secs: 300 } });
+  assert.match(grace, /<option value="wait">Wait for them<\/option><option value="grace" selected="">Stop them after a grace time<\/option>/);
+  assert.match(grace, /<label for="tg-grace-chores">Grace time in seconds<\/label><input id="tg-grace-chores"[^>]* value="300"/);
+  assert.ok(grace.includes("From 10 to 3600 seconds."), "the grace time says its range");
+  const stop = render({ background_at_end: { mode: "stop" } });
+  assert.match(stop, /<option value="grace">Stop them after a grace time<\/option><option value="stop" selected="">Stop them when the turn ends<\/option>/);
+  assert.doesNotMatch(stop, /id="tg-grace-chores"/, "no grace time to type while Stop is on");
+  assert.deepEqual(["10", "3600", "120", " 45 "].map(controls.graceSecs), [10, 3600, 120, 45]);
+  assert.deepEqual(["9", "3601", "1.5", "", "2e3", "-10", "0120x"].map(controls.graceSecs), [null, null, null, null, null, null, null]);
+  assert.deepEqual(controls.backgroundChoice(status()), { mode: "wait" });
+});
+
 test("a team view the engine shortened to fit says older history is hidden", () => {
   const whole = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status(), reload() {} }));
   assert.doesNotMatch(whole, /Older team history is hidden/);
@@ -114,6 +153,44 @@ test("a team view the engine shortened to fit says older history is hidden", () 
 test("the idle stop says when an idle master stops, which no setting changes", () => {
   const html = renderToStaticMarkup(createElement(controls.TeamControls, { projectId: "chores", status: status(), reload() {} }));
   assert.match(html, /An idle master stops 15 min after its work is done and is never stopped while that work is still going\./);
+});
+
+const coordination = await import("../src/screens/team/coordination.tsx");
+
+test("workflow nudges offer Off first, Every 10 minutes and First edit, and show Off for a project with no saved coordination settings", () => {
+  assert.equal(coordination.COORD_DEFAULTS.nudges, "off");
+  const html = renderToStaticMarkup(createElement(coordination.CoordinationControls, { projectId: "chores", status: status(), reload: () => {} }));
+  const group = html.match(/<div class="segmented" role="radiogroup" aria-label="Workflow nudges">(.*?)<\/div>/)[1];
+  const choices = [...group.matchAll(/aria-checked="(true|false)"[^>]*>([^<]+)<\/button>/g)].map(([, checked, label]) => [label, checked === "true"]);
+  assert.deepEqual(choices, [["Off", true], ["Every 10 minutes", false], ["First edit", false]], "the default comes first, as in the panel's other settings");
+});
+
+const rustList = (name) => {
+  const source = readFileSync(new URL("../../../crates/crazyagent/src/team.rs", import.meta.url), "utf8");
+  const found = source.match(new RegExp(`pub const ${name}: \\[u\\d+; \\d+\\] = \\[([^\\]]*)\\]`));
+  assert.ok(found, name);
+  return found[1].split(",").map((item) => item.trim().replaceAll("_", "")).filter(Boolean).map(Number);
+};
+
+test("every cap, token budget, depth and landing choice is offered once, from the engine's own lists, and reads back", () => {
+  assert.deepEqual([...controls.CAP_CHOICES], rustList("CAP_CHOICES"));
+  assert.deepEqual([...controls.BUDGET_CHOICES], rustList("BUDGET_CHOICES"));
+  assert.deepEqual(rustList("DEPTH_CHOICES"), controls.DEPTH_OPTIONS.map((option) => Number(option.value)));
+  const caps = controls.capOptions();
+  assert.deepEqual(caps.map((option) => [option.value, option.label]), [["off", "No limit"], ...controls.CAP_CHOICES.map((cap) => [String(cap), String(cap)])]);
+  for (const option of caps) {
+    assert.equal(controls.chosen(option.value, controls.CAP_CHOICES), option.value === "off" ? null : Number(option.value));
+  }
+  const budgets = controls.budgetOptions();
+  assert.deepEqual(budgets.map((option) => option.label), ["Off", "10M tokens", "25M tokens", "50M tokens", "100M tokens", "250M tokens", "500M tokens", "1000M tokens"]);
+  for (const option of budgets) {
+    assert.equal(controls.chosen(option.value, controls.BUDGET_CHOICES), option.value === "off" ? null : Number(option.value));
+  }
+  assert.equal(controls.chosen("7", controls.CAP_CHOICES), undefined, "a value off the list is not a choice");
+  assert.equal(controls.chosen("12000000", controls.BUDGET_CHOICES), undefined);
+  assert.deepEqual([999_999, 1_000_000, 12_500_000, 12_590_000].map(controls.tokenWords), ["999999 tokens", "1M tokens", "12.5M tokens", "12.5M tokens"]);
+  assert.equal(controls.DEPTH_DEFAULT, 2);
+  assert.deepEqual(controls.LANDING_OPTIONS.map((option) => option.value), ["lead", "owner"]);
 });
 
 test("team settings changes send the revision the window read, so the engine refuses a stale one", () => {

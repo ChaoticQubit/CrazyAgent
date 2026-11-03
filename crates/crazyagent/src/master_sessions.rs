@@ -45,6 +45,15 @@ const MARKS: &str = "CREATE TABLE IF NOT EXISTS session_marks (
     active_ms INTEGER NOT NULL CHECK(active_ms >= started_ms)
 )";
 
+const OWNER_TURNS: &str = "CREATE TABLE session_owner_turns (
+    session TEXT PRIMARY KEY CHECK(length(session) BETWEEN 1 AND 128),
+    project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128)
+)";
+
+/// The SQL condition that the master session `s` holds an owner turn: a turn the engine ran
+/// for an owner message, or a turn its live master started in the terminal.
+const HAS_OWNER_TURN: &str = "(EXISTS(SELECT 1 FROM master_turns t WHERE t.session=s.id) OR EXISTS(SELECT 1 FROM session_owner_turns o WHERE o.session=s.id))";
+
 /// One master session as the Sessions list shows it. `created` and `last_activity` are
 /// engine revisions; `started_ms` and `active_ms` are wall-clock times, absent for sessions
 /// older than the marks. `agents` names the session's own sub-agents, newest first;
@@ -91,10 +100,81 @@ pub const FRESH_NOTE: &str = "This session continues in a new harness conversati
 /// The note a resumed session shows when its earlier harness conversation can no longer be read.
 pub const LOST_NOTE: &str = "This session continues in a new harness conversation. Its earlier harness conversation could not be read, so only the session's state was passed on.";
 
-/// Creates the table of session wall-clock marks when the engine database opens.
+/// Creates the tables of session wall-clock marks and of sessions with an owner turn when
+/// the engine database opens. The first creation counts every session that kept a harness
+/// conversation as having one, so sessions used only in the live terminal stay listed.
 /// Takes the engine connection. Returns any SQLite failure.
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
-    connection.execute_batch(MARKS).map_err(error)
+    connection.execute_batch(MARKS).map_err(error)?;
+    if table_exists(connection, "session_owner_turns")? {
+        return Ok(());
+    }
+    let backfill = if table_exists(connection, "team_master_conversations")? {
+        "INSERT OR IGNORE INTO session_owner_turns(session,project)
+         SELECT session,project FROM team_master_conversations
+         WHERE length(session) BETWEEN 1 AND 128 AND length(project) BETWEEN 1 AND 128;"
+    } else {
+        ""
+    };
+    let created = connection.execute_batch(&format!(
+        "SAVEPOINT session_owner_turns; {OWNER_TURNS}; {backfill} RELEASE session_owner_turns;"
+    ));
+    if let Err(failure) = created {
+        let _ = connection
+            .execute_batch("ROLLBACK TO session_owner_turns; RELEASE session_owner_turns;");
+        return Err(error(failure));
+    }
+    Ok(())
+}
+
+fn table_exists(connection: &Connection, name: &str) -> Result<bool, EngineError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE type='table' AND name=?1)",
+            [name],
+            |row| row.get(0),
+        )
+        .map_err(error)
+}
+
+/// Records that a project's master session had a turn in its live terminal, so the session
+/// is listed and New session may leave it. Takes the engine database, the project and the
+/// session. Returns Ok, also when the session id cannot be one or the table does not exist.
+pub(crate) fn mark_owner_turn(
+    connection: &Connection,
+    project: &ProjectId,
+    session: &str,
+) -> Result<(), EngineError> {
+    if session.is_empty()
+        || session.len() > 128
+        || !table_exists(connection, "session_owner_turns")?
+    {
+        return Ok(());
+    }
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO session_owner_turns(session,project) VALUES (?1,?2)",
+            params![session, project.as_str()],
+        )
+        .map_err(error)?;
+    Ok(())
+}
+
+/// Tells whether a master session holds an owner turn. Takes the connection and session.
+/// Returns false for a session with none, or one that does not exist.
+pub(crate) fn has_owner_turn(
+    connection: &Connection,
+    session: &SessionId,
+) -> Result<bool, EngineError> {
+    connection
+        .query_row(
+            &format!("SELECT {HAS_OWNER_TURN} FROM master_sessions s WHERE s.id=?1"),
+            [session.as_str()],
+            |row| row.get::<_, bool>(0),
+        )
+        .optional()
+        .map(|found| found.unwrap_or(false))
+        .map_err(error)
 }
 
 /// Migration part that gives team tasks and team agents their owning session column.
@@ -192,23 +272,24 @@ pub fn results_waiting(connection: &Connection, session: &SessionId) -> Result<u
     u64::try_from(count).map_err(error)
 }
 
-/// Lists a project's master sessions: the live one first, then newest activity first,
-/// at most `SESSIONS_LISTED_MAX`, within `LIST_BYTES_MAX` once encoded.
+/// Lists a project's master sessions that hold an owner turn: the live one first, then
+/// newest activity first, at most `SESSIONS_LISTED_MAX`, within `LIST_BYTES_MAX` once
+/// encoded. A session with no owner turn, the live one included, is not listed.
 /// Takes the connection and project. Returns the summaries.
 pub(crate) fn list(
     connection: &Connection,
     project: &ProjectId,
 ) -> Result<Vec<MasterSessionSummary>, EngineError> {
     let mut statement = connection
-        .prepare(
+        .prepare(&format!(
             "SELECT CASE WHEN length(CAST(s.id AS BLOB))<=128 THEN s.id END,s.created,s.version,
                     CASE WHEN length(s.phase)<=10 THEN s.phase END,
                     MAX(s.version,COALESCE((SELECT MAX(t.input) FROM master_turns t WHERE t.session=s.id),0)) AS active,
                     m.started_ms,m.active_ms
              FROM master_sessions s LEFT JOIN session_marks m ON m.session=s.id
-             WHERE s.project=?1
-             ORDER BY s.phase='configured' DESC, active DESC, s.created DESC LIMIT ?2",
-        )
+             WHERE s.project=?1 AND {HAS_OWNER_TURN}
+             ORDER BY s.phase='configured' DESC, active DESC, s.created DESC LIMIT ?2"
+        ))
         .map_err(error)?;
     type Row = (
         Option<String>,
@@ -447,7 +528,7 @@ pub fn session_state(
         )
         .map_err(error)?;
     let found = if landing {
-        crate::landing::list(connection, project)?
+        crate::landing::owner_list(connection, project)?
     } else {
         Vec::new()
     };

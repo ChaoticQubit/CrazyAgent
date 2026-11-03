@@ -1,1 +1,23 @@
 .process-text { margin: 0; max-height: 28rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-family: var(--mono); font-size: 12px; line-height: 18px; color: var(--text); }
+.adoption-note { margin: 0; padding: 12px 16px 8px; }
+.adoption-table td { font-variant-numeric: tabular-nums; }
+.adoption-flags { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.adoption-skills { display: inline-flex; flex-wrap: wrap; gap: 4px 12px; max-width: 48ch; }
+.adoption-skills > span { white-space: nowrap; }
+.adoption-stopped th, .adoption-stopped td { color: var(--text-2); }
+.import-move {
+  display: grid;
+  gap: 8px;
+}
+
+.import-move-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.import-move-failure {
+  font-weight: 600;
+}
+
+.instruction-import { margin: 0; padding-left: 20px; display: grid; gap: 4px; }

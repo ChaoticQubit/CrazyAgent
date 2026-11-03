@@ -159,6 +159,32 @@ test("Accept shows the proposed commit message to edit and sends only a usable o
   assert.match(blank, /<button[^>]*disabled=""[^>]*>Accept<\/button>/);
 });
 
+test("Accept lands on the team's Land on branch unless the owner picks another, and says where and whether it is checked out", () => {
+  const listed = { branches: ["feat/x", "main", "stage"], current: "feat/x", land_on: "stage" };
+  const away = "They land as one commit on stage, under your own Git name. That branch isn't checked out, so the files in your project folder stay as they are. CrazyAgent did not check them.";
+  assert.deepEqual(model.acceptTarget(listed, "stage"), { picked: null, text: away });
+  assert.deepEqual(model.acceptTarget(listed, "feat/x"), { picked: "feat/x", text: "They land as one commit on feat/x, the branch checked out in your project folder, under your own Git name. CrazyAgent did not check them." });
+  assert.equal(model.acceptTarget(listed, "main").picked, "main");
+  assert.deepEqual(model.acceptTarget({ branches: ["main"], current: "main", land_on: null }, "main"),
+    { picked: null, text: "They land as one commit on main, the branch checked out in your project folder, under your own Git name. CrazyAgent did not check them." },
+    "with no Land on branch the engine lands on the checked-out one");
+  assert.deepEqual(model.acceptTarget(null, ""), { picked: null, text: "They land as one commit on your project's Land on branch, under your own Git name. CrazyAgent did not check them." });
+  assert.deepEqual(listed.branches.map((name) => model.branchLabel(listed, name)), ["feat/x (checked out)", "main", "stage (Land on)"]);
+  assert.equal(model.branchLabel({ branches: ["main"], current: "main", land_on: "main" }, "main"), "main (Land on, checked out)");
+});
+
+test("Accept with a missing Land on branch names it, offers no default and waits for a picked branch", () => {
+  const missing = "Your Land on branch stage is not a local branch of this project. Pick a branch, or change Land on in Team settings.";
+  const listed = { branches: ["feat/x", "main"], current: "feat/x", land_on: null, land_on_problem: missing };
+  assert.deepEqual(model.acceptTarget(listed, ""), { picked: null, text: missing });
+  assert.equal(model.acceptBlocked(listed, ""), true);
+  assert.deepEqual(model.acceptTarget(listed, "feat/x"), { picked: "feat/x", text: "They land as one commit on feat/x, the branch checked out in your project folder, under your own Git name. CrazyAgent did not check them." });
+  assert.equal(model.acceptBlocked(listed, "feat/x"), false);
+  assert.equal(model.acceptTarget(listed, "main").picked, "main");
+  assert.equal(model.acceptBlocked({ branches: ["main"], current: "main", land_on: "main" }, "main"), false);
+  assert.equal(model.acceptBlocked(null, ""), false);
+});
+
 test("Accept shows hidden characters in a proposed message as escapes and never sends them", () => {
   assert.equal(model.commitMessage("Owner title\u{e0041}\u{e0042}"), null);
   assert.equal(model.commitMessage("Zero\u200bwidth"), null);
@@ -212,6 +238,17 @@ test("a change set that moved on while open goes back to review: Accept and Disc
   assert.match(source, /const asked = \{ \.\.\.set, head \};/);
 });
 
+test("a change set closed outside the app says how, keeps its note and offers no action", () => {
+  const landed = set({ state: "accepted", outside: true });
+  const removed = set({ state: "discarded", outside: true, restorable_until_ms: null });
+  assert.deepEqual(model.stateBadge(landed), { word: "Landed outside the app", tone: "ok" });
+  assert.deepEqual(model.stateBadge(removed), { word: "Removed outside the app", tone: "neutral" });
+  assert.equal(model.restoreNote(landed, NOW), "Your branch already has these changes. They were landed outside the app.");
+  assert.equal(model.restoreNote(removed, NOW), "The agent's copy of these changes was removed outside the app, so they cannot be restored.");
+  const none = { accept: false, discard: false, update: false, restore: false };
+  assert.deepEqual(model.actions(landed, NOW), none);
+  assert.deepEqual(model.actions(removed, NOW), none);
+});
 test("every diff page is read at the head under review, and a page refused as moved on rereads the list (RV-DS-13)", () => {
   assert.equal(client.loadChangeDiff.length, 3, "the diff read names the change set, the head and the page");
   const api = readFileSync(new URL("../src/api-changes.ts", import.meta.url), "utf8");

@@ -26,6 +26,11 @@ pub(crate) enum Command {
         skills: Vec<PathBuf>,
         server: Option<(String, ServerSpec)>,
     },
+    #[cfg(unix)]
+    SeedHooks {
+        id: String,
+        plugin: PathBuf,
+    },
     Sweep,
 }
 
@@ -600,25 +605,94 @@ fn sweep(connection: &mut Connection, root: &Path) -> Result<(), EngineError> {
     tx.commit().map_err(error)
 }
 
+/// Adds the hooks an installed, switched-on entry's plugin folder defines as global hooks
+/// that follow the entry's MCP server, or else its first skill (the owner's own item when
+/// the entry adopted one), unless hooks already follow that item or already exist under
+/// those names. An entry not installed or switched off gets none. Inputs: the engine
+/// connection, the engine root, the entry id and its plugin folder. Output: nothing, or the
+/// plain reason, with the hooks' folder copy removed when they did not commit.
+#[cfg(unix)]
+fn seed_hooks(
+    connection: &mut Connection,
+    root: &Path,
+    id: &str,
+    plugin: &Path,
+) -> Result<(), EngineError> {
+    let tx = connection.transaction().map_err(error)?;
+    let Some(record) = load_pack(&tx, id)? else {
+        return Ok(());
+    };
+    if !record.enabled {
+        return Ok(());
+    }
+    let Some(follows) = record
+        .server
+        .clone()
+        .or_else(|| record.skills.first().cloned())
+    else {
+        return Ok(());
+    };
+    if plugins::hooks_follow(&tx, &follows)? {
+        return Ok(());
+    }
+    let source = plugin
+        .to_str()
+        .ok_or_else(|| error("pack_no_skills"))?
+        .to_owned();
+    let command = plugins::Command::AddHooks {
+        scope: Scope::Global,
+        source,
+        follows: Some(follows),
+    };
+    match plugins::run(&tx, root, command) {
+        Ok(plugins::ResultValue::HooksAdded(_, copy)) => tx.commit().map_err(|problem| {
+            let _ = std::fs::remove_dir_all(&copy);
+            error(problem)
+        }),
+        Ok(_) => Err(error("setup_record_invalid")),
+        Err(problem)
+            if matches!(
+                problem.0.as_str(),
+                "hooks_none_found" | "hooks_already_added"
+            ) =>
+        {
+            Ok(())
+        }
+        Err(problem) => Err(problem),
+    }
+}
+
 /// Runs one default-pack job for the engine: install an entry's skills and its approved
-/// MCP server in one transaction, or sweep folders and secrets that removals left. Copied
-/// skill folders are removed again and moved ones put back when an install does not
-/// commit; replaced ones are deleted after it commits. Inputs: the engine connection, the
-/// engine root and the job. Output: nothing, or the plain reason.
+/// MCP server in one transaction, add the hooks of its plugin folder and keep why they were
+/// refused for the entry's setup row, or sweep folders and secrets that removals left.
+/// Copied skill folders are removed again and moved ones put back when an install does not
+/// commit; replaced ones are deleted after it commits.
+/// Inputs: the engine connection, the engine root and the job. Output: nothing, or the
+/// plain reason.
 #[cfg(unix)]
 pub(crate) fn execute(
     connection: &mut Connection,
     root: &Path,
     command: Command,
 ) -> Result<(), EngineError> {
-    let Command::Install {
-        id,
-        source,
-        skills,
-        server,
-    } = command
-    else {
-        return sweep(connection, root);
+    let (id, source, skills, server) = match command {
+        Command::Install {
+            id,
+            source,
+            skills,
+            server,
+        } => (id, source, skills, server),
+        Command::SeedHooks { id, plugin } => {
+            let seeded = seed_hooks(connection, root, &id, &plugin);
+            progress::with(root, |state| match &seeded {
+                Ok(()) => state.hooks.remove(&id),
+                Err(problem) => state
+                    .hooks
+                    .insert(id.clone(), crate::setup::pack_reason(&problem.0)),
+            });
+            return seeded;
+        }
+        Command::Sweep => return sweep(connection, root),
     };
     if source.is_empty() || source == PRESENT || (skills.is_empty() && server.is_none()) {
         return Err(error("pack_unknown"));

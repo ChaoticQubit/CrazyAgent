@@ -1,9 +1,11 @@
 use super::*;
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{
-    AgentInstructions, InstructionSettings, OwnerClient, PROCESS_CODES, ProcessSaved,
+    Adoption, AgentInstructions, ImportCommit, ImportFile, InstructionSettings, OwnerClient,
+    PROCESS_CODES, ProcessSaved,
 };
 use crazyagent::protocol::ProjectId;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 fn process_error(error: EngineError) -> BridgeError {
@@ -69,13 +71,86 @@ impl NativeBridge {
         }))
     }
 
-    /// Reads the owner's `~/.claude/CLAUDE.md` for a preview, run without the bridge lock.
-    /// Only the owner's Import click calls this. Output: the text.
-    pub fn import_global_instructions(&self) -> Result<Unlocked<String>, BridgeError> {
+    /// Reads one instructions file the owner picked in the native chooser, run without the
+    /// bridge lock; nothing is saved. Input: the absolute path the chooser returned. Output:
+    /// the text for the app-wide editor.
+    pub fn read_instruction_file(&self, path: String) -> Result<Unlocked<String>, BridgeError> {
         let client = self.process_client()?;
         Ok(Box::pin(async move {
             client
-                .import_global_instructions()
+                .read_instruction_file(PathBuf::from(path))
+                .await
+                .map_err(process_error)
+        }))
+    }
+
+    /// Lists the project's own instruction files an import would copy into its instructions
+    /// and move aside, run without the bridge lock; nothing changes. Input: the project id.
+    /// Output: the files, each with why it would stay, empty when there is nothing to import.
+    pub fn instruction_import(
+        &self,
+        project_id: String,
+    ) -> Result<Unlocked<Vec<ImportFile>>, BridgeError> {
+        let project =
+            project(Some(project_id))?.ok_or_else(|| failure("process_project_unknown"))?;
+        let client = self.process_client()?;
+        Ok(Box::pin(async move {
+            client
+                .instruction_import(project)
+                .await
+                .map_err(process_error)
+        }))
+    }
+
+    /// Copies the project's own instruction files into its instructions and moves them into
+    /// `.crazyagent/imported/`, run without the bridge lock, on the owner's confirm only.
+    /// Input: the project id. Output: the moved files.
+    pub fn confirm_instruction_import(
+        &self,
+        project_id: String,
+    ) -> Result<Unlocked<Vec<ImportFile>>, BridgeError> {
+        let project =
+            project(Some(project_id))?.ok_or_else(|| failure("process_project_unknown"))?;
+        let client = self.process_client()?;
+        Ok(Box::pin(async move {
+            client
+                .confirm_instruction_import(project)
+                .await
+                .map_err(process_error)
+        }))
+    }
+
+    /// Lists the moved instruction files whose move the project folder has not committed,
+    /// run without the bridge lock. Input: the project id. Output: the paths, empty when
+    /// no move waits for a commit.
+    pub fn uncommitted_instruction_import(
+        &self,
+        project_id: String,
+    ) -> Result<Unlocked<Vec<String>>, BridgeError> {
+        let project =
+            project(Some(project_id))?.ok_or_else(|| failure("process_project_unknown"))?;
+        let client = self.process_client()?;
+        Ok(Box::pin(async move {
+            client
+                .uncommitted_instruction_import(project)
+                .await
+                .map_err(process_error)
+        }))
+    }
+
+    /// Commits the instruction import's move as one local commit holding only the moved
+    /// files, never pushed, run without the bridge lock, on the owner's click only.
+    /// Input: the project id. Output: the commit, its branch and the files it holds.
+    pub fn commit_instruction_import(
+        &self,
+        project_id: String,
+    ) -> Result<Unlocked<ImportCommit>, BridgeError> {
+        let project =
+            project(Some(project_id))?.ok_or_else(|| failure("process_project_unknown"))?;
+        let client = self.process_client()?;
+        Ok(Box::pin(async move {
+            client
+                .commit_instruction_import(project)
                 .await
                 .map_err(process_error)
         }))
@@ -122,6 +197,18 @@ impl NativeBridge {
                 .instruction_settings(project)
                 .await
                 .map_err(process_error)
+        }))
+    }
+
+    /// Reads one project's workflow adoption, run without the bridge lock. Input: the
+    /// project id. Output: its nudges option, the counted tools and each recent agent's
+    /// counts, flags and reminders.
+    pub fn adoption(&self, project_id: String) -> Result<Unlocked<Adoption>, BridgeError> {
+        let project =
+            project(Some(project_id))?.ok_or_else(|| failure("process_project_unknown"))?;
+        let client = self.process_client()?;
+        Ok(Box::pin(async move {
+            client.adoption(project).await.map_err(process_error)
         }))
     }
 

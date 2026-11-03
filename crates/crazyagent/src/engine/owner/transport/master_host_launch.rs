@@ -130,6 +130,7 @@ impl OwnerRuntimeHandle {
             repository: &prepared.repository,
             worktree: &prepared.cwd,
             policy: &policy,
+            hidden: &prepared.hidden_paths,
         };
         let engine = if prepared.tools {
             Some(self.registered_engine_executable()?)
@@ -269,6 +270,7 @@ pub(super) struct MasterTurnPlace<'a> {
     pub(super) repository: &'a Path,
     pub(super) worktree: &'a Path,
     pub(super) policy: &'a AgentPolicy,
+    pub(super) hidden: &'a [PathBuf],
 }
 
 /// One master turn's command and Seatbelt boundary, the home both name, the account
@@ -321,6 +323,7 @@ pub(super) fn claude_master_turn(
                 executable,
                 &connection.endpoint,
                 place.policy,
+                place.hidden,
             )?,
             None,
         ),
@@ -335,6 +338,7 @@ pub(super) fn claude_master_turn(
                 &connection.endpoint,
                 engine,
                 place.policy,
+                place.hidden,
             )?;
             let drop = sandbox
                 .sandbox()
@@ -396,6 +400,7 @@ pub(super) fn codex_master_turn(
                 executable,
                 &connection.endpoint,
                 place.policy,
+                place.hidden,
             )?,
             home,
             credential,
@@ -412,6 +417,7 @@ pub(super) fn codex_master_turn(
         &connection.endpoint,
         engine,
         place.policy,
+        place.hidden,
     )?;
     let drop = sandbox
         .sandbox()
@@ -814,6 +820,7 @@ pub(super) fn master_sandbox(
     executable: &Path,
     endpoint: &ModelEndpoint,
     policy: &AgentPolicy,
+    hidden: &[PathBuf],
 ) -> Result<InstalledSandbox, EngineError> {
     turn_sandbox(
         root,
@@ -825,6 +832,7 @@ pub(super) fn master_sandbox(
         endpoint,
         None,
         policy,
+        hidden,
     )
 }
 
@@ -845,6 +853,7 @@ pub(super) fn master_tools_sandbox(
     endpoint: &ModelEndpoint,
     engine: &Path,
     policy: &AgentPolicy,
+    hidden: &[PathBuf],
 ) -> Result<InstalledSandbox, EngineError> {
     turn_sandbox(
         root,
@@ -856,6 +865,7 @@ pub(super) fn master_tools_sandbox(
         endpoint,
         Some(engine),
         policy,
+        hidden,
     )
 }
 
@@ -871,10 +881,12 @@ fn turn_sandbox(
     endpoint: &ModelEndpoint,
     engine: Option<&Path>,
     policy: &AgentPolicy,
+    hidden: &[PathBuf],
 ) -> Result<InstalledSandbox, EngineError> {
     if policy.access.unavailable().is_some() {
         return Err(failure("agent_access_unavailable"));
     }
+    crate::sandbox::hidden_paths::none_tracked(repository, hidden).map_err(failure)?;
     let refused = |_: SandboxError| failure("master_sandbox_unavailable");
     let remote = match endpoint {
         ModelEndpoint::Native {} => SandboxRemote::AnyHost(HTTPS_PORT),
@@ -918,6 +930,10 @@ fn turn_sandbox(
     .and_then(|sandbox| sandbox.allow_tools(&tools))
     .and_then(|sandbox| sandbox.guard_engine(&root.path))
     .map_err(refused)?;
+    let sandbox = hidden
+        .iter()
+        .try_fold(sandbox, |sandbox, folder| sandbox.hide(folder))
+        .map_err(refused)?;
     #[cfg(target_os = "linux")]
     let sandbox = {
         let sandbox = sandbox.limit_sockets(stored_sandbox_settings(root)?.linux_sockets);
@@ -974,6 +990,7 @@ fn stored_sandbox_settings(
 /// Takes the owner root, turn reference, repository, worktree, home, executable and
 /// endpoint, all unused. Returns `master_sandbox_unavailable`.
 #[cfg(not(unix))]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn master_sandbox(
     _root: &Root,
     _runtime_ref: &RequestId,
@@ -983,6 +1000,7 @@ pub(super) fn master_sandbox(
     _executable: &Path,
     _endpoint: &ModelEndpoint,
     _policy: &AgentPolicy,
+    _hidden: &[PathBuf],
 ) -> Result<InstalledSandbox, EngineError> {
     Err(failure("master_sandbox_unavailable"))
 }
@@ -1002,6 +1020,7 @@ pub(super) fn master_tools_sandbox(
     _endpoint: &ModelEndpoint,
     _engine: &Path,
     _policy: &AgentPolicy,
+    _hidden: &[PathBuf],
 ) -> Result<InstalledSandbox, EngineError> {
     Err(failure("master_sandbox_unavailable"))
 }
@@ -1051,13 +1070,14 @@ pub(super) fn allocate_master_capture(
 }
 
 /// Writes the master's startup instruction into its private turn directory as the 0600
-/// file Claude Code reads through `--append-system-prompt-file`. Input: the owner root,
-/// the turn's runtime reference from `allocate_master_capture` and the text. Output: the
-/// file's absolute path, `master_instructions_too_large` past the Claude host's limit
+/// file Claude Code reads through `--append-system-prompt-file` and the rcli host through
+/// `--instructions-file`. Input: the owner root, the turn's runtime reference from
+/// `allocate_master_capture` and the text. Output: the file's absolute path,
+/// `master_instructions_too_large` past the Claude host's limit
 /// before any credential reaches the turn, or a plain refusal when the directory or file
 /// is not the engine's.
 #[cfg(unix)]
-fn write_master_instructions(
+pub(super) fn write_master_instructions(
     root: &Root,
     runtime_ref: &RequestId,
     text: &str,
@@ -1097,7 +1117,7 @@ fn write_master_instructions(
 /// Takes the owner root, turn reference and text, all unused.
 /// Returns `master_capture_unavailable`.
 #[cfg(not(unix))]
-fn write_master_instructions(
+pub(super) fn write_master_instructions(
     _root: &Root,
     _runtime_ref: &RequestId,
     _text: &str,
@@ -1331,137 +1351,6 @@ mod tests {
         assert!(write_master_instructions(&root, &runtime_ref, &fits).is_ok());
     }
 
-    /// Runs git in a test checkout with no system or global config. Inputs: the folder and
-    /// the arguments. Output: unit.
-    fn git_in(dir: &Path, args: &[&str]) {
-        let output = crate::spawn_gate::output(
-            std::process::Command::new("/usr/bin/git")
-                .env_clear()
-                .env("PATH", "/usr/bin:/bin")
-                .env("HOME", dir)
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .env("LC_ALL", "C")
-                .args([
-                    "-c",
-                    "user.name=Owner",
-                    "-c",
-                    "user.email=owner@example.invalid",
-                    "-c",
-                    "commit.gpgsign=false",
-                ])
-                .arg("-C")
-                .arg(dir)
-                .args(args)
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::piped()),
-        )
-        .unwrap();
-        assert!(output.status.success(), "git {args:?} failed");
-    }
-
-    #[test]
-    fn a_claude_master_past_the_host_limit_gets_its_owner_text_cut_with_a_note_and_every_instruction_file()
-     {
-        use crate::instruction_files::{Choice, FILE_BYTES_MAX, State};
-        let temporary = private_root();
-        let base = std::fs::canonicalize(temporary.path()).unwrap();
-        let (data, folder, home) = (
-            base.join("data"),
-            base.join("repo"),
-            base.join("master-home"),
-        );
-        for made in [&data, &folder, &home] {
-            std::fs::create_dir(made).unwrap();
-            std::fs::set_permissions(made, std::fs::Permissions::from_mode(0o700)).unwrap();
-        }
-        git_in(&folder, &["init", "-q"]);
-        std::fs::write(folder.join("CLAUDE.md"), "c".repeat(FILE_BYTES_MAX + 1)).unwrap();
-        let agents = format!("AGENTS-RULE-91\n{}\n", "a".repeat(30_000));
-        std::fs::write(folder.join("AGENTS.md"), &agents).unwrap();
-        std::fs::write(folder.join(".gitignore"), ".crazyagent/\n").unwrap();
-        git_in(&folder, &["add", "-A"]);
-        git_in(&folder, &["commit", "-q", "-m", "rules"]);
-        std::fs::create_dir(folder.join(".crazyagent")).unwrap();
-        let full = crate::agent_home::TEXT_BYTES_MAX;
-        crate::agent_home::save_app(&data, &format!("APP-START-92{}", "A".repeat(full - 12)))
-            .unwrap();
-        crate::agent_home::save_project(&folder, &"P".repeat(full)).unwrap();
-        let project = crate::agent_home::AgentProject {
-            data,
-            id: crate::protocol::ProjectId::new("cut-instructions").unwrap(),
-            folder: Some(folder),
-            files: Choice::Project,
-            owner_home: None,
-        };
-        let given = crate::agent_home::text(&project).unwrap();
-        let states: Vec<(&str, State)> = given
-            .files
-            .iter()
-            .map(|file| (file.name.as_str(), file.state))
-            .collect();
-        assert_eq!(
-            states,
-            [("CLAUDE.md", State::TooLarge), ("AGENTS.md", State::Given)],
-            "a CLAUDE.md past its limit is left out whole and recorded"
-        );
-        let section = given.text[given.text.len() - given.section_bytes..].to_owned();
-        assert!(section.contains("AGENTS-RULE-91"));
-
-        let instructions = "x".repeat(crate::launch_context::MASTER_INSTRUCTIONS_BYTES_MAX);
-        let host_limit =
-            usize::try_from(crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX).unwrap();
-        assert!(instructions.len() + 1 + given.text.len() > host_limit);
-        let capped = claude_process(&instructions, given.clone());
-        let prompt = master_prompt(&instructions, &capped.text);
-        assert!(prompt.len() <= host_limit, "{} bytes", prompt.len());
-        let root = Root::open(&base).unwrap();
-        let (runtime_ref, _, _) = allocate_master_capture(&root).unwrap();
-        assert!(
-            write_master_instructions(&root, &runtime_ref, &prompt).is_ok(),
-            "the turn's prompt file is written, never refused"
-        );
-        assert!(capped.text.starts_with("# Instructions from CrazyAgent\n"));
-        assert!(capped.text.contains("APP-START-92"));
-        assert!(
-            capped
-                .text
-                .contains("CrazyAgent cut the app and project instructions here")
-        );
-        assert!(
-            capped.text.ends_with(&section),
-            "the instruction files section stays whole"
-        );
-        assert_eq!(capped.section_bytes, section.len());
-        assert_eq!(capped.files, given.files);
-
-        crate::agent_home::prepare(&home, crate::agent_home::Harness::Claude, &project, &capped)
-            .unwrap();
-        let card = crate::agent_home::received(&home, crate::agent_home::Harness::Claude)
-            .unwrap()
-            .unwrap();
-        assert_eq!(
-            card.text, capped.text,
-            "the agent card shows what the master got"
-        );
-        assert!(card.text.contains("Shorten them on the Process page."));
-        assert_eq!(
-            crate::agent_home::given_files(&project.data, &home).unwrap(),
-            given.files
-        );
-
-        let small = crate::agent_home::Given {
-            text: "# Instructions from CrazyAgent\n\nShort.\n".into(),
-            files: Vec::new(),
-            section_bytes: 0,
-        };
-        assert_eq!(
-            claude_process(&instructions, small.clone()),
-            small,
-            "text that fits is never cut"
-        );
-    }
-
     #[test]
     fn master_instructions_are_one_private_file_in_the_turn_directory() {
         let temporary = private_root();
@@ -1530,6 +1419,7 @@ mod tests {
             &executable,
             &ModelEndpoint::Native {},
             &AgentPolicy::default(),
+            &[],
         )
         .unwrap();
         let turn = base.join(format!("master-runtime-{}", runtime_ref.as_str()));
@@ -1570,6 +1460,96 @@ mod tests {
     }
 
     #[test]
+    fn the_live_master_keeps_the_model_only_network_under_every_project_choice() {
+        use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+        let temporary = private_root();
+        let base = temporary.path().canonicalize().unwrap();
+        let root = Root::open(&base).unwrap();
+        let repository = base.join("repository");
+        let worktree = base.join("worktrees").join("lease");
+        let home = base.join("profile-home");
+        let install = base.join("install").join("bin");
+        for directory in [&repository, &worktree, &home, &install] {
+            private_directory(directory);
+        }
+        let executable = install.join("codex");
+        std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let native = ModelEndpoint::Native {};
+        for choice in AgentNetwork::ALL {
+            let (runtime_ref, _capture_ref, capture) = allocate_master_capture(&root).unwrap();
+            let policy = AgentPolicy {
+                network: choice,
+                ..AgentPolicy::default()
+            };
+            let sandbox = master_sandbox(
+                &root,
+                &runtime_ref,
+                &repository,
+                &worktree,
+                &home,
+                &executable,
+                &native,
+                &policy,
+                &[],
+            )
+            .unwrap();
+            let profile = sandbox.sandbox().profile();
+            assert!(
+                profile.contains("(allow network-outbound (remote ip \"*:443\"))"),
+                "{choice:?}\n{profile}"
+            );
+            assert!(
+                !profile.contains("(remote ip \"*:*\")"),
+                "{choice:?}\n{profile}"
+            );
+            drop((capture, sandbox));
+            drop(MasterRuntimeFolder::new(&root, &runtime_ref));
+        }
+    }
+
+    #[test]
+    fn the_live_master_sandbox_is_confined_under_sandboxed_and_own_branch() {
+        use crate::sandbox::policy::AgentPolicy;
+        let temporary = private_root();
+        let base = temporary.path().canonicalize().unwrap();
+        let root = Root::open(&base).unwrap();
+        let repository = base.join("repository");
+        let worktree = base.join("worktrees").join("lease");
+        let home = base.join("profile-home");
+        let install = base.join("install").join("bin");
+        for directory in [&repository, &worktree, &home, &install] {
+            private_directory(directory);
+        }
+        let executable = install.join("codex");
+        std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let native = ModelEndpoint::Native {};
+        for access in [AgentAccess::Sandboxed, AgentAccess::OwnBranch] {
+            let (runtime_ref, _capture_ref, capture) = allocate_master_capture(&root).unwrap();
+            let policy = AgentPolicy {
+                access,
+                ..AgentPolicy::default()
+            };
+            let sandbox = master_sandbox(
+                &root,
+                &runtime_ref,
+                &repository,
+                &worktree,
+                &home,
+                &executable,
+                &native,
+                &policy,
+                &[],
+            )
+            .unwrap();
+            assert!(!sandbox.is_unconfined(), "{access:?}");
+            drop((capture, sandbox));
+            drop(MasterRuntimeFolder::new(&root, &runtime_ref));
+        }
+    }
+
+    #[test]
     fn master_sandbox_lets_a_real_child_write_only_in_the_project_worktree_and_its_own_dirs() {
         use std::process::{Command, Stdio};
         let temporary = private_root();
@@ -1596,6 +1576,7 @@ mod tests {
             &executable,
             &native,
             &AgentPolicy::default(),
+            &[],
         )
         .unwrap();
         let turn = base.join(format!("master-runtime-{}", runtime_ref.as_str()));
@@ -1765,6 +1746,7 @@ mod tests {
                 &executable,
                 &native,
                 &AgentPolicy::default(),
+                &[],
             )
             .is_err()
         );
@@ -1792,6 +1774,7 @@ mod tests {
                     &executable,
                     endpoint,
                     &AgentPolicy::default(),
+                    &[],
                 )
                 .unwrap_err()
                 .0,
@@ -1817,6 +1800,7 @@ mod tests {
             &executable,
             &endpoint,
             &AgentPolicy::default(),
+            &[],
         )
         .unwrap()
         .sandbox()
@@ -1824,6 +1808,123 @@ mod tests {
         assert!(text.contains("(allow network-outbound (remote ip \"localhost:11434\"))"));
         assert!(!text.contains("*:443"));
         assert!(!text.contains("(allow network*)"));
+    }
+
+    /// A hidden folder inside the project reaches the master's own boundary: the installed
+    /// master profile denies it and a real sandboxed read of a file inside it is refused,
+    /// while a plain file elsewhere in the repository stays readable.
+    #[test]
+    fn master_sandbox_hides_a_listed_folder_from_a_real_child() {
+        use std::process::{Command, Stdio};
+        let temporary = private_root();
+        let base = temporary.path().canonicalize().unwrap();
+        let root = Root::open(&base).unwrap();
+        let repository = base.join("repository");
+        let worktree = base.join("worktrees").join("lease");
+        let home = base.join("profile-home");
+        let install = base.join("install").join("bin");
+        let hidden = repository.join("secret");
+        for directory in [&repository, &worktree, &home, &install, &hidden] {
+            private_directory(directory);
+        }
+        std::fs::write(hidden.join("key.txt"), "owner secret\n").unwrap();
+        std::fs::write(repository.join("open.txt"), "open\n").unwrap();
+        let executable = install.join("codex");
+        std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (runtime_ref, _, _) = allocate_master_capture(&root).unwrap();
+        let sandbox = master_sandbox(
+            &root,
+            &runtime_ref,
+            &repository,
+            &worktree,
+            &home,
+            &executable,
+            &ModelEndpoint::Native {},
+            &AgentPolicy::default(),
+            std::slice::from_ref(&hidden),
+        )
+        .unwrap();
+        assert!(
+            sandbox
+                .sandbox()
+                .profile()
+                .contains(hidden.to_str().unwrap())
+        );
+        let read = |target: &Path| {
+            let mut harness = Command::new("/bin/sh");
+            harness
+                .arg("-c")
+                .arg("cat \"$0\"")
+                .arg(target)
+                .current_dir(&worktree);
+            let mut child = sandbox.wrap(&harness).unwrap();
+            child
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            crate::spawn_gate::status(&mut child).unwrap().success()
+        };
+        assert!(read(&repository.join("open.txt")));
+        assert!(!read(&hidden.join("key.txt")));
+        assert_eq!(
+            std::fs::read_to_string(hidden.join("key.txt")).unwrap(),
+            "owner secret\n"
+        );
+    }
+
+    /// A master launch refuses a hidden folder git now tracks: the same none_tracked gate the
+    /// team and research launches use, here on the master turn sandbox, fails the launch with
+    /// the plain code rather than install a profile that promises to hide a file in history.
+    #[test]
+    fn master_sandbox_refuses_a_folder_git_now_tracks() {
+        use std::process::{Command, Stdio};
+        let temporary = private_root();
+        let base = temporary.path().canonicalize().unwrap();
+        let root = Root::open(&base).unwrap();
+        let repository = base.join("repository");
+        let worktree = base.join("worktrees").join("lease");
+        let home = base.join("profile-home");
+        let install = base.join("install").join("bin");
+        let hidden = repository.join("secret");
+        for directory in [&repository, &worktree, &home, &install, &hidden] {
+            private_directory(directory);
+        }
+        std::fs::write(hidden.join("key.txt"), "tracked\n").unwrap();
+        let git = |args: &[&str]| {
+            let mut command = Command::new("/usr/bin/git");
+            command
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .current_dir(&repository)
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            assert!(crate::spawn_gate::status(&mut command).unwrap().success());
+        };
+        git(&["init", "-q"]);
+        git(&["add", "secret/key.txt"]);
+        let executable = install.join("codex");
+        std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (runtime_ref, _, _) = allocate_master_capture(&root).unwrap();
+        assert_eq!(
+            master_sandbox(
+                &root,
+                &runtime_ref,
+                &repository,
+                &worktree,
+                &home,
+                &executable,
+                &ModelEndpoint::Native {},
+                &AgentPolicy::default(),
+                std::slice::from_ref(&hidden),
+            )
+            .unwrap_err()
+            .0,
+            "hidden_path_tracked"
+        );
     }
 
     /// A tools-off master in a real git worktree lease reads the repository's refs but
@@ -1912,6 +2013,7 @@ mod tests {
             &executable,
             &ModelEndpoint::Native {},
             &AgentPolicy::default(),
+            &[],
         )
         .unwrap();
         let run = |program: &Path, args: &[&str]| {
@@ -2054,6 +2156,7 @@ mod tests {
             &ModelEndpoint::Native {},
             &engine,
             &AgentPolicy::default(),
+            &[],
         )
         .unwrap();
         let turn = base.join(format!("master-runtime-{}", runtime_ref.as_str()));

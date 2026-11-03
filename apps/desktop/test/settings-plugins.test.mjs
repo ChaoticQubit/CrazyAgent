@@ -29,6 +29,9 @@ test("plugin refusals from the engine read as the plugin sentences, not the gene
   assert.equal(api.plainError("skill_missing_skill_md"), "This folder has no SKILL.md file.");
   assert.equal(api.plainError("server_changed"), "This server changed. Review it again before approving.");
   assert.equal(api.plainError("plugin_switch_global_only"), "Only items from global settings can be switched here.");
+  assert.equal(api.plainError("hooks_none_found"), "This folder has no Claude Code hooks.");
+  assert.equal(api.plainError("hooks_plugin_manifest_missing"), "This folder has hooks but no .claude-plugin/plugin.json naming the plugin.");
+  assert.equal(api.plainError("hook_plugin_name_invalid"), "The plugin name must be 1 to 32 letters, digits, ., - or _.");
   assert.equal(api.classifyFailure({ code: "server_secret_invalid" }).message, "Enter the secret on one line, up to 8192 characters.");
   assert.equal(api.plainError("picker_failed"), "Couldn't open the folder chooser. Type the full path instead.");
   assert.equal(api.plainError("skillful <b>"), "Something went wrong. Try again. (unknown)");
@@ -160,7 +163,7 @@ test("server rows use the design status words, show tools and a plain reason wit
   const markup = renderToStaticMarkup(createElement(ServersView, serversProps({ kind: "ok", value: [broken, checked] })));
   assert.match(markup, /Can&#x27;t start: command not found/);
   assert.match(markup, /Check again/);
-  assert.match(markup, /Tools: read_file, list_dir/);
+  assert.match(markup, /<button aria-expanded="false" type="button" class="btn quiet small">(?:<svg[\s\S]*?<\/svg>)?\s*2 tools<\/button>/);
   const empty = renderToStaticMarkup(createElement(ServersView, serversProps({ kind: "ok", value: [] })));
   assert.match(empty, /No MCP servers yet/);
   assert.match(empty, /Add MCP server/);
@@ -225,7 +228,7 @@ test("every plugins and folder chooser command the settings call is registered i
   const handler = lib.slice(lib.indexOf("generate_handler!["));
   const allowed = JSON.parse(read("src-tauri/capabilities/main-window.json")).permissions;
   const commands = [...source.matchAll(/call<[^(]*>\("(desktop_(?:plugin|add_skill|set_skill|remove_skill|skill_detail|skill_import|import_skill|add_mcp|approve_mcp|set_mcp|remove_mcp|check_mcp|switch_plugin|pick)[a-z_]*)"/g)].map((match) => match[1]);
-  assert.equal(new Set(commands).size, 17);
+  assert.equal(new Set(commands).size, 18);
   assert.ok(commands.includes("desktop_skill_import_scan") && commands.includes("desktop_import_skill"));
   for (const command of commands) {
     assert.ok(build.includes(`"${command}"`), `${command} missing from build.rs`);

@@ -38,6 +38,7 @@ pub(crate) mod trash;
 pub(crate) use native_auth::NativeAuthRetirementCheckpoint;
 #[cfg(all(test, unix))]
 pub(crate) use native_auth::doubt_sign_in;
+pub(crate) use native_auth::sign_in_rechecking;
 pub(crate) use native_auth::{NativeAuthBegin, NativeAuthDispatch, NativeAuthWork};
 #[cfg(all(test, unix))]
 mod model_access_page_tests;
@@ -950,6 +951,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::sandbox_settings::initialize(connection)?;
     crate::project_setup::repair_repositories(connection)?;
     crate::team::initialize(connection)?;
+    crate::coord::ensure(connection)?;
     crate::instruction_files::initialize(connection).map_err(error)?;
     crate::scheduling::initialize(connection)?;
     plugins::initialize(connection)?;
@@ -2454,6 +2456,14 @@ fn owner_read(
                 .map(|path| path.display().to_string())
                 .collect(),
         },
+        OwnerRead::ProjectHiddenPaths { project_id } => OwnerData::ProjectHiddenPaths {
+            project_id: project_id.clone(),
+            paths: crate::sandbox::hidden_paths::load(&tx, project_id.as_str())
+                .map_err(error)?
+                .into_iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+        },
         OwnerRead::ProjectAgentPolicy { project_id } => {
             let setup = crate::project_setup::load_setup(&tx, project_id)?
                 .ok_or_else(|| error("invalid_project"))?;
@@ -2500,6 +2510,12 @@ fn owner_read(
                 &stored_setup(&tx, project_id)?,
             )?),
         },
+        OwnerRead::CoordQuestions { project_id } => {
+            stored_setup(&tx, project_id)?;
+            OwnerData::CoordQuestions {
+                inbox: Box::new(crate::team::questions::inbox(&tx, project_id)?),
+            }
+        }
         OwnerRead::ResearchJobs { project_id } => OwnerData::ResearchJobs {
             project_id: project_id.clone(),
             jobs: crate::project_setup::list_jobs(&tx, config, project_id)?,

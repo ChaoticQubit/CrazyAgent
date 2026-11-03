@@ -84,6 +84,12 @@ async fn serve(controller: &mut OwnerController, query: SetupQuery) -> Result<Se
                 .await
                 .map_err(problem)?,
         ),
+        SetupQuery::HiddenPaths { project } => SetupView::HiddenPaths(
+            controller
+                .project_hidden_paths(project)
+                .await
+                .map_err(problem)?,
+        ),
         SetupQuery::AgentPolicy { project } => SetupView::AgentPolicy(
             controller
                 .project_agent_policy(project)
@@ -134,7 +140,8 @@ async fn serve(controller: &mut OwnerController, query: SetupQuery) -> Result<Se
         SetupQuery::Team { .. }
         | SetupQuery::TeamChange { .. }
         | SetupQuery::TeamMessages { .. }
-        | SetupQuery::Library(_) => {
+        | SetupQuery::Library(_)
+        | SetupQuery::CoordQuestions { .. } => {
             panic!("the project screen never reads the team or the library")
         }
     })
@@ -1237,18 +1244,27 @@ fn a_wide_conversation_shows_the_team_panel_beside_the_master_and_t_opens_the_te
         project_id: project,
         nodes: vec![crate::team::GraphNode {
             id: "team-1".into(),
-            kind: crate::team::NodeKind::Agent,
-            parent: Some("group-codex".into()),
+            kind: crate::team::NodeKind::Lead,
+            parent: Some("master".into()),
             label: "Ada (@onboarding-fix)".into(),
             harness: "codex".into(),
             status: Some(crate::team::AgentStatus::Working),
             status_label: None,
             account: None,
-            agents: None,
+            branch: None,
             terminal: Some(crate::terminal::AgentId::new("team-1").unwrap()),
             questions: None,
+            agent: Some(1),
+            pane: None,
+            presence: None,
+            waiting: None,
+            owner_questions: 0,
+            no_worktree: false,
+            hookless: false,
         }],
         edges: Vec::new(),
+        messages: Vec::new(),
+        overlaps: Vec::new(),
     }));
     screen.open(Tab::Conversation);
     let look = Look::plain();
@@ -2074,6 +2090,131 @@ fn the_read_only_folders_box_saves_colon_separated_folders_and_shows_refusals() 
     assert!(screen.folders.is_none());
 }
 
+#[test]
+fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
+    let look = Look::plain();
+    let project = ProjectId::new("hidden").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Settings);
+    screen.read_paths = Some(vec![]);
+    assert_eq!(screen.key(key(KeyCode::Char('d'))), ProjectReply::Handled);
+    assert!(screen.hidden.is_none());
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some("Still loading the hidden folders. Try again.")
+    );
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains("Hidden    Loading...   d Edit hidden folders"),
+        "{shown}"
+    );
+
+    let mut read = None;
+    for now in 20..26 {
+        let query = screen.next_query(now).unwrap();
+        if matches!(query, SetupQuery::HiddenPaths { .. }) {
+            read = Some(query);
+            break;
+        }
+        screen.apply(&query, Err("trusted_connection_unavailable".into()));
+    }
+    let read = read.expect("the Settings tab reads the hidden folders");
+    assert_eq!(
+        read,
+        SetupQuery::HiddenPaths {
+            project: project.clone()
+        }
+    );
+    screen.apply(
+        &read,
+        Ok(SetupView::HiddenPaths(vec!["/Users/owner/secret".into()])),
+    );
+    let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
+    assert!(
+        shown.contains("Hidden    /Users/owner/secret   d Edit hidden folders"),
+        "{shown}"
+    );
+
+    assert_eq!(screen.key(key(KeyCode::Char('d'))), ProjectReply::Handled);
+    assert_eq!(
+        screen.hidden.as_ref().unwrap().input.value(),
+        "/Users/owner/secret"
+    );
+    let drawn = project_screen(&mut screen, 80, 24, &look);
+    assert!(text(&drawn.rows).contains("Hidden folders"));
+    assert_eq!(
+        drawn.help,
+        [("Enter", "Save hidden folders"), ("Esc", "Cancel")]
+    );
+    assert!(drawn.cursor.is_some());
+    assert_eq!(
+        screen.paste(" : /Users/owner/project/vendor : "),
+        ProjectReply::Handled
+    );
+    let save = SetupAction::SetHiddenPaths {
+        project_id: project.clone(),
+        paths: vec![
+            "/Users/owner/secret".into(),
+            "/Users/owner/project/vendor".into(),
+        ],
+    };
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Change(Box::new(save.clone()))
+    );
+    assert!(screen.hidden.as_ref().unwrap().busy);
+    let change = SetupQuery::Change {
+        action: save,
+        generation: 2,
+    };
+    screen.apply(
+        &change,
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: "hidden_path_outside_project".into(),
+        })),
+    );
+    let hidden = screen.hidden.as_ref().unwrap();
+    assert!(!hidden.busy);
+    assert_eq!(
+        hidden.error.as_deref(),
+        Some("A hidden folder must sit inside the project. Pick a folder within it.")
+    );
+    assert_eq!(
+        screen.hidden_paths, None,
+        "a refused change reads the hidden folders again"
+    );
+
+    screen.hidden.as_mut().unwrap().input.set("");
+    let clear = SetupAction::SetHiddenPaths {
+        project_id: project.clone(),
+        paths: vec![],
+    };
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Change(Box::new(clear.clone()))
+    );
+    screen.apply(
+        &SetupQuery::Change {
+            action: clear,
+            generation: 3,
+        },
+        Ok(SetupView::Changed(OwnerResult::Applied)),
+    );
+    assert!(screen.hidden.is_none());
+    assert_eq!(screen.hidden_paths, None);
+
+    screen.hidden_paths = Some(vec![]);
+    screen.key(key(KeyCode::Char('d')));
+    screen.paste(&format!("/{}", "d".repeat(1100)));
+    assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::Handled);
+    assert_eq!(
+        screen.hidden.as_ref().unwrap().error.as_deref(),
+        Some("Each folder must be one plain path of up to 1024 characters.")
+    );
+    assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
+    assert!(screen.hidden.is_none());
+}
+
 fn console_screen() -> ProjectScreen {
     use super::project::{Message, Speaker};
     use crate::project_setup::{ContextItem, ProjectContext};
@@ -2115,17 +2256,26 @@ fn console_screen() -> ProjectScreen {
         status: None,
         status_label: None,
         account: None,
-        agents: None,
+        branch: None,
         terminal: None,
         questions: None,
+        agent: None,
+        pane: None,
+        presence: None,
+        waiting: None,
+        owner_questions: 0,
+        no_worktree: false,
+        hookless: false,
     };
     screen.team = crate::tui::ctx::Load::Ready(Box::new(TeamGraph {
         project_id: project.clone(),
         nodes: vec![
             node("master", NodeKind::Master, "Master"),
-            node("agent-1", NodeKind::Agent, "Ada (@page)"),
+            node("team-1", NodeKind::Lead, "Ada (@page)"),
         ],
         edges: vec![],
+        messages: Vec::new(),
+        overlaps: Vec::new(),
     }));
     screen.context = Some(ProjectContext {
         project_id: project,

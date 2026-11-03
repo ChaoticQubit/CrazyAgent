@@ -18,7 +18,7 @@ fn set(digit: char, state: ChangeState) -> ChangeSetView {
         agent: ChangeAgent {
             kind: AgentKind::Sub,
             id: "agent-1".into(),
-            label: "Agent 1".into(),
+            label: crate::team::AgentRole::Sub.agent_label(1),
         },
         state,
         base: "b".repeat(40),
@@ -87,13 +87,17 @@ fn a_pending_change_set_shows_its_agent_size_and_that_crazyagent_did_not_check_i
     let view = listed(vec![set('1', ChangeState::Pending)]);
     let shown = text(&view);
     for want in [
-        "Sub-agent Agent 1",
+        "Sub-agent 1",
         "Ready to review",
         "1 file, 1 line added, 0 removed",
         "Not checked by CrazyAgent. Any test results in it are reported by the agent.",
     ] {
         assert!(shown.contains(want), "{want} missing in\n{shown}");
     }
+    assert!(
+        !shown.contains("Sub-agent Sub-agent"),
+        "the engine's label is shown as given: {shown}"
+    );
     let (_, _, help) = view.rows(100, 40, NOW, &Look::plain());
     assert!(help.contains(&("a", "Accept")) && help.contains(&("d", "Discard")));
     assert!(!help.iter().any(|(key, _)| *key == "u" || *key == "r"));
@@ -145,7 +149,7 @@ fn the_diff_shows_files_marks_and_plain_text_then_accept_lands_the_reviewed_head
     );
 
     assert!(view.key(key(KeyCode::Char('a')), NOW));
-    assert!(text(&view).contains("Accept the changes of Sub-agent Agent 1?"));
+    assert!(text(&view).contains("Accept the changes of Sub-agent 1?"));
     assert!(view.key(key(KeyCode::Enter), NOW));
     let landed = AcceptOutcome::Landed {
         commit: "abcdef0123456789abcdef0123456789abcdef01".into(),
@@ -458,6 +462,16 @@ fn accept_opens_the_proposed_commit_message_for_editing_and_sends_the_edit() {
     assert_eq!(shown[line - 2].trim_end(), "  Add a main");
     assert_eq!(cursor, Some((2 + "- Add the fourth line".len(), line)));
     assert!(help.contains(&("Enter", "Accept")) && help.contains(&("Esc", "Keep reviewing")));
+    let asked = reply(
+        &mut view,
+        Ok(ChangesView::Branches(crate::landing::TargetBranches {
+            branches: vec!["main".into(), "release".into()],
+            current: Some("main".into()),
+            land_on: None,
+            land_on_problem: None,
+        })),
+    );
+    assert_eq!(asked, ChangesQuery::Branches { id: id('1') });
 
     view.key(
         KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
@@ -561,7 +575,8 @@ fn a_set_merged_but_not_handed_to_its_agent_says_so_and_can_be_asked_again_or_di
 /// Inputs: the digit and the state. Output: the change set.
 fn named(digit: char, state: ChangeState) -> ChangeSetView {
     let mut set = set(digit, state);
-    set.agent.label = format!("Agent {digit}");
+    set.agent.label =
+        crate::team::AgentRole::Sub.agent_label(i64::from(digit.to_digit(10).unwrap()));
     set
 }
 
@@ -584,7 +599,7 @@ fn the_highlight_and_each_action_stay_on_the_chosen_set_when_a_read_reorders_the
         named('3', ChangeState::Pending),
     ]);
     assert!(view.key(key(KeyCode::Down), NOW));
-    assert!(text(&view).contains("> Sub-agent Agent 2"));
+    assert!(text(&view).contains("> Sub-agent 2"));
     reordered(
         &mut view,
         vec![
@@ -594,7 +609,7 @@ fn the_highlight_and_each_action_stay_on_the_chosen_set_when_a_read_reorders_the
         ],
     );
     assert!(
-        text(&view).contains("> Sub-agent Agent 2"),
+        text(&view).contains("> Sub-agent 2"),
         "the highlight follows the chosen set, not its old place"
     );
     assert!(view.key(key(KeyCode::Char('d')), NOW));
@@ -619,7 +634,7 @@ fn the_highlight_and_each_action_stay_on_the_chosen_set_when_a_read_reorders_the
             named('1', ChangeState::Pending),
         ],
     );
-    assert!(text(&view).contains("> Sub-agent Agent 3"));
+    assert!(text(&view).contains("> Sub-agent 3"));
     assert!(view.key(key(KeyCode::Char('u')), NOW));
     assert_eq!(
         view.next_query(NOW),
@@ -640,7 +655,7 @@ fn the_highlight_and_each_action_stay_on_the_chosen_set_when_a_read_reorders_the
         ],
     );
     assert!(
-        text(&view).contains("> Sub-agent Agent 2"),
+        text(&view).contains("> Sub-agent 2"),
         "an open question keeps the highlight and details on its own set"
     );
     assert!(view.key(key(KeyCode::Char('y')), NOW));
@@ -767,7 +782,7 @@ fn a_set_that_leaves_the_list_takes_the_selection_with_it_and_no_key_acts_on_its
         named('3', ChangeState::Conflict),
     ]);
     assert!(view.key(key(KeyCode::Down), NOW));
-    assert!(text(&view).contains("> Sub-agent Agent 2"));
+    assert!(text(&view).contains("> Sub-agent 2"));
     reordered(
         &mut view,
         vec![
@@ -805,7 +820,7 @@ fn a_set_that_leaves_the_list_takes_the_selection_with_it_and_no_key_acts_on_its
 
     assert!(view.key(key(KeyCode::Down), NOW));
     assert!(
-        text(&view).contains("> Sub-agent Agent 3"),
+        text(&view).contains("> Sub-agent 3"),
         "the first move picks the set now in that place"
     );
     assert!(view.key(key(KeyCode::Char('u')), NOW));
@@ -825,7 +840,7 @@ fn accept_and_discard_name_the_set_they_ask_about() {
     assert!(view.key(key(KeyCode::Char('d')), NOW));
     let shown = text(&view);
     for want in [
-        "Discard the changes of Sub-agent Agent 2?",
+        "Discard the changes of Sub-agent 2?",
         "1 file, 1 line added, 0 removed, at 2222222.",
     ] {
         assert!(shown.contains(want), "{want} missing in\n{shown}");
@@ -834,7 +849,7 @@ fn accept_and_discard_name_the_set_they_ask_about() {
     assert!(view.key(key(KeyCode::Char('a')), NOW));
     let shown = text(&view);
     for want in [
-        "Accept the changes of Sub-agent Agent 2?",
+        "Accept the changes of Sub-agent 2?",
         "1 file, 1 line added, 0 removed, at 2222222.",
     ] {
         assert!(shown.contains(want), "{want} missing in\n{shown}");
@@ -949,6 +964,336 @@ fn a_file_list_past_its_bound_is_cut_and_says_the_rest_is_not_shown() {
     );
 }
 
+fn flat(view: &ProjectChanges) -> String {
+    text(view).split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+#[test]
+fn accept_lists_the_branches_and_tab_picks_another_target() {
+    let mut view = listed(vec![set('1', ChangeState::Pending)]);
+    assert!(view.key(key(KeyCode::Char('a')), NOW));
+    assert!(
+        view.key(key(KeyCode::Tab), NOW),
+        "Tab before the list arrives moves nothing"
+    );
+    let listed_branches = TargetBranches {
+        branches: vec!["main".into(), "release".into(), "next".into()],
+        current: Some("main".into()),
+        land_on: None,
+        land_on_problem: None,
+    };
+    let query = reply(&mut view, Ok(ChangesView::Branches(listed_branches)));
+    assert_eq!(query, ChangesQuery::Branches { id: id('1') });
+    let shown = flat(&view);
+    assert!(shown.contains("Branch main"), "{shown}");
+    assert!(
+        shown.contains(
+            "They land as one commit on main, the branch checked out in your project folder"
+        ),
+        "{shown}"
+    );
+    assert!(view.key(key(KeyCode::Tab), NOW));
+    let shown = flat(&view);
+    assert!(shown.contains("Branch release"), "{shown}");
+    assert!(shown.contains("That branch isn't checked out"), "{shown}");
+    assert!(view.key(KeyEvent::new(KeyCode::BackTab, KeyModifiers::SHIFT), NOW));
+    assert!(view.key(key(KeyCode::BackTab), NOW));
+    assert!(flat(&view).contains("Branch next"));
+    assert!(view.key(key(KeyCode::Tab), NOW));
+    assert!(view.key(key(KeyCode::Tab), NOW));
+    assert!(flat(&view).contains("Branch release"));
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    assert_eq!(
+        view.next_query(NOW),
+        Some(ChangesQuery::AcceptInto {
+            id: id('1'),
+            expected_head: "1".repeat(40),
+            message: "Add a file".into(),
+            target: "release".into(),
+        })
+    );
+}
+
+#[test]
+fn accept_on_the_checked_out_branch_sends_a_plain_accept_and_esc_drops_the_list() {
+    let mut view = listed(vec![set('1', ChangeState::Pending)]);
+    assert!(view.key(key(KeyCode::Char('a')), NOW));
+    assert!(view.key(key(KeyCode::Esc), NOW));
+    assert_eq!(view.next_query(NOW), None, "Esc drops the branch read");
+    assert!(view.key(key(KeyCode::Char('a')), NOW));
+    reply(
+        &mut view,
+        Ok(ChangesView::Branches(TargetBranches {
+            branches: vec!["main".into(), "release".into()],
+            current: Some("main".into()),
+            land_on: None,
+            land_on_problem: None,
+        })),
+    );
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    assert_eq!(
+        view.next_query(NOW),
+        Some(ChangesQuery::Accept {
+            id: id('1'),
+            expected_head: "1".repeat(40),
+            message: "Add a file".into(),
+        })
+    );
+
+    let mut failed = listed(vec![set('1', ChangeState::Pending)]);
+    failed.key(key(KeyCode::Char('a')), NOW);
+    reply(&mut failed, Err("changes_unavailable".into()));
+    let shown = flat(&failed);
+    assert!(
+        shown.contains(
+            "Couldn't list your branches, so these changes land on your project's Land on branch."
+        ),
+        "{shown}"
+    );
+    assert!(
+        shown.contains(
+            "They land as one commit on your project's Land on branch, under your own Git name."
+        ),
+        "{shown}"
+    );
+}
+
+#[test]
+fn accept_preselects_the_land_on_branch_and_sends_a_plain_accept_for_it() {
+    let land_on = || TargetBranches {
+        branches: vec!["feat/x".into(), "main".into(), "stage".into()],
+        current: Some("feat/x".into()),
+        land_on: Some("stage".into()),
+        land_on_problem: None,
+    };
+    let mut view = listed(vec![set('1', ChangeState::Pending)]);
+    assert!(view.key(key(KeyCode::Char('a')), NOW));
+    reply(&mut view, Ok(ChangesView::Branches(land_on())));
+    let shown = flat(&view);
+    assert!(shown.contains("Branch stage"), "{shown}");
+    assert!(
+        shown.contains(
+            "They land as one commit on stage, under your own Git name. That branch isn't checked out"
+        ),
+        "{shown}"
+    );
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    assert_eq!(
+        view.next_query(NOW),
+        Some(ChangesQuery::Accept {
+            id: id('1'),
+            expected_head: "1".repeat(40),
+            message: "Add a file".into(),
+        }),
+        "the Land on branch is where the engine lands with no branch named"
+    );
+
+    let mut view = listed(vec![set('1', ChangeState::Pending)]);
+    assert!(view.key(key(KeyCode::Char('a')), NOW));
+    reply(&mut view, Ok(ChangesView::Branches(land_on())));
+    assert!(view.key(key(KeyCode::Tab), NOW));
+    let shown = flat(&view);
+    assert!(shown.contains("Branch feat/x"), "{shown}");
+    assert!(
+        shown.contains(
+            "They land as one commit on feat/x, the branch checked out in your project folder"
+        ),
+        "{shown}"
+    );
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    assert_eq!(
+        view.next_query(NOW),
+        Some(ChangesQuery::AcceptInto {
+            id: id('1'),
+            expected_head: "1".repeat(40),
+            message: "Add a file".into(),
+            target: "feat/x".into(),
+        }),
+        "the checked-out branch is named when it is not the Land on branch"
+    );
+}
+
+/// With the Land on branch missing, Accept names the setting and the branch, preselects no
+/// branch and sends nothing until the owner picks one with Tab, which it then names
+/// (DEC-111 Q1, review F1): the checked-out branch is never the silent destination.
+#[test]
+fn accept_with_a_missing_land_on_branch_names_it_and_waits_for_a_picked_branch() {
+    let missing = "Your Land on branch stage is not a local branch of this project. Pick a branch, or change Land on in Team settings.";
+    let mut view = listed(vec![set('1', ChangeState::Pending)]);
+    assert!(view.key(key(KeyCode::Char('a')), NOW));
+    reply(
+        &mut view,
+        Ok(ChangesView::Branches(TargetBranches {
+            branches: vec!["feat/x".into(), "main".into()],
+            current: Some("feat/x".into()),
+            land_on: None,
+            land_on_problem: Some(missing.into()),
+        })),
+    );
+    let shown = flat(&view);
+    assert!(shown.contains(missing), "{shown}");
+    assert!(
+        shown.contains("Press Tab to pick the branch they land on."),
+        "{shown}"
+    );
+    assert!(!shown.contains("Branch feat/x"), "{shown}");
+    assert!(!shown.contains("They land as one commit on"), "{shown}");
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    assert_eq!(view.next_query(NOW), None, "nothing lands before a pick");
+    assert!(flat(&view).contains(missing), "{}", flat(&view));
+    assert!(view.key(key(KeyCode::Tab), NOW));
+    let picked = flat(&view);
+    assert!(picked.contains("Branch feat/x"), "{picked}");
+    assert!(
+        picked.contains(
+            "They land as one commit on feat/x, the branch checked out in your project folder"
+        ),
+        "{picked}"
+    );
+    assert!(view.key(key(KeyCode::Enter), NOW));
+    assert_eq!(
+        view.next_query(NOW),
+        Some(ChangesQuery::AcceptInto {
+            id: id('1'),
+            expected_head: "1".repeat(40),
+            message: "Add a file".into(),
+            target: "feat/x".into(),
+        }),
+        "a picked branch is always named"
+    );
+}
+
+/// Opening the Accept editor drops an older notice about the same change set, such as a
+/// refused Discard, so the editor shows only what bears on this Accept: the branch list,
+/// or the notice that it could not be read (review WL-L2).
+#[test]
+fn opening_accept_drops_an_older_notice_about_the_set() {
+    let mut view = listed(vec![set('1', ChangeState::Pending)]);
+    assert!(view.key(key(KeyCode::Char('d')), NOW));
+    assert!(view.key(key(KeyCode::Char('y')), NOW));
+    reply(&mut view, Err("changes_stale".into()));
+    let refused = refusal("changes_stale")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(flat(&view).contains(&refused), "{}", flat(&view));
+    let query = reply(
+        &mut view,
+        Ok(ChangesView::List(vec![set('1', ChangeState::Pending)])),
+    );
+    assert_eq!(query, ChangesQuery::List { project: project() });
+    assert!(flat(&view).contains(&refused), "{}", flat(&view));
+    assert!(view.key(key(KeyCode::Char('a')), NOW));
+    let editor = flat(&view);
+    assert!(!editor.contains(&refused), "{editor}");
+    assert_eq!(
+        reply(&mut view, Err("changes_unavailable".into())),
+        ChangesQuery::Branches { id: id('1') }
+    );
+    let failed = flat(&view);
+    assert!(!failed.contains(&refused), "{failed}");
+    assert!(
+        failed.contains(
+            "Couldn't list your branches, so these changes land on your project's Land on branch."
+        ),
+        "{failed}"
+    );
+}
+
+#[test]
+fn an_action_notice_shows_only_while_the_set_it_was_about_is_chosen() {
+    let mut view = listed(vec![
+        named('1', ChangeState::Pending),
+        named('2', ChangeState::Accepted),
+    ]);
+    assert!(view.key(key(KeyCode::Char('d')), NOW));
+    assert!(view.key(key(KeyCode::Char('y')), NOW));
+    let until = u64::try_from(NOW + 7 * DAY).unwrap();
+    let query = reply(
+        &mut view,
+        Ok(ChangesView::Discarded {
+            restorable_until_ms: until,
+        }),
+    );
+    assert_eq!(
+        query,
+        ChangesQuery::Discard {
+            id: id('1'),
+            expected_head: "1".repeat(40)
+        }
+    );
+    let discarded = "Discarded. You can restore these changes for 7 days.";
+    assert!(text(&view).contains(discarded), "{}", text(&view));
+    let mut gone = named('1', ChangeState::Discarded);
+    gone.restorable_until_ms = Some(until);
+    reply(
+        &mut view,
+        Ok(ChangesView::List(vec![
+            gone.clone(),
+            named('2', ChangeState::Accepted),
+        ])),
+    );
+    assert!(text(&view).contains(discarded), "{}", text(&view));
+
+    assert!(view.key(key(KeyCode::Down), NOW));
+    let shown = text(&view);
+    assert!(shown.contains("> Sub-agent 2"), "{shown}");
+    assert!(
+        !shown.contains(discarded),
+        "the accepted set never shows the other set's discard\n{shown}"
+    );
+    assert!(shown.contains("Accepted"), "{shown}");
+
+    assert!(view.key(key(KeyCode::Up), NOW));
+    assert!(
+        text(&view).contains(discarded),
+        "the notice comes back with its own set\n{}",
+        text(&view)
+    );
+}
+
+#[test]
+fn a_set_closed_outside_the_app_says_how_keeps_its_note_and_takes_no_action_keys() {
+    let mut landed = set('1', ChangeState::Accepted);
+    landed.outside = true;
+    let mut removed = set('2', ChangeState::Discarded);
+    removed.outside = true;
+    for (closed, word, note) in [
+        (
+            landed,
+            "Landed outside the app",
+            "Your branch already has these changes. They were landed outside the app.",
+        ),
+        (
+            removed,
+            "Removed outside the app",
+            "The agent's copy of these changes was removed outside the app, so they cannot be restored.",
+        ),
+    ] {
+        let mut view = listed(vec![closed]);
+        let shown = tall(&view).split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(shown.contains(word), "{word} missing in\n{shown}");
+        assert!(shown.contains(note), "{note} missing in\n{shown}");
+        assert!(!shown.contains("You can restore"), "{shown}");
+        let (_, _, help) = view.rows(100, 40, NOW, &Look::plain());
+        assert!(
+            !help
+                .iter()
+                .any(|(key, _)| ["a", "d", "r", "u"].contains(key)),
+            "{help:?}"
+        );
+        for action in ['a', 'd', 'r', 'u'] {
+            assert!(!view.key(key(KeyCode::Char(action)), NOW), "{action}");
+        }
+        assert_eq!(view.next_query(NOW), None);
+    }
+
+    let mut accepted = listed(vec![set('3', ChangeState::Accepted)]);
+    let shown = tall(&accepted);
+    assert!(shown.contains("Accepted"), "{shown}");
+    assert!(!shown.contains("outside the app"), "{shown}");
+    assert!(!accepted.key(key(KeyCode::Char('r')), NOW));
+}
 /// Every page of an open diff is read at the head it opened on. When the set moves on, a
 /// page the engine refuses as stale, or a reread list naming a new head, sends the owner
 /// back to the top of the new head; Accept and Discard wait for its last page and then

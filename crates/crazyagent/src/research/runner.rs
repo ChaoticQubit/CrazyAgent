@@ -67,9 +67,6 @@ const RUNS_PER_ATTEMPT_MAX: u32 = 100;
 const LOG_LINE_BYTES_MAX: usize = 16 * 1024;
 const DRAIN_WAIT: Duration = Duration::from_secs(5);
 const CODEX_LOG: &str = "error,codex_core::responses_retry=warn";
-/// The Codex 0.164 setting that removes `request_user_input`, the one tool a
-/// tools-off research agent is still offered after the shared tools-off settings.
-const CODEX_NO_USER_INPUT: &str = "tools.experimental_request_user_input.enabled=false";
 const LINKS_HEADING: &str = "## Links and references";
 const LOCAL_PLACEHOLDER_KEY: &str = "crazyagent-local";
 /// The `RunError::Invalid` text of a run whose agent state folder already exists,
@@ -858,17 +855,13 @@ impl ResearchRunner {
         private_directory(&agent)?;
         let tmp = agent.join("tmp");
         private_directory(&tmp)?;
-        let network = if job.tools {
-            SandboxNetwork::Open
-        } else {
-            SandboxNetwork::Only(vec![model_remote(account)?])
-        };
         let policy = jobs
             .agent_policy(&project)
             .map_err(|_| RunError::Invalid("project agent access unreadable".into()))?;
         if let Some(reason) = policy.access.unavailable() {
             return Err(RunError::Invalid(reason.into()));
         }
+        let network = job_network(&policy, job.tools, model_remote(account)?);
         let unconfined = policy.access == AgentAccess::Full;
         let homes = ToolHomes::owner()?;
         let scratch = toolchains::ScopedTmp::make(&home)?;
@@ -906,7 +899,16 @@ impl ResearchRunner {
             let _setup = self.setup.lock().unwrap_or_else(PoisonError::into_inner);
             ensure_repository(&root, &tmp)?;
             add_worktree(&sandbox, &profile, &worktree)?;
-            let sandbox = sandbox.confine_to_worktree(&worktree)?;
+            let mut sandbox = sandbox.confine_to_worktree(&worktree)?;
+            let hidden = jobs
+                .hidden_paths(&project)
+                .map_err(|_| RunError::Invalid("project hidden folders unreadable".into()))?;
+            if let Err(code) = crate::sandbox::hidden_paths::none_tracked(&root, &hidden) {
+                return Err(RunError::Invalid(code.into()));
+            }
+            for folder in &hidden {
+                sandbox = sandbox.hide(folder)?;
+            }
             sandbox.install(&profile)?;
             Ok(sandbox)
         })??;
@@ -1450,6 +1452,18 @@ impl ResearchRunner {
         if let Some(parent) = executable.canonicalize()?.parent() {
             sandbox = sandbox.allow_read(parent)?;
         }
+        let hidden = match run.project {
+            Some(project) => ResearchJobs::open(&self.database)?
+                .hidden_paths(project)
+                .map_err(|_| RunError::Invalid("project hidden folders unreadable".into()))?,
+            None => Vec::new(),
+        };
+        if let Err(code) = crate::sandbox::hidden_paths::none_tracked(&folder, &hidden) {
+            return Err(RunError::Invalid(code.into()));
+        }
+        for sub in hidden.iter().filter(|path| path.starts_with(&folder)) {
+            sandbox = sandbox.hide(sub)?;
+        }
         let profile = self.state.join("profiles").join(format!("{}.sb", run.name));
         sandbox.install(&profile)?;
         write_private(&agent, &agent.join("prompt.md"), run.prompt.as_bytes())?;
@@ -1613,6 +1627,22 @@ fn read_folders(
     Ok(folders)
 }
 
+/// The sandbox network a research job runs under (DEC-111 Q17, S4R1-2): a tools-off job
+/// reaches only its model endpoint, and a tools-on job follows the project's network choice
+/// with the model still reachable. Inputs: the project's agent policy, whether the job has
+/// tools, and the model endpoint. Output: the sandbox network.
+pub(crate) fn job_network(
+    policy: &crate::sandbox::policy::AgentPolicy,
+    tools: bool,
+    model: SandboxRemote,
+) -> SandboxNetwork {
+    if tools {
+        policy.network.sandbox(Some(model))
+    } else {
+        SandboxNetwork::Only(vec![model])
+    }
+}
+
 pub(crate) fn model_remote(account: &ResearchAccount) -> Result<SandboxRemote, RunError> {
     match account {
         ResearchAccount::ManagedCodex { .. } | ResearchAccount::ManagedClaude { .. } => {
@@ -1694,7 +1724,7 @@ fn codex_arguments(
         for setting in crate::harnesses::launch::CODEX_TOOLS_OFF {
             command.arg("-c").arg(setting);
         }
-        command.args(["-c", CODEX_NO_USER_INPUT]);
+        command.args(["-c", crate::harnesses::launch::CODEX_NO_USER_INPUT]);
     }
     match account {
         ResearchAccount::Endpoint { base_url, model } => {
@@ -2012,6 +2042,18 @@ pub(crate) fn add_worktree(
     )))
 }
 
+/// Refuses to add a worktree at a commit, as `add_worktree` does where Seatbelt is missing.
+/// Takes the sandbox, profile, worktree and commit, all unused. Returns the same refusal.
+#[cfg(not(unix))]
+pub(crate) fn add_worktree_at(
+    sandbox: &ProjectSandbox,
+    profile: &Path,
+    worktree: &Path,
+    _base: &str,
+) -> Result<(), RunError> {
+    add_worktree(sandbox, profile, worktree)
+}
+
 /// Adds a detached git worktree at `worktree` inside the sandbox's project folder, running
 /// git under the installed profile so that no command the repository configures runs: the
 /// worktree is added without a checkout, its effective config is listed in the worktree's
@@ -2023,6 +2065,23 @@ pub(crate) fn add_worktree(
     profile: &Path,
     worktree: &Path,
 ) -> Result<(), RunError> {
+    add_worktree_at(sandbox, profile, worktree, "HEAD")
+}
+
+/// Adds a detached git worktree as `add_worktree` does, checked out at `base`: `HEAD`, or
+/// the full commit id a lead's worktree holds for a worker cut from it (N1).
+/// Takes the sandbox, its installed profile, the new worktree path and the commit.
+#[cfg(unix)]
+pub(crate) fn add_worktree_at(
+    sandbox: &ProjectSandbox,
+    profile: &Path,
+    worktree: &Path,
+    base: &str,
+) -> Result<(), RunError> {
+    assert!(
+        base == "HEAD"
+            || (matches!(base.len(), 40 | 64) && base.bytes().all(|b| b.is_ascii_hexdigit()))
+    );
     let _setup = repository_setup(sandbox.project_root());
     let worktrees = crate::projects_home::state_folder(sandbox.project_root()).join("worktrees");
     if worktree.parent() != Some(worktrees.as_path()) {
@@ -2032,7 +2091,7 @@ pub(crate) fn add_worktree(
     let mut add = worktree_git(sandbox, profile);
     add.args(["worktree", "add", "-q", "--no-checkout", "--detach"])
         .arg(worktree)
-        .arg("HEAD");
+        .arg(base);
     setup_step(&mut add, "worktree_add_failed")?;
     let mut listing = worktree_git(sandbox, profile);
     listing
@@ -2119,6 +2178,80 @@ fn worktree_git(sandbox: &ProjectSandbox, profile: &Path) -> Command {
         .stdout(Stdio::null())
         .stderr(setup_debug_stderr());
     git
+}
+
+/// What one git command run under an agent's profile ended with: its exit code, None when
+/// it was stopped at the setup time limit or by a signal, its output up to the caller's
+/// bound and whether it printed more.
+#[cfg(unix)]
+#[derive(Debug)]
+pub(crate) struct AgentGit {
+    pub(crate) code: Option<i32>,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) overflow: bool,
+}
+
+/// Runs one git command in a folder an agent owns with that agent's own rights (DEC-104
+/// K5b): under its installed profile, as the worktree setup steps run, with the
+/// [`GIT_SAFE`] settings and the caller's extra variables, within the setup time limit.
+/// Its output is read while it runs, so a long listing never stalls it. Takes the
+/// agent's sandbox, its installed profile, the folder, the arguments, the variables and
+/// the most output bytes kept. Returns how it ended, or the spawn failure.
+#[cfg(unix)]
+pub(crate) fn agent_git(
+    sandbox: &ProjectSandbox,
+    profile: &Path,
+    folder: &Path,
+    arguments: &[&str],
+    variables: &[(&str, &str)],
+    limit: usize,
+) -> Result<AgentGit, RunError> {
+    let mut command = worktree_git(sandbox, profile);
+    command
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_EDITOR", "true")
+        .envs(variables.iter().copied())
+        .arg("-C")
+        .arg(folder)
+        .args(arguments)
+        .stdout(Stdio::piped());
+    let mut child = crate::spawn_gate::spawn(&mut command)?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| RunError::Invalid("git gave no output pipe".into()))?;
+    let reader = std::thread::spawn(move || {
+        let mut kept = Vec::new();
+        let mut stdout = stdout;
+        let read = stdout
+            .by_ref()
+            .take(limit as u64 + 1)
+            .read_to_end(&mut kept);
+        let _ = io::copy(&mut stdout, &mut io::sink());
+        read.map(|_| kept)
+    });
+    let started = Instant::now();
+    let code = loop {
+        if let Some(status) = child.try_wait()? {
+            break status.code();
+        }
+        if started.elapsed() >= SETUP_TIMEOUT {
+            stop_timed_out(&mut child);
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let mut stdout = reader
+        .join()
+        .map_err(|_| RunError::Invalid("git output could not be read".into()))??;
+    let overflow = stdout.len() > limit;
+    stdout.truncate(limit);
+    assert!(stdout.len() <= limit);
+    Ok(AgentGit {
+        code,
+        stdout,
+        overflow,
+    })
 }
 
 #[cfg(unix)]
@@ -2779,6 +2912,44 @@ mod tests {
     use crate::config::{ModelAuthentication, ModelEndpoint, ModelReference};
     use crate::protocol::{ConfigId, CredentialRef, Cursor};
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_research_job_network_follows_the_project_choice_only_with_tools() {
+        use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+        let model = SandboxRemote::AnyHost(8443);
+        let profile = |choice: AgentNetwork, tools: bool| {
+            let policy = AgentPolicy {
+                network: choice,
+                ..AgentPolicy::default()
+            };
+            let dir = tempfile::tempdir().unwrap();
+            let base = dir.path().canonicalize().unwrap();
+            let make = |name: &str| {
+                let folder = base.join(name);
+                std::fs::create_dir(&folder).unwrap();
+                folder
+            };
+            ProjectSandbox::new(
+                &make("project"),
+                &make("home"),
+                &make("tmp"),
+                job_network(&policy, tools, model),
+            )
+            .unwrap()
+            .profile()
+        };
+        let off = profile(AgentNetwork::Open, false);
+        assert!(off.contains("(remote ip \"*:8443\")"), "{off}");
+        assert!(!off.contains("(remote ip \"*:*\")"), "{off}");
+        let open = profile(AgentNetwork::Open, true);
+        assert!(open.contains("(remote ip \"*:*\")"), "{open}");
+        let https = profile(AgentNetwork::Https, true);
+        assert!(https.contains("(remote ip \"*:443\")"), "{https}");
+        assert!(!https.contains("(remote ip \"*:*\")"), "{https}");
+        let none = profile(AgentNetwork::None, true);
+        assert!(none.contains("(remote ip \"*:8443\")"), "{none}");
+        assert!(!none.contains("(remote ip \"*:*\")"), "{none}");
+    }
 
     #[test]
     fn linux_and_windows_refuse_team_agents_and_research_with_a_plain_line() {

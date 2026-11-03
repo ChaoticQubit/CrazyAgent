@@ -74,7 +74,7 @@ test("Settings and a project each have a Process tab, and a skill link keeps its
 test("the app Process page shows the saved text, the two seeds and a Save that waits for a change", () => {
   const markup = page();
   assert.match(markup, /Instructions every master and sub-agent gets, in every project\./);
-  assert.match(markup, /Import my global instructions/);
+  assert.match(markup, /Import from file/);
   assert.match(markup, /Use the CrazyAgent default process/);
   assert.match(markup, /<textarea[^>]*id="process-app"[^>]*>Use tdd\.\n<\/textarea>/);
   assert.match(markup, /9 bytes of 64\.0 KB/);
@@ -94,7 +94,7 @@ test("a project Process page names its file and offers no seeds", () => {
   const markup = page({ scope: { kind: "project", id: "harbor-notes", name: "Harbor Notes" } });
   assert.match(markup, /Instructions every agent in Harbor Notes gets, after the app-wide ones\. Kept in the project&#x27;s \.crazyagent\/instructions\.md/);
   assert.match(markup, /id="process-project"/);
-  assert.doesNotMatch(markup, /Import my global instructions/);
+  assert.doesNotMatch(markup, /Import from file/);
   assert.doesNotMatch(markup, /Use the CrazyAgent default process/);
 });
 
@@ -112,22 +112,26 @@ test("a draft over 64 KB or with a NUL says why and cannot be saved", () => {
 test("a seed opens a preview first and only Put in the editor or Save would change anything", () => {
   const imported = page({ preview: { source: "import", text: "Owner rule: use tdd.\n" } });
   assert.match(imported, /<dialog[^>]*>/);
-  assert.match(imported, /Your global instructions/);
-  assert.match(imported, /Read from ~\/\.claude\/CLAUDE\.md\. It replaces the editor&#x27;s text; nothing is saved until you click Save\./);
+  assert.match(imported, /Instructions from your file/);
+  assert.match(imported, /Read once from the file you picked; afterwards the instructions live here\. It replaces the editor&#x27;s text; nothing is saved until you click Save\./);
   assert.match(imported, /Owner rule: use /);
   assert.match(imported, /Put in the editor/);
   const fallback = page({ preview: { source: "default", text: "# CrazyAgent default process\n" } });
   assert.match(fallback, /CrazyAgent default process/);
-  assert.doesNotMatch(fallback, /Read from ~\/\.claude/);
+  assert.doesNotMatch(fallback, /Read once from the file you picked/);
   assert.match(page({ busy: "import" }), /Reading\.\.\./);
 });
 
-test("only the Import click reads the owner's global instructions", () => {
+test("only the Import from file click opens the chooser, and a closed chooser changes nothing", () => {
   const source = readFileSync(new URL("../src/screens/process.tsx", import.meta.url), "utf8");
-  const reads = [...source.matchAll(/importGlobalInstructions\(\)/g)];
+  const reads = [...source.matchAll(/importInstructionsFile\(\)/g)];
   assert.equal(reads.length, 1);
   const seed = source.slice(source.indexOf("const seed = async"), source.indexOf("const save = async"));
-  assert.match(seed, /source === "import" \? importGlobalInstructions\(\) : defaultProcess\(\)/);
+  assert.match(seed, /source === "import" \? importInstructionsFile\(\) : defaultProcess\(\)/);
+  assert.match(seed, /else if \(result\.value !== null\) setPreview\(\{ source, text: result\.value \}\)/, "a closed chooser opens no preview");
+  const api = readFileSync(new URL("../src/api-process.ts", import.meta.url), "utf8");
+  assert.match(api, /call<string \| null>\("desktop_import_instructions_file"\)/);
+  assert.doesNotMatch(source + api, /importGlobalInstructions|desktop_import_global_instructions/);
   assert.match(source, /onImport=\{\(\) => void seed\("import"\)\}/);
   assert.match(source, /onClick=\{onImport\}/);
 });
@@ -196,34 +200,59 @@ function agentSettings(extra = {}) {
   }));
 }
 
-test("a project's agent settings offer every instruction files option and the transcript switch, the defaults first", () => {
-  assert.deepEqual(client.DEFAULT_INSTRUCTION_SETTINGS, { files: "project", transcripts: true });
-  assert.deepEqual(client.INSTRUCTION_CHOICES.map((choice) => [choice.value, choice.label]),
-    [["project", "Project files"], ["project_and_user", "Project and user files"], ["none", "None"]]);
+const escaped = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const html = (text) => text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll("'", "&#x27;");
+
+test("a project's agent settings offer every instructions mode and the transcript switch, the defaults first", () => {
+  assert.deepEqual(client.DEFAULT_INSTRUCTION_SETTINGS, { mode: "both", transcripts: true, edits: "next_message" });
+  assert.deepEqual(client.INSTRUCTION_MODES.map((choice) => [choice.value, choice.label]),
+    [["project_only", "Project only"], ["app_only", "App only"], ["both", "Both (app, then project appended)"]]);
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/instruction_files.rs", import.meta.url), "utf8");
-  for (const choice of client.INSTRUCTION_CHOICES) assert.match(engine, new RegExp(`=> "${choice.value}"`), `${choice.value} is an engine option`);
+  for (const choice of client.INSTRUCTION_MODES) assert.match(engine, new RegExp(`=> "${choice.value}"`), `${choice.value} is an engine option`);
   const markup = agentSettings();
-  assert.match(markup, /Agent instruction files/);
-  for (const label of ["Project files", "Project and user files", "None"]) assert.match(markup, new RegExp(`role="radio"[^>]*>${label}</button>`));
-  assert.match(markup, /role="radio" aria-checked="true"[^>]*>Project files</);
-  assert.match(markup, /as committed in your checkout/);
+  assert.match(markup, /Instructions agents get/);
+  for (const choice of client.INSTRUCTION_MODES) assert.match(markup, new RegExp(`role="radio"[^>]*>${escaped(choice.label)}</button>`));
+  assert.match(markup, /role="radio" aria-checked="true"[^>]*>Both \(app, then project appended\)</);
+  assert.ok(markup.includes(html(client.INSTRUCTION_MODES[2].note)));
   assert.match(markup, /role="switch"[^>]*aria-checked="true"/);
   assert.match(markup, /Keep transcripts for headless Claude runs/);
   assert.match(markup, /keep their transcript in the agent&#x27;s own home/);
-  for (const choice of client.INSTRUCTION_CHOICES) {
-    const shown = agentSettings({ settings: { kind: "ok", value: { files: choice.value, transcripts: false } } });
-    assert.match(shown, new RegExp(`role="radio" aria-checked="true"[^>]*>${choice.label}</`));
-    assert.ok(shown.includes(choice.note.replaceAll("'", "&#x27;")), choice.value);
+  assert.doesNotMatch(markup, /Project files|Project and user files/);
+  for (const choice of client.INSTRUCTION_MODES) {
+    const shown = agentSettings({ settings: { kind: "ok", value: { mode: choice.value, transcripts: false } } });
+    assert.match(shown, new RegExp(`role="radio" aria-checked="true"[^>]*>${escaped(choice.label)}</`));
+    assert.ok(shown.includes(html(choice.note)), choice.value);
     assert.match(shown, /role="switch"[^>]*aria-checked="false"/);
     assert.match(shown, /keep no transcript/);
   }
+});
+
+test("every way an instruction edit reaches running agents is offered with what it does, Next task first", () => {
+  assert.deepEqual(client.EDIT_DELIVERIES.map((choice) => [choice.value, choice.label]),
+    [["next_message", "Next task"], ["restart", "Restart when idle"], ["badge", "Badge only"]]);
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/instruction_files.rs", import.meta.url), "utf8");
+  for (const choice of client.EDIT_DELIVERIES) assert.match(engine, new RegExp(`=> "${choice.value}"`), `${choice.value} is an engine option`);
+  const markup = agentSettings();
+  assert.match(markup, /When you edit instructions/);
+  for (const choice of client.EDIT_DELIVERIES) assert.match(markup, new RegExp(`role="radio"[^>]*>${escaped(choice.label)}</button>`));
+  assert.match(markup, /role="radio" aria-checked="true"[^>]*>Next task</);
+  assert.match(markup, /next task starts with the sections you changed/);
+  for (const choice of client.EDIT_DELIVERIES) {
+    const shown = agentSettings({ settings: { kind: "ok", value: { mode: "both", transcripts: true, edits: choice.value } } });
+    assert.match(shown, new RegExp(`role="radio" aria-checked="true"[^>]*>${escaped(choice.label)}</`));
+    assert.ok(shown.includes(html(choice.note)), choice.value);
+  }
+  assert.match(agentSettings({ settings: { kind: "ok", value: { mode: "both", transcripts: true } } }),
+    /role="radio" aria-checked="true"[^>]*>Next task</, "an engine reply without the choice shows the default");
+  assert.match(client.EDIT_DELIVERIES[1].note, /restarts when it is next idle/);
+  assert.match(client.EDIT_DELIVERIES[2].note, /shows Instructions changed/);
 });
 
 test("unreadable agent settings say why and show the defaults so a change replaces them", () => {
   const markup = agentSettings({ settings: { kind: "error", code: "instruction_settings_invalid", message: "" } });
   assert.match(markup, /value CrazyAgent doesn&#x27;t know/);
   assert.doesNotMatch(markup, /instruction_settings_/);
-  assert.match(markup, /role="radio" aria-checked="true"[^>]*>Project files</);
+  assert.match(markup, /role="radio" aria-checked="true"[^>]*>Both \(app, then project appended\)</);
   assert.match(agentSettings({ failure: "This project's agent settings couldn't be read. Try again." }), /couldn&#x27;t be read/);
   assert.match(agentSettings({ busy: true }), /Saving\.\.\./);
   assert.match(agentSettings({ settings: { kind: "not_ready" } }), /ready/);
@@ -242,4 +271,150 @@ test("a project's Process page reads and saves its agent settings through the en
     assert.match(lib, new RegExp(`async fn ${command}\\(`));
     assert.match(lib, new RegExp(`\\n\\s+${command},\\n`), `${command} is registered`);
   }
+});
+
+test("picking an instructions mode, the transcript switch or an edit choice saves the whole setting, never a files field", async () => {
+  const { bundle, withPage } = await import("./browser.mjs");
+  const fixture = await bundle(new URL("./fixtures/agent-settings.mjs", import.meta.url).pathname);
+  const seen = await withPage(async ({ evaluate }) => {
+    await evaluate(fixture);
+    await evaluate(`Fixture.mount(${JSON.stringify(client.DEFAULT_INSTRUCTION_SETTINGS)})`);
+    const clicks = [];
+    for (const label of ["Project only", "App only", "agent-transcripts", "Restart when idle", "Badge only"]) {
+      clicks.push(await evaluate(`Fixture.click(${JSON.stringify(label)})`));
+    }
+    const first = await evaluate("Fixture.saves()");
+    await evaluate(`Fixture.mount(${JSON.stringify({ ...client.DEFAULT_INSTRUCTION_SETTINGS, edits: "badge" })})`);
+    clicks.push(await evaluate(`Fixture.click("Next task")`));
+    return { clicks, saves: [...first, ...await evaluate("Fixture.saves()")] };
+  });
+  assert.deepEqual(seen.clicks, [true, true, true, true, true, true]);
+  assert.deepEqual(seen.saves, [
+    { mode: "project_only", transcripts: true, edits: "next_message" },
+    { mode: "app_only", transcripts: true, edits: "next_message" },
+    { mode: "both", transcripts: false, edits: "next_message" },
+    { mode: "both", transcripts: true, edits: "restart" },
+    { mode: "both", transcripts: true, edits: "badge" },
+    { mode: "both", transcripts: true, edits: "next_message" },
+  ]);
+});
+
+const importFile = (path, extra = {}) => ({ path, bytes: 15, tracked: false, refused: null, uncommitted: false, ...extra });
+
+test("the import prompt lists each found file with its size, a tracked note or why it stays, and confirms only a movable set", () => {
+  const prompt = (files, extra = {}) => renderToStaticMarkup(createElement(view.InstructionImportView, {
+    name: "Harbor Notes", files, busy: false, failure: "", onConfirm: never("onConfirm"), onLater: never("onLater"), ...extra,
+  }));
+  const markup = prompt([
+    importFile("CLAUDE.md", { tracked: true }),
+    importFile("AGENTS.md", { bytes: 2048 }),
+    importFile("CLAUDE.local.md", { refused: "process_import_outside" }),
+  ]);
+  assert.match(markup, /Instruction files found in Harbor Notes/);
+  assert.match(markup, /<strong>CLAUDE\.md<\/strong> <span class="secondary">15 bytes, tracked by git<\/span>/);
+  assert.match(markup, /<strong>AGENTS\.md<\/strong> <span class="secondary">2\.0 KB<\/span>/);
+  assert.ok(markup.includes(html(`Stays in place: ${client.importRefusal("process_import_outside")}`)), markup);
+  assert.match(markup, /Git tracks some of these files, so after the move your checkout shows them as deleted\./);
+  assert.match(markup, /Not now/);
+  assert.doesNotMatch(markup.match(/<button[^>]*>(?:(?!<\/button>).)*Copy into instructions\.md and move aside/s)[0], /disabled/);
+  const refused = prompt([importFile("CLAUDE.md", { refused: "process_import_outside" })]);
+  assert.match(refused.match(/<button[^>]*>(?:(?!<\/button>).)*Copy into instructions\.md and move aside/s)[0], /disabled=""/, "nothing movable, nothing to confirm");
+  assert.doesNotMatch(refused, /Git tracks some/);
+  assert.match(prompt([importFile("AGENTS.md")], { failure: "The instruction files couldn't be moved aside." }), /class="notice danger" role="alert">.*The instruction files couldn&#x27;t be moved aside\./s);
+});
+
+test("the move notice names the files, says this or these deletions, offers Leave it only when given and shows a refusal as an alert", () => {
+  const notice = (files, extra = {}) => renderToStaticMarkup(createElement(view.ImportMoveView, {
+    files, busy: false, failure: "", onCommit: never("onCommit"), ...extra,
+  }));
+  const one = notice(["CLAUDE.md"], { onLeave: never("onLeave") });
+  assert.match(one, /Git still shows CLAUDE\.md as deleted, and merges into this branch are refused until the move is committed\./);
+  assert.match(one, /holding only this deletion; it is never pushed\./);
+  assert.match(one, />Leave it</);
+  assert.match(one, />Commit the move</);
+  assert.doesNotMatch(one, /role="alert"/);
+  const two = notice(["CLAUDE.md", ".claude/CLAUDE.md"]);
+  assert.match(two, /Git still shows CLAUDE\.md, \.claude\/CLAUDE\.md as deleted/);
+  assert.match(two, /holding only these deletions;/);
+  assert.doesNotMatch(two, /Leave it/, "the banner offers no Leave it");
+  const refused = notice(["CLAUDE.md"], { failure: client.processMessage({ kind: "error", code: "process_commit_staged", message: "" }) });
+  assert.match(refused, /class="import-move-failure" role="alert">Other files are staged/);
+  for (const code of ["process_commit_staged", "process_commit_none", "process_commit_busy", "process_commit_detached", "process_commit_moved", "process_commit_identity", "process_commit_failed"]) {
+    assert.ok(client.PROCESS_REFUSALS.includes(code), code);
+    assert.doesNotMatch(client.processMessage({ kind: "error", code, message: "" }), /process_/, code);
+  }
+});
+
+const ADOPTION = {
+  nudges: "ten_minutes",
+  counted: ["start_work", "graphify"],
+  skills: ["tdd", "zeta"],
+  hidden: 2,
+  agents: [
+    { agent: 3, role: "sub", harness: "claude-code", active: true, counts: [0, 0], skills: [0, 0], other_skills: [], graphify: 0, context_mode: 0, flags: [], reminded: [], hookless: true },
+    { agent: 2, role: "sub", harness: "codex", active: false, counts: [0, 2], skills: [1, 0], other_skills: [{ name: "other-one", count: 1 }], graphify: 2, context_mode: 1,
+      flags: ["edits_without_start_work"], reminded: ["edits_without_start_work"], hookless: false },
+    { agent: 1, role: "master", harness: "claude-code", active: true, counts: [1, 0], skills: [0, 0], other_skills: [], graphify: 0, context_mode: 0,
+      flags: ["no_graphify_or_context_mode"], reminded: [], hookless: false },
+  ],
+};
+
+const rowOf = (markup, label) => {
+  const row = markup.split("<tr").find((part) => part.includes(`>${label}</th>`));
+  assert.ok(row, `${label} has a row`);
+  return row;
+};
+
+test("workflow adoption shows each counted tool's column, skill counts, red flags and the nudges line", () => {
+  const markup = renderToStaticMarkup(createElement(view.AdoptionView, { adoption: { kind: "ok", value: ADOPTION }, onRefresh: never("onRefresh") }));
+  assert.match(markup, /Nudges run every 10 minutes: each red flag sends that agent one reminder\./);
+  assert.match(markup, /<th scope="col">Agent<\/th><th scope="col">start_work<\/th><th scope="col">graphify<\/th><th scope="col">Skills<\/th><th scope="col">Flags<\/th>/);
+  const codex = rowOf(markup, "#2 sub codex");
+  assert.match(codex, /class="adoption-stopped"/, "a stopped agent is dimmed");
+  assert.match(codex, /<td>0<\/td><td>2<\/td>/);
+  assert.match(codex, /graphify <strong>2<\/strong>/);
+  assert.match(codex, /ctx_\* <strong>1<\/strong>/);
+  assert.match(codex, /<span>tdd <strong>1<\/strong><\/span>/);
+  assert.match(codex, /<span class="secondary">zeta <strong>0<\/strong><\/span>/, "a zero count is muted");
+  assert.match(codex, /other-one \(not enabled\) <strong>1<\/strong>/);
+  assert.match(codex, /Edits without start_work, reminded/);
+  const master = rowOf(markup, "#1 master claude-code");
+  assert.doesNotMatch(master, /adoption-stopped/);
+  assert.match(master, /10\+ min without graphify or context-mode/);
+  assert.doesNotMatch(master, /reminded/);
+  assert.match(markup, /2 older agents are not listed\./);
+  const off = renderToStaticMarkup(createElement(view.AdoptionView, { adoption: { kind: "ok", value: { ...ADOPTION, nudges: "off", hidden: 0, agents: [] } }, onRefresh: never("onRefresh") }));
+  assert.match(off, /Nudges are off: flags show here, and agents get no reminder\./);
+  const firstEdit = renderToStaticMarkup(createElement(view.AdoptionView, { adoption: { kind: "ok", value: { ...ADOPTION, nudges: "first_edit", hidden: 0, agents: [] } }, onRefresh: never("onRefresh") }));
+  assert.match(firstEdit, /Nudges run on the first edit: an edit before any graph query gets one reminder, and flags send none\./);
+  assert.match(off, /No agents yet/);
+  assert.doesNotMatch(off, /not listed/);
+  const failed = renderToStaticMarkup(createElement(view.AdoptionView, { adoption: { kind: "error", code: "process_adoption_unavailable", message: "" }, onRefresh() {} }));
+  assert.match(failed, /Workflow adoption couldn&#x27;t be read\. Try again\./);
+});
+
+test("a hookless agent's adoption row is one cell spanning the counts, skills and flags", () => {
+  const markup = renderToStaticMarkup(createElement(view.AdoptionView, { adoption: { kind: "ok", value: ADOPTION }, onRefresh: never("onRefresh") }));
+  const bare = rowOf(markup, "#3 sub claude-code");
+  assert.match(bare, new RegExp(`<td colSpan="${ADOPTION.counted.length + 2}" class="secondary">Counts and flags unavailable for this account kind</td>`, "i"));
+  assert.doesNotMatch(bare, /<strong>|None/);
+});
+
+test("an agent's skill counts list graphify, ctx_* and every enabled skill, zeros muted", () => {
+  const counts = renderToStaticMarkup(createElement(view.SkillCounts, { skills: ADOPTION.skills, agent: ADOPTION.agents[1] }));
+  assert.deepEqual([...counts.matchAll(/<span( class="secondary")?>([^<]+) <strong>(\d+)<\/strong><\/span>/g)].map((found) => [found[2], Number(found[3]), Boolean(found[1])]), [
+    ["graphify", 2, false], ["ctx_*", 1, false], ["tdd", 1, false], ["zeta", 0, true], ["other-one (not enabled)", 1, false],
+  ]);
+  const none = renderToStaticMarkup(createElement(view.SkillCounts, { skills: [], agent: ADOPTION.agents[2] }));
+  assert.match(none, /<span class="secondary">No skills enabled<\/span>/);
+});
+
+test("the skills dialog shows an agent's counts, or says why a hookless or unlisted agent has none", () => {
+  const body = (agent, adoption = { kind: "ok", value: ADOPTION }) =>
+    renderToStaticMarkup(createElement(view.AgentSkills, { adoption, agent, onRetry() {} }));
+  assert.match(body(2), /tdd <strong>1<\/strong>/);
+  assert.match(body(3), /Skill counts unavailable for this account kind\./);
+  assert.doesNotMatch(body(3), /<strong>/);
+  assert.match(body(9), /This agent is older than the agents the Process page lists, so its counts are not shown\./);
+  assert.match(body(2, { kind: "error", code: "process_adoption_unavailable", message: "" }), /Workflow adoption couldn&#x27;t be read\. Try again\./);
 });

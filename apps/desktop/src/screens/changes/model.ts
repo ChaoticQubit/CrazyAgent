@@ -1,5 +1,5 @@
 import { changesRefusal } from "../../api-changes";
-import type { AcceptOutcome, ChangedFile, ChangeSet, FileStatus } from "../../api-changes";
+import type { AcceptOutcome, ChangedFile, ChangeSet, FileStatus, TargetBranches } from "../../api-changes";
 import type { Tone } from "../../ui";
 import { displayText } from "../conversation";
 
@@ -160,6 +160,39 @@ export function conflictNote(set: ChangeSet): string | null {
 export function commitMessage(text: string): string | null {
   const message = text.replace(/\r\n/g, "\n").trim();
   return message !== "" && new TextEncoder().encode(message).length <= MESSAGE_BYTES_MAX && displayText(message) === message ? message : null;
+}
+
+/** Where an Accept lands and how the dialog says it: the picked branch to send, null when it
+ * is where the engine lands with no branch named, the team's Land on branch, else the
+ * checked-out one, and the sentence naming that branch, or the engine's sentence naming a
+ * missing Land on branch while none is picked. Inputs: the listed branches, null before they
+ * load, and the picked branch, empty for none. Output: the branch and sentence. */
+export function acceptTarget(branches: TargetBranches | null, target: string): { picked: string | null; text: string } {
+  const problem = branches?.land_on_problem ?? null;
+  if (problem !== null && target === "") return { picked: null, text: displayText(problem) };
+  const fallback = branches === null || problem !== null ? null : branches.land_on ?? branches.current;
+  const lands = target !== "" ? target : fallback;
+  const picked = branches !== null && target !== "" && target !== fallback ? target : null;
+  const where = lands === null
+    ? "They land as one commit on your project's Land on branch, under your own Git name."
+    : lands === branches?.current
+      ? `They land as one commit on ${displayText(lands)}, the branch checked out in your project folder, under your own Git name.`
+      : `They land as one commit on ${displayText(lands)}, under your own Git name. That branch isn't checked out, so the files in your project folder stay as they are.`;
+  return { picked, text: `${where} CrazyAgent did not check them.` };
+}
+
+/** Whether the Accept dialog must wait for the owner to pick a branch: the Land on branch is
+ * missing, so no branch is where the changes land by default. Inputs: the listed branches,
+ * null before they load, and the picked branch, empty for none. Output: true to wait. */
+export function acceptBlocked(branches: TargetBranches | null, target: string): boolean {
+  return (branches?.land_on_problem ?? null) !== null && target === "";
+}
+
+/** One branch as the Accept dialog lists it, marked as the Land on branch and as checked out
+ * where it is. Inputs: the listed branches and the name. Output: the label. */
+export function branchLabel(branches: TargetBranches, name: string): string {
+  const marks = [name === branches.land_on ? "Land on" : null, name === branches.current ? "checked out" : null].filter((mark) => mark !== null);
+  return marks.length === 0 ? name : `${name} (${marks.join(", ")})`;
 }
 
 /** What a landed Accept did, in one sentence; a conflict is told by the change set's own

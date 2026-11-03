@@ -1009,7 +1009,11 @@ async fn actual_legacy_database_migrates_additively_and_readonly_does_not_instal
         if name == "file_trash" {
             continue;
         }
-        assert_eq!(after.get(name), Some(sql));
+        let renamed = format!("CREATE TABLE \"{name}\"");
+        let kept = after
+            .get(name)
+            .map(|sql| sql.replacen(&renamed, &format!("CREATE TABLE {name}"), 1));
+        assert_eq!(kept.as_ref(), Some(sql), "{name}");
     }
     assert!(
         after

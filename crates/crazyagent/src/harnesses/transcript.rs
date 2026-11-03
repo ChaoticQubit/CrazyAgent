@@ -16,9 +16,14 @@ const CLAUDE_INTERRUPTED: &str = "[Request interrupted by user";
 const CONVERSATION_ID_BYTES_MAX: usize = 128;
 const EXCERPT_TAIL_BYTES_MAX: u64 = 4 * 1024 * 1024;
 const EXCERPT_MESSAGES_MAX: usize = 256;
+const CLAUDE_NOTIFICATION: &str = "<task-notification>";
+const NOTIFIED_TASKS_MAX: usize = 16;
 
 /// One fact read from a harness's own session record, whatever the harness.
 /// `Waiting` means the harness waits for the owner, such as an approval or a question.
+/// `BackgroundStarted` and `BackgroundEnded` follow a command the harness runs on after its
+/// tool call returns, such as Claude Code's Bash `run_in_background`, by its task id: it
+/// ends with its task notification, or with the agent's own stop of it, which brings none.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TranscriptEvent {
     TurnStarted,
@@ -28,6 +33,8 @@ pub enum TranscriptEvent {
     Interrupted,
     TurnFinished { success: bool },
     TurnError { rate_limited: bool },
+    BackgroundStarted { id: String },
+    BackgroundEnded { id: String },
 }
 
 /// Follows one harness session record as the harness appends to it: the Codex rollout of a
@@ -149,6 +156,13 @@ impl TranscriptReader {
         self.start
     }
 
+    /// Says whether this record reports the commands its harness starts in the background
+    /// and their ends, as a Claude Code transcript does; a Codex rollout reports neither.
+    /// Output: the answer.
+    pub fn reports_background(&self) -> bool {
+        matches!(self.source, Transcript::ClaudeSession { .. })
+    }
+
     /// Counts the bytes read from the record so far, so a caller can bound a session's output.
     /// Output: the total since the reader started.
     pub fn bytes(&self) -> u64 {
@@ -242,7 +256,7 @@ impl TranscriptReader {
 /// the open takes the reparse point rather than following it. Takes the path.
 /// Returns the file, or none for a link, a directory or an open failure.
 #[cfg(windows)]
-fn open_plain(path: &Path) -> Option<File> {
+pub(crate) fn open_plain(path: &Path) -> Option<File> {
     use std::os::windows::fs::OpenOptionsExt;
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -253,7 +267,7 @@ fn open_plain(path: &Path) -> Option<File> {
 }
 
 #[cfg(unix)]
-fn open_plain(path: &Path) -> Option<File> {
+pub(crate) fn open_plain(path: &Path) -> Option<File> {
     let file = rustix::fs::open(
         path,
         rustix::fs::OFlags::RDONLY
@@ -363,7 +377,7 @@ fn newest(folder: &Path, keep: usize) -> Vec<PathBuf> {
 /// Tells whether a record lies inside a folder through plain folders only: no `..`, no
 /// link between the folder and the record. Takes the folder and the record. Returns true
 /// when every step is a plain name and every folder on the way is a real folder.
-fn plain_below(folder: &Path, record: &Path) -> bool {
+pub(crate) fn plain_below(folder: &Path, record: &Path) -> bool {
     let Ok(rest) = record.strip_prefix(folder) else {
         return false;
     };
@@ -420,6 +434,24 @@ fn conversation_id(value: &Value) -> Option<String> {
                 && !id.chars().any(char::is_control)
         })
         .map(str::to_owned)
+}
+
+/// Reads the task ids a Claude Code task notification says ended: each `<task-id>` of a
+/// message that holds `<task-notification>`, kept as `conversation_id` keeps an id, at most
+/// `NOTIFIED_TASKS_MAX`. Takes the message text. Returns the ids, none for other text.
+fn notified_tasks(text: &str) -> Vec<String> {
+    if !text.contains(CLAUDE_NOTIFICATION) {
+        return Vec::new();
+    }
+    let ids: Vec<String> = text
+        .split("<task-id>")
+        .skip(1)
+        .filter_map(|rest| rest.split_once("</task-id>"))
+        .filter_map(|(id, _)| conversation_id(&Value::String(id.trim().to_owned())))
+        .take(NOTIFIED_TASKS_MAX)
+        .collect();
+    assert!(ids.len() <= NOTIFIED_TASKS_MAX);
+    ids
 }
 
 fn line_text(text: &str) -> TranscriptEvent {
@@ -489,19 +521,33 @@ fn claude_facts(value: &Value) -> Vec<TranscriptEvent> {
                     .collect(),
                 _ => Vec::new(),
             };
+            let mut facts: Vec<TranscriptEvent> =
+                conversation_id(&value["toolUseResult"]["backgroundTaskId"])
+                    .map(|id| TranscriptEvent::BackgroundStarted { id })
+                    .into_iter()
+                    .chain(
+                        conversation_id(&value["toolUseResult"]["task_id"])
+                            .map(|id| TranscriptEvent::BackgroundEnded { id }),
+                    )
+                    .collect();
+            facts.extend(
+                texts
+                    .iter()
+                    .flat_map(|text| notified_tasks(text))
+                    .map(|id| TranscriptEvent::BackgroundEnded { id }),
+            );
             if texts
                 .iter()
                 .any(|text| text.starts_with(CLAUDE_INTERRUPTED))
             {
-                vec![
+                facts.extend([
                     TranscriptEvent::Interrupted,
                     TranscriptEvent::TurnFinished { success: false },
-                ]
-            } else if texts.is_empty() {
-                Vec::new()
-            } else {
-                vec![TranscriptEvent::TurnStarted]
+                ]);
+            } else if !texts.is_empty() {
+                facts.push(TranscriptEvent::TurnStarted);
             }
+            facts
         }
         Some("assistant") if value["isApiErrorMessage"] == true => {
             let code = value["error"].as_str().unwrap_or_default();
@@ -599,6 +645,19 @@ pub fn conversation_messages(harness: &str, record: &Path) -> Vec<(Speaker, Stri
     }
     assert!(messages.len() <= EXCERPT_MESSAGES_MAX);
     messages.into()
+}
+
+/// Reads one line of a harness conversation record as `conversation_messages` reads it:
+/// a Codex rollout `message` item or Claude Code `user` and `assistant` text. Takes the
+/// catalog harness id and the line. Returns the speaker and text, or none for any other
+/// line, a harness without a reader or a line that is not JSON.
+pub fn record_message(harness: &str, line: &[u8]) -> Option<(Speaker, String)> {
+    let value = serde_json::from_slice::<Value>(line).ok()?;
+    match harness {
+        "codex" => codex_message(&value),
+        "claude-code" => claude_message(&value),
+        _ => None,
+    }
 }
 
 fn codex_message(value: &Value) -> Option<(Speaker, String)> {

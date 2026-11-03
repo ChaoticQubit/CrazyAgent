@@ -22,6 +22,8 @@ mod accounts;
 mod agents;
 mod changes;
 mod cleanup;
+mod coord;
+mod coord_questions;
 mod harnesses;
 pub mod intake;
 pub mod master;
@@ -632,6 +634,11 @@ impl NativeBridge {
                 Some(project_id.as_str().to_owned()),
                 None,
             ),
+            OwnerMutation::SetProjectHiddenPaths { project_id, .. } => (
+                "project_hidden_paths",
+                Some(project_id.as_str().to_owned()),
+                None,
+            ),
             OwnerMutation::SetProjectAgentPolicy { project_id, .. } => (
                 "project_agent_policy",
                 Some(project_id.as_str().to_owned()),
@@ -696,6 +703,9 @@ impl NativeBridge {
                     Some(project_id.as_str().to_owned()),
                     None,
                 ),
+                crazyagent::memory::library::LibraryAction::Import { project_id, .. } => {
+                    ("memory_add", Some(project_id.as_str().to_owned()), None)
+                }
                 crazyagent::memory::library::LibraryAction::SaveSelection {
                     project_id, ..
                 } => (
@@ -703,6 +713,12 @@ impl NativeBridge {
                     Some(project_id.as_str().to_owned()),
                     None,
                 ),
+                crazyagent::memory::library::LibraryAction::Approve { .. } => {
+                    ("memory_approve", None, None)
+                }
+                crazyagent::memory::library::LibraryAction::AgentWrites { .. } => {
+                    ("memory_agent_writes", None, None)
+                }
             },
             OwnerMutation::ProjectMaster { action } => match action {
                 crazyagent::master_session::MasterOwnerAction::Open { project_id, .. }
@@ -712,9 +728,10 @@ impl NativeBridge {
                 | crazyagent::master_session::MasterOwnerAction::Resume { project_id, .. }
                 | crazyagent::master_session::MasterOwnerAction::Submit { project_id, .. }
                 | crazyagent::master_session::MasterOwnerAction::Cancel { project_id, .. }
-                | crazyagent::master_session::MasterOwnerAction::Close { project_id, .. } => {
-                    ("master", Some(project_id.as_str().to_owned()), None)
-                }
+                | crazyagent::master_session::MasterOwnerAction::Close { project_id, .. }
+                | crazyagent::master_session::MasterOwnerAction::DeleteSession {
+                    project_id, ..
+                } => ("master", Some(project_id.as_str().to_owned()), None),
                 crazyagent::master_session::MasterOwnerAction::Resolve { .. }
                 | crazyagent::master_session::MasterOwnerAction::RegisterRcliProfile { .. } => {
                     return Err(failure("unexpected_pending_intent"));

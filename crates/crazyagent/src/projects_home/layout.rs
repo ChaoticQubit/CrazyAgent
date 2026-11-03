@@ -11,10 +11,11 @@ pub const EXCLUDES: [&str; 2] = [".crazyagent/", "graphify-out/"];
 const EXCLUDE_BYTES_MAX: u64 = 1024 * 1024;
 
 /// Creates a project's `.crazyagent/` folder with its setup, research, context
-/// and agent worktree folders, reusing any that already exist, and hides it
-/// and `graphify-out/` from git. Called when the owner starts onboarding.
+/// and agent worktree folders and an empty project `instructions.md`, reusing
+/// any that already exist, and hides it and `graphify-out/` from git. Called
+/// for a new project, when the owner starts onboarding and before an import.
 /// Input: the project folder. Output: the `.crazyagent/` path, or a code when
-/// the folder or an existing `.crazyagent/` entry is not a real folder.
+/// the folder or an existing `.crazyagent/` entry is not a real folder or file.
 pub fn prepare_layout(folder: &Path) -> Result<PathBuf, EngineError> {
     let folder = real_folder(folder, "project_folder_missing", "project_folder_missing")?;
     let root = folder.join(CRAZYAGENT_DIRECTORY);
@@ -22,6 +23,7 @@ pub fn prepare_layout(folder: &Path) -> Result<PathBuf, EngineError> {
     for name in LAYOUT {
         ensure_folder(&root.join(name))?;
     }
+    ensure_file(&root.join(crate::agent_home::PROJECT_FILE))?;
     exclude_from_git(&folder)?;
     assert!(root.is_dir());
     Ok(root)
@@ -34,6 +36,28 @@ fn ensure_folder(path: &Path) -> Result<(), EngineError> {
             let metadata =
                 fs::symlink_metadata(path).map_err(|_| refused("crazyagent_folder_invalid"))?;
             if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                Ok(())
+            } else {
+                Err(refused("crazyagent_folder_invalid"))
+            }
+        }
+        Err(_) => Err(refused("crazyagent_folder_unwritable")),
+    }
+}
+
+/// Creates an empty owner-only file unless one is there, which must then be a
+/// regular file, not a link. Input: the path. Output: unit, or a code.
+fn ensure_file(path: &Path) -> Result<(), EngineError> {
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    match options.open(path) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let metadata =
+                fs::symlink_metadata(path).map_err(|_| refused("crazyagent_folder_invalid"))?;
+            if metadata.is_file() && !metadata.file_type().is_symlink() {
                 Ok(())
             } else {
                 Err(refused("crazyagent_folder_invalid"))
