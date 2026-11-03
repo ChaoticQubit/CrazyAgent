@@ -1,13 +1,11 @@
-use super::managed_agent::{AGENT, ManagedAgent, NativeTeam, SignedIn, claude};
+use super::managed_agent::{AGENT, ManagedAgent, NativeTeam, SignedIn, claude, shown};
 use super::{Order, Report, TurnEnd, TurnRules};
 use crate::sandbox::policy::AgentAccess;
-use crate::team::AgentRole;
-use crate::terminal::tmux::{Tmux, installed};
-use crate::terminal::{AgentId, FOLDER, Host, harness_socket, teammates_socket};
+use crate::terminal::tmux::installed;
+use crate::terminal::{AgentId, harness_socket, teammates_socket};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -22,31 +20,18 @@ const TEAM_TURN: Duration = Duration::from_secs(420);
 const POLL: Duration = Duration::from_millis(250);
 const GRACE: Duration = Duration::from_secs(30);
 
-/// A real Claude Code lead prepared by the team runtime on the owner's signed-in account,
-/// in a pane of a tmux host of its own test folder. Output: the lead and the folder.
-fn native_lead() -> (ManagedAgent, tempfile::TempDir) {
-    let root = tempfile::Builder::new()
-        .prefix("ca-live-lead-")
-        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
-        .unwrap();
-    let base = root.path().canonicalize().unwrap();
-    let tmux = installed(&base).expect("BLOCKED: tmux must be installed");
-    let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &base.join(FOLDER)));
-    let lead = ManagedAgent::in_pane("claude-code", &claude(), host, AgentRole::Sub);
-    (lead, root)
-}
-
-/// The same lead started as a real worker of its team runtime at `access`, with its first
-/// turn granted on the owner's account, as the runtime's first dispatch to it does.
-/// Inputs: the held account, the launch's name and the saved level. Output: the team and
-/// the first turn's reports, the finished turn last.
+/// A real Claude Code lead the team runtime plans and starts as a native-mode lead on the
+/// owner's signed-in account, on the engine's own terminal host, started as a real worker of
+/// its team runtime at `access` with its first turn granted, as the runtime's first dispatch
+/// to it does. Inputs: the held account, the launch's name and the saved level. Output: the
+/// team and the first turn's reports, the finished turn last.
 fn native_worker(
     signed_in: &mut SignedIn,
     launch: &str,
     access: AgentAccess,
 ) -> (NativeTeam, Vec<Report>) {
-    let (lead, root) = native_lead();
-    let team = lead.into_native_worker(signed_in.acquire(launch), ONE, TURN, access, Some(root));
+    let lead = ManagedAgent::engine_native_lead(&claude());
+    let team = lead.into_native_worker(signed_in.acquire(launch), ONE, TURN, access);
     let first = team.until_finished(TURN);
     (team, first)
 }
@@ -87,7 +72,7 @@ fn finished(reports: &[Report]) -> Vec<(String, TurnEnd, Option<String>)> {
 #[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
 fn live_native_lead_managed_keeps_one_session() {
     let mut signed_in = SignedIn::claude();
-    let (mut lead, _root) = native_lead();
+    let mut lead = ManagedAgent::engine_native_lead(&claude());
     let profile = signed_in.acquire("claude-live-native-lead");
     let (reports, problem) = lead.run_native_lead(
         profile,
@@ -129,7 +114,7 @@ fn live_native_lead_managed_keeps_one_session() {
 #[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
 fn live_native_lead_managed_adopted_gets_credential() {
     let mut signed_in = SignedIn::claude();
-    let (mut lead, _root) = native_lead();
+    let mut lead = ManagedAgent::engine_native_lead(&claude());
     let (reports, problem) = lead.run_native_lead(
         signed_in.acquire("claude-live-native-left"),
         &["Reply with exactly the word ONE and nothing else."],
@@ -364,17 +349,18 @@ impl LeadServers {
         )
     }
 
-    /// Reads one teammate pane's screen and recent history as the lead's own tmux client
-    /// does: inside the lead's installed profile, on the teammates' server its `TMUX`
-    /// names. Input: the pane. Output: the text, empty when the read was refused.
-    fn read_as_lead(&self, pane: &str) -> String {
+    /// Reads one pane's screen and recent history as the lead's own tmux client does:
+    /// inside the lead's installed profile, on the lead's own server or the teammates' one
+    /// its `TMUX` names. Inputs: the server's socket and the pane. Output: the text, empty
+    /// when the read was refused.
+    fn read_as_lead(&self, socket: &Path, pane: &str) -> String {
         crate::spawn_gate::output(
             Command::new(crate::sandbox::SANDBOX_EXEC)
                 .arg("-f")
                 .arg(&self.profile)
                 .arg(&self.tmux)
                 .arg("-S")
-                .arg(&self.mates)
+                .arg(socket)
                 .args(["capture-pane", "-p", "-J", "-S", "-200", "-t", pane])
                 .env_clear()
                 .stdin(Stdio::null())
@@ -385,6 +371,25 @@ impl LeadServers {
         .filter(|output| output.status.success())
         .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
         .unwrap_or_default()
+    }
+
+    /// Every pane of both servers with its text as the lead's client reads it, so a failed
+    /// wait shows what the lead and its teammates had on screen. Output: each server's
+    /// socket, pane and text.
+    fn screens(&self) -> Vec<(PathBuf, String, String)> {
+        [&self.own, &self.mates]
+            .into_iter()
+            .flat_map(|socket| {
+                self.panes(socket)
+                    .unwrap_or_default()
+                    .into_keys()
+                    .map(|pane| {
+                        let text = self.read_as_lead(socket, &pane);
+                        (socket.clone(), pane, text)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
 
     /// Polls both servers until `wait` passed, or `done` is set and either the lead's client
@@ -404,7 +409,7 @@ impl LeadServers {
                 (Some(own), Some(mates)) => {
                     seen.own.extend(own.into_keys());
                     for (pane, window) in mates {
-                        if pane != anchor && self.read_as_lead(&pane).contains(token) {
+                        if pane != anchor && self.read_as_lead(&self.mates, &pane).contains(token) {
                             seen.read.insert(pane.clone());
                         }
                         seen.mates.insert(pane, window);
@@ -486,7 +491,6 @@ fn live_native_lead_splits_teammates_into_mates_server() {
         &team_prompt(&token),
         TEAM_TURN,
         AgentAccess::Sandboxed,
-        None,
     );
     let started = team.reports_until(TEAM_TURN, |report| matches!(report, Report::Ready { .. }));
     assert_eq!(
@@ -501,9 +505,9 @@ fn live_native_lead_splits_teammates_into_mates_server() {
         .panes(&servers.mates)
         .expect("the teammates' server answers");
     assert_eq!(
-        own.len(),
-        1,
-        "the lead's own server holds only the lead: {own:?}"
+        (own.len(), own.values().collect::<BTreeSet<_>>().len()),
+        (2, 2),
+        "the lead's own server holds only its holder window and the lead's, one pane each: {own:?}"
     );
     assert_eq!(
         mates.len(),
@@ -578,7 +582,6 @@ fn live_a_teammate_cannot_plant_a_command_in_its_lead_s_shell_snapshot() {
         BASH_ONE,
         TURN,
         AgentAccess::Sandboxed,
-        None,
     );
     let first = finished(&team.until_finished(TURN));
     assert!(answered(&first, "ONE"), "{first:?}");
@@ -750,6 +753,13 @@ fn live_native_teammates_work_from_their_own_home_through_the_lead_s_team_folder
     .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
     .unwrap();
     let lead = ManagedAgent::engine_native_lead(&claude());
+    let name = AgentId::team(AGENT).unwrap();
+    let servers = LeadServers {
+        tmux: installed(&lead.base).expect("BLOCKED: tmux must be installed"),
+        own: harness_socket(&lead.base, &name).unwrap(),
+        mates: teammates_socket(&lead.base, &name).unwrap(),
+        profile: lead.sandbox_profile.clone(),
+    };
     let token = format!(
         "OWNHOME{:x}",
         SystemTime::now()
@@ -763,14 +773,26 @@ fn live_native_teammates_work_from_their_own_home_through_the_lead_s_team_folder
         &own_home_prompt(&token),
         TEAM_TURN,
         AgentAccess::Sandboxed,
-        None,
     );
-    let reports = team.reports_until(TEAM_TURN, |report| token_turn(report, &answer).is_some());
+    let mates = crate::launch_context::mates_home(&team.home);
+    let reports = team
+        .reports_within(TEAM_TURN, |report| token_turn(report, &answer).is_some())
+        .unwrap_or_else(|(why, seen)| {
+            for (socket, pane, text) in servers.screens() {
+                println!("screen {} {pane}:\n{text}", socket.display());
+            }
+            println!(
+                "mates transcripts={:?} shared={:?} tasks={:?}",
+                files_under(&mates.join("projects"), 3),
+                files_under(&team.home.join("teams"), 3),
+                files_under(&team.home.join("tasks"), 2)
+            );
+            panic!("{why}, after {} others: {:?}", seen.len(), shown(&seen))
+        });
     let (end, text) = reports
         .last()
         .and_then(|report| token_turn(report, &answer))
         .expect("the wait ends on the lead's turn holding the teammate's answer");
-    let mates = crate::launch_context::mates_home(&team.home);
     let transcripts = files_under(&mates.join("projects"), 3);
     let shared = files_under(&team.home.join("teams"), 3);
     let tasks = files_under(&team.home.join("tasks"), 2);

@@ -431,6 +431,51 @@ fn a_resumed_harness_continues_the_conversation_it_recorded() {
     );
 }
 
+/// A Claude Code app renders its system prompt fresh on every request (QR2): Claude Code
+/// 2.1.309 otherwise records the prompt of a conversation's first request and sends that
+/// record on every resume, so a relaunch after an instructions edit would run with the old
+/// text. A signed-in launch, where recording is on by default, and a keyed `--bare` one
+/// both turn it off, fresh and resumed, tools on and off.
+#[test]
+fn a_claude_app_renders_its_system_prompt_fresh_so_a_resume_runs_with_the_relaunch_s_text() {
+    let case = Case::new();
+    let key = case.keyed(None);
+    let key_file = write_key(&case.home(), key.key().unwrap()).unwrap();
+    for keyed in [false, true] {
+        let fresh = run(keyed.then_some(key_file.as_path()));
+        let resumed = Run {
+            resume: true,
+            ..fresh
+        };
+        for tools in [true, false] {
+            let account = if keyed {
+                case.keyed(None)
+            } else {
+                case.subscription()
+            };
+            let request = case.request("claude-code", account, tools);
+            assert_eq!(claude_bare(&request.account), keyed);
+            for launch in [fresh, resumed] {
+                let built = command(&request, None, &launch).unwrap();
+                let at = built
+                    .argv
+                    .iter()
+                    .position(|argument| argument == "--system-prompt-snapshot")
+                    .unwrap_or_else(|| panic!("no snapshot setting: {:?}", built.argv));
+                assert_eq!(built.argv[at + 1], "off", "{:?}", built.argv);
+                assert_eq!(
+                    built
+                        .argv
+                        .iter()
+                        .filter(|argument| *argument == "--system-prompt-snapshot")
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn a_keyed_codex_reads_its_key_from_the_key_file_and_never_from_its_environment() {
     let case = Case::new();
@@ -612,6 +657,8 @@ fn claude_runs_its_own_app_under_a_known_session_and_keeps_its_transcript() {
         "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"disableAllHooks\":true,\"includeCoAuthoredBy\":false,\"skipDangerousModePermissionPrompt\":true}",
         "--session-id",
         SESSION,
+        "--system-prompt-snapshot",
+        "off",
     ]);
     argv.extend(strings(&CLAUDE_NO_MCP));
     argv.extend(strings(&[

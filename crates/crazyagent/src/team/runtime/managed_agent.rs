@@ -194,6 +194,32 @@ pub(crate) fn claude() -> PathBuf {
     installed("CRAZYAGENT_CLAUDE", "claude")
 }
 
+/// One short line per report, so a failed wait says what the lead sent: the report's kind,
+/// and for a turn its end, cause and first `SHOWN_TEXT_MAX` characters. Input: the reports.
+/// Output: the lines, in order.
+pub(super) fn shown(reports: &[Report]) -> Vec<String> {
+    const SHOWN_TEXT_MAX: usize = 300;
+    let cut = |text: &str| text.chars().take(SHOWN_TEXT_MAX).collect::<String>();
+    reports
+        .iter()
+        .map(|report| match report {
+            Report::Ready { group, pane } => {
+                format!("Ready group={group} pane={}", pane.is_some())
+            }
+            Report::Progress { bytes } => format!("Progress bytes={bytes}"),
+            Report::Usage { .. } => "Usage".to_owned(),
+            Report::Finished { text, end, cause } => {
+                format!("Finished end={end:?} cause={cause:?} text={:?}", cut(text))
+            }
+            Report::Ended { problem } => format!("Ended problem={problem:?}"),
+            Report::Turn { end, text } => format!("Turn end={end:?} text={:?}", cut(text)),
+            Report::Own { end, text } => format!("Own end={end:?} text={:?}", cut(text)),
+            Report::Conversation(_) => "Conversation".to_owned(),
+            Report::ResumeRefused => "ResumeRefused".to_owned(),
+        })
+        .collect()
+}
+
 /// Where a prepared agent's harness app runs: as its worker's child, in a pane on a given
 /// host, or as a native-mode Claude Code lead on the engine's own terminal host at this
 /// engine's root, the project's Claude Code agents set to native teammates.
@@ -562,21 +588,15 @@ impl ManagedAgent {
         finished.unwrap_or_else(|| panic!("the turn never finished: {problem:?}"))
     }
 
-    /// Makes this agent a native-mode lead (DEC-104) that runs in a tmux server of its own,
-    /// as the runtime plans a native lead on a signed-in account. Input: none. Output: none.
-    fn make_native(&mut self) {
-        if self.plan.native {
-            return;
-        }
-        let (host, agent) = self
-            .plan
-            .pane
-            .clone()
-            .expect("a native lead runs in a pane");
-        self.plan.native = true;
-        self.plan.tmux =
-            Some(crate::terminal::tmux::installed(&self.base).expect("tmux must be installed"));
-        self.plan.pane = Some((crate::terminal::own_server(host), agent));
+    /// Checks that the runtime planned this agent as a native-mode lead (DEC-104), as only
+    /// [`Self::engine_native_lead`] prepares one: its teammates' profile installed, their
+    /// server named and its pane on its own server of the engine's terminal host. Input:
+    /// none. Output: none, or a panic for any other agent.
+    fn assert_native(&self) {
+        assert!(
+            self.plan.native && self.plan.tmux.is_some() && self.plan.pane.is_some(),
+            "a native lead is prepared by engine_native_lead"
+        );
     }
 
     /// The first order of a signed-in native lead: a turn carrying the held profile, the
@@ -627,7 +647,7 @@ impl ManagedAgent {
         leave: bool,
     ) -> (Vec<Report>, Option<String>) {
         assert!(!prompts.is_empty());
-        self.make_native();
+        self.assert_native();
         let (orders, ordered) = channel();
         let (reports, reported) = channel();
         orders
@@ -670,7 +690,7 @@ impl ManagedAgent {
         prompt: &str,
         turn_time: Duration,
     ) -> (Vec<Report>, Option<String>) {
-        self.make_native();
+        self.assert_native();
         let (host, agent) = self
             .plan
             .pane
@@ -710,17 +730,15 @@ impl ManagedAgent {
     /// runtime's first dispatch to a kept session does: the project saves `access`, the
     /// worker starts from the agent's plan at that level, its first turn carries the held
     /// profile and the worker then counts as briefed. Inputs: the profile, the first prompt,
-    /// the turn's time, the saved level and the folder of the lead's terminal host when the
-    /// caller made one, kept until the lead stopped. Output: the running team.
+    /// the turn's time and the saved level. Output: the running team.
     pub(super) fn into_native_worker(
         mut self,
         profile: NativeProfileUse,
         prompt: &str,
         turn_time: Duration,
         access: AgentAccess,
-        folder: Option<tempfile::TempDir>,
     ) -> NativeTeam {
-        self.make_native();
+        self.assert_native();
         crate::sandbox::policy::save(
             &self.runtime.connection,
             PROJECT,
@@ -774,7 +792,6 @@ impl ManagedAgent {
             home,
             pane,
             _root,
-            _folder: folder,
         }
     }
 
@@ -822,7 +839,6 @@ pub(super) struct NativeTeam {
     pub(super) home: PathBuf,
     pane: (Arc<dyn Host>, AgentId),
     _root: tempfile::TempDir,
-    _folder: Option<tempfile::TempDir>,
 }
 
 impl NativeTeam {
@@ -833,12 +849,28 @@ impl NativeTeam {
 
     /// Waits for the lead's reports until one matches `last`. Inputs: the longest wait and
     /// the match. Output: every report up to and with the match, or a panic that says what
-    /// ended the wait when the worker ended or the wait passed first.
+    /// ended the wait when the worker ended or the wait passed first and lists every report
+    /// seen before.
     pub(super) fn reports_until(
         &self,
         wait: Duration,
         last: impl Fn(&Report) -> bool,
     ) -> Vec<Report> {
+        self.reports_within(wait, last)
+            .unwrap_or_else(|(why, seen)| {
+                panic!("{why}, after {} others: {:?}", seen.len(), shown(&seen))
+            })
+    }
+
+    /// Waits for the lead's reports until one matches `last`, for a test that shows more
+    /// when the wait fails. Inputs: the longest wait and the match. Output: every report up
+    /// to and with the match, or what ended the wait first, the worker's end or the time,
+    /// with every report seen before.
+    pub(super) fn reports_within(
+        &self,
+        wait: Duration,
+        last: impl Fn(&Report) -> bool,
+    ) -> Result<Vec<Report>, (String, Vec<Report>)> {
         let deadline = Instant::now() + wait;
         let mut seen = Vec::new();
         let mut ended = None;
@@ -852,19 +884,20 @@ impl NativeTeam {
                     }
                     seen.push(report);
                     if done {
-                        return seen;
+                        return Ok(seen);
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {
-                    panic!(
-                        "no awaited report from the lead in {wait:?}, after {} others",
-                        seen.len()
-                    )
+                    return Err((format!("no awaited report from the lead in {wait:?}"), seen));
                 }
-                Err(RecvTimeoutError::Disconnected) => panic!(
-                    "the lead's worker ended before the awaited report, problem {ended:?}, after {} others",
-                    seen.len()
-                ),
+                Err(RecvTimeoutError::Disconnected) => {
+                    return Err((
+                        format!(
+                            "the lead's worker ended before the awaited report, problem {ended:?}"
+                        ),
+                        seen,
+                    ));
+                }
             }
         }
     }
