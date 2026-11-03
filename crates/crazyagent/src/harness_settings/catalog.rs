@@ -9,8 +9,19 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeSet;
 
-/// The catalogs the engine ships, by harness id, each a version-qualified JSON document.
-pub const BUILTIN: &[(&str, &str)] = &[];
+/// The catalogs the engine ships, by harness id, each a version-qualified JSON document
+/// built from the harness's published settings reference. rcli has none until its settings
+/// source is named.
+pub const BUILTIN: &[(&str, &str)] = &[
+    (
+        "claude-code",
+        include_str!("../../assets/harness-settings/claude-code.json"),
+    ),
+    (
+        "codex",
+        include_str!("../../assets/harness-settings/codex.json"),
+    ),
+];
 
 /// One harness's settings catalog: the harness, the exact versions it was checked
 /// against, the published references it was built from, and every key in page order.

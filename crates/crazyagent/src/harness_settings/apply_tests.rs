@@ -3,12 +3,12 @@ use crate::harness_settings::tests::{fixture, fixture_text};
 use crate::harness_settings::{Access, Key, Kind, Scope, Stored, Written, resolve};
 use crate::harnesses::interactive::{self, Run};
 use crate::harnesses::launch::{
-    AccountBinding, CLAUDE_ENGINE_KEYS, CODEX_ENGINE_KEYS, LaunchLimits, LaunchRequest,
+    AccountBinding, CLAUDE_ENGINE_KEYS, CODEX_ENGINE_KEYS, LaunchLimits, LaunchRequest, Secret,
 };
 use crate::launch_context::AgentContext;
 use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 const PROJECT: &str = "alpha";
 const SESSION: &str = "0f8c2c1e-5a7b-4c3d-9e2f-1a2b3c4d5e6f";
@@ -110,13 +110,24 @@ impl Case {
     /// project's real install into the agent home. Output: the arguments after the
     /// harness executable.
     fn pane(&self, request: &LaunchRequest, settings: &Applied) -> Vec<String> {
+        self.pane_run(request, settings, None)
+    }
+
+    /// Builds what a terminal pane runs, as `pane` does, for an account whose relay key the
+    /// harness reads from `key_file`, none for a signed-in account.
+    fn pane_run(
+        &self,
+        request: &LaunchRequest,
+        settings: &Applied,
+        key_file: Option<&Path>,
+    ) -> Vec<String> {
         let context = AgentContext::empty().with_harness_settings(settings.clone());
         let installed = context
             .install(&request.harness, request.account.home(), request.tools)
             .unwrap();
         let run = Run {
             session_id: SESSION,
-            key_file: None,
+            key_file,
             resume: false,
         };
         let argv = interactive::command(request, Some(&installed), &run)
@@ -183,6 +194,21 @@ fn launched(harness: &str, arguments: &[String], key: &str) -> Option<Value> {
         serde_json::to_value(toml::from_str::<toml::Table>(line).unwrap()).unwrap()
     };
     at(&document, key).cloned()
+}
+
+/// Lists the settings one launch passes its harness, as dotted key and value: Claude
+/// Code's `--settings` object, or Codex's `-c` lines with the fixed lines every installed
+/// agent's `config.toml` holds. Inputs: the harness and the arguments after the executable.
+fn engine_settings(harness: &str, arguments: &[String]) -> Vec<(String, Value)> {
+    if harness == "claude-code" {
+        crate::harness_settings::tests::json_leaves(&settings_json(arguments))
+    } else {
+        crate::harness_settings::tests::codex_settings(
+            configs(arguments)
+                .into_iter()
+                .chain(crate::launch_context::CODEX_CONFIG_FIXED),
+        )
+    }
 }
 
 /// One catalog built from a fixture with more keys. Inputs: the harness and the keys as
@@ -722,6 +748,79 @@ fn an_unqualified_harness_version_launches_with_engine_defaults_only() {
     for harness in ["codex", "claude", "not-a-harness"] {
         let settings = for_launch(&case.db, harness, &silent, Some(&case.project)).unwrap();
         assert!(settings.values().is_empty(), "{harness}");
+    }
+}
+
+#[test]
+fn every_key_the_engine_sets_at_launch_is_locked_with_a_reason() {
+    use crate::harness_settings::tests::{assert_locked_in_shipped, codex_file_settings};
+    let case = Case::new();
+    let home = case.base.join("home");
+    let key_file = home.join("relay-key");
+    for harness in ["claude-code", "codex"] {
+        let shipped = catalog::builtin(harness).unwrap().unwrap();
+        let version = shipped.qualified_versions.first().map(String::as_str);
+        let settings = resolved(&case.db, &shipped, version, Some(&case.project)).unwrap();
+        assert!(settings.values().is_empty());
+        assert_eq!(settings.harness(), Some(harness));
+        let mut launched: std::collections::BTreeMap<String, Vec<Value>> = Default::default();
+        let mut launches = 0;
+        for tools in [false, true] {
+            for keyed in [false, true] {
+                let mut request = case.request(harness, tools);
+                if keyed {
+                    request.account = AccountBinding::ApiKey {
+                        home: home.clone(),
+                        key: Secret::new(crate::model_gateway::relay::LOCAL_PLACEHOLDER.into())
+                            .unwrap(),
+                        base_url: None,
+                    };
+                }
+                let pane = case.pane_run(&request, &settings, keyed.then_some(key_file.as_path()));
+                let headless = case.headless(&request, &settings);
+                for arguments in [pane, headless] {
+                    let set = engine_settings(harness, &arguments);
+                    assert_locked_in_shipped(harness, &set);
+                    launches += 1;
+                    for (key, value) in set {
+                        launched.entry(key).or_default().push(value);
+                    }
+                }
+            }
+            if harness == "codex" {
+                let context = AgentContext::empty().with_harness_settings(settings.clone());
+                let installed = context.install(harness, &home, tools).unwrap();
+                let text = std::fs::read_to_string(home.join("config.toml")).unwrap();
+                drop(installed);
+                let written = codex_file_settings(&text);
+                assert!(
+                    written
+                        .iter()
+                        .any(|(key, _)| key == "developer_instructions")
+                );
+                assert_locked_in_shipped(harness, &written);
+            }
+        }
+        assert_eq!(launches, 8);
+        for key in &shipped.keys {
+            let Some(engine) = key
+                .locked
+                .as_ref()
+                .map(|lock| &lock.engine_value)
+                .filter(|value| !value.is_null())
+            else {
+                continue;
+            };
+            let values = launched
+                .get(&key.key)
+                .unwrap_or_else(|| panic!("{harness} locks {} to a value no launch sets", key.key));
+            assert_eq!(values.len(), launches, "{harness} {}", key.key);
+            assert!(
+                values.iter().all(|value| value == engine),
+                "{harness} {}",
+                key.key
+            );
+        }
     }
 }
 

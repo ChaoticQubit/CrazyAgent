@@ -2361,6 +2361,47 @@ mod tests {
         assert!(allocate_master_capture(&root).is_err());
         assert_eq!(std::fs::read_dir(temporary.path()).unwrap().count(), 0);
     }
+
+    #[test]
+    fn every_key_a_codex_master_sets_is_locked_in_the_shipped_catalog() {
+        use crate::harness_settings::{apply::Applied, catalog, resolve, tests};
+        let shipped = catalog::builtin("codex").unwrap().unwrap();
+        let version = shipped.qualified_versions.first().map(String::as_str);
+        let settings = Applied::new(
+            &shipped,
+            resolve(&shipped, version, &Default::default(), None),
+        );
+        let temporary = private_root();
+        let engine = temporary.path().join("crazyagent");
+        let drop = temporary.path().join(crate::team::tool::DROP_FILE);
+        let tools = crate::engine::claude_host::MasterTools {
+            engine: &engine,
+            drop: &drop,
+        };
+        for (name, tools) in [("off", None), ("on", Some(tools))] {
+            let home = temporary.path().join(name);
+            std::fs::create_dir(&home).unwrap();
+            let command = master_command(
+                Path::new("/registered/codex"),
+                &home,
+                Path::new("/leased/worktree"),
+                "admitted-model",
+                tools,
+            )
+            .unwrap();
+            let args: Vec<&str> = command
+                .get_args()
+                .map(|arg| arg.to_str().unwrap())
+                .collect();
+            let lines = args
+                .windows(2)
+                .filter(|pair| pair[0] == "-c")
+                .map(|pair| pair[1]);
+            tests::assert_locked_in_shipped("codex", &tests::codex_settings(lines));
+            write_master_settings(&home, &command, &settings).unwrap();
+            assert!(!home.join("config.toml").exists());
+        }
+    }
 }
 
 #[cfg(all(test, target_os = "macos"))]

@@ -223,6 +223,366 @@ fn every_built_in_catalog_parses_for_its_own_harness() {
     assert!(catalog::builtin("codex-not-a-harness").unwrap().is_none());
 }
 
+/// Words in a key name that mean it can hold a credential: a key, token, secret, password,
+/// sign-in or auth value, a cookie or header, or a helper command that prints one.
+const CREDENTIAL_WORDS: [&str; 18] = [
+    "apikey",
+    "auth",
+    "bearer",
+    "cookie",
+    "cookies",
+    "credential",
+    "credentials",
+    "header",
+    "headers",
+    "helper",
+    "key",
+    "login",
+    "oauth",
+    "passwd",
+    "password",
+    "secret",
+    "secrets",
+    "token",
+];
+
+/// Words in a key name that mean it shapes the agent's environment variables.
+const ENVIRONMENT_WORDS: [&str; 2] = ["env", "environment"];
+
+/// Splits a dotted key into its lowercase words, at `.`, `_`, `-` and each camelCase hump.
+/// Input: the key. Output: the words in order.
+fn name_words(key: &str) -> Vec<String> {
+    let mut words = Vec::new();
+    for part in key.split(['.', '_', '-']) {
+        let mut word = String::new();
+        let mut previous: Option<char> = None;
+        for ch in part.chars() {
+            let hump = ch.is_ascii_uppercase()
+                && previous
+                    .is_some_and(|before| before.is_ascii_lowercase() || before.is_ascii_digit());
+            if hump && !word.is_empty() {
+                words.push(std::mem::take(&mut word));
+            }
+            word.push(ch.to_ascii_lowercase());
+            previous = Some(ch);
+        }
+        if !word.is_empty() {
+            words.push(word);
+        }
+    }
+    words
+}
+
+fn credential_named(key: &str) -> bool {
+    name_words(key)
+        .iter()
+        .any(|word| CREDENTIAL_WORDS.contains(&word.as_str()))
+}
+
+fn environment_named(key: &str) -> bool {
+    name_words(key)
+        .iter()
+        .any(|word| ENVIRONMENT_WORDS.contains(&word.as_str()))
+}
+
+/// Tells whether two dotted keys name the same setting or one sits inside the other.
+fn overlap(one: &str, other: &str) -> bool {
+    let inside = |outer: &str, inner: &str| {
+        inner
+            .strip_prefix(outer)
+            .is_some_and(|rest| rest.starts_with('.'))
+    };
+    one == other || inside(one, other) || inside(other, one)
+}
+
+/// Lists the settings one Claude Code `--settings` object sets, as dotted key and value:
+/// each object is walked to its scalar and list values. Input: the object. Output: the
+/// settings, in key order.
+pub(crate) fn json_leaves(document: &Value) -> Vec<(String, Value)> {
+    fn walk(prefix: &str, value: &Value, out: &mut Vec<(String, Value)>) {
+        match value.as_object() {
+            Some(fields) if !fields.is_empty() => {
+                for (name, inner) in fields {
+                    let key = if prefix.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{prefix}.{name}")
+                    };
+                    walk(&key, inner, out);
+                }
+            }
+            _ => out.push((prefix.to_owned(), value.clone())),
+        }
+    }
+    assert!(document.is_object());
+    let mut out = Vec::new();
+    walk("", document, &mut out);
+    assert!(out.iter().all(|(key, _)| !key.is_empty()));
+    out
+}
+
+/// Lists the settings Codex `-c` lines set, as dotted key and value: a line's key is the
+/// text before its first `=`, and its value is read as TOML. Input: the lines. Output: the
+/// settings, in line order.
+pub(crate) fn codex_settings<'a>(lines: impl IntoIterator<Item = &'a str>) -> Vec<(String, Value)> {
+    let mut out = Vec::new();
+    for line in lines {
+        let (key, _) = line.split_once('=').expect("a Codex setting is key=value");
+        let key = key.trim();
+        let document = serde_json::to_value(toml::from_str::<toml::Table>(line).unwrap()).unwrap();
+        let value = apply::at(&document, key)
+            .cloned()
+            .unwrap_or_else(|| panic!("{line} sets {key}"));
+        out.push((key.to_owned(), value));
+    }
+    out
+}
+
+/// Lists the top-level settings of one `config.toml` the engine wrote. Input: the file
+/// text. Output: the settings, in key order.
+pub(crate) fn codex_file_settings(text: &str) -> Vec<(String, Value)> {
+    let table = toml::from_str::<toml::Table>(text).unwrap();
+    table
+        .into_iter()
+        .map(|(key, value)| (key, serde_json::to_value(value).unwrap()))
+        .collect()
+}
+
+/// Asserts that every setting one engine launch passes is locked in the shipped catalog of
+/// its harness: every catalog key on, inside or around it is locked with a reason; a scalar
+/// value has at least one such key, and a lock that names an engine value names this one; a
+/// table or list sits under a key the engine reserves, since no catalog type can hold one.
+/// Inputs: the harness and the launch's settings as dotted key and value. A failed check
+/// panics naming the key.
+pub(crate) fn assert_locked_in_shipped(harness: &str, settings: &[(String, Value)]) {
+    let shipped = catalog::builtin(harness)
+        .unwrap()
+        .unwrap_or_else(|| panic!("{harness} ships no catalog"));
+    let reserved: &[&str] = match harness {
+        "codex" => &crate::harnesses::launch::CODEX_ENGINE_KEYS,
+        "claude-code" => &crate::harnesses::launch::CLAUDE_ENGINE_KEYS,
+        other => panic!("no reserved keys for {other}"),
+    };
+    assert!(!settings.is_empty());
+    for (name, value) in settings {
+        let near: Vec<&Key> = shipped
+            .keys
+            .iter()
+            .filter(|key| overlap(&key.key, name))
+            .collect();
+        for key in &near {
+            let lock = key.locked.as_ref();
+            assert!(
+                lock.is_some_and(|lock| !lock.reason.trim().is_empty()),
+                "{harness}: the engine sets {name}, and {} is not locked with a reason",
+                key.key
+            );
+        }
+        if value.is_object() || value.is_array() {
+            let kept = reserved
+                .iter()
+                .any(|key| name == key || name.starts_with(&format!("{key}.")));
+            assert!(
+                kept,
+                "{harness}: the engine sets the table {name} without reserving it"
+            );
+            continue;
+        }
+        assert!(
+            !near.is_empty(),
+            "{harness}: the engine sets {name} and the catalog does not lock it"
+        );
+        let named = shipped.key(name).and_then(|key| key.locked.as_ref());
+        assert!(
+            named.is_none_or(|lock| lock.engine_value.is_null() || lock.engine_value == *value),
+            "{harness}: {name} is locked to another value than the launch sets"
+        );
+    }
+}
+
+#[test]
+fn the_launch_lock_check_trips_on_an_unlocked_or_missing_key() {
+    let codex = codex_settings([
+        "approval_policy=\"never\"",
+        "projects={\"/x\"={trust_level=\"trusted\"}}",
+    ]);
+    assert_eq!(codex[0], ("approval_policy".to_owned(), json!("never")));
+    assert!(codex[1].1.is_object());
+    let claude =
+        json_leaves(&json!({"attribution": {"commit": "", "pr": ""}, "disableAllHooks": true}));
+    let keys: Vec<&str> = claude.iter().map(|(key, _)| key.as_str()).collect();
+    assert_eq!(
+        keys,
+        ["attribution.commit", "attribution.pr", "disableAllHooks"]
+    );
+    assert_locked_in_shipped("codex", &codex);
+    assert_locked_in_shipped("claude-code", &claude);
+    for (harness, settings) in [
+        (
+            "codex",
+            vec![("not_a_codex_setting".to_owned(), json!(true))],
+        ),
+        (
+            "codex",
+            vec![("approval_policy".to_owned(), json!("on-request"))],
+        ),
+        ("codex", vec![("not_reserved".to_owned(), json!({}))]),
+        (
+            "claude-code",
+            vec![("includeCoAuthoredBy".to_owned(), json!(true))],
+        ),
+        (
+            "claude-code",
+            vec![("spinnerTipsEnabled".to_owned(), json!(false))],
+        ),
+    ] {
+        let tripped = std::panic::catch_unwind(|| assert_locked_in_shipped(harness, &settings));
+        assert!(tripped.is_err(), "{harness} {settings:?}");
+    }
+}
+
+#[test]
+fn every_catalog_parses_and_names_its_sources_and_versions() {
+    let shipped: Vec<&str> = catalog::BUILTIN
+        .iter()
+        .map(|(harness, _)| *harness)
+        .collect();
+    assert_eq!(shipped, ["claude-code", "codex"]);
+    let hosts = [
+        "https://code.claude.com/docs/en/",
+        "https://developers.openai.com/codex/",
+        "https://github.com/openai/codex/blob/rust-v0.164.0/",
+    ];
+    for (harness, version, references) in [
+        (
+            "claude-code",
+            "2.1.309",
+            &["https://code.claude.com/docs/en/settings-reference"][..],
+        ),
+        (
+            "codex",
+            "0.164.0",
+            &[
+                "https://developers.openai.com/codex/config-reference",
+                "https://github.com/openai/codex/blob/rust-v0.164.0/",
+            ][..],
+        ),
+    ] {
+        let parsed = catalog::builtin(harness).unwrap().unwrap();
+        assert_eq!(parsed.harness, harness);
+        assert_eq!(parsed.qualified_versions, [version]);
+        assert!(qualified(&parsed, Some(version)));
+        assert!(installed::version_valid(version));
+        for reference in references {
+            assert!(
+                parsed
+                    .sources
+                    .iter()
+                    .any(|source| source.starts_with(reference)),
+                "{harness} names no {reference} source"
+            );
+        }
+        assert!(
+            parsed
+                .sources
+                .iter()
+                .all(|source| hosts.iter().any(|host| source.starts_with(host))),
+            "{harness} names a source outside the published references"
+        );
+        let open = parsed
+            .keys
+            .iter()
+            .filter(|key| key.locked.is_none())
+            .count();
+        assert!(
+            open > 0 && open < parsed.keys.len(),
+            "{harness}: {open} open keys"
+        );
+        for key in &parsed.keys {
+            assert!(applied_at_launch(key.apply), "{harness} {}", key.key);
+            assert!(
+                check_value(key, &key.default).is_ok(),
+                "{harness} {}",
+                key.key
+            );
+            assert!(
+                key.locked
+                    .as_ref()
+                    .is_none_or(|lock| !lock.reason.trim().is_empty()),
+                "{harness} {}",
+                key.key
+            );
+        }
+    }
+    assert!(
+        catalog::builtin("rcli").unwrap().is_none(),
+        "the rcli catalog waits on its settings source (owner input P2)"
+    );
+}
+
+#[test]
+fn no_catalog_key_can_carry_a_credential_or_environment_secret() {
+    assert!(credential_named("apiKeyHelper"));
+    assert!(credential_named("cli_auth_credentials_store"));
+    assert!(credential_named("otelHeadersHelper"));
+    assert!(!credential_named("keybindingFlavor"));
+    assert!(!credential_named("spinnerTipsEnabled"));
+    assert!(environment_named("shell_environment_policy.inherit"));
+    assert!(environment_named(
+        "sandbox_workspace_write.exclude_tmpdir_env_var"
+    ));
+    assert!(!environment_named("tui.alternate_screen"));
+    let secret_like = |text: &str| {
+        text.contains(crate::model_gateway::relay::LOCAL_PLACEHOLDER)
+            || ["sk-", "ghp_", "xox", "Bearer ", "-----BEGIN", "AKIA"]
+                .iter()
+                .any(|mark| text.contains(mark))
+    };
+    let mut credential_keys = 0;
+    for (harness, _) in catalog::BUILTIN {
+        let parsed = catalog::builtin(harness).unwrap().unwrap();
+        for key in &parsed.keys {
+            let lock = key.locked.as_ref();
+            let text = matches!(key.kind, Kind::String);
+            if environment_named(&key.key) {
+                assert!(
+                    lock.is_some_and(|lock| lock.engine_value.is_null()),
+                    "{harness}: {} shapes the environment and is not locked unset",
+                    key.key
+                );
+            }
+            if credential_named(&key.key) {
+                credential_keys += 1;
+                assert!(
+                    lock.is_some() || !text,
+                    "{harness}: {} can hold a credential and is not locked",
+                    key.key
+                );
+                assert!(
+                    lock.is_none_or(|lock| lock.engine_value.is_null() || !text),
+                    "{harness}: {} is locked to a credential text",
+                    key.key
+                );
+            }
+            assert!(
+                lock.is_some() || !text,
+                "{harness}: {} takes free text, which could carry a secret into argv",
+                key.key
+            );
+            let texts = key
+                .options
+                .iter()
+                .map(String::as_str)
+                .chain(key.default.as_str())
+                .chain(lock.and_then(|lock| lock.engine_value.as_str()));
+            for text in texts {
+                assert!(!secret_like(text), "{harness}: {} carries {text}", key.key);
+            }
+        }
+    }
+    assert!(credential_keys > 0);
+}
+
 #[test]
 fn a_value_is_checked_against_its_key() {
     let catalog = fixture("codex");

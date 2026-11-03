@@ -990,6 +990,52 @@ fn the_host_runs_a_tools_on_master_only_as_the_engine_builds_it() {
 }
 
 #[test]
+fn every_key_a_claude_master_sets_is_locked_in_the_shipped_catalog() {
+    use crate::harness_settings::{apply::Applied, catalog, resolve, tests};
+    let shipped = catalog::builtin("claude-code").unwrap().unwrap();
+    let version = shipped.qualified_versions.first().map(String::as_str);
+    let settings = Applied::new(
+        &shipped,
+        resolve(&shipped, version, &Default::default(), None),
+    );
+    let directories = Directories::new();
+    let engine = Path::new("/approved/crazyagent");
+    let drop = directories
+        .root
+        .join("tmp")
+        .join(crate::team::tool::DROP_FILE);
+    let off = launch_command(
+        Path::new("/approved/claude"),
+        &directories.project,
+        &directories.home,
+        "native-default",
+        None,
+        &settings,
+    )
+    .unwrap();
+    let on = tools_launch_command(
+        Path::new("/approved/claude"),
+        &directories.project,
+        &directories.home,
+        "native-default",
+        None,
+        MasterTools {
+            engine,
+            drop: &drop,
+        },
+        &settings,
+    )
+    .unwrap();
+    for command in [off, on] {
+        let args = arguments(&command);
+        let at = args.iter().position(|arg| arg == "--settings").unwrap() + 1;
+        let document: serde_json::Value = serde_json::from_str(&args[at]).unwrap();
+        tests::assert_locked_in_shipped("claude-code", &tests::json_leaves(&document));
+        assert_eq!(master_settings_of(&args[at]), Some(settings.clone()));
+    }
+}
+
+#[test]
 fn the_host_runs_a_master_only_with_settings_the_shipped_catalog_allows() {
     use crate::engine::master_host_fixture::MasterFixture;
     use crate::harness_settings::apply::Applied;
