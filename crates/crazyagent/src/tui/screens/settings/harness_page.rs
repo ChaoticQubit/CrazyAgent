@@ -63,8 +63,11 @@ pub(in crate::tui) fn message(code: &str) -> String {
         "harness_settings_key_app_only" => "This setting is set once for the whole app.".into(),
         "harness_settings_value_invalid" => "This value is not allowed for this setting.".into(),
         "harness_settings_project_unknown" => "This project no longer exists.".into(),
-        "harness_settings_harness_unknown" => {
+        "harness_settings_no_catalog" => {
             "CrazyAgent has no settings page for this harness yet.".into()
+        }
+        "harness_settings_outcome_unknown" => {
+            "The engine did not say whether it saved; press r to read the current value.".into()
         }
         "harness_settings_unavailable" => {
             "Harness settings are not available in this engine.".into()
@@ -314,9 +317,9 @@ impl HarnessPage {
             return;
         }
         if setting.here.is_none() {
-            let follows = match self.scope {
-                Scope::App => "the default",
-                Scope::Project { .. } => "the app value",
+            let follows = match setting.source {
+                Source::App => "the app value",
+                _ => "the default",
             };
             ctx.say(Message::warning(
                 "Nothing to reset.",

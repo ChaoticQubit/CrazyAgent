@@ -605,6 +605,10 @@ fn values_and_kinds_read_plainly() {
         "This setting is set once for the whole app."
     );
     assert_eq!(
+        message("harness_settings_no_catalog"),
+        "CrazyAgent has no settings page for this harness yet."
+    );
+    assert_eq!(
         message("trusted_connection_unavailable"),
         "The engine connection is not ready yet."
     );
