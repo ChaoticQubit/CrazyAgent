@@ -205,6 +205,7 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
         key: Some(PathBuf::from("/private/tmp/home/.key")),
         resumed: None,
         access: None,
+        context: None,
     };
     let text = record.encode().unwrap();
     assert_eq!(PaneRecord::decode(&text), Some(record.clone()));
@@ -286,5 +287,58 @@ fn an_adopted_pane_removes_its_key_file_when_it_stops_but_not_when_left() {
         !key.exists(),
         "stopping the adopted pane removes its key file"
     );
+    assert!(host.alive().unwrap().is_empty());
+}
+
+#[test]
+fn an_adopted_pane_keeps_only_the_run_time_left_since_its_launch() {
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    let agent = AgentId::team(4).unwrap();
+    let file = fixture.transcript(&[TURN_OPEN, TURN_DONE]);
+    let record = fixture.spawn(&host, &agent, "exec cat", &file);
+    let launched = PaneRecord {
+        since_ms: record.since_ms - 3_000,
+        ..record
+    };
+    let limits = LaunchLimits {
+        run_time: Duration::from_secs(4),
+        ..LaunchLimits::default()
+    };
+
+    let mut session = TerminalSession::adopt(host.clone(), agent, &launched, limits).unwrap();
+    let started = Instant::now();
+    let ended = session.next_event(Duration::from_secs(10));
+    let waited = started.elapsed();
+    assert_eq!(
+        ended.err().map(|refused| refused.0).as_deref(),
+        Some("launch_deadline")
+    );
+    assert!(
+        waited < Duration::from_millis(2_500),
+        "the pane was launched 3 s into a 4 s run time, so about 1 s was left: {waited:?}"
+    );
+}
+
+#[test]
+fn an_adopted_pane_counts_the_events_it_already_had_against_its_budget() {
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    let agent = AgentId::team(5).unwrap();
+    let file = fixture.transcript(&[TURN_OPEN, TURN_DONE, TURN_OPEN, TURN_DONE]);
+    let record = fixture.spawn(&host, &agent, "exec cat", &file);
+    let limits = LaunchLimits {
+        events: 1,
+        ..LaunchLimits::default()
+    };
+
+    let refused = TerminalSession::adopt(host.clone(), agent.clone(), &record, limits);
+    assert_eq!(
+        refused.err().map(|refused| refused.0).as_deref(),
+        Some("launch_event_limit")
+    );
+    let session =
+        TerminalSession::adopt(host.clone(), agent, &record, LaunchLimits::default()).unwrap();
+    drop(session);
     assert!(host.alive().unwrap().is_empty());
 }

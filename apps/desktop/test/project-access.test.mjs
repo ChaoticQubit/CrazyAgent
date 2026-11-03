@@ -10,10 +10,16 @@ const api = await import("../src/api.ts");
 
 const view = {
   access: "sandboxed",
+  network: "open",
   levels: [
     { access: "sandboxed", label: "Sandboxed", unavailable: null },
     { access: "own_branch", label: "Own branch", unavailable: null },
     { access: "full", label: "Full access", unavailable: null },
+  ],
+  networks: [
+    { network: "open", label: "Open" },
+    { network: "https", label: "Port 443 only" },
+    { network: "none", label: "None" },
   ],
   toolchains: [
     { toolchain: "rust", label: "Rust", installed: true, used: true, allowed: true },
@@ -22,14 +28,15 @@ const view = {
   ide_git_hooks: false,
 };
 
-test("Save sends the level and only the toolchain switches that differ from the project's own use", () => {
-  assert.deepEqual(access.policyOf(view, "own_branch", [true, false], false), { access: "own_branch", toolchains: [], ide_git_hooks: false });
-  assert.deepEqual(access.policyOf(view, "sandboxed", [false, true], false), {
+test("Save sends the level, the network choice and only the toolchain switches that differ from the project's own use", () => {
+  assert.deepEqual(access.policyOf(view, "own_branch", "open", [true, false], false), { access: "own_branch", network: "open", toolchains: [], ide_git_hooks: false });
+  assert.deepEqual(access.policyOf(view, "sandboxed", "https", [false, true], false), {
     access: "sandboxed",
+    network: "https",
     toolchains: [{ toolchain: "rust", allowed: false }, { toolchain: "node", allowed: true }],
     ide_git_hooks: false,
   });
-  assert.throws(() => access.policyOf(view, "full", [true], false), /one switch per toolchain/);
+  assert.throws(() => access.policyOf(view, "full", "none", [true], false), /one switch per toolchain/);
 });
 
 test("Full access asks for the plain warning first, and the project page names the level and toolchains", () => {
@@ -74,7 +81,7 @@ test("agent access saves at the version the page read, and a stale save reads th
   assert.match(settings.ACCESS_STALE, /Agent access changed since you opened it\. The page now shows the saved access/);
   const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
   const save = page.slice(page.indexOf("  async function save() {\n    if (!view) return;"));
-  assert.match(save, /saveAgentPolicy\(data\.id, policyOf\(view, access, allowed, ideGitHooks\), view\.version, nextGeneration\(\)\)/);
+  assert.match(save, /saveAgentPolicy\(data\.id, policyOf\(view, access, network, allowed, ideGitHooks\), view\.version, nextGeneration\(\)\)/);
   assert.match(save, /if \(savedStale\(result\)\) \{\n      const fresh = await loadAgentPolicy\(data\.id\);/, "the stale save reads the access and its version again");
   assert.match(save, /seed\(fresh\.value\);\n      return setNote\(ACCESS_STALE\);/);
   assert.ok(save.indexOf("savedStale(result)") >= 0 && save.indexOf("savedStale(result)") < save.indexOf("failureCopy(result)"), "before the plain refusal copy");
@@ -82,14 +89,14 @@ test("agent access saves at the version the page read, and a stale save reads th
   assert.match(client, /export interface PolicyView \{[\s\S]*?\n  version: number;\n\}/);
   assert.match(client, /call<IntentReceipt>\("desktop_set_project_agent_policy", \{ id, version, policy, generation \}\)/);
   const created = readFileSync(new URL("../src/screens/new-project/index.tsx", import.meta.url), "utf8");
-  assert.match(created, /const read = await loadAgentPolicy\(id\);\n\s*const saved = read\.kind === "ok" \? await saveAgentPolicy\(id, \{ access, toolchains: \[\], ide_git_hooks: false \}, read\.value\.version, nextGeneration\(\)\) : read;/,
+  assert.match(created, /const read = await loadAgentPolicy\(id\);\n\s*const saved = read\.kind === "ok" \? await saveAgentPolicy\(id, \{ access, network: "open", toolchains: \[\], ide_git_hooks: false \}, read\.value\.version, nextGeneration\(\)\) : read;/,
     "a new project's chosen access is saved at the version the engine holds");
   const lib = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
   assert.match(lib, /async fn desktop_set_project_agent_policy\([^)]*version: u64/);
 });
 
 test("the IDE hooks switch is saved with the policy and reads the same in both UIs, Off for a new project", () => {
-  assert.deepEqual(access.policyOf(view, "sandboxed", [true, false], true), { access: "sandboxed", toolchains: [], ide_git_hooks: true });
+  assert.deepEqual(access.policyOf(view, "sandboxed", "open", [true, false], true), { access: "sandboxed", network: "open", toolchains: [], ide_git_hooks: true });
   assert.equal(access.IDE_GIT_HOOKS, "IDE git runs the project's hooks");
   assert.match(access.IDE_GIT_HOOKS_LINE, /never signed/);
   assert.match(access.IDE_GIT_HOOKS_LINE, /Applies when the IDE next starts\.$/);
@@ -97,12 +104,38 @@ test("the IDE hooks switch is saved with the policy and reads the same in both U
   assert.ok(tui.includes(`"${access.IDE_GIT_HOOKS}"`));
   assert.ok(tui.includes(`"${access.IDE_GIT_HOOKS_LINE}"`));
   const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
-  assert.ok(page.includes("policyOf(view, access, allowed, ideGitHooks)"));
+  assert.ok(page.includes("policyOf(view, access, network, allowed, ideGitHooks)"));
   assert.ok(page.includes("ideGitHooks !== view.ide_git_hooks"));
   assert.ok(page.includes("setIdeGitHooks(next.ide_git_hooks)"));
   assert.match(page, /<IdeGitHooksSwitch prefix="ps" checked={ideGitHooks} onChange={setIdeGitHooks} \/>/);
   const created = readFileSync(new URL("../src/screens/new-project/index.tsx", import.meta.url), "utf8");
-  assert.ok(created.includes("{ access, toolchains: [], ide_git_hooks: false }"));
+  assert.ok(created.includes('{ access, network: "open", toolchains: [], ide_git_hooks: false }'));
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/sandbox/policy.rs", import.meta.url), "utf8");
   assert.match(engine, /#\[serde\(default\)\]\n    pub ide_git_hooks: bool,/);
+});
+
+test("None explains the Port 443 overlap and Full access annotates the network choice as moot", () => {
+  const none = access.NETWORK_CHOICES.find((choice) => choice.network === "none");
+  assert.match(none.help, /same as Port 443 only/);
+  assert.equal(access.NETWORK_IGNORED_UNDER_FULL, "Full access runs agents without a sandbox, so this choice does not apply.");
+  const card = readFileSync(new URL("../src/screens/project/access.tsx", import.meta.url), "utf8");
+  assert.match(card, /access === "full"[^\n]*NETWORK_IGNORED_UNDER_FULL/);
+  const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
+  assert.match(page, /<NetworkChoices[^>]*access=\{access\}/);
+});
+
+test("Hiding a folder takes an absolute path, rejects duplicates and caps at the engine's limit", () => {
+  assert.deepEqual(settings.addHiddenPath([], "/Users/you/project/secrets"), { paths: ["/Users/you/project/secrets"] });
+  assert.ok("error" in settings.addHiddenPath([], "secrets"));
+  assert.ok("error" in settings.addHiddenPath([], "/Users/you/a\"b"));
+  assert.ok("error" in settings.addHiddenPath([], "/Users/you/a\\b"));
+  assert.ok("error" in settings.addHiddenPath([], "/Users/you/a'b"));
+  assert.ok("error" in settings.addHiddenPath(["/a"], "/a"));
+  const full = Array.from({ length: settings.HIDDEN_PATHS_MAX }, (_, index) => `/dir${index}`);
+  assert.ok("error" in settings.addHiddenPath(full, "/one-more"));
+  const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
+  assert.match(page, /<HiddenSection data=\{data\} \/>/);
+  for (const code of ["hidden_paths_too_many", "hidden_paths_invalid", "hidden_path_not_absolute", "hidden_path_not_plain", "hidden_path_missing", "hidden_path_not_folder", "hidden_path_outside_project", "hidden_path_tracked", "hidden_path_unchecked"]) {
+    assert.ok(api.KNOWN_ERROR_CODES.includes(code), code);
+  }
 });

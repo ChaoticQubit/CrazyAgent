@@ -15,6 +15,7 @@ mod accounts;
 mod agents;
 mod changes;
 mod cleanup;
+mod coord;
 mod harness_settings;
 mod ide;
 mod intake;

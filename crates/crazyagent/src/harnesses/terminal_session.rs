@@ -7,7 +7,7 @@ use super::transcript::{TranscriptEvent, TranscriptReader};
 use crate::launch_context::{AgentContext, Installed};
 use crate::model_gateway::relay::{Relay, is_placeholder};
 use crate::terminal::{AgentId, Host, HostError, INPUT_BYTES_MAX};
-use std::collections::VecDeque;
+use std::collections::{BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -22,6 +22,10 @@ const READY_WAIT: Duration = Duration::from_secs(30);
 const READY_QUIET: Duration = Duration::from_millis(700);
 const PASTE_SETTLE: Duration = Duration::from_millis(200);
 const POLL: Duration = Duration::from_millis(100);
+/// The most facts of turns the app started by itself that wait to be taken at once.
+const OWN_FACTS_MAX: usize = 4096;
+/// The most background commands of the app one session follows at once.
+const BACKGROUND_MAX: usize = 64;
 const ALIVE_EVERY: Duration = Duration::from_secs(1);
 const PASTE_START: &str = "\x1b[200~";
 const PASTE_END: &str = "\x1b[201~";
@@ -43,8 +47,11 @@ pub struct TerminalSession {
     events: usize,
     ready: bool,
     turn: bool,
+    held: bool,
     live: bool,
+    own: bool,
     facts: VecDeque<TranscriptEvent>,
+    background: BTreeSet<String>,
     exited: bool,
     stopped: bool,
     record: Option<PaneRecord>,
@@ -173,20 +180,21 @@ impl TerminalSession {
                 resume: resume.is_some(),
             },
         )?;
+        if let Some(team) = installed.as_ref().and_then(Installed::native) {
+            interactive::write_teammate_command(&home, &command, &request, team)?;
+        }
         if command.transcript == Transcript::Unavailable {
             return Err(failure("launch_transcript_unavailable"));
         }
         if let Some(context) = context {
-            assert!(
-                command
-                    .argv
-                    .iter()
-                    .all(|argument| !context.exposes_secret(argument.as_bytes()))
-            );
-            assert!(command.env.iter().all(|(name, value)| {
-                !context.exposes_secret(name.as_bytes())
-                    && !context.exposes_secret(value.as_bytes())
-            }));
+            context.refuse_exposed(
+                command.argv.iter().map(String::as_bytes).chain(
+                    command
+                        .env
+                        .iter()
+                        .flat_map(|(name, value)| [name.as_bytes(), value.as_bytes()]),
+                ),
+            )?;
         }
         let since = SystemTime::now();
         let reader = match resume {
@@ -216,8 +224,11 @@ impl TerminalSession {
             events: 0,
             ready: false,
             turn: false,
+            held: false,
             live: false,
+            own: false,
             facts: VecDeque::new(),
+            background: BTreeSet::new(),
             exited: false,
             stopped: false,
             record: PaneRecord::new(
@@ -227,7 +238,11 @@ impl TerminalSession {
                 pane.pid,
                 key.as_ref().map(|key| key.0.as_path()),
             )
-            .map(|record| PaneRecord { resumed, ..record }),
+            .map(|record| PaneRecord {
+                resumed,
+                context: installed.as_ref().and_then(Installed::files).cloned(),
+                ..record
+            }),
             _key: key,
             _context: installed,
             _relay: relay,
@@ -245,6 +260,21 @@ impl TerminalSession {
     /// Returns the pane's first process, which leads the process group of the harness.
     pub fn process_group(&self) -> u32 {
         self.pid
+    }
+
+    /// Counts the commands the app started in the background whose end it has not reported
+    /// yet. An engine-typed turn that ends while any runs stays open until the app's turn on
+    /// their end notification finishes, so the task sees their result instead of their being
+    /// ended with it. Output: the count, at most `BACKGROUND_MAX`.
+    pub fn background_running(&self) -> usize {
+        self.background.len()
+    }
+
+    /// Says whether the engine-typed turn has ended in the app, is held open only for
+    /// commands it started in the background, and every event it gave has been read.
+    /// Output: the answer.
+    pub fn held(&self) -> bool {
+        self.held && self.queue.is_empty()
     }
 
     /// Types one prompt into the app as a bracketed paste, then Enter. The first prompt
@@ -279,12 +309,23 @@ impl TerminalSession {
         Ok(())
     }
 
-    /// Presses Escape in the app, which stops the running turn in Codex and Claude Code.
-    /// Output: Ok once typed, or `launch_not_running` with no turn.
+    /// Presses Escape in the app, which stops the running turn in Codex and Claude Code. A
+    /// turn held open for the app's background commands has no request running for Escape
+    /// to stop, so it ends here as interrupted, its commands still counted as running.
+    /// Output: Ok once typed or ended, or `launch_not_running` with no turn.
     pub fn interrupt(&mut self) -> Result<(), LaunchError> {
         self.require_live()?;
         if !self.turn {
             return Err(failure("launch_not_running"));
+        }
+        if self.held {
+            self.held = false;
+            self.turn = false;
+            self.queue.extend([
+                LaunchEvent::Interrupted,
+                LaunchEvent::TurnFinished { success: false },
+            ]);
+            return Ok(());
         }
         self.type_bytes(ESCAPE)
     }
@@ -328,9 +369,26 @@ impl TerminalSession {
     /// live master needs: turn facts then come from [`Self::next_fact`] and `next_event`
     /// reports nothing more. Takes the session. Returns nothing.
     pub fn follow_every_turn(&mut self) {
+        assert!(!self.own);
         self.live = true;
         self.queue
             .retain(|event| matches!(event, LaunchEvent::Ready { .. }));
+    }
+
+    /// Keeps the turns the app starts by itself between the engine's turns, as a native
+    /// lead's app does when its teammates write to it: their facts then come from
+    /// [`Self::next_own_fact`], tool use left out, at most `OWN_FACTS_MAX` waiting. The
+    /// engine's turns still come from `next_event`. Takes the session. Returns nothing.
+    pub fn follow_own_turns(&mut self) {
+        assert!(!self.live);
+        self.own = true;
+    }
+
+    /// Takes the oldest kept fact of a turn the app started by itself, read by the last
+    /// poll of `next_event`. Takes the session. Returns the fact, or none.
+    pub fn next_own_fact(&mut self) -> Option<TranscriptEvent> {
+        assert!(self.own && !self.live);
+        self.facts.pop_front()
     }
 
     /// Waits up to `wait` for the next turn fact of a session that follows every turn: a
@@ -433,7 +491,9 @@ impl TerminalSession {
         for fact in facts {
             if self.live {
                 match fact {
-                    TranscriptEvent::ToolUse { .. } => {}
+                    TranscriptEvent::ToolUse { .. }
+                    | TranscriptEvent::BackgroundStarted { .. }
+                    | TranscriptEvent::BackgroundEnded { .. } => {}
                     TranscriptEvent::TurnStarted => {
                         self.turn = true;
                         self.facts.push_back(fact);
@@ -446,7 +506,27 @@ impl TerminalSession {
                 }
                 continue;
             }
+            match fact {
+                TranscriptEvent::BackgroundStarted { id } => {
+                    if self.background.len() < BACKGROUND_MAX {
+                        self.background.insert(id);
+                    }
+                    continue;
+                }
+                TranscriptEvent::BackgroundEnded { id } => {
+                    self.background.remove(&id);
+                    continue;
+                }
+                _ => {}
+            }
+            assert!(self.background.len() <= BACKGROUND_MAX);
             if !self.turn {
+                if self.own
+                    && self.facts.len() < OWN_FACTS_MAX
+                    && !matches!(fact, TranscriptEvent::ToolUse { .. })
+                {
+                    self.facts.push_back(fact);
+                }
                 continue;
             }
             let event = match fact {
@@ -457,10 +537,21 @@ impl TerminalSession {
                     LaunchEvent::TurnError { rate_limited }
                 }
                 TranscriptEvent::TurnFinished { success } => {
+                    if success && !self.background.is_empty() {
+                        self.held = true;
+                        continue;
+                    }
+                    self.held = false;
                     self.turn = false;
                     LaunchEvent::TurnFinished { success }
                 }
-                TranscriptEvent::TurnStarted | TranscriptEvent::Waiting => continue,
+                TranscriptEvent::TurnStarted => {
+                    self.held = false;
+                    continue;
+                }
+                TranscriptEvent::Waiting
+                | TranscriptEvent::BackgroundStarted { .. }
+                | TranscriptEvent::BackgroundEnded { .. } => continue,
             };
             self.queue.push_back(event);
         }
@@ -570,6 +661,34 @@ impl AgentSession {
         }
     }
 
+    /// Counts the commands a pane app started in the background that still run; a headless
+    /// session reports none. Output: the count.
+    pub fn background_running(&self) -> usize {
+        match self {
+            Self::Piped(_) => 0,
+            Self::Terminal(session) => session.background_running(),
+        }
+    }
+
+    /// Says whether a pane app's engine-typed turn has ended and is held open only for its
+    /// background commands; a headless session never holds one. Output: the answer.
+    pub fn held(&self) -> bool {
+        match self {
+            Self::Piped(_) => false,
+            Self::Terminal(session) => session.held(),
+        }
+    }
+
+    /// Says whether the engine sees the commands the agent starts in the background, so a
+    /// turn can be held for them or stopped with them: a pane app whose record reports
+    /// them; a headless session reports none. Output: the answer.
+    pub fn reports_background(&self) -> bool {
+        match self {
+            Self::Piped(_) => false,
+            Self::Terminal(session) => session.reader.reports_background(),
+        }
+    }
+
     /// Sends one prompt. Output: Ok, or a plain refusal code such as `launch_busy`.
     pub fn send(&mut self, prompt: &str) -> Result<(), LaunchError> {
         match self {
@@ -602,6 +721,24 @@ impl AgentSession {
         match self {
             Self::Piped(session) => session.next_event(wait),
             Self::Terminal(session) => session.next_event(wait),
+        }
+    }
+
+    /// Keeps the turns a pane app starts by itself, see
+    /// [`TerminalSession::follow_own_turns`]; a headless agent starts none. Takes the
+    /// session. Returns nothing.
+    pub fn follow_own_turns(&mut self) {
+        if let Self::Terminal(session) = self {
+            session.follow_own_turns();
+        }
+    }
+
+    /// Takes the oldest kept fact of a turn the pane app started by itself; a headless
+    /// agent has none. Takes the session. Returns the fact, or none.
+    pub fn next_own_fact(&mut self) -> Option<TranscriptEvent> {
+        match self {
+            Self::Piped(_) => None,
+            Self::Terminal(session) => session.next_own_fact(),
         }
     }
 

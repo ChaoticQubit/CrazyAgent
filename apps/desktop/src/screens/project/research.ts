@@ -3,7 +3,7 @@ import { failureCopy, failureSentence, receiptState } from "../../api-projects";
 import type { ContextItem, MemoryItem, ResearchJob, ResearchKind, TeamAgentStatus, TeamStatus, TeamTaskStatus } from "../../api-projects";
 import type { HarnessEntry, PoolSummary, Result } from "../../api";
 import { namedFailure } from "../../api";
-import { withCode, type IntentReceipt, type MasterState, type MasterTurn, type ProjectDetail } from "../../engine-client";
+import { withCode, type IntentReceipt, type MasterState, type MasterTurn, type ProjectDetail, type TeamAgent } from "../../engine-client";
 import { formatBytes } from "../new-project/wizard";
 import type { Loaded } from "../../state";
 
@@ -90,6 +90,57 @@ export interface TeamAgentRow {
   task: string;
   folder: string;
   rename: { agent: number; handle: string } | null;
+  depth: number;
+  lead: string | null;
+  stop: { agent: number } | null;
+  stoppedByYou: boolean;
+  teammates: TeammateRow[];
+}
+
+/** One teammate a harness split off in its own terminal window, as the Team panel shows it. */
+export interface TeammateRow {
+  key: string;
+  pane: string;
+  word: string;
+  stop: { agent: number; pane: string } | null;
+}
+
+/** The teammate rows of one harness: running first, then the ones that closed, as the engine
+ * lists them. Inputs: the harness agent and whether it runs now and was not stopped by the
+ * owner. Output: the rows, each with a Stop only while it and its harness run. */
+export function teammateRows(agent: Pick<TeamAgent, "id" | "teammates">, running: boolean): TeammateRow[] {
+  return (agent.teammates ?? []).map((mate) => ({
+    key: `teammate-${agent.id}-${mate.pane}`,
+    pane: mate.pane,
+    word: mate.stopped ? "Stopped by you" : mate.ended ? "Closed" : "Running",
+    stop: running && !mate.ended && !mate.stopped ? { agent: agent.id, pane: mate.pane } : null,
+  }));
+}
+
+/** Orders agents as their lead tree (N2): each lead followed by its own workers, depth first,
+ * siblings in the given order; an agent whose lead is not listed starts a tree of its own.
+ * Input: the agents in display order. Output: each agent once with its depth under the listed
+ * leads, 0 for a top agent. */
+export function leadTree<T extends { id: number; parent?: number | null }>(agents: T[]): { agent: T; depth: number }[] {
+  const listed = new Set(agents.map((agent) => agent.id));
+  const top = agents.filter((agent) => agent.parent == null || agent.parent === agent.id || !listed.has(agent.parent));
+  const stack = [...top].reverse().map((agent) => ({ agent, depth: 0 }));
+  const seen = new Set<number>();
+  const ordered: { agent: T; depth: number }[] = [];
+  for (let next = stack.pop(); next !== undefined; next = stack.pop()) {
+    if (seen.has(next.agent.id)) continue;
+    seen.add(next.agent.id);
+    ordered.push(next);
+    const lead = next;
+    const workers = agents.filter((item) => item.parent === lead.agent.id && item.id !== lead.agent.id);
+    stack.push(...[...workers].reverse().map((agent) => ({ agent, depth: lead.depth + 1 })));
+  }
+  for (const agent of agents) {
+    if (seen.has(agent.id)) continue;
+    seen.add(agent.id);
+    ordered.push({ agent, depth: 0 });
+  }
+  return ordered;
 }
 
 export interface TeamTaskRow {
@@ -137,7 +188,8 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks" | "show_fi
   const names = new Map(status.agents.map((agent) => [agent.id, agent.label]));
   const account = (id: string | null) => accountName(accounts, id);
   const listed = status.agents.filter((agent) => status.show_finished === true || agent.finished !== true);
-  const agents = listed.filter((agent) => filter === "all" || (agent.status !== "stopped" && agent.status !== "failed")).map((agent): TeamAgentRow => {
+  const shown = listed.filter((agent) => filter === "all" || (agent.status !== "stopped" && agent.status !== "failed"));
+  const agents = leadTree(shown).map(({ agent, depth }): TeamAgentRow => {
     const held = status.tasks.find((item) => item.id === agent.task);
     const last = held ? undefined : status.tasks.reduce<(typeof status.tasks)[number] | undefined>((newest, item) =>
       item.agent === agent.id && (newest === undefined || item.id > newest.id) ? item : newest, undefined);
@@ -151,11 +203,16 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks" | "show_fi
       task: agent.problem ?? (held ? firstLine(held.prompt) : last ? `Last task: ${firstLine(last.prompt)}` : agent.status === "idle" ? "Waiting for work" : ""),
       folder: agent.role === "master" ? "Works in the project folder" : agent.worktree ? `Works in ${agent.worktree}` : "",
       rename: agent.role === "sub" && agent.persona && LIVE_AGENT.includes(agent.status) ? { agent: agent.id, handle: agent.handle ?? "" } : null,
+      depth,
+      lead: agent.parent != null ? names.get(agent.parent) ?? null : null,
+      stop: agent.role !== "master" && agent.owner_stopped !== true && LIVE_AGENT.includes(agent.status) ? { agent: agent.id } : null,
+      stoppedByYou: agent.owner_stopped === true,
+      teammates: agent.role === "sub" ? teammateRows(agent, agent.owner_stopped !== true && LIVE_AGENT.includes(agent.status)) : [],
     };
   });
   const tasks = status.tasks.filter((item) => filter === "all" || item.status === "running" || WAITING.includes(item.status)).map((item): TeamTaskRow => ({
     key: `task-${item.id}`,
-    from: item.source === "owner" ? "From you" : "From the master",
+    from: taskFrom(item, names),
     to: (item.agent !== null ? names.get(item.agent) : undefined) ?? harnessLabel(item.harness),
     word: teamTaskWord(item.status),
     prompt: firstLine(item.prompt),
@@ -165,6 +222,14 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks" | "show_fi
     stop: item.status === "running" ? { task: item.id, label: "Stop" } : WAITING.includes(item.status) ? { task: item.id, label: "Cancel" } : null,
   }));
   return { agents, tasks };
+}
+
+/** Names who handed a task out, as "From Grace (@lead-b)" for the lead that started it, "From a
+ * lead" for one the status does not list, else "From the master" or "From you" by its source.
+ * Inputs: the task and the agent names by id. Output: the words. */
+export function taskFrom(task: Pick<TeamStatus["tasks"][number], "source" | "parent">, names: ReadonlyMap<number, string>): string {
+  if (typeof task.parent === "number") return `From ${names.get(task.parent) ?? "a lead"}`;
+  return task.source === "owner" ? "From you" : "From the master";
 }
 
 /** One agent in the Finished fold-out: its name, harness, status word, what it last worked on
@@ -206,7 +271,7 @@ export function finishedRows(status: Pick<TeamStatus, "agents" | "tasks">, harne
       word: teamAgentWord(agent.status),
       task: agent.problem ?? (last ? `Last task: ${firstLine(last.prompt)}` : "No task yet"),
       result: last?.result ?? null,
-      ended: at === null ? "" : `${agent.status === "idle" ? "Last active" : teamAgentWord(agent.status)} ${ago(at, now).toLowerCase()}`,
+      ended: at === null ? "" : `${agent.status === "idle" ? "Last active" : agent.owner_stopped === true ? "Stopped by you" : teamAgentWord(agent.status)} ${ago(at, now).toLowerCase()}`,
       tasks: own.length,
       wakeable: agent.wakeable === true,
       wakeNote: agent.wakeable === true ? null : agent.wake_note ?? "This version of the engine can't wake agents.",

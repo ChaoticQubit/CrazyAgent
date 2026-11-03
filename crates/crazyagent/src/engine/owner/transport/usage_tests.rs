@@ -8,6 +8,14 @@ use std::os::unix::fs::PermissionsExt;
 const OWNER_WAIT_MS: u64 = 5000;
 pub(super) const IN_FLIGHT: Duration = Duration::from_millis(300);
 const AT_MS: i64 = 1_800_000_000_000;
+static BUSY_STORAGE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Lets one test at a time write and sweep tens of thousands of real files. Run together,
+/// those tests share one disk, and each sweep then outlasts the owner waits its test was
+/// measured against. Output: the guard the test holds until it ends.
+pub(super) async fn busy_storage() -> tokio::sync::MutexGuard<'static, ()> {
+    BUSY_STORAGE.lock().await
+}
 
 /// A real engine with an owner client and the folder of its usage store.
 pub(super) struct Usage {

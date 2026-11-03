@@ -327,11 +327,18 @@ fn content(_source: &AdmittedSource, _maximum: usize) -> Result<AssetContent, En
     Err(error("asset_source_unavailable"))
 }
 
+/// Reads an admitted asset file for a snapshot when it is still the file that was admitted:
+/// the same inode, on the same device or on its volume renumbered at mount after a restart
+/// (`file_identity::same_files`). Takes the admitted source and the byte limit. Returns its
+/// content, `asset_source_replaced` for another file, or the read or change refusal.
 #[cfg(unix)]
 fn content(source: &AdmittedSource, maximum: usize) -> Result<AssetContent, EngineError> {
     let file = open_regular(&source.source.path)?;
     let before = file.metadata().map_err(error)?;
-    if before.ino() != source.inode || before.dev() != source.device {
+    if !crate::file_identity::same_files(
+        &[(source.device, source.inode)],
+        &[file_identity(&before)],
+    ) {
         return Err(error("asset_source_replaced"));
     }
     if before.len() > maximum as u64 {
@@ -458,3 +465,6 @@ fn read(
         snapshot: Box::new(snapshot),
     })
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests;

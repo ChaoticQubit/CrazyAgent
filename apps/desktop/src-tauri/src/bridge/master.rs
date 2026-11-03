@@ -141,7 +141,7 @@ impl NativeBridge {
         action: MasterOwnerAction,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
-        self.allow_new_auth()?;
+        self.allow_change()?;
         if self.blocked() {
             return Err(failure("pending_intent"));
         }
@@ -155,7 +155,8 @@ impl NativeBridge {
             | MasterOwnerAction::Resume { project_id, .. }
             | MasterOwnerAction::Submit { project_id, .. }
             | MasterOwnerAction::Cancel { project_id, .. }
-            | MasterOwnerAction::Close { project_id, .. } => project_id,
+            | MasterOwnerAction::Close { project_id, .. }
+            | MasterOwnerAction::DeleteSession { project_id, .. } => project_id,
             MasterOwnerAction::Resolve { .. } | MasterOwnerAction::RegisterRcliProfile { .. } => {
                 return Err(failure("master_bridge_unavailable"));
             }
@@ -428,6 +429,25 @@ impl NativeBridge {
             project_id,
             session_id,
             cancel_running,
+        };
+        self.apply_master(ticket, action, generation).await
+    }
+
+    /// Deletes a session of the selected project that is not live: the engine removes its
+    /// stored turns and the harness transcript in its master's private home. Inputs: the
+    /// selection ticket, the session id from the session list and a draft generation.
+    /// Output: the engine receipt.
+    pub async fn delete_master_session(
+        &mut self,
+        ticket: &str,
+        session_id: &str,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = self.master_project(ticket)?;
+        let session_id = SessionId::new(session_id).map_err(|_| failure("invalid_session"))?;
+        let action = MasterOwnerAction::DeleteSession {
+            project_id,
+            session_id,
         };
         self.apply_master(ticket, action, generation).await
     }

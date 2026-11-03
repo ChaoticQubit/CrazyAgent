@@ -536,6 +536,10 @@ pub enum MasterOwnerAction {
         session_id: SessionId,
         change_set: crate::landing::ChangeSetId,
     },
+    DeleteSession {
+        project_id: ProjectId,
+        session_id: SessionId,
+    },
     RegisterRcliProfile {
         registration: Box<RcliProfileRegistration>,
     },
@@ -591,6 +595,7 @@ pub(crate) fn validate_action(action: &MasterOwnerAction) -> Result<(), EngineEr
         | MasterOwnerAction::Close { .. }
         | MasterOwnerAction::Resume { .. }
         | MasterOwnerAction::Resolve { .. }
+        | MasterOwnerAction::DeleteSession { .. }
         | MasterOwnerAction::RegisterRcliProfile { .. } => {}
     }
     Ok(())

@@ -2098,3 +2098,99 @@ fn a_sandboxed_agent_in_a_linked_worktree_cannot_commit() {
     let after = owner_git(&case.project, &case.home, &["rev-parse", "HEAD"]);
     assert_eq!(after.stdout, head.stdout);
 }
+
+#[test]
+fn an_agent_cannot_exec_an_app_bundle_binary_in_any_case_but_bundle_tools_still_run() {
+    let case = case();
+    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let text = sandbox.profile();
+    let allow = text.find("(allow process-exec)\n").unwrap();
+    let deny = text.find("(deny process-exec\n").unwrap();
+    assert!(allow < deny, "{text}");
+    let blender = "/Applications/Blender.app/Contents/MacOS/Blender";
+    assert!(Path::new(blender).is_file(), "the probe needs {blender}");
+    let profile = case.profiles.join("apps.sb");
+    for app in [
+        blender,
+        "/applications/blender.APP/contents/MACOS/Blender",
+        "/System/Volumes/Data/Applications/Blender.app/Contents/MacOS/Blender",
+        "/system/volumes/data/Applications/Blender.app/Contents/MacOS/Blender",
+    ] {
+        let output = run(
+            &sandbox,
+            &profile,
+            &format!("{} --version", quoted(Path::new(app))),
+        );
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{app} ran");
+        assert!(
+            stderr.contains("Operation not permitted"),
+            "{app}: {stderr}"
+        );
+        assert!(output.stdout.is_empty(), "{app}");
+    }
+    for (tool, expected) in [
+        (
+            "/Applications/Docker.app/Contents/Resources/bin/docker",
+            "Docker version",
+        ),
+        (
+            "/Applications/Xcode.app/Contents/Developer/usr/bin/git",
+            "git version",
+        ),
+    ] {
+        let output = run(
+            &sandbox,
+            &profile,
+            &format!("{} --version", quoted(Path::new(tool))),
+        );
+        assert!(
+            output.status.success(),
+            "{tool}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).starts_with(expected),
+            "{tool}"
+        );
+    }
+}
+
+#[test]
+fn a_teammate_worktree_is_added_in_the_clone_but_no_other_git_lands_below_it() {
+    assert!(Path::new(AGENT_GIT).is_file());
+    let (case, clone, _head) = clone_case();
+    let profile = case.profiles.join("agent.sb");
+    let confined = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .confine_to_clone(&clone)
+        .unwrap();
+    let teammates = clone.join(crazyagent::agent_git::TEAMMATES_FOLDER);
+    let bob = teammates.join("bob");
+    let added = run(
+        &confined,
+        &profile,
+        &format!(
+            "cd {} && {AGENT_GIT} -c core.hooksPath=/dev/null worktree add -q -b agent/bob {} HEAD",
+            quoted(&clone),
+            quoted(&bob)
+        ),
+    );
+    assert!(added.status.success(), "{added:?}");
+    assert!(bob.join(".git").is_file());
+    for target in [
+        teammates.join("dave").join(".git").join("config"),
+        bob.join("nested").join(".git"),
+        clone.join("sub").join(".git"),
+    ] {
+        write_refused(
+            &confined,
+            &profile,
+            &format!(
+                "mkdir -p {} && printf x > {}",
+                quoted(target.parent().unwrap()),
+                quoted(&target)
+            ),
+            &target,
+        );
+    }
+}

@@ -40,6 +40,7 @@ pub mod versioned;
 pub(crate) use native_auth::NativeAuthRetirementCheckpoint;
 #[cfg(all(test, unix))]
 pub(crate) use native_auth::doubt_sign_in;
+pub(crate) use native_auth::sign_in_rechecking;
 pub(crate) use native_auth::{NativeAuthBegin, NativeAuthDispatch, NativeAuthWork};
 #[cfg(all(test, unix))]
 mod model_access_page_tests;
@@ -938,6 +939,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::project_setup::repair_repositories(connection)?;
     crate::team::initialize(connection)?;
     crate::ide::bridge::memory::initialize(connection)?;
+    crate::coord::ensure(connection)?;
     crate::instruction_files::initialize(connection).map_err(error)?;
     crate::scheduling::initialize(connection)?;
     plugins::initialize(connection)?;
@@ -1550,6 +1552,12 @@ fn execute(
     }
 }
 
+/// Records a new project and clears any plugin rows a prior project of the same id left
+/// behind, so a reused id (re-adding a folder with the same name is the normal way to reuse
+/// one) inherits none of the old project's MCP servers, secrets, skills or switches. The
+/// clear runs only once the row is confirmed new, so a rejected duplicate leaves a live
+/// project's plugins untouched. Inputs: the transaction, the id and the spec. Output: Applied,
+/// or Rejected when the id is already in use.
 pub(crate) fn create_project(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
@@ -1575,6 +1583,7 @@ pub(crate) fn create_project(
     }
     enforce_snapshot_bound(tx)?;
     assert_eq!(count, 1);
+    plugins::remove_project(tx, project_id)?;
     assert!(!tx.is_autocommit());
     Ok(Outcome::Applied)
 }
@@ -2415,6 +2424,14 @@ fn owner_read(
                 .collect(),
             version: versioned::current(&tx, &versioned::read_paths_item(project_id))?.version,
         },
+        OwnerRead::ProjectHiddenPaths { project_id } => OwnerData::ProjectHiddenPaths {
+            project_id: project_id.clone(),
+            paths: crate::sandbox::hidden_paths::load(&tx, project_id.as_str())
+                .map_err(error)?
+                .into_iter()
+                .map(|path| path.display().to_string())
+                .collect(),
+        },
         OwnerRead::ProjectAgentPolicy { project_id } => {
             let setup = crate::project_setup::load_setup(&tx, project_id)?
                 .ok_or_else(|| error("invalid_project"))?;
@@ -2455,6 +2472,12 @@ fn owner_read(
                 &stored_setup(&tx, project_id)?,
             )?),
         },
+        OwnerRead::CoordQuestions { project_id } => {
+            stored_setup(&tx, project_id)?;
+            OwnerData::CoordQuestions {
+                inbox: Box::new(crate::team::questions::inbox(&tx, project_id)?),
+            }
+        }
         OwnerRead::ResearchJobs { project_id } => OwnerData::ResearchJobs {
             project_id: project_id.clone(),
             jobs: crate::project_setup::list_jobs(&tx, config, project_id)?,
@@ -2499,9 +2522,10 @@ fn owner_read(
             memories: crate::memory::library::approved_for_project(&tx, project_id)?,
         },
         OwnerRead::PoolSummaries { offset } => pool_summaries(&tx, config, *offset)?,
-        OwnerRead::AccountSchedule => OwnerData::AccountSchedule {
-            schedule: crate::scheduling::load(&tx)?,
-        },
+        OwnerRead::AccountSchedule { after } => {
+            let (schedule, next) = crate::scheduling::load_page(&tx, after.as_ref())?;
+            OwnerData::AccountSchedule { schedule, next }
+        }
         OwnerRead::AccountRanking => OwnerData::AccountRanking {
             pools: crate::scheduling::ranking(
                 &tx,

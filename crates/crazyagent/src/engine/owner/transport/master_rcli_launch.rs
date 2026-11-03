@@ -49,6 +49,7 @@ impl OwnerRuntimeHandle {
             home_dir,
             cwd: prepared.cwd.clone(),
             profile_config_sha256,
+            instructions: None,
         })
     }
 }
@@ -304,7 +305,7 @@ fallback_allowed = false
                 assert_eq!(operation.result, OwnerResult::Applied);
                 Ok(())
             },
-            Duration::from_millis(100),
+            super::super::master_dispatch::DRIVE_PAUSE,
         )
         .await
         .unwrap();
@@ -555,6 +556,7 @@ fallback_allowed = false
             lease: prepared.lease.clone(),
             agent_project: prepared.agent_project.clone(),
             agent_policy: prepared.agent_policy.clone(),
+            hidden_paths: prepared.hidden_paths.clone(),
         }
     }
 

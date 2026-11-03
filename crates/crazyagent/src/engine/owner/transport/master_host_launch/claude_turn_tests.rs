@@ -151,6 +151,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         repository: &repository,
         worktree: &worktree,
         policy: &AgentPolicy::default(),
+        hidden: &[],
     };
     let MasterTurnLaunch {
         command: off_command,
@@ -218,6 +219,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         repository: &repository,
         worktree: &worktree,
         policy: &AgentPolicy::default(),
+        hidden: &[],
     };
     let host_limit = usize::try_from(crate::engine::claude_host::INSTRUCTIONS_BYTES_MAX).unwrap();
     let refused = claude_master_turn(
@@ -252,6 +254,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         repository: &repository,
         worktree: &worktree,
         policy: &AgentPolicy::default(),
+        hidden: &[],
     };
     let MasterTurnLaunch {
         command,

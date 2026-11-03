@@ -21,6 +21,7 @@ pub const CLEANUP_CODES: &[&str] = &[
     "cleanup_commits_unlanded",
     "cleanup_folder_failed",
     "cleanup_outcome_unknown",
+    "cleanup_refs_unlanded",
     "cleanup_reply_bounds",
     "cleanup_request_bounds",
     "cleanup_request_invalid",

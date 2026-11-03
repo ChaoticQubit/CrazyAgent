@@ -366,3 +366,39 @@ async fn configured_gateway_revalidates_actual_source_and_physical_profile_ident
         case.close().await;
     }
 }
+
+/// Moves the database pin of the fixture's one configured master registration, as a
+/// registration written before a reboot keeps it. Inputs: the case and the amounts added
+/// to the pinned device and inode. Output: none.
+fn move_registered_database(case: &Fixture, device: i64, inode: i64) {
+    let changed = case
+        .db
+        .execute(
+            "UPDATE configured_master_profiles SET body=json_set(body,'$.database_identity',\
+             json_array(json_extract(body,'$.database_identity[0]')+?1,\
+             json_extract(body,'$.database_identity[1]')+?2))",
+            rusqlite::params![device, inode],
+        )
+        .unwrap();
+    assert_eq!(changed, 1);
+}
+
+#[tokio::test]
+async fn configured_master_registration_survives_a_database_renumber() {
+    let mut case = configured_initial_conversation_fixture().await;
+    move_registered_database(&case, 1, 0);
+    let first = begin(&mut case, 100).unwrap();
+    assert!(!first.replayed);
+    assert_eq!(first.attempt.connection, case.proof.connection);
+    assert_eq!(counts(&case), (1, 0));
+    case.close().await;
+}
+
+#[tokio::test]
+async fn configured_master_registration_on_another_database_inode_is_refused() {
+    let mut case = configured_initial_conversation_fixture().await;
+    move_registered_database(&case, 1, 1);
+    reject(&mut case, 100, Some("master_configured_database_changed"));
+    assert_eq!(counts(&case), (0, 0));
+    case.close().await;
+}
