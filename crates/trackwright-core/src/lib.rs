@@ -1,4 +1,5 @@
 pub mod catalog;
+pub mod coverage;
 pub mod criteria;
 pub mod events;
 pub mod host;

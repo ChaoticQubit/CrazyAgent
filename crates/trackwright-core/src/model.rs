@@ -59,6 +59,45 @@ pub mod codes {
     pub const CRITERION_NEEDS_CHECK: &str = "criterion_needs_check";
     pub const EVIDENCE_NOT_FOR_AGENTS: &str = "evidence_not_for_agents";
 
+    pub const ACTIVE_PLAN_EXISTS: &str = "active_plan_exists";
+    pub const CASES_FULL: &str = "cases_full";
+    pub const CASE_LINKS_FULL: &str = "case_links_full";
+    pub const CASE_LINK_EXISTS: &str = "case_link_exists";
+    pub const CASE_LINK_UNKNOWN: &str = "case_link_unknown";
+    pub const CASE_PROTECTED: &str = "case_protected";
+    pub const CASE_UNKNOWN: &str = "case_unknown";
+    pub const CROSS_PROJECT: &str = "cross_project";
+    pub const CYCLE_UNKNOWN: &str = "cycle_unknown";
+    pub const OPTION_NEEDS_HOST: &str = "option_needs_host";
+    pub const PLANS_FULL: &str = "plans_full";
+    pub const PLAN_CLOSED: &str = "plan_closed";
+    pub const PLAN_ITEMS_FULL: &str = "plan_items_full";
+    pub const PLAN_ITEM_EXISTS: &str = "plan_item_exists";
+    pub const PLAN_ITEM_UNKNOWN: &str = "plan_item_unknown";
+    pub const PLAN_UNKNOWN: &str = "plan_unknown";
+    pub const RELEASE_UNKNOWN: &str = "release_unknown";
+    pub const RESULTS_EMPTY: &str = "results_empty";
+    pub const RESULTS_TOO_MANY: &str = "results_too_many";
+    pub const RESULT_NAME_REPEATED: &str = "result_name_repeated";
+    pub const RUNS_FULL: &str = "runs_full";
+    pub const RUN_BATCH_INVALID: &str = "run_batch_invalid";
+    pub const RUN_CLOSED: &str = "run_closed";
+    pub const RUN_FINISH_INVALID: &str = "run_finish_invalid";
+    pub const RUN_INTEGRITY_INVALID: &str = "run_integrity_invalid";
+    pub const RUN_POLICY_INVALID: &str = "run_policy_invalid";
+    pub const RUN_RESULTS_FULL: &str = "run_results_full";
+    pub const RUN_SOURCE_INVALID: &str = "run_source_invalid";
+    pub const RUN_UNKNOWN: &str = "run_unknown";
+    pub const RUN_WRITER_REFUSED: &str = "run_writer_refused";
+    pub const SETS_FULL: &str = "sets_full";
+    pub const SET_CASES_FULL: &str = "set_cases_full";
+    pub const SET_CASE_EXISTS: &str = "set_case_exists";
+    pub const SET_CASE_UNKNOWN: &str = "set_case_unknown";
+    pub const SET_UNKNOWN: &str = "set_unknown";
+    pub const STABLE_NAME_TAKEN: &str = "stable_name_taken";
+    pub const STEPS_FULL: &str = "steps_full";
+    pub const TEST_ID_INVALID: &str = "test_id_invalid";
+
     /// Every code above, so a host can map each core refusal to its own vocabulary.
     pub const ALL: &[&str] = &[
         TEXT_EMPTY,
@@ -115,6 +154,44 @@ pub mod codes {
         NOTIFY_TOO_WIDE,
         CRITERION_NEEDS_CHECK,
         EVIDENCE_NOT_FOR_AGENTS,
+        ACTIVE_PLAN_EXISTS,
+        CASES_FULL,
+        CASE_LINKS_FULL,
+        CASE_LINK_EXISTS,
+        CASE_LINK_UNKNOWN,
+        CASE_PROTECTED,
+        CASE_UNKNOWN,
+        CROSS_PROJECT,
+        CYCLE_UNKNOWN,
+        OPTION_NEEDS_HOST,
+        PLANS_FULL,
+        PLAN_CLOSED,
+        PLAN_ITEMS_FULL,
+        PLAN_ITEM_EXISTS,
+        PLAN_ITEM_UNKNOWN,
+        PLAN_UNKNOWN,
+        RELEASE_UNKNOWN,
+        RESULTS_EMPTY,
+        RESULTS_TOO_MANY,
+        RESULT_NAME_REPEATED,
+        RUNS_FULL,
+        RUN_BATCH_INVALID,
+        RUN_CLOSED,
+        RUN_FINISH_INVALID,
+        RUN_INTEGRITY_INVALID,
+        RUN_POLICY_INVALID,
+        RUN_RESULTS_FULL,
+        RUN_SOURCE_INVALID,
+        RUN_UNKNOWN,
+        RUN_WRITER_REFUSED,
+        SETS_FULL,
+        SET_CASES_FULL,
+        SET_CASE_EXISTS,
+        SET_CASE_UNKNOWN,
+        SET_UNKNOWN,
+        STABLE_NAME_TAKEN,
+        STEPS_FULL,
+        TEST_ID_INVALID,
     ];
 }
 

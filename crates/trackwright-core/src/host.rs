@@ -3,6 +3,7 @@ use crate::model::{
     codes,
 };
 use crate::policy;
+use crate::runs::SourceRef;
 use crate::store::{self, StoreError};
 use crate::text::{self, TextField};
 use rusqlite::Transaction;
@@ -102,6 +103,26 @@ pub trait Evidence {
         project: &ProjectKey,
         check: &CheckView,
     ) -> Result<EvidenceState, Refusal>;
+
+    /// Tells whether this host knows the source a ticket's work is at, so a project may set
+    /// `test_evidence = current_source`. Output: false unless the host also gives
+    /// `current_source`; the standalone host keeps this default.
+    fn tracks_source(&self) -> bool {
+        false
+    }
+
+    /// The source a ticket's work is at now. Under `test_evidence = current_source` a `test`
+    /// check counts only results from runs of that source. Inputs: the transaction, the
+    /// project and the ticket. Output: the source, None when the host does not know it (the
+    /// default), or a refusal.
+    fn current_source(
+        &self,
+        _tx: &Transaction<'_>,
+        _project: &ProjectKey,
+        _ticket: &TicketView,
+    ) -> Result<Option<SourceRef>, Refusal> {
+        Ok(None)
+    }
 }
 
 /// Decides who may run which operation.
