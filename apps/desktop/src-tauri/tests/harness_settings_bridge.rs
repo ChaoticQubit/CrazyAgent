@@ -3,7 +3,7 @@
 mod engine_support;
 
 use crazyagent::engine::bootstrap::EngineService;
-use crazyagent::harness_settings::{APP_ONLY, Access, Scope, catalog, catalog_page, store};
+use crazyagent::harness_settings::{APP_ONLY, Access, Scope, Source, catalog, catalog_page, store};
 use crazyagent::project_setup::{Platform, ProjectSetup, ResearchKind};
 use crazyagent::protocol::{ProjectId, ProjectSpec};
 use crazyagent::storage::versioned;
@@ -493,6 +493,15 @@ async fn disagreeing(root: std::path::PathBuf) -> Result<(), Box<dyn Error>> {
     let mut extra = stray.settings[0].clone();
     extra.key = "no_longer_listed".into();
     stray.settings.push(extra);
+    let mut empty = values()?;
+    let mut retired = empty.settings[0].clone();
+    retired.key = "no_longer_listed".into();
+    retired.access = Access::ReadOnly {
+        reason: "Not qualified for Codex 0.51.0".into(),
+    };
+    retired.source = Source::NotApplied;
+    retired.here = None;
+    empty.settings.push(retired);
     for (name, page) in [
         ("a catalog key without a row", missing),
         ("another harness", other),
@@ -500,6 +509,7 @@ async fn disagreeing(root: std::path::PathBuf) -> Result<(), Box<dyn Error>> {
         ("a catalog-locked key shown editable", unlocked),
         ("an editable value of the wrong type", wrong),
         ("an unlisted key shown editable", stray),
+        ("an unlisted key without a stored value", empty),
     ] {
         assert_eq!(
             page_of(vec![head.clone()], vec![page], None)
@@ -513,8 +523,121 @@ async fn disagreeing(root: std::path::PathBuf) -> Result<(), Box<dyn Error>> {
 }
 
 /// Pages that do not agree with the catalog never reach the window as a page it could
-/// trust: a missing, doubled or foreign row, a lock dropped, or a value of the wrong type.
+/// trust: a missing, doubled or foreign row, a lock dropped, a value of the wrong type, or a
+/// row for an unlisted key with no stored value.
 #[tokio::test]
 async fn engine_pages_that_disagree_with_the_catalog_are_refused() {
     with_engine("ca-desk-hsd-", disagreeing).await;
+}
+
+fn newer_fixture() -> Result<catalog::Catalog, Box<dyn Error>> {
+    let mut json: Value = serde_json::from_slice(FIXTURE)?;
+    let keys = json["keys"].as_array_mut().unwrap();
+    let before = keys.len();
+    keys.retain(|key| key["key"] != "hide_agent_reasoning");
+    assert_eq!(keys.len(), before - 1);
+    let effort = keys
+        .iter_mut()
+        .find(|key| key["key"] == "model_reasoning_effort")
+        .unwrap();
+    effort["options"] = json!(["low", "medium", "high"]);
+    Ok(catalog::parse(&serde_json::to_vec(&json)?)?)
+}
+
+fn page_under(
+    root: &Path,
+    catalog: &catalog::Catalog,
+) -> Result<HarnessSettingsPage, Box<dyn Error>> {
+    let db = versioned::open(root)?;
+    let head = catalog_page(catalog, QUALIFIED, None)?;
+    let values = store::values(&db, catalog, QUALIFIED, &Scope::App, None)?;
+    assert_eq!((head.next, values.next), (None, None));
+    Ok(page_of(vec![head], vec![values], None)?)
+}
+
+async fn outdated(root: std::path::PathBuf) -> Result<(), Box<dyn Error>> {
+    let older = catalog::parse(FIXTURE)?;
+    let newer = newer_fixture()?;
+    let db = versioned::open(&root)?;
+    let before = page_under(&root, &older)?;
+    for (key, value) in [
+        ("model_reasoning_effort", json!("minimal")),
+        ("hide_agent_reasoning", json!(true)),
+    ] {
+        written(store::set(
+            &db,
+            &older,
+            QUALIFIED,
+            &Scope::App,
+            key,
+            &value,
+            row(&before, key).version,
+        )?)?;
+    }
+    assert!(
+        page_under(&root, &older)?
+            .keys
+            .iter()
+            .all(|row| row.here_valid)
+    );
+
+    let page = page_under(&root, &newer)?;
+    let effort = row(&page, "model_reasoning_effort").clone();
+    assert_eq!(effort.access, Access::Editable, "set and reset stay open");
+    assert_eq!(
+        (&effort.here, effort.here_valid),
+        (&json!("minimal"), false)
+    );
+    assert_eq!(
+        (&effort.value, effort.source),
+        (&json!("medium"), "default"),
+        "a stored value the catalog in force refuses is not in force"
+    );
+    assert_eq!(serde_json::to_value(&effort)?["here_valid"], json!(false));
+    assert!(effort.listed);
+    let retired = row(&page, "hide_agent_reasoning").clone();
+    assert!(matches!(retired.access, Access::ReadOnly { .. }));
+    assert_eq!(
+        (&retired.here, retired.here_valid, retired.source),
+        (&json!(true), false, "not_applied")
+    );
+    assert!(!retired.listed);
+    assert_eq!(serde_json::to_value(&retired)?["listed"], json!(false));
+    assert!(
+        page.keys
+            .iter()
+            .filter(|row| row.key != effort.key && row.key != retired.key)
+            .all(|row| row.here_valid)
+    );
+
+    for setting in [&effort, &retired] {
+        written(store::reset(
+            &db,
+            &newer,
+            QUALIFIED,
+            &Scope::App,
+            &setting.key,
+            setting.version,
+        )?)?;
+    }
+    let after = page_under(&root, &newer)?;
+    let effort = row(&after, "model_reasoning_effort");
+    assert_eq!((&effort.here, effort.here_valid), (&Value::Null, true));
+    assert!(
+        after
+            .keys
+            .iter()
+            .all(|row| row.key != "hide_agent_reasoning")
+    );
+    assert!(after.keys.iter().all(|row| row.here_valid));
+    Ok(())
+}
+
+/// HS4-M1: a value stored under an older catalog that the catalog in force refuses no
+/// longer makes the page unreadable. Its row loads with the stored value marked not valid,
+/// the effective value from the next layer, and a reset that clears it; a stored key the
+/// catalog stopped listing shows the same way and resets too.
+#[tokio::test]
+async fn a_stored_value_the_catalog_in_force_refuses_loads_as_a_row_the_owner_can_reset() {
+    with_engine("ca-desk-hso-", outdated).await;
 }

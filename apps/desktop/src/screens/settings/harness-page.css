@@ -9,6 +9,7 @@
 .hs-value { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
 .hs-input { width: 100%; }
 .hs-note { color: var(--text-2); }
+.hs-stored { color: var(--warn); overflow-wrap: anywhere; }
 .hs-head { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }
 @media (max-width: 760px) { .hs-row { grid-template-columns: minmax(0, 1fr); } }
 a.harness-row { color: inherit; text-decoration: none; }

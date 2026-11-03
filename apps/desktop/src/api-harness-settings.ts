@@ -26,7 +26,9 @@ export type SettingScope = "app" | "project";
 /** One harness setting as the window shows it. `here` is the value set at the page's scope,
  * if any; `value` is what the next start of the harness gets and `source` where it comes from;
  * `version` goes back with a set or reset, so a setting that changed since the page was read is
- * refused as stale. A key stored here that the catalog no longer lists has its key as label. */
+ * refused as stale. `here_valid` is false when the catalog in force refuses the stored value,
+ * which is then not in force. A key stored here that the catalog no longer lists has `listed`
+ * false and its key as label. */
 export interface HarnessSetting {
   key: string;
   label: string;
@@ -38,6 +40,8 @@ export interface HarnessSetting {
   max: number | null;
   max_bytes: number | null;
   here: SettingValue;
+  here_valid: boolean;
+  listed: boolean;
   value: SettingValue;
   source: SettingSource;
   version: number;
@@ -234,16 +238,32 @@ export function draftChanged(key: Pick<HarnessSetting, "type" | "value">, draft:
   return draft !== draftOf(key);
 }
 
-/** Whether a row offers a reset: only an editable key with a value set at the page's scope.
- * Input: the key. Output: true when Reset has something to clear. */
-export function canReset(key: Pick<HarnessSetting, "access" | "here">): boolean {
-  return key.access.kind === "editable" && key.here !== null;
+/** Whether a row offers a reset: a value set at the page's scope on an editable key, or on a
+ * key the catalog no longer lists, which the engine lets the owner clear. Input: the key.
+ * Output: true when Reset has something to clear. */
+export function canReset(key: Pick<HarnessSetting, "access" | "here" | "listed">): boolean {
+  assert(key.listed || key.access.kind === "read_only", "an unlisted key is read-only");
+  assert(key.listed || key.here !== null, "an unlisted key shows only for its saved value");
+  return key.here !== null && (key.access.kind === "editable" || !key.listed);
 }
 
-/** The reset button's words for the page's scope. A project reset clears only the project's
- * value, which then follows the app value or, with none, the default. Input: the scope.
- * Output: the label. */
-export function resetLabel(scope: SettingScope): string {
+/** Why the value saved at the page's scope is not in force: this harness version no longer
+ * allows it, or no longer lists the setting. Input: the key. Output: the line, or "" when the
+ * saved value, if any, is one the catalog allows. */
+export function storedLine(key: Pick<HarnessSetting, "here" | "here_valid" | "listed">): string {
+  if (key.here_valid) return "";
+  assert(key.here !== null, "only a saved value can be not valid");
+  const saved = valueText(key.here);
+  if (!key.listed) return `This harness version no longer lists this setting, so the saved value ${saved} isn't used.`;
+  return `The saved value ${saved} isn't allowed for this harness version, so it isn't used.`;
+}
+
+/** The reset button's words. A project reset clears only the project's value, which then
+ * follows the app value or, with none, the default; a key the catalog no longer lists has no
+ * default, so its reset clears the saved value. Inputs: the key and the scope. Output: the
+ * label. */
+export function resetLabel(key: Pick<HarnessSetting, "listed">, scope: SettingScope): string {
+  if (!key.listed) return "Clear saved value";
   return scope === "app" ? "Use default" : "Clear project value";
 }
 

@@ -11,17 +11,19 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-/// The most rows one window page holds, as the engine keeps them at one scope: every catalog
-/// key, then keys stored there that the catalog no longer lists.
-pub const ROWS_MAX: usize = crazyagent::harness_settings::store::ROWS_MAX;
+/// The most rows one window page holds, as the engine reads them at one scope: every catalog
+/// key, then at most `UNLISTED_MAX` keys stored there that the catalog no longer lists.
+pub const ROWS_MAX: usize = KEYS_MAX + crazyagent::harness_settings::store::UNLISTED_MAX;
 const _: () = assert!(ROWS_MAX >= KEYS_MAX);
+const _: () = assert!(ROWS_MAX == 512);
 /// The most engine pages one window read follows; every engine page holds at least one row.
 const PAGES_MAX: usize = ROWS_MAX + 1;
 const ROW_BYTES_MAX: usize = 16 * 1024;
 const PAGE_BYTES_MAX: usize = ROWS_MAX * ROW_BYTES_MAX;
 
 /// One harness setting as the window shows it: the catalog's label, help, type, options,
-/// default and bounds, then the value set at the page's scope (null when none), the value
+/// default and bounds, then the value set at the page's scope (null when none), whether the
+/// catalog in force allows that value, whether the catalog lists the key at all, the value
 /// the next start uses with its source, the version a change names and the engine's access.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SettingRow {
@@ -36,6 +38,8 @@ pub struct SettingRow {
     pub max: Option<i64>,
     pub max_bytes: Option<u32>,
     pub here: Value,
+    pub here_valid: bool,
+    pub listed: bool,
     pub value: Value,
     pub source: &'static str,
     pub version: u64,
@@ -158,11 +162,20 @@ fn unreadable() -> BridgeError {
     failure("owner_read_failed")
 }
 
+fn here_valid(key: Option<&Key>, here: Option<&Value>) -> bool {
+    match (key, here) {
+        (_, None) => true,
+        (Some(key), Some(here)) => check_value(key, here).is_ok(),
+        (None, Some(_)) => false,
+    }
+}
+
 /// One window row from the engine's row and the catalog key it names, none for a key stored
-/// here that the catalog no longer lists, which the engine must show read-only. A key is
-/// locked exactly when its catalog key is, with the engine's value; an editable key's value
-/// must pass the catalog's own check; a text key's bound must fit the engine's. Output: the
-/// row, or `owner_read_failed`.
+/// here that the catalog no longer lists, which the engine must show read-only, not applied
+/// and with its stored value. A key is locked exactly when its catalog key is, with the
+/// engine's value; an editable key's value must pass the catalog's own check, while a stored
+/// value the catalog refuses stays on the row as not valid; a text key's bound must fit the
+/// engine's. Output: the row, or `owner_read_failed`.
 fn row(key: Option<&Key>, setting: Setting) -> Result<SettingRow, BridgeError> {
     let editable = matches!(setting.access, Access::Editable);
     let locked = matches!(setting.access, Access::Locked { .. });
@@ -173,11 +186,16 @@ fn row(key: Option<&Key>, setting: Setting) -> Result<SettingRow, BridgeError> {
                 && (!locked || setting.source == Source::Engine)
                 && bound_fits(key.max_bytes)
         }
-        None => matches!(setting.access, Access::ReadOnly { .. }),
+        None => {
+            matches!(setting.access, Access::ReadOnly { .. })
+                && setting.source == Source::NotApplied
+                && setting.here.is_some()
+        }
     };
     if !consistent || setting.key.is_empty() {
         return Err(unreadable());
     }
+    let valid = here_valid(key, setting.here.as_ref());
     let here = setting.here.unwrap_or(Value::Null);
     let row = match key {
         Some(key) => SettingRow {
@@ -191,6 +209,8 @@ fn row(key: Option<&Key>, setting: Setting) -> Result<SettingRow, BridgeError> {
             max: key.max,
             max_bytes: key.max_bytes,
             here,
+            here_valid: valid,
+            listed: true,
             value: setting.effective,
             source: source_word(setting.source),
             version: setting.version,
@@ -207,6 +227,8 @@ fn row(key: Option<&Key>, setting: Setting) -> Result<SettingRow, BridgeError> {
             max: None,
             max_bytes: None,
             here,
+            here_valid: valid,
+            listed: false,
             value: setting.effective,
             source: source_word(setting.source),
             version: setting.version,

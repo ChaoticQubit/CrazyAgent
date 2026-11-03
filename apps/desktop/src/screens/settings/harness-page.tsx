@@ -3,7 +3,7 @@ import type { Result } from "../../api";
 import {
   EFFECT_LINE, NO_CATALOG_LINE, STALE_LINE, canReset, draftChanged, draftOf, draftValue, harnessSettingsRefusal, isStale,
   loadHarnessSettings, notReady, resetHarnessSetting, resetLabel, setHarnessSetting, settingGroups, sourceLine,
-  valueText, versionLine,
+  storedLine, valueText, versionLine,
 } from "../../api-harness-settings";
 import type { HarnessSetting, HarnessSettingsPage, SettingDraft, SettingScope } from "../../api-harness-settings";
 import { useLoad, type Loaded } from "../../state";
@@ -49,36 +49,42 @@ function Control({ setting, id, draft, onDraft }: { setting: HarnessSetting; id:
     inputMode={setting.type === "integer" ? "numeric" : undefined} value={draft} onChange={(event) => onDraft(event.target.value)} />;
 }
 
-function ReadOnly({ setting, id, reason }: { setting: HarnessSetting; id: string; reason: string }) {
+function ReadOnly({ setting, id, reason, scope, busy, note, onReset }: { setting: HarnessSetting; id: string; reason: string; scope: SettingScope; busy: boolean; note: string; onReset: () => void }) {
   const locked = setting.access.kind === "locked";
   assert(!locked || setting.source === "engine", "a locked key shows the engine's value");
+  const stored = storedLine(setting);
   return <div className="hs-control">
     <span className="hs-value">{locked && <Icon name="lock" size={14} label="Locked" />}<span className="mono">{valueText(setting.value)}</span></span>
     <p id={`${id}-reason`} className="helper">{displayText(reason)}</p>
+    {stored && <p className="helper hs-stored">{stored}</p>}
+    {canReset(setting) && <span className="row"><Button variant="quiet" size="small" pending={busy} pendingLabel="Clearing..." onClick={onReset}>{resetLabel(setting, scope)}</Button></span>}
+    {note && <p className="helper hs-note" role="status">{note}</p>}
   </div>;
 }
 
 /** One setting: its label, key and help, then a switch, select or field with Save and the
  * scope's reset when the owner can change it, or the value with the engine's reason (and a
- * lock for a key CrazyAgent sets itself) when they can't. Input: the row props. Output: the
- * row. */
+ * lock for a key CrazyAgent sets itself) when they can't. A saved value that is not in force
+ * says so, with the reset that clears it. Input: the row props. Output: the row. */
 export function SettingRow({ setting, scope, draft, busy, note, onDraft, onSave, onReset }: SettingRowProps) {
   const id = rowId(setting.key);
   const access = setting.access;
   assert((access.kind === "editable") === (draft !== null), "only an editable key has a draft");
+  const stored = storedLine(setting);
   return <div className="hs-row" role="group" aria-labelledby={`${id}-label`}>
     <div className="hs-text">
       <span id={`${id}-label`} className="hs-label">{displayText(setting.label)}</span>
       <span className="mono muted">{displayText(setting.key)}</span>
       {setting.help && <p id={`${id}-help`} className="helper">{displayText(setting.help)}</p>}
     </div>
-    {access.kind !== "editable" || draft === null ? <ReadOnly setting={setting} id={id} reason={access.kind === "editable" ? "" : access.reason} />
+    {access.kind !== "editable" || draft === null ? <ReadOnly setting={setting} id={id} reason={access.kind === "editable" ? "" : access.reason} scope={scope} busy={busy} note={note} onReset={onReset} />
       : <div className="hs-control">
         <Control setting={setting} id={id} draft={draft} onDraft={onDraft} />
         <span className="small muted">{sourceLine(setting, scope)}</span>
+        {stored && <p className="helper hs-stored">{stored}</p>}
         <span className="row">
           {draftChanged(setting, draft) && <Button variant="primary" size="small" pending={busy} pendingLabel="Saving..." onClick={onSave}>Save</Button>}
-          {canReset(setting) && <Button variant="quiet" size="small" disabled={busy} onClick={onReset}>{resetLabel(scope)}</Button>}
+          {canReset(setting) && <Button variant="quiet" size="small" disabled={busy} onClick={onReset}>{resetLabel(setting, scope)}</Button>}
         </span>
         {note && <p className="helper hs-note" role="status">{note}</p>}
       </div>}

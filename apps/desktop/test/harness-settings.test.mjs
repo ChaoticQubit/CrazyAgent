@@ -12,7 +12,7 @@ const list = await import("../src/screens/settings/harnesses.tsx");
 const REASON = "CrazyAgent runs agents in its sandbox and sets the permission mode itself.";
 const setting = (extra = {}) => ({
   key: "autoCompactEnabled", label: "Auto-compact", help: "Compacts the conversation when it nears the context limit.", type: "bool",
-  options: [], default: true, min: null, max: null, max_bytes: null, here: null, value: true, source: "default", version: 0,
+  options: [], default: true, min: null, max: null, max_bytes: null, here: null, here_valid: true, listed: true, value: true, source: "default", version: 0,
   access: { kind: "editable" }, ...extra,
 });
 const locked = (extra = {}) => setting({
@@ -97,6 +97,33 @@ test("read-only keys show their value and the engine's reason, never a control",
   assert.equal(client.versionLine(page([], { name: "Codex", installed: null, qualified: false, qualified_versions: [] })),
     "CrazyAgent couldn't read the installed Codex version, so every setting is read-only and agents start with CrazyAgent's defaults. Qualified versions: none yet.");
   assert.equal(client.sourceLine({ source: "not_applied" }, "app"), "Not applied: agents start with CrazyAgent's defaults");
+});
+
+test("a saved value this harness version no longer allows shows as not used, with a reset that clears it", () => {
+  const outdated = setting({ key: "model_reasoning_effort", label: "Reasoning effort", type: "enum", options: ["low", "medium", "high"], default: "medium",
+    here: "minimal", here_valid: false, value: "medium", source: "default", version: 3 });
+  const markup = row(outdated);
+  assert.match(markup, /<select[^>]*>/, "the owner can still pick an allowed value");
+  assert.match(markup, />The saved value minimal isn&#x27;t allowed for this harness version, so it isn&#x27;t used.</);
+  assert.match(markup, /<button[^>]*>Use default<\/button>/);
+  assert.equal(client.canReset(outdated), true);
+  assert.equal(client.storedLine(outdated), "The saved value minimal isn't allowed for this harness version, so it isn't used.");
+  assert.equal(client.storedLine(setting({ here: false, value: false, source: "app" })), "");
+  assert.doesNotMatch(row(setting({ here: false, value: false, source: "app" })), /isn&#x27;t used/);
+  const retired = readOnly("Not qualified for Codex 0.51.0", { key: "hide_agent_reasoning", label: "hide_agent_reasoning", here: true, here_valid: false, value: null, listed: false });
+  const gone = row(retired);
+  assert.match(gone, />This harness version no longer lists this setting, so the saved value On isn&#x27;t used.</);
+  assert.match(gone, /<button[^>]*>Clear saved value<\/button>/);
+  assert.doesNotMatch(gone, /<input|<select|role="switch"|>Save<|aria-label="Locked"/);
+  assert.equal(client.canReset(retired), true);
+  assert.equal(client.resetLabel(retired, "app"), "Clear saved value");
+  assert.equal(client.resetLabel(retired, "project"), "Clear saved value");
+  const waiting = readOnly("Not qualified for Codex 0.49.0", { here: "on", here_valid: false });
+  assert.equal(client.canReset(waiting), false, "the engine refuses a reset on a key of an unqualified version");
+  assert.doesNotMatch(row(waiting), /<button/);
+  assert.throws(() => client.storedLine(setting({ here: null, here_valid: false })), /only a saved value can be not valid/);
+  assert.throws(() => row(readOnly("r", { listed: false, here: null, here_valid: true })), /an unlisted key shows only for its saved value/);
+  assert.throws(() => row(setting({ listed: false, here: true, here_valid: false })), /an unlisted key is read-only/);
 });
 
 test("the page groups keys in catalog order, filters them and says when changes apply", () => {
