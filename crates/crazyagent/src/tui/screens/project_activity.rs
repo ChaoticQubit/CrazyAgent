@@ -1,6 +1,6 @@
 use super::new_project::harness_name;
 use super::new_project_view::{Look, Row, wrap_words};
-use crate::team::{AgentStatus, EdgeState, GraphNode, NodeKind, TeamGraph};
+use crate::team::{AgentStatus, EdgeState, GraphNode, TeamGraph};
 use crate::tui::ctx::Load;
 use ratatui::style::Style;
 
@@ -45,7 +45,7 @@ fn agent_lines(graph: &TeamGraph, height: usize, look: &Look, lines: &mut Vec<Ro
     let mut agents: Vec<&GraphNode> = graph
         .nodes
         .iter()
-        .filter(|node| node.kind == NodeKind::Agent)
+        .filter(|node| node.kind.agent())
         .collect();
     agents.sort_by(|a, b| {
         live(b)
@@ -131,21 +131,28 @@ fn task_line(graph: &TeamGraph, agent: &GraphNode) -> String {
 mod tests {
     use super::*;
     use crate::protocol::ProjectId;
-    use crate::team::{GraphEdge, TaskSource};
+    use crate::team::{GraphEdge, NodeKind, TaskSource};
 
     fn agent(id: &str, label: &str, status: AgentStatus) -> GraphNode {
         GraphNode {
             id: id.into(),
-            kind: NodeKind::Agent,
-            parent: Some("group-codex".into()),
+            kind: NodeKind::Lead,
+            parent: Some("master".into()),
             label: label.into(),
             harness: "codex".into(),
             status: Some(status),
             status_label: None,
             account: None,
-            agents: None,
+            branch: None,
             terminal: None,
             questions: None,
+            agent: None,
+            pane: None,
+            presence: None,
+            waiting: None,
+            owner_questions: 0,
+            no_worktree: false,
+            hookless: false,
         }
     }
 
@@ -158,6 +165,8 @@ mod tests {
             text: text.into(),
             state,
             reply: None,
+            lead: None,
+            agent_label: None,
         }
     }
 
@@ -166,6 +175,8 @@ mod tests {
             project_id: ProjectId::new("tidepool").unwrap(),
             nodes: agents,
             edges,
+            messages: Vec::new(),
+            overlaps: Vec::new(),
         }))
     }
 

@@ -226,6 +226,17 @@ pub fn connect_unix_std(
     guarded(|| std::os::unix::net::UnixStream::connect(&address))
 }
 
+/// Accepts one waiting connection on a non-blocking Unix listener inside the gate, never
+/// waiting for one. Input: the listener. Output: the stream, or `WouldBlock` when none
+/// waits, or the accept failure.
+#[cfg(unix)]
+#[allow(clippy::disallowed_methods)]
+pub fn accept_unix_std(
+    listener: &std::os::unix::net::UnixListener,
+) -> io::Result<std::os::unix::net::UnixStream> {
+    guarded(|| listener.accept()).map(|(stream, _)| stream)
+}
+
 /// Binds a blocking Unix listener inside the gate, through the short address of a path
 /// too long for a socket address. Input: the socket path. Output: the listener.
 #[cfg(unix)]

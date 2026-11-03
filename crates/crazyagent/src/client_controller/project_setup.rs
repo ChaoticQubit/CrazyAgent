@@ -86,6 +86,23 @@ impl OwnerController {
         }
     }
 
+    /// Reads the folders the owner keeps this project's agents out of (DEC-111 Q7).
+    /// Takes the project id.
+    /// Returns the folders in saved order, none when nothing was saved.
+    pub async fn project_hidden_paths(
+        &mut self,
+        project_id: ProjectId,
+    ) -> Result<Vec<String>, EngineError> {
+        match self
+            .read(OwnerRead::ProjectHiddenPaths { project_id })
+            .await?
+            .data
+        {
+            OwnerData::ProjectHiddenPaths { paths, .. } => Ok(paths),
+            _ => Err(EngineError("controller_read_response".into())),
+        }
+    }
+
     /// Reads a project's agent policy (DEC-101, DEC-102): its access level, every level with
     /// its availability here, and the toolchains its agents may read. Takes the project id.
     /// Returns the policy view, or the engine's refusal for an unknown project.
@@ -296,6 +313,23 @@ impl OwnerController {
                 version,
                 paths,
             },
+            generation,
+        )?;
+        self.send_pending().await
+    }
+
+    /// Replaces the folders this project's agents are kept out of (DEC-111 Q7). Takes the
+    /// project id, the typed folders and the client generation. Returns the actual owner
+    /// response; a folder outside the project is a plain rejection.
+    pub async fn set_project_hidden_paths(
+        &mut self,
+        project_id: ProjectId,
+        paths: Vec<String>,
+        generation: u64,
+    ) -> Result<OwnerResponse, EngineError> {
+        self.project_hidden_paths(project_id.clone()).await?;
+        self.begin_mutation(
+            OwnerMutation::SetProjectHiddenPaths { project_id, paths },
             generation,
         )?;
         self.send_pending().await

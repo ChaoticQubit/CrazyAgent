@@ -78,14 +78,17 @@ test("cancelling a sign-in reaches the engine and says plainly when the engine c
   const result = await cancelSignIn("acct-1");
   assert.equal(result.kind, "error");
   assert.equal(result.code, "engine_unreachable");
-  for (const code of ["native_auth_operation_missing", "native_profile_source_conflict", "native_auth_operation_scope_conflict", "native_auth_recovery_required"]) {
+  for (const code of ["native_auth_operation_missing", "native_profile_source_conflict"]) {
     assert.equal(cancelError(code), "CrazyAgent can't stop this sign-in from here. Delete the account to clear it, then add it again.", code);
+  }
+  for (const code of ["native_auth_operation_scope_conflict", "native_auth_recovery_required"]) {
+    assert.equal(cancelError(code), "CrazyAgent can't stop this sign-in from here. Use Clear stuck sign-in at the top of the window.", code);
   }
   assert.equal(cancelError("native_auth_not_active"), undefined);
 });
 
 test("a change refused while a sign-in runs, or a cancel still stopping, says so plainly", () => {
-  assert.equal(api.plainError("native_auth_recovery_required"), "Another sign-in is still running or closing. Finish or cancel it, or wait a minute, then try again. If this keeps happening, restart CrazyAgent.");
+  assert.equal(api.plainError("native_auth_recovery_required"), "A sign-in didn't confirm how it ended, so changes to its account and new sign-ins wait. Use Clear stuck sign-in at the top of the window, then try again.");
   assert.equal(api.plainError("native_auth_cancel_pending"), "The sign-in is still stopping. Try again in a moment.");
 });
 

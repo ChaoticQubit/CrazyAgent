@@ -1,9 +1,11 @@
 use super::*;
+use crate::coord::tool_switches::{self, BUILTIN_TOOLS, CRAZYAGENT_SERVER, Switch};
 use crate::plugins::{
-    EffectivePlugins, EffectiveSecret, EffectiveServer, EffectiveSkill, LaunchPlugins,
-    LaunchSecret, LaunchServer, SECRETS_PER_SERVER_MAX, SERVERS_PER_SCOPE_MAX,
-    SKILLS_PER_SCOPE_MAX, Scope, SecretValue, SecretView, ServerSpec, ServerStatus, ServerView,
-    SkillView, TOOL_NAME_BYTES_MAX, TOOLS_MAX, skill_folder,
+    EffectiveHook, EffectivePlugins, EffectiveSecret, EffectiveServer, EffectiveSkill,
+    HOOKS_PER_SCOPE_MAX, HookView, LaunchPlugins, LaunchSecret, LaunchServer,
+    SECRETS_PER_SERVER_MAX, SERVERS_PER_SCOPE_MAX, SKILLS_PER_SCOPE_MAX, Scope, SecretValue,
+    SecretView, ServerSpec, ServerStatus, ServerView, SkillView, TOOL_NAME_BYTES_MAX,
+    TOOL_NAMES_BYTES_MAX, TOOLS_MAX, ToolView, hook_folder, skill_folder,
 };
 use crate::storage::versioned;
 use serde::{Deserialize, Serialize};
@@ -11,20 +13,41 @@ use serde::{Deserialize, Serialize};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::PathBuf;
 
-#[cfg(any(unix, test))]
-const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS plugin_items (
+macro_rules! items_columns {
+    () => {
+        "(
     id TEXT PRIMARY KEY CHECK(length(id) BETWEEN 1 AND 64),
-    kind TEXT NOT NULL CHECK(kind IN ('skill','server')),
+    kind TEXT NOT NULL CHECK(kind IN ('skill','server','hook')),
     scope TEXT NOT NULL CHECK(length(scope) BETWEEN 1 AND 160),
     name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 64),
     body TEXT NOT NULL CHECK(length(CAST(body AS BLOB)) <= 65536),
     UNIQUE(kind, scope, name)
-);
+)"
+    };
+}
+
+#[cfg(any(unix, test))]
+const SCHEMA: &str = concat!(
+    "CREATE TABLE IF NOT EXISTS plugin_items ",
+    items_columns!(),
+    ";
 CREATE TABLE IF NOT EXISTS plugin_switches (
     project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),
     item TEXT NOT NULL CHECK(length(item) BETWEEN 1 AND 64),
     PRIMARY KEY(project, item)
-);";
+);"
+);
+/// Rebuilds an item table from before hooks with the current check, keeping every row, for
+/// the upgrade step that lets it hold hooks.
+pub(super) const WIDEN_ITEMS: &str = concat!(
+    "CREATE TABLE plugin_items_next ",
+    items_columns!(),
+    ";
+INSERT INTO plugin_items_next(id,kind,scope,name,body) SELECT id,kind,scope,name,body FROM plugin_items;
+DROP TABLE plugin_items;
+ALTER TABLE plugin_items_next RENAME TO plugin_items;"
+);
+pub(crate) const HOOKS: &str = "hooks";
 const PAGE_BYTES_MAX: usize = 48 * 1024;
 pub(crate) const STORE: &str = "plugins";
 pub(crate) const SECRETS: &str = "secrets";
@@ -47,10 +70,24 @@ pub(crate) enum Command {
         id: String,
         version: u64,
     },
+    AddHooks {
+        scope: Scope,
+        source: String,
+        follows: Option<String>,
+    },
+    SetHook {
+        id: String,
+        enabled: bool,
+    },
+    Hooks {
+        project: Option<ProjectId>,
+        offset: u16,
+    },
     AddServer {
         scope: Scope,
         name: String,
         spec: ServerSpec,
+        secrets: Vec<EffectiveSecret>,
     },
     UpdateServer {
         id: String,
@@ -114,6 +151,20 @@ pub(crate) enum Command {
     Launch {
         project: ProjectId,
     },
+    Tools {
+        project: Option<ProjectId>,
+        server: Option<String>,
+    },
+    SetTool {
+        project: Option<ProjectId>,
+        server: Option<String>,
+        tool: String,
+        switch: Switch,
+    },
+    RestoreTools {
+        project: Option<ProjectId>,
+        server: Option<String>,
+    },
 }
 
 pub(crate) struct SkillChange {
@@ -130,9 +181,17 @@ pub(crate) enum ResultValue {
     Skills(Vec<SkillView>, Option<u16>),
     Servers(Vec<ServerView>, Option<u16>),
     Secret(Box<ServerView>, Option<String>),
-    Check(Box<ServerSpec>, Vec<EffectiveSecret>),
+    Check(
+        Box<ServerSpec>,
+        Vec<EffectiveSecret>,
+        crate::sandbox::SandboxNetwork,
+    ),
     Effective(Box<EffectivePlugins>),
     Launch(Box<LaunchPlugins>),
+    HooksAdded(Vec<HookView>, PathBuf),
+    Hooks(Vec<HookView>, Option<u16>),
+    Hook(Box<HookView>),
+    Tools(Vec<ToolView>),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,6 +202,26 @@ struct SkillRecord {
     description: String,
     scope: Scope,
     enabled: bool,
+    source: String,
+    folder: String,
+}
+
+/// One stored hook: its plugin, event, matcher, command and timeout as the plugin defined
+/// them, the store-relative folder copy its command runs from, where it applies, whether it
+/// is on, the skill or MCP server id it follows and the folder it was added from.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HookRecord {
+    id: String,
+    name: String,
+    plugin: String,
+    event: String,
+    matcher: Option<String>,
+    command: String,
+    timeout: Option<u32>,
+    scope: Scope,
+    enabled: bool,
+    follows: Option<String>,
     source: String,
     folder: String,
 }
@@ -169,7 +248,7 @@ struct ServerRecord {
     checks: u64,
 }
 
-/// Creates the skill and MCP server tables when the engine database opens.
+/// Creates the skill, MCP server and hook tables when the engine database opens.
 /// Input: the engine connection. Output: any SQLite failure.
 #[cfg(any(unix, test))]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
@@ -220,7 +299,7 @@ pub(crate) fn store_folder(root: &Path, parts: &[&str]) -> Result<PathBuf, Engin
     let mut path = root.join(STORE);
     private_directory(&path)?;
     for part in parts {
-        assert!(!part.is_empty() && !part.contains('/') && *part != "..");
+        assert!(crate::protocol::single_component(part));
         path.push(part);
         private_directory(&path)?;
     }
@@ -405,19 +484,152 @@ pub(crate) fn remove_secret(root: &Path, reference: &str) -> Result<(), EngineEr
 /// folder per server id.
 pub(crate) const CHECK_FOLDER: &str = "mcp-checks";
 
-/// Deletes one removed MCP server's check folder with everything in it, for the start sweep.
-/// Inputs: the engine root and the server id. Output: Ok when the folder is gone, including
-/// when it was already missing; `plugin_check_folder_invalid` for a name that is not one
-/// plain folder name.
+/// The name prefix of a removed MCP server's check folder moved aside in the check folder
+/// to be deleted: `.removed-<server id>-<32 hex digits>`.
+const REMOVED_CHECK: &str = ".removed-";
+
+/// Moves one removed MCP server's check folder aside to `.removed-<id>-<nonce>` in the same
+/// folder with one rename, so its path is free at once however much a check wrote there.
+/// Inputs: the engine's check folder and the server id. Output: the moved folder, none when
+/// there was no folder, `plugin_check_folder_invalid` for a name that is not one plain
+/// folder name, or `plugin_check_folder_not_removed`.
+pub(crate) fn move_check_folder_aside(
+    checks: &Path,
+    id: &str,
+) -> Result<Option<PathBuf>, EngineError> {
+    check_folder_name(id)?;
+    let nonce = crate::engine::owner::random_id()?;
+    let name = format!("{REMOVED_CHECK}{id}-{}", &nonce[..32]);
+    assert!(moved_aside(&name, id));
+    let aside = checks.join(name);
+    match std::fs::rename(checks.join(id), &aside) {
+        Ok(()) => Ok(Some(aside)),
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err(error("plugin_check_folder_not_removed")),
+    }
+}
+
+/// Deletes one removed MCP server's check folder with everything in it, and each copy of it
+/// moved aside for deletion that a crash left, for the start sweep. Inputs: the engine root
+/// and the server id. Output: Ok when all are gone, including when already missing;
+/// `plugin_check_folder_invalid` for a name that is not one plain folder name.
 pub(crate) fn remove_check_folder(root: &Path, id: &str) -> Result<(), EngineError> {
+    check_folder_name(id)?;
+    let checks = root.join(CHECK_FOLDER);
+    let mut folders = vec![checks.join(id)];
+    match std::fs::read_dir(&checks) {
+        Ok(entries) => {
+            for entry in entries {
+                let entry = entry.map_err(|_| error("plugin_check_folder_not_removed"))?;
+                if moved_aside(&entry.file_name().to_string_lossy(), id) {
+                    folders.push(entry.path());
+                }
+            }
+        }
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return Err(error("plugin_check_folder_not_removed")),
+    }
+    for folder in folders {
+        match std::fs::remove_dir_all(folder) {
+            Ok(()) => {}
+            Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(error("plugin_check_folder_not_removed")),
+        }
+    }
+    Ok(())
+}
+
+fn check_folder_name(id: &str) -> Result<(), EngineError> {
     if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
         return Err(error("plugin_check_folder_invalid"));
     }
-    match std::fs::remove_dir_all(root.join(CHECK_FOLDER).join(id)) {
+    Ok(())
+}
+
+fn moved_aside(name: &str, id: &str) -> bool {
+    name.strip_prefix(REMOVED_CHECK)
+        .and_then(|rest| rest.rsplit_once('-'))
+        .is_some_and(|(moved, nonce)| {
+            moved == id && nonce.len() == 32 && nonce.bytes().all(|b| b.is_ascii_hexdigit())
+        })
+}
+
+/// Deletes one removed project's skill store folder with everything in it, for the start
+/// sweep. Inputs: the engine root and the project id. Output: Ok when the folder is gone,
+/// including when it was already missing; `plugin_skill_folder_invalid` for a name that is
+/// not one store-relative folder name.
+pub(crate) fn remove_skill_project_folder(root: &Path, project: &str) -> Result<(), EngineError> {
+    if project.is_empty() || project.len() > 128 || project.contains('/') || project.contains("..")
+    {
+        return Err(error("plugin_skill_folder_invalid"));
+    }
+    match std::fs::remove_dir_all(
+        root.join(STORE)
+            .join("skills")
+            .join("project")
+            .join(project),
+    ) {
         Ok(()) => Ok(()),
         Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(_) => Err(error("plugin_check_folder_not_removed")),
+        Err(_) => Err(error("plugin_skill_folder_not_removed")),
     }
+}
+
+/// Deletes one stored hook folder the trash names, all its hooks being gone. Inputs: the
+/// engine root and the folder's id. Output: Ok when it is gone, or a plain refusal.
+pub(crate) fn remove_hook_folder(root: &Path, id: &str) -> Result<(), EngineError> {
+    if !valid_folder_id(id) {
+        return Err(error("plugin_hook_folder_invalid"));
+    }
+    match std::fs::remove_dir_all(root.join(STORE).join(HOOKS).join(id)) {
+        Ok(()) => Ok(()),
+        Err(problem) if problem.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(_) => Err(error("plugin_hook_folder_not_removed")),
+    }
+}
+
+fn valid_folder_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= 64
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+/// Names the store folder id of a hook's folder copy, the last part of its store path.
+fn folder_id(record: &HookRecord) -> Option<&str> {
+    Path::new(&record.folder)
+        .file_name()?
+        .to_str()
+        .filter(|id| valid_folder_id(id))
+}
+
+/// Tells whether any stored hook follows one skill or MCP server. Inputs: the transaction
+/// and the item id. Output: true when one does.
+pub(super) fn hooks_follow(tx: &Transaction<'_>, item: &str) -> Result<bool, EngineError> {
+    Ok(all::<HookRecord>(tx, "hook")?
+        .iter()
+        .any(|hook| hook.follows.as_deref() == Some(item)))
+}
+
+/// Deletes every hook that follows one skill or MCP server, with the item, and notes each
+/// hook folder copy for the trash to delete once nothing refers to it. Inputs: the
+/// transaction and the item id. Output: any SQLite failure.
+fn remove_following(tx: &Transaction<'_>, item: &str) -> Result<(), EngineError> {
+    let hooks: Vec<HookRecord> = all::<HookRecord>(tx, "hook")?
+        .into_iter()
+        .filter(|hook| hook.follows.as_deref() == Some(item))
+        .collect();
+    for hook in &hooks {
+        tx.execute("DELETE FROM plugin_items WHERE id=?1", [&hook.id])
+            .map_err(error)?;
+        tx.execute("DELETE FROM plugin_switches WHERE item=?1", [&hook.id])
+            .map_err(error)?;
+        if let Some(id) = folder_id(hook) {
+            super::trash::put(tx, super::trash::HOOK_FOLDER, id)?;
+        }
+    }
+    Ok(())
 }
 
 /// Deletes every listed MCP server secret file, going on past one that fails so an
@@ -428,6 +640,57 @@ pub(crate) fn remove_secrets(root: &Path, references: &[String]) -> Result<(), E
         .iter()
         .map(|reference| remove_secret(root, reference))
         .fold(Ok(()), Result::and)
+}
+
+/// Deletes every plugin item and switch scoped to one project, and trashes each project MCP
+/// server's secret files and check folder and, when the project has skills, its skill store
+/// folder, all swept after commit. A new project that reuses the removed project's id inherits
+/// none of its MCP servers, secrets, skills or per-project switches, and a rolled back removal
+/// keeps every file. Safe to call for an id with no scoped rows, where it changes nothing.
+/// Inputs: the transaction and the project. Output: any SQLite failure.
+pub(crate) fn remove_project(tx: &Transaction<'_>, project: &ProjectId) -> Result<(), EngineError> {
+    let scope = Scope::Project {
+        project_id: project.clone(),
+    };
+    let key = scope_key(&scope);
+    let servers: Vec<ServerRecord> = all::<ServerRecord>(tx, "server")?
+        .into_iter()
+        .filter(|server| server.scope == scope)
+        .collect();
+    for server in &servers {
+        for secret in &server.secrets {
+            super::trash::put(tx, super::trash::MCP_SECRET, &secret.reference)?;
+        }
+        super::trash::put(tx, super::trash::MCP_CHECKS, &server.id)?;
+    }
+    let skills: i64 = tx
+        .query_row(
+            "SELECT count(*) FROM plugin_items WHERE kind='skill' AND scope=?1",
+            [&key],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    for hook in all::<HookRecord>(tx, "hook")?
+        .iter()
+        .filter(|hook| hook.scope == scope)
+    {
+        if let Some(id) = folder_id(hook) {
+            super::trash::put(tx, super::trash::HOOK_FOLDER, id)?;
+        }
+    }
+    tx.execute(
+        "DELETE FROM plugin_switches WHERE project=?1",
+        [project.as_str()],
+    )
+    .map_err(error)?;
+    let removed_items = tx
+        .execute("DELETE FROM plugin_items WHERE scope=?1", [&key])
+        .map_err(error)?;
+    assert!(removed_items >= servers.len());
+    if skills > 0 {
+        super::trash::put(tx, super::trash::SKILL_FOLDER, project.as_str())?;
+    }
+    Ok(())
 }
 
 fn project_exists(tx: &Transaction<'_>, project: &ProjectId) -> Result<bool, EngineError> {
@@ -541,6 +804,51 @@ fn switched_off(tx: &Transaction<'_>, project: &ProjectId) -> Result<Vec<String>
     Ok(items)
 }
 
+/// The network a global server's plugin check runs under: the strictest choice among the
+/// projects that enable the server, so the check reaches no further than any of their agents
+/// may; Open when no project enables it. A project enables a global server unless it is in
+/// that project's switched-off list. Takes the transaction and the server id. Returns the
+/// sandbox network, or `project_network_unreadable` when a project's policy cannot be read.
+fn global_check_network(
+    tx: &Transaction<'_>,
+    id: &str,
+) -> Result<crate::sandbox::SandboxNetwork, EngineError> {
+    use crate::sandbox::policy::AgentNetwork;
+    let mut ids: Vec<String> = Vec::new();
+    {
+        let mut statement = tx.prepare("SELECT id FROM projects").map_err(error)?;
+        let rows = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(error)?;
+        for row in rows {
+            ids.push(row.map_err(error)?);
+        }
+    }
+    let rank = |network: AgentNetwork| {
+        AgentNetwork::ALL
+            .iter()
+            .position(|choice| *choice == network)
+            .unwrap_or(0)
+    };
+    let mut strictest: Option<AgentNetwork> = None;
+    for project in ids {
+        let project = ProjectId::new(&project).map_err(|_| error("project_network_unreadable"))?;
+        if switched_off(tx, &project)?.iter().any(|item| item == id) {
+            continue;
+        }
+        let network = crate::sandbox::policy::load(tx, project.as_str())
+            .map_err(|_| error("project_network_unreadable"))?
+            .network;
+        let replace = strictest.is_none_or(|current| rank(network) > rank(current));
+        if replace {
+            strictest = Some(network);
+        }
+    }
+    Ok(strictest
+        .map(|network| network.sandbox(None))
+        .unwrap_or(crate::sandbox::SandboxNetwork::Open))
+}
+
 fn visible(scope: &Scope, project: Option<&ProjectId>) -> bool {
     match (scope, project) {
         (Scope::Global, _) => true,
@@ -599,6 +907,172 @@ fn skill_view(
         version: plugin_version(connection, &record.id)?,
         refused,
     })
+}
+
+fn hook_view(record: &HookRecord, follows: Option<String>, on_here: Option<bool>) -> HookView {
+    HookView {
+        id: record.id.clone(),
+        name: record.name.clone(),
+        plugin: record.plugin.clone(),
+        event: record.event.clone(),
+        matcher: record.matcher.clone(),
+        command: crate::memory::visible_text(&record.command),
+        scope: record.scope.clone(),
+        scope_label: record.scope.label().into(),
+        enabled: record.enabled,
+        on_here,
+        follows,
+        source: crate::memory::visible_text(&record.source),
+    }
+}
+
+/// Names the skill or MCP server a hook follows, as the hook list shows it.
+fn follows_name(tx: &Transaction<'_>, record: &HookRecord) -> Result<Option<String>, EngineError> {
+    let Some(item) = &record.follows else {
+        return Ok(None);
+    };
+    tx.query_row("SELECT name FROM plugin_items WHERE id=?1", [item], |row| {
+        row.get(0)
+    })
+    .optional()
+    .map_err(error)
+}
+
+/// Reads a plugin folder's command hooks and stores each one, turned on, with one bounded
+/// copy of the files they run from in the plugin store; a hook with `follows` runs only
+/// while that skill or MCP server is on. Hooks are named `<plugin>/<event>/<n>`. Inputs:
+/// the transaction, engine root, scope, the absolute plugin folder and the item to follow.
+/// Output: the stored hooks and their folder copy, or a plain refusal with nothing stored.
+fn add_hooks(
+    tx: &Transaction<'_>,
+    root: &Path,
+    scope: Scope,
+    source: String,
+    follows: Option<String>,
+) -> Result<(Vec<HookRecord>, PathBuf), EngineError> {
+    require_scope(tx, &scope)?;
+    if let Some(item) = &follows {
+        let kind: Option<String> = tx
+            .query_row("SELECT kind FROM plugin_items WHERE id=?1", [item], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(error)?;
+        if !matches!(kind.as_deref(), Some("skill" | "server")) {
+            return Err(error("plugin_not_found"));
+        }
+    }
+    let folder = std::fs::canonicalize(&source).map_err(|_| error("skill_folder_not_found"))?;
+    let found = hook_folder::read(&folder).map_err(error)?;
+    let key = scope_key(&scope);
+    if count(tx, "hook", &key)? + found.hooks.len() > HOOKS_PER_SCOPE_MAX {
+        return Err(error("hook_limit"));
+    }
+    let names: Vec<String> = (0..found.hooks.len())
+        .map(|index| {
+            let hook = &found.hooks[index];
+            let same = found.hooks[..index]
+                .iter()
+                .filter(|other| other.event == hook.event)
+                .count();
+            format!("{}/{}/{}", found.plugin, hook.event, same + 1)
+        })
+        .collect();
+    for name in &names {
+        assert!(name.len() <= 64);
+        if name_taken(tx, "hook", &key, name)? {
+            return Err(error("hooks_already_added"));
+        }
+    }
+    let id = new_id("hooks")?;
+    let parent = store_folder(root, &[HOOKS])?;
+    let copy = parent.join(&id);
+    hook_folder::copy(&folder, &copy, &found.hooks).map_err(error)?;
+    let relative = copy
+        .strip_prefix(root)
+        .map_err(|_| error("plugin_store_unavailable"))?
+        .display()
+        .to_string();
+    let mut records = Vec::with_capacity(found.hooks.len());
+    let stored = (|| {
+        for (hook, name) in found.hooks.iter().zip(names) {
+            let record = HookRecord {
+                id: new_id("hook")?,
+                name,
+                plugin: found.plugin.clone(),
+                event: hook.event.clone(),
+                matcher: hook.matcher.clone(),
+                command: hook.command.clone(),
+                timeout: hook.timeout,
+                scope: scope.clone(),
+                enabled: true,
+                follows: follows.clone(),
+                source: source.clone(),
+                folder: relative.clone(),
+            };
+            save(tx, "hook", &record.id, &record.scope, &record.name, &record)?;
+            records.push(record);
+        }
+        Ok(())
+    })();
+    if let Err(problem) = stored {
+        remove_folder(&copy);
+        return Err(problem);
+    }
+    assert_eq!(records.len(), found.hooks.len());
+    Ok((records, copy))
+}
+
+/// Lists the hooks agents launched for a project run: each hook that is on, from global
+/// settings unless the project switched it off or from the project itself, whose followed
+/// skill or MCP server is on there too, with its stored folder copy. Inputs: the open
+/// transaction, the engine root and the project. Output: the hooks, ordered by event,
+/// plugin and name.
+pub(crate) fn effective_hooks(
+    tx: &Transaction<'_>,
+    root: &Path,
+    project: &ProjectId,
+) -> Result<Vec<EffectiveHook>, EngineError> {
+    let off = switched_off(tx, project)?;
+    let usable = |scope: &Scope, id: &str| match scope {
+        Scope::Global => !off.iter().any(|item| item == id),
+        Scope::Project { project_id } => project_id == project,
+    };
+    let mut on: Vec<String> = all::<SkillRecord>(tx, "skill")?
+        .into_iter()
+        .filter(|skill| skill.enabled && usable(&skill.scope, &skill.id))
+        .map(|skill| skill.id)
+        .collect();
+    on.extend(
+        all::<ServerRecord>(tx, "server")?
+            .into_iter()
+            .filter(|server| {
+                status(server) == ServerStatus::Approved && usable(&server.scope, &server.id)
+            })
+            .map(|server| server.id),
+    );
+    let mut hooks: Vec<(String, EffectiveHook)> = all::<HookRecord>(tx, "hook")?
+        .into_iter()
+        .filter(|hook| hook.enabled && usable(&hook.scope, &hook.id))
+        .filter(|hook| hook.follows.as_ref().is_none_or(|item| on.contains(item)))
+        .filter(|hook| folder_id(hook).is_some())
+        .map(|hook| {
+            (
+                hook.name,
+                EffectiveHook {
+                    plugin: hook.plugin,
+                    event: hook.event,
+                    matcher: hook.matcher,
+                    command: hook.command,
+                    timeout: hook.timeout,
+                    folder: root.join(hook.folder),
+                },
+            )
+        })
+        .collect();
+    hooks.sort_by(|a, b| (&a.1.event, &a.1.plugin, &a.0).cmp(&(&b.1.event, &b.1.plugin, &b.0)));
+    assert!(hooks.len() <= 2 * HOOKS_PER_SCOPE_MAX);
+    Ok(hooks.into_iter().map(|(_, hook)| hook).collect())
 }
 
 fn status(record: &ServerRecord) -> ServerStatus {
@@ -813,9 +1287,12 @@ fn add_server(
     scope: Scope,
     name: String,
     spec: ServerSpec,
+    secrets: Vec<EffectiveSecret>,
 ) -> Result<ServerRecord, EngineError> {
     crate::plugins::validate_server_name(&name)?;
     spec.validate()?;
+    let names: Vec<&str> = secrets.iter().map(|secret| secret.name.as_str()).collect();
+    crate::plugins::validate_secret_names(&names)?;
     require_scope(tx, &scope)?;
     let key = scope_key(&scope);
     if count(tx, "server", &key)? >= SERVERS_PER_SCOPE_MAX {
@@ -831,7 +1308,7 @@ fn add_server(
         spec,
         enabled: true,
         approved: None,
-        secrets: Vec::new(),
+        secrets,
         check: None,
         checks: 0,
     };
@@ -859,6 +1336,7 @@ fn put_server(tx: &Transaction<'_>, record: &ServerRecord) -> Result<(), EngineE
 
 fn valid_tools(tools: Vec<String>) -> Result<Vec<String>, String> {
     if tools.len() > TOOLS_MAX
+        || tools.iter().map(String::len).sum::<usize>() > TOOL_NAMES_BYTES_MAX
         || tools.iter().any(|tool| {
             tool.is_empty()
                 || tool.len() > TOOL_NAME_BYTES_MAX
@@ -965,9 +1443,13 @@ fn launch(root: &Path, plugins: EffectivePlugins) -> Result<LaunchPlugins, Engin
                 value: SecretValue::new(read_secret(root, &secret.reference)?),
             });
         }
+        #[cfg(unix)]
+        let spec = crate::context_mode::for_launch(root, server.spec);
+        #[cfg(not(unix))]
+        let spec = server.spec;
         servers.push(LaunchServer {
             name: server.name,
-            spec: server.spec,
+            spec,
             secrets,
         });
     }
@@ -1004,6 +1486,10 @@ pub(crate) fn execute(
             if skill.added =>
         {
             remove_folder(Path::new(&skill.view.folder));
+            Err(problem)
+        }
+        (ResultValue::HooksAdded(_, folder), Err(problem)) => {
+            remove_folder(folder);
             Err(problem)
         }
         (_, Err(problem)) => Err(problem),
@@ -1072,10 +1558,51 @@ pub(super) fn run(
                 .map_err(error)?;
             tx.execute("DELETE FROM plugin_switches WHERE item=?1", [&id])
                 .map_err(error)?;
+            remove_following(tx, &id)?;
             ResultValue::SkillRemoved(root.join(&record.folder))
         }
-        Command::AddServer { scope, name, spec } => {
-            let record = add_server(tx, scope, name, spec)?;
+        Command::AddHooks {
+            scope,
+            source,
+            follows,
+        } => {
+            let (records, copy) = add_hooks(tx, root, scope, source, follows)?;
+            let mut views = Vec::with_capacity(records.len());
+            for record in &records {
+                views.push(hook_view(record, follows_name(tx, record)?, None));
+            }
+            ResultValue::HooksAdded(views, copy)
+        }
+        Command::SetHook { id, enabled } => {
+            let mut record: HookRecord = load(tx, "hook", &id)?;
+            record.enabled = enabled;
+            save(tx, "hook", &record.id, &record.scope, &record.name, &record)?;
+            let follows = follows_name(tx, &record)?;
+            ResultValue::Hook(Box::new(hook_view(&record, follows, None)))
+        }
+        Command::Hooks { project, offset } => {
+            let off = match &project {
+                Some(project) => switched_off(tx, project)?,
+                None => Vec::new(),
+            };
+            let mut views = Vec::new();
+            for record in all::<HookRecord>(tx, "hook")?
+                .iter()
+                .filter(|record| visible(&record.scope, project.as_ref()))
+            {
+                let here = on_here(&record.scope, &record.id, project.as_ref(), &off);
+                views.push(hook_view(record, follows_name(tx, record)?, here));
+            }
+            let (views, next) = page(views, offset)?;
+            ResultValue::Hooks(views, next)
+        }
+        Command::AddServer {
+            scope,
+            name,
+            spec,
+            secrets,
+        } => {
+            let record = add_server(tx, scope, name, spec, secrets)?;
             ResultValue::Server(Box::new(server_view(tx, &record, root, None)?))
         }
         Command::UpdateServer { id, spec, version } => {
@@ -1118,6 +1645,7 @@ pub(super) fn run(
                 .map_err(error)?;
             tx.execute("DELETE FROM plugin_switches WHERE item=?1", [&id])
                 .map_err(error)?;
+            remove_following(tx, &id)?;
             for secret in &record.secrets {
                 super::trash::put(tx, super::trash::MCP_SECRET, &secret.reference)?;
             }
@@ -1204,7 +1732,16 @@ pub(super) fn run(
         }
         Command::GetServer { id } => {
             let record: ServerRecord = load(tx, "server", &id)?;
-            ResultValue::Check(Box::new(record.spec), record.secrets)
+            let network = match &record.scope {
+                Scope::Project { project_id } => {
+                    crate::sandbox::policy::load(tx, project_id.as_str())
+                        .map_err(|_| error("project_network_unreadable"))?
+                        .network
+                        .sandbox(None)
+                }
+                Scope::Global => global_check_network(tx, &id)?,
+            };
+            ResultValue::Check(Box::new(record.spec), record.secrets, network)
         }
         Command::RecordCheck {
             id,
@@ -1291,7 +1828,96 @@ pub(super) fn run(
         Command::Launch { project } => {
             ResultValue::Launch(Box::new(launch_set(tx, root, &project)?))
         }
+        Command::Tools { project, server } => {
+            ResultValue::Tools(tool_views(tx, root, project.as_ref(), server.as_deref())?.1)
+        }
+        Command::SetTool {
+            project,
+            server,
+            tool,
+            switch,
+        } => {
+            let (key, views) = tool_views(tx, root, project.as_ref(), server.as_deref())?;
+            let Some(found) = views.iter().find(|view| view.tool == tool) else {
+                return Err(error("tool_unknown"));
+            };
+            if switch == Switch::Hidden && !found.builtin {
+                return Err(error("tool_delete_builtin_only"));
+            }
+            tool_switches::set(tx, project.as_ref(), &key, &tool, switch)?;
+            let (_, views) = tool_views(tx, root, project.as_ref(), server.as_deref())?;
+            assert!(views.iter().any(|view| view.tool == tool));
+            ResultValue::Tools(views)
+        }
+        Command::RestoreTools { project, server } => {
+            let (key, _) = tool_views(tx, root, project.as_ref(), server.as_deref())?;
+            tool_switches::restore_defaults(tx, project.as_ref(), &key)?;
+            ResultValue::Tools(tool_views(tx, root, project.as_ref(), server.as_deref())?.1)
+        }
     })
+}
+
+/// Lists one server's tools with their switches: the CrazyAgent built-in tools when no server
+/// id is given, else the checked tools of that MCP server, keyed by its name as agents see it.
+/// A project-only server is listed only in its own project.
+/// Inputs: the transaction, the plugin store root, the project (none for every project) and the
+/// server id. Output: the switch key of the server and its tools in order, or a plain refusal.
+fn tool_views(
+    tx: &Transaction<'_>,
+    root: &Path,
+    project: Option<&ProjectId>,
+    server: Option<&str>,
+) -> Result<(String, Vec<ToolView>), EngineError> {
+    if let Some(project) = project
+        && !project_exists(tx, project)?
+    {
+        return Err(error("plugin_project_unknown"));
+    }
+    let (key, tools): (String, Vec<(String, String)>) = match server {
+        None => (
+            CRAZYAGENT_SERVER.to_owned(),
+            BUILTIN_TOOLS
+                .iter()
+                .map(|(tool, description)| ((*tool).to_owned(), (*description).to_owned()))
+                .collect(),
+        ),
+        Some(id) => {
+            let record: ServerRecord = load(tx, "server", id)?;
+            let view = server_view(tx, &record, root, None)?;
+            if let Scope::Project { project_id } = &view.scope
+                && project != Some(project_id)
+            {
+                return Err(error("server_not_found"));
+            }
+            let tools = view.tools.into_iter().map(|tool| (tool, String::new()));
+            (view.name, tools.collect())
+        }
+    };
+    let global: std::collections::BTreeMap<String, Switch> =
+        tool_switches::overrides(tx, None, &key)?
+            .into_iter()
+            .collect();
+    let here: std::collections::BTreeMap<String, Switch> = match project {
+        Some(project) => tool_switches::overrides(tx, Some(project), &key)?
+            .into_iter()
+            .collect(),
+        None => std::collections::BTreeMap::new(),
+    };
+    let views: Vec<ToolView> = tools
+        .into_iter()
+        .map(|(tool, description)| ToolView {
+            server: key.clone(),
+            server_id: server.map(str::to_owned),
+            global: global.get(&tool).copied().unwrap_or(Switch::On),
+            here: here.get(&tool).copied(),
+            builtin: server.is_none(),
+            tool,
+            description,
+        })
+        .collect();
+    assert!(views.len() <= TOOLS_MAX.max(BUILTIN_TOOLS.len()));
+    assert!(project.is_some() || views.iter().all(|view| view.here.is_none()));
+    Ok((key, views))
 }
 
 #[cfg(all(test, unix))]

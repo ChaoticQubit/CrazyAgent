@@ -158,19 +158,24 @@ fn scripted_codex(case: &UseCase, name: &str, script: &str, next: &[u8]) -> Path
 }
 
 #[test]
-fn dropping_a_copy_stops_its_keeper_mid_renewal_at_once_and_ends_the_renewal_child() {
+fn dropping_a_copy_mid_renewal_returns_at_once_and_the_renewal_still_keeps_the_rotated_token() {
     let mut case = UseCase::new();
     let harness = scripted_codex(
         &case,
-        "codex-renews-once",
-        "#!/bin/sh\nif [ ! -f \"$0.renewed\" ]; then\n  : > \"$0.renewed\"\n  cp \"$0.next\" \"$CODEX_HOME/auth.json\"\n  exit 0\nfi\necho $$ > \"$0.pid.part\"\nmv \"$0.pid.part\" \"$0.pid\"\nexec /bin/sleep 120\n",
+        "codex-held",
+        "#!/bin/sh\nif [ ! -f \"$0.renewed\" ]; then\n  : > \"$0.renewed\"\n  cp \"$0.next\" \"$CODEX_HOME/auth.json\"\n  exit 0\nfi\necho $$ > \"$0.pid.part\"\nmv \"$0.pid.part\" \"$0.pid\"\ni=0\nwhile [ ! -f \"$0.go\" ] && [ $i -lt 400 ]; do /bin/sleep 0.05; i=$((i+1)); done\ncp \"$0.rotated\" \"$CODEX_HOME/auth.json\"\n",
         &codex_auth(now() + 200),
     );
+    let rotated = String::from_utf8(codex_auth(now() + 3 * 86_400))
+        .unwrap()
+        .replace("unit-refresh-secret", "unit-rotated-refresh")
+        .into_bytes();
+    private_file(&case.root.path().join("codex-held.rotated"), &rotated);
     private_file(&case.home().join("auth.json"), &codex_auth(now() + 30));
     let agent = agent_home(&case);
     let guard = execution(&mut case);
     let copy = guard.hand_to_agent(&agent, TURN, &harness).unwrap();
-    let marker = case.root.path().join("codex-renews-once.pid");
+    let marker = case.root.path().join("codex-held.pid");
     let waited = Instant::now();
     while !marker.is_file() {
         assert!(
@@ -189,15 +194,53 @@ fn dropping_a_copy_stops_its_keeper_mid_renewal_at_once_and_ends_the_renewal_chi
     drop(copy);
     let took = dropping.elapsed();
     assert!(took < Duration::from_secs(5), "{took:?}");
+    assert!(
+        rustix::process::test_kill_process(child).is_ok(),
+        "the turn's end killed the renewal mid-refresh"
+    );
+    assert_eq!(
+        guard.hold_renewal(Duration::ZERO).err().unwrap().0,
+        "native_profile_renewal_busy",
+        "the renewal keeps the account's renewal lock until it ends"
+    );
+    assert!(entries(&agent).is_empty());
+
+    private_file(&case.root.path().join("codex-held.go"), b"");
     let ending = Instant::now();
     while rustix::process::test_kill_process(child).is_ok() {
         assert!(
-            ending.elapsed() < Duration::from_secs(2),
-            "the renewal child outlived its keeper"
+            ending.elapsed() < Duration::from_secs(10),
+            "the renewal never finished"
         );
         std::thread::sleep(Duration::from_millis(20));
     }
-    assert!(entries(&agent).is_empty());
+    let released = Instant::now();
+    let lock = loop {
+        match guard.hold_renewal(Duration::ZERO) {
+            Ok(lock) => break lock,
+            Err(_) => {
+                assert!(
+                    released.elapsed() < Duration::from_secs(10),
+                    "the renewal never released the account's renewal lock"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    };
+    drop(lock);
+    assert_eq!(
+        std::fs::read(case.home().join("auth.json")).unwrap(),
+        rotated,
+        "the account keeps the rotated refresh token"
+    );
+    let watched = Instant::now();
+    while watched.elapsed() < Duration::from_millis(300) {
+        assert!(
+            entries(&agent).is_empty(),
+            "a copy was written after the turn"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
     drop(guard);
 }
 

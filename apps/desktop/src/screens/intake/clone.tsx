@@ -88,8 +88,10 @@ export function RepoListView({ status, repos, query, onQuery, more, loadingMore,
         : shown.length === 0 ? <p className="pj-muted">No repositories match "{query.trim()}".</p>
         : <ul className="in-list">{shown.map((repo) => <li className="in-row" key={repo.full_name}>
           <span className="in-row-main"><span className="pj-row"><Icon name={repo.private ? "lock" : "globe"} size={14} /><strong className="pj-mono">{displayText(repo.full_name)}</strong></span>
-            <span className="pj-small pj-secondary">{repoMeta(repo)}</span></span>
-          <Button size="small" icon="git-branch" pending={cloning === repo.full_name} pendingLabel="Cloning..." disabled={cloning !== null && cloning !== repo.full_name}
+            {repo.refused ? <span className="pj-small pj-error">{intakeCopy(repo.refused)}</span>
+              : <span className="pj-small pj-secondary">{repoMeta(repo)}</span>}</span>
+          <Button size="small" icon="git-branch" pending={cloning === repo.full_name} pendingLabel="Cloning..."
+            disabled={Boolean(repo.refused) || (cloning !== null && cloning !== repo.full_name)}
             onClick={() => onClone(repo)}>Clone</Button>
         </li>)}</ul>}
       {more && <span><Button variant="quiet" pending={loadingMore} pendingLabel="Loading more..." onClick={onMore}>Show more</Button></span>}
@@ -200,7 +202,7 @@ export function CloneFromGitHub() {
   };
 
   const clone = async (repo: GitHubRepo) => {
-    if (cloning) return;
+    if (cloning || repo.refused) return;
     setCloning(repo.full_name);
     setProblem("");
     const result = await cloneRepo(repo.full_name);

@@ -1,6 +1,9 @@
 use super::*;
+use crate::coord::tool_switches::Switch;
 use crate::engine::owner::{AccountSecret, OwnerClient};
-use crate::plugins::{EffectivePlugins, Scope, ServerSpec, ServerView, SkillView};
+use crate::plugins::{
+    EffectivePlugins, HookView, Scope, ServerSpec, ServerView, SkillView, ToolView,
+};
 use crate::protocol::ProjectId;
 
 const PAGES_MAX: usize = 64;
@@ -32,6 +35,48 @@ impl OwnerController {
             }
         }
         Err(EngineError("plugins_page_invalid".into()))
+    }
+
+    /// Lists every hook for global settings (no project) or for one project's settings,
+    /// following the engine's pages. Output: hooks with scope, On flags and the item each
+    /// follows.
+    pub async fn plugin_hooks(
+        &self,
+        project: Option<ProjectId>,
+    ) -> Result<Vec<HookView>, EngineError> {
+        let client = self.plugins_client()?;
+        let mut hooks = Vec::new();
+        let mut offset = 0;
+        for _ in 0..PAGES_MAX {
+            let page = client.plugin_hooks(project.clone(), offset).await?;
+            hooks.extend(page.hooks);
+            match page.next {
+                Some(next) if next > offset => offset = next,
+                Some(_) => return Err(EngineError("plugins_page_invalid".into())),
+                None => return Ok(hooks),
+            }
+        }
+        Err(EngineError("plugins_page_invalid".into()))
+    }
+
+    /// Adds the command hooks a plugin folder defines. Inputs: global or project scope and
+    /// the absolute folder path. Output: the added hooks, each turned on.
+    pub async fn add_hooks(
+        &self,
+        scope: Scope,
+        folder: String,
+    ) -> Result<Vec<HookView>, EngineError> {
+        Ok(self.plugins_client()?.add_hooks(scope, folder).await?.hooks)
+    }
+
+    /// Turns a hook on or off where it was added. Inputs: the hook id and the new state.
+    /// Output: the hook.
+    pub async fn set_hook_enabled(
+        &self,
+        id: String,
+        enabled: bool,
+    ) -> Result<HookView, EngineError> {
+        self.plugins_client()?.set_hook_enabled(id, enabled).await
     }
 
     /// Reads one skill's whole detail for its detail view, following the engine's pages of
@@ -149,9 +194,10 @@ impl OwnerController {
         self.plugins_client()?.remove_skill(id, version).await
     }
 
-    /// Adds an MCP server, then saves each secret through its own private frame.
-    /// Inputs: scope, name, command or URL, and secrets by name. Output: the server,
-    /// waiting for approval, with its secrets shown as saved.
+    /// Adds an MCP server with its secrets in one request, so the engine keeps the server
+    /// with every secret or keeps none of them. Inputs: scope, name, command or URL, and
+    /// secrets by name. Output: the server, waiting for approval, with its secrets shown
+    /// as saved.
     pub async fn add_mcp_server(
         &self,
         scope: Scope,
@@ -159,35 +205,9 @@ impl OwnerController {
         spec: ServerSpec,
         secrets: Vec<(String, AccountSecret)>,
     ) -> Result<ServerView, EngineError> {
-        for (index, (secret, _)) in secrets.iter().enumerate() {
-            crate::plugins::validate_secret_name(secret)?;
-            if secrets[..index]
-                .iter()
-                .any(|(earlier, _)| earlier == secret)
-            {
-                return Err(EngineError("server_secret_duplicate".into()));
-            }
-        }
-        if secrets.len() > crate::plugins::SECRETS_PER_SERVER_MAX {
-            return Err(EngineError("server_secret_limit".into()));
-        }
-        let client = self.plugins_client()?;
-        let mut server = client.add_mcp_server(scope, name, spec).await?;
-        for (secret, value) in secrets {
-            match client
-                .set_mcp_secret(server.id.clone(), secret, value)
-                .await
-            {
-                Ok(saved) => server = saved,
-                Err(problem) => {
-                    let _ = client
-                        .remove_mcp_server(server.id.clone(), server.version)
-                        .await;
-                    return Err(problem);
-                }
-            }
-        }
-        Ok(server)
+        self.plugins_client()?
+            .add_mcp_server(scope, name, spec, secrets)
+            .await
     }
 
     /// Changes an MCP server's command or URL; it then waits for approval again.
@@ -276,5 +296,41 @@ impl OwnerController {
         project: ProjectId,
     ) -> Result<EffectivePlugins, EngineError> {
         self.plugins_client()?.project_plugins(project).await
+    }
+
+    /// Reads one server's tools with their switches. Inputs: project (none for every
+    /// project) and server id (none for the CrazyAgent built-in tools). Output: the tools.
+    pub async fn tool_switches(
+        &self,
+        project: Option<ProjectId>,
+        server: Option<String>,
+    ) -> Result<Vec<ToolView>, EngineError> {
+        self.plugins_client()?.tool_switches(project, server).await
+    }
+
+    /// Sets one tool's switch in that scope. Inputs: project, server id, tool and switch.
+    /// Output: the server's tools after the change.
+    pub async fn set_tool_switch(
+        &self,
+        project: Option<ProjectId>,
+        server: Option<String>,
+        tool: String,
+        switch: Switch,
+    ) -> Result<Vec<ToolView>, EngineError> {
+        self.plugins_client()?
+            .set_tool_switch(project, server, tool, switch)
+            .await
+    }
+
+    /// Clears one server's stored switches in that scope. Inputs: project and server id.
+    /// Output: the server's tools.
+    pub async fn restore_tool_switches(
+        &self,
+        project: Option<ProjectId>,
+        server: Option<String>,
+    ) -> Result<Vec<ToolView>, EngineError> {
+        self.plugins_client()?
+            .restore_tool_switches(project, server)
+            .await
     }
 }
