@@ -150,6 +150,7 @@ fn only_plain_unused_top_level_home_folders_can_be_deleted() {
         project_id: ProjectId::new("used").unwrap(),
         name: "Used".into(),
         folder: home.join("used"),
+        repositories: vec![home.join("used")],
         onboarding: false,
     }];
     let text = |path: PathBuf| path.to_str().unwrap().to_owned();
@@ -583,4 +584,35 @@ async fn a_slow_new_project_still_answers_within_the_default_owner_deadline() {
     assert!([Some(&first), Some(&second)].contains(&twin.project_id.as_ref()));
 
     engine.stop().await;
+}
+
+#[test]
+fn a_home_folder_holding_a_set_up_project_cannot_be_deleted() {
+    let temp = tempfile::tempdir_in(std::fs::canonicalize("/tmp").unwrap()).unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let home = root.join("home");
+    for folder in [home.join("org").join("service-a"), home.join("org-tools")] {
+        fs::create_dir_all(folder).unwrap();
+    }
+    let registered = [Registered {
+        project_id: ProjectId::new("service-a").unwrap(),
+        name: "Service A".into(),
+        folder: home.join("org").join("service-a"),
+        repositories: vec![home.join("org").join("service-a")],
+        onboarding: true,
+    }];
+    let text = |path: PathBuf| path.to_str().unwrap().to_owned();
+    assert_eq!(
+        plan_trash(&home, &text(home.join("org")), &registered)
+            .unwrap_err()
+            .0,
+        "home_trash_still_set_up",
+        "a folder holding a set-up project stays"
+    );
+    assert_eq!(
+        plan_trash(&home, &text(home.join("org-tools")), &registered).unwrap(),
+        home.join("org-tools"),
+        "a name that only starts the same is another folder"
+    );
+    assert_eq!(names(&home), ["org", "org-tools"]);
 }

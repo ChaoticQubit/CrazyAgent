@@ -202,6 +202,9 @@ fn plugins_commands_use_the_local_main_window_acl() {
         "desktop_skill_detail",
         "desktop_skill_import_scan",
         "desktop_import_skill",
+        "desktop_tool_switches",
+        "desktop_set_tool_switch",
+        "desktop_restore_tool_switches",
     ] {
         assert!(
             authority

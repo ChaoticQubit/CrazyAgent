@@ -233,7 +233,7 @@ impl NativeBridge {
         edit: ModelAccessEdit,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
-        self.allow_new_auth()?;
+        self.allow_account_change(|stuck| edit.touches(stuck))?;
         if self.blocked() {
             return Err(failure("pending_intent"));
         }

@@ -1,4 +1,5 @@
 import { invoke as native, type Channel, type InvokeArgs } from "@tauri-apps/api/core";
+import type { AgentPolicy, PolicyView } from "./api-projects";
 import type { NativeAuthMethod, NativeAuthView } from "./native-auth";
 
 /** Retries a bridge call the native side refused with "busy" because another call held
@@ -108,6 +109,7 @@ export function logoutNativeAuth(ticket: string): Promise<NativeAuthView> {
 export interface ConnectionStatus {
   connected: boolean;
   pending: boolean;
+  stuck_sign_in: string | null;
 }
 
 export interface BaselineRow {
@@ -263,7 +265,7 @@ export function errorMessage(error: unknown): string {
     server_limit: "You can add up to 50 MCP servers here.",
     server_not_found: "This MCP server was removed.",
     server_command_invalid: "Enter the full path to the command, starting with /.",
-    server_args_invalid: "Use up to 32 arguments, each on one line.",
+    server_args_invalid: "Use up to 32 arguments, each on one line, with at most 4 KB for the command and its arguments together.",
     server_url_invalid: "Use an https address. Plain http works only for this Mac, and the address can't hold a password.",
     server_secret_name_invalid: "Use letters, digits, _ or - for the secret name, starting with a letter.",
     server_secret_limit: "A server can have up to 16 secrets.",
@@ -287,6 +289,17 @@ export function errorMessage(error: unknown): string {
     plugin_store_unavailable: "CrazyAgent can't write its plugin folder.",
     plugin_store_unsafe: "CrazyAgent can't write its plugin folder.",
     plugin_secret_store_unavailable: "CrazyAgent can't write its plugin folder.",
+    hooks_none_found: "This folder has no Claude Code hooks.",
+    hooks_invalid: "The hooks file in this folder is not valid hooks JSON.",
+    hooks_too_many: "This plugin has more than 64 hooks.",
+    hooks_too_large: "The files these hooks run are larger than 16 MB or 2048 files.",
+    hook_plugin_name_invalid: "The plugin name must be 1 to 32 letters, digits, ., - or _.",
+    hooks_plugin_manifest_missing: "This folder has hooks but no .claude-plugin/plugin.json naming the plugin.",
+    hooks_already_added: "These hooks were already added here.",
+    hook_limit: "There are already 100 hooks here.",
+    tool_unknown: "That tool is not on this server. Check the server again to list its tools.",
+    tool_delete_builtin_only: "Only a CrazyAgent tool can be deleted. Turn an MCP server's tool off instead.",
+    coord_tool_invalid: "This tool's name has characters a switch can't hold. Only letters, digits, _, - and . work.",
     plugins_failed: "The plugins request failed. Refresh before continuing.",
     setup_busy: "Setup is already running.",
     setup_store_unavailable: "CrazyAgent can't write its app data folder.",
@@ -398,7 +411,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "project_agent_policy" | "account_schedule" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "research_cancel" | "research_retry" | "plan_roadmap";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "project_hidden_paths" | "project_agent_policy" | "account_schedule" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_approve" | "memory_agent_writes" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "research_cancel" | "research_retry" | "plan_roadmap";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
@@ -606,14 +619,18 @@ export type SavedMemory = {
   text: string;
   scope: "global" | "project";
   project_id: string | null;
-  origin: "written" | "promoted" | "selected";
+  origin: "written" | "promoted" | "selected" | "imported" | "agent" | "requested";
   from_project_id: string | null;
   source_path: string | null;
+  agent: string | null;
 };
+
+export type AgentMemoryWrites = "save" | "ask";
 
 export type SavedMemoryPage = {
   items: SavedMemory[];
   next: number | null;
+  agent_writes: AgentMemoryWrites;
 };
 
 export type ApprovedMemory = {
@@ -691,7 +708,19 @@ export function setProjectReadPaths(id: string, paths: string[], version: number
   return invoke<IntentReceipt>("desktop_set_project_read_paths", { id, version, paths, generation });
 }
 
-export type TeamRole = "master" | "sub";
+export function projectAgentPolicy(id: string): Promise<PolicyView> {
+  return invoke<PolicyView>("desktop_project_agent_policy", { id });
+}
+
+export function setProjectAgentPolicy(id: string, policy: AgentPolicy, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_set_project_agent_policy", { id, policy, generation });
+}
+
+export type TeamRole = "master" | "sub" | "teammate";
+
+/** What the screens show in place of receipts and adoption counts for an agent whose launch
+ * fires no hooks (DEC-104 bare-hooks), instead of zeros or a blank. */
+export const HOOKLESS_WORDS = "unavailable for this account kind";
 export type TeamAgentStatus = "starting" | "idle" | "working" | "stopped" | "failed";
 export type TeamTaskStatus = "queued" | "needs_pool" | "running" | "done" | "failed" | "cancelled";
 export type TeamMessageAuthor = "owner" | "master" | "engine";
@@ -730,6 +759,21 @@ export interface TeamAgent {
   finished?: boolean;
   wakeable?: boolean;
   wake_note?: string | null;
+  parent?: number | null;
+  owner_stopped?: boolean;
+  teammates?: Teammate[];
+  pane?: string | null;
+  hookless?: boolean;
+}
+
+/** One teammate a harness split off in its own pane of the harness's terminal: its pane id,
+ * whether its pane closed, whether the owner or the teammate cap stopped it, and when the
+ * engine first saw it. */
+export interface Teammate {
+  pane: string;
+  ended: boolean;
+  stopped: boolean;
+  seen_ms: number;
 }
 
 export interface TeamTask {
@@ -749,6 +793,7 @@ export interface TeamTask {
   created_ms: number;
   started_ms: number | null;
   finished_ms: number | null;
+  parent?: number | null;
 }
 
 export interface TeamMessage {
@@ -763,6 +808,67 @@ export interface TeamMessage {
  * over to the new harness, or start the new harness fresh. */
 export type SwitchMode = "carry" | "fresh";
 
+/** What a task does at its turn end while commands its agent started in the background
+ * still run: wait for them, give them a grace time in seconds and stop them, or stop them
+ * with the turn and tell the agent first. */
+export type BackgroundAtEnd = { mode: "wait" } | { mode: "grace"; secs: number } | { mode: "stop" };
+
+/** Where a lead's worker lands its change set: on the lead's branch when the lead accepts it,
+ * or only when the owner accepts it. */
+export type ChildLanding = "lead" | "owner";
+
+/** Where a project's new sub-agents commit: each on its own branch, or a detached HEAD. */
+export type BranchMode = "named" | "detached";
+
+/** A harness kind the coordination settings are kept for, by its catalog id. */
+export type CoordHarness = "claude-code" | "codex" | "rcli";
+/** How a lead's sub-agents start: app-spawned processes, or the harness's native teammates. */
+export type SubagentMode = "app_spawned" | "native";
+/** How messages reach an agent: native channels with typing as fallback, native only, or typing only. */
+export type Delivery = "auto" | "native_only" | "typing_only";
+/** Where a sub-agent's questions for its lead go: to the lead, or straight to the owner. */
+export type QuestionsTo = "lead" | "me";
+/** What happens when two agents claim the same files: warn both, block the edit, or nothing. */
+export type Overlaps = "warn" | "block" | "off";
+/** When workflow nudges remind an agent: never, with the engine's note per flag after ten
+ * minutes of work, or with one hook reminder on its first edit before any code-graph query. */
+export type Nudges = "off" | "ten_minutes" | "first_edit";
+
+/** A team role whose skills the owner chooses: the master, a lead or a worker. */
+export type SkillRole = "master" | "lead" | "worker";
+
+/** Which approved skills each team role gets: null is All approved skills, a list is Chosen
+ * skills, and an empty list gives that role no skills. */
+export interface RoleSkills {
+  master: string[] | null;
+  lead: string[] | null;
+  worker: string[] | null;
+}
+
+/** A project's coordination settings: question routing, claim overlaps, workflow nudges, the
+ * tool names the adoption counts include and the skills each team role gets. */
+export interface CoordSettings {
+  questions_to: QuestionsTo;
+  overlaps: Overlaps;
+  nudges: Nudges;
+  counted_tools: string[];
+  role_skills: RoleSkills;
+}
+
+/** One harness kind's sub-agent mode and delivery, and whether it has native teammates at all. */
+export interface HarnessCoordination {
+  harness: CoordHarness;
+  mode: SubagentMode;
+  delivery: Delivery;
+  native: boolean;
+}
+
+/** A project's coordination settings with each harness kind's mode and delivery. */
+export interface CoordinationView {
+  settings: CoordSettings;
+  harnesses: HarnessCoordination[];
+}
+
 export interface SessionSwitch {
   harness: string;
   mode: SwitchMode;
@@ -776,10 +882,25 @@ export interface TeamStatus {
   session_limit_secs?: number | null;
   idle_stop_secs?: number | null;
   on_harness_switch?: SwitchMode;
+  sub_agent_depth?: number;
+  child_landing?: ChildLanding;
   show_finished?: boolean;
+  agent_branches?: BranchMode;
+  master_branch?: string | null;
+  land_on?: string | null;
+  background_at_end?: BackgroundAtEnd;
+  ask_before_merge?: boolean;
+  new_folder_files_max?: number;
+  coordination?: CoordinationView | null;
   partial?: boolean;
   live_switch?: SessionSwitch | null;
   paused: boolean;
+  max_harnesses?: number | null;
+  max_teammates?: number | null;
+  token_budget?: number | null;
+  budget_used?: number | null;
+  budget_reached?: boolean;
+  spread_accounts?: boolean;
   live_master?: boolean | null;
   live_problem?: string | null;
   settings_version?: number;
@@ -826,10 +947,48 @@ export type WakeRuleTarget =
 export interface TeamNotification {
   id: number;
   project_id: string;
-  kind: "escalation" | "wake_paused" | "queue_full" | "question";
+  kind: "escalation" | "wake_paused" | "queue_full" | "budget_stopped" | "urgent_question" | "question" | "waiting_on_you";
   text: string;
   created_ms: number;
   seen_ms: number | null;
+}
+
+/** How urgent a question to the owner is (Q14b): high pauses the asker, normal makes it wait
+ * for the answer and low lets it carry on with the assumption it stated. */
+export type QuestionSeverity = "high" | "normal" | "low";
+
+/** One open question an agent put to the owner: who asked, how urgent it is, whom the asker
+ * meant it for, the question, what the asker assumes until answered, when it was asked and
+ * the asker's terminal while it runs. */
+export interface OwnerQuestion {
+  id: number;
+  agent: number;
+  label: string;
+  severity: QuestionSeverity;
+  asked_for: "me" | "master" | "lead";
+  text: string;
+  assumption: string | null;
+  created_ms: number;
+  terminal: string | null;
+}
+
+/** One running agent that waits on the owner in its own terminal (Q14): a permission prompt
+ * or a question asked there, which only that terminal can answer. */
+export interface WaitingAgent {
+  agent: number;
+  label: string;
+  waiting: "question" | "permission";
+  since_ms: number;
+  terminal: string | null;
+}
+
+/** One project's Questions inbox: open questions to the owner, most urgent and then oldest
+ * first, how many more are open than it lists, and the agents waiting in their terminal. */
+export interface QuestionsInbox {
+  project_id: string;
+  questions: OwnerQuestion[];
+  more: number;
+  waiting: WaitingAgent[];
 }
 
 export interface TeamEventsView {
@@ -907,6 +1066,18 @@ export function teamTimeLimits(id: string, turnSecs: number | null, sessionSecs:
  * generation. Output: the engine receipt. */
 export function teamOnHarnessSwitch(id: string, mode: SwitchMode, version: number, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, version, generation });
+}
+
+/** Sets how deep sub-agents may start workers of their own. Inputs: the project id, the depth
+ * 1, 2 or 3 and a generation. Output: the engine receipt. */
+export function teamSubAgentDepth(id: string, depth: number, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_sub_agent_depth", { id, depth, generation });
+}
+
+/** Sets where a lead's worker lands its change set. Inputs: the project id, the mode and a
+ * generation. Output: the engine receipt. */
+export function teamChildLanding(id: string, mode: ChildLanding, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_child_landing", { id, mode, generation });
 }
 
 /** Sets where the project's finished agents show. Inputs: the project id, true for Show (the
@@ -1020,6 +1191,26 @@ export interface MappingFacts {
   entry_points: string[];
 }
 
+/** One instruction file of a project (CLAUDE.md, .claude/CLAUDE.md, AGENTS.md or
+ * CLAUDE.local.md): its path inside the project with `/`, its size, whether git tracks it (so
+ * moving it shows as a deletion), the plain code of why it stays in place, null when it is
+ * or was imported, and whether its move still waits for a commit (DEC-106). */
+export interface ImportFile {
+  path: string;
+  bytes: number;
+  tracked: boolean;
+  refused: string | null;
+  uncommitted?: boolean;
+}
+
+/** The local commit that recorded an instruction import's move: its id, the branch it is on
+ * and the moved paths whose deletion it holds; never pushed (DEC-106 addendum). */
+export interface ImportCommit {
+  commit: string;
+  branch: string;
+  files: string[];
+}
+
 export interface OnboardingView {
   project_id: string;
   graph: OnboardingStep;
@@ -1029,7 +1220,9 @@ export interface OnboardingView {
   facts: MappingFacts;
   missing: string[];
   overview: string | null;
+  folder_overview: string | null;
   finished: boolean;
+  imported?: ImportFile[];
 }
 
 export interface GitHubDeviceCode {
@@ -1053,6 +1246,7 @@ export interface GitHubRepo {
   private: boolean;
   default_branch: string;
   size_kb: number;
+  refused: string | null;
 }
 
 export interface GitHubRepoPage {
@@ -1127,6 +1321,7 @@ export interface PackEntry {
   license: string;
   on_by_default: boolean;
   state: PackState;
+  hooks_refused?: string | null;
 }
 
 export interface SetupStatus {
@@ -1209,15 +1404,21 @@ export function removePackEntry(id: string, version: number, generation: number)
   return invoke<SetupStatus>("desktop_remove_pack_entry", { id, version, generation });
 }
 
-/** What one node of a project's team graph stands for: the master, one harness with its
- * agent count, or one agent. */
-export type GraphNodeKind = "master" | "harness_group" | "agent";
+/** What one node of the who-leads-whom tree stands for: the master, a harness lead the master
+ * started, a sub-agent a lead started, or a native teammate a lead's harness split off. */
+export type GraphNodeKind = "master" | "lead" | "sub" | "teammate";
 export type GraphEdgeState = "sent" | "running" | "done" | "failed";
+export type Presence = "live" | "idle" | "away" | "stopped";
+export type Waiting = "question" | "permission";
+export type Receipt = "sent" | "delivered" | "typed" | "read" | "replied" | "failed" | "expired";
 
 /** One node of a project's team graph, as the engine's TeamGraph read returns it. `parent`
- * links an agent to its harness group and a group to the master; `terminal` is the name the
- * terminal commands take, for the master and agents that have one. `questions` counts the
- * questions an agent waits on, once the engine reports them. */
+ * names the node that leads it; `terminal` is the name the terminal commands take, for the
+ * nodes that have one. `questions` counts the questions it queued for the master, `agent` is
+ * its own team agent row and `pane` a native teammate's pane, for Stop. `presence`, `waiting`
+ * on the owner in its terminal, `owner_questions` (open For: Me questions) and `no_worktree`
+ * come from the coordination layer; `hookless` marks an agent whose launch fires no hooks, so
+ * it has no receipts. Older engines leave the optional fields out. */
 export interface GraphNode {
   id: string;
   kind: GraphNodeKind;
@@ -1227,13 +1428,41 @@ export interface GraphNode {
   status: TeamAgentStatus | null;
   status_label: string | null;
   account: string | null;
-  agents: number | null;
+  branch?: string | null;
   terminal: string | null;
   questions?: number | null;
+  agent?: number | null;
+  pane?: string | null;
+  presence?: Presence | null;
+  waiting?: Waiting | null;
+  owner_questions?: number;
+  no_worktree?: boolean;
+  hookless?: boolean;
 }
 
-/** One task edge from the master to the agent running it, or to its harness group before
- * that. `reply` is the result or the plain problem once the task ended. */
+/** Unread messages from one party to another: how many and the newest one's receipt. Each end
+ * is a node id, "owner" or "engine". */
+export interface MessageEdge {
+  from: string;
+  to: string;
+  unread: number;
+  receipt: Receipt;
+}
+
+/** Active claims of two agents that may touch the same thing: how many claim pairs, the first
+ * plain reason, and whether every pair has a stale side. */
+export interface OverlapEdge {
+  from: string;
+  to: string;
+  count: number;
+  reason: string;
+  stale: boolean;
+}
+
+/** One assignment edge from the node leading an agent to the agent running the task, or from
+ * the master to the master while no agent took it. `to` stays the agent's own node id while
+ * that agent is not drawn, so its task counts for no other card; `agent_label` names it.
+ * `reply` is the result or the plain problem once the task ended. */
 export interface GraphEdge {
   from: string;
   to: string;
@@ -1242,13 +1471,18 @@ export interface GraphEdge {
   text: string;
   state: GraphEdgeState;
   reply: string | null;
+  lead?: string | null;
+  agent_label?: string | null;
 }
 
-/** One project's team as a graph: the master, harness groups, agents and task edges. */
+/** One project's team as a tree of who leads whom, its assignment edges, and the unread
+ * message and claim overlap edges of the coordination layer. */
 export interface TeamGraph {
   project_id: string;
   nodes: GraphNode[];
   edges: GraphEdge[];
+  messages?: MessageEdge[];
+  overlaps?: OverlapEdge[];
 }
 
 /** A control message on an attached terminal channel: the terminal's size once attached,
@@ -1283,8 +1517,8 @@ export function ideFocus(): Promise<IdeFocus | null> {
 /** Opens a live view of one agent's terminal. The channel gets the attach frame, the screen
  * and then live output until the terminal closes or the view detaches. Inputs: the terminal
  * name and the channel. Output: the view's serial once the engine accepted the attach. */
-export function terminalAttach(agent: string, output: Channel<TerminalMessage>): Promise<number> {
-  return invoke<number>("desktop_terminal_attach", { agent, output });
+export function terminalAttach(agent: string, output: Channel<TerminalMessage>, pane: string | null = null): Promise<number> {
+  return invoke<number>("desktop_terminal_attach", { agent, pane, output });
 }
 
 /** Types bytes into an attached agent terminal exactly as given. Inputs: the terminal name
@@ -1532,6 +1766,23 @@ export interface SkillFile {
   bytes: number;
 }
 
+/** One hook as Settings lists it: its plugin, Claude Code event and matcher, command, where
+ * it applies, its On flags and the skill or MCP server it follows. */
+export interface HookView {
+  id: string;
+  name: string;
+  plugin: string;
+  event: string;
+  matcher: string | null;
+  command: string;
+  scope: PluginScope;
+  scope_label: string;
+  enabled: boolean;
+  on_here: boolean | null;
+  follows: string | null;
+  source: string;
+}
+
 export interface SkillDetail {
   skill: SkillView;
   text: string;
@@ -1584,6 +1835,22 @@ export interface McpServerView {
   version: number;
 }
 
+/** A tool's switch: on, off, or deleted (hidden; built-in tools only). */
+export type ToolSwitch = "on" | "off" | "hidden";
+
+/** One tool with its switches: the CrazyAgent built-in tools, or one MCP server's tools.
+ * `global` is the every-project switch; `here` is the project's own switch, null when the
+ * project follows the global one or in global settings. */
+export interface ToolView {
+  server: string;
+  server_id: string | null;
+  tool: string;
+  description: string;
+  builtin: boolean;
+  global: ToolSwitch;
+  here: ToolSwitch | null;
+}
+
 export interface EffectivePlugins {
   skills: { name: string; folder: string }[];
   servers: { name: string; spec: McpServerSpec; secrets: { name: string; reference: string }[] }[];
@@ -1602,6 +1869,21 @@ export function pluginServers(projectId?: string): Promise<McpServerView[]> {
 /** Adds a skill from a picked folder that holds SKILL.md; the engine keeps its own copy. */
 export function addSkill(scope: PluginScope, folder: string): Promise<SkillView> {
   return invoke<SkillView>("desktop_add_skill", { scope, folder });
+}
+
+/** Lists hooks for global settings (no project) or for one project's settings. */
+export function pluginHooks(projectId?: string): Promise<HookView[]> {
+  return invoke<HookView[]>("desktop_plugin_hooks", { projectId: projectId ?? null });
+}
+
+/** Adds the hooks a picked plugin folder defines; the engine keeps its own copy of their files. */
+export function addHooks(scope: PluginScope, folder: string): Promise<HookView[]> {
+  return invoke<HookView[]>("desktop_add_hooks", { scope, folder });
+}
+
+/** Turns a hook on or off where it was added. */
+export function setHookEnabled(id: string, enabled: boolean): Promise<HookView> {
+  return invoke<HookView>("desktop_set_hook_enabled", { id, enabled });
 }
 
 /** Turns a skill on or off where it was added, from the version the list showed. */
@@ -1844,6 +2126,11 @@ export function newMasterSession(ticket: string, cancelRunning: boolean, generat
 /** Makes a parked session live again, parking the live one; a running turn needs `cancelRunning`. */
 export function resumeMasterSession(ticket: string, sessionId: string, cancelRunning: boolean, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_resume_master_session", { ticket, sessionId, cancelRunning, generation });
+}
+
+/** Deletes a session that is not live: its stored turns and its transcript in the master's private home. */
+export function deleteMasterSession(ticket: string, sessionId: string, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_delete_master_session", { ticket, sessionId, generation });
 }
 
 export interface MasterTurns {

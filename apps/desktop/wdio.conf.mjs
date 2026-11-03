@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
-import { basename, isAbsolute, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { isAbsolute, join } from "node:path";
 
 const app = process.env.CRAZYAGENT_DESKTOP_TEST_APP;
 const port = Number(process.env.CRAZYAGENT_DESKTOP_TEST_PORT);
@@ -8,12 +7,9 @@ const evidence = process.env.CRAZYAGENT_DESKTOP_TEST_EVIDENCE;
 assert(app && isAbsolute(app), "built native test application required");
 assert(evidence && isAbsolute(evidence), "private native evidence directory required");
 assert(Number.isInteger(port) && port > 1024 && port < 65536, "owned test port required");
-const run = basename(evidence);
-assert(/^[A-Za-z0-9_-]{1,64}$/.test(run), "bounded owned observation run required");
 
 export const config = {
   runner: "local",
-  specs: [fileURLToPath(new URL("test/native/baseline.e2e.mjs", import.meta.url))],
   maxInstances: 1,
   capabilities: [{ browserName: "tauri", "tauri:options": { application: app } }],
   services: [["@wdio/tauri-service", {
@@ -24,7 +20,6 @@ export const config = {
     startTimeout: 20000,
     captureBackendLogs: true,
     backendLogLevel: "info",
-    env: { CRAZYAGENT_NATIVE_REFRESH_OBSERVE: run },
   }]],
   framework: "mocha",
   reporters: ["spec"],
@@ -40,6 +35,7 @@ export const config = {
   },
   before: async function () {
     await globalThis.browser.setWindowSize(1180, 800);
+    await globalThis.browser.switchToWindow(await globalThis.browser.getWindowHandle());
   },
   afterTest: async function (test, context, result) {
     if (!result.passed) {

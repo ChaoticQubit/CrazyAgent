@@ -1,0 +1,104 @@
+import { useState } from "react";
+import { restoreToolSwitches, setToolSwitch, toolSwitches, type Result, type ToolSwitch, type ToolView } from "../../api";
+import { useAppSession, useLoad, type Loaded } from "../../state";
+import { Button, LoadError, Menu, NotReady, Notice, Panel, Skeleton, Switch, type MenuItem } from "../../ui";
+
+const NOT_READY = "This change isn't ready in this build yet.";
+
+/** The switch a tool has where it is shown: in a project its own switch, else the every-project
+ * one. Inputs: the tool and the project id, if any. Output: on, off or hidden. */
+export function toolState(tool: ToolView, projectId?: string): ToolSwitch {
+  return projectId ? tool.here ?? tool.global : tool.global;
+}
+
+/** Whether any of these tools has a switch stored in this scope, so Restore defaults has
+ * something to clear. Inputs: the tools and the project id, if any. Output: the answer. */
+export function toolsChanged(tools: ToolView[], projectId?: string): boolean {
+  return tools.some((tool) => projectId ? tool.here !== null : tool.global !== "on");
+}
+
+/** One server's tools as a pure view: a switch per tool, Delete for a built-in tool, and
+ * Restore defaults while any switch is stored here. Deleted tools are left out and counted.
+ * Inputs: the read, project id, last failure, the tool being changed and the actions. */
+export function ToolSwitchesView({ tools, projectId, failure, busy, onToggle, onHide, onRestore, onRetry }: {
+  tools: Loaded<ToolView[]>;
+  projectId?: string;
+  failure: string;
+  busy: string | null;
+  onToggle: (tool: ToolView, on: boolean) => void;
+  onHide: (tool: ToolView) => void;
+  onRestore: () => void;
+  onRetry: () => void;
+}) {
+  if (tools.kind === "loading") return <Skeleton shape="row" count={3} />;
+  if (tools.kind === "not_ready") return <NotReady what="Tool switches" compact />;
+  if (tools.kind === "error") return <LoadError message="Couldn't load the tools." onRetry={onRetry} />;
+  const shown = tools.value.filter((tool) => toolState(tool, projectId) !== "hidden");
+  const hidden = tools.value.length - shown.length;
+  const label = projectId ? "On in this project" : "On for every project";
+  return <div className="stack-small">
+    {failure && <Notice tone="danger" alert>{failure}</Notice>}
+    {shown.length === 0 ? <p className="secondary">{tools.value.length === 0 ? "No tools yet. Check the server to list its tools." : "Every tool here is deleted."}</p>
+      : <div className="rows">
+        {shown.map((tool) => {
+          const menu: MenuItem[] = tool.builtin ? [{ label: "Delete", icon: "trash", danger: true, onSelect: () => onHide(tool) }] : [];
+          return <div className="item-row" key={`${tool.server}/${tool.tool}`}>
+            <div className="stack-small">
+              <span className="mono">{tool.tool}</span>
+              {tool.description && <span className="secondary">{tool.description}</span>}
+            </div>
+            <span className="row">
+              <Switch id={`tool-${tool.server}-${tool.tool}`} label={label} checked={toolState(tool, projectId) === "on"} onChecked={(next) => onToggle(tool, next)}
+                disabledReason={busy === tool.tool ? "Saving the last change." : undefined} />
+              {menu.length > 0 && <Menu label={`More for ${tool.tool}`} items={menu} />}
+            </span>
+          </div>;
+        })}
+      </div>}
+    {(hidden > 0 || toolsChanged(tools.value, projectId)) && <span className="row">
+      {hidden > 0 && <span className="muted small">{hidden} deleted. Restore defaults brings {hidden === 1 ? "it" : "them"} back.</span>}
+      <Button size="small" icon="refresh-cw" pending={busy === "restore"} pendingLabel="Restoring..." onClick={onRestore}>Restore defaults</Button>
+    </span>}
+  </div>;
+}
+
+/** One server's tool switches read from the engine: the CrazyAgent built-in tools (no server id)
+ * or one MCP server's checked tools, global or for one project. Inputs: project id and server id. */
+export function ToolSwitches({ projectId, serverId }: { projectId?: string; serverId: string | null }) {
+  const session = useAppSession();
+  const [tools, reload] = useLoad(() => toolSwitches(projectId, serverId), [projectId, serverId]);
+  const [failure, setFailure] = useState("");
+  const [busy, setBusy] = useState<string | null>(null);
+
+  async function act(key: string, change: () => Promise<Result<ToolView[]>>, done: string) {
+    if (busy) return;
+    setFailure("");
+    setBusy(key);
+    const result = session.noteResult(await change());
+    setBusy(null);
+    if (result.kind === "ok") session.showToast(done);
+    else setFailure(result.kind === "not_ready" ? NOT_READY : result.message);
+    reload();
+  }
+
+  return <ToolSwitchesView tools={tools} projectId={projectId} failure={failure} busy={busy} onRetry={reload}
+    onToggle={(tool, on) => void act(tool.tool, () => setToolSwitch(projectId, serverId, tool.tool, on ? "on" : "off"), on ? `${tool.tool} turned on.` : `${tool.tool} turned off.`)}
+    onHide={(tool) => void act(tool.tool, () => setToolSwitch(projectId, serverId, tool.tool, "hidden"), `${tool.tool} deleted. Restore defaults brings it back.`)}
+    onRestore={() => void act("restore", () => restoreToolSwitches(projectId, serverId), "Tool switches restored.")} />;
+}
+
+/** Settings, Plugins, Tools: one switch per CrazyAgent built-in tool, and Add a tool, which adds
+ * an MCP server whose tools then get their own switches under MCP servers. Inputs: the project
+ * id, if any, and the action that opens Add MCP server. */
+export function ToolsSection({ projectId, onAddTool }: { projectId?: string; onAddTool: () => void }) {
+  return <div className="stack-small">
+    <div className="row between">
+      <p className="secondary">{projectId
+        ? "Tools agents in this project can call. A switch here overrides the one for every project."
+        : "Tools every agent can call. Each project can override a switch. Delete hides a built-in tool until you restore the defaults."}</p>
+      <Button icon="plus" onClick={onAddTool}>Add a tool</Button>
+    </div>
+    <Panel title="CrazyAgent tools"><ToolSwitches projectId={projectId} serverId={null} /></Panel>
+    <p className="muted small">Each MCP server's tools have their own switches: open MCP servers and expand a server's tools.</p>
+  </div>;
+}

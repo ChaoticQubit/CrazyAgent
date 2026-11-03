@@ -3,6 +3,7 @@ use super::app_setup::{AppSetupEvent, AppSetupJob};
 use super::*;
 use crate::accounts::AccountView;
 use crate::config::ModelAccessEdit;
+use crate::coord::tool_switches::Switch;
 use crate::engine::EngineError;
 use crate::engine::owner::{
     AccountSecret, ClaudeAuthInput, ModelAccessCollection, ModelAccessRecord, NativeAuthAccount,
@@ -10,10 +11,11 @@ use crate::engine::owner::{
 };
 use crate::harnesses::HarnessEntry;
 use crate::memory::library::{
-    LIBRARY_ITEMS_MAX, MemoryScope, PAGE_ITEMS_MAX, SCOPE_ITEMS_MAX, SavedMemory,
+    AgentWrites, LIBRARY_ITEMS_MAX, LibraryAction, MemoryScope, PAGE_ITEMS_MAX, SCOPE_ITEMS_MAX,
+    SavedMemory,
 };
 use crate::memory::{KnowledgeStatus, ReviewDecision};
-use crate::plugins::{Scope, ServerSpec, ServerView, SkillView};
+use crate::plugins::{HookView, Scope, ServerSpec, ServerView, SkillView, ToolView};
 use crate::protocol::CredentialRef;
 use crate::usage::report::UsageReport;
 
@@ -51,9 +53,21 @@ pub(in crate::tui) enum SettingsJob {
         memory: RequestId,
         generation: u64,
     },
+    ApproveMemory {
+        memory: RequestId,
+        generation: u64,
+    },
+    AgentWrites {
+        set: Option<(AgentWrites, u64)>,
+    },
     AddMemory {
         scope: MemoryScope,
         text: String,
+        generation: u64,
+    },
+    ImportMemory {
+        project: ProjectId,
+        folder: String,
         generation: u64,
     },
     Suggestions {
@@ -76,7 +90,24 @@ pub(in crate::tui) enum SettingsJob {
     ImportSkills {
         picks: Vec<(String, Option<String>)>,
     },
+    Hooks {
+        project: Option<ProjectId>,
+    },
     Plugin(PluginChange),
+    Tools {
+        project: Option<ProjectId>,
+        server: Option<String>,
+    },
+    SetTool {
+        project: Option<ProjectId>,
+        server: Option<String>,
+        tool: String,
+        switch: Switch,
+    },
+    RestoreTools {
+        project: Option<ProjectId>,
+        server: Option<String>,
+    },
     AppSetup(AppSetupJob),
     Schedule,
     SetSchedule {
@@ -94,6 +125,14 @@ pub(in crate::tui) enum PluginChange {
     AddSkill {
         scope: Scope,
         folder: String,
+    },
+    AddHooks {
+        scope: Scope,
+        folder: String,
+    },
+    SetHook {
+        id: String,
+        enabled: bool,
     },
     SetSkill {
         id: String,
@@ -160,7 +199,10 @@ impl std::fmt::Debug for SettingsJob {
             Self::JoinPools { .. } => "JoinPools",
             Self::Memories { .. } => "Memories",
             Self::DeleteMemory { .. } => "DeleteMemory",
+            Self::ApproveMemory { .. } => "ApproveMemory",
+            Self::AgentWrites { .. } => "AgentWrites",
             Self::AddMemory { .. } => "AddMemory",
+            Self::ImportMemory { .. } => "ImportMemory",
             Self::Suggestions { .. } => "Suggestions",
             Self::Suggestion { .. } => "Suggestion",
             Self::Plugins => "Plugins",
@@ -168,7 +210,11 @@ impl std::fmt::Debug for SettingsJob {
             Self::SkillDetail { .. } => "SkillDetail",
             Self::ImportScan => "ImportScan",
             Self::ImportSkills { .. } => "ImportSkills",
+            Self::Hooks { .. } => "Hooks",
             Self::Plugin(_) => "Plugin",
+            Self::Tools { .. } => "Tools",
+            Self::SetTool { .. } => "SetTool",
+            Self::RestoreTools { .. } => "RestoreTools",
             Self::AppSetup(job) => job.name(),
             Self::Schedule => "Schedule",
             Self::SetSchedule { .. } => "SetSchedule",
@@ -268,7 +314,10 @@ pub(in crate::tui) enum SettingsEvent {
     PoolsJoined(Result<usize, String>),
     Memories(Result<Vec<SavedMemory>, String>),
     MemoryDeleted(Result<(), String>),
+    MemoryApproved(Result<(), String>),
+    AgentWrites(Result<AgentWrites, String>),
     MemoryAdded(Result<(), String>),
+    MemoryImported(Result<crate::memory::import::ImportReport, String>),
     Suggestions(Result<Vec<Suggestion>, String>),
     SuggestionDone(Suggestion, Result<(), String>),
     Plugins(Result<(Vec<SkillView>, Vec<ServerView>), String>),
@@ -279,7 +328,14 @@ pub(in crate::tui) enum SettingsEvent {
     ),
     ImportScan(Result<crate::skills::import::ImportList, String>),
     Imported(Result<ImportOutcomes, String>),
+    Hooks(Option<ProjectId>, Result<Vec<HookView>, String>),
     PluginChanged(Result<Option<ServerView>, String>),
+    Tools {
+        project: Option<ProjectId>,
+        server: Option<String>,
+        changed: bool,
+        result: Result<Vec<ToolView>, String>,
+    },
     AppSetup(AppSetupEvent),
     Schedule(Result<crate::scheduling::Schedule, String>),
     ScheduleSet(u64, Result<(), String>),
@@ -301,7 +357,10 @@ impl SettingsEvent {
             SettingsJob::JoinPools { .. } => Self::PoolsJoined(Err(problem)),
             SettingsJob::Memories { .. } => Self::Memories(Err(problem)),
             SettingsJob::DeleteMemory { .. } => Self::MemoryDeleted(Err(problem)),
+            SettingsJob::ApproveMemory { .. } => Self::MemoryApproved(Err(problem)),
+            SettingsJob::AgentWrites { .. } => Self::AgentWrites(Err(problem)),
             SettingsJob::AddMemory { .. } => Self::MemoryAdded(Err(problem)),
+            SettingsJob::ImportMemory { .. } => Self::MemoryImported(Err(problem)),
             SettingsJob::Suggestions { .. } => Self::Suggestions(Err(problem)),
             SettingsJob::Suggestion { suggestion, .. } => {
                 Self::SuggestionDone(suggestion.clone(), Err(problem))
@@ -315,7 +374,23 @@ impl SettingsEvent {
             }
             SettingsJob::ImportScan => Self::ImportScan(Err(problem)),
             SettingsJob::ImportSkills { .. } => Self::Imported(Err(problem)),
+            SettingsJob::Hooks { project } => Self::Hooks(project.clone(), Err(problem)),
             SettingsJob::Plugin(_) => Self::PluginChanged(Err(problem)),
+            SettingsJob::Tools { project, server } => Self::Tools {
+                project: project.clone(),
+                server: server.clone(),
+                changed: false,
+                result: Err(problem),
+            },
+            SettingsJob::SetTool {
+                project, server, ..
+            }
+            | SettingsJob::RestoreTools { project, server } => Self::Tools {
+                project: project.clone(),
+                server: server.clone(),
+                changed: true,
+                result: Err(problem),
+            },
             SettingsJob::AppSetup(job) => Self::AppSetup(AppSetupEvent::failed(job, problem)),
             SettingsJob::Schedule => Self::Schedule(Err(problem)),
             SettingsJob::SetSchedule { generation, .. } => {
@@ -498,8 +573,68 @@ impl NativeOwner {
                     Err(error) => Err(error),
                 })
             }
+            SettingsJob::Hooks { project } => SettingsEvent::Hooks(
+                project.clone(),
+                match self.settings_controller() {
+                    Ok(controller) => controller
+                        .plugin_hooks(project)
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                },
+            ),
             SettingsJob::Plugin(change) => {
                 SettingsEvent::PluginChanged(self.plugin_change(change, lost).await)
+            }
+            SettingsJob::Tools { project, server } => {
+                let result = match self.settings_controller() {
+                    Ok(controller) => controller
+                        .tool_switches(project.clone(), server.clone())
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                };
+                SettingsEvent::Tools {
+                    project,
+                    server,
+                    changed: false,
+                    result,
+                }
+            }
+            SettingsJob::SetTool {
+                project,
+                server,
+                tool,
+                switch,
+            } => {
+                let result = match self.settings_controller() {
+                    Ok(controller) => controller
+                        .set_tool_switch(project.clone(), server.clone(), tool, switch)
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                };
+                SettingsEvent::Tools {
+                    project,
+                    server,
+                    changed: true,
+                    result,
+                }
+            }
+            SettingsJob::RestoreTools { project, server } => {
+                let result = match self.settings_controller() {
+                    Ok(controller) => controller
+                        .restore_tool_switches(project.clone(), server.clone())
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                };
+                SettingsEvent::Tools {
+                    project,
+                    server,
+                    changed: true,
+                    result,
+                }
             }
             SettingsJob::AppSetup(job) => SettingsEvent::AppSetup(self.app_setup(job, lost).await),
             SettingsJob::Schedule => SettingsEvent::Schedule(match self.settings_controller() {
@@ -545,6 +680,17 @@ impl NativeOwner {
                 ),
                 Err(error) => Err(error),
             }),
+            SettingsJob::ImportMemory {
+                project,
+                folder,
+                generation,
+            } => SettingsEvent::MemoryImported(match self.settings_controller() {
+                Ok(controller) => controller
+                    .import_memories(project, std::path::Path::new(&folder), generation)
+                    .await
+                    .map_err(|error| problem(&error, lost)),
+                Err(error) => Err(error),
+            }),
             SettingsJob::Suggestions { projects } => {
                 SettingsEvent::Suggestions(self.suggestions(projects, lost).await)
             }
@@ -565,6 +711,20 @@ impl NativeOwner {
                     ),
                     Err(error) => Err(error),
                 })
+            }
+            SettingsJob::ApproveMemory { memory, generation } => {
+                let action = LibraryAction::Approve { memory_id: memory };
+                SettingsEvent::MemoryApproved(match self.settings_controller() {
+                    Ok(controller) => applied(
+                        controller.change_memory(action, generation).await,
+                        "memory_outcome_unknown",
+                        lost,
+                    ),
+                    Err(error) => Err(error),
+                })
+            }
+            SettingsJob::AgentWrites { set } => {
+                SettingsEvent::AgentWrites(self.agent_writes(set, lost).await)
             }
         }
     }
@@ -602,6 +762,12 @@ impl NativeOwner {
         let done = match change {
             PluginChange::AddSkill { scope, folder } => {
                 controller.add_skill(scope, folder).await.map(|_| None)
+            }
+            PluginChange::AddHooks { scope, folder } => {
+                controller.add_hooks(scope, folder).await.map(|_| None)
+            }
+            PluginChange::SetHook { id, enabled } => {
+                controller.set_hook_enabled(id, enabled).await.map(|_| None)
             }
             PluginChange::SetSkill {
                 id,
@@ -789,6 +955,32 @@ impl NativeOwner {
         memories.sort_by_key(|memory| std::cmp::Reverse(memory.ordinal));
         memories.truncate(LIBRARY_ITEMS_MAX);
         Ok(memories)
+    }
+
+    /// Saves the owner's Agent memory writes setting when asked, then reads it back.
+    /// Inputs: the choice with its client generation, if any, and the lost-connection
+    /// flag. Output: the setting the engine now holds, or the plain problem code.
+    pub(super) async fn agent_writes(
+        &mut self,
+        set: Option<(AgentWrites, u64)>,
+        lost: &mut bool,
+    ) -> Result<AgentWrites, String> {
+        let controller = self.settings_controller()?;
+        if let Some((writes, generation)) = set {
+            applied(
+                controller
+                    .change_memory(LibraryAction::AgentWrites { writes }, generation)
+                    .await,
+                "memory_outcome_unknown",
+                lost,
+            )?;
+        }
+        let controller = self.settings_controller()?;
+        controller
+            .memories(MemoryScope::Global, None, None)
+            .await
+            .map(|page| page.agent_writes)
+            .map_err(|error| problem(&error, lost))
     }
 
     /// Reads every saved memory in one scope, newest first, page by page.
@@ -1742,6 +1934,101 @@ mod tests {
             SettingsEvent::Imported(Err(code)) => panic!("import failed: {code}"),
             _ => panic!("an import reply required"),
         }
+        drop(native);
+        tokio::time::timeout(Duration::from_secs(5), service.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn agent_memory_writes_change_on_the_engine_and_only_a_requested_memory_is_approved() {
+        use crate::memory::library::MemoryOrigin;
+        let root = tempfile::Builder::new()
+            .prefix("ca-twrites-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let (mut service, _stop) = engine(root.path()).await;
+        let mut native = NativeOwner::new(
+            root.path().join("e.sock"),
+            crate::tui::test_home::ENGINE_WAIT,
+        );
+        let _ = native.attach().await;
+        assert!(native.ready);
+        let writes = |set| SettingsJob::AgentWrites { set };
+        assert!(matches!(
+            native.settings(writes(None)).await,
+            SettingsEvent::AgentWrites(Ok(AgentWrites::Save))
+        ));
+        assert!(matches!(
+            native.settings(writes(Some((AgentWrites::Ask, 1)))).await,
+            SettingsEvent::AgentWrites(Ok(AgentWrites::Ask))
+        ));
+        assert!(matches!(
+            native.settings(writes(None)).await,
+            SettingsEvent::AgentWrites(Ok(AgentWrites::Ask))
+        ));
+
+        let mut db = rusqlite::Connection::open(root.path().join("engine.db")).unwrap();
+        db.busy_timeout(Duration::from_secs(5)).unwrap();
+        db.execute("INSERT INTO projects(id,body) VALUES ('alpha','{}')", [])
+            .unwrap();
+        assert_eq!(
+            crate::memory::library::agent_remember(
+                &mut db,
+                &ProjectId::new("alpha").unwrap(),
+                "Ada (@lead-a)",
+                true,
+                "Ship on Fridays.",
+            )
+            .unwrap(),
+            Ok(true)
+        );
+        drop(db);
+        let agent = "Ada (@lead-a)".to_owned();
+        let listed = |event: SettingsEvent| {
+            let SettingsEvent::Memories(Ok(list)) = event else {
+                panic!("the memories were not listed");
+            };
+            list
+        };
+        let global = || SettingsJob::Memories {
+            scopes: vec![MemoryScope::Global],
+        };
+        let memories = listed(native.settings(global()).await);
+        assert_eq!(memories.len(), 1);
+        assert_eq!(
+            memories[0].origin,
+            MemoryOrigin::Requested {
+                agent: agent.clone()
+            }
+        );
+        let id = memories[0].id.clone();
+        assert!(matches!(
+            native
+                .settings(SettingsJob::ApproveMemory {
+                    memory: id.clone(),
+                    generation: 2,
+                })
+                .await,
+            SettingsEvent::MemoryApproved(Ok(()))
+        ));
+        let memories = listed(native.settings(global()).await);
+        assert_eq!(memories[0].origin, MemoryOrigin::Agent { agent });
+        assert!(matches!(
+            native
+                .settings(SettingsJob::ApproveMemory {
+                    memory: id,
+                    generation: 3,
+                })
+                .await,
+            SettingsEvent::MemoryApproved(Err(code)) if code == "memory_not_requested"
+        ));
+        assert!(matches!(
+            native.settings(writes(Some((AgentWrites::Save, 4)))).await,
+            SettingsEvent::AgentWrites(Ok(AgentWrites::Save))
+        ));
         drop(native);
         tokio::time::timeout(Duration::from_secs(5), service.shutdown())
             .await

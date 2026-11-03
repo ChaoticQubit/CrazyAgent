@@ -5,7 +5,7 @@ use crate::client_controller::OwnerController;
 use crate::engine::Client;
 use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
-use crate::github::{GitHubMethod, GitHubStatus};
+use crate::github::{GitHubMethod, GitHubRepo, GitHubRepoPage, GitHubStatus};
 use crate::onboarding::{MappingFacts, OnboardingView, Step};
 use crate::project_setup::{ProjectSetup, SetupAction, SetupQuery};
 use crate::protocol::ProjectId;
@@ -949,7 +949,9 @@ fn review_with(change: impl FnOnce(&mut OnboardingView)) -> (Shell, ProjectId) {
         },
         missing: vec!["about".into(), "platforms".into()],
         overview: None,
+        folder_overview: None,
         finished: false,
+        imported: Vec::new(),
     };
     let mut draft = draft;
     change(&mut draft);
@@ -1347,6 +1349,71 @@ fn a_pasted_github_token_leaves_only_as_its_own_job_and_is_never_drawn() {
     assert!(shell.ctx.next_request().is_none());
 }
 
+#[test]
+fn a_repository_the_engine_cannot_clone_is_listed_with_why_and_enter_never_clones_it() {
+    let mut ctx = ctx(100, 24);
+    let screen = open(&Place::CloneRepo, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    assert!(shell.ctx.next_request().is_some());
+    shell.arrive(intake(
+        IntakeQuery::GitHubStatus,
+        Ok(IntakeView::GitHub(GitHubStatus {
+            signed_in: true,
+            login: Some("octo-cat".into()),
+            method: GitHubMethod::Token,
+            waiting: false,
+            problem: None,
+        })),
+    ));
+    let Some(Request::Intake(job)) = shell.ctx.next_request() else {
+        panic!("a signed-in clone page lists the repositories");
+    };
+    assert_eq!(job.query(), IntakeQuery::GitHubRepos { page: 1 });
+    let repo = |full_name: &str, refused: Option<&str>| GitHubRepo {
+        full_name: full_name.into(),
+        private: false,
+        default_branch: "main".into(),
+        size_kb: 4,
+        refused: refused.map(Into::into),
+    };
+    shell.arrive(intake(
+        IntakeQuery::GitHubRepos { page: 1 },
+        Ok(IntakeView::Repos(GitHubRepoPage {
+            repos: vec![
+                repo("octo-cat/.github", Some("github_repo_name_unsupported")),
+                repo("octo-cat/notes", None),
+            ],
+            next: None,
+        })),
+    ));
+    let rows = render(&mut shell, 100, 24);
+    assert!(shows(&rows, "octo-cat/.github"), "{rows:#?}");
+    assert!(shows(&rows, "Can't clone this name"), "{rows:#?}");
+    assert!(shows(&rows, "octo-cat/notes"), "{rows:#?}");
+    shell.key(Key::Enter);
+    assert!(shell.ctx.next_request().is_none());
+    let rows = render(&mut shell, 100, 24);
+    assert!(
+        shows(
+            &rows,
+            "can't clone a repository whose name starts with a dot"
+        ),
+        "{rows:#?}"
+    );
+    assert!(!shows(&rows, "github_repo_name_unsupported"), "{rows:#?}");
+    shell.key(Key::Down);
+    shell.key(Key::Enter);
+    let Some(Request::Intake(job)) = shell.ctx.next_request() else {
+        panic!("the other repository still clones");
+    };
+    assert_eq!(
+        job.query(),
+        IntakeQuery::CloneRepo {
+            full_name: "octo-cat/notes".into()
+        }
+    );
+}
+
 /// Starts an engine whose GitHub settings file sets an empty client id, so the engine
 /// refuses a GitHub sign-in with `github_client_id_not_configured` before any network call.
 async fn engine_without_github_client_id() -> Engine {
@@ -1396,4 +1463,162 @@ async fn a_projects_home_the_engine_refuses_says_why_on_the_setup_page() {
     assert_eq!(pump(&mut shell, &mut connection).await, ["settings"]);
     let message = shell.ctx.message().expect("the refusal is shown");
     assert_eq!(message.lead, "Pick a folder, not a file or a link.");
+}
+
+/// A real checkout with CLAUDE.md tracked and AGENTS.md untracked, imported by the
+/// engine's own import, and the onboarding review of `notes` showing what it moved.
+/// Output: the shell, the project, the folder (kept alive by its guard) and the tip
+/// before the import.
+fn imported_review() -> (
+    Shell,
+    ProjectId,
+    tempfile::TempDir,
+    std::path::PathBuf,
+    String,
+) {
+    let guard = tempfile::tempdir().unwrap();
+    let folder = guard.path().canonicalize().unwrap();
+    let tip = crate::tui::test_home::instruction_repo(&folder, &["CLAUDE.md"], &["AGENTS.md"]);
+    let moved = crate::instruction_files::import(&folder).unwrap();
+    assert_eq!(
+        moved
+            .iter()
+            .map(|file| (file.path.as_str(), file.uncommitted))
+            .collect::<Vec<_>>(),
+        [("CLAUDE.md", true), ("AGENTS.md", false)]
+    );
+    let (mut shell, project) = review_with(|view| view.imported = moved);
+    while shell.ctx.next_request().is_some() {}
+    (shell, project, guard, folder, tip)
+}
+
+fn commit_reply(project: &ProjectId, folder: &Path, home: &Path) -> Arrival {
+    let query = crate::tui::client::process::ProcessQuery::CommitImport {
+        project: project.clone(),
+    };
+    let result = crate::instruction_files::commit(folder, home)
+        .map(crate::tui::client::process::ProcessReply::Committed)
+        .map_err(|problem| problem.0);
+    Arrival::Owner(Box::new(OwnerEvent::Process(Box::new(
+        crate::tui::client::process::ProcessEvent { query, result },
+    ))))
+}
+
+fn commit_sent(shell: &mut Shell, project: &ProjectId) -> bool {
+    let sent: Vec<Request> = std::iter::from_fn(|| shell.ctx.next_request()).collect();
+    matches!(
+        sent.as_slice(),
+        [Request::Process(query)] if matches!(
+            query.as_ref(),
+            crate::tui::client::process::ProcessQuery::CommitImport { project: asked } if asked == project
+        )
+    )
+}
+
+#[test]
+fn imported_files_are_listed_after_folder_import_and_ctrl_g_commits_the_move() {
+    let (mut shell, project, _guard, folder, tip) = imported_review();
+    let rows = render(&mut shell, 80, 40);
+    assert!(
+        shows(&rows, "CrazyAgent copied these instruction files into"),
+        "{rows:#?}"
+    );
+    assert!(
+        shows(&rows, "- CLAUDE.md (git shows it as deleted)"),
+        "{rows:#?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.trim_end().ends_with("- AGENTS.md")),
+        "an untracked file is not shown deleted: {rows:#?}"
+    );
+    assert!(
+        shows(
+            &rows,
+            "Merges into this branch are refused until the move is"
+        ),
+        "{rows:#?}"
+    );
+    assert!(shows(&rows, "Ctrl-G Commit the move"), "{rows:#?}");
+    assert!(shows(&rows, "Ctrl-L Leave it"), "{rows:#?}");
+
+    shell.key(Key::Ctrl('g'));
+    assert!(commit_sent(&mut shell, &project));
+    shell.key(Key::Ctrl('g'));
+    assert!(shell.ctx.next_request().is_none(), "one commit at a time");
+    let home = tempfile::tempdir().unwrap();
+    shell.arrive(commit_reply(&project, &folder, home.path()));
+    let message = shell.ctx.message().unwrap();
+    assert_eq!(message.lead, "Committed the move on main:");
+    assert_eq!(message.rest, "CLAUDE.md. Nothing was pushed.");
+    let rows = render(&mut shell, 80, 40);
+    assert!(!shows(&rows, "(git shows it as deleted)"), "{rows:#?}");
+    assert!(!shows(&rows, "Ctrl-G Commit the move"), "{rows:#?}");
+    assert!(
+        rows.iter()
+            .any(|row| row.trim_end().ends_with("- CLAUDE.md")),
+        "{rows:#?}"
+    );
+    let git = |args: &[&str]| crate::tui::test_home::git(&folder, args);
+    assert_eq!(git(&["rev-parse", "HEAD~1"]).trim(), tip);
+    assert_eq!(
+        git(&["show", "--name-status", "--format=", "HEAD"]).trim(),
+        "D\tCLAUDE.md"
+    );
+    assert!(
+        crate::instruction_files::uncommitted(&folder)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn ctrl_l_leaves_the_move_and_hides_the_offer() {
+    let (mut shell, _project, _guard, folder, tip) = imported_review();
+    shell.key(Key::Ctrl('l'));
+    assert!(shell.ctx.next_request().is_none(), "Leave it sends nothing");
+    let rows = render(&mut shell, 80, 40);
+    assert!(!shows(&rows, "Ctrl-G Commit the move"), "{rows:#?}");
+    assert!(
+        !shows(&rows, "Merges into this branch are refused"),
+        "{rows:#?}"
+    );
+    assert!(
+        shows(&rows, "- CLAUDE.md (git shows it as deleted)"),
+        "the file is still named as git shows it: {rows:#?}"
+    );
+    shell.key(Key::Ctrl('g'));
+    assert!(
+        shell.ctx.next_request().is_none(),
+        "Ctrl-G no longer commits once left"
+    );
+    assert_eq!(
+        crate::tui::test_home::git(&folder, &["rev-parse", "HEAD"]).trim(),
+        tip
+    );
+}
+
+#[test]
+fn a_refused_onboarding_commit_says_why_and_keeps_the_offer() {
+    let (mut shell, project, _guard, folder, tip) = imported_review();
+    std::fs::write(folder.join("other.txt"), "staged\n").unwrap();
+    crate::tui::test_home::git(&folder, &["add", "other.txt"]);
+    shell.key(Key::Ctrl('g'));
+    assert!(commit_sent(&mut shell, &project));
+    let home = tempfile::tempdir().unwrap();
+    shell.arrive(commit_reply(&project, &folder, home.path()));
+    assert_eq!(
+        shell.ctx.message().unwrap().lead,
+        super::process::message("process_commit_staged")
+    );
+    let rows = render(&mut shell, 80, 40);
+    assert!(
+        shows(&rows, "- CLAUDE.md (git shows it as deleted)"),
+        "{rows:#?}"
+    );
+    assert!(shows(&rows, "Ctrl-G Commit the move"), "{rows:#?}");
+    assert_eq!(
+        crate::tui::test_home::git(&folder, &["rev-parse", "HEAD"]).trim(),
+        tip
+    );
 }

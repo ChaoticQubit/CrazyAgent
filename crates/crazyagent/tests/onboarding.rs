@@ -332,7 +332,8 @@ impl Bench {
 
     /// Adds a global Graphify skill from a folder outside the projects folder,
     /// the way an owner who has the skill already would. The pack then reads it
-    /// installed.
+    /// installed. An unknown outcome is reconciled the way a client does, any other
+    /// error fails at once.
     async fn graphify_skill(&self) {
         let folder = self.skills.path().canonicalize().unwrap().join("graphify");
         fs::create_dir_all(&folder).unwrap();
@@ -341,10 +342,37 @@ impl Bench {
             "---\nname: graphify\ndescription: Reads the project's code graph.\n---\n",
         )
         .unwrap();
-        self.owner
+        match self
+            .owner
             .add_skill(Scope::Global, folder.to_str().unwrap().into())
             .await
-            .unwrap();
+        {
+            Ok(_) => {}
+            Err(error) if error.0 == "plugins_outcome_unknown" => self.graphify_listed().await,
+            Err(error) => panic!("adding the graphify skill failed: {error:?}"),
+        }
+    }
+
+    /// Waits, at most 30 s, until the global skill list holds graphify. On a loaded machine
+    /// the engine stops waiting for storage and answers plugins_outcome_unknown while the
+    /// add still runs there, so the client reads the list and never sends the add again.
+    /// A list read with the same unknown outcome is read again; any other error fails.
+    async fn graphify_listed(&self) {
+        let until = Instant::now() + Duration::from_secs(30);
+        loop {
+            let read = self.owner.plugin_skills(None).await;
+            match &read {
+                Ok(skills) if skills.iter().any(|skill| skill.name == "graphify") => return,
+                Ok(_) => {}
+                Err(error) if error.0 == "plugins_outcome_unknown" => {}
+                Err(error) => panic!("reading the global skills failed: {error:?}"),
+            }
+            assert!(
+                Instant::now() < until,
+                "graphify was never listed after an unknown add outcome: {read:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
     }
 
     /// Starts an in-process engine with nothing of the Graphify pack entry
@@ -748,6 +776,7 @@ async fn a_found_rust_repo_is_onboarded_end_to_end_with_a_local_model() {
             .as_deref()
             .is_some_and(|overview| !overview.trim().is_empty())
     );
+    assert_eq!(view.folder_overview, None);
     assert!(view.draft.tech_stack.iter().any(|entry| entry == "Rust"));
     assert!(
         view.facts
@@ -1112,7 +1141,7 @@ async fn stopping_the_service_mid_mapping_stops_the_agent_and_requeues_the_step(
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_draft_or_brief_the_folder_came_with_is_never_taken_as_the_engines() {
+async fn a_draft_brief_or_overview_the_folder_came_with_is_never_taken_as_the_engines() {
     let mut bench = Bench::start(|repo| {
         fs::create_dir_all(repo.join(".crazyagent/setup")).unwrap();
         fs::create_dir_all(repo.join(".crazyagent/context")).unwrap();
@@ -1131,7 +1160,14 @@ async fn a_draft_or_brief_the_folder_came_with_is_never_taken_as_the_engines() {
         fresh.draft.pool.as_ref().map(CredentialRef::as_str),
         Some(POOL)
     );
-    assert_eq!(fresh.overview.as_deref(), Some(OWNER_OVERVIEW.trim()));
+    assert_eq!(
+        fresh.overview, None,
+        "the folder's overview is not the mapping agent's"
+    );
+    assert_eq!(
+        fresh.folder_overview.as_deref(),
+        Some(OWNER_OVERVIEW.trim())
+    );
     let setup = bench
         .owner
         .project_setup(project.clone())
@@ -2054,5 +2090,182 @@ async fn mapping_paused_on_every_pool_account_shows_when_the_pause_ends() {
         serde_json::json!({"kind": "waiting", "until_ms": UNTIL_MS}),
         "{view:?}"
     );
+    bench.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_home_move_points_a_nested_project_and_its_repository_at_the_moved_folder() {
+    let mut bench = Bench::start(|_| {}).await;
+    let home = bench.repo.parent().unwrap().to_path_buf();
+    fs::create_dir(home.join("org")).unwrap();
+    let nested = home.join("org").join("service-a");
+    rust_repo(&nested);
+    bench.use_repos_as_home().await;
+    let response = bench.start_onboarding_at(&nested).await;
+    assert_eq!(rejection(&response), None, "{response:?}");
+    let project = project_id_for(&nested).unwrap();
+    assert_eq!(
+        bench.repositories(&project),
+        [nested.to_str().unwrap().to_owned()]
+    );
+    let next_place = tempfile::Builder::new()
+        .prefix("ca-onboard-next-")
+        .tempdir()
+        .unwrap();
+    let next = next_place.path().canonicalize().unwrap().join("home");
+    fs::create_dir(&next).unwrap();
+    bench.generation += 1;
+    let response = bench
+        .owner
+        .move_projects_home(next.to_str().unwrap().to_owned(), true, bench.generation)
+        .await
+        .unwrap();
+    assert_eq!(rejection(&response), None, "{response:?}");
+    let moved = next.join("org").join("service-a");
+    assert!(moved.join(".crazyagent").is_dir() && !nested.exists());
+    assert_eq!(
+        bench.repositories(&project),
+        [moved.to_str().unwrap().to_owned()],
+        "the master's workspace follows the nested project"
+    );
+    let db = rusqlite::Connection::open_with_flags(
+        bench.root.join("engine.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+    )
+    .unwrap();
+    let repo: String = db
+        .query_row(
+            "SELECT repo FROM onboarding WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(Path::new(&repo), moved);
+    let body: String = db
+        .query_row(
+            "SELECT body FROM project_setups WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let stored: serde_json::Value = serde_json::from_str(&body).unwrap();
+    assert!(
+        Path::new(stored["folder"].as_str().unwrap()).starts_with(&moved),
+        "{stored}"
+    );
+    drop(db);
+    bench.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn starting_onboarding_moves_the_instruction_files_and_the_view_lists_them_and_a_rejected_start_moves_nothing()
+ {
+    const CLAUDE: &str = "# Rules\n\nONBOARD-CLAUDE-RULE-83\n";
+    const AGENTS: &str = "ONBOARD-AGENTS-RULE-84\n";
+    let mut bench = Bench::start_without_graphify(|repo| {
+        fs::write(repo.join("CLAUDE.md"), CLAUDE).unwrap();
+        git(repo, &["add", "CLAUDE.md"]);
+        git(repo, &["commit", "-q", "-m", "rules"]);
+        fs::write(repo.join("AGENTS.md"), AGENTS).unwrap();
+    })
+    .await;
+    bench.use_repos_as_home().await;
+    let imported = bench.repo.join(".crazyagent").join("imported");
+    let link = bench.root.join("repo-link");
+    std::os::unix::fs::symlink(&bench.repo, &link).unwrap();
+    let refused = bench.start_onboarding_at(&link).await;
+    assert_eq!(
+        rejection(&refused).as_deref(),
+        Some("onboarding_folder_missing")
+    );
+    assert_eq!(
+        fs::read_to_string(bench.repo.join("CLAUDE.md")).unwrap(),
+        CLAUDE
+    );
+    assert_eq!(
+        fs::read_to_string(bench.repo.join("AGENTS.md")).unwrap(),
+        AGENTS
+    );
+    assert!(fs::symlink_metadata(&imported).is_err());
+    let project = bench.start_onboarding().await;
+    let view = bench.view(&project).await;
+    let file =
+        |path: &str, bytes: usize, tracked: bool| crazyagent::instruction_files::ImportFile {
+            path: path.to_owned(),
+            bytes: bytes as u64,
+            tracked,
+            refused: None,
+            uncommitted: tracked,
+        };
+    assert_eq!(
+        view.imported,
+        [
+            file("CLAUDE.md", CLAUDE.len(), true),
+            file("AGENTS.md", AGENTS.len(), false)
+        ]
+    );
+    assert!(fs::symlink_metadata(bench.repo.join("CLAUDE.md")).is_err());
+    assert!(fs::symlink_metadata(bench.repo.join("AGENTS.md")).is_err());
+    assert_eq!(
+        fs::read_to_string(imported.join("CLAUDE.md")).unwrap(),
+        CLAUDE
+    );
+    assert_eq!(
+        fs::read_to_string(imported.join("AGENTS.md")).unwrap(),
+        AGENTS
+    );
+    assert_eq!(
+        fs::read_to_string(bench.repo.join(".crazyagent").join("instructions.md")).unwrap(),
+        "## Imported from CLAUDE.md\n\n# Rules\n\nONBOARD-CLAUDE-RULE-83\n\n## Imported from AGENTS.md\n\nONBOARD-AGENTS-RULE-84\n"
+    );
+    assert_eq!(
+        git(&bench.repo, &["status", "--porcelain"]),
+        " D CLAUDE.md\n"
+    );
+    bench.stop().await;
+}
+
+/// A project onboarded from an existing folder runs its agents in their own clones, as a
+/// New Project does: onboarding saves the New Project access level wherever this computer
+/// can run it, and starting the same folder's onboarding again keeps the level the owner
+/// chose since (fix/own-clones-and-lead-landing 6e60b198).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn start_onboarding_saves_own_branch_access_and_a_restart_keeps_the_owners_level() {
+    use crazyagent::sandbox::policy::{AgentAccess, AgentPolicy};
+    let mut bench = Bench::start(|_| {}).await;
+    let project = bench.start_onboarding().await;
+    let saved = bench
+        .owner
+        .project_agent_policy(project.clone())
+        .await
+        .unwrap();
+    let expected = match AgentAccess::NEW_PROJECT.unavailable() {
+        None => AgentAccess::NEW_PROJECT,
+        Some(_) => AgentAccess::Sandboxed,
+    };
+    assert_eq!(saved.access, expected);
+    #[cfg(target_os = "macos")]
+    assert_eq!(saved.access, AgentAccess::OwnBranch);
+    bench.generation += 1;
+    let response = bench
+        .owner
+        .set_project_agent_policy(
+            project.clone(),
+            AgentPolicy {
+                access: AgentAccess::Sandboxed,
+                network: crazyagent::sandbox::policy::AgentNetwork::default(),
+                toolchains: Vec::new(),
+                ide_git_hooks: false,
+            },
+            bench.generation,
+        )
+        .await
+        .unwrap();
+    assert_eq!(rejection(&response), None, "{response:?}");
+    let repo = bench.repo.clone();
+    let restarted = bench.start_onboarding_at(&repo).await;
+    assert_eq!(rejection(&restarted), None, "{restarted:?}");
+    let kept = bench.owner.project_agent_policy(project).await.unwrap();
+    assert_eq!(kept.access, AgentAccess::Sandboxed);
     bench.stop().await;
 }
