@@ -84,6 +84,13 @@ fn a_malformed_or_oversized_request_is_refused_before_it_runs() {
         refused(json!({"scorecard": {"kind": "report", "offset_minutes": 15 * 60}})),
         "scorecard_request_invalid"
     );
+    for offset_minutes in [i32::MIN, i32::MAX, -15 * 60] {
+        assert_eq!(
+            refused(json!({"scorecard": {"kind": "report", "offset_minutes": offset_minutes}})),
+            "scorecard_request_invalid",
+            "{offset_minutes}"
+        );
+    }
     let settings = |window: serde_json::Value| {
         json!({"scorecard": {"kind": "set", "version": 0, "settings": {
             "window": window,

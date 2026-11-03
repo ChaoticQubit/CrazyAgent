@@ -388,6 +388,82 @@ fn a_done_ticket_whose_change_set_was_never_accepted_is_no_real_task() {
 }
 
 #[test]
+fn one_accepted_change_set_backs_one_real_task_however_many_tickets_link_it() {
+    let mut score = Score::new();
+    let agent = score.agent();
+    let shared = score.turn(&agent, PASS);
+    let other = score.agent();
+    let own = score.turn(&other, PASS);
+    let first = score.ticket("Make the gate pass");
+    let copies: Vec<ShortId> = (0..3)
+        .map(|copy| score.ticket(&format!("Make the gate pass, copy {copy}")))
+        .collect();
+    score.link(&first, &shared);
+    for copy in &copies {
+        score.link(copy, &shared);
+    }
+    score.link(&copies[0], &own);
+    score.gate(&shared);
+    score.gate(&own);
+    assert_eq!(score.status(&first), "done");
+    for copy in &copies {
+        assert_eq!(score.status(copy), "done");
+    }
+    score.accept(&shared);
+    score.accept(&own);
+
+    let card = score.report();
+    assert_eq!(card.real, 2, "the shared set backs its first ticket only");
+    assert_eq!(card.clean, 2);
+    let mut listed: Vec<String> = card.tasks.iter().map(|task| task.ticket.clone()).collect();
+    listed.sort();
+    let mut expected = vec![String::from(first), String::from(copies[0].clone())];
+    expected.sort();
+    assert_eq!(listed, expected);
+    assert_eq!(card.coordination.measured.tasks, 2);
+}
+
+#[test]
+fn owner_acts_stand_when_the_ledger_refuses_their_marks() {
+    let mut score = Score::new();
+    score.case.db.execute_batch(SCHEMA).unwrap();
+    score
+        .case
+        .db
+        .execute_batch(
+            "CREATE TRIGGER scorecard_marks_refused BEFORE INSERT ON scorecard_marks
+             BEGIN SELECT RAISE(ABORT, 'scorecard_marks refused'); END;",
+        )
+        .unwrap();
+    score.message("Please make the gate pass");
+    let master = questions::ask(
+        &score.case.db,
+        &score.case.project,
+        &Asker::Master(41),
+        &ask("May I rewrite the gate?"),
+    )
+    .unwrap();
+    let settled = questions::answer(&score.case.db, master, 0, &Answer::Option(0)).unwrap();
+    assert_eq!(settled, questions::Settlement::Settled);
+    let stopped = score.agent();
+    let tx = score.case.db.unchecked_transaction().unwrap();
+    let action = TeamAction::StopAgent {
+        project_id: score.case.project.clone(),
+        agent: stopped.id,
+    };
+    let outcome = crate::team::execute(&tx, &ModelAccess::default(), &action).unwrap();
+    assert_eq!(outcome, crate::protocol::Outcome::Applied);
+    tx.commit().unwrap();
+
+    assert!(crate::team::owner_stopped(&score.case.db, stopped.id).unwrap());
+    let pending = questions::pending(&score.case.db, &score.case.project).unwrap();
+    assert!(pending.is_empty(), "the answer stands: {pending:?}");
+    let card = score.report();
+    assert!(card.acts.is_empty(), "{:?}", card.acts);
+    assert_eq!(card.coordination.measured.acts(), 0);
+}
+
+#[test]
 fn owner_messages_answers_and_stops_count_per_task_against_the_baseline() {
     let mut score = Score::new();
     score.settings(Settings {
@@ -455,6 +531,59 @@ fn owner_stops_interrupts_and_restarts_from_the_agents_page_count_as_interventio
         card.coordination.baseline.messages + card.coordination.measured.messages,
         0
     );
+}
+
+#[test]
+fn an_agents_page_stop_of_a_hosted_agent_counts_once_after_the_runtime_stops_it() {
+    let mut score = Score::new();
+    let hosted = score.agent();
+    let page_id = crate::terminal::AgentId::team(hosted.id).unwrap();
+    intervened(
+        &score.case.root,
+        &score.case.project,
+        Kind::OwnerStop,
+        page_id.as_str(),
+    );
+    crate::team::owner_stop(&score.case.db, &score.case.project, hosted.id, now_ms()).unwrap();
+    assert!(crate::team::owner_stopped(&score.case.db, hosted.id).unwrap());
+
+    let card = score.report();
+    let stops: Vec<&Act> = card
+        .acts
+        .iter()
+        .filter(|act| act.kind == Kind::OwnerStop)
+        .collect();
+    assert_eq!(stops.len(), 1, "{:?}", card.acts);
+    assert_eq!(stops[0].subject, page_id.as_str());
+    let counted =
+        card.coordination.baseline.interventions + card.coordination.measured.interventions;
+    assert_eq!(counted, 1);
+}
+
+#[test]
+fn a_master_cannot_settle_the_daily_question_from_chat() {
+    let score = Score::new();
+    score.settings(Settings {
+        window: Window::Rolling,
+        baseline: Baseline::FirstDays,
+        daily_question: DailyQuestion::On,
+    });
+    let projects = [score.case.project.clone()];
+    let id = ask_daily(&score.case.db, &projects, now_ms())
+        .unwrap()
+        .unwrap();
+    let chat = questions::record_from_chat(&score.case.db, &score.case.project, 41, id, 0, 1);
+    assert_eq!(chat.unwrap_err().0, "questions_not_found");
+    let session = crate::protocol::SessionId::new("session-1").unwrap();
+    let from_session =
+        questions::record_from_session(&score.case.db, &score.case.project, &session, id, 0, "Yes");
+    assert_eq!(from_session.unwrap_err().0, "questions_not_found");
+
+    let pending = questions::pending(&score.case.db, &score.case.project).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].id, id);
+    let card = score.report();
+    assert_eq!(card.answered_days, 0);
 }
 
 #[test]

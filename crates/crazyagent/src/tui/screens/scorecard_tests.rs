@@ -191,6 +191,22 @@ fn the_panel_shows_the_four_numbers_with_targets_and_the_records_behind_them() {
 }
 
 #[test]
+fn agent_written_titles_subjects_and_sets_show_hidden_characters_as_escapes() {
+    let ctx = ctx(120, 60);
+    let mut hidden = card();
+    hidden.tasks[0].title = "Sort\u{200B} the inbox\u{E0041}".into();
+    hidden.tasks[0].change_sets = vec!["cs-4\u{2060}".into()];
+    hidden.acts[0].subject = "src/in\u{E0062}box.rs".into();
+    hidden.acts[0].project = "project-\u{200D}dock".into();
+    let names = HashMap::new();
+    let shown = text(&card_lines(&hidden, 110, &names, NOW, 0, &ctx.theme));
+    assert!(!crate::memory::hidden_text(&shown), "{shown:?}");
+    for words in ["CA-12 Sort", "the inbox", "src/in", "box.rs", "project-"] {
+        assert!(shown.contains(words), "{words} in:\n{shown}");
+    }
+}
+
+#[test]
 fn a_settings_key_saves_by_version_and_every_answer_reads_again() {
     let mut ctx = ctx(120, 60);
     let mut panel = ScorecardPanel::new();
