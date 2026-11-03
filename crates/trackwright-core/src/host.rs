@@ -5,6 +5,7 @@ use crate::model::{
 use crate::policy;
 use crate::runs::SourceRef;
 use crate::store::{self, StoreError};
+use crate::tests_model::TestId;
 use crate::text::{self, TextField};
 use rusqlite::Transaction;
 
@@ -162,6 +163,28 @@ pub trait Authority {
     fn policy_locked(&self, _setting: PolicyKey) -> Option<&'static str> {
         None
     }
+
+    /// Tells how much of one run an actor may read, for example only the outcome of a
+    /// holdout run the host keeps from agents. Every run read (`run_show`, `run_list`,
+    /// `coverage`) applies it. Inputs: the transaction, the project, the actor and the run.
+    /// Output: the sight, `Full` by default, or the refusal.
+    fn run_sight(
+        &self,
+        _tx: &Transaction<'_>,
+        _project: &ProjectKey,
+        _actor: &Actor,
+        _run: &TestId,
+    ) -> Result<Sight, Refusal> {
+        Ok(Sight::Full)
+    }
+}
+
+/// How much of one run an actor reads: `Full` shows everything; `Outcome` shows only its
+/// state, verdict, times and counts, with no title, source, policy, integrity or result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sight {
+    Full,
+    Outcome,
 }
 
 /// Everything a host supplies: links, evidence and authority. Any type with the three is

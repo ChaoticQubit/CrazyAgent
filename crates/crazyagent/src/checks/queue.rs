@@ -439,8 +439,13 @@ fn end(db: &Connection, id: i64, reason: &str) -> Result<Job, CheckRefusal> {
             params![id, reason, now_ms()],
         )
         .map_err(unavailable)?;
-    assert_eq!(ended, 1);
-    job(db, id)
+    assert!(ended <= 1);
+    let stored = job(db, id)?;
+    assert!(matches!(
+        stored.state,
+        JobState::Cancelled | JobState::Recorded
+    ));
+    Ok(stored)
 }
 
 /// Runs the oldest queued job, while fewer than the project's `parallel` jobs run, to its
