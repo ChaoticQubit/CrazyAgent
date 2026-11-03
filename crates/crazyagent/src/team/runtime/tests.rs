@@ -8166,7 +8166,15 @@ fn a_native_teammate_keeps_the_name_it_was_first_seen_with() {
         )
         .unwrap();
     };
-    let whom = |pane: &str| super::pane_whom(&connection, None, &project, lead, pane);
+    let whom = |pane: &str| {
+        super::pane_whom(
+            &connection,
+            None,
+            &project,
+            lead,
+            (pane, std::process::id()),
+        )
+    };
     let named = |name: &str| Some(crate::team::caller::Whom::Teammate(name.to_owned()));
 
     config(r#"{"name":"greet","tmuxPaneId":"%7"}"#);
@@ -8923,15 +8931,16 @@ fn a_native_lead_s_call_is_answered_as_the_teammate_whose_pane_made_it() {
     let project = ProjectId::new(PROJECT).unwrap();
     let native = native_lead(&f, &host);
     let lead = native.lead;
-    let caller = |pane: Option<&str>| {
+    let under = |pane: Option<&str>, pid: u32| {
         team_caller(
             &f.connection,
             Some(host.as_ref()),
             &project,
             (lead, "Lead"),
-            pane,
+            pane.map(|pane| (pane, pid)),
         )
     };
+    let caller = |pane: Option<&str>| under(pane, native.record.pid);
     let as_lead = Some((lead, "Lead".to_owned()));
     let mode = |name: &str| {
         f.connection
@@ -8971,7 +8980,7 @@ fn a_native_lead_s_call_is_answered_as_the_teammate_whose_pane_made_it() {
             params![lead, unlisted.encode().unwrap()],
         )
         .unwrap();
-    assert_eq!(caller(Some(native.own.as_str())), None);
+    assert_eq!(under(Some(native.own.as_str()), unlisted.pid), None);
     f.connection
         .execute(
             "UPDATE team_panes SET record=?2 WHERE agent=?1",
@@ -8984,7 +8993,7 @@ fn a_native_lead_s_call_is_answered_as_the_teammate_whose_pane_made_it() {
             None,
             &project,
             (lead, "Lead"),
-            Some(native.own.as_str())
+            Some((native.own.as_str(), native.record.pid))
         ),
         None
     );
@@ -9125,7 +9134,9 @@ fn a_native_teammate_s_calls_are_its_own_and_it_starts_or_stops_no_agent() {
                     Some(host_ref),
                     &project,
                     (lead, "Lead"),
-                    named.get(call).map(String::as_str),
+                    named
+                        .get(call)
+                        .map(|pane| (pane.as_str(), native.record.pid)),
                 )
             },
             &mut |connection, caller, call| {
@@ -9289,7 +9300,7 @@ fn a_call_file_carrying_the_lead_s_pane_with_no_kernel_stamp_is_refused() {
                 Some(host_ref),
                 &project,
                 (lead, "Lead"),
-                pane.as_deref(),
+                pane.as_ref().map(|(pane, pid)| (pane.as_str(), *pid)),
             )
         },
         &mut |connection, caller, call| {
@@ -9332,7 +9343,7 @@ fn a_native_lead_whose_tmux_socket_file_is_gone_still_names_no_unstamped_caller(
             Some(host.as_ref()),
             &project,
             (lead, "Lead"),
-            pane,
+            pane.map(|pane| (pane, native.record.pid)),
         )
     };
     for pane in [None, Some("%999")] {
@@ -9347,8 +9358,8 @@ fn a_native_lead_whose_tmux_socket_file_is_gone_still_names_no_unstamped_caller(
 
 /// A teammate that rewrites a call file in the shared mailbox after the engine named it
 /// cannot keep the name: the bytes the engine reads no longer have the named digest, so
-/// the lead-only call is refused and no agent starts, while an unchanged named call is
-/// served as the lead's (DEC-111 Q18).
+/// the swapped call is refused as nobody's and no agent starts, while an unchanged named
+/// call is served as the teammate's whose pane made it (DEC-111 Q18).
 #[test]
 fn a_named_call_whose_file_changed_after_naming_is_refused() {
     use std::io::{Read, Write};
@@ -9396,7 +9407,7 @@ fn a_named_call_whose_file_changed_after_naming_is_refused() {
     }
     let own = std::process::id();
     assert_eq!(
-        callers.serve(&mut || vec![(native.own.clone(), own)], &mut |_| None),
+        callers.serve(&mut || vec![("%900".to_owned(), own)], &mut |_, _| None),
         2
     );
     for stream in &mut streams {
@@ -9428,7 +9439,7 @@ fn a_named_call_whose_file_changed_after_naming_is_refused() {
                 Some(host_ref),
                 &project,
                 (lead, "Lead"),
-                pane.as_deref(),
+                pane.as_ref().map(|(pane, pid)| (pane.as_str(), *pid)),
             )
         },
         &mut |connection, caller, call| {
@@ -9495,16 +9506,19 @@ fn a_caller_found_under_the_lead_s_pane_id_from_another_process_is_not_the_lead(
     asked.write_all(b"who\n").unwrap();
     let host_ref = host.as_ref();
     assert_eq!(
-        callers.serve(&mut || vec![(native.own.clone(), other)], &mut |pane| {
-            pane_whom(&f.connection, Some(host_ref), &project, lead, pane)
-        }),
+        callers.serve(
+            &mut || vec![(native.own.clone(), other)],
+            &mut |pane, pid| {
+                pane_whom(&f.connection, Some(host_ref), &project, lead, (pane, pid))
+            }
+        ),
         1
     );
     let mut reply = Vec::new();
     named.read_to_end(&mut reply).unwrap();
     assert_eq!(reply, b"ok\n");
     let pane = callers.take(&id, &digest);
-    assert_eq!(pane.as_deref(), Some(native.own.as_str()));
+    assert_eq!(pane, Some((native.own.clone(), other)));
 
     let mut told = Vec::new();
     asked.read_to_end(&mut told).unwrap();
@@ -9513,7 +9527,7 @@ fn a_caller_found_under_the_lead_s_pane_id_from_another_process_is_not_the_lead(
         Some(host_ref),
         &project,
         (lead, "Lead"),
-        pane.as_deref(),
+        pane.as_ref().map(|(pane, pid)| (pane.as_str(), *pid)),
     );
     assert_eq!(
         named_as, None,
@@ -9625,13 +9639,13 @@ fn an_unlinked_caller_socket_is_bound_again_on_the_next_tick() {
         let asked = scope.spawn(|| crate::team::caller::name_call(&mailbox, &id, &digest));
         let deadline = Instant::now() + crate::team::caller::CALLER_WAIT;
         while !asked.is_finished() && Instant::now() < deadline {
-            callers.serve(&mut || vec![("%5".to_owned(), own)], &mut |_| None);
+            callers.serve(&mut || vec![("%5".to_owned(), own)], &mut |_, _| None);
             std::thread::sleep(Duration::from_millis(10));
         }
         asked.join().unwrap()
     });
     assert!(named);
-    assert_eq!(callers.take(&id, &digest), Some("%5".to_owned()));
+    assert_eq!(callers.take(&id, &digest), Some(("%5".to_owned(), own)));
 }
 
 /// Something an agent leaves at the caller socket's path, such as a folder, stops the
@@ -9683,12 +9697,15 @@ fn a_caller_socket_blocked_by_an_obstacle_is_bound_once_the_obstacle_is_gone() {
             let asked = scope.spawn(|| crate::team::caller::name_call(&mailbox, &id, &digest));
             let deadline = Instant::now() + crate::team::caller::CALLER_WAIT;
             while !asked.is_finished() && Instant::now() < deadline {
-                callers.serve(&mut || vec![(pane.to_owned(), pid)], &mut |_| None);
+                callers.serve(&mut || vec![(pane.to_owned(), pid)], &mut |_, _| None);
                 std::thread::sleep(Duration::from_millis(10));
             }
             asked.join().unwrap()
         });
-        named.then(|| callers.take(&id, &digest)).flatten()
+        named
+            .then(|| callers.take(&id, &digest))
+            .flatten()
+            .map(|(pane, _)| pane)
     };
     team.serve_agent_calls(&f.setup, &f.access);
     assert!(bound());
