@@ -1449,15 +1449,21 @@ async fn open_terminal(socket: &Path, packet: [u8; 37], body: &[u8]) -> (UnixStr
 }
 
 /// The Sandboxed terminal runs in a pane the engine itself starts, outside the IDE
-/// server's sandbox, under the project's agent profile: typed input runs, an IDE
-/// capability file cannot be read, at most `TERMINALS_MAX` run at once, a detached
-/// terminal's pane ends, and revoking the capability ends the rest.
+/// server's sandbox, under the project's agent profile: it starts in the project folder,
+/// typed input runs, the project's file is readable, the engine database and an IDE
+/// capability file are not, the network is open, at most `TERMINALS_MAX` run at once, a
+/// detached terminal's pane ends, and revoking the capability ends the rest.
 #[cfg(target_os = "macos")]
 #[tokio::test]
 async fn sandboxed_terminal_runs_in_an_engine_pane_and_cannot_read_the_capability() {
     use crate::terminal::TerminalRequest;
     let mut case = Case::start().await;
     let alpha = ProjectId::new("alpha").unwrap();
+    let folder = case.root.path().join("projects").join("alpha");
+    std::fs::write(folder.join("README.md"), "alpha readme\n").unwrap();
+    let database = case.root.path().join("engine.db");
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
     let path = issue(&case.runtime, &alpha).unwrap();
     let socket = case.socket(&path);
     let ide = packet(MAGIC, 0, &session(&socket, &path).await);
@@ -1477,7 +1483,19 @@ async fn sandboxed_terminal_runs_in_an_engine_pane_and_cannot_read_the_capabilit
     let host = case.runtime.terminal().unwrap();
     assert!(host.alive().unwrap().contains(&name));
     output_until(&mut stream, None).await;
-    let typed = format!("cat '{}'; echo ide-$((40+2))\r", unread.display());
+    let test = |label: &str, command: String| {
+        format!(
+            "if {command} >/dev/null 2>&1; then echo {label}-$((1)); else echo {label}-$((0)); fi; "
+        )
+    };
+    let mut typed = format!("cat '{}'; echo cwd-$((1))=$(pwd -P); ", unread.display());
+    typed.push_str(&test("db", format!("/bin/cat '{}'", database.display())));
+    typed.push_str(&test("project", "/bin/cat README.md".to_owned()));
+    typed.push_str(&test(
+        "net",
+        format!("/usr/bin/nc -z -G 2 127.0.0.1 {port}"),
+    ));
+    typed.push_str("echo ide-$((40+2))\r");
     control(
         &mut stream,
         &TerminalRequest::Input {
@@ -1488,6 +1506,14 @@ async fn sandboxed_terminal_runs_in_an_engine_pane_and_cannot_read_the_capabilit
     let seen = output_until(&mut stream, Some("ide-42")).await;
     assert!(seen.contains("Operation not permitted"), "{seen}");
     assert!(!seen.contains(&secret), "{seen}");
+    for answer in [
+        format!("cwd-1={}", folder.display()),
+        "db-0".to_owned(),
+        "project-1".to_owned(),
+        "net-1".to_owned(),
+    ] {
+        assert!(seen.contains(&answer), "{answer} missing in: {seen}");
+    }
     control(&mut stream, &TerminalRequest::Resize { cols: 90, rows: 20 }).await;
     let mut more = Vec::new();
     for _ in 1..terminal::TERMINALS_MAX {
