@@ -220,7 +220,7 @@ test("a project without tickets offers a key from its name, and keys are 2 to 8 
 
 test("the Tickets tab sits after Questions and both tracker tabs route", async () => {
   const { TABS } = await import("../src/screens/project/index.tsx");
-  assert.deepEqual(TABS.map((tab) => tab.id), ["overview", "conversation", "agents", "changes", "questions", "tickets", "context", "process", "settings"]);
+  assert.deepEqual(TABS.map((tab) => tab.id), ["overview", "conversation", "agents", "changes", "questions", "tickets", "roadmap", "context", "process", "settings"]);
   assert.equal(TABS.find((tab) => tab.id === "tickets").label, "Tickets");
   const router = await import("../src/ui/router.ts");
   for (const tab of ["tickets", "roadmap"]) {
