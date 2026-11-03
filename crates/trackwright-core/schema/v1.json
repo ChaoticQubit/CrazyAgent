@@ -56,7 +56,17 @@
     "link_kind_unknown",
     "notify_too_wide",
     "criterion_needs_check",
-    "evidence_not_for_agents"
+    "evidence_not_for_agents",
+    "export_path_refused",
+    "export_too_large",
+    "import_path_refused",
+    "import_too_large",
+    "import_not_text",
+    "import_format_unknown",
+    "import_item_unknown",
+    "import_item_needs_version",
+    "import_keys_collide",
+    "versions_full"
   ],
   "ops": {
     "check_add": {

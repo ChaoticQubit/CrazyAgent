@@ -58,6 +58,16 @@ pub mod codes {
     pub const NOTIFY_TOO_WIDE: &str = "notify_too_wide";
     pub const CRITERION_NEEDS_CHECK: &str = "criterion_needs_check";
     pub const EVIDENCE_NOT_FOR_AGENTS: &str = "evidence_not_for_agents";
+    pub const EXPORT_PATH_REFUSED: &str = "export_path_refused";
+    pub const EXPORT_TOO_LARGE: &str = "export_too_large";
+    pub const IMPORT_PATH_REFUSED: &str = "import_path_refused";
+    pub const IMPORT_TOO_LARGE: &str = "import_too_large";
+    pub const IMPORT_NOT_TEXT: &str = "import_not_text";
+    pub const IMPORT_FORMAT_UNKNOWN: &str = "import_format_unknown";
+    pub const IMPORT_ITEM_UNKNOWN: &str = "import_item_unknown";
+    pub const IMPORT_ITEM_NEEDS_VERSION: &str = "import_item_needs_version";
+    pub const IMPORT_KEYS_COLLIDE: &str = "import_keys_collide";
+    pub const VERSIONS_FULL: &str = "versions_full";
 
     /// Every code above, so a host can map each core refusal to its own vocabulary.
     pub const ALL: &[&str] = &[
@@ -115,6 +125,16 @@ pub mod codes {
         NOTIFY_TOO_WIDE,
         CRITERION_NEEDS_CHECK,
         EVIDENCE_NOT_FOR_AGENTS,
+        EXPORT_PATH_REFUSED,
+        EXPORT_TOO_LARGE,
+        IMPORT_PATH_REFUSED,
+        IMPORT_TOO_LARGE,
+        IMPORT_NOT_TEXT,
+        IMPORT_FORMAT_UNKNOWN,
+        IMPORT_ITEM_UNKNOWN,
+        IMPORT_ITEM_NEEDS_VERSION,
+        IMPORT_KEYS_COLLIDE,
+        VERSIONS_FULL,
     ];
 }
 

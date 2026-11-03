@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Barrier};
 use trackwright_core::catalog::{self, FieldType};
 use trackwright_core::host::{
-    Authority, CheckView, Evidence, EvidenceState, LinkKind, LinkState, Links, TicketView,
+    Authority, CheckView, Evidence, EvidenceState, LinkKind, LinkState, Links, Paths, TicketView,
 };
 use trackwright_core::model::{
     ACTOR_BYTES_MAX, Actor, CRITERIA_PER_TICKET_MAX, HOST_CODE_BYTES_MAX,
@@ -17,6 +17,7 @@ use trackwright_core::reply::{
     LISTED_TITLE_BYTES_MAX, NEXT_MAX, PAGE_ROWS_MAX, REPLY_BYTES_DEFAULT, REPLY_BYTES_MAX, Reply,
 };
 use trackwright_core::requests::Request;
+use trackwright_core::standalone::Standalone;
 use trackwright_core::store::{self, NewTicket, Store, TicketChange};
 use trackwright_core::text::{BODY_BYTES_MAX, CRITERION_BYTES_MAX, TITLE_BYTES_MAX};
 
@@ -40,7 +41,7 @@ const KINDS: &[LinkKind] = &[
 
 /// A host whose links, evidence and grants live in its own tables of the same database, read
 /// in the core's transaction: `host_targets`, `host_results` and `host_grants` (`*` grants
-/// every op).
+/// every op). File paths follow the standalone host.
 struct TableHost;
 
 impl Links for TableHost {
@@ -134,6 +135,19 @@ impl Authority for TableHost {
         _check: &CheckView,
     ) -> Result<(), Refusal> {
         Ok(())
+    }
+}
+
+impl Paths for TableHost {
+    fn resolve(
+        &self,
+        tx: &Transaction<'_>,
+        project: &ProjectKey,
+        actor: &Actor,
+        op: OpKind,
+        requested: &Path,
+    ) -> Result<PathBuf, Refusal> {
+        Standalone.resolve(tx, project, actor, op, requested)
     }
 }
 
