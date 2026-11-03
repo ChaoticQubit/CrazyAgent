@@ -6,6 +6,7 @@ use crate::checks::{self, Actor, AdmittedProfile, NetworkMode, Trigger};
 use crate::landing::{self, AgentKind, ChangeAgent, ChangeSetId, TurnEnd, TurnOutcome, Workspace};
 use crate::projects_home::CRAZYAGENT_DIRECTORY;
 use crate::protocol::ProjectId;
+use crate::tracker::settings::{Scope, TicketOverride};
 use crate::tracker::{self, Host};
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use serde_json::{Value, json};
@@ -17,9 +18,12 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
 use trackwright_core::criteria;
-use trackwright_core::host::{Evidence, TicketView};
-use trackwright_core::model::{self as core, CheckKind as CoreCheck, ProjectKey, ShortId};
+use trackwright_core::host::{Authority, Evidence, TicketView};
+use trackwright_core::model::{
+    self as core, CheckKind as CoreCheck, ClosePolicy, PolicyKey, ProjectKey, ShortId,
+};
 use trackwright_core::ops;
+use trackwright_core::policy;
 use trackwright_core::requests::Request;
 use trackwright_core::runs::{
     self, NewResult, ResultOutcome, RunEnd, RunFinish, RunRecord, RunShow, RunStart, RunState,
@@ -689,6 +693,8 @@ fn only_the_engine_path_counts_whatever_the_run_writers_policy() {
     case.run(&id);
     let engine = case.only(&id);
     let engine_view = case.view(&engine);
+    unlock(&case);
+    assert_eq!(run_writers(&case), json!("any"));
     let forged = forge(&case, "agent:1", &engine_view).expect("run_writers defaults to any");
     assert_eq!(forged.verdict, Some(Verdict::Passed));
     assert_eq!(forged.recorded_by.as_str(), "agent:1");
@@ -698,19 +704,8 @@ fn only_the_engine_path_counts_whatever_the_run_writers_policy() {
         engine,
         "a run the engine did not record never counts"
     );
-    let tracker_project: i64 = case
-        .db
-        .query_row("SELECT id FROM tk_projects WHERE key = 'CA'", [], |row| {
-            row.get(0)
-        })
-        .unwrap();
-    case.db
-        .execute(
-            "INSERT INTO tk_policy(project, key, value_json, version)
-             VALUES (?1, 'run_writers', '\"engine_only\"', 1)",
-            [tracker_project],
-        )
-        .unwrap();
+    crate::tracker::initialize(&case.db).unwrap();
+    assert_eq!(run_writers(&case), json!("engine_only"));
     for actor in ["agent:1", "owner"] {
         let Err(StoreError::Refused(refusal)) = forge(&case, actor, &engine_view) else {
             panic!("{actor} writes an automated run under engine_only");
@@ -722,4 +717,95 @@ fn only_the_engine_path_counts_whatever_the_run_writers_policy() {
     assert_ne!(again.run, engine.run);
     assert_eq!(again.verdict, Some(Verdict::Passed));
     assert_eq!(case.view(&again).recorded_by.as_str(), runs::ENGINE_ACTOR);
+}
+
+/// The `run_writers` value `policy_get` shows for `CA`. Input: the case. Output: the value.
+fn run_writers(case: &Case) -> Value {
+    let tx = case.db.unchecked_transaction().unwrap();
+    policy::describe(&tx, &key())
+        .unwrap()
+        .into_iter()
+        .find(|setting| setting.key == PolicyKey::RunWriters)
+        .unwrap()
+        .value
+}
+
+/// Removes `CA`'s stored `run_writers`, the state of a project attached before the engine
+/// locked it, so the core's default `any` applies. Input: the case.
+fn unlock(case: &Case) {
+    let removed = case
+        .db
+        .execute(
+            "DELETE FROM tk_policy WHERE key = 'run_writers'
+                AND project = (SELECT id FROM tk_projects WHERE key = 'CA')",
+            [],
+        )
+        .unwrap();
+    assert_eq!(removed, 1);
+}
+
+#[test]
+fn attaching_a_project_locks_run_writers_to_the_engine() {
+    let case = Case::new();
+    assert_eq!(run_writers(&case), json!("engine_only"));
+    assert_eq!(
+        Host.policy_locked(PolicyKey::RunWriters),
+        Some("engine_only")
+    );
+    for setting in PolicyKey::ALL
+        .iter()
+        .filter(|setting| **setting != PolicyKey::RunWriters)
+    {
+        assert_eq!(Host.policy_locked(*setting), None, "{setting}");
+    }
+    let id = case.change_set(&[("pass.sh", "exit 0\n")]);
+    case.approve(json!([check(
+        "unit",
+        &["sh", "pass.sh"],
+        "exit_code",
+        None
+    )]));
+    case.run(&id);
+    let engine = case.view(&case.only(&id));
+    assert_eq!(engine.recorded_by.as_str(), runs::ENGINE_ACTOR);
+    for actor in ["agent:1", "owner"] {
+        let Err(StoreError::Refused(refusal)) = forge(&case, actor, &engine) else {
+            panic!("{actor} writes an automated run in an attached project");
+        };
+        assert_eq!(refusal.code, "run_writer_refused", "{actor}");
+    }
+    let tx = Transaction::new_unchecked(&case.db, TransactionBehavior::Immediate).unwrap();
+    let scope = Scope::Project(case.project.clone());
+    let version = tracker::settings::stored(&tx, &scope).unwrap().version;
+    let changed = TicketOverride {
+        close: Some(ClosePolicy::Agents),
+        ..TicketOverride::default()
+    };
+    tracker::settings::set(&tx, &scope, &changed, version, NOW + 10)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        policy::load(&tx, &key()).unwrap().close,
+        ClosePolicy::Agents
+    );
+    tx.commit().unwrap();
+    assert_eq!(
+        run_writers(&case),
+        json!("engine_only"),
+        "saving the owner's ticket settings keeps the lock"
+    );
+}
+
+#[test]
+fn initialize_locks_run_writers_of_projects_attached_before_the_lock() {
+    let case = Case::new();
+    unlock(&case);
+    assert_eq!(run_writers(&case), json!("any"));
+    crate::tracker::initialize(&case.db).unwrap();
+    assert_eq!(run_writers(&case), json!("engine_only"));
+    let events = case.count("SELECT COUNT(*) FROM tk_events");
+    let rows = case.count("SELECT COUNT(*) FROM tk_policy");
+    crate::tracker::initialize(&case.db).unwrap();
+    assert_eq!(case.count("SELECT COUNT(*) FROM tk_events"), events);
+    assert_eq!(case.count("SELECT COUNT(*) FROM tk_policy"), rows);
 }
