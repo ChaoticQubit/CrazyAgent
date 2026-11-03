@@ -5191,21 +5191,32 @@ impl TeamRuntime {
                 )
                 .ok()
             });
-        if let Some(sandbox) = &sandbox {
-            let profile = agent_profile(&self.state, lead);
-            let git = crate::landing::LeadGit {
-                sandbox,
-                profile: &profile,
-            };
-            for name in &wanted {
-                let _ = crate::landing::add_teammate_worktree(
-                    &self.connection,
-                    &worktree,
-                    &git_dir,
-                    name,
-                    &git,
-                );
+        match &sandbox {
+            Some(sandbox) => {
+                let profile = agent_profile(&self.state, lead);
+                let git = crate::landing::LeadGit {
+                    sandbox,
+                    profile: &profile,
+                };
+                for name in &wanted {
+                    if let Err(problem) = crate::landing::add_teammate_worktree(
+                        &self.connection,
+                        &worktree,
+                        &git_dir,
+                        name,
+                        &git,
+                    ) {
+                        eprintln!(
+                            "teammate_worktree_failed cause={}",
+                            crate::protocol::plain_code(&problem.0)
+                        );
+                    }
+                }
             }
+            None if !wanted.is_empty() => {
+                eprintln!("teammate_worktree_failed cause=lead_sandbox_unavailable");
+            }
+            None => {}
         }
         teammates::keep_worktrees(&self.connection, project, lead)
     }
