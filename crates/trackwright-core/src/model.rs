@@ -68,6 +68,19 @@ pub mod codes {
     pub const IMPORT_ITEM_NEEDS_VERSION: &str = "import_item_needs_version";
     pub const IMPORT_KEYS_COLLIDE: &str = "import_keys_collide";
     pub const VERSIONS_FULL: &str = "versions_full";
+    pub const ALREADY_CLAIMED: &str = "already_claimed";
+    pub const NOT_CLAIMANT: &str = "not_claimant";
+    pub const DEPENDENCY_INVALID: &str = "dependency_invalid";
+    pub const DEPENDENCY_EXISTS: &str = "dependency_exists";
+    pub const DEPENDENCY_UNKNOWN: &str = "dependency_unknown";
+    pub const DEPENDENCY_CYCLE: &str = "dependency_cycle";
+    pub const DEPENDENCIES_FULL: &str = "dependencies_full";
+    pub const PARENT_INVALID: &str = "parent_invalid";
+    pub const VERSION_UNKNOWN: &str = "version_unknown";
+    pub const CYCLE_UNKNOWN: &str = "cycle_unknown";
+    pub const CYCLE_CLOSED: &str = "cycle_closed";
+    pub const CYCLES_FULL: &str = "cycles_full";
+    pub const CYCLE_OVERLAPS: &str = "cycle_overlaps";
 
     /// Every code above, so a host can map each core refusal to its own vocabulary.
     pub const ALL: &[&str] = &[
@@ -135,6 +148,19 @@ pub mod codes {
         IMPORT_ITEM_NEEDS_VERSION,
         IMPORT_KEYS_COLLIDE,
         VERSIONS_FULL,
+        ALREADY_CLAIMED,
+        NOT_CLAIMANT,
+        DEPENDENCY_INVALID,
+        DEPENDENCY_EXISTS,
+        DEPENDENCY_UNKNOWN,
+        DEPENDENCY_CYCLE,
+        DEPENDENCIES_FULL,
+        PARENT_INVALID,
+        VERSION_UNKNOWN,
+        CYCLE_UNKNOWN,
+        CYCLE_CLOSED,
+        CYCLES_FULL,
+        CYCLE_OVERLAPS,
     ];
 }
 

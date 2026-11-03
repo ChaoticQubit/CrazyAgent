@@ -4,11 +4,13 @@ use crate::model::{
     Actor, LINKS_PER_TICKET_MAX, OPEN_TICKETS_CREATED_PER_ACTOR_MAX, OpKind, Priority, ProjectKey,
     Refusal, ShortId, Ticket, TicketKind, TicketStatus, WRITES_PER_ACTOR_MINUTE_MAX, codes,
 };
+use crate::policy;
 use crate::reply::{
     self, LISTED_TITLE_BYTES_MAX, NEXT_MAX, Next, PAGE_ROWS_MAX, Page, Reply, WHY_BYTES_MAX,
 };
 use crate::requests::{self, Args, Remembered, Request};
 use crate::store::{self, NewTicket, StoreError, TicketChange};
+use crate::{plan, ready};
 use rusqlite::{Transaction, params};
 use serde_json::{Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -224,7 +226,16 @@ fn attempt<H: Host>(
     at_ms: i64,
 ) -> Result<Reply, Failure> {
     match requests::remembered(tx, actor, request)? {
-        Remembered::Repeat(reply) => return Ok(reply),
+        Remembered::Repeat(reply) => {
+            if reply.json().len() > request.reply_bytes_max() {
+                return Err(Failure::new(
+                    codes::REQUEST_ID_REUSED,
+                    "this request id's first reply is over this call's reply bound; repeat it \
+                     with the reply bound of the first call",
+                ));
+            }
+            return Ok(reply);
+        }
         Remembered::Reused => {
             return Err(Failure::new(
                 codes::REQUEST_ID_REUSED,
@@ -308,15 +319,15 @@ fn handle<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
         OpKind::Create => create(cx),
         OpKind::Edit => edit(cx),
         OpKind::Move => move_to(cx),
-        OpKind::Ready
-        | OpKind::Roadmap
-        | OpKind::Claim
-        | OpKind::Release
-        | OpKind::Depend
-        | OpKind::Undepend
-        | OpKind::VersionUpsert
-        | OpKind::CycleStart
-        | OpKind::CycleClose => unavailable(cx),
+        OpKind::Ready => ready::ready(cx),
+        OpKind::Roadmap => ready::roadmap(cx),
+        OpKind::Claim => plan::claim(cx),
+        OpKind::Release => plan::release(cx),
+        OpKind::Depend => plan::depend(cx),
+        OpKind::Undepend => plan::undepend(cx),
+        OpKind::VersionUpsert => plan::version_upsert(cx),
+        OpKind::CycleStart => plan::cycle_start(cx),
+        OpKind::CycleClose => plan::cycle_close(cx),
         OpKind::Link => link(cx),
         OpKind::Unlink => unlink(cx),
         OpKind::PolicyGet
@@ -501,10 +512,12 @@ pub(crate) fn ticket_next(
     Ok(next)
 }
 
-/// The ticket fields a reply carries, its body as a byte count. Input: the ticket. Output:
-/// the JSON object.
-pub(crate) fn ticket_json(ticket: &Ticket) -> Value {
-    json!({
+/// The ticket fields a reply carries, its body as a byte count, its placement by name and
+/// the open tickets it waits for. Inputs: the transaction and the ticket. Output: the JSON
+/// object.
+pub(crate) fn ticket_json(tx: &Transaction<'_>, ticket: &Ticket) -> Result<Value, Failure> {
+    let (parent, release, cycle) = ready::placement_names(tx, ticket)?;
+    Ok(json!({
         "id": ticket.short_id.to_string(),
         "version": ticket.version,
         "title": ticket.title,
@@ -519,7 +532,11 @@ pub(crate) fn ticket_json(ticket: &Ticket) -> Value {
         "closed_ms": ticket.closed_ms,
         "closed_by": ticket.closed_by.as_ref().map(Actor::as_str),
         "close_reason": ticket.close_reason,
-    })
+        "parent": parent,
+        "release": release,
+        "cycle": cycle,
+        "blocked_by": ready::blocked_by(tx, ticket)?,
+    }))
 }
 
 /// Refuses a write unless it carries the version this transaction read. Inputs: the
@@ -545,9 +562,11 @@ pub(crate) fn fresh<H: Host>(cx: &Cx<'_, '_, H>, ticket: &Ticket) -> Result<i64,
     )]))
 }
 
-fn written<H: Host>(cx: &Cx<'_, '_, H>, ticket: &Ticket) -> Result<Outcome, Failure> {
+/// The reply to a write on a ticket: the ticket and the next actions its state suggests.
+/// Inputs: the context and the ticket as stored. Output: the outcome.
+pub(crate) fn written<H: Host>(cx: &Cx<'_, '_, H>, ticket: &Ticket) -> Result<Outcome, Failure> {
     Ok(Outcome {
-        data: ticket_json(ticket),
+        data: ticket_json(cx.tx, ticket)?,
         next: ticket_next(cx.tx, ticket)?,
         cursor: None,
     })
@@ -560,6 +579,7 @@ fn priority(value: i64) -> Result<Priority, Failure> {
 }
 
 fn create<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
+    let placement = plan::placement(cx, None)?;
     let new = NewTicket {
         title: cx.args.need::<&str>("title").to_owned(),
         body: cx.args.get::<&str>("body").unwrap_or_default().to_owned(),
@@ -567,21 +587,39 @@ fn create<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
             .args
             .get::<TicketKind>("kind")
             .unwrap_or(TicketKind::Feature),
-        status: cx
-            .args
-            .get::<TicketStatus>("status")
-            .unwrap_or(TicketStatus::Backlog),
+        status: start_status(cx)?,
         priority: match cx.args.get::<i64>("priority") {
             Some(value) => priority(value)?,
             None => Priority::new(PRIORITY_DEFAULT)?,
         },
     };
-    let ticket = store::create_ticket(cx.tx, cx.actor, cx.project(), &new, cx.at_ms)?;
+    let ticket =
+        store::create_ticket_placed(cx.tx, cx.actor, cx.project(), &new, placement, cx.at_ms)?;
     assert_eq!(ticket.version, 1);
+    assert_eq!(ticket.version_id, placement.version_id.flatten());
     written(cx, &ticket)
 }
 
-fn update<H: Host>(
+fn start_status<H: Host>(cx: &Cx<'_, '_, H>) -> Result<TicketStatus, Failure> {
+    let requested = cx
+        .args
+        .get::<TicketStatus>("status")
+        .unwrap_or(TicketStatus::Backlog);
+    if requested.is_closed() {
+        return Err(Failure::new(
+            codes::STATUS_CLOSED_AT_CREATE,
+            format!("{requested} is a closed status; a ticket starts open"),
+        ));
+    }
+    let status = policy::start_status(&policy::load(cx.tx, cx.project())?, cx.actor, requested);
+    assert!(!status.is_closed());
+    assert!(status == requested || status == TicketStatus::Triage);
+    Ok(status)
+}
+
+/// Writes a change to a ticket at the version the caller read. Inputs: the context, the
+/// ticket as read and the change. Output: the ticket as stored, or `stale_version`.
+pub(crate) fn update<H: Host>(
     cx: &Cx<'_, '_, H>,
     ticket: &Ticket,
     change: &TicketChange,
@@ -604,6 +642,7 @@ fn edit<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
         body: cx.args.get::<&str>("body").map(str::to_owned),
         kind: cx.args.get::<TicketKind>("kind"),
         priority: cx.args.get::<i64>("priority").map(priority).transpose()?,
+        placement: plan::placement(cx, Some(cx.ticket()))?,
         ..TicketChange::default()
     };
     update(cx, cx.ticket(), &change)
@@ -612,6 +651,17 @@ fn edit<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
 fn move_to<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
     let ticket = cx.ticket();
     let status = cx.args.need::<TicketStatus>("status");
+    if ticket.status.is_closed() {
+        return Err(Failure::new(
+            codes::TICKET_CLOSED,
+            format!("{} is closed; reopen opens it", ticket.short_id),
+        )
+        .with_next(vec![Candidate::ticket(
+            OpKind::Reopen,
+            ticket,
+            "reopen it to work on it again",
+        )]));
+    }
     if status.is_closed() {
         return Err(Failure::new(
             codes::USE_CLOSE,
@@ -719,7 +769,8 @@ fn decimal(text: &str) -> Option<u64> {
     text.parse().ok()
 }
 
-fn cursor_invalid() -> Failure {
+/// The refusal of a cursor this operation never gave. Output: `cursor_invalid`.
+pub(crate) fn cursor_invalid() -> Failure {
     Failure::new(
         codes::CURSOR_INVALID,
         "that cursor is not one this operation gave; read the first page again",
@@ -883,10 +934,20 @@ fn changed_fields(before: Option<&str>, after: Option<&str>) -> Result<Vec<Strin
                 .cloned(),
         )
         .filter(|name| !IGNORED_FIELDS.contains(&name.as_str()))
+        .map(|name| shown_field(&name).to_owned())
         .collect();
     fields.sort();
     fields.dedup();
     Ok(fields)
+}
+
+fn shown_field(stored: &str) -> &str {
+    match stored {
+        "parent_id" => "parent",
+        "version_id" => "release",
+        "cycle_id" => "cycle",
+        other => other,
+    }
 }
 
 fn schema<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
@@ -992,7 +1053,7 @@ fn show<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
     let first = cx.args.get::<&str>("cursor").is_none();
     let mut page = Page::new(cx.data_bytes_max);
     let header = if first {
-        ticket_json(ticket)
+        ticket_json(cx.tx, ticket)?
     } else {
         json!({
             "id": ticket.short_id.to_string(),
