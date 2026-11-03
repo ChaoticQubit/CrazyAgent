@@ -5521,6 +5521,7 @@ dependencies = [
 name = "trackwright-core"
 version = "0.2.0"
 dependencies = [
+ "quick-xml",
  "rusqlite",
  "serde",
  "serde_json",
