@@ -243,6 +243,10 @@ fn main() {
         "desktop_engine_versions",
         "desktop_restart_engine",
         "desktop_ide_focus",
+        "desktop_tracker_op",
+        "desktop_tracker_projects",
+        "desktop_tracker_attach",
+        "desktop_tracker_open_change_set",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("desktop build configuration failed");
