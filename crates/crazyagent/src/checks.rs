@@ -1,7 +1,11 @@
 use crate::engine::EngineError;
+use crate::engine::owner::failure;
 use crate::protocol::ProjectId;
-use rusqlite::Connection;
+use crate::questions::{Ask, EngineSource};
+use crate::team::{bound_text, now_ms};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 pub mod profile;
@@ -16,6 +20,39 @@ pub use profile::{
     ProfileId, ReportFormat, Trigger,
 };
 pub use settings::{ChecksChoice, ChecksSettings, Scope};
+
+/// The most profiles one project keeps. Past it the oldest profile never approved nor
+/// revoked makes room; approved and revoked profiles stay as the record of admissions.
+pub const PROFILES_KEPT_MAX: i64 = 256;
+/// The most holdout files one project stores.
+pub const HOLDOUT_FILES_STORED_MAX: i64 = 1024;
+
+const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS check_profiles (
+    project TEXT NOT NULL,
+    id TEXT NOT NULL,
+    body TEXT NOT NULL,
+    proposed_by TEXT NOT NULL,
+    proposed_ms INTEGER NOT NULL,
+    approved_ms INTEGER,
+    revoked_ms INTEGER,
+    PRIMARY KEY (project, id)
+);
+CREATE TABLE IF NOT EXISTS check_profile_current (
+    project TEXT PRIMARY KEY,
+    profile TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS check_holdout_files (
+    project TEXT NOT NULL,
+    digest TEXT NOT NULL,
+    bytes BLOB NOT NULL,
+    stored_ms INTEGER NOT NULL,
+    PRIMARY KEY (project, digest)
+);
+CREATE TABLE IF NOT EXISTS check_settings (
+    scope TEXT PRIMARY KEY,
+    body TEXT NOT NULL,
+    version INTEGER NOT NULL
+);";
 
 /// A refused checks request: one plain code such as `checks_profile_invalid`, never protected
 /// check material.
@@ -64,17 +101,39 @@ pub struct Proposal {
     pub question: Option<u64>,
 }
 
+impl Actor {
+    /// The stored actor name. Output: `owner`, `master:<id>` or `agent:<id>`.
+    pub fn name(self) -> String {
+        match self {
+            Self::Owner => "owner".into(),
+            Self::Master(id) => format!("master:{id}"),
+            Self::Agent(id) => format!("agent:{id}"),
+        }
+    }
+
+    /// Who proposed, as the owner reads it. Output: the words.
+    fn spoken(self) -> String {
+        match self {
+            Self::Owner => "the owner".into(),
+            Self::Master(id) => format!("the master (agent {id})"),
+            Self::Agent(id) => format!("agent {id}"),
+        }
+    }
+}
+
 /// Creates the check profile, holdout file and settings tables. Input: the engine
 /// connection. Output: Ok, or the storage error.
 pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
-    let _ = connection;
-    todo!()
+    connection
+        .execute_batch(SCHEMA)
+        .map_err(|error| EngineError(error.to_string()))
 }
 
-/// Stores a proposed profile by content. A master's or agent's proposal of a profile not yet
-/// approved raises one owner question; the owner's own proposal raises none. Inputs: the
-/// engine connection, the project, the profile JSON and the actor. Output: the proposal, or
-/// `checks_profile_invalid`, `checks_holdout_missing`, `checks_profile_revoked`,
+/// Stores a proposed profile by content. A master's or agent's proposal of a profile that is
+/// not the current one raises one owner question, asked again only once the last one is
+/// settled; the owner's own proposal raises none. Inputs: the engine connection, the project,
+/// the profile JSON and the actor. Output: the proposal, or `checks_profile_invalid`,
+/// `checks_holdout_missing`, `checks_profile_revoked`, `checks_profiles_full`,
 /// `checks_project_missing`, a questions refusal, or `checks_unavailable`.
 pub fn propose(
     db: &Connection,
@@ -82,22 +141,101 @@ pub fn propose(
     body: &[u8],
     actor: Actor,
 ) -> Result<Proposal, CheckRefusal> {
-    let _ = (db, project, body, actor);
-    todo!()
+    let profile = CheckProfile::import(body)?;
+    let canonical = profile.canonical()?;
+    let id = profile.identity()?;
+    let tx = immediate(db)?;
+    project_known(&tx, project)?;
+    for digest in profile
+        .holdouts
+        .iter()
+        .flat_map(|holdout| holdout.files.values())
+    {
+        if !holdout_stored(&tx, project, digest)? {
+            return Err(failure("checks_holdout_missing"));
+        }
+    }
+    let ask = match stored(&tx, project, &id)? {
+        Some(known) if known.state == ProfileState::Revoked && actor != Actor::Owner => {
+            return Err(failure("checks_profile_revoked"));
+        }
+        Some(known) => actor != Actor::Owner && known.state != ProfileState::Current,
+        None => {
+            make_room(&tx, project)?;
+            tx.execute(
+                "INSERT INTO check_profiles(project,id,body,proposed_by,proposed_ms) VALUES (?1,?2,?3,?4,?5)",
+                params![
+                    project.as_str(),
+                    id.as_str(),
+                    String::from_utf8(canonical).map_err(unavailable)?,
+                    actor.name(),
+                    now_ms()
+                ],
+            )
+            .map_err(unavailable)?;
+            actor != Actor::Owner
+        }
+    };
+    tx.commit().map_err(unavailable)?;
+    let question = if ask {
+        Some(ask_owner(db, project, &id, &profile, actor)?)
+    } else {
+        None
+    };
+    assert!(question.is_none() || actor != Actor::Owner);
+    Ok(Proposal { id, question })
 }
 
-/// Approves a stored profile as the project's current one, as a new admission. Approving the
-/// current profile again changes nothing. Inputs: the engine connection, the project, the
-/// profile id and the actor. Output: the admitted profile, or `checks_owner_only`,
-/// `checks_profile_unknown` or `checks_unavailable`.
+/// Approves a stored profile as the project's current one, as a new admission whose time is
+/// later than every earlier approval in the project. Approving the current profile again
+/// changes nothing; approving a revoked one restores it. Inputs: the engine connection, the
+/// project, the profile id and the actor. Output: the admitted profile, or
+/// `checks_owner_only`, `checks_profile_unknown` or `checks_unavailable`.
 pub fn approve(
     db: &Connection,
     project: &ProjectId,
     id: &ProfileId,
     actor: Actor,
 ) -> Result<AdmittedProfile, CheckRefusal> {
-    let _ = (db, project, id, actor);
-    todo!()
+    owner_only(actor)?;
+    let tx = immediate(db)?;
+    let known = stored(&tx, project, id)?.ok_or_else(|| failure("checks_profile_unknown"))?;
+    if known.state == ProfileState::Current {
+        let approved_ms = known.approved_ms.expect("the current profile was approved");
+        return Ok(AdmittedProfile {
+            id: known.id,
+            project: known.project,
+            approved_ms,
+            profile: known.profile,
+        });
+    }
+    let last: i64 = tx
+        .query_row(
+            "SELECT COALESCE(MAX(approved_ms),0) FROM check_profiles WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    let approved_ms = now_ms().max(last.saturating_add(1));
+    tx.execute(
+        "UPDATE check_profiles SET approved_ms=?3, revoked_ms=NULL WHERE project=?1 AND id=?2",
+        params![project.as_str(), id.as_str(), approved_ms],
+    )
+    .map_err(unavailable)?;
+    tx.execute(
+        "INSERT INTO check_profile_current(project,profile) VALUES (?1,?2)
+         ON CONFLICT(project) DO UPDATE SET profile=excluded.profile",
+        params![project.as_str(), id.as_str()],
+    )
+    .map_err(unavailable)?;
+    tx.commit().map_err(unavailable)?;
+    assert!(approved_ms > last);
+    Ok(AdmittedProfile {
+        id: known.id,
+        project: known.project,
+        approved_ms,
+        profile: known.profile,
+    })
 }
 
 /// Revokes a stored profile; a revoked current profile leaves the project with none.
@@ -109,8 +247,25 @@ pub fn revoke(
     id: &ProfileId,
     actor: Actor,
 ) -> Result<(), CheckRefusal> {
-    let _ = (db, project, id, actor);
-    todo!()
+    owner_only(actor)?;
+    let tx = immediate(db)?;
+    let changed = tx
+        .execute(
+            "UPDATE check_profiles SET revoked_ms=COALESCE(revoked_ms,?3) WHERE project=?1 AND id=?2",
+            params![project.as_str(), id.as_str(), now_ms()],
+        )
+        .map_err(unavailable)?;
+    if changed == 0 {
+        return Err(failure("checks_profile_unknown"));
+    }
+    tx.execute(
+        "DELETE FROM check_profile_current WHERE project=?1 AND profile=?2",
+        params![project.as_str(), id.as_str()],
+    )
+    .map_err(unavailable)?;
+    tx.commit().map_err(unavailable)?;
+    assert_eq!(changed, 1);
+    Ok(())
 }
 
 /// Reads one stored profile. Inputs: the engine connection, the project and the profile id.
@@ -120,8 +275,7 @@ pub fn show(
     project: &ProjectId,
     id: &ProfileId,
 ) -> Result<Option<StoredProfile>, CheckRefusal> {
-    let _ = (db, project, id);
-    todo!()
+    stored(db, project, id)
 }
 
 /// The project's current admitted profile. Inputs: the engine connection or a transaction
@@ -131,32 +285,256 @@ pub fn current_profile(
     db: &Connection,
     project: &ProjectId,
 ) -> Result<Option<AdmittedProfile>, CheckRefusal> {
-    let _ = (db, project);
-    todo!()
+    let current: Option<String> = db
+        .query_row(
+            "SELECT profile FROM check_profile_current WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(unavailable)?;
+    let Some(current) = current else {
+        return Ok(None);
+    };
+    let id = ProfileId::new(current).map_err(unavailable)?;
+    let known = stored(db, project, &id)?.ok_or_else(|| failure("checks_unavailable"))?;
+    assert_eq!(known.state, ProfileState::Current);
+    Ok(Some(AdmittedProfile {
+        id: known.id,
+        project: known.project,
+        approved_ms: known.approved_ms.expect("the current profile was approved"),
+        profile: known.profile,
+    }))
 }
 
 /// Stores one holdout file the owner gives, by content. Inputs: the engine connection, the
 /// project, the bytes and the actor. Output: the bytes' SHA-256 hex digest a profile names,
-/// or `checks_owner_only`, `checks_holdout_invalid`, `checks_holdouts_full` or
-/// `checks_unavailable`.
+/// or `checks_owner_only`, `checks_holdout_invalid`, `checks_holdouts_full`,
+/// `checks_project_missing` or `checks_unavailable`.
 pub fn store_holdout_file(
     db: &Connection,
     project: &ProjectId,
     bytes: &[u8],
     actor: Actor,
 ) -> Result<String, CheckRefusal> {
-    let _ = (db, project, bytes, actor);
-    todo!()
+    owner_only(actor)?;
+    if bytes.is_empty() || bytes.len() > profile::HOLDOUT_FILE_BYTES_MAX {
+        return Err(failure("checks_holdout_invalid"));
+    }
+    let digest = format!("{:x}", Sha256::digest(bytes));
+    let tx = immediate(db)?;
+    project_known(&tx, project)?;
+    if !holdout_stored(&tx, project, &digest)? {
+        let held: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM check_holdout_files WHERE project=?1",
+                [project.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(unavailable)?;
+        if held >= HOLDOUT_FILES_STORED_MAX {
+            return Err(failure("checks_holdouts_full"));
+        }
+        tx.execute(
+            "INSERT INTO check_holdout_files(project,digest,bytes,stored_ms) VALUES (?1,?2,?3,?4)",
+            params![project.as_str(), digest, bytes, now_ms()],
+        )
+        .map_err(unavailable)?;
+    }
+    tx.commit().map_err(unavailable)?;
+    assert_eq!(digest.len(), 64);
+    Ok(digest)
 }
 
 /// The bytes of an admitted holdout's files, to copy into its run's snapshot. Inputs: the
 /// engine connection, the project and the check. Output: each relative path with its bytes,
-/// empty for an ordinary check, or `checks_holdout_missing` or `checks_unavailable`.
+/// empty for an ordinary check, or `checks_holdout_missing` when a file is not stored in
+/// the project or its bytes no longer match the digest, or `checks_unavailable`.
 pub fn holdout_files(
     db: &Connection,
     project: &ProjectId,
     check: &AdmittedCheck,
 ) -> Result<BTreeMap<String, Vec<u8>>, CheckRefusal> {
-    let _ = (db, project, check);
-    todo!()
+    let Some(files) = &check.holdout else {
+        return Ok(BTreeMap::new());
+    };
+    let mut found = BTreeMap::new();
+    for (path, digest) in files {
+        let bytes: Vec<u8> = db
+            .query_row(
+                "SELECT bytes FROM check_holdout_files WHERE project=?1 AND digest=?2",
+                params![project.as_str(), digest],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(unavailable)?
+            .ok_or_else(|| failure("checks_holdout_missing"))?;
+        if format!("{:x}", Sha256::digest(&bytes)) != *digest {
+            return Err(failure("checks_holdout_missing"));
+        }
+        found.insert(path.clone(), bytes);
+    }
+    assert_eq!(found.len(), files.len());
+    Ok(found)
+}
+
+/// Raises the owner question for a master's or agent's proposal: where to review it, what it
+/// runs, and that an answer here changes nothing. Holdouts are counted, never described,
+/// since the questions page sits in the project folder. Inputs: the connection, the project,
+/// the profile, its id and the proposer. Output: the question id, or the questions refusal.
+fn ask_owner(
+    db: &Connection,
+    project: &ProjectId,
+    id: &ProfileId,
+    profile: &CheckProfile,
+    actor: Actor,
+) -> Result<u64, CheckRefusal> {
+    let checks: Vec<String> = profile
+        .checks
+        .iter()
+        .map(|check| format!("{}: {}", check.id, check.argv.join(" ")))
+        .collect();
+    let context = format!(
+        "Checks:\n{}\nHoldouts: {}\nProtected paths: {}",
+        checks.join("\n"),
+        profile.holdouts.len(),
+        profile.protected_paths.join(", ")
+    );
+    let ask = Ask {
+        question: format!(
+            "Check profile {} was proposed by {}. Review it in Project Settings > Checks and approve or revoke it there; an answer here changes nothing.",
+            &id.as_str()[..12],
+            actor.spoken()
+        ),
+        options: Vec::new(),
+        recommended: None,
+        context: Some(bound_text(&context, crate::questions::CONTEXT_BYTES_MAX)),
+    };
+    crate::questions::raise(db, project, &EngineSource::Checks, &ask)
+}
+
+/// Reads one stored profile inside the caller's connection or transaction. Inputs: the
+/// connection, the project and the id. Output: the profile, none, or `checks_unavailable`
+/// when a stored row no longer reads as a valid profile.
+fn stored(
+    db: &Connection,
+    project: &ProjectId,
+    id: &ProfileId,
+) -> Result<Option<StoredProfile>, CheckRefusal> {
+    let row: Option<(String, String, i64, Option<i64>, Option<i64>, bool)> = db
+        .query_row(
+            "SELECT p.body, p.proposed_by, p.proposed_ms, p.approved_ms, p.revoked_ms,
+                    EXISTS(SELECT 1 FROM check_profile_current c WHERE c.project=p.project AND c.profile=p.id)
+             FROM check_profiles p WHERE p.project=?1 AND p.id=?2",
+            params![project.as_str(), id.as_str()],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(unavailable)?;
+    let Some((body, proposed_by, proposed_ms, approved_ms, revoked_ms, current)) = row else {
+        return Ok(None);
+    };
+    let profile = CheckProfile::import(body.as_bytes()).map_err(unavailable)?;
+    if profile.identity()? != *id {
+        return Err(failure("checks_unavailable"));
+    }
+    let state = match (revoked_ms, approved_ms) {
+        (Some(_), _) => ProfileState::Revoked,
+        (None, None) => ProfileState::Proposed,
+        (None, Some(_)) if current => ProfileState::Current,
+        (None, Some(_)) => ProfileState::Approved,
+    };
+    assert!(!current || state == ProfileState::Current);
+    Ok(Some(StoredProfile {
+        id: id.clone(),
+        project: project.clone(),
+        profile,
+        proposed_by,
+        proposed_ms,
+        approved_ms,
+        revoked_ms,
+        state,
+    }))
+}
+
+/// Makes room for one more profile in the project by removing its oldest profile that was
+/// never approved nor revoked, when the project holds `PROFILES_KEPT_MAX`. Inputs: the
+/// transaction and the project. Output: Ok, or `checks_profiles_full` when nothing may go.
+fn make_room(tx: &Transaction<'_>, project: &ProjectId) -> Result<(), CheckRefusal> {
+    let kept: i64 = tx
+        .query_row(
+            "SELECT COUNT(*) FROM check_profiles WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    if kept < PROFILES_KEPT_MAX {
+        return Ok(());
+    }
+    let removed = tx
+        .execute(
+            "DELETE FROM check_profiles WHERE rowid=(SELECT rowid FROM check_profiles
+             WHERE project=?1 AND approved_ms IS NULL AND revoked_ms IS NULL
+             ORDER BY proposed_ms, rowid LIMIT 1)",
+            [project.as_str()],
+        )
+        .map_err(unavailable)?;
+    if removed == 0 {
+        return Err(failure("checks_profiles_full"));
+    }
+    assert_eq!(removed, 1);
+    Ok(())
+}
+
+fn holdout_stored(
+    db: &Connection,
+    project: &ProjectId,
+    digest: &str,
+) -> Result<bool, CheckRefusal> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM check_holdout_files WHERE project=?1 AND digest=?2)",
+        params![project.as_str(), digest],
+        |row| row.get(0),
+    )
+    .map_err(unavailable)
+}
+
+/// Refuses a project the engine does not know. Inputs: the connection and the project.
+/// Output: Ok, or `checks_project_missing` or `checks_unavailable`.
+fn project_known(db: &Connection, project: &ProjectId) -> Result<(), CheckRefusal> {
+    let known: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    if !known {
+        return Err(failure("checks_project_missing"));
+    }
+    Ok(())
+}
+
+fn owner_only(actor: Actor) -> Result<(), CheckRefusal> {
+    match actor {
+        Actor::Owner => Ok(()),
+        Actor::Master(_) | Actor::Agent(_) => Err(failure("checks_owner_only")),
+    }
+}
+
+fn immediate(db: &Connection) -> Result<Transaction<'_>, CheckRefusal> {
+    Transaction::new_unchecked(db, TransactionBehavior::Immediate).map_err(unavailable)
+}
+
+fn unavailable<E>(_: E) -> CheckRefusal {
+    failure("checks_unavailable")
 }

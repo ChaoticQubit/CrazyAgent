@@ -1,9 +1,11 @@
 use super::CheckRefusal;
 use crate::engine::owner::{failure, is_hex_id};
+use crate::memory::hidden_text;
 use crate::protocol::ProjectId;
 use crate::sandbox::toolchains::Toolchain;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet};
 
 /// The most bytes of one profile's canonical JSON. Holdout file bytes are stored apart and
 /// named here by digest, so they never count.
@@ -34,6 +36,9 @@ pub const HOLDOUT_FILE_BYTES_MAX: usize = 8 * 1024;
 pub const HOLDOUT_BYTES_MAX: usize = 256 * 1024;
 /// The only profile version this engine reads.
 pub const PROFILE_VERSION: u16 = 1;
+/// The most bytes of profile JSON read before parsing, leaving room for whitespace a
+/// writer adds around a profile within `PROFILE_BYTES_MAX`.
+pub const PROFILE_INPUT_BYTES_MAX: usize = 2 * PROFILE_BYTES_MAX;
 
 const _: () = assert!(HOLDOUT_FILES_MAX * HOLDOUT_FILE_BYTES_MAX <= HOLDOUT_BYTES_MAX);
 const _: () = assert!(PROFILE_BYTES_MAX <= crate::protocol::FRAME_BYTES_MAX / 2);
@@ -182,26 +187,103 @@ impl CheckProfile {
     /// `checks_profile_invalid` for bad JSON, an unknown field or any bound or path that
     /// `validate` refuses.
     pub fn import(bytes: &[u8]) -> Result<Self, CheckRefusal> {
-        let _ = bytes;
-        todo!()
+        if bytes.len() > PROFILE_INPUT_BYTES_MAX {
+            return Err(invalid());
+        }
+        let profile: Self = serde_json::from_slice(bytes).map_err(|_| invalid())?;
+        profile.validate()?;
+        Ok(profile)
     }
 
     /// Checks every bound of the profile, never truncating. Output: Ok, or
     /// `checks_profile_invalid`.
     pub fn validate(&self) -> Result<(), CheckRefusal> {
-        todo!()
+        self.canonical().map(|_| ())
     }
 
     /// The canonical JSON the identity hashes and the store keeps. Output: the bytes, or
     /// `checks_profile_invalid` when the profile fails `validate`.
     pub fn canonical(&self) -> Result<Vec<u8>, CheckRefusal> {
-        todo!()
+        let mut ids = BTreeSet::new();
+        let files: usize = self
+            .holdouts
+            .iter()
+            .map(|holdout| holdout.files.len())
+            .sum();
+        let shaped = self.version == PROFILE_VERSION
+            && (1..=CHECKS_MAX).contains(&self.checks.len())
+            && self.holdouts.len() <= HOLDOUTS_MAX
+            && files <= HOLDOUT_FILES_MAX
+            && self.protected_paths.len() <= PROTECTED_PATHS_MAX
+            && self
+                .checks
+                .iter()
+                .chain(self.holdouts.iter().map(|holdout| &holdout.check))
+                .all(|check| check.valid() && ids.insert(check.id.as_str()))
+            && self.holdouts.iter().all(|holdout| {
+                !holdout.files.is_empty()
+                    && holdout
+                        .files
+                        .iter()
+                        .all(|(path, digest)| safe_path(path) && is_hex_id(digest))
+            })
+            && self
+                .protected_paths
+                .iter()
+                .all(|path| safe_path(path.strip_suffix('/').unwrap_or(path)));
+        if !shaped {
+            return Err(invalid());
+        }
+        let bytes = serde_json::to_vec(self).map_err(|_| invalid())?;
+        if bytes.len() > PROFILE_BYTES_MAX {
+            return Err(invalid());
+        }
+        assert_eq!(ids.len(), self.checks.len() + self.holdouts.len());
+        Ok(bytes)
     }
 
     /// The profile's content identity. Output: the SHA-256 of `canonical`, or
     /// `checks_profile_invalid`.
     pub fn identity(&self) -> Result<ProfileId, CheckRefusal> {
-        todo!()
+        let bytes = self.canonical()?;
+        Ok(ProfileId::new(format!("{:x}", Sha256::digest(&bytes)))
+            .expect("a SHA-256 hex digest is a profile id"))
+    }
+}
+
+impl CheckSpec {
+    /// Whether every field of one check is within its bounds: a plain id, a bare program
+    /// name and plain command items, a safe `cwd`, a report path exactly for the formats that
+    /// write one, a time limit in range and distinct triggers. Output: true when valid.
+    fn valid(&self) -> bool {
+        let reported = match self.format {
+            ReportFormat::Junit | ReportFormat::Allure => {
+                self.report.as_deref().is_some_and(safe_path)
+            }
+            ReportFormat::Libtest | ReportFormat::ExitCode => self.report.is_none(),
+        };
+        let triggers: BTreeSet<_> = self.when.iter().collect();
+        let id = &self.id;
+        !id.is_empty()
+            && id.len() <= ID_BYTES_MAX
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_".contains(&b))
+            && self
+                .argv
+                .first()
+                .is_some_and(|program| program.len() <= ID_BYTES_MAX && component(program))
+            && self.argv.len() <= ARGV_MAX
+            && self.argv.iter().all(|item| {
+                item.len() <= ARG_BYTES_MAX
+                    && !item.chars().any(char::is_control)
+                    && !hidden_text(item)
+            })
+            && (self.cwd == "." || safe_path(&self.cwd))
+            && reported
+            && (TIMEOUT_S_MIN..=TIMEOUT_S_MAX).contains(&self.timeout_s)
+            && !self.when.is_empty()
+            && triggers.len() == self.when.len()
     }
 }
 
@@ -209,6 +291,47 @@ impl AdmittedProfile {
     /// Every check of the profile as admitted, ordinary checks first and then holdouts, in
     /// profile order. Output: the admitted checks.
     pub fn checks(&self) -> Vec<AdmittedCheck> {
-        todo!()
+        let ordinary = self.profile.checks.iter().map(|spec| (spec, None));
+        let holdouts = self
+            .profile
+            .holdouts
+            .iter()
+            .map(|holdout| (&holdout.check, Some(holdout.files.clone())));
+        let checks: Vec<AdmittedCheck> = ordinary
+            .chain(holdouts)
+            .map(|(spec, holdout)| AdmittedCheck {
+                profile: self.id.clone(),
+                approved_ms: self.approved_ms,
+                spec: spec.clone(),
+                holdout,
+            })
+            .collect();
+        assert_eq!(
+            checks.len(),
+            self.profile.checks.len() + self.profile.holdouts.len()
+        );
+        checks
     }
+}
+
+fn invalid() -> CheckRefusal {
+    failure("checks_profile_invalid")
+}
+
+/// Whether a relative path is portable and stays inside its root: at most `PATH_BYTES_MAX`
+/// bytes of components made of ASCII letters, digits, `-`, `_` and `.`, none empty, `.` or
+/// `..`. Input: the untrusted path. Output: true when admissible.
+fn safe_path(path: &str) -> bool {
+    !path.is_empty() && path.len() <= PATH_BYTES_MAX && path.split('/').all(component)
+}
+
+/// Whether one path component or bare program name is plain: ASCII letters, digits, `-`,
+/// `_` and `.`, not empty, `.` or `..`. Input: the text. Output: true when plain.
+fn component(part: &str) -> bool {
+    !part.is_empty()
+        && part != "."
+        && part != ".."
+        && part
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
 }

@@ -656,6 +656,6 @@ fn the_same_profile_bytes_have_the_same_identity() {
             .identity()
             .unwrap()
     };
-    assert_ne!(with(&x), with(&y));
-    assert_ne!(with(&x), id);
+    assert_ne!(with(x.as_str()), with(y.as_str()));
+    assert_ne!(with(x.as_str()), id);
 }

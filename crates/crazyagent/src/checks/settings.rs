@@ -1,6 +1,7 @@
-use super::{Actor, CheckRefusal};
+use super::{Actor, CheckRefusal, immediate, owner_only, project_known, unavailable};
+use crate::engine::owner::failure;
 use crate::protocol::ProjectId;
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 
 /// What the owner's Accept asks of checks: nothing; Accept proceeds and the change set and
@@ -112,13 +113,63 @@ impl Default for ChecksSettings {
     }
 }
 
+impl GateMode {
+    /// Every option, in display order.
+    pub const ALL: [Self; 3] = [Self::Off, Self::Warn, Self::Require];
+}
+
+impl InventoryMode {
+    /// Every option, in display order.
+    pub const ALL: [Self; 3] = [Self::LastKnown, Self::RunBase, Self::Off];
+}
+
+impl SkipMarkers {
+    /// Every option, in display order.
+    pub const ALL: [Self; 3] = [Self::Flag, Self::Refuse, Self::Off];
+}
+
+impl ProtectedChange {
+    /// Every option, in display order.
+    pub const ALL: [Self; 2] = [Self::Refuse, Self::Flag];
+}
+
 impl ChecksSettings {
     /// Resolves the settings in effect: each key from the project's override, else the app
     /// default, else the proposal. Inputs: the app layer and the project layer, both
     /// validated. Output: the settings.
     pub fn resolve(app: &ChecksChoice, project: &ChecksChoice) -> Self {
-        let _ = (app, project);
-        todo!()
+        let proposal = Self::default();
+        let resolved = Self {
+            gate: project.gate.or(app.gate).unwrap_or(proposal.gate),
+            parallel: project
+                .parallel
+                .or(app.parallel)
+                .unwrap_or(proposal.parallel),
+            keep_failed_snapshots: project
+                .keep_failed_snapshots
+                .or(app.keep_failed_snapshots)
+                .unwrap_or(proposal.keep_failed_snapshots),
+            agent_requests: project
+                .agent_requests
+                .or(app.agent_requests)
+                .unwrap_or(proposal.agent_requests),
+            inventory: project
+                .inventory
+                .or(app.inventory)
+                .unwrap_or(proposal.inventory),
+            skip_markers: project
+                .skip_markers
+                .or(app.skip_markers)
+                .unwrap_or(proposal.skip_markers),
+            protected_change: project
+                .protected_change
+                .or(app.protected_change)
+                .unwrap_or(proposal.protected_change),
+        };
+        assert!(PARALLEL_OPTIONS.contains(&resolved.parallel));
+        assert!(KEEP_FAILED_OPTIONS.contains(&resolved.keep_failed_snapshots));
+        assert!(AGENT_REQUESTS_OPTIONS.contains(&resolved.agent_requests));
+        resolved
     }
 }
 
@@ -126,27 +177,95 @@ impl ChecksChoice {
     /// Checks each numeric key is one of its options. Output: Ok, or
     /// `checks_setting_invalid`.
     pub fn validate(&self) -> Result<(), CheckRefusal> {
-        todo!()
+        let listed = |value: Option<u8>, options: &[u8]| value.is_none_or(|v| options.contains(&v));
+        if !listed(self.parallel, &PARALLEL_OPTIONS)
+            || !listed(self.keep_failed_snapshots, &KEEP_FAILED_OPTIONS)
+            || !listed(self.agent_requests, &AGENT_REQUESTS_OPTIONS)
+        {
+            return Err(failure("checks_setting_invalid"));
+        }
+        Ok(())
+    }
+}
+
+impl Scope {
+    fn key(&self) -> String {
+        match self {
+            Self::App => "app".into(),
+            Self::Project(project) => format!("project:{}", project.as_str()),
+        }
     }
 }
 
 /// Every checks settings key with all its options and the proposed default, in display
 /// order. Output: the keys.
 pub fn choices() -> Vec<SettingChoice> {
-    todo!()
+    fn value(option: impl Serialize) -> serde_json::Value {
+        serde_json::to_value(option).expect("a checks option serializes")
+    }
+    fn listed<T: Serialize>(
+        key: &'static str,
+        options: impl IntoIterator<Item = T>,
+        default: T,
+    ) -> SettingChoice {
+        SettingChoice {
+            key,
+            options: options.into_iter().map(value).collect(),
+            default: value(default),
+        }
+    }
+    let proposal = ChecksSettings::default();
+    let keys = vec![
+        listed("gate", GateMode::ALL, proposal.gate),
+        listed("parallel", PARALLEL_OPTIONS, proposal.parallel),
+        listed(
+            "keep_failed_snapshots",
+            KEEP_FAILED_OPTIONS,
+            proposal.keep_failed_snapshots,
+        ),
+        listed(
+            "agent_requests",
+            AGENT_REQUESTS_OPTIONS,
+            proposal.agent_requests,
+        ),
+        listed("inventory", InventoryMode::ALL, proposal.inventory),
+        listed("skip_markers", SkipMarkers::ALL, proposal.skip_markers),
+        listed(
+            "protected_change",
+            ProtectedChange::ALL,
+            proposal.protected_change,
+        ),
+    ];
+    assert!(keys.iter().all(|key| key.options.contains(&key.default)));
+    keys
 }
 
-/// Reads one saved layer. Inputs: the engine connection and the scope. Output: the layer and
-/// its version, 0 and an empty layer when never saved, or `checks_unavailable`.
+/// Reads one saved layer. Inputs: the engine connection or a transaction on it, and the
+/// scope. Output: the layer and its version, 0 and an empty layer when never saved, or
+/// `checks_unavailable`.
 pub fn read(db: &Connection, scope: &Scope) -> Result<(ChecksChoice, u64), CheckRefusal> {
-    let _ = (db, scope);
-    todo!()
+    let row: Option<(String, i64)> = db
+        .query_row(
+            "SELECT body,version FROM check_settings WHERE scope=?1",
+            [scope.key()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(unavailable)?;
+    let Some((body, version)) = row else {
+        return Ok((ChecksChoice::default(), 0));
+    };
+    let choice: ChecksChoice = serde_json::from_str(&body).map_err(unavailable)?;
+    choice.validate().map_err(unavailable)?;
+    let version = u64::try_from(version).map_err(unavailable)?;
+    assert!(version > 0);
+    Ok((choice, version))
 }
 
 /// Saves one layer whole when it is still at the version the owner read. Inputs: the engine
 /// connection, the scope, the layer, that version and the actor. Output: the new version, or
-/// `checks_owner_only`, `checks_setting_invalid`, `checks_settings_stale` or
-/// `checks_unavailable`.
+/// `checks_owner_only`, `checks_setting_invalid`, `checks_project_missing`,
+/// `checks_settings_stale` or `checks_unavailable`.
 pub fn write(
     db: &Connection,
     scope: &Scope,
@@ -154,13 +273,38 @@ pub fn write(
     version: u64,
     actor: Actor,
 ) -> Result<u64, CheckRefusal> {
-    let _ = (db, scope, choice, version, actor);
-    todo!()
+    owner_only(actor)?;
+    choice.validate()?;
+    let tx = immediate(db)?;
+    if let Scope::Project(project) = scope {
+        project_known(&tx, project)?;
+    }
+    let (_, saved) = read(&tx, scope)?;
+    if saved != version {
+        return Err(failure("checks_settings_stale"));
+    }
+    let next = version
+        .checked_add(1)
+        .ok_or_else(|| failure("checks_settings_stale"))?;
+    tx.execute(
+        "INSERT INTO check_settings(scope,body,version) VALUES (?1,?2,?3)
+         ON CONFLICT(scope) DO UPDATE SET body=excluded.body, version=excluded.version",
+        params![
+            scope.key(),
+            serde_json::to_string(choice).map_err(unavailable)?,
+            i64::try_from(next).map_err(unavailable)?
+        ],
+    )
+    .map_err(unavailable)?;
+    tx.commit().map_err(unavailable)?;
+    assert!(next > saved);
+    Ok(next)
 }
 
-/// The settings in effect for one project. Inputs: the engine connection and the project.
-/// Output: the resolved settings, or `checks_unavailable`.
+/// The settings in effect for one project. Inputs: the engine connection or a transaction
+/// on it, and the project. Output: the resolved settings, or `checks_unavailable`.
 pub fn effective(db: &Connection, project: &ProjectId) -> Result<ChecksSettings, CheckRefusal> {
-    let _ = (db, project);
-    todo!()
+    let (app, _) = read(db, &Scope::App)?;
+    let (own, _) = read(db, &Scope::Project(project.clone()))?;
+    Ok(ChecksSettings::resolve(&app, &own))
 }
