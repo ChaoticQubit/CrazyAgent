@@ -523,7 +523,7 @@ fn bounds_and_hidden_characters_are_refused_plainly() {
 }
 
 #[test]
-#[should_panic]
+#[should_panic(expected = "source.bytes().all(actor_byte)")]
 fn the_core_s_own_actor_takes_only_a_plain_source() {
     Actor::host("two words");
 }
