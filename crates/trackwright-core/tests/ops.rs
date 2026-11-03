@@ -125,6 +125,16 @@ impl Authority for TableHost {
     fn actors_verified(&self) -> bool {
         true
     }
+
+    fn evidence_may(
+        &self,
+        _tx: &Transaction<'_>,
+        _project: &ProjectKey,
+        _actor: &Actor,
+        _check: &CheckView,
+    ) -> Result<(), Refusal> {
+        Ok(())
+    }
 }
 
 fn db_path(dir: &Path) -> PathBuf {

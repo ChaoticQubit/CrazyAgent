@@ -241,12 +241,13 @@ pub fn add_check(
     })
 }
 
-/// Appends one evidence record for a check of an open ticket, then re-derives the check's
-/// criterion: met when every check is satisfied, open again on a failing one. Under
-/// `close = evidence` the last satisfied check closes the ticket as `host:evidence`, with a
-/// reason naming the proof. Inputs: the transaction, the host, the actor, the evidence and
-/// the time. Output: the evidence row and what it left, or `check_unknown`,
-/// `criterion_unknown`, `ticket_closed`, a text refusal or the host's refusal.
+/// Appends one evidence record for a check of an open ticket, once the host's
+/// `evidence_may` lets the actor prove that check, then re-derives the check's criterion:
+/// met when every check is satisfied, open again on a failing one. Under `close = evidence`
+/// the last satisfied check closes the ticket as `host:evidence`, with a reason naming the
+/// proof. Inputs: the transaction, the host, the actor, the evidence and the time. Output:
+/// the evidence row and what it left, or `check_unknown`, `criterion_unknown`,
+/// `ticket_closed`, a text refusal or the host's refusal.
 pub fn record_evidence(
     tx: &Transaction<'_>,
     host: &impl Host,
@@ -263,6 +264,13 @@ pub fn record_evidence(
         let ticket = open_ticket(tx, host, actor, OpKind::EvidenceRecord, &new.ticket)?;
         let criterion = criterion_at(tx, &ticket, new.criterion)?;
         let check = check_of(tx, &criterion, new.kind, &new.check)?;
+        host.evidence_may(
+            tx,
+            ticket.short_id.key(),
+            actor,
+            &view_of(&ticket, &criterion, &check),
+        )
+        .map_err(StoreError::Refused)?;
         store::prepare(tx, EVIDENCE_INSERT)?.execute(params![
             check.id,
             new.result.as_str(),
@@ -526,12 +534,7 @@ fn derive(
     }
     let mut satisfied = true;
     for check in &checks {
-        let view = CheckView {
-            ticket: ticket.short_id.clone(),
-            criterion: criterion.position,
-            kind: check.kind,
-            reference: check.reference.clone(),
-        };
+        let view = view_of(ticket, criterion, check);
         let found = host
             .check(tx, ticket.short_id.key(), &view)
             .map_err(StoreError::Refused)?;
@@ -643,6 +646,23 @@ fn check_of(
                 format!("criterion {} has no such {kind} check", criterion.position),
             )
         })
+}
+
+fn view_of(ticket: &Ticket, criterion: &Criterion, check: &Check) -> CheckView {
+    assert_eq!(
+        criterion.ticket, ticket.id,
+        "the criterion is on this ticket"
+    );
+    assert_eq!(
+        check.criterion, criterion.id,
+        "the check proves this criterion"
+    );
+    CheckView {
+        ticket: ticket.short_id.clone(),
+        criterion: criterion.position,
+        kind: check.kind,
+        reference: check.reference.clone(),
+    }
 }
 
 fn latest_of(tx: &Transaction<'_>, check: i64) -> Result<Option<Evidence>, StoreError> {
