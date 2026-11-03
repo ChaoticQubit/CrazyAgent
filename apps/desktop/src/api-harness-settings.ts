@@ -60,11 +60,12 @@ export interface HarnessSettingsPage {
 /** What the owner is editing in one row: the switch state, or the field or option text. */
 export type SettingDraft = boolean | string;
 
-/** The longest text value the engine keeps when a key names no bound of its own. */
+/** The longest text value the engine keeps, whatever bound a key names. */
 export const VALUE_BYTES_MAX = 1024;
 
-/** The most keys one harness page holds, as the engine bounds a catalog. */
-export const KEYS_MAX = 256;
+/** The most rows one harness page holds, as the engine keeps them at one scope: every catalog
+ * key, then keys stored there that the catalog no longer lists. */
+export const ROWS_MAX = 512;
 
 const HARNESS_ID = /^[a-z0-9-]{1,64}$/;
 
@@ -88,6 +89,8 @@ const REFUSALS: Record<string, string> = {
   harness_settings_key_app_only: "This setting is set once for the whole app. Change it in Settings, Harnesses.",
   harness_settings_key_invalid: "This setting isn't on this harness's list. The page shows what is there.",
   harness_settings_no_catalog: NO_CATALOG_LINE,
+  harness_settings_catalog_invalid: "CrazyAgent's settings list for this harness is damaged. Reinstall CrazyAgent.",
+  harness_settings_page_invalid: "The settings list changed while it was read. Open the page again.",
   harness_settings_value_invalid: "This value doesn't fit the setting. Check its limits, then save again.",
   harness_settings_project_unknown: "This project is no longer in CrazyAgent.",
   harness_settings_unavailable: "Harness settings aren't ready in this engine yet.",
@@ -104,6 +107,7 @@ const REFUSALS: Record<string, string> = {
   peer_owner_mismatch: "The engine runs as another user. Start it as yourself, then try again.",
   versioned_item_invalid: "CrazyAgent couldn't record a change to this setting. Open the page again.",
   versioned_unavailable: "CrazyAgent couldn't record this right now. Try again in a moment.",
+  changes_unavailable: "The engine's records aren't available right now. Try again in a moment.",
 };
 
 /** The refusal codes of the harness settings protocol that have their own sentence. */
@@ -145,7 +149,7 @@ export function versionLine(page: Pick<HarnessSettingsPage, "name" | "installed"
  * CrazyAgent sets itself, and the read-only ones. Empty groups drop. Inputs: the keys and the
  * filter text. Output: the titled groups. */
 export function settingGroups(keys: readonly HarnessSetting[], query = ""): { kind: SettingAccess["kind"]; title: string; keys: HarnessSetting[] }[] {
-  assert(keys.length <= KEYS_MAX, "a harness page holds at most KEYS_MAX keys");
+  assert(keys.length <= ROWS_MAX, "a harness page holds at most ROWS_MAX rows");
   const shown = keys.filter((key) => matchesQuery(key, query));
   const groups = [
     { kind: "editable" as const, title: "Settings", keys: shown.filter((key) => key.access.kind === "editable") },
@@ -205,7 +209,8 @@ export function draftValue(key: Pick<HarnessSetting, "type" | "options" | "min" 
   if (key.type === "integer") return wholeNumber(key, draft);
   const bytes = new TextEncoder().encode(draft).length;
   const most = key.max_bytes ?? VALUE_BYTES_MAX;
-  assert(most > 0 && most <= VALUE_BYTES_MAX, "a text key's bound is inside the bridge bound");
+  assert(most > 0 && most <= VALUE_BYTES_MAX, "a text key's bound is inside the engine's bound");
+  if (/[\u0000-\u001f\u007f-\u009f]/.test(draft)) return { error: "Use one line of plain text." };
   return bytes <= most ? { value: draft } : { error: `Use at most ${most} bytes.` };
 }
 

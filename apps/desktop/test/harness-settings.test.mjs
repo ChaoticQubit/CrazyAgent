@@ -118,7 +118,7 @@ test("the page groups keys in catalog order, filters them and says when changes 
   const project = screen({ kind: "ok", value: page(keys, { project_id: "p-1" }) }, { scope: "project" });
   assert.match(project, /A value set here wins over the app value for this project only./);
   assert.throws(() => screen({ kind: "ok", value: page(keys) }, { scope: "project" }), /a project page names its project/);
-  assert.throws(() => client.settingGroups(Array.from({ length: client.KEYS_MAX + 1 }, (_, at) => setting({ key: `k${at}` }))), /at most KEYS_MAX/);
+  assert.throws(() => client.settingGroups(Array.from({ length: client.ROWS_MAX + 1 }, (_, at) => setting({ key: `k${at}` }))), /at most ROWS_MAX/);
 });
 
 test("a harness with no settings list, a missing build and a failed read each read plainly", () => {
@@ -140,7 +140,10 @@ test("a draft sends a value of the key's type inside its bounds, as the engine c
   assert.deepEqual(client.draftValue({ ...number, min: null, max: null }, "-4"), { value: -4 });
   const text = { type: "string", options: [], min: null, max: null, max_bytes: 8 };
   assert.deepEqual(client.draftValue(text, "abcdefgh"), { value: "abcdefgh" });
-  assert.deepEqual(client.draftValue(text, "ééééé"), { error: "Use at most 8 bytes." }, "bytes, not characters");
+  assert.deepEqual(client.draftValue(text, "\u00e9".repeat(5)), { error: "Use at most 8 bytes." }, "bytes, not characters");
+  for (const broken of ["two\nlines", "tab\there", "bell\u0007"]) {
+    assert.deepEqual(client.draftValue(text, broken), { error: "Use one line of plain text." }, JSON.stringify(broken));
+  }
   assert.deepEqual(client.draftValue({ ...text, max_bytes: null }, "a".repeat(client.VALUE_BYTES_MAX)), { value: "a".repeat(client.VALUE_BYTES_MAX) });
   assert.deepEqual(client.draftValue({ ...text, max_bytes: null }, "a".repeat(client.VALUE_BYTES_MAX + 1)), { error: `Use at most ${client.VALUE_BYTES_MAX} bytes.` });
   const choice = { type: "enum", options: ["dark", "light"], min: null, max: null, max_bytes: null };
@@ -157,9 +160,9 @@ test("a draft sends a value of the key's type inside its bounds, as the engine c
 
 test("agent and catalog text shows through displayText, so hidden characters cannot hide or reorder it", async () => {
   const { displayText } = await import("../src/screens/conversation.tsx");
-  const hidden = "Mode‮ reversed​";
+  const hidden = "Mode\u202e reversed\u200b";
   const markup = row(locked({ label: hidden, help: hidden, value: hidden, access: { kind: "locked", reason: hidden } }));
-  assert.ok(!markup.includes("‮") && !markup.includes("​"), "no raw bidi or zero-width character reaches the page");
+  assert.ok(!markup.includes("\u202e") && !markup.includes("\u200b"), "no raw bidi or zero-width character reaches the page");
   assert.ok(markup.includes(displayText(hidden)));
   assert.equal(client.valueText(""), "Empty");
   assert.equal(client.valueText(false), "Off");
