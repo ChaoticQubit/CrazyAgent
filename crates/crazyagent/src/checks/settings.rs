@@ -49,6 +49,17 @@ pub enum ProtectedChange {
     Flag,
 }
 
+/// What a test a passing run no longer reports against its inventory baseline does at the
+/// gate: a gap, kept in the note under `warn` and refused under `require`, or a refusal
+/// under `warn` too. A passing run whose integrity block is missing counts as one.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RemovedTests {
+    #[default]
+    Flag,
+    Refuse,
+}
+
 /// Every option of `parallel`: how many check runs go at once.
 pub const PARALLEL_OPTIONS: [u8; 4] = [1, 2, 3, 4];
 /// Every option of `keep_failed_snapshots`: how many failed runs keep their snapshot folder.
@@ -58,7 +69,8 @@ pub const AGENT_REQUESTS_OPTIONS: [u8; 4] = [0, 2, 6, 12];
 
 /// The checks settings in effect for a project. The default is the proposal for each key:
 /// gate `warn`, one run at once, two failed snapshots kept, six agent requests per hour,
-/// inventory `last_known`, skip markers `flag`, protected change `refuse`.
+/// inventory `last_known`, skip markers `flag`, protected change `refuse`, removed tests
+/// `flag`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ChecksSettings {
@@ -69,6 +81,7 @@ pub struct ChecksSettings {
     pub inventory: InventoryMode,
     pub skip_markers: SkipMarkers,
     pub protected_change: ProtectedChange,
+    pub removed_tests: RemovedTests,
 }
 
 /// One layer of checks settings the owner saved: the app default, or a project's override.
@@ -83,6 +96,7 @@ pub struct ChecksChoice {
     pub inventory: Option<InventoryMode>,
     pub skip_markers: Option<SkipMarkers>,
     pub protected_change: Option<ProtectedChange>,
+    pub removed_tests: Option<RemovedTests>,
 }
 
 /// Which saved layer a read or write names: the app default, or one project's override.
@@ -111,6 +125,7 @@ impl Default for ChecksSettings {
             inventory: InventoryMode::default(),
             skip_markers: SkipMarkers::default(),
             protected_change: ProtectedChange::default(),
+            removed_tests: RemovedTests::default(),
         }
     }
 }
@@ -133,6 +148,11 @@ impl SkipMarkers {
 impl ProtectedChange {
     /// Every option, in display order.
     pub const ALL: [Self; 2] = [Self::Refuse, Self::Flag];
+}
+
+impl RemovedTests {
+    /// Every option, in display order.
+    pub const ALL: [Self; 2] = [Self::Flag, Self::Refuse];
 }
 
 impl ChecksSettings {
@@ -167,6 +187,10 @@ impl ChecksSettings {
                 .protected_change
                 .or(app.protected_change)
                 .unwrap_or(proposal.protected_change),
+            removed_tests: project
+                .removed_tests
+                .or(app.removed_tests)
+                .unwrap_or(proposal.removed_tests),
         };
         assert!(PARALLEL_OPTIONS.contains(&resolved.parallel));
         assert!(KEEP_FAILED_OPTIONS.contains(&resolved.keep_failed_snapshots));
@@ -237,6 +261,7 @@ pub fn choices() -> Vec<SettingChoice> {
             ProtectedChange::ALL,
             proposal.protected_change,
         ),
+        listed("removed_tests", RemovedTests::ALL, proposal.removed_tests),
     ];
     assert!(keys.iter().all(|key| key.options.contains(&key.default)));
     keys

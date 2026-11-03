@@ -9,7 +9,7 @@ use super::{
 };
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction, TransactionBehavior};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -719,8 +719,9 @@ pub(super) fn accept(
 /// Lands a change set as one squash commit on a target branch, the project's Land on
 /// branch when none is named (DEC-111 Q1): as [`accept`] through the owner's checkout, by
 /// moving the ref alone for a branch checked out nowhere, or through an agent's worktree
-/// for that agent's own branch. Inputs: as [`accept`], plus the target branch. Output: the landed
-/// commit and branch, or the conflicts.
+/// for that agent's own branch, once the accept gate admits it under the hold and again in
+/// one transaction with the branch move. Inputs: as [`accept`], plus the target branch.
+/// Output: the landed commit and branch, the conflicts, or the gate's refusal.
 pub(super) fn accept_to(
     db: &Connection,
     home: &Path,
@@ -741,6 +742,7 @@ pub(super) fn accept_to(
     {
         return Err(failure("changes_stale"));
     }
+    crate::checks::gate::admit(db, id, expected_head)?;
     flow::check_places(&record.repository, &record.worktree, &record.git_dir)?;
     let git_dir = repository.join(".git");
     let owner = Repo::open(&repository, &git_dir, Some(&repository))?;
@@ -821,22 +823,33 @@ pub(super) fn accept_to(
         ("GIT_COMMITTER_EMAIL", identity.1),
     ];
     let message = format!("CrazyAgent: accept {}", id.as_str());
-    let moved = match &target {
-        Target::Checkout | Target::Ref => {
-            owner
-                .exec(
-                    &["update-ref", "-m", &message, &reference, &commit, &tip],
-                    None,
-                    &env,
-                    256,
-                )?
-                .code
-                == 0
-        }
-        Target::Agent(agent) => agent
-            .move_head(Some(tip.as_str()), &commit, &message)
-            .is_ok(),
+    let admitting = Transaction::new_unchecked(db, TransactionBehavior::Immediate);
+    let refused = match &admitting {
+        Ok(_) => crate::checks::gate::admit(db, id, expected_head).err(),
+        Err(_) => Some(failure("changes_unavailable")),
     };
+    let moved = refused.is_none()
+        && match &target {
+            Target::Checkout | Target::Ref => {
+                owner
+                    .exec(
+                        &["update-ref", "-m", &message, &reference, &commit, &tip],
+                        None,
+                        &env,
+                        256,
+                    )?
+                    .code
+                    == 0
+            }
+            Target::Agent(agent) => agent
+                .move_head(Some(tip.as_str()), &commit, &message)
+                .is_ok(),
+        };
+    if let Ok(admitting) = admitting {
+        admitting
+            .commit()
+            .map_err(|_| failure("changes_unavailable"))?;
+    }
     if !moved {
         let checkout = match &target {
             Target::Checkout => Some(&owner),
@@ -850,7 +863,7 @@ pub(super) fn accept_to(
         }
         record.intent = None;
         store::save(db, &record)?;
-        return Err(failure("changes_branch_moved"));
+        return Err(refused.unwrap_or_else(|| failure("changes_branch_moved")));
     }
     if stopped(Step::BranchMoved) {
         return Err(failure("changes_git_failed"));
