@@ -1159,11 +1159,11 @@ pub fn plan_show(tx: &Transaction<'_>, id: &TestId) -> Result<PlanView, StoreErr
         .query_map([found.id], |row| plan_item_view(row, &key))?
         .collect::<rusqlite::Result<Vec<PlanItemView>>>()?;
     assert!(items.len() <= ITEMS_PER_PLAN_MAX);
-    let release = match found.version_id {
+    let release: Option<String> = match found.version_id {
         None => None,
         Some(release) => Some(prepare(tx, RELEASE_NAME)?.query_row([release], |row| row.get(0))?),
     };
-    let cycle = match found.cycle_id {
+    let cycle: Option<u32> = match found.cycle_id {
         None => None,
         Some(cycle) => Some(prepare(tx, CYCLE_NUMBER)?.query_row([cycle], |row| row.get(0))?),
     };

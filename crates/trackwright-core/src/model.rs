@@ -108,6 +108,8 @@ macro_rules! named_enum {
     };
 }
 
+pub(crate) use named_enum;
+
 named_enum! {
     /// What a ticket is: new work, a defect, upkeep, or a time-boxed investigation.
     TicketKind { Feature => "feature", Bug => "bug", Chore => "chore", Spike => "spike" }

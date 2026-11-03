@@ -2,7 +2,7 @@ use crate::model::{Refusal, codes};
 use crate::store::StoreError;
 use rusqlite::{OptionalExtension, Transaction};
 
-pub const SCHEMA_VERSION: i64 = 1;
+pub const SCHEMA_VERSION: i64 = 2;
 
 const META: &str = "CREATE TABLE IF NOT EXISTS tk_meta(
     key TEXT PRIMARY KEY NOT NULL,
@@ -149,13 +149,25 @@ CREATE TRIGGER tk_evidence_no_delete BEFORE DELETE ON tk_evidence
     BEGIN SELECT RAISE(ABORT, 'tk_evidence is append-only'); END;
 ";
 
-const MIGRATIONS: [&str; SCHEMA_VERSION as usize] = [V1];
+const MIGRATIONS: [&str; SCHEMA_VERSION as usize] = [V1, crate::tests_store::SCHEMA_STEP_TWO];
 
 /// Brings the core's `tk_` tables to `SCHEMA_VERSION` inside the caller's transaction, so a
 /// host migrates them beside its own tables. Forward-only and idempotent: a current schema
 /// is left as it is. Input: the open transaction. Output: Ok, or `store_schema_newer` for a
 /// database a later core wrote.
 pub fn migrate(tx: &Transaction<'_>) -> Result<(), StoreError> {
+    migrate_to(tx, SCHEMA_VERSION)
+}
+
+/// Brings the core's `tk_` tables up to one schema step, so a test can build the file an
+/// earlier core wrote. A schema at or past the step is left as it is. Inputs: the open
+/// transaction and the step, 1 to `SCHEMA_VERSION`. Output: Ok, or `store_schema_newer`.
+pub fn migrate_to(tx: &Transaction<'_>, step: i64) -> Result<(), StoreError> {
+    assert!(step >= 1, "schema steps start at 1");
+    assert!(
+        step <= SCHEMA_VERSION,
+        "step {step} is past this core's schema"
+    );
     tx.execute_batch(META)?;
     let current: i64 = tx
         .query_row(VERSION_READ, [], |row| row.get(0))
@@ -174,10 +186,15 @@ pub fn migrate(tx: &Transaction<'_>) -> Result<(), StoreError> {
             "the tracker schema version {current} is negative"
         )));
     }
-    if current == SCHEMA_VERSION {
+    if current >= step {
         return Ok(());
     }
-    for (index, migration) in MIGRATIONS.iter().enumerate().skip(current as usize) {
+    for (index, migration) in MIGRATIONS
+        .iter()
+        .enumerate()
+        .take(step as usize)
+        .skip(current as usize)
+    {
         tx.execute_batch(migration)?;
         tx.execute(VERSION_WRITE, [index as i64 + 1])?;
     }

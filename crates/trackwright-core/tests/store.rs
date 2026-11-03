@@ -253,6 +253,8 @@ fn every_core_statement_prepares_against_a_database_holding_only_the_core_schema
     assert_eq!(
         names,
         [
+            "tk_case_criteria",
+            "tk_cases",
             "tk_checks",
             "tk_criteria",
             "tk_cycles",
@@ -261,9 +263,15 @@ fn every_core_statement_prepares_against_a_database_holding_only_the_core_schema
             "tk_evidence",
             "tk_links",
             "tk_meta",
+            "tk_plan_items",
+            "tk_plans",
             "tk_policy",
             "tk_projects",
             "tk_requests",
+            "tk_results",
+            "tk_runs",
+            "tk_set_cases",
+            "tk_sets",
             "tk_tickets",
             "tk_versions",
         ]

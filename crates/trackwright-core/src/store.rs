@@ -684,7 +684,10 @@ pub(crate) fn refusal(code: &'static str, message: impl Into<String>) -> StoreEr
     StoreError::Refused(Refusal::new(code, message))
 }
 
-fn write<T>(
+/// Runs one write inside a savepoint, so a refused or failed write leaves no row and no
+/// event. Inputs: the transaction and the write. Output: the write's value, or its error
+/// after the savepoint rolled back.
+pub(crate) fn write<T>(
     tx: &Transaction<'_>,
     body: impl FnOnce() -> Result<T, StoreError>,
 ) -> Result<T, StoreError> {
@@ -706,7 +709,9 @@ fn write<T>(
     }
 }
 
-fn current(what: &str, stored: i64, expected: i64) -> Result<(), StoreError> {
+/// Refuses a write made from a stale read. Inputs: what is written, its stored version and
+/// the version the caller read. Output: Ok, or `stale_version`.
+pub(crate) fn current(what: &str, stored: i64, expected: i64) -> Result<(), StoreError> {
     if stored == expected {
         return Ok(());
     }
