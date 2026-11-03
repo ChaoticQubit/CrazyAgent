@@ -3159,7 +3159,8 @@ impl TeamRuntime {
         Ok(())
     }
 
-    /// Answers the team calls a project's live master made since the last tick.
+    /// Answers the team calls a project's live master made since the last tick, or only the
+    /// memory calls of a master with tools running without its live terminal.
     /// Takes the setup and live access. Returns any SQLite failure.
     fn serve_live_calls(
         &mut self,
@@ -3169,10 +3170,18 @@ impl TeamRuntime {
         let Some(id) = self.master(&stored.project_id) else {
             return Ok(());
         };
-        if !self.workers[&id].live || !self.workers[&id].team_tool {
+        if !self.workers[&id].team_tool {
             return Ok(());
         }
         let mailbox = self.mailbox(id);
+        if !self.workers[&id].live {
+            return super::master::serve_memory_calls(
+                &mut self.connection,
+                &stored.project_id,
+                &mailbox,
+            )
+            .map(drop);
+        }
         let agents = self.state.join("agents");
         let answering = super::master::Answering {
             access,
@@ -5358,7 +5367,7 @@ impl TeamRuntime {
         }
         let live = self.live_master(&stored.project_id, role, launch);
         let agent_tools = role == AgentRole::Sub && tools && self.delegation_tool.is_some();
-        if (live && tools) || agent_tools {
+        if (role == AgentRole::Master && tools) || agent_tools {
             private_directory(&tmp.join(tool::MAILBOX_FOLDER)).map_err(|e| {
                 with_code("the master's tool mailbox could not be made", Some(&e.0))
             })?;
@@ -5740,8 +5749,11 @@ impl TeamRuntime {
                 let engine = engine
                     .verified_path()
                     .map_err(|e| with_code("the delegate engine changed", Some(&e.0)))?;
+                let off = self.off_tools(project, id, role).map_err(|e| {
+                    with_code("the team tool switches could not be read", Some(&e.0))
+                })?;
                 context
-                    .with_team_tool(engine, &self.tool_record(id))
+                    .with_team_tool(engine, &self.tool_record(id), &self.mailbox(id), &off)
                     .map_err(unread)
             }
             _ if master && !tools => context

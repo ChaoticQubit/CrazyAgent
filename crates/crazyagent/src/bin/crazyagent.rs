@@ -21,7 +21,7 @@ crazyagent tui\n\
 crazyagent tui SOCKET\n\
 crazyagent service install|uninstall|status|start|stop|link-cli\n\
 crazyagent update [--check] [--channel stable|dev]\n\
-crazyagent team-mcp DROP_FILE\n\
+crazyagent team-mcp DROP_FILE [MAILBOX_DIR [OFF_TOOL ...]]\n\
 crazyagent team-mcp-live MAILBOX_DIR [OFF_TOOL ...]\n\
 crazyagent team-mcp-agent MAILBOX_DIR [OFF_TOOL ...]\n\
 crazyagent coord-hook post-tool|stop|asked|notification|prompt|edit MAILBOX_DIR\n\
@@ -102,17 +102,26 @@ fn main() -> ExitCode {
         .first()
         .is_some_and(|arg| arg == crazyagent::team::tool::SERVER_COMMAND)
     {
-        let result = if args.len() != 2 {
-            Err("usage: crazyagent team-mcp DROP_FILE".to_owned())
-        } else {
-            crazyagent::team::tool::serve(
-                io::stdin().lock(),
-                io::stdout().lock(),
-                Path::new(&args[1]),
-                None,
-                &[],
-            )
-            .map_err(|e| e.to_string())
+        let off: Option<Vec<String>> = args
+            .get(3..)
+            .unwrap_or_default()
+            .iter()
+            .map(|arg| arg.to_str().map(str::to_owned))
+            .collect();
+        let result = match off {
+            Some(off) if args.len() >= 2 && crazyagent::team::tool::known_tools(&off) => {
+                crazyagent::team::tool::serve(
+                    io::stdin().lock(),
+                    io::stdout().lock(),
+                    Path::new(&args[1]),
+                    args.get(2).map(Path::new),
+                    &off,
+                )
+                .map_err(|e| e.to_string())
+            }
+            _ => {
+                Err("usage: crazyagent team-mcp DROP_FILE [MAILBOX_DIR [OFF_TOOL ...]]".to_owned())
+            }
         };
         return match result {
             Ok(()) => ExitCode::SUCCESS,

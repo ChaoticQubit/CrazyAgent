@@ -436,6 +436,29 @@ pub fn team_tools_section(off: &[String]) -> String {
     section
 }
 
+/// Renders the section that names the memory tools of a team master running without its
+/// live terminal, less the ones switched off, and says that only they keep what later
+/// sessions and the owner see. Takes the tools left out. Returns the markdown, empty when
+/// both are off.
+fn memory_tools_section(off: &[String]) -> String {
+    let lines: String = crate::coord::tool_switches::BUILTIN_TOOLS
+        .iter()
+        .filter(|(name, _)| {
+            crate::team::tool::MEMORY_TOOLS.contains(name) && !off.iter().any(|tool| tool == name)
+        })
+        .map(|(name, line)| format!("- {name}: {line}\n"))
+        .collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+    let section = format!(
+        "\n## Memory tools\n\nYour memory tools are in the `{}` MCP server. Keep what later sessions should know with remember: the owner sees it in Project memory, and memory you keep anywhere else is never seen there:\n{lines}",
+        crate::team::tool::SERVER_NAME
+    );
+    assert!(section.len() <= TOOLS_SECTION_BYTES_MAX);
+    section
+}
+
 fn engine_root(connection: &Connection) -> Result<PathBuf, LaunchError> {
     Ok(connection
         .path()
@@ -539,12 +562,27 @@ impl AgentContext {
         self
     }
 
-    /// Adds the engine's own MCP server that gives a team master with tools on its `delegate` tool.
-    /// Input: the absolute canonical engine executable that serves it and the absolute drop file
-    /// in the master's private temporary folder. Output: the context, or a plain code when a path
-    /// is not plain or an approved server already uses the name.
-    pub fn with_team_tool(self, executable: &Path, drop: &Path) -> Result<Self, LaunchError> {
-        self.with_team_server(executable, crate::team::tool::SERVER_COMMAND, drop, &[])
+    /// Adds the engine's own MCP server that gives a team master with tools on, running
+    /// without its live terminal, its `delegate` tool and its `remember` and `recall` tools,
+    /// answered by the engine through the mailbox folder, and the section that names those
+    /// two. Input: the absolute canonical engine executable that serves it, the absolute drop
+    /// file and mailbox in the master's private temporary folder and the team tools left out.
+    /// Output: the context, or a plain code when a path is not plain or an approved server
+    /// already uses the name.
+    pub fn with_team_tool(
+        self,
+        executable: &Path,
+        drop: &Path,
+        mailbox: &Path,
+        off: &[String],
+    ) -> Result<Self, LaunchError> {
+        self.with_team_server(
+            executable,
+            crate::team::tool::SERVER_COMMAND,
+            &[drop, mailbox],
+            off,
+        )
+        .map(|context| context.with_memory_section(off))
     }
 
     /// Adds the engine's own MCP server that gives a live team master with tools on its team
@@ -561,7 +599,7 @@ impl AgentContext {
         self.with_team_server(
             executable,
             crate::team::tool::LIVE_SERVER_COMMAND,
-            mailbox,
+            &[mailbox],
             off,
         )
         .map(|context| context.with_tools_section(off))
@@ -581,7 +619,7 @@ impl AgentContext {
         self.with_team_server(
             executable,
             crate::team::tool::AGENT_SERVER_COMMAND,
-            mailbox,
+            &[mailbox],
             off,
         )
         .map(|context| context.with_tools_section(off))
@@ -593,11 +631,17 @@ impl AgentContext {
         self
     }
 
+    fn with_memory_section(mut self, off: &[String]) -> Self {
+        self.instructions.push_str(&memory_tools_section(off));
+        assert!(self.instructions.len() <= MASTER_INSTRUCTIONS_BYTES_MAX);
+        self
+    }
+
     fn with_team_server(
         mut self,
         executable: &Path,
         subcommand: &str,
-        drop: &Path,
+        folders: &[&Path],
         off: &[String],
     ) -> Result<Self, LaunchError> {
         if !crate::team::tool::known_tools(off) {
@@ -610,7 +654,14 @@ impl AgentContext {
                 .filter(|text| !text.chars().any(char::is_control))
                 .map(str::to_owned)
         };
-        let (Some(command), Some(drop)) = (plain(executable), plain(drop)) else {
+        let (Some(command), Some(folders)) = (
+            plain(executable),
+            folders
+                .iter()
+                .copied()
+                .map(&plain)
+                .collect::<Option<Vec<String>>>(),
+        ) else {
             return Err(failure("launch_context_team_tool_invalid"));
         };
         let name = crate::team::tool::SERVER_NAME;
@@ -626,8 +677,8 @@ impl AgentContext {
             name: name.into(),
             spec: ServerSpec::Stdio {
                 command,
-                args: [subcommand.to_owned(), drop]
-                    .into_iter()
+                args: std::iter::once(subcommand.to_owned())
+                    .chain(folders)
                     .chain(off.iter().cloned())
                     .collect(),
             },
