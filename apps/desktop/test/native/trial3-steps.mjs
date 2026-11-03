@@ -13,11 +13,12 @@ const MASTER_MS = Math.min(TEAM_MS, 600000);
 const STOP_MS = Math.min(TEAM_MS, 300000);
 const FIXTURE_INSTRUCTIONS = "# Mandatory workflow\n\nFixture instruction set for the trial 3 offline proof.\n";
 const INSTRUCTIONS = { first: "# Mandatory workflow", bytes: MODE === "fixture" ? Buffer.byteLength(FIXTURE_INSTRUCTIONS) : 12848 };
-const SETTINGS = { landOn: "trial3-land", background: "wait", worker: "Chosen skills", nudges: "First edit", finished: "Show", network: "https", input: "Both" };
+const SETTINGS = { landOn: process.env.TRIAL_LAND_ON ?? "trial3-land", background: "wait", worker: "Chosen skills", nudges: "First edit", finished: "Show", network: "https", input: "Both" };
 const RUNNING = ["starting", "idle", "working"];
 const WORKER_BOX = "//*[@role=\"group\"][@aria-label=\"Skills per role\"]/div[.//*[@aria-label=\"Worker skills\"]]//label[.//input[@type=\"checkbox\"]]";
 const STATE_WORDS = ["Ready to review", "Conflicts with your branch", "Agent is updating", "Accepted", "Discarded", "Landed outside the app"];
 assert(Number.isFinite(SETUP_MS) && SETUP_MS > 0, "the setup deadline is positive");
+assert.match(SETTINGS.landOn, /^trial[0-9]{1,2}-land$/, "TRIAL_LAND_ON names the trial<n>-land branch the runner seeded");
 
 /** Reads the worker skill boxes the Agents tab shows. Output: [{ name, on }] in screen order. */
 async function workerSkills() {
@@ -167,7 +168,7 @@ export const TRIAL3_STEPS = [
     slug: "land-on",
     it: "sets Land on",
     title: `Set Land on to ${SETTINGS.landOn}`,
-    why: "18.13 Land on (Q1): the master's merges and Accept land on trial3-land, not on main",
+    why: `18.13 Land on (Q1): the master's merges and Accept land on ${SETTINGS.landOn}, not on main`,
     action: async () => {
       await tab("agents");
       const field = `[id="tg-land-on-${project()}"]`;
@@ -379,7 +380,7 @@ export const TRIAL3_STEPS = [
     slug: "changes",
     it: "shows the merges in Changes",
     title: "Changes shows the merges",
-    why: "Each lead's merged work shows as a change set that lands on trial3-land (Land on, DEC-095)",
+    why: `Each lead's merged work shows as a change set that lands on ${SETTINGS.landOn} (Land on, DEC-095)`,
     action: async () => {
       const wait = team();
       await tab("changes");

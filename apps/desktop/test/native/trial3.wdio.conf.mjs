@@ -221,6 +221,20 @@ function checkLive() {
   assert(existsSync(process.env.TRIAL_PROMPT), `no trial prompt at ${process.env.TRIAL_PROMPT}`);
 }
 
+/** Turns off @wdio/tauri-service's focus recovery for the session by switching to the app's own
+ * window once, as an explicit switchToWindow does. Without it the service asks the page for
+ * window states before every find and click through the @wdio/tauri-plugin guest API, which this
+ * build does not ship, so each of those commands waited 5 s ("Tauri core.invoke not available
+ * after 5s timeout"). The app has one window. Input: the browser. A failed switch is printed
+ * and the run goes on at the slow pace. */
+async function keepWindow(browser) {
+  try {
+    await browser.switchToWindow(await browser.getWindowHandle());
+  } catch (failure) {
+    console.warn(`trial: focus recovery stays on, so finds and clicks wait 5 s each: ${failure?.message ?? failure}`);
+  }
+}
+
 export const config = {
   runner: "local",
   specs: [fileURLToPath(new URL("trial3.e2e.mjs", import.meta.url))],
@@ -253,6 +267,7 @@ export const config = {
   },
   before: async function () {
     await globalThis.browser.setWindowSize(1440, 960);
+    await keepWindow(globalThis.browser);
   },
   onComplete: async function () {
     if (seeding) await seeding;
