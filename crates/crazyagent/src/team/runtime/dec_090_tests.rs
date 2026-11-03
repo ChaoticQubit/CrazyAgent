@@ -186,7 +186,7 @@ const LAUNCH_FILES: [(&str, &str); 7] = [
     ),
 ];
 
-const LAUNCH_NAMES: [&str; 7] = [
+const LAUNCH_NAMES: [&str; 12] = [
     "claude.md",
     "agents.md",
     "agents.override.md",
@@ -194,9 +194,14 @@ const LAUNCH_NAMES: [&str; 7] = [
     "crazyagent",
     "crazyagent-relay",
     "skills/crazyagent",
+    "agents",
+    "commands",
+    "output-styles",
+    "rules",
+    "settings.json",
 ];
 
-const LAUNCH_ATTEMPTS: [(&str, &str); 23] = [
+const LAUNCH_ATTEMPTS: [(&str, &str); 37] = [
     ("overwrite_claude", "printf planted > {p}/CLAUDE.md"),
     ("append_agents", "printf planted >> {p}/AGENTS.md"),
     ("create_override", "printf planted > {p}/AGENTS.override.md"),
@@ -253,22 +258,79 @@ const LAUNCH_ATTEMPTS: [(&str, &str); 23] = [
         "mkdir -p {p}/ll2/crazyagent/rules && printf planted > {p}/ll2/crazyagent/rules/SKILL.md && mv {p}/skills {p}/skills-away && mv {p}/ll2 {p}/skills",
     ),
     ("case_skills_move", "mv {p}/Skills {p}/skills-moved"),
+    (
+        "new_skill",
+        "mkdir -p {p}/skills/planted && printf planted > {p}/skills/planted/SKILL.md",
+    ),
+    (
+        "case_new_skill",
+        "mkdir -p {p}/Skills/Planted && printf planted > {p}/Skills/Planted/SKILL.md",
+    ),
+    (
+        "hidden_skill",
+        "mkdir -p {p}/skills/.planted && printf planted > {p}/skills/.planted/SKILL.md",
+    ),
+    (
+        "shorter_than_system",
+        "mkdir -p {p}/skills/.syst && printf planted > {p}/skills/.syst/SKILL.md",
+    ),
+    (
+        "longer_than_system",
+        "mkdir -p {p}/skills/.systems && printf planted > {p}/skills/.systems/SKILL.md",
+    ),
+    ("skill_file", "printf planted > {p}/skills/SKILL.md"),
+    (
+        "subagent",
+        "mkdir -p {p}/agents && printf planted > {p}/agents/planted.md",
+    ),
+    (
+        "case_subagent",
+        "mkdir -p {p}/Agents && printf planted > {p}/Agents/planted.md",
+    ),
+    (
+        "subagents_moved_in",
+        "mkdir -p {p}/ll2-agents && printf planted > {p}/ll2-agents/planted.md && mv {p}/ll2-agents {p}/agents",
+    ),
+    (
+        "command",
+        "mkdir -p {p}/commands && printf planted > {p}/commands/planted.md",
+    ),
+    (
+        "output_style",
+        "mkdir -p {p}/output-styles && printf planted > {p}/output-styles/planted.md",
+    ),
+    (
+        "rule",
+        "mkdir -p {p}/rules && printf planted > {p}/rules/planted.md",
+    ),
+    ("settings", "printf planted > {p}/settings.json"),
+    ("case_settings", "printf planted > {p}/Settings.JSON"),
 ];
 
-const LAUNCH_ALLOWED: [(&str, &str); 3] = [
+const LAUNCH_ALLOWED: [(&str, &str); 5] = [
     ("own_home", "printf ok > {p}/ll2-note"),
     (
         "harness_state",
         "mkdir -p {p}/skills/.system && printf ok > {p}/skills/.system/ll2-note",
+    ),
+    (
+        "harness_state_case",
+        "mkdir -p {p}/skills/.System && printf ok > {p}/skills/.System/ll2-note-case",
+    ),
+    (
+        "claude_state",
+        "mkdir -p {p}/projects/ll2 && printf ok > {p}/projects/ll2/note",
     ),
     ("worktree", "printf ok > ll2-note"),
 ];
 
 /// Seeds the agent's own home with the instruction, skill and hook files the engine writes
 /// there before each launch, lets a tools-on agent try to change them every way a shell
-/// can, in any letter case and by swapping in the folder above them (LL-2, r1), and
-/// requires every attempt refused, those files byte for byte unchanged and the agent
-/// still able to write the rest of its home and its worktree.
+/// can, in any letter case and by swapping in the folder above them (LL-2, r1), and to add
+/// a skill, subagent, command, output style, rule or settings file its harness would load
+/// (LL-2 residual), and requires every attempt refused, those files byte for byte unchanged
+/// and the agent still able to write the rest of its home, Codex's own system skills and
+/// its worktree.
 /// Input: the launch harness and its real executable.
 fn agent_cannot_change_its_own_launch_files(harness: &'static str, executable: &Path) {
     let agent = ManagedAgent::new(harness, executable);

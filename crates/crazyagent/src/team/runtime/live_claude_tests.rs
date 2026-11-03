@@ -40,6 +40,28 @@ fn a_real_claude_team_agent_turn_is_signed_in_inside_the_agent_sandbox() {
     assert!(!rules.contains(managed.to_str().unwrap()));
 }
 
+/// LL-2: a real Claude Code team agent runs a turn with the launch files of its own home read
+/// only and no write allowed to the skills, agents, commands, output-styles, rules or
+/// settings.json Claude Code would load from there: the turn succeeds and it answers from the
+/// instructions the engine gave it. It prints its home, so the run's Seatbelt denials can
+/// be read for any write Claude Code itself tried there.
+#[test]
+#[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
+fn a_real_claude_agent_reads_its_instructions_with_its_home_config_read_only() {
+    let mut signed_in = SignedIn::claude();
+    let agent = ManagedAgent::new("claude-code", &claude());
+    let instructions = format!("## Codeword\n\nThe codeword is {FIRST_CODEWORD}.\n");
+    crate::agent_home::save_app(&agent.base, &instructions).unwrap();
+    let profile = signed_in.acquire("claude-live-home-config");
+    let (text, end, cause) = agent.run_turn(profile, ASK_FIRST, TURN);
+    println!(
+        "real claude agent with read-only home config: home={} end={end:?} cause={cause:?} reply={text:?}",
+        agent.home.display()
+    );
+    assert_eq!(end, TurnEnd::Success, "{cause:?}");
+    assert!(text.contains(FIRST_CODEWORD), "{text}");
+}
+
 /// The texts of one kind of entry in the transcript Claude Code keeps: each `user` or
 /// `assistant` line's message content, a plain string or its text blocks joined.
 /// Inputs: the transcript path and the entry type. Output: the texts in transcript order.
