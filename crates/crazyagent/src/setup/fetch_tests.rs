@@ -63,6 +63,7 @@ fn entry(id: &str, kind: PackKind, source: PackSource, install: &str) -> PackMan
         license: "MIT".into(),
         on_by_default: true,
         install: install.into(),
+        integrity: None,
     }
 }
 

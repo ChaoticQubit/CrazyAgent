@@ -101,6 +101,7 @@ pub(super) async fn serve(
     for (id, executable) in [
         ("codex", runtime.registered_codex_executable()),
         ("claude-code", runtime.registered_claude_executable()),
+        ("rcli", runtime.registered_rcli_master_executable()),
     ] {
         if let Ok(executable) = executable
             && let Ok(path) = executable.verified_path()

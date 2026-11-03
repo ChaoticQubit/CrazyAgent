@@ -24,17 +24,23 @@ pub fn run(
 ) -> Result<(bool, Vec<u8>), InstallError> {
     assert!(program.is_absolute());
     let mut command = Command::new(program);
+    command.args(args).env_clear().current_dir(cwd);
+    for (name, value) in env {
+        command.env(name, value);
+    }
+    run_command(command, limit)
+}
+
+/// Runs one prepared command, such as a sandboxed one, with no input and a time bound, then
+/// stops its whole process group. Inputs: the command and the bound. Output: whether it
+/// exited with success and at most `OUTPUT_BYTES_MAX` bytes of its standard output, or
+/// `setup_timeout`.
+pub fn run_command(mut command: Command, limit: Duration) -> Result<(bool, Vec<u8>), InstallError> {
     command
-        .args(args)
-        .env_clear()
-        .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .process_group(0);
-    for (name, value) in env {
-        command.env(name, value);
-    }
     let mut child =
         crate::spawn_gate::spawn(&mut command).map_err(|_| InstallError("setup_install_failed"))?;
     let pid = child.id();

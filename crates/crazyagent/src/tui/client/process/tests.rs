@@ -143,8 +143,12 @@ async fn a_save_past_what_a_claude_master_takes_is_kept_and_warns_with_the_limit
     );
     assert!(both.bytes > both.claude_bytes_max);
     let warning = both.claude_warning().expect("the save warns");
+    let room = format!(
+        "a Claude master takes {:.1} KB",
+        f64::from(claude_room()) / 1024.0
+    );
     assert!(
-        warning.contains("a Claude master takes 27.5 KB")
+        warning.contains(&room)
             && warning.contains(&format!("not {:.1} KB", given.text.len() as f64 / 1024.0)),
         "{warning}"
     );
@@ -315,7 +319,7 @@ async fn the_tui_saves_both_texts_through_the_engine_and_every_launch_reads_them
         std::fs::set_permissions(folder, std::fs::Permissions::from_mode(0o700)).unwrap();
     }
     crate::agent_home::prepare(&home, crate::agent_home::Harness::Codex, &launch, &given).unwrap();
-    crate::agent_home::record_skills(&home, &[]).unwrap();
+    crate::agent_home::record_skills(&launch.data, &home, &[]).unwrap();
     let Ok(ProcessReply::Agent(view)) = native.process(asked.clone()).await.result else {
         panic!("the launched agent's view is read through the engine");
     };
@@ -404,7 +408,7 @@ async fn the_tui_saves_both_texts_through_the_engine_and_every_launch_reads_them
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_tui_reads_and_stores_every_agent_setting_through_the_engine() {
     use crate::engine::owner::{InstructionSettings, InstructionView};
-    use crate::instruction_files::Choice;
+    use crate::instruction_files::Mode;
     let root = private_root("ca-tsettings-");
     let work = private_root("ca-tsettings-work-");
     let folder = std::fs::canonicalize(work.path()).unwrap().join("project");
@@ -440,12 +444,23 @@ async fn the_tui_reads_and_stores_every_agent_setting_through_the_engine() {
             settings: InstructionSettings::default(),
             version: 0
         })),
-        "a project the owner never changed gets the project's files and keeps transcripts"
+        "a project the owner never changed gets both texts and keeps transcripts"
     );
     let mut version = 0;
-    for files in [Choice::ProjectAndUser, Choice::None, Choice::Project] {
-        for transcripts in [false, true] {
-            let settings = InstructionSettings { files, transcripts };
+    let every = [Mode::ProjectOnly, Mode::AppOnly, Mode::Both]
+        .into_iter()
+        .flat_map(|mode| [false, true].map(|transcripts| (mode, transcripts)));
+    for (mode, transcripts) in every {
+        for edits in [
+            crate::instruction_files::EditDelivery::NextMessage,
+            crate::instruction_files::EditDelivery::Restart,
+            crate::instruction_files::EditDelivery::Badge,
+        ] {
+            let settings = InstructionSettings {
+                mode,
+                transcripts,
+                edits,
+            };
             let saved = InstructionView {
                 settings,
                 version: version + 1,
@@ -492,8 +507,8 @@ async fn the_tui_reads_and_stores_every_agent_setting_through_the_engine() {
             assert_eq!(
                 crate::launch_context::agent_project(&tx, &project)
                     .unwrap()
-                    .files,
-                files,
+                    .mode,
+                mode,
                 "the next launch reads the stored choice"
             );
             drop(tx);

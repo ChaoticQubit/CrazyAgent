@@ -1,16 +1,17 @@
 use crate::engine::EngineError;
+use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-const GIT: &str = "/usr/bin/git";
 pub(super) const OUTPUT_BYTES_MAX: usize = 64 * 1024 * 1024;
 pub(super) const LISTING_BYTES_MAX: usize = 64 * 1024;
 const STEP_TIME: Duration = Duration::from_secs(90);
 const POLL: Duration = Duration::from_millis(2);
 const VERSION_MIN: (u32, u32) = (2, 40);
 const EXCLUDES_PATH_BYTES_MAX: usize = 1024;
+const CHECK_LINE_BYTES_MAX: usize = 80;
 
 #[cfg(test)]
 thread_local! {
@@ -18,6 +19,9 @@ thread_local! {
     /// that test reads that home's global ignore rules. None keeps the process's HOME.
     pub(super) static OWNER_HOME: std::cell::RefCell<Option<PathBuf>> =
         const { std::cell::RefCell::new(None) };
+    /// How many git commands engine git started on this thread, so a landing test can
+    /// count what one read costs.
+    pub(super) static GIT_RUNS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// The settings every engine git call carries on top of the research runner's
@@ -84,7 +88,7 @@ pub(super) fn owner_excludes(home: &Path, xdg: Option<&Path>) -> Option<PathBuf>
         return None;
     }
     let xdg = xdg.filter(|xdg| xdg.is_absolute());
-    let mut command = Command::new(GIT);
+    let mut command = Command::new(crate::research::runner::setup_git());
     command
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
@@ -128,9 +132,10 @@ pub(super) fn owner_excludes(home: &Path, xdg: Option<&Path>) -> Option<PathBuf>
 }
 
 /// A repository the engine runs git on through a git folder and work tree it computed
-/// itself, never a `.git` file in the work tree. Every call runs the host git with a
-/// cleared environment, no system or global config, no system attributes, hooks,
-/// fsmonitor, pager, submodule recursion, protocols or upkeep, and with every filter
+/// itself, never a `.git` file in the work tree. Every call runs the real git, not the
+/// `/usr/bin/git` xcrun shim where xcrun resolves it, with a cleared environment, no
+/// system or global config, no system attributes, hooks, fsmonitor, pager, submodule
+/// recursion, protocols or upkeep, and with every filter
 /// driver the repository's own config names blanked. A work tree also honours the
 /// owner's global ignore file, so what the owner's git ignores the engine never stages.
 pub(super) struct Repo {
@@ -138,16 +143,28 @@ pub(super) struct Repo {
     work_tree: Option<PathBuf>,
     overrides: Vec<String>,
     excludes: Option<String>,
+    index: Option<PathBuf>,
 }
 
 impl Repo {
     /// Opens a repository for engine git calls, lists the filter drivers to blank and,
-    /// for a work tree, finds the owner's global ignore file. Inputs: the git folder and
-    /// the work tree, none for object and ref work only. Output: the repository, or
-    /// `changes_git_unsupported` for a git older than 2.40 or a filter name a `-c`
-    /// cannot carry.
+    /// for a work tree, finds the owner's global ignore file. The git folder is always the
+    /// owner checkout's own `.git` or a linked worktree's folder directly in its
+    /// `.git/worktrees`, never an agent's own clone, whose config is the agent's (CC-N1).
+    /// Inputs: the owner checkout root, the git folder and the work tree, none for object
+    /// and ref work only. Output: the repository, or `changes_git_unsupported` for a git
+    /// older than 2.40 or a filter name a `-c` cannot carry.
     #[cfg(unix)]
-    pub(super) fn open(git_dir: &Path, work_tree: Option<&Path>) -> Result<Self, EngineError> {
+    pub(super) fn open(
+        repository: &Path,
+        git_dir: &Path,
+        work_tree: Option<&Path>,
+    ) -> Result<Self, EngineError> {
+        let metadata = repository.join(".git");
+        assert!(
+            git_dir == metadata || git_dir.parent() == Some(metadata.join("worktrees").as_path()),
+            "engine git opens only the owner checkout's git folder or a linked worktree's"
+        );
         let excludes = work_tree
             .and_then(|_| {
                 let (home, xdg) = owner_folders();
@@ -162,6 +179,7 @@ impl Repo {
             work_tree: work_tree.map(Path::to_path_buf),
             overrides: Vec::new(),
             excludes,
+            index: None,
         };
         repo.check_version()?;
         let listing = repo.capture(
@@ -175,10 +193,14 @@ impl Repo {
     }
 
     /// Refuses engine git where the host git and the research runner's filter listing
-    /// do not exist. Takes the git folder and work tree, unused.
+    /// do not exist. Takes the checkout root, git folder and work tree, unused.
     /// Returns `changes_unavailable`.
     #[cfg(not(unix))]
-    pub(super) fn open(_git_dir: &Path, _work_tree: Option<&Path>) -> Result<Self, EngineError> {
+    pub(super) fn open(
+        _repository: &Path,
+        _git_dir: &Path,
+        _work_tree: Option<&Path>,
+    ) -> Result<Self, EngineError> {
         Err(failure("changes_unavailable"))
     }
 
@@ -193,7 +215,16 @@ impl Repo {
             work_tree: Some(work_tree.to_path_buf()),
             overrides: Vec::new(),
             excludes: None,
+            index: None,
         }
+    }
+
+    /// Points every later git call at a private index file the engine owns, so reading a
+    /// work tree, such as an agent's own clone, neither reads nor writes an index in it.
+    /// Input: the index path, which git creates. Output: the repository.
+    pub(super) fn private_index(mut self, index: &Path) -> Self {
+        self.index = Some(index.to_path_buf());
+        self
     }
 
     fn check_version(&self) -> Result<(), EngineError> {
@@ -212,7 +243,7 @@ impl Repo {
     }
 
     fn command(&self, args: &[&str], env: &[(&str, &str)]) -> Command {
-        let mut command = Command::new(GIT);
+        let mut command = Command::new(crate::research::runner::setup_git());
         command
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -224,6 +255,7 @@ impl Repo {
             .env("GIT_NO_LAZY_FETCH", "1")
             .env("GIT_NO_REPLACE_OBJECTS", "1")
             .envs(env.iter().copied())
+            .envs(self.index.iter().map(|index| ("GIT_INDEX_FILE", index)))
             .arg("--no-optional-locks")
             .args(crate::research::runner::GIT_SAFE)
             .args(ENGINE_SETTINGS)
@@ -259,6 +291,8 @@ impl Repo {
         limit: usize,
     ) -> Result<Output, EngineError> {
         let mut command = self.command(args, env);
+        #[cfg(test)]
+        GIT_RUNS.with(|runs| runs.set(runs.get() + 1));
         command.stdin(if input.is_some() {
             Stdio::piped()
         } else {
@@ -341,6 +375,40 @@ impl Repo {
             1 => Ok(false),
             _ => Err(failure("changes_git_failed")),
         }
+    }
+
+    /// Says which of the given object ids name a commit here, with one git run for all of
+    /// them. Input: the ids; one that is not an object id is never sent. Output: the ids
+    /// that are commits; a missing id or one naming another object type is left out.
+    pub(super) fn commits_among(&self, ids: &[&str]) -> Result<BTreeSet<String>, EngineError> {
+        let asked: Vec<&str> = ids.iter().copied().filter(|id| is_object_id(id)).collect();
+        if asked.is_empty() {
+            return Ok(BTreeSet::new());
+        }
+        let input: String = asked.iter().map(|id| format!("{id}\n")).collect();
+        let output = self.exec(
+            &["cat-file", "--batch-check=%(objectname) %(objecttype)"],
+            Some(input.as_bytes()),
+            &[],
+            asked.len() * CHECK_LINE_BYTES_MAX,
+        )?;
+        if output.code != 0 || output.overflow {
+            return Err(failure("changes_git_failed"));
+        }
+        let text =
+            std::str::from_utf8(&output.stdout).map_err(|_| failure("changes_git_failed"))?;
+        let lines: Vec<&str> = text.lines().collect();
+        if lines.len() != asked.len() {
+            return Err(failure("changes_git_failed"));
+        }
+        let commits: BTreeSet<String> = asked
+            .iter()
+            .zip(lines)
+            .filter(|(id, line)| line.strip_prefix(**id) == Some(" commit"))
+            .map(|(id, _)| (*id).to_owned())
+            .collect();
+        assert!(commits.len() <= asked.len());
+        Ok(commits)
     }
 
     /// Resolves a revision to a commit id. Input: the revision. Output: the id, or None

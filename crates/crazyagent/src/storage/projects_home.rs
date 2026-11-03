@@ -4,7 +4,7 @@ use crate::projects_home::{
     ProjectsHome, Registered,
 };
 use std::ffi::OsStr;
-use std::path::PathBuf;
+use std::path::{Component, PathBuf};
 
 const FOUND_REPLY_BYTES: usize = 48 * 1024;
 
@@ -94,17 +94,19 @@ fn engine_root(path: &Path) -> Result<PathBuf, EngineError> {
 }
 
 /// Lists every set-up project, none left out, so the trash guard and the
-/// Found list see them all: each project's folder and whether onboarding is
-/// still under way. An onboarded project is Ready once the owner saved its
-/// setup, or its graph step is done or off and its mapping is done; a project
-/// made with New Project has no onboarding row and is Ready at once.
+/// Found list see them all: each project's folder, the repositories it
+/// declares and whether onboarding is still under way. An onboarded project
+/// is Ready once the owner saved its setup, or its graph step is done or off
+/// and its mapping is done; a project made with New Project has no onboarding
+/// row and is Ready at once.
 fn registered(tx: &Transaction<'_>) -> Result<Vec<Registered>, EngineError> {
     let done = crate::onboarding::Step::Done.columns().0;
     let off = crate::onboarding::Step::Off.columns().0;
     let mut statement = tx
         .prepare(
-            "SELECT s.body, o.graph_state, o.mapping_state FROM project_setups s
+            "SELECT s.body, o.graph_state, o.mapping_state, p.body FROM project_setups s
              LEFT JOIN onboarding o ON o.project=s.project
+             LEFT JOIN projects p ON p.id=s.project
              ORDER BY s.project",
         )
         .map_err(error)?;
@@ -114,14 +116,19 @@ fn registered(tx: &Transaction<'_>) -> Result<Vec<Registered>, EngineError> {
                 row.get::<_, String>(0)?,
                 row.get::<_, Option<String>>(1)?,
                 row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
             ))
         })
         .map_err(error)?;
     let mut projects = Vec::new();
     for row in rows {
-        let (body, graph, mapping) = row.map_err(error)?;
+        let (body, graph, mapping, project) = row.map_err(error)?;
         let stored: crate::project_setup::StoredSetup =
             serde_json::from_str(&body).map_err(error)?;
+        let repositories = match project {
+            Some(project) => declared(&project)?.1,
+            None => Vec::new(),
+        };
         let onboarding = !stored.saved()
             && graph
                 .zip(mapping)
@@ -130,7 +137,48 @@ fn registered(tx: &Transaction<'_>) -> Result<Vec<Registered>, EngineError> {
             folder: stored.project_folder(),
             project_id: stored.project_id,
             name: stored.name,
+            repositories,
             onboarding,
+        });
+    }
+    Ok(projects)
+}
+
+/// Reads a project row's body. Input: the stored body. Output: the project
+/// and the repositories it declares as paths, or the parse failure.
+fn declared(body: &str) -> Result<(crate::protocol::StoredProject, Vec<PathBuf>), EngineError> {
+    let stored: crate::protocol::StoredProject = serde_json::from_str(body).map_err(error)?;
+    let repositories = stored.spec.repositories.iter().map(PathBuf::from).collect();
+    Ok((stored, repositories))
+}
+
+/// The projects whose folders the trash and move guards keep: every set-up
+/// project, then each project made without setup that declares a repository,
+/// its first repository standing in for its folder. Input: the transaction.
+/// Output: the projects with the repositories each declares.
+fn guarded(tx: &Transaction<'_>) -> Result<Vec<Registered>, EngineError> {
+    let mut projects = registered(tx)?;
+    let mut statement = tx
+        .prepare(
+            "SELECT p.body FROM projects p
+             WHERE NOT EXISTS (SELECT 1 FROM project_setups s WHERE s.project=p.id)
+             ORDER BY p.id",
+        )
+        .map_err(error)?;
+    let rows = statement
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(error)?;
+    for row in rows {
+        let (stored, repositories) = declared(&row.map_err(error)?)?;
+        let Some(folder) = repositories.first().cloned() else {
+            continue;
+        };
+        projects.push(Registered {
+            project_id: stored.project_id,
+            name: stored.spec.name,
+            folder,
+            repositories,
+            onboarding: false,
         });
     }
     Ok(projects)
@@ -206,7 +254,7 @@ pub(super) fn add_plan(
         return Err(error("stale_revision"));
     }
     let saved = home::load(&tx)?.ok_or_else(|| error("projects_home_unset"))?;
-    home::plan_add(&saved, &engine_root(path)?, source, mode, &registered(&tx)?)
+    home::plan_add(&saved, &engine_root(path)?, source, mode, &guarded(&tx)?)
 }
 
 /// Plans a MoveProjectsHome that moves the project folders and records the
@@ -387,10 +435,10 @@ fn switch_home(tx: &Transaction<'_>, path: &Path, picked: &str) -> Result<Outcom
     }
 }
 
-/// Points every set-up project whose folder sat in the old home, under a name
-/// `arrived` accepts, at the same folder name in the new home, keeping an
-/// onboarded project's recorded `.crazyagent/` folder, its onboarding folder and
-/// each repository it lists inside that folder, where its master works.
+/// Points every set-up project whose folder sat anywhere inside a folder of the
+/// old home that `arrived` accepts at the same place in the new home, keeping an
+/// onboarded project's recorded `.crazyagent/` folder and its onboarding folder,
+/// then every project's repository inside such a folder, where its master works.
 fn rewrite_folders(
     tx: &Transaction<'_>,
     from: &Path,
@@ -410,13 +458,9 @@ fn rewrite_folders(
         let mut stored: crate::project_setup::StoredSetup =
             serde_json::from_str(&body).map_err(error)?;
         let folder = stored.project_folder();
-        let Some(name) = folder.file_name() else {
+        let Some(moved) = moved_path(&folder, from, to, &arrived) else {
             continue;
         };
-        if folder.parent() != Some(from) || !arrived(name) {
-            continue;
-        }
-        let moved = to.join(name);
         let recorded = if Path::new(&stored.folder) == folder {
             moved.clone()
         } else {
@@ -438,58 +482,70 @@ fn rewrite_folders(
             params![text(&moved)?, project],
         )
         .map_err(error)?;
-        move_repositories(tx, &project, &folder, &moved)?;
     }
-    Ok(())
+    move_repositories(tx, from, to, &arrived)
 }
 
-/// Rewrites the repositories a project lists inside its moved folder to the same
-/// place in the new folder, leaving those outside it. Inputs: the transaction,
-/// the project, its old folder and its new one. Output: the project row agrees
-/// with the move, or the bound the moved path breaks.
-fn move_repositories(
-    tx: &Transaction<'_>,
-    project: &str,
+/// Says where a path inside the old home is after a move: the same place in the
+/// new home when the home folder holding it arrived, compared component by
+/// component. Inputs: the path, both homes and the arrived test. Output: the
+/// moved path, or None for a path that stays where it is.
+fn moved_path(
+    path: &Path,
     from: &Path,
     to: &Path,
+    arrived: &impl Fn(&OsStr) -> bool,
+) -> Option<PathBuf> {
+    let rest = path.strip_prefix(from).ok()?;
+    match rest.components().next()? {
+        Component::Normal(name) if arrived(name) => Some(to.join(rest)),
+        _ => None,
+    }
+}
+
+/// Rewrites every project's repositories inside a moved folder of the old home to
+/// the same place in the new home, leaving the others. Inputs: the transaction,
+/// both homes and the arrived test. Output: the project rows agree with the move,
+/// or the bound a moved path breaks.
+fn move_repositories(
+    tx: &Transaction<'_>,
+    from: &Path,
+    to: &Path,
+    arrived: &impl Fn(&OsStr) -> bool,
 ) -> Result<(), EngineError> {
-    let Some(body) = tx
-        .query_row("SELECT body FROM projects WHERE id=?1", [project], |row| {
-            row.get::<_, String>(0)
-        })
-        .optional()
-        .map_err(error)?
-    else {
-        return Ok(());
+    let rows: Vec<(String, String)> = {
+        let mut statement = tx.prepare("SELECT id, body FROM projects").map_err(error)?;
+        let rows = statement
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(error)?;
+        rows.collect::<Result<_, _>>().map_err(error)?
     };
-    let mut stored: crate::protocol::StoredProject = serde_json::from_str(&body).map_err(error)?;
-    let mut moved = 0;
-    for repository in &mut stored.spec.repositories {
-        let Ok(rest) = Path::new(repository.as_str()).strip_prefix(from) else {
+    for (project, body) in rows {
+        let mut stored: crate::protocol::StoredProject =
+            serde_json::from_str(&body).map_err(error)?;
+        let mut moved = 0;
+        for repository in &mut stored.spec.repositories {
+            let Some(place) = moved_path(Path::new(repository.as_str()), from, to, arrived) else {
+                continue;
+            };
+            *repository = place
+                .to_str()
+                .ok_or_else(|| error("projects_home_path_invalid"))?
+                .to_owned();
+            moved += 1;
+        }
+        if moved == 0 {
             continue;
-        };
-        let place = if rest.as_os_str().is_empty() {
-            to.to_path_buf()
-        } else {
-            to.join(rest)
-        };
-        *repository = place
-            .to_str()
-            .ok_or_else(|| error("projects_home_path_invalid"))?
-            .to_owned();
-        moved += 1;
+        }
+        stored.spec.validate().map_err(error)?;
+        let changed = tx
+            .execute(
+                "UPDATE projects SET body=?1 WHERE id=?2",
+                params![serde_json::to_string(&stored).map_err(error)?, project],
+            )
+            .map_err(error)?;
+        assert_eq!(changed, 1);
     }
-    if moved == 0 {
-        return Ok(());
-    }
-    stored.spec.validate().map_err(error)?;
-    let changed = tx
-        .execute(
-            "UPDATE projects SET body=?1 WHERE id=?2",
-            params![serde_json::to_string(&stored).map_err(error)?, project],
-        )
-        .map_err(error)?;
-    assert_eq!(changed, 1);
     Ok(())
 }
 
@@ -519,7 +575,7 @@ pub(super) fn execute(
             let Some(saved) = home::load(tx)? else {
                 return rejected("projects_home_unset");
             };
-            let folder = match home::plan_trash(&saved, picked, &registered(tx)?) {
+            let folder = match home::plan_trash(&saved, picked, &guarded(tx)?) {
                 Ok(folder) => folder,
                 Err(e) => return rejected(&e.0),
             };

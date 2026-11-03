@@ -34,7 +34,7 @@ const view = (extra = {}) => ({
   project_id: "p1", graph: { kind: "done" }, mapping: { kind: "done" },
   draft: setup({ about: "A shop for plants.", tech_stack: ["Rust", "React"], platforms: ["website"] }),
   facts: { languages: ["Rust"], build_commands: ["cargo build"], test_commands: ["cargo test"], entry_points: ["src/main.rs"] },
-  missing: [], name: "Plant shop", overview: "# Plant shop\n\nBuild with `cargo build`.", finished: false, ...extra,
+  missing: [], name: "Plant shop", overview: "# Plant shop\n\nBuild with `cargo build`.", folder_overview: null, finished: false, ...extra,
 });
 
 test("each folder state has its badge, line and one action", () => {
@@ -131,20 +131,21 @@ test("the device sign-in polls only while its code works and the owner isn't sig
 test("each folder chooser names what the folder is for, and adding a project never asks for a skill folder", () => {
   const source = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
   assert.match(source("../src/api.ts"), /export function pickFolder\(purpose: FolderPurpose\)[^{]*\{\s*return call<string \| null>\("desktop_pick_folder", \{ purpose \}\);/);
-  for (const [file, purpose, count] of [
-    ["../src/screens/intake/add-folder.tsx", "project", 1],
-    ["../src/screens/intake/home-folder.tsx", "projects_home", 1],
-    ["../src/screens/settings/projects-home.tsx", "projects_home", 1],
-    ["../src/screens/settings/plugins.tsx", "skill", 2],
+  for (const [file, expected] of [
+    ["../src/screens/intake/add-folder.tsx", ['"project"']],
+    ["../src/screens/intake/home-folder.tsx", ['"projects_home"']],
+    ["../src/screens/settings/projects-home.tsx", ['"projects_home"']],
+    ["../src/screens/settings/memory.tsx", ['"memory"']],
+    ["../src/screens/settings/plugins.tsx", ['"skill"', '"skill"', '"plugin"']],
   ]) {
     const calls = [...source(file).matchAll(/\bpickFolder\(([^)]*)\)/g)].map((call) => call[1]);
-    assert.deepEqual(calls, Array(count).fill(`"${purpose}"`), file);
+    assert.deepEqual(calls, expected, file);
   }
   const lib = source("../src-tauri/src/lib.rs");
   assert.match(lib, /async fn desktop_pick_folder\(\s*window: WebviewWindow,\s*purpose: FolderPurpose,\s*\)/);
   assert.match(lib, /bridge::picker::choose\(purpose\.script\(\)\)/);
   const picker = source("../src-tauri/src/bridge/picker.rs");
-  assert.match(picker, /#\[serde\(rename_all = "snake_case"\)\]\s*pub enum FolderPurpose \{\s*Skill,\s*Project,\s*ProjectsHome,\s*\}/,
+  assert.match(picker, /#\[serde\(rename_all = "snake_case"\)\]\s*pub enum FolderPurpose \{\s*Skill,\s*Project,\s*ProjectsHome,\s*Memory,\s*Plugin,\s*\}/,
     "the web view's purpose names are the engine's");
 });
 
@@ -328,6 +329,10 @@ test("pack states read in plain words and only on or off entries count as instal
   assert.deepEqual(intake.packStateView({ state: "on" }), { word: "On", tone: "ok", line: null });
   assert.deepEqual(intake.packStateView({ state: "off" }), { word: "Off", tone: "neutral", line: null });
   assert.deepEqual(intake.packStateView({ state: "failed", reason: "Checksum didn't match." }), { word: "Failed", tone: "danger", line: "Checksum didn't match." });
+  const refused = "This folder has hooks but no .claude-plugin/plugin.json naming the plugin.";
+  assert.deepEqual(intake.packStateView({ state: "on" }, refused), { word: "On", tone: "ok", line: `Hooks not added: ${refused}` });
+  assert.deepEqual(intake.packStateView({ state: "off" }, refused), { word: "Off", tone: "neutral", line: `Hooks not added: ${refused}` });
+  assert.deepEqual(intake.packStateView({ state: "on" }, null), { word: "On", tone: "ok", line: null });
   assert.deepEqual(pack.filter(intake.installed).map((item) => item.id), ["headroom"]);
   assert.equal(intake.installed(entry("x", "skill", "workflow", true, { state: "off" })), true);
   assert.equal(intake.installed(entry("x", "skill", "workflow", true, { state: "failed", reason: "no" })), false);
@@ -486,6 +491,35 @@ test("the repository list shows each repository with Clone and a search", () => 
   assert.match(html(RepoListView, { ...base, repos: notReady }), /Not ready yet/);
 });
 
+test("an overview the engine did not write is shown apart and labelled, never as the mapping agent's", () => {
+  const catalog = ok({ tech_stack: [], platforms: [], research: [], document_extensions: [], documents_max: 16, document_bytes_max: 1, project_document_bytes_max: 1, default_team: stored().team });
+  const base = { name: "Plant shop", catalog, errors: {}, showErrors: false, busy: false, problem: "", onDraft: noop, onConfirm: noop, onOpenLink: noop, draft: null };
+  const engine = html(OnboardingReviewView, { ...base, view: ok(view()) });
+  assert.match(engine, />Overview</);
+  assert.doesNotMatch(engine, /Overview found in the folder|did not write this/);
+  const found = html(OnboardingReviewView, { ...base, view: ok(view({ overview: null, folder_overview: "# Shipped\n\nFrom the repository." })) });
+  assert.match(found, /Overview found in the folder/);
+  assert.match(found, /The mapping agent did not write this: it came with the folder or was changed since\./);
+  assert.match(found, /From the repository\./);
+  assert.doesNotMatch(found, />Overview</);
+});
+
+test("a repository CrazyAgent can't clone is listed with why and without a working Clone", () => {
+  const repos = [
+    { full_name: "octo-cat/.github", private: false, default_branch: "main", size_kb: 4, refused: "github_repo_name_unsupported" },
+    { full_name: "octo-cat/notes", private: false, default_branch: "main", size_kb: 4, refused: null },
+  ];
+  const base = { status: { signed_in: true, login: "octo-cat", method: "token", waiting: false, problem: null }, query: "", onQuery: noop, more: false, loadingMore: false, onMore: noop, cloning: null, onClone: noop };
+  const rows = html(RepoListView, { ...base, repos: ok(repos) }).split("<li").slice(1);
+  assert.equal(rows.length, 2);
+  assert.match(rows[0], /octo-cat\/\.github/);
+  assert.match(rows[0], /CrazyAgent can(&#x27;|')t clone a repository whose name starts with a dot/);
+  assert.match(rows[0], /<button[^>]*disabled=""[^>]*>.*Clone<\/button>/);
+  assert.doesNotMatch(rows[0], /github_repo_name_unsupported/);
+  assert.match(rows[1], /Public, 4 KB, branch main/);
+  assert.doesNotMatch(rows[1], /disabled=""/);
+});
+
 test("the setup review shows the steps, the overview, missing items and a confirm that waits", () => {
   const catalog = ok({ tech_stack: [], platforms: [{ kind: "website", label: "Website" }], research: [{ kind: "market_research", label: "Market research" }], document_extensions: [], documents_max: 16, document_bytes_max: 1, project_document_bytes_max: 1, default_team: stored().team });
   const base = { name: "Plant shop", catalog, errors: {}, showErrors: false, busy: false, problem: "", onDraft: noop, onConfirm: noop, onOpenLink: noop };
@@ -558,6 +592,17 @@ test("the tools step lists dependencies and the pack by group, and names the MCP
   assert.match(running, /Installing: 1 of 5 done\. You can continue; setup keeps going\./);
   assert.match(running, />Continue<\/button>/);
   assert.match(html(ToolsSetupView, { ...base, status: notReady }), /Not ready yet[\s\S]*>Continue<\/button>/);
+});
+
+test("the tools step says why an installed entry's hooks were not added, on that entry only", () => {
+  const refused = "This folder has hooks but no .claude-plugin/plugin.json naming the plugin.";
+  const listed = pack.map((item) => item.id === "headroom" ? { ...item, hooks_refused: refused } : item);
+  const markup = html(ToolsSetupView, { status: ok({ dependencies: [], pack: listed, running: false }), ticks: intake.packTicks(listed), onTick: noop, busy: false, started: false, problem: "", onRun: noop, onContinue: noop });
+  const rows = markup.split('<li class="in-row">').filter((row) => row.includes("headroom"));
+  assert.equal(rows.length, 1);
+  assert.match(rows[0], /Already installed/);
+  assert.ok(rows[0].includes(`<span class="pj-small pj-error">Hooks not added: ${refused}</span>`), rows[0]);
+  assert.equal(markup.split("Hooks not added").length - 1, 1, "only the refused entry says so");
 });
 
 test("a failed setup read keeps the shown setup, says so, backs off, and a newer read clears it", () => {

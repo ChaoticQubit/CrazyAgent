@@ -27,6 +27,16 @@ echo $$ > leader.pid
 exec /bin/sleep 30
 "#;
 
+/// A stand-in harness whose group keeps a process the engine can neither signal nor reap: a
+/// descendant in its own group starts a child that joins the harness group and exits, never
+/// reaped, then writes its own id and sleeps. macOS answers a probe of that group with EPERM.
+#[cfg(target_os = "macos")]
+pub(in crate::engine) const ZOMBIE_HOLDING_HARNESS: &str = r#"#!/bin/sh
+/usr/bin/perl -e 'my $group = getpgrp(); setpgrp(0, 0) or exit 1; pipe(my $read, my $write) or exit 1; my $child = fork(); defined $child or exit 1; if ($child == 0) { close($read); setpgrp(0, $group) or exit 1; exit 0 } close($write); my $gone = <$read>; open(my $file, ">", "descendant.pid") or exit 1; print $file "$$\n"; close($file); sleep 30' < /dev/null > /dev/null 2>&1 &
+echo $$ > leader.pid
+exec /bin/sleep 30
+"#;
+
 /// The start of a stand-in harness that leaves what a Claude Code Bash tool shell can leave: a
 /// process that started its own session with its own stdio, as each tool shell does, and a
 /// `nohup` command whose shell already exited. It writes their ids into its working folder; a
@@ -255,6 +265,38 @@ impl Drop for HarnessProcesses {
     fn drop(&mut self) {
         let _ = rustix::process::kill_process(self.descendant, rustix::process::Signal::KILL);
         let _ = rustix::process::kill_process_group(self.leader, rustix::process::Signal::KILL);
+    }
+}
+
+/// Kills a running stand-in harness while a waiter already blocks on it, so the waiter, not
+/// the host, reaps it, after which the host can never reap its harness. The host polls its
+/// harness too, so it can still win: the caller then starts over. Takes the stand-in's
+/// working folder. Returns whether the waiter reaped the harness.
+pub(in crate::engine) fn reap_before_the_host(folder: &Path) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let harness = loop {
+        if let Some(harness) = fs::read_to_string(folder.join("leader.pid"))
+            .ok()
+            .and_then(|text| text.trim().parse::<i32>().ok())
+            .and_then(Pid::from_raw)
+        {
+            break harness;
+        }
+        assert!(Instant::now() < deadline, "stand-in harness never started");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    let waiter = std::thread::spawn(move || {
+        rustix::process::waitpid(Some(harness), rustix::process::WaitOptions::empty())
+    });
+    std::thread::sleep(Duration::from_millis(50));
+    rustix::process::kill_process(harness, rustix::process::Signal::KILL).unwrap();
+    match waiter.join().unwrap() {
+        Ok(Some((reaped, _))) => {
+            assert_eq!(reaped, harness);
+            true
+        }
+        Err(rustix::io::Errno::CHILD) => false,
+        waited => panic!("waiting for the harness failed: {waited:?}"),
     }
 }
 

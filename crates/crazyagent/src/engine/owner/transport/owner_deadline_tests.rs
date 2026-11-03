@@ -72,15 +72,13 @@ impl Owner {
     }
 
     /// Queues a real storage sweep of `SWEPT_FILES` files ahead of every later storage
-    /// job. Output: the swept folder and the sweep's answer.
+    /// job, in a removed skill folder of the private plugin store made as the engine makes
+    /// it. Output: the swept folder and the sweep's answer.
     fn occupy_storage(&self) -> (PathBuf, oneshot::Receiver<Result<(), EngineError>>) {
-        let swept = self
-            .engine_root
-            .join(crate::storage::plugins::STORE)
-            .join("skills")
-            .join("global")
+        let swept = crate::storage::plugins::store_folder(&self.engine_root, &["skills", "global"])
+            .unwrap()
             .join(".removed-busy-storage");
-        std::fs::create_dir_all(&swept).unwrap();
+        std::fs::create_dir(&swept).unwrap();
         for index in 0..SWEPT_FILES {
             std::fs::write(swept.join(index.to_string()), b"x").unwrap();
         }
@@ -227,6 +225,7 @@ fn finished_agent(engine_root: &Path, repo: &Path, home: &Path, project: &Projec
 /// it removed, rather than the connection closing while the folders go on being deleted.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_removal_slower_than_the_owner_deadline_answers_with_the_agents_it_removed() {
+    let _disk = super::usage_tests::busy_storage().await;
     let owner = Owner::start().await;
     let work = owner.root.path().join("work");
     let home = work.join("home");
@@ -306,6 +305,7 @@ async fn a_usage_request_slower_than_the_owner_deadline_still_answers() {
 /// while storage adds it later.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_skill_import_slower_than_the_owner_deadline_answers_with_the_skill() {
+    let _disk = super::usage_tests::busy_storage().await;
     let owner = Owner::start().await;
     let source = owner.root.path().join("work/release-notes");
     std::fs::create_dir_all(&source).unwrap();

@@ -2,6 +2,8 @@ use super::*;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 
+const SHORT_LINES_READ_TIME: Duration = Duration::from_secs(10);
+
 struct Case {
     root: tempfile::TempDir,
 }
@@ -178,6 +180,76 @@ fn claude_finish_after_end_turn_is_reported_once() {
             TranscriptEvent::TurnStarted,
             text("Hello\n"),
             TranscriptEvent::TurnFinished { success: true },
+        ]
+    );
+}
+
+/// A Bash call Claude Code runs in the background reports its task id, and the task
+/// notification that later starts a turn reports each id it names as ended. An id with a
+/// control character is not kept. The record shapes are copied from a real lead's transcript.
+#[test]
+fn claude_background_commands_are_followed_by_task_id() {
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    append(
+        &file,
+        concat!(
+            r#"{"type":"user","message":{"content":"Run the check"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"Command running in background with ID: bub9bmz4a."}]},"toolUseResult":{"backgroundTaskId":"bub9bmz4a"}}"#,
+            "\n",
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Waiting"}],"stop_reason":"end_turn"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":"<task-notification>\n<task-id>bub9bmz4a</task-id>\n<task-id>bad\u0007id</task-id>\n<status>completed</status>\n</task-notification>"}}"#,
+            "\n",
+        ),
+    );
+    assert_eq!(
+        reader.read().unwrap(),
+        vec![
+            TranscriptEvent::TurnStarted,
+            TranscriptEvent::BackgroundStarted {
+                id: "bub9bmz4a".into()
+            },
+            text("Waiting\n"),
+            TranscriptEvent::TurnFinished { success: true },
+            TranscriptEvent::BackgroundEnded {
+                id: "bub9bmz4a".into()
+            },
+            TranscriptEvent::TurnStarted,
+        ]
+    );
+    assert_eq!(
+        notified_tasks("<task-id>x</task-id> with no notification"),
+        Vec::<String>::new()
+    );
+}
+
+/// A background command the agent stops itself with TaskStop gets no task notification, so
+/// the stop's tool result, which names the task, ends it (w-review LTK-H1, the record shape
+/// a real Claude Code session wrote on 2026-10-29).
+#[test]
+fn claude_a_background_command_the_agent_stops_ends_by_its_task_id() {
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    append(
+        &file,
+        concat!(
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t1","content":"Command running in background with ID: b20nv1bx6."}]},"toolUseResult":{"backgroundTaskId":"b20nv1bx6"}}"#,
+            "\n",
+            r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":"Successfully stopped task: b20nv1bx6 (npm run dev)"}]},"toolUseResult":{"message":"Successfully stopped task: b20nv1bx6 (npm run dev)","task_id":"b20nv1bx6","task_type":"local_bash"}}"#,
+            "\n",
+        ),
+    );
+    assert_eq!(
+        reader.read().unwrap(),
+        vec![
+            TranscriptEvent::BackgroundStarted {
+                id: "b20nv1bx6".into()
+            },
+            TranscriptEvent::BackgroundEnded {
+                id: "b20nv1bx6".into()
+            },
         ]
     );
 }
@@ -572,4 +644,27 @@ fn a_fifo_in_place_of_a_transcript_never_blocks_a_reader() {
         Some(LaunchError("launch_resume_unavailable".to_owned()))
     );
     assert!(messages.is_empty());
+}
+
+/// A record an agent fills with a million empty lines in its own home is read in one pass:
+/// each read drains the lines it used once, not once per line, so the engine thread that
+/// polls the record is never stalled, and the line after them is still read.
+#[test]
+fn a_read_of_a_million_short_lines_drains_them_in_one_pass() {
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    let prompt = r#"{"type":"user","message":{"role":"user","content":"Fix the build"}}"#;
+    append(&file, &"\n".repeat(READ_BYTES_MAX - prompt.len() - 1));
+    append(&file, &format!("{prompt}\n"));
+    let (sent, read) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        let events = reader.read();
+        let _ = sent.send((events, started.elapsed()));
+    });
+    let (events, took) = read
+        .recv_timeout(SHORT_LINES_READ_TIME)
+        .expect("a read of short lines stalls the engine thread");
+    assert_eq!(events.unwrap(), vec![TranscriptEvent::TurnStarted]);
+    assert!(took < SHORT_LINES_READ_TIME, "{took:?}");
 }
