@@ -1,7 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
-import { chmod, lstat, mkdtemp, open, readdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, open, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -786,9 +786,10 @@ export function renderReport(model) {
 }
 
 /**
- * Prints an HTML file to PDF with Google Chrome headless, in a throwaway profile with background networking off.
+ * Prints an HTML file to PDF with Google Chrome headless under umask 077, in a throwaway profile with a mock
+ * keychain, every request sent to a closed proxy and every host name unresolvable.
  * Input: the HTML path, the PDF path and optionally the Chrome executable (CRAZYAGENT_CHROME or the macOS app).
- * Output: the PDF path, mode 0600. Throws a BLOCKED error when Chrome is missing.
+ * Output: the PDF path, mode 0600, moved into place only once complete. Throws a BLOCKED error when Chrome is missing.
  */
 export async function printPdf(htmlPath, pdfPath, { chrome = process.env.CRAZYAGENT_CHROME || CHROME, timeout = 120_000 } = {}) {
   try {
@@ -797,24 +798,30 @@ export async function printPdf(htmlPath, pdfPath, { chrome = process.env.CRAZYAG
     fail(`BLOCKED: Google Chrome is not at ${chrome}; set CRAZYAGENT_CHROME to its executable`);
   }
   const profile = await mkdtemp(join(tmpdir(), "trial-report-chrome-"));
+  const staging = await mkdtemp(join(dirname(pdfPath), ".report-pdf-"));
   try {
     await rm(pdfPath, { force: true });
+    const staged = join(staging, "report.pdf");
     const args = [
       "--headless", "--disable-gpu", "--no-first-run", "--no-default-browser-check", "--disable-extensions",
-      "--disable-background-networking", "--disable-component-update", "--disable-sync", `--user-data-dir=${profile}`,
-      "--no-pdf-header-footer", `--print-to-pdf=${pdfPath}`, pathToFileURL(htmlPath).href,
+      "--disable-background-networking", "--disable-component-update", "--disable-sync", "--use-mock-keychain", "--password-store=basic",
+      "--proxy-server=127.0.0.1:9", "--proxy-bypass-list=<-loopback>", "--host-resolver-rules=MAP * ~NOTFOUND",
+      `--user-data-dir=${profile}`, "--no-pdf-header-footer", `--print-to-pdf=${staged}`, pathToFileURL(htmlPath).href,
     ];
     await new Promise((done, failed) => {
-      execFile(chrome, args, { timeout, killSignal: "SIGKILL", maxBuffer: 4 * 1024 * 1024 }, (error) => (error ? failed(new Error(`report_pdf_failed: ${error.message.split("\n")[0]}`)) : done()));
+      execFile("/bin/sh", ["-c", 'umask 077 && exec "$0" "$@"', chrome, ...args], { timeout, killSignal: "SIGKILL", maxBuffer: 4 * 1024 * 1024 }, (error) => (error ? failed(new Error(`report_pdf_failed: ${error.message.split("\n")[0]}`)) : done()));
     });
-    const where = await lstat(pdfPath);
+    const where = await lstat(staged).catch(() => fail("report_pdf_missing"));
     if (!where.isFile()) fail("report_pdf_missing");
-    const { bytes } = await readBounded(pdfPath, 5);
+    if (where.mode & 0o077) fail("report_pdf_mode: Chrome wrote the PDF readable by others");
+    const { bytes } = await readBounded(staged, 5);
     if (bytes.toString("latin1") !== "%PDF-") fail("report_pdf_invalid");
-    await chmod(pdfPath, 0o600);
+    await chmod(staged, 0o600);
+    await rename(staged, pdfPath);
     return pdfPath;
   } finally {
     await rm(profile, { recursive: true, force: true });
+    await rm(staging, { recursive: true, force: true });
   }
 }
 
