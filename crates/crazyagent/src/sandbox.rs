@@ -101,6 +101,7 @@ const LOCK_FOLDER: &str = r#"\.lock$"#;
 const SOCKET_PATH_BYTES_MAX: usize = 103;
 const TOOL_ROOTS_MAX: usize = 24;
 const TOOL_FILES_MAX: usize = 4;
+const EXECS_MAX: usize = 4;
 const GIT_LINK_BYTES_MAX: u64 = 2 * PATH_BYTES_MAX as u64;
 const REMOTES_MAX: usize = 8;
 const PROFILE_BYTES_MAX: usize = 64 * 1024;
@@ -616,6 +617,7 @@ pub struct ProjectSandbox {
     read_roots: Vec<PathBuf>,
     tool_roots: Vec<PathBuf>,
     tool_files: Vec<PathBuf>,
+    execs: Vec<PathBuf>,
     scratch: Option<PathBuf>,
     hidden: Vec<PathBuf>,
     network: SandboxNetwork,
@@ -674,6 +676,7 @@ impl ProjectSandbox {
             read_roots: Vec::new(),
             tool_roots: Vec::new(),
             tool_files: Vec::new(),
+            execs: Vec::new(),
             scratch: None,
             hidden: Vec::new(),
             network,
@@ -962,6 +965,28 @@ impl ProjectSandbox {
         }
         granted_root(root, &owner_home()?, &self.secret_paths())?;
         self.read_roots.push(root.to_path_buf());
+        Ok(self)
+    }
+
+    /// Lets the agent start one exact program the engine itself launches, such as its
+    /// harness or the engine executable, from an app bundle's `Contents/MacOS`, which no
+    /// agent may start otherwise (OP-24). One inside a folder the agent can write stays
+    /// denied, since the agent could replace it. Input: a canonical existing regular file
+    /// clear of [`Self::secret_paths`]. Output: the widened sandbox, or `Invalid`.
+    pub fn allow_exec(mut self, program: &Path) -> Result<Self, SandboxError> {
+        clear_of_secrets(program, &self.secret_paths())?;
+        if !clean_absolute(program) || !program.is_file() || canonical(program)? != *program {
+            return Err(invalid(
+                "an allowed program must be an existing canonical file",
+            ));
+        }
+        if self.execs.iter().any(|exec| exec == program) {
+            return Ok(self);
+        }
+        if self.execs.len() >= EXECS_MAX {
+            return Err(invalid("too many allowed programs"));
+        }
+        self.execs.push(program.to_path_buf());
         Ok(self)
     }
 
