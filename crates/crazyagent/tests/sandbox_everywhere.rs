@@ -1,6 +1,9 @@
 #![cfg(target_os = "macos")]
 
-use crazyagent::sandbox::{InstalledSandbox, ProjectSandbox, SandboxNetwork, SandboxRemote};
+use crazyagent::sandbox::hidden_paths::HIDDEN_PATHS_MAX;
+use crazyagent::sandbox::{
+    HIDDEN_MAX, InstalledSandbox, ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote,
+};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -268,11 +271,18 @@ fn a_hidden_folder_in_a_root_can_be_neither_listed_read_nor_written() {
             refused.display()
         );
     }
+    assert!(
+        HIDDEN_MAX > HIDDEN_PATHS_MAX,
+        "a step hides one folder beside every hidden folder a project saves"
+    );
     let mut bounded = sandbox(&case).hide(&case.project.join("not-yet")).unwrap();
-    for index in 1..4 {
+    for index in 1..HIDDEN_MAX {
         bounded = bounded
             .hide(&case.project.join(format!("hidden-{index}")))
             .unwrap();
     }
-    assert!(bounded.hide(&case.project.join("hidden-4")).is_err());
+    assert!(matches!(
+        bounded.hide(&case.project.join(format!("hidden-{HIDDEN_MAX}"))),
+        Err(SandboxError::Invalid(reason)) if reason == "too many hidden folders"
+    ));
 }

@@ -172,6 +172,7 @@ function args(paths, overrides = {}) {
     "--frame-gap-s", "0.2", "--ps-after-s", "1", "--ps-every-s", "1",
     "--frames-cmd", JSON.stringify(commands.frames), "--desktop-cmd", JSON.stringify(commands.desktop),
     "--audit-cmd", JSON.stringify(commands.audit), "--report-cmd", JSON.stringify(commands.report),
+    ...(overrides.grace === undefined ? [] : ["--kill-grace-s", overrides.grace]),
   ];
 }
 
@@ -342,13 +343,13 @@ test("a desktop run past its deadline is stopped with its whole process group an
   const paths = fixture("ca-trial-deadline-");
   const pidFile = join(paths.root, "desktop.pid");
   const stubborn = ["/bin/sh", "-c", "echo $$ > \"$0\"; trap '' TERM; while :; do sleep 1; done", pidFile];
-  const result = await runner(args(paths, { deadline: "0.05", commands: { desktop: stubborn } }), paths.env);
+  const result = await runner(args(paths, { deadline: "0.05", grace: "1", commands: { desktop: stubborn } }), paths.env);
   assert.equal(result.code, 1, result.out);
   const pgid = Number(readFileSync(pidFile, "utf8"));
   assert.ok(!groupAlive(pgid), `group ${pgid} still has members`);
   const ended = steps(paths.evidence).find((step) => step.title === "WebdriverIO run ended");
   assert.equal(ended.ok, false);
-  assert.match(ended.detail, /deadline of 0\.05 min passed; process group stopped with SIGKILL after the 20 s grace/);
+  assert.match(ended.detail, /deadline of 0\.05 min passed; process group stopped with SIGKILL after the 1 s grace/);
   assert.ok(existsSync(join(paths.evidence, "manifest.json")));
   assert.ok(existsSync(join(paths.root, "audit-seen.json")));
 });
