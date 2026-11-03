@@ -338,6 +338,10 @@ pub trait Host: Send + Sync {
 /// lead's sandbox: Linux, Windows, or a missing tmux.
 pub const OWN_SERVER_UNAVAILABLE: &str = "terminal_own_server_unavailable";
 
+/// The refusal for a team pane call on a native lead whose latest start named a teammates'
+/// server that no longer accepts connections; its pane ids are never read on another server.
+pub const TEAMMATES_SERVER_ENDED: &str = "terminal_teammates_server_ended";
+
 /// A host that starts each agent through `Host::spawn_own_server`, in a tmux server of its
 /// own inside the agent's sandbox; every other call goes to the host unchanged.
 struct OwnServer(Arc<dyn Host>);
