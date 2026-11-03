@@ -125,7 +125,6 @@ impl Case {
 
     /// Builds the headless command for one agent with these settings through
     /// `command_with_context`. Output: the arguments after the harness executable.
-    #[cfg(target_os = "macos")]
     fn headless(&self, request: &LaunchRequest, settings: &Applied) -> Vec<String> {
         let context = AgentContext::empty().with_harness_settings(settings.clone());
         let (command, _installed) =
@@ -201,7 +200,6 @@ fn hostile(key: &Key) -> Value {
     value
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn no_owner_or_project_value_can_override_a_locked_key() {
     let case = Case::new();
@@ -283,7 +281,6 @@ fn no_owner_or_project_value_can_override_a_locked_key() {
     }
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn an_owner_claude_setting_reaches_the_agent_settings_json() {
     let case = Case::new();
@@ -379,7 +376,6 @@ fn an_owner_claude_setting_reaches_the_agent_settings_json() {
     }
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn an_owner_codex_setting_becomes_one_c_line() {
     let case = Case::new();
@@ -451,7 +447,6 @@ fn an_rcli_setting_merges_into_the_agent_config() {
     );
 }
 
-#[cfg(target_os = "macos")]
 #[test]
 fn an_unqualified_harness_version_launches_with_engine_defaults_only() {
     let case = Case::new();
