@@ -380,6 +380,20 @@ fn each_inbox_question_names_whom_its_asker_meant_it_for() {
             params![lead, worker],
         )
         .unwrap();
+    let row = crate::protocol::StoredProject {
+        project_id: project.clone(),
+        spec: crate::protocol::ProjectSpec {
+            name: "Questions".into(),
+            repositories: vec![],
+        },
+    };
+    engine
+        .connection
+        .execute(
+            "INSERT INTO projects VALUES (?1,?2)",
+            params![project.as_str(), serde_json::to_string(&row).unwrap()],
+        )
+        .unwrap();
     crate::coord::settings::write(
         &engine.connection,
         &project,
