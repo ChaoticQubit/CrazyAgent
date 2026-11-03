@@ -578,7 +578,9 @@ pub fn show(tx: &Transaction<'_>, input: &RunShow) -> Result<RunPage, StoreError
     };
     let mut names = tx.prepare(UNLINKED_NAMES)?;
     let fetched: Vec<String> = names
-        .query_map((run.row_id, RUN_SHOW_PAGE_ROWS), |row| row.get(0))?
+        .query_map((run.row_id, sql_count(RUN_SHOW_PAGE_ROWS)?), |row| {
+            row.get(0)
+        })?
         .collect::<Result<_, _>>()?;
     let (unlinked, _) = fill(fetched, RUN_SHOW_PAGE_ROWS, UNLINKED_BYTES_MAX);
     let unlinked_total: u32 = tx.query_row(UNLINKED_COUNT, [run.row_id], |row| row.get(0))?;
@@ -621,7 +623,7 @@ pub fn list(tx: &Transaction<'_>, input: &RunList) -> Result<RunListPage, StoreE
                 verdict,
                 &input.commit,
                 before,
-                LIST_ROWS_MAX + 1,
+                sql_count(LIST_ROWS_MAX + 1)?,
             ),
             |row| list_row(&input.project, row),
         )?
@@ -891,7 +893,9 @@ fn prune(
     let (limit, cutoff_ms) = match retention {
         RunRetention::KeepAll => return Ok(()),
         RunRetention::PruneCount => {
-            let count: usize = tx.query_row(RUN_COUNT, [project_id], |row| row.get(0))?;
+            let count: i64 = tx.query_row(RUN_COUNT, [project_id], |row| row.get(0))?;
+            let count = usize::try_from(count)
+                .map_err(|_| StoreError::Corrupt("a run count is negative".into()))?;
             let over = count.saturating_sub(RUNS_RETAINED_PER_PROJECT_MAX);
             if over == 0 {
                 return Ok(());
@@ -903,9 +907,10 @@ fn prune(
     let prefix = format!("{key}-R");
     let mut candidates = tx.prepare(PRUNE_CANDIDATES)?;
     let pruned: Vec<(i64, u32)> = candidates
-        .query_map((project_id, newest, &prefix, cutoff_ms, limit), |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })?
+        .query_map(
+            (project_id, newest, &prefix, cutoff_ms, sql_count(limit)?),
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?
         .collect::<Result<_, _>>()?;
     assert!(pruned.len() <= limit);
     let retention_actor = Actor::host("retention");
@@ -1115,6 +1120,17 @@ fn state_fits(view: &RunView) -> bool {
     ended && counted
 }
 
+/// Binds a row count or bound as an SQLite integer, which `rusqlite` takes as `i64` and not
+/// as `usize`. Input: the count. Output: the integer, or `store_failed` when it does not fit.
+pub(crate) fn sql_count(count: usize) -> Result<i64, StoreError> {
+    i64::try_from(count).map_err(|_| {
+        store::refusal(
+            core_codes::STORE_FAILED,
+            format!("the count {count} does not fit an SQLite integer"),
+        )
+    })
+}
+
 fn results_from(
     tx: &Transaction<'_>,
     run: &Loaded,
@@ -1124,7 +1140,7 @@ fn results_from(
     let key = run.view.id.key();
     let mut statement = tx.prepare(RESULTS_FROM)?;
     let rows = statement
-        .query_map((run.row_id, after, limit), |row| {
+        .query_map((run.row_id, after, sql_count(limit)?), |row| {
             Ok(stored_result(key, row))
         })?
         .collect::<Result<Vec<_>, _>>()?;
