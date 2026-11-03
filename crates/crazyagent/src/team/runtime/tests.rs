@@ -12438,7 +12438,10 @@ fn a_reask_waits_for_a_kept_lead_s_working_teammates_and_its_own_turn() {
         .unwrap();
     match sent.try_recv() {
         Ok(Order::Turn(text, None, _)) => assert_eq!(text, REASK_EMPTY),
-        other => panic!("one re-ask once the lead is free, got one: {}", other.is_ok()),
+        other => panic!(
+            "one re-ask once the lead is free, got one: {}",
+            other.is_ok()
+        ),
     }
     assert_eq!(
         (team.workers[&lead].reask, team.workers[&lead].reasked),
