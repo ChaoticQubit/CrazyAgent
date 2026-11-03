@@ -206,7 +206,14 @@ impl Case {
     /// Proposes and approves a profile holding the checks as the owner. Input: the
     /// checks. Output: the admitted profile.
     fn approve(&self, checks: Value) -> AdmittedProfile {
-        let body = json!({"version": 1, "checks": checks, "holdouts": [], "protected_paths": []});
+        self.approve_with(checks, json!([]))
+    }
+
+    /// Proposes and approves a profile holding the checks and the holdouts as the owner.
+    /// Inputs: the checks and the holdouts. Output: the admitted profile.
+    fn approve_with(&self, checks: Value, holdouts: Value) -> AdmittedProfile {
+        let body =
+            json!({"version": 1, "checks": checks, "holdouts": holdouts, "protected_paths": []});
         let proposal = checks::propose(
             &self.db,
             &self.project,
@@ -808,4 +815,108 @@ fn initialize_locks_run_writers_of_projects_attached_before_the_lock() {
     crate::tracker::initialize(&case.db).unwrap();
     assert_eq!(case.count("SELECT COUNT(*) FROM tk_events"), events);
     assert_eq!(case.count("SELECT COUNT(*) FROM tk_policy"), rows);
+}
+
+const ORACLE_FAILS: &str = "printf 'running 1 test\\ntest oracle::answers ... FAILED\\n\\nfailures:\\n\\n---- oracle::answers stdout ----\\nexpected 42, got 41\\n\\n\\nfailures:\\n    oracle::answers\\n\\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\\n\\n'\nexit 101\n";
+
+/// One recorded result as `tk_results` holds it, with the case it links to: the case's
+/// stable name and protection, the outcome, the message and the artifact.
+type Linked = (
+    Option<String>,
+    Option<bool>,
+    String,
+    Option<String>,
+    Option<String>,
+);
+
+fn linked(case: &Case, run: &CheckRun) -> Vec<Linked> {
+    let mut statement = case
+        .db
+        .prepare(
+            "SELECT c.stable_name, c.protected, r.outcome, r.message, r.artifact
+             FROM tk_results r LEFT JOIN tk_cases c ON c.id = r.case_id
+             WHERE r.run_id = ?1 ORDER BY r.position",
+        )
+        .unwrap();
+    statement
+        .query_map([run.run], |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        })
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+}
+
+#[test]
+fn a_holdout_run_links_its_results_to_the_protected_case_and_stores_no_message() {
+    let case = Case::new();
+    let id = case.change_set(&[("oracle.sh", ORACLE_FAILS)]);
+    let digest = checks::store_holdout_file(
+        &case.db,
+        &case.project,
+        ORACLE_FAILS.as_bytes(),
+        Actor::Owner,
+    )
+    .unwrap();
+    let tx = Transaction::new_unchecked(&case.db, TransactionBehavior::Immediate).unwrap();
+    tests_store::create_case(
+        &tx,
+        &owner(),
+        &key(),
+        &NewCase {
+            title: "The hidden oracle answers".into(),
+            kind: CaseKind::Unit,
+            stable_name: Some("oracle::answers".into()),
+            steps: Vec::new(),
+            protected: true,
+            status: CaseStatus::Ready,
+        },
+        NOW,
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    case.approve_with(
+        json!([check("visible", &["sh", "oracle.sh"], "libtest", None)]),
+        json!([{
+            "check": check("hidden", &["sh", "hidden.sh"], "libtest", None),
+            "files": {"hidden.sh": digest}
+        }]),
+    );
+    assert_eq!(case.run(&id).len(), 2);
+    let latest = record::latest(&case.db, &id).unwrap();
+    assert_eq!(latest.len(), 2, "{latest:?}");
+    assert_eq!(
+        latest
+            .iter()
+            .filter(|run| run.holdout)
+            .map(|run| run.check.as_str())
+            .collect::<Vec<_>>(),
+        ["hidden"]
+    );
+    for run in &latest {
+        assert_eq!(run.verdict, Some(Verdict::Failed), "{run:?}");
+        let rows = linked(&case, run);
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let (stable_name, protected, outcome, message, artifact) = &rows[0];
+        assert_eq!(stable_name.as_deref(), Some("oracle::answers"));
+        assert_eq!(*protected, Some(true), "{}", run.check);
+        assert_eq!(outcome, "failed");
+        assert_eq!(*artifact, None);
+        if run.holdout {
+            assert_eq!(*message, None, "a holdout result keeps no message");
+        } else {
+            assert!(
+                message
+                    .as_deref()
+                    .is_some_and(|text| text.contains("expected 42, got 41")),
+                "{message:?}"
+            );
+        }
+    }
 }
