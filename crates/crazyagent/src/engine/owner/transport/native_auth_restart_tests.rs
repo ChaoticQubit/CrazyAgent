@@ -1610,6 +1610,7 @@ async fn live_master_waits_for_restart_recheck() {
         restart.team_action(TeamAction::LiveMaster {
             project_id: setup.project_id.clone(),
             on: true,
+            version: restart.team_settings_version(&setup.project_id),
         });
         let (admission, work) = run.begin_check(&restart).await;
         for _ in 0..5 {
@@ -1674,6 +1675,7 @@ async fn live_master_starts_once_restart_recheck_passes() {
         restart.team_action(TeamAction::LiveMaster {
             project_id: setup.project_id.clone(),
             on: true,
+            version: restart.team_settings_version(&setup.project_id),
         });
         team.tick().unwrap();
         assert_eq!(

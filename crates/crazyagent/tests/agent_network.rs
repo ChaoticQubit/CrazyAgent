@@ -93,10 +93,16 @@ async fn create_project(controller: &mut OwnerController, id: &str) -> ProjectId
 
 async fn set_network(controller: &mut OwnerController, project: ProjectId, network: AgentNetwork) {
     controller.read(OwnerRead::Capabilities).await.unwrap();
+    let version = controller
+        .project_agent_policy(project.clone())
+        .await
+        .unwrap()
+        .version;
     controller
         .begin_mutation(
             OwnerMutation::SetProjectAgentPolicy {
                 project_id: project,
+                version,
                 policy: AgentPolicy {
                     network,
                     ..AgentPolicy::default()
