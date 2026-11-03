@@ -1,17 +1,21 @@
 use rusqlite::Transaction;
+use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use trackwright_core::catalog;
 use trackwright_core::criteria::{self, NewEvidence};
 use trackwright_core::events;
 use trackwright_core::export::{self, EXPORT_HEADER};
 use trackwright_core::host;
 use trackwright_core::import::{self, Change, IMPORT_BYTES_MAX, Preview, Unparsed, Why};
 use trackwright_core::model::{
-    Actor, CheckKind, EvidenceResult, OPEN_TICKETS_CREATED_PER_ACTOR_MAX, PolicyKey, Priority,
-    ProjectKey, ShortId, TicketKind, TicketStatus, VersionStatus, codes,
+    Actor, CheckKind, EvidenceResult, OPEN_TICKETS_CREATED_PER_ACTOR_MAX, OpKind, PolicyKey,
+    Priority, ProjectKey, ShortId, TicketKind, TicketStatus, VersionStatus, codes,
 };
+use trackwright_core::ops;
 use trackwright_core::policy;
+use trackwright_core::requests::Request;
 use trackwright_core::standalone::Standalone;
 use trackwright_core::store::{self, NewTicket, Store, StoreError, TicketChange};
 use trackwright_core::text::TITLE_BYTES_MAX;
@@ -206,6 +210,29 @@ fn counts(tx: &Transaction<'_>) -> [i64; 3] {
         })
         .unwrap()
     })
+}
+
+/// Runs one request through the core's dispatch on the standalone host, as MCP and the CLI
+/// do. Inputs: the transaction, the actor, the operation and its arguments. Output: the
+/// reply envelope.
+fn call(tx: &Transaction<'_>, by: &Actor, op: &str, args: Value) -> Value {
+    let request = Request::parse(op, args.to_string().as_bytes()).unwrap();
+    let reply = ops::dispatch(tx, &Standalone, by, request);
+    let envelope: Value = serde_json::from_str(reply.json()).unwrap();
+    assert_eq!(envelope["ok"], json!(reply.is_ok()));
+    envelope
+}
+
+/// The data of a reply that must succeed. Input: the envelope. Output: its data.
+fn answered(envelope: &Value) -> &Value {
+    assert_eq!(envelope["ok"], json!(true), "{envelope}");
+    &envelope["data"]
+}
+
+/// The code of a reply that must be refused. Input: the envelope. Output: its code.
+fn denied(envelope: &Value) -> &str {
+    assert_eq!(envelope["ok"], json!(false), "{envelope}");
+    envelope["code"].as_str().unwrap()
 }
 
 fn tracker(dir: &Path) -> PathBuf {
@@ -1103,4 +1130,221 @@ fn import_counts_its_tickets_against_the_actors_open_ticket_bound() {
     );
     assert_eq!(counts(&tx), held);
     replayed(&tx, &key());
+}
+
+#[test]
+fn export_and_import_answer_through_dispatch_inside_the_hosts_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = opened(dir.path());
+    let roadmap = written(dir.path(), "roadmap.md", ROADMAP);
+    let path = roadmap.to_str().unwrap();
+    let tx = store.transaction().unwrap();
+    project(&tx);
+    ticket(
+        &tx,
+        "Ship <it> | now",
+        TicketKind::Feature,
+        TicketStatus::Todo,
+        2,
+        "",
+        1_100,
+    );
+    let me = owner();
+
+    let text = export::project(&tx, &key()).unwrap();
+    let whole = call(&tx, &me, "export", json!({"project": "CA"}));
+    assert_eq!(answered(&whole), &json!({"text": text}));
+    let one = call(&tx, &me, "export", json!({"project": "CA", "id": "CA-1"}));
+    assert_eq!(
+        answered(&one),
+        &json!({"text": export::ticket(&tx, &id(1)).unwrap()})
+    );
+    let to_file = call(
+        &tx,
+        &me,
+        "export",
+        json!({"project": "CA", "path": "open.md"}),
+    );
+    assert_eq!(
+        answered(&to_file),
+        &json!({"path": "open.md", "bytes": text.len()})
+    );
+    assert_eq!(
+        fs::read_to_string(tracker(dir.path()).join("open.md")).unwrap(),
+        text
+    );
+    for refused_path in ["../open.md", "/tmp/open.md", "CLAUDE.md", "notes.txt"] {
+        let refused = call(
+            &tx,
+            &me,
+            "export",
+            json!({"project": "CA", "path": refused_path}),
+        );
+        assert_eq!(denied(&refused), "export_path_refused", "{refused_path}");
+    }
+    assert!(!dir.path().join("open.md").exists());
+    assert!(!tracker(dir.path()).join("CLAUDE.md").exists());
+
+    let expected = import::preview(&tx, &Standalone, &me, &key(), &roadmap).unwrap();
+    let previewed = call(
+        &tx,
+        &me,
+        "import_preview",
+        json!({"project": "CA", "path": path}),
+    );
+    assert_eq!(
+        answered(&previewed),
+        &serde_json::to_value(&expected).unwrap()
+    );
+    assert_eq!(
+        denied(&call(
+            &tx,
+            &me,
+            "import_preview",
+            json!({"project": "CA", "path": "../roadmap.md"}),
+        )),
+        "import_path_refused"
+    );
+    let accept = keys(&expected);
+    let by_agent = json!({"project": "CA", "path": path, "accept": accept.clone()});
+    assert_eq!(
+        denied(&call(&tx, &actor("agent:w1"), "import_apply", by_agent)),
+        "agent_edit_refused"
+    );
+    let applied = call(
+        &tx,
+        &me,
+        "import_apply",
+        json!({"project": "CA", "path": path, "accept": accept}),
+    );
+    let data = answered(&applied);
+    assert_eq!(data["versions"], json!(["V1", "V2"]));
+    assert_eq!(data["tickets"], json!(["CA-2", "CA-3", "CA-4"]));
+    let roadmap = call(&tx, &me, "roadmap", json!({"project": "CA"}));
+    assert_eq!(answered(&roadmap)["versions"][0]["name"], "V1");
+    assert_eq!(
+        answered(&roadmap)["versions"][0]["target_day"],
+        "2026-12-01"
+    );
+    let again = import::preview(&tx, &Standalone, &me, &key(), &roadmap).unwrap();
+    assert!(again.items.is_empty(), "{:?}", again.items);
+    assert_eq!(
+        events::replay(&tx, &key()).unwrap(),
+        store::state(&tx, &key()).unwrap()
+    );
+    tx.commit().unwrap();
+}
+
+#[test]
+fn an_export_or_preview_larger_than_one_reply_is_refused_and_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = opened(dir.path());
+    let scope: String = (1..=120)
+        .map(|item| format!("- Scope item {item:03} for the first release of the board\n"))
+        .collect();
+    let long = written(
+        dir.path(),
+        "long.md",
+        &format!("# Roadmap\n\n## V1: first release\nScope:\n{scope}"),
+    );
+    let tx = store.transaction().unwrap();
+    project(&tx);
+    for number in 1..=40 {
+        let title = format!("{number:02} {}", "w".repeat(150));
+        ticket(
+            &tx,
+            &title,
+            TicketKind::Feature,
+            TicketStatus::Todo,
+            2,
+            "",
+            1_100,
+        );
+    }
+    let me = owner();
+    let text = export::project(&tx, &key()).unwrap();
+    assert!(text.len() > 8 * 1024);
+
+    let whole = call(&tx, &me, "export", json!({"project": "CA"}));
+    assert_eq!(denied(&whole), "export_too_large");
+    assert!(
+        whole["message"].as_str().unwrap().contains("path"),
+        "{whole}"
+    );
+    let to_file = call(
+        &tx,
+        &me,
+        "export",
+        json!({"project": "CA", "path": "open.md"}),
+    );
+    assert_eq!(answered(&to_file)["bytes"], text.len());
+
+    let before = counts(&tx);
+    let previewed = call(
+        &tx,
+        &me,
+        "import_preview",
+        json!({"project": "CA", "path": long.to_str().unwrap()}),
+    );
+    assert_eq!(denied(&previewed), "import_too_large");
+    assert_eq!(counts(&tx), before);
+    let preview = import::preview(&tx, &Standalone, &me, &key(), &long).unwrap();
+    assert_eq!(preview.items.len(), 121);
+    tx.commit().unwrap();
+}
+
+#[test]
+fn the_largest_import_apply_reply_fits_the_default_reply_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = opened(dir.path());
+    let mut roadmap = String::from("# Roadmap\n\n");
+    for section in 0..64_usize {
+        roadmap.push_str(&format!(
+            "## V1000.1000.{}: release {section}\nTarget: 2026-12-01\n",
+            1000 + section
+        ));
+        if section < OPEN_TICKETS_CREATED_PER_ACTOR_MAX {
+            roadmap.push_str(&format!("Scope:\n- Item {section:02} of the plan\n"));
+        }
+        roadmap.push('\n');
+    }
+    let path = written(dir.path(), "roadmap.md", &roadmap);
+    let tx = store.transaction().unwrap();
+    project(&tx);
+    let preview = import::preview(&tx, &Standalone, &owner(), &key(), &path).unwrap();
+    assert_eq!(preview.items.len(), 64 + OPEN_TICKETS_CREATED_PER_ACTOR_MAX);
+    assert!(preview.unparsed.is_empty(), "{:?}", preview.unparsed);
+
+    let applied = call(
+        &tx,
+        &owner(),
+        "import_apply",
+        json!({"project": "CA", "path": path.to_str().unwrap(), "accept": keys(&preview)}),
+    );
+    let data = answered(&applied);
+    let versions = data["versions"].as_array().unwrap();
+    assert_eq!(versions.len(), 64);
+    assert_eq!(versions[0], "V1000.1000.1000");
+    assert_eq!(versions[63], "V1000.1000.1063");
+    let tickets = data["tickets"].as_array().unwrap();
+    assert_eq!(tickets.len(), OPEN_TICKETS_CREATED_PER_ACTOR_MAX);
+    assert_eq!(tickets[0], "CA-1");
+    assert!(
+        applied.to_string().len() <= 8 * 1024,
+        "{}",
+        applied.to_string().len()
+    );
+    tx.commit().unwrap();
+}
+
+#[test]
+fn an_import_preview_is_a_read_and_takes_no_request_id() {
+    assert!(!OpKind::ImportPreview.is_write());
+    assert!(!OpKind::Export.is_write());
+    assert!(OpKind::ImportApply.is_write());
+    let spec = catalog::spec(OpKind::ImportPreview);
+    assert!(spec.fields.iter().all(|field| field.name != "request_id"));
+    let args = json!({"project": "CA", "path": "roadmap.md", "request_id": "r-1"});
+    let refused = Request::parse("import_preview", args.to_string().as_bytes()).unwrap_err();
+    assert_eq!(refused.code, codes::UNKNOWN_FIELD);
 }

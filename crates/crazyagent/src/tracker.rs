@@ -1,16 +1,19 @@
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
-use rusqlite::{Connection, OptionalExtension, Transaction, params};
+use rusqlite::{OptionalExtension, Transaction, params};
 use trackwright_core::model::{Actor, ProjectKey, Refusal};
 use trackwright_core::store::{self, StoreError};
 
+pub mod context_import;
 pub mod host;
+pub(crate) mod render;
 pub mod settings;
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;
 
 pub use host::Host;
 
+#[cfg(unix)]
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS tracker_projects (
     project TEXT PRIMARY KEY NOT NULL,
@@ -19,6 +22,10 @@ CREATE TABLE IF NOT EXISTS tracker_projects (
 CREATE TABLE IF NOT EXISTS tracker_settings (
     scope TEXT PRIMARY KEY NOT NULL,
     body TEXT NOT NULL CHECK (length(CAST(body AS BLOB)) BETWEEN 2 AND 1024)
+);
+CREATE TABLE IF NOT EXISTS tracker_context_imports (
+    project TEXT PRIMARY KEY NOT NULL,
+    imported_ms INTEGER NOT NULL
 );";
 
 const PROJECT_OF_KEY: &str = "SELECT project FROM tracker_projects WHERE key = ?1";
@@ -44,7 +51,8 @@ pub(crate) fn engine_error(error: StoreError) -> EngineError {
 /// transaction, forward only and idempotent. Input: the engine database, not inside a
 /// transaction. Output: Ok once both are current, or `tracker_unavailable`, or the core's
 /// `store_schema_newer` for a database a newer tracker wrote.
-pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
+#[cfg(unix)]
+pub(crate) fn initialize(connection: &rusqlite::Connection) -> Result<(), EngineError> {
     assert!(connection.is_autocommit());
     let tx = connection.unchecked_transaction().map_err(unavailable)?;
     trackwright_core::schema::migrate(&tx).map_err(engine_error)?;
