@@ -202,7 +202,7 @@ async fn the_owner_types_into_an_engine_terminal_and_the_team_graph_shows_the_ma
         "no harness runs the master yet, so it has no terminal to open"
     );
     assert!(
-        graph.nodes.iter().all(|node| node.kind != NodeKind::Agent),
+        graph.nodes.iter().all(|node| !node.kind.agent()),
         "{graph:?}"
     );
     assert!(graph.edges.is_empty(), "{graph:?}");

@@ -1,5 +1,5 @@
 use super::buffer::buffer;
-use super::{AgentId, Host, HostError, PaneRef, TerminalStream, VIEWER_BUFFER_BYTES_MAX};
+use super::{AgentId, Host, HostError, PaneInfo, PaneRef, TerminalStream, VIEWER_BUFFER_BYTES_MAX};
 use crate::harnesses::interactive::InteractiveCommand;
 use std::collections::VecDeque;
 use std::sync::{Mutex, MutexGuard, PoisonError};
@@ -76,8 +76,10 @@ impl LastScreens {
 
 /// A terminal host that keeps the last screen of each terminal it ends, so a viewer opening
 /// an agent between runs sees how its last run finished, labeled with the local time it
-/// ended, instead of a refusal; a new run of the agent forgets it. Screens live only in the
-/// engine's memory: a terminal that exits on its own, or an engine restart, keeps none.
+/// ended, instead of a refusal; a new run of the agent forgets it. A kill and a spawn each
+/// hold the kept screens while they act, so a respawn never lands between a kill and the
+/// screen it keeps. Screens live only in the engine's memory: a terminal that exits on its
+/// own, or an engine restart, keeps none.
 pub(super) struct LastScreenHost<H> {
     inner: H,
     screens: Mutex<LastScreens>,
@@ -99,8 +101,9 @@ impl<H: Host> LastScreenHost<H> {
 
 impl<H: Host> Host for LastScreenHost<H> {
     fn spawn(&self, agent: &AgentId, command: &InteractiveCommand) -> Result<PaneRef, HostError> {
+        let mut screens = self.screens();
         let pane = self.inner.spawn(agent, command)?;
-        self.screens().forget(agent);
+        screens.forget(agent);
         Ok(pane)
     }
 
@@ -129,20 +132,63 @@ impl<H: Host> Host for LastScreenHost<H> {
         self.inner.input_live(agent)
     }
 
+    fn quiet(&self, agent: &AgentId) -> Result<Option<std::time::Duration>, HostError> {
+        self.inner.quiet(agent)
+    }
+
     fn resize(&self, agent: &AgentId, cols: u16, rows: u16) -> Result<(), HostError> {
         self.inner.resize(agent, cols, rows)
     }
 
     fn kill(&self, agent: &AgentId) -> Result<(), HostError> {
+        let mut screens = self.screens();
         let last = self.inner.snapshot(agent).ok();
         self.inner.kill(agent)?;
         if let Some(last) = last {
             use crate::tui::clock::{clock, local_offset, now_ms};
             let label = format!(" Finished at {} ", clock(now_ms(), local_offset()));
-            self.screens()
-                .keep(agent, &last.screen, last.cols, last.rows, &label);
+            screens.keep(agent, &last.screen, last.cols, last.rows, &label);
         }
         Ok(())
+    }
+
+    fn panes(&self, agent: &AgentId) -> Result<Vec<PaneInfo>, HostError> {
+        self.inner.panes(agent)
+    }
+
+    fn kill_pane(&self, agent: &AgentId, pane: &str) -> Result<(), HostError> {
+        self.inner.kill_pane(agent, pane)
+    }
+
+    fn attach_pane(&self, agent: &AgentId, pane: &str) -> Result<TerminalStream, HostError> {
+        self.inner.attach_pane(agent, pane)
+    }
+
+    fn snapshot_pane(&self, agent: &AgentId, pane: &str) -> Result<TerminalStream, HostError> {
+        self.inner.snapshot_pane(agent, pane)
+    }
+
+    fn input_pane(&self, agent: &AgentId, pane: &str, bytes: &[u8]) -> Result<(), HostError> {
+        self.inner.input_pane(agent, pane, bytes)
+    }
+
+    fn input_live_pane(&self, agent: &AgentId, pane: &str) -> Result<bool, HostError> {
+        self.inner.input_live_pane(agent, pane)
+    }
+
+    fn adopt_pane(&self, agent: &AgentId, lead: &AgentId, pane: &str) -> Result<(), HostError> {
+        self.inner.adopt_pane(agent, lead, pane)
+    }
+
+    fn spawn_own_server(
+        &self,
+        agent: &AgentId,
+        command: &InteractiveCommand,
+    ) -> Result<PaneRef, HostError> {
+        let mut screens = self.screens();
+        let pane = self.inner.spawn_own_server(agent, command)?;
+        screens.forget(agent);
+        Ok(pane)
     }
 
     fn alive(&self) -> Result<Vec<AgentId>, HostError> {
@@ -218,5 +264,87 @@ mod tests {
 
     fn contains(seen: &[u8], wanted: &[u8]) -> bool {
         seen.windows(wanted.len()).any(|window| window == wanted)
+    }
+
+    #[cfg(unix)]
+    struct Server(std::path::PathBuf, std::path::PathBuf);
+
+    #[cfg(unix)]
+    impl Drop for Server {
+        fn drop(&mut self) {
+            let _ = crate::spawn_gate::status(
+                std::process::Command::new(&self.0)
+                    .arg("-S")
+                    .arg(&self.1)
+                    .arg("kill-server")
+                    .env_clear()
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null()),
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_respawn_never_slips_between_a_kill_and_the_screen_it_keeps() {
+        use crate::terminal::tmux::{SOCKET, Tmux, installed};
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::Arc;
+        use std::time::Duration;
+
+        let home = tempfile::tempdir().unwrap();
+        let folder = home.path().join("terminal");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let program = installed(home.path()).expect("tmux is required for this test");
+        let _server = Server(program.clone(), folder.join(SOCKET));
+        let host = Arc::new(LastScreenHost::new(Tmux::open(Some(program), &folder)));
+        let named = agent(9);
+        let run = |text: &str| InteractiveCommand {
+            argv: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                format!("printf '{text}\\n'; exec /bin/sleep 30"),
+            ],
+            cwd: home.path().to_path_buf(),
+            env: Vec::new(),
+            transcript: crate::harnesses::interactive::Transcript::Unavailable,
+        };
+        host.spawn(&named, &run("first run")).unwrap();
+        assert_eq!(host.alive().unwrap(), vec![named.clone()]);
+
+        let held = host.screens();
+        let killing = {
+            let (host, named) = (Arc::clone(&host), named.clone());
+            std::thread::spawn(move || host.kill(&named))
+        };
+        std::thread::sleep(Duration::from_millis(500));
+        assert_eq!(
+            host.alive().unwrap(),
+            vec![named.clone()],
+            "a kill ends the terminal only while it holds the kept screens"
+        );
+        drop(held);
+        killing.join().unwrap().unwrap();
+        assert!(host.alive().unwrap().is_empty());
+
+        let held = host.screens();
+        assert!(held.view(&named).is_some());
+        let spawning = {
+            let (host, named) = (Arc::clone(&host), named.clone());
+            let second = run("second run");
+            std::thread::spawn(move || host.spawn(&named, &second).map(drop))
+        };
+        std::thread::sleep(Duration::from_millis(500));
+        assert!(
+            host.alive().unwrap().is_empty(),
+            "a respawn starts the terminal only while it holds the kept screens"
+        );
+        drop(held);
+        spawning.join().unwrap().unwrap();
+        assert_eq!(host.alive().unwrap(), vec![named.clone()]);
+        assert!(host.screens().view(&named).is_none());
+        host.kill(&named).unwrap();
     }
 }

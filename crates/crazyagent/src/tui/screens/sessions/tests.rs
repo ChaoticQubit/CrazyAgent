@@ -100,6 +100,7 @@ fn the_list_and_header_draw_every_session_at_80_and_120_columns() {
             vec![
                 ("\u{2191}\u{2193}", "Move"),
                 ("Enter", "Resume"),
+                ("d", "Delete"),
                 ("n", "New session"),
                 ("Esc", "Back")
             ]
@@ -329,6 +330,65 @@ fn a_switch_the_engine_refused_for_a_running_turn_asks_the_owner_again() {
         SessionsReply::Act(SessionsAction::Resume {
             session: "s2".into(),
             cancel_running: true
+        })
+    );
+}
+
+#[test]
+fn d_asks_before_deleting_a_session_that_is_not_live_and_n_keeps_it() {
+    let content = 80 - 4;
+    let mut sessions = opened();
+    assert_eq!(
+        sessions.key(press(KeyCode::Char('d')), true, false),
+        SessionsReply::Handled
+    );
+    let (body, _) = sessions.view(content, 12, NOW, 0, &Look::plain()).unwrap();
+    assert!(
+        !texts(&body)
+            .iter()
+            .any(|line| line.starts_with("Delete the session")),
+        "the live session is never offered for Delete"
+    );
+    sessions.key(press(KeyCode::Down), true, false);
+    assert_eq!(
+        sessions.key(press(KeyCode::Char('d')), true, false),
+        SessionsReply::Handled
+    );
+    let (body, help) = sessions.view(content, 12, NOW, 0, &Look::plain()).unwrap();
+    assert!(body.iter().all(|row| row.width() <= content));
+    let drawn = texts(&body);
+    let asked = drawn
+        .iter()
+        .position(|line| line.starts_with("Delete the session"))
+        .unwrap_or_else(|| panic!("{drawn:?}"));
+    assert!(
+        asked + 1 < drawn.len(),
+        "the question wraps in the 76 cells an 80-column master view gives it"
+    );
+    assert_eq!(
+        drawn[asked..].join(" "),
+        "Delete the session from 26 h ago? Its messages and its transcript are removed for good.",
+        "the whole question is drawn"
+    );
+    assert_eq!(help, vec![("y", "Delete it"), ("n", "Keep it")]);
+    assert_eq!(
+        sessions.key(press(KeyCode::Char('n')), true, false),
+        SessionsReply::Handled
+    );
+    let (body, _) = sessions.view(content, 12, NOW, 0, &Look::plain()).unwrap();
+    assert!(
+        !texts(&body)
+            .iter()
+            .any(|line| line.starts_with("Delete the session")),
+        "n keeps the session"
+    );
+    assert!(sessions.showing(), "the list stays open after n");
+
+    sessions.key(press(KeyCode::Char('d')), true, false);
+    assert_eq!(
+        sessions.key(press(KeyCode::Char('y')), true, false),
+        SessionsReply::Act(SessionsAction::Delete {
+            session: "s2".into()
         })
     );
 }

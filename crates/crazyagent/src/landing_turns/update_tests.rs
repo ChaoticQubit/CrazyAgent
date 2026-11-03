@@ -241,10 +241,14 @@ fn change_sets_the_listed_32_leave_out_are_still_found_by_their_id() {
     let copy = |id: &str, kind: &str, agent: &str, state: &str, updated_ms: i64| {
         case.db
             .execute(
-                "INSERT INTO landing_change_sets SELECT ?2,project,?3,?4,label,repository,
-                 worktree||?2,git_dir,base,head,?5,last_outcome,turn,prompt_line,files,added,
-                 removed,conflicts,created_ms,?6,restorable_until_ms,pruned,landed,intent,
-                 message,waiting FROM landing_change_sets WHERE id=?1",
+                "INSERT INTO landing_change_sets(id,project,agent_kind,agent_id,label,
+                 repository,worktree,git_dir,base,head,state,last_outcome,turn,prompt_line,
+                 files,added,removed,conflicts,created_ms,updated_ms,restorable_until_ms,
+                 pruned,landed,intent,message,waiting,outside)
+                 SELECT ?2,project,?3,?4,label,repository,worktree||?2,git_dir,base,head,?5,
+                 last_outcome,turn,prompt_line,files,added,removed,conflicts,created_ms,?6,
+                 restorable_until_ms,pruned,landed,intent,message,waiting,outside
+                 FROM landing_change_sets WHERE id=?1",
                 rusqlite::params![case.id.as_str(), id, kind, agent, state, updated_ms],
             )
             .unwrap();

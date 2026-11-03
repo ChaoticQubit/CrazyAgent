@@ -239,6 +239,139 @@ fn the_tui_walks_from_home_into_the_project_team_tree() {
     engine.stop();
 }
 
+const STOPPED_PROJECT: &str = "Stopped team e2e";
+const LEAD_TASK: &str = "Run a native agent team";
+const WORKER_TASKS: [&str; 2] = ["Write greet.py", "Write the README"];
+
+/// Writes a lead and its two workers as the engine leaves them after Stop all: stopped, no
+/// task held, each with the done task it ran, the workers' handed out by the lead. Inputs:
+/// the engine root and the project id. Output: the lead and worker ids.
+fn stopped_team(root: &Path, project: &str) -> (i64, [i64; 2]) {
+    let db = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+    db.busy_timeout(Duration::from_secs(10)).unwrap();
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    let agent = |parent: Option<i64>| {
+        db.execute(
+            "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms,stopped_ms,turns,parent)
+             VALUES (?1,'sub','codex',0,'local-connection','stopped',?2,?2,?2,1,?3)",
+            rusqlite::params![project, now, parent],
+        )
+        .unwrap();
+        db.last_insert_rowid()
+    };
+    let task = |prompt: &str, agent: i64, parent: Option<i64>| {
+        db.execute(
+            "INSERT INTO team_tasks(project,source,harness,tools,prompt,status,agent,attempts,result,delivered,created_ms,started_ms,finished_ms,parent)
+             VALUES (?1,'master','codex',0,?2,'done',?3,1,'Done',1,?4,?4,?4,?5)",
+            rusqlite::params![project, prompt, agent, now, parent],
+        )
+        .unwrap();
+    };
+    let lead = agent(None);
+    let workers = [agent(Some(lead)), agent(Some(lead))];
+    task(LEAD_TASK, lead, None);
+    for (prompt, worker) in WORKER_TASKS.iter().zip(workers) {
+        task(prompt, worker, Some(lead));
+    }
+    (lead, workers)
+}
+
+#[test]
+fn after_every_agent_stops_its_tasks_keep_its_name_and_f_lists_it_in_the_tui() {
+    let mut engine = Engine::start("ca-e2e-stopped-");
+    let tmux = installed(engine.path()).expect(TMUX);
+    let disk = scratch("ca-e2e-home-");
+    let home = disk.path().join("Projects");
+    std::fs::create_dir(&home).unwrap();
+    let project = ProjectId::new("e2e-stopped").unwrap();
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let mut owner = Owner::attach(&engine).await;
+        assert_eq!(owner.save_profile(profile()).await, OwnerResult::Applied);
+        assert_eq!(owner.set_home(&home).await, OwnerResult::Applied);
+        assert_eq!(
+            owner
+                .create_project(project.as_str(), STOPPED_PROJECT)
+                .await,
+            OwnerResult::Applied
+        );
+        owner.controller.detach();
+    });
+    let (lead, workers) = stopped_team(engine.path(), project.as_str());
+    let graph = runtime.block_on(async {
+        let mut owner = Owner::attach(&engine).await;
+        let graph = owner.controller.team_graph(project.clone()).await.unwrap();
+        owner.controller.detach();
+        graph
+    });
+    assert!(
+        graph.nodes.iter().all(|node| !node.kind.agent()),
+        "Finished agents is Hide, so the stopped agents leave the tree: {:#?}",
+        graph.nodes
+    );
+    let name = |agent: i64| -> String {
+        graph
+            .edges
+            .iter()
+            .find(|edge| edge.to == format!("team-{agent}"))
+            .and_then(|edge| edge.agent_label.clone())
+            .unwrap_or_else(|| panic!("no task edge keeps agent {agent}: {:#?}", graph.edges))
+    };
+    let lead_name = name(lead);
+    let worker_names = workers.map(name);
+
+    let pty = Pty::launch(tmux, &engine.socket());
+    open_team(&pty, STOPPED_PROJECT);
+    let screen = pty.until("the Tasks rows show every task", |screen| {
+        screen.contains(LEAD_TASK) && WORKER_TASKS.iter().all(|task| screen.contains(task))
+    });
+    let row = line_of(&screen, LEAD_TASK);
+    assert!(
+        row.contains(&lead_name) && !row.contains("Master"),
+        "the lead's task keeps the lead's name, not the master's:\n{screen}"
+    );
+    for (task, worker) in WORKER_TASKS.iter().zip(&worker_names) {
+        let row = line_of(&screen, task);
+        assert!(
+            row.contains(worker.as_str()) && !row.contains(&lead_name),
+            "a worker's task keeps the worker's name, not its lead's:\n{screen}"
+        );
+    }
+
+    pty.keys(&["s"]);
+    pty.until(
+        "the agents list points at the Finished box for the three stopped agents",
+        |screen| screen.contains("3 finished agents are in Finished: press Esc, then f."),
+    );
+    pty.keys(&["Escape"]);
+    pty.until("Esc goes back to the team tree", |screen| {
+        on_team(screen, STOPPED_PROJECT) && !screen.contains("in Finished: press Esc")
+    });
+    pty.keys(&["f"]);
+    let finished = pty.until("f lists the stopped agents", |screen| {
+        screen.contains("Finished (3)")
+            && screen.contains(&lead_name)
+            && worker_names
+                .iter()
+                .all(|worker| screen.contains(worker.as_str()))
+    });
+    assert!(
+        finished.contains("Finished agents: Hide. They leave the team tree for this list."),
+        "{finished}"
+    );
+    drop(pty);
+    engine.stop();
+}
+
 fn line_of<'a>(screen: &'a str, label: &str) -> &'a str {
     screen
         .lines()

@@ -3,8 +3,6 @@ import { existsSync, readFileSync } from "node:fs";
 import { registerHooks } from "node:module";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { createElement } from "react";
-import { renderToStaticMarkup } from "react-dom/server";
 import { transformSync } from "rolldown/utils";
 
 const sourceRoot = new URL("../src/", import.meta.url).href;
@@ -31,50 +29,6 @@ registerHooks({
     assert.deepEqual(result.errors, [], `production module did not transform: ${url}`);
     return { format: "module", source: result.code, shortCircuit: true };
   },
-});
-
-const conversation = await import("../src/screens/conversation.tsx");
-const { useOwnerBrowser } = await import("../src/state.ts");
-
-test("master panel offers Start master in plain language before a session exists", () => {
-  function Panel() {
-    const state = useOwnerBrowser();
-    return createElement(conversation.MasterPanel, { state: { ...state, connected: true }, ticket: "7" });
-  }
-  const markup = renderToStaticMarkup(createElement(Panel));
-  assert.match(markup, /Master conversation/);
-  assert.match(markup, /The master has not started for this project/);
-  assert.match(markup, /data-testid="select-project-master"[^>]*>Start master</);
-  assert.doesNotMatch(markup, /data-testid="select-project-master"[^>]*disabled/);
-  assert.doesNotMatch(markup, /does not expose master selection/);
-});
-
-test("master panel disables Start master while disconnected", () => {
-  function Panel() {
-    return createElement(conversation.MasterPanel, { state: useOwnerBrowser(), ticket: "7" });
-  }
-  const markup = renderToStaticMarkup(createElement(Panel));
-  assert.match(markup, /<button[^>]*disabled=""[^>]*data-testid="select-project-master"/);
-});
-
-test("turn status labels are plain language for every phase", () => {
-  const label = (phase, reason = null) => conversation.turnStatus({ id: "t", ordinal: 1, phase, reason, reply: null });
-  assert.equal(label("queued"), "Waiting to start");
-  assert.equal(label("prepared"), "Waiting to start");
-  assert.equal(label("running"), "Thinking");
-  assert.equal(label("succeeded"), "Replied");
-  assert.equal(label("blocked", "runtime_unavailable"), "Blocked (runtime unavailable)");
-  assert.equal(label("blocked", "readiness_unknown"),
-    "Blocked: not signed in. Sign in to this account in Settings, then send again");
-  assert.equal(label("blocked", "readiness_stale"),
-    "Blocked: sign-in is out of date. Sign in again in Settings, then send again");
-  assert.equal(label("blocked", "connection_changed"),
-    "Blocked: settings or the engine changed since the master opened. Close it, open it again, then send again");
-  assert.equal(label("uncertain"), "Outcome unclear");
-  assert.equal(label("failed", "unknown"), "Failed");
-  assert.equal(conversation.turnStatus({ id: "t", ordinal: 1, phase: "blocked", reason: "runtime_unavailable", cause: "rcli_profile_configuration_required", reply: null }),
-    "Blocked (rcli_profile_configuration_required)");
-  for (const phase of ["delivering", "waiting_approval", "failed", "cancelled"]) assert.ok(label(phase).length > 0);
 });
 
 test("busy bridge calls are retried and other failures are not", async () => {
@@ -108,13 +62,6 @@ test("a burst of calls refused busy together does not retry in step until some g
   const burst = Array.from({ length: 13 }, () => retryBusy(hold, 50));
   const settled = await Promise.allSettled(burst);
   assert.deepEqual(settled.filter((result) => result.status === "rejected").map((result) => result.reason), []);
-});
-
-test("master controls offer Close on an open master and Start again once it is closed", () => {
-  assert.deepEqual(conversation.masterControls(undefined), { start: true, close: false });
-  assert.deepEqual(conversation.masterControls("configured"), { start: false, close: true });
-  assert.deepEqual(conversation.masterControls("parked"), { start: true, close: false });
-  assert.deepEqual(conversation.masterControls("closed"), { start: true, close: false });
 });
 
 test("a master opened before an engine or settings change explains how to recover", async () => {

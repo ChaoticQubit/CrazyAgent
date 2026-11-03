@@ -75,6 +75,12 @@ def main():
             })
         elif method == "tools/list":
             cursor = message.get("params", {}).get("cursor")
+            if mode == "deaf":
+                reply(message, {"tools": [{"name": first, "inputSchema": {"type": "object"}}], "nextCursor": "c" * (900 * 1024)})
+                with open(sys.argv[2], "w") as handle:
+                    handle.write(str(os.getpid()))
+                time.sleep(30)
+                return
             if cursor is None:
                 reply(message, {"tools": [{"name": first, "inputSchema": {"type": "object"}}], "nextCursor": "page-2"})
             else:

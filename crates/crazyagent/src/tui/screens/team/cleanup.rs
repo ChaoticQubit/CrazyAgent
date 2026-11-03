@@ -62,6 +62,9 @@ pub(super) fn words(code: &str) -> &'static str {
         "cleanup_folder_failed" => {
             "The worktree is gone but the agent's folder could not be removed. Try again."
         }
+        "cleanup_refs_unlanded" => {
+            "An agent's working copy has a stash, branch or tag that is not saved anywhere else."
+        }
         "cleanup_worktree_dirty" => {
             "An agent's working copy has changes that are not saved anywhere else."
         }
@@ -255,6 +258,7 @@ impl Cleanup {
             let role = match agent.role {
                 AgentRole::Master => "master",
                 AgentRole::Sub => "sub-agent",
+                AgentRole::Teammate => "teammate",
             };
             let row = wrap(
                 &format!(

@@ -2,18 +2,18 @@ use super::*;
 use crate::protocol::ProjectId;
 use crate::questions::{Asker, Note};
 use rusqlite::Connection;
+use serde_json::json;
 use std::io::Cursor;
 use std::os::unix::fs::{PermissionsExt, symlink};
 
 const PROJECT: &str = "alpha";
 const AGENT: i64 = 7;
 
-/// A private engine root with the engine database, one set-up project and an agent's
-/// mailbox folder, as a team launch leaves them.
+/// A private engine root with the engine database and one set-up project, as a team launch
+/// leaves them.
 struct Case {
     _tmp: tempfile::TempDir,
     base: PathBuf,
-    mailbox: PathBuf,
     db: Connection,
     project: ProjectId,
 }
@@ -25,8 +25,8 @@ impl Case {
         let base = tmp.path().canonicalize().unwrap();
         let root = base.join("engine");
         let folder = base.join("project");
-        let mailbox = base.join("tmp").join(super::super::MAILBOX_FOLDER);
-        for path in [&root, &folder, &mailbox] {
+        let tmp_folder = base.join("tmp");
+        for path in [&root, &folder, &tmp_folder] {
             std::fs::create_dir_all(path).unwrap();
         }
         std::fs::create_dir(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
@@ -37,7 +37,6 @@ impl Case {
         Self {
             _tmp: tmp,
             base,
-            mailbox,
             db,
             project: ProjectId::new(PROJECT).unwrap(),
         }
@@ -45,25 +44,6 @@ impl Case {
 
     fn drop_file(&self) -> PathBuf {
         self.base.join("tmp").join(super::super::DROP_FILE)
-    }
-
-    /// Runs the sub-agent's ask server on the given requests while the engine side answers
-    /// its mailbox, logging each question for agent `AGENT`. Returns the server's answers.
-    fn served(&self, requests: &[Value]) -> Vec<Value> {
-        let input = lines(requests);
-        let mailbox = self.mailbox.clone();
-        let server = std::thread::spawn(move || {
-            let mut output = Vec::new();
-            serve_agent(input, &mut output, &mailbox).map(|()| output)
-        });
-        let asker = Asker::Agent(AGENT);
-        while !server.is_finished() {
-            serve_agent_calls(&self.mailbox, |ask| {
-                crate::questions::ask(&self.db, &self.project, &asker, ask)
-            });
-            std::thread::sleep(std::time::Duration::from_millis(10));
-        }
-        answers(&server.join().unwrap().unwrap())
     }
 }
 
@@ -241,39 +221,28 @@ fn the_engine_keeps_only_checked_questions_and_never_follows_a_linked_record() {
 }
 
 #[test]
-fn a_sub_agent_server_lists_only_ask_and_logs_its_question_as_the_agent() {
+fn a_sub_agent_server_lists_ask_but_not_record_answer_and_logs_its_question_as_the_agent() {
+    let sub_agent = [RECORD_TOOL.to_owned()];
+    let listed = super::super::team_tools(&sub_agent);
+    let tools = listed["tools"].as_array().unwrap();
+    assert_eq!(tools.last(), Some(&super::super::ask_tool()));
+    assert!(tools.iter().all(|tool| tool["name"] != RECORD_TOOL));
+    assert!(super::super::known_tools(&sub_agent));
+
     let case = Case::new();
-    let answered = case.served(&[
-        json!({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}),
-        json!({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}),
-        ask_line(3, super::super::TOOL_NAME, json!({"task": "fix it"})),
-        ask_line(4, ASK_TOOL, json!({"question": ""})),
-        ask_line(5, ASK_TOOL, shipping()),
-    ]);
-    assert_eq!(answered.len(), 5);
-    assert!(answered[0]["result"].is_object());
     assert_eq!(
-        answered[1]["result"]["tools"],
-        json!([super::super::ask_tool()])
+        super::super::live_call(ASK_TOOL, Some(&json!({"question": ""}))),
+        Some(Err(super::super::ASK_INVALID))
     );
-    assert_eq!(answered[2]["error"]["code"], -32602);
-    let (refused, error) = text(&answered[3]);
-    assert!(error && refused.starts_with("Not asked"), "{refused}");
-    let (logged, error) = text(&answered[4]);
+    let (logged, error) = agent_ask(&case.db, &case.project, AGENT, shipped());
     assert!(!error, "{logged}");
     assert!(logged.starts_with("Question 1 is logged"), "{logged}");
     assert!(logged.contains("types the owner's answer or dismissal into your terminal"));
-
     let pending = crate::questions::pending(&case.db, &case.project).unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].asker, Asker::Agent(AGENT).name());
     assert_eq!(pending[0].question, "Ship the release on Friday?");
     assert_eq!(pending[0].recommended.as_deref(), Some("Friday"));
-    assert_eq!(
-        std::fs::read_dir(&case.mailbox).unwrap().count(),
-        0,
-        "every call was answered and cleared"
-    );
 }
 
 #[test]
@@ -289,50 +258,27 @@ fn a_sub_agent_hears_why_its_question_was_not_logged() {
     for _ in 0..crate::questions::PENDING_PER_ASKER_MAX {
         crate::questions::ask(&case.db, &case.project, &asker, &ask).unwrap();
     }
-    let answered = case.served(&[ask_line(1, ASK_TOOL, shipping())]);
-    let (refused, error) = text(&answered[0]);
+    let (refused, error) = agent_ask(&case.db, &case.project, AGENT, shipped());
     assert!(error);
     assert!(
         refused.starts_with("Not asked: 8 of your questions are still open"),
         "{refused}"
     );
-    assert_eq!(
-        crate::questions::pending(&case.db, &case.project)
-            .unwrap()
-            .len(),
-        crate::questions::PENDING_PER_ASKER_MAX as usize
-    );
-
-    std::fs::write(
-        case.mailbox
-            .join(format!("{}{}", "d".repeat(32), super::super::CALL_SUFFIX)),
-        serde_json::to_vec(&Call::Status).unwrap(),
-    )
-    .unwrap();
-    let other = Asker::Agent(AGENT + 1);
-    assert_eq!(
-        serve_agent_calls(&case.mailbox, |ask| {
-            crate::questions::ask(&case.db, &case.project, &other, ask)
-        }),
-        1
-    );
+    let record = Call::RecordAnswer {
+        question: 1,
+        version: 0,
+        owner_turn: 1,
+    };
+    let (refused, error) = agent_ask(&case.db, &case.project, AGENT + 1, record);
+    assert!(error);
+    assert_eq!(refused, AGENT_ASKS_ONLY);
     assert_eq!(
         crate::questions::pending(&case.db, &case.project)
             .unwrap()
             .len(),
         crate::questions::PENDING_PER_ASKER_MAX as usize,
-        "a call other than ask is answered and never logged"
+        "a refused question and a sub-agent's record_answer log nothing"
     );
-}
-
-#[test]
-fn the_sub_agent_server_needs_an_absolute_plain_mailbox() {
-    let case = Case::new();
-    let list = lines(&[json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})]);
-    assert!(serve_agent(list.clone(), Vec::new(), Path::new("relative")).is_err());
-    let linked = case.base.join("linked");
-    symlink(&case.mailbox, &linked).unwrap();
-    assert!(serve_agent(list, Vec::new(), &linked).is_err());
 }
 
 #[test]

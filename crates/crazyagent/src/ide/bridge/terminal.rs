@@ -285,7 +285,12 @@ async fn relay(
             },
             request = asked.recv() => match request {
                 None | Some(TerminalRequest::Detach) => break "terminal_detached",
-                Some(TerminalRequest::Attach { .. } | TerminalRequest::Prompt { .. }) => {
+                Some(
+                    TerminalRequest::Attach { .. }
+                    | TerminalRequest::AttachPane { .. }
+                    | TerminalRequest::AttachSized { .. }
+                    | TerminalRequest::Prompt { .. },
+                ) => {
                     break "terminal_request_invalid";
                 }
                 Some(TerminalRequest::Input { bytes }) if bytes.is_empty() || bytes.len() > INPUT_BYTES_MAX => {
@@ -325,6 +330,8 @@ async fn act(
         TerminalRequest::Input { bytes } => host.input(&name, &bytes),
         TerminalRequest::Resize { cols, rows } => host.resize(&name, cols, rows),
         TerminalRequest::Attach { .. }
+        | TerminalRequest::AttachPane { .. }
+        | TerminalRequest::AttachSized { .. }
         | TerminalRequest::Prompt { .. }
         | TerminalRequest::Detach => Ok(()),
     })

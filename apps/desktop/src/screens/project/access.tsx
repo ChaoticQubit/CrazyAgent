@@ -1,4 +1,4 @@
-import type { AgentAccess, AgentPolicy, PolicyView } from "../../api-projects";
+import type { AgentAccess, AgentNetwork, AgentPolicy, PolicyView } from "../../api-projects";
 import { Switch } from "../../ui";
 
 function assert(condition: boolean, message: string): asserts condition {
@@ -29,14 +29,30 @@ export function accessLabel(access: AgentAccess): string {
   return ACCESS_LEVELS.find((level) => level.access === access)?.label ?? access;
 }
 
-/** The policy Save sends: the level, a choice only for each toolchain whose switch differs
- * from the project's own use, so the others keep following the project, and the IDE hooks switch.
- * Inputs: the engine's view, the chosen level, one switch per view toolchain and the IDE hooks
- * switch. Output: the policy. */
-export function policyOf(view: PolicyView, access: AgentAccess, allowed: boolean[], ideGitHooks: boolean): AgentPolicy {
+/** Every network choice, widest first, with what it lets agents and the plugin check reach. */
+export const NETWORK_CHOICES: { network: AgentNetwork; label: string; help: string }[] = [
+  { network: "open", label: "Open", help: "Agents with tools on reach the whole network, and so does the plugin check." },
+  { network: "https", label: "Port 443 only", help: "Agents and the plugin check reach port 443 only; agents also still reach the model." },
+  { network: "none", label: "None", help: "Agents reach only the model's port, on any host; for subscription accounts that is all of port 443, same as Port 443 only; the plugin check reaches nothing." },
+];
+
+/** Why the network choice has no effect under Full access. */
+export const NETWORK_IGNORED_UNDER_FULL = "Full access runs agents without a sandbox, so this choice does not apply.";
+
+/** Names a network choice as the owner sees it. Input: the choice. Output: the label. */
+export function networkLabel(network: AgentNetwork): string {
+  return NETWORK_CHOICES.find((choice) => choice.network === network)?.label ?? network;
+}
+
+/** The policy Save sends: the level, the network choice, a choice only for each toolchain
+ * whose switch differs from the project's own use, so the others keep following the project,
+ * and the IDE hooks switch. Inputs: the engine's view, the chosen level and network, one
+ * switch per view toolchain and the IDE hooks switch. Output: the policy. */
+export function policyOf(view: PolicyView, access: AgentAccess, network: AgentNetwork, allowed: boolean[], ideGitHooks: boolean): AgentPolicy {
   assert(allowed.length === view.toolchains.length, "one switch per toolchain");
   return {
     access,
+    network,
     toolchains: view.toolchains.flatMap((row, index) => row.used === allowed[index] ? [] : [{ toolchain: row.toolchain, allowed: allowed[index] }]),
     ide_git_hooks: ideGitHooks,
   };
@@ -85,6 +101,27 @@ export function AccessLevels({ name, value, unavailable, onChange }: {
       })}
     </div>
     {value === "full" && <p className="pj-note warn" role="alert">{FULL_ACCESS_WARNING}</p>}
+  </fieldset>;
+}
+
+/** The network choice as radio cards, with a note when Full access makes it moot. Inputs: the
+ * radio group name, the chosen network, the chosen access level and the change handler.
+ * Output: the fieldset. */
+export function NetworkChoices({ name, value, access, onChange }: {
+  name: string; value: AgentNetwork; access: AgentAccess; onChange: (network: AgentNetwork) => void;
+}) {
+  return <fieldset className="pj-field">
+    <legend>Network for agents with tools on</legend>
+    <div className="pj-radio-cards" role="radiogroup" aria-label="Agent network">
+      {NETWORK_CHOICES.map((choice) => <label className={`pj-radio-card ${value === choice.network ? "selected" : ""}`} key={choice.network}>
+        <input type="radio" name={name} value={choice.network} checked={value === choice.network} onChange={() => onChange(choice.network)} />
+        <span className="pj-radio-body">
+          <strong>{choice.label}</strong>
+          <span className="pj-secondary">{choice.help}</span>
+        </span>
+      </label>)}
+    </div>
+    {access === "full" && <p className="pj-note" role="note">{NETWORK_IGNORED_UNDER_FULL}</p>}
   </fieldset>;
 }
 

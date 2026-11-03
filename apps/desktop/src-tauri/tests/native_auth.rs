@@ -833,21 +833,22 @@ async fn desktop_native_auth_settings_change_mid_sign_in_does_not_wedge_the_desk
         login_pid(&running).await;
         for refused in [
             bridge
-                .add_account(claude_draft("Added while signing in"), None)
-                .await
-                .map(|_| ()),
-            bridge
                 .rename_account("connection-z", "Renamed while signing in".into())
                 .await
                 .map(|_| ()),
-            bridge.remove_account("connection-api").await,
+            bridge.remove_account("connection-z").await,
         ] {
             assert_eq!(
                 refused.unwrap_err().code,
                 "native_auth_recovery_required",
-                "the desktop does not move the settings a running sign-in is bound to"
+                "the desktop does not change the account a running sign-in is bound to"
             );
         }
+        bridge
+            .add_account(claude_draft("Added while signing in"), None)
+            .await
+            .unwrap();
+        bridge.remove_account("connection-api").await.unwrap();
         let observer = OwnerController::attach(
             &fixture.root.path().join("s"),
             OwnerClientKind::Tui,

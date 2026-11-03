@@ -275,6 +275,10 @@ pub(in crate::tui) fn master_problem(code: &str) -> String {
         "master_turn_outstanding" => "The master is still working on the last message.",
         "master_turn_capacity" => "This conversation is full. Press e to end it, then send again.",
         "master_turn_not_current" => "That turn already ended.",
+        "master_session_live" => "The live session cannot be deleted.",
+        "master_session_files_kept" => {
+            "Its transcript could not be removed from the master's home, so nothing was deleted."
+        }
         "stale_revision" => "Something changed meanwhile. Try again.",
         _ => "The engine refused it.",
     };
