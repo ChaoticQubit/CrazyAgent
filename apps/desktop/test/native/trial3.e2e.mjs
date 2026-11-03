@@ -4,7 +4,7 @@ import { appendFileSync, existsSync, readFileSync, realpathSync } from "node:fs"
 import { basename, join } from "node:path";
 import { SECRET_SOURCES, mask } from "./trial3-mask.mjs";
 import { teamWait } from "./trial3-team.mjs";
-import { click, says, shot, shown, text, texts, type, until } from "./settings-steps.mjs";
+import { click, says, shot, shown, text, texts, type } from "./settings-steps.mjs";
 
 const MODE = process.env.TRIAL3_MODE;
 const EVIDENCE = process.env.TRIAL_EVIDENCE;
@@ -102,6 +102,23 @@ async function step(slug, title, why, action) {
   if (!ok) {
     run.failed.push(slug);
     throw new Error(`${title}: ${mask(detail)}`);
+  }
+}
+
+/** The text the window shows as the owner reads it: the innerText of the page, an open
+ * dialog and toasts, so labels stay apart and the mask cannot fuse them into one token.
+ * Output: the text. */
+function screen() {
+  return browser.execute(() => [...document.querySelectorAll("main, dialog[open], .toast")].map((node) => node.innerText).join("\n"));
+}
+
+/** Waits for a condition and fails with what the window shows when it never holds.
+ * Inputs: the condition, the time limit in ms and the failure label. */
+async function until(condition, timeout, label) {
+  try {
+    await browser.waitUntil(condition, { timeout, interval: 250 });
+  } catch {
+    throw new Error(`${label}; on screen: ${JSON.stringify((await screen()).slice(0, 2000))}; at ${await hash()}`);
   }
 }
 
@@ -437,7 +454,7 @@ describe(`CrazyAgent trial 3 owner actions on the desktop app (${MODE})`, () => 
       const send = "//form[contains(@class, \"tg-composer\")]//button[normalize-space(.)=\"Send\"]";
       await waitFor(async () => {
         const live = await shown(box) && await $(send).isEnabled();
-        return { done: live, seen: live ? "the master terminal is live" : mask(String(await browser.execute(() => document.querySelector("main")?.innerText ?? "")).slice(0, 400)) };
+        return { done: live, seen: live ? "the master terminal is live" : mask((await screen()).slice(0, 400)) };
       }, MASTER_MS, "the master's message box never became ready to send");
       await paste(box, message);
       await click(send);

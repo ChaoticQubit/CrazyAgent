@@ -39,3 +39,10 @@ test("the browser masks with the same patterns the node side uses", () => {
   assert.equal(browser, mask(sample));
   assert.equal(browser, "mail [masked] and key [masked]");
 });
+
+test("the owner's screen text keeps its labels, while the same labels fused by textContent read as one masked token", () => {
+  const fused = "ca-trial-3OverviewConversationAgentsChangesContextProcessSettings2 change sets are waiting";
+  const lines = "ca-trial-3\nOverview\nConversation\nAgents\nChanges\nContext\nProcess\nSettings\n2 change sets are waiting";
+  assert.equal(mask(fused), "[masked] change sets are waiting");
+  assert.equal(mask(lines), lines);
+});
