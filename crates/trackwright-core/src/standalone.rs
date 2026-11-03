@@ -131,7 +131,7 @@ impl Authority for Standalone {
 }
 
 impl Paths for Standalone {
-    fn resolve(
+    fn resolve_path(
         &self,
         tx: &Transaction<'_>,
         _project: &ProjectKey,
