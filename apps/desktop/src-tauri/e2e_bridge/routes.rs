@@ -2433,6 +2433,53 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let call = lock(state).await?.update_change(id)?; call.await }.await;
             routed(result)
         }
+        "desktop_harness_settings" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                harness: String,
+                project_id: Option<String>,
+            }
+            let Args { harness, project_id } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = read(state).await?.harness_settings(harness, project_id)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_set_harness_setting" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                harness: String,
+                project_id: Option<String>,
+                key: String,
+                value: serde_json::Value,
+                version: u64,
+            }
+            let Args { harness, project_id, key, value, version } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .set_harness_setting(harness, project_id, key, value, version)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_reset_harness_setting" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                harness: String,
+                project_id: Option<String>,
+                key: String,
+                version: u64,
+            }
+            let Args { harness, project_id, key, version } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state) .await? .reset_harness_setting(harness, project_id, key, version)?; call.await }.await;
+            routed(result)
+        }
         "desktop_questions" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
