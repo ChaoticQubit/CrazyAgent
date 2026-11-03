@@ -8,7 +8,9 @@ use trackwright_core::catalog::{catalog, op_schema};
 use trackwright_core::model::{Actor, OpKind, ProjectKey};
 use trackwright_core::standalone::Standalone;
 use trackwright_core::store::{self, Store};
-use trackwright_mcp::{LINE_BYTES_MAX, PROTOCOL_VERSIONS, SERVER_NAME, Session, serve};
+use trackwright_mcp::{
+    BATCH_REQUESTS_MAX, LINE_BYTES_MAX, PROTOCOL_VERSIONS, SERVER_NAME, Session, serve,
+};
 
 const AGENT: &str = "agent:7";
 
@@ -331,15 +333,15 @@ fn an_oversized_line_is_refused_and_the_server_keeps_serving() {
 
     assert_eq!(error_code(&replies[0]), -32600);
     assert_eq!(
-        replies[0]["id"],
-        Value::Null,
-        "an unread line has no id to answer"
+        replies[0]["id"], 1,
+        "an oversized request is answered with its own id"
     );
     assert_eq!(replies[1]["id"], 2);
     assert_eq!(replies[1]["result"], json!({}));
     assert_eq!(replies[2]["id"], 3, "a line of exactly the bound is served");
     assert_eq!(replies[2]["result"], json!({}));
     assert_eq!(error_code(&replies[3]), -32600);
+    assert_eq!(replies[3]["id"], 4);
     assert_eq!(replies[4]["id"], 5);
     let (list_failed, list) = envelope(&replies[4]);
     assert!(!list_failed, "list still runs after refused lines: {list}");
@@ -350,6 +352,162 @@ fn an_oversized_line_is_refused_and_the_server_keeps_serving() {
         .expect("an oversized last line without a newline ends cleanly");
     let last: Value = serde_json::from_slice(output.trim_ascii()).expect("one reply");
     assert_eq!(error_code(&last), -32600);
+    assert_eq!(last["id"], 6);
+}
+
+fn oversized(before: &str, after: &str) -> String {
+    let line = format!("{before}{}{after}", "x".repeat(LINE_BYTES_MAX * 2));
+    assert!(line.len() > LINE_BYTES_MAX);
+    line
+}
+
+#[test]
+fn an_oversized_line_is_answered_with_its_top_level_id_wherever_it_stands() {
+    let tracker = Tracker::new();
+    let session = tracker.session(AGENT);
+    let replies = exchange(
+        &session,
+        &[
+            oversized(
+                concat!(
+                    r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"create","#,
+                    r#""arguments":{"project":"CA","title":""#,
+                ),
+                r#""}},"id":"late-7"}"#,
+            ),
+            oversized(
+                r#"{"jsonrpc":"2.0","method":"ping","params":{"note":""#,
+                r#""},"id":"a\"}b"}"#,
+            ),
+            oversized(
+                r#"{"jsonrpc":"2.0","method":"ping","params":{"id":9,"pad":""#,
+                r#""}}"#,
+            ),
+            oversized(
+                r#"{"jsonrpc":"2.0","method":"ping","id":{"x":1},"params":{"pad":""#,
+                r#""}}"#,
+            ),
+            oversized(
+                r#"[{"jsonrpc":"2.0","id":5,"method":"ping","params":{"pad":""#,
+                r#""}}]"#,
+            ),
+            rpc(6, "ping", json!({})),
+        ],
+    );
+    assert_eq!(replies.len(), 6);
+    for reply in &replies[..5] {
+        assert_eq!(error_code(reply), -32600);
+    }
+    assert_eq!(
+        replies[0]["id"], "late-7",
+        "an id after the long params is found"
+    );
+    assert_eq!(
+        replies[1]["id"], "a\"}b",
+        "quotes and braces inside strings are skipped"
+    );
+    assert_eq!(
+        replies[2]["id"],
+        Value::Null,
+        "an id inside params is not the request's"
+    );
+    assert_eq!(replies[3]["id"], Value::Null, "an object is not an id");
+    assert_eq!(
+        replies[4]["id"],
+        Value::Null,
+        "an oversized batch has no one id"
+    );
+    assert_eq!(replies[5]["id"], 6);
+    assert_eq!(replies[5]["result"], json!({}));
+    assert!(
+        tracker.tickets().is_empty(),
+        "nothing in an oversized line runs"
+    );
+}
+
+#[test]
+fn a_batch_gets_one_reply_per_request_in_one_array() {
+    let tracker = Tracker::new();
+    let session = tracker.session(AGENT);
+    let batch = json!([
+        {"jsonrpc": "2.0", "id": 1, "method": "ping"},
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/call",
+            "params": {"name": "create", "arguments": {"project": "CA", "title": "Batched"}},
+        },
+        {"jsonrpc": "2.0", "id": 3, "method": "resources/list"},
+        5,
+    ]);
+    let notifications = json!([{"jsonrpc": "2.0", "method": "notifications/initialized"}]);
+    let full: Vec<Value> = (0..BATCH_REQUESTS_MAX)
+        .map(|n| json!({"jsonrpc": "2.0", "id": 100 + n, "method": "ping"}))
+        .collect();
+    let mut over: Vec<Value> = vec![json!({
+        "jsonrpc": "2.0",
+        "id": 200,
+        "method": "tools/call",
+        "params": {"name": "create", "arguments": {"project": "CA", "title": "Too many"}},
+    })];
+    over.extend(full.iter().cloned());
+    assert_eq!(over.len(), BATCH_REQUESTS_MAX + 1);
+    let replies = exchange(
+        &session,
+        &[
+            batch.to_string(),
+            notifications.to_string(),
+            Value::Array(full).to_string(),
+            Value::Array(over).to_string(),
+            rpc(9, "ping", json!({})),
+        ],
+    );
+    assert_eq!(
+        replies.len(),
+        4,
+        "a batch of notifications gets no reply at all"
+    );
+
+    let answered = replies[0]
+        .as_array()
+        .expect("a batch is answered with an array");
+    assert_eq!(answered.len(), 4, "the notification gets no element");
+    assert_eq!(answered[0]["id"], 1);
+    assert_eq!(answered[0]["result"], json!({}));
+    assert_eq!(answered[1]["id"], 2);
+    let (created_failed, created) = envelope(&answered[1]);
+    assert!(!created_failed, "a call inside a batch runs: {created}");
+    assert_eq!(answered[2]["id"], 3);
+    assert_eq!(error_code(&answered[2]), -32601);
+    assert_eq!(answered[3]["id"], Value::Null);
+    assert_eq!(
+        error_code(&answered[3]),
+        -32600,
+        "a batch element is an object"
+    );
+
+    let full = replies[1]
+        .as_array()
+        .expect("a full batch is answered with an array");
+    assert_eq!(full.len(), BATCH_REQUESTS_MAX);
+    for (reply, id) in full.iter().zip(100..) {
+        assert_eq!(reply["id"], id);
+        assert_eq!(reply["result"], json!({}));
+    }
+
+    assert!(
+        replies[2].is_object(),
+        "an oversized batch gets one error, not an array"
+    );
+    assert_eq!(error_code(&replies[2]), -32600);
+    assert_eq!(replies[2]["id"], Value::Null);
+    assert_eq!(replies[3]["id"], 9);
+    assert_eq!(
+        tracker.tickets(),
+        vec![("Batched".to_owned(), AGENT.to_owned())],
+        "nothing in a refused batch runs"
+    );
 }
 
 #[test]
