@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 import { SECRET_SOURCES, mask } from "./trial3-mask.mjs";
 import { teamWait } from "./trial3-team.mjs";
 import { click, shot, shown } from "./settings-steps.mjs";
@@ -11,6 +11,7 @@ export const PROJECT = process.env.TRIAL_PROJECT;
 export const NAME = PROJECT ? basename(PROJECT) : "";
 export const TEAM_MS = Number(process.env.TRIAL_TEAM_MS ?? 7200000);
 export const UI_MS = 30000;
+const PURPOSES = ["skill", "project", "projects_home", "memory", "plugin"];
 assert(Number.isFinite(TEAM_MS) && TEAM_MS > 0, "the team deadline is positive");
 
 /** The state the steps of one trial run share: desktop step count, the project id, the leads,
@@ -232,6 +233,47 @@ export async function choose(where, group, option) {
   await until(async () => await shown(segment(group, option)) && await $(segment(group, option)).getAttribute("aria-checked") === "true", UI_MS, `${group} did not read ${option} after reopening`);
   await inView(segment(group, option));
   return `${group} reads ${option} after reopening the tab${was ? " (it already was)" : ""}`;
+}
+
+/** Runs in the page: makes the next desktop_pick_folder call of one purpose answer a path, as
+ * the owner's pick in the native chooser would, by wrapping the page's Tauri invoke once; every
+ * other call goes to the app's own invoke. Uses only its arguments, since WebDriver sends its
+ * source to the page. Inputs: the path, the purpose and the page scope (window). Output:
+ * whether the pick is armed. */
+export function armPick(path, purpose, scope = window) {
+  const internals = scope.__TAURI_INTERNALS__;
+  if (!internals.__trialPicks) {
+    const invoke = internals.invoke;
+    const picks = {};
+    const trialInvoke = (cmd, args, options) => {
+      if (cmd === "desktop_pick_folder" && Object.hasOwn(picks, args?.purpose)) {
+        const picked = picks[args.purpose];
+        delete picks[args.purpose];
+        return Promise.resolve(picked);
+      }
+      return invoke.call(internals, cmd, args, options);
+    };
+    try {
+      internals.invoke = trialInvoke;
+      internals.__trialPicks = picks;
+    } catch {
+      return false;
+    }
+    if (internals.invoke !== trialInvoke || internals.__trialPicks !== picks) return false;
+  }
+  internals.__trialPicks[purpose] = path;
+  return internals.__trialPicks[purpose] === path;
+}
+
+/** Makes the app's next native folder chooser for a purpose answer a path, because WebDriver
+ * cannot drive the macOS chooser. The app's own code gets the path and the engine does the
+ * rest; the chooser window itself is not exercised. Inputs: the absolute path and the purpose
+ * (project, the default, skill, projects_home, memory or plugin). Throws when the page's
+ * invoke cannot be wrapped. */
+export async function chooseFolder(path, purpose = "project") {
+  assert(typeof path === "string" && isAbsolute(path), `chooseFolder takes an absolute path, got ${path}`);
+  assert(PURPOSES.includes(purpose), `the purpose is one of ${PURPOSES.join(", ")}, got ${purpose}`);
+  assert(await browser.execute(armPick, path, purpose), "the page's Tauri invoke could not be wrapped, so the folder pick is not armed");
 }
 
 /** Reads the project's team graph from the engine through the app's own command and the
