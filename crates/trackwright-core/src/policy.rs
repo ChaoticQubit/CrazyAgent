@@ -177,12 +177,11 @@ pub fn set(
     })
 }
 
-/// Decides whether a policy lets an actor run an operation. The owner may run every
-/// operation. Reads and `import_preview` are open to all. `close` and `reopen` follow
-/// `close`; `create` follows `create`; `policy_set` is the owner's. Engine actors may make
-/// every other write. Agents follow `agent_edit` on tickets they did not create and may run
-/// planning writes only under `agent_edit = any`. Inputs: the policy, the actor, the
-/// operation and the ticket it acts on, if any. Output: Ok, or the refusal.
+/// Decides whether a policy lets an actor run an operation. The owner runs all; reads, test
+/// ops and `import_preview` are open to all, the test store deciding protected cases and run
+/// writers. `close` and `reopen` follow `close`, `create` follows `create`, `policy_set` is the
+/// owner's; engines make other writes; `agent_edit` rules agents on others' tickets and plans.
+/// Inputs: the policy, the actor, the operation and its ticket. Output: Ok, or the refusal.
 pub fn permits(
     policy: &Policy,
     actor: &Actor,
@@ -231,6 +230,31 @@ pub fn permits(
         | OpKind::CheckAdd
         | OpKind::EvidenceRecord
         | OpKind::CriterionSet => edit_permits(policy.agent_edit, role, actor, op, ticket),
+        OpKind::CaseList
+        | OpKind::CaseShow
+        | OpKind::SetShow
+        | OpKind::PlanList
+        | OpKind::PlanShow
+        | OpKind::RunList
+        | OpKind::RunShow
+        | OpKind::Coverage
+        | OpKind::CaseCreate
+        | OpKind::CaseEdit
+        | OpKind::CaseLink
+        | OpKind::CaseUnlink
+        | OpKind::SetUpsert
+        | OpKind::SetAdd
+        | OpKind::SetRemove
+        | OpKind::PlanUpsert
+        | OpKind::PlanAdd
+        | OpKind::PlanRemove
+        | OpKind::RunStart
+        | OpKind::RunRecord
+        | OpKind::RunFinish
+        | OpKind::RunCancel => {
+            assert!(op.is_test_read() || op.is_test_write());
+            Ok(())
+        }
     }
 }
 

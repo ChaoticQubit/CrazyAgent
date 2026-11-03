@@ -247,6 +247,8 @@ fn value_of(field: &FieldSpec, text: &str) -> Result<Value, Usage> {
     let value = match field.ty {
         FieldType::Project
         | FieldType::Ticket
+        | FieldType::Test(_)
+        | FieldType::Line { .. }
         | FieldType::Actor
         | FieldType::Text(_)
         | FieldType::Choice(_)
@@ -265,8 +267,14 @@ fn value_of(field: &FieldSpec, text: &str) -> Result<Value, Usage> {
             "false" => Value::Bool(false),
             _ => return Err(Usage::new(format!("--{} takes true or false", field.name))),
         },
+        FieldType::Shape(_) => serde_json::from_str::<Value>(text)
+            .ok()
+            .filter(|value| value.is_array() || value.is_object())
+            .ok_or_else(|| Usage::new(format!("--{} takes a JSON array or object", field.name)))?,
     };
-    assert!(value.is_string() || value.is_i64() || value.is_boolean());
+    let whole = matches!(field.ty, FieldType::Shape(_));
+    assert!(whole || value.is_string() || value.is_i64() || value.is_boolean());
+    assert!(!whole || value.is_array() || value.is_object());
     Ok(value)
 }
 

@@ -1,4 +1,4 @@
-use crate::catalog;
+use crate::catalog::{self, FieldType};
 use crate::host::{self, Host, LinkState, TicketView};
 use crate::model::{
     Actor, LINKS_PER_TICKET_MAX, OPEN_TICKETS_CREATED_PER_ACTOR_MAX, OpKind, Priority, ProjectKey,
@@ -9,6 +9,7 @@ use crate::reply::{
 };
 use crate::requests::{self, Args, Remembered, Request};
 use crate::store::{self, NewTicket, StoreError, TicketChange};
+use crate::tests_model::TestId;
 use rusqlite::{Transaction, params};
 use serde_json::{Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -329,6 +330,28 @@ fn handle<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
         | OpKind::Reopen
         | OpKind::PolicySet => unavailable(cx),
         OpKind::Export | OpKind::ImportPreview | OpKind::ImportApply => unavailable(cx),
+        OpKind::CaseList
+        | OpKind::CaseShow
+        | OpKind::SetShow
+        | OpKind::PlanList
+        | OpKind::PlanShow
+        | OpKind::RunList
+        | OpKind::RunShow
+        | OpKind::Coverage => unavailable(cx),
+        OpKind::CaseCreate
+        | OpKind::CaseEdit
+        | OpKind::CaseLink
+        | OpKind::CaseUnlink
+        | OpKind::SetUpsert
+        | OpKind::SetAdd
+        | OpKind::SetRemove
+        | OpKind::PlanUpsert
+        | OpKind::PlanAdd
+        | OpKind::PlanRemove
+        | OpKind::RunStart
+        | OpKind::RunRecord
+        | OpKind::RunFinish
+        | OpKind::RunCancel => unavailable(cx),
     }
 }
 
@@ -348,12 +371,19 @@ fn clock_ms() -> i64 {
 }
 
 fn target_ticket(tx: &Transaction<'_>, args: &Args) -> Result<Option<Ticket>, Failure> {
-    if !args.has_field("id") {
+    if args.field_type("id") != Some(FieldType::Ticket) {
         return Ok(None);
     }
     match args.get::<&ShortId>("id") {
         Some(id) => Ok(Some(store::ticket(tx, id)?)),
         None => Ok(None),
+    }
+}
+
+fn target_test(args: &Args) -> Option<&TestId> {
+    match args.field_type("id") {
+        Some(FieldType::Test(_)) => args.get::<&TestId>("id"),
+        _ => None,
     }
 }
 
@@ -367,17 +397,30 @@ fn target_project(
     } else {
         None
     };
-    match (named, ticket) {
-        (Some(named), Some(ticket)) if named != ticket.short_id.key() => Err(Failure::new(
+    let tested = target_test(args);
+    assert!(
+        ticket.is_none() || tested.is_none(),
+        "an id is a ticket or a test id"
+    );
+    match (named, ticket, tested) {
+        (Some(named), Some(ticket), _) if named != ticket.short_id.key() => Err(Failure::new(
             codes::FIELD_INVALID,
             format!("{} is not a ticket of project {named}", ticket.short_id),
         )),
-        (_, Some(ticket)) => Ok(Some(ticket.short_id.key().clone())),
-        (Some(named), None) => {
+        (_, Some(ticket), _) => Ok(Some(ticket.short_id.key().clone())),
+        (Some(named), None, Some(id)) if named != id.key() => Err(Failure::new(
+            codes::FIELD_INVALID,
+            format!("{id} is not of project {named}"),
+        )),
+        (_, None, Some(id)) => {
+            store::project(tx, id.key())?;
+            Ok(Some(id.key().clone()))
+        }
+        (Some(named), None, None) => {
             store::project(tx, named)?;
             Ok(Some(named.clone()))
         }
-        (None, None) => Ok(None),
+        (None, None, None) => Ok(None),
     }
 }
 

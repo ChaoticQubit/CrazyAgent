@@ -112,6 +112,9 @@ fn shape(field: &FieldSpec) -> String {
     match field.ty {
         FieldType::Project => "KEY".to_owned(),
         FieldType::Ticket => "KEY-N".to_owned(),
+        FieldType::Test(object) => format!("KEY-{}N", object.letter()),
+        FieldType::Line { .. } => "text".to_owned(),
+        FieldType::Shape(_) => "JSON".to_owned(),
         FieldType::Actor => "actor".to_owned(),
         FieldType::Text(_) => "text".to_owned(),
         FieldType::Version => "version".to_owned(),
