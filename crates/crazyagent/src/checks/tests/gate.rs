@@ -259,7 +259,7 @@ impl Case {
     /// ticket.
     fn ticket_on(&self, id: &ChangeSetId) -> ShortId {
         let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate).unwrap();
-        let mut call = |op: &str, args: Value| -> Value {
+        let call = |op: &str, args: Value| -> Value {
             let request = Request::parse(op, &serde_json::to_vec(&args).unwrap()).unwrap();
             let reply: Value =
                 serde_json::from_str(ops::dispatch(&tx, &Host, &owner(), request).json()).unwrap();
@@ -363,7 +363,7 @@ fn require_accepts_when_every_required_check_passed_on_the_reviewed_head() {
 }
 
 #[test]
-fn accept_into_is_gated_like_accept_for_the_owner_and_a_lead() {
+fn accept_into_is_gated_like_accept() {
     let case = Case::new();
     let id = case.turn("turn-1", &[("pass.sh", "exit 0\n")]);
     case.approve(json!([check("unit", "pass.sh", true)]), &[]);
