@@ -214,6 +214,34 @@ fn hex(digit: char, len: usize) -> String {
     std::iter::repeat_n(digit, len).collect()
 }
 
+fn run_start_input() -> Value {
+    json!({
+        "project": "TW",
+        "title": "unit on CS-12",
+        "batch": "trigger-7",
+        "source": {
+            "kind": "git",
+            "repository": "trackwright",
+            "commit": hex('a', 40),
+            "tree": hex('b', 40),
+            "base": hex('c', 40),
+            "change_set": "CS-12",
+        },
+        "policy": {
+            "profile": hex('d', 64),
+            "profile_approved_ms": 1_000,
+            "check": "unit",
+            "kind": "unit",
+            "argv": ["cargo", "test", "--locked"],
+            "toolchain": {"family": "rust", "version": "rustc 1.98.1"},
+            "sandbox": hex('e', 64),
+            "network": "off",
+            "timeout_s": 1_800,
+            "environment": hex('f', 64),
+        },
+    })
+}
+
 fn seed_run(client: &mut dyn Client) {
     data(
         client,
@@ -225,35 +253,7 @@ fn seed_run(client: &mut dyn Client) {
             "stable_name": "sum::adds_two_numbers",
         }),
     );
-    let started = data(
-        client,
-        OpKind::RunStart,
-        json!({
-            "project": "TW",
-            "title": "unit on CS-12",
-            "batch": "trigger-7",
-            "source": {
-                "kind": "git",
-                "repository": "trackwright",
-                "commit": hex('a', 40),
-                "tree": hex('b', 40),
-                "base": hex('c', 40),
-                "change_set": "CS-12",
-            },
-            "policy": {
-                "profile": hex('d', 64),
-                "profile_approved_ms": 1_000,
-                "check": "unit",
-                "kind": "unit",
-                "argv": ["cargo", "test", "--locked"],
-                "toolchain": {"family": "rust", "version": "rustc 1.98.1"},
-                "sandbox": hex('e', 64),
-                "network": "off",
-                "timeout_s": 1_800,
-                "environment": hex('f', 64),
-            },
-        }),
-    );
+    let started = data(client, OpKind::RunStart, run_start_input());
     assert_eq!(started["run"]["id"], "TW-R1");
     let recorded = data(
         client,
@@ -263,7 +263,11 @@ fn seed_run(client: &mut dyn Client) {
             "version": started["run"]["version"],
             "results": [
                 {"name": "sum::adds_two_numbers", "outcome": "passed", "duration_ms": 4},
-                {"name": "sum::overflows", "outcome": "failed", "message": "attempt to add with overflow"},
+                {
+                    "name": "sum::overflows",
+                    "outcome": "failed",
+                    "message": "attempt to add with overflow",
+                },
             ],
         }),
     );
@@ -329,6 +333,19 @@ fn the_run_view_renders_the_binding_block_at_80_columns() {
         detail.render(area, frame.buffer_mut(), &Theme::plain());
     });
     check("run-80", &frame);
+}
+
+#[test]
+fn the_run_view_widens_the_result_names_at_120_columns() {
+    let folder = tempfile::tempdir().expect("a temporary folder");
+    let mut client = local(&folder);
+    seed_run(&mut client);
+    let detail = RunDetail::load("TW-R1", &mut client).expect("the run loads");
+    let frame = screen(120, 24, |frame| {
+        let area = frame.area();
+        detail.render(area, frame.buffer_mut(), &Theme::plain());
+    });
+    check("run-120", &frame);
 }
 
 #[test]

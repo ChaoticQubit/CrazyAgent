@@ -14,6 +14,8 @@ use rusqlite::{Transaction, params};
 use serde_json::{Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod test_ops;
+
 pub const WRITE_WINDOW_MS: i64 = 60_000;
 pub const SHOWN_EVENTS_MAX: usize = 10;
 pub const SHOWN_REF_BYTES_MAX: usize = 80;
@@ -330,28 +332,28 @@ fn handle<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
         | OpKind::Reopen
         | OpKind::PolicySet => unavailable(cx),
         OpKind::Export | OpKind::ImportPreview | OpKind::ImportApply => unavailable(cx),
-        OpKind::CaseList
-        | OpKind::CaseShow
-        | OpKind::SetShow
-        | OpKind::PlanList
-        | OpKind::PlanShow
-        | OpKind::RunList
-        | OpKind::RunShow
-        | OpKind::Coverage => unavailable(cx),
-        OpKind::CaseCreate
-        | OpKind::CaseEdit
-        | OpKind::CaseLink
-        | OpKind::CaseUnlink
-        | OpKind::SetUpsert
-        | OpKind::SetAdd
-        | OpKind::SetRemove
-        | OpKind::PlanUpsert
-        | OpKind::PlanAdd
-        | OpKind::PlanRemove
-        | OpKind::RunStart
-        | OpKind::RunRecord
-        | OpKind::RunFinish
-        | OpKind::RunCancel => unavailable(cx),
+        OpKind::CaseList => test_ops::case_list(cx),
+        OpKind::CaseShow => test_ops::case_show(cx),
+        OpKind::SetShow => test_ops::set_show(cx),
+        OpKind::PlanList => test_ops::plan_list(cx),
+        OpKind::PlanShow => test_ops::plan_show(cx),
+        OpKind::RunList => test_ops::run_list(cx),
+        OpKind::RunShow => test_ops::run_show(cx),
+        OpKind::Coverage => test_ops::coverage(cx),
+        OpKind::CaseCreate => test_ops::case_create(cx),
+        OpKind::CaseEdit => test_ops::case_edit(cx),
+        OpKind::CaseLink => test_ops::case_link(cx),
+        OpKind::CaseUnlink => test_ops::case_unlink(cx),
+        OpKind::SetUpsert => test_ops::set_upsert(cx),
+        OpKind::SetAdd => test_ops::set_add(cx),
+        OpKind::SetRemove => test_ops::set_remove(cx),
+        OpKind::PlanUpsert => test_ops::plan_upsert(cx),
+        OpKind::PlanAdd => test_ops::plan_add(cx),
+        OpKind::PlanRemove => test_ops::plan_remove(cx),
+        OpKind::RunStart => test_ops::run_start(cx),
+        OpKind::RunRecord => test_ops::run_record(cx),
+        OpKind::RunFinish => test_ops::run_finish(cx),
+        OpKind::RunCancel => test_ops::run_cancel(cx),
     }
 }
 

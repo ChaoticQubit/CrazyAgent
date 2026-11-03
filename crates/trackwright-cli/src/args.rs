@@ -1,3 +1,4 @@
+use crate::import_cmd::{self, Import};
 use serde_json::{Map, Value};
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -8,7 +9,7 @@ pub const ARGUMENTS_MAX: usize = 256;
 /// The CLI's own flags. No catalog field may take one of these names.
 const RESERVED: [&str; 4] = ["json", "db", "actor", "help"];
 /// The CLI's own subcommands beside the catalog's operations.
-const COMMANDS: [&str; 3] = ["init", "mcp", "help"];
+const COMMANDS: [&str; 4] = ["init", "mcp", "help", "run"];
 /// The longest caller word a usage line repeats back.
 const SHOWN_BYTES_MAX: usize = 64;
 
@@ -51,6 +52,7 @@ pub enum Command {
         spec: &'static OpSpec,
         args: Map<String, Value>,
     },
+    Import(Import),
 }
 
 /// What a help call explains.
@@ -59,6 +61,7 @@ pub enum Topic {
     Overview,
     Init,
     Mcp,
+    Import,
     Op(&'static OpSpec),
 }
 
@@ -69,6 +72,7 @@ struct Scan<'a> {
     db: Option<&'a str>,
     actor: Option<&'a str>,
     op: Option<&'a str>,
+    sub: Option<&'a str>,
     fields: Vec<(String, &'a str)>,
 }
 
@@ -126,6 +130,8 @@ fn scan<'a>(words: &[&'a str]) -> Result<Scan<'a>, Usage> {
             return Err(Usage::new(format!("unknown flag {}", shown(word))));
         } else if scan.op.is_none() {
             scan.op = Some(word);
+        } else if scan.op == Some("run") && scan.sub.is_none() {
+            scan.sub = Some(word);
         } else {
             return Err(Usage::new(format!("unexpected argument {}", shown(word))));
         }
@@ -164,6 +170,8 @@ fn command(scan: &Scan<'_>, catalog: &'static [OpSpec]) -> Result<Command, Usage
         "help" => Ok(Command::Help(Topic::Overview)),
         "init" if scan.help => Ok(Command::Help(Topic::Init)),
         "init" => init(&scan.fields),
+        "run" if scan.help => Ok(Command::Help(Topic::Import)),
+        "run" => import_cmd::command(scan.sub, &scan.fields).map(Command::Import),
         "mcp" if scan.help => Ok(Command::Help(Topic::Mcp)),
         "mcp" => match scan.fields.first() {
             Some((name, _)) => Err(Usage::new(format!(

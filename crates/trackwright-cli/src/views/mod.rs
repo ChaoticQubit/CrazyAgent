@@ -1,6 +1,9 @@
 mod board;
+pub mod cases;
+pub mod coverage;
 mod detail;
 mod roadmap;
+pub mod runs;
 mod table;
 pub mod text;
 mod theme;

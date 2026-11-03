@@ -681,12 +681,12 @@ const CATALOG: &[OpSpec] = &[
     OpSpec {
         kind: OpKind::CaseShow,
         summary: "Shows one case: steps as policy allows, criteria, sets and latest outcome.",
-        fields: &[CASE_ID],
+        fields: &[CASE_ID, CURSOR],
     },
     OpSpec {
         kind: OpKind::SetShow,
         summary: "Shows one set and its cases in order.",
-        fields: &[SET_ID],
+        fields: &[SET_ID, CURSOR],
     },
     OpSpec {
         kind: OpKind::PlanList,
@@ -700,7 +700,7 @@ const CATALOG: &[OpSpec] = &[
     OpSpec {
         kind: OpKind::PlanShow,
         summary: "Shows one plan: its release, cycle, status and items in order.",
-        fields: &[PLAN_ID],
+        fields: &[PLAN_ID, CURSOR],
     },
     OpSpec {
         kind: OpKind::RunList,
