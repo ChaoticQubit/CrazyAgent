@@ -54,7 +54,8 @@ pub fn help(topic: Topic, catalog: &[OpSpec]) -> String {
         Topic::Init => out.push_str(
             "trackwright init --key KEY [--name NAME] [--db PATH] [--actor ACTOR] [--json]\n\
              Adds the project KEY (2 to 8 letters A-Z), creating the database if missing.\n\
-             Without --db: ./.trackwright/tracker.db, refused while a folder above holds one.\n",
+             Without --db: ./.trackwright/tracker.db, refused while a folder above holds one.\n\
+             --db ./.trackwright/tracker.db makes a separate tracker that hides the one above.\n",
         ),
         Topic::Mcp => out.push_str(
             "trackwright mcp --actor ACTOR [--db PATH]\n\

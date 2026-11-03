@@ -140,7 +140,8 @@ fn none_above(cwd: &Path) -> Result<(), Failure> {
             Err(Failure::new(
                 codes::STORE_EXISTS_ABOVE,
                 format!(
-                    "{} already serves this folder; pass --db {} to add the project there",
+                    "{} already serves this folder; pass --db {} to add the project there, \
+                     or --db ./{FOLDER}/{FILE} for a separate tracker that hides it here",
                     found.display(),
                     found.display()
                 ),
