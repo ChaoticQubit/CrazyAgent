@@ -12,7 +12,7 @@ pub use shape::{
 };
 
 use crate::model::{Actor, ProjectKey, Refusal, codes as core_codes};
-use crate::store::StoreError;
+use crate::store::{self, StoreError};
 use crate::tests_model::{
     CaseKind, LIST_ROWS_MAX, LIST_TITLE_BYTES_MAX, OWNER_ACTOR, RESULT_ARTIFACT_BYTES_MAX,
     RESULT_MESSAGE_BYTES_MAX, RESULT_NAME_BYTES_MAX, RESULT_ROWS_PER_RECORD_MAX,
@@ -379,172 +379,188 @@ struct Ending {
 }
 
 /// Starts a running run with its source and policy bound, writes its event, then prunes
-/// per `run_retention`. Inputs: the transaction, the writer, the start and the time.
-/// Output: the run, or a refusal that wrote nothing.
+/// per `run_retention`, all in one savepoint. Inputs: the transaction, the writer, the
+/// start and the time. Output: the run, or an error that wrote nothing.
 pub fn start(
     tx: &Transaction<'_>,
     actor: &Actor,
     input: &RunStart,
     now_ms: i64,
 ) -> Result<RunView, StoreError> {
-    let project_id = project_id(tx, &input.project)?;
-    writer_may(tx, project_id, actor, input.policy.kind)?;
-    shape::run_text("run title", &input.title, RUN_TITLE_BYTES_MAX, false)
-        .map_err(StoreError::Refused)?;
-    batch_fits(input.batch.as_deref())?;
-    let plan_id = match &input.plan {
-        Some(plan) => Some(plan_id(tx, project_id, &input.project, plan)?),
-        None => None,
-    };
-    input.source.check().map_err(StoreError::Refused)?;
-    input.policy.check().map_err(StoreError::Refused)?;
-    let next: i64 = tx.query_row(RUN_NEXT_NUMBER, [project_id], |row| row.get(0))?;
-    let number = u32::try_from(next)
-        .map_err(|_| refused(codes::RUNS_FULL, "the project has used every run number"))?;
-    let id = run_id(&input.project, number)?;
-    tx.prepare(RUN_INSERT)?.execute((
-        project_id,
-        number,
-        plan_id,
-        &input.batch,
-        &input.title,
-        json(&input.source),
-        json(&input.policy),
-        now_ms,
-        actor.as_str(),
-    ))?;
-    let run = load(tx, &id)?;
-    assert_eq!(run.view.state, RunState::Running);
-    assert_eq!(run.view.version, 1);
-    assert_eq!(run.view.totals, Totals::default());
-    event(
-        tx,
-        project_id,
-        actor,
-        RUN_START,
-        None,
-        Some(json(&run.view)),
-        now_ms,
-    )?;
-    prune(tx, &input.project, project_id, number, now_ms)?;
-    Ok(run.view)
+    store::write(tx, || {
+        let project_id = project_id(tx, &input.project)?;
+        writer_may(tx, project_id, actor, input.policy.kind)?;
+        shape::run_text("run title", &input.title, RUN_TITLE_BYTES_MAX, false)
+            .map_err(StoreError::Refused)?;
+        batch_fits(input.batch.as_deref())?;
+        let plan_id = match &input.plan {
+            Some(plan) => Some(plan_id(tx, project_id, &input.project, plan)?),
+            None => None,
+        };
+        input.source.check().map_err(StoreError::Refused)?;
+        input.policy.check().map_err(StoreError::Refused)?;
+        let next: i64 = tx.query_row(RUN_NEXT_NUMBER, [project_id], |row| row.get(0))?;
+        let number = u32::try_from(next)
+            .map_err(|_| refused(codes::RUNS_FULL, "the project has used every run number"))?;
+        let id = run_id(&input.project, number)?;
+        tx.prepare(RUN_INSERT)?.execute((
+            project_id,
+            number,
+            plan_id,
+            &input.batch,
+            &input.title,
+            json(&input.source),
+            json(&input.policy),
+            now_ms,
+            actor.as_str(),
+        ))?;
+        let run = load(tx, &id)?;
+        assert_eq!(run.view.state, RunState::Running);
+        assert_eq!(run.view.version, 1);
+        assert_eq!(run.view.totals, Totals::default());
+        event(
+            tx,
+            project_id,
+            actor,
+            RUN_START,
+            None,
+            Some(json(&run.view)),
+            now_ms,
+        )?;
+        prune(tx, &input.project, project_id, number, now_ms)?;
+        Ok(run.view)
+    })
 }
 
 /// Appends results to a running run. Each name maps to the project's case with that
 /// stable name, or stays unlinked. The batch is refused whole: empty, over 500 rows, a
-/// repeated or bad name, a bad message or artifact, or past 20,000 results per run.
-/// Inputs: the transaction, the writer, the record and the time. Output: the run.
+/// repeated or bad name, a bad message or artifact, or past 20,000 results per run. A
+/// refused or failed record writes nothing and the run stays running at its version; the
+/// host then finishes it `report_unreadable` with the refusal as its reason. Inputs: the
+/// transaction, the writer, the record and the time. Output: the run.
 pub fn record(
     tx: &Transaction<'_>,
     actor: &Actor,
     input: &RunRecord,
     now_ms: i64,
 ) -> Result<RunView, StoreError> {
-    let run = writable(tx, actor, &input.id, input.version)?;
-    if input.results.is_empty() {
-        return Err(refused(
-            codes::RESULTS_EMPTY,
-            "a record holds at least one result",
-        ));
-    }
-    if input.results.len() > RESULT_ROWS_PER_RECORD_MAX {
-        return Err(refused(
-            codes::RESULTS_TOO_MANY,
-            format!("a record holds at most {RESULT_ROWS_PER_RECORD_MAX} results"),
-        ));
-    }
-    let rows = prepared(tx, &run, &input.results)?;
-    let totals = run
-        .view
-        .totals
-        .counted(rows.iter().map(|(_, row)| row.outcome))
-        .map_err(StoreError::Refused)?;
-    let mut insert = tx.prepare(RESULT_INSERT)?;
-    for (case_id, row) in &rows {
-        insert.execute((
+    store::write(tx, || {
+        let run = writable(tx, actor, &input.id, input.version)?;
+        if input.results.is_empty() {
+            return Err(refused(
+                codes::RESULTS_EMPTY,
+                "a record holds at least one result",
+            ));
+        }
+        if input.results.len() > RESULT_ROWS_PER_RECORD_MAX {
+            return Err(refused(
+                codes::RESULTS_TOO_MANY,
+                format!("a record holds at most {RESULT_ROWS_PER_RECORD_MAX} results"),
+            ));
+        }
+        let rows = prepared(tx, &run, &input.results)?;
+        let totals = run
+            .view
+            .totals
+            .counted(rows.iter().map(|(_, row)| row.outcome))
+            .map_err(StoreError::Refused)?;
+        let mut insert = tx.prepare(RESULT_INSERT)?;
+        for (case_id, row) in &rows {
+            insert.execute((
+                run.row_id,
+                row.position,
+                case_id,
+                &row.name,
+                row.outcome.as_str(),
+                row.duration_ms,
+                &row.message,
+                &row.artifact,
+            ))?;
+        }
+        let changed = tx.prepare(RUN_TOTALS_UPDATE)?.execute((
             run.row_id,
-            row.position,
-            case_id,
-            &row.name,
-            row.outcome.as_str(),
-            row.duration_ms,
-            &row.message,
-            &row.artifact,
+            totals.total,
+            totals.passed,
+            totals.failed,
+            totals.skipped,
+            totals.errored,
+            input.version,
         ))?;
-    }
-    let changed = tx.prepare(RUN_TOTALS_UPDATE)?.execute((
-        run.row_id,
-        totals.total,
-        totals.passed,
-        totals.failed,
-        totals.skipped,
-        totals.errored,
-        input.version,
-    ))?;
-    assert_eq!(changed, 1);
-    let after = load(tx, &input.id)?.view;
-    assert_eq!(after.totals, totals);
-    assert_eq!(after.version, input.version + 1);
-    let written = RecordEvent {
-        id: after.id.clone(),
-        version: after.version,
-        totals,
-        results: rows.into_iter().map(|(_, row)| row).collect(),
-    };
-    event(
-        tx,
-        run.project_id,
-        actor,
-        RUN_RECORD,
-        None,
-        Some(json(&written)),
-        now_ms,
-    )?;
-    Ok(after)
+        assert_eq!(changed, 1);
+        let after = load(tx, &input.id)?.view;
+        assert_eq!(after.totals, totals);
+        assert_eq!(after.version, input.version + 1);
+        let written = RecordEvent {
+            id: after.id.clone(),
+            version: after.version,
+            totals,
+            results: rows.into_iter().map(|(_, row)| row).collect(),
+        };
+        event(
+            tx,
+            run.project_id,
+            actor,
+            RUN_RECORD,
+            None,
+            Some(json(&written)),
+            now_ms,
+        )?;
+        Ok(after)
+    })
 }
 
 /// Finishes a running run and stores its verdict by the core's locked rules, with the
-/// host's integrity evidence. Inputs: the transaction, the writer, the finish and the
-/// time. Output: the finished run.
+/// host's integrity evidence. `not_started` needs a one-line reason and `report_unreadable`
+/// may carry one; no other end takes a reason. Inputs: the transaction, the writer, the
+/// finish and the time. Output: the finished run, or an error that wrote nothing.
 pub fn finish(
     tx: &Transaction<'_>,
     actor: &Actor,
     input: &RunFinish,
     now_ms: i64,
 ) -> Result<RunView, StoreError> {
-    let run = writable(tx, actor, &input.id, input.version)?;
-    let totals = run.view.totals;
-    ending_fits(input, &totals).map_err(StoreError::Refused)?;
-    if let Some(integrity) = &input.integrity {
-        integrity.check().map_err(StoreError::Refused)?;
-    }
-    let ending = Ending {
-        state: RunState::Finished,
-        verdict: Some(verdict(input.end, input.exit_code, &totals)),
-        reason: input.reason.clone(),
-        integrity: input.integrity.as_ref().map(json),
-        op: RUN_FINISH,
-    };
-    end(tx, actor, &run, ending, now_ms)
+    store::write(tx, || {
+        let run = writable(tx, actor, &input.id, input.version)?;
+        let totals = run.view.totals;
+        ending_fits(input, &totals).map_err(StoreError::Refused)?;
+        assert!(
+            input.reason.is_none()
+                || matches!(input.end, RunEnd::NotStarted | RunEnd::ReportUnreadable)
+        );
+        if let Some(integrity) = &input.integrity {
+            integrity.check().map_err(StoreError::Refused)?;
+        }
+        let ending = Ending {
+            state: RunState::Finished,
+            verdict: Some(verdict(input.end, input.exit_code, &totals)),
+            reason: input.reason.clone(),
+            integrity: input.integrity.as_ref().map(json),
+            op: RUN_FINISH,
+        };
+        end(tx, actor, &run, ending, now_ms)
+    })
 }
 
 /// Interrupts a running run: no verdict, the reason `cancelled` or `timed_out`. Inputs:
-/// the transaction, the writer, the cancel and the time. Output: the interrupted run.
+/// the transaction, the writer, the cancel and the time. Output: the interrupted run, or
+/// an error that wrote nothing.
 pub fn cancel(
     tx: &Transaction<'_>,
     actor: &Actor,
     input: &RunCancel,
     now_ms: i64,
 ) -> Result<RunView, StoreError> {
-    let run = writable(tx, actor, &input.id, input.version)?;
-    let ending = Ending {
-        state: RunState::Interrupted,
-        verdict: None,
-        reason: Some(input.reason.as_str().to_owned()),
-        integrity: None,
-        op: RUN_CANCEL,
-    };
-    end(tx, actor, &run, ending, now_ms)
+    store::write(tx, || {
+        let run = writable(tx, actor, &input.id, input.version)?;
+        let ending = Ending {
+            state: RunState::Interrupted,
+            verdict: None,
+            reason: Some(input.reason.as_str().to_owned()),
+            integrity: None,
+            op: RUN_CANCEL,
+        };
+        end(tx, actor, &run, ending, now_ms)
+    })
 }
 
 /// Shows one run and a page of its results, filled to at most 50 rows and 6 KiB. Inputs:
@@ -631,8 +647,9 @@ pub fn list(tx: &Transaction<'_>, input: &RunList) -> Result<RunListPage, StoreE
 /// Computes a finished run's verdict, the locked rules shared by every host. A completed
 /// run: a nonzero exit with no results is `build_failed`; an exit status that contradicts
 /// the results is `unknown`; any failed or errored result is `failed`; zero executed is
-/// `no_tests`; else `passed`. Inputs: how it ended, the exit code and the counts. Output:
-/// the verdict.
+/// `no_tests`; else `passed`. A check whose report is only its exit status records one
+/// result named after the check, so exit 0 passes and a nonzero exit fails. Inputs: how it
+/// ended, the exit code and the counts. Output: the verdict.
 pub(crate) fn verdict(end: RunEnd, exit_code: Option<i32>, totals: &Totals) -> Verdict {
     let broken = totals.failed + totals.errored;
     let executed = totals.executed();
@@ -672,7 +689,14 @@ fn ending_fits(input: &RunFinish, totals: &Totals) -> Result<(), Refusal> {
                 ));
             }
         }
-        (_, Some(_)) => return Err(invalid("only a run that could not start takes a reason")),
+        (RunEnd::ReportUnreadable, Some(reason)) => {
+            shape::run_text("run reason", reason, RUN_REASON_BYTES_MAX, false)?;
+        }
+        (_, Some(_)) => {
+            return Err(invalid(
+                "only a run that could not start or read its report takes a reason",
+            ));
+        }
         (RunEnd::BuildFailed, None) if totals.total > 0 => {
             return Err(invalid(
                 "a build that failed before tests ran has no results",

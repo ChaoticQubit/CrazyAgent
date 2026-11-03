@@ -1,4 +1,5 @@
 use crate::model::{Actor, Criterion, Event, Link, ProjectKey, ShortId, Ticket};
+use crate::runs;
 use crate::store::{self, State, StoreError};
 use crate::tests_store;
 use rusqlite::{Row, Transaction, params};
@@ -111,7 +112,7 @@ pub fn replay(tx: &Transaction<'_>, key: &ProjectKey) -> Result<State, StoreErro
                         StoreError::Corrupt("an event removes a link no event added".into())
                     })?;
             }
-            op if tests_store::OPS.contains(&op) => {}
+            op if tests_store::OPS.contains(&op) || runs::OPS.contains(&op) => {}
             _ => {
                 return Err(StoreError::Corrupt(
                     "an event names an op this core does not know".into(),
