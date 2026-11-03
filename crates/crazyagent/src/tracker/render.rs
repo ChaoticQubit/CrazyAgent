@@ -20,7 +20,7 @@ impl Paths for View {
     /// Resolves the view's one file. Inputs: the transaction, key and actor (unused: the
     /// engine writes the view itself), the operation, always `export`, and the name, always
     /// `tickets.md`. Output: the path, or `export_path_refused`.
-    fn resolve(
+    fn resolve_path(
         &self,
         _tx: &Transaction<'_>,
         _project: &ProjectKey,

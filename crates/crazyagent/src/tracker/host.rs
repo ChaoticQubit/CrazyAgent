@@ -507,7 +507,7 @@ impl Paths for Host {
     /// agent never names a file outside its own project's folders. Inputs: the
     /// transaction, the key, the actor, the operation and the requested relative path.
     /// Output: the path to open, or `export_path_refused` / `import_path_refused`.
-    fn resolve(
+    fn resolve_path(
         &self,
         tx: &Transaction<'_>,
         project: &ProjectKey,
