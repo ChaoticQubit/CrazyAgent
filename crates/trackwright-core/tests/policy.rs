@@ -1,23 +1,26 @@
 use rusqlite::{OptionalExtension, Transaction, params};
-use serde_json::json;
-use std::path::Path;
+use serde_json::{Value, json};
+use std::path::{Path, PathBuf};
 use trackwright_core::criteria::{self, NewEvidence};
 use trackwright_core::events;
 use trackwright_core::host::{
     self, Authority, CheckView, Evidence, EvidenceState, HostEvent, LinkKind, LinkState, Links,
-    TicketView,
+    Paths, TicketView,
 };
 use trackwright_core::model::{
     Actor, AgentEditPolicy, CheckKind, ClosePolicy, CreatePolicy, CriterionState, EvidenceResult,
     OpKind, PolicyKey, Priority, ProjectKey, Refusal, ShortId, TicketKind, TicketStatus, codes,
 };
+use trackwright_core::ops;
 use trackwright_core::policy::{self, Role};
+use trackwright_core::requests::Request;
 use trackwright_core::standalone::Standalone;
 use trackwright_core::store::{self, NewTicket, Store, StoreError};
 
 /// A host shaped like an engine: branches and change sets live in its own tables in the
-/// tracker's database and are read in the core's transaction; authority and every other
-/// check kind follow the standalone host.
+/// tracker's database and are read in the core's transaction, so nobody records evidence
+/// for a change check; authority, file paths and every other check kind follow the
+/// standalone host.
 struct EngineLike;
 
 const ENGINE_KINDS: [LinkKind; 2] = [
@@ -61,7 +64,7 @@ impl Links for EngineLike {
             "change_set" => "SELECT project, accepted FROM host_change_sets WHERE id = ?1",
             _ => {
                 return Err(Refusal::new(
-                    "link_kind_unknown",
+                    codes::LINK_KIND_UNKNOWN,
                     format!("this host links no {kind}"),
                 ));
             }
@@ -134,6 +137,38 @@ impl Authority for EngineLike {
 
     fn actors_verified(&self) -> bool {
         true
+    }
+
+    fn evidence_may(
+        &self,
+        tx: &Transaction<'_>,
+        project: &ProjectKey,
+        actor: &Actor,
+        check: &CheckView,
+    ) -> Result<(), Refusal> {
+        if check.kind == CheckKind::Change {
+            return Err(Refusal::host(
+                "change_from_host",
+                format!(
+                    "change set {} is read from this host, never recorded",
+                    check.reference
+                ),
+            ));
+        }
+        Standalone.evidence_may(tx, project, actor, check)
+    }
+}
+
+impl Paths for EngineLike {
+    fn resolve_path(
+        &self,
+        tx: &Transaction<'_>,
+        project: &ProjectKey,
+        actor: &Actor,
+        op: OpKind,
+        requested: &Path,
+    ) -> Result<PathBuf, Refusal> {
+        Standalone.resolve_path(tx, project, actor, op, requested)
     }
 }
 
@@ -225,6 +260,29 @@ fn set_policy(tx: &Transaction<'_>, setting: PolicyKey, value: &str) {
     );
 }
 
+/// Runs one request through the core's dispatch on the standalone host, as MCP and the CLI
+/// do. Inputs: the transaction, the actor, the operation and its arguments. Output: the
+/// reply envelope.
+fn call(tx: &Transaction<'_>, by: &Actor, op: &str, args: Value) -> Value {
+    let request = Request::parse(op, args.to_string().as_bytes()).unwrap();
+    let reply = ops::dispatch(tx, &Standalone, by, request);
+    let envelope: Value = serde_json::from_str(reply.json()).unwrap();
+    assert_eq!(envelope["ok"], json!(reply.is_ok()));
+    envelope
+}
+
+/// The data of a reply that must succeed. Input: the envelope. Output: its data.
+fn answered(envelope: &Value) -> &Value {
+    assert_eq!(envelope["ok"], json!(true), "{envelope}");
+    &envelope["data"]
+}
+
+/// The code of a reply that must be refused. Input: the envelope. Output: its code.
+fn denied(envelope: &Value) -> &str {
+    assert_eq!(envelope["ok"], json!(false), "{envelope}");
+    envelope["code"].as_str().unwrap()
+}
+
 fn engine_tables(tx: &Transaction<'_>) {
     tx.execute_batch(ENGINE_TABLES).unwrap();
 }
@@ -275,10 +333,11 @@ fn the_last_passing_evidence_closes_the_ticket_and_records_why() {
     )
     .unwrap();
 
+    let runner = actor("engine:ci");
     let (_, first) = criteria::record_evidence(
         &tx,
         &Standalone,
-        &agent,
+        &runner,
         &proof(
             &id,
             build.position,
@@ -336,7 +395,7 @@ fn the_last_passing_evidence_closes_the_ticket_and_records_why() {
     let late = criteria::record_evidence(
         &tx,
         &Standalone,
-        &agent,
+        &runner,
         &proof(
             &id,
             build.position,
@@ -387,11 +446,12 @@ fn a_failing_evidence_reopens_a_met_criterion() {
         )
         .unwrap();
     }
+    let runner = actor("engine:ci");
     let record = |check: &str, result: EvidenceResult, at_ms: i64| {
         criteria::record_evidence(
             &tx,
             &Standalone,
-            &agent,
+            &runner,
             &proof(&id, tests.position, CheckKind::Ci, check, result),
             at_ms,
         )
@@ -564,7 +624,7 @@ fn each_close_option_allows_and_refuses_the_right_actors() {
             )
         };
         let (recorded, _) =
-            criteria::record_evidence(&tx, &Standalone, &others[0], &unnamed, 1_900).unwrap();
+            criteria::record_evidence(&tx, &Standalone, &owner(), &unnamed, 1_900).unwrap();
         assert_eq!(recorded.reference, "");
         let proven = store::ticket(&tx, &id).unwrap();
         if option == ClosePolicy::Evidence {
@@ -914,6 +974,584 @@ fn notify_reevaluates_only_tickets_linked_to_that_target() {
         store::ticket(&tx, &unlinked).unwrap().status,
         TicketStatus::Todo
     );
+    assert_eq!(
+        events::replay(&tx, &key()).unwrap(),
+        store::state(&tx, &key()).unwrap()
+    );
+    tx.commit().unwrap();
+}
+
+#[test]
+fn under_evidence_only_the_owner_or_engine_proves_a_criterion_without_checks() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = opened(dir.path());
+    let tx = store.transaction().unwrap();
+    project(&tx);
+    let agent = actor("agent:w1");
+    let theirs = ticket(&tx, &owner(), "The owner's ticket");
+    let done = criteria::add_criterion(&tx, &Standalone, &agent, &theirs, "done", 1_200).unwrap();
+    let own = ticket(&tx, &agent, "The agent's own ticket");
+    let mine =
+        criteria::add_criterion(&tx, &Standalone, &agent, &own, "Mine works", 1_210).unwrap();
+    let before = count(&tx, "tk_events");
+    for (id, criterion) in [(&theirs, &done), (&own, &mine)] {
+        let by_hand = criteria::set_criterion(
+            &tx,
+            &Standalone,
+            &agent,
+            id,
+            criterion.position,
+            criterion.version,
+            CriterionState::Met,
+            1_300,
+        );
+        assert_eq!(refused(by_hand), codes::CRITERION_NEEDS_CHECK);
+        assert_eq!(store::ticket(&tx, id).unwrap().status, TicketStatus::Todo);
+        assert_eq!(
+            criteria::criteria(&tx, id).unwrap()[0].state,
+            CriterionState::Open
+        );
+    }
+    assert_eq!(
+        count(&tx, "tk_events"),
+        before,
+        "a refused set writes nothing"
+    );
+
+    let by_engine = criteria::set_criterion(
+        &tx,
+        &Standalone,
+        &actor("engine:ci"),
+        &theirs,
+        done.position,
+        done.version,
+        CriterionState::Met,
+        1_400,
+    )
+    .unwrap();
+    assert_eq!(by_engine.criterion.state, CriterionState::Met);
+    assert_eq!(by_engine.ticket.status, TicketStatus::Done);
+    assert_eq!(by_engine.ticket.closed_by, Some(Actor::host("evidence")));
+    let by_owner = criteria::set_criterion(
+        &tx,
+        &Standalone,
+        &owner(),
+        &own,
+        mine.position,
+        mine.version,
+        CriterionState::Met,
+        1_410,
+    )
+    .unwrap();
+    assert_eq!(by_owner.ticket.status, TicketStatus::Done);
+
+    set_policy(&tx, PolicyKey::Close, "agents");
+    let later = ticket(&tx, &owner(), "Agents close this one");
+    let it = criteria::add_criterion(&tx, &Standalone, &agent, &later, "done", 1_500).unwrap();
+    let set = criteria::set_criterion(
+        &tx,
+        &Standalone,
+        &agent,
+        &later,
+        it.position,
+        it.version,
+        CriterionState::Met,
+        1_510,
+    )
+    .unwrap();
+    assert_eq!(set.criterion.state, CriterionState::Met);
+    assert_eq!(
+        set.ticket.status,
+        TicketStatus::Todo,
+        "only close = evidence closes on its own"
+    );
+    assert_eq!(
+        events::replay(&tx, &key()).unwrap(),
+        store::state(&tx, &key()).unwrap()
+    );
+    tx.commit().unwrap();
+}
+
+#[test]
+fn only_the_owner_rewrites_a_waived_criterion() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = opened(dir.path());
+    let tx = store.transaction().unwrap();
+    project(&tx);
+    let id = ticket(&tx, &owner(), "Waived docs");
+    let docs =
+        criteria::add_criterion(&tx, &Standalone, &owner(), &id, "Docs updated", 1_200).unwrap();
+    let ships =
+        criteria::add_criterion(&tx, &Standalone, &owner(), &id, "It ships", 1_210).unwrap();
+    let waived = criteria::set_criterion(
+        &tx,
+        &Standalone,
+        &owner(),
+        &id,
+        docs.position,
+        docs.version,
+        CriterionState::Waived,
+        1_220,
+    )
+    .unwrap();
+    assert_eq!(waived.ticket.status, TicketStatus::Todo);
+    let before = count(&tx, "tk_events");
+    for who in [actor("agent:w1"), actor("engine:ci")] {
+        let rewrite = criteria::edit_criterion(
+            &tx,
+            &Standalone,
+            &who,
+            &id,
+            docs.position,
+            waived.criterion.version,
+            "Security review passed",
+            1_300,
+        );
+        assert_eq!(refused(rewrite), codes::OWNER_ONLY, "{who}");
+    }
+    assert_eq!(
+        count(&tx, "tk_events"),
+        before,
+        "a refused edit writes nothing"
+    );
+    let kept = &criteria::criteria(&tx, &id).unwrap()[0];
+    assert_eq!(kept.text, "Docs updated");
+    assert_eq!(kept.state, CriterionState::Waived);
+
+    let open = criteria::edit_criterion(
+        &tx,
+        &Standalone,
+        &actor("agent:w1"),
+        &id,
+        ships.position,
+        ships.version,
+        "It ships to users",
+        1_400,
+    )
+    .unwrap();
+    assert_eq!(open.state, CriterionState::Open);
+    let owned = criteria::edit_criterion(
+        &tx,
+        &Standalone,
+        &owner(),
+        &id,
+        docs.position,
+        waived.criterion.version,
+        "Docs and changelog updated",
+        1_410,
+    )
+    .unwrap();
+    assert_eq!(
+        owned.state,
+        CriterionState::Waived,
+        "the owner waives the new text"
+    );
+    assert_eq!(owned.text, "Docs and changelog updated");
+    assert_eq!(
+        events::replay(&tx, &key()).unwrap(),
+        store::state(&tx, &key()).unwrap()
+    );
+    tx.commit().unwrap();
+}
+
+#[test]
+fn only_the_owner_or_an_engine_records_manual_or_ci_evidence_on_the_standalone_host() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = opened(dir.path());
+    let tx = store.transaction().unwrap();
+    project(&tx);
+    let agent = actor("agent:w1");
+    let id = ticket(&tx, &agent, "Proof an agent cannot give itself");
+    let kinds = [
+        (CheckKind::Manual, "look:release-notes"),
+        (CheckKind::Ci, "ci:build"),
+        (CheckKind::Test, "test:unit"),
+    ];
+    let mut positions = Vec::new();
+    for (kind, check) in kinds {
+        let criterion = criteria::add_criterion(
+            &tx,
+            &Standalone,
+            &agent,
+            &id,
+            &format!("Proven by {check}"),
+            1_200,
+        )
+        .unwrap();
+        criteria::add_check(
+            &tx,
+            &Standalone,
+            &agent,
+            &id,
+            criterion.position,
+            kind,
+            check,
+            1_210,
+        )
+        .unwrap();
+        positions.push(criterion.position);
+    }
+    let pass = |position: u32, (kind, check): (CheckKind, &str)| {
+        proof(&id, position, kind, check, EvidenceResult::Pass)
+    };
+    let written = events::history(&tx, &id).unwrap().len();
+
+    for (position, kind) in positions.iter().zip(kinds).take(2) {
+        let attempt =
+            criteria::record_evidence(&tx, &Standalone, &agent, &pass(*position, kind), 1_300);
+        assert_eq!(
+            refused(attempt),
+            codes::EVIDENCE_NOT_FOR_AGENTS,
+            "{}",
+            kind.0
+        );
+    }
+    assert_eq!(count(&tx, "tk_evidence"), 0);
+    assert_eq!(events::history(&tx, &id).unwrap().len(), written);
+    assert_eq!(store::ticket(&tx, &id).unwrap().status, TicketStatus::Todo);
+
+    let (_, tested) = criteria::record_evidence(
+        &tx,
+        &Standalone,
+        &agent,
+        &pass(positions[2], kinds[2]),
+        1_400,
+    )
+    .unwrap();
+    assert_eq!(tested.criterion.state, CriterionState::Met);
+    assert_eq!(tested.ticket.status, TicketStatus::Todo);
+    let (by_engine, built) = criteria::record_evidence(
+        &tx,
+        &Standalone,
+        &actor("engine:ci"),
+        &pass(positions[1], kinds[1]),
+        1_500,
+    )
+    .unwrap();
+    assert_eq!(by_engine.recorded_by, actor("engine:ci"));
+    assert_eq!(built.criterion.state, CriterionState::Met);
+    assert_eq!(built.ticket.status, TicketStatus::Todo);
+    let (by_owner, looked) = criteria::record_evidence(
+        &tx,
+        &Standalone,
+        &owner(),
+        &pass(positions[0], kinds[0]),
+        1_600,
+    )
+    .unwrap();
+    assert_eq!(by_owner.recorded_by, owner());
+    assert_eq!(looked.ticket.status, TicketStatus::Done);
+    assert_eq!(looked.ticket.closed_by, Some(Actor::host("evidence")));
+    assert_eq!(count(&tx, "tk_evidence"), 3);
+    assert_eq!(
+        events::replay(&tx, &key()).unwrap(),
+        store::state(&tx, &key()).unwrap()
+    );
+    tx.commit().unwrap();
+}
+
+#[test]
+fn a_host_refusing_evidence_leaves_no_row_even_for_the_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = opened(dir.path());
+    let tx = store.transaction().unwrap();
+    project(&tx);
+    engine_tables(&tx);
+    tx.execute(
+        "INSERT INTO host_change_sets(project, id, accepted) VALUES ('CA', 'CS-1', 0)",
+        [],
+    )
+    .unwrap();
+    let id = ticket(&tx, &owner(), "Proven by the host's own change set");
+    let criterion =
+        criteria::add_criterion(&tx, &EngineLike, &owner(), &id, "The change lands", 1_200)
+            .unwrap();
+    criteria::add_check(
+        &tx,
+        &EngineLike,
+        &owner(),
+        &id,
+        criterion.position,
+        CheckKind::Change,
+        "CS-1",
+        1_210,
+    )
+    .unwrap();
+    let written = events::history(&tx, &id).unwrap().len();
+
+    for who in [owner(), actor("engine:landing"), actor("agent:w1")] {
+        let attempt = criteria::record_evidence(
+            &tx,
+            &EngineLike,
+            &who,
+            &proof(
+                &id,
+                criterion.position,
+                CheckKind::Change,
+                "CS-1",
+                EvidenceResult::Pass,
+            ),
+            1_300,
+        );
+        assert_eq!(refused(attempt), "change_from_host", "{who}");
+    }
+    assert_eq!(count(&tx, "tk_evidence"), 0);
+    assert_eq!(events::history(&tx, &id).unwrap().len(), written);
+    let ticket = store::ticket(&tx, &id).unwrap();
+    assert_eq!(ticket.status, TicketStatus::Todo);
+    assert_eq!(ticket.closed_by, None);
+    assert_eq!(
+        events::replay(&tx, &key()).unwrap(),
+        store::state(&tx, &key()).unwrap()
+    );
+    tx.commit().unwrap();
+}
+
+#[test]
+fn every_criteria_policy_and_close_op_answers_through_dispatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = opened(dir.path());
+    let tx = store.transaction().unwrap();
+    project(&tx);
+    let id = ticket(&tx, &owner(), "Prove it");
+    let (me, agent) = (owner(), actor("agent:w1"));
+
+    let read = call(&tx, &me, "policy_get", json!({"project": "CA"}));
+    let settings = answered(&read)["settings"].as_array().unwrap().clone();
+    assert_eq!(settings.len(), PolicyKey::ALL.len());
+    let close = settings
+        .iter()
+        .find(|entry| entry["key"] == "close")
+        .unwrap();
+    assert_eq!(close["value"], "evidence");
+    assert_eq!(close["version"], 0);
+    assert_eq!(close["options"], json!(["agents", "evidence", "owner"]));
+    let set = call(
+        &tx,
+        &me,
+        "policy_set",
+        json!({"project": "CA", "key": "close", "value": "owner"}),
+    );
+    assert_eq!(answered(&set)["setting"]["key"], "close");
+    assert_eq!(answered(&set)["setting"]["value"], "owner");
+    assert_eq!(answered(&set)["setting"]["version"], 1);
+    let again = json!({"project": "CA", "key": "close", "value": "agents"});
+    assert_eq!(
+        denied(&call(&tx, &me, "policy_set", again.clone())),
+        "stale_version"
+    );
+    assert_eq!(
+        denied(&call(&tx, &agent, "policy_set", again)),
+        "owner_only"
+    );
+    assert_eq!(policy::load(&tx, &key()).unwrap().close, ClosePolicy::Owner);
+
+    let added = call(
+        &tx,
+        &me,
+        "criterion_add",
+        json!({"id": "CA-1", "text": "It is proven"}),
+    );
+    assert_eq!(answered(&added)["id"], "CA-1");
+    let criterion = &answered(&added)["criterion"];
+    assert_eq!(criterion["position"], 1);
+    assert_eq!(criterion["state"], "open");
+    assert_eq!(criterion["version"], 1);
+    let edited = call(
+        &tx,
+        &me,
+        "criterion_edit",
+        json!({"id": "CA-1", "position": 1, "version": 1, "text": "It is proven twice"}),
+    );
+    assert_eq!(answered(&edited)["criterion"]["text"], "It is proven twice");
+    assert_eq!(answered(&edited)["criterion"]["version"], 2);
+    let check = call(
+        &tx,
+        &me,
+        "check_add",
+        json!({"id": "CA-1", "position": 1, "kind": "test", "ref": "tests::proof"}),
+    );
+    assert_eq!(answered(&check)["position"], 1);
+    assert_eq!(
+        answered(&check)["check"],
+        json!({"kind": "test", "ref": "tests::proof"})
+    );
+    let manual = call(
+        &tx,
+        &me,
+        "check_add",
+        json!({"id": "CA-1", "position": 1, "kind": "manual", "ref": "looked at it"}),
+    );
+    assert_eq!(answered(&manual)["check"]["kind"], "manual");
+    let by_agent = json!({"id": "CA-1", "position": 1, "kind": "manual",
+        "ref": "looked at it", "result": "pass"});
+    assert_eq!(
+        denied(&call(&tx, &agent, "evidence_record", by_agent.clone())),
+        "evidence_not_for_agents"
+    );
+    let first = call(&tx, &me, "evidence_record", by_agent);
+    assert_eq!(answered(&first)["evidence"]["result"], "pass");
+    assert_eq!(answered(&first)["evidence"]["by"], "owner");
+    assert_eq!(answered(&first)["criterion"]["state"], "open");
+    let recorded = call(
+        &tx,
+        &me,
+        "evidence_record",
+        json!({"id": "CA-1", "position": 1, "kind": "test", "ref": "tests::proof",
+            "result": "pass", "evidence": "run 1"}),
+    );
+    let data = answered(&recorded);
+    assert_eq!(data["id"], "CA-1");
+    assert_eq!(data["position"], 1);
+    assert_eq!(data["evidence"]["evidence"], "run 1");
+    assert_eq!(data["criterion"]["state"], "met");
+    assert_eq!(
+        data["ticket"]["status"], "todo",
+        "close = owner keeps it open"
+    );
+    let version = data["criterion"]["version"].as_i64().unwrap();
+    let waived = call(
+        &tx,
+        &me,
+        "criterion_set",
+        json!({"id": "CA-1", "position": 1, "version": version, "state": "waived"}),
+    );
+    assert_eq!(answered(&waived)["criterion"]["state"], "waived");
+    assert_eq!(answered(&waived)["criterion"]["version"], version + 1);
+    let ticket_version = answered(&waived)["ticket"]["version"].as_i64().unwrap();
+
+    let closing = json!({"id": "CA-1", "version": ticket_version, "reason": "Shipped"});
+    assert_eq!(
+        denied(&call(&tx, &agent, "close", closing.clone())),
+        "close_owner_only"
+    );
+    let closed = call(&tx, &me, "close", closing);
+    assert_eq!(answered(&closed)["status"], "done");
+    assert_eq!(answered(&closed)["close_reason"], "Shipped");
+    assert_eq!(answered(&closed)["closed_by"], "owner");
+    let closed_version = answered(&closed)["version"].as_i64().unwrap();
+    let reopened = call(
+        &tx,
+        &me,
+        "reopen",
+        json!({"id": "CA-1", "version": closed_version}),
+    );
+    assert_eq!(answered(&reopened)["status"], "todo");
+    assert_eq!(answered(&reopened)["closed_by"], Value::Null);
+    assert_eq!(store::ticket(&tx, &id).unwrap().status, TicketStatus::Todo);
+    assert_eq!(count(&tx, "tk_evidence"), 2);
+    assert_eq!(
+        events::replay(&tx, &key()).unwrap(),
+        store::state(&tx, &key()).unwrap()
+    );
+    tx.commit().unwrap();
+}
+
+#[test]
+fn stale_closed_and_open_refusals_through_dispatch_name_what_to_read_next() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = opened(dir.path());
+    let tx = store.transaction().unwrap();
+    project(&tx);
+    let id = ticket(&tx, &owner(), "Prove it");
+    let me = owner();
+    let added = call(
+        &tx,
+        &me,
+        "criterion_add",
+        json!({"id": "CA-1", "text": "It is proven"}),
+    );
+    assert_eq!(answered(&added)["criterion"]["version"], 1);
+    let written = count(&tx, "tk_events");
+
+    for (op, args) in [
+        (
+            "criterion_edit",
+            json!({"id": "CA-1", "position": 1, "version": 5, "text": "It is proven twice"}),
+        ),
+        (
+            "criterion_set",
+            json!({"id": "CA-1", "position": 1, "version": 5, "state": "waived"}),
+        ),
+    ] {
+        let stale = call(&tx, &me, op, args);
+        assert_eq!(denied(&stale), "stale_version", "{op}");
+        assert_eq!(
+            stale["data"],
+            json!({"id": "CA-1", "position": 1, "version": 1}),
+            "{op}"
+        );
+        assert_eq!(stale["next"][0]["op"], "show", "{op}");
+        assert_eq!(stale["next"][0]["id"], "CA-1", "{op}");
+    }
+
+    let version = store::ticket(&tx, &id).unwrap().version;
+    let stale = call(
+        &tx,
+        &me,
+        "close",
+        json!({"id": "CA-1", "version": version + 1}),
+    );
+    assert_eq!(denied(&stale), "stale_version");
+    assert_eq!(stale["data"], json!({"id": "CA-1", "version": version}));
+    assert_eq!(stale["next"][0]["op"], "show");
+    let open = call(
+        &tx,
+        &me,
+        "reopen",
+        json!({"id": "CA-1", "version": version}),
+    );
+    assert_eq!(denied(&open), "ticket_open");
+    assert_eq!(open["next"][0]["op"], "close");
+    assert_eq!(open["next"][0]["id"], "CA-1");
+    assert_eq!(count(&tx, "tk_events"), written, "refusals write nothing");
+
+    let closed = call(
+        &tx,
+        &me,
+        "close",
+        json!({"id": "CA-1", "version": version, "reason": "Shipped"}),
+    );
+    let closed_version = answered(&closed)["version"].as_i64().unwrap();
+    let again = call(
+        &tx,
+        &me,
+        "close",
+        json!({"id": "CA-1", "version": closed_version}),
+    );
+    assert_eq!(denied(&again), "ticket_closed");
+    assert_eq!(again["next"][0]["op"], "reopen");
+    assert_eq!(again["next"][0]["id"], "CA-1");
+    let stale = call(
+        &tx,
+        &me,
+        "reopen",
+        json!({"id": "CA-1", "version": closed_version + 1}),
+    );
+    assert_eq!(denied(&stale), "stale_version");
+    assert_eq!(
+        stale["data"],
+        json!({"id": "CA-1", "version": closed_version})
+    );
+    assert_eq!(stale["next"][0]["op"], "show");
+
+    let set = call(
+        &tx,
+        &me,
+        "policy_set",
+        json!({"project": "CA", "key": "close", "value": "owner"}),
+    );
+    assert_eq!(answered(&set)["setting"]["version"], 1);
+    let stale = call(
+        &tx,
+        &me,
+        "policy_set",
+        json!({"project": "CA", "key": "close", "value": "agents"}),
+    );
+    assert_eq!(denied(&stale), "stale_version");
+    assert_eq!(stale["data"], json!({"key": "close", "version": 1}));
+    assert_eq!(stale["next"][0]["op"], "policy_get");
+    assert_eq!(policy::load(&tx, &key()).unwrap().close, ClosePolicy::Owner);
     assert_eq!(
         events::replay(&tx, &key()).unwrap(),
         store::state(&tx, &key()).unwrap()

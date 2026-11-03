@@ -5,10 +5,12 @@ use crate::model::{
     Criterion, CriterionState, Evidence, EvidenceResult, OpKind, ShortId, TICKETS_PER_PROJECT_MAX,
     Ticket, TicketStatus, codes,
 };
+use crate::ops::{self, Candidate, Cx, Failure};
 use crate::policy::{self, Role};
 use crate::store::{self, StoreError, TicketChange};
 use crate::text::{self, CLOSE_REASON_BYTES_MAX, TextField};
 use rusqlite::{OptionalExtension, Row, Transaction, params};
+use serde_json::{Value, json};
 
 pub(crate) const CRITERIA_OF_TICKET: &str = "SELECT id, ticket, position, text, state, version \
      FROM tk_criteria WHERE ticket = ?1 ORDER BY position";
@@ -107,9 +109,11 @@ pub fn add_criterion(
 }
 
 /// Rewrites a criterion's text at the version the caller read, keeping its state and checks.
-/// The same text writes nothing. Inputs: the transaction, the host, the actor, the ticket,
+/// The same text writes nothing. A waived criterion is the owner's to rewrite, since the
+/// waiver was given for its text. Inputs: the transaction, the host, the actor, the ticket,
 /// the position, the version, the text and the time. Output: the criterion, or
-/// `criterion_unknown`, `stale_version`, `ticket_closed`, a text or the host's refusal.
+/// `criterion_unknown`, `stale_version`, `owner_only`, `ticket_closed`, a text or the host's
+/// refusal.
 #[allow(clippy::too_many_arguments)]
 pub fn edit_criterion(
     tx: &Transaction<'_>,
@@ -130,6 +134,12 @@ pub fn edit_criterion(
             before.version,
             version,
         )?;
+        if before.state == CriterionState::Waived && policy::role(actor) != Role::Owner {
+            return Err(store::refusal(
+                codes::OWNER_ONLY,
+                format!("the owner waived {id} criterion {position}; only the owner rewrites it"),
+            ));
+        }
         if before.text == criterion {
             return Ok(before);
         }
@@ -233,12 +243,13 @@ pub fn add_check(
     })
 }
 
-/// Appends one evidence record for a check of an open ticket, then re-derives the check's
-/// criterion: met when every check is satisfied, open again on a failing one. Under
-/// `close = evidence` the last satisfied check closes the ticket as `host:evidence`, with a
-/// reason naming the proof. Inputs: the transaction, the host, the actor, the evidence and
-/// the time. Output: the evidence row and what it left, or `check_unknown`,
-/// `criterion_unknown`, `ticket_closed`, a text refusal or the host's refusal.
+/// Appends one evidence record for a check of an open ticket, once the host's
+/// `evidence_may` lets the actor prove that check, then re-derives the check's criterion:
+/// met when every check is satisfied, open again on a failing one. Under `close = evidence`
+/// the last satisfied check closes the ticket as `host:evidence`, with a reason naming the
+/// proof. Inputs: the transaction, the host, the actor, the evidence and the time. Output:
+/// the evidence row and what it left, or `check_unknown`, `criterion_unknown`,
+/// `ticket_closed`, a text refusal or the host's refusal.
 pub fn record_evidence(
     tx: &Transaction<'_>,
     host: &impl Host,
@@ -255,6 +266,13 @@ pub fn record_evidence(
         let ticket = open_ticket(tx, host, actor, OpKind::EvidenceRecord, &new.ticket)?;
         let criterion = criterion_at(tx, &ticket, new.criterion)?;
         let check = check_of(tx, &criterion, new.kind, &new.check)?;
+        host.evidence_may(
+            tx,
+            ticket.short_id.key(),
+            actor,
+            &view_of(&ticket, &criterion, &check),
+        )
+        .map_err(StoreError::Refused)?;
         store::prepare(tx, EVIDENCE_INSERT)?.execute(params![
             check.id,
             new.result.as_str(),
@@ -298,10 +316,12 @@ pub fn record_evidence(
 
 /// Sets a criterion's state by hand at the version the caller read. A criterion with checks
 /// follows them: it is never set met or reopened by hand, only waived by the owner or taken
-/// back from waived to open. Waiving is the owner's. Under `close = evidence` the last met
-/// criterion closes the ticket. Inputs: the transaction, the host, the actor, the ticket,
-/// the position, the version, the state and the time. Output: what the write left, or
-/// `owner_only`, `criterion_has_checks`, `stale_version`, `ticket_closed` or a refusal.
+/// back from waived to open. Waiving is the owner's. Under `close = evidence` an agent may
+/// not set a criterion without checks met, so no agent closes a ticket on its own word, and
+/// the last met criterion closes the ticket. Inputs: the transaction, the host, the actor,
+/// the ticket, the position, the version, the state and the time. Output: what the write
+/// left, or `owner_only`, `criterion_has_checks`, `criterion_needs_check`, `stale_version`,
+/// `ticket_closed` or a refusal.
 #[allow(clippy::too_many_arguments)]
 pub fn set_criterion(
     tx: &Transaction<'_>,
@@ -322,10 +342,20 @@ pub fn set_criterion(
                 "only the owner waives a criterion",
             ));
         }
-        if !checks_of(tx, before.id)?.is_empty() && !by_hand_with_checks(before.state, state) {
+        let checked = !checks_of(tx, before.id)?.is_empty();
+        if checked && !by_hand_with_checks(before.state, state) {
             return Err(store::refusal(
                 codes::CRITERION_HAS_CHECKS,
                 format!("{id} criterion {position} follows its checks; record evidence"),
+            ));
+        }
+        if !checked && state == CriterionState::Met && self_certified(tx, actor, id)? {
+            return Err(store::refusal(
+                codes::CRITERION_NEEDS_CHECK,
+                format!(
+                    "under close = evidence an agent proves {id} criterion {position} with a \
+                     check; add one or ask the owner"
+                ),
             ));
         }
         let set = store::set_criterion(tx, actor, id, position, version, state, now_ms)?;
@@ -506,12 +536,7 @@ fn derive(
     }
     let mut satisfied = true;
     for check in &checks {
-        let view = CheckView {
-            ticket: ticket.short_id.clone(),
-            criterion: criterion.position,
-            kind: check.kind,
-            reference: check.reference.clone(),
-        };
+        let view = view_of(ticket, criterion, check);
         let found = host
             .check(tx, ticket.short_id.key(), &view)
             .map_err(StoreError::Refused)?;
@@ -538,6 +563,14 @@ fn derive(
         assert_eq!(set.state, state);
     }
     Ok(state)
+}
+
+/// Whether a hand `met` would be the actor's own word standing in for proof: an agent under
+/// `close = evidence`. The owner and the host's engine actors are trusted to say so.
+fn self_certified(tx: &Transaction<'_>, actor: &Actor, id: &ShortId) -> Result<bool, StoreError> {
+    let agent = policy::role(actor) == Role::Agent;
+    let evidence = policy::load(tx, id.key())?.close == ClosePolicy::Evidence;
+    Ok(agent && evidence)
 }
 
 /// Whether a criterion with checks may move by hand from one state to another: to waived,
@@ -584,7 +617,9 @@ fn criterion_at(
     Ok(found)
 }
 
-fn criteria_of(tx: &Transaction<'_>, ticket: i64) -> Result<Vec<Criterion>, StoreError> {
+/// A ticket's criteria by position. Inputs: the transaction and the ticket's row id.
+/// Output: the criteria.
+pub(crate) fn criteria_of(tx: &Transaction<'_>, ticket: i64) -> Result<Vec<Criterion>, StoreError> {
     let criteria = store::prepare(tx, CRITERIA_OF_TICKET)?
         .query_map([ticket], store::criterion_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -592,7 +627,9 @@ fn criteria_of(tx: &Transaction<'_>, ticket: i64) -> Result<Vec<Criterion>, Stor
     Ok(criteria)
 }
 
-fn checks_of(tx: &Transaction<'_>, criterion: i64) -> Result<Vec<Check>, StoreError> {
+/// A criterion's checks in the order they were added. Inputs: the transaction and the
+/// criterion's row id. Output: the checks.
+pub(crate) fn checks_of(tx: &Transaction<'_>, criterion: i64) -> Result<Vec<Check>, StoreError> {
     let checks = store::prepare(tx, CHECKS_OF_CRITERION)?
         .query_map([criterion], check_row)?
         .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -617,7 +654,26 @@ fn check_of(
         })
 }
 
-fn latest_of(tx: &Transaction<'_>, check: i64) -> Result<Option<Evidence>, StoreError> {
+fn view_of(ticket: &Ticket, criterion: &Criterion, check: &Check) -> CheckView {
+    assert_eq!(
+        criterion.ticket, ticket.id,
+        "the criterion is on this ticket"
+    );
+    assert_eq!(
+        check.criterion, criterion.id,
+        "the check proves this criterion"
+    );
+    CheckView {
+        ticket: ticket.short_id.clone(),
+        criterion: criterion.position,
+        kind: check.kind,
+        reference: check.reference.clone(),
+    }
+}
+
+/// The latest evidence of one check. Inputs: the transaction and the check's row id.
+/// Output: the latest record, or none.
+pub(crate) fn latest_of(tx: &Transaction<'_>, check: i64) -> Result<Option<Evidence>, StoreError> {
     Ok(store::prepare(tx, EVIDENCE_LATEST)?
         .query_row([check], evidence_row)
         .optional()?)
@@ -641,4 +697,177 @@ fn evidence_row(row: &Row<'_>) -> rusqlite::Result<Evidence> {
         recorded_by: store::actor(row, 4)?,
         recorded_ms: row.get(5)?,
     })
+}
+
+/// One criterion as a reply shows it, as `show` lists it without its checks. Input: the
+/// criterion. Output: its position, text, state and row version.
+fn criterion_json(criterion: &Criterion) -> Value {
+    assert!(criterion.position >= 1);
+    json!({
+        "position": criterion.position,
+        "text": criterion.text,
+        "state": criterion.state.as_str(),
+        "version": criterion.version,
+    })
+}
+
+/// The criterion position a request names, which the catalog bounds from 1. Input: the
+/// context. Output: the position.
+fn position<H: Host>(cx: &Cx<'_, '_, H>) -> u32 {
+    let position = cx.args.need::<i64>("position");
+    let position = u32::try_from(position).expect("the catalog bounds a position");
+    assert!((1..=CRITERIA_PER_TICKET_MAX as u32).contains(&position));
+    position
+}
+
+/// The reply to a write on a criterion: the data and the next actions of its ticket as it
+/// stands after the write. Inputs: the context and the data. Output: the outcome.
+fn criterion_written<H: Host>(cx: &Cx<'_, '_, H>, data: Value) -> Result<ops::Outcome, Failure> {
+    assert!(data.is_object());
+    let ticket = store::ticket(cx.tx, &cx.ticket().short_id)?;
+    assert_eq!(ticket.id, cx.ticket().id);
+    Ok(ops::Outcome {
+        data,
+        next: ops::ticket_next(cx.tx, &ticket)?,
+        cursor: None,
+    })
+}
+
+/// Refuses a criterion write unless it carries the version of the criterion this
+/// transaction read, as `ops::fresh` does for a ticket; a position with no criterion is left
+/// to the store's refusal. Inputs: the context, the position and the version sent. Output:
+/// Ok, or `stale_version` naming the current version with `show` next.
+fn criterion_fresh<H: Host>(cx: &Cx<'_, '_, H>, at: u32, version: i64) -> Result<(), Failure> {
+    let ticket = cx.ticket();
+    let criteria = criteria_of(cx.tx, ticket.id)?;
+    assert!(criteria.len() <= CRITERIA_PER_TICKET_MAX);
+    let Some(found) = criteria
+        .into_iter()
+        .find(|criterion| criterion.position == at)
+    else {
+        return Ok(());
+    };
+    if found.version == version {
+        return Ok(());
+    }
+    Err(Failure::new(
+        codes::STALE_VERSION,
+        format!(
+            "criterion {at} of {} is at version {}, not {version}; show it and retry",
+            ticket.short_id, found.version
+        ),
+    )
+    .with_data(json!({
+        "id": ticket.short_id.to_string(),
+        "position": at,
+        "version": found.version,
+    }))
+    .with_next(vec![Candidate::ticket(
+        OpKind::Show,
+        ticket,
+        "read the criterion's current version, then retry",
+    )]))
+}
+
+/// Runs `criterion_add` for dispatch. Input: the context. Output: the ticket's id and the
+/// new criterion.
+pub(crate) fn criterion_add<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Failure> {
+    let id = &cx.ticket().short_id;
+    let text = cx.args.need::<&str>("text");
+    let added = add_criterion(cx.tx, cx.host, cx.actor, id, text, cx.at_ms)?;
+    assert_eq!(added.ticket, cx.ticket().id);
+    assert_eq!(added.text, text);
+    criterion_written(
+        cx,
+        json!({"id": id.to_string(), "criterion": criterion_json(&added)}),
+    )
+}
+
+/// Runs `criterion_edit` for dispatch. Input: the context. Output: the ticket's id and the
+/// criterion as rewritten.
+pub(crate) fn criterion_edit<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Failure> {
+    let id = &cx.ticket().short_id;
+    let (at, version) = (position(cx), cx.args.need::<i64>("version"));
+    let text = cx.args.need::<&str>("text");
+    criterion_fresh(cx, at, version)?;
+    let edited = edit_criterion(cx.tx, cx.host, cx.actor, id, at, version, text, cx.at_ms)?;
+    assert_eq!(edited.position, at);
+    assert!(edited.version >= version);
+    criterion_written(
+        cx,
+        json!({"id": id.to_string(), "criterion": criterion_json(&edited)}),
+    )
+}
+
+/// Runs `check_add` for dispatch. Input: the context. Output: the ticket's id, the
+/// criterion's position and the new check.
+pub(crate) fn check_add<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Failure> {
+    let id = &cx.ticket().short_id;
+    let at = position(cx);
+    let kind = cx.args.need::<CheckKind>("kind");
+    let reference = cx.args.need::<&str>("ref");
+    let check = add_check(cx.tx, cx.host, cx.actor, id, at, kind, reference, cx.at_ms)?;
+    assert_eq!(check.kind, kind);
+    assert_eq!(check.reference, reference);
+    criterion_written(
+        cx,
+        json!({
+            "id": id.to_string(),
+            "position": at,
+            "check": {"kind": check.kind.as_str(), "ref": check.reference},
+        }),
+    )
+}
+
+/// Runs `evidence_record` for dispatch. Input: the context. Output: the ticket's id, the
+/// criterion's position, the evidence, and the criterion and ticket after it.
+pub(crate) fn evidence_record<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Failure> {
+    let id = &cx.ticket().short_id;
+    let new = NewEvidence {
+        ticket: id.clone(),
+        criterion: position(cx),
+        kind: cx.args.need::<CheckKind>("kind"),
+        check: cx.args.need::<&str>("ref").to_owned(),
+        result: cx.args.need::<EvidenceResult>("result"),
+        reference: cx.args.get::<&str>("evidence").map(str::to_owned),
+    };
+    let (evidence, outcome) = record_evidence(cx.tx, cx.host, cx.actor, &new, cx.at_ms)?;
+    assert_eq!(evidence.result, new.result);
+    assert_eq!(outcome.criterion.position, new.criterion);
+    criterion_written(
+        cx,
+        json!({
+            "id": id.to_string(),
+            "position": new.criterion,
+            "evidence": {
+                "result": evidence.result.as_str(),
+                "evidence": evidence.reference,
+                "by": evidence.recorded_by.as_str(),
+                "at_ms": evidence.recorded_ms,
+            },
+            "criterion": criterion_json(&outcome.criterion),
+            "ticket": ops::ticket_json(cx.tx, &outcome.ticket)?,
+        }),
+    )
+}
+
+/// Runs `criterion_set` for dispatch. Input: the context. Output: the ticket's id, the
+/// criterion's position, and the criterion and ticket after it.
+pub(crate) fn criterion_set<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Failure> {
+    let id = &cx.ticket().short_id;
+    let (at, version) = (position(cx), cx.args.need::<i64>("version"));
+    let state = cx.args.need::<CriterionState>("state");
+    criterion_fresh(cx, at, version)?;
+    let outcome = set_criterion(cx.tx, cx.host, cx.actor, id, at, version, state, cx.at_ms)?;
+    assert_eq!(outcome.criterion.position, at);
+    assert_eq!(outcome.ticket.id, cx.ticket().id);
+    criterion_written(
+        cx,
+        json!({
+            "id": id.to_string(),
+            "position": at,
+            "criterion": criterion_json(&outcome.criterion),
+            "ticket": ops::ticket_json(cx.tx, &outcome.ticket)?,
+        }),
+    )
 }

@@ -55,6 +55,18 @@
     "check_unknown",
     "link_kind_unknown",
     "notify_too_wide",
+    "criterion_needs_check",
+    "evidence_not_for_agents",
+    "export_path_refused",
+    "export_too_large",
+    "import_path_refused",
+    "import_too_large",
+    "import_not_text",
+    "import_format_unknown",
+    "import_item_unknown",
+    "import_item_needs_version",
+    "import_keys_collide",
+    "versions_full",
     "already_claimed",
     "not_claimant",
     "dependency_invalid",
@@ -64,7 +76,6 @@
     "dependencies_full",
     "parent_invalid",
     "version_unknown",
-    "versions_full",
     "cycle_unknown",
     "cycle_closed",
     "cycles_full",
@@ -817,13 +828,6 @@
             "description": "The project's key, for example CA.",
             "pattern": "^[A-Z]{2,8}$",
             "type": "string"
-          },
-          "request_id": {
-            "description": "Your key for this write; repeating it with the same fields returns the first reply.",
-            "maxLength": 64,
-            "minLength": 1,
-            "pattern": "^[A-Za-z0-9._:-]+$",
-            "type": "string"
           }
         },
         "required": [
@@ -833,7 +837,7 @@
         "type": "object"
       },
       "summary": "Reads a roadmap or release checklist file and lists what an import would change.",
-      "write": true
+      "write": false
     },
     "link": {
       "args": {

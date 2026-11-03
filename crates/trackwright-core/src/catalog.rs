@@ -586,7 +586,6 @@ const CATALOG: &[OpSpec] = &[
         fields: &[
             PROJECT,
             req("path", FieldType::Path, "The Markdown file to read."),
-            REQUEST_ID,
         ],
     },
     OpSpec {
