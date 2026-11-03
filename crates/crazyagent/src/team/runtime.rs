@@ -8315,9 +8315,9 @@ impl Drop for TeamService {
 /// Names who made a team call in a sub-agent's mailbox (DEC-104). A lead stored as leading
 /// native teammates shares that mailbox with them, so the pane the engine named the call
 /// by from the caller's process decides (DEC-111 Q18): the lead's own pane, found under the
-/// lead's own pane process, is the lead, the pane of one of its live teammate rows is that
-/// teammate, and anything else, no pane included, is nobody (PLC). Every other mailbox
-/// names its own agent. Inputs: the database, the terminal host, the project, the
+/// lead's own pane process, is the lead, the pane of one of its live teammate rows, under
+/// the pane process that row was first named by, is that teammate, and anything else, no
+/// pane included, is nobody (PLC). Every other mailbox names its own agent. Inputs: the database, the terminal host, the project, the
 /// mailbox's agent with its label and the named pane with the pane process it was found
 /// under. Output: the caller's id and label, or none, also when the lead's mode is unread.
 pub fn team_caller(
@@ -8357,10 +8357,11 @@ enum PaneMember {
 /// Finds who runs in one pane of a native lead's team from the engine's own rows, never
 /// from a file the agents write (DEC-111 Q18): the lead when the caller was found under
 /// the process its pane record names and the host lists that pane under it (PLC), or the
-/// newest live teammate row of the lead in that pane. Inputs: the database, the terminal
-/// host, the project, the lead and the pane with the pane process the caller was found
-/// under. Output: the member, or none for a pane id that is not plain or a pane no row
-/// names.
+/// newest live teammate row of the lead in that pane while the caller was found under the
+/// pane process that row is pinned to (PLC (b)). Inputs: the database, the terminal host,
+/// the project, the lead and the pane with the pane process the caller was found under.
+/// Output: the member, or none for a pane id that is not plain, a pane no row names or a
+/// teammate's pane under another process.
 fn pane_member(
     connection: &Connection,
     host: Option<&dyn Host>,
@@ -8371,18 +8372,19 @@ fn pane_member(
     if !crate::terminal::pane_id_valid(pane) {
         return None;
     }
-    let teammate: Option<i64> = connection
+    let teammate: Option<(i64, Option<i64>)> = connection
         .query_row(
-            "SELECT id FROM team_agents WHERE project=?1 AND parent=?2 AND role='teammate'
+            "SELECT id,pane_pid FROM team_agents WHERE project=?1 AND parent=?2 AND role='teammate'
              AND status IN ('starting','idle','working') AND pane=?3 ORDER BY id DESC LIMIT 1",
             params![project.as_str(), lead, pane],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .ok()?;
-    if let Some(teammate) = teammate {
+    if let Some((teammate, pinned)) = teammate {
         assert_ne!(teammate, lead);
-        return Some(PaneMember::Teammate(teammate));
+        return teammate_pinned(connection, teammate, pinned, pid)
+            .then_some(PaneMember::Teammate(teammate));
     }
     let name = AgentId::team(lead).ok()?;
     let record: Option<String> = connection
@@ -8403,6 +8405,36 @@ fn pane_member(
         .iter()
         .any(|listed| listed.pid == own.pid && listed.id == pane)
         .then_some(PaneMember::Lead)
+}
+
+/// Whether a native teammate's row is named by this pane process (PLC (b)): the first
+/// process the engine names it by is kept on the row, so the pin outlives the caller socket
+/// and the engine, and any other process under that pane id is refused. Claude Code writes
+/// the pane into its team config before it respawns the placeholder there, so the pin waits
+/// for the first call or `who`, never the first listing. Takes the connection, the row, the
+/// process it is pinned to, if any, and the caller's pane process. Returns the answer, no
+/// also when the pin cannot be kept.
+fn teammate_pinned(connection: &Connection, teammate: i64, pinned: Option<i64>, pid: u32) -> bool {
+    let pid = i64::from(pid);
+    if let Some(pinned) = pinned {
+        return pinned == pid;
+    }
+    if connection
+        .execute(
+            "UPDATE team_agents SET pane_pid=?2 WHERE id=?1 AND pane_pid IS NULL",
+            params![teammate, pid],
+        )
+        .is_err()
+    {
+        return false;
+    }
+    connection
+        .query_row(
+            "SELECT pane_pid FROM team_agents WHERE id=?1",
+            [teammate],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .is_ok_and(|kept| kept == Some(pid))
 }
 
 /// Who runs in one pane of a native lead's team, for the lead's caller socket to answer
