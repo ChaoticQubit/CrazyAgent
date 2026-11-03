@@ -73,6 +73,16 @@ impl Case {
     fn state(&self, id: &ProfileId) -> ProfileState {
         show(&self.db, &self.alpha, id).unwrap().unwrap().state
     }
+
+    fn question_status(&self, question: u64) -> String {
+        self.db
+            .query_row(
+                "SELECT status FROM owner_questions WHERE id=?1",
+                [i64::try_from(question).unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
 }
 
 fn code(text: &str) -> EngineError {
@@ -111,6 +121,11 @@ fn changed(edit: impl FnOnce(&mut Value)) -> Value {
     value
 }
 
+/// A distinct valid profile for each number: one unit check named after it.
+fn numbered(n: usize) -> Value {
+    profile(vec![unit_check(&format!("c{n}"))])
+}
+
 fn holdout(id: &str, files: Value) -> Value {
     json!({ "check": unit_check(id), "files": files })
 }
@@ -140,6 +155,11 @@ fn an_agent_cannot_approve_a_profile_and_its_proposal_raises_one_owner_question(
         .unwrap();
     assert!(asked.contains("agent 7"), "{asked}");
     assert!(asked.contains(&first.id.as_str()[..12]), "{asked}");
+    let other_agent = case
+        .propose(&case.alpha, &proposed, Actor::Agent(8))
+        .unwrap();
+    assert_eq!(other_agent.question, Some(question));
+    assert_eq!(case.count(PENDING_CHECK_QUESTIONS), 1);
 
     for actor in [AGENT, MASTER] {
         assert_eq!(
@@ -156,6 +176,7 @@ fn an_agent_cannot_approve_a_profile_and_its_proposal_raises_one_owner_question(
     let stored = show(&case.db, &case.alpha, &first.id).unwrap().unwrap();
     assert_eq!(stored.proposed_by, "agent:7");
     assert_eq!(stored.approved_ms, None);
+    assert_eq!(stored.question, Some(question));
 
     let admitted = approve(&case.db, &case.alpha, &first.id, Actor::Owner).unwrap();
     assert_eq!(admitted.id, first.id);
@@ -163,6 +184,8 @@ fn an_agent_cannot_approve_a_profile_and_its_proposal_raises_one_owner_question(
         current_profile(&case.db, &case.alpha).unwrap(),
         Some(admitted)
     );
+    assert_eq!(case.count(PENDING_CHECK_QUESTIONS), 0);
+    assert_eq!(case.question_status(question), "dismissed");
 
     let own = case
         .propose(
@@ -174,14 +197,96 @@ fn an_agent_cannot_approve_a_profile_and_its_proposal_raises_one_owner_question(
     assert_eq!(own.question, None);
     let approved_again = case.propose(&case.alpha, &proposed, MASTER).unwrap();
     assert_eq!(approved_again.question, None);
-    assert_eq!(case.count(PENDING_CHECK_QUESTIONS), 1);
+    assert_eq!(case.count(PENDING_CHECK_QUESTIONS), 0);
 
     revoke(&case.db, &case.alpha, &first.id, Actor::Owner).unwrap();
     assert_eq!(
         case.propose(&case.alpha, &proposed, AGENT),
         Err(code("checks_profile_revoked"))
     );
-    assert_eq!(case.count(PENDING_CHECK_QUESTIONS), 1);
+    assert_eq!(case.count(PENDING_CHECK_QUESTIONS), 0);
+}
+
+#[test]
+fn a_proposal_past_the_question_bound_is_stored_and_a_settled_profile_frees_its_question() {
+    let case = Case::new();
+    let proposals: Vec<Proposal> = (1..=9)
+        .map(|n| {
+            case.propose(&case.alpha, &numbered(n), Actor::Agent(n as i64))
+                .unwrap()
+        })
+        .collect();
+    assert!(proposals[..8].iter().all(|p| p.question.is_some()));
+    assert_eq!(case.count(PENDING_CHECK_QUESTIONS), 8);
+    assert_eq!(proposals[8].question, None);
+    assert_eq!(case.state(&proposals[8].id), ProfileState::Proposed);
+
+    revoke(&case.db, &case.alpha, &proposals[0].id, Actor::Owner).unwrap();
+    assert_eq!(
+        case.question_status(proposals[0].question.unwrap()),
+        "dismissed"
+    );
+    assert_eq!(case.count(PENDING_CHECK_QUESTIONS), 7);
+    let asked_again = case
+        .propose(&case.alpha, &numbered(9), Actor::Agent(9))
+        .unwrap();
+    let ninth = asked_again.question.expect("room for the ninth question");
+    assert_eq!(case.count(PENDING_CHECK_QUESTIONS), 8);
+    assert_eq!(
+        show(&case.db, &case.alpha, &proposals[8].id)
+            .unwrap()
+            .unwrap()
+            .question,
+        Some(ninth)
+    );
+
+    approve(&case.db, &case.alpha, &proposals[1].id, Actor::Owner).unwrap();
+    assert_eq!(
+        case.question_status(proposals[1].question.unwrap()),
+        "dismissed"
+    );
+    assert_eq!(case.count(PENDING_CHECK_QUESTIONS), 7);
+}
+
+#[test]
+fn an_agents_proposals_evict_only_its_own_oldest_and_never_the_owners() {
+    let case = Case::new();
+    let owners = case
+        .propose(&case.alpha, &numbered(0), Actor::Owner)
+        .unwrap();
+    let others = case
+        .propose(&case.alpha, &numbered(1), Actor::Agent(8))
+        .unwrap();
+    let mine: Vec<Proposal> = (0..=PENDING_PER_PROPOSER_MAX)
+        .map(|n| {
+            case.propose(&case.alpha, &numbered(100 + n as usize), AGENT)
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(show(&case.db, &case.alpha, &mine[0].id).unwrap(), None);
+    assert_eq!(case.question_status(mine[0].question.unwrap()), "dismissed");
+    assert_eq!(
+        case.count("SELECT COUNT(*) FROM check_profiles WHERE proposed_by='agent:7'"),
+        PENDING_PER_PROPOSER_MAX
+    );
+    assert_eq!(case.state(&owners.id), ProfileState::Proposed);
+    assert_eq!(case.state(&others.id), ProfileState::Proposed);
+
+    let mut n = 1000;
+    while case.count("SELECT COUNT(*) FROM check_profiles") < PROFILES_KEPT_MAX {
+        let agent = Actor::Agent(100 + (n as i64 - 1000) / PENDING_PER_PROPOSER_MAX);
+        case.propose(&case.alpha, &numbered(n), agent).unwrap();
+        n += 1;
+    }
+    case.propose(&case.alpha, &numbered(n), Actor::Agent(99))
+        .unwrap();
+    assert_eq!(
+        case.count("SELECT COUNT(*) FROM check_profiles"),
+        PROFILES_KEPT_MAX
+    );
+    assert_eq!(case.state(&owners.id), ProfileState::Proposed);
+    assert_eq!(show(&case.db, &case.alpha, &others.id).unwrap(), None);
+    assert_eq!(case.state(&mine[1].id), ProfileState::Proposed);
 }
 
 #[test]

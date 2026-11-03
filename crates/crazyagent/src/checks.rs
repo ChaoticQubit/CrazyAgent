@@ -26,6 +26,9 @@ pub use settings::{ChecksChoice, ChecksSettings, Scope};
 pub const PROFILES_KEPT_MAX: i64 = 256;
 /// The most holdout files one project stores.
 pub const HOLDOUT_FILES_STORED_MAX: i64 = 1024;
+/// The most proposals one master or agent keeps waiting in a project; its next one makes
+/// room by removing its own oldest.
+pub const PENDING_PER_PROPOSER_MAX: i64 = 16;
 
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS check_profiles (
     project TEXT NOT NULL,
@@ -35,6 +38,7 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS check_profiles (
     proposed_ms INTEGER NOT NULL,
     approved_ms INTEGER,
     revoked_ms INTEGER,
+    question INTEGER,
     PRIMARY KEY (project, id)
 );
 CREATE TABLE IF NOT EXISTS check_profile_current (
@@ -79,8 +83,8 @@ pub enum ProfileState {
     Revoked,
 }
 
-/// One stored profile as the owner reviews it, with who proposed it and when it was last
-/// approved or revoked.
+/// One stored profile as the owner reviews it, with who proposed it, when it was last
+/// approved or revoked, and the owner question its last master or agent proposal raised.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoredProfile {
     pub id: ProfileId,
@@ -90,7 +94,19 @@ pub struct StoredProfile {
     pub proposed_ms: i64,
     pub approved_ms: Option<i64>,
     pub revoked_ms: Option<i64>,
+    pub question: Option<u64>,
     pub state: ProfileState,
+}
+
+/// One `check_profiles` row as stored, with whether it is the project's current profile.
+struct ProfileRow {
+    body: String,
+    proposed_by: String,
+    proposed_ms: i64,
+    approved_ms: Option<i64>,
+    revoked_ms: Option<i64>,
+    question: Option<i64>,
+    current: bool,
 }
 
 /// The outcome of a proposal: the profile's identity, and the owner question it raised when
@@ -421,47 +437,53 @@ fn stored(
     project: &ProjectId,
     id: &ProfileId,
 ) -> Result<Option<StoredProfile>, CheckRefusal> {
-    let row: Option<(String, String, i64, Option<i64>, Option<i64>, bool)> = db
+    let row = db
         .query_row(
-            "SELECT p.body, p.proposed_by, p.proposed_ms, p.approved_ms, p.revoked_ms,
+            "SELECT p.body, p.proposed_by, p.proposed_ms, p.approved_ms, p.revoked_ms, p.question,
                     EXISTS(SELECT 1 FROM check_profile_current c WHERE c.project=p.project AND c.profile=p.id)
              FROM check_profiles p WHERE p.project=?1 AND p.id=?2",
             params![project.as_str(), id.as_str()],
             |row| {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                ))
+                Ok(ProfileRow {
+                    body: row.get(0)?,
+                    proposed_by: row.get(1)?,
+                    proposed_ms: row.get(2)?,
+                    approved_ms: row.get(3)?,
+                    revoked_ms: row.get(4)?,
+                    question: row.get(5)?,
+                    current: row.get(6)?,
+                })
             },
         )
         .optional()
         .map_err(unavailable)?;
-    let Some((body, proposed_by, proposed_ms, approved_ms, revoked_ms, current)) = row else {
+    let Some(row) = row else {
         return Ok(None);
     };
-    let profile = CheckProfile::import(body.as_bytes()).map_err(unavailable)?;
+    let profile = CheckProfile::import(row.body.as_bytes()).map_err(unavailable)?;
     if profile.identity()? != *id {
         return Err(failure("checks_unavailable"));
     }
-    let state = match (revoked_ms, approved_ms) {
+    let state = match (row.revoked_ms, row.approved_ms) {
         (Some(_), _) => ProfileState::Revoked,
         (None, None) => ProfileState::Proposed,
-        (None, Some(_)) if current => ProfileState::Current,
+        (None, Some(_)) if row.current => ProfileState::Current,
         (None, Some(_)) => ProfileState::Approved,
     };
-    assert!(!current || state == ProfileState::Current);
+    assert!(!row.current || state == ProfileState::Current);
     Ok(Some(StoredProfile {
         id: id.clone(),
         project: project.clone(),
         profile,
-        proposed_by,
-        proposed_ms,
-        approved_ms,
-        revoked_ms,
+        proposed_by: row.proposed_by,
+        proposed_ms: row.proposed_ms,
+        approved_ms: row.approved_ms,
+        revoked_ms: row.revoked_ms,
+        question: row
+            .question
+            .map(u64::try_from)
+            .transpose()
+            .map_err(unavailable)?,
         state,
     }))
 }
