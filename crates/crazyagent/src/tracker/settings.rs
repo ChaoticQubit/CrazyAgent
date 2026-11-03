@@ -4,12 +4,13 @@ use crate::protocol::ProjectId;
 use crate::storage::versioned::{self, Item, Stale};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
+use std::path::{Path, PathBuf};
 use trackwright_core::host::{
-    Authority, CheckView, Evidence, EvidenceState, LinkKind, LinkState, Links, TicketView,
+    Authority, CheckView, Evidence, EvidenceState, LinkKind, LinkState, Links, Paths, TicketView,
 };
 use trackwright_core::model::{
     Actor, AgentEditPolicy, ClosePolicy, CreatePolicy, CycleDays, ImportPolicy, OpKind, Policy,
-    PolicyKey, ProjectKey, Refusal, RolloverPolicy,
+    PolicyKey, ProjectKey, Refusal, RolloverPolicy, codes,
 };
 use trackwright_core::policy;
 use trackwright_core::runs::{RunWriters, SourceRef};
@@ -222,8 +223,8 @@ pub fn set(
 /// The host `sync` writes the core's policy keys through. The engine host refuses the
 /// core's `policy_set` for every caller, so the ticket settings are the one writer of
 /// `tk_policy`; only this module, writing the settings the owner saved, passes it. It
-/// records no evidence, holds the engine host's policy locks and answers links and
-/// evidence as the engine host does.
+/// records no evidence, opens no file, holds the engine host's policy locks and answers
+/// links and evidence as the engine host does.
 struct SettingsWriter;
 
 impl Links for SettingsWriter {
@@ -263,6 +264,29 @@ impl Evidence for SettingsWriter {
         ticket: &TicketView,
     ) -> Result<Option<SourceRef>, Refusal> {
         super::Host.current_source(tx, project, ticket)
+    }
+}
+
+impl Paths for SettingsWriter {
+    /// Refuses every file: the settings writer only writes policy keys and opens none.
+    /// Inputs: the transaction, key, actor and path (unused) and the operation. Output:
+    /// `export_path_refused` for an export, `import_path_refused` otherwise.
+    fn resolve_path(
+        &self,
+        _: &Transaction<'_>,
+        _: &ProjectKey,
+        _: &Actor,
+        op: OpKind,
+        _: &Path,
+    ) -> Result<PathBuf, Refusal> {
+        let code = match op {
+            OpKind::Export => codes::EXPORT_PATH_REFUSED,
+            _ => codes::IMPORT_PATH_REFUSED,
+        };
+        Err(Refusal::new(
+            code,
+            "the ticket settings writer opens no file",
+        ))
     }
 }
 
