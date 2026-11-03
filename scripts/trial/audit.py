@@ -40,6 +40,7 @@ TEXT_BYTES_MAX = 64 * 1024
 SKILL_PREFIX = "skill:"
 CALLER_UNKNOWN = "team_caller_unknown"
 REPLY_INVALID = "coord_reply_invalid"
+ACCOUNT_WAIT = ("native_profile_in_use", "free account")
 XCRUN = re.compile(r"xcrun_db|xcrun: error")
 GIT_WORD = re.compile(r"(^|[\s;&|(])git(\s|$)")
 FINISH_EVENTS = ("finished", "change_set_ready")
@@ -1671,6 +1672,48 @@ def check_reask(t):
     return verdict("UNKNOWN", detail + idle)
 
 
+def check_shared_account(t):
+    accounts = dict(t.q(
+        "SELECT id, DENSE_RANK() OVER (ORDER BY connection) FROM team_agents "
+        "WHERE project=? AND role<>'teammate' AND connection IS NOT NULL ORDER BY id",
+        t.pid,
+    ))
+    spans = {}
+    for task, agent, started, finished in t.q(
+        "SELECT id, agent, started_ms, finished_ms FROM team_tasks WHERE project=? AND agent IS NOT NULL AND started_ms IS NOT NULL ORDER BY id",
+        t.pid,
+    ):
+        if agent in accounts:
+            end = finished if finished is not None else max(started, t.agents[agent]["heartbeat"])
+            spans.setdefault(accounts[agent], []).append((started, end, task, agent))
+    shared = []
+    for account, runs in sorted(spans.items()):
+        for at, (start, end, task, agent) in enumerate(runs):
+            for other_start, other_end, other_task, other in runs[at + 1:]:
+                if other != agent and start < other_end and other_start < end:
+                    together = (min(end, other_end) - max(start, other_start)) // 1000
+                    shared.append(f"agents {agent} and {other} ran tasks {task} and {other_task} on account {account} together for {together} s")
+    likes = [f"%{word}%" for word in ACCOUNT_WAIT]
+    waits = []
+    for table, text in (
+        ("team_agents", "coalesce(error,'')"),
+        ("team_tasks", "coalesce(error,'') || ' ' || coalesce(result,'')"),
+        ("team_events", "text"),
+    ):
+        for (row_id,) in t.q(f"SELECT id FROM {table} WHERE project=? AND ({text} LIKE ? OR {text} LIKE ?) ORDER BY id", t.pid, *likes):
+            waits.append(f"{table} {row_id}")
+    detail = (
+        f"agents with an account={len(accounts)} on accounts={len(set(accounts.values()))}; "
+        f"tasks run={sum(len(runs) for runs in spans.values())}; agents on one account at once={len(shared)}"
+        + (f" ({listed(shared)})" if shared else "")
+    )
+    if waits:
+        return verdict("FAIL", detail + f"; an agent waited for its account: {listed(waits)}")
+    if shared:
+        return verdict("PASS", detail)
+    return verdict("UNKNOWN", detail + "; not exercised: no two agents ran a task on one account at the same time")
+
+
 CHECKS = (
     {
         "id": "T3-01", "name": "tree", "run": check_tree,
@@ -1846,6 +1889,13 @@ CHECKS = (
         "proves": "With re-ask on, the default, the engine re-asks the sub-agent before an empty reply is reported; with it off the empty reply is reported as is.",
         "why": "Owner DEC-111: re-ask a sub-agent that ends a task with no reply text, a setting, default On. New in 18.13, no trial-2 result. UNKNOWN while the build has no team_reask_empty table.",
         "how": "team_reask_empty for the project (no row is on); done team_tasks with a blank result per agent; the engine's re-ask turn text in each agent's transcript; engine notes of an empty master reply, which the setting does not cover.",
+    },
+    {
+        "id": "T3-26", "name": "shared account", "run": check_shared_account,
+        "title": "Agents beyond the pool's account count run at once, none waiting for a free account",
+        "proves": "Two agents of the project ran tasks on the same pool account at the same time, and no agent, task or team event says it waited for its account.",
+        "why": "OP-40, DEC-086: any number of agents share one signed-in account (fix 08ac582c, B-55). Owner 10-25: Claude has 4 accounts, agents beyond 4 wait for a free account. New in trial 3; UNKNOWN when no two agents shared an account at once.",
+        "how": "team_agents connection per agent, teammates left out, ranked so no account id is written; overlapping team_tasks started_ms to finished_ms (or the agent's heartbeat while running) per account; native_profile_in_use or free account in team_agents.error, team_tasks error and result, and team_events text.",
     },
 )
 
