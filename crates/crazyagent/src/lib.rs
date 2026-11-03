@@ -12,6 +12,7 @@ pub mod coordination;
 pub mod credentials;
 pub mod engine;
 pub mod github;
+pub mod harness_settings;
 pub mod harnesses;
 /// The engine side of the IDE tab: per-project loopback IDE servers, their tokens, ports
 /// and environment.
