@@ -74,6 +74,10 @@ GIT_SAFE = ("-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false")
 ROWS_PER_READ_MAX = 200
 READS_PER_CHECK_MAX = 400
 STEPS_MAX = 10_000
+FINISHED_HIDE_STEP = "Set Finished agents to Hide"
+STOP_ALL_STEP = "Stop all"
+FINISHED_COUNT = re.compile(r"Finished \((\d+)\)")
+DRAWN = re.compile(r"drawn: ([^;]*)")
 CITES_PER_CHECK_MAX = 16
 EXCERPT_BYTES_MAX = 2000
 VALUE_BYTES_MAX = 4096
@@ -1208,7 +1212,7 @@ def check_adoption(t):
     )
 
 
-def tui_steps(out):
+def read_steps(out):
     try:
         handle = (out / "steps.jsonl").open("r", encoding="utf-8", errors="replace")
     except OSError:
@@ -1226,7 +1230,7 @@ def tui_steps(out):
             except ValueError:
                 skipped += 1
                 continue
-            if isinstance(step, dict) and step.get("surface") == "tui":
+            if isinstance(step, dict):
                 steps.append(step)
     return steps, skipped
 
@@ -1234,7 +1238,8 @@ def tui_steps(out):
 def check_tui(t):
     frames = len(list((t.out / "frames").glob("*"))) if (t.out / "frames").is_dir() else 0
     gif = (t.out / "trial.gif").is_file()
-    steps, skipped = tui_steps(t.out)
+    every, skipped = read_steps(t.out)
+    steps = None if every is None else [step for step in every if step.get("surface") == "tui"]
     extra = tui_frames(t.out) + ([{"kind": "log", "path": "steps.jsonl", "caption": "the run's recorded steps"}] if steps is not None else [])
     failed = [f"step {step.get('n')} {step.get('title')}" for step in steps or () if step.get("ok") is False]
     detail = (
@@ -1674,6 +1679,53 @@ def check_reask(t):
     return verdict("UNKNOWN", detail + idle)
 
 
+def check_finished(t):
+    if not t.columns("team_finished_view"):
+        return verdict("UNKNOWN", "not in this build: no team_finished_view table")
+    stored = t.q("SELECT show FROM team_finished_view WHERE project=?", t.pid)
+    show = bool(stored and stored[0][0])
+    finished = [a for a in t.agents.values() if a["role"] in ("sub", "teammate") and a["status"] in ("stopped", "failed")]
+    every = read_steps(t.out)[0] or []
+    stop_at = next((stamp_ms(step.get("at")) for step in every if step.get("title") == STOP_ALL_STEP), None)
+    early = [a for a in finished if stop_at is not None and a["stopped"] is not None and a["stopped"] < stop_at]
+    reused = t.q("SELECT agent, COUNT(*) FROM team_tasks WHERE project=? AND agent IS NOT NULL GROUP BY agent HAVING COUNT(*) > 1", t.pid)
+    step = next((step for step in reversed(every) if str(step.get("title", "")).startswith(FINISHED_HIDE_STEP)), None)
+    shots = [path for path in (step or {}).get("evidence") or () if isinstance(path, str) and not os.path.isabs(path)]
+    extra = [
+        {"kind": "screenshot", "path": path, "caption": f"step {step.get('n')} {FINISHED_HIDE_STEP}"}
+        for path in shots if under(t.out / path, t.out) and (t.out / path).is_file()
+    ]
+    detail = (
+        f"setting={'show' if show else 'hide'}{'' if stored else ' (no row: hide by default)'}; "
+        f"finished in the store={len(finished)} ({listed(t.label(a) for a in finished) or 'none'}); "
+        f"left on their own before Stop all={len(early) if stop_at is not None else 'unknown'}; "
+        f"agents given more than one task={len(reused)}"
+    )
+    if show:
+        return verdict("FAIL", detail + "; Finished agents is Show at the end of the run, so finished agents stay in the list and graph", extra=extra)
+    if step is None:
+        return verdict("UNKNOWN", detail + f"; not exercised: no '{FINISHED_HIDE_STEP}' step in steps.jsonl", extra=extra)
+    said = str(step.get("detail") or "")
+    detail += f"; step {step.get('n')} ok={step.get('ok')} said: {said[:300]}"
+    if step.get("ok") is not True:
+        return verdict("FAIL", detail + "; the step failed", extra=extra)
+    count = FINISHED_COUNT.search(said)
+    if count is None:
+        return verdict("FAIL", detail + "; the step recorded no Finished (N) count", extra=extra)
+    if int(count.group(1)) != len(finished):
+        return verdict("FAIL", detail + f"; Finished ({count.group(1)}) shown, {len(finished)} finished in the store", extra=extra)
+    cards = DRAWN.search(said)
+    if cards is None:
+        return verdict("FAIL", detail + "; the step recorded no drawn cards", extra=extra)
+    drawn = {card.strip() for card in cards.group(1).split(",") if card.strip()}
+    still = [a["handle"] or a["persona"] or str(a["id"]) for a in finished if {a["handle"], a["persona"]} & drawn]
+    if still:
+        return verdict("FAIL", detail + f"; drawn while finished: {listed(still)}", extra=extra)
+    if not finished:
+        return verdict("UNKNOWN", detail + "; not exercised: no finished agent", extra=extra)
+    return verdict("PASS", detail, extra=extra)
+
+
 CHECKS = (
     {
         "id": "T3-01", "name": "tree", "run": check_tree,
@@ -1849,6 +1901,13 @@ CHECKS = (
         "proves": "With re-ask on, the default, the engine re-asks the sub-agent before an empty reply is reported; with it off the empty reply is reported as is.",
         "why": "Owner DEC-111: re-ask a sub-agent that ends a task with no reply text, a setting, default On. New in 18.13, no trial-2 result. UNKNOWN while the build has no team_reask_empty table.",
         "how": "team_reask_empty for the project (no row is on); done team_tasks with a blank result per agent; the engine's re-ask turn text in each agent's transcript; engine notes of an empty master reply, which the setting does not cover.",
+    },
+    {
+        "id": "T3-26", "name": "finished", "run": check_finished,
+        "title": "Finished agents leave the Agents list and graph for the Finished fold-out",
+        "proves": "With Finished agents on Hide, the default, stopped and failed sub-agents and teammates leave the Team panel and graph, and the Finished (N) fold-out lists each of them.",
+        "why": "OP-27, owner 10-27: sub-agents that finished their work and sat idle never left. DEC-102 decision 2 as the owner changed it after the DEC-104 trial: an idle agent stays until Idle stop or Stop all ends it (125e3173). Fix B-51, fix/agent-view-finished 84e5ec76. Trial 2: not checked; trial 3 sets Show for its tree checks.",
+        "how": "team_finished_view for the project (no row is Hide); stopped or failed sub-agent and teammate rows; the desktop step 'Set Finished agents to Hide' in steps.jsonl with its Finished (N) count, drawn cards and screenshots; team_tasks per agent for reuse.",
     },
 )
 
