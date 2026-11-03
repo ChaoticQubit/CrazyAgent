@@ -1088,9 +1088,11 @@ impl ProjectSandbox {
     /// rv-secreview RH-1) and no teammate holds a listener or places a node where the lead
     /// connects. They read but never write the launch folders the engine installs in the
     /// lead's home, its hooks, skills and relay plugin, which the lead's Claude Code runs
-    /// (TPH), nor move, replace or re-permission that home itself (TPH r1 F1). Inputs: the
-    /// three sockets and the canonical tmux program. Output: the lead's and the teammates'
-    /// sandboxes, `Invalid`, or `Unavailable` off macOS.
+    /// (TPH), nor move, replace or re-permission that home itself (TPH r1 F1). Both are shut
+    /// out of the name the engine binds the caller socket at before it moves it over
+    /// `callers`, so neither swaps its own listener in there (rv-secreview RH2R2-1). Inputs:
+    /// the three sockets and the canonical tmux program. Output: the lead's and the
+    /// teammates' sandboxes, `Invalid`, or `Unavailable` off macOS.
     pub fn native_team(
         self,
         own: &Path,
@@ -1098,11 +1100,13 @@ impl ProjectSandbox {
         callers: &Path,
         tmux: &Path,
     ) -> Result<(Self, Self), SandboxError> {
+        let binding = crate::team::caller::binding_path(callers);
         let mut teammates = self
             .clone()
             .serve_tmux_server(mates, tmux)?
             .reach_unix_socket(callers)?
-            .shut_unix_socket(own)?;
+            .shut_unix_socket(own)?
+            .shut_unix_socket(&binding)?;
         teammates.read_only = vec![
             self.agent_home.join(crate::launch_context::STATE),
             self.agent_home.join(crate::coord::relay::PLUGIN_FOLDER),
@@ -1111,7 +1115,8 @@ impl ProjectSandbox {
         let lead = self
             .allow_tmux_server(own, tmux)?
             .reach_unix_socket(callers)?
-            .reach_unix_socket(mates)?;
+            .reach_unix_socket(mates)?
+            .shut_unix_socket(&binding)?;
         Ok((lead, teammates))
     }
 
