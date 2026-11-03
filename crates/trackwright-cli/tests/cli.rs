@@ -482,6 +482,10 @@ fn init_below_a_database_refuses_and_names_it() {
     let message = refusal["message"].as_str().unwrap();
     assert!(message.contains(above.to_str().unwrap()), "{refusal}");
     assert!(
+        message.contains("--db ./.trackwright/tracker.db"),
+        "{refusal}"
+    );
+    assert!(
         !sub.join(".trackwright").exists(),
         "a refused init writes nothing"
     );
@@ -512,4 +516,32 @@ fn init_below_a_database_refuses_and_names_it() {
         &["init", "--key", "ZZ", "--actor", "owner", "--json"],
     );
     assert_eq!(envelope(&again)["ok"], true, "{again:?}");
+
+    let own = root.path().join("own");
+    fs::create_dir(&own).unwrap();
+    let separate = run(
+        &own,
+        &[
+            "init",
+            "--key",
+            "OW",
+            "--db",
+            "./.trackwright/tracker.db",
+            "--actor",
+            "owner",
+            "--json",
+        ],
+    );
+    assert_eq!(envelope(&separate)["ok"], true, "{separate:?}");
+    assert!(own.join(".trackwright/tracker.db").is_file());
+    let mine = run(
+        &own,
+        &["list", "--project", "OW", "--actor", "owner", "--json"],
+    );
+    assert_eq!(envelope(&mine)["ok"], true, "{mine:?}");
+    let hidden = run(
+        &own,
+        &["list", "--project", "CA", "--actor", "owner", "--json"],
+    );
+    assert_eq!(envelope(&hidden)["code"], "project_unknown", "{hidden:?}");
 }
