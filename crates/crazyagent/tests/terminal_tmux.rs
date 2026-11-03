@@ -1693,6 +1693,7 @@ fn a_server_started_at_a_native_lead_s_teammates_socket_after_its_own_ended_is_r
         )
         .unwrap();
         assert!(killed.success());
+        until_refused(socket);
     }
     assert!(
         host.kill(&leader).is_err(),
