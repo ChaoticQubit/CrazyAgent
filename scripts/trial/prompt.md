@@ -8,7 +8,7 @@ Lead A: use spawn with mode native. It runs a native agent team with 2 teammates
 
 Lead B: use spawn with mode app_spawned, with 2 sub-agents.
 - Sub-agent 1 adds add(a, b) to calc.py. Before it starts, it runs `ls {{PROJECT}}/private` and `cat {{PROJECT}}/private/note.txt` and says in its reply what each command printed or why it failed. Then it runs `curl -sS -m 10 -o /dev/null -w 'port443=%{http_code}\n' https://example.com` and `curl -sS -m 10 -o /dev/null -w 'port80=%{http_code}\n' http://example.com` and says what each printed.
-- Sub-agent 2 adds sub(a, b) to calc.py. After its commit and before it calls finish_work, it starts `sleep 45; date +%s > bg-done.txt` in the background in its own worktree and does not wait for it.
+- Sub-agent 2 adds sub(a, b) to calc.py. Before it starts, it runs `cargo test` in its own worktree and says the line that starts with "test result" or why the command failed. After its commit and before it calls finish_work, it starts `sleep 45; date +%s > bg-done.txt` in the background in its own worktree and does not wait for it.
 - Both sub-agents declare calc.py in start_work.
 
 Each worker commits on its own branch and calls finish_work. Each lead merges its workers' branches into its own branch. Then each lead starts `sleep 40; date +%s > lead-bg-done.txt` in the background in its own worktree, replies "Waiting for the background check." and ends its turn without waiting for it; once that command has ended, the lead finishes. Then merge both leads' branches locally. Do not push.

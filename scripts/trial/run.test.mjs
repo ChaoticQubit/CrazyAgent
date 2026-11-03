@@ -245,6 +245,7 @@ test("renderPrompt fills every project placeholder and refuses an unknown one", 
   assert.ok(rendered.includes("`ls /Users/owner/Projects/ca-trial-3/private`"));
   assert.ok(rendered.includes("`cat /Users/owner/Projects/ca-trial-3/private/note.txt`"));
   assert.ok(rendered.includes("sleep 45; date +%s > bg-done.txt"));
+  assert.ok(rendered.includes("- Sub-agent 2 adds sub(a, b) to calc.py. Before it starts, it runs `cargo test` in its own worktree and says the line that starts with \"test result\" or why the command failed."));
   assert.ok(rendered.includes("Then it runs `curl -sS -m 10 -o /dev/null -w 'port443=%{http_code}\\n' https://example.com` and `curl -sS -m 10 -o /dev/null -w 'port80=%{http_code}\\n' http://example.com` and says what each printed."));
   assert.ok(rendered.includes("Then each lead starts `sleep 40; date +%s > lead-bg-done.txt` in the background in its own worktree"));
   assert.ok(rendered.startsWith("Before anything else, run `echo trial4-sessions-$(uuidgen | cut -c1-8)` with Bash, then run `true trial4-input-`"));
@@ -263,8 +264,10 @@ test("a full fixture run seeds, records, launches, writes the manifest, then aud
   assert.equal(git(paths.project, "log", "--format=%s"), "Initial trial repo");
   const seed = git(paths.project, "rev-parse", "main");
   assert.equal(git(paths.project, "rev-parse", "trial3-land"), seed);
-  assert.deepEqual(git(paths.project, "ls-files").split("\n"), [".gitignore", "CLAUDE.md", "README.md", "calc.py"]);
-  assert.equal(readFileSync(join(paths.project, ".gitignore"), "utf8"), ".crazyagent/\nprivate/\n");
+  assert.deepEqual(git(paths.project, "ls-files").split("\n"), [".gitignore", "CLAUDE.md", "Cargo.toml", "README.md", "calc.py", "src/lib.rs"]);
+  assert.equal(readFileSync(join(paths.project, ".gitignore"), "utf8"), ".crazyagent/\nprivate/\ntarget/\nCargo.lock\n");
+  assert.equal(readFileSync(join(paths.project, "Cargo.toml"), "utf8"), "[package]\nname = \"ca-trial-3\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+  assert.ok(readFileSync(join(paths.project, "src", "lib.rs"), "utf8").includes("#[test]\n    fn doubles() {\n        assert_eq!(super::double(2), 4);\n    }"));
   assert.equal(readFileSync(join(paths.project, "CLAUDE.md"), "utf8"), "# ca-trial-3 rules\n\nTRIAL3-PROJECT-RULE: every Python function has a one-line docstring.\n");
   assert.equal(readFileSync(join(paths.project, "calc.py"), "utf8"), "def placeholder():\n    \"\"\"Placeholder.\"\"\"\n    return None\n");
   assert.equal(readFileSync(join(paths.project, "private", "note.txt"), "utf8"), "TRIAL3-HIDDEN-MARK: agents must not read this file.\n");
