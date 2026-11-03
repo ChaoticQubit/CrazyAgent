@@ -5272,10 +5272,13 @@ fn background_task(
 /// it ends only after the command's notification turn, with that turn's reply in its
 /// result, and the command finishes instead of being ended with the task. On 2026-10-29 a
 /// lead's task ended at "Waiting for the compile check to finish" and its check was killed.
+/// This is DEC-111 Q13 option A, saved through the team action, whose agent is not told
+/// that its commands stop at turn end.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_task_stays_open_until_the_background_command_it_started_ends() {
     let fixture = Fixture::new(1);
+    choose_background(&fixture, crate::team::BackgroundAtEnd::Wait);
     let (status, result, _, finished) = background_task(&fixture, BACKGROUND_CLAUDE, None);
     assert!(
         finished.exists(),
@@ -5287,24 +5290,302 @@ fn a_task_stays_open_until_the_background_command_it_started_ends() {
         result.contains("Waiting for the check.") && result.contains("Check passed."),
         "{result}"
     );
+    let typed = std::fs::read_to_string(finished.with_file_name("typed")).unwrap();
+    assert!(typed.contains("Run the compile check."), "{typed}");
+    assert!(!typed.contains(BACKGROUND_STOPS_LINE), "{typed}");
+}
+
+/// Saves the project's Background commands at task end choice through the team action, as
+/// the owner's Team settings save it, and reads it back. Takes the fixture and the choice.
+#[cfg(target_os = "macos")]
+fn choose_background(fixture: &Fixture, choice: crate::team::BackgroundAtEnd) {
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::execute(
+            &tx,
+            &fixture.access,
+            &crate::team::TeamAction::BackgroundAtEnd {
+                project_id: fixture.setup.project_id.clone(),
+                choice,
+            },
+        )
+        .unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    tx.commit().unwrap();
+    assert_eq!(
+        crate::team::background_at_end(&fixture.connection, &fixture.setup.project_id).unwrap(),
+        choice
+    );
+}
+
+/// The background stand-in with a command that runs `secs` seconds, writes its pid to
+/// `background-pid` as it starts, and marks the end of its first turn in `held`. Takes the
+/// seconds. Returns the script.
+#[cfg(target_os = "macos")]
+fn long_background(secs: u32) -> String {
+    let script = BACKGROUND_CLAUDE
+        .replace("/bin/sleep 2\n", &format!("/bin/sleep {secs}\n"))
+        .replace(
+            "  ) &\n",
+            "  ) &\n  printf %s \"$!\" > \"$CLAUDE_CONFIG_DIR/background-pid\"\n",
+        )
+        .replace(
+            ">> \"$f\"\ndone\n",
+            ">> \"$f\"\n  printf held > \"$CLAUDE_CONFIG_DIR/held\"\ndone\n",
+        );
+    assert_eq!(script.matches(&format!("sleep {secs}\n")).count(), 1);
+    assert_eq!(
+        script.matches("CLAUDE_CONFIG_DIR/background-pid").count(),
+        1
+    );
+    assert_eq!(script.matches("CLAUDE_CONFIG_DIR/held").count(), 1);
+    script
+}
+
+/// Whether the stand-in's background command still runs, by the pid it wrote, waiting up
+/// to 3 s for a stopped one to go. Takes the fixture and the agent. Returns the answer.
+#[cfg(target_os = "macos")]
+fn background_alive(fixture: &Fixture, agent: i64) -> bool {
+    let pid: u32 = std::fs::read_to_string(stand_in_file(fixture, agent, "background-pid"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let alive = || {
+        crate::spawn_gate::status(
+            Command::new("/bin/kill")
+                .arg("-0")
+                .arg(pid.to_string())
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .unwrap()
+        .success()
+    };
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while alive() {
+        if Instant::now() >= deadline {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    false
+}
+
+/// How one task ended whose agent's background command outlived its turn: the task's
+/// status, result and error, the time from the turn's end to the task's, whether the
+/// command still ran 3 s after, whether it finished, and the prompt the agent was typed.
+#[cfg(target_os = "macos")]
+struct Outlived {
+    status: String,
+    result: String,
+    error: Option<String>,
+    waited: Duration,
+    alive: bool,
+    finished: bool,
+    typed: String,
+}
+
+/// Runs one task whose agent's background command outlives its turn under the saved
+/// choice, timing it from the end of the agent's turn. Takes the fixture and the choice.
+/// Returns how the task ended.
+#[cfg(target_os = "macos")]
+fn outliving_background(fixture: &Fixture, choice: crate::team::BackgroundAtEnd) -> Outlived {
+    choose_background(fixture, choice);
+    let host = fixture.host();
+    let mut team = check_runtime(fixture, &host, &long_background(25), None, None);
+    fixture.until(&mut team, "the agent's turn ends", |f| {
+        subs(f)
+            .first()
+            .is_some_and(|agent| stand_in_file(f, *agent, "held").exists())
+    });
+    let turn_ended = Instant::now();
+    let agent = subs(fixture)[0];
+    fixture.until(&mut team, "the task ends", |f| check_end(f).is_some());
+    let waited = turn_ended.elapsed();
+    let (status, result, error) = check_end(fixture).unwrap();
+    let alive = background_alive(fixture, agent);
+    let finished = stand_in_file(fixture, agent, "background-done").exists();
+    let typed = std::fs::read_to_string(stand_in_file(fixture, agent, "typed")).unwrap();
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    Outlived {
+        status,
+        result: result.unwrap_or_default(),
+        error,
+        waited,
+        alive,
+        finished,
+        typed,
+    }
+}
+
+/// With a grace time saved (DEC-111 Q13 option B), a task whose turn ended while its
+/// background command still runs ends once that time is over, says so first in its result,
+/// and the command is stopped; the agent is not told that its commands stop at turn end.
+#[cfg(target_os = "macos")]
+#[test]
+fn with_grace_a_task_ends_after_the_grace_time_and_its_background_command_is_stopped() {
+    let fixture = Fixture::new(1);
+    let Outlived {
+        status,
+        result,
+        error,
+        waited,
+        alive,
+        finished,
+        typed,
+    } = outliving_background(&fixture, crate::team::BackgroundAtEnd::Grace { secs: 10 });
+    assert!(
+        waited >= Duration::from_secs(9) && waited < Duration::from_secs(20),
+        "{waited:?}: {result}"
+    );
+    assert_eq!((status.as_str(), error), ("done", None), "{result}");
+    assert!(
+        result.starts_with(BACKGROUND_GRACE_ENDED) && result.contains("Waiting for the check."),
+        "{result}"
+    );
+    assert!(!alive, "the grace time left the background command running");
+    assert!(!finished);
+    assert!(typed.contains("Run the compile check."), "{typed}");
+    assert!(!typed.contains(BACKGROUND_STOPS_LINE), "{typed}");
+}
+
+/// With a grace time saved, a background command that ends within it ends its task as
+/// waiting does, with the reply of its notification turn and no grace line (DEC-111 Q13 B).
+#[cfg(target_os = "macos")]
+#[test]
+fn with_grace_a_background_command_that_ends_in_time_ends_its_task_with_its_result() {
+    let fixture = Fixture::new(1);
+    choose_background(&fixture, crate::team::BackgroundAtEnd::Grace { secs: 10 });
+    let (status, result, _, finished) = background_task(&fixture, BACKGROUND_CLAUDE, None);
+    assert!(finished.exists(), "{status} {result:?}");
+    assert_eq!(status, "done");
+    let result = result.unwrap_or_default();
+    assert!(
+        result.contains("Waiting for the check.")
+            && result.contains("Check passed.")
+            && !result.contains(BACKGROUND_GRACE_ENDED),
+        "{result}"
+    );
+}
+
+/// With background commands set to stop at task end (DEC-111 Q13 option C), the agent's
+/// task prompt says so, and its task ends with its turn while its background command still
+/// runs, says so first in its result, and the command is stopped.
+#[cfg(target_os = "macos")]
+#[test]
+fn with_no_wait_a_task_ends_with_its_turn_and_its_agent_was_told() {
+    let fixture = Fixture::new(1);
+    let Outlived {
+        status,
+        result,
+        error,
+        waited,
+        alive,
+        finished,
+        typed,
+    } = outliving_background(&fixture, crate::team::BackgroundAtEnd::Stop);
+    assert!(typed.contains(BACKGROUND_STOPS_LINE), "{typed}");
+    assert!(waited < Duration::from_secs(5), "{waited:?}: {result}");
+    assert_eq!((status.as_str(), error), ("done", None), "{result}");
+    assert!(
+        result.starts_with(BACKGROUND_STOPPED) && result.contains("Waiting for the check."),
+        "{result}"
+    );
+    assert!(!alive, "the turn's end left the background command running");
+    assert!(!finished);
+}
+
+/// Under Stop, a Codex sub-agent whose app keeps running between tasks is not told that its
+/// background commands stop when its turn ends: its rollout reports no such commands, so
+/// the engine neither holds its turn for them nor stops them, and the line would be untrue
+/// (rv-audit S3 F2). Its task still reaches it and ends.
+#[cfg(target_os = "macos")]
+#[test]
+fn under_stop_a_kept_codex_agent_is_not_told_its_background_commands_stop() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    choose_background(&fixture, crate::team::BackgroundAtEnd::Stop);
+    let mut team = live_runtime(&fixture, &host, &recording_codex());
+    owner(&fixture, &[hand_off(&fixture, "Write page.md")]);
+    fixture.until(&mut team, "the task is done", |f| {
+        task_of(f, "Write page.md").0 == "done"
+    });
+    let agent = subs(&fixture)[0];
+    let text = typed(&fixture, agent);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    assert!(text.contains("Write page.md"), "{text}");
+    assert!(!text.contains(BACKGROUND_STOPS_LINE), "{text}");
+}
+
+/// Under Stop, an agent whose harness starts for each turn on a signed-in account is told
+/// that its background commands stop when its turn ends, whatever its harness: the engine
+/// stops that harness after every turn (rv-audit S3 F2).
+#[cfg(target_os = "macos")]
+#[test]
+fn under_stop_a_per_turn_agent_is_told_its_background_commands_stop() {
+    let fixture = Fixture::new(1);
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir_all(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, recording_codex()).unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let mut agent = super::managed_agent::ManagedAgent::in_pane(
+        "codex",
+        &codex,
+        fixture.host(),
+        AgentRole::Sub,
+    );
+    let record = agent.profile_home.join("auth.json");
+    std::fs::write(&record, signed_in_codex_record()).unwrap();
+    std::fs::set_permissions(&record, std::fs::Permissions::from_mode(0o600)).unwrap();
+    agent.background = crate::team::BackgroundAtEnd::Stop;
+    let turns = vec![("Write the page", agent.acquire("s3-f2-per-turn"))];
+    let (reports, problem) = agent.run_turns(None, turns, WAIT);
+    assert_eq!(problem, None);
+    let ends: Vec<TurnEnd> = reports
+        .iter()
+        .filter_map(|report| match report {
+            Report::Finished { end, .. } => Some(*end),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ends, [TurnEnd::Success]);
+    let typed = std::fs::read_to_string(agent.home.join("typed")).unwrap();
+    assert!(
+        typed.contains("Write the page") && typed.contains(BACKGROUND_STOPS_LINE),
+        "{typed}"
+    );
 }
 
 /// A task its time limit ends while a command its agent started in the background still
 /// runs says so first in its result, so the master and the owner read that the command was
 /// stopped with the task rather than that it finished, and the command really stops with
-/// the task: while the runtime and its panes still run, it never writes what it would have
-/// written on finishing (w-review LTK-L1, rounds 1 and 2).
+/// the task: released after the task ended, it never writes what it would have written on
+/// finishing (w-review LTK-L1, rounds 1 and 2). The agent's reply comes 2 s after its
+/// background command, as on a loaded machine, and the result still holds it: the stand-in
+/// writes both before it shows it is ready, so they are in its transcript before the engine
+/// types the task and the limit's clock starts, an order no machine load changes (leader
+/// 2026-11-02). The command never ends by itself, so the 4 s limit is what ends the task and
+/// leaves the engine time to read the transcript after typing it (rv-audit S3 r1).
 #[cfg(target_os = "macos")]
 #[test]
 fn a_task_cut_by_its_time_limit_says_its_background_command_was_stopped() {
     let fixture = Fixture::new(1);
     let host = fixture.host();
-    let slow = BACKGROUND_CLAUDE.replace("/bin/sleep 2\n", "/bin/sleep 4\n");
-    assert_ne!(slow, BACKGROUND_CLAUDE);
-    let mut team = check_runtime(&fixture, &host, &slow, Some(1), None);
+    let mut team = check_runtime(&fixture, &host, STAGED_BACKGROUND_CLAUDE, Some(4), None);
     fixture.until(&mut team, "the task ends", |f| check_end(f).is_some());
     let (status, result, error) = check_end(&fixture).unwrap();
-    let finished = stand_in_file(&fixture, subs(&fixture)[0], "background-done");
+    let agent = subs(&fixture)[0];
+    let finished = stand_in_file(&fixture, agent, "background-done");
+    assert!(!finished.exists());
+    std::fs::write(stand_in_file(&fixture, agent, "release"), "go").unwrap();
     std::thread::sleep(Duration::from_secs(5));
     let outlived = finished.exists();
     team.shutdown().unwrap();
@@ -5316,7 +5597,7 @@ fn a_task_cut_by_its_time_limit_says_its_background_command_was_stopped() {
     assert_eq!(status, "failed");
     assert_eq!(
         error.as_deref(),
-        Some("The sub-agent was stopped by the 1 s task limit; change it in Team settings")
+        Some("The sub-agent was stopped by the 4 s task limit; change it in Team settings")
     );
     let result = result.unwrap_or_default();
     assert!(
@@ -5324,6 +5605,38 @@ fn a_task_cut_by_its_time_limit_says_its_background_command_was_stopped() {
         "{result}"
     );
 }
+
+/// A Claude Code stand-in that writes its first turn before it shows it is ready: a
+/// background command, then 2 s later the reply "Waiting for the check." and a turn end, so
+/// the turn stays open for the command. The command writes `background-done` only once the
+/// test creates `release`, so nothing but the engine ends it while the task runs. The lines
+/// the owner types are kept in `typed`.
+#[cfg(target_os = "macos")]
+const STAGED_BACKGROUND_CLAUDE: &str = r#"#!/bin/sh
+printf '%s\n' "$*" >> "$CLAUDE_CONFIG_DIR/launches"
+id=""
+prev=""
+for a in "$@"; do
+  case "$prev" in --resume|--session-id) id="$a" ;; esac
+  prev="$a"
+done
+[ -n "$id" ] || { echo "no session id"; exit 4; }
+d="$CLAUDE_CONFIG_DIR/projects/$(/bin/pwd -P | /usr/bin/tr -c 'A-Za-z0-9\n' '-' | /usr/bin/tr -d '\n')"
+/bin/mkdir -p "$d" || exit 1
+f="$d/$id.jsonl"
+(
+  while [ ! -e "$CLAUDE_CONFIG_DIR/release" ]; do /bin/sleep 0.1; done
+  printf done > "$CLAUDE_CONFIG_DIR/background-done"
+) &
+printf '{"type":"user","message":{"content":"Owner turn"}}\n' >> "$f"
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_bg","name":"Bash","input":{"command":"check","run_in_background":true}}],"stop_reason":"tool_use"}}' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bg","content":"Command running in background with ID: bgcheck1."}]},"toolUseResult":{"backgroundTaskId":"bgcheck1"}}' >> "$f"
+/bin/sleep 2
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"Waiting for the check."}],"stop_reason":"end_turn"}}' '{"type":"system","subtype":"turn_duration","durationMs":300}' >> "$f"
+printf '\033[?2004hClaude stand-in ready\n'
+while IFS= read -r line; do
+  printf '%s\n' "$line" >> "$CLAUDE_CONFIG_DIR/typed"
+done
+"#;
 
 /// The reply line of the background stand-in's first turn, which a variant swaps for its
 /// own steps before the reply.
@@ -7890,6 +8203,74 @@ fn a_fifo_or_link_at_an_agent_git_pointer_is_refused_without_waiting() {
     );
 }
 
+/// A native teammate keeps the name its lead's team config gave its pane when the engine
+/// first saw it: the config is the agents' own file, so a later rename there changes
+/// nothing, a second live teammate under a name already held gets none, a name that could
+/// not name a worktree is never kept, and `who` for each pane answers from those rows
+/// (DEC-111 Q18, RH-2).
+#[test]
+fn a_native_teammate_keeps_the_name_it_was_first_seen_with() {
+    let directory = tempfile::tempdir().unwrap();
+    let connection = Connection::open(directory.path().join("engine.db")).unwrap();
+    super::super::initialize(&connection).unwrap();
+    crate::project_setup::initialize(&connection).unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    connection
+        .execute(
+            "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms)
+             VALUES (?1,'sub','claude-code',1,?2,'working',1,1)",
+            params![PROJECT, ENDPOINT],
+        )
+        .unwrap();
+    let lead = connection.last_insert_rowid();
+    let home = directory.path().join("home");
+    let team = home.join("teams").join("session-1");
+    std::fs::create_dir_all(&team).unwrap();
+    let config = |members: &str| {
+        std::fs::write(
+            team.join("config.json"),
+            format!(r#"{{"members":[{{"name":"team-lead","tmuxPaneId":"leader"}},{members}]}}"#),
+        )
+        .unwrap();
+    };
+    let whom = |pane: &str| super::pane_whom(&connection, None, &project, lead, pane);
+    let named = |name: &str| Some(crate::team::caller::Whom::Teammate(name.to_owned()));
+
+    config(r#"{"name":"greet","tmuxPaneId":"%7"}"#);
+    super::teammates::register(&connection, &project, lead, &home, &["%7"], 1, 5).unwrap();
+    assert_eq!(whom("%7"), named("greet"));
+
+    config(
+        r#"{"name":"other","tmuxPaneId":"%7"},{"name":"greet","tmuxPaneId":"%8"},{"name":"../up","tmuxPaneId":"%9"}"#,
+    );
+    super::teammates::register(
+        &connection,
+        &project,
+        lead,
+        &home,
+        &["%7", "%8", "%9"],
+        1,
+        6,
+    )
+    .unwrap();
+    assert_eq!(
+        whom("%7"),
+        named("greet"),
+        "a rename in the config changes nothing"
+    );
+    assert_eq!(
+        whom("%8"),
+        None,
+        "a second live teammate never takes a name already held"
+    );
+    assert_eq!(
+        whom("%9"),
+        None,
+        "a name that names no worktree is never kept"
+    );
+    assert_eq!(whom("%10"), None, "a pane with no row is no one");
+}
+
 #[test]
 fn a_rediscovered_native_teammate_keeps_the_idle_its_relay_read() {
     let directory = tempfile::tempdir().unwrap();
@@ -9081,7 +9462,10 @@ fn a_named_call_whose_file_changed_after_naming_is_refused() {
         streams.push(stream);
     }
     let own = std::process::id();
-    assert_eq!(callers.serve(&mut || vec![(native.own.clone(), own)]), 2);
+    assert_eq!(
+        callers.serve(&mut || vec![(native.own.clone(), own)], &mut |_| None),
+        2
+    );
     for stream in &mut streams {
         let mut reply = Vec::new();
         stream.read_to_end(&mut reply).unwrap();
@@ -9241,13 +9625,146 @@ fn an_unlinked_caller_socket_is_bound_again_on_the_next_tick() {
         let asked = scope.spawn(|| crate::team::caller::name_call(&mailbox, &id, &digest));
         let deadline = Instant::now() + crate::team::caller::CALLER_WAIT;
         while !asked.is_finished() && Instant::now() < deadline {
-            callers.serve(&mut || vec![("%5".to_owned(), own)]);
+            callers.serve(&mut || vec![("%5".to_owned(), own)], &mut |_| None);
             std::thread::sleep(Duration::from_millis(10));
         }
         asked.join().unwrap()
     });
     assert!(named);
     assert_eq!(callers.take(&id, &digest), Some("%5".to_owned()));
+}
+
+/// Something an agent leaves at the caller socket's path, such as a folder, stops the
+/// engine binding there, and the lead's calls are refused meanwhile. The engine tries again
+/// each tick, so once the obstacle is gone the next tick binds the socket and a call is
+/// named again (DEC-111 S1R1-2), still under the pane pins the replaced socket held, so no
+/// other process takes a pinned pane across the gap (rv-secreview merge point 3).
+#[test]
+fn a_caller_socket_blocked_by_an_obstacle_is_bound_once_the_obstacle_is_gone() {
+    struct TmpRemoved(PathBuf);
+    impl Drop for TmpRemoved {
+        fn drop(&mut self) {
+            let _ = crate::sandbox::toolchains::remove_tmp(&self.0);
+        }
+    }
+    let f = Fixture::new(1);
+    let bin = f.base.join("engine-bin");
+    std::fs::create_dir(&bin).unwrap();
+    let engine = bin.join("crazyagent");
+    engine_file(&engine);
+    let mut team = f.runtime().with_delegation_tool(&engine).unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let lead = f.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    f.connection
+        .execute("UPDATE team_agents SET mode='native' WHERE id=?1", [lead])
+        .unwrap();
+    team.workers
+        .insert(lead, between_turns(&project, AgentRole::Sub, true, true));
+    let home = agent_home(&team.state, lead);
+    let scratch = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let _scratch = TmpRemoved(home);
+    let socket = scratch.join(crate::team::caller::CALLER_SOCKET);
+    let bound = || {
+        std::fs::symlink_metadata(&socket)
+            .is_ok_and(|metadata| std::os::unix::fs::FileTypeExt::is_socket(&metadata.file_type()))
+    };
+    let mailbox = team.mailbox(lead);
+    let digest = [8_u8; crate::team::tool::CALL_DIGEST_BYTES];
+    let own = std::process::id();
+    let parent = std::os::unix::process::parent_id();
+    let name = |team: &mut TeamRuntime, n: u8, (pane, pid): (&str, u32)| -> Option<String> {
+        let id = format!("{n:032x}");
+        let callers = team
+            .callers
+            .get_mut(&lead)
+            .and_then(Option::as_mut)
+            .unwrap();
+        let named = std::thread::scope(|scope| {
+            let asked = scope.spawn(|| crate::team::caller::name_call(&mailbox, &id, &digest));
+            let deadline = Instant::now() + crate::team::caller::CALLER_WAIT;
+            while !asked.is_finished() && Instant::now() < deadline {
+                callers.serve(&mut || vec![(pane.to_owned(), pid)], &mut |_| None);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            asked.join().unwrap()
+        });
+        named.then(|| callers.take(&id, &digest)).flatten()
+    };
+    team.serve_agent_calls(&f.setup, &f.access);
+    assert!(bound());
+    assert_eq!(
+        name(&mut team, 1, ("%5", parent)),
+        Some("%5".to_owned()),
+        "the first process pins its pane"
+    );
+
+    std::fs::remove_file(&socket).unwrap();
+    std::fs::create_dir(&socket).unwrap();
+    std::fs::write(socket.join("kept"), b"agent data").unwrap();
+    team.serve_agent_calls(&f.setup, &f.access);
+    assert!(
+        socket.join("kept").is_file(),
+        "the obstacle is not the engine's to remove"
+    );
+    std::fs::remove_dir_all(&socket).unwrap();
+    team.serve_agent_calls(&f.setup, &f.access);
+    assert!(bound(), "bound once the obstacle is gone");
+    assert_eq!(
+        name(&mut team, 2, ("%5", own)),
+        None,
+        "the socket bound again keeps the pins of the one it replaces"
+    );
+    assert_eq!(name(&mut team, 3, ("%6", own)), Some("%6".to_owned()));
+}
+
+/// A native lead whose team tool is off still has its caller socket bound and answered on
+/// each tick, so its teammates' hooks learn which pane they run in (DEC-111 Q18).
+#[test]
+fn a_native_lead_without_the_team_tool_still_has_its_caller_socket_answered() {
+    struct TmpRemoved(PathBuf);
+    impl Drop for TmpRemoved {
+        fn drop(&mut self) {
+            let _ = crate::sandbox::toolchains::remove_tmp(&self.0);
+        }
+    }
+    let f = Fixture::new(1);
+    let mut team = f.runtime();
+    assert!(team.delegation_tool.is_none());
+    let project = ProjectId::new(PROJECT).unwrap();
+    let lead = f.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    f.connection
+        .execute("UPDATE team_agents SET mode='native' WHERE id=?1", [lead])
+        .unwrap();
+    team.workers
+        .insert(lead, between_turns(&project, AgentRole::Sub, true, true));
+    let home = agent_home(&team.state, lead);
+    let scratch = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let _scratch = TmpRemoved(home);
+    let socket = scratch.join(crate::team::caller::CALLER_SOCKET);
+    team.serve_agent_calls(&f.setup, &f.access);
+    assert!(
+        std::fs::symlink_metadata(&socket)
+            .is_ok_and(|metadata| std::os::unix::fs::FileTypeExt::is_socket(&metadata.file_type())),
+        "the socket is bound without the team tool"
+    );
+    let mut asked = crate::spawn_gate::connect_unix_std(&socket).unwrap();
+    std::io::Write::write_all(&mut asked, b"who\n").unwrap();
+    asked
+        .set_read_timeout(Some(Duration::from_millis(50)))
+        .unwrap();
+    let mut reply = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !reply.ends_with(b"\n") && Instant::now() < deadline {
+        team.serve_agent_calls(&f.setup, &f.access);
+        let mut byte = [0_u8; 1];
+        if std::io::Read::read(&mut asked, &mut byte).is_ok_and(|read| read == 1) {
+            reply.push(byte[0]);
+        }
+    }
+    assert_eq!(
+        reply, b"no\n",
+        "a process in no pane of the lead is told so on the next tick"
+    );
 }
 
 /// A worker at the owner's Sub-agent depth gets a team server without spawn, stop and
@@ -10154,7 +10671,17 @@ fn wiring_a_native_lead_adopted_without_its_account_is_killed() {
     let host = fixture.host();
     for (first, leave) in [
         (Order::Stop, false),
-        (Order::Turn("Plan the page".into(), None, None), false),
+        (
+            Order::Turn(
+                "Plan the page".into(),
+                None,
+                TurnRules {
+                    limit: None,
+                    background: crate::team::BackgroundAtEnd::Wait,
+                },
+            ),
+            false,
+        ),
         (Order::Start("Your brief".into(), None), false),
         (Order::Stop, true),
     ] {
@@ -10232,7 +10759,17 @@ fn wiring_a_native_lead_started_without_its_account_starts_nothing() {
     };
     let home = fixture.base.join("lead-home");
     for (first, taken) in [
-        (Order::Turn("Plan the page".into(), None, None), true),
+        (
+            Order::Turn(
+                "Plan the page".into(),
+                None,
+                TurnRules {
+                    limit: None,
+                    background: crate::team::BackgroundAtEnd::Wait,
+                },
+            ),
+            true,
+        ),
         (Order::Start("Your brief".into(), None), false),
     ] {
         let (orders, ordered) = channel();
@@ -12455,4 +12992,540 @@ fn a_native_teammate_cannot_type_into_its_lead_s_pane() {
         listed.iter().any(|pane| pane.id == teammate && !pane.dead),
         "the lead's teammate pane is listed for it: {listed:?}"
     );
+}
+
+/// A native lead's teammate cannot change a hook its lead runs (brief residual 3). The
+/// project holds one owner hook, added through the plugin store as the owner adds one, and
+/// the lead's launch installs it into the lead's agent home as Claude Code reads it. The
+/// teammate, in its installed profile, overwrites the hook's script, replaces it, and
+/// rewrites the hooks file. The lead then runs the hook command the engine wrote, in the
+/// lead's profile, as Claude Code runs it on its next matching event: only the owner's
+/// script runs.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_teammate_cannot_change_a_hook_its_lead_runs() {
+    use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    set_mode(
+        &fixture.connection,
+        &project,
+        HarnessKind::ClaudeCode,
+        SubagentMode::Native,
+    )
+    .unwrap();
+    let source = fixture.base.join("lead-guard");
+    std::fs::create_dir_all(source.join(".claude-plugin")).unwrap();
+    std::fs::create_dir_all(source.join("hooks")).unwrap();
+    std::fs::write(
+        source.join(".claude-plugin").join("plugin.json"),
+        r#"{"name":"lead-guard"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        source.join("hooks").join("hooks.json"),
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"sh \"${CLAUDE_PLUGIN_ROOT}/hooks/start.sh\""}]}]}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        source.join("hooks").join("start.sh"),
+        "echo ran > lead-ran.txt\n",
+    )
+    .unwrap();
+    let mut store = Connection::open(fixture.base.join("engine.db")).unwrap();
+    crate::storage::plugins::execute(
+        &mut store,
+        &fixture.base,
+        crate::storage::plugins::Command::AddHooks {
+            scope: crate::plugins::Scope::Project {
+                project_id: project.clone(),
+            },
+            source: source.to_str().unwrap().into(),
+            follows: None,
+        },
+    )
+    .unwrap();
+    drop(store);
+    std::fs::set_permissions(
+        fixture.base.join("engine.db"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let host = crate::terminal::tmux_host(&fixture.base, Some(fixture.tmux.clone()));
+    let runtime = exiting_claude_runtime(&fixture)
+        .with_terminal(host.clone())
+        .unwrap();
+    let profile = reference("managed-profile");
+    let managed = runtime.custody.as_ref().unwrap().profile_home(&profile);
+    std::fs::create_dir_all(&managed).unwrap();
+    std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let account = TeamAccount {
+        connection: reference("managed-connection"),
+        reach: TeamReach::Managed {
+            profile_ref: profile,
+            model: None,
+        },
+    };
+    let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    let (_, plan, _) = runtime
+        .prepare(
+            &fixture.setup,
+            id,
+            AgentRole::Sub,
+            "claude-code",
+            true,
+            &account,
+            false,
+            Layout::Linked,
+        )
+        .unwrap();
+    assert!(plan.native, "the lead starts with native teammates");
+    let teammates = agent_teammates_profile(&runtime.state, id);
+    assert!(teammates.is_file());
+    let home = agent_home(&runtime.state, id);
+    let context = runtime
+        .context(&project, id, AgentRole::Sub, true, Layout::Linked)
+        .unwrap();
+    let installed = plan
+        .team_context(context)
+        .install("claude-code", &home, true)
+        .unwrap();
+    assert!(installed.runs_hooks());
+    let plugin = home.join("crazyagent").join("plugin");
+    let copies: Vec<PathBuf> = std::fs::read_dir(plugin.join("hook-plugins"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(copies.len(), 1, "{copies:?}");
+    let script = copies[0].join("hooks").join("start.sh");
+    let manifest = plugin.join("hooks").join("hooks.json");
+    let written: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
+    let command = written["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let work = plan.working_dir.clone();
+    let marker = work.join("planted.txt");
+    let tried = work.join("tried.txt");
+    let mate = work.join("mate.sh");
+    std::fs::write(
+        &mate,
+        format!(
+            "printf 'echo planted > {marker}\\n' > '{script}'; echo overwrite=$? > {tried}\n\
+             rm -f '{script}' && printf 'echo planted > {marker}\\n' > '{script}'; echo replace=$? >> {tried}\n\
+             printf '{{\"hooks\":{{}}}}\\n' > '{manifest}'; echo manifest=$? >> {tried}\n",
+            marker = marker.display(),
+            script = script.display(),
+            manifest = manifest.display(),
+            tried = tried.display(),
+        ),
+    )
+    .unwrap();
+    let mated = crate::spawn_gate::output(
+        Command::new(crate::sandbox::SANDBOX_EXEC)
+            .arg("-f")
+            .arg(&teammates)
+            .arg("/bin/sh")
+            .arg(&mate)
+            .current_dir(&work)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    let attempts = std::fs::read_to_string(&tried).unwrap_or_default();
+    let ran = crate::spawn_gate::output(
+        Command::new(crate::sandbox::SANDBOX_EXEC)
+            .arg("-f")
+            .arg(&plan.sandbox_profile)
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg(&command)
+            .current_dir(&work)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home)
+            .env("CLAUDE_PLUGIN_ROOT", &plugin)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    drop(installed);
+
+    assert!(ran.status.success(), "{ran:?}");
+    assert!(
+        !marker.exists(),
+        "a teammate changed a hook its lead runs: {attempts} {}",
+        String::from_utf8_lossy(&mated.stderr)
+    );
+    assert!(
+        work.join("lead-ran.txt").is_file(),
+        "the lead ran the owner's hook"
+    );
+    for attempt in ["overwrite", "replace", "manifest"] {
+        assert!(
+            attempts
+                .lines()
+                .any(|line| line.starts_with(&format!("{attempt}=")) && !line.ends_with("=0")),
+            "{attempts}"
+        );
+    }
+}
+
+/// A native lead's teammate cannot move its lead's home folder away and put a link in its
+/// place (rv-audit TPH r1 F1). The lead's launch installs one owner hook into its agent home.
+/// The teammate, in its installed profile, renames the home into the shared worktree, links
+/// the home path to the moved folder and rewrites the hook's script through the link. The
+/// move is refused, the home stays the engine's own folder and the lead, running the hook
+/// command the engine wrote, runs only the owner's script.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_teammate_cannot_move_or_replace_its_lead_s_home() {
+    use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    set_mode(
+        &fixture.connection,
+        &project,
+        HarnessKind::ClaudeCode,
+        SubagentMode::Native,
+    )
+    .unwrap();
+    let source = fixture.base.join("lead-guard");
+    std::fs::create_dir_all(source.join(".claude-plugin")).unwrap();
+    std::fs::create_dir_all(source.join("hooks")).unwrap();
+    std::fs::write(
+        source.join(".claude-plugin").join("plugin.json"),
+        r#"{"name":"lead-guard"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        source.join("hooks").join("hooks.json"),
+        r#"{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"sh \"${CLAUDE_PLUGIN_ROOT}/hooks/start.sh\""}]}]}}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        source.join("hooks").join("start.sh"),
+        "echo ran > lead-ran.txt\n",
+    )
+    .unwrap();
+    let mut store = Connection::open(fixture.base.join("engine.db")).unwrap();
+    crate::storage::plugins::execute(
+        &mut store,
+        &fixture.base,
+        crate::storage::plugins::Command::AddHooks {
+            scope: crate::plugins::Scope::Project {
+                project_id: project.clone(),
+            },
+            source: source.to_str().unwrap().into(),
+            follows: None,
+        },
+    )
+    .unwrap();
+    drop(store);
+    std::fs::set_permissions(
+        fixture.base.join("engine.db"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let host = crate::terminal::tmux_host(&fixture.base, Some(fixture.tmux.clone()));
+    let runtime = exiting_claude_runtime(&fixture)
+        .with_terminal(host.clone())
+        .unwrap();
+    let profile = reference("managed-profile");
+    let managed = runtime.custody.as_ref().unwrap().profile_home(&profile);
+    std::fs::create_dir_all(&managed).unwrap();
+    std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let account = TeamAccount {
+        connection: reference("managed-connection"),
+        reach: TeamReach::Managed {
+            profile_ref: profile,
+            model: None,
+        },
+    };
+    let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    let (_, plan, _) = runtime
+        .prepare(
+            &fixture.setup,
+            id,
+            AgentRole::Sub,
+            "claude-code",
+            true,
+            &account,
+            false,
+            Layout::Linked,
+        )
+        .unwrap();
+    assert!(plan.native, "the lead starts with native teammates");
+    let home = agent_home(&runtime.state, id);
+    let context = runtime
+        .context(&project, id, AgentRole::Sub, true, Layout::Linked)
+        .unwrap();
+    let installed = plan
+        .team_context(context)
+        .install("claude-code", &home, true)
+        .unwrap();
+    assert!(installed.runs_hooks());
+    let plugin = home.join("crazyagent").join("plugin");
+    let copies: Vec<PathBuf> = std::fs::read_dir(plugin.join("hook-plugins"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(copies.len(), 1, "{copies:?}");
+    let script = copies[0].join("hooks").join("start.sh");
+    let written: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(plugin.join("hooks").join("hooks.json")).unwrap(),
+    )
+    .unwrap();
+    let command = written["hooks"]["SessionStart"][0]["hooks"][0]["command"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+
+    let work = plan.working_dir.clone();
+    let moved = work.join("h");
+    let marker = work.join("planted.txt");
+    let tried = work.join("tried.txt");
+    let mate = work.join("mate.sh");
+    std::fs::write(
+        &mate,
+        format!(
+            "mv '{home}' '{moved}'; echo move=$? > {tried}\n\
+             ln -s '{moved}' '{home}'; echo link=$? >> {tried}\n\
+             printf 'echo planted > {marker}\\n' > '{script}'; echo plant=$? >> {tried}\n",
+            home = home.display(),
+            moved = moved.display(),
+            marker = marker.display(),
+            script = script.display(),
+            tried = tried.display(),
+        ),
+    )
+    .unwrap();
+    let mated = crate::spawn_gate::output(
+        Command::new(crate::sandbox::SANDBOX_EXEC)
+            .arg("-f")
+            .arg(agent_teammates_profile(&runtime.state, id))
+            .arg("/bin/sh")
+            .arg(&mate)
+            .current_dir(&work)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    let attempts = std::fs::read_to_string(&tried).unwrap_or_default();
+    let ran = crate::spawn_gate::output(
+        Command::new(crate::sandbox::SANDBOX_EXEC)
+            .arg("-f")
+            .arg(&plan.sandbox_profile)
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg(&command)
+            .current_dir(&work)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home)
+            .env("CLAUDE_PLUGIN_ROOT", &plugin)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    let kept = std::fs::symlink_metadata(&home).map(|metadata| metadata.is_dir());
+    drop(installed);
+
+    assert!(ran.status.success(), "{ran:?}");
+    assert!(
+        !marker.exists(),
+        "a teammate moved its lead's home and changed a hook the lead runs: {attempts} {}",
+        String::from_utf8_lossy(&mated.stderr)
+    );
+    assert!(
+        work.join("lead-ran.txt").is_file(),
+        "the lead ran the owner's hook"
+    );
+    assert!(
+        matches!(kept, Ok(true)) && !moved.exists(),
+        "the lead's home is still its own folder: {kept:?} {attempts}"
+    );
+    assert!(
+        attempts
+            .lines()
+            .any(|line| line.starts_with("move=") && !line.ends_with("=0")),
+        "{attempts}"
+    );
+}
+
+/// A native lead's teammate cannot change the skills or the message relay its lead's Claude
+/// Code reads (TPH). The project holds one owner skill, added through the plugin store, and
+/// the lead has tools on with the engine's relay. Once the lead's launch installs both into
+/// its agent home, the teammate, in its installed profile, overwrites and replaces the skill's
+/// copy, rewrites the relay's hooks file and plugin manifest and moves the relay folder away:
+/// every write is refused and each file keeps the engine's bytes.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_teammate_cannot_change_its_lead_s_skills_or_relay_plugin() {
+    use crate::coord::settings::{HarnessKind, SubagentMode, set_mode};
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    set_mode(
+        &fixture.connection,
+        &project,
+        HarnessKind::ClaudeCode,
+        SubagentMode::Native,
+    )
+    .unwrap();
+    let source = fixture.base.join("owner-skills").join("lead-notes");
+    std::fs::create_dir_all(&source).unwrap();
+    std::fs::write(
+        source.join("SKILL.md"),
+        "---\nname: lead-notes\ndescription: The lead's notes.\n---\n",
+    )
+    .unwrap();
+    let mut store = Connection::open(fixture.base.join("engine.db")).unwrap();
+    crate::storage::plugins::execute(
+        &mut store,
+        &fixture.base,
+        crate::storage::plugins::Command::AddSkill {
+            scope: crate::plugins::Scope::Project {
+                project_id: project.clone(),
+            },
+            source: source.to_str().unwrap().into(),
+        },
+    )
+    .unwrap();
+    drop(store);
+    std::fs::set_permissions(
+        fixture.base.join("engine.db"),
+        std::fs::Permissions::from_mode(0o600),
+    )
+    .unwrap();
+    let bin = fixture.base.join("engine-bin");
+    std::fs::create_dir(&bin).unwrap();
+    let engine = bin.join("crazyagent");
+    engine_file(&engine);
+    let host = crate::terminal::tmux_host(&fixture.base, Some(fixture.tmux.clone()));
+    let runtime = exiting_claude_runtime(&fixture)
+        .with_delegation_tool(&engine)
+        .unwrap()
+        .with_terminal(host.clone())
+        .unwrap();
+    let profile = reference("managed-profile");
+    let managed = runtime.custody.as_ref().unwrap().profile_home(&profile);
+    std::fs::create_dir_all(&managed).unwrap();
+    std::fs::set_permissions(&managed, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let account = TeamAccount {
+        connection: reference("managed-connection"),
+        reach: TeamReach::Managed {
+            profile_ref: profile,
+            model: None,
+        },
+    };
+    let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    let (_, plan, _) = runtime
+        .prepare(
+            &fixture.setup,
+            id,
+            AgentRole::Sub,
+            "claude-code",
+            true,
+            &account,
+            false,
+            Layout::Linked,
+        )
+        .unwrap();
+    assert!(plan.native, "the lead starts with native teammates");
+    std::fs::create_dir_all(runtime.mailbox(id).parent().unwrap()).unwrap();
+    let home = agent_home(&runtime.state, id);
+    let context = runtime
+        .context(&project, id, AgentRole::Sub, true, Layout::Linked)
+        .unwrap();
+    let installed = plan
+        .team_context(context)
+        .install("claude-code", &home, true)
+        .unwrap();
+    assert!(crate::coord::relay::installed(&home));
+    let skill = home
+        .join("crazyagent")
+        .join("plugin")
+        .join("skills")
+        .join("lead-notes")
+        .join("SKILL.md");
+    let relay = home.join(crate::coord::relay::PLUGIN_FOLDER);
+    let relay_hooks = relay.join("hooks").join("hooks.json");
+    let relay_manifest = relay.join(".claude-plugin").join("plugin.json");
+    let engine_bytes: Vec<(PathBuf, Vec<u8>)> = [&skill, &relay_hooks, &relay_manifest]
+        .into_iter()
+        .map(|file| (file.clone(), std::fs::read(file).unwrap()))
+        .collect();
+
+    let work = plan.working_dir.clone();
+    let tried = work.join("tried.txt");
+    let mate = work.join("mate.sh");
+    std::fs::write(
+        &mate,
+        format!(
+            "printf 'planted\\n' > '{skill}'; echo skill=$? > {tried}\n\
+             rm -f '{skill}' && printf 'planted\\n' > '{skill}'; echo skill_replace=$? >> {tried}\n\
+             printf '{{}}\\n' > '{hooks}'; echo relay_hooks=$? >> {tried}\n\
+             printf '{{}}\\n' > '{manifest}'; echo relay_manifest=$? >> {tried}\n\
+             mv '{relay}' '{relay}.away'; echo relay_move=$? >> {tried}\n",
+            skill = skill.display(),
+            hooks = relay_hooks.display(),
+            manifest = relay_manifest.display(),
+            relay = relay.display(),
+            tried = tried.display(),
+        ),
+    )
+    .unwrap();
+    let mated = crate::spawn_gate::output(
+        Command::new(crate::sandbox::SANDBOX_EXEC)
+            .arg("-f")
+            .arg(agent_teammates_profile(&runtime.state, id))
+            .arg("/bin/sh")
+            .arg(&mate)
+            .current_dir(&work)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    let attempts = std::fs::read_to_string(&tried).unwrap_or_default();
+
+    for attempt in [
+        "skill",
+        "skill_replace",
+        "relay_hooks",
+        "relay_manifest",
+        "relay_move",
+    ] {
+        assert!(
+            attempts
+                .lines()
+                .any(|line| line.starts_with(&format!("{attempt}=")) && !line.ends_with("=0")),
+            "a teammate's {attempt} write in its lead's home succeeded: {attempts} {}",
+            String::from_utf8_lossy(&mated.stderr)
+        );
+    }
+    for (file, bytes) in engine_bytes {
+        assert_eq!(
+            std::fs::read(&file).ok().as_deref(),
+            Some(bytes.as_slice()),
+            "{} changed",
+            file.display()
+        );
+    }
+    drop(installed);
 }

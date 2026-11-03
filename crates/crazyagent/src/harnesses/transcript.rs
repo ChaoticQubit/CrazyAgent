@@ -154,6 +154,13 @@ impl TranscriptReader {
         self.start
     }
 
+    /// Says whether this record reports the commands its harness starts in the background
+    /// and their ends, as a Claude Code transcript does; a Codex rollout reports neither.
+    /// Output: the answer.
+    pub fn reports_background(&self) -> bool {
+        matches!(self.source, Transcript::ClaudeSession { .. })
+    }
+
     /// Counts the bytes read from the record so far, so a caller can bound a session's output.
     /// Output: the total since the reader started.
     pub fn bytes(&self) -> u64 {
