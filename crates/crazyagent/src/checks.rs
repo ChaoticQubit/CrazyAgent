@@ -10,6 +10,8 @@ use std::collections::BTreeMap;
 
 pub mod binding;
 #[cfg(unix)]
+pub mod gate;
+#[cfg(unix)]
 pub mod integrity;
 pub mod markers;
 pub mod profile;

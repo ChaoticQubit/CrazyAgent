@@ -873,10 +873,11 @@ pub fn diff(db: &Connection, id: &ChangeSetId, page: u16) -> Result<ChangeDiff, 
 }
 
 /// Lands a change set as one squash commit on the owner's checked-out branch, authored
-/// with the owner's git identity. Inputs: the store, the owner's home folder (where git
-/// finds the owner's own user.name and user.email), the change set, the head the owner
-/// reviewed and the owner's edited message, None for the proposed one. Output: the
-/// landed commit and branch, or the conflicting files.
+/// with the owner's git identity, once the accept gate (`checks::gate::admit`) lets it.
+/// Inputs: the store, the owner's home folder (where git finds the owner's own user.name
+/// and user.email), the change set, the head the owner reviewed and the owner's edited
+/// message, None for the proposed one. Output: the landed commit and branch, the
+/// conflicting files, or the gate's refusal.
 pub fn accept(
     db: &Connection,
     owner_home: &Path,
@@ -885,7 +886,10 @@ pub fn accept(
     message: Option<&str>,
 ) -> Result<AcceptOutcome, EngineError> {
     #[cfg(unix)]
-    return owner::accept(db, owner_home, id, expected_head, message, &|_| false);
+    {
+        crate::checks::gate::admit(db, id, expected_head)?;
+        owner::accept(db, owner_home, id, expected_head, message, &|_| false)
+    }
     #[cfg(not(unix))]
     {
         let _ = (db, owner_home, id, expected_head, message);
@@ -896,10 +900,11 @@ pub fn accept(
 /// Lands a change set as one squash commit on a chosen local branch: the owner's
 /// checked-out branch through the owner's checkout as [`accept`] does, a branch checked
 /// out nowhere by moving its ref only, leaving the owner's files untouched, or an agent's
-/// own branch through that agent's worktree, which must hold nothing uncommitted. Inputs:
-/// the store, the owner's home folder, the change set, the head the owner reviewed, the
-/// edited message, None for the proposed one, and the target branch. Output: the landed
-/// commit and branch, or the conflicting files.
+/// own branch through that agent's worktree, which must hold nothing uncommitted, once the
+/// accept gate (`checks::gate::admit`) lets it. Inputs: the store, the owner's home folder,
+/// the change set, the head the owner reviewed, the edited message, None for the proposed
+/// one, and the target branch. Output: the landed commit and branch, the conflicting
+/// files, or the gate's refusal.
 pub fn accept_into(
     db: &Connection,
     owner_home: &Path,
@@ -909,15 +914,18 @@ pub fn accept_into(
     target_branch: &str,
 ) -> Result<AcceptOutcome, EngineError> {
     #[cfg(unix)]
-    return owner::accept_to(
-        db,
-        owner_home,
-        id,
-        expected_head,
-        message,
-        Some(target_branch),
-        &|_| false,
-    );
+    {
+        crate::checks::gate::admit(db, id, expected_head)?;
+        owner::accept_to(
+            db,
+            owner_home,
+            id,
+            expected_head,
+            message,
+            Some(target_branch),
+            &|_| false,
+        )
+    }
     #[cfg(not(unix))]
     {
         let _ = (db, owner_home, id, expected_head, message, target_branch);
