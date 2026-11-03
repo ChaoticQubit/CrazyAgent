@@ -1,4 +1,4 @@
-use super::{ParseRefusal, ParsedResults, ResultRow};
+use super::{ParseRefusal, ParsedResults, ResultRow, push_row};
 use crate::tests_model::{JUNIT_DEPTH_MAX, ResultOutcome};
 use quick_xml::XmlVersion;
 use quick_xml::errors::Error as XmlError;
@@ -59,7 +59,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<ParsedResults, ParseRefusal> {
             }
             Event::Start(element) => walk.open(&element, false)?,
             Event::Empty(element) => walk.open(&element, true)?,
-            Event::End(_) => walk.close(),
+            Event::End(_) => walk.close()?,
             Event::Text(content) => {
                 let content = content.xml_content(walk.version);
                 if walk.depth == 0 && !content.trim().is_empty() {
@@ -118,7 +118,7 @@ impl Walk {
                 }
                 let row = attributes.row()?;
                 if empty {
-                    self.rows.push(row);
+                    push_row(&mut self.rows, row)?;
                 } else {
                     self.case = Some(OpenCase {
                         depth,
@@ -173,7 +173,7 @@ impl Walk {
         Ok(())
     }
 
-    fn close(&mut self) {
+    fn close(&mut self) -> Result<(), ParseRefusal> {
         assert!(self.depth > 0, "an end tag closes no open element");
         if self
             .outcome
@@ -189,9 +189,10 @@ impl Walk {
             .is_some_and(|case| case.depth == self.depth)
         {
             let case = self.case.take().expect("the open case was just seen");
-            self.rows.push(case.row);
+            push_row(&mut self.rows, case.row)?;
         }
         self.depth -= 1;
+        Ok(())
     }
 
     fn text(&mut self, content: &str) {

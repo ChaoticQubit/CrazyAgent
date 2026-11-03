@@ -140,11 +140,10 @@ pub fn parse(format: ResultFormat, bytes: &[u8]) -> Result<ParsedResults, ParseR
         ResultFormat::Allure => allure::parse(bytes)?,
         ResultFormat::Libtest => libtest::parse(bytes)?,
     };
-    if parsed.rows.len() > RESULTS_PER_RUN_MAX {
-        return Err(ParseRefusal::TooManyResults {
-            limit: RESULTS_PER_RUN_MAX,
-        });
-    }
+    assert!(
+        parsed.rows.len() <= RESULTS_PER_RUN_MAX,
+        "a format reader returned more rows than a run holds"
+    );
     for row in &mut parsed.rows {
         row.message = row
             .message
@@ -155,25 +154,51 @@ pub fn parse(format: ResultFormat, bytes: &[u8]) -> Result<ParsedResults, ParseR
     Ok(parsed)
 }
 
+/// Adds a row unless the report already holds as many rows as a run may.
+/// Inputs: the rows read so far and the next row. Output: TooManyResults at the cap.
+pub(crate) fn push_row(rows: &mut Vec<ResultRow>, row: ResultRow) -> Result<(), ParseRefusal> {
+    if rows.len() >= RESULTS_PER_RUN_MAX {
+        return Err(ParseRefusal::TooManyResults {
+            limit: RESULTS_PER_RUN_MAX,
+        });
+    }
+    rows.push(row);
+    Ok(())
+}
+
 fn unique_names(rows: &mut [ResultRow]) -> Result<(), ParseRefusal> {
-    let mut taken: HashSet<String> = HashSet::with_capacity(rows.len());
+    let mut seen: HashMap<String, usize> = HashMap::with_capacity(rows.len());
+    for row in rows.iter() {
+        check_name(&row.name)?;
+        *seen.entry(row.name.clone()).or_insert(0) += 1;
+    }
+    let mut taken: HashSet<String> = seen
+        .iter()
+        .filter(|(_, count)| **count == 1)
+        .map(|(name, _)| name.clone())
+        .collect();
     let mut next: HashMap<String, u64> = HashMap::new();
     for row in rows.iter_mut() {
-        check_name(&row.name)?;
-        if taken.contains(&row.name) {
-            let counter = next.entry(row.name.clone()).or_insert(2);
-            let mut candidate = format!("{} [{counter}]", row.name);
-            while taken.contains(&candidate) {
-                *counter += 1;
-                candidate = format!("{} [{counter}]", row.name);
-            }
-            *counter += 1;
-            check_name(&candidate)?;
-            row.name = candidate;
+        if seen[&row.name] == 1 {
+            continue;
         }
-        let fresh = taken.insert(row.name.clone());
-        assert!(fresh, "a result name is taken twice in one report");
+        let counter = next.entry(row.name.clone()).or_insert(1);
+        let mut candidate = format!("{} [{counter}]", row.name);
+        while taken.contains(&candidate) {
+            *counter += 1;
+            candidate = format!("{} [{counter}]", row.name);
+        }
+        *counter += 1;
+        check_name(&candidate)?;
+        taken.insert(candidate.clone());
+        row.name = candidate;
     }
+    let distinct: HashSet<&str> = rows.iter().map(|row| row.name.as_str()).collect();
+    assert_eq!(
+        distinct.len(),
+        rows.len(),
+        "a result name is taken twice in one report"
+    );
     Ok(())
 }
 

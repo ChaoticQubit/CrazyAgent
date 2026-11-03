@@ -1,10 +1,12 @@
-use super::{ParseRefusal, ParsedResults, ResultRow, Summary, strip_ansi};
+use super::{ParseRefusal, ParsedResults, ResultRow, Summary, push_row, strip_ansi};
 use crate::tests_model::ResultOutcome;
+use std::collections::HashMap;
 
 struct Block {
     first: usize,
     announced: u64,
     measured: u64,
+    names: HashMap<String, usize>,
 }
 
 struct Stated {
@@ -12,39 +14,55 @@ struct Stated {
     counts: Summary,
 }
 
+struct Section {
+    row: Option<usize>,
+    output: String,
+}
+
 /// Reads cargo and libtest text: `test <name> ... ok|FAILED|ignored` lines grouped by
 /// `running N tests` blocks, failure output from `---- <name> stdout ----` sections, and
-/// compiler `error[E` or `error: could not compile` lines as a build failure. Each block's
-/// `test result:` line must match the lines it closes. Input: the text bytes, read lossily.
-/// Output: the rows and summed totals, or SummaryMismatch for a block that disagrees with
-/// its summary or ends without one.
+/// compiler `error[E` or `error: could not compile` lines outside any block as a build
+/// failure. An open section takes every line up to the next section or `failures:` line,
+/// so a test's own output never reads as report structure. Each block's `test result:`
+/// line must match the lines it closes. Input: the text bytes, read lossily. Output: the
+/// rows and summed totals, or SummaryMismatch for a block that disagrees with its summary
+/// or ends without one.
 pub(super) fn parse(bytes: &[u8]) -> Result<ParsedResults, ParseRefusal> {
     let text = String::from_utf8_lossy(bytes);
     let mut rows: Vec<ResultRow> = Vec::new();
     let mut summary: Option<Summary> = None;
     let mut build_failed = false;
     let mut block: Option<Block> = None;
-    let mut section: Option<(usize, String)> = None;
+    let mut section: Option<Section> = None;
     for raw in text.lines() {
         let line = strip_ansi(raw);
         let line: &str = &line;
-        if line.starts_with("error[E") || line.starts_with("error: could not compile") {
+        if let Some(open) = section.as_mut()
+            && section_name(line).is_none()
+            && line != "failures:"
+        {
+            open.output.push_str(line);
+            open.output.push('\n');
+            continue;
+        }
+        if block.is_none()
+            && (line.starts_with("error[E") || line.starts_with("error: could not compile"))
+        {
             build_failed = true;
         }
         if let Some(announced) = running(line) {
             if block.is_some() {
                 return Err(ParseRefusal::SummaryMismatch);
             }
-            settle(&mut rows, section.take());
             block = Some(Block {
                 first: rows.len(),
                 announced,
                 measured: 0,
+                names: HashMap::new(),
             });
             continue;
         }
         if let Some(stated) = result_line(line)? {
-            settle(&mut rows, section.take());
             let open = block.take().ok_or(ParseRefusal::SummaryMismatch)?;
             let counts = check(&rows[open.first..], &open, &stated)?;
             let total = summary.get_or_insert_with(Summary::default);
@@ -60,26 +78,22 @@ pub(super) fn parse(bytes: &[u8]) -> Result<ParsedResults, ParseRefusal> {
         };
         if let Some(name) = section_name(line) {
             settle(&mut rows, section.take());
-            section = rows[open.first..]
-                .iter()
-                .position(|row| row.name == name)
-                .map(|at| (open.first + at, String::new()));
+            section = Some(Section {
+                row: open.names.get(name).copied(),
+                output: String::new(),
+            });
             continue;
         }
         if line == "failures:" {
             settle(&mut rows, section.take());
             continue;
         }
-        if let Some((_, output)) = section.as_mut() {
-            output.push_str(line);
-            output.push('\n');
-            continue;
-        }
         if let Some((row, measured)) = test_line(line) {
             if measured {
                 open.measured += 1;
             }
-            rows.push(row);
+            open.names.entry(row.name.clone()).or_insert(rows.len());
+            push_row(&mut rows, row)?;
         }
     }
     if block.is_some() {
@@ -201,11 +215,16 @@ fn check(rows: &[ResultRow], block: &Block, stated: &Stated) -> Result<Summary, 
     Ok(found)
 }
 
-fn settle(rows: &mut [ResultRow], section: Option<(usize, String)>) {
-    if let Some((at, output)) = section {
-        let row = &mut rows[at];
-        if row.message.is_none() && !output.trim().is_empty() {
-            row.message = Some(output);
-        }
+fn settle(rows: &mut [ResultRow], section: Option<Section>) {
+    let Some(Section {
+        row: Some(at),
+        output,
+    }) = section
+    else {
+        return;
+    };
+    let row = &mut rows[at];
+    if row.message.is_none() && !output.trim().is_empty() {
+        row.message = Some(output);
     }
 }
