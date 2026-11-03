@@ -8896,9 +8896,11 @@ fn native_lead_clone_in_the_project(fixture: &Fixture) -> (i64, String, PathBuf)
     .unwrap();
     committed_project(fixture);
     let repository = fixture.base.join("project");
+    std::fs::create_dir(repository.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
     let lead = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
     let db = crate::landing::open(&fixture.base).unwrap();
     let worktrees = crate::projects_home::state_folder(&repository).join("worktrees");
+    assert!(worktrees.starts_with(repository.join(crate::projects_home::CRAZYAGENT_DIRECTORY)));
     std::fs::create_dir_all(&worktrees).unwrap();
     let clone = worktrees.join(format!("agent-{lead}"));
     let branch =
@@ -8926,7 +8928,12 @@ fn native_lead_clone_in_the_project(fixture: &Fixture) -> (i64, String, PathBuf)
         .join("tmp");
     let profiles = state.join("profiles");
     for folder in [&home, &tmp, &profiles] {
-        std::fs::create_dir_all(folder).unwrap();
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(folder)
+            .unwrap();
     }
     crate::sandbox::ProjectSandbox::new(
         &repository,
