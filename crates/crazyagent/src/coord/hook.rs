@@ -1,6 +1,6 @@
 use super::relay::{
     self, ANSWER, ANSWER_BYTES_MAX, ASK, ASKED, Answer, Ask, Held, IDLE, INBOX, INBOX_MAX,
-    LEAD_TAG, Letter, Part, SHOWN, TOOLS, TOOLS_LOG_BYTES_MAX, TOUCH, WAITING,
+    LEAD_TAG, Letter, Part, REQUEST_WAIT, SHOWN, TOOLS, TOOLS_LOG_BYTES_MAX, TOUCH, WAITING,
 };
 use super::settings::{Nudges, Overlaps};
 use super::{TOOL_BYTES_MAX, Waiting};
@@ -15,6 +15,8 @@ const INPUT_BYTES_MAX: u64 = 16 * 1024 * 1024;
 /// The most characters one delivery hands a session, below Claude Code's 10,000
 /// character cap on `additionalContext` and plain hook output.
 const CONTEXT_CHARS_MAX: usize = 9000;
+/// The most characters of letters one delivery hands a session, leaving room for the header.
+pub(crate) const LETTERS_CHARS_MAX: usize = CONTEXT_CHARS_MAX - 400;
 const ASK_WAIT: Duration = Duration::from_secs(8);
 const ASK_POLL: Duration = Duration::from_millis(50);
 const TEAM_FOLDERS_MAX: usize = 16;
@@ -33,6 +35,12 @@ const _: () = assert!(
         && PANE_WAIT.as_secs() < Event::Notification.timeout_seconds() as u64
         && PANE_WAIT.as_secs() < Event::Prompt.timeout_seconds() as u64
         && PANE_WAIT.as_secs() + ASK_WAIT.as_secs() < Event::Edit.timeout_seconds() as u64
+);
+const _: () = assert!(
+    PANE_WAIT.as_millis() + REQUEST_WAIT.as_millis()
+        < 1000 * Event::Asked.timeout_seconds() as u128
+        && PANE_WAIT.as_millis() + ASK_WAIT.as_millis() + REQUEST_WAIT.as_millis()
+            < 1000 * Event::Edit.timeout_seconds() as u128
 );
 /// Why an edit of a session the engine placed in no pane is held (DEC-111 Q18).
 const UNNAMED_EDIT: &str = "CrazyAgent: the engine could not tell which agent this session is, so this edit is held. Try again in a moment.";
@@ -120,8 +128,10 @@ struct Member {
 /// AskUserQuestion and permission or elicitation notifications set Waiting; a user prompt
 /// clears it; an edit is denied outside a teammate's own worktree or, under Overlaps Block,
 /// on a file another active agent claimed, and under the FirstEdit nudges a session's first
-/// edit before any code-graph query gets one reminder. Inputs: the event argument, the
-/// mailbox, the input and the output. Output: Ok, or the usage text for an unknown event.
+/// edit before any code-graph query gets one reminder. A native teammate's session does
+/// all of it over its lead's caller socket instead of the mailbox (relay over the caller
+/// socket, OQ-7 B). Inputs: the event argument, the mailbox, the input and the output.
+/// Output: Ok, or the usage text for an unknown event.
 pub fn run(
     event: &str,
     mailbox: &Path,
@@ -153,18 +163,34 @@ pub fn run(
     let Ok(folder) = relay::part_folder(root, who.part) else {
         return Ok(());
     };
+    let answer = if who.part == Part::Teammates && who.activity.is_some() {
+        teammate(event, mailbox, &folder, &who, &input)
+    } else {
+        in_mailbox(event, &folder, &who, &input)
+    };
+    if let Some(answer) = answer {
+        let _ = writeln!(output, "{answer}");
+        let _ = output.flush();
+    }
+    Ok(())
+}
+
+/// Runs one relay hook through the session's part of the mailbox: the lead's sessions of
+/// a native lead and every session of an agent that leads no native team. Takes the event,
+/// the folder, the identity and the hook input. Returns the answer, or None for none.
+fn in_mailbox(event: Event, folder: &Mailbox, who: &Identity, input: &Value) -> Option<Value> {
     let mate = who.teammate.as_ref().and(who.activity.as_deref());
-    let answer = match event {
+    match event {
         Event::PostTool => {
             if let Some(tag) = &who.activity {
-                settle(&folder, tag);
-                log_tools(&folder, tag, &input);
+                settle(folder, tag);
+                log_tools(folder, tag, input);
             }
             if let Some(tag) = mate {
-                wake(&folder, tag);
+                wake(folder, tag);
             }
             who.inbox.as_deref().and_then(|tag| {
-                deliver(&folder, tag).map(|text| {
+                deliver(folder, tag).map(|text| {
                     json!({"hookSpecificOutput": {
                         "hookEventName": "PostToolUse",
                         "additionalContext": text,
@@ -174,52 +200,131 @@ pub fn run(
         }
         Event::Stop => {
             if let Some(tag) = &who.activity {
-                settle(&folder, tag);
-                touch(&folder, tag);
+                settle(folder, tag);
+                touch(folder, tag);
             }
-            let held = who.inbox.as_deref().and_then(|tag| deliver(&folder, tag));
+            let held = who.inbox.as_deref().and_then(|tag| deliver(folder, tag));
             if held.is_none()
                 && let Some(tag) = mate
             {
-                rest(&folder, tag);
+                rest(folder, tag);
             }
             held.map(|text| json!({"decision": "block", "reason": text}))
         }
         Event::Asked => {
             if let Some(tag) = &who.activity {
-                wait_on(&folder, tag, Waiting::Question);
+                wait_on(folder, tag, Waiting::Question);
             }
             None
         }
         Event::Notification => {
-            let waiting = match input["notification_type"].as_str() {
-                Some("permission_prompt") => Some(Waiting::Permission),
-                Some("elicitation_dialog" | "elicitation_url_dialog") => Some(Waiting::Question),
-                _ => None,
-            };
-            if let (Some(tag), Some(waiting)) = (&who.activity, waiting) {
-                wait_on(&folder, tag, waiting);
+            if let (Some(tag), Some(waiting)) = (&who.activity, notified(input)) {
+                wait_on(folder, tag, waiting);
             }
             None
         }
         Event::Prompt => {
             if let Some(tag) = mate {
-                wake(&folder, tag);
+                wake(folder, tag);
             }
-            let typed = matches!(input["source"].as_str(), None | Some("user" | "sdk"));
-            if let Some(tag) = who.activity.as_deref().filter(|_| typed) {
-                settle(&folder, tag);
-                touch(&folder, tag);
+            if let Some(tag) = who.activity.as_deref().filter(|_| typed(input)) {
+                settle(folder, tag);
+                touch(folder, tag);
             }
             None
         }
-        Event::Edit => edit_answer(&folder, &who, &input),
-    };
-    if let Some(answer) = answer {
-        let _ = writeln!(output, "{answer}");
-        let _ = output.flush();
+        Event::Edit => edit_answer(folder, None, who, input),
     }
-    Ok(())
+}
+
+/// Runs one relay hook of a native teammate's session over its lead's caller socket, never
+/// through the mailbox, which every teammate writes (relay over the caller socket, OQ-7 B):
+/// each event is one request the engine carries out for the pane it finds this process in,
+/// and its letters, overlap answer and first-edit reminder come back on the same
+/// connection. Only the roster the edit guard reads stays a file, the engine's own in the
+/// lead's part. Takes the event, the mailbox, the teammates' folder, the identity and the
+/// hook input. Returns the answer, or None for none.
+fn teammate(
+    event: Event,
+    mailbox: &Path,
+    folder: &Mailbox,
+    who: &Identity,
+    input: &Value,
+) -> Option<Value> {
+    let own = if who.inbox.is_some() { "own" } else { "sub" };
+    let text = |bytes: Vec<u8>| {
+        String::from_utf8(bytes)
+            .ok()
+            .filter(|text| !text.is_empty() && text.chars().count() <= CONTEXT_CHARS_MAX)
+    };
+    match event {
+        Event::PostTool => {
+            let mut line = format!("post {own}");
+            for tool in tool_lines(input).0 {
+                line.push(' ');
+                line.push_str(&tool);
+            }
+            request(mailbox, &line, REQUEST_WAIT)
+                .and_then(text)
+                .map(|text| {
+                    json!({"hookSpecificOutput": {
+                        "hookEventName": "PostToolUse",
+                        "additionalContext": text,
+                    }})
+                })
+        }
+        Event::Stop => request(mailbox, &format!("stop {own}"), REQUEST_WAIT)
+            .and_then(text)
+            .map(|text| json!({"decision": "block", "reason": text})),
+        Event::Asked => {
+            request(mailbox, "wait question", REQUEST_WAIT);
+            None
+        }
+        Event::Notification => {
+            if let Some(waiting) = notified(input) {
+                request(mailbox, &format!("wait {}", waiting.as_str()), REQUEST_WAIT);
+            }
+            None
+        }
+        Event::Prompt => {
+            let kind = if typed(input) { "typed" } else { "other" };
+            request(mailbox, &format!("prompt {kind}"), REQUEST_WAIT);
+            None
+        }
+        Event::Edit => edit_answer(folder, Some(mailbox), who, input),
+    }
+}
+
+/// Sends one relay request over the lead's caller socket and waits up to `wait` for the
+/// engine's answer (relay over the caller socket, OQ-7 B). Takes the mailbox, the request
+/// and the wait. Returns the answer's payload, or None for a refusal or no answer, always
+/// where the platform has no caller socket.
+fn request(mailbox: &Path, line: &str, wait: Duration) -> Option<Vec<u8>> {
+    #[cfg(unix)]
+    {
+        crate::team::caller::relay(mailbox, line, wait)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (mailbox, line, wait);
+        None
+    }
+}
+
+/// The wait a notification shows: a permission prompt, or an elicitation as a question.
+/// Takes the hook input. Returns the wait, or None for any other notification.
+fn notified(input: &Value) -> Option<Waiting> {
+    match input["notification_type"].as_str() {
+        Some("permission_prompt") => Some(Waiting::Permission),
+        Some("elicitation_dialog" | "elicitation_url_dialog") => Some(Waiting::Question),
+        _ => None,
+    }
+}
+
+/// Whether a submitted prompt is the user's, not one the harness typed itself. Takes the
+/// hook input. Returns the answer.
+fn typed(input: &Value) -> bool {
+    matches!(input["source"].as_str(), None | Some("user" | "sdk"))
 }
 
 /// Finds who a hook or monitor runs for, from the engine's answer alone (DEC-111 Q18,
@@ -372,8 +477,8 @@ fn deliver(folder: &Mailbox, tag: &str) -> Option<String> {
         if letter.to != tag || relay::letter_stem(letter.id).as_deref() != Some(stem.as_str()) {
             continue;
         }
-        let length = letter.text().chars().count() + 2;
-        if size + length > CONTEXT_CHARS_MAX - 400 {
+        let length = letter_chars(&letter);
+        if size + length > LETTERS_CHARS_MAX {
             break;
         }
         if folder.rename(&name, &format!("{stem}{SHOWN}")).is_err() {
@@ -385,17 +490,31 @@ fn deliver(folder: &Mailbox, tag: &str) -> Option<String> {
     if taken.is_empty() {
         return None;
     }
+    Some(bundle(&mut taken))
+}
+
+/// The characters one letter takes of a delivery: its text and the blank line before it.
+/// Takes the letter. Returns the count.
+pub(crate) fn letter_chars(letter: &Letter) -> usize {
+    letter.text().chars().count() + 2
+}
+
+/// The text a session reads for the letters it takes: a header with their count and how to
+/// answer, then each letter, oldest first. Takes the letters, at least one and at most
+/// `LETTERS_CHARS_MAX` characters of them by `letter_chars`. Returns the text.
+pub(crate) fn bundle(taken: &mut [Letter]) -> String {
+    assert!(!taken.is_empty());
     taken.sort_by_key(|letter| letter.id);
     let mut text = format!(
         "CrazyAgent team messages for you ({}). Answer a question or work for you with update_work kind reply and its id in reply_to. A note takes no reply; to answer one, send kind note with to.",
         taken.len()
     );
-    for letter in &taken {
+    for letter in taken.iter() {
         text.push_str("\n\n");
         text.push_str(&letter.text());
     }
     assert!(text.chars().count() <= CONTEXT_CHARS_MAX);
-    Some(text)
+    text
 }
 
 /// Marks a session waiting on its user (Q14): the latest wait replaces the last one for
@@ -445,45 +564,23 @@ fn wake(folder: &Mailbox, tag: &str) {
     }
 }
 
-/// Appends the tool a session called to its tool log in one write: the tool name, for a
-/// graphify command or skill `graphify` too (Q18), and for a skill `skill:` and its name,
-/// so each skill counts by name (F7). Nothing is logged past `TOOLS_LOG_BYTES_MAX` or for
-/// a name that is not plain.
+/// Appends the tool a session called to its tool log in one write, the names
+/// `tool_lines` gives, one a line, and marks a code-graph query. Nothing is logged past
+/// `TOOLS_LOG_BYTES_MAX` or for a name that is not plain.
 fn log_tools(folder: &Mailbox, tag: &str, input: &Value) {
     let Some(key) = relay::tag_key(tag) else {
         return;
     };
-    let Some(tool) = input["tool_name"].as_str().filter(|tool| {
-        !tool.is_empty()
-            && tool.len() <= TOOL_BYTES_MAX
-            && !tool.chars().any(|c| c.is_control() || c.is_whitespace())
-    }) else {
+    let (names, graphed) = tool_lines(input);
+    if names.is_empty() {
         return;
-    };
-    let mut lines = format!("{tool}\n");
-    let graphify = match tool {
-        "Bash" => input["tool_input"]["command"]
-            .as_str()
-            .and_then(|command| command.split_whitespace().next())
-            .is_some_and(|program| {
-                Path::new(program).file_name() == Some(std::ffi::OsStr::new(GRAPHIFY))
-            }),
-        "Skill" => input["tool_input"]["skill"]
-            .as_str()
-            .is_some_and(|skill| skill == GRAPHIFY || skill.ends_with(":graphify")),
-        _ => false,
-    };
-    if graphify {
-        lines.push_str(GRAPHIFY);
-        lines.push('\n');
     }
-    if graphify
-        || super::adoption::tool_key(tool, &input["tool_input"]).as_deref() == Some(GRAPHIFY)
-    {
+    if graphed {
         let _ = folder.create(&format!("{key}{GRAPHED}"));
     }
-    if let Some(skill) = super::adoption::skill_key(tool, &input["tool_input"]) {
-        lines.push_str(&skill);
+    let mut lines = String::new();
+    for name in names {
+        lines.push_str(&name);
         lines.push('\n');
     }
     let Ok(mut file) = folder.append(&format!("{key}{TOOLS}")) else {
@@ -497,19 +594,63 @@ fn log_tools(folder: &Mailbox, tag: &str, input: &Value) {
     }
 }
 
+/// The names one tool call counts under: the tool name, for a graphify command or skill
+/// `graphify` too (Q18), and for a skill `skill:` and its name, so each skill counts by name
+/// (F7), and whether the call queried the code graph. Takes the hook input. Returns the
+/// names, none for a tool name that is not plain, and the answer.
+fn tool_lines(input: &Value) -> (Vec<String>, bool) {
+    let Some(tool) = input["tool_name"].as_str().filter(|tool| {
+        !tool.is_empty()
+            && tool.len() <= TOOL_BYTES_MAX
+            && !tool.chars().any(|c| c.is_control() || c.is_whitespace())
+    }) else {
+        return (Vec::new(), false);
+    };
+    let mut names = vec![tool.to_owned()];
+    let graphify = match tool {
+        "Bash" => input["tool_input"]["command"]
+            .as_str()
+            .and_then(|command| command.split_whitespace().next())
+            .is_some_and(|program| {
+                Path::new(program).file_name() == Some(std::ffi::OsStr::new(GRAPHIFY))
+            }),
+        "Skill" => input["tool_input"]["skill"]
+            .as_str()
+            .is_some_and(|skill| skill == GRAPHIFY || skill.ends_with(":graphify")),
+        _ => false,
+    };
+    if graphify {
+        names.push(GRAPHIFY.to_owned());
+    }
+    let graphed = graphify
+        || super::adoption::tool_key(tool, &input["tool_input"]).as_deref() == Some(GRAPHIFY);
+    if let Some(skill) = super::adoption::skill_key(tool, &input["tool_input"]) {
+        names.push(skill);
+    }
+    assert!(names.len() <= 3);
+    (names, graphed)
+}
+
 /// Answers one file edit before it runs: the guard's denial when it refuses the edit, else,
 /// under the FirstEdit nudges, the first-edit reminder as `additionalContext` with no
 /// permission decision, so the harness's own permission rules still decide the edit. Takes
-/// the mailbox, the identity and the hook input. Returns the answer, or None for none.
-fn edit_answer(folder: &Mailbox, who: &Identity, input: &Value) -> Option<Value> {
-    if let Some(reason) = guard(folder, who, input) {
+/// the session's folder, the mailbox whose caller socket a native teammate asks the engine
+/// over (None to ask through the folder), the identity and the hook input. Returns the
+/// answer, or None for none.
+fn edit_answer(
+    folder: &Mailbox,
+    socket: Option<&Path>,
+    who: &Identity,
+    input: &Value,
+) -> Option<Value> {
+    if let Some(reason) = guard(folder, socket, who, input) {
         return Some(json!({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
             "permissionDecisionReason": reason,
         }}));
     }
-    first_edit(folder, who).map(|text| {
+    first_edit(folder, socket, who).map(|text| {
         json!({"hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "additionalContext": text,
@@ -519,9 +660,16 @@ fn edit_answer(folder: &Mailbox, who: &Identity, input: &Value) -> Option<Value>
 
 /// Hands a session the first-edit reminder once (DEC-111 R4): only under the project's
 /// FirstEdit nudges, only while the session made no code-graph query (`log_tools` marks
-/// one), and only the first time, which an exclusive marker in the mailbox records. Takes
-/// the mailbox and the identity. Returns the reminder, or None.
-fn first_edit(folder: &Mailbox, who: &Identity) -> Option<&'static str> {
+/// one), and only the first time, which an exclusive marker in the mailbox records; a
+/// native teammate's comes from the engine, which decides it from its own rows (relay over
+/// the caller socket, OQ-7 B). Takes the folder, the mailbox whose caller socket a native
+/// teammate asks over, and the identity. Returns the reminder, or None.
+fn first_edit(folder: &Mailbox, socket: Option<&Path>, who: &Identity) -> Option<&'static str> {
+    if let Some(mailbox) = socket {
+        let said = request(mailbox, "nudge", REQUEST_WAIT)?;
+        let reminder = super::adoption::FIRST_EDIT_REMINDER;
+        return (said == reminder.as_bytes()).then_some(reminder);
+    }
     if relay::read_roster(folder, who.part)?.nudges != Nudges::FirstEdit {
         return None;
     }
@@ -537,9 +685,10 @@ fn first_edit(folder: &Mailbox, who: &Identity) -> Option<&'static str> {
 /// edit (DEC-111 Q18). A native teammate may edit only inside
 /// `<lead worktree>/.worktrees/<its name>/` (Q17); under Overlaps Block, an edit to a
 /// repository file another active agent claimed is refused after asking the engine (Q15).
-/// The guard is cooperative: the session owns its home and mailbox. Takes the mailbox, the
-/// identity and the hook input. Returns the reason to deny, or None to let it run.
-fn guard(folder: &Mailbox, who: &Identity, input: &Value) -> Option<String> {
+/// The guard is cooperative: the session owns its home and mailbox. Takes the folder, the
+/// mailbox whose caller socket a native teammate asks over, the identity and the hook
+/// input. Returns the reason to deny, or None to let it run.
+fn guard(folder: &Mailbox, socket: Option<&Path>, who: &Identity, input: &Value) -> Option<String> {
     if who.unnamed {
         return Some(UNNAMED_EDIT.to_owned());
     }
@@ -586,7 +735,13 @@ fn guard(folder: &Mailbox, who: &Identity, input: &Value) -> Option<String> {
     {
         return None;
     }
-    let held = ask(folder, tag, relative);
+    let held = match socket {
+        Some(mailbox) => request(mailbox, &format!("ask {relative}"), ASK_WAIT)
+            .and_then(|bytes| serde_json::from_slice::<Answer>(&bytes).ok())
+            .map(|answer| answer.held)
+            .unwrap_or_default(),
+        None => ask(folder, tag, relative),
+    };
     if held.is_empty() {
         return None;
     }

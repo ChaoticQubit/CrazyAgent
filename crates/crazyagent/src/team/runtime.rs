@@ -3253,8 +3253,9 @@ impl TeamRuntime {
     /// refused on an earlier tick, under the pane pins of the socket it replaces, also kept
     /// across a refused bind, logging only a change; then serves each bound socket once,
     /// whether or not the lead has the team tool, so its hooks and monitors learn their pane
-    /// and who the engine's rows put there, and its team servers get their calls named.
-    /// Takes the project.
+    /// and who the engine's rows put there, its teammates' hooks and monitors get their relay
+    /// requests answered for their own pane (relay over the caller socket, OQ-7 B), and its
+    /// team servers get their calls named. Takes the project.
     #[cfg(unix)]
     fn tend_callers(&mut self, project: &ProjectId) {
         let workers = &self.workers;
@@ -3305,6 +3306,17 @@ impl TeamRuntime {
                 callers.serve(
                     &mut || listed_panes(host, lead.as_ref()),
                     &mut |pane, pid| pane_whom(connection, host, project, id, (pane, pid)),
+                    &mut |pane, _, request, out| {
+                        let _ = crate::coord::relay::answer(
+                            connection,
+                            project,
+                            id,
+                            pane,
+                            request,
+                            out,
+                            now_ms(),
+                        );
+                    },
                 );
             }
         }

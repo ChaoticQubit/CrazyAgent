@@ -25,7 +25,6 @@ const OTHER_SESSION: &str = "other-session";
 const OTHER_PANE: &str = "%8";
 const HELPER_AGENT: &str = "helper@relay-team";
 const LEAD_KEY: &str = "00000000000000000000000000000000";
-const MATE_KEY: &str = "00000000000000000000000000000008";
 const OTHER_KEY: &str = "00000000000000000000000000000009";
 
 struct Team {
@@ -143,10 +142,6 @@ impl Team {
             .join(name)
     }
 
-    fn text(&self, name: &str) -> Option<String> {
-        std::fs::read_to_string(self.entry(name)).ok()
-    }
-
     fn lead_text(&self, name: &str) -> Option<String> {
         std::fs::read_to_string(self.lead_entry(name)).ok()
     }
@@ -215,8 +210,9 @@ fn now_ms() -> i64 {
 #[test]
 fn post_tool_hands_each_session_only_its_own_letters_and_logs_the_tool_for_its_tag() {
     let team = Team::new();
+    let native = Native::new(&team, CoordSettings::default());
     team.letter(5, "leader", "For the lead.");
-    team.letter(6, MATE_PANE, "For greet.");
+    native.note(native.lead, native.greet, "For greet.");
 
     let subagent = team.hook(
         "post-tool",
@@ -278,10 +274,7 @@ fn post_tool_hands_each_session_only_its_own_letters_and_logs_the_tool_for_its_t
     ));
     assert!(mate.ends_with(":\nFor greet."), "{mate}");
     assert!(!mate.contains("For the lead."));
-    assert_eq!(
-        team.text(&format!("{MATE_KEY}.tools")).as_deref(),
-        Some("Edit\n")
-    );
+    assert_eq!(native.tools(native.greet), ["Edit"]);
 
     let again = team.hook(
         "post-tool",
@@ -1137,8 +1130,21 @@ fn with_first_edit_the_hook_returns_the_reminder_once() {
     );
     assert_eq!(edits[1], "", "once per session");
     assert!(notes.is_empty(), "no 10-minute reminder: {notes:?}");
+}
 
-    let own = team.root.join(".worktrees").join("greet").join("a.rs");
+/// Under the FirstEdit nudges a native teammate whose session queried the code graph first
+/// gets no reminder: the engine decides it from the calls the teammate's own requests
+/// counted (relay over the caller socket, OQ-7 B).
+#[test]
+fn with_first_edit_a_teammate_that_queried_the_graph_first_gets_no_reminder() {
+    let team = Team::new();
+    let native = Native::new(
+        &team,
+        CoordSettings {
+            nudges: Nudges::FirstEdit,
+            ..CoordSettings::default()
+        },
+    );
     team.hook(
         "post-tool",
         Some(MATE_PANE),
@@ -1149,34 +1155,44 @@ fn with_first_edit_the_hook_returns_the_reminder_once() {
             json!({"command": "graphify query \"parser\""}),
         ),
     );
+    let own = team.root.join(".worktrees").join("greet").join("a.rs");
     assert_eq!(
         team.hook("edit", Some(MATE_PANE), edit(MATE_SESSION, &own)),
         "",
         "a session that queried the graph first gets no reminder"
     );
+    assert_eq!(native.tools(native.greet), ["Bash", "graphify"]);
 }
 
-/// Under the split layout the engine keeps `relay.json` in the lead's part alone, and a
-/// native teammate's hook, which never opens that part, still reads the project's nudges
-/// from it (DEC-111 relay mailbox forgery, C1).
+/// Under the split layout the engine keeps `relay.json` in the lead's part alone, where no
+/// teammate writes, and a native teammate's edit guard, which never opens that part, still
+/// reads the lead's worktree from it (DEC-111 relay mailbox forgery, C1).
 #[test]
 fn a_native_teammate_reads_the_roster_the_engine_keeps_in_the_leads_part() {
     let team = Team::new();
-    nudged(&team, Nudges::FirstEdit);
+    let native = Native::new(&team, CoordSettings::default());
+    let repo = team.root.join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    native
+        .db
+        .execute(
+            "UPDATE team_worktrees SET worktree=?1 WHERE agent=?2",
+            params![repo.to_str().unwrap(), native.lead],
+        )
+        .unwrap();
+    native.serve(&team);
     assert!(
         team.lead_entry("relay.json").is_file() && !team.entry("relay.json").exists(),
         "the roster sits in the lead's part, where no teammate writes"
     );
-    let own = team.root.join(".worktrees").join("greet").join("a.rs");
-    let answer: Value = serde_json::from_str(
-        team.hook("edit", Some(MATE_PANE), edit(MATE_SESSION, &own))
-            .trim(),
-    )
-    .unwrap();
-    assert_eq!(
-        answer["hookSpecificOutput"]["additionalContext"],
-        "You are editing before any code-graph query. Run graphify query first if this touches code you have not mapped.",
-        "the teammate's hook read the FirstEdit nudges from the lead's part"
+    let mate = |path: PathBuf| team.hook("edit", Some(MATE_PANE), edit(MATE_SESSION, &path));
+    assert_eq!(mate(repo.join(".worktrees").join("greet").join("a.rs")), "");
+    assert!(
+        denial(&mate(
+            team.root.join(".worktrees").join("greet").join("a.rs")
+        ))
+        .contains("you are teammate greet"),
+        "the guard took the lead's worktree from the roster, not the session's project folder"
     );
 }
 

@@ -78,7 +78,7 @@ fn the_first_edit_without_a_graph_query_gets_one_reminder_and_is_allowed() {
         "tool_name": "Edit",
         "tool_input": {"file_path": root.path().join("a.rs"), "old_string": "a", "new_string": "b"},
     });
-    let edit = |tag: &str| edit_answer(&folder, &session(tag), &input);
+    let edit = |tag: &str| edit_answer(&folder, None, &session(tag), &input);
 
     for quiet in [Nudges::Off, Nudges::TenMinutes] {
         roster(quiet);
