@@ -1,7 +1,7 @@
 use serde_json::{Map, Value};
 use std::ffi::OsString;
 use std::path::PathBuf;
-use trackwright_core::{FieldSpec, FieldType, OpSpec};
+use trackwright_core::catalog::{FieldSpec, FieldType, OpSpec};
 
 /// The most command line words one call takes; more is a usage error, never truncated.
 pub const ARGUMENTS_MAX: usize = 256;
@@ -175,7 +175,7 @@ fn command(scan: &Scan<'_>, catalog: &'static [OpSpec]) -> Result<Command, Usage
         _ => {
             let spec = catalog
                 .iter()
-                .find(|spec| spec.kind.as_str() == op)
+                .find(|spec| spec.op.as_str() == op)
                 .ok_or_else(|| {
                     Usage::new(format!(
                         "unknown operation {}; trackwright --help lists them",
@@ -214,7 +214,7 @@ fn init(fields: &[(String, &str)]) -> Result<Command, Usage> {
 }
 
 fn arguments(spec: &OpSpec, fields: &[(String, &str)]) -> Result<Map<String, Value>, Usage> {
-    let op = spec.kind.as_str();
+    let op = spec.op.as_str();
     let mut args = Map::new();
     for (name, text) in fields {
         let field = spec
@@ -267,9 +267,9 @@ fn value_of(field: &FieldSpec, text: &str) -> Result<Value, Usage> {
 fn assert_catalog_leaves_cli_names_free(catalog: &[OpSpec]) {
     for spec in catalog {
         assert!(
-            !COMMANDS.contains(&spec.kind.as_str()),
+            !COMMANDS.contains(&spec.op.as_str()),
             "{} is a CLI command",
-            spec.kind
+            spec.op
         );
         for field in spec.fields {
             assert!(

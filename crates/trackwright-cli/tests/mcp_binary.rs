@@ -7,7 +7,7 @@ use std::sync::mpsc::{Receiver, channel};
 use std::thread;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
-use trackwright_core::catalog;
+use trackwright_core::catalog::catalog;
 
 const BIN: &str = env!("CARGO_BIN_EXE_trackwright");
 const REPLY_WAIT: Duration = Duration::from_secs(30);
@@ -108,7 +108,7 @@ fn the_built_binary_serves_mcp_over_stdio() {
         .iter()
         .map(|tool| tool["name"].as_str().expect("every tool has a name"))
         .collect();
-    let ops: BTreeSet<&str> = catalog().iter().map(|spec| spec.kind.as_str()).collect();
+    let ops: BTreeSet<&str> = catalog().iter().map(|spec| spec.op.as_str()).collect();
     assert_eq!(tools, ops);
 
     let created = call(

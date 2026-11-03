@@ -5,7 +5,7 @@ use std::fs;
 use std::path::Path;
 use std::process::{Command, Output};
 use tempfile::TempDir;
-use trackwright_core::catalog;
+use trackwright_core::catalog::catalog;
 use trackwright_core::model::OpKind;
 
 const BIN: &str = env!("CARGO_BIN_EXE_trackwright");
@@ -120,7 +120,7 @@ fn the_built_binary_creates_a_ticket_and_lists_it_ready_in_json() {
 #[test]
 fn every_catalog_op_has_a_subcommand_with_its_fields() {
     let root = TempDir::new().unwrap();
-    let names: BTreeSet<&str> = catalog().iter().map(|spec| spec.kind.as_str()).collect();
+    let names: BTreeSet<&str> = catalog().iter().map(|spec| spec.op.as_str()).collect();
     let kinds: BTreeSet<&str> = OpKind::ALL.iter().map(|kind| kind.as_str()).collect();
     assert_eq!(names, kinds, "the catalog holds every operation once");
     assert_eq!(names.len(), catalog().len());
@@ -128,7 +128,7 @@ fn every_catalog_op_has_a_subcommand_with_its_fields() {
     assert_eq!(top.status.code(), Some(0), "{top:?}");
     let top = String::from_utf8(top.stdout).unwrap();
     for spec in catalog() {
-        let op = spec.kind.as_str();
+        let op = spec.op.as_str();
         assert!(
             top.lines()
                 .any(|line| line.trim_start().starts_with(&format!("{op} "))),

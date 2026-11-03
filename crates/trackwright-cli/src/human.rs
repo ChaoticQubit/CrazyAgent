@@ -3,7 +3,7 @@ use crate::locate::{DB_ENV, FILE, FOLDER};
 use crate::{ACTOR_ENV, EXIT_REFUSED, EXIT_USAGE};
 use serde_json::{Map, Value};
 use std::fmt::Write;
-use trackwright_core::{FieldSpec, FieldType, OpSpec};
+use trackwright_core::catalog::{FieldSpec, FieldType, OpSpec};
 
 /// How deep nested reply objects are drawn before they are summarized.
 const DEPTH_MAX: usize = 3;
@@ -74,7 +74,7 @@ fn overview(out: &mut String, catalog: &[OpSpec]) {
          Operations:\n",
     );
     for spec in catalog {
-        writeln!(out, "  {:<16} {}", spec.kind.as_str(), spec.summary).unwrap();
+        writeln!(out, "  {:<16} {}", spec.op.as_str(), spec.summary).unwrap();
     }
     writeln!(
         out,
@@ -90,7 +90,7 @@ fn operation(out: &mut String, spec: &OpSpec) {
     writeln!(
         out,
         "trackwright {} [--field value ...] [--json] [--db PATH] [--actor ACTOR]\n{}\nFields:",
-        spec.kind.as_str(),
+        spec.op.as_str(),
         spec.summary
     )
     .unwrap();

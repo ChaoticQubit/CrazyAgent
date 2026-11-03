@@ -13,10 +13,13 @@ use std::io::{self, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
+use trackwright_core::catalog::{OpSpec, catalog};
+use trackwright_core::dispatch;
 use trackwright_core::model::{Actor, OpKind, ProjectKey, Refusal, codes};
+use trackwright_core::reply::Reply;
+use trackwright_core::requests::Request;
 use trackwright_core::standalone::Standalone;
 use trackwright_core::store::{self, Store, StoreError};
-use trackwright_core::{OpSpec, Reply, Request, catalog, dispatch};
 
 /// The environment variable naming the actor when `--actor` is absent.
 pub const ACTOR_ENV: &str = "TRACKWRIGHT_ACTOR";
@@ -89,7 +92,7 @@ pub fn run(args: &[OsString]) -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(failure) => stderr_exit(&failure),
         },
-        Command::Op { spec, .. } if spec.kind == OpKind::Schema => schema(invocation.json),
+        Command::Op { spec, .. } if spec.op == OpKind::Schema => schema(invocation.json),
         Command::Init { .. } | Command::Mcp | Command::Op { .. } => as_actor(invocation),
     }
 }
@@ -164,7 +167,7 @@ fn operation(
 ) -> Result<Value, Failure> {
     let actor = Actor::new(actor)?;
     let bytes = serde_json::to_vec(&Value::Object(args)).expect("a JSON object serializes");
-    let request = Request::parse(spec.kind.as_str(), &bytes)?;
+    let request = Request::parse(spec.op.as_str(), &bytes)?;
     let mut store = Store::open(&place.existing()?)?;
     let transaction = store.transaction()?;
     let envelope = envelope_of(dispatch(&transaction, &Standalone, &actor, request));
@@ -219,12 +222,12 @@ fn schema(json: bool) -> ExitCode {
 }
 
 fn envelope_of(reply: Reply) -> Value {
-    let envelope: Value = serde_json::from_str(&reply.json).expect("the core replies JSON");
+    let envelope: Value = serde_json::from_str(&reply.to_json()).expect("the core replies JSON");
     assert_eq!(envelope["api"], 1, "the core replies api 1");
     assert_eq!(
         envelope["ok"].as_bool(),
-        Some(reply.ok),
-        "the envelope agrees with ok"
+        Some(reply.is_ok()),
+        "the envelope agrees with is_ok"
     );
     envelope
 }
