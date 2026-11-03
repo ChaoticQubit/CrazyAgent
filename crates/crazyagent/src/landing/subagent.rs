@@ -1,5 +1,6 @@
 use super::flow::{
-    check_places, clone_branch, hold, now_ms, pending_ref, set_engine_ref, shared, tip,
+    agent_branch, check_places, clone_branch, hold, now_ms, pending_ref, set_engine_ref, shared,
+    tip,
 };
 use super::git::{failure, object_id};
 use super::{ChangeState, LeadGit, MergeOutcome, clone, store};
@@ -753,6 +754,73 @@ pub(super) fn add_teammate(
         _ => return Err(failure("changes_git_failed")),
     };
     if added.code != Some(0) || !on_branch()? {
+        return Err(failure("changes_git_failed"));
+    }
+    Ok(())
+}
+
+/// Makes one native teammate's linked worktree inside its linked lead's worktree (OP-9b), as
+/// [`super::add_teammate_worktree`] says: `<worktree>/.worktrees/<name>` as a worktree of
+/// the project repository on `<task branch>--<name>`, a new branch cut from the lead's
+/// HEAD or the one an earlier run left as it stands. Nothing runs when the repository
+/// already records it on that branch, and the record is read again after git. Inputs: the
+/// store, the owner checkout root, the lead's worktree and git folder, the teammate's name
+/// and the lead's teammates' setup git. Output: Ok, or a `changes_*` refusal.
+pub(super) fn add_linked_teammate(
+    db: &Connection,
+    repository: &Path,
+    worktree: &Path,
+    git_dir: &Path,
+    name: &str,
+    git: &LeadGit<'_>,
+) -> Result<(), EngineError> {
+    let invalid = || failure("changes_workspace_invalid");
+    if check_places(repository, worktree, git_dir)? != Layout::Linked {
+        return Err(invalid());
+    }
+    if !agent_git::worktree_name_valid(name) {
+        return Err(invalid());
+    }
+    let task = agent_branch(db, worktree, Layout::Linked)?.ok_or_else(invalid)?;
+    let branch = agent_git::teammate_branch(&task, name).ok_or_else(invalid)?;
+    let folder = worktree.join(agent_git::TEAMMATES_FOLDER).join(name);
+    let on_branch = || -> Result<bool, EngineError> {
+        Ok(clone::linked_teammates(repository, worktree, &task)?
+            .iter()
+            .any(|teammate| {
+                teammate.folder == folder
+                    && teammate.head == clone::TeammateHead::Branch(branch.clone())
+            }))
+    };
+    if on_branch()? {
+        return Ok(());
+    }
+    let held = shared(repository)?.exec(
+        &[
+            "rev-parse",
+            "-q",
+            "--verify",
+            "--end-of-options",
+            &format!("refs/heads/{branch}^{{commit}}"),
+        ],
+        None,
+        &[],
+        256,
+    )?;
+    let base = match held.code {
+        0 => None,
+        1 => Some(tip(db, repository, worktree, git_dir)?),
+        _ => return Err(failure("changes_git_failed")),
+    };
+    crate::research::runner::add_teammate_worktree_at(
+        git.sandbox,
+        git.profile,
+        &folder,
+        &branch,
+        base.as_deref(),
+    )
+    .map_err(|_| failure("changes_git_failed"))?;
+    if !on_branch()? {
         return Err(failure("changes_git_failed"));
     }
     Ok(())

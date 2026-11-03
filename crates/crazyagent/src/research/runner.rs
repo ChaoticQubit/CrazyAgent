@@ -1977,6 +1977,60 @@ pub(crate) fn add_worktree_at(
     Ok(())
 }
 
+/// Adds a linked lead's native teammate's own linked worktree of the project (OP-9b) at
+/// `worktree`, in the lead's teammates' folder, on `branch`: a new branch cut from `base`,
+/// or with no base the branch an earlier run left, checked out as it stands. Git runs
+/// under the lead's teammates' setup profile as [`add_worktree_at`] runs it: added
+/// without a checkout, its effective config listed in the new worktree, then checked out
+/// with every filter driver that listing names blanked. Takes the sandbox, its installed
+/// profile, the new worktree path, the branch and the commit. Returns unit, or the step
+/// that failed.
+#[cfg(unix)]
+pub(crate) fn add_teammate_worktree_at(
+    sandbox: &ProjectSandbox,
+    profile: &Path,
+    worktree: &Path,
+    branch: &str,
+    base: Option<&str>,
+) -> Result<(), RunError> {
+    if !worktree.starts_with(sandbox.project_root())
+        || worktree
+            .parent()
+            .and_then(Path::file_name)
+            .is_none_or(|folder| folder != crate::agent_git::TEAMMATES_FOLDER)
+        || !branch.starts_with(crate::agent_git::LINKED_PREFIX)
+        || base.is_some_and(|base| {
+            !matches!(base.len(), 40 | 64) || !base.bytes().all(|b| b.is_ascii_hexdigit())
+        })
+    {
+        return Err(RunError::Invalid(
+            "a teammate's worktree must sit in its lead's teammates' folder on a teammate branch"
+                .into(),
+        ));
+    }
+    let _setup = repository_setup(sandbox.project_root());
+    let mut add = worktree_git(sandbox, profile);
+    add.args(["worktree", "add", "-q", "--no-checkout"]);
+    match base {
+        Some(base) => add.args(["-b", branch]).arg(worktree).arg(base),
+        None => add.arg(worktree).arg(branch),
+    };
+    setup_step(&mut add, "worktree_add_failed")?;
+    let mut listing = worktree_git(sandbox, profile);
+    listing
+        .arg("-C")
+        .arg(worktree)
+        .args(["config", "--list", "--name-only", "-z"]);
+    let overrides = filter_overrides(&bounded_stdout(&mut listing)?)?;
+    let mut checkout = worktree_git(sandbox, profile);
+    checkout
+        .args(&overrides)
+        .arg("-C")
+        .arg(worktree)
+        .args(["reset", "-q", "--hard", "HEAD"]);
+    setup_step(&mut checkout, "worktree_checkout_failed")
+}
+
 /// Runs one worktree setup git step within the setup time limit. Takes the command and
 /// the plain code for a step that exits with a failure. Returns unit, or [`RunError::Setup`]
 /// with that code, or with `setup_timed_out` for a step stopped at the limit, so the owner

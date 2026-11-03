@@ -1063,11 +1063,11 @@ pub fn unlanded_teammates(
     }
 }
 
-/// Names the native teammates of a harness's own clone that work in their own worktree,
-/// `<clone>/.worktrees/<name>`, on their own branch `<task branch>--<name>` (DEC-111 Q17),
-/// read from the clone's git records as data, so no git runs in it. Inputs: the store, the
-/// worktree and its git folder. Output: the names, none for a linked worktree, or the code
-/// that kept the clone from being read.
+/// Names the native teammates of a harness that work in their own worktree,
+/// `<worktree>/.worktrees/<name>`, on their own branch `<task branch>--<name>` (DEC-111 Q17,
+/// OP-9b), read as data from its clone's git records, or for a linked worktree the project
+/// repository's, so no git runs. Inputs: the store, the worktree and its git folder.
+/// Output: the names, or the code that kept them from being read.
 pub fn teammate_worktrees(
     db: &Connection,
     worktree: &Path,
@@ -1082,12 +1082,14 @@ pub fn teammate_worktrees(
     }
 }
 
-/// Makes one native teammate's own worktree in its lead's own clone (OP-9):
-/// `<clone>/.worktrees/<name>` on `<task branch>--<name>`, cut from the lead's HEAD for a new
-/// branch and checked out as it stands for one an earlier run left, with git run only with
-/// the lead's rights. Inputs: the store, the lead's worktree and git folder, the teammate's
-/// name and the lead's git. Output: Ok once the clone records the worktree on that branch,
-/// else a plain `changes_*` refusal.
+/// Makes one native teammate's own worktree inside its lead's worktree (OP-9, OP-9b):
+/// `<worktree>/.worktrees/<name>` on `<task branch>--<name>`, cut from the lead's HEAD for a
+/// new branch and checked out as it stands for one an earlier run left: a worktree of the
+/// lead's own clone, with git run only with the lead's rights, or for a linked lead a
+/// linked worktree of the project repository, with git run under the lead's teammates'
+/// setup profile. Inputs: the store, the lead's worktree and git folder, the teammate's
+/// name and that git. Output: Ok once git records the worktree on that branch, else a
+/// plain `changes_*` refusal.
 pub fn add_teammate_worktree(
     db: &Connection,
     worktree: &Path,
@@ -1096,7 +1098,12 @@ pub fn add_teammate_worktree(
     git: &LeadGit<'_>,
 ) -> Result<(), EngineError> {
     #[cfg(unix)]
-    return subagent::add_teammate(db, worktree, git_dir, name, git);
+    return if git_dir == crate::agent_git::git_dir(worktree) {
+        subagent::add_teammate(db, worktree, git_dir, name, git)
+    } else {
+        let repository = retire::linked_repository(git_dir)?;
+        subagent::add_linked_teammate(db, repository, worktree, git_dir, name, git)
+    };
     #[cfg(not(unix))]
     {
         let _ = (db, worktree, git_dir, name, git);

@@ -1,8 +1,8 @@
 use super::AgentKind;
 use super::clone;
 use super::flow::{
-    check_places, clone_branch, drop_branch, hold, holds_only, holds_only_except, open_agent,
-    shared,
+    agent_branch, check_places, clone_branch, drop_branch, hold, holds_only, holds_only_except,
+    open_agent, shared,
 };
 use super::git::{Repo, failure};
 use super::store;
@@ -16,6 +16,10 @@ const TIP_LISTING_BYTES_MAX: usize = 64 * 1024 * 1024;
 
 fn unavailable(_: impl std::fmt::Display) -> EngineError {
     failure("changes_unavailable")
+}
+
+fn invalid() -> EngineError {
+    failure("changes_workspace_invalid")
 }
 
 /// What the engine's own fetch read from an agent's clone: its branch tip with each
@@ -128,21 +132,30 @@ fn teammates_landed(
     Ok(None)
 }
 
-/// Names the native teammates of a harness's own clone that work in their own worktree on
-/// their own branch (DEC-111 Q17): each `<clone>/.worktrees/<name>` the clone's git records
-/// checked out on `<task branch>--<name>`, read as data with no git run. Inputs: the store,
-/// the worktree and its git folder. Output: the names, none for a linked worktree, or the
-/// code that kept the clone from being read.
+/// Names the native teammates of a harness that work in their own worktree on their own
+/// branch (DEC-111 Q17, OP-9b): each `<worktree>/.worktrees/<name>` its clone's git, or for
+/// a linked worktree the project repository's git, records checked out on
+/// `<task branch>--<name>`, read as data with no git run. Inputs: the store, the worktree
+/// and its git folder. Output: the names, or the code that kept them from being read.
 pub(super) fn own_teammates(
     db: &Connection,
     worktree: &Path,
     git_dir: &Path,
 ) -> Result<Vec<String>, EngineError> {
-    if git_dir != agent_git::git_dir(worktree) {
-        return Ok(Vec::new());
-    }
-    let branch = clone_branch(db, worktree)?;
-    let named = clone::teammates(worktree, &branch)?
+    let (branch, teammates) = if git_dir == agent_git::git_dir(worktree) {
+        let branch = clone_branch(db, worktree)?;
+        let teammates = clone::teammates(worktree, &branch)?;
+        (branch, teammates)
+    } else {
+        let repository = linked_repository(git_dir)?;
+        if check_places(repository, worktree, git_dir)? != Layout::Linked {
+            return Ok(Vec::new());
+        }
+        let branch = agent_branch(db, worktree, Layout::Linked)?.ok_or_else(invalid)?;
+        let teammates = clone::linked_teammates(repository, worktree, &branch)?;
+        (branch, teammates)
+    };
+    let named = teammates
         .into_iter()
         .filter_map(|teammate| {
             let name = teammate.folder.file_name()?.to_str()?.to_owned();
@@ -157,6 +170,20 @@ pub(super) fn own_teammates(
         })
         .collect();
     Ok(named)
+}
+
+/// The owner checkout root a linked worktree's git folder sits in,
+/// `<repository>/.git/worktrees/<record>`, read from the path alone. Input: the git
+/// folder. Output: the root, or `changes_workspace_invalid` for any other path.
+pub(super) fn linked_repository(git_dir: &Path) -> Result<&Path, EngineError> {
+    let records = git_dir.parent().ok_or_else(invalid)?;
+    let metadata = records.parent().ok_or_else(invalid)?;
+    if records.file_name() != Some(std::ffi::OsStr::new("worktrees"))
+        || metadata.file_name() != Some(std::ffi::OsStr::new(".git"))
+    {
+        return Err(invalid());
+    }
+    metadata.parent().ok_or_else(invalid)
 }
 
 /// Names the teammate branches and teammate worktrees of a harness's clone whose work is

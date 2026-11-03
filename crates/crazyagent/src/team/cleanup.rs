@@ -519,7 +519,8 @@ fn unclaim(db: &Connection, project: &ProjectId, agents: &[i64]) -> Result<(), E
 }
 
 /// Deletes a removed agent's folder and sandbox profile from the team state, with a native
-/// lead's teammates' profile and teammates' socket name record (rv-audit TTDL F2), making
+/// lead's teammates' profile, teammates' setup profile and teammates' socket name record
+/// (rv-audit TTDL F2, OP-9b), making
 /// its read-only folders writable first, such as a module cache a toolchain left. Inputs:
 /// the team state folder and the agent. Output: Ok once all are gone.
 fn remove_agent_files(team: &Path, id: i64) -> Result<(), EngineError> {
@@ -527,6 +528,7 @@ fn remove_agent_files(team: &Path, id: i64) -> Result<(), EngineError> {
     for file in [
         profile(team, id),
         super::runtime::agent_teammates_profile(team, id),
+        super::runtime::agent_teammates_setup_profile(team, id),
         super::runtime::agent_teammates_socket_name(team, id),
     ] {
         gone(std::fs::remove_file(file))?;

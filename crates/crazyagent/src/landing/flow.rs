@@ -906,10 +906,19 @@ pub(super) fn reset_if_quiet(
     store::save(db, record)
 }
 
+/// The pathspec that leaves the teammates' folder at the top of an agent worktree out of
+/// what the engine lists and commits there (OP-9b): each native teammate's own worktree
+/// sits in `.worktrees/<name>` and lands through its own branch, never as an embedded
+/// repository in its lead's turn. Output: the pathspec.
+fn teammates_left_out() -> String {
+    format!(":(exclude,top){}", agent_git::TEAMMATES_FOLDER)
+}
+
 /// Refuses a change past the bounds before git stores any of it: too many changed
 /// paths, a path too deep, too long or not UTF-8, or too many bytes in the files.
 /// Inputs: the worktree, its root and the bounds. Output: Ok within the bounds.
 fn check_bounds(repo: &Repo, worktree: &Path, bounds: &TreeBounds) -> Result<(), EngineError> {
+    let teammates = teammates_left_out();
     let output = repo.exec(
         &[
             "ls-files",
@@ -918,6 +927,9 @@ fn check_bounds(repo: &Repo, worktree: &Path, bounds: &TreeBounds) -> Result<(),
             "--others",
             "--deleted",
             "--exclude-standard",
+            "--",
+            ":(top)",
+            &teammates,
         ],
         None,
         &[],
@@ -1419,7 +1431,7 @@ fn commit_worktree(
     message: &str,
 ) -> Result<Option<String>, EngineError> {
     check_bounds(repo, worktree, bounds)?;
-    repo.run(&["add", "-A"])?;
+    repo.run(&["add", "-A", "--", ":(top)", &teammates_left_out()])?;
     let tree = object_id(&repo.run(&["write-tree"])?)?;
     if tree == repo.tree_of(head)? {
         return Ok(None);

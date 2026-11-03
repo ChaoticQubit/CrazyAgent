@@ -5134,9 +5134,10 @@ impl TeamRuntime {
         name
     }
 
-    /// Makes each running native teammate's own worktree in its lead's own clone (OP-9),
-    /// `.worktrees/<name>` on `<task branch>--<name>`, with git run under the lead's installed
-    /// profile, at most `TEAMMATE_WORKTREE_TRIES` times per name, then records each
+    /// Makes each running native teammate's own worktree inside its lead's worktree (OP-9,
+    /// OP-9b), `.worktrees/<name>` on `<task branch>--<name>`, with git run under the lead's
+    /// installed profile in its own clone, or under its teammates' setup profile for a
+    /// linked lead, at most `TEAMMATE_WORKTREE_TRIES` times per name, then records each
     /// teammate's worktree. Takes the project and the lead. Returns Ok, or a SQLite failure;
     /// a worktree git could not make is left without one.
     fn make_teammate_worktrees(
@@ -5157,9 +5158,7 @@ impl TeamRuntime {
             return teammates::keep_worktrees(&self.connection, project, lead);
         };
         let (worktree, git_dir) = (PathBuf::from(worktree), PathBuf::from(git_dir));
-        if git_dir != crate::agent_git::git_dir(&worktree) {
-            return teammates::keep_worktrees(&self.connection, project, lead);
-        }
+        let linked = git_dir != crate::agent_git::git_dir(&worktree);
         let made = crate::landing::teammate_worktrees(&self.connection, &worktree, &git_dir)
             .unwrap_or_default();
         let mut wanted = Vec::new();
@@ -5179,23 +5178,13 @@ impl TeamRuntime {
                 wanted.push(name);
             }
         }
-        let sandbox = (!wanted.is_empty())
-            .then(|| Path::new(&repository).canonicalize().ok())
-            .flatten()
-            .and_then(|root| {
-                ProjectSandbox::new(
-                    &root,
-                    &agent_home(&self.state, lead),
-                    &self.agent_folder(lead).join("tmp"),
-                    SandboxNetwork::Only(Vec::new()),
-                )
-                .ok()
-            });
-        match &sandbox {
-            Some(sandbox) => {
-                let profile = agent_profile(&self.state, lead);
+        if wanted.is_empty() {
+            return teammates::keep_worktrees(&self.connection, project, lead);
+        }
+        match self.teammates_git(Path::new(&repository), &worktree, lead, linked) {
+            Ok((sandbox, profile)) => {
                 let git = crate::landing::LeadGit {
-                    sandbox,
+                    sandbox: &sandbox,
                     profile: &profile,
                 };
                 for name in &wanted {
@@ -5213,12 +5202,43 @@ impl TeamRuntime {
                     }
                 }
             }
-            None if !wanted.is_empty() => {
-                eprintln!("teammate_worktree_failed cause=lead_sandbox_unavailable");
-            }
-            None => {}
+            Err(cause) => eprintln!("teammate_worktree_failed cause={cause}"),
         }
         teammates::keep_worktrees(&self.connection, project, lead)
+    }
+
+    /// The sandbox and installed profile the engine's git runs under to make a lead's native
+    /// teammates' worktrees: the lead's own launch profile for its own clone, or for a
+    /// linked lead its teammates' setup profile, installed now (OP-9b). Takes the project
+    /// folder, the lead's worktree, the lead and whether the worktree is linked. Returns
+    /// both, or the plain cause.
+    fn teammates_git(
+        &self,
+        repository: &Path,
+        worktree: &Path,
+        lead: i64,
+        linked: bool,
+    ) -> Result<(ProjectSandbox, PathBuf), &'static str> {
+        let unavailable = |_| "lead_sandbox_unavailable";
+        let sandbox = ProjectSandbox::new(
+            &repository
+                .canonicalize()
+                .map_err(|_| "lead_sandbox_unavailable")?,
+            &agent_home(&self.state, lead),
+            &self.agent_folder(lead).join("tmp"),
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .map_err(unavailable)?;
+        if !linked {
+            return Ok((sandbox, agent_profile(&self.state, lead)));
+        }
+        let setup = |_| "teammates_setup_unavailable";
+        let sandbox = sandbox
+            .confine_to_teammates_setup(worktree)
+            .map_err(setup)?;
+        let profile = agent_teammates_setup_profile(&self.state, lead);
+        sandbox.install(&profile).map_err(setup)?;
+        Ok((sandbox, profile))
     }
 
     /// What a harness reads about its git branch with each task (DEC-100): its task branch
@@ -8789,6 +8809,17 @@ pub fn agent_teammates_profile(state: &Path, id: i64) -> PathBuf {
     state
         .join("profiles")
         .join(format!("agent-{id}-teammates.sb"))
+}
+
+/// The Seatbelt profile the engine's own git runs inside while it adds a linked native-mode
+/// lead's teammates' linked worktrees (OP-9b): it writes only the teammates' folder of the
+/// lead's worktree, the project repository's worktree records and teammate branch refs.
+/// Inputs: the team state folder and the lead's id. Output:
+/// `<state>/profiles/agent-<id>-teammates-setup.sb`.
+pub fn agent_teammates_setup_profile(state: &Path, id: i64) -> PathBuf {
+    state
+        .join("profiles")
+        .join(format!("agent-{id}-teammates-setup.sb"))
 }
 
 /// Where the engine keeps the socket name a native-mode lead's latest start chose for its
