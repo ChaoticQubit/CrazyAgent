@@ -11000,6 +11000,98 @@ fn a_native_lead_without_the_team_tool_still_has_its_caller_socket_answered() {
     );
 }
 
+/// Attaches the fixture's project to the tracker as `TP`, as the owner's Tickets setup
+/// does. Input: the fixture.
+fn attach_tickets(f: &Fixture) {
+    let tx = rusqlite::Transaction::new_unchecked(
+        &f.connection,
+        rusqlite::TransactionBehavior::Immediate,
+    )
+    .unwrap();
+    crate::tracker::attach(
+        &tx,
+        &f.setup.project_id,
+        &trackwright_core::model::ProjectKey::new("TP").unwrap(),
+        "Panes",
+        1,
+    )
+    .unwrap();
+    tx.commit().unwrap();
+}
+
+/// Reads the instructions one team agent's launch would write, from the runtime's own
+/// launch context with tools on. Takes the runtime, the agent and its role. Returns the
+/// instructions and how often the default pack's ticket rule appears in them.
+fn ticket_rules_told(team: &TeamRuntime, id: i64, role: AgentRole) -> (String, usize) {
+    std::fs::create_dir_all(team.mailbox(id).parent().unwrap()).unwrap();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let told = team
+        .context(&project, id, role, true, Layout::Linked)
+        .unwrap()
+        .instructions()
+        .to_owned();
+    let rules = crate::setup::bundled::TICKET_RULES;
+    let count = told.matches(rules).count();
+    (told, count)
+}
+
+/// A sub-agent's launch with tools on gets the ticket rule and its project's key once the
+/// project has tickets, and no ticket text before.
+#[test]
+fn a_sub_agent_launch_gets_the_ticket_rules_once_its_project_has_tickets() {
+    let f = Fixture::new(1);
+    let folder = f.base.join("engine-bin");
+    std::fs::create_dir(&folder).unwrap();
+    let engine = folder.join("crazyagent");
+    engine_file(&engine);
+    let team = f.runtime().with_delegation_tool(&engine).unwrap();
+    let sub = f.agent(AgentRole::Sub, "codex", AgentStatus::Working);
+    let (told, count) = ticket_rules_told(&team, sub, AgentRole::Sub);
+    assert_eq!(count, 0, "{told}");
+    assert!(
+        !told.contains("This project's tickets use the key"),
+        "{told}"
+    );
+    attach_tickets(&f);
+    let (told, count) = ticket_rules_told(&team, sub, AgentRole::Sub);
+    assert_eq!(count, 1, "{told}");
+    assert!(
+        told.contains("This project's tickets use the key `TP`."),
+        "{told}"
+    );
+}
+
+/// The live master's launch gets the ticket rule and its project's key once the project
+/// has tickets, and no ticket text before.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_master_launch_gets_the_ticket_rules_once_its_project_has_tickets() {
+    let f = Fixture::new(1);
+    let folder = f.base.join("engine-bin");
+    std::fs::create_dir(&folder).unwrap();
+    let engine = folder.join("crazyagent");
+    engine_file(&engine);
+    let host = f.host();
+    let team = live_runtime(&f, &host, LIVE_CODEX)
+        .with_delegation_tool(&engine)
+        .unwrap();
+    super::super::master::set_live(&f.connection, &f.setup.project_id, true).unwrap();
+    let master = f.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let (told, count) = ticket_rules_told(&team, master, AgentRole::Master);
+    assert_eq!(count, 0, "{told}");
+    assert!(
+        told.contains(tool::SPAWN_TOOL),
+        "the live team tools are there: {told}"
+    );
+    attach_tickets(&f);
+    let (told, count) = ticket_rules_told(&team, master, AgentRole::Master);
+    assert_eq!(count, 1, "{told}");
+    assert!(
+        told.contains("This project's tickets use the key `TP`."),
+        "{told}"
+    );
+}
+
 /// A worker at the owner's Sub-agent depth gets a team server without spawn, stop and
 /// merge, a tool the owner switched off is left out for every agent and both sections
 /// say so; the same calls planted in the worker's mailbox anyway are refused.

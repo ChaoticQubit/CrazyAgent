@@ -31,6 +31,7 @@ struct Case {
     mailbox: PathBuf,
     db: Connection,
     setup: StoredSetup,
+    access: ModelAccess,
 }
 
 impl Case {
@@ -102,6 +103,7 @@ impl Case {
             mailbox,
             db,
             setup,
+            access: ModelAccess::default(),
         }
     }
 
@@ -120,7 +122,7 @@ impl Case {
             crate::team::tool::serve_live(Cursor::new(input), &mut output, &mailbox, &[]).unwrap();
             output
         });
-        let access = ModelAccess::default();
+        let access = self.access.clone();
         let setup = self.setup.clone();
         let landing = self.base.clone();
         let answering = Answering {
@@ -143,7 +145,15 @@ impl Case {
                     (AGENT, "Agent 7"),
                     &landing,
                     &self.mailbox,
-                    &mut |_, _, _| Some((AGENT, "Agent 7".to_owned())),
+                    &mut |db, _, _| {
+                        crate::team::runtime::team_caller(
+                            db,
+                            None,
+                            &project(),
+                            (AGENT, "Agent 7"),
+                            None,
+                        )
+                    },
                     &mut |db, caller, call| answer_sub(db, &answering, caller, call).unwrap(),
                 );
             }
@@ -398,6 +408,165 @@ fn delegate_with_a_ticket_records_the_task_link() {
     );
     assert_eq!(text(&answers[3]), (TICKET_ID_INVALID, true));
     assert_eq!(text(&answers[4]), (TICKET_ID_INVALID, true));
+    assert_eq!(
+        case.count("SELECT COUNT(*) FROM team_tasks"),
+        1,
+        "a refused link leaves no task behind"
+    );
+    assert_eq!(case.count("SELECT COUNT(*) FROM tk_links"), 1);
+}
+
+const CODEX_PROFILE: &str = "codex-managed-profile";
+
+/// The project's pool as a lead's `spawn` needs it: one native managed Codex profile whose
+/// latest sign-in, recorded as the native sign-in flow stores it, observed an account.
+/// Input: the case. Output: the access holding that pool.
+fn signed_in_codex(case: &Case) -> ModelAccess {
+    use crate::config::{
+        AccountPool, ModelAuthentication, ModelConnection, ModelEndpoint, ModelReference,
+    };
+    use crate::protocol::CredentialRef;
+    let reference = |value: &str| CredentialRef::new(value).unwrap();
+    case.db
+        .execute(
+            "INSERT INTO native_auth_operations(id,profile_key,generation,phase,request,fact)
+             VALUES ('operation-1',?1,1,'authenticated_observed',X'01',X'01')",
+            [crate::memory::hash(CODEX_PROFILE.as_bytes())],
+        )
+        .unwrap();
+    ModelAccess {
+        accounts: vec![reference("local-account")],
+        connections: vec![ModelConnection {
+            id: reference("codex-managed"),
+            provider: reference("openai"),
+            harness: reference("codex"),
+            protocol: reference("native"),
+            account_ref: reference("local-account"),
+            endpoint: ModelEndpoint::Native {},
+            model: ModelReference {
+                id: "gpt-5.5".into(),
+                author: reference("openai"),
+            },
+            auth: ModelAuthentication::NativeManaged {
+                profile_ref: reference(CODEX_PROFILE),
+            },
+        }],
+        pools: vec![AccountPool {
+            id: reference("team-pool"),
+            name: None,
+            members: vec![reference("codex-managed")],
+            projects: vec![reference(PROJECT)],
+            roles: vec![reference("project_leader")],
+            fallback_allowed: false,
+            provider_quota_policy: Default::default(),
+        }],
+    }
+}
+
+/// Attaches a second engine project to the tracker as `TO` and gives it the owner's ticket
+/// `TO-1`, so a lead of `TT` can name a real ticket of another project. Input: the case.
+fn other_project_ticket(case: &Case) {
+    let folder = case.base.join("other");
+    std::fs::create_dir_all(folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY)).unwrap();
+    crate::ide::workspace::tests::add_project(&case.db, "other-tools", &folder);
+    let tx = Transaction::new_unchecked(&case.db, TransactionBehavior::Immediate).unwrap();
+    let other = ProjectId::new("other-tools").unwrap();
+    crate::tracker::attach(&tx, &other, &ProjectKey::new("TO").unwrap(), "Other", NOW).unwrap();
+    let request = trackwright_core::requests::Request::parse(
+        "create",
+        br#"{"project": "TO", "title": "Their own work"}"#,
+    )
+    .unwrap();
+    let owner = trackwright_core::model::Actor::new("owner").unwrap();
+    let reply = trackwright_core::ops::dispatch(&tx, &crate::tracker::Host, &owner, request);
+    assert!(reply.is_ok(), "{}", reply.json());
+    tx.commit().unwrap();
+}
+
+#[test]
+fn a_lead_spawn_with_a_ticket_links_its_task_and_a_refused_ticket_leaves_no_task() {
+    let mut case = Case::new();
+    case.access = signed_in_codex(&case);
+    other_project_ticket(&case);
+    let answers = case.served(
+        false,
+        &[
+            tool_call(
+                1,
+                "ticket_create",
+                json!({"project": KEY, "title": "Write the parser"}),
+            ),
+            tool_call(
+                2,
+                SPAWN_TOOL,
+                json!({"task": "Write parser.rs", "harness": "codex", "ticket": "TT-1"}),
+            ),
+            tool_call(
+                3,
+                SPAWN_TOOL,
+                json!({"task": "Write lexer.rs", "harness": "codex", "ticket": "TT-9"}),
+            ),
+            tool_call(
+                4,
+                SPAWN_TOOL,
+                json!({"task": "Write lexer.rs", "harness": "codex", "ticket": "TO-1"}),
+            ),
+        ],
+    );
+    let (created, error) = envelope(&answers[0]);
+    assert!(!error, "{created}");
+    assert_eq!(created["data"]["id"], "TT-1", "{created}");
+
+    let (task, parent): (i64, i64) = case
+        .db
+        .query_row(
+            "SELECT id, parent FROM team_tasks WHERE project=?1 AND prompt='Write parser.rs'",
+            [PROJECT],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(parent, AGENT);
+    let (queued, error) = text(&answers[1]);
+    assert!(!error, "{queued}");
+    assert!(
+        queued.starts_with(&format!(
+            "Task {task} is queued for a codex worker of yours"
+        )),
+        "{queued}"
+    );
+    let link: (String, String, String, String) = case
+        .db
+        .query_row(
+            "SELECT p.key, l.kind, l.target, l.created_by FROM tk_links l
+             JOIN tk_tickets t ON t.id = l.ticket JOIN tk_projects p ON p.id = t.project",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        link,
+        (
+            KEY.to_owned(),
+            "task".to_owned(),
+            task.to_string(),
+            DELEGATE_ACTOR.to_owned()
+        )
+    );
+
+    let (missing, error) = text(&answers[2]);
+    assert!(error, "{missing}");
+    assert!(missing.starts_with("Not started: "), "{missing}");
+    assert!(
+        missing.contains(trackwright_core::model::codes::TICKET_UNKNOWN),
+        "{missing}"
+    );
+    assert_eq!(
+        text(&answers[3]),
+        (
+            "Not started: TO-1 is not a ticket of this project (link_cross_project).",
+            true
+        )
+    );
     assert_eq!(
         case.count("SELECT COUNT(*) FROM team_tasks"),
         1,
