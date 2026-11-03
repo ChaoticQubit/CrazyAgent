@@ -1,70 +1,16 @@
-use rusqlite::{Connection, Transaction};
+use rusqlite::Connection;
 use serde_json::{Value, json};
 use std::io::Cursor;
 use std::path::PathBuf;
 use std::time::Duration;
 use tempfile::TempDir;
 use trackwright_core::catalog::{catalog, op_schema};
-use trackwright_core::host::{
-    Authority, CheckView, Evidence, EvidenceState, LinkKind, LinkState, Links, TicketView,
-};
-use trackwright_core::model::{Actor, OpKind, ProjectKey, Refusal};
+use trackwright_core::model::{Actor, OpKind, ProjectKey};
+use trackwright_core::standalone::Standalone;
 use trackwright_core::store::{self, Store};
 use trackwright_mcp::{LINE_BYTES_MAX, PROTOCOL_VERSIONS, SERVER_NAME, Session, serve};
 
 const AGENT: &str = "agent:7";
-
-/// The smallest real host: it declares no link kinds, resolves any target as `unknown`,
-/// finds no check satisfied and lets every actor run every operation, so these tests see
-/// the server's own behaviour rather than a policy's.
-struct OpenHost;
-
-impl Links for OpenHost {
-    fn kinds(&self) -> &[LinkKind] {
-        &[]
-    }
-
-    fn resolve(
-        &self,
-        _tx: &Transaction<'_>,
-        _project: &ProjectKey,
-        _kind: &str,
-        target: &str,
-    ) -> Result<LinkState, Refusal> {
-        Ok(LinkState {
-            live: true,
-            label: target.to_owned(),
-            state: "unknown".to_owned(),
-        })
-    }
-}
-
-impl Evidence for OpenHost {
-    fn check(
-        &self,
-        _tx: &Transaction<'_>,
-        _project: &ProjectKey,
-        _check: &CheckView,
-    ) -> Result<EvidenceState, Refusal> {
-        Ok(EvidenceState {
-            satisfied: false,
-            detail: "this host records no evidence".to_owned(),
-        })
-    }
-}
-
-impl Authority for OpenHost {
-    fn actor_may(
-        &self,
-        _tx: &Transaction<'_>,
-        _project: &ProjectKey,
-        _actor: &Actor,
-        _op: OpKind,
-        _ticket: Option<&TicketView>,
-    ) -> Result<(), Refusal> {
-        Ok(())
-    }
-}
 
 /// A real standalone tracker database in a private temporary folder, opened and migrated by
 /// the core's store and holding one project `CA` created by the actor `setup`.
@@ -95,19 +41,19 @@ impl Tracker {
             .into_connection()
     }
 
-    fn session(&self, actor: &str) -> Session<OpenHost> {
+    fn session(&self, actor: &str) -> Session<Standalone> {
         let actor = Actor::new(actor).expect("a valid actor");
-        Session::new(self.connection(), OpenHost, actor)
+        Session::new(self.connection(), Standalone, actor)
     }
 
-    fn impatient_session(&self) -> Session<OpenHost> {
+    fn impatient_session(&self) -> Session<Standalone> {
         let connection = self.connection();
         connection
             .busy_timeout(Duration::ZERO)
             .expect("the busy timeout sets");
         Session::new(
             connection,
-            OpenHost,
+            Standalone,
             Actor::new(AGENT).expect("a valid actor"),
         )
     }
@@ -149,7 +95,7 @@ fn call(id: u64, tool: &str, arguments: Value) -> String {
     )
 }
 
-fn exchange(session: &Session<OpenHost>, lines: &[String]) -> Vec<Value> {
+fn exchange(session: &Session<Standalone>, lines: &[String]) -> Vec<Value> {
     let mut input = lines.join("\n");
     input.push('\n');
     let mut output = Vec::new();
