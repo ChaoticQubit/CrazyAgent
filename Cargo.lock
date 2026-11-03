@@ -801,6 +801,7 @@ dependencies = [
  "tokio",
  "toml 1.1.6+spec-1.1.0",
  "toml_edit 0.25.17+spec-1.1.0",
+ "trackwright-core",
  "trash",
  "url",
  "vt100",
@@ -824,6 +825,7 @@ dependencies = [
  "tauri-plugin-wdio-webdriver",
  "tempfile",
  "tokio",
+ "trackwright-core",
 ]
 
 [[package]]
