@@ -1,5 +1,6 @@
 use rusqlite::{Connection, Transaction};
 use std::path::Path;
+use trackwright_core::events;
 use trackwright_core::model::{Actor, ProjectKey, codes};
 use trackwright_core::runs::{
     self, IntegrityRef, Inventory, NetworkMode, NewResult, NewSkip, PolicyRef, ResultOutcome,
@@ -10,7 +11,8 @@ use trackwright_core::runs::{
 use trackwright_core::schema;
 use trackwright_core::store::{self, Store, StoreError};
 use trackwright_core::tests_model::{
-    CaseKind, RESULT_MESSAGE_BYTES_MAX, RESULT_ROWS_PER_RECORD_MAX, RUNS_RETAINED_PER_PROJECT_MAX,
+    CaseKind, CaseStatus, RESULT_MESSAGE_BYTES_MAX, RESULT_ROWS_PER_RECORD_MAX,
+    RUNS_RETAINED_PER_PROJECT_MAX,
 };
 use trackwright_core::tests_store::{self, NewCase};
 
@@ -264,6 +266,7 @@ fn a_run_records_results_per_case_and_replays_from_events() {
                 stable_name: Some("runs::store_runs".to_owned()),
                 steps: Vec::new(),
                 protected: false,
+                status: CaseStatus::Ready,
             },
             1_500,
         )
@@ -278,6 +281,7 @@ fn a_run_records_results_per_case_and_replays_from_events() {
                 stable_name: Some("runs::replay_runs".to_owned()),
                 steps: Vec::new(),
                 protected: false,
+                status: CaseStatus::Ready,
             },
             1_501,
         )
@@ -376,6 +380,10 @@ fn a_run_records_results_per_case_and_replays_from_events() {
         assert_eq!(
             runs::stored(&tx, &key()).unwrap(),
             runs::replay(&tx, &key()).unwrap()
+        );
+        assert_eq!(
+            store::state(&tx, &key()).unwrap(),
+            events::replay(&tx, &key()).unwrap()
         );
         tx.commit().unwrap();
     }
@@ -1085,6 +1093,7 @@ fn retention_never_prunes_a_run_that_evidence_refers_to() {
             stable_name: Some("keep::latest".to_owned()),
             steps: Vec::new(),
             protected: false,
+            status: CaseStatus::Ready,
         },
         1_200,
     )
@@ -1207,4 +1216,119 @@ fn every_run_statement_prepares_against_a_database_holding_only_the_core_schema(
             .unwrap_or_else(|error| panic!("{statement}: {error}"));
     }
     assert!(runs::statements().len() >= 10);
+}
+
+#[test]
+fn a_write_that_fails_part_way_leaves_no_rows() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = opened(dir.path());
+    let tx = store.transaction().unwrap();
+    project(&tx);
+    let engine = actor("engine:checks");
+    let run = started(&tx, &engine, 2_000);
+    tx.execute_batch(
+        "CREATE TRIGGER abort_result BEFORE INSERT ON tk_results
+             WHEN NEW.name = 'a::aborts'
+             BEGIN SELECT RAISE(ABORT, 'result insert aborted'); END;
+         CREATE TRIGGER abort_event BEFORE INSERT ON tk_events
+             WHEN NEW.op IN ('run.start', 'run.finish')
+             BEGIN SELECT RAISE(ABORT, 'event insert aborted'); END;",
+    )
+    .unwrap();
+    let runs_before = count(&tx, "tk_runs");
+    let events_before = count(&tx, "tk_events");
+
+    let rows = vec![
+        result("a::lands_first", ResultOutcome::Passed),
+        result("a::aborts", ResultOutcome::Passed),
+    ];
+    let failed = runs::record(&tx, &engine, &record_of(&run, rows), 2_001);
+    assert!(matches!(failed, Err(StoreError::Sqlite(_))), "{failed:?}");
+    assert_eq!(count(&tx, "tk_results"), 0);
+
+    let failed = runs::start(&tx, &engine, &start_of(CaseKind::Unit), 2_002);
+    assert!(matches!(failed, Err(StoreError::Sqlite(_))), "{failed:?}");
+    assert_eq!(count(&tx, "tk_runs"), runs_before);
+
+    let finish = finish_of(&run, RunEnd::Completed, Some(0));
+    let failed = runs::finish(&tx, &engine, &finish, 2_003);
+    assert!(matches!(failed, Err(StoreError::Sqlite(_))), "{failed:?}");
+
+    assert_eq!(count(&tx, "tk_events"), events_before);
+    tx.commit().unwrap();
+    let tx = store.transaction().unwrap();
+    assert_eq!(count(&tx, "tk_results"), 0);
+    assert_eq!(count(&tx, "tk_runs"), runs_before);
+    let shown = runs::show(
+        &tx,
+        &RunShow {
+            id: run.id.clone(),
+            after: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(shown.run.state, RunState::Running);
+    assert_eq!(shown.run.version, run.version);
+    assert_eq!(shown.run.totals.total, 0);
+}
+
+#[test]
+fn a_refused_record_keeps_the_run_running_and_an_unreadable_report_is_unknown() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = opened(dir.path());
+    let tx = store.transaction().unwrap();
+    project(&tx);
+    let engine = actor("engine:checks");
+    let run = started(&tx, &engine, 2_000);
+    let run = recorded(
+        &tx,
+        &engine,
+        &run,
+        &[("a::first", ResultOutcome::Passed)],
+        2_001,
+    );
+    let events_before = count(&tx, "tk_events");
+
+    let rows = vec![
+        result("a::second", ResultOutcome::Passed),
+        result("a::\u{7}bell", ResultOutcome::Failed),
+    ];
+    let code = refused(runs::record(&tx, &engine, &record_of(&run, rows), 2_002));
+    assert_eq!(code, codes::TEXT_HIDDEN_CHARACTERS);
+    assert_eq!(count(&tx, "tk_results"), 1);
+    assert_eq!(count(&tx, "tk_events"), events_before);
+    let shown = runs::show(
+        &tx,
+        &RunShow {
+            id: run.id.clone(),
+            after: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(shown.run.state, RunState::Running);
+    assert_eq!(shown.run.version, run.version);
+
+    let why = "result 2 of the report has a hidden character in its name";
+    let mut finish = finish_of(&run, RunEnd::ReportUnreadable, Some(1));
+    finish.reason = Some(why.to_owned());
+    let unknown = runs::finish(&tx, &engine, &finish, 2_003).unwrap();
+    assert_eq!(unknown.state, RunState::Finished);
+    assert_eq!(unknown.verdict, Some(Verdict::Unknown));
+    assert_eq!(unknown.reason.as_deref(), Some(why));
+    assert_eq!(unknown.totals.total, 1);
+    assert!(!unknown.verdict.unwrap().satisfies());
+
+    let other = started(&tx, &engine, 2_004);
+    let mut broken = finish_of(&other, RunEnd::ReportUnreadable, None);
+    broken.reason = Some("two\nlines".to_owned());
+    assert_eq!(
+        refused(runs::finish(&tx, &engine, &broken, 2_005)),
+        codes::TEXT_LINE_BREAK
+    );
+    let mut completed = finish_of(&other, RunEnd::Completed, Some(0));
+    completed.reason = Some(why.to_owned());
+    assert_eq!(
+        refused(runs::finish(&tx, &engine, &completed, 2_006)),
+        run_codes::RUN_FINISH_INVALID
+    );
 }
