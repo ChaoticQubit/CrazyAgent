@@ -660,3 +660,53 @@ fn the_page_stands_for_its_place() {
     );
     assert_eq!(list.crumbs(), ["Fieldnotes Mobile", "Harnesses"]);
 }
+
+#[test]
+fn a_key_left_to_the_harness_default_reads_harness_default() {
+    let mut document = crate::harness_settings::tests::fixture_json();
+    document["keys"][1]["default"] = Value::Null;
+    let parsed = catalog::parse(&serde_json::to_vec(&document).unwrap());
+    assert!(
+        parsed.is_ok(),
+        "an unlocked key may leave its default to the harness"
+    );
+    let catalog = parsed.unwrap();
+    let key = catalog.key("model_reasoning_effort").unwrap();
+    assert_eq!(
+        kind_sentence(key),
+        "One of minimal, low, medium, high. Default: Harness default."
+    );
+    let empty = Stored::new();
+    let settings = catalog
+        .keys
+        .iter()
+        .map(|key| {
+            setting(
+                &catalog,
+                QUALIFIED,
+                &Layer::App,
+                &key.key,
+                &empty,
+                &empty,
+                0,
+            )
+        })
+        .collect();
+    let page = catalog_page(&catalog, QUALIFIED, None).unwrap();
+    let answer = HarnessRead {
+        name: page.name,
+        installed: page.installed,
+        qualified: page.qualified,
+        keys: page.keys,
+        settings,
+    };
+    let mut shell = opened(Scope::App, 80, 24, answer);
+    let shown = screen(&mut shell);
+    let effort = shown
+        .lines()
+        .find(|line| line.contains("Reasoning effort"))
+        .unwrap_or_default();
+    assert!(effort.contains("Harness default"), "{shown}");
+    assert!(!effort.contains("Not set"), "{shown}");
+    assert!(shown.contains("Sandbox"), "{shown}");
+}

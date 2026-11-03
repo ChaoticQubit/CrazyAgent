@@ -645,3 +645,65 @@ async fn outdated(root: std::path::PathBuf) -> Result<(), Box<dyn Error>> {
 async fn a_stored_value_the_catalog_in_force_refuses_loads_as_a_row_the_owner_can_reset() {
     with_engine("ca-desk-hso-", outdated).await;
 }
+
+async fn unset(root: std::path::PathBuf) -> Result<(), Box<dyn Error>> {
+    let mut json: Value = serde_json::from_slice(FIXTURE)?;
+    json["keys"][1]["default"] = Value::Null;
+    let parsed = catalog::parse(&serde_json::to_vec(&json)?);
+    assert!(
+        parsed.is_ok(),
+        "an unlocked key may leave its default to the harness"
+    );
+    let unset = parsed?;
+    let read = page_under(&root, &unset);
+    assert!(
+        read.is_ok(),
+        "a row left to the harness default reaches the window"
+    );
+    let page = read?;
+    let effort = row(&page, "model_reasoning_effort").clone();
+    assert_eq!(effort.access, Access::Editable);
+    assert_eq!(
+        (&effort.value, effort.source, &effort.default),
+        (&Value::Null, "default", &Value::Null)
+    );
+    assert_eq!((&effort.here, effort.here_valid), (&Value::Null, true));
+    assert_eq!(serde_json::to_value(&effort)?["default"], Value::Null);
+
+    let db = versioned::open(&root)?;
+    let key = "model_reasoning_effort";
+    let high = json!("high");
+    written(store::set(
+        &db,
+        &unset,
+        QUALIFIED,
+        &Scope::App,
+        key,
+        &high,
+        effort.version,
+    )?)?;
+    let set = page_under(&root, &unset)?;
+    let saved = row(&set, key).clone();
+    assert_eq!((&saved.value, saved.source), (&high, "app"));
+    written(store::reset(
+        &db,
+        &unset,
+        QUALIFIED,
+        &Scope::App,
+        key,
+        saved.version,
+    )?)?;
+    let after = page_under(&root, &unset)?;
+    let cleared = row(&after, key);
+    assert_eq!((&cleared.value, cleared.source), (&Value::Null, "default"));
+    assert!(after.keys.iter().all(|row| row.here_valid));
+    Ok(())
+}
+
+/// Q24: a key whose catalog default is null, left to the harness, loads as an editable row
+/// with no value and the default source; a value the owner saves applies, and a reset
+/// returns the row to the harness default.
+#[tokio::test]
+async fn a_key_left_to_the_harness_default_reaches_the_window_as_unset() {
+    with_engine("ca-desk-hsu-", unset).await;
+}
