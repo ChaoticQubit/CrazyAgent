@@ -4,7 +4,7 @@ use std::io::Cursor;
 use std::path::PathBuf;
 use std::time::Duration;
 use tempfile::TempDir;
-use trackwright_core::catalog::catalog;
+use trackwright_core::catalog::{catalog, op_schema};
 use trackwright_core::host::{
     Authority, CheckView, Evidence, EvidenceState, LinkKind, LinkState, Links, TicketView,
 };
@@ -312,9 +312,9 @@ fn tools_list_matches_the_catalog() {
             3,
             "a tool has a name, a description and a schema only"
         );
-        assert_eq!(tool["name"], spec.op.as_str());
+        assert_eq!(tool["name"], spec.kind.as_str());
         assert_eq!(tool["description"], spec.summary);
-        assert_eq!(tool["inputSchema"], spec.input_schema());
+        assert_eq!(tool["inputSchema"], op_schema(spec)["args"]);
         assert_eq!(tool["inputSchema"]["type"], "object");
     }
     for op in OpKind::ALL {

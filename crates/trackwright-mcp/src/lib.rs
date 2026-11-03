@@ -1,10 +1,10 @@
 use rusqlite::{Connection, Transaction, TransactionBehavior};
 use serde_json::{Map, Value, json};
 use std::io::{BufRead, ErrorKind, Write};
-use trackwright_core::catalog::{OpSpec, catalog};
-use trackwright_core::dispatch;
+use trackwright_core::catalog::{OpSpec, catalog, op_schema};
 use trackwright_core::host::Host;
 use trackwright_core::model::{Actor, REQUEST_BYTES_MAX, Refusal, codes};
+use trackwright_core::ops::dispatch;
 use trackwright_core::reply::Reply;
 use trackwright_core::requests::Request;
 
@@ -216,10 +216,10 @@ fn tools() -> Value {
 }
 
 fn tool(spec: &OpSpec) -> Value {
-    let schema = spec.input_schema();
+    let schema = op_schema(spec)["args"].clone();
     assert_eq!(schema["type"], "object", "an MCP tool's input is an object");
     assert!(!spec.summary.is_empty(), "every op says what it does");
-    json!({"name": spec.op.as_str(), "description": spec.summary, "inputSchema": schema})
+    json!({"name": spec.kind.as_str(), "description": spec.summary, "inputSchema": schema})
 }
 
 type Called = Result<Value, &'static str>;
@@ -231,7 +231,7 @@ fn call<H: Host>(params: Option<&Value>, session: &Session<H>) -> std::io::Resul
     let Some(name) = params.get("name").and_then(Value::as_str) else {
         return Ok(Err("tools/call takes the tool's name"));
     };
-    let Some(spec) = catalog().iter().find(|spec| spec.op.as_str() == name) else {
+    let Some(spec) = catalog().iter().find(|spec| spec.kind.as_str() == name) else {
         return Ok(Err("Unknown tool"));
     };
     let empty = Value::Object(Map::new());
@@ -241,14 +241,14 @@ fn call<H: Host>(params: Option<&Value>, session: &Session<H>) -> std::io::Resul
     }
     let input = serde_json::to_vec(arguments).expect("a parsed JSON value serializes");
     let reply = run(session, spec, &input)?;
-    let text = reply.to_json();
+    let text = reply.json();
     assert!(text.starts_with('{'), "the envelope is a JSON object");
     let result = json!({"content": [{"type": "text", "text": text}], "isError": !reply.is_ok()});
     Ok(Ok(result))
 }
 
 fn run<H: Host>(session: &Session<H>, spec: &OpSpec, input: &[u8]) -> std::io::Result<Reply> {
-    let request = match Request::parse(spec.op.as_str(), input) {
+    let request = match Request::parse(spec.kind.as_str(), input) {
         Ok(request) => request,
         Err(refusal) => return Ok(Reply::from(refusal)),
     };
@@ -256,7 +256,7 @@ fn run<H: Host>(session: &Session<H>, spec: &OpSpec, input: &[u8]) -> std::io::R
         session.connection.is_autocommit(),
         "no call starts inside another"
     );
-    let behavior = if spec.op.is_write() {
+    let behavior = if spec.kind.is_write() {
         TransactionBehavior::Immediate
     } else {
         TransactionBehavior::Deferred
