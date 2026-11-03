@@ -10,7 +10,7 @@ use crate::reply::{
 };
 use crate::requests::{self, Args, Remembered, Request};
 use crate::store::{self, NewTicket, StoreError, TicketChange};
-use crate::{plan, ready};
+use crate::{criteria, export, import, plan, ready};
 use rusqlite::{Transaction, params};
 use serde_json::{Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -330,24 +330,43 @@ fn handle<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
         OpKind::CycleClose => plan::cycle_close(cx),
         OpKind::Link => link(cx),
         OpKind::Unlink => unlink(cx),
-        OpKind::PolicyGet
-        | OpKind::CriterionAdd
-        | OpKind::CriterionEdit
-        | OpKind::CheckAdd
-        | OpKind::EvidenceRecord
-        | OpKind::CriterionSet
-        | OpKind::Close
-        | OpKind::Reopen
-        | OpKind::PolicySet => unavailable(cx),
-        OpKind::Export | OpKind::ImportPreview | OpKind::ImportApply => unavailable(cx),
+        OpKind::PolicyGet => policy::policy_get(cx),
+        OpKind::CriterionAdd => criteria::criterion_add(cx),
+        OpKind::CriterionEdit => criteria::criterion_edit(cx),
+        OpKind::CheckAdd => criteria::check_add(cx),
+        OpKind::EvidenceRecord => criteria::evidence_record(cx),
+        OpKind::CriterionSet => criteria::criterion_set(cx),
+        OpKind::Close => policy::close_ticket(cx),
+        OpKind::Reopen => policy::reopen_ticket(cx),
+        OpKind::PolicySet => policy::policy_set(cx),
+        OpKind::Export => export::export(cx),
+        OpKind::ImportPreview => import::import_preview(cx),
+        OpKind::ImportApply => import::import_apply(cx),
     }
 }
 
-fn unavailable<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
-    Err(Failure::new(
-        codes::OP_UNAVAILABLE,
-        format!("{} is not available in this tracker build", cx.kind),
-    ))
+/// Keeps reply data that has no pages within the caller's reply budget. Inputs: the
+/// context, the data, the code of the refusal and what the caller does instead. Output: the
+/// data, or the refusal naming its size.
+pub(crate) fn whole<H: Host>(
+    cx: &Cx<'_, '_, H>,
+    data: Value,
+    code: &'static str,
+    instead: &str,
+) -> Result<Value, Failure> {
+    assert!(data.is_object());
+    assert!(!instead.is_empty());
+    let bytes = data.to_string().len();
+    if bytes > cx.data_bytes_max {
+        return Err(Failure::new(
+            code,
+            format!(
+                "{} data is {bytes} bytes, more than the {} one reply holds; {instead}",
+                cx.kind, cx.data_bytes_max
+            ),
+        ));
+    }
+    Ok(data)
 }
 
 fn clock_ms() -> i64 {

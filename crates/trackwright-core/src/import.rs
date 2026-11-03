@@ -1,15 +1,17 @@
 use crate::events::{self, Recorded};
-use crate::host::{Authority, Paths};
+use crate::host::{Authority, Host, Paths};
 use crate::model::{
     Actor, OPEN_TICKETS_CREATED_PER_ACTOR_MAX, OpKind, Priority, ProjectKey, ReleaseVersion,
     Ticket, TicketKind, TicketStatus, VERSIONS_PER_PROJECT_MAX, VersionStatus, codes,
 };
-use crate::ops;
+use crate::ops::{self, Cx, Failure};
+use crate::plan;
 use crate::policy;
 use crate::store::{self, NewTicket, StoreError};
 use crate::text::{self, TextField};
 use rusqlite::{OptionalExtension, Row, Transaction, params};
 use serde::Serialize;
+use serde_json::json;
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::fs;
@@ -994,4 +996,60 @@ fn failed(error: &std::io::Error) -> StoreError {
         codes::STORE_FAILED,
         format!("the import file cannot be read: {}", error.kind()),
     )
+}
+
+/// Runs `import_preview` for dispatch. A preview longer than one reply is refused; the
+/// file is split, or previewed with a larger reply bound. Input: the context. Output: the
+/// preview's items and unparsed parts.
+pub(crate) fn import_preview<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Failure> {
+    let requested = Path::new(cx.args.need::<&str>("path"));
+    let found = preview(cx.tx, cx.host, cx.actor, cx.project(), requested)?;
+    assert!(found.items.len() <= IMPORT_ITEMS_MAX);
+    let data = serde_json::to_value(&found).expect("a preview is plain data");
+    Ok(ops::Outcome {
+        data: ops::whole(
+            cx,
+            data,
+            codes::IMPORT_TOO_LARGE,
+            "split the file, or ask with a larger reply bound",
+        )?,
+        next: Vec::new(),
+        cursor: None,
+    })
+}
+
+/// Runs `import_apply` for dispatch. Input: the context. Output: the versions added or
+/// changed and the ids of the tickets created, in file order; a reply longer than one page
+/// refuses the apply, which then writes nothing.
+pub(crate) fn import_apply<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Failure> {
+    let requested = Path::new(cx.args.need::<&str>("path"));
+    let accept = cx.args.need::<&[String]>("accept");
+    let applied = apply(
+        cx.tx,
+        cx.host,
+        cx.actor,
+        cx.project(),
+        requested,
+        accept,
+        cx.at_ms,
+    )?;
+    assert!(applied.versions.len() + applied.tickets.len() <= accept.len());
+    let tickets: Vec<String> = applied
+        .tickets
+        .iter()
+        .map(|ticket| ticket.short_id.to_string())
+        .collect();
+    let versions: Vec<serde_json::Value> =
+        applied.versions.iter().map(plan::version_json).collect();
+    let data = json!({"versions": versions, "tickets": tickets});
+    Ok(ops::Outcome {
+        data: ops::whole(
+            cx,
+            data,
+            codes::IMPORT_TOO_LARGE,
+            "accept fewer items in one apply",
+        )?,
+        next: Vec::new(),
+        cursor: None,
+    })
 }

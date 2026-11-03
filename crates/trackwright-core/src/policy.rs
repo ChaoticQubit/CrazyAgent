@@ -1,9 +1,10 @@
 use crate::events::{self, Recorded};
-use crate::host::{Authority, TicketView};
+use crate::host::{Authority, Host, TicketView};
 use crate::model::{
     Actor, AgentEditPolicy, ClosePolicy, CreatePolicy, CycleDays, ImportPolicy, OpKind, Policy,
     PolicyKey, ProjectKey, Refusal, RolloverPolicy, ShortId, Ticket, TicketStatus, codes,
 };
+use crate::ops::{self, Cx, Failure};
 use crate::store::{self, StoreError, TicketChange};
 use rusqlite::{Transaction, params};
 use serde::Serialize;
@@ -504,4 +505,102 @@ fn invalid(setting: PolicyKey) -> StoreError {
         codes::POLICY_VALUE_INVALID,
         format!("{setting} takes one of {}{custom}", offered.join(", ")),
     )
+}
+
+/// One policy setting as a reply shows it. Input: the setting. Output: its key, value,
+/// proposed default, options, custom range (null when none) and stored version.
+fn setting_json(setting: &Setting) -> Value {
+    assert!(setting.options.len() >= 2);
+    json!({
+        "key": setting.key.as_str(),
+        "value": setting.value,
+        "default": setting.default,
+        "options": setting.options,
+        "custom": setting.custom.map(|range| json!({"min": range.min, "max": range.max})),
+        "version": setting.version,
+    })
+}
+
+/// Runs `policy_get` for dispatch. Input: the context. Output: the project and every
+/// setting of its policy, in key order.
+pub(crate) fn policy_get<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Failure> {
+    let settings = describe(cx.tx, cx.project())?;
+    assert_eq!(settings.len(), PolicyKey::ALL.len());
+    let shown: Vec<Value> = settings.iter().map(setting_json).collect();
+    Ok(ops::Outcome {
+        data: json!({"project": cx.project().as_str(), "settings": shown}),
+        next: Vec::new(),
+        cursor: None,
+    })
+}
+
+/// Runs `policy_set` for dispatch; a key never set is at version 0, so `version` may be
+/// left out until it was set once. Input: the context. Output: the setting as stored.
+pub(crate) fn policy_set<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Failure> {
+    let setting = cx.args.need::<PolicyKey>("key");
+    let value = cx.args.need::<&str>("value");
+    let version = cx.args.get::<i64>("version").unwrap_or(0);
+    set(
+        cx.tx,
+        cx.host,
+        cx.actor,
+        cx.project(),
+        setting,
+        value,
+        version,
+        cx.at_ms,
+    )?;
+    let stored = describe(cx.tx, cx.project())?
+        .into_iter()
+        .find(|entry| entry.key == setting)
+        .expect("describe lists every policy key");
+    assert!(stored.version >= version);
+    Ok(ops::Outcome {
+        data: json!({"setting": setting_json(&stored)}),
+        next: Vec::new(),
+        cursor: None,
+    })
+}
+
+/// Runs `close` for dispatch: done when no status is named. Input: the context. Output:
+/// the ticket as closed.
+pub(crate) fn close_ticket<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Failure> {
+    let status = cx
+        .args
+        .get::<TicketStatus>("status")
+        .unwrap_or(TicketStatus::Done);
+    let closed = close(
+        cx.tx,
+        cx.host,
+        cx.actor,
+        &cx.ticket().short_id,
+        cx.args.need::<i64>("version"),
+        status,
+        cx.args.get::<&str>("reason"),
+        cx.at_ms,
+    )?;
+    assert_eq!(closed.status, status);
+    assert!(closed.status.is_closed());
+    ops::written(cx, &closed)
+}
+
+/// Runs `reopen` for dispatch: todo when no status is named. Input: the context. Output:
+/// the ticket as reopened.
+pub(crate) fn reopen_ticket<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Failure> {
+    let status = cx
+        .args
+        .get::<TicketStatus>("status")
+        .unwrap_or(TicketStatus::Todo);
+    let reopened = reopen(
+        cx.tx,
+        cx.host,
+        cx.actor,
+        &cx.ticket().short_id,
+        cx.args.need::<i64>("version"),
+        status,
+        cx.at_ms,
+    )?;
+    assert_eq!(reopened.status, status);
+    assert!(!reopened.status.is_closed());
+    ops::written(cx, &reopened)
 }

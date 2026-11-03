@@ -5,10 +5,12 @@ use crate::model::{
     Criterion, CriterionState, Evidence, EvidenceResult, OpKind, ShortId, TICKETS_PER_PROJECT_MAX,
     Ticket, TicketStatus, codes,
 };
+use crate::ops::{self, Cx, Failure};
 use crate::policy::{self, Role};
 use crate::store::{self, StoreError, TicketChange};
 use crate::text::{self, CLOSE_REASON_BYTES_MAX, TextField};
 use rusqlite::{OptionalExtension, Row, Transaction, params};
+use serde_json::{Value, json};
 
 pub(crate) const CRITERIA_OF_TICKET: &str = "SELECT id, ticket, position, text, state, version \
      FROM tk_criteria WHERE ticket = ?1 ORDER BY position";
@@ -695,4 +697,139 @@ fn evidence_row(row: &Row<'_>) -> rusqlite::Result<Evidence> {
         recorded_by: store::actor(row, 4)?,
         recorded_ms: row.get(5)?,
     })
+}
+
+/// One criterion as a reply shows it, as `show` lists it without its checks. Input: the
+/// criterion. Output: its position, text, state and row version.
+fn criterion_json(criterion: &Criterion) -> Value {
+    assert!(criterion.position >= 1);
+    json!({
+        "position": criterion.position,
+        "text": criterion.text,
+        "state": criterion.state.as_str(),
+        "version": criterion.version,
+    })
+}
+
+/// The criterion position a request names, which the catalog bounds from 1. Input: the
+/// context. Output: the position.
+fn position<H: Host>(cx: &Cx<'_, '_, H>) -> u32 {
+    let position = cx.args.need::<i64>("position");
+    let position = u32::try_from(position).expect("the catalog bounds a position");
+    assert!((1..=CRITERIA_PER_TICKET_MAX as u32).contains(&position));
+    position
+}
+
+/// The reply to a write on a criterion: the data and the next actions of its ticket as it
+/// stands after the write. Inputs: the context and the data. Output: the outcome.
+fn criterion_written<H: Host>(cx: &Cx<'_, '_, H>, data: Value) -> Result<ops::Outcome, Failure> {
+    assert!(data.is_object());
+    let ticket = store::ticket(cx.tx, &cx.ticket().short_id)?;
+    assert_eq!(ticket.id, cx.ticket().id);
+    Ok(ops::Outcome {
+        data,
+        next: ops::ticket_next(cx.tx, &ticket)?,
+        cursor: None,
+    })
+}
+
+/// Runs `criterion_add` for dispatch. Input: the context. Output: the ticket's id and the
+/// new criterion.
+pub(crate) fn criterion_add<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Failure> {
+    let id = &cx.ticket().short_id;
+    let text = cx.args.need::<&str>("text");
+    let added = add_criterion(cx.tx, cx.host, cx.actor, id, text, cx.at_ms)?;
+    assert_eq!(added.ticket, cx.ticket().id);
+    assert_eq!(added.text, text);
+    criterion_written(
+        cx,
+        json!({"id": id.to_string(), "criterion": criterion_json(&added)}),
+    )
+}
+
+/// Runs `criterion_edit` for dispatch. Input: the context. Output: the ticket's id and the
+/// criterion as rewritten.
+pub(crate) fn criterion_edit<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Failure> {
+    let id = &cx.ticket().short_id;
+    let (at, version) = (position(cx), cx.args.need::<i64>("version"));
+    let text = cx.args.need::<&str>("text");
+    let edited = edit_criterion(cx.tx, cx.host, cx.actor, id, at, version, text, cx.at_ms)?;
+    assert_eq!(edited.position, at);
+    assert!(edited.version >= version);
+    criterion_written(
+        cx,
+        json!({"id": id.to_string(), "criterion": criterion_json(&edited)}),
+    )
+}
+
+/// Runs `check_add` for dispatch. Input: the context. Output: the ticket's id, the
+/// criterion's position and the new check.
+pub(crate) fn check_add<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Failure> {
+    let id = &cx.ticket().short_id;
+    let at = position(cx);
+    let kind = cx.args.need::<CheckKind>("kind");
+    let reference = cx.args.need::<&str>("ref");
+    let check = add_check(cx.tx, cx.host, cx.actor, id, at, kind, reference, cx.at_ms)?;
+    assert_eq!(check.kind, kind);
+    assert_eq!(check.reference, reference);
+    criterion_written(
+        cx,
+        json!({
+            "id": id.to_string(),
+            "position": at,
+            "check": {"kind": check.kind.as_str(), "ref": check.reference},
+        }),
+    )
+}
+
+/// Runs `evidence_record` for dispatch. Input: the context. Output: the ticket's id, the
+/// criterion's position, the evidence, and the criterion and ticket after it.
+pub(crate) fn evidence_record<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Failure> {
+    let id = &cx.ticket().short_id;
+    let new = NewEvidence {
+        ticket: id.clone(),
+        criterion: position(cx),
+        kind: cx.args.need::<CheckKind>("kind"),
+        check: cx.args.need::<&str>("ref").to_owned(),
+        result: cx.args.need::<EvidenceResult>("result"),
+        reference: cx.args.get::<&str>("evidence").map(str::to_owned),
+    };
+    let (evidence, outcome) = record_evidence(cx.tx, cx.host, cx.actor, &new, cx.at_ms)?;
+    assert_eq!(evidence.result, new.result);
+    assert_eq!(outcome.criterion.position, new.criterion);
+    criterion_written(
+        cx,
+        json!({
+            "id": id.to_string(),
+            "position": new.criterion,
+            "evidence": {
+                "result": evidence.result.as_str(),
+                "evidence": evidence.reference,
+                "by": evidence.recorded_by.as_str(),
+                "at_ms": evidence.recorded_ms,
+            },
+            "criterion": criterion_json(&outcome.criterion),
+            "ticket": ops::ticket_json(cx.tx, &outcome.ticket)?,
+        }),
+    )
+}
+
+/// Runs `criterion_set` for dispatch. Input: the context. Output: the ticket's id, the
+/// criterion's position, and the criterion and ticket after it.
+pub(crate) fn criterion_set<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Failure> {
+    let id = &cx.ticket().short_id;
+    let (at, version) = (position(cx), cx.args.need::<i64>("version"));
+    let state = cx.args.need::<CriterionState>("state");
+    let outcome = set_criterion(cx.tx, cx.host, cx.actor, id, at, version, state, cx.at_ms)?;
+    assert_eq!(outcome.criterion.position, at);
+    assert_eq!(outcome.ticket.id, cx.ticket().id);
+    criterion_written(
+        cx,
+        json!({
+            "id": id.to_string(),
+            "position": at,
+            "criterion": criterion_json(&outcome.criterion),
+            "ticket": ops::ticket_json(cx.tx, &outcome.ticket)?,
+        }),
+    )
 }
