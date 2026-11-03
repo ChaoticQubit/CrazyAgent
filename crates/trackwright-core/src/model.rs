@@ -28,6 +28,140 @@ pub mod codes {
     pub const STORE_NOT_PRIVATE: &str = "store_not_private";
     pub const STORE_SCHEMA_NEWER: &str = "store_schema_newer";
     pub const STORE_FAILED: &str = "store_failed";
+    pub const UNKNOWN_OP: &str = "unknown_op";
+    pub const ARGS_INVALID: &str = "args_invalid";
+    pub const UNKNOWN_FIELD: &str = "unknown_field";
+    pub const MISSING_FIELD: &str = "missing_field";
+    pub const FIELD_INVALID: &str = "field_invalid";
+    pub const REQUEST_TOO_LARGE: &str = "request_too_large";
+    pub const REQUEST_ID_REUSED: &str = "request_id_reused";
+    pub const CURSOR_INVALID: &str = "cursor_invalid";
+    pub const OP_UNAVAILABLE: &str = "op_unavailable";
+    pub const USE_CLOSE: &str = "use_close";
+    pub const RATE_LIMITED: &str = "rate_limited";
+    pub const OPEN_TICKETS_FULL: &str = "open_tickets_full";
+
+    pub const TICKET_CLOSED: &str = "ticket_closed";
+    pub const TICKET_OPEN: &str = "ticket_open";
+    pub const STATUS_INVALID: &str = "status_invalid";
+    pub const CLOSE_NEEDS_EVIDENCE: &str = "close_needs_evidence";
+    pub const CLOSE_OWNER_ONLY: &str = "close_owner_only";
+    pub const CREATE_OWNER_ONLY: &str = "create_owner_only";
+    pub const AGENT_EDIT_REFUSED: &str = "agent_edit_refused";
+    pub const OWNER_ONLY: &str = "owner_only";
+    pub const POLICY_VALUE_INVALID: &str = "policy_value_invalid";
+    pub const CRITERION_HAS_CHECKS: &str = "criterion_has_checks";
+    pub const CHECKS_FULL: &str = "checks_full";
+    pub const CHECK_EXISTS: &str = "check_exists";
+    pub const CHECK_UNKNOWN: &str = "check_unknown";
+    pub const LINK_KIND_UNKNOWN: &str = "link_kind_unknown";
+    pub const NOTIFY_TOO_WIDE: &str = "notify_too_wide";
+    pub const CRITERION_NEEDS_CHECK: &str = "criterion_needs_check";
+    pub const EVIDENCE_NOT_FOR_AGENTS: &str = "evidence_not_for_agents";
+    pub const EXPORT_PATH_REFUSED: &str = "export_path_refused";
+    pub const EXPORT_TOO_LARGE: &str = "export_too_large";
+    pub const IMPORT_PATH_REFUSED: &str = "import_path_refused";
+    pub const IMPORT_TOO_LARGE: &str = "import_too_large";
+    pub const IMPORT_NOT_TEXT: &str = "import_not_text";
+    pub const IMPORT_FORMAT_UNKNOWN: &str = "import_format_unknown";
+    pub const IMPORT_ITEM_UNKNOWN: &str = "import_item_unknown";
+    pub const IMPORT_ITEM_NEEDS_VERSION: &str = "import_item_needs_version";
+    pub const IMPORT_KEYS_COLLIDE: &str = "import_keys_collide";
+    pub const VERSIONS_FULL: &str = "versions_full";
+    pub const ALREADY_CLAIMED: &str = "already_claimed";
+    pub const NOT_CLAIMANT: &str = "not_claimant";
+    pub const DEPENDENCY_INVALID: &str = "dependency_invalid";
+    pub const DEPENDENCY_EXISTS: &str = "dependency_exists";
+    pub const DEPENDENCY_UNKNOWN: &str = "dependency_unknown";
+    pub const DEPENDENCY_CYCLE: &str = "dependency_cycle";
+    pub const DEPENDENCIES_FULL: &str = "dependencies_full";
+    pub const PARENT_INVALID: &str = "parent_invalid";
+    pub const VERSION_UNKNOWN: &str = "version_unknown";
+    pub const CYCLE_UNKNOWN: &str = "cycle_unknown";
+    pub const CYCLE_CLOSED: &str = "cycle_closed";
+    pub const CYCLES_FULL: &str = "cycles_full";
+    pub const CYCLE_OVERLAPS: &str = "cycle_overlaps";
+
+    /// Every code above, so a host can map each core refusal to its own vocabulary.
+    pub const ALL: &[&str] = &[
+        TEXT_EMPTY,
+        TEXT_TOO_LONG,
+        TEXT_LINE_BREAK,
+        TEXT_HIDDEN_CHARACTERS,
+        PROJECT_KEY_INVALID,
+        PROJECT_EXISTS,
+        PROJECT_UNKNOWN,
+        SHORT_ID_INVALID,
+        TICKET_UNKNOWN,
+        ACTOR_INVALID,
+        PRIORITY_INVALID,
+        CYCLE_DAYS_INVALID,
+        STALE_VERSION,
+        STATUS_CLOSED_AT_CREATE,
+        CLOSE_REASON_OPEN,
+        TICKETS_FULL,
+        CRITERIA_FULL,
+        CRITERION_UNKNOWN,
+        LINKS_FULL,
+        LINK_EXISTS,
+        LINK_UNKNOWN,
+        STORE_PATH_REFUSED,
+        STORE_NOT_PRIVATE,
+        STORE_SCHEMA_NEWER,
+        STORE_FAILED,
+        UNKNOWN_OP,
+        ARGS_INVALID,
+        UNKNOWN_FIELD,
+        MISSING_FIELD,
+        FIELD_INVALID,
+        REQUEST_TOO_LARGE,
+        REQUEST_ID_REUSED,
+        CURSOR_INVALID,
+        OP_UNAVAILABLE,
+        USE_CLOSE,
+        RATE_LIMITED,
+        OPEN_TICKETS_FULL,
+        TICKET_CLOSED,
+        TICKET_OPEN,
+        STATUS_INVALID,
+        CLOSE_NEEDS_EVIDENCE,
+        CLOSE_OWNER_ONLY,
+        CREATE_OWNER_ONLY,
+        AGENT_EDIT_REFUSED,
+        OWNER_ONLY,
+        POLICY_VALUE_INVALID,
+        CRITERION_HAS_CHECKS,
+        CHECKS_FULL,
+        CHECK_EXISTS,
+        CHECK_UNKNOWN,
+        LINK_KIND_UNKNOWN,
+        NOTIFY_TOO_WIDE,
+        CRITERION_NEEDS_CHECK,
+        EVIDENCE_NOT_FOR_AGENTS,
+        EXPORT_PATH_REFUSED,
+        EXPORT_TOO_LARGE,
+        IMPORT_PATH_REFUSED,
+        IMPORT_TOO_LARGE,
+        IMPORT_NOT_TEXT,
+        IMPORT_FORMAT_UNKNOWN,
+        IMPORT_ITEM_UNKNOWN,
+        IMPORT_ITEM_NEEDS_VERSION,
+        IMPORT_KEYS_COLLIDE,
+        VERSIONS_FULL,
+        ALREADY_CLAIMED,
+        NOT_CLAIMANT,
+        DEPENDENCY_INVALID,
+        DEPENDENCY_EXISTS,
+        DEPENDENCY_UNKNOWN,
+        DEPENDENCY_CYCLE,
+        DEPENDENCIES_FULL,
+        PARENT_INVALID,
+        VERSION_UNKNOWN,
+        CYCLE_UNKNOWN,
+        CYCLE_CLOSED,
+        CYCLES_FULL,
+        CYCLE_OVERLAPS,
+    ];
 }
 
 pub const ACTOR_BYTES_MAX: usize = 128;
@@ -42,6 +176,7 @@ pub const WRITES_PER_ACTOR_MINUTE_MAX: usize = 30;
 pub const OPEN_TICKETS_CREATED_PER_ACTOR_MAX: usize = 50;
 pub const REQUEST_BYTES_MAX: usize = 16 * 1024;
 pub const REQUEST_ID_BYTES_MAX: usize = 64;
+pub const HOST_CODE_BYTES_MAX: usize = 64;
 
 /// A plain refusal the core, a host or a caller acts on. Fields: a stable code from a fixed
 /// vocabulary (`codes` for the core's own), and one line saying why, safe to show an agent.
@@ -52,8 +187,38 @@ pub struct Refusal {
 }
 
 impl Refusal {
-    /// Builds a refusal. Inputs: the code and the message. Output: the refusal.
+    /// Builds one of the core's own refusals. Inputs: a code from `codes::ALL` and the
+    /// message. Output: the refusal. A code outside the core vocabulary panics; a host
+    /// refusal goes through `Refusal::host`.
     pub fn new(code: &'static str, message: impl Into<String>) -> Self {
+        assert!(
+            codes::ALL.contains(&code),
+            "{code:?} is not a core code; a host refusal uses Refusal::host"
+        );
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    /// Builds a host's refusal. Inputs: the host's code, 1 to `HOST_CODE_BYTES_MAX` bytes of
+    /// lowercase ASCII letters and underscores and never a core code, and the message.
+    /// Output: the refusal. A code of another shape panics.
+    pub fn host(code: &'static str, message: impl Into<String>) -> Self {
+        assert!(!code.is_empty(), "a host code is not empty");
+        assert!(
+            code.len() <= HOST_CODE_BYTES_MAX,
+            "host code {code:?} is over {HOST_CODE_BYTES_MAX} bytes"
+        );
+        assert!(
+            code.bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_'),
+            "host code {code:?} is lowercase ASCII letters and underscores"
+        );
+        assert!(
+            !codes::ALL.contains(&code),
+            "{code:?} is a core code; a host names its own"
+        );
         Self {
             code,
             message: message.into(),
@@ -248,6 +413,7 @@ impl OpKind {
                 | OpKind::Roadmap
                 | OpKind::PolicyGet
                 | OpKind::Export
+                | OpKind::ImportPreview
                 | OpKind::Schema
         )
     }
