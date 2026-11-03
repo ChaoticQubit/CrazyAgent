@@ -23,7 +23,9 @@ pub(crate) fn fixture(harness: &str) -> Catalog {
     catalog::parse(fixture_text(harness).as_bytes()).unwrap()
 }
 
-fn fixture_json() -> Value {
+/// Reads the fixture Codex catalog as JSON, so a test can build a later catalog from it.
+/// Output: the document.
+pub(crate) fn fixture_json() -> Value {
     serde_json::from_str(CODEX).unwrap()
 }
 
@@ -55,7 +57,9 @@ fn the_fixture_catalog_parses_in_its_own_order() {
         locked.reason,
         "CrazyAgent runs every agent in its own sandbox."
     );
-    assert_eq!(locked.engine_value, json!("workspace-write"));
+    assert_eq!(locked.engine_value, Value::Null);
+    let docs = catalog.key("project_doc_max_bytes").unwrap();
+    assert_eq!(docs.locked.as_ref().unwrap().engine_value, json!(0));
     assert!(qualified(&catalog, Some("0.51.0")));
     assert!(!qualified(&catalog, Some("0.50")));
     assert!(!qualified(&catalog, None));
@@ -152,6 +156,13 @@ fn a_catalog_that_breaks_the_contract_is_refused() {
             Box::new(|c| c["keys"][0]["apply"] = json!("claude_settings")),
         ),
         (
+            "an engine value on a key no launch writes",
+            Box::new(|c| {
+                c["keys"][0]["apply"] = json!("arg");
+                c["keys"][0]["locked"] = json!({"reason": "Fixture.", "engine_value": false});
+            }),
+        ),
+        (
             "a key inside another key",
             Box::new(|c| c["keys"][3]["key"] = json!("hide_agent_reasoning.label")),
         ),
@@ -195,6 +206,19 @@ fn every_built_in_catalog_parses_for_its_own_harness() {
     for (harness, _) in catalog::BUILTIN {
         let parsed = catalog::builtin(harness).unwrap().unwrap();
         assert_eq!(parsed.harness, *harness);
+        let reserved: &[&str] = match *harness {
+            "codex" => &crate::harnesses::launch::CODEX_ENGINE_KEYS,
+            "claude-code" => &crate::harnesses::launch::CLAUDE_ENGINE_KEYS,
+            _ => &[],
+        };
+        for key in parsed.keys.iter().filter(|key| key.locked.is_none()) {
+            let taken = reserved.iter().any(|name| {
+                key.key == *name
+                    || key.key.starts_with(&format!("{name}."))
+                    || name.starts_with(&format!("{}.", key.key))
+            });
+            assert!(!taken, "{harness} lists {} unlocked", key.key);
+        }
     }
     assert!(catalog::builtin("codex-not-a-harness").unwrap().is_none());
 }
@@ -354,51 +378,76 @@ fn a_real_executable_reports_its_version_within_the_limit() {
 
 #[cfg(unix)]
 #[test]
-fn a_verified_executable_is_asked_for_its_version_once_per_content() {
+fn an_executable_file_is_asked_for_its_version_once() {
     use std::os::unix::fs::PermissionsExt;
     let tmp = tempfile::tempdir().unwrap();
-    let base = tmp.path().canonicalize().unwrap();
-    let count = base.join("asked");
-    let executable = base.join("codex");
+    let path = tmp.path().join("tool");
+    let count = tmp.path().join("tool.count");
     let write = |body: &str| {
-        std::fs::write(&executable, format!("#!/bin/sh\n{body}\n")).unwrap();
-        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(
+            &path,
+            format!("#!/bin/sh\necho asked >> \"$0.count\"\n{body}\n"),
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
     };
-    let asked = || {
-        std::fs::read_to_string(&count)
-            .map(|text| text.lines().count())
-            .unwrap_or(0)
-    };
-    let digest = |name: &str| format!("{}-{name}", base.display());
+    let asked = || std::fs::read_to_string(&count).unwrap().lines().count();
     let limit = Duration::from_secs(20);
-    write(&format!(
-        "echo x >> '{}'; echo \"codex-cli 0.50.0\"",
-        count.display()
-    ));
+    write("echo \"tool 3.4.5\"");
     for _ in 0..3 {
         assert_eq!(
-            installed::version_of_digest(&executable, &digest("one"), limit).as_deref(),
-            Some("0.50.0")
+            installed::version_cached(&path, limit).as_deref(),
+            Some("3.4.5")
         );
     }
     assert_eq!(asked(), 1);
+    write("echo \"tool 3.4.10\"");
     assert_eq!(
-        installed::version_of_digest(&executable, &digest("two"), limit).as_deref(),
-        Some("0.50.0")
+        installed::version_cached(&path, limit).as_deref(),
+        Some("3.4.10")
+    );
+    assert_eq!(
+        installed::version_cached(&path, limit).as_deref(),
+        Some("3.4.10")
     );
     assert_eq!(asked(), 2);
-    write(&format!("echo x >> '{}'; exit 3", count.display()));
+    write("echo \"tool 3.4.11\"; exit 3");
+    assert_eq!(installed::version_cached(&path, limit), None);
+    assert_eq!(installed::version_cached(&path, limit), None);
+    assert_eq!(asked(), 4);
     assert_eq!(
-        installed::version_of_digest(&executable, &digest("three"), limit),
+        installed::version_cached(&tmp.path().join("missing"), limit),
         None
     );
-    write(&format!(
-        "echo x >> '{}'; echo \"codex-cli 0.51.0\"",
-        count.display()
-    ));
-    assert_eq!(
-        installed::version_of_digest(&executable, &digest("three"), limit).as_deref(),
-        Some("0.51.0")
-    );
-    assert_eq!(asked(), 4);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_probe_past_its_limit_leaves_no_process_behind() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("hangs");
+    std::fs::write(
+        &path,
+        "#!/bin/sh\n/bin/sleep 30 &\necho $! > \"$0.child\"\nexec /bin/sleep 30\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let started = std::time::Instant::now();
+    assert_eq!(installed::version_of(&path, Duration::from_secs(2)), None);
+    assert!(started.elapsed() < Duration::from_secs(10));
+    let child: i32 = std::fs::read_to_string(tmp.path().join("hangs.child"))
+        .expect("the probe was stopped before it started its own child")
+        .trim()
+        .parse()
+        .unwrap();
+    let child = rustix::process::Pid::from_raw(child).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while rustix::process::test_kill_process(child).is_ok() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the probe's own child still runs after the probe was stopped"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }

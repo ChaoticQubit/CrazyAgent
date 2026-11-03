@@ -354,7 +354,12 @@ fn codex(
         ])
         .collect();
     let owner = installed.map_or_else(Vec::new, |installed| {
-        apply::codex_lines(&engine, &CODEX_ENGINE_KEYS, installed.harness_settings())
+        let set: Vec<String> = engine
+            .iter()
+            .cloned()
+            .chain(crate::launch_context::CODEX_CONFIG_FIXED.map(str::to_owned))
+            .collect();
+        apply::codex_lines(&set, &CODEX_ENGINE_KEYS, installed.harness_settings())
     });
     let mut arguments = Vec::new();
     for setting in owner.into_iter().chain(engine) {

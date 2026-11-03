@@ -94,10 +94,39 @@ impl OwnerRuntimeHandle {
         allocate_master_capture(&self.authority.root)
     }
 
+    /// Reads the owner's harness settings one master turn applies on a blocking thread, so
+    /// the store read and a first version probe never hold the async runtime. Input: the
+    /// prepared turn. Output: the settings, none for an rcli master, or a
+    /// `HARNESS_SETTINGS_CODES` refusal.
+    pub(super) async fn master_settings(
+        &self,
+        prepared: &PreparedMasterTurn,
+    ) -> Result<crate::harness_settings::apply::Applied, EngineError> {
+        let (harness, executable) = match prepared.session.selection.backend {
+            MasterBackend::Codex => ("codex", self.registered_codex_executable()?),
+            MasterBackend::Claude => ("claude-code", self.registered_claude_executable()?),
+            MasterBackend::Rcli => return Ok(Default::default()),
+        };
+        let executable = executable.verified_path()?.to_path_buf();
+        let root = super::changes::engine_root(&self.authority)?;
+        let project = prepared.session.project_id.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::harness_settings::apply::for_launch(
+                &crate::storage::versioned::open(&root)?,
+                harness,
+                &executable,
+                Some(&project),
+            )
+        })
+        .await
+        .map_err(|_| failure("harness_settings_unavailable"))?
+    }
+
     pub(super) fn prepare_master_host(
         &self,
         prepared: &PreparedMasterTurn,
         profile: &NativeProfileUse,
+        settings: crate::harness_settings::apply::Applied,
     ) -> Result<MasterHostLaunch, EngineError> {
         validate_master_binding(prepared)?;
         let binding = prepared.profile.binding();
@@ -141,13 +170,13 @@ impl OwnerRuntimeHandle {
         let process = crate::agent_home::text(&prepared.agent_project)
             .map_err(|problem| EngineError(problem.0))?;
         let claude = prepared.session.selection.backend == MasterBackend::Claude;
-        let settings = crate::harness_settings::apply::for_master(
-            &crate::storage::versioned::open(&super::changes::engine_root(&self.authority)?)?,
-            if claude { "claude-code" } else { "codex" },
-            executable.verified_path()?,
-            &artifact_sha256,
-            &prepared.session.project_id,
-        )?;
+        let harness = if claude { "claude-code" } else { "codex" };
+        if settings
+            .harness()
+            .is_some_and(|resolved| resolved != harness)
+        {
+            return Err(failure("master_runtime_binding"));
+        }
         let process = match claude {
             true => claude_process(&prepared.instructions, process),
             false => process,

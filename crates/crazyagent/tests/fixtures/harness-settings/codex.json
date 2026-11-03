@@ -34,7 +34,10 @@
       "max": 1048576,
       "apply": "codex_config",
       "scope": "app_and_project",
-      "locked": null
+      "locked": {
+        "reason": "CrazyAgent delivers the project's instructions itself.",
+        "engine_value": 0
+      }
     },
     {
       "key": "tui.status_label",
@@ -58,7 +61,7 @@
       "scope": "app_and_project",
       "locked": {
         "reason": "CrazyAgent runs every agent in its own sandbox.",
-        "engine_value": "workspace-write"
+        "engine_value": null
       }
     },
     {

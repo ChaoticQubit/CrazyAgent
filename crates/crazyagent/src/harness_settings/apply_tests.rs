@@ -1,8 +1,10 @@
 use super::*;
 use crate::harness_settings::tests::{fixture, fixture_text};
-use crate::harness_settings::{Key, Kind, Scope, Stored, Written, resolve};
+use crate::harness_settings::{Access, Key, Kind, Scope, Stored, Written, resolve};
 use crate::harnesses::interactive::{self, Run};
-use crate::harnesses::launch::{AccountBinding, LaunchLimits, LaunchRequest};
+use crate::harnesses::launch::{
+    AccountBinding, CLAUDE_ENGINE_KEYS, CODEX_ENGINE_KEYS, LaunchLimits, LaunchRequest,
+};
 use crate::launch_context::AgentContext;
 use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
@@ -163,6 +165,46 @@ fn configs(arguments: &[String]) -> Vec<&str> {
         .collect()
 }
 
+/// Reads the value one launch gives a dotted key: Claude Code's from the `--settings`
+/// JSON, Codex's from its last `-c` line for that key, read as TOML. Inputs: the harness,
+/// the arguments after the executable and the key. Output: the value, none when unset.
+fn launched(harness: &str, arguments: &[String], key: &str) -> Option<Value> {
+    let document = if harness == "claude-code" {
+        settings_json(arguments)
+    } else {
+        let line = configs(arguments)
+            .into_iter()
+            .rev()
+            .chain(crate::launch_context::CODEX_CONFIG_FIXED)
+            .find(|line| {
+                line.split_once('=')
+                    .is_some_and(|(name, _)| name.trim() == key)
+            })?;
+        serde_json::to_value(toml::from_str::<toml::Table>(line).unwrap()).unwrap()
+    };
+    at(&document, key).cloned()
+}
+
+/// One catalog built from a fixture with more keys. Inputs: the harness and the keys as
+/// (name, type, extra fields). Output: the catalog.
+fn with_keys(harness: &str, keys: &[(&str, &str, Value)]) -> Catalog {
+    let mut document: Value = serde_json::from_str(fixture_text(harness)).unwrap();
+    let apply = if harness == "codex" {
+        "codex_config"
+    } else {
+        "claude_settings"
+    };
+    for (name, kind, extra) in keys {
+        let mut key = json!({"key": name, "label": "Fixture", "help": "Fixture key.",
+            "type": kind, "apply": apply, "scope": "app_and_project", "locked": null});
+        for (field, value) in extra.as_object().unwrap() {
+            key[field] = value.clone();
+        }
+        document["keys"].as_array_mut().unwrap().push(key);
+    }
+    catalog::parse(&serde_json::to_vec(&document).unwrap()).unwrap()
+}
+
 fn installed(harness: &str) -> Option<&'static str> {
     match harness {
         "codex" => CODEX,
@@ -251,30 +293,25 @@ fn no_owner_or_project_value_can_override_a_locked_key() {
                 .all(|value| value.source == Source::Project || value.key == open.key)
         );
         for settings in [&shipped, &forged] {
-            let request = case.request(harness, false);
-            for arguments in [
-                case.pane(&request, settings),
-                case.headless(&request, settings),
-            ] {
-                if harness == "claude-code" {
-                    let json = settings_json(&arguments);
-                    assert_eq!(json["disableAllHooks"], json!(true));
-                    assert_eq!(json["includeCoAuthoredBy"], json!(false));
-                    assert_eq!(json["attribution"], json!({"commit": "", "pr": ""}));
-                    assert!(json.get("apiKeyHelper").is_none(), "{json}");
-                    continue;
-                }
-                let lines = configs(&arguments);
-                for (key, engine) in [
-                    ("sandbox_mode", "sandbox_mode=\"read-only\""),
-                    ("approval_policy", "approval_policy=\"never\""),
-                ] {
-                    let set: Vec<&str> = lines
-                        .iter()
-                        .copied()
-                        .filter(|line| line.starts_with(&format!("{key}=")))
-                        .collect();
-                    assert_eq!(set, [engine], "{arguments:?}");
+            for tools in [false, true] {
+                let request = case.request(harness, tools);
+                let built = [
+                    case.pane(&request, settings),
+                    case.headless(&request, settings),
+                ];
+                let plain = [
+                    case.pane(&request, &Applied::default()),
+                    case.headless(&request, &Applied::default()),
+                ];
+                for (arguments, plain) in built.iter().zip(&plain) {
+                    for key in catalog.keys.iter().filter(|key| key.locked.is_some()) {
+                        let value = launched(harness, arguments, &key.key);
+                        assert_eq!(value, launched(harness, plain, &key.key), "{}", key.key);
+                        let engine = &key.locked.as_ref().unwrap().engine_value;
+                        if !engine.is_null() {
+                            assert_eq!(value.as_ref(), Some(engine), "{}", key.key);
+                        }
+                    }
                 }
             }
         }
@@ -424,27 +461,217 @@ fn an_owner_codex_setting_becomes_one_c_line() {
 }
 
 #[test]
-fn an_rcli_setting_merges_into_the_agent_config() {
+fn an_rcli_or_arg_setting_shows_not_applied_and_is_never_resolved() {
     let case = Case::new();
-    let catalog = fixture("rcli");
-    case.set(&catalog, RCLI, &case.here(), "theme", json!("light"));
-    case.forge(&Scope::App, "rcli", "model", &json!("forged-model"));
-    let engine = json!({"model": "account-model", "telemetry": {"enabled": false}});
-    let settings = resolved(&case.db, &catalog, RCLI, Some(&case.project)).unwrap();
-    assert_eq!(
-        json_settings(&engine, &settings, Apply::RcliConfig, &[]),
-        json!({"model": "account-model", "telemetry": {"enabled": false}, "theme": "light"})
+    case.set(
+        &fixture("codex"),
+        CODEX,
+        &Scope::App,
+        "hide_agent_reasoning",
+        json!(true),
     );
-    let forged = resolved(&case.db, &unlocked("rcli"), RCLI, Some(&case.project)).unwrap();
-    assert_eq!(forged.values().len(), 2);
-    assert_eq!(
-        json_settings(&engine, &forged, Apply::RcliConfig, &[]),
-        json!({"model": "account-model", "telemetry": {"enabled": false}, "theme": "light"})
+    let rcli = fixture("rcli");
+    let codex = with_keys(
+        "codex",
+        &[(
+            "profile_note",
+            "string",
+            json!({"default": "", "max_bytes": 16, "apply": "arg"}),
+        )],
     );
+    for (catalog, key, value, version) in [
+        (&rcli, "theme", json!("light"), RCLI),
+        (&codex, "profile_note", json!("x"), CODEX),
+    ] {
+        for scope in [Scope::App, case.here()] {
+            let written = store::set(&case.db, catalog, version, &scope, key, &value, 0).unwrap();
+            let (code, setting) = match written {
+                Written::Refused { code, setting } => (code, setting),
+                other => panic!("{key}: {other:?}"),
+            };
+            assert_eq!(code, "harness_settings_key_not_qualified");
+            assert_eq!(
+                setting.access,
+                Access::ReadOnly {
+                    reason: crate::harness_settings::NOT_APPLIED.into()
+                }
+            );
+            assert_eq!(
+                (setting.effective, setting.source),
+                (Value::Null, Source::NotApplied)
+            );
+            case.forge(&scope, &catalog.harness, key, &value);
+        }
+        let page = store::values(&case.db, catalog, version, &case.here(), None).unwrap();
+        let row = page.settings.iter().find(|row| row.key == key).unwrap();
+        assert_eq!(row.here, Some(value.clone()));
+        assert_eq!(
+            (&row.effective, row.source),
+            (&Value::Null, Source::NotApplied)
+        );
+        assert!(matches!(row.access, Access::ReadOnly { .. }));
+        let settings = resolved(&case.db, catalog, version, Some(&case.project)).unwrap();
+        assert!(settings.values().iter().all(|value| value.key != key));
+    }
+    let model = rcli.key("model").unwrap();
+    assert!(model.locked.as_ref().unwrap().engine_value.is_null());
+    let mut document: Value = serde_json::from_str(fixture_text("rcli")).unwrap();
+    document["keys"][1]["locked"]["engine_value"] = json!("account-model");
     assert_eq!(
-        json_settings(&json!({}), &forged, Apply::RcliConfig, &["model"]),
-        json!({"theme": "light"})
+        catalog::parse(&serde_json::to_vec(&document).unwrap())
+            .unwrap_err()
+            .0,
+        "harness_settings_catalog_invalid"
     );
+}
+
+#[test]
+fn every_key_the_engine_writes_into_a_codex_config_is_reserved() {
+    let case = Case::new();
+    for tools in [false, true] {
+        let request = case.request("codex", tools);
+        let installed = AgentContext::empty()
+            .install("codex", request.account.home(), tools)
+            .unwrap();
+        let text = std::fs::read_to_string(request.account.home().join("config.toml")).unwrap();
+        let config: toml::Table = toml::from_str(&text).unwrap();
+        for written in ["developer_instructions", "project_doc_max_bytes"] {
+            assert!(config.contains_key(written), "{text}");
+        }
+        for fixed in crate::launch_context::CODEX_CONFIG_FIXED {
+            let line: toml::Table = toml::from_str(fixed).unwrap();
+            for (key, value) in &line {
+                assert_eq!(config.get(key), Some(value), "{fixed}");
+            }
+        }
+        for key in config.keys() {
+            assert!(CODEX_ENGINE_KEYS.contains(&key.as_str()), "{key}");
+        }
+        drop(installed);
+    }
+}
+
+#[test]
+fn an_owner_value_never_reaches_a_key_the_engine_sets_or_delivers_instructions_with() {
+    let case = Case::new();
+    let text = |max: i64| json!({"default": "", "max_bytes": max});
+    let codex = with_keys(
+        "codex",
+        &[
+            ("developer_instructions", "string", text(64)),
+            ("experimental_instructions_file", "string", text(64)),
+            ("model_instructions_file", "string", text(64)),
+            ("project_doc_fallback_filenames", "string", text(64)),
+            ("mcp_servers.extra.command", "string", text(64)),
+            ("model", "string", text(64)),
+        ],
+    );
+    let claude = with_keys(
+        "claude-code",
+        &[
+            ("env.ANTHROPIC_BASE_URL", "string", text(64)),
+            ("permissions.defaultMode", "string", text(64)),
+            ("model", "string", text(64)),
+            ("hooks.Stop", "string", text(64)),
+            (
+                "enableAllProjectMcpServers",
+                "bool",
+                json!({"default": false}),
+            ),
+            (
+                "skipDangerousModePermissionPrompt",
+                "bool",
+                json!({"default": false}),
+            ),
+        ],
+    );
+    let cases: [(&Catalog, &[&str], usize); 2] = [
+        (&codex, &CODEX_ENGINE_KEYS, 6),
+        (&claude, &CLAUDE_ENGINE_KEYS, 6),
+    ];
+    for (catalog, reserved, owner) in cases {
+        let version = installed(&catalog.harness);
+        for key in &catalog.keys {
+            let top = key.key.split('.').next().unwrap();
+            if key.locked.is_none() && reserved.contains(&top) {
+                for scope in [Scope::App, case.here()] {
+                    case.set(catalog, version, &scope, &key.key, hostile(key));
+                }
+            }
+        }
+        let settings = resolved(&case.db, catalog, version, Some(&case.project)).unwrap();
+        assert_eq!(settings.values().len(), owner, "{:?}", settings.values());
+        for tools in [false, true] {
+            let request = case.request(&catalog.harness, tools);
+            assert_eq!(
+                case.pane(&request, &settings),
+                case.pane(&request, &Applied::default())
+            );
+            assert_eq!(
+                case.headless(&request, &settings),
+                case.headless(&request, &Applied::default())
+            );
+        }
+    }
+}
+
+#[test]
+#[should_panic]
+fn a_codex_lock_no_launch_uses_stops_the_launch() {
+    let case = Case::new();
+    let mut document: Value = serde_json::from_str(fixture_text("codex")).unwrap();
+    document["keys"][4]["locked"]["engine_value"] = json!("workspace-write");
+    let catalog = catalog::parse(&serde_json::to_vec(&document).unwrap()).unwrap();
+    let settings = resolved(&case.db, &catalog, CODEX, None).unwrap();
+    let _ = case.pane(&case.request("codex", false), &settings);
+}
+
+#[test]
+#[should_panic]
+fn a_claude_lock_no_launch_sets_stops_the_launch() {
+    let case = Case::new();
+    let catalog = with_keys(
+        "claude-code",
+        &[(
+            "permissions.defaultMode",
+            "enum",
+            json!({"options": ["default", "plan"], "default": "default",
+                "locked": {"reason": "Fixture.", "engine_value": "plan"}}),
+        )],
+    );
+    let settings = resolved(&case.db, &catalog, CLAUDE, None).unwrap();
+    let _ = case.headless(&case.request("claude-code", false), &settings);
+}
+
+#[test]
+fn a_harness_is_asked_for_its_version_once_per_executable_file() {
+    let case = Case::new();
+    let catalog = fixture("codex");
+    case.set(
+        &catalog,
+        CODEX,
+        &Scope::App,
+        "hide_agent_reasoning",
+        json!(true),
+    );
+    let executable = case.base.join("bin").join("codex-versioned");
+    std::fs::write(
+        &executable,
+        "#!/bin/sh\necho asked >> \"$0.count\"\necho \"codex-cli 0.50.0\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    for _ in 0..3 {
+        let settings = for_catalog(&case.db, &catalog, &executable, Some(&case.project)).unwrap();
+        let names: Vec<&str> = settings
+            .values()
+            .iter()
+            .map(|value| value.key.as_str())
+            .collect();
+        assert_eq!(names, ["hide_agent_reasoning"]);
+    }
+    let count = case.base.join("bin").join("codex-versioned.count");
+    assert_eq!(std::fs::read_to_string(count).unwrap().lines().count(), 1);
 }
 
 #[test]
@@ -559,7 +786,7 @@ fn a_locked_key_never_enters_the_applied_settings() {
 fn a_codex_value_that_is_no_toml_literal_is_never_rendered() {
     let catalog = fixture("codex");
     let fraction = Resolved {
-        key: "project_doc_max_bytes".into(),
+        key: "tui.status_label".into(),
         value: json!(1.5),
         source: Source::App,
         apply: Apply::CodexConfig,
@@ -572,6 +799,12 @@ fn a_codex_value_that_is_no_toml_literal_is_never_rendered() {
 fn codex_values_never_merge_into_a_settings_object() {
     let settings = resolved(&Case::new().db, &fixture("codex"), CODEX, None).unwrap();
     let _ = json_settings(&json!({}), &settings, Apply::CodexConfig, &[]);
+}
+
+#[test]
+#[should_panic]
+fn rcli_values_never_merge_into_a_settings_object() {
+    let _ = json_settings(&json!({}), &Applied::default(), Apply::RcliConfig, &[]);
 }
 
 #[test]
@@ -597,10 +830,76 @@ fn a_key_inside_another_owner_key_is_never_merged() {
     let _ = json_settings(&json!({}), &settings, Apply::ClaudeSettings, &[]);
 }
 
+/// The fixed `--settings` object of a Claude Code master turn, as `claude_host` builds it.
+fn master_engine() -> Value {
+    json!({
+        "attribution": {"commit": "", "pr": ""},
+        "disableAllHooks": true,
+        "includeCoAuthoredBy": false,
+    })
+}
+
+#[test]
+fn a_value_an_older_catalog_allowed_never_blocks_a_master_command() {
+    let case = Case::new();
+    let catalog = fixture("claude-code");
+    case.set(
+        &catalog,
+        CLAUDE,
+        &Scope::App,
+        "outputStyle",
+        json!("Explanatory"),
+    );
+    case.set(
+        &catalog,
+        CLAUDE,
+        &Scope::App,
+        "cleanupPeriodDays",
+        json!(45),
+    );
+    let mut document: Value = serde_json::from_str(fixture_text("claude-code")).unwrap();
+    let style = document["keys"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|key| key["key"] == "outputStyle")
+        .unwrap();
+    style["max_bytes"] = json!(4);
+    let later = catalog::parse(&serde_json::to_vec(&document).unwrap()).unwrap();
+    for (catalog, keys) in [
+        (&catalog, vec!["cleanupPeriodDays", "outputStyle"]),
+        (&later, vec!["cleanupPeriodDays"]),
+    ] {
+        let settings = resolved(&case.db, catalog, CLAUDE, Some(&case.project)).unwrap();
+        let names: Vec<&str> = settings
+            .values()
+            .iter()
+            .map(|value| value.key.as_str())
+            .collect();
+        assert_eq!(names, keys);
+        let text = json_settings(
+            &master_engine(),
+            &settings,
+            Apply::ClaudeSettings,
+            &CLAUDE_ENGINE_KEYS,
+        )
+        .to_string();
+        let read = read_back(
+            Some(catalog),
+            &master_engine(),
+            Apply::ClaudeSettings,
+            &CLAUDE_ENGINE_KEYS,
+            &text,
+        )
+        .expect("the verifier accepts the command the engine built");
+        assert_eq!(read, settings);
+    }
+}
+
 #[test]
 fn a_master_verifier_reads_back_only_settings_the_engine_would_build() {
     let catalog = fixture("claude-code");
-    let engine = json!({"disableAllHooks": true});
+    let engine = master_engine();
     let app: Stored = [
         ("cleanupPeriodDays".to_owned(), json!(60)),
         ("feedback.surveys".to_owned(), json!(false)),
@@ -632,14 +931,24 @@ fn a_master_verifier_reads_back_only_settings_the_engine_would_build() {
         json_settings(&engine, &read, Apply::ClaudeSettings, &reserved).to_string(),
         text
     );
+    let with = |key: &str, value: Value| {
+        let mut forged = engine.clone();
+        forged[key] = value;
+        forged
+    };
     for forged in [
-        json!({"disableAllHooks": false}),
-        json!({"disableAllHooks": true, "hooks": {}}),
-        json!({"disableAllHooks": true, "cleanupPeriodDays": 0}),
-        json!({"disableAllHooks": true, "cleanupPeriodDays": "60"}),
-        json!({"disableAllHooks": true, "apiKeyHelper": "/bin/sh -c id"}),
-        json!({"disableAllHooks": true, "includeCoAuthoredBy": true}),
-        json!({"disableAllHooks": true, "feedback": {"surveys": false, "extra": 1}}),
+        with("disableAllHooks", json!(false)),
+        with("hooks", json!({})),
+        with("cleanupPeriodDays", json!(0)),
+        with("cleanupPeriodDays", json!("60")),
+        with("apiKeyHelper", json!("/bin/sh -c id")),
+        with("includeCoAuthoredBy", json!(true)),
+        with(
+            "attribution",
+            json!({"commit": "Co-Authored-By: x", "pr": ""}),
+        ),
+        with("feedback", json!({"surveys": false, "extra": 1})),
+        json!({"disableAllHooks": true}),
         json!([]),
     ] {
         assert!(
@@ -686,7 +995,10 @@ fn owner_codex_settings_for_a_config_file_are_one_line_each_or_none() {
     .into_iter()
     .collect();
     let settings = Applied::new(&catalog, resolve(&catalog, CODEX, &app, None));
-    let engine = ["project_doc_max_bytes=0".to_owned()];
+    let engine = [
+        "approval_policy=\"never\"".to_owned(),
+        "project_doc_max_bytes=0".to_owned(),
+    ];
     assert_eq!(
         codex_config(&engine, &["tui"], &settings).as_deref(),
         Some("hide_agent_reasoning=true\n")
@@ -696,4 +1008,30 @@ fn owner_codex_settings_for_a_config_file_are_one_line_each_or_none() {
         Some("hide_agent_reasoning=true\ntui.status_label=\"one\"\n")
     );
     assert_eq!(codex_config(&engine, &[], &Applied::default()), None);
+}
+
+#[test]
+#[should_panic]
+fn a_lock_no_launch_writes_never_names_an_engine_value() {
+    let mut catalog = fixture("rcli");
+    let model = catalog
+        .keys
+        .iter_mut()
+        .find(|key| key.key == "model")
+        .unwrap();
+    model.locked.as_mut().unwrap().engine_value = json!("account-model");
+    let _ = Applied::new(&catalog, resolve(&catalog, RCLI, &Stored::new(), None));
+}
+
+#[test]
+#[should_panic]
+fn an_owner_value_no_launch_writes_never_enters_the_applied_settings() {
+    let catalog = fixture("rcli");
+    let theme = Resolved {
+        key: "theme".into(),
+        value: json!("light"),
+        source: Source::App,
+        apply: Apply::RcliConfig,
+    };
+    let _ = Applied::new(&catalog, vec![theme]);
 }

@@ -3450,7 +3450,14 @@ impl TeamRuntime {
             executable,
             Some(&stored.project_id),
         )
-        .map_err(|e| with_code("the harness settings could not be read", Some(&e.0)))?;
+        .map_err(|e| {
+            let name = crate::harnesses::spec(launch).map_or(launch, |spec| spec.name);
+            let sentence = format!(
+                "the saved {name} settings could not be read, so this agent did not start; \
+                 reset them in Settings > Harnesses"
+            );
+            with_code(&sentence, Some(&e.0))
+        })?;
         let context = self
             .context(&stored.project_id, id, role, tools, layout)?
             .with_harness_settings(settings);

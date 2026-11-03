@@ -785,7 +785,7 @@ fn a_claude_master_with_tools_on_gets_the_team_tool_flags_and_only_the_engine_de
             "--setting-sources",
             "",
             "--settings",
-            "{\"disableAllHooks\":true}",
+            "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"disableAllHooks\":true,\"includeCoAuthoredBy\":false}",
             "--disable-slash-commands",
             "--no-session-persistence",
             "--max-turns",
@@ -825,7 +825,7 @@ fn a_claude_master_with_tools_on_gets_the_team_tool_flags_and_only_the_engine_de
             "--setting-sources",
             "",
             "--settings",
-            "{\"disableAllHooks\":true}",
+            "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"disableAllHooks\":true,\"includeCoAuthoredBy\":false}",
             "--disable-slash-commands",
             "--no-session-persistence",
             "--max-turns",
@@ -951,7 +951,12 @@ fn the_host_runs_a_master_only_with_settings_the_shipped_catalog_allows() {
     let at = args.iter().position(|arg| arg == "--settings").unwrap() + 1;
     assert_eq!(
         serde_json::from_str::<serde_json::Value>(&args[at]).unwrap(),
-        serde_json::json!({"cleanupPeriodDays": 60, "disableAllHooks": true})
+        serde_json::json!({
+            "attribution": {"commit": "", "pr": ""},
+            "cleanupPeriodDays": 60,
+            "disableAllHooks": true,
+            "includeCoAuthoredBy": false,
+        })
     );
     assert_eq!(args.len(), arguments(&build(&Applied::default())).len());
     let allowed = crate::harness_settings::catalog::builtin("claude-code")
@@ -967,7 +972,13 @@ fn the_host_runs_a_master_only_with_settings_the_shipped_catalog_allows() {
         ));
     }
     let mut hooked = args.clone();
-    hooked[at] = serde_json::json!({"disableAllHooks": true, "hooks": {"Stop": []}}).to_string();
+    hooked[at] = serde_json::json!({
+        "attribution": {"commit": "", "pr": ""},
+        "disableAllHooks": true,
+        "hooks": {"Stop": []},
+        "includeCoAuthoredBy": false,
+    })
+    .to_string();
     let mut forged = std::process::Command::new(owned.get_program());
     forged
         .args(hooked)

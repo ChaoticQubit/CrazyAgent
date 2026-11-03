@@ -85,25 +85,42 @@ pub(crate) const CLAUDE_BUILT_IN_AGENTS: [&str; 3] = ["Agent", "Workflow", "Team
 /// the turn's result, which the engine would read as the next task's reply.
 const CLAUDE_BACKGROUND_TASKS_OFF: (&str, &str) = ("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1");
 const CLAUDE_SETTINGS: &str = "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"disableAllHooks\":true,\"includeCoAuthoredBy\":false}";
-/// Every top-level Claude Code setting some launch the engine builds sets, master or team
-/// agent, keyed or not; no owner value ever takes one.
-pub(crate) const CLAUDE_ENGINE_KEYS: [&str; 5] = [
+/// Claude Code settings the engine decides itself, so no owner value ever takes one: the
+/// fixed settings and the key helper of a keyed account, and the settings behind the
+/// engine's flags and environment (model, permissions and tools, MCP servers, hooks and
+/// environment variables).
+pub(crate) const CLAUDE_ENGINE_KEYS: [&str; 12] = [
     "apiKeyHelper",
     "attribution",
     "disableAllHooks",
+    "disabledMcpjsonServers",
+    "enableAllProjectMcpServers",
+    "enabledMcpjsonServers",
+    "env",
+    "hooks",
     "includeCoAuthoredBy",
+    "model",
+    "permissions",
     "skipDangerousModePermissionPrompt",
 ];
-/// Codex settings the engine sets on some launches only or writes into the agent's
-/// `config.toml`: the account's provider and model, the project's MCP servers and a pane's
-/// trusted folder; no owner value ever takes one.
-pub(crate) const CODEX_ENGINE_KEYS: [&str; 6] = [
+/// Codex settings the engine decides itself, so no owner value ever takes one: those it
+/// sets on some launches only (the account's provider and model, the project's MCP servers,
+/// a pane's trusted folder), those it writes into the agent's `config.toml` (its
+/// instructions and the project docs limit), and those that would replace the
+/// instructions it delivers.
+pub(crate) const CODEX_ENGINE_KEYS: [&str; 12] = [
+    "check_for_update_on_startup",
+    "developer_instructions",
+    "experimental_instructions_file",
+    "instructions",
     "mcp_servers",
     "model",
+    "model_instructions_file",
     "model_provider",
     "model_providers",
+    "project_doc_fallback_filenames",
+    "project_doc_max_bytes",
     "projects",
-    "check_for_update_on_startup",
 ];
 const CLAUDE_COMMON: [&str; 12] = [
     "--print",
@@ -526,8 +543,13 @@ fn codex_invocation(
     let environment = vec![("CODEX_HOME", home)];
     let engine = codex_configuration(request, installed.is_some(), key_file);
     let owner = installed.map_or_else(Vec::new, |installed| {
+        let set: Vec<String> = engine
+            .iter()
+            .cloned()
+            .chain(crate::launch_context::CODEX_CONFIG_FIXED.map(str::to_owned))
+            .collect();
         crate::harness_settings::apply::codex_lines(
-            &engine,
+            &set,
             &CODEX_ENGINE_KEYS,
             installed.harness_settings(),
         )
@@ -606,12 +628,11 @@ pub(super) fn codex_configuration(
 
 /// Claude Code's `--settings` for one launch: the fixed settings, plus for a keyed account
 /// an `apiKeyHelper` that prints its relay token from `key_file` (see [`key_file_text`]),
-/// merged over the owner's Claude Code settings of the installed context. Inputs: the key
-/// file of a keyed account and the installed context. Output: the settings JSON.
+/// merged over the owner's Claude Code settings of the installed context, whose locked
+/// values it must hold. Inputs: the key file of a keyed account and the installed context.
+/// Output: the settings JSON.
 fn claude_settings(key_file: Option<&str>, installed: Option<&Installed>) -> String {
-    let owner = installed
-        .map(Installed::harness_settings)
-        .filter(|owner| !owner.values().is_empty());
+    let owner = installed.map(Installed::harness_settings);
     if key_file.is_none() && owner.is_none() {
         return CLAUDE_SETTINGS.to_owned();
     }

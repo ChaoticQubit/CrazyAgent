@@ -865,6 +865,10 @@ fn secret_text(secret: &LaunchSecret) -> Result<&str, LaunchError> {
         .ok_or_else(|| failure("launch_context_secret_invalid"))
 }
 
+/// The Codex settings every installed agent's `config.toml` sets to a fixed value, as
+/// `-c` lines, so a launch's lock checks read them with its own `-c` settings.
+pub(crate) const CODEX_CONFIG_FIXED: [&str; 1] = ["project_doc_max_bytes=0"];
+
 fn codex_config(instructions: &str, servers: &[LaunchServer]) -> Result<String, LaunchError> {
     let mut document = toml_edit::DocumentMut::new();
     document["developer_instructions"] = toml_edit::value(instructions);
