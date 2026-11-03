@@ -1324,7 +1324,7 @@ impl ProjectSandbox {
     pub fn profile(&self) -> String {
         let mut text = String::from("(version 1)\n(deny default)\n");
         text.push_str("(allow process-exec)\n(allow process-fork)\n");
-        text.push_str(&app_exec_denies(&self.owner_home, self.writable_roots()));
+        text.push_str(&app_exec_denies(self.writable_roots()));
         text.push_str("(allow signal (target same-sandbox))\n");
         text.push_str("(allow process-info* (target same-sandbox))\n");
         text.push_str("(allow sysctl-read)\n");
@@ -2056,18 +2056,17 @@ fn seatbelt_pattern(path: &Path) -> String {
     regex_escape(&text)
 }
 
-/// The Seatbelt rule that keeps an agent from starting a macOS app: no exec of a main
-/// executable in an app bundle's `Contents/MacOS` under `/Applications`,
-/// `/System/Applications` or the owner's `~/Applications`, nor anywhere in the folders the
-/// agent can write, where a download such as Puppeteer's Chrome for Testing, Playwright's
-/// Chromium or a project's Electron lands, the Data volume path of each included, each
-/// name in any letter case. A GUI app started inside the agent profile aborts at launch
-/// and macOS shows a crash report for every attempt (Chrome crash popups, decision C1,
-/// OP-24). Command-line tools a bundle ships under `Contents/Resources` or
+/// The Seatbelt rules that keep an agent from starting a macOS app: no exec of a main
+/// executable in any app bundle's `Contents/MacOS`, wherever it sits and in any letter
+/// case, since a GUI app started inside the agent profile aborts at launch and macOS shows
+/// a crash report for every attempt (Chrome crash popups, decision C1, OP-24). The
+/// interpreter a framework Python's launcher starts, `<name>.framework/Versions/<v>/
+/// Resources/Python.app/Contents/MacOS/Python`, stays allowed, except in the folders the
+/// agent can write, where it could plant a bundle under that name; their Data volume path
+/// is denied too. Command-line tools a bundle ships under `Contents/Resources` or
 /// `Contents/Developer` stay allowed. It must follow the exec allow, since the last
-/// matching rule wins. Inputs: the owner's home and the agent's writable roots. Output:
-/// the rule text.
-fn app_exec_denies<'a>(owner_home: &Path, writable: impl Iterator<Item = &'a PathBuf>) -> String {
+/// matching rule wins. Input: the agent's writable roots. Output: the rule text.
+fn app_exec_denies<'a>(writable: impl Iterator<Item = &'a PathBuf>) -> String {
     let data = format!(
         "/{}/{}/{}",
         any_case("System"),
@@ -2080,11 +2079,8 @@ fn app_exec_denies<'a>(owner_home: &Path, writable: impl Iterator<Item = &'a Pat
         any_case("Contents"),
         any_case("MacOS")
     );
-    let bundle = format!("/{}/{app}", any_case("Applications"));
     let mut rule = format!(
-        "(deny process-exec\n  (regex #\"^(/{}|{data})?{bundle}\")\n  (regex #\"^({data})?{}{bundle}\")",
-        any_case("System"),
-        seatbelt_pattern(owner_home)
+        "(deny process-exec\n  (regex #\"^/{app}\"))\n(allow process-exec\n  (regex #\"^/.+\\.framework/Versions/[^/]+/Resources/Python\\.app/Contents/MacOS/Python$\"))\n(deny process-exec"
     );
     for root in writable {
         let root = root.display().to_string();
