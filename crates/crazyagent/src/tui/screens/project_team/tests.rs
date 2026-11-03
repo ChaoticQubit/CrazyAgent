@@ -2610,7 +2610,7 @@ fn f_moves_the_new_folder_limit_through_every_choice() {
 #[test]
 fn shift_b_steps_background_commands_and_shift_g_steps_the_grace_time() {
     use crate::team::BackgroundAtEnd;
-    const SCOPE: &str = "It applies to Claude agents and to agents run per turn; a kept Codex pane keeps its background commands whatever the choice.";
+    const SCOPE: &str = "Wait and a grace time act on Claude Code panes. Other agents run per turn have their background commands stopped when the turn ends, and other kept agents, such as a kept Codex pane, keep theirs whatever the choice.";
     let mut view = TeamView::new(project());
     for key in ['B', 'G'] {
         assert_eq!(view.key(press(KeyCode::Char(key))), TeamReply::Handled);
