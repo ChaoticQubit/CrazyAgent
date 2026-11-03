@@ -23,7 +23,8 @@ use trackwright_core::tests_model::{
 /// The code of an import refused before parsing: a link, not a regular file, unreadable,
 /// or over its format's byte bound.
 pub const IMPORT_FILE_REFUSED: &str = "import_file_refused";
-/// The code of an import whose report the parser refused.
+/// The code of an import whose report the parser refused, or that shows a build failure
+/// while importing into a running run.
 pub const IMPORT_REPORT_REFUSED: &str = "import_report_refused";
 /// The digest a declared import binds where no profile, sandbox or environment exists.
 const NO_DIGEST: &str = "0000000000000000000000000000000000000000000000000000000000000000";
@@ -105,10 +106,10 @@ pub fn command(sub: Option<&str>, fields: &[(String, &str)]) -> Result<Import, U
 }
 
 /// Imports one report: reads the file (no link, a regular file within its format's
-/// bound), parses it locally, then in one transaction records the rows in batches of at
-/// most 500 into the running run, or starts, records and finishes a declared run of the
-/// project. Inputs: the actor, the place and the import. Output: the envelope, or the
-/// refusal; a refused import writes nothing.
+/// bound), parses it, then in one transaction records the rows in batches of at most 500
+/// into the running run (a build-failed report is refused there), or starts, records and
+/// finishes a declared run of the project. Inputs: the actor, the place and the import.
+/// Output: the envelope, or the refusal; a refused import writes nothing.
 pub(crate) fn run(actor: &str, place: &Place, import: &Import) -> Result<Value, Failure> {
     let actor = Actor::new(actor)?;
     let bytes = report(&import.file, import.format.bytes_max())?;
@@ -118,6 +119,12 @@ pub(crate) fn run(actor: &str, place: &Place, import: &Import) -> Result<Value, 
             format!("the report is refused: {refusal}"),
         )
     })?;
+    if let (true, Target::Run(id)) = (parsed.build_failed, &import.target) {
+        return Err(Failure::new(
+            IMPORT_REPORT_REFUSED,
+            format!("the report shows a build failure; finish {id} with end build_failed"),
+        ));
+    }
     assert!(parsed.rows.len() <= RESULTS_PER_RUN_MAX);
     let rows: Vec<NewResult> = parsed.rows.iter().map(new_result).collect();
     let mut store = Store::open(&place.existing()?)?;

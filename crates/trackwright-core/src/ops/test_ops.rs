@@ -4,16 +4,17 @@ use crate::host::Host;
 use crate::model::{ShortId, codes};
 use crate::reply::Page;
 use crate::runs::{
-    self, RunCancel, RunEnd, RunFinish, RunList, RunRecord, RunShow, RunStart, RunView, StopReason,
-    Verdict,
+    self, ResultView, RunCancel, RunEnd, RunFinish, RunList, RunRecord, RunShow, RunStart, RunView,
+    StopReason, Verdict,
 };
 use crate::tests_model::{
-    CaseKind, CaseStatus, CaseView, CriterionRef, LIST_ROWS_MAX, PlanItemRef, PlanStatus,
-    StepsView, TestId, TestObject,
+    CaseKind, CaseProtectedVisibility, CaseStatus, CaseView, CriterionRef, LIST_ROWS_MAX,
+    PlanItemRef, PlanStatus, StepsView, TestId, TestObject, sees_protected,
 };
 use crate::tests_store::{self, CaseChange, CaseFilter, NewCase, PlanFields};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::BTreeSet;
 
 /// Lists a project's cases by number within the page budget. Input: the context. Output:
 /// `cases` and a `case:<n>` cursor while more may follow.
@@ -152,7 +153,8 @@ pub(super) fn plan_show<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure>
 
 /// Shows one run: on the first page its fields, source, policy and integrity (a member
 /// that cannot fit is named `<member>_cut`) and unlinked names, then its results from
-/// the cursor's `result:<position>`. Input: the context. Output: the page and cursor.
+/// the cursor's `result:<position>`; a protected case's message and artifact are withheld
+/// from an actor its visibility narrows. Input: the context. Output: the page and cursor.
 pub(super) fn run_show<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
     let id = cx.args.need::<&TestId>("id");
     let after = cursor(cx, "result", 0)?;
@@ -178,7 +180,13 @@ pub(super) fn run_show<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> 
         }
         Some(_) => assert!(page.put("id", json!(id.to_string()))),
     }
-    let taken = fill(&mut page, "results", &shown.results);
+    let withheld = withheld_cases(cx, &shown.results)?;
+    let rows: Vec<Value> = shown
+        .results
+        .iter()
+        .map(|result| result_row(result, &withheld))
+        .collect();
+    let taken = fill(&mut page, "results", &rows);
     assert!(after.is_none() || shown.results.is_empty() || taken > 0);
     let next = if taken < shown.results.len() {
         let last = taken.checked_sub(1).map(|at| shown.results[at].position);
@@ -478,6 +486,47 @@ fn finished<H: Host>(cx: &Cx<'_, '_, H>, ended: &Finished) -> Outcome {
     assert!(page.put("tickets_total", json!(ended.tickets.len())));
     fill(&mut page, "tickets", &ended.tickets);
     done(page.into_value(), None)
+}
+
+fn withheld_cases<H: Host>(
+    cx: &Cx<'_, '_, H>,
+    results: &[ResultView],
+) -> Result<BTreeSet<TestId>, Failure> {
+    let mut withheld = BTreeSet::new();
+    if sees_protected(cx.actor) {
+        return Ok(withheld);
+    }
+    let cases: BTreeSet<&TestId> = results
+        .iter()
+        .filter_map(|result| result.case.as_ref())
+        .collect();
+    for case in cases {
+        let found = tests_store::case(cx.tx, case)?;
+        if !found.protected {
+            continue;
+        }
+        let visibility = tests_store::protected_visibility(cx.tx, found.project)?;
+        if visibility != CaseProtectedVisibility::Full {
+            withheld.insert(case.clone());
+        }
+    }
+    assert!(withheld.len() <= results.len());
+    Ok(withheld)
+}
+
+fn result_row(result: &ResultView, withheld: &BTreeSet<TestId>) -> Value {
+    let mut row = value(result);
+    if result
+        .case
+        .as_ref()
+        .is_some_and(|case| withheld.contains(case))
+    {
+        let fields = row.as_object_mut().expect("a result view is an object");
+        assert!(fields.insert("message".to_owned(), Value::Null).is_some());
+        assert!(fields.insert("artifact".to_owned(), Value::Null).is_some());
+        fields.insert("withheld".to_owned(), json!(true));
+    }
+    row
 }
 
 fn run_ack(run: &RunView) -> Value {

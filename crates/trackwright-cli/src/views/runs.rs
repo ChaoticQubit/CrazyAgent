@@ -268,7 +268,8 @@ fn policy_lines(policy: Option<&PolicyRef>, cut: bool) -> Vec<(String, Role)> {
     let command = if policy.argv.is_empty() {
         "none".to_owned()
     } else {
-        safe(&policy.argv.join(" "))
+        let quoted: Vec<String> = policy.argv.iter().map(|arg| quoted(arg)).collect();
+        safe(&quoted.join(" "))
     };
     let mut toolchain = policy.toolchain.family.as_str().to_owned();
     if !policy.toolchain.version.is_empty() {
@@ -291,6 +292,19 @@ fn policy_lines(policy: Option<&PolicyRef>, cut: bool) -> Vec<(String, Role)> {
         fact("Sandbox", &sandbox),
         fact("Environment", &short(&policy.environment)),
     ]
+}
+
+fn quoted(arg: &str) -> String {
+    let plain = !arg.is_empty()
+        && !arg
+            .chars()
+            .any(|character| character.is_whitespace() || matches!(character, '\'' | '"' | '\\'));
+    if plain {
+        return arg.to_owned();
+    }
+    let quoted = format!("'{}'", arg.replace('\'', r"'\''"));
+    assert!(quoted.len() >= arg.len() + 2);
+    quoted
 }
 
 fn integrity_lines(integrity: Option<&IntegrityRef>, cut: bool) -> Vec<(String, Role)> {
