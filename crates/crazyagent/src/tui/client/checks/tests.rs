@@ -1,7 +1,7 @@
 use super::*;
 use crate::checks::settings::{ChecksSettings, Scope as Layer, choices, read, write};
 use crate::checks::{Actor, Trigger};
-use crate::engine::owner::SettingChoices;
+use crate::engine::owner::{CheckGapView, GATE_PATHS_SHOWN, SettingChoices};
 use crate::projects_home::CRAZYAGENT_DIRECTORY;
 use crate::tui::client::settings::SettingsEvent;
 use crate::tui::screens::new_project_view::Look;
@@ -423,11 +423,12 @@ pub(in crate::tui) fn answer(job: ChecksJob, engine: &mut Engine) -> SettingsEve
             approve: false,
         },
         ChecksJob::Runs { change_set, .. } => ChecksEvent::Runs {
-            change_set,
             result: Ok(ChangeChecks {
                 runs: engine.latest.clone(),
                 pending: 0,
+                gate: gate_view(&engine.db, &change_set),
             }),
+            change_set,
         },
         ChecksJob::Run { change_set, .. } => ChecksEvent::Started {
             result: crate::checks::queue::submit(
@@ -443,6 +444,33 @@ pub(in crate::tui) fn answer(job: ChecksJob, engine: &mut Engine) -> SettingsEve
         },
     };
     SettingsEvent::Checks(Box::new(event))
+}
+
+/// What the Accept gate meets at the head, read through the engine's gate as the owner
+/// protocol's gate view does. Inputs: the database and the change set. Output: the view,
+/// or the gate's code.
+fn gate_view(db: &Connection, change_set: &ChangeSetId) -> Result<CheckGateView, String> {
+    let note = crate::checks::gate::assess(db, change_set, HEAD).map_err(|error| error.0)?;
+    let refusal = crate::checks::gate::refusal(&note).map(str::to_owned);
+    Ok(CheckGateView {
+        gate: note.gate,
+        removed_tests: note.removed_tests,
+        head: note.head,
+        profile: note.profile,
+        refusal,
+        gaps_total: u32::try_from(note.gaps.len()).unwrap(),
+        gaps: note
+            .gaps
+            .into_iter()
+            .map(|gap| CheckGapView {
+                code: gap.code,
+                check: gap.check,
+                run: gap.run,
+                paths: gap.paths.into_iter().take(GATE_PATHS_SHOWN).collect(),
+                paths_total: gap.paths_total,
+            })
+            .collect(),
+    })
 }
 
 /// The text of the views drawn into an area, one string per row with trailing spaces

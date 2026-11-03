@@ -1,6 +1,8 @@
 use super::new_project_input::{TextInput, cells};
 use super::new_project_view::{Look, Row, wrap_words};
 use super::project_team::{Help, Notice, TABS};
+use crate::checks::settings::GateMode;
+use crate::engine::owner::CheckGateView;
 use crate::landing::ChangeSetId;
 use crate::protocol::ProjectId;
 use crate::tui::client::checks::{ChangeChecks, ChecksEvent, ChecksJob, STEPS_PER_JOB_MAX};
@@ -40,6 +42,8 @@ const FIELD_CELLS: usize = 24;
 const CHECK_CELLS: usize = 18;
 const COMMIT_SHOWN: usize = 7;
 const CHECKS_POLL_MS: i64 = 5_000;
+const GAPS_SHOWN: usize = 4;
+const STALE: &str = "checks_stale";
 
 /// One page of the Tests tab, in tab order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1021,7 +1025,7 @@ impl SetChecks {
         let mut lines = vec![Row::default(), Row::of("Checks", look.heading)];
         match &self.read {
             Some((id, Ok(checks))) if id == change_set => {
-                lines.extend(check_rows(checks, head, look));
+                lines.extend(check_rows(checks, head, content, look));
             }
             Some((id, Err(code))) if id == change_set => lines.extend(
                 wrap_words(
@@ -1041,9 +1045,17 @@ impl SetChecks {
 }
 
 /// One change set's check lines: one per check with its verdict, run and protected paths
-/// touched, a run that covered another commit than the head marked stale, then the jobs
-/// still waiting. Inputs: the checks, the change set's head and the look. Output: the rows.
-fn check_rows(checks: &ChangeChecks, head: &str, look: &Look) -> Vec<Row> {
+/// touched, a run marked stale when it covered another commit than the head or the gate
+/// names it stale, then what the Accept gate meets and the jobs still waiting. Inputs: the
+/// checks, the change set's head, the content width and the look. Output: the rows.
+fn check_rows(checks: &ChangeChecks, head: &str, content: usize, look: &Look) -> Vec<Row> {
+    let gate = checks.gate.as_ref().ok();
+    let stale_runs: Vec<&str> = gate
+        .into_iter()
+        .flat_map(|gate| &gate.gaps)
+        .filter(|gap| gap.code == STALE)
+        .filter_map(|gap| gap.run.as_deref())
+        .collect();
     let mut lines = Vec::new();
     if checks.runs.is_empty() {
         lines.push(Row::of(
@@ -1052,7 +1064,9 @@ fn check_rows(checks: &ChangeChecks, head: &str, look: &Look) -> Vec<Row> {
         ));
     }
     for line in &checks.runs {
-        let stale = line.commit != head;
+        let run = line.run_id.to_string();
+        let moved = line.commit != head;
+        let stale = moved || stale_runs.contains(&run.as_str());
         let verdict = line.verdict.map_or_else(
             || run_state(line.state).to_owned(),
             |v| v.as_str().to_owned(),
@@ -1073,11 +1087,11 @@ fn check_rows(checks: &ChangeChecks, head: &str, look: &Look) -> Vec<Row> {
                 "  {}{}{}{holdout}{protected}",
                 pad(&safe(&line.check), CHECK_CELLS),
                 pad(&verdict, VERDICT_CELLS),
-                line.run_id
+                run
             ),
             style,
         ));
-        if stale {
+        if moved {
             lines.push(Row::of(
                 format!(
                     "    stale: covered {}, head is {}; it does not count for Accept",
@@ -1086,7 +1100,23 @@ fn check_rows(checks: &ChangeChecks, head: &str, look: &Look) -> Vec<Row> {
                 ),
                 look.warning,
             ));
+        } else if stale {
+            lines.push(Row::of(
+                "    stale: another profile or approval; it does not count for Accept",
+                look.warning,
+            ));
         }
+    }
+    match &checks.gate {
+        Ok(gate) => lines.extend(gate_rows(gate, content, look)),
+        Err(code) => lines.extend(
+            wrap_words(
+                &format!("Could not read the Accept gate. {}", sentence(code)),
+                content.saturating_sub(2),
+            )
+            .into_iter()
+            .map(|line| Row::of(format!("  {line}"), look.error)),
+        ),
     }
     if checks.pending > 0 {
         lines.push(Row::of(
@@ -1096,6 +1126,65 @@ fn check_rows(checks: &ChangeChecks, head: &str, look: &Look) -> Vec<Row> {
             },
             look.muted,
         ));
+    }
+    lines
+}
+
+/// What the Accept gate meets at the head: each gap but a stale run (shown on its run's
+/// line) with the paths it names, at most `GAPS_SHOWN`, how many more there are, then
+/// whether Accept is refused, goes ahead recording gaps, or meets nothing. Inputs: the gate
+/// view, the content width and the look. Output: the rows.
+fn gate_rows(gate: &CheckGateView, content: usize, look: &Look) -> Vec<Row> {
+    let wrapped = |text: &str, style: Style| -> Vec<Row> {
+        wrap_words(text, content.saturating_sub(2))
+            .into_iter()
+            .map(|line| Row::of(format!("  {line}"), style))
+            .collect()
+    };
+    let mut lines = Vec::new();
+    let listed: Vec<_> = gate.gaps.iter().filter(|gap| gap.code != STALE).collect();
+    for gap in listed.iter().take(GAPS_SHOWN) {
+        let mut text = gap
+            .check
+            .as_deref()
+            .map(|check| format!("{}: ", safe(check)))
+            .unwrap_or_default();
+        text.push_str(&sentence(&gap.code));
+        if !gap.paths.is_empty() {
+            let paths: Vec<String> = gap.paths.iter().map(|path| safe(path)).collect();
+            text.push(' ');
+            text.push_str(&paths.join(", "));
+            let total = usize::try_from(gap.paths_total).unwrap_or(usize::MAX);
+            match total.saturating_sub(gap.paths.len()) {
+                0 => text.push('.'),
+                more => text.push_str(&format!(" and {more} more.")),
+            }
+        }
+        lines.extend(wrapped(&text, look.warning));
+    }
+    let unlisted = usize::try_from(gate.gaps_total)
+        .unwrap_or(usize::MAX)
+        .saturating_sub(gate.gaps.len());
+    let more = listed.len().saturating_sub(GAPS_SHOWN) + unlisted;
+    if more > 0 {
+        lines.push(Row::of(format!("  {more} more gaps."), look.muted));
+    }
+    match (&gate.refusal, gate.gate) {
+        (Some(code), _) => {
+            lines.extend(wrapped(
+                &format!("Accept is refused: {}", sentence(code)),
+                look.error,
+            ));
+        }
+        (None, GateMode::Off) => lines.push(Row::of("  The Accept gate is off.", look.muted)),
+        (None, _) if gate.gaps_total > 0 => lines.push(Row::of(
+            "  Accept goes ahead; the change set records these gaps.",
+            look.warning,
+        )),
+        (None, _) => lines.push(Row::of(
+            "  Nothing in the checks blocks Accept.",
+            look.success,
+        )),
     }
     lines
 }

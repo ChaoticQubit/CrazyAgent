@@ -1,4 +1,6 @@
 use super::*;
+use crate::checks::settings::RemovedTests;
+use crate::engine::owner::CheckGapView;
 use crate::tui::client::checks::run;
 use crate::tui::client::checks::tests::{
     EARLIER, Engine, HEAD, Ran, Recorder, answer, change_set, fieldnotes, text_of, with_runs,
@@ -232,6 +234,7 @@ fn a_stale_run_shows_its_line() {
                 pad("passed", VERDICT_CELLS)
             ),
             "    stale: covered a7e3d1c, head is 4f1c2b9; it does not count for Accept".to_owned(),
+            "  Could not read the Accept gate. That change set is gone.".to_owned(),
         ]
     );
     checks.want(&change_set(), NOW);
@@ -346,4 +349,105 @@ fn the_block_reads_again_while_a_check_waits_and_stops_once_none_does() {
     checks.apply(&answer(job, &mut engine));
     checks.want(&change_set(), NOW + 10 * CHECKS_POLL_MS);
     assert!(checks.next_job().is_none());
+}
+
+#[test]
+fn the_gate_says_what_blocks_accept_and_marks_the_run_it_finds_stale() {
+    let mut engine = with_runs(Engine::new());
+    let job = ChecksJob::Runs {
+        project: fieldnotes(),
+        change_set: change_set(),
+    };
+    let SettingsEvent::Checks(event) = answer(job, &mut engine) else {
+        panic!("a checks job answers a checks event");
+    };
+    let ChecksEvent::Runs {
+        result: Ok(mut read),
+        ..
+    } = *event
+    else {
+        panic!("the engine lists the change set's runs");
+    };
+    let gap =
+        |code: &str, check: Option<&str>, run: Option<&str>, paths: &[&str], total| CheckGapView {
+            code: code.to_owned(),
+            check: check.map(str::to_owned),
+            run: run.map(str::to_owned),
+            paths: paths.iter().map(|path| (*path).to_owned()).collect(),
+            paths_total: total,
+        };
+    let mut gate = CheckGateView {
+        gate: GateMode::Require,
+        removed_tests: RemovedTests::Flag,
+        head: HEAD.to_owned(),
+        profile: None,
+        refusal: Some("checks_protected_change".to_owned()),
+        gaps: vec![
+            gap(STALE, Some("unit"), Some("FM-R1"), &[], 0),
+            gap(
+                "checks_protected_change",
+                None,
+                None,
+                &["Cargo.lock", "ci/check.sh"],
+                5,
+            ),
+            gap("checks_failed", Some("unit"), Some("FM-R1"), &[], 0),
+        ],
+        gaps_total: 3,
+    };
+    read.gate = Ok(gate.clone());
+    let rows: Vec<String> = check_rows(&read, HEAD, 76, &Look::plain())
+        .iter()
+        .map(Row::text)
+        .collect();
+    assert_eq!(
+        rows,
+        vec![
+            format!(
+                "  {}{}FM-R1",
+                pad("unit", CHECK_CELLS),
+                pad("failed", VERDICT_CELLS)
+            ),
+            "    stale: another profile or approval; it does not count for Accept".to_owned(),
+            format!(
+                "  {}{}FM-R2",
+                pad("lint", CHECK_CELLS),
+                pad("passed", VERDICT_CELLS)
+            ),
+            "    stale: covered a7e3d1c, head is 4f1c2b9; it does not count for Accept".to_owned(),
+            "  It changes a protected path. Cargo.lock, ci/check.sh and 3 more.".to_owned(),
+            "  unit: A required check did not pass on this head.".to_owned(),
+            "  Accept is refused: It changes a protected path.".to_owned(),
+        ]
+    );
+
+    gate.gate = GateMode::Warn;
+    gate.refusal = None;
+    gate.gaps_total = 9;
+    read.gate = Ok(gate.clone());
+    let rows: Vec<String> = check_rows(&read, HEAD, 76, &Look::plain())
+        .iter()
+        .map(Row::text)
+        .collect();
+    assert_eq!(
+        rows[rows.len() - 2..],
+        [
+            "  6 more gaps.".to_owned(),
+            "  Accept goes ahead; the change set records these gaps.".to_owned(),
+        ]
+    );
+
+    gate.gate = GateMode::Off;
+    gate.gaps.clear();
+    gate.gaps_total = 0;
+    read.gate = Ok(gate);
+    let rows: Vec<String> = check_rows(&read, HEAD, 76, &Look::plain())
+        .iter()
+        .map(Row::text)
+        .collect();
+    assert_eq!(
+        rows.last().map(String::as_str),
+        Some("  The Accept gate is off.")
+    );
+    assert_eq!(rows.iter().filter(|row| row.contains("stale")).count(), 1);
 }

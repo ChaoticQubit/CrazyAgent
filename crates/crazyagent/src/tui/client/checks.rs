@@ -5,7 +5,8 @@ use crate::checks::settings::ChecksChoice;
 use crate::checks::{ProfileId, ProfileSummary};
 use crate::engine::EngineError;
 use crate::engine::owner::{
-    CheckRunView, ChecksReply, ChecksRequest, ChecksSettingsView, OwnerClient, SettingsSaved,
+    CheckGateView, CheckRunView, ChecksReply, ChecksRequest, ChecksSettingsView, OwnerClient,
+    RUNS_LATEST_MAX, SettingsSaved,
 };
 use crate::landing::ChangeSetId;
 use crate::tui::screens::tests::{Step, TestViews};
@@ -17,15 +18,14 @@ use trackwright_core::model::{OpKind, ProjectKey};
 /// The most steps one Views job runs, so one job stays within a few tracker calls per key.
 pub(in crate::tui) const STEPS_PER_JOB_MAX: usize = 8;
 const PROFILE_PAGES_MAX: usize = 2;
-const CHECK_LINES_MAX: usize = 16;
 const UNKNOWN: &str = "checks_outcome_unknown";
 
 /// One checks request a TUI screen sends. `Tracked` asks for the project's tracker key;
 /// `Views` lends the tab's test views to the owner worker, which runs the steps against the
 /// owner protocol as the owner and gives them back; the rest read or save one scope's check
 /// settings at the version the screen read, list a project's stored profiles, approve or
-/// revoke one, read the newest run of each check of a change set, and start its checks. No
-/// project means the app scope.
+/// revoke one, read the newest run of each check of a change set with its Accept gate, and
+/// start its checks. No project means the app scope.
 pub(in crate::tui) enum ChecksJob {
     Tracked {
         project: ProjectId,
@@ -65,11 +65,13 @@ pub(in crate::tui) enum ChecksJob {
 }
 
 /// A change set's checks as its screen shows them: the newest run of each check, at most
-/// `CHECK_LINES_MAX`, and how many check jobs still wait or run.
+/// `RUNS_LATEST_MAX`, how many check jobs still wait or run, and what the Accept gate would
+/// meet at the head now, or the code it could not be read with.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) struct ChangeChecks {
     pub runs: Vec<CheckRunView>,
     pub pending: usize,
+    pub gate: Result<CheckGateView, String>,
 }
 
 /// What the owner worker answered a checks request with, or a bounded plain code. A Views
@@ -364,24 +366,49 @@ impl NativeOwner {
                 change_set,
             } => {
                 let request = ChecksRequest::Runs {
+                    project: project.clone(),
+                    change_set: change_set.clone(),
+                };
+                let (jobs, latest) = match ask(&client, request, lost).await {
+                    Ok(ChecksReply::Runs { jobs, latest }) => (jobs, latest),
+                    Ok(_) => {
+                        return failed(
+                            &ChecksJob::Runs {
+                                project,
+                                change_set,
+                            },
+                            UNKNOWN.to_owned(),
+                        );
+                    }
+                    Err(code) => {
+                        return failed(
+                            &ChecksJob::Runs {
+                                project,
+                                change_set,
+                            },
+                            code,
+                        );
+                    }
+                };
+                let request = ChecksRequest::Gate {
                     project,
                     change_set: change_set.clone(),
                 };
+                let gate = match ask(&client, request, lost).await {
+                    Ok(ChecksReply::Gate { gate }) => Ok(gate),
+                    Ok(_) => Err(UNKNOWN.to_owned()),
+                    Err(code) => Err(code),
+                };
                 ChecksEvent::Runs {
                     change_set,
-                    result: match ask(&client, request, lost).await {
-                        Ok(ChecksReply::Runs { jobs, latest }) => Ok(ChangeChecks {
-                            runs: latest.into_iter().take(CHECK_LINES_MAX).collect(),
-                            pending: jobs
-                                .iter()
-                                .filter(|job| {
-                                    matches!(job.state, JobState::Queued | JobState::Running)
-                                })
-                                .count(),
-                        }),
-                        Ok(_) => Err(UNKNOWN.to_owned()),
-                        Err(code) => Err(code),
-                    },
+                    result: Ok(ChangeChecks {
+                        runs: latest.into_iter().take(RUNS_LATEST_MAX).collect(),
+                        pending: jobs
+                            .iter()
+                            .filter(|job| matches!(job.state, JobState::Queued | JobState::Running))
+                            .count(),
+                        gate,
+                    }),
                 }
             }
             ChecksJob::Run {
