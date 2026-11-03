@@ -1,7 +1,7 @@
 use super::integrity;
 use super::profile::{CHECKS_MAX, HOLDOUTS_MAX};
 use super::record::{self, CheckRun};
-use super::settings::{self, GateMode, ProtectedChange, SkipMarkers};
+use super::settings::{self, GateMode, ProtectedChange, RemovedTests, SkipMarkers};
 use super::{AdmittedProfile, CheckRefusal, ProfileId};
 use crate::engine::owner::failure;
 use crate::landing::{self, ChangeSetId};
@@ -19,16 +19,27 @@ pub const PROTECTED_CHANGE: &str = "checks_protected_change";
 /// changed test files, or a test a current passing run skipped; it refuses Accept under
 /// `warn` and `require`.
 pub const NEW_SKIPS: &str = "checks_new_skips";
+/// The gap of a required check whose current passing run no longer reports tests its
+/// inventory baseline had, or has no readable integrity block; it refuses Accept under
+/// `require`, and under `warn` too with `removed_tests refuse`.
+pub const TESTS_REMOVED: &str = "checks_tests_removed";
 /// The gap of a required check whose run on the reviewed head ended without passing.
 pub const FAILED: &str = "checks_failed";
 /// The gap of a required check whose newest run covered another head, or ran under another
 /// profile or an earlier approval of the current one.
 pub const STALE: &str = "checks_stale";
 /// The gap of a required check with no run, a stopped run or a run that never started, and
-/// of a project with no current profile.
+/// of a project with no current profile or a current profile that requires no check.
 pub const NOT_RUN: &str = "checks_not_run";
 /// Every gap code, in the order the gate picks the one it refuses with.
-pub const CODES: [&str; 5] = [PROTECTED_CHANGE, NEW_SKIPS, FAILED, STALE, NOT_RUN];
+pub const CODES: [&str; 6] = [
+    PROTECTED_CHANGE,
+    NEW_SKIPS,
+    TESTS_REMOVED,
+    FAILED,
+    STALE,
+    NOT_RUN,
+];
 /// The most paths one gap lists; `paths_total` counts them all.
 pub const PATHS_MAX: usize = 5;
 /// The most linked tickets one note names.
@@ -36,9 +47,11 @@ pub const TICKETS_MAX: usize = 64;
 /// The most notes one read returns, newest first.
 pub const NOTES_READ_MAX: usize = 64;
 /// The most bytes one stored note holds.
-pub const NOTE_BYTES_MAX: usize = 64 * 1024;
+pub const NOTE_BYTES_MAX: usize = 256 * 1024;
 
-const GAPS_MAX: usize = CHECKS_MAX + HOLDOUTS_MAX + 2;
+const GAPS_MAX: usize = 2 * (CHECKS_MAX + HOLDOUTS_MAX) + 2;
+const GAP_BYTES_MAX: usize = 4 * 1024;
+const _: () = assert!(GAPS_MAX * GAP_BYTES_MAX + GAP_BYTES_MAX <= NOTE_BYTES_MAX);
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS check_gate_notes (
     change_set TEXT NOT NULL,
     head TEXT NOT NULL,
@@ -71,12 +84,13 @@ pub struct Gap {
     pub paths_total: u32,
 }
 
-/// What the gate found for one reviewed head: the gate setting in effect, the head, the
-/// current profile (None when the project has none) and every gap.
+/// What the gate found for one reviewed head: the gate and removed tests settings in
+/// effect, the head, the current profile (None when the project has none) and every gap.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GateNote {
     pub gate: GateMode,
+    pub removed_tests: RemovedTests,
     pub head: String,
     pub profile: Option<ProfileId>,
     pub gaps: Vec<Gap>,
@@ -125,11 +139,11 @@ fn initialize(db: &Connection) -> Result<(), CheckRefusal> {
     db.execute_batch(SCHEMA).map_err(unavailable)
 }
 
-/// Decides an Accept of a change set at its reviewed head before any ref moves, as
-/// `landing::accept` and `accept_into` call it: `refusal` picks the refusal, and under
-/// `warn` other gaps are kept as a note on the change set and its linked tickets. Inputs:
-/// the engine connection, the change set and the head. Output: the note, or a `CODES`
-/// refusal, `changes_not_found`, `changes_stale` or `checks_unavailable`.
+/// Decides an Accept of a change set at its reviewed head, as every Accept calls it under
+/// the repository hold and again in the transaction that moves the branch: `refusal` picks
+/// the refusal, and under `warn` other gaps are kept as a note on the change set and its
+/// linked tickets. Inputs: the engine connection, the change set and the head. Output: the
+/// note, or a `CODES` refusal, `changes_not_found`, `changes_stale` or `checks_unavailable`.
 pub fn admit(
     db: &Connection,
     change_set: &ChangeSetId,
@@ -146,11 +160,11 @@ pub fn admit(
     Ok(note)
 }
 
-/// Reads the gaps of a change set at a head, writing nothing: each required check, holdouts
-/// included, needs its newest run to pass on that head under the current profile and
-/// approval; a protected change and new skips count under their `refuse` settings, read
-/// from the change itself. Inputs: the engine connection, the change set and the head.
-/// Output: the note, or `changes_not_found`, `changes_stale` or `checks_unavailable`.
+/// Reads the gaps of a change set at a head, writing nothing: the profile must require a
+/// check, and each required one, holdouts included, needs its newest run to pass on that
+/// head under the current profile and approval without removing tests; a protected change
+/// and new skips count under `refuse`. Inputs: the engine connection, the change set and
+/// the head. Output: the note, or `changes_not_found`, `changes_stale`, `checks_unavailable`.
 pub fn assess(
     db: &Connection,
     change_set: &ChangeSetId,
@@ -165,6 +179,7 @@ pub fn assess(
     let settings = settings::effective(db, &project)?;
     let mut note = GateNote {
         gate: settings.gate,
+        removed_tests: settings.removed_tests,
         head: view.head.clone(),
         profile: None,
         gaps: Vec::new(),
@@ -179,8 +194,14 @@ pub fn assess(
     };
     note.profile = Some(profile.id.clone());
     let runs = record::latest(db, change_set)?;
+    let checks = profile.checks();
+    let mut required = checks.iter().filter(|check| check.spec.required).peekable();
+    if required.peek().is_none() {
+        note.gaps
+            .push(Gap::new(NOT_RUN, None, None, BTreeSet::new()));
+    }
     let mut passed = Vec::new();
-    for check in profile.checks().iter().filter(|check| check.spec.required) {
+    for check in required {
         let name = check.spec.id.as_str();
         let run = runs.iter().find(|run| run.check == name);
         let code = match run {
@@ -223,12 +244,18 @@ pub fn assess(
             if !added.is_empty() {
                 note.gaps.push(Gap::new(NEW_SKIPS, None, None, added));
             }
-            for run in passed {
-                if let Some(names) = skipped_in(db, run)? {
-                    note.gaps
-                        .push(Gap::new(NEW_SKIPS, Some(&run.check), Some(run), names));
-                }
-            }
+        }
+    }
+    for run in passed {
+        let block = integrity_of(db, run)?;
+        if skips && let Some(names) = skipped_in(block.as_ref(), run) {
+            note.gaps
+                .push(Gap::new(NEW_SKIPS, Some(&run.check), Some(run), names));
+        }
+        if let Some((names, total)) = removed_in(block.as_ref(), run) {
+            let mut gap = Gap::new(TESTS_REMOVED, Some(&run.check), Some(run), names);
+            gap.paths_total = gap.paths_total.max(total);
+            note.gaps.push(gap);
         }
     }
     assert!(note.gaps.len() <= GAPS_MAX);
@@ -240,14 +267,21 @@ pub fn assess(
     Ok(note)
 }
 
-/// The code a note refuses Accept with: none under `off`; under `warn` a protected change
-/// or new skips; under `require` any gap, the first of `CODES` present. Input: the note.
-/// Output: the code, or None when Accept may proceed.
+/// The code a note refuses Accept with: none under `off`; under `warn` a protected change,
+/// new skips, or removed tests under `removed_tests refuse`; under `require` any gap, the
+/// first of `CODES` present. Input: the note. Output: the code, or None when Accept may
+/// proceed.
 pub fn refusal(note: &GateNote) -> Option<&'static str> {
     let present = |code: &&str| note.gaps.iter().any(|gap| gap.code == *code);
     match note.gate {
         GateMode::Off => None,
-        GateMode::Warn => [PROTECTED_CHANGE, NEW_SKIPS].iter().copied().find(present),
+        GateMode::Warn => {
+            let removed = (note.removed_tests == RemovedTests::Refuse).then_some(TESTS_REMOVED);
+            [Some(PROTECTED_CHANGE), Some(NEW_SKIPS), removed]
+                .into_iter()
+                .flatten()
+                .find(present)
+        }
         GateMode::Require => CODES.iter().copied().find(present),
     }
 }
@@ -274,11 +308,9 @@ fn covers(run: &CheckRun, head: &str, profile: &AdmittedProfile) -> bool {
         && run.profile_approved_ms == profile.approved_ms
 }
 
-/// The tests one passing run's integrity block lists as new skips: None when it lists
-/// none, no names for a holdout run so its tests stay unnamed, and no names when the block
-/// is missing or unreadable, which counts as a skip so `refuse` fails closed. Inputs: the
-/// engine connection and the run. Output: the names, or `checks_unavailable`.
-fn skipped_in(db: &Connection, run: &CheckRun) -> Result<Option<BTreeSet<String>>, CheckRefusal> {
+/// The integrity block of one run, None when it is missing or unreadable. Inputs: the
+/// engine connection and the run. Output: the block, or `checks_unavailable`.
+fn integrity_of(db: &Connection, run: &CheckRun) -> Result<Option<IntegrityRef>, CheckRefusal> {
     let block: Option<String> = db
         .query_row(
             "SELECT integrity_json FROM tk_runs WHERE id = ?1",
@@ -288,16 +320,44 @@ fn skipped_in(db: &Connection, run: &CheckRun) -> Result<Option<BTreeSet<String>
         .optional()
         .map_err(unavailable)?
         .flatten();
-    let skips = block
+    Ok(block
         .as_deref()
-        .and_then(|text| IntegrityRef::parse(text).ok())
-        .map(|block| block.new_skips);
-    Ok(match skips {
+        .and_then(|text| IntegrityRef::parse(text).ok()))
+}
+
+/// The tests one passing run's integrity block lists as new skips: None when it lists
+/// none, no names for a holdout run so its tests stay unnamed, and no names when the block
+/// is missing or unreadable, which counts as a skip so `refuse` fails closed. Inputs: the
+/// block and the run. Output: the names.
+fn skipped_in(block: Option<&IntegrityRef>, run: &CheckRun) -> Option<BTreeSet<String>> {
+    match block.map(|block| &block.new_skips) {
         Some(skips) if skips.is_empty() => None,
         Some(_) if run.holdout => Some(BTreeSet::new()),
-        Some(skips) => Some(skips.into_iter().map(|skip| skip.path).collect()),
+        Some(skips) => Some(skips.iter().map(|skip| skip.path.clone()).collect()),
         None => Some(BTreeSet::new()),
-    })
+    }
+}
+
+/// The tests one passing run's integrity block lists as removed against its baseline, with
+/// how many in all: None when it lists none, nothing for a holdout run so its tests stay
+/// unnamed and uncounted, and nothing when the block is missing or unreadable, which counts
+/// as removed tests so the gate fails closed. Inputs: the block and the run. Output: the
+/// names and the total.
+fn removed_in(block: Option<&IntegrityRef>, run: &CheckRun) -> Option<(BTreeSet<String>, u32)> {
+    let Some(inventory) = block.map(|block| &block.inventory) else {
+        return Some((BTreeSet::new(), 0));
+    };
+    if inventory.removed_total == 0 {
+        assert!(inventory.removed.is_empty());
+        return None;
+    }
+    if run.holdout {
+        return Some((BTreeSet::new(), 0));
+    }
+    Some((
+        inventory.removed.iter().cloned().collect(),
+        inventory.removed_total,
+    ))
 }
 
 fn remember(
