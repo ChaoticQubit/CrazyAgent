@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.COMMENT_BYTES_MAX = exports.REFUSAL_CODES = exports.HEAD_SCHEME = exports.IDE_CONFIG = exports.CONFIG_SCHEME = exports.BASE_SCHEME = void 0;
+exports.COMMENT_BYTES_MAX = exports.REFUSAL_CODES = exports.LIVE_FILE = exports.HEAD_SCHEME = exports.IDE_CONFIG = exports.CONFIG_SCHEME = exports.BASE_SCHEME = void 0;
 exports.unconfirmed = unconfirmed;
 exports.plainLine = plainLine;
 exports.refusal = refusal;
@@ -17,6 +17,7 @@ exports.BASE_SCHEME = "crazyagent-base";
 exports.CONFIG_SCHEME = "crazyagent-config";
 exports.IDE_CONFIG = "ide_config";
 exports.HEAD_SCHEME = "crazyagent-head";
+exports.LIVE_FILE = "Opens the agent's current file: Accept lands the version it recorded";
 const SET_ID = /^[0-9a-f]{32}$/;
 const CONFLICT_SHOWN = 5;
 const UNSAFE = /[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
@@ -74,6 +75,8 @@ const UNCONFIRMED = {
     ide_agent_message_outcome_unknown: "CrazyAgent couldn't confirm the agent got this message. Check its terminal before you send it again.",
     ide_memory_decide_outcome_unknown: "CrazyAgent couldn't confirm your decision on this memory. Check the CrazyAgent window before you decide again.",
     ide_extension_decide_outcome_unknown: "CrazyAgent couldn't confirm your decision on this update. Check the CrazyAgent app before you decide again.",
+    ide_extension_request_outcome_unknown: "CrazyAgent couldn't confirm it got your request for this extension. Check the CrazyAgent app before you ask again.",
+    ide_show_all_agents_outcome_unknown: "CrazyAgent couldn't confirm the agent folders changed. Check the Explorer before you try again.",
     ide_git_outcome_unknown: "CrazyAgent couldn't confirm this git command finished. It may have run, so check the branch and its remote before you run it again.",
 };
 function unconfirmed(code) {
@@ -137,7 +140,7 @@ function resource(set, file) {
         head: open === "diff" ? basePath(set.id, file.path) : null,
         open,
         letter: LETTERS[file.status],
-        tooltip: tooltip(file),
+        tooltip: open === "file" ? `${tooltip(file)}, ${exports.LIVE_FILE}` : tooltip(file),
         strikeThrough: file.status === "deleted",
     };
 }
