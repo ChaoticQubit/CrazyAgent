@@ -835,3 +835,101 @@ fn an_engine_notice_shows_as_the_engines_message_when_master_messages_are_not_ke
         ]
     );
 }
+
+/// B19R3-H1 (rv-code r3 of chore/b19-line): an engine store whose kept messages table was
+/// made before engine notices, with its old author check and rows, opens with the table
+/// rebuilt: every row keeps its id and values, a deleted row's id is never handed out again,
+/// the agent index is back, a second open changes nothing, and a notice then records.
+#[test]
+fn an_old_kept_messages_table_is_rebuilt_on_open_with_every_row_and_a_notice_records() {
+    let connection = Connection::open_in_memory().unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE team_agent_messages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project TEXT NOT NULL,
+                agent INTEGER NOT NULL,
+                author TEXT NOT NULL CHECK(author IN ('master','owner')),
+                kind TEXT NOT NULL CHECK(kind IN ('message','answer','prompt')),
+                text TEXT,
+                created_ms INTEGER NOT NULL
+            );
+            INSERT INTO team_agent_messages(project,agent,author,kind,text,created_ms) VALUES
+                ('timeline',1,'master','message','Start with the header',10),
+                ('timeline',1,'owner','prompt','Use the blue theme',20),
+                ('timeline',1,'master','answer',NULL,30),
+                ('timeline',1,'master','message','Dropped to make room',40);
+            DELETE FROM team_agent_messages WHERE id=4;",
+        )
+        .unwrap();
+    let rows =
+        |connection: &Connection| -> Vec<(i64, String, i64, String, String, Option<String>, i64)> {
+            connection
+            .prepare("SELECT id,project,agent,author,kind,text,created_ms FROM team_agent_messages ORDER BY id")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+        };
+    let before = rows(&connection);
+    assert_eq!(before.len(), 3);
+
+    super::super::initialize(&connection).unwrap();
+    assert_eq!(
+        rows(&connection),
+        before,
+        "every row keeps its id and values"
+    );
+    let schema = |connection: &Connection| -> Vec<(String, String)> {
+        connection
+            .prepare(
+                "SELECT name,sql FROM sqlite_schema WHERE tbl_name='team_agent_messages' AND sql IS NOT NULL ORDER BY name",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    let rebuilt = schema(&connection);
+    let names: Vec<&str> = rebuilt.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names, ["team_agent_messages", "team_agent_messages_agent"]);
+    assert!(rebuilt[0].1.contains("'engine'"), "{}", rebuilt[0].1);
+    super::super::initialize(&connection).unwrap();
+    assert_eq!(
+        schema(&connection),
+        rebuilt,
+        "a second open changes nothing"
+    );
+    assert_eq!(rows(&connection), before);
+
+    let ada = agent(&connection, PROJECT);
+    let id = said(
+        &connection,
+        PROJECT,
+        ada,
+        Said::Notice,
+        "[team] The owner stopped your teammate in pane %3.",
+        50,
+    );
+    assert_eq!(id, 5, "a deleted row's id is never handed out again");
+    let (author, kind): (String, String) = connection
+        .query_row(
+            "SELECT author,kind FROM team_agent_messages WHERE id=?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((author.as_str(), kind.as_str()), ("engine", "message"));
+}

@@ -12138,6 +12138,64 @@ fn stop_teammate_kills_only_that_pane_and_tells_the_lead() {
     team.shutdown().unwrap();
 }
 
+/// B19R3-H1 (rv-code r3 of chore/b19-line): the tick that ends a teammate the owner stopped
+/// and types the notice into its lead completes, so that tick's sweep and owner questions
+/// still run, and the lead's Messages keep the notice as the engine's.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_tick_that_ends_a_stopped_teammate_completes_and_keeps_the_notice_as_the_engines() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, HEARING_CODEX, TeamLimits::default());
+    let (lead, lead_pane) = hearing_lead(&fixture, &mut team, &host);
+    let first = teammate_split(&fixture, &lead_pane);
+    fixture.until(&mut team, "the engine records the teammate pane", |f| {
+        teammate_rows(f, lead) == vec![(first.clone(), false, false)]
+    });
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::StopTeammate {
+            project_id: fixture.setup.project_id.clone(),
+            agent: lead,
+            pane: first.clone(),
+        }],
+    );
+
+    let told = format!(
+        "The owner stopped your teammate in pane {first}. Do not start it again unless the owner asks."
+    );
+    let deadline = Instant::now() + WAIT;
+    while !heard(&fixture, lead).contains(&told) {
+        assert!(Instant::now() < deadline, "the lead never heard the stop");
+        assert_eq!(
+            team.tick().map_err(|problem| problem.0),
+            Ok(()),
+            "the tick that ends a teammate completes its sweep and questions"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let timeline = crate::team::agent_messages::read(
+        &fixture.connection,
+        &fixture.setup.project_id,
+        lead,
+        None,
+        None,
+    )
+    .unwrap();
+    let notices: Vec<Option<String>> = timeline
+        .entries
+        .into_iter()
+        .filter(|entry| {
+            entry.from == crate::team::agent_messages::Speaker::Engine
+                && entry.kind == crate::team::agent_messages::EntryKind::Message
+        })
+        .map(|entry| entry.text)
+        .collect();
+    assert_eq!(notices, [Some(format!("(team) {told}"))]);
+    assert_eq!(team.tick().map_err(|problem| problem.0), Ok(()));
+    team.shutdown().unwrap();
+}
+
 /// Max teammates per harness closes the newest panes past each choice (S4): for every
 /// choice, with two panes more than it allows, the engine closes the two newest in one
 /// scan, keeps the oldest ones, marks the closed ones stopped and tells the harness the
