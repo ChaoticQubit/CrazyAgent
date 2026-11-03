@@ -11,6 +11,12 @@ use crate::landing::{AgentKind, ChangeAgent, FileMark, TurnEnd, TurnOutcome, Wor
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use trackwright_core::model::{Actor as CoreActor, ProjectKey};
+use trackwright_core::runs::{
+    self, NewResult, PolicyRef, RunEnd, RunFinish, RunRecord, RunStart, SourceRef, Toolchain,
+    ToolchainFamily,
+};
+use trackwright_core::tests_model::CaseKind as CoreKind;
 
 const TRACKER_PROJECT: i64 = 1;
 const PROFILE: &str = "5e1d3a0c9b8f7e6d5c4b3a291807f6e5d4c3b2a19087f6e5d4c3b2a190807f6e";
@@ -63,39 +69,27 @@ fn git_in(home: &Path, dir: &Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap()
 }
 
-/// Creates the trackwright project, run and result tables with the columns of the core
-/// schema and the test management contract's migration step 2, and project 1 keyed `CA`,
-/// until `trackwright-core` is a dependency of this crate and its migration makes them.
-/// Input: the engine store.
+/// Builds the trackwright and tracker tables with the tracker's own migration, so every
+/// column, CHECK, foreign key and trigger is the real one, and creates core project 1 keyed
+/// `CA` as the owner. Input: the engine store.
 fn tracker_tables(db: &Connection) {
-    db.execute_batch(
-        "CREATE TABLE tk_projects(
-            id INTEGER PRIMARY KEY,
-            key TEXT NOT NULL UNIQUE CHECK (length(key) BETWEEN 2 AND 8 AND key NOT GLOB '*[^A-Z]*'),
-            name TEXT NOT NULL, created_ms INTEGER NOT NULL, version INTEGER NOT NULL);
-        INSERT INTO tk_projects(id, key, name, created_ms, version)
-            VALUES (1, 'CA', 'Project one', 1, 1);
-        CREATE TABLE tk_runs(
-            id INTEGER PRIMARY KEY, project INTEGER NOT NULL, number INTEGER NOT NULL,
-            plan_id INTEGER, batch TEXT, title TEXT NOT NULL,
-            state TEXT NOT NULL CHECK (state IN ('running', 'finished', 'interrupted')),
-            verdict TEXT CHECK (verdict IN
-                ('passed', 'failed', 'no_tests', 'build_failed', 'unknown', 'unavailable')),
-            reason TEXT, source_json TEXT NOT NULL, policy_json TEXT NOT NULL,
-            integrity_json TEXT, started_ms INTEGER NOT NULL, finished_ms INTEGER,
-            recorded_by TEXT NOT NULL, total INTEGER NOT NULL, passed INTEGER NOT NULL,
-            failed INTEGER NOT NULL, skipped INTEGER NOT NULL, errored INTEGER NOT NULL,
-            version INTEGER NOT NULL, UNIQUE (project, number));
-        CREATE TABLE tk_results(
-            id INTEGER PRIMARY KEY, run_id INTEGER NOT NULL REFERENCES tk_runs(id),
-            position INTEGER NOT NULL CHECK (position >= 1), case_id INTEGER,
-            name TEXT NOT NULL,
-            outcome TEXT NOT NULL CHECK (outcome IN
-                ('passed', 'failed', 'skipped', 'errored', 'not_run')),
-            duration_ms INTEGER, message TEXT, artifact TEXT,
-            UNIQUE (run_id, name), UNIQUE (run_id, position));",
+    crate::tracker::initialize(db).unwrap();
+    let tx = db.unchecked_transaction().unwrap();
+    trackwright_core::store::create_project(
+        &tx,
+        &crate::tracker::owner(),
+        &ProjectKey::new("CA").unwrap(),
+        "Project one",
+        1,
     )
     .unwrap();
+    tx.commit().unwrap();
+    let project: i64 = db
+        .query_row("SELECT id FROM tk_projects WHERE key = 'CA'", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(project, TRACKER_PROJECT);
 }
 
 impl Case {
@@ -417,6 +411,106 @@ fn a_change_set_that_deletes_a_test_records_the_removed_name() {
         block["inventory"]["baseline_run"],
         serde_json::json!("CA-R1")
     );
+}
+
+#[test]
+fn the_inventory_reads_a_baseline_the_trackwright_recorder_wrote_into_the_migrated_tables() {
+    let head = "#[test]\nfn adds() {\n    assert_eq!(1 + 1, 2);\n}\n";
+    let case = Case::new(
+        &[("tests/math.rs", MATH_BASE)],
+        &[("tests/math.rs", Some(head))],
+    );
+    let engine = CoreActor::new(ENGINE_ACTOR).unwrap();
+    let tx = case.db.unchecked_transaction().unwrap();
+    let started = runs::start(
+        &tx,
+        &engine,
+        &RunStart {
+            project: ProjectKey::new("CA").unwrap(),
+            title: "unit".into(),
+            plan: None,
+            batch: None,
+            source: SourceRef::Git {
+                repository: "project-1".into(),
+                commit: case.base.clone(),
+                tree: case.base_tree.clone(),
+                base: None,
+                change_set: None,
+            },
+            policy: PolicyRef {
+                profile: PROFILE.into(),
+                profile_approved_ms: 1,
+                check: "unit".into(),
+                kind: CoreKind::Unit,
+                argv: vec!["cargo".into(), "test".into()],
+                toolchain: Toolchain {
+                    family: ToolchainFamily::Rust,
+                    version: "rustc 1.98.1".into(),
+                },
+                sandbox: PROFILE.into(),
+                network: runs::NetworkMode::Off,
+                timeout_s: 600,
+                environment: PROFILE.into(),
+            },
+        },
+        100,
+    )
+    .unwrap();
+    let result = |name: &str| NewResult {
+        name: name.into(),
+        outcome: runs::ResultOutcome::Passed,
+        duration_ms: Some(1),
+        message: None,
+        artifact: None,
+    };
+    let recorded = runs::record(
+        &tx,
+        &engine,
+        &RunRecord {
+            id: started.id.clone(),
+            version: started.version,
+            results: vec![result("math::adds"), result("math::subtracts")],
+        },
+        110,
+    )
+    .unwrap();
+    let finished = runs::finish(
+        &tx,
+        &engine,
+        &RunFinish {
+            id: recorded.id.clone(),
+            version: recorded.version,
+            end: RunEnd::Completed,
+            exit_code: Some(0),
+            reason: None,
+            integrity: None,
+        },
+        120,
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    assert_eq!(finished.verdict, Some(runs::Verdict::Passed));
+    let integrity = case
+        .assess(
+            &check("unit", false),
+            &[],
+            &ChecksSettings::default(),
+            &passed(&["math::adds"]),
+        )
+        .unwrap();
+    assert_eq!(
+        integrity.inventory,
+        Inventory {
+            baseline_run: Some(String::from(finished.id)),
+            removed: vec!["math::subtracts".into()],
+            removed_total: 1,
+        }
+    );
+    let rewritten = case
+        .db
+        .execute("UPDATE tk_results SET outcome = 'failed'", [])
+        .unwrap_err();
+    assert!(rewritten.to_string().contains("append-only"), "{rewritten}");
 }
 
 #[test]
