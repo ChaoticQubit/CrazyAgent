@@ -8387,6 +8387,54 @@ fn between_turns(
     }
 }
 
+/// A native lead's relay is served in the split layout its sandbox was built for, the roster
+/// in the lead's part, and a lead whose stored mode cannot be read is not served at all, so
+/// nothing lands in the mailbox folder its teammates write (relay mailbox forgery C1,
+/// rv-audit r1 F1).
+#[test]
+fn a_native_lead_s_relay_is_served_split_and_one_whose_mode_cannot_be_read_is_not_served() {
+    let fixture = Fixture::new(2);
+    crate::coord::ensure(&fixture.connection).unwrap();
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let native = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    let unread = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    fixture
+        .connection
+        .execute("UPDATE team_agents SET mode='native' WHERE id=?1", [native])
+        .unwrap();
+    fixture
+        .connection
+        .execute("UPDATE team_agents SET mode=X'00' WHERE id=?1", [unread])
+        .unwrap();
+    for id in [native, unread] {
+        let home = agent_home(&team.state, id);
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(team.mailbox(id).parent().unwrap()).unwrap();
+        crate::coord::relay::install(&home, &team.mailbox(id), &fixture.base.join("engine"))
+            .unwrap();
+        let mut worker = between_turns(&project, AgentRole::Sub, false, false);
+        worker.harness = "claude-code".into();
+        team.workers.insert(id, worker);
+    }
+
+    team.serve_relays(&project);
+    let roster = |id: i64| team.mailbox(id).join("relay.json");
+    let lead_roster = |id: i64| {
+        team.mailbox(id)
+            .join(crate::coord::relay::LEAD_PART)
+            .join("relay.json")
+    };
+    assert!(
+        lead_roster(native).is_file() && !roster(native).exists(),
+        "a native lead's roster sits in its part, never where its teammates write"
+    );
+    assert!(
+        !roster(unread).exists() && !lead_roster(unread).exists(),
+        "a lead whose mode cannot be read is skipped, never served in the single layout"
+    );
+}
+
 /// F2 and FAIL C: the agents the engine wakes for their messages are the project's idle
 /// sub-agents on a signed-in account between turns, kept native-lead sessions included;
 /// busy, live, stopping, endpoint (kept) agents, the master and other projects are not.
