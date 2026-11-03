@@ -18,6 +18,7 @@ pub mod codes {
     pub const STORE_NOT_FOUND: &str = "store_not_found";
     pub const STORE_PATH_REFUSED: &str = "store_path_refused";
     pub const STORE_UNREADABLE: &str = "store_unreadable";
+    pub const STORE_EXISTS_ABOVE: &str = "store_exists_above";
 }
 
 /// Finds the database an operation runs on: `--db`, then `TRACKWRIGHT_DB`, then
@@ -35,8 +36,9 @@ pub fn existing(flag: Option<&Path>, env: Option<&OsStr>, cwd: &Path) -> Result<
 }
 
 /// Picks where `init` creates or reopens the database: `--db`, then `TRACKWRIGHT_DB`, then
-/// `cwd/.trackwright/tracker.db` (never an ancestor). Inputs: as for [`existing`]. Output:
-/// the path and whether a file is already there; a symlink in either place is refused.
+/// `cwd/.trackwright/tracker.db`, refused when an ancestor already holds one it would hide.
+/// Inputs: as for [`existing`]. Output: the path and whether a file is already there; a
+/// symlink in either place is refused.
 pub fn for_init(
     flag: Option<&Path>,
     env: Option<&OsStr>,
@@ -52,7 +54,11 @@ pub fn for_init(
             {
                 return Err(refused(&folder, "is not a plain folder"));
             }
-            folder.join(FILE)
+            let file = folder.join(FILE);
+            if kind_of(&file)?.is_none() {
+                none_above(cwd)?;
+            }
+            file
         }
     };
     let exists = match kind_of(&path)? {
@@ -116,6 +122,33 @@ fn upward(cwd: &Path) -> Result<PathBuf, Failure> {
             cwd.display()
         ),
     ))
+}
+
+/// Refuses a new database in `cwd` while an ancestor holds one: the upward search would find
+/// the new file first and hide every project above it. Input: the absolute working folder.
+/// Output: `Ok` when no ancestor holds a database, else `store_exists_above` naming it.
+fn none_above(cwd: &Path) -> Result<(), Failure> {
+    assert!(cwd.is_absolute(), "the working folder is absolute");
+    let Some(parent) = cwd.parent() else {
+        return Ok(());
+    };
+    match upward(parent) {
+        Ok(found) => {
+            assert!(found.ends_with(Path::new(FOLDER).join(FILE)));
+            let holder = found.parent().and_then(Path::parent);
+            assert!(holder.is_some_and(|holder| parent.starts_with(holder)));
+            Err(Failure::new(
+                codes::STORE_EXISTS_ABOVE,
+                format!(
+                    "{} already serves this folder; pass --db {} to add the project there",
+                    found.display(),
+                    found.display()
+                ),
+            ))
+        }
+        Err(failure) if failure.code == codes::STORE_NOT_FOUND => Ok(()),
+        Err(failure) => Err(failure),
+    }
 }
 
 fn kind_of(path: &Path) -> Result<Option<Kind>, Failure> {

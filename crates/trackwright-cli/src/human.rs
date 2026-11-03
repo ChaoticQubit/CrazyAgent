@@ -53,7 +53,8 @@ pub fn help(topic: Topic, catalog: &[OpSpec]) -> String {
         Topic::Overview => overview(&mut out, catalog),
         Topic::Init => out.push_str(
             "trackwright init --key KEY [--name NAME] [--db PATH] [--actor ACTOR] [--json]\n\
-             Creates the database when it is missing and adds the project KEY (2 to 8 letters A-Z).\n",
+             Adds the project KEY (2 to 8 letters A-Z), creating the database if missing.\n\
+             Without --db: ./.trackwright/tracker.db, refused while a folder above holds one.\n",
         ),
         Topic::Mcp => out.push_str(
             "trackwright mcp --actor ACTOR [--db PATH]\n\
@@ -79,9 +80,9 @@ fn overview(out: &mut String, catalog: &[OpSpec]) {
     writeln!(
         out,
         "Database: --db, then {DB_ENV}, then {FOLDER}/{FILE} here or in the nearest folder above.\n\
-         Actor: --actor, then {ACTOR_ENV}. trackwright schema needs neither.\n\
-         --json prints the reply envelope as one line. Exit status: 0 done, {EXIT_REFUSED} refused, \
-         {EXIT_USAGE} usage error."
+         Actor: --actor, then {ACTOR_ENV}. Plain trackwright schema needs neither.\n\
+         --json prints the reply envelope as one line.\n\
+         Exit status: 0 done, {EXIT_REFUSED} refused, {EXIT_USAGE} usage error."
     )
     .unwrap();
 }

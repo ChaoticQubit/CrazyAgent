@@ -92,8 +92,10 @@ pub fn run(args: &[OsString]) -> ExitCode {
             Ok(()) => ExitCode::SUCCESS,
             Err(failure) => stderr_exit(&failure),
         },
-        Command::Op { spec, args } if spec.kind == OpKind::Schema && args.is_empty() => {
-            schema(invocation.json)
+        Command::Op { spec, args }
+            if spec.kind == OpKind::Schema && args.is_empty() && !invocation.json =>
+        {
+            schema()
         }
         Command::Init { .. } | Command::Mcp | Command::Op { .. } => as_actor(invocation),
     }
@@ -210,14 +212,14 @@ fn serve(actor: &str, place: &Place) -> Result<(), Failure> {
         .map_err(|error| Failure::new(STDIO_FAILED, format!("stdio failed: {}", error.kind())))
 }
 
-fn schema(json: bool) -> ExitCode {
+fn schema() -> ExitCode {
     let schema = catalog::schema_v1();
     assert_eq!(schema["api"], 1, "the published schema is API version 1");
-    if json {
-        let envelope = json!({"api": 1, "ok": true, "data": schema, "next": [], "cursor": null});
-        return reply(true, &envelope);
-    }
     let text = serde_json::to_string_pretty(&schema).expect("a JSON value serializes") + "\n";
+    assert!(
+        text.starts_with('{'),
+        "the published schema is one JSON object"
+    );
     match write_stdout(&text) {
         Ok(()) => ExitCode::SUCCESS,
         Err(failure) => stderr_exit(&failure),
