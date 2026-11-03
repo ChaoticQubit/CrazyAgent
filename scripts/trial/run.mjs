@@ -13,7 +13,6 @@ const REPO = resolve(TRIAL, "..", "..");
 const DESKTOP = join(REPO, "apps", "desktop");
 const PROMPT = join(TRIAL, "prompt.md");
 const STOP_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"];
-const KILL_GRACE_MS = 20000;
 const REAP_MS = 10000;
 const CLOSE_MS = 5000;
 const POLL_MS = 200;
@@ -111,6 +110,7 @@ function options(argv) {
       "frame-gap-s": { type: "string", default: "3" },
       "ps-after-s": { type: "string", default: "120" },
       "ps-every-s": { type: "string", default: "60" },
+      "kill-grace-s": { type: "string", default: "20" },
       "frames-cmd": { type: "string" },
       "desktop-cmd": { type: "string" },
       "audit-cmd": { type: "string" },
@@ -151,6 +151,7 @@ function options(argv) {
     frameGapMs: seconds("--frame-gap-s", values["frame-gap-s"], 600) * 1000,
     psAfterMs: seconds("--ps-after-s", values["ps-after-s"], 24 * 3600) * 1000,
     psEveryMs: seconds("--ps-every-s", values["ps-every-s"], 3600) * 1000,
+    graceMs: seconds("--kill-grace-s", values["kill-grace-s"], 600) * 1000,
   };
 }
 
@@ -365,11 +366,11 @@ function killLive() {
   }
 }
 
-/** Stops every supervised group still live, reporting a group that cannot be stopped instead of throwing. Input: none. Output: none. */
-async function stopLive() {
+/** Stops every supervised group still live, reporting a group that cannot be stopped instead of throwing. Input: the SIGKILL grace in ms. Output: none. */
+async function stopLive(graceMs) {
   for (const pgid of [...LIVE]) {
     try {
-      await stopGroup(pgid);
+      await stopGroup(pgid, graceMs);
     } catch (error) {
       console.error(mask(`could not stop group ${pgid}: ${error.message}`));
     }
@@ -384,24 +385,25 @@ function childEnv(extra) {
   return { ...env, ...extra };
 }
 
-/** Stops a process group: SIGTERM, then SIGKILL after the grace period. Input: the group id. Output: null when the group was already empty, else how it was stopped, naming members that outlived SIGKILL. */
-async function stopGroup(pgid) {
+/** Stops a process group: SIGTERM, then SIGKILL after the grace period. Input: the group id and the grace in ms. Output: null when the group was already empty, else how it was stopped, naming members that outlived SIGKILL. */
+async function stopGroup(pgid, graceMs) {
+  assert.ok(Number.isFinite(graceMs) && graceMs > 0, "every stop has a SIGKILL grace");
   if (!groupAlive(pgid)) return null;
   signalGroup(pgid, "SIGTERM");
-  const grace = Date.now() + KILL_GRACE_MS;
+  const grace = Date.now() + graceMs;
   while (groupAlive(pgid) && Date.now() < grace) await pause(POLL_MS);
   let how = "SIGTERM";
   if (groupAlive(pgid)) {
     signalGroup(pgid, "SIGKILL");
-    how = `SIGKILL after the ${KILL_GRACE_MS / 1000} s grace`;
+    how = `SIGKILL after the ${graceMs / 1000} s grace`;
   }
   const reap = Date.now() + REAP_MS;
   while (groupAlive(pgid) && Date.now() < reap) await pause(POLL_MS);
   return groupAlive(pgid) ? `${how}, members still present` : how;
 }
 
-/** Runs one long command in its own process group with a deadline and a stop signal, streaming masked output to a log; the group is recorded as live until it is stopped. Input: argv, working folder, environment, log path, deadline in ms, an AbortSignal and the failure callback for log writes. Output: exit code, signal, cause ("deadline", or "stop" with the stop reason), how the runner stopped the group and any members left after exit, and elapsed ms. */
-async function supervise(argv, { cwd, env, log, ms, stop, onError }) {
+/** Runs one long command in its own process group with a deadline and a stop signal, streaming masked output to a log; the group is recorded as live until it is stopped. Input: argv, working folder, environment, log path, deadline in ms, SIGKILL grace in ms, an AbortSignal and the failure callback for log writes. Output: exit code, signal, cause ("deadline", or "stop" with the stop reason), how the runner stopped the group and any members left after exit, and elapsed ms. */
+async function supervise(argv, { cwd, env, log, ms, graceMs, stop, onError }) {
   writeFileSync(log, "");
   const out = maskedStream(log, onError);
   const err = maskedStream(log, onError);
@@ -423,10 +425,10 @@ async function supervise(argv, { cwd, env, log, ms, stop, onError }) {
   });
   const first = await Promise.race([exited, deadline, stopped]);
   const cause = typeof first === "string" ? first : null;
-  const how = cause && child.pid !== undefined ? await stopGroup(child.pid) : null;
+  const how = cause && child.pid !== undefined ? await stopGroup(child.pid, graceMs) : null;
   const result = cause ? await exited : first;
   timer.abort();
-  const stray = child.pid !== undefined ? await stopGroup(child.pid) : null;
+  const stray = child.pid !== undefined ? await stopGroup(child.pid, graceMs) : null;
   LIVE.delete(child.pid);
   await Promise.race([closed, pause(CLOSE_MS)]);
   if (result.error) err.write(`could not start ${argv[0]}: ${result.error}\n`);
@@ -677,11 +679,11 @@ export async function main(argv) {
     steps.add("tui", "Start the TUI recorder", "the TUI check reads the frames and the GIF the owner would have seen", recorder.first, recorder.first ? "first frame read" : "the first pane read failed; the recorder keeps trying", ["frames/f00000.txt"]);
     writeFileSync(join(opts.evidence, "logs", "env.txt"), `${envNames.join("\n")}\n`);
     snapshots = startSnapshots(opts.evidence, [opts.app, project, opts.engine], opts.psAfterMs, opts.psEveryMs);
-    if (!stop.aborted) desktop = await supervise(opts.commands.desktop, { cwd: opts.desktopCwd, env, log: join(opts.evidence, "logs", "desktop.log"), ms: opts.deadlineMs, stop, onError: fail });
+    if (!stop.aborted) desktop = await supervise(opts.commands.desktop, { cwd: opts.desktopCwd, env, log: join(opts.evidence, "logs", "desktop.log"), ms: opts.deadlineMs, graceMs: opts.graceMs, stop, onError: fail });
   } catch (error) {
     fail(error);
   } finally {
-    await stopLive();
+    await stopLive(opts.graceMs);
     if (snapshots) shots = await snapshots.stop();
     if (recorder) recorded = await recorder.stop();
   }
@@ -699,13 +701,13 @@ export async function main(argv) {
   finish();
   if (interrupted()) return 130;
 
-  const audit = await supervise(opts.commands.audit, { cwd: REPO, env, log: join(opts.evidence, "logs", "audit.log"), ms: AUDIT_MS, stop: halt.signal, onError: fail }).catch((error) => ({ code: null, error: error.message, cause: null, ms: 0 }));
+  const audit = await supervise(opts.commands.audit, { cwd: REPO, env, log: join(opts.evidence, "logs", "audit.log"), ms: AUDIT_MS, graceMs: opts.graceMs, stop: halt.signal, onError: fail }).catch((error) => ({ code: null, error: error.message, cause: null, ms: 0 }));
   const audited = audit.cause === null && (audit.code === 0 || audit.code === 1);
   const verdict = audit.code === 0 ? "no FAIL" : audit.code === 1 ? "at least one FAIL, see checks/" : "the audit could not run";
   steps.add("engine", "Run the audit", "the checks decide what the trial proved", audited, `${ending(audit, AUDIT_MS)}: ${verdict}`, ["logs/audit.log"]);
   if (interrupted()) return 130;
 
-  const report = await supervise(opts.commands.report, { cwd: REPO, env, log: join(opts.evidence, "logs", "report.log"), ms: REPORT_MS, stop: halt.signal, onError: fail }).catch((error) => ({ code: null, error: error.message, cause: null, ms: 0 }));
+  const report = await supervise(opts.commands.report, { cwd: REPO, env, log: join(opts.evidence, "logs", "report.log"), ms: REPORT_MS, graceMs: opts.graceMs, stop: halt.signal, onError: fail }).catch((error) => ({ code: null, error: error.message, cause: null, ms: 0 }));
   steps.add("engine", "Build the report", "the owner reads the trial as one report", report.code === 0 && report.cause === null && !report.error, ending(report, REPORT_MS), ["logs/report.log", "report.html", "report.pdf"]);
   if (interrupted()) return 130;
   reportCrash();
