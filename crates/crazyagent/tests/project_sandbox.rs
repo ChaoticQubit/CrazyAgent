@@ -2157,6 +2157,62 @@ fn an_agent_cannot_exec_an_app_bundle_binary_in_any_case_but_bundle_tools_still_
 }
 
 #[test]
+fn an_agent_cannot_exec_an_app_bundle_it_put_in_its_own_folders_but_bundle_tools_still_run() {
+    use std::os::unix::fs::PermissionsExt;
+    let case = case();
+    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let profile = case.profiles.join("own-apps.sb");
+    let script = |root: &Path, path: &str| {
+        let file = root.join(path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "#!/bin/sh\necho ran\n").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+        file
+    };
+    let chrome = script(
+        &case.home,
+        ".cache/puppeteer/chrome/mac_arm-131.0.6778.85/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+    );
+    let apps = [
+        chrome.clone(),
+        script(
+            &case.home,
+            "Library/Caches/ms-playwright/chromium-1148/chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+        ),
+        script(
+            &case.project,
+            "node_modules/electron/dist/Electron.app/Contents/MacOS/Electron",
+        ),
+        script(&case.tmp, "unpacked/Some Tool.APP/contents/macos/Some Tool"),
+        Path::new("/System/Volumes/Data").join(chrome.strip_prefix("/").unwrap()),
+        PathBuf::from(chrome.to_str().unwrap().to_uppercase()),
+    ];
+    for app in &apps {
+        assert!(app.is_file(), "{}", app.display());
+        let output = run(&sandbox, &profile, &quoted(app));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{} ran", app.display());
+        assert!(
+            stderr.contains("Operation not permitted"),
+            "{}: {stderr}",
+            app.display()
+        );
+        assert!(output.stdout.is_empty(), "{}", app.display());
+    }
+    let tool = script(
+        &case.project,
+        "node_modules/electron/dist/Electron.app/Contents/Resources/bin/tool",
+    );
+    let output = run(&sandbox, &profile, &quoted(&tool));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "ran\n");
+}
+
+#[test]
 fn a_teammate_worktree_is_added_in_the_clone_but_no_other_git_lands_below_it() {
     assert!(Path::new(AGENT_GIT).is_file());
     let (case, clone, _head) = clone_case();
