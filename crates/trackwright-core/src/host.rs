@@ -176,7 +176,7 @@ pub trait Paths {
     /// the host's folder for the project, before any file is touched. Inputs: the
     /// transaction, the project, the actor, the operation (`export`, `import_preview` or
     /// `import_apply`) and the requested path. Output: the path to open, or the refusal.
-    fn resolve(
+    fn resolve_path(
         &self,
         tx: &Transaction<'_>,
         project: &ProjectKey,

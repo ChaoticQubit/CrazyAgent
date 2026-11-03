@@ -160,7 +160,7 @@ impl Authority for EngineLike {
 }
 
 impl Paths for EngineLike {
-    fn resolve(
+    fn resolve_path(
         &self,
         tx: &Transaction<'_>,
         project: &ProjectKey,
@@ -168,7 +168,7 @@ impl Paths for EngineLike {
         op: OpKind,
         requested: &Path,
     ) -> Result<PathBuf, Refusal> {
-        Standalone.resolve(tx, project, actor, op, requested)
+        Standalone.resolve_path(tx, project, actor, op, requested)
     }
 }
 
