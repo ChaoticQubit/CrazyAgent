@@ -129,7 +129,7 @@ function Launching() {
 export function Screen({ route, session, alerts }: { route: Route; session: Session; alerts?: Map<string, number> }) {
   const projects = session.projects.kind === "ok" ? session.projects.value : undefined;
   switch (route.name) {
-    case "settings": return <Settings tab={route.tab} action={route.action} account={route.account} skill={route.skill} />;
+    case "settings": return <Settings tab={route.tab} action={route.action} account={route.account} skill={route.skill} harness={route.harness} />;
     case "new-project": return <NewProjectFlow step={route.step} />;
     case "add-project": return route.way === "clone" ? <CloneFromGitHub /> : <AddFolder />;
     case "onboarding": return <OnboardingReview key={route.id} id={route.id} />;

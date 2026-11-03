@@ -5,6 +5,7 @@ mod updates;
 #[cfg(feature = "native-webdriver")]
 mod native_refresh_observation;
 
+use bridge::harness_settings::HarnessSettingsPage;
 use bridge::intake::FolderSize;
 use bridge::memory::{MemoryImport, MemoryList, MemoryNote};
 use bridge::notify::Notices;
@@ -2804,6 +2805,51 @@ async fn desktop_system_notifications(window: WebviewWindow) -> Result<&'static 
 }
 
 #[tauri::command]
+async fn desktop_harness_settings(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    harness: String,
+    project_id: Option<String>,
+) -> Result<HarnessSettingsPage, BridgeError> {
+    main_window(&window)?;
+    let call = read(&state).await?.harness_settings(harness, project_id)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_set_harness_setting(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    harness: String,
+    project_id: Option<String>,
+    key: String,
+    value: serde_json::Value,
+    version: u64,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state)
+        .await?
+        .set_harness_setting(harness, project_id, key, value, version)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_reset_harness_setting(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    harness: String,
+    project_id: Option<String>,
+    key: String,
+    version: u64,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state)
+        .await?
+        .reset_harness_setting(harness, project_id, key, version)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_questions(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -3385,6 +3431,9 @@ pub fn run() {
             desktop_connect,
             desktop_status,
             desktop_harness_catalog,
+            desktop_harness_settings,
+            desktop_set_harness_setting,
+            desktop_reset_harness_setting,
             desktop_baselines,
             desktop_inspect_baseline,
             desktop_approve_baseline,

@@ -24,6 +24,7 @@ mod changes;
 mod cleanup;
 mod coord;
 mod coord_questions;
+pub mod harness_settings;
 mod harnesses;
 pub mod ide;
 mod ide_extensions;
