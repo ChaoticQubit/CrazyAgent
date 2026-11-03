@@ -6,5 +6,14 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[[bin]]
+name = "trackwright"
+path = "src/main.rs"
+
 [dependencies]
 trackwright-core = { path = "../trackwright-core" }
+trackwright-mcp = { path = "../trackwright-mcp" }
+serde_json = "=1.0.154"
+
+[dev-dependencies]
+tempfile = "=3.27.0"
