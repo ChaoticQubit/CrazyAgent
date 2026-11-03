@@ -2,8 +2,8 @@
 
 use crazyagent_desktop::bridge::picker::{
     DOCUMENTS_SCRIPT, FOLDER_SCRIPT, FolderPurpose, Pick, WINDOWS_DOCUMENTS_SCRIPT,
-    WINDOWS_FOLDER_SCRIPT, WINDOWS_PROJECT_FOLDER_SCRIPT, WINDOWS_PROJECTS_HOME_SCRIPT,
-    chooser_command, read_reply,
+    WINDOWS_FOLDER_SCRIPT, WINDOWS_MEMORY_FOLDER_SCRIPT, WINDOWS_PROJECT_FOLDER_SCRIPT,
+    WINDOWS_PROJECTS_HOME_SCRIPT, chooser_command, read_reply,
 };
 
 #[test]
@@ -36,6 +36,7 @@ fn each_windows_folder_chooser_asks_for_its_own_purpose() {
         (FolderPurpose::Skill, WINDOWS_FOLDER_SCRIPT),
         (FolderPurpose::Project, WINDOWS_PROJECT_FOLDER_SCRIPT),
         (FolderPurpose::ProjectsHome, WINDOWS_PROJECTS_HOME_SCRIPT),
+        (FolderPurpose::Memory, WINDOWS_MEMORY_FOLDER_SCRIPT),
     ] {
         let command = chooser_command(purpose.script()).unwrap();
         assert_eq!(

@@ -5,7 +5,7 @@ use crate::engine::EngineError;
 use crate::engine::owner::failure;
 use crate::landing::{self, AgentKind, ChangeSetId, ChangeState, FileStatus};
 use crate::protocol::{Outcome, ProjectId};
-use crate::team::events::{SEND_BYTES_MAX, plain_brackets, send_to_agent};
+use crate::team::events::{SEND_BYTES_MAX, plain_agent_text, send_to_agent};
 use crate::team::{AgentStatus, MESSAGE_BYTES_MAX, TeamAction, bound_text};
 use crate::terminal::Host;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -60,7 +60,7 @@ fn shown(text: &str, max: usize) -> String {
             }
         })
         .collect();
-    bound_text(&plain_brackets(&plain), max)
+    bound_text(&plain_agent_text(&plain), max)
 }
 
 /// The one message a comment becomes: whose changes, which ones, the file and line, then

@@ -124,3 +124,13 @@ test("the live master area shows the switch divider under its header, above the 
   assert.match(shown, /Switched to Codex\. Started fresh/);
   assert.doesNotMatch(view(null), /harness-switch/);
 });
+
+test("a listed live session with no messages is new already, and Delete says why it kept a session", () => {
+  const list = [summary("old", "parked", { turns: 2 })];
+  assert.equal(sessions.liveUnused("live", list, true), true);
+  assert.equal(sessions.liveUnused("live", [summary("live", "configured", { turns: 1 }), ...list], true), false);
+  assert.equal(sessions.liveUnused("live", [], false), false, "not before the list is read");
+  assert.equal(sessions.liveUnused(null, list, true), false);
+  assert.equal(api.failureCopy("master_session_unused"), "This session has no messages yet, so it already is a new session.");
+  assert.match(api.failureCopy("master_session_files_kept"), /nothing was deleted/);
+});

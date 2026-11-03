@@ -1,6 +1,6 @@
 use super::settings::connection_lost;
 use super::*;
-use crate::landing::{AcceptOutcome, ChangeDiff, ChangeSetId, ChangeSetView};
+use crate::landing::{AcceptOutcome, ChangeDiff, ChangeSetId, ChangeSetView, TargetBranches};
 
 #[cfg(all(test, unix))]
 mod tests;
@@ -22,6 +22,15 @@ pub(in crate::tui) enum ChangesQuery {
         expected_head: String,
         message: String,
     },
+    AcceptInto {
+        id: ChangeSetId,
+        expected_head: String,
+        message: String,
+        target: String,
+    },
+    Branches {
+        id: ChangeSetId,
+    },
     Discard {
         id: ChangeSetId,
         expected_head: String,
@@ -42,6 +51,7 @@ pub(in crate::tui) enum ChangesView {
     List(Vec<ChangeSetView>),
     Diff(ChangeDiff),
     Accepted(AcceptOutcome),
+    Branches(TargetBranches),
     Discarded { restorable_until_ms: u64 },
     Restored,
     Updating,
@@ -125,6 +135,20 @@ impl NativeOwner {
                     .await
                     .map_err(problem)?,
             ),
+            ChangesQuery::AcceptInto {
+                id,
+                expected_head,
+                message,
+                target,
+            } => ChangesView::Accepted(
+                controller
+                    .accept_changes_into(id, expected_head, Some(message), Some(target))
+                    .await
+                    .map_err(problem)?,
+            ),
+            ChangesQuery::Branches { id } => {
+                ChangesView::Branches(controller.change_branches(id).await.map_err(problem)?)
+            }
             ChangesQuery::Discard { id, expected_head } => ChangesView::Discarded {
                 restorable_until_ms: controller
                     .discard_changes(id, expected_head)

@@ -9,13 +9,15 @@ import teamStyles from "../../src/screens/team/team-graph.css?inline";
 import { LiveMasterView, MasterArea } from "../../src/screens/project/live-master.tsx";
 import { TerminalMenu, terminalOptions, typeKeys } from "../../src/screens/team/terminal-panel.tsx";
 import { muteQueries } from "../../src/screens/team/terminal-io.ts";
+import { teamStatus } from "./team-status.mjs";
 
 let root = null;
 let menuRoot = null;
 let terminal = null;
 export const notes = [];
 export const typed = [];
-const switched = [];
+let starts = 0;
+let reloads = 0;
 
 function page() {
   root?.unmount();
@@ -26,7 +28,8 @@ function page() {
   terminal?.dispose();
   terminal = null;
   typed.length = 0;
-  switched.length = 0;
+  starts = 0;
+  reloads = 0;
   document.head.innerHTML = "";
   for (const text of [styles, projectStyles, teamStyles, xtermStyles]) {
     const style = document.createElement("style");
@@ -37,7 +40,7 @@ function page() {
   return document.getElementById("panel");
 }
 
-function data(master) {
+function data(master, on, team = undefined) {
   const setup = master === undefined ? undefined : {
     kind: "ok",
     value: { project_id: "alpha", name: "Alpha", about: "", tech_stack: [], platforms: [], research: [], pool: null, documents: [], folder: "/tmp/alpha", created_ms: 0, revision: 1,
@@ -46,24 +49,30 @@ function data(master) {
   return {
     id: "alpha", name: "Alpha", setup, research: undefined, context: undefined, pools: undefined, harnesses: undefined,
     assigned: null, now: 0, navigate: () => {}, notify: () => {}, reload: () => {}, reloadPools: () => {},
-    team: { result: undefined, at: 0 }, reloadTeam: () => {},
+    team: team !== undefined ? { result: team, at: 0 } : on === undefined ? { result: undefined, at: 0 } : { result: { kind: "ok", value: status(on) }, at: 1 },
+    reloadTeam: () => { reloads += 1; },
   };
+}
+
+function status(on) {
+  return teamStatus({ live_master: on, live_problem: null });
 }
 
 const node = { id: "team-1", kind: "master", parent: null, label: "Master", harness: "codex", status: null, status_label: null, account: null, agents: null, terminal: "team-1" };
 
 /** Mounts the project's master area for a team plan whose master is the given harness, or
- * whose setup is still loading when it is undefined. */
-export function mountArea(master) {
+ * whose setup is still loading when it is undefined, with the engine's live switch read as
+ * `on` (true, false or null for never set), or the team not read yet when it is undefined. */
+export function mountArea(master, on) {
   const panel = page();
   root = createRoot(panel);
-  flushSync(() => root.render(createElement(MasterArea, { data: data(master) })));
+  flushSync(() => root.render(createElement(MasterArea, { data: data(master, on) })));
 }
 
 /** Mounts the live master view in one of its states: running with the master's terminal,
  * running before the terminal opens, starting, refused with an engine code, or stopped with
- * the engine's reason when the code is given. */
-export function mountView(state, code = "") {
+ * the engine's reason when the code is given, with the team status read so far, if any. */
+export function mountView(state, code = "", team = undefined) {
   const panel = page();
   const live = state === "running" ? { kind: "running", node }
     : state === "waiting" ? { kind: "running", node: null }
@@ -71,12 +80,24 @@ export function mountView(state, code = "") {
     : state === "stopped" ? { kind: "stopped", problem: code || null }
     : { kind: state };
   root = createRoot(panel);
-  flushSync(() => root.render(createElement(LiveMasterView, { data: data("codex"), harness: "codex", live, onSwitch: (on) => switched.push(on) })));
+  flushSync(() => root.render(createElement(LiveMasterView, { data: data("codex", undefined, team), harness: "codex", live, onStart: async () => { starts += 1; } })));
 }
 
-/** The switch changes the view asked for, in order. */
-export function switchedTo() {
-  return [...switched];
+/** How many times the mounted view asked to start the live master. */
+export function startsAsked() {
+  return starts;
+}
+
+/** How many team re-reads the master area asked for; each start of the live master ends
+ * with one. */
+export function teamReloads() {
+  return reloads;
+}
+
+/** Lets the page's pending replies and renders finish, then says what the area shows. */
+export async function settle() {
+  for (let round = 0; round < 20; round += 1) await new Promise((done) => setTimeout(done, 10));
+  return shown();
 }
 
 /** Clicks the button with this exact text and lets React render. */
@@ -87,11 +108,19 @@ export function click(text) {
   return true;
 }
 
-/** What the master area shows: which views are mounted, the buttons, and how much of the
- * area the terminal fills. */
+/** What the master area shows: which views are mounted, the buttons, how much of the area
+ * the terminal fills below the Sessions bar, and how far in from the console's edges the
+ * head's title and the Sessions bar's text and last button sit. */
 export function shown() {
   const area = document.querySelector(".pj-master-live")?.getBoundingClientRect();
   const box = document.querySelector(".pj-master-live > .tg-terminal")?.getBoundingClientRect();
+  const above = document.querySelector(".pj-master-live > .tg-terminal")?.previousElementSibling?.getBoundingClientRect();
+  const sessions = document.querySelector(".pj-master-live > .pj-sessions")?.getBoundingClientRect();
+  const head = document.querySelector(".pj-master-live > .pj-console-head");
+  const title = head?.querySelector(".pj-console-title")?.getBoundingClientRect();
+  const said = document.querySelector('.pj-master-live > .pj-sessions [data-testid="master-live-session"]')?.getBoundingClientRect();
+  const last = document.querySelector('.pj-master-live > .pj-sessions [data-testid="sessions-toggle"]')?.getBoundingClientRect();
+  const edge = document.querySelector(".pj-master-live")?.getBoundingClientRect();
   return {
     live: Boolean(document.querySelector(".pj-master-live")),
     terminal: Boolean(document.querySelector(".tg-terminal")),
@@ -109,6 +138,14 @@ export function shown() {
     viewport: window.innerHeight,
     area: area ? { top: Math.round(area.top), bottom: Math.round(area.bottom) } : null,
     box: box ? { top: Math.round(box.top), bottom: Math.round(box.bottom), height: Math.round(box.height) } : null,
+    above: above ? Math.round(above.bottom) : null,
+    sessions: sessions ? { top: Math.round(sessions.top), bottom: Math.round(sessions.bottom) } : null,
+    inset: head && title && said && last && edge ? {
+      head: Math.round(title.left - edge.left),
+      bar: Math.round(said.left - edge.left),
+      headEnd: Math.round(parseFloat(getComputedStyle(head).paddingRight)),
+      barEnd: Math.round(edge.right - last.right - parseFloat(getComputedStyle(document.querySelector(".pj-master-live")).borderRightWidth)),
+    } : null,
   };
 }
 

@@ -67,9 +67,6 @@ const RUNS_PER_ATTEMPT_MAX: u32 = 100;
 const LOG_LINE_BYTES_MAX: usize = 16 * 1024;
 const DRAIN_WAIT: Duration = Duration::from_secs(5);
 const CODEX_LOG: &str = "error,codex_core::responses_retry=warn";
-/// The Codex 0.164 setting that removes `request_user_input`, the one tool a
-/// tools-off research agent is still offered after the shared tools-off settings.
-const CODEX_NO_USER_INPUT: &str = "tools.experimental_request_user_input.enabled=false";
 const LINKS_HEADING: &str = "## Links and references";
 const LOCAL_PLACEHOLDER_KEY: &str = "crazyagent-local";
 /// The `RunError::Invalid` text of a run whose agent state folder already exists,
@@ -793,17 +790,13 @@ impl ResearchRunner {
         private_directory(&agent)?;
         let tmp = agent.join("tmp");
         private_directory(&tmp)?;
-        let network = if job.tools {
-            SandboxNetwork::Open
-        } else {
-            SandboxNetwork::Only(vec![model_remote(account)?])
-        };
         let policy = jobs
             .agent_policy(&project)
             .map_err(|_| RunError::Invalid("project agent access unreadable".into()))?;
         if let Some(reason) = policy.access.unavailable() {
             return Err(RunError::Invalid(reason.into()));
         }
+        let network = job_network(&policy, job.tools, model_remote(account)?);
         let unconfined = policy.access == AgentAccess::Full;
         let homes = ToolHomes::owner()?;
         let scratch = toolchains::ScopedTmp::make(&home)?;
@@ -834,12 +827,21 @@ impl ResearchRunner {
         let setup = self.setup.lock().unwrap_or_else(PoisonError::into_inner);
         ensure_repository(&root, &tmp)?;
         add_worktree(&sandbox, &profile, &worktree)?;
-        let sandbox = sandbox.confine_to_worktree(&worktree)?;
+        let mut sandbox = sandbox.confine_to_worktree(&worktree)?;
+        let hidden = jobs
+            .hidden_paths(&project)
+            .map_err(|_| RunError::Invalid("project hidden folders unreadable".into()))?;
+        if let Err(code) = crate::sandbox::hidden_paths::none_tracked(&root, &hidden) {
+            return Err(RunError::Invalid(code.into()));
+        }
+        for folder in &hidden {
+            sandbox = sandbox.hide(folder)?;
+        }
         sandbox.install(&profile)?;
         drop(setup);
         still_held(jobs, job)?;
         let prompt = research_prompt(&root, &job.kind)?;
-        write_private(&agent.join("prompt.md"), prompt.as_bytes())?;
+        write_private(&agent, &agent.join("prompt.md"), prompt.as_bytes())?;
         if let Some(host) = &self.terminal {
             let output = match harness {
                 ResearchHarness::Codex => tmp.join("report.md"),
@@ -906,7 +908,20 @@ impl ResearchRunner {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        assert!(!carries_secret(&command, &context));
+        context
+            .refuse_exposed(
+                std::iter::once(command.get_program().as_encoded_bytes())
+                    .chain(
+                        command
+                            .get_args()
+                            .map(|argument| argument.as_encoded_bytes()),
+                    )
+                    .chain(command.get_envs().flat_map(|(name, value)| {
+                        std::iter::once(name.as_encoded_bytes())
+                            .chain(value.map(|value| value.as_encoded_bytes()))
+                    })),
+            )
+            .map_err(RunError::Context)?;
         let mut running = AgentProcess::spawn(&mut command)?;
         let group = running.group;
         let counted = Arc::new(AtomicU64::new(0));
@@ -933,7 +948,7 @@ impl ResearchRunner {
             ),
         ] {
             let Some(stream) = stream else { continue };
-            let log = create_private(&agent.join(name))?;
+            let log = create_private(&agent, &agent.join(name))?;
             let counted = counted.clone();
             let log_max = self.limits.output_bytes_max;
             drains.push(std::thread::spawn(move || {
@@ -1136,7 +1151,7 @@ impl ResearchRunner {
         let _ = jobs.heartbeat(job, counted);
         if matches!(ending, Ending::Exited(true)) {
             assert!(last.len() as u64 <= counted);
-            write_private(output, last.as_bytes())?;
+            write_private(&self.state.join("agents"), output, last.as_bytes())?;
         }
         Ok(ending)
     }
@@ -1177,8 +1192,12 @@ impl ResearchRunner {
         root: &Path,
         output: &Path,
     ) -> Result<PathBuf, &'static str> {
-        let body = read_bounded(output, self.limits.report_bytes_max)
-            .map_err(|_| "Agent returned no report")?;
+        let body = read_bounded(
+            &self.state.join("agents"),
+            output,
+            self.limits.report_bytes_max,
+        )
+        .map_err(|_| "Agent returned no report")?;
         let body = body.trim();
         if body.is_empty() {
             return Err("Agent returned no report");
@@ -1311,9 +1330,21 @@ impl ResearchRunner {
         if let Some(parent) = executable.canonicalize()?.parent() {
             sandbox = sandbox.allow_read(parent)?;
         }
+        let hidden = match run.project {
+            Some(project) => ResearchJobs::open(&self.database)?
+                .hidden_paths(project)
+                .map_err(|_| RunError::Invalid("project hidden folders unreadable".into()))?,
+            None => Vec::new(),
+        };
+        if let Err(code) = crate::sandbox::hidden_paths::none_tracked(&folder, &hidden) {
+            return Err(RunError::Invalid(code.into()));
+        }
+        for sub in hidden.iter().filter(|path| path.starts_with(&folder)) {
+            sandbox = sandbox.hide(sub)?;
+        }
         let profile = self.state.join("profiles").join(format!("{}.sb", run.name));
         sandbox.install(&profile)?;
-        write_private(&agent.join("prompt.md"), run.prompt.as_bytes())?;
+        write_private(&agent, &agent.join("prompt.md"), run.prompt.as_bytes())?;
         let mut command = sandbox.command(&profile, executable);
         let (output, stdout_log) = match harness {
             ResearchHarness::Codex => {
@@ -1354,7 +1385,7 @@ impl ResearchRunner {
         ];
         for (stream, name) in streams {
             let Some(stream) = stream else { continue };
-            let log = create_private(&agent.join(name))?;
+            let log = create_private(&agent, &agent.join(name))?;
             let counted = counted.clone();
             let log_max = self.limits.output_bytes_max;
             drains.push(std::thread::spawn(move || {
@@ -1406,7 +1437,7 @@ impl ResearchRunner {
         if let Some(ending) = ending {
             return Ok(ending);
         }
-        let answer = read_bounded(&output, self.limits.report_bytes_max)
+        let answer = read_bounded(&agent, &output, self.limits.report_bytes_max)
             .map(|text| text.trim().to_owned())
             .unwrap_or_default();
         Ok(if answer.is_empty() {
@@ -1474,17 +1505,20 @@ fn read_folders(
     Ok(folders)
 }
 
-/// Reports whether any MCP secret of the project context appears in the
-/// command's program, arguments or environment.
-fn carries_secret(command: &Command, context: &AgentContext) -> bool {
-    context.exposes_secret(command.get_program().as_encoded_bytes())
-        || command
-            .get_args()
-            .any(|argument| context.exposes_secret(argument.as_encoded_bytes()))
-        || command.get_envs().any(|(name, value)| {
-            context.exposes_secret(name.as_encoded_bytes())
-                || value.is_some_and(|value| context.exposes_secret(value.as_encoded_bytes()))
-        })
+/// The sandbox network a research job runs under (DEC-111 Q17, S4R1-2): a tools-off job
+/// reaches only its model endpoint, and a tools-on job follows the project's network choice
+/// with the model still reachable. Inputs: the project's agent policy, whether the job has
+/// tools, and the model endpoint. Output: the sandbox network.
+pub(crate) fn job_network(
+    policy: &crate::sandbox::policy::AgentPolicy,
+    tools: bool,
+    model: SandboxRemote,
+) -> SandboxNetwork {
+    if tools {
+        policy.network.sandbox(Some(model))
+    } else {
+        SandboxNetwork::Only(vec![model])
+    }
 }
 
 pub(crate) fn model_remote(account: &ResearchAccount) -> Result<SandboxRemote, RunError> {
@@ -1568,7 +1602,7 @@ fn codex_arguments(
         for setting in crate::harnesses::launch::CODEX_TOOLS_OFF {
             command.arg("-c").arg(setting);
         }
-        command.args(["-c", CODEX_NO_USER_INPUT]);
+        command.args(["-c", crate::harnesses::launch::CODEX_NO_USER_INPUT]);
     }
     match account {
         ResearchAccount::Endpoint { base_url, model } => {
@@ -1705,22 +1739,34 @@ fn unavailable() -> io::Error {
     io::Error::new(io::ErrorKind::Unsupported, "research_runner_unavailable")
 }
 
-/// Creates a fresh 0600 file without following a link at `path`.
-/// Takes the path. Returns the new file, or the I/O error, also when it exists.
+/// Creates a fresh 0600 file below a folder the engine holds, following no link in any
+/// part below that folder, so an agent that swapped its temp folder for a link is refused
+/// rather than written through. Takes the folder and the path in it. Returns the new file,
+/// or the I/O error, also when it exists.
 #[cfg(unix)]
-fn create_private(path: &Path) -> io::Result<File> {
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(path)
+fn create_private(base: &Path, path: &Path) -> io::Result<File> {
+    use rustix::fs::{Mode, OFlags};
+    let invalid = || io::Error::from(io::ErrorKind::InvalidInput);
+    let below = path.strip_prefix(base).map_err(|_| invalid())?;
+    let name = below.file_name().ok_or_else(invalid)?;
+    let folder = crate::platform::open_beneath(
+        base,
+        below.parent().unwrap_or(Path::new("")),
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+    )?;
+    let created = rustix::fs::openat(
+        &folder,
+        name,
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::RUSR | Mode::WUSR,
+    )?;
+    Ok(File::from(created))
 }
 
 /// Refuses an owner-only research file where none can be made.
-/// Takes the path, unused. Returns `research_runner_unavailable`.
+/// Takes the folder and path, unused. Returns `research_runner_unavailable`.
 #[cfg(not(unix))]
-fn create_private(_path: &Path) -> io::Result<File> {
+fn create_private(_base: &Path, _path: &Path) -> io::Result<File> {
     Err(unavailable())
 }
 
@@ -1747,29 +1793,10 @@ fn open_append(path: &Path) -> io::Result<File> {
         .open(path)
 }
 
-/// Opens a file to read without following a link at `path`.
-/// Takes the path. Returns the open file or the I/O error.
-#[cfg(unix)]
-fn open_read(path: &Path) -> io::Result<File> {
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
-        .open(path)
-}
-
-/// Opens a file to read as the reparse point itself, never a link's target.
-/// Takes the path. Returns the open file or the I/O error.
-#[cfg(windows)]
-fn open_read(path: &Path) -> io::Result<File> {
-    use std::os::windows::fs::OpenOptionsExt;
-    OpenOptions::new()
-        .read(true)
-        .custom_flags(crate::platform::FILE_FLAG_OPEN_REPARSE_POINT)
-        .open(path)
-}
-
-fn write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
-    let mut file = create_private(path)?;
+/// Writes a fresh 0600 file below a folder the engine holds ([`create_private`]). Takes
+/// the folder, the path in it and the bytes. Returns Ok once synced, or the I/O error.
+fn write_private(base: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let mut file = create_private(base, path)?;
     file.write_all(bytes)?;
     file.sync_all()
 }
@@ -1893,6 +1920,18 @@ pub(crate) fn add_worktree(
     )))
 }
 
+/// Refuses to add a worktree at a commit, as `add_worktree` does where Seatbelt is missing.
+/// Takes the sandbox, profile, worktree and commit, all unused. Returns the same refusal.
+#[cfg(not(unix))]
+pub(crate) fn add_worktree_at(
+    sandbox: &ProjectSandbox,
+    profile: &Path,
+    worktree: &Path,
+    _base: &str,
+) -> Result<(), RunError> {
+    add_worktree(sandbox, profile, worktree)
+}
+
 /// Adds a detached git worktree at `worktree` inside the sandbox's project folder, running
 /// git under the installed profile so that no command the repository configures runs: the
 /// worktree is added without a checkout and made local-only, its effective config is
@@ -1905,6 +1944,23 @@ pub(crate) fn add_worktree(
     profile: &Path,
     worktree: &Path,
 ) -> Result<(), RunError> {
+    add_worktree_at(sandbox, profile, worktree, "HEAD")
+}
+
+/// Adds a detached git worktree as `add_worktree` does, checked out at `base`: `HEAD`, or
+/// the full commit id a lead's worktree holds for a worker cut from it (N1).
+/// Takes the sandbox, its installed profile, the new worktree path and the commit.
+#[cfg(unix)]
+pub(crate) fn add_worktree_at(
+    sandbox: &ProjectSandbox,
+    profile: &Path,
+    worktree: &Path,
+    base: &str,
+) -> Result<(), RunError> {
+    assert!(
+        base == "HEAD"
+            || (matches!(base.len(), 40 | 64) && base.bytes().all(|b| b.is_ascii_hexdigit()))
+    );
     let _setup = repository_setup(sandbox.project_root());
     let worktrees = crate::projects_home::state_folder(sandbox.project_root()).join("worktrees");
     if worktree.parent() != Some(worktrees.as_path()) {
@@ -1914,7 +1970,7 @@ pub(crate) fn add_worktree(
     let mut add = worktree_git(sandbox, profile);
     add.args(["worktree", "add", "-q", "--no-checkout", "--detach"])
         .arg(worktree)
-        .arg("HEAD");
+        .arg(base);
     setup_step(&mut add, "worktree_add_failed")?;
     crate::worktrees::lock_remotes(sandbox.project_root(), worktree)
         .map_err(|_| RunError::Setup("worktree_remote_lock_failed"))?;
@@ -2003,6 +2059,80 @@ fn worktree_git(sandbox: &ProjectSandbox, profile: &Path) -> Command {
         .stdout(Stdio::null())
         .stderr(setup_debug_stderr());
     git
+}
+
+/// What one git command run under an agent's profile ended with: its exit code, None when
+/// it was stopped at the setup time limit or by a signal, its output up to the caller's
+/// bound and whether it printed more.
+#[cfg(unix)]
+#[derive(Debug)]
+pub(crate) struct AgentGit {
+    pub(crate) code: Option<i32>,
+    pub(crate) stdout: Vec<u8>,
+    pub(crate) overflow: bool,
+}
+
+/// Runs one git command in a folder an agent owns with that agent's own rights (DEC-104
+/// K5b): under its installed profile, as the worktree setup steps run, with the
+/// [`GIT_SAFE`] settings and the caller's extra variables, within the setup time limit.
+/// Its output is read while it runs, so a long listing never stalls it. Takes the
+/// agent's sandbox, its installed profile, the folder, the arguments, the variables and
+/// the most output bytes kept. Returns how it ended, or the spawn failure.
+#[cfg(unix)]
+pub(crate) fn agent_git(
+    sandbox: &ProjectSandbox,
+    profile: &Path,
+    folder: &Path,
+    arguments: &[&str],
+    variables: &[(&str, &str)],
+    limit: usize,
+) -> Result<AgentGit, RunError> {
+    let mut command = worktree_git(sandbox, profile);
+    command
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_EDITOR", "true")
+        .envs(variables.iter().copied())
+        .arg("-C")
+        .arg(folder)
+        .args(arguments)
+        .stdout(Stdio::piped());
+    let mut child = crate::spawn_gate::spawn(&mut command)?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| RunError::Invalid("git gave no output pipe".into()))?;
+    let reader = std::thread::spawn(move || {
+        let mut kept = Vec::new();
+        let mut stdout = stdout;
+        let read = stdout
+            .by_ref()
+            .take(limit as u64 + 1)
+            .read_to_end(&mut kept);
+        let _ = io::copy(&mut stdout, &mut io::sink());
+        read.map(|_| kept)
+    });
+    let started = Instant::now();
+    let code = loop {
+        if let Some(status) = child.try_wait()? {
+            break status.code();
+        }
+        if started.elapsed() >= SETUP_TIMEOUT {
+            stop_timed_out(&mut child);
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let mut stdout = reader
+        .join()
+        .map_err(|_| RunError::Invalid("git output could not be read".into()))??;
+    let overflow = stdout.len() > limit;
+    stdout.truncate(limit);
+    assert!(stdout.len() <= limit);
+    Ok(AgentGit {
+        code,
+        stdout,
+        overflow,
+    })
 }
 
 #[cfg(unix)]
@@ -2401,7 +2531,7 @@ fn refused_for_limit(harness: ResearchHarness, agent: &Path, output: &Path, max:
         ResearchHarness::Codex => {
             rate_limited(&agent_failure(&agent.join("events.jsonl"), harness, max))
         }
-        ResearchHarness::ClaudeCode => read_bounded(output, max).is_ok_and(|text| {
+        ResearchHarness::ClaudeCode => read_bounded(agent, output, max).is_ok_and(|text| {
             text.lines()
                 .find(|line| !line.trim().is_empty())
                 .is_some_and(rate_limited)
@@ -2444,7 +2574,7 @@ fn agent_failure(log: &Path, harness: ResearchHarness, max: u64) -> String {
     if harness != ResearchHarness::Codex {
         return GENERIC.to_owned();
     }
-    let Ok(text) = read_bounded(log, max) else {
+    let Some(Ok(text)) = log.parent().map(|agent| read_bounded(agent, log, max)) else {
         return GENERIC.to_owned();
     };
     let (mut turn, mut error) = (None, None);
@@ -2470,8 +2600,16 @@ fn agent_failure(log: &Path, harness: ResearchHarness, max: u64) -> String {
     )
 }
 
-fn read_bounded(path: &Path, max: u64) -> io::Result<String> {
-    let file = open_read(path)?;
+/// Reads a report or brief an agent may have replaced, opened from a folder the engine
+/// holds with no link followed in any part below it and no FIFO waited on, so an agent
+/// that swapped its temp folder for a link is refused; the file is kept only when regular
+/// and within `max` bytes. Inputs: the engine-held folder, the path in it and the bound.
+/// Output: the text or the I/O error.
+fn read_bounded(base: &Path, path: &Path, max: u64) -> io::Result<String> {
+    let below = path
+        .strip_prefix(base)
+        .map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+    let file = crate::platform::open_plain_beneath(base, below)?;
     let metadata = file.metadata()?;
     if !metadata.is_file() || metadata.len() > max {
         return Err(io::Error::other("report is not a bounded regular file"));
@@ -2487,7 +2625,7 @@ fn research_prompt(root: &Path, kind: &str) -> Result<String, RunError> {
         return Ok(crate::planning::prompt::prompt(&state)?);
     }
     let context = crate::projects_home::state_folder(root).join("context");
-    let brief = match read_bounded(&context.join("brief.md"), BRIEF_BYTES_MAX) {
+    let brief = match read_bounded(&context, &context.join("brief.md"), BRIEF_BYTES_MAX) {
         Ok(text) => text,
         Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
         Err(error) => return Err(error.into()),
@@ -2693,6 +2831,44 @@ mod tests {
     use crate::config::{ModelAuthentication, ModelEndpoint, ModelReference};
     use crate::protocol::{ConfigId, CredentialRef, Cursor};
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_research_job_network_follows_the_project_choice_only_with_tools() {
+        use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+        let model = SandboxRemote::AnyHost(8443);
+        let profile = |choice: AgentNetwork, tools: bool| {
+            let policy = AgentPolicy {
+                network: choice,
+                ..AgentPolicy::default()
+            };
+            let dir = tempfile::tempdir().unwrap();
+            let base = dir.path().canonicalize().unwrap();
+            let make = |name: &str| {
+                let folder = base.join(name);
+                std::fs::create_dir(&folder).unwrap();
+                folder
+            };
+            ProjectSandbox::new(
+                &make("project"),
+                &make("home"),
+                &make("tmp"),
+                job_network(&policy, tools, model),
+            )
+            .unwrap()
+            .profile()
+        };
+        let off = profile(AgentNetwork::Open, false);
+        assert!(off.contains("(remote ip \"*:8443\")"), "{off}");
+        assert!(!off.contains("(remote ip \"*:*\")"), "{off}");
+        let open = profile(AgentNetwork::Open, true);
+        assert!(open.contains("(remote ip \"*:*\")"), "{open}");
+        let https = profile(AgentNetwork::Https, true);
+        assert!(https.contains("(remote ip \"*:443\")"), "{https}");
+        assert!(!https.contains("(remote ip \"*:*\")"), "{https}");
+        let none = profile(AgentNetwork::None, true);
+        assert!(none.contains("(remote ip \"*:8443\")"), "{none}");
+        assert!(!none.contains("(remote ip \"*:*\")"), "{none}");
+    }
 
     #[test]
     fn linux_and_windows_refuse_team_agents_and_research_with_a_plain_line() {
@@ -3261,6 +3437,82 @@ mod tests {
         assert!(capital.contains("- [A](https://a.example/z)"));
         let empty = render_report("Market research", "Codex", "Body only");
         assert!(empty.contains("No links were returned by the agent."));
+    }
+
+    #[test]
+    fn a_fifo_left_at_the_report_path_is_refused_without_waiting_for_a_writer() {
+        let folder = tempfile::tempdir().unwrap();
+        let report = folder.path().join("report.md");
+        fs::write(&report, "Findings\n").unwrap();
+        assert_eq!(
+            read_bounded(folder.path(), &report, 64).unwrap(),
+            "Findings\n"
+        );
+        let link = folder.path().join("link.md");
+        std::os::unix::fs::symlink(&report, &link).unwrap();
+        assert!(read_bounded(folder.path(), &link, 64).is_err());
+        let fifo = folder.path().join("fifo.md");
+        let made = crate::spawn_gate::status(
+            std::process::Command::new("/usr/bin/mkfifo")
+                .arg(&fifo)
+                .stdin(std::process::Stdio::null()),
+        )
+        .unwrap();
+        assert!(made.success());
+        let (sent, read) = std::sync::mpsc::channel();
+        let (base, reader) = (folder.path().to_path_buf(), fifo.clone());
+        std::thread::spawn(move || {
+            let _ = sent.send(read_bounded(&base, &reader, 64).map_err(|error| error.to_string()));
+        });
+        let answer = read.recv_timeout(Duration::from_secs(5));
+        if answer.is_err() {
+            let _ = OpenOptions::new()
+                .write(true)
+                .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+                .open(&fifo);
+        }
+        assert!(
+            matches!(answer, Ok(Err(_))),
+            "a FIFO at the report path made the research worker wait: {answer:?}"
+        );
+    }
+
+    #[test]
+    fn a_temp_folder_swapped_for_a_link_is_neither_read_nor_written_through() {
+        let folder = tempfile::tempdir().unwrap();
+        let agents = folder.path().join("agents");
+        let agent = agents.join("job-1");
+        let tmp = agent.join("tmp");
+        fs::create_dir_all(&tmp).unwrap();
+        let report = tmp.join("report.md");
+        fs::write(&report, "Own findings\n").unwrap();
+        assert_eq!(
+            read_bounded(&agents, &report, 64).unwrap(),
+            "Own findings\n"
+        );
+        let outside = folder.path().join("other-project");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("report.md"), "Another project's findings\n").unwrap();
+        fs::rename(&tmp, agent.join("home-tmp")).unwrap();
+        std::os::unix::fs::symlink(&outside, &tmp).unwrap();
+        let read = read_bounded(&agents, &report, 64);
+        assert!(
+            read.is_err(),
+            "the report was read through the swapped folder: {read:?}"
+        );
+        fs::remove_file(outside.join("report.md")).unwrap();
+        let written = write_private(&agents, &report, b"Reply\n");
+        assert!(
+            written.is_err(),
+            "the reply was written through the swapped folder"
+        );
+        assert!(!outside.join("report.md").exists());
+        assert!(read_bounded(&agent, &outside.join("report.md"), 64).is_err());
+        write_private(&agents, &agent.join("prompt.md"), b"Plan\n").unwrap();
+        assert_eq!(
+            read_bounded(&agent, &agent.join("prompt.md"), 64).unwrap(),
+            "Plan\n"
+        );
     }
 
     #[test]

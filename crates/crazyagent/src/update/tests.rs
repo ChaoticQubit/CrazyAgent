@@ -73,11 +73,12 @@ fn response(head: &str, body: &[u8]) -> Vec<u8> {
 
 #[test]
 fn the_channel_file_defaults_to_stable_round_trips_and_refuses_bad_values() {
-    let root = tempfile::tempdir().unwrap();
-    assert_eq!(read_channel(root.path()).unwrap(), Channel::Stable);
-    save_channel(root.path(), Channel::Dev).unwrap();
-    assert_eq!(read_channel(root.path()).unwrap(), Channel::Dev);
-    let file = root.path().join("update.toml");
+    let temporary = tempfile::tempdir().unwrap();
+    let root = temporary.path().join("engine");
+    assert_eq!(read_channel(&root).unwrap(), Channel::Stable);
+    save_channel(&root, Channel::Dev).unwrap();
+    assert_eq!(read_channel(&root).unwrap(), Channel::Dev);
+    let file = root.join("update.toml");
     assert_eq!(
         std::fs::read_to_string(&file).unwrap(),
         "channel = \"dev\"\n"
@@ -90,16 +91,16 @@ fn the_channel_file_defaults_to_stable_round_trips_and_refuses_bad_values() {
             0o600
         );
     }
-    save_channel(root.path(), Channel::Stable).unwrap();
-    assert_eq!(read_channel(root.path()).unwrap(), Channel::Stable);
+    save_channel(&root, Channel::Stable).unwrap();
+    assert_eq!(read_channel(&root).unwrap(), Channel::Stable);
     std::fs::write(&file, "").unwrap();
-    assert_eq!(read_channel(root.path()).unwrap(), Channel::Stable);
+    assert_eq!(read_channel(&root).unwrap(), Channel::Stable);
     std::fs::write(&file, "channel = \"nightly\"\n").unwrap();
-    assert_eq!(code(read_channel(root.path())), "update_channel_invalid");
+    assert_eq!(code(read_channel(&root)), "update_channel_invalid");
     std::fs::write(&file, "channel = [").unwrap();
-    assert_eq!(code(read_channel(root.path())), "update_channel_invalid");
+    assert_eq!(code(read_channel(&root)), "update_channel_invalid");
     std::fs::write(&file, format!("channel = \"dev\"\n#{}", "x".repeat(5000))).unwrap();
-    assert_eq!(code(read_channel(root.path())), "update_channel_invalid");
+    assert_eq!(code(read_channel(&root)), "update_channel_invalid");
 }
 
 #[test]

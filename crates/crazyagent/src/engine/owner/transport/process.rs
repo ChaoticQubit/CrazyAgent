@@ -1,6 +1,10 @@
 use super::*;
 use crate::agent_home::{LoadedFile, PROCESS_BYTES_MAX, TEXT_BYTES_MAX};
-pub use crate::instruction_files::{Record as InstructionRecord, Settings as InstructionSettings};
+pub use crate::coord::adoption::Adoption;
+pub use crate::instruction_files::{
+    ImportCommit, ImportFile, Mode as InstructionMode, Record as InstructionRecord,
+    Settings as InstructionSettings,
+};
 use crate::protocol::encode_frame;
 use crate::storage::versioned::{self, LastWriter, Refusal, Writer};
 use rusqlite::{OptionalExtension, TransactionBehavior};
@@ -31,11 +35,23 @@ pub const PROCESS_CODES: &[&str] = &[
     "owner_socket_replaced",
     "owner_socket_unsafe",
     "peer_owner_mismatch",
+    "process_adoption_unavailable",
     "process_agent_unknown",
     "process_agent_unsupported",
+    "process_commit_busy",
+    "process_commit_detached",
+    "process_commit_failed",
+    "process_commit_identity",
+    "process_commit_moved",
+    "process_commit_none",
+    "process_commit_staged",
     "process_folder_missing",
     "process_folder_unsafe",
     "process_import_missing",
+    "process_import_outside",
+    "process_import_unmovable",
+    "process_import_unreadable",
+    "process_import_unsafe",
     "process_outcome_unknown",
     "process_owner_unavailable",
     "process_project_folder_missing",
@@ -63,7 +79,21 @@ enum Action {
         version: u64,
         opened: Option<u64>,
     },
-    ImportGlobal,
+    PendingImport {
+        project: ProjectId,
+    },
+    ConfirmImport {
+        project: ProjectId,
+    },
+    UncommittedImport {
+        project: ProjectId,
+    },
+    CommitImport {
+        project: ProjectId,
+    },
+    ReadFile {
+        path: PathBuf,
+    },
     Default,
     Agent {
         project: ProjectId,
@@ -86,6 +116,9 @@ enum Action {
         project: ProjectId,
         settings: InstructionSettings,
         version: Option<u64>,
+    },
+    Adoption {
+        project: ProjectId,
     },
 }
 
@@ -131,15 +164,27 @@ enum Reply {
         settings: InstructionSettings,
         version: u64,
     },
+    Adoption {
+        adoption: Adoption,
+    },
+    Imports {
+        files: Vec<ImportFile>,
+    },
+    Uncommitted {
+        files: Vec<String>,
+    },
+    Committed {
+        commit: ImportCommit,
+    },
     Rejected {
         code: String,
     },
 }
 
 /// What one team agent received at its last launch: the agent id, its harness, whether it
-/// has launched, the text of its harness's instruction file (empty when none was given) and
-/// the names of the skills installed for it, read back from its private home, and the
-/// engine's own record of the instruction files it found, kept outside that home; then
+/// has launched and the text of its harness's instruction file (empty when none was given),
+/// read back from its private home, then the engine's own records, kept outside that home,
+/// of the names of the skills installed for it and of the instruction files it found; then
 /// what its harness reported in its own session records: how many were read, the
 /// instruction files it loaded and the skills it invoked.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -242,6 +287,10 @@ enum Answer {
     Saved(SavedText),
     Agent(AgentInstructions),
     Settings(InstructionView),
+    Adoption(Adoption),
+    Imports(Vec<ImportFile>),
+    Uncommitted(Vec<String>),
+    Committed(ImportCommit),
 }
 
 fn unknown() -> EngineError {
@@ -314,11 +363,84 @@ impl OwnerClient {
         }
     }
 
-    /// Reads the owner's own global Claude Code instructions, `~/.claude/CLAUDE.md`, for a
-    /// preview the owner may then save. Only this explicit request reads that file.
-    /// Output: the text, or `process_import_missing` when there is none.
-    pub async fn import_global_instructions(&self) -> Result<String, EngineError> {
-        self.process_text_reply(Action::ImportGlobal).await
+    /// Reads one file the owner picked, for the app-wide instructions editor the owner may
+    /// then save; a link is followed only to a regular file the owner owns. Input: the
+    /// absolute path. Output: the text, at most `agent_home::TEXT_BYTES_MAX` bytes, or a
+    /// `PROCESS_CODES` refusal such as `process_import_unsafe`.
+    pub async fn read_instruction_file(&self, path: PathBuf) -> Result<String, EngineError> {
+        if !path.is_absolute() {
+            return Err(failure("process_request_invalid"));
+        }
+        self.process_text_reply(Action::ReadFile { path }).await
+    }
+
+    /// Lists the project's own instruction files (CLAUDE.md, .claude/CLAUDE.md, AGENTS.md,
+    /// CLAUDE.local.md) an import would copy into its project instructions and move into
+    /// `.crazyagent/imported/`, without changing anything. Input: the project. Output: each
+    /// file with its size, whether git tracks it and why it would stay, empty when none.
+    pub async fn instruction_import(
+        &self,
+        project: ProjectId,
+    ) -> Result<Vec<ImportFile>, EngineError> {
+        self.process_imports_reply(Action::PendingImport { project })
+            .await
+    }
+
+    /// Copies the project's own instruction files into its project instructions and moves
+    /// them into `.crazyagent/imported/`, creating `.crazyagent/` when the project has none;
+    /// files that cannot be imported stay. Input: the project. Output: the moved files, each
+    /// marked `uncommitted` while its move still waits for `commit_instruction_import`, or a
+    /// `PROCESS_CODES` refusal with nothing moved.
+    pub async fn confirm_instruction_import(
+        &self,
+        project: ProjectId,
+    ) -> Result<Vec<ImportFile>, EngineError> {
+        self.process_imports_reply(Action::ConfirmImport { project })
+            .await
+    }
+
+    /// Lists the project's moved instruction files whose move the owner's checkout has not
+    /// committed, so a merge refusal for uncommitted changes can name them and offer the
+    /// commit. Input: the project. Output: the paths inside the project folder, empty when
+    /// no move waits for a commit.
+    pub async fn uncommitted_instruction_import(
+        &self,
+        project: ProjectId,
+    ) -> Result<Vec<String>, EngineError> {
+        match self
+            .process_exchange(Action::UncommittedImport { project }, None)
+            .await?
+        {
+            (Reply::Uncommitted { files }, None)
+                if files.len() <= crate::instruction_files::PROJECT_FILES.len() =>
+            {
+                Ok(files)
+            }
+            _ => Err(unknown()),
+        }
+    }
+
+    /// Commits the instruction import's move as the owner chose: one local commit, never
+    /// pushed, on the project folder's checked-out branch with the repository's own git
+    /// identity, holding only the deletions of the moved files git tracked. Input: the
+    /// project. Output: the commit, or a `PROCESS_CODES` refusal such as
+    /// `process_commit_staged` when other files are staged, with nothing committed.
+    pub async fn commit_instruction_import(
+        &self,
+        project: ProjectId,
+    ) -> Result<ImportCommit, EngineError> {
+        match self
+            .process_exchange(Action::CommitImport { project }, None)
+            .await?
+        {
+            (Reply::Committed { commit }, None)
+                if !commit.files.is_empty()
+                    && commit.files.len() <= crate::instruction_files::PROJECT_FILES.len() =>
+            {
+                Ok(commit)
+            }
+            _ => Err(unknown()),
+        }
     }
 
     /// Reads the CrazyAgent default process, for a preview the owner may then save.
@@ -405,10 +527,10 @@ impl OwnerClient {
         }
     }
 
-    /// Reads one project's agent instruction settings: which instruction files its agents
-    /// get and whether headless Claude runs keep their transcript. Input: the project.
-    /// Output: the settings, the defaults when the owner never changed them, with their
-    /// version.
+    /// Reads one project's agent instruction settings: which of the owner's instruction
+    /// texts its agents get and whether headless Claude runs keep their transcript. Input:
+    /// the project. Output: the settings, the defaults when the owner never changed them,
+    /// with their version.
     pub async fn instruction_settings(
         &self,
         project: ProjectId,
@@ -436,10 +558,45 @@ impl OwnerClient {
         .await
     }
 
+    /// Reads one project's workflow adoption: its nudges option, the counted tools and
+    /// each recent agent's counts, flags and reminders. Input: the project. Output: the
+    /// view, or a `PROCESS_CODES` refusal such as `process_adoption_unavailable`.
+    pub async fn adoption(&self, project: ProjectId) -> Result<Adoption, EngineError> {
+        match self
+            .process_exchange(Action::Adoption { project }, None)
+            .await?
+        {
+            (Reply::Adoption { adoption }, None)
+                if adoption.agents.len() <= crate::coord::adoption::AGENTS_SHOWN_MAX
+                    && adoption.counted.len() <= crate::coord::settings::COUNTED_TOOLS_MAX
+                    && adoption.skills.len() <= crate::coord::adoption::SKILLS_SHOWN_MAX
+                    && adoption.agents.iter().all(|agent| {
+                        agent.counts.len() == adoption.counted.len()
+                            && agent.skills.len() == adoption.skills.len()
+                            && agent.other_skills.len() <= crate::coord::adoption::OTHER_SKILLS_MAX
+                    }) =>
+            {
+                Ok(adoption)
+            }
+            _ => Err(unknown()),
+        }
+    }
+
     async fn process_settings_reply(&self, action: Action) -> Result<InstructionView, EngineError> {
         match self.process_exchange(action, None).await? {
             (Reply::Settings { settings, version }, None) => {
                 Ok(InstructionView { settings, version })
+            }
+            _ => Err(unknown()),
+        }
+    }
+
+    async fn process_imports_reply(&self, action: Action) -> Result<Vec<ImportFile>, EngineError> {
+        match self.process_exchange(action, None).await? {
+            (Reply::Imports { files }, None)
+                if files.len() <= crate::instruction_files::PROJECT_FILES.len() =>
+            {
+                Ok(files)
             }
             _ => Err(unknown()),
         }
@@ -651,6 +808,19 @@ pub(super) async fn serve(
             },
             None,
         ),
+        Ok(Answer::Adoption(adoption)) => (Reply::Adoption { adoption }, None),
+        Ok(Answer::Imports(files)) => {
+            assert!(files.len() <= crate::instruction_files::PROJECT_FILES.len());
+            (Reply::Imports { files }, None)
+        }
+        Ok(Answer::Uncommitted(files)) => {
+            assert!(files.len() <= crate::instruction_files::PROJECT_FILES.len());
+            (Reply::Uncommitted { files }, None)
+        }
+        Ok(Answer::Committed(commit)) => {
+            assert!(!commit.files.is_empty());
+            (Reply::Committed { commit }, None)
+        }
         Err(error) => (
             Reply::Rejected {
                 code: public_code(error),
@@ -710,7 +880,6 @@ async fn handle(
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| failure("process_unavailable"))?;
-    let home = std::env::var_os("HOME").map(PathBuf::from);
     tokio::task::spawn_blocking(move || match action {
         Action::Agent { project, agent } if text.is_none() => {
             agent_instructions(&root, &project, agent).map(Answer::Agent)
@@ -725,21 +894,35 @@ async fn handle(
         } if text.is_none() => {
             instruction_settings(&root, &project, Some((settings, version))).map(Answer::Settings)
         }
-        action => run(&root, home.as_deref(), action, text),
+        Action::Adoption { project } if text.is_none() => {
+            adoption(&root, &project).map(Answer::Adoption)
+        }
+        Action::PendingImport { project } if text.is_none() => {
+            crate::instruction_files::pending(&project_folder(&root, &project)?)
+                .map(Answer::Imports)
+        }
+        Action::ConfirmImport { project } if text.is_none() => {
+            crate::instruction_files::import(&project_folder(&root, &project)?).map(Answer::Imports)
+        }
+        Action::UncommittedImport { project } if text.is_none() => {
+            crate::instruction_files::uncommitted(&project_folder(&root, &project)?)
+                .map(Answer::Uncommitted)
+        }
+        Action::CommitImport { project } if text.is_none() => {
+            let home = crate::projects_home::owner_home()?;
+            crate::instruction_files::commit(&project_folder(&root, &project)?, &home)
+                .map(Answer::Committed)
+        }
+        action => run(&root, action, text),
     })
     .await
     .map_err(|_| failure("process_unavailable"))?
 }
 
 /// Runs one Process request against the engine root. Inputs: the root holding
-/// `engine.db`, the owner's home for an import, the action and a save's text.
-/// Output: the text read with its version, a seed text, what a save did, or a plain code.
-fn run(
-    root: &Path,
-    home: Option<&Path>,
-    action: Action,
-    text: Option<String>,
-) -> Result<Answer, EngineError> {
+/// `engine.db`, the action and a save's text. Output: the text read with its version, a
+/// seed text, what a save did, or a plain code.
+fn run(root: &Path, action: Action, text: Option<String>) -> Result<Answer, EngineError> {
     Ok(match (action, text) {
         (Action::Read { project }, None) => Answer::Current(current_text(root, project.as_ref())?),
         (
@@ -750,11 +933,8 @@ fn run(
             },
             Some(text),
         ) => Answer::Saved(save_text(root, project.as_ref(), &text, version, opened)?),
-        (Action::ImportGlobal, None) => {
-            let home = home.ok_or_else(|| failure("process_import_missing"))?;
-            Answer::Text(
-                crate::agent_home::import_global(home).map_err(|problem| EngineError(problem.0))?,
-            )
+        (Action::ReadFile { path }, None) => {
+            Answer::Text(crate::instruction_files::read_picked(&path)?)
         }
         (Action::Default, None) => Answer::Text(crate::agent_home::DEFAULT_PROCESS.to_owned()),
         (Action::AgentText { project, agent }, None) => {
@@ -1079,11 +1259,13 @@ fn agent_instructions(
     let received =
         crate::agent_home::received(&home, kind).map_err(|problem| EngineError(problem.0))?;
     let launched = received.is_some();
-    let files = match launched {
-        true => {
-            crate::agent_home::given_files(root, &home).map_err(|problem| EngineError(problem.0))?
-        }
-        false => Vec::new(),
+    let recorded = |problem: crate::agent_home::AgentHomeError| EngineError(problem.0);
+    let (skills, files) = match launched {
+        true => (
+            crate::agent_home::given_skills(root, &home).map_err(recorded)?,
+            crate::agent_home::given_files(root, &home).map_err(recorded)?,
+        ),
+        false => (Vec::new(), Vec::new()),
     };
     let received = received.unwrap_or_default();
     let seen = match launched {
@@ -1095,7 +1277,7 @@ fn agent_instructions(
         harness,
         launched,
         text: received.text,
-        skills: received.skills,
+        skills,
         sessions: u32::try_from(seen.records).map_err(|_| failure("process_reply_bounds"))?,
         loaded: seen.loaded,
         skills_used: seen.used,
@@ -1180,6 +1362,34 @@ fn instruction_settings(
         settings: stored,
         version,
     })
+}
+
+/// Reads one set-up project's workflow adoption from the engine store, read-only, with a
+/// count for each skill its agents receive. Inputs: the engine root and the project.
+/// Output: the view, `process_project_unknown` for a project with no setup, or
+/// `process_adoption_unavailable`.
+fn adoption(root: &Path, project: &ProjectId) -> Result<Adoption, EngineError> {
+    let unavailable = |_| failure("process_adoption_unavailable");
+    let connection = read_only(root)?;
+    let tx = connection.unchecked_transaction().map_err(unavailable)?;
+    let known: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM project_setups WHERE project=?1)",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    if !known {
+        return Err(failure("process_project_unknown"));
+    }
+    let skills: Vec<String> = crate::storage::plugins::effective(&tx, root, project)
+        .map_err(|_| failure("process_adoption_unavailable"))?
+        .skills
+        .into_iter()
+        .map(|skill| skill.name)
+        .collect();
+    crate::coord::adoption::view(&tx, project, &skills, crate::team::now_ms())
+        .map_err(|_| failure("process_adoption_unavailable"))
 }
 
 fn read_only(root: &Path) -> Result<rusqlite::Connection, EngineError> {

@@ -55,6 +55,16 @@ test("Settings, Pack lists the pack by group with a switch, Remove or Install on
   assert.match(broken, />Try again<\/button>/);
 });
 
+test("Settings, Pack says why an installed entry's hooks were not added", () => {
+  const refused = "This folder has hooks but no .claude-plugin/plugin.json naming the plugin.";
+  const listed = pack.map((item) => item.id === "superpowers" ? { ...item, state: { state: "on" }, hooks_refused: refused } : item);
+  const markup = html(PackSettingsView, packProps(ok(setup({ pack: listed }))));
+  const row = rowOf(markup, "superpowers");
+  assert.match(row, /role="switch"[^>]*aria-checked="true"/);
+  assert.ok(row.includes("Hooks not added: This folder has hooks but no .claude-plugin/plugin.json naming the plugin."), row);
+  assert.equal(markup.split("Hooks not added").length - 1, 1, "only the refused entry says so");
+});
+
 test("Settings, Pack locks every change while setup runs or another change is in flight", () => {
   for (const props of [packProps(ok(setup({ running: true }))), packProps(ok(setup()), { busy: "headroom" })]) {
     const markup = html(PackSettingsView, props);
