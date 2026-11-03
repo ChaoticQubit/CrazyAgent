@@ -1473,9 +1473,10 @@ fn read_folders(
 }
 
 /// The sandbox network a research job runs under (DEC-111 Q17, S4R1-2): a tools-off job
-/// reaches only its model endpoint's port on any host, and a tools-on job follows the
-/// project's network choice with the model still reachable. Inputs: the project's agent
-/// policy, whether the job has tools, and the model endpoint. Output: the sandbox network.
+/// reaches only its model endpoint's port, on loopback for a local model, otherwise on any
+/// host, and a tools-on job follows the project's network choice with the model still
+/// reachable. Inputs: the project's agent policy, whether the job has tools, and the model
+/// endpoint. Output: the sandbox network.
 pub(crate) fn job_network(
     policy: &crate::sandbox::policy::AgentPolicy,
     tools: bool,

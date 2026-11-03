@@ -84,10 +84,10 @@ impl AgentAccess {
 
 /// How far one project's tools-on agents and the plugin "Check again" server may reach on
 /// the network (DEC-111 Q17): Open is the whole network, Https is port 443 only, None is
-/// the model endpoint's port alone on any host (port 443 for an HTTPS endpoint), not yet
-/// the model host alone. The same choice applies to the agents and to the check. It does
-/// not widen or narrow the live master, which always reaches the model's port only,
-/// whatever this choice.
+/// the model endpoint's port alone, on loopback for a local model, otherwise on any host,
+/// not yet the model host alone. The same choice applies to the agents and to the check.
+/// It does not widen or narrow the live master, which always reaches the model's port
+/// only, whatever this choice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentNetwork {
@@ -121,7 +121,8 @@ impl AgentNetwork {
 
     /// The sandbox reach this choice grants. Input: the model endpoint the agent still
     /// needs, or None for the plugin check, which needs no model. Output: Open for Open,
-    /// port 443 plus the model's port for Https, the model's port alone on any host for None.
+    /// port 443 plus the model's port for Https, and for None the model's port alone, on
+    /// loopback for a local model, otherwise on any host.
     pub fn sandbox(self, model: Option<super::SandboxRemote>) -> super::SandboxNetwork {
         match self {
             Self::Open => super::SandboxNetwork::Open,
