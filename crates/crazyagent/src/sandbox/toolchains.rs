@@ -21,7 +21,7 @@ const TMP_PARENT: &str = "/private/tmp";
 const TMP_PREFIX: &str = "ca-";
 const TMP_HASH_BYTES: usize = 8;
 /// The folder of an agent's short temp folder that holds its own `git`, and that program.
-const GIT_FOLDER: &str = "bin";
+pub(super) const GIT_FOLDER: &str = "bin";
 const GIT_PROGRAM: &str = "git";
 /// The xcrun shim at `/usr/bin/git`, whose cache file write Seatbelt denies (Q73).
 #[cfg(unix)]

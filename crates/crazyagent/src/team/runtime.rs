@@ -538,6 +538,56 @@ fn private_directory(path: &Path) -> Result<(), EngineError> {
     Ok(())
 }
 
+/// Makes the home a native lead's teammates run with (TPH-2 C): a private folder beside the
+/// lead's home, with its own cargo home and Claude Code's first-run questions answered for
+/// the project, whose `teams` and `tasks` are links to the lead's folders of those names,
+/// made here when missing, since Claude Code keeps the team's mailboxes and task lists there
+/// for every member. A changed entry is refused, not replaced. Inputs: the lead's home, the
+/// owner's tool homes and the lead's working folder. Output: the folder.
+#[cfg(unix)]
+fn prepare_mates_home(
+    home: &Path,
+    homes: &ToolHomes,
+    project: &Path,
+) -> Result<PathBuf, EngineError> {
+    let mates = crate::launch_context::mates_home(home);
+    private_directory(&mates)?;
+    for folder in crate::sandbox::CLAUDE_TEAM_SHARED {
+        let shared = home.join(folder);
+        match std::fs::DirBuilder::new().mode(0o700).create(&shared) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(error(e)),
+        }
+        let link = mates.join(folder);
+        match std::os::unix::fs::symlink(&shared, &link) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(error(e)),
+        }
+        if !std::fs::symlink_metadata(&shared).is_ok_and(|metadata| metadata.is_dir())
+            || std::fs::read_link(&link).ok().as_deref() != Some(shared.as_path())
+        {
+            return Err(EngineError("team_shared_folder_changed".into()));
+        }
+    }
+    toolchains::prepare_cargo_home(&mates, homes).map_err(error)?;
+    crate::harnesses::interactive::prepare_claude_home(&mates, project)
+        .map_err(|e| EngineError(e.0))?;
+    Ok(mates)
+}
+
+/// Refuses a native lead's teammates' home where no link can be made. Takes the lead's
+/// home, the tool homes and the working folder, all unused. Returns `team_state_unavailable`.
+#[cfg(not(unix))]
+fn prepare_mates_home(
+    _home: &Path,
+    _homes: &ToolHomes,
+    _project: &Path,
+) -> Result<PathBuf, EngineError> {
+    Err(EngineError("team_state_unavailable".into()))
+}
+
 impl TeamRuntime {
     /// Opens the team runtime over the engine database.
     /// Takes the database, an engine-owned state directory outside every project, the
@@ -5402,8 +5452,10 @@ impl TeamRuntime {
                 Some(callers.as_path()),
                 "the lead's servers find the caller socket its sandbox reaches"
             );
+            let mates_home = prepare_mates_home(&home, &homes, &working_dir)
+                .map_err(|e| with_code("the teammates' home could not be made", Some(&e.0)))?;
             let (lead, mates) = sandbox
-                .native_team(&socket, &mates_socket, &callers, &tmux)
+                .native_team(&socket, &mates_socket, &callers, &tmux, &mates_home)
                 .map_err(sandboxed)?;
             sandbox = lead;
             teammates = Some(mates);
