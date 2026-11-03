@@ -10,6 +10,8 @@ use std::collections::BTreeMap;
 
 pub mod binding;
 #[cfg(unix)]
+pub mod gate;
+#[cfg(unix)]
 pub mod integrity;
 pub mod markers;
 pub mod profile;
@@ -21,6 +23,8 @@ pub mod snapshot;
 
 #[cfg(all(test, unix))]
 mod tests {
+    #[cfg(target_os = "macos")]
+    mod gate;
     mod profile;
     #[cfg(target_os = "macos")]
     mod record;
