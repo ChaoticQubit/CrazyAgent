@@ -652,3 +652,166 @@ fn live_a_teammate_cannot_plant_a_command_in_its_lead_s_shell_snapshot() {
         String::from_utf8_lossy(&planted.stderr)
     );
 }
+
+/// Every file under `root`, at most `depth` folders down and `FILES_MAX` in all, read by
+/// the test from outside every sandbox. Inputs: the folder and the depth. Output: the files.
+fn files_under(root: &Path, depth: usize) -> Vec<PathBuf> {
+    const FILES_MAX: usize = 4096;
+    let mut found = Vec::new();
+    let mut folders = vec![(root.to_path_buf(), 0)];
+    while let Some((folder, level)) = folders.pop() {
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() && level < depth {
+                folders.push((entry.path(), level + 1));
+            } else if kind.is_file() && found.len() < FILES_MAX {
+                found.push(entry.path());
+            }
+        }
+    }
+    found
+}
+
+/// The files of `files` whose text holds `word`. Inputs: the files and the word. Output:
+/// the matching files.
+fn holding(files: &[PathBuf], word: &str) -> Vec<PathBuf> {
+    files
+        .iter()
+        .filter(|file| std::fs::read_to_string(file).is_ok_and(|text| text.contains(word)))
+        .cloned()
+        .collect()
+}
+
+/// The lead's one turn for the TPH-2 C live check: make a task, create one teammate that
+/// claims and completes it, send that teammate a word and pass its answer on. Input: the
+/// run's token. Output: the prompt.
+fn own_home_prompt(token: &str) -> String {
+    format!(
+        "Use your agent team for this. First create a task in your team's task list with exactly the title {token}TASK. Then spawn exactly one teammate and tell it: claim the task titled {token}TASK and mark it completed, then wait for a message from the team lead and send the team lead back the exact word that message holds followed by OK, and nothing else. Then send the teammate a message with exactly the word {token}MSG. Wait until the teammate's answer reaches you and the task shows completed, then reply with exactly the teammate's answer and nothing else."
+    )
+}
+
+/// TPH-2 C, live: a native lead's teammates run from their own config home and reach the
+/// lead only through the team folders the lead shares. A real Claude Code lead, started by
+/// the runtime on the owner's account, makes a task, creates one teammate, messages it and
+/// waits for its answer. Checked: the teammate starts signed in and answers, past every
+/// first-run, trust and sign-in screen (1); its answer to the lead's message arrives through
+/// the linked `teams/` (2); it completes the lead's task in the linked `tasks/` (3); its
+/// transcript sits in the mates home, where the engine's record walk, which usage and the
+/// relay's read receipts use, finds it (4); and Seatbelt denied nothing under the lead's
+/// `teams/` or `tasks/` during the run (5).
+#[test]
+#[ignore = "live qualification: needs a signed-in Claude account, CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
+fn live_native_teammates_work_from_their_own_home_through_the_lead_s_team_folders() {
+    let mut signed_in = SignedIn::claude();
+    let started_at = crate::spawn_gate::output(
+        Command::new("/bin/date")
+            .arg("+%Y-%m-%d %H:%M:%S")
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    .unwrap();
+    let lead = ManagedAgent::engine_native_lead(&claude());
+    let token = format!(
+        "OWNHOME{:x}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let answer = format!("{token}MSGOK");
+    let team = lead.into_native_worker(
+        signed_in.acquire("claude-live-own-home"),
+        &own_home_prompt(&token),
+        TEAM_TURN,
+        AgentAccess::Sandboxed,
+        None,
+    );
+    let reports = team.reports_until(TEAM_TURN, |report| token_turn(report, &answer).is_some());
+    let (end, text) = reports
+        .last()
+        .and_then(|report| token_turn(report, &answer))
+        .expect("the wait ends on the lead's turn holding the teammate's answer");
+    let mates = crate::launch_context::mates_home(&team.home);
+    let transcripts = files_under(&mates.join("projects"), 3);
+    let shared = files_under(&team.home.join("teams"), 3);
+    let tasks = files_under(&team.home.join("tasks"), 2);
+    let walked = crate::usage::capture::records(&team.home, crate::usage::capture::Format::Claude);
+    let denials = crate::spawn_gate::output(
+        Command::new("/usr/bin/log")
+            .args(["show", "--style", "compact", "--start", &started_at, "--predicate"])
+            .arg("eventMessage CONTAINS \"deny\" AND (eventMessage CONTAINS \"/teams/\" OR eventMessage CONTAINS \"/tasks/\")")
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    let lead_folders = [
+        format!("/agent-{AGENT}/home/teams"),
+        format!("/agent-{AGENT}/home/tasks"),
+    ];
+    let denied: Vec<String> = String::from_utf8_lossy(&denials.stdout)
+        .lines()
+        .filter(|line| {
+            lead_folders
+                .iter()
+                .any(|folder| line.contains(folder.as_str()))
+        })
+        .map(str::to_owned)
+        .collect();
+    println!(
+        "real claude native team in its own home: end={end:?} text={text:?} transcripts={transcripts:?} shared={shared:?} tasks={tasks:?} walked={walked:?} denied={denied:?} log_exit={:?} turns={:?}",
+        denials.status.code(),
+        finished(&reports)
+    );
+    assert_eq!(end, TurnEnd::Success, "{text:?}");
+    let teammate = holding(&transcripts, &format!("{token}MSG"));
+    assert!(
+        !teammate.is_empty(),
+        "no teammate transcript in its own home {} holds the lead's message",
+        mates.display()
+    );
+    assert!(
+        !holding(&teammate, &answer).is_empty(),
+        "the teammate's own transcript holds no answer to the lead's message"
+    );
+    assert!(
+        shared
+            .iter()
+            .any(|file| file.components().any(|part| part.as_os_str() == "inboxes")),
+        "no inbox was written in the lead's own teams folder: {shared:?}"
+    );
+    assert!(
+        holding(&tasks, &format!("{token}TASK"))
+            .iter()
+            .any(|file| std::fs::read_to_string(file).is_ok_and(|text| text.contains("completed"))),
+        "the lead's task was not completed in the lead's own tasks folder: {tasks:?}"
+    );
+    assert!(
+        walked
+            .iter()
+            .any(|record| record.starts_with(&mates) && teammate.contains(record)),
+        "the engine's record walk misses the teammate's transcript: {walked:?}"
+    );
+    assert!(
+        denials.status.success(),
+        "the Seatbelt log could not be read: {}",
+        String::from_utf8_lossy(&denials.stderr)
+    );
+    assert!(
+        denied.is_empty(),
+        "Seatbelt denied a write in the lead's team folders: {denied:?}"
+    );
+    team.order(Order::Stop);
+    let (_, problem) = team.until_ended(STOP);
+    assert_eq!(problem, None);
+}
