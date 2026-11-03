@@ -45,12 +45,19 @@ const _: () = assert!(TRACKER_REPLY_BYTES_MAX <= trackwright_core::reply::REPLY_
 /// (`trackwright_core::model::codes::ALL`, inside a refused envelope), the engine host's,
 /// this protocol's, and the owner connection's it travels on. Sorted, each once.
 pub const TRACKER_CODES: &[&str] = &[
+    "active_plan_exists",
     "actor_invalid",
     "actor_not_engine",
     "actor_other_project",
     "agent_edit_refused",
     "already_claimed",
     "args_invalid",
+    "case_link_exists",
+    "case_link_unknown",
+    "case_links_full",
+    "case_protected",
+    "case_unknown",
+    "cases_full",
     "changes_unavailable",
     "check_exists",
     "check_unknown",
@@ -63,6 +70,7 @@ pub const TRACKER_CODES: &[&str] = &[
     "criterion_has_checks",
     "criterion_needs_check",
     "criterion_unknown",
+    "cross_project",
     "cursor_invalid",
     "cycle_closed",
     "cycle_days_invalid",
@@ -99,6 +107,7 @@ pub const TRACKER_CODES: &[&str] = &[
     "notify_too_wide",
     "op_unavailable",
     "open_tickets_full",
+    "option_needs_host",
     "owner_authentication_failed",
     "owner_authority_unavailable",
     "owner_busy",
@@ -111,7 +120,14 @@ pub const TRACKER_CODES: &[&str] = &[
     "owner_socket_unsafe",
     "parent_invalid",
     "peer_owner_mismatch",
+    "plan_closed",
+    "plan_item_exists",
+    "plan_item_unknown",
+    "plan_items_full",
+    "plan_unknown",
+    "plans_full",
     "policy_in_settings",
+    "policy_locked",
     "policy_value_invalid",
     "priority_invalid",
     "project_exists",
@@ -119,16 +135,38 @@ pub const TRACKER_CODES: &[&str] = &[
     "project_not_attached",
     "project_unknown",
     "rate_limited",
+    "release_unknown",
     "request_id_reused",
     "request_too_large",
+    "result_name_repeated",
+    "results_empty",
+    "results_too_many",
+    "run_batch_invalid",
+    "run_closed",
+    "run_finish_invalid",
+    "run_integrity_invalid",
+    "run_policy_invalid",
+    "run_results_full",
+    "run_source_invalid",
+    "run_unknown",
+    "run_writer_refused",
+    "runs_full",
+    "set_case_exists",
+    "set_case_unknown",
+    "set_cases_full",
+    "set_unknown",
+    "sets_full",
     "short_id_invalid",
+    "stable_name_taken",
     "stale_version",
     "status_closed_at_create",
     "status_invalid",
+    "steps_full",
     "store_failed",
     "store_not_private",
     "store_path_refused",
     "store_schema_newer",
+    "test_id_invalid",
     "text_empty",
     "text_hidden_characters",
     "text_line_break",
@@ -650,7 +688,9 @@ fn named<T: Serialize>(all: &[T]) -> Vec<serde_json::Value> {
 }
 
 /// Every ticket setting's choices: the core policy keys in their order, then the engine's
-/// `manual_evidence` and `ci_evidence`. Output: every setting, one per core key and two.
+/// `manual_evidence` and `ci_evidence`. `run_writers` lists only the value the host locks
+/// it to, so it shows locked and no save can change it. Output: every setting, one per core
+/// key and two.
 fn choices() -> Vec<SettingChoices> {
     let proposed =
         serde_json::to_value(TicketSettings::default()).expect("settings are plain data");
@@ -666,7 +706,7 @@ fn choices() -> Vec<SettingChoices> {
             PolicyKey::TestEvidence => named(TestEvidence::ALL),
             PolicyKey::SkippedCounts => named(SkippedCounts::ALL),
             PolicyKey::CaseProtectedVisibility => named(CaseProtectedVisibility::ALL),
-            PolicyKey::RunWriters => named(RunWriters::ALL),
+            PolicyKey::RunWriters => named(&[RunWriters::EngineOnly]),
             PolicyKey::RunRetention => named(RunRetention::ALL),
         };
         all.push(SettingChoices {
@@ -691,6 +731,10 @@ fn choices() -> Vec<SettingChoices> {
         });
     }
     assert_eq!(all.len(), PolicyKey::ALL.len() + 2);
+    assert_eq!(
+        crate::tracker::host::locked(PolicyKey::RunWriters),
+        Some(RunWriters::EngineOnly.as_str())
+    );
     assert!(
         all.iter()
             .all(|choice| choice.options.contains(&choice.proposed))
