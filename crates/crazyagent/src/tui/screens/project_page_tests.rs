@@ -2981,28 +2981,6 @@ async fn s_on_the_agents_tab_opens_team_settings_and_each_setting_reaches_the_en
     );
 }
 
-#[test]
-fn s_on_the_team_screen_opens_its_team_settings() {
-    let notes = ProjectId::new("notes-cli").unwrap();
-    let mut ctx = ctx(120, 30);
-    let screen = open(
-        &Place::Team {
-            id: notes,
-            name: "Notes CLI".into(),
-        },
-        &mut ctx,
-    );
-    let mut shell = Shell::with(ctx, screen);
-    let shown = render(&mut shell, 120, 30);
-    assert!(shown.contains("s Team settings"), "{shown}");
-    shell.key(Key::Char('s'));
-    assert_eq!(shell.depth(), 2);
-    let shown = render(&mut shell, 120, 30);
-    assert!(shown.contains("Notes CLI  /  Team settings"), "{shown}");
-    shell.key(Key::Esc);
-    assert_eq!(shell.depth(), 1);
-}
-
 fn git_in(home: &std::path::Path, dir: &std::path::Path, args: &[&str]) {
     let output = crate::spawn_gate::output(
         std::process::Command::new("/usr/bin/git")

@@ -2196,7 +2196,8 @@ impl TeamView {
         (lines, help)
     }
 
-    /// Draws the Team view for the Team screen's settings box and places the typing cursor.
+    /// Draws the Team view for the Team screen's settings box and the Team settings screen,
+    /// and places the typing cursor.
     /// When the window is too short for the lists, the panel and any footer question, the
     /// blank rows before the panel and before the tasks go first, then the settings summary
     /// folds toward its first row, so every setting shows while blank rows can make room.
