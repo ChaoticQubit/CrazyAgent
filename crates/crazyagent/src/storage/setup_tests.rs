@@ -1101,6 +1101,7 @@ fn seeded_hooks_follow_their_entry_and_turn_off_per_hook_per_project_or_with_the
         effective_events(&mut connection, root, "project-1"),
         ["UserPromptSubmit"]
     );
+    let version = plugins::plugin_version(&connection, &prompt).unwrap();
     plugins::execute(
         &mut connection,
         root,
@@ -1108,6 +1109,7 @@ fn seeded_hooks_follow_their_entry_and_turn_off_per_hook_per_project_or_with_the
             project: crate::protocol::ProjectId::new("project-1").unwrap(),
             id: prompt.clone(),
             on: false,
+            version,
         },
     )
     .unwrap();

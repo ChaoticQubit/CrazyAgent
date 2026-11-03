@@ -909,8 +909,13 @@ fn skill_view(
     })
 }
 
-fn hook_view(record: &HookRecord, follows: Option<String>, on_here: Option<bool>) -> HookView {
-    HookView {
+fn hook_view(
+    connection: &Connection,
+    record: &HookRecord,
+    follows: Option<String>,
+    on_here: Option<bool>,
+) -> Result<HookView, EngineError> {
+    Ok(HookView {
         id: record.id.clone(),
         name: record.name.clone(),
         plugin: record.plugin.clone(),
@@ -923,7 +928,8 @@ fn hook_view(record: &HookRecord, follows: Option<String>, on_here: Option<bool>
         on_here,
         follows,
         source: crate::memory::visible_text(&record.source),
-    }
+        version: plugin_version(connection, &record.id)?,
+    })
 }
 
 /// Names the skill or MCP server a hook follows, as the hook list shows it.
@@ -1569,7 +1575,7 @@ pub(super) fn run(
             let (records, copy) = add_hooks(tx, root, scope, source, follows)?;
             let mut views = Vec::with_capacity(records.len());
             for record in &records {
-                views.push(hook_view(record, follows_name(tx, record)?, None));
+                views.push(hook_view(tx, record, follows_name(tx, record)?, None)?);
             }
             ResultValue::HooksAdded(views, copy)
         }
@@ -1578,7 +1584,7 @@ pub(super) fn run(
             record.enabled = enabled;
             save(tx, "hook", &record.id, &record.scope, &record.name, &record)?;
             let follows = follows_name(tx, &record)?;
-            ResultValue::Hook(Box::new(hook_view(&record, follows, None)))
+            ResultValue::Hook(Box::new(hook_view(tx, &record, follows, None)?))
         }
         Command::Hooks { project, offset } => {
             let off = match &project {
@@ -1591,7 +1597,7 @@ pub(super) fn run(
                 .filter(|record| visible(&record.scope, project.as_ref()))
             {
                 let here = on_here(&record.scope, &record.id, project.as_ref(), &off);
-                views.push(hook_view(record, follows_name(tx, record)?, here));
+                views.push(hook_view(tx, record, follows_name(tx, record)?, here)?);
             }
             let (views, next) = page(views, offset)?;
             ResultValue::Hooks(views, next)

@@ -421,6 +421,7 @@ impl ProjectPlugins {
                     hook.name.clone(),
                     hook.enabled,
                     hook.on_here,
+                    hook.version,
                 )
             }
         };
