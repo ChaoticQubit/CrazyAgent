@@ -1,0 +1,676 @@
+use serde::{Deserialize, Serialize};
+use std::fmt;
+
+/// The refusal codes the core itself returns. A host adds its own codes beside these.
+pub mod codes {
+    pub const TEXT_EMPTY: &str = "text_empty";
+    pub const TEXT_TOO_LONG: &str = "text_too_long";
+    pub const TEXT_LINE_BREAK: &str = "text_line_break";
+    pub const TEXT_HIDDEN_CHARACTERS: &str = "text_hidden_characters";
+    pub const PROJECT_KEY_INVALID: &str = "project_key_invalid";
+    pub const PROJECT_EXISTS: &str = "project_exists";
+    pub const PROJECT_UNKNOWN: &str = "project_unknown";
+    pub const SHORT_ID_INVALID: &str = "short_id_invalid";
+    pub const TICKET_UNKNOWN: &str = "ticket_unknown";
+    pub const ACTOR_INVALID: &str = "actor_invalid";
+    pub const PRIORITY_INVALID: &str = "priority_invalid";
+    pub const CYCLE_DAYS_INVALID: &str = "cycle_days_invalid";
+    pub const STALE_VERSION: &str = "stale_version";
+    pub const STATUS_CLOSED_AT_CREATE: &str = "status_closed_at_create";
+    pub const CLOSE_REASON_OPEN: &str = "close_reason_open";
+    pub const TICKETS_FULL: &str = "tickets_full";
+    pub const CRITERIA_FULL: &str = "criteria_full";
+    pub const CRITERION_UNKNOWN: &str = "criterion_unknown";
+    pub const LINKS_FULL: &str = "links_full";
+    pub const LINK_EXISTS: &str = "link_exists";
+    pub const LINK_UNKNOWN: &str = "link_unknown";
+    pub const STORE_PATH_REFUSED: &str = "store_path_refused";
+    pub const STORE_NOT_PRIVATE: &str = "store_not_private";
+    pub const STORE_SCHEMA_NEWER: &str = "store_schema_newer";
+    pub const STORE_FAILED: &str = "store_failed";
+}
+
+pub const ACTOR_BYTES_MAX: usize = 128;
+pub const CRITERIA_PER_TICKET_MAX: usize = 32;
+pub const CHECKS_PER_CRITERION_MAX: usize = 8;
+pub const LINKS_PER_TICKET_MAX: usize = 256;
+pub const DEPENDENCIES_PER_TICKET_MAX: usize = 64;
+pub const TICKETS_PER_PROJECT_MAX: usize = 10_000;
+pub const VERSIONS_PER_PROJECT_MAX: usize = 64;
+pub const CYCLES_PER_PROJECT_MAX: usize = 520;
+pub const WRITES_PER_ACTOR_MINUTE_MAX: usize = 30;
+pub const OPEN_TICKETS_CREATED_PER_ACTOR_MAX: usize = 50;
+pub const REQUEST_BYTES_MAX: usize = 16 * 1024;
+pub const REQUEST_ID_BYTES_MAX: usize = 64;
+
+/// A plain refusal the core, a host or a caller acts on. Fields: a stable code from a fixed
+/// vocabulary (`codes` for the core's own), and one line saying why, safe to show an agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    pub code: &'static str,
+    pub message: String,
+}
+
+impl Refusal {
+    /// Builds a refusal. Inputs: the code and the message. Output: the refusal.
+    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for Refusal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for Refusal {}
+
+/// Declares a closed set of names stored in SQL and sent on the wire, with one text per
+/// variant used by serde, by `as_str` and by `parse`, so the three can never disagree.
+macro_rules! named_enum {
+    ($(#[$meta:meta])* $name:ident { $($variant:ident => $text:literal),+ $(,)? }) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+        pub enum $name {
+            $(#[serde(rename = $text)] $variant),+
+        }
+
+        impl $name {
+            /// Every value, in declaration order.
+            pub const ALL: &'static [$name] = &[$($name::$variant),+];
+
+            /// The stored and wire name. Output: the name.
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $($name::$variant => $text),+
+                }
+            }
+
+            /// Reads a stored or wire name. Input: the text. Output: the value, or None
+            /// for any other text.
+            pub fn parse(text: &str) -> Option<Self> {
+                match text {
+                    $($text => Some($name::$variant),)+
+                    _ => None,
+                }
+            }
+        }
+
+        impl fmt::Display for $name {
+            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+    };
+}
+
+pub(crate) use named_enum;
+
+named_enum! {
+    /// What a ticket is: new work, a defect, upkeep, or a time-boxed investigation.
+    TicketKind { Feature => "feature", Bug => "bug", Chore => "chore", Spike => "spike" }
+}
+
+named_enum! {
+    /// Where a ticket is in its life. `done` and `cancelled` are the closed states.
+    TicketStatus {
+        Triage => "triage",
+        Backlog => "backlog",
+        Todo => "todo",
+        InProgress => "in_progress",
+        InReview => "in_review",
+        Done => "done",
+        Cancelled => "cancelled",
+    }
+}
+
+impl TicketStatus {
+    /// Tells whether the status is a closed one. Output: true for done and cancelled.
+    pub fn is_closed(self) -> bool {
+        matches!(self, TicketStatus::Done | TicketStatus::Cancelled)
+    }
+}
+
+named_enum! {
+    /// Where a product version is: planned, being worked on, or shipped.
+    VersionStatus { Planned => "planned", Active => "active", Released => "released" }
+}
+
+named_enum! {
+    /// Where a cycle is: not started, running, or finished.
+    CycleStatus { Upcoming => "upcoming", Active => "active", Closed => "closed" }
+}
+
+named_enum! {
+    /// Whether an acceptance criterion still needs proof, is proven, or was waived.
+    CriterionState { Open => "open", Met => "met", Waived => "waived" }
+}
+
+named_enum! {
+    /// What proves a criterion: a test, a change set, a person's check, or a CI run.
+    CheckKind { Test => "test", Change => "change", Manual => "manual", Ci => "ci" }
+}
+
+named_enum! {
+    /// The outcome one evidence record reports for a check.
+    EvidenceResult { Pass => "pass", Fail => "fail" }
+}
+
+named_enum! {
+    /// Policy `close`: who may close a ticket. `evidence` lets the core close it once every
+    /// criterion is met and every check is satisfied.
+    ClosePolicy { Agents => "agents", Evidence => "evidence", Owner => "owner" }
+}
+
+named_enum! {
+    /// Policy `create`: whether new tickets start in the backlog, in triage, or only the
+    /// owner may create them.
+    CreatePolicy { Direct => "direct", Triage => "triage", OwnerOnly => "owner_only" }
+}
+
+named_enum! {
+    /// Policy `agent_edit`: what an agent may change on a ticket it did not create.
+    AgentEditPolicy { Any => "any", StatusAndCriteria => "status_and_criteria", NoEdits => "none" }
+}
+
+named_enum! {
+    /// Policy `rollover`: what happens to unfinished work when a cycle closes.
+    RolloverPolicy { Auto => "auto", Ask => "ask", Off => "off" }
+}
+
+named_enum! {
+    /// Policy `import`: whether a host's roadmap is imported once on its own or only on
+    /// request.
+    ImportPolicy { AutoOnce => "auto_once", OnRequest => "on_request" }
+}
+
+named_enum! {
+    /// The policy keys a project stores, one per policy setting.
+    PolicyKey {
+        Close => "close",
+        Create => "create",
+        AgentEdit => "agent_edit",
+        CycleDays => "cycle_days",
+        Rollover => "rollover",
+        Import => "import",
+    }
+}
+
+named_enum! {
+    /// Every operation of the catalog, by its wire name. Hosts receive it in
+    /// `Authority::actor_may`; the operation set maps each to its input and output.
+    OpKind {
+        Ready => "ready",
+        List => "list",
+        Show => "show",
+        History => "history",
+        Roadmap => "roadmap",
+        PolicyGet => "policy_get",
+        Export => "export",
+        Schema => "schema",
+        Create => "create",
+        Edit => "edit",
+        Move => "move",
+        Claim => "claim",
+        Release => "release",
+        Depend => "depend",
+        Undepend => "undepend",
+        CriterionAdd => "criterion_add",
+        CriterionEdit => "criterion_edit",
+        CheckAdd => "check_add",
+        EvidenceRecord => "evidence_record",
+        CriterionSet => "criterion_set",
+        Link => "link",
+        Unlink => "unlink",
+        Close => "close",
+        Reopen => "reopen",
+        VersionUpsert => "version_upsert",
+        CycleStart => "cycle_start",
+        CycleClose => "cycle_close",
+        ImportPreview => "import_preview",
+        ImportApply => "import_apply",
+        PolicySet => "policy_set",
+    }
+}
+
+impl OpKind {
+    /// Tells whether the operation is one of the contract's writes. Output: false for the
+    /// eight reads (ready, list, show, history, roadmap, policy_get, export, schema).
+    pub fn is_write(self) -> bool {
+        !matches!(
+            self,
+            OpKind::Ready
+                | OpKind::List
+                | OpKind::Show
+                | OpKind::History
+                | OpKind::Roadmap
+                | OpKind::PolicyGet
+                | OpKind::Export
+                | OpKind::Schema
+        )
+    }
+}
+
+/// A project's key, the prefix of its short ticket ids: 2 to 8 letters A to Z, unique per
+/// database.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ProjectKey(String);
+
+impl ProjectKey {
+    /// Checks a key. Input: the text. Output: the key, or `project_key_invalid`.
+    pub fn new(text: &str) -> Result<Self, Refusal> {
+        if (2..=8).contains(&text.len()) && text.bytes().all(|b| b.is_ascii_uppercase()) {
+            Ok(Self(text.to_owned()))
+        } else {
+            Err(Refusal::new(
+                codes::PROJECT_KEY_INVALID,
+                "a project key is 2 to 8 uppercase letters A to Z",
+            ))
+        }
+    }
+
+    /// The key's text. Output: the text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for ProjectKey {
+    type Error = Refusal;
+
+    fn try_from(text: String) -> Result<Self, Refusal> {
+        Self::new(&text)
+    }
+}
+
+impl From<ProjectKey> for String {
+    fn from(key: ProjectKey) -> String {
+        key.0
+    }
+}
+
+impl fmt::Display for ProjectKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A ticket's stable short id, `<KEY>-<number>` (for example `CA-42`). The number counts
+/// from 1 per project and is never reused; internal row ids never leave the core.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct ShortId {
+    key: ProjectKey,
+    number: u32,
+}
+
+impl ShortId {
+    /// Builds an id. Inputs: the project key and the ticket number. Output: the id, or
+    /// `short_id_invalid` for number 0.
+    pub fn new(key: ProjectKey, number: u32) -> Result<Self, Refusal> {
+        if number == 0 {
+            return Err(short_id_refused());
+        }
+        Ok(Self { key, number })
+    }
+
+    /// Reads `<KEY>-<number>`, the number in decimal without a leading zero. Input: the
+    /// text. Output: the id, or `short_id_invalid`.
+    pub fn parse(text: &str) -> Result<Self, Refusal> {
+        let (key, number) = text.split_once('-').ok_or_else(short_id_refused)?;
+        let key = ProjectKey::new(key).map_err(|_| short_id_refused())?;
+        if number.is_empty()
+            || number.len() > 10
+            || number.starts_with('0')
+            || !number.bytes().all(|b| b.is_ascii_digit())
+        {
+            return Err(short_id_refused());
+        }
+        let number = number.parse::<u32>().map_err(|_| short_id_refused())?;
+        Self::new(key, number)
+    }
+
+    /// The project key. Output: the key.
+    pub fn key(&self) -> &ProjectKey {
+        &self.key
+    }
+
+    /// The ticket number within its project. Output: the number, 1 or more.
+    pub fn number(&self) -> u32 {
+        self.number
+    }
+}
+
+fn short_id_refused() -> Refusal {
+    Refusal::new(
+        codes::SHORT_ID_INVALID,
+        "a ticket id is <KEY>-<number>, for example CA-42",
+    )
+}
+
+impl TryFrom<String> for ShortId {
+    type Error = Refusal;
+
+    fn try_from(text: String) -> Result<Self, Refusal> {
+        Self::parse(&text)
+    }
+}
+
+impl From<ShortId> for String {
+    fn from(id: ShortId) -> String {
+        id.to_string()
+    }
+}
+
+impl fmt::Display for ShortId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}-{}", self.key, self.number)
+    }
+}
+
+/// Who acts: a host-set identity (`owner`, `master:<session>`, `agent:<team id>`) or a
+/// standalone self-declared name. 1 to 128 bytes of letters, digits and `: _ . - @ /`.
+/// The `host:` prefix belongs to the core's own writes (for example `host:evidence`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "String", into = "String")]
+pub struct Actor(String);
+
+impl Actor {
+    /// Checks a caller's identity. Input: the text. Output: the actor, or `actor_invalid`
+    /// for a bad shape or the reserved `host:` prefix.
+    pub fn new(text: &str) -> Result<Self, Refusal> {
+        let actor = Self::shaped(text)?;
+        if actor.is_host() {
+            return Err(Refusal::new(
+                codes::ACTOR_INVALID,
+                "the host: prefix is reserved for the tracker's own writes",
+            ));
+        }
+        Ok(actor)
+    }
+
+    /// The core's own identity for a write it makes itself. Input: what caused it, for
+    /// example `evidence`. Output: the actor `host:<source>`.
+    pub fn host(source: &'static str) -> Self {
+        assert!(!source.is_empty() && source.len() + 5 <= ACTOR_BYTES_MAX);
+        assert!(source.bytes().all(actor_byte));
+        Self(format!("host:{source}"))
+    }
+
+    /// Tells whether the core made this write itself. Output: true for `host:` actors.
+    pub fn is_host(&self) -> bool {
+        self.0.starts_with("host:")
+    }
+
+    /// The actor's text. Output: the text.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn shaped(text: &str) -> Result<Self, Refusal> {
+        if text.is_empty() || text.len() > ACTOR_BYTES_MAX || !text.bytes().all(actor_byte) {
+            return Err(Refusal::new(
+                codes::ACTOR_INVALID,
+                "an actor is 1 to 128 bytes of letters, digits and : _ . - @ /",
+            ));
+        }
+        Ok(Self(text.to_owned()))
+    }
+}
+
+fn actor_byte(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || matches!(b, b':' | b'_' | b'.' | b'-' | b'@' | b'/')
+}
+
+impl TryFrom<String> for Actor {
+    type Error = Refusal;
+
+    fn try_from(text: String) -> Result<Self, Refusal> {
+        Self::shaped(&text)
+    }
+}
+
+impl From<Actor> for String {
+    fn from(actor: Actor) -> String {
+        actor.0
+    }
+}
+
+impl fmt::Display for Actor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A ticket's priority, 0 to 4 as the contract defines; the ready queue decides the order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(try_from = "u8", into = "u8")]
+pub struct Priority(u8);
+
+impl Priority {
+    /// Checks a priority. Input: the value. Output: the priority, or `priority_invalid`.
+    pub fn new(value: u8) -> Result<Self, Refusal> {
+        if value <= 4 {
+            Ok(Self(value))
+        } else {
+            Err(Refusal::new(
+                codes::PRIORITY_INVALID,
+                "a priority is 0 to 4",
+            ))
+        }
+    }
+
+    /// The value. Output: 0 to 4.
+    pub fn get(self) -> u8 {
+        self.0
+    }
+}
+
+impl TryFrom<u8> for Priority {
+    type Error = Refusal;
+
+    fn try_from(value: u8) -> Result<Self, Refusal> {
+        Self::new(value)
+    }
+}
+
+impl From<Priority> for u8 {
+    fn from(priority: Priority) -> u8 {
+        priority.0
+    }
+}
+
+/// Policy `cycle_days`: a cycle's length, one of the presets 7, 14, 21 and 28 or any
+/// custom length from 1 to 90 days.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(try_from = "u8", into = "u8")]
+pub struct CycleDays(u8);
+
+impl CycleDays {
+    pub const PRESETS: [u8; 4] = [7, 14, 21, 28];
+
+    /// Checks a length. Input: days. Output: the length, or `cycle_days_invalid`.
+    pub fn new(days: u8) -> Result<Self, Refusal> {
+        if (1..=90).contains(&days) {
+            Ok(Self(days))
+        } else {
+            Err(Refusal::new(
+                codes::CYCLE_DAYS_INVALID,
+                "a cycle is 1 to 90 days",
+            ))
+        }
+    }
+
+    /// The length. Output: 1 to 90 days.
+    pub fn get(self) -> u8 {
+        self.0
+    }
+}
+
+impl TryFrom<u8> for CycleDays {
+    type Error = Refusal;
+
+    fn try_from(days: u8) -> Result<Self, Refusal> {
+        Self::new(days)
+    }
+}
+
+impl From<CycleDays> for u8 {
+    fn from(days: CycleDays) -> u8 {
+        days.0
+    }
+}
+
+/// One project's policy, every key set. `Default` is the proposed default of each key;
+/// every other option stays selectable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Policy {
+    pub close: ClosePolicy,
+    pub create: CreatePolicy,
+    pub agent_edit: AgentEditPolicy,
+    pub cycle_days: CycleDays,
+    pub rollover: RolloverPolicy,
+    pub import: ImportPolicy,
+}
+
+impl Default for Policy {
+    fn default() -> Self {
+        Self {
+            close: ClosePolicy::Evidence,
+            create: CreatePolicy::Triage,
+            agent_edit: AgentEditPolicy::StatusAndCriteria,
+            cycle_days: CycleDays(14),
+            rollover: RolloverPolicy::Auto,
+            import: ImportPolicy::AutoOnce,
+        }
+    }
+}
+
+/// A `tk_projects` row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Project {
+    pub(crate) id: i64,
+    pub key: ProjectKey,
+    pub name: String,
+    pub created_ms: i64,
+    pub version: i64,
+}
+
+/// A `tk_versions` row: one product version of the roadmap.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseVersion {
+    pub(crate) id: i64,
+    pub(crate) project: i64,
+    pub name: String,
+    pub position: u32,
+    pub target_day: Option<String>,
+    pub status: VersionStatus,
+    pub source: String,
+    pub version: i64,
+}
+
+/// A `tk_cycles` row: one time box of work, optionally inside a version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Cycle {
+    pub(crate) id: i64,
+    pub(crate) project: i64,
+    pub(crate) version_id: Option<i64>,
+    pub number: u32,
+    pub starts_day: String,
+    pub ends_day: String,
+    pub status: CycleStatus,
+    pub version: i64,
+}
+
+/// A `tk_tickets` row. `version` counts every write, for stale-write checks.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Ticket {
+    pub(crate) id: i64,
+    pub(crate) project: i64,
+    pub short_id: ShortId,
+    pub title: String,
+    pub body: String,
+    pub kind: TicketKind,
+    pub status: TicketStatus,
+    pub priority: Priority,
+    pub(crate) version_id: Option<i64>,
+    pub(crate) cycle_id: Option<i64>,
+    pub(crate) parent_id: Option<i64>,
+    pub assignee: Option<Actor>,
+    pub created_by: Actor,
+    pub created_ms: i64,
+    pub updated_ms: i64,
+    pub closed_ms: Option<i64>,
+    pub closed_by: Option<Actor>,
+    pub close_reason: Option<String>,
+    pub version: i64,
+}
+
+/// A `tk_criteria` row: one acceptance criterion of a ticket, at its position.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Criterion {
+    pub(crate) id: i64,
+    pub(crate) ticket: i64,
+    pub position: u32,
+    pub text: String,
+    pub state: CriterionState,
+    pub version: i64,
+}
+
+/// A `tk_checks` row: one item that proves a criterion.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Check {
+    pub(crate) id: i64,
+    pub(crate) criterion: i64,
+    pub kind: CheckKind,
+    pub reference: String,
+}
+
+/// A `tk_evidence` row, append-only: one recorded outcome of a check.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Evidence {
+    pub(crate) id: i64,
+    pub(crate) check: i64,
+    pub result: EvidenceResult,
+    pub reference: String,
+    pub recorded_by: Actor,
+    pub recorded_ms: i64,
+}
+
+/// A `tk_links` row: a ticket's link of a host-declared kind to a target.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Link {
+    pub(crate) ticket: i64,
+    pub kind: String,
+    pub target: String,
+    pub created_by: Actor,
+    pub created_ms: i64,
+}
+
+/// A `tk_events` row, append-only: one state change, with the changed row before and
+/// after it as JSON (none before a creation, none after a removal).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Event {
+    pub(crate) id: i64,
+    pub(crate) ticket: Option<i64>,
+    pub(crate) project: i64,
+    pub at_ms: i64,
+    pub actor: Actor,
+    pub op: String,
+    pub before: Option<serde_json::Value>,
+    pub after: Option<serde_json::Value>,
+}
