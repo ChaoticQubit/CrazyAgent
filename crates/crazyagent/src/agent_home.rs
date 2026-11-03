@@ -123,8 +123,8 @@ impl Harness {
 /// The project one agent launch serves: the engine data folder holding `engine.db` and
 /// the app-wide instructions, the project id, the project folder whose
 /// `.crazyagent/instructions.md` holds the project instructions, none when the project
-/// has no recorded folder, which instruction files the owner chose for its agents and the
-/// owner's home those files may be read from.
+/// has no recorded folder, which instruction files the owner chose for its agents, the
+/// owner's home those files may be read from and how far the owner trusts the repository.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentProject {
     pub data: PathBuf,
@@ -132,6 +132,7 @@ pub struct AgentProject {
     pub folder: Option<PathBuf>,
     pub files: crate::instruction_files::Choice,
     pub owner_home: Option<PathBuf>,
+    pub trust: crate::trust::Trust,
 }
 
 /// What every agent of one project receives at a launch: the owner's app and project
@@ -202,19 +203,24 @@ pub fn save_project(folder: &Path, text: &str) -> Result<(), AgentHomeError> {
 /// Builds what every agent of the project receives: the app-wide instructions, then the
 /// project instructions, each under its heading, then the instruction files the owner
 /// chose, read by the engine from the owner's checkout and home; empty when all are blank.
-/// Input: the project. Output: at most `PROCESS_BYTES_MAX` bytes of markdown with the
-/// record of each instruction file, or a code.
+/// An untrusted repository that commits `.crazyagent/instructions.md` never gives that file
+/// as the project instructions: it is repository text, quoted with the other repository
+/// files when the owner chose files. Input: the project. Output: at most
+/// `PROCESS_BYTES_MAX` bytes of markdown with the record of each instruction file, or a code.
 pub fn text(project: &AgentProject) -> Result<Given, AgentHomeError> {
     let app = read_app(&project.data)?;
-    let own = match &project.folder {
-        Some(folder) => read_project(folder)?,
-        None => String::new(),
-    };
     let delivery = crate::instruction_files::read(
         project.folder.as_deref(),
         project.owner_home.as_deref(),
         project.files,
+        project.trust,
     );
+    let own = match &project.folder {
+        Some(_) if delivery.repository_instructions => String::new(),
+        Some(folder) => read_project(folder)?,
+        None => String::new(),
+    };
+    assert!(!delivery.repository_instructions || project.trust == crate::trust::Trust::Untrusted);
     let mut text = render(&app, &own);
     text.push_str(&delivery.text);
     assert!(text.len() <= PROCESS_BYTES_MAX);

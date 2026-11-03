@@ -11,6 +11,7 @@
   Team      Codex leads. Codex x3. Tools on.
   Folders   Loading...   f Edit read-only folders
   Access    Loading...   c Agent access
+  Trust     Loading...   k Repository trust
   Process   Instructions for this project's agents   i Edit
   Roadmap   Not planned   p Plan roadmap now
 

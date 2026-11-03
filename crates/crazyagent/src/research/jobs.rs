@@ -499,6 +499,15 @@ impl ResearchJobs {
         crate::sandbox::extra_paths::load(&self.connection, project.as_str())
     }
 
+    /// Reads how far the owner trusts a project's repository, see [`crate::trust::level`].
+    /// Takes the project. Returns the level.
+    pub fn trust(
+        &self,
+        project: &crate::protocol::ProjectId,
+    ) -> rusqlite::Result<crate::trust::Trust> {
+        crate::trust::level(&self.connection, project.as_str())
+    }
+
     /// Reads the agent policy the owner saved for a project, see
     /// [`crate::sandbox::policy::load`]. Takes the project. Returns the policy.
     pub fn agent_policy(

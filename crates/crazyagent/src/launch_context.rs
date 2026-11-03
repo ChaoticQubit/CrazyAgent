@@ -160,8 +160,9 @@ pub fn for_project(
 
 /// Names what an agent home of the project receives the owner's instructions from: the
 /// engine data folder (the folder of `engine.db`), the project's recorded folder, the
-/// instruction files the owner chose for its agents and the owner's home.
-/// Input: a transaction on `engine.db` and the project. Output: the project, or a plain code.
+/// instruction files the owner chose for its agents, the owner's home and the project's
+/// repository trust. Input: a transaction on `engine.db` and the project. Output: the
+/// project, or a plain code.
 pub(crate) fn agent_project(
     tx: &Transaction<'_>,
     project: &ProjectId,
@@ -179,6 +180,8 @@ pub(crate) fn agent_project(
         folder,
         files,
         owner_home: crate::instruction_files::owner_home(),
+        trust: crate::trust::level(tx, project.as_str())
+            .map_err(|_| failure("repository_trust_unreadable"))?,
     })
 }
 

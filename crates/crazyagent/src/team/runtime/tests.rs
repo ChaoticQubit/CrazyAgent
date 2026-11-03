@@ -5893,6 +5893,7 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         sandbox_profile: PathBuf::from("/tmp/agent-1.sb"),
         access: AgentAccess::Full,
         layout,
+        trust: crate::trust::Trust::Reviewed,
         git_identity: None,
         limits: LaunchLimits::default(),
         pane: None,

@@ -86,6 +86,7 @@ fn wiring_a_shell_stand_in_in_a_real_tmux_pane_gets_the_prompt_as_one_paste_and_
     std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
     let request = LaunchRequest {
         harness: "claude-code".into(),
+        trust: crazyagent::trust::Trust::Reviewed,
         executable,
         working_dir: work,
         account: AccountBinding::ApiKey {
@@ -177,6 +178,7 @@ fn wiring_the_first_prompt_waits_until_the_app_reads_keys_itself() {
     std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
     let request = LaunchRequest {
         harness: "claude-code".into(),
+        trust: crazyagent::trust::Trust::Reviewed,
         executable,
         working_dir: work,
         account: AccountBinding::ApiKey {

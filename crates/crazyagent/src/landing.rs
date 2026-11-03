@@ -235,6 +235,22 @@ fn unavailable() -> EngineError {
     EngineError("changes_unavailable".into())
 }
 
+/// Refuses engine git on an untrusted project's repository whose own config names a key the
+/// admission rules refuse, before a diff, Accept, Update, Discard or Restore runs git on it
+/// (threat model G-a); a reviewed project is unchanged. Inputs: the store and the change
+/// set. Output: Ok, or `repository_config_refused:<rule>` or `repository_trust_unreadable`.
+#[cfg(unix)]
+fn untrusted_config(db: &Connection, id: &ChangeSetId) -> Result<(), EngineError> {
+    store::initialize(db)?;
+    let record = store::load(db, id)?;
+    let trust = crate::trust::level(db, record.project.as_str())
+        .map_err(|_| git::failure("repository_trust_unreadable"))?;
+    match crate::trust::Enforcement::for_level(trust).repo_config_as_text {
+        true => crate::worktrees::refuse_repository_config(&record.repository),
+        false => Ok(()),
+    }
+}
+
 /// Opens the change set store in the engine database, adding its table when missing.
 /// Input: the engine root holding `engine.db`. Output: the connection.
 pub fn open(runtime: &Path) -> Result<Connection, EngineError> {
@@ -513,7 +529,7 @@ pub fn open_change_set(
 pub fn diff(db: &Connection, id: &ChangeSetId, page: u16) -> Result<ChangeDiff, EngineError> {
     #[cfg(unix)]
     {
-        store::initialize(db)?;
+        untrusted_config(db, id)?;
         let record = store::load(db, id)?;
         let mut shown = diff::page(&record.repository, &record.base, &record.head, page)?;
         owner_edit::mark(db, &record.worktree, &record.id, &mut shown.files)?;
@@ -539,7 +555,10 @@ pub fn accept(
     message: Option<&str>,
 ) -> Result<AcceptOutcome, EngineError> {
     #[cfg(unix)]
-    return owner::accept(db, owner_home, id, expected_head, message, &|_| false);
+    {
+        untrusted_config(db, id)?;
+        owner::accept(db, owner_home, id, expected_head, message, &|_| false)
+    }
     #[cfg(not(unix))]
     {
         let _ = (db, owner_home, id, expected_head, message);
@@ -575,7 +594,10 @@ pub fn discard(
     now_ms: u64,
 ) -> Result<u64, EngineError> {
     #[cfg(unix)]
-    return flow::discard(db, id, expected_head, now_ms);
+    {
+        untrusted_config(db, id)?;
+        flow::discard(db, id, expected_head, now_ms)
+    }
     #[cfg(not(unix))]
     {
         let _ = (db, id, expected_head, now_ms);
@@ -588,7 +610,10 @@ pub fn discard(
 /// pending.
 pub fn restore(db: &Connection, id: &ChangeSetId, now_ms: u64) -> Result<(), EngineError> {
     #[cfg(unix)]
-    return flow::restore(db, id, now_ms);
+    {
+        untrusted_config(db, id)?;
+        flow::restore(db, id, now_ms)
+    }
     #[cfg(not(unix))]
     {
         let _ = (db, id, now_ms);
@@ -600,7 +625,10 @@ pub fn restore(db: &Connection, id: &ChangeSetId, now_ms: u64) -> Result<(), Eng
 /// for the resolve task. Inputs: the store and the change set. Output: Ok once merged.
 pub fn update(db: &Connection, id: &ChangeSetId) -> Result<(), EngineError> {
     #[cfg(unix)]
-    return owner::update(db, id);
+    {
+        untrusted_config(db, id)?;
+        owner::update(db, id)
+    }
     #[cfg(not(unix))]
     {
         let _ = (db, id);

@@ -124,6 +124,11 @@ const COPY: Record<string, string> = {
   agent_access_unavailable: "That agent access level can't run on this computer. Pick another level.",
   agent_policy_invalid: "That agent access choice isn't valid. Open Agent access and save again.",
   agent_policy_unreadable: "CrazyAgent couldn't read this project's agent access. Try again.",
+  agent_access_untrusted: "This project's repository is untrusted, so its agents run Sandboxed only. Raise its trust in Repository trust before choosing another level.",
+  trust_raise_unconfirmed: "Confirm the raise to Reviewed first.",
+  launch_harness_untrusted: "This project's repository is untrusted, so only Claude Code and Codex run its agents. Pick one of them for this project's team.",
+  trust_platform_unqualified: "Untrusted projects run agents and checks only on macOS in this version.",
+  repository_trust_unreadable: "CrazyAgent couldn't read this project's repository trust. Try again.",
 };
 
 export const KNOWN_ERROR_CODES = Object.keys(COPY);

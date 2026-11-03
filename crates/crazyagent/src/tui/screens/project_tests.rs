@@ -91,6 +91,9 @@ async fn serve(controller: &mut OwnerController, query: SetupQuery) -> Result<Se
                 .await
                 .map_err(problem)?,
         ),
+        SetupQuery::RepositoryTrust { project } => SetupView::RepositoryTrust(Box::new(
+            controller.project_trust(project).await.map_err(problem)?,
+        )),
         SetupQuery::ReviewMemory {
             project,
             entry_id,

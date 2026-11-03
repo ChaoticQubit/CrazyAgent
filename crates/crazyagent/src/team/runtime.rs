@@ -141,6 +141,7 @@ struct Plan {
     sandbox_profile: PathBuf,
     access: AgentAccess,
     layout: Layout,
+    trust: crate::trust::Trust,
     git_identity: Option<GitIdentity>,
     limits: LaunchLimits,
     pane: Option<(Arc<dyn Host>, AgentId)>,
@@ -162,6 +163,7 @@ impl Plan {
         let unconfined = confinement(self.layout, access)?;
         Ok(LaunchRequest {
             harness: self.harness.clone(),
+            trust: self.trust,
             executable: self.executable.clone(),
             working_dir: self.working_dir.clone(),
             account,
@@ -1753,6 +1755,11 @@ impl TeamRuntime {
         if let Some(reason) = access.unavailable() {
             return Err(with_code(reason, Some("agent_access_unavailable")));
         }
+        if let Some((line, code)) =
+            crate::trust::Enforcement::for_level(self.trust_level(project)?).refusal(access)
+        {
+            return Err(with_code(line, Some(code)));
+        }
         let worker = self.workers.get_mut(&id).expect("worker exists");
         worker.grants = generation;
         worker.access = access;
@@ -1761,6 +1768,17 @@ impl TeamRuntime {
             context,
             access,
         })))
+    }
+
+    /// Reads how far the owner trusts the project's repository. Takes the project. Returns
+    /// the level, or the owner's line when it cannot be read.
+    fn trust_level(&self, project: &ProjectId) -> Result<crate::trust::Trust, String> {
+        crate::trust::level(&self.connection, project.as_str()).map_err(|_| {
+            with_code(
+                "the project's repository trust could not be read",
+                Some("repository_trust_unreadable"),
+            )
+        })
     }
 
     fn note(&mut self, project: &ProjectId, text: &str) -> Result<(), EngineError> {
@@ -3445,22 +3463,24 @@ impl TeamRuntime {
                 .map_err(|e| with_code("the agent's tool mailbox could not be made", Some(&e.0)))?;
         }
         let context = self.context(&stored.project_id, id, role, tools, layout)?;
-        let network = if tools {
-            SandboxNetwork::Open
-        } else {
-            SandboxNetwork::Only(vec![remote])
-        };
+        let trust = self.trust_level(&stored.project_id)?;
+        let enforcement = crate::trust::Enforcement::for_level(trust);
+        let network = enforcement.agent_network(tools, remote);
+        let open = matches!(network, SandboxNetwork::Open);
         let policy = crate::sandbox::policy::load(&self.connection, stored.project_id.as_str())
             .map_err(|_| with_code("the project's agent access could not be read", None))?;
         if let Some(reason) = policy.access.unavailable() {
             return Err(with_code(reason, Some("agent_access_unavailable")));
+        }
+        if let Some((line, code)) = enforcement.refusal(policy.access) {
+            return Err(with_code(line, Some(code)));
         }
         let homes = ToolHomes::owner().map_err(sandboxed)?;
         let scratch = toolchains::make_tmp(&home)
             .map_err(|e| with_code("the agent temp folder could not be made", Some(io_code(&e))))?;
         toolchains::prepare_cargo_home(&home, &homes)
             .map_err(|e| with_code("the agent cargo home could not be made", Some(io_code(&e))))?;
-        let kept = if tools {
+        let kept = if open {
             (self.access)().map_or_else(Vec::new, |access| crate::sandbox::owner_ports(&access))
         } else {
             Vec::new()
@@ -3550,6 +3570,12 @@ impl TeamRuntime {
             Layout::Clone => sandbox.confine_to_clone(&working_dir),
         }
         .map_err(sandboxed)?;
+        if enforcement.repo_config_as_text {
+            sandbox = sandbox.hide_repository_config(&root).map_err(sandboxed)?;
+        }
+        assert!(
+            !enforcement.model_endpoints_only || !matches!(sandbox.network(), SandboxNetwork::Open)
+        );
         if let Some(engine) = self
             .delegation_tool
             .as_ref()
@@ -3573,6 +3599,7 @@ impl TeamRuntime {
             sandbox_profile: profile,
             access: policy.access,
             layout,
+            trust,
             git_identity: owner_git_identity(&root),
             limits: self.launch_limits(),
             pane: self.terminal.clone().zip(AgentId::team(id).ok()),
