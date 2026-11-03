@@ -172,11 +172,7 @@ fn unique_names(rows: &mut [ResultRow]) -> Result<(), ParseRefusal> {
         check_name(&row.name)?;
         *seen.entry(row.name.clone()).or_insert(0) += 1;
     }
-    let mut taken: HashSet<String> = seen
-        .iter()
-        .filter(|(_, count)| **count == 1)
-        .map(|(name, _)| name.clone())
-        .collect();
+    let mut taken: HashSet<String> = seen.keys().cloned().collect();
     let mut next: HashMap<String, u64> = HashMap::new();
     for row in rows.iter_mut() {
         if seen[&row.name] == 1 {

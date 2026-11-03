@@ -19,14 +19,11 @@ struct Section {
     output: String,
 }
 
-/// Reads cargo and libtest text: `test <name> ... ok|FAILED|ignored` lines grouped by
-/// `running N tests` blocks, failure output from `---- <name> stdout ----` sections, and
-/// compiler `error[E` or `error: could not compile` lines outside any block as a build
-/// failure. An open section takes every line up to the next section or `failures:` line,
-/// so a test's own output never reads as report structure. Each block's `test result:`
-/// line must match the lines it closes. Input: the text bytes, read lossily. Output: the
-/// rows and summed totals, or SummaryMismatch for a block that disagrees with its summary
-/// or ends without one.
+/// Reads cargo and libtest text: `test <name> ... ok|FAILED|ignored` lines in `running N
+/// tests` blocks, each checked against its `test result:` line, failure output from
+/// `---- <name> stdout ----` sections (open until the next header, `failures:` or
+/// `successes:`), and compiler errors outside any block as a build failure. Input: the
+/// bytes, read lossily. Output: the rows and totals, or SummaryMismatch.
 pub(super) fn parse(bytes: &[u8]) -> Result<ParsedResults, ParseRefusal> {
     let text = String::from_utf8_lossy(bytes);
     let mut rows: Vec<ResultRow> = Vec::new();
@@ -39,7 +36,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<ParsedResults, ParseRefusal> {
         let line: &str = &line;
         if let Some(open) = section.as_mut()
             && section_name(line).is_none()
-            && line != "failures:"
+            && !list_heading(line)
         {
             open.output.push_str(line);
             open.output.push('\n');
@@ -84,7 +81,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<ParsedResults, ParseRefusal> {
             });
             continue;
         }
-        if line == "failures:" {
+        if list_heading(line) {
             settle(&mut rows, section.take());
             continue;
         }
@@ -143,6 +140,10 @@ fn test_line(line: &str) -> Option<(ResultRow, bool)> {
         },
         measured,
     ))
+}
+
+fn list_heading(line: &str) -> bool {
+    line == "failures:" || line == "successes:"
 }
 
 fn section_name(line: &str) -> Option<&str> {
