@@ -5,8 +5,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { createServer } from "node:http";
 import { crc32, deflateSync } from "node:zlib";
-import { assertMasked, mask, readLivePass, readRetro, readTrial, renderReport } from "./report.mjs";
+import { assertMasked, mask, printPdf, readLivePass, readRetro, readTrial, renderReport } from "./report.mjs";
 
 const REPORT = join(dirname(fileURLToPath(import.meta.url)), "report.mjs");
 const GIF = Buffer.from("47494638396101000100800000000000ffffff21f90401000000002c00000000010001000002024401003b", "hex");
@@ -57,6 +58,67 @@ const LEAKY = [
   `git clone https://botuser:${SECRETS.urlPassword}@git.example.org/repo.git`,
   `Proxy-Authorization: Basic ${SECRETS.authBasic}`,
 ].join("\n");
+
+const HEADERS = {
+  basic: "Ym90dXNlcjpodW50ZXIycGFzcw==",
+  hex: "4f9a1c2e8b7d6a5f4e3d2c1b0a9f8e7d6c5b4a39",
+  shortBearer: "plainbearervalue",
+  sid: "q7Zq7Zq7Zq7Zq7Zq7Zq7Z",
+  org: "7d3e1c2a-5555-4666-8777-988899990000",
+  cfbm: "cfbmvalue" + "b".repeat(12),
+  puid: "user-" + "P".repeat(20),
+  jwe: "eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0..aXZpdml2aXZpdg.Y2lwaGVydGV4dGNpcGhlcnRleHQ.dGFndGFndGFndGFn",
+};
+
+const HEADER_LINES = [
+  `curl -sS -H 'Authorization: Basic ${HEADERS.basic}' https://api.example.org/v1`,
+  `sent with Authorization: token ${HEADERS.hex} to the API`,
+  `retrying with Authorization: Bearer ${HEADERS.shortBearer} after 401`,
+  `request headers Cookie: theme=dark; sid=${HEADERS.sid}; lastActiveOrg=${HEADERS.org}`,
+  `< set-cookie: __cf_bm=${HEADERS.cfbm}; _puid=${HEADERS.puid}; Path=/; HttpOnly`,
+  `the session ${HEADERS.jwe} expired`,
+].join("\n");
+
+const ENCODED = {
+  base64: Buffer.from('{"access_token":"enc0dedAccessT0kenValue1"}').toString("base64"),
+  urlToken: "urlEnc0dedTokenValue22",
+  escaped: "esc4pedRefreshValue333",
+  unicodeTail: "Un1c0deTail" + "u".repeat(20),
+  entityTail: "Ent1tyTail" + "e".repeat(20),
+  tspanTail: "Tsp4nTail" + "t".repeat(20),
+};
+
+const ENCODED_LINES = [
+  `payload ${ENCODED.base64}`,
+  `redirect next=%2Fcallback%3Faccess_token%3D${ENCODED.urlToken}%26x%3D1`,
+  `{\\"refresh_token\\":\\"${ENCODED.escaped}\\"}`,
+  `{"note": "sk\\u002dant\\u002dapi03\\u002d${ENCODED.unicodeTail}"}`,
+].join("\n");
+
+const WRAPPED_FRAME = [
+  "  ┌─ Login ────────────────────┐",
+  "  │ id eyJhbGciOiJSUzI1NiJ9.ey │",
+  "  │ JzdWIiOiJ3cmFwIn0.d3JhcHBl │",
+  "  │ ZC1zaWduYXR1cmU            │",
+  "  │ key sk-ant-api03-Wr4pWr4pW │",
+  "  │ r4pWr4pWr4pWr4pWr4pWr4pWr4 │",
+  "  └────────────────────────────┘",
+].join("\n");
+
+const WRAPPED_PARTS = ["JzdWIiOiJ3cmFwIn0", "d3JhcHBl", "ZC1zaWduYXR1cmU", "r4pWr4pWr4pWr4pWr4pWr4pWr4"];
+
+function svgText(body) {
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="240" height="40"><text x="4" y="20">${body}</text></svg>`;
+}
+
+function section(html, id) {
+  const from = html.indexOf(`<article class="check" id="${id}">`);
+  return from < 0 ? "" : html.slice(from, html.indexOf("</article>", from));
+}
+
+async function addCheck(root, id, evidence) {
+  await put(root, `checks/${id}.json`, JSON.stringify({ id, title: id, proves: "review finding", why: "rv-secreview r1", how: "the report", result: "PASS", detail: "", evidence }));
+}
 
 function png() {
   const chunk = (type, data) => {
@@ -307,7 +369,10 @@ test("the retro mode reads trials 1 and 2 from the saved audit, plan, timeline, 
     for (const value of [SECRETS.chatgpt, SECRETS.account, SECRETS.email]) assert.ok(![html, ...svgImages(html)].join("\n").includes(value));
     const images = html.slice(html.indexOf('<section class="images">'));
     assert.ok(images.includes("trial-1028.gif") && images.includes("trial-2.gif"));
-    assert.equal([...images.matchAll(/the recorded TUI text held values the report masked/g)].length, 1, "only trial 1's frames held a secret");
+    assert.ok(!html.includes("data:image/gif"), "a retro GIF is left out when its masked frames are drawn");
+    assert.equal([...images.matchAll(/left out: /g)].length, 2, "each left-out GIF says why");
+    const cover = html.slice(html.indexOf('<header class="cover">'), html.indexOf("</header>"));
+    assert.ok(cover.includes("trial-1028.gif") && cover.includes("trial-2.gif"), "the cover names the left-out GIFs");
   } finally {
     await rm(root, { recursive: true });
   }
@@ -326,6 +391,117 @@ test("the command writes report.html and a real report.pdf printed by Google Chr
     assert.equal(pdf.subarray(0, 5).toString("latin1"), "%PDF-");
     assert.ok(pdf.length > 10_000, `a real document, ${pdf.length} bytes`);
     for (const file of ["report.html", "report.pdf"]) assert.equal((await stat(join(root, file))).mode & 0o777, 0o600, `${file} is private`);
+  } finally {
+    await rm(root, { recursive: true });
+  }
+});
+
+test("PDF-1: Authorization schemes and every Cookie and Set-Cookie pair are masked mid-line, and so is a JWE token", async () => {
+  const root = await trialFolder();
+  try {
+    await put(root, "logs/headers.log", `${HEADER_LINES}\n`);
+    await addCheck(root, "T3-04", [{ kind: "log", path: "logs/headers.log", caption: "request headers" }]);
+    const html = renderReport(await readTrial(root));
+    assert.deepEqual(Object.entries(HEADERS).filter(([, value]) => html.includes(value)).map(([name]) => name), [], "no header value is shown");
+    assert.ok(html.includes("curl -sS -H &#39;Authorization: [masked]&#39; https://api.example.org/v1"), "the mask stops at the closing quote");
+    assert.ok(html.includes("request headers Cookie: [masked]"), "the words before the header stay");
+    assert.equal(mask(mask(HEADER_LINES)), mask(HEADER_LINES), "masking twice changes nothing");
+    assert.equal(assertMasked(html), html);
+  } finally {
+    await rm(root, { recursive: true });
+  }
+});
+
+test("PDF-2: secrets wrapped across frame lines, encoded in logs or held in SVG text are masked or refused, and the residue check reads SVG text", async () => {
+  const root = await trialFolder();
+  try {
+    await put(root, "frames/f00002.txt", `${WRAPPED_FRAME}\n`);
+    await put(root, "logs/encoded.log", `${ENCODED_LINES}\n`);
+    await put(root, "screenshots/03-entity.svg", svgText(`&#115;k-ant-api03-${ENCODED.entityTail}`));
+    await put(root, "screenshots/04-split.svg", svgText(`<tspan>sk-ant-api03-</tspan><tspan>${ENCODED.tspanTail}</tspan>`));
+    await put(root, "screenshots/05-plain.svg", svgText("Sign in page"));
+    await addCheck(root, "T3-05", [
+      { kind: "frame", path: "frames/f00002.txt", caption: "wrapped login" },
+      { kind: "log", path: "logs/encoded.log", caption: "encoded values" },
+      { kind: "screenshot", path: "screenshots/03-entity.svg", caption: "entity svg" },
+      { kind: "screenshot", path: "screenshots/04-split.svg", caption: "split svg" },
+      { kind: "screenshot", path: "screenshots/05-plain.svg", caption: "plain svg" },
+    ]);
+    const html = renderReport(await readTrial(root));
+    const shown = [html, ...svgImages(html)].join("\n");
+    assert.deepEqual([...WRAPPED_PARTS, ...Object.values(ENCODED)].filter((value) => shown.includes(value)), [], "no wrapped or encoded value is shown");
+    assert.ok(svgImages(html).some((svg) => svg.includes("Login")), "the wrapped frame is still drawn");
+    const check = section(html, "T3-05");
+    assert.equal([...check.matchAll(/refused: /g)].length, 2, "the entity and the split SVG are refused");
+    const images = html.slice(html.indexOf('<section class="images">'));
+    assert.ok(images.includes("screenshots/05-plain.svg"), "an embedded SVG file is listed as unmasked");
+    assert.equal(assertMasked(html), html);
+    const svg = (body) => `<img src="data:image/svg+xml;base64,${Buffer.from(svgText(body)).toString("base64")}">`;
+    assert.throws(() => assertMasked(svg(SECRETS.email)), /report_mask_residue/, "the residue check reads SVG text");
+    assert.throws(() => assertMasked(svg(`&#115;k-ant-api03-${ENCODED.entityTail}`)), /report_mask_residue/, "the residue check decodes SVG entities");
+    assert.throws(() => assertMasked(`<p>payload ${ENCODED.base64}</p>`), /report_mask_residue/, "the residue check reads base64");
+  } finally {
+    await rm(root, { recursive: true });
+  }
+});
+
+test("PDF-3: Chrome prints with every network request refused, loopback included", { timeout: 120_000 }, async () => {
+  const root = await folder("trial-report-network-");
+  const asked = [];
+  const server = createServer((request, response) => {
+    asked.push(request.url);
+    response.writeHead(200, { "content-type": "image/png" });
+    response.end(png());
+  });
+  await new Promise((done) => server.listen(0, "127.0.0.1", done));
+  try {
+    const { port } = server.address();
+    await put(root, "probe.html", `<!doctype html><html><body><p>network probe</p><img src="http://127.0.0.1:${port}/loopback.png"><img src="http://localhost:${port}/named.png"></body></html>`);
+    assert.equal(await printPdf(join(root, "probe.html"), join(root, "probe.pdf")), join(root, "probe.pdf"));
+    assert.deepEqual(asked, [], "Chrome reached the network");
+    const pdf = await readFile(join(root, "probe.pdf"));
+    assert.equal(pdf.subarray(0, 5).toString("latin1"), "%PDF-");
+    assert.equal((await stat(join(root, "probe.pdf"))).mode & 0o777, 0o600);
+  } finally {
+    server.closeAllConnections();
+    await new Promise((done) => server.close(done));
+    await rm(root, { recursive: true });
+  }
+});
+
+test("PDF-4: the cover names every image the report cannot mask, and account labels and home paths are masked in text and frames", async () => {
+  const root = await trialFolder();
+  try {
+    await put(root, "frames/f00003.txt", "  │Account       Claude-AcmeWorks          │\n  │ cwd /Users/owner/Projects/ca-trial-3    │\n");
+    await put(root, "logs/paths.log", "transcript ~/.claude/projects/-Users-owner-Projects-ca-trial-3/5f1c.jsonl\nconfig /home/owner/.codex/config.toml\nsigned in as Codex-PersonalPlus\n");
+    await addCheck(root, "T3-06", [{ kind: "frame", path: "frames/f00003.txt", caption: "account label" }, { kind: "log", path: "logs/paths.log", caption: "paths" }]);
+    const html = renderReport(await readTrial(root));
+    const cover = html.slice(html.indexOf('<header class="cover">'), html.indexOf("</header>"));
+    const missing = ["are not masked", "screenshots/01-open-project.png", "trial.gif"].filter((part) => !cover.includes(part));
+    assert.deepEqual(missing, [], "the cover says plainly which images are not masked");
+    const shown = [html, ...svgImages(html)].join("\n");
+    assert.deepEqual(["AcmeWorks", "PersonalPlus", "/Users/owner", "-Users-owner-", "/home/owner"].filter((value) => shown.includes(value)), [], "no account label or home path is shown");
+    assert.deepEqual(["Claude-[account]", "Codex-[account]", "~/Projects/ca-trial-3", "-Users-[user]-Projects-ca-trial-3", "~/.codex/config.toml"].filter((value) => !shown.includes(value)), [], "the masked forms keep their kind and path");
+    assert.equal(assertMasked(html), html);
+  } finally {
+    await rm(root, { recursive: true });
+  }
+});
+
+test("PDF-5: an image over the per-file cap and images past the total cap are refused and named", async () => {
+  const root = await trialFolder();
+  try {
+    const filler = (mib) => Buffer.concat([png(), Buffer.alloc(mib * 1024 * 1024)]);
+    await put(root, "screenshots/big.png", filler(16));
+    for (const n of [1, 2, 3]) await put(root, `screenshots/wide-${n}.png`, filler(14));
+    await addCheck(root, "T3-07", ["big", "wide-1", "wide-2", "wide-3"].map((name) => ({ kind: "screenshot", path: `screenshots/${name}.png`, caption: name })));
+    const html = renderReport(await readTrial(root));
+    const check = section(html, "T3-07");
+    assert.deepEqual([...check.matchAll(/<img alt="([\w-]+)"/g)].map((match) => match[1]), ["wide-1", "wide-2"], "only the images under both caps are embedded");
+    assert.match(check, /big <span class="path">[^<]*<\/span><\/figcaption><p class="problem">refused: larger than/);
+    assert.match(check, /wide-3 <span class="path">[^<]*<\/span><\/figcaption><p class="problem">refused: the report already embeds/);
+    const images = html.slice(html.indexOf('<section class="images">'));
+    assert.deepEqual(["big", "wide-1", "wide-2", "wide-3"].filter((name) => images.includes(`screenshots/${name}.png`)), ["wide-1", "wide-2"]);
   } finally {
     await rm(root, { recursive: true });
   }
