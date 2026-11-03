@@ -257,34 +257,29 @@ impl Engine {
     /// Stores a profile with the given checks as the owner proposes it. Input: the check
     /// ids. Output: the stored profile's id.
     pub(in crate::tui) fn propose(&self, checks: &[&str]) -> ProfileId {
-        let checks: Vec<Value> = checks
-            .iter()
-            .map(|id| {
-                json!({
-                    "id": id,
-                    "kind": "unit",
-                    "toolchain": "rust",
-                    "argv": ["cargo", "test", "--locked", "--offline"],
-                    "cwd": ".",
-                    "format": "cargo_test",
-                    "report": null,
-                    "timeout_s": 600,
-                    "network": "off",
-                    "when": ["on_request"],
-                    "required": true,
-                    "protected": false
-                })
-            })
-            .collect();
-        let body = json!({"version": 1, "checks": checks, "holdouts": [], "protected_paths": []});
+        let checks: Vec<Value> = checks.iter().map(|id| check(id)).collect();
+        self.propose_body(
+            &json!({"version": 1, "checks": checks, "holdouts": [], "protected_paths": []}),
+        )
+    }
+
+    /// Stores a whole profile as the owner proposes it. Input: the profile JSON. Output:
+    /// the stored profile's id.
+    pub(in crate::tui) fn propose_body(&self, body: &Value) -> ProfileId {
         crate::checks::propose(
             &self.db,
             &fieldnotes(),
-            &serde_json::to_vec(&body).unwrap(),
+            &serde_json::to_vec(body).unwrap(),
             Actor::Owner,
         )
         .unwrap()
         .id
+    }
+
+    /// Stores one holdout file's bytes as the owner gives them. Input: the bytes. Output:
+    /// the digest a profile names the file by.
+    pub(in crate::tui) fn holdout(&self, bytes: &[u8]) -> String {
+        crate::checks::store_holdout_file(&self.db, &fieldnotes(), bytes, Actor::Owner).unwrap()
     }
 
     /// The project's stored profiles, newest first, as the engine lists them. Output: the
@@ -298,6 +293,25 @@ impl Engine {
     fn tx(&self) -> Transaction<'_> {
         Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate).unwrap()
     }
+}
+
+/// One ordinary check of a profile: a unit check running the workspace tests offline on
+/// request. Input: its id. Output: the check's JSON.
+pub(in crate::tui) fn check(id: &str) -> Value {
+    json!({
+        "id": id,
+        "kind": "unit",
+        "toolchain": "rust",
+        "argv": ["cargo", "test", "--locked", "--offline"],
+        "cwd": ".",
+        "format": "libtest",
+        "report": null,
+        "timeout_s": 600,
+        "network": "off",
+        "when": ["on_request"],
+        "required": true,
+        "protected": false
+    })
 }
 
 /// The newest run of one check as a change set's runs reply carries it. Input: the run.
@@ -371,7 +385,8 @@ impl Client for Recorder<'_> {
 
 /// Answers one checks job the way the owner worker does, against the engine: views jobs
 /// run their steps through the engine as the tracker client, settings and profiles go
-/// through the engine's checks functions as the owner, a start goes to the engine's check
+/// through the engine's checks functions as the owner, a shown profile is held to the id
+/// asked for as the owner worker holds it, a start goes to the engine's check
 /// queue, and a runs read gives the newest recorded run of each check. Inputs: the job and
 /// the engine. Output: the Settings event the screens take.
 pub(in crate::tui) fn answer(job: ChecksJob, engine: &mut Engine) -> SettingsEvent {
@@ -406,6 +421,14 @@ pub(in crate::tui) fn answer(job: ChecksJob, engine: &mut Engine) -> SettingsEve
         ChecksJob::Profiles { project } => ChecksEvent::Profiles {
             result: engine.profiles(),
             project,
+        },
+        ChecksJob::Show { project, profile } => ChecksEvent::Shown {
+            result: crate::checks::show(&engine.db, &project, &profile)
+                .map_err(|error| error.0)
+                .and_then(|found| found.ok_or_else(|| "checks_profile_unknown".to_owned()))
+                .and_then(|stored| matching(stored, &profile)),
+            project,
+            profile,
         },
         ChecksJob::Approve { project, profile } => ChecksEvent::Profile {
             result: crate::checks::approve(&engine.db, &project, &profile, Actor::Owner)
@@ -567,6 +590,10 @@ fn a_job_without_a_trusted_connection_answers_its_own_event_with_the_code() {
         ChecksJob::Profiles {
             project: fieldnotes(),
         },
+        ChecksJob::Show {
+            project: fieldnotes(),
+            profile: profile.clone(),
+        },
         ChecksJob::Approve {
             project: fieldnotes(),
             profile: profile.clone(),
@@ -608,6 +635,11 @@ fn a_job_without_a_trusted_connection_answers_its_own_event_with_the_code() {
                 project: fieldnotes(),
                 result: Err(code.clone()),
             },
+            ChecksEvent::Shown {
+                project: fieldnotes(),
+                profile: profile.clone(),
+                result: Err(code.clone()),
+            },
             ChecksEvent::Profile {
                 project: fieldnotes(),
                 profile: profile.clone(),
@@ -638,6 +670,7 @@ fn a_job_without_a_trusted_connection_answers_its_own_event_with_the_code() {
             "ChecksSettings",
             "ChecksSaveSettings",
             "ChecksProfiles",
+            "ChecksShow",
             "ChecksApprove",
             "ChecksRevoke",
             "ChecksRuns",
@@ -668,4 +701,27 @@ fn a_save_at_an_old_version_is_stale_and_writes_nothing() {
     let view = engine.settings_view(Some(&fieldnotes()));
     assert_eq!((view.values, view.version), (values, 1));
     assert_eq!(view.effective.parallel, 2);
+}
+
+#[test]
+fn a_shown_profile_is_kept_only_when_its_body_hashes_to_the_id_asked_for() {
+    let engine = Engine::new();
+    let id = engine.propose(&["unit"]);
+    let other = engine.propose(&["unit", "lint"]);
+    let stored = crate::checks::show(&engine.db, &fieldnotes(), &id)
+        .unwrap()
+        .unwrap();
+    assert_eq!(matching(stored.clone(), &id), Ok(Box::new(stored.clone())));
+    assert_eq!(
+        matching(stored.clone(), &other),
+        Err(UNKNOWN.to_owned()),
+        "another id is not the profile asked for"
+    );
+    let mut altered = stored;
+    altered.profile.checks[0].network = crate::checks::NetworkMode::Remotes;
+    assert_eq!(
+        matching(altered, &id),
+        Err(UNKNOWN.to_owned()),
+        "a body that does not hash to its id is not shown for approval"
+    );
 }

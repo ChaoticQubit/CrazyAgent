@@ -1,10 +1,11 @@
 use super::*;
 use crate::tui::client::OwnerEvent;
-use crate::tui::client::checks::tests::{Engine, answer, fieldnotes};
+use crate::tui::client::checks::tests::{Engine, answer, check, fieldnotes};
 use crate::tui::screens::open;
 use crate::tui::screens::settings_accounts::tests::{ctx, render};
 use crate::tui::seam::Request;
 use crate::tui::shell::{Shell, targets};
+use serde_json::json;
 
 fn jobs(shell: &mut Shell) -> Vec<ChecksJob> {
     std::iter::from_fn(|| shell.ctx.next_request())
@@ -295,38 +296,150 @@ fn a_save_over_a_newer_version_reads_the_current_values_again() {
     );
 }
 
+/// A profile with every field the review shows: two ordinary checks, a check that reaches
+/// the sandbox remotes at turn end and before Accept, a protected holdout with one stored
+/// file, and two protected paths. Input: the engine. Output: the stored profile's id.
+fn wide_profile(engine: &Engine) -> ProfileId {
+    let digest = engine.holdout(b"#[test]\nfn hidden_case() {}\n");
+    let mut fetch = check("fetch");
+    fetch["kind"] = json!("integration");
+    fetch["toolchain"] = Value::Null;
+    fetch["argv"] = json!(["curl", "--fail", "https://api.example.test/v1/health"]);
+    fetch["network"] = json!("remotes");
+    fetch["when"] = json!(["turn_end", "before_accept"]);
+    fetch["required"] = json!(false);
+    let mut hidden = check("hidden");
+    hidden["kind"] = json!("e2e");
+    hidden["argv"] = json!(["cargo", "test", "--test", "hidden"]);
+    hidden["protected"] = json!(true);
+    engine.propose_body(&json!({
+        "version": 1,
+        "checks": [check("unit"), check("lint"), fetch],
+        "holdouts": [{"check": hidden, "files": {"tests/hidden.rs": digest}}],
+        "protected_paths": ["tests/", "Cargo.lock"],
+    }))
+}
+
+/// Approves the selected profile the way the owner does: p reads it, PgDn shows the rest
+/// of it, Enter approves it. Inputs: the shell and the engine. Output: the profile the page
+/// approved.
+fn approve(shell: &mut Shell, engine: &mut Engine) -> ProfileId {
+    shell.key(Key::Char('p'));
+    let job = one(shell);
+    reply(shell, engine, job);
+    for _ in 0..4 {
+        render(shell, 120, 40);
+        shell.key(Key::PageDown);
+    }
+    render(shell, 120, 40);
+    shell.key(Key::Enter);
+    let job = one(shell);
+    let Some((true, id)) = job_profile(&job).map(|(approve, id)| (approve, id.clone())) else {
+        panic!("Enter after the end approves");
+    };
+    reply(shell, engine, job);
+    serve(shell, engine);
+    id
+}
+
 #[test]
-fn approving_a_profile_asks_first_and_keep_it_changes_nothing() {
+fn approving_a_profile_shows_its_whole_body_first_and_keep_it_changes_nothing() {
     let mut engine = Engine::new();
-    let id = engine.propose(&["unit", "lint"]);
+    let id = wide_profile(&engine);
     let short: String = id.as_str().chars().take(PROFILE_SHOWN).collect();
     let mut shell = page(&mut engine, project());
     assert!(shows(&mut shell, &short, "Proposed"));
-    assert!(shows(&mut shell, &short, "2 checks, proposed by owner"));
+    assert!(shows(
+        &mut shell,
+        &short,
+        "3 checks and 1 holdout, proposed by owner"
+    ));
     for _ in 0..choices().len() {
         shell.key(Key::Down);
     }
     assert!(says(&mut shell, "p Approve"));
 
     shell.key(Key::Char('p'));
+    let job = one(&mut shell);
+    assert!(
+        matches!(&job, ChecksJob::Show { profile, .. } if *profile == id),
+        "p reads the whole profile before anything is approved"
+    );
+    reply(&mut shell, &mut engine, job);
     assert!(says(&mut shell, &format!("Approve check profile {short}?")));
-    assert!(says(&mut shell, "Checks then run as it says: 2 checks."));
+    assert!(says(&mut shell, "Proposed by owner."));
+    assert!(shows(&mut shell, "unit", "unit, required"));
+    assert!(shows(
+        &mut shell,
+        "Command",
+        r#"["cargo","test","--locked","--offline"]"#
+    ));
+    assert!(shows(&mut shell, "fetch", "integration, optional"));
+    assert!(shows(
+        &mut shell,
+        "Command",
+        r#"["curl","--fail","https://api.example.test/v1/health"]"#
+    ));
+    assert!(shows(
+        &mut shell,
+        "Network",
+        "The project's sandbox remotes"
+    ));
+    assert!(shows(&mut shell, "Runs at", "turn end, before Accept"));
+    assert!(shows(&mut shell, "Toolchain", "None"));
+    assert!(shows(&mut shell, "Timeout", "600 s"));
+    assert!(shows(&mut shell, "Reports", "libtest output"));
+    assert!(
+        !says(&mut shell, "Protected paths"),
+        "the rest of the profile is below the first screen"
+    );
+    assert!(says(&mut shell, "PgDn Read on"));
     assert!(jobs(&mut shell).is_empty(), "nothing is sent before Enter");
+
+    shell.key(Key::Enter);
+    assert!(says(&mut shell, "Read the whole profile first."));
+    assert!(
+        jobs(&mut shell).is_empty(),
+        "Enter before the end is shown approves nothing"
+    );
+
+    shell.key(Key::PageDown);
+    assert!(shows(&mut shell, "hidden", "e2e, required, protected"));
+    assert!(shows(
+        &mut shell,
+        "Command",
+        r#"["cargo","test","--test","hidden"]"#
+    ));
+    assert!(shows(&mut shell, "Files", "tests/hidden.rs"));
+    assert!(says(&mut shell, "Protected paths"));
+    assert!(
+        render(&mut shell, 120, 40)
+            .iter()
+            .any(|row| row.trim() == "tests/")
+    );
+    assert!(
+        render(&mut shell, 120, 40)
+            .iter()
+            .any(|row| row.trim() == "Cargo.lock")
+    );
+    assert!(says(&mut shell, "Enter approves this profile."));
+    assert!(says(&mut shell, "Enter Approve"));
+    assert!(
+        !says(&mut shell, "hidden_case"),
+        "a holdout's bytes stay with the engine"
+    );
+
     shell.key(Key::Esc);
     assert!(!says(&mut shell, "Approve check profile"));
     assert!(jobs(&mut shell).is_empty(), "Keep it sends nothing");
     assert_eq!(engine.profiles().unwrap()[0].state, ProfileState::Proposed);
+    assert!(says(&mut shell, "p Approve"));
 
-    shell.key(Key::Char('p'));
-    shell.key(Key::Enter);
-    let job = one(&mut shell);
     assert_eq!(
-        job_profile(&job),
-        Some((true, &id)),
+        approve(&mut shell, &mut engine),
+        id,
         "Enter approves the profile shown"
     );
-    reply(&mut shell, &mut engine, job);
-    serve(&mut shell, &mut engine);
     assert!(says(&mut shell, "Approved."));
     assert_eq!(engine.profiles().unwrap()[0].state, ProfileState::Current);
     assert!(shows(&mut shell, &short, "Current"));
@@ -338,7 +451,7 @@ fn approving_a_profile_asks_first_and_keep_it_changes_nothing() {
 }
 
 #[test]
-fn revoking_a_profile_asks_first_and_leaves_the_project_without_one() {
+fn a_profile_the_engine_no_longer_holds_is_never_shown_for_approval() {
     let mut engine = Engine::new();
     let id = engine.propose(&["unit"]);
     let mut shell = page(&mut engine, project());
@@ -346,10 +459,37 @@ fn revoking_a_profile_asks_first_and_leaves_the_project_without_one() {
         shell.key(Key::Down);
     }
     shell.key(Key::Char('p'));
-    shell.key(Key::Enter);
     let job = one(&mut shell);
-    reply(&mut shell, &mut engine, job);
-    serve(&mut shell, &mut engine);
+    let ChecksJob::Show { project, .. } = job else {
+        panic!("p reads the profile first");
+    };
+    let gone = ProfileId::new("0".repeat(64)).unwrap();
+    assert_ne!(gone, id);
+    reply(
+        &mut shell,
+        &mut engine,
+        ChecksJob::Show {
+            project,
+            profile: gone,
+        },
+    );
+    assert!(!says(&mut shell, "Approve check profile"));
+    assert!(says(&mut shell, "Could not read the check profile."));
+    assert!(says(&mut shell, "That check profile is no longer stored."));
+    shell.key(Key::Enter);
+    assert!(jobs(&mut shell).is_empty(), "nothing is approved unseen");
+    assert_eq!(engine.profiles().unwrap()[0].state, ProfileState::Proposed);
+}
+
+#[test]
+fn revoking_a_profile_asks_first_and_leaves_the_project_without_one() {
+    let mut engine = Engine::new();
+    let id = engine.propose(&["unit"]);
+    let mut shell = page(&mut engine, project());
+    for _ in 0..choices().len() {
+        shell.key(Key::Down);
+    }
+    assert_eq!(approve(&mut shell, &mut engine), id);
 
     shell.key(Key::Char('v'));
     let short: String = id.as_str().chars().take(PROFILE_SHOWN).collect();
@@ -413,4 +553,45 @@ fn job_profile(job: &ChecksJob) -> Option<(bool, &ProfileId)> {
         ChecksJob::Revoke { profile, .. } => Some((false, profile)),
         _ => None,
     }
+}
+
+#[test]
+fn enter_approves_only_after_every_line_of_the_profile_was_shown() {
+    let mut engine = Engine::new();
+    let ids: Vec<String> = (0..12).map(|at| format!("check-{at:02}")).collect();
+    let id = engine.propose(&ids.iter().map(String::as_str).collect::<Vec<_>>());
+    let mut shell = page(&mut engine, project());
+    for _ in 0..choices().len() {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Char('p'));
+    let job = one(&mut shell);
+    reply(&mut shell, &mut engine, job);
+    assert!(says(&mut shell, "check-00"));
+    assert!(!says(&mut shell, "check-11"));
+
+    shell.key(Key::End);
+    assert!(says(&mut shell, "check-11"));
+    assert!(says(&mut shell, "Enter approves this profile."));
+    assert!(!says(&mut shell, "check-00"));
+    assert!(
+        says(&mut shell, "PgDn Read on"),
+        "jumping to the end skipped lines no draw has shown"
+    );
+    shell.key(Key::Enter);
+    assert!(says(&mut shell, "Read the whole profile first."));
+    assert!(jobs(&mut shell).is_empty(), "nothing is approved unseen");
+
+    shell.key(Key::Home);
+    assert!(says(&mut shell, "check-00"));
+    let mut pages = 0;
+    while !says(&mut shell, "Enter Approve") {
+        assert!(pages < 8, "paging down reaches the end");
+        shell.key(Key::PageDown);
+        pages += 1;
+    }
+    assert!(pages >= 2, "the profile is longer than two screens");
+    shell.key(Key::Enter);
+    let job = one(&mut shell);
+    assert_eq!(job_profile(&job), Some((true, &id)));
 }

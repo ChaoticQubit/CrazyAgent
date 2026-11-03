@@ -1352,7 +1352,9 @@ pub(in crate::tui) fn sentence(code: &str) -> String {
         "ticket_not_found" => "No ticket has that id in this project.",
         "version_not_found" => "No release of this project has that name.",
         "run_not_found" => "That run is no longer kept.",
-        "reply_unreadable" => "The engine's answer could not be read. Press r to read again.",
+        "reply_unreadable" | "checks_outcome_unknown" => {
+            "The engine's answer could not be read. Press r to read again."
+        }
         "checks_owner_only" => "Only you can do that, from this app.",
         "checks_profile_unknown" => "That check profile is no longer stored.",
         "checks_profile_invalid" => "That check profile is not one the engine accepts.",

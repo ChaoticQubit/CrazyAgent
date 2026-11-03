@@ -2,7 +2,7 @@ use super::settings::problem;
 use super::*;
 use crate::checks::queue::JobState;
 use crate::checks::settings::ChecksChoice;
-use crate::checks::{ProfileId, ProfileSummary};
+use crate::checks::{ProfileId, ProfileSummary, StoredProfile};
 use crate::engine::EngineError;
 use crate::engine::owner::{
     CheckGateView, CheckRunView, ChecksReply, ChecksRequest, ChecksSettingsView, OwnerClient,
@@ -23,9 +23,10 @@ const UNKNOWN: &str = "checks_outcome_unknown";
 /// One checks request a TUI screen sends. `Tracked` asks for the project's tracker key;
 /// `Views` lends the tab's test views to the owner worker, which runs the steps against the
 /// owner protocol as the owner and gives them back; the rest read or save one scope's check
-/// settings at the version the screen read, list a project's stored profiles, approve or
-/// revoke one, read the newest run of each check of a change set with its Accept gate, and
-/// start its checks. No project means the app scope.
+/// settings at the version the screen read, list a project's stored profiles, read one
+/// whole profile for the owner to review, approve or revoke one, read the newest run of
+/// each check of a change set with its Accept gate, and start its checks. No project means
+/// the app scope.
 pub(in crate::tui) enum ChecksJob {
     Tracked {
         project: ProjectId,
@@ -45,6 +46,10 @@ pub(in crate::tui) enum ChecksJob {
     },
     Profiles {
         project: ProjectId,
+    },
+    Show {
+        project: ProjectId,
+        profile: ProfileId,
     },
     Approve {
         project: ProjectId,
@@ -76,7 +81,8 @@ pub(in crate::tui) struct ChangeChecks {
 
 /// What the owner worker answered a checks request with, or a bounded plain code. A Views
 /// reply names its project and the first transport problem its calls met; the views
-/// themselves stay with the tab. `Started` carries the batch the engine queued.
+/// themselves stay with the tab. `Shown` carries a whole stored profile whose body hashes to
+/// the id asked for. `Started` carries the batch the engine queued.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum ChecksEvent {
     Tracked {
@@ -98,6 +104,11 @@ pub(in crate::tui) enum ChecksEvent {
     Profiles {
         project: ProjectId,
         result: Result<Vec<ProfileSummary>, String>,
+    },
+    Shown {
+        project: ProjectId,
+        profile: ProfileId,
+        result: Result<Box<StoredProfile>, String>,
     },
     Profile {
         project: ProjectId,
@@ -129,6 +140,7 @@ impl ChecksEvent {
             Self::Settings { result, .. } => *result = Err(code),
             Self::Saved { result, .. } => *result = Err(code),
             Self::Profiles { result, .. } => *result = Err(code),
+            Self::Shown { result, .. } => *result = Err(code),
             Self::Profile { result, .. } => *result = Err(code),
             Self::Runs { result, .. } => *result = Err(code),
             Self::Started { result, .. } => *result = Err(code),
@@ -160,6 +172,11 @@ fn failed(job: &ChecksJob, code: String) -> ChecksEvent {
             project: project.clone(),
             result: Err(String::new()),
         },
+        ChecksJob::Show { project, profile } => ChecksEvent::Shown {
+            project: project.clone(),
+            profile: profile.clone(),
+            result: Err(String::new()),
+        },
         ChecksJob::Approve { project, profile } | ChecksJob::Revoke { project, profile } => {
             ChecksEvent::Profile {
                 project: project.clone(),
@@ -181,6 +198,18 @@ fn failed(job: &ChecksJob, code: String) -> ChecksEvent {
     event
 }
 
+/// A stored profile the owner may review before approving the id asked for: one whose id is
+/// that id and whose body hashes to it, so the body shown is the one an approval admits.
+/// Inputs: the stored profile and the id asked for. Output: the profile, or
+/// `checks_outcome_unknown` for any other profile.
+fn matching(stored: StoredProfile, asked: &ProfileId) -> Result<Box<StoredProfile>, String> {
+    let hashed = stored.profile.identity().ok();
+    if stored.id != *asked || hashed.as_ref() != Some(asked) {
+        return Err(UNKNOWN.to_owned());
+    }
+    Ok(Box::new(stored))
+}
+
 /// Names a checks job for logs without its contents. Input: the job. Output: the name.
 pub(in crate::tui) fn job_name(job: &ChecksJob) -> &'static str {
     match job {
@@ -189,6 +218,7 @@ pub(in crate::tui) fn job_name(job: &ChecksJob) -> &'static str {
         ChecksJob::Settings { .. } => "ChecksSettings",
         ChecksJob::SaveSettings { .. } => "ChecksSaveSettings",
         ChecksJob::Profiles { .. } => "ChecksProfiles",
+        ChecksJob::Show { .. } => "ChecksShow",
         ChecksJob::Approve { .. } => "ChecksApprove",
         ChecksJob::Revoke { .. } => "ChecksRevoke",
         ChecksJob::Runs { .. } => "ChecksRuns",
@@ -325,6 +355,21 @@ impl NativeOwner {
                 result: profiles(&client, &project, lost).await,
                 project,
             },
+            ChecksJob::Show { project, profile } => {
+                let request = ChecksRequest::ProfileShow {
+                    project: project.clone(),
+                    id: profile.clone(),
+                };
+                ChecksEvent::Shown {
+                    result: match ask(&client, request, lost).await {
+                        Ok(ChecksReply::Profile { profile: stored }) => matching(stored, &profile),
+                        Ok(_) => Err(UNKNOWN.to_owned()),
+                        Err(code) => Err(code),
+                    },
+                    project,
+                    profile,
+                }
+            }
             ChecksJob::Approve { project, profile } => {
                 let request = ChecksRequest::ProfileApprove {
                     project: project.clone(),

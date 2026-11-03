@@ -1,7 +1,11 @@
 use crate::checks::settings::{ChecksChoice, ChecksSettings, SettingChoice, choices};
-use crate::checks::{ProfileId, ProfileState, ProfileSummary};
+use crate::checks::{
+    CheckKind, CheckSpec, NetworkMode, ProfileId, ProfileState, ProfileSummary, ReportFormat,
+    StoredProfile, Trigger,
+};
 use crate::engine::owner::{ChecksSettingsView, SettingsSaved};
 use crate::protocol::ProjectId;
+use crate::sandbox::toolchains::Toolchain;
 use crate::tui::client::checks::{ChecksEvent, ChecksJob};
 use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::ctx::Ctx;
@@ -19,6 +23,8 @@ use ratatui::Frame;
 use ratatui::layout::{Position, Rect};
 use ratatui::text::Line;
 use serde_json::{Map, Value};
+use std::collections::BTreeMap;
+use trackwright_cli::views::text::safe;
 
 #[cfg(all(test, unix))]
 mod tests;
@@ -28,6 +34,8 @@ const NAME_CELLS: usize = 16;
 const PROFILE_SHOWN: usize = 12;
 const STATE_CELLS: usize = 10;
 const MODAL_WIDTH: u16 = 58;
+const FIELD_INDENT: usize = 4;
+const FIELD_CELLS: usize = 11;
 
 #[derive(Debug, PartialEq)]
 enum State {
@@ -41,22 +49,28 @@ enum Pending {
     Read,
     Save,
     Profiles,
+    Show,
     Profile,
 }
 
-/// A profile action the owner asked for and has not confirmed yet: approve or revoke one
-/// stored profile.
+/// A stored profile the owner reads before approving it: its whole body, the first line
+/// drawn, how many rows the last draw had, how many lines from the top draws have shown
+/// without a gap, and whether that reached the last line.
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct Confirm {
-    approve: bool,
-    profile: ProfileSummary,
+struct Review {
+    profile: Box<StoredProfile>,
+    scroll: usize,
+    page: usize,
+    read: usize,
+    seen: bool,
 }
 
 /// The check settings page: every checks setting for the app, or one project's values over
 /// the app values, with each option's one-line meaning; a project's page also lists its
-/// stored check profiles, where the owner approves or revokes one after confirming it. A
-/// change saves the scope's values with that key set, at the version read; `u` clears the
-/// key so it follows the scope below. One request runs at a time.
+/// stored check profiles. The owner approves one from a review of its whole body once every
+/// line of it was shown, and revokes one after confirming it. A change saves the scope's
+/// values with that key set, at the version read; `u` clears the key so it follows the
+/// scope below. One request runs at a time.
 pub(in crate::tui) struct CheckSettingsPage {
     scope: Scope,
     state: State,
@@ -64,7 +78,8 @@ pub(in crate::tui) struct CheckSettingsPage {
     profiles_problem: Option<String>,
     selected: usize,
     choosing: Option<usize>,
-    confirm: Option<Confirm>,
+    confirm: Option<ProfileSummary>,
+    review: Option<Review>,
     pending: Option<Pending>,
     profiles_due: bool,
 }
@@ -82,6 +97,7 @@ impl CheckSettingsPage {
             selected: 0,
             choosing: None,
             confirm: None,
+            review: None,
             pending: None,
             profiles_due,
         }
@@ -249,30 +265,80 @@ impl CheckSettingsPage {
             ));
             return;
         }
-        self.confirm = Some(Confirm { approve, profile });
+        if !approve {
+            self.confirm = Some(profile);
+            return;
+        }
+        let (Some(project), None) = (self.project(), self.pending) else {
+            return;
+        };
+        self.ask(
+            ChecksJob::Show {
+                project,
+                profile: profile.id,
+            },
+            Pending::Show,
+            ctx,
+        );
     }
 
     fn confirm_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         match key {
             Key::Esc => self.confirm = None,
             Key::Enter => {
-                let Some(confirm) = self.confirm.take() else {
+                let (Some(project), None) = (self.project(), self.pending) else {
                     return Flow::Handled;
                 };
-                let Some(project) = self.project() else {
+                let Some(profile) = self.confirm.take() else {
                     return Flow::Handled;
                 };
-                if self.pending.is_some() {
-                    self.confirm = Some(confirm);
+                self.ask(
+                    ChecksJob::Revoke {
+                        project,
+                        profile: profile.id,
+                    },
+                    Pending::Profile,
+                    ctx,
+                );
+            }
+            _ => {}
+        }
+        Flow::Handled
+    }
+
+    /// Keys while the owner reads a profile: arrows and pages scroll, Esc keeps it, and
+    /// Enter approves it once draws have shown every line of it. Inputs: the key and the
+    /// context. Output: handled; no key reaches the table under the review.
+    fn review_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        let project = self.project();
+        let idle = self.pending.is_none();
+        let Some(review) = self.review.as_mut() else {
+            return Flow::Handled;
+        };
+        let page = review.page.max(1);
+        match key {
+            Key::Esc => self.review = None,
+            Key::Up => review.scroll = review.scroll.saturating_sub(1),
+            Key::Down => review.scroll = review.scroll.saturating_add(1),
+            Key::PageUp => review.scroll = review.scroll.saturating_sub(page),
+            Key::PageDown => review.scroll = review.scroll.saturating_add(page),
+            Key::Home => review.scroll = 0,
+            Key::End => review.scroll = usize::MAX,
+            Key::Enter if !review.seen => ctx.say(Message::warning(
+                "Read the whole profile first.",
+                "Press PgDn until its end is shown, then Enter to approve it.",
+            )),
+            Key::Enter => {
+                let (Some(project), true) = (project, idle) else {
                     return Flow::Handled;
-                }
-                let profile = confirm.profile.id;
-                let job = if confirm.approve {
-                    ChecksJob::Approve { project, profile }
-                } else {
-                    ChecksJob::Revoke { project, profile }
                 };
-                self.ask(job, Pending::Profile, ctx);
+                let profile = review.profile.id.clone();
+                self.review = None;
+                self.ask(
+                    ChecksJob::Approve { project, profile },
+                    Pending::Profile,
+                    ctx,
+                );
             }
             _ => {}
         }
@@ -340,6 +406,31 @@ impl CheckSettingsPage {
                         self.profiles_problem = None;
                     }
                     Err(code) => self.profiles_problem = Some(sentence(code)),
+                }
+            }
+            (
+                ChecksEvent::Shown {
+                    project: scope,
+                    result,
+                    ..
+                },
+                Some(Pending::Show),
+            ) if Some(scope) == project.as_ref() => {
+                self.pending = None;
+                match result {
+                    Ok(profile) => {
+                        self.review = Some(Review {
+                            profile: profile.clone(),
+                            scroll: 0,
+                            page: 1,
+                            read: 0,
+                            seen: false,
+                        })
+                    }
+                    Err(code) => ctx.say(Message::error(
+                        "Could not read the check profile.",
+                        &sentence(code),
+                    )),
                 }
             }
             (
@@ -556,6 +647,17 @@ impl Screen for CheckSettingsPage {
     }
 
     fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
+        if let Some(review) = &self.review {
+            return vec![
+                if review.seen {
+                    hint("Enter", "Approve")
+                } else {
+                    hint("PgDn", "Read on")
+                },
+                hint(&format!("{}{}", ctx.glyphs.up, ctx.glyphs.down), "Scroll"),
+                hint("Esc", "Keep it"),
+            ];
+        }
         if self.choosing.is_some() {
             return vec![
                 hint(&format!("{}{}", ctx.glyphs.left, ctx.glyphs.right), "Pick"),
@@ -603,6 +705,9 @@ impl Screen for CheckSettingsPage {
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        if self.review.is_some() {
+            return self.review_key(key, ctx);
+        }
         if self.confirm.is_some() {
             return self.confirm_key(key, ctx);
         }
@@ -645,48 +750,52 @@ impl Screen for CheckSettingsPage {
 
     fn draw(&mut self, frame: &mut Frame, area: Rect, ctx: &Ctx) -> Option<Position> {
         let limit = usize::from(area.width).saturating_sub(4).max(8);
-        let content = self.body(limit, ctx);
-        draw_lines(frame.buffer_mut(), area, &indent(content, 2));
+        let content = match &self.review {
+            Some(review) => review_lines(&review.profile, limit, ctx),
+            None => self.body(limit, ctx),
+        };
+        let rows = usize::from(area.height);
+        let first = match self.review.as_mut() {
+            Some(review) => {
+                review.scroll = review.scroll.min(content.len().saturating_sub(rows));
+                review.page = rows;
+                if rows > 0 && review.scroll <= review.read {
+                    review.read = review.read.max(review.scroll + rows);
+                }
+                review.seen = review.seen || review.read >= content.len();
+                review.scroll
+            }
+            None => 0,
+        };
+        let shown = content.into_iter().skip(first).collect();
+        draw_lines(frame.buffer_mut(), area, &indent(shown, 2));
         None
     }
 
     fn modal(&self, ctx: &Ctx) -> Option<(Modal, Vec<Hint>)> {
-        let confirm = self.confirm.as_ref()?;
-        let short = short(&confirm.profile.id);
-        let (title, question, note, action) = if confirm.approve {
-            (
-                "Approve check profile",
-                format!("Approve check profile {short}?"),
-                format!(
-                    "Checks then run as it says: {}. Runs under any other profile no longer count for Accept.",
-                    counts(&confirm.profile)
-                ),
-                "Approve",
-            )
-        } else {
-            (
-                "Revoke check profile",
-                format!("Revoke check profile {short}?"),
-                "No check runs under it from now on. If it is the current profile, the project has none until you approve one.".to_owned(),
-                "Revoke",
-            )
-        };
-        let mut body = vec![Line::raw(question), Line::default()];
+        let profile = self.confirm.as_ref()?;
+        let mut body = vec![
+            Line::raw(format!("Revoke check profile {}?", short(&profile.id))),
+            Line::default(),
+        ];
         body.extend(
-            wrap(&note, usize::from(MODAL_WIDTH) - 6)
-                .into_iter()
-                .map(Line::raw),
+            wrap(
+                "No check runs under it from now on. If it is the current profile, the project has none until you approve one.",
+                usize::from(MODAL_WIDTH) - 6,
+            )
+            .into_iter()
+            .map(Line::raw),
         );
         body.push(Line::default());
-        body.push(buttons(&["Keep it", action], Some(1), &ctx.theme));
+        body.push(buttons(&["Keep it", "Revoke"], Some(1), &ctx.theme));
         Some((
             Modal {
                 width: MODAL_WIDTH,
-                title: title.into(),
+                title: "Revoke check profile".into(),
                 body,
                 top: None,
             },
-            vec![hint("Enter", action), hint("Esc", "Keep it")],
+            vec![hint("Enter", "Revoke"), hint("Esc", "Keep it")],
         ))
     }
 
@@ -739,13 +848,213 @@ fn profile_text(profile: &ProfileSummary) -> String {
         ProfileState::Approved => "Replaced",
         ProfileState::Revoked => "Revoked",
     };
-    let by = trackwright_cli::views::text::safe(&profile.proposed_by);
+    let by = safe(&profile.proposed_by);
     format!(
         "{:<width$}{state:<STATE_CELLS$}{}, proposed by {by}",
         short(&profile.id),
         counts(profile),
         width = PROFILE_SHOWN + 2,
     )
+}
+
+/// A whole stored profile as the owner reads it before approving it: who proposed it, each
+/// check and holdout with every field that decides what runs, each holdout's files by path
+/// (their bytes stay with the engine) and the protected paths, all stored text made safe to
+/// draw. Inputs: the profile, the content width and the context. Output: the lines.
+fn review_lines(stored: &StoredProfile, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
+    let theme = &ctx.theme;
+    let body = &stored.profile;
+    let mut lines = vec![styled(
+        format!("Approve check profile {}?", short(&stored.id)),
+        Role::Accent,
+        theme,
+    )];
+    let note = format!(
+        "Proposed by {}. Approving it lets every check below run exactly as written, with the network it names; runs under any other profile no longer count for Accept.",
+        safe(&stored.proposed_by)
+    );
+    lines.extend(
+        wrap(&note, limit)
+            .into_iter()
+            .map(|part| styled(part, Role::Muted, theme)),
+    );
+    lines.push(Line::default());
+    lines.push(styled(
+        format!("Checks ({})", body.checks.len()),
+        Role::Accent,
+        theme,
+    ));
+    for spec in &body.checks {
+        lines.extend(check_lines(spec, None, limit, ctx));
+    }
+    if !body.holdouts.is_empty() {
+        lines.push(Line::default());
+        lines.push(styled(
+            format!("Holdouts ({})", body.holdouts.len()),
+            Role::Accent,
+            theme,
+        ));
+        for holdout in &body.holdouts {
+            lines.extend(check_lines(
+                &holdout.check,
+                Some(&holdout.files),
+                limit,
+                ctx,
+            ));
+        }
+    }
+    lines.push(Line::default());
+    lines.push(styled("Protected paths", Role::Accent, theme));
+    if body.protected_paths.is_empty() {
+        lines.push(styled(
+            "  None. A change set may touch any path.",
+            Role::Muted,
+            theme,
+        ));
+    }
+    for path in &body.protected_paths {
+        lines.extend(
+            wrap(&safe(path), limit.saturating_sub(2).max(1))
+                .into_iter()
+                .map(|part| Line::raw(format!("  {part}"))),
+        );
+    }
+    lines.push(Line::default());
+    lines.push(styled(
+        "Enter approves this profile. Esc keeps it as it is.",
+        Role::Muted,
+        theme,
+    ));
+    lines
+}
+
+/// One check as the review shows it: its id, kind, whether the gate requires it and whether
+/// its cases are protected, then its command, folder, network, time limit, triggers,
+/// toolchain and report, and a holdout's files by path. A network beyond none is drawn as a
+/// warning. Inputs: the check, a holdout's files, the content width and the context.
+/// Output: the lines.
+fn check_lines(
+    spec: &CheckSpec,
+    files: Option<&BTreeMap<String, String>>,
+    limit: usize,
+    ctx: &Ctx,
+) -> Vec<Line<'static>> {
+    let mut traits = vec![
+        kind_text(spec.kind),
+        if spec.required {
+            "required"
+        } else {
+            "optional"
+        },
+    ];
+    if spec.protected {
+        traits.push("protected");
+    }
+    let mut lines = vec![Line::raw(format!(
+        "  {}  {}",
+        safe(&spec.id),
+        traits.join(", ")
+    ))];
+    let (network, reach) = match spec.network {
+        NetworkMode::Off => ("Off", None),
+        NetworkMode::Localhost => ("Localhost only", Some(Role::Warning)),
+        NetworkMode::Remotes => ("The project's sandbox remotes", Some(Role::Warning)),
+    };
+    let report = match spec.format {
+        ReportFormat::Libtest => "libtest output",
+        ReportFormat::Junit => "JUnit",
+        ReportFormat::Allure => "Allure results",
+        ReportFormat::ExitCode => "exit status only",
+    };
+    let report = match &spec.report {
+        Some(path) => format!("{report} at {}", safe(path)),
+        None => report.to_owned(),
+    };
+    let when: Vec<&str> = spec
+        .when
+        .iter()
+        .map(|trigger| trigger_text(*trigger))
+        .collect();
+    let mut fields = vec![
+        (
+            "Command",
+            safe(&serde_json::to_string(&spec.argv).unwrap_or_default()),
+            None,
+        ),
+        ("Folder", safe(&spec.cwd), None),
+        ("Network", network.to_owned(), reach),
+        ("Timeout", format!("{} s", spec.timeout_s), None),
+        ("Runs at", when.join(", "), None),
+        (
+            "Toolchain",
+            spec.toolchain.map_or("None", Toolchain::label).to_owned(),
+            None,
+        ),
+        ("Reports", report, None),
+    ];
+    if let Some(files) = files {
+        let paths: Vec<String> = files.keys().map(|path| safe(path)).collect();
+        fields.push(("Files", paths.join(", "), None));
+    }
+    for (label, value, role) in fields {
+        lines.extend(field_lines(label, &value, role, limit, ctx));
+    }
+    lines
+}
+
+/// One labelled field of a check, its value wrapped under the value column. Inputs: the
+/// label, the value, the value's role (None for plain), the content width and the context.
+/// Output: at least one line.
+fn field_lines(
+    label: &str,
+    value: &str,
+    role: Option<Role>,
+    limit: usize,
+    ctx: &Ctx,
+) -> Vec<Line<'static>> {
+    let mut parts = wrap(
+        value,
+        limit.saturating_sub(FIELD_INDENT + FIELD_CELLS).max(1),
+    );
+    if parts.is_empty() {
+        parts.push(String::new());
+    }
+    parts
+        .into_iter()
+        .enumerate()
+        .map(|(index, part)| {
+            let head = if index == 0 {
+                format!("{}{label:<FIELD_CELLS$}", " ".repeat(FIELD_INDENT))
+            } else {
+                " ".repeat(FIELD_INDENT + FIELD_CELLS)
+            };
+            let value = match role {
+                Some(role) => styled(part, role, &ctx.theme),
+                None => Line::raw(part),
+            };
+            join([Line::raw(head), value])
+        })
+        .collect()
+}
+
+/// The word for what a check proves. Input: the kind. Output: the word.
+fn kind_text(kind: CheckKind) -> &'static str {
+    match kind {
+        CheckKind::Unit => "unit",
+        CheckKind::Integration => "integration",
+        CheckKind::E2e => "e2e",
+        CheckKind::Smoke => "smoke",
+        CheckKind::Scenario => "scenario",
+    }
+}
+
+/// The words for when the engine runs a check. Input: the trigger. Output: the words.
+fn trigger_text(trigger: Trigger) -> &'static str {
+    match trigger {
+        Trigger::TurnEnd => "turn end",
+        Trigger::BeforeAccept => "before Accept",
+        Trigger::OnRequest => "on request",
+    }
 }
 
 /// The value one scope sets for a key, if it sets it. Inputs: the scope's values and the
