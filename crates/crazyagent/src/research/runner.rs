@@ -11,6 +11,7 @@ use crate::harnesses::launch::{
 use crate::harnesses::terminal_session::TerminalSession;
 use crate::launch_context::AgentContext;
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
+use crate::sandbox::model_proxy::ModelHost;
 use crate::sandbox::policy::AgentAccess;
 use crate::sandbox::toolchains::{self, ToolHomes, Toolchains};
 use crate::sandbox::warden::Warden;
@@ -1511,6 +1512,29 @@ pub(crate) fn model_remote(account: &ResearchAccount) -> Result<SandboxRemote, R
                 SandboxRemote::AnyHost(port)
             })
         }
+    }
+}
+
+/// The hosts a signed-in Claude account's model traffic goes to, the only ones a Claude
+/// Code agent under the None network reaches through its model proxy (S4b).
+pub(crate) const CLAUDE_MODEL_HOSTS: &[(&str, u16)] = &[("api.anthropic.com", 443)];
+
+/// The hosts a signed-in Codex account's model traffic goes to: chatgpt.com for a ChatGPT
+/// sign-in, api.openai.com for an API key. A managed profile does not say at launch which
+/// one it holds, so a Codex agent under the None network may reach both (S4b).
+pub(crate) const CODEX_MODEL_HOSTS: &[(&str, u16)] =
+    &[("chatgpt.com", 443), ("api.openai.com", 443)];
+
+/// The one host an endpoint account's traffic goes to through a model proxy (S4b): its
+/// base URL's DNS name and port. Input: the base URL. Output: the host, or none for an
+/// http URL or an IP literal, which a CONNECT proxy checking names cannot tell apart from
+/// any other address.
+pub(crate) fn endpoint_model_host(base_url: &str) -> Option<ModelHost> {
+    let url = endpoint_url(base_url).ok()?;
+    let port = url.port_or_known_default()?;
+    match url.host()? {
+        url::Host::Domain(name) if url.scheme() == "https" => ModelHost::new(name, port),
+        _ => None,
     }
 }
 

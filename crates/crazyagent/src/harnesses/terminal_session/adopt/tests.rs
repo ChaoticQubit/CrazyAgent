@@ -206,10 +206,19 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
         resumed: None,
         access: None,
         context: None,
+        proxy: Some(49_152),
     };
     let text = record.encode().unwrap();
     assert_eq!(PaneRecord::decode(&text), Some(record.clone()));
     assert!(!text.contains("access"), "{text}");
+    assert!(text.contains("\"proxy\":49152"), "{text}");
+    let unproxied = PaneRecord {
+        proxy: None,
+        ..record.clone()
+    };
+    assert!(!unproxied.encode().unwrap().contains("proxy"));
+    let zero = text.replace("\"proxy\":49152", "\"proxy\":0");
+    assert_eq!(PaneRecord::decode(&zero), None);
     let started = PaneRecord {
         access: Some(crate::sandbox::policy::AgentAccess::OwnBranch),
         ..record.clone()

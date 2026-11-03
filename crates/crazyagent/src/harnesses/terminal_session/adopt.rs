@@ -29,9 +29,10 @@ pub enum RecordSource {
 /// without starting the harness again: the session record, the working folder, when the
 /// harness started, the pane's first process, the key file the harness reads, if any, for a
 /// resumed conversation its record and the offset where this pane's turns begin, the
-/// project access level the agent started at, and where its launch wrote the project
-/// context files that hold MCP secrets. A record from an engine that did not keep the
-/// level or the files has none.
+/// project access level the agent started at, where its launch wrote the project
+/// context files that hold MCP secrets, and the loopback port of the model proxy its
+/// profile and variables name (S4b). A record from an engine that did not keep the level,
+/// the files or the port has none.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PaneRecord {
@@ -47,6 +48,8 @@ pub struct PaneRecord {
     pub access: Option<AgentAccess>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<InstalledFiles>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy: Option<u16>,
 }
 
 impl PaneRecord {
@@ -79,6 +82,7 @@ impl PaneRecord {
             resumed: None,
             access: None,
             context: None,
+            proxy: None,
         })
     }
 
@@ -115,8 +119,9 @@ impl PaneRecord {
             && record.pid > 0
             && key
             && resumed
-            && context)
-            .then_some(record)
+            && context
+            && record.proxy != Some(0))
+        .then_some(record)
     }
 
     /// Deletes the context files of a pane that ends without being taken over, unless its

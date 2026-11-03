@@ -6745,6 +6745,7 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         tmux: None,
         hookless: false,
         scratch_pin: None,
+        proxy: None,
     };
     let account = || AccountBinding::Subscription {
         home: PathBuf::from("/tmp/home"),
@@ -9887,6 +9888,7 @@ fn hooks_plan(harness: &str, hookless: bool) -> Plan {
         tmux: None,
         hookless,
         scratch_pin: None,
+        proxy: None,
     }
 }
 
@@ -10424,6 +10426,7 @@ fn reap_keeps_a_kept_lead_past_its_idle_limit_while_its_teammate_works() {
                 executable: PathBuf::from("/bin/sh"),
             }),
             access: AgentAccess::Sandboxed,
+            proxy: None,
         })),
         Seat {
             project: ProjectId::new(PROJECT).unwrap(),
@@ -10501,6 +10504,7 @@ fn kept_lead_with_a_task(fixture: &Fixture) -> (TeamRuntime, i64, i64) {
                 executable: PathBuf::from("/bin/sh"),
             }),
             access: AgentAccess::Sandboxed,
+            proxy: None,
         })),
         Seat {
             project: ProjectId::new(PROJECT).unwrap(),
@@ -10635,6 +10639,7 @@ fn wiring_a_native_lead_adopted_without_its_account_is_killed() {
                 executable: PathBuf::from("/bin/sh"),
             }),
             access: AgentAccess::Sandboxed,
+            proxy: None,
         };
         let (orders, ordered) = channel();
         let (reports, reported) = channel();
@@ -10932,6 +10937,7 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
         tmux: Some(PathBuf::from("/opt/homebrew/bin/tmux")),
         hookless: false,
         scratch_pin: None,
+        proxy: None,
     };
     let account = || AccountBinding::Subscription {
         home: PathBuf::from("/private/tmp/agent-1-home"),
@@ -10985,16 +10991,12 @@ fn a_tools_on_agent_profile_follows_the_project_network_choice() {
     assert!(!none.contains("(remote ip \"*:*\")"), "{none}");
 }
 
-/// A subscription agent with tools under the None network reaches only its model (Q17 C,
-/// rv-secreview S4R1-1). Nothing listens on 127.0.0.1:443, so the connect's error names
-/// the verdict: Seatbelt's denial is "Operation not permitted", while "Connection refused"
-/// means the profile let the packet out. Seatbelt matches by port, so loopback 443 stands
-/// for every host on 443.
+/// Opens a runtime for a project whose agents with tools run under the None network, with a
+/// codex stand-in and a signed-in profile home its custody keeps. Input: the fixture.
+/// Output: the runtime and a signed-in account on that profile.
 #[cfg(target_os = "macos")]
-#[test]
-fn a_managed_tools_on_agent_under_no_network_cannot_reach_a_non_model_host_on_443() {
+fn none_network_runtime(fixture: &Fixture) -> (TeamRuntime, TeamAccount) {
     use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
-    let fixture = Fixture::new(1);
     let bin = fixture.base.join("bin");
     std::fs::create_dir(&bin).unwrap();
     let codex = bin.join("codex");
@@ -11035,24 +11037,41 @@ fn a_managed_tools_on_agent_under_no_network_cannot_reach_a_non_model_host_on_44
             model: None,
         },
     };
+    (runtime, account)
+}
+
+/// Prepares one new codex sub-agent with tools on `account`. Inputs: the fixture, the
+/// runtime and the account. Output: the agent id and its plan, or the plain refusal.
+#[cfg(target_os = "macos")]
+fn prepare_tools_on(
+    fixture: &Fixture,
+    runtime: &TeamRuntime,
+    account: &TeamAccount,
+) -> (i64, Result<Plan, String>) {
     let id = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Starting);
-    let (_, plan, _) = runtime
-        .prepare(
-            &fixture.setup,
-            id,
-            AgentRole::Sub,
-            "codex",
-            true,
-            &account,
-            false,
-            crate::agent_git::Layout::Linked,
-        )
-        .unwrap();
+    let prepared = runtime.prepare(
+        &fixture.setup,
+        id,
+        AgentRole::Sub,
+        "codex",
+        true,
+        account,
+        false,
+        crate::agent_git::Layout::Linked,
+    );
+    (id, prepared.map(|(_, plan, _)| plan))
+}
+
+/// Runs `/usr/bin/nc -z` to 127.0.0.1 on `port` inside the agent's Seatbelt profile.
+/// Inputs: the runtime, the agent and its plan, and the port. Output: what nc printed.
+#[cfg(target_os = "macos")]
+fn nc_under_profile(runtime: &TeamRuntime, id: i64, plan: &Plan, port: u16) -> String {
     let output = crate::spawn_gate::output(
         Command::new("/usr/bin/sandbox-exec")
             .arg("-f")
             .arg(&plan.sandbox_profile)
-            .args(["/usr/bin/nc", "-v", "-z", "-G", "3", "127.0.0.1", "443"])
+            .args(["/usr/bin/nc", "-v", "-z", "-G", "3", "127.0.0.1"])
+            .arg(port.to_string())
             .current_dir(&plan.working_dir)
             .env_clear()
             .env("PATH", "/usr/bin:/bin")
@@ -11062,11 +11081,424 @@ fn a_managed_tools_on_agent_under_no_network_cannot_reach_a_non_model_host_on_44
             .stderr(Stdio::piped()),
     )
     .unwrap();
-    let said = String::from_utf8_lossy(&output.stderr);
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// Asks a model proxy for a tunnel to `target` and reads its status line. Inputs: the
+/// proxy's port and the `host:port` target. Output: the status line, or why nothing
+/// listens on the port.
+fn proxy_status(port: u16, target: &str) -> String {
+    use std::io::{BufRead, Write};
+    let mut client = match std::net::TcpStream::connect(("127.0.0.1", port)) {
+        Ok(client) => client,
+        Err(error) => return format!("no proxy on {port}: {error}"),
+    };
+    client
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .unwrap();
+    client
+        .write_all(format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes())
+        .unwrap();
+    let mut line = String::new();
+    std::io::BufReader::new(client)
+        .read_line(&mut line)
+        .unwrap();
+    line.trim_end().to_owned()
+}
+
+/// A subscription agent with tools under the None network reaches only its model (Q17 C,
+/// rv-secreview S4R1-1). Nothing listens on 127.0.0.1:443, so the connect's error names
+/// the verdict: Seatbelt's denial is "Operation not permitted", while "Connection refused"
+/// means the profile let the packet out. Seatbelt matches by port, so loopback 443 stands
+/// for every host on 443.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_managed_tools_on_agent_under_no_network_cannot_reach_a_non_model_host_on_443() {
+    let fixture = Fixture::new(1);
+    let (runtime, account) = none_network_runtime(&fixture);
+    let (id, plan) = prepare_tools_on(&fixture, &runtime, &account);
+    let said = nc_under_profile(&runtime, id, &plan.unwrap(), 443);
     assert!(
         said.contains("connectx to 127.0.0.1 port 443 (tcp) failed: Operation not permitted"),
         "under None a managed tools-on agent reached a non-model host on 443: {said}"
     );
+}
+
+/// Under the None network a signed-in agent with tools reaches the network only through its
+/// own model proxy (S4b): its profile allows that one loopback port, no other port and no
+/// DNS, the proxy opens tunnels only to its harness's model hosts, the launch's variables
+/// name the proxy for the headless and the pane launch alike, and the proxy closes with
+/// its plan.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_managed_tools_on_agent_under_no_network_reaches_the_network_only_through_its_model_proxy() {
+    let fixture = Fixture::new(1);
+    let (runtime, account) = none_network_runtime(&fixture);
+    let (id, plan) = prepare_tools_on(&fixture, &runtime, &account);
+    let plan = plan.unwrap();
+    let port = plan.proxy.as_ref().map(|proxy| proxy.port());
+    assert!(
+        port.is_some(),
+        "an agent with tools under None gets a model proxy"
+    );
+    let port = port.unwrap();
+    let profile = std::fs::read_to_string(&plan.sandbox_profile).unwrap();
+    assert!(
+        profile.contains(&format!(
+            "(allow network-outbound (remote ip \"localhost:{port}\"))"
+        )),
+        "{profile}"
+    );
+    assert!(
+        !profile.contains("(remote ip \"*:") && !profile.contains("mDNSResponder"),
+        "{profile}"
+    );
+    let said = nc_under_profile(&runtime, id, &plan, port);
+    assert!(
+        said.contains(&format!(
+            "Connection to 127.0.0.1 port {port} [tcp/*] succeeded"
+        )),
+        "the agent's profile does not reach its model proxy: {said}"
+    );
+    for (target, status) in [
+        ("chatgpt.com:443", "HTTP/1.1 200 Connection Established"),
+        ("api.openai.com:443", "HTTP/1.1 200 Connection Established"),
+        ("api.anthropic.com:443", "HTTP/1.1 403 Forbidden"),
+        ("example.com:443", "HTTP/1.1 403 Forbidden"),
+    ] {
+        assert_eq!(proxy_status(port, target), status, "{target}");
+    }
+    let url = format!("http://127.0.0.1:{port}");
+    let context = runtime
+        .context(
+            &fixture.setup.project_id,
+            id,
+            AgentRole::Sub,
+            true,
+            Layout::Linked,
+        )
+        .unwrap();
+    let request = plan
+        .request(
+            AccountBinding::Subscription {
+                home: runtime.agent_folder(id).join("home"),
+            },
+            AgentAccess::Sandboxed,
+        )
+        .unwrap();
+    let (command, installed) =
+        crate::harnesses::launch::command_with_context(&request, &plan.team_context(context))
+            .unwrap();
+    assert_eq!(installed.model_proxy(), Some(port));
+    let headless: BTreeMap<&std::ffi::OsStr, Option<&std::ffi::OsStr>> =
+        command.get_envs().collect();
+    let pane = crate::harnesses::interactive::command(
+        &request,
+        Some(&installed),
+        &crate::harnesses::interactive::Run {
+            session_id: "0f8fad5b-d9cb-469f-a165-70867728950e",
+            key_file: None,
+            resume: false,
+        },
+    )
+    .unwrap();
+    for (name, value) in [
+        ("HTTPS_PROXY", url.as_str()),
+        ("https_proxy", url.as_str()),
+        ("HTTP_PROXY", url.as_str()),
+        ("http_proxy", url.as_str()),
+        ("NO_PROXY", ""),
+        ("no_proxy", ""),
+    ] {
+        assert_eq!(
+            headless.get(std::ffi::OsStr::new(name)),
+            Some(&Some(std::ffi::OsStr::new(value))),
+            "{name}"
+        );
+        assert!(
+            pane.env.contains(&(name.to_owned(), value.to_owned())),
+            "{name}: {:?}",
+            pane.env
+        );
+    }
+    drop(installed);
+    let context = runtime
+        .context(
+            &fixture.setup.project_id,
+            id,
+            AgentRole::Sub,
+            true,
+            Layout::Linked,
+        )
+        .unwrap();
+    let host = fixture.host();
+    let session = crate::harnesses::terminal_session::TerminalSession::start(
+        host.clone(),
+        AgentId::team(id).unwrap(),
+        request,
+        Some(plan.team_context(context)),
+    )
+    .unwrap();
+    assert_eq!(
+        session.record().and_then(|record| record.proxy),
+        Some(port),
+        "the pane record keeps the proxy port for a later engine"
+    );
+    drop(session);
+    host.close(&[]).unwrap();
+    drop(plan);
+    assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
+}
+
+/// Under the None network an endpoint agent with tools keeps its direct grant for a local
+/// endpoint, reaches an https endpoint named by a host name through a model proxy that
+/// opens tunnels to that host and port alone, and is refused for an endpoint at an IP
+/// address (S4b).
+#[cfg(target_os = "macos")]
+#[test]
+fn an_endpoint_agent_under_no_network_gets_a_proxy_only_for_its_named_https_endpoint() {
+    let fixture = Fixture::new(3);
+    let (runtime, _) = none_network_runtime(&fixture);
+    let endpoint = |base_url: &str| TeamAccount {
+        connection: reference(ENDPOINT),
+        reach: TeamReach::Endpoint {
+            base_url: base_url.into(),
+            model: "qwen2.5:0.5b".into(),
+        },
+    };
+    let (_, local) = prepare_tools_on(&fixture, &runtime, &endpoint("http://127.0.0.1:11434/v1"));
+    let local = local.unwrap();
+    assert!(local.proxy.is_none());
+    let profile = std::fs::read_to_string(&local.sandbox_profile).unwrap();
+    assert!(
+        profile.contains("(remote ip \"localhost:11434\")"),
+        "{profile}"
+    );
+    assert!(!profile.contains("mDNSResponder"), "{profile}");
+
+    let (_, named) = prepare_tools_on(
+        &fixture,
+        &runtime,
+        &endpoint("https://models.crazyagent.test:8443/v1"),
+    );
+    let named = named.unwrap();
+    let port = named.proxy.as_ref().map(|proxy| proxy.port());
+    assert!(port.is_some(), "a named https endpoint is proxied");
+    let port = port.unwrap();
+    let profile = std::fs::read_to_string(&named.sandbox_profile).unwrap();
+    assert!(
+        profile.contains(&format!("(remote ip \"localhost:{port}\")")),
+        "{profile}"
+    );
+    assert!(
+        !profile.contains("(remote ip \"*:") && !profile.contains("mDNSResponder"),
+        "{profile}"
+    );
+    for (target, status) in [
+        (
+            "models.crazyagent.test:8443",
+            "HTTP/1.1 200 Connection Established",
+        ),
+        ("models.crazyagent.test:443", "HTTP/1.1 403 Forbidden"),
+        ("chatgpt.com:443", "HTTP/1.1 403 Forbidden"),
+    ] {
+        assert_eq!(proxy_status(port, target), status, "{target}");
+    }
+
+    let (_, address) = prepare_tools_on(&fixture, &runtime, &endpoint("https://203.0.113.7/v1"));
+    let refused = address
+        .err()
+        .expect("an endpoint at an address is refused under None");
+    assert!(
+        refused.contains("network_none_endpoint_unnamed"),
+        "{refused}"
+    );
+}
+
+/// A kept pane an earlier engine left running gets its model proxy back on the port its
+/// record and profile name, with its account's hosts, and closes with the engine; a pane
+/// whose saved port another process took ends with the reason, since its profile reaches
+/// no other port (S4b).
+#[test]
+fn a_kept_pane_gets_its_model_proxy_back_on_its_saved_port_or_ends() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut access = fixture.access.clone();
+    access.connections[0].endpoint = ModelEndpoint::Http {
+        url: "https://models.crazyagent.test/v1".into(),
+    };
+    let open = || {
+        let access = access.clone();
+        TeamRuntime::open(
+            &fixture.base.join("engine.db"),
+            &fixture.base.join("team"),
+            BTreeMap::from([("codex", fixture.base.join("codex"))]),
+            Box::new(move || Some(access.clone())),
+            TeamLimits::default(),
+        )
+        .unwrap()
+    };
+    let free = || {
+        std::net::TcpListener::bind(("127.0.0.1", 0))
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port()
+    };
+
+    let kept = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let port = free();
+    let record = PaneRecord {
+        proxy: Some(port),
+        ..fixture.pane(&host, kept)
+    };
+    fixture.keep(kept, &record);
+    let mut team = open().with_terminal(host.clone()).unwrap();
+    fixture.until(
+        &mut team,
+        "the pane with a model proxy is taken over",
+        |f| f.agent_status(kept) == (AgentStatus::Idle, None),
+    );
+    assert_eq!(
+        proxy_status(port, "models.crazyagent.test:443"),
+        "HTTP/1.1 200 Connection Established"
+    );
+    assert_eq!(
+        proxy_status(port, "example.com:443"),
+        "HTTP/1.1 403 Forbidden"
+    );
+    assert_eq!(team.shutdown().unwrap(), names(&[kept]));
+    let deadline = Instant::now() + WAIT;
+    while std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+        assert!(
+            Instant::now() < deadline,
+            "the model proxy outlived its worker"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    host.kill(&AgentId::team(kept).unwrap()).unwrap();
+
+    let taken = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    let holder = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let held = holder.local_addr().unwrap().port();
+    let record = PaneRecord {
+        proxy: Some(held),
+        ..fixture.pane(&host, taken)
+    };
+    fixture.keep(taken, &record);
+    let mut again = open().with_terminal(host.clone()).unwrap();
+    assert!(
+        !host
+            .alive()
+            .unwrap()
+            .contains(&AgentId::team(taken).unwrap())
+    );
+    assert!(fixture.note(&format!(
+        "The terminal of team agent {taken} was closed: its model proxy port {held} is taken."
+    )));
+    assert!(again.shutdown().unwrap().is_empty());
+    host.close(&[]).unwrap();
+}
+
+/// One real turn of a codex master with tools on a keyless https endpoint under the None
+/// network (S4b): its profile reaches only its model proxy, and its answer comes back
+/// through the proxy's tunnel to the endpoint's host.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "live qualification: needs a keyless https openai-compatible endpoint named by a host name, CRAZYAGENT_LIVE_HTTPS_ENDPOINT and CRAZYAGENT_LIVE_HTTPS_ENDPOINT_MODEL"]
+fn a_real_endpoint_turn_under_no_network_reaches_only_its_model() {
+    use crate::protocol::Outcome;
+    use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+    use crate::team::TeamAction;
+    let blocked = |name: &str| {
+        std::env::var(name).unwrap_or_else(|_| panic!("BLOCKED: set {name} for the live pass"))
+    };
+    let url = blocked("CRAZYAGENT_LIVE_HTTPS_ENDPOINT");
+    let model = blocked("CRAZYAGENT_LIVE_HTTPS_ENDPOINT_MODEL");
+    assert!(
+        crate::research::runner::endpoint_model_host(&url).is_some(),
+        "BLOCKED: {url} is not an https URL named by a host name"
+    );
+    let mut fixture = Fixture::new(1);
+    fixture.access.connections[0].endpoint = ModelEndpoint::Http { url };
+    fixture.access.connections[0].model.id = model;
+    fixture.setup.team.master_tools = true;
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?2 WHERE project=?1",
+            params![PROJECT, serde_json::to_string(&fixture.setup).unwrap()],
+        )
+        .unwrap();
+    crate::sandbox::policy::save(
+        &fixture.connection,
+        PROJECT,
+        &AgentPolicy {
+            access: AgentAccess::Sandboxed,
+            network: AgentNetwork::None,
+            ..AgentPolicy::default()
+        },
+    )
+    .unwrap();
+    let access = fixture.access.clone();
+    let mut team = TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", super::managed_agent::codex())]),
+        Box::new(move || Some(access.clone())),
+        TeamLimits::default(),
+    )
+    .unwrap();
+    let tx = fixture.connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::execute(
+            &tx,
+            &fixture.access,
+            &TeamAction::Message {
+                project_id: fixture.setup.project_id.clone(),
+                text: "Reply with exactly the word OK and nothing else.".into(),
+            },
+        )
+        .unwrap(),
+        Outcome::Applied
+    );
+    tx.commit().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(240);
+    let reply = loop {
+        team.tick().unwrap();
+        if let Some(reply) = fixture
+            .status()
+            .messages
+            .into_iter()
+            .find(|message| message.author == MessageAuthor::Master)
+        {
+            break reply.text;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the master never answered: {:#?}",
+            fixture.status()
+        );
+        std::thread::sleep(Duration::from_millis(200));
+    };
+    println!("real endpoint master under no network: {reply:?}");
+    assert!(reply.contains("OK"), "{reply}");
+    let master: i64 = fixture
+        .connection
+        .query_row(
+            "SELECT id FROM team_agents WHERE role='master' ORDER BY id LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let rules = std::fs::read_to_string(agent_profile(&fixture.base.join("team"), master)).unwrap();
+    assert!(
+        rules.contains("(remote ip \"localhost:")
+            && !rules.contains("(remote ip \"*:")
+            && !rules.contains("mDNSResponder"),
+        "{rules}"
+    );
+    team.shutdown().unwrap();
 }
 
 #[test]
