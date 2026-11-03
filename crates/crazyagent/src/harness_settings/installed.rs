@@ -1,14 +1,46 @@
 use super::VERSION_BYTES_MAX;
+use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 /// How long one harness has to print its version.
 pub const LIMIT: Duration = Duration::from_secs(5);
 
+/// The most executable contents whose version the engine keeps.
+pub const KNOWN_MAX: usize = 16;
+
 const OUTPUT_BYTES_MAX: u64 = 4096;
 const POLL: Duration = Duration::from_millis(20);
+
+static KNOWN: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
+
+/// Asks an executable whose content the engine verified for its version once per content,
+/// as `version_of` does, since a master starts a harness every turn. A failed ask is not
+/// kept, so the next start asks again. Inputs: the executable, the SHA-256 of its content
+/// and the limit. Output: the version, or none.
+pub fn version_of_digest(executable: &Path, digest: &str, limit: Duration) -> Option<String> {
+    let known = |digest: &str| {
+        KNOWN
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(digest)
+            .cloned()
+    };
+    if let Some(version) = known(digest) {
+        return Some(version);
+    }
+    let version = version_of(executable, limit)?;
+    let mut kept = KNOWN.lock().unwrap_or_else(PoisonError::into_inner);
+    if kept.len() >= KNOWN_MAX {
+        kept.clear();
+    }
+    kept.insert(digest.to_owned(), version.clone());
+    assert!(kept.len() <= KNOWN_MAX);
+    Some(version)
+}
 
 /// Asks one engine-verified harness executable for its version: `--version` with no
 /// input, a cleared environment holding only a system PATH, and a time limit. Its output

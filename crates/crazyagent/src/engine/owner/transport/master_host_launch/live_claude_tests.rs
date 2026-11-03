@@ -52,6 +52,7 @@ async fn a_real_claude_master_turn_is_signed_in_inside_the_master_sandbox() {
         "You are a test. Follow the user's instruction exactly.",
         Duration::from_millis(budget.wall_time_ms),
         None,
+        &crate::harness_settings::apply::Applied::default(),
     )
     .unwrap();
     let MasterTurnLaunch {
@@ -188,6 +189,7 @@ async fn a_real_claude_master_with_tools_on_works_in_its_worktree_and_delegates(
         "You are a test. Follow the user's steps exactly and use your tools for them.",
         Duration::from_millis(budget.wall_time_ms),
         Some(&engine),
+        &crate::harness_settings::apply::Applied::default(),
     )
     .unwrap();
     let record = tool_record.unwrap();
@@ -326,6 +328,7 @@ async fn a_real_claude_master_asked_for_a_background_task_ends_its_turn_at_the_r
         "You are a test. Follow the user's steps exactly and use your tools for them.",
         Duration::from_millis(budget.wall_time_ms),
         Some(&engine),
+        &crate::harness_settings::apply::Applied::default(),
     )
     .unwrap();
     let mut master = ClaudeHost::spawn(
@@ -495,6 +498,7 @@ async fn start_detaching_master(base: &Path, name: &str) -> DetachingMaster {
         "You are a test. Follow the user's steps exactly and use your tools for them.",
         DETACHED_LIVE_TIME,
         Some(&engine),
+        &crate::harness_settings::apply::Applied::default(),
     )
     .unwrap();
     let mut master = ClaudeHost::spawn(

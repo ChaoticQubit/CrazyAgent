@@ -601,3 +601,104 @@ fn a_key_inside_another_owner_key_is_never_merged() {
     let settings = Applied::new(&catalog, resolve(&catalog, CLAUDE, &app, None));
     let _ = json_settings(&json!({}), &settings, Apply::ClaudeSettings, &[]);
 }
+
+#[test]
+fn a_master_verifier_reads_back_only_settings_the_engine_would_build() {
+    let catalog = fixture("claude-code");
+    let engine = json!({"disableAllHooks": true});
+    let app: Stored = [
+        ("cleanupPeriodDays".to_owned(), json!(60)),
+        ("feedback.surveys".to_owned(), json!(false)),
+    ]
+    .into_iter()
+    .collect();
+    let settings = Applied::new(&catalog, resolve(&catalog, CLAUDE, &app, None));
+    let reserved = ["apiKeyHelper"];
+    let text = json_settings(&engine, &settings, Apply::ClaudeSettings, &reserved).to_string();
+    let read = read_back(
+        Some(&catalog),
+        &engine,
+        Apply::ClaudeSettings,
+        &reserved,
+        &text,
+    )
+    .expect("the engine's own text reads back");
+    assert_eq!(
+        read.values()
+            .iter()
+            .map(|value| (value.key.as_str(), &value.value))
+            .collect::<Vec<_>>(),
+        [
+            ("cleanupPeriodDays", &json!(60)),
+            ("feedback.surveys", &json!(false))
+        ]
+    );
+    assert_eq!(
+        json_settings(&engine, &read, Apply::ClaudeSettings, &reserved).to_string(),
+        text
+    );
+    for forged in [
+        json!({"disableAllHooks": false}),
+        json!({"disableAllHooks": true, "hooks": {}}),
+        json!({"disableAllHooks": true, "cleanupPeriodDays": 0}),
+        json!({"disableAllHooks": true, "cleanupPeriodDays": "60"}),
+        json!({"disableAllHooks": true, "apiKeyHelper": "/bin/sh -c id"}),
+        json!({"disableAllHooks": true, "includeCoAuthoredBy": true}),
+        json!({"disableAllHooks": true, "feedback": {"surveys": false, "extra": 1}}),
+        json!([]),
+    ] {
+        assert!(
+            read_back(
+                Some(&catalog),
+                &engine,
+                Apply::ClaudeSettings,
+                &reserved,
+                &forged.to_string()
+            )
+            .is_none(),
+            "{forged}"
+        );
+    }
+    assert!(
+        read_back(
+            Some(&catalog),
+            &engine,
+            Apply::ClaudeSettings,
+            &reserved,
+            "{"
+        )
+        .is_none()
+    );
+    let bare = read_back(
+        None,
+        &engine,
+        Apply::ClaudeSettings,
+        &reserved,
+        &engine.to_string(),
+    );
+    assert_eq!(bare, Some(Applied::default()));
+    assert!(read_back(None, &engine, Apply::ClaudeSettings, &reserved, &text).is_none());
+}
+
+#[test]
+fn owner_codex_settings_for_a_config_file_are_one_line_each_or_none() {
+    let catalog = fixture("codex");
+    let app: Stored = [
+        ("hide_agent_reasoning".to_owned(), json!(true)),
+        ("project_doc_max_bytes".to_owned(), json!(65536)),
+        ("tui.status_label".to_owned(), json!("one")),
+    ]
+    .into_iter()
+    .collect();
+    let settings = Applied::new(&catalog, resolve(&catalog, CODEX, &app, None));
+    let engine = ["project_doc_max_bytes=0".to_owned()];
+    assert_eq!(
+        codex_config(&engine, &["tui"], &settings).as_deref(),
+        Some("hide_agent_reasoning=true\n")
+    );
+    assert_eq!(
+        codex_config(&engine, &[], &settings).as_deref(),
+        Some("hide_agent_reasoning=true\ntui.status_label=\"one\"\n")
+    );
+    assert_eq!(codex_config(&engine, &[], &Applied::default()), None);
+}

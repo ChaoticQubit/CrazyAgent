@@ -26,7 +26,7 @@ use std::fs::File;
 #[cfg(unix)]
 use std::io::Write;
 #[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, MetadataExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -141,6 +141,13 @@ impl OwnerRuntimeHandle {
         let process = crate::agent_home::text(&prepared.agent_project)
             .map_err(|problem| EngineError(problem.0))?;
         let claude = prepared.session.selection.backend == MasterBackend::Claude;
+        let settings = crate::harness_settings::apply::for_master(
+            &crate::storage::versioned::open(&super::changes::engine_root(&self.authority)?)?,
+            if claude { "claude-code" } else { "codex" },
+            executable.verified_path()?,
+            &artifact_sha256,
+            &prepared.session.project_id,
+        )?;
         let process = match claude {
             true => claude_process(&prepared.instructions, process),
             false => process,
@@ -154,6 +161,7 @@ impl OwnerRuntimeHandle {
                 &master_prompt(&prepared.instructions, &process.text),
                 wall_time,
                 delegate,
+                &settings,
             )?
         } else {
             codex_master_turn(
@@ -173,6 +181,9 @@ impl OwnerRuntimeHandle {
         };
         crate::agent_home::prepare(&turn.home, harness, &prepared.agent_project, &process)
             .map_err(|problem| EngineError(problem.0))?;
+        if !claude {
+            write_master_settings(&turn.home, &turn.command, &settings)?;
+        }
         let MasterTurnLaunch {
             command,
             sandbox,
@@ -287,7 +298,9 @@ pub(super) struct MasterTurnLaunch {
 /// account lease, the registered executable, the attempt's connection, the instruction text,
 /// the turn's wall time and the engine executable for tools on. Output: the launch parts with
 /// the copy, or the refusal of the part that failed, `native_profile_renewal_failed`, a
-/// transient refusal, when the token still lapses within a minute after a renewal.
+/// transient refusal, when the token still lapses within a minute after a renewal. The
+/// owner's Claude Code settings go into its `--settings`.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn claude_master_turn(
     place: &MasterTurnPlace<'_>,
     profile: &NativeProfileUse,
@@ -296,6 +309,7 @@ pub(super) fn claude_master_turn(
     instructions: &str,
     wall_time: Duration,
     engine: Option<&Path>,
+    settings: &crate::harness_settings::apply::Applied,
 ) -> Result<MasterTurnLaunch, EngineError> {
     let instructions = write_master_instructions(place.root, place.runtime_ref, instructions)?;
     let home = master_turn_home(place.root, place.runtime_ref)?;
@@ -308,6 +322,7 @@ pub(super) fn claude_master_turn(
                 &home,
                 &connection.model.id,
                 Some(instructions.as_path()),
+                settings,
             )?,
             master_sandbox(
                 place.root,
@@ -347,6 +362,7 @@ pub(super) fn claude_master_turn(
                     engine,
                     drop: &drop,
                 },
+                settings,
             )?;
             (command, sandbox, Some(drop))
         }
@@ -431,6 +447,55 @@ pub(super) fn codex_master_turn(
         credential,
         tool_record: Some(drop),
     })
+}
+
+/// Writes the owner's Codex settings into a master turn's home as a new 0600 `config.toml`,
+/// leaving out every key the turn's command sets with `-c`, which Codex reads over the
+/// file. Inputs: the turn home, the command and the settings. Output: Ok, or
+/// `harness_settings_unavailable` when the file cannot be made.
+#[cfg(unix)]
+fn write_master_settings(
+    home: &Path,
+    command: &Command,
+    settings: &crate::harness_settings::apply::Applied,
+) -> Result<(), EngineError> {
+    let args: Vec<&str> = command
+        .get_args()
+        .map(|arg| arg.to_str())
+        .collect::<Option<_>>()
+        .ok_or_else(|| failure("harness_settings_unavailable"))?;
+    let engine: Vec<String> = args
+        .windows(2)
+        .filter(|pair| pair[0] == "-c")
+        .map(|pair| pair[1].to_owned())
+        .collect();
+    let Some(text) = crate::harness_settings::apply::codex_config(
+        &engine,
+        &crate::harnesses::launch::CODEX_ENGINE_KEYS,
+        settings,
+    ) else {
+        return Ok(());
+    };
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(home.join("config.toml"))
+        .map_err(|_| failure("harness_settings_unavailable"))?;
+    file.write_all(text.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|_| failure("harness_settings_unavailable"))
+}
+
+/// Refuses the owner's Codex settings file where a master turn cannot run. Takes the home,
+/// command and settings, all unused. Returns `master_host_unavailable`.
+#[cfg(not(unix))]
+fn write_master_settings(
+    _home: &Path,
+    _command: &Command,
+    _settings: &crate::harness_settings::apply::Applied,
+) -> Result<(), EngineError> {
+    Err(failure("master_host_unavailable"))
 }
 
 /// Makes the private home of one master turn inside its turn folder, so everything the
@@ -1642,6 +1707,7 @@ mod tests {
             &home,
             ACCOUNT_DEFAULT_MODEL,
             None,
+            &crate::harness_settings::apply::Applied::default(),
         )
         .unwrap();
         let claude = sandbox.wrap(&claude).unwrap();

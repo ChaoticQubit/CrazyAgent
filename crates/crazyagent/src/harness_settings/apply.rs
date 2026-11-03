@@ -61,14 +61,40 @@ pub fn for_launch(
     executable: &Path,
     project: Option<&ProjectId>,
 ) -> Result<Applied, EngineError> {
+    launch(db, harness, project, || {
+        installed::version_of(executable, installed::LIMIT)
+    })
+}
+
+/// Reads the settings one master turn applies, as `for_launch` does, asking the executable
+/// for its version once per content the engine verified. Inputs: the engine database, the
+/// harness id, the executable, its SHA-256 and the project. Output: the settings, or a
+/// `HARNESS_SETTINGS_CODES` refusal.
+pub fn for_master(
+    db: &Connection,
+    harness: &str,
+    executable: &Path,
+    digest: &str,
+    project: &ProjectId,
+) -> Result<Applied, EngineError> {
+    launch(db, harness, Some(project), || {
+        installed::version_of_digest(executable, digest, installed::LIMIT)
+    })
+}
+
+fn launch(
+    db: &Connection,
+    harness: &str,
+    project: Option<&ProjectId>,
+    version: impl FnOnce() -> Option<String>,
+) -> Result<Applied, EngineError> {
     let Some(id) = crate::harnesses::spec(harness).map(|spec| spec.id) else {
         return Ok(Applied::default());
     };
     let Some(catalog) = catalog::builtin(id)? else {
         return Ok(Applied::default());
     };
-    let version = installed::version_of(executable, installed::LIMIT);
-    resolved(db, &catalog, version.as_deref(), project)
+    resolved(db, &catalog, version().as_deref(), project)
 }
 
 /// Reads the settings one start of a known catalog and version applies. Inputs: the
@@ -133,6 +159,63 @@ fn insert(map: &mut Map<String, Value>, key: &str, value: Value) {
             }
         }
     }
+}
+
+/// Reads back the owner's values a settings object carries, for a command verifier: every
+/// value must sit at an unlocked key of the catalog with this apply and pass its checks,
+/// and merging them over the engine's object must give the same object. Inputs: the
+/// shipped catalog, none when the harness has none, the engine's object, the apply, the
+/// reserved keys and the JSON text. Output: the settings, or none for any other text.
+pub fn read_back(
+    catalog: Option<&Catalog>,
+    engine: &Value,
+    apply: Apply,
+    reserved: &[&str],
+    text: &str,
+) -> Option<Applied> {
+    let parsed: Value = serde_json::from_str(text).ok()?;
+    let applied = match catalog {
+        None => Applied::default(),
+        Some(catalog) => {
+            let values = catalog
+                .keys
+                .iter()
+                .filter(|key| key.locked.is_none() && key.apply == apply)
+                .filter_map(|key| {
+                    let value = lookup(&parsed, &key.key)?;
+                    super::check_value(key, value).ok()?;
+                    Some(Resolved {
+                        key: key.key.clone(),
+                        value: value.clone(),
+                        source: Source::App,
+                        apply,
+                    })
+                })
+                .collect();
+            Applied::new(catalog, values)
+        }
+    };
+    (json_settings(engine, &applied, apply, reserved) == parsed).then_some(applied)
+}
+
+fn lookup<'a>(value: &'a Value, key: &str) -> Option<&'a Value> {
+    key.split('.')
+        .try_fold(value, |value, part| value.get(part))
+}
+
+/// Renders the owner's Codex values as a `config.toml` for a home whose launch passes the
+/// engine's settings as `-c` lines, which Codex reads over the file: the lines
+/// `codex_lines` gives, one per line. Inputs: as `codex_lines`. Output: the file text,
+/// none when no owner value applies.
+pub fn codex_config(engine: &[String], reserved: &[&str], applied: &Applied) -> Option<String> {
+    let lines = codex_lines(engine, reserved, applied);
+    if lines.is_empty() {
+        return None;
+    }
+    let mut text = lines.join("\n");
+    text.push('\n');
+    assert_eq!(text.lines().count(), lines.len());
+    Some(text)
 }
 
 /// Renders the owner's Codex values as `-c` settings, one `key=value` each in TOML, for

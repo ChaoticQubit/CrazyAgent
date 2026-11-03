@@ -166,6 +166,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         "Unit master instructions.",
         Duration::from_secs(3600),
         None,
+        &crate::harness_settings::apply::Applied::default(),
     )
     .unwrap();
     assert_eq!(
@@ -227,6 +228,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         &"x".repeat(host_limit + 1),
         Duration::from_secs(3600),
         None,
+        &crate::harness_settings::apply::Applied::default(),
     );
     assert_eq!(
         refused.err().map(|error| error.0),
@@ -265,6 +267,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         "Unit master instructions.",
         Duration::from_secs(3600),
         Some(&engine),
+        &crate::harness_settings::apply::Applied::default(),
     )
     .unwrap();
     let turn = runtime.join(format!("master-runtime-{}", tools_ref.as_str()));

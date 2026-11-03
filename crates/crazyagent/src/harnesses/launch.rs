@@ -85,10 +85,15 @@ pub(crate) const CLAUDE_BUILT_IN_AGENTS: [&str; 3] = ["Agent", "Workflow", "Team
 /// the turn's result, which the engine would read as the next task's reply.
 const CLAUDE_BACKGROUND_TASKS_OFF: (&str, &str) = ("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1");
 const CLAUDE_SETTINGS: &str = "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"disableAllHooks\":true,\"includeCoAuthoredBy\":false}";
-/// Claude Code settings the engine sets on some launches only, such as the key helper of a
-/// keyed account; no owner value ever takes one.
-pub(crate) const CLAUDE_ENGINE_KEYS: [&str; 2] =
-    ["apiKeyHelper", "skipDangerousModePermissionPrompt"];
+/// Every top-level Claude Code setting some launch the engine builds sets, master or team
+/// agent, keyed or not; no owner value ever takes one.
+pub(crate) const CLAUDE_ENGINE_KEYS: [&str; 5] = [
+    "apiKeyHelper",
+    "attribution",
+    "disableAllHooks",
+    "includeCoAuthoredBy",
+    "skipDangerousModePermissionPrompt",
+];
 /// Codex settings the engine sets on some launches only or writes into the agent's
 /// `config.toml`: the account's provider and model, the project's MCP servers and a pane's
 /// trusted folder; no owner value ever takes one.

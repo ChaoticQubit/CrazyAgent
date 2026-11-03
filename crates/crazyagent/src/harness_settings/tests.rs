@@ -351,3 +351,54 @@ fn a_real_executable_reports_its_version_within_the_limit() {
         None
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn a_verified_executable_is_asked_for_its_version_once_per_content() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path().canonicalize().unwrap();
+    let count = base.join("asked");
+    let executable = base.join("codex");
+    let write = |body: &str| {
+        std::fs::write(&executable, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    };
+    let asked = || {
+        std::fs::read_to_string(&count)
+            .map(|text| text.lines().count())
+            .unwrap_or(0)
+    };
+    let digest = |name: &str| format!("{}-{name}", base.display());
+    let limit = Duration::from_secs(20);
+    write(&format!(
+        "echo x >> '{}'; echo \"codex-cli 0.50.0\"",
+        count.display()
+    ));
+    for _ in 0..3 {
+        assert_eq!(
+            installed::version_of_digest(&executable, &digest("one"), limit).as_deref(),
+            Some("0.50.0")
+        );
+    }
+    assert_eq!(asked(), 1);
+    assert_eq!(
+        installed::version_of_digest(&executable, &digest("two"), limit).as_deref(),
+        Some("0.50.0")
+    );
+    assert_eq!(asked(), 2);
+    write(&format!("echo x >> '{}'; exit 3", count.display()));
+    assert_eq!(
+        installed::version_of_digest(&executable, &digest("three"), limit),
+        None
+    );
+    write(&format!(
+        "echo x >> '{}'; echo \"codex-cli 0.51.0\"",
+        count.display()
+    ));
+    assert_eq!(
+        installed::version_of_digest(&executable, &digest("three"), limit).as_deref(),
+        Some("0.51.0")
+    );
+    assert_eq!(asked(), 4);
+}
