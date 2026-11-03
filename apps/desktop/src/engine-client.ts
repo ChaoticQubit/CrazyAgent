@@ -1767,7 +1767,8 @@ export interface SkillFile {
 }
 
 /** One hook as Settings lists it: its plugin, Claude Code event and matcher, command, where
- * it applies, its On flags and the skill or MCP server it follows. */
+ * it applies, its On flags, the skill or MCP server it follows and the version a project
+ * switch names. */
 export interface HookView {
   id: string;
   name: string;
@@ -1781,6 +1782,7 @@ export interface HookView {
   on_here: boolean | null;
   follows: string | null;
   source: string;
+  version: number;
 }
 
 export interface SkillDetail {
