@@ -391,7 +391,7 @@ fn baseline_results(
 /// a checkout writes. Paths compare case-folded with the characters HFS+ ignores dropped,
 /// as a case-insensitive disk would. Inputs: the changed files and the protected paths.
 /// Output: the touched paths in order, each cut to `TEXT_BYTES_MAX`.
-fn protected(files: &[ChangedFile], entries: &[String]) -> Vec<String> {
+pub(crate) fn protected(files: &[ChangedFile], entries: &[String]) -> Vec<String> {
     let entries: Vec<String> = entries
         .iter()
         .map(|entry| format!("{}/", folded(entry.trim_end_matches('/'))))
@@ -427,7 +427,7 @@ fn folded(path: &str) -> String {
         .collect()
 }
 
-fn skips(
+pub(crate) fn skips(
     db: &Connection,
     project: &ProjectId,
     id: &ChangeSetId,
@@ -491,7 +491,7 @@ fn added_in(
 /// and character a reader cannot see or that reorders text becomes U+FFFD, and a text past
 /// `TEXT_BYTES_MAX` keeps its head cut on a character boundary with `...`. Input: the text.
 /// Output: the recorded text.
-fn recorded(text: &str) -> String {
+pub(crate) fn recorded(text: &str) -> String {
     let plain: String = text
         .chars()
         .map(|c| if hidden(c) { '\u{FFFD}' } else { c })

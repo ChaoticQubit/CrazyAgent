@@ -4,7 +4,9 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use trackwright_core::model::{Actor, ProjectKey, Refusal};
 use trackwright_core::store::{self, StoreError};
 
+pub mod context_import;
 pub mod host;
+pub(crate) mod render;
 pub mod settings;
 #[cfg(all(test, unix))]
 mod tests;
@@ -20,6 +22,10 @@ CREATE TABLE IF NOT EXISTS tracker_projects (
 CREATE TABLE IF NOT EXISTS tracker_settings (
     scope TEXT PRIMARY KEY NOT NULL,
     body TEXT NOT NULL CHECK (length(CAST(body AS BLOB)) BETWEEN 2 AND 1024)
+);
+CREATE TABLE IF NOT EXISTS tracker_context_imports (
+    project TEXT PRIMARY KEY NOT NULL,
+    imported_ms INTEGER NOT NULL
 );";
 
 const PROJECT_OF_KEY: &str = "SELECT project FROM tracker_projects WHERE key = ?1";

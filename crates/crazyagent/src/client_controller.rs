@@ -14,6 +14,7 @@ mod account_profile;
 mod accounts;
 mod agents;
 mod changes;
+mod checks;
 mod cleanup;
 mod coord;
 mod ide;

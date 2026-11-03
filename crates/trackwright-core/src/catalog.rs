@@ -192,6 +192,24 @@ const BODY: FieldType = FieldType::Text(TextField::Body);
 const PRIORITY: FieldType = FieldType::Integer { min: 0, max: 4 };
 const STATUS: FieldType = FieldType::Choice(Named::TicketStatus);
 const KIND: FieldType = FieldType::Choice(Named::TicketKind);
+const PARENT: FieldSpec = opt(
+    "parent",
+    FieldType::Ticket,
+    "The parent ticket, open and in the same project.",
+);
+const RELEASE: FieldSpec = opt(
+    "release",
+    FieldType::Text(TextField::VersionName),
+    "The product version it ships in, by name.",
+);
+const CYCLE: FieldSpec = opt(
+    "cycle",
+    FieldType::Integer {
+        min: 1,
+        max: CYCLES_PER_PROJECT_MAX as i64,
+    },
+    "The open cycle it is planned for, by number.",
+);
 const CASE: FieldType = FieldType::Test(TestObject::Case);
 const SET: FieldType = FieldType::Test(TestObject::Set);
 const PLAN: FieldType = FieldType::Test(TestObject::Plan);
@@ -205,7 +223,7 @@ const STABLE_NAME: FieldType = FieldType::Line {
 const BATCH: FieldType = FieldType::Line {
     bytes_max: RUN_BATCH_BYTES_MAX,
 };
-const RELEASE: FieldType = FieldType::Text(TextField::VersionName);
+const RELEASE_NAME: FieldType = FieldType::Text(TextField::VersionName);
 const CASE_ID: FieldSpec = req("id", CASE, "The case's id, for example CA-T3.");
 const SET_ID: FieldSpec = req("id", SET, "The set's id, for example CA-S1.");
 const PLAN_ID: FieldSpec = req("id", PLAN, "The plan's id, for example CA-P2.");
@@ -227,7 +245,8 @@ const _: () = assert!(RUN_TITLE_BYTES_MAX == TITLE_BYTES_MAX);
 const CATALOG: &[OpSpec] = &[
     OpSpec {
         kind: OpKind::Ready,
-        summary: "Lists unblocked work you may take: unclaimed or yours, by priority, active cycle and age.",
+        summary: "Lists unblocked work you may take: unclaimed or yours, by priority, active \
+                  cycle and age.",
         fields: &[PROJECT, CURSOR],
     },
     OpSpec {
@@ -247,7 +266,8 @@ const CATALOG: &[OpSpec] = &[
     },
     OpSpec {
         kind: OpKind::Show,
-        summary: "Shows one ticket: body, criteria with checks and latest evidence, links and recent events.",
+        summary: "Shows one ticket: body, criteria with checks and latest evidence, links and \
+                  recent events.",
         fields: &[ID, CURSOR],
     },
     OpSpec {
@@ -306,21 +326,47 @@ const CATALOG: &[OpSpec] = &[
             opt(
                 "status",
                 STATUS,
-                "An open status to start in; the project's create policy decides when absent.",
+                "An open status to start in, backlog when absent; under create = triage an \
+                 agent's ticket starts in triage.",
             ),
+            PARENT,
+            RELEASE,
+            CYCLE,
             REQUEST_ID,
         ],
     },
     OpSpec {
         kind: OpKind::Edit,
-        summary: "Changes a ticket's title, body, kind or priority.",
+        summary: "Changes a ticket's title, body, kind, priority, parent, version or cycle.",
         fields: &[
             ID,
             VERSION,
             opt("title", TITLE, "The new title."),
             opt("body", BODY, "The new body."),
             opt("kind", KIND, "The new kind."),
-            opt("priority", PRIORITY, "The new priority."),
+            opt(
+                "priority",
+                PRIORITY,
+                "The new priority, 0 most urgent to 4 least.",
+            ),
+            PARENT,
+            RELEASE,
+            CYCLE,
+            opt(
+                "parent_clear",
+                FieldType::Flag,
+                "true takes it out of its parent.",
+            ),
+            opt(
+                "release_clear",
+                FieldType::Flag,
+                "true takes it out of its version.",
+            ),
+            opt(
+                "cycle_clear",
+                FieldType::Flag,
+                "true takes it out of its cycle.",
+            ),
             REQUEST_ID,
         ],
     },
@@ -340,7 +386,7 @@ const CATALOG: &[OpSpec] = &[
     },
     OpSpec {
         kind: OpKind::Claim,
-        summary: "Assigns an unclaimed ticket to you; one claimer wins.",
+        summary: "Assigns an unclaimed ticket to you, ready or not; one claimer wins.",
         fields: &[ID, VERSION, REQUEST_ID],
     },
     OpSpec {
@@ -353,7 +399,6 @@ const CATALOG: &[OpSpec] = &[
         summary: "Records that a ticket waits for another one to close.",
         fields: &[
             ID,
-            VERSION,
             req("on", FieldType::Ticket, "The ticket it waits for."),
             REQUEST_ID,
         ],
@@ -363,7 +408,6 @@ const CATALOG: &[OpSpec] = &[
         summary: "Removes a dependency.",
         fields: &[
             ID,
-            VERSION,
             req(
                 "on",
                 FieldType::Ticket,
@@ -406,7 +450,8 @@ const CATALOG: &[OpSpec] = &[
     },
     OpSpec {
         kind: OpKind::CheckAdd,
-        summary: "Adds a check that proves a criterion: a test, a change, a manual check or a CI run.",
+        summary: "Adds a check that proves a criterion: a test, a change, a manual check or a \
+                  CI run.",
         fields: &[
             ID,
             POSITION,
@@ -580,7 +625,8 @@ const CATALOG: &[OpSpec] = &[
             opt(
                 "starts_day",
                 FieldType::Day,
-                "Its first day, YYYY-MM-DD; today when absent.",
+                "Its first day, YYYY-MM-DD; when absent, the day after the latest cycle or \
+                 today in UTC, whichever is later.",
             ),
             opt(
                 "days",
@@ -597,7 +643,8 @@ const CATALOG: &[OpSpec] = &[
     },
     OpSpec {
         kind: OpKind::CycleClose,
-        summary: "Closes a cycle; unfinished work rolls over as the project's rollover policy says.",
+        summary: "Closes a cycle; unfinished work rolls over as the project's rollover policy \
+                  says.",
         fields: &[
             PROJECT,
             req(
@@ -622,7 +669,6 @@ const CATALOG: &[OpSpec] = &[
         fields: &[
             PROJECT,
             req("path", FieldType::Path, "The Markdown file to read."),
-            REQUEST_ID,
         ],
     },
     OpSpec {
@@ -741,7 +787,7 @@ const CATALOG: &[OpSpec] = &[
             ),
             opt(
                 "release",
-                RELEASE,
+                RELEASE_NAME,
                 "Cover the criteria of this release's tickets; give ticket or release.",
             ),
             CURSOR,
@@ -848,7 +894,7 @@ const CATALOG: &[OpSpec] = &[
             req("name", TITLE, "One line naming the plan."),
             opt(
                 "release",
-                RELEASE,
+                RELEASE_NAME,
                 "The project's release version the plan is for.",
             ),
             opt(

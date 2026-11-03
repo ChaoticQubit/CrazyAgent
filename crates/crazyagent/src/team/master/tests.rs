@@ -3619,6 +3619,7 @@ fn a_live_master_remembers_and_recalls_memories_quoted_with_who_saved_them() {
     let listed_on: Vec<&str> = tool::TEAM_TOOLS
         .into_iter()
         .chain(tool::QUESTION_TOOLS)
+        .chain(tool::CHECKS_TOOLS)
         .collect();
     assert_eq!(listed, listed_on);
     let saved = "Saved to memory. recall finds it now, and agents started from now on get it.";
