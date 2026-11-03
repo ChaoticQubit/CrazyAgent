@@ -1,14 +1,16 @@
 use rusqlite::{Connection, Transaction};
 use std::path::Path;
 use trackwright_core::events;
+use trackwright_core::host::{Authority, Sight};
 use trackwright_core::model::{Actor, ProjectKey, codes};
 use trackwright_core::runs::{
     self, IntegrityRef, Inventory, NetworkMode, NewResult, NewSkip, PolicyRef, ResultOutcome,
     RunCancel, RunEnd, RunFinish, RunList, RunRecord, RunRetention, RunShow, RunStart, RunState,
-    RunView, RunWriters, SourceRef, StopReason, TestId, TestObject, Toolchain, ToolchainFamily,
-    Verdict, codes as run_codes,
+    RunView, RunWriters, Sighted, SourceRef, StopReason, TestId, TestObject, Toolchain,
+    ToolchainFamily, Verdict, codes as run_codes,
 };
 use trackwright_core::schema;
+use trackwright_core::standalone::Standalone;
 use trackwright_core::store::{self, Store, StoreError};
 use trackwright_core::tests_model::{
     CaseKind, CaseStatus, RESULT_MESSAGE_BYTES_MAX, RESULT_ROWS_PER_RECORD_MAX,
@@ -1331,4 +1333,40 @@ fn a_refused_record_keeps_the_run_running_and_an_unreadable_report_is_unknown() 
         refused(runs::finish(&tx, &engine, &completed, 2_006)),
         run_codes::RUN_FINISH_INVALID
     );
+}
+
+#[test]
+fn the_standalone_host_shows_every_actor_each_run_in_full() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = opened(dir.path());
+    let tx = store.transaction().unwrap();
+    project(&tx);
+    let engine = actor("engine:checks");
+    let run = started(&tx, &engine, 2_000);
+    let run = recorded(
+        &tx,
+        &engine,
+        &run,
+        &[("hidden::answers", ResultOutcome::Failed)],
+        2_001,
+    );
+    let run = finished(&tx, &engine, &run, Some(101), 2_002);
+    assert_eq!(run.verdict, Some(Verdict::Failed));
+    let show = RunShow {
+        id: run.id.clone(),
+        after: None,
+    };
+    for reader in ["agent:1", "owner"] {
+        let reader = actor(reader);
+        let sight = Standalone.run_sight(&tx, &key(), &reader, &run.id).unwrap();
+        assert_eq!(sight, Sight::Full);
+        assert_eq!(
+            runs::show_as(&tx, &Standalone, &reader, &show).unwrap(),
+            Sighted::Full(runs::show(&tx, &show).unwrap())
+        );
+        assert_eq!(
+            runs::list_as(&tx, &Standalone, &reader, &list_of(None)).unwrap(),
+            runs::list(&tx, &list_of(None)).unwrap()
+        );
+    }
 }
