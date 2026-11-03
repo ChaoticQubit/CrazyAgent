@@ -620,6 +620,7 @@ pub fn load_page(
         pools: page.take(ScheduleList::Pools, all.pools, |row| &row.id)?,
         projects: page.take(ScheduleList::Projects, all.projects, |row| &row.id)?,
         accounts: page.take(ScheduleList::Accounts, all.accounts, |row| &row.connection)?,
+        version: all.version,
     };
     assert!(page.bytes <= PAGE_BYTES_MAX);
     assert!(!page.full || page.last.is_some());

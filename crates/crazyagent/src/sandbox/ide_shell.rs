@@ -135,7 +135,7 @@ pub fn command(launch: &Launch<'_>) -> Result<Command, SandboxError> {
         .allow_extra_reads(launch.extra_reads)?;
     let profile = place.join("shell.sb");
     sandbox.install(&profile)?;
-    let base = sandbox.base_env();
+    let base = sandbox.base_env(true);
     let terminal = TERMINAL_VARIABLES.iter().map(|name| {
         let value = launch
             .incoming

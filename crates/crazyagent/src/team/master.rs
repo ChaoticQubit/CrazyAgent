@@ -1222,8 +1222,10 @@ fn lead_delegate(
             true,
         ));
     }
-    if let Some(role) = role {
-        super::names::set_task_role(&tx, project, id, role)?;
+    if let Some(role) = role
+        && super::names::set_task_role(&tx, project, id, role, 0)?.is_err()
+    {
+        return Err(state("team_task_role_stale"));
     }
     tx.commit().map_err(state)?;
     Ok((

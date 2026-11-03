@@ -1036,7 +1036,25 @@ pub fn send_to(
     let Some(id) = found else {
         return Ok(Err("team_agent_not_found"));
     };
-    Ok(send_to_id(connection, host, project, id, text)?.map(|()| id))
+    let status: String = connection
+        .query_row("SELECT status FROM team_agents WHERE id=?1", [id], |row| {
+            row.get(0)
+        })
+        .map_err(error)?;
+    if !AgentStatus::parse(&status).is_some_and(AgentStatus::live) {
+        return Ok(Err("team_agent_not_running"));
+    }
+    let name = AgentId::team(id).map_err(EngineError::from)?;
+    match type_prompt(host, &name, text) {
+        Ok(true) => {}
+        Ok(false) => return Ok(Err("team_message_invalid")),
+        Err(HostError(code)) if code == "terminal_agent_unknown" => {
+            return Ok(Err("team_agent_not_running"));
+        }
+        Err(_) => return Ok(Err("team_agent_unreachable")),
+    }
+    clear_waiting(connection, id)?;
+    Ok(Ok(id))
 }
 
 /// Types text into the terminal of exactly one sub-agent of a project, chosen by its team

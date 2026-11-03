@@ -134,11 +134,13 @@ pub struct AgentContext {
 }
 
 /// The project whose app and project instructions and instruction files each launch reads
-/// and writes into the agent's home, and the hooks the owner turned on for it.
+/// and writes into the agent's home, the hooks the owner turned on for it, and the owner's
+/// own instructions for the one team agent launched, empty for none.
 #[derive(Debug)]
 struct Process {
     project: crate::agent_home::AgentProject,
     hooks: Vec<EffectiveHook>,
+    agent: String,
 }
 
 /// The files one launch wrote into its agent home, whether a headless Claude run keeps its
@@ -211,6 +213,7 @@ pub fn for_project(
         process: Some(Box::new(Process {
             project: home_project,
             hooks,
+            agent: String::new(),
         })),
         transcripts,
         off_tools,
@@ -550,13 +553,9 @@ impl AgentContext {
         let (text, _) =
             crate::storage::agent_text::read(&tx, project, agent).map_err(unavailable)?;
         drop(tx);
+        assert!(text.len() <= crate::agent_home::TEXT_BYTES_MAX);
         if let Some(process) = self.process.as_mut() {
-            let given = &mut process.given;
-            assert!(given.section_bytes <= given.text.len());
-            let section = given.text.split_off(given.text.len() - given.section_bytes);
-            given.text = crate::agent_home::with_agent(std::mem::take(&mut given.text), &text);
-            given.text.push_str(&section);
-            assert!(given.text.len() <= crate::agent_home::PROCESS_BYTES_MAX);
+            process.agent = text;
         }
         Ok(self)
     }
@@ -763,8 +762,14 @@ impl AgentContext {
             Some(process) => {
                 let harness = crate::agent_home::Harness::from_id(id)
                     .ok_or_else(|| failure("launch_harness_unsupported"))?;
-                let given = crate::agent_home::text(&process.project)
+                let mut given = crate::agent_home::text(&process.project)
                     .map_err(|problem| LaunchError(problem.0))?;
+                assert!(given.section_bytes <= given.text.len());
+                let section = given.text.split_off(given.text.len() - given.section_bytes);
+                given.text =
+                    crate::agent_home::with_agent(std::mem::take(&mut given.text), &process.agent);
+                given.text.push_str(&section);
+                assert!(given.text.len() <= crate::agent_home::PROCESS_BYTES_MAX);
                 crate::agent_home::prepare(home, harness, &process.project, &given)
                     .map_err(|problem| LaunchError(problem.0))?;
                 given
