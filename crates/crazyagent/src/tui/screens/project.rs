@@ -342,7 +342,8 @@ impl Field {
 /// The General form on the Settings tab: the project's name, description,
 /// tech stack, platforms and research, saved as one engine edit.
 /// Holds the setup revision it started from, so a change made elsewhere is refused; after
-/// such a refusal it keeps the draft and takes the revision of the setup read next.
+/// such a refusal it keeps the draft, takes the revision of the setup read next and names the
+/// fields changed since the owner last saw them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) struct GeneralEdit {
     pub name: TextInput,
@@ -355,6 +356,50 @@ pub(in crate::tui) struct GeneralEdit {
     pub busy: bool,
     pub error: Option<String>,
     pub stale: bool,
+    seen: GeneralSeen,
+}
+
+/// The General form's fields in the setup last shown to the owner: the one the form opened
+/// at, or the one read after a stale refusal. Platforms and research are sorted, and research
+/// leaves out roadmap planning, which the form has no switch for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GeneralSeen {
+    name: String,
+    about: String,
+    tech_stack: Vec<String>,
+    platforms: Vec<Platform>,
+    research: Vec<ResearchKind>,
+}
+
+impl GeneralSeen {
+    fn of(setup: &StoredSetup) -> Self {
+        Self {
+            name: setup.name.clone(),
+            about: setup.about.clone(),
+            tech_stack: setup.tech_stack.clone(),
+            platforms: sorted(&setup.platforms),
+            research: sorted(&setup.research)
+                .into_iter()
+                .filter(|kind| *kind != ResearchKind::RoadmapPlanning)
+                .collect(),
+        }
+    }
+
+    /// Names the fields that differ between two readings of the setup.
+    /// Takes the earlier reading and the later one.
+    /// Returns the field names as the form labels them, in form order.
+    fn changed(&self, now: &Self) -> Vec<&'static str> {
+        [
+            ("name", self.name != now.name),
+            ("description", self.about != now.about),
+            ("tech stack", self.tech_stack != now.tech_stack),
+            ("platforms", self.platforms != now.platforms),
+            ("research", self.research != now.research),
+        ]
+        .into_iter()
+        .filter_map(|(field, differs)| differs.then_some(field))
+        .collect()
+    }
 }
 
 impl GeneralEdit {
@@ -379,6 +424,7 @@ impl GeneralEdit {
             busy: false,
             error: None,
             stale: false,
+            seen: GeneralSeen::of(setup),
         }
     }
 
@@ -889,9 +935,16 @@ impl ProjectScreen {
         match view {
             SetupView::Setup(Some(setup)) => {
                 if let Some(general) = self.general.as_mut().filter(|general| general.stale) {
+                    let now = GeneralSeen::of(&setup);
+                    let changed = general.seen.changed(&now);
+                    general.seen = now;
                     general.revision = setup.revision;
                     general.stale = false;
-                    general.error = Some(format!("This project changed elsewhere. {KEEP_MINE}"));
+                    general.error = Some(if changed.is_empty() {
+                        "This project changed elsewhere, but not on this form. Enter saves your edit; Esc keeps the saved one.".to_owned()
+                    } else {
+                        format!("Changed elsewhere: {}. {KEEP_MINE}", changed.join(", "))
+                    });
                 }
                 self.name = setup.name.clone();
                 self.setup = Some(*setup);
@@ -984,10 +1037,7 @@ impl ProjectScreen {
         let SetupQuery::Change { action, .. } = query else {
             return false;
         };
-        let stale = matches!(
-            code,
-            crate::storage::versioned::STALE_CODE | "project_setup_revision"
-        );
+        let stale = code == crate::storage::versioned::STALE_CODE;
         let reason = Some(if stale {
             STALE_READING.to_owned()
         } else {
@@ -2705,9 +2755,7 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         }
         "platforms_duplicate" => "Each platform can be picked once.",
         "research_duplicate" => "Each kind of research can be picked once.",
-        "stale_revision" | "project_setup_revision" => {
-            "This project changed since you opened the form. Open it again."
-        }
+        "stale_revision" => "This project changed since you opened the form. Open it again.",
         "invalid_project" => "This project no longer exists.",
         "change_outcome_unknown" => "We couldn't confirm the change. Check it and try again.",
         _ => return coded("That didn't work. Try again.", code),

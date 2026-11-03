@@ -1619,7 +1619,7 @@ fn the_general_form_saves_one_edit_at_the_revision_it_opened() {
     screen.apply(
         &change,
         Ok(SetupView::Changed(OwnerResult::Rejected {
-            code: "project_setup_revision".into(),
+            code: crate::storage::versioned::STALE_CODE.into(),
         })),
     );
     let general = screen.general.as_ref().unwrap();
@@ -1654,9 +1654,8 @@ fn the_general_form_saves_one_edit_at_the_revision_it_opened() {
     assert!(!general.stale);
     assert_eq!(
         general.error.as_deref(),
-        Some(
-            "This project changed elsewhere. Enter saves your edit over it; Esc keeps the saved one."
-        )
+        Some("Changed elsewhere: name. Enter saves your edit over it; Esc keeps the saved one."),
+        "the field changed elsewhere is named before Enter saves over it"
     );
     let drawn = text(&project_screen(&mut screen, 80, 24, &Look::plain()).rows);
     assert!(drawn.contains("Enter saves your edit over it"), "{drawn}");
@@ -1754,6 +1753,13 @@ fn a_general_save_takes_the_re_read_revision_only_after_a_stale_refusal() {
     let general = screen.general.as_ref().unwrap();
     assert_eq!(general.revision, 6);
     assert_eq!(general.name.value(), "Notes Pro");
+    assert_eq!(
+        general.error.as_deref(),
+        Some(
+            "This project changed elsewhere, but not on this form. Enter saves your edit; Esc keeps the saved one."
+        ),
+        "a change outside the form's fields names none"
+    );
 
     assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
     assert!(screen.general.is_none(), "Esc keeps the saved one");
@@ -1762,6 +1768,86 @@ fn a_general_save_takes_the_re_read_revision_only_after_a_stale_refusal() {
     assert_eq!(general.name.value(), "Notes CLI");
     assert_eq!((general.revision, general.stale), (6, false));
     assert_eq!(general.error, None);
+}
+
+#[test]
+fn a_stale_general_form_names_each_field_changed_since_the_owner_last_saw_it() {
+    let project = ProjectId::new("general-elsewhere").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Settings);
+    screen.key(key(KeyCode::Char('g')));
+    let control_u = KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL);
+    screen.key(control_u);
+    assert_eq!(screen.paste("Notes Pro"), ProjectReply::Handled);
+    let ProjectReply::Change(sent) = screen.key(key(KeyCode::Enter)) else {
+        panic!("the edit is sent");
+    };
+    let change = SetupQuery::Change {
+        action: *sent,
+        generation: 2,
+    };
+    let stale = || {
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: crate::storage::versioned::STALE_CODE.into(),
+        }))
+    };
+
+    screen.apply(&change, stale());
+    let read = screen
+        .next_query(20)
+        .expect("a stale refusal reads the setup again");
+    let mut elsewhere = stored(&project);
+    elsewhere.revision = 5;
+    elsewhere.about = "Shared notes.".into();
+    elsewhere.platforms = vec![Platform::Website, Platform::Cli];
+    elsewhere.research.push(ResearchKind::RoadmapPlanning);
+    screen.apply(
+        &read,
+        Ok(SetupView::Setup(Some(Box::new(elsewhere.clone())))),
+    );
+    let general = screen.general.as_ref().unwrap();
+    assert_eq!(general.name.value(), "Notes Pro", "the typed draft is kept");
+    assert_eq!(general.about.value(), "Terminal-first notes.");
+    assert_eq!(general.revision, 5);
+    assert_eq!(
+        general.error.as_deref(),
+        Some(
+            "Changed elsewhere: description, platforms. Enter saves your edit over it; Esc keeps the saved one."
+        ),
+        "the owner's own name edit and the roadmap choice the form has no switch for are not named"
+    );
+
+    let ProjectReply::Change(sent) = screen.key(key(KeyCode::Enter)) else {
+        panic!("Enter saves the edit over the named fields");
+    };
+    let SetupAction::Update {
+        expected_revision,
+        setup,
+        ..
+    } = &*sent
+    else {
+        panic!("the General form sends a setup update");
+    };
+    assert_eq!(*expected_revision, 5);
+    assert_eq!(setup.about, "Terminal-first notes.");
+    assert!(
+        setup.research.contains(&ResearchKind::RoadmapPlanning),
+        "the roadmap choice saved elsewhere is kept"
+    );
+    screen.apply(&change, stale());
+    let read = screen
+        .next_query(30)
+        .expect("a second stale refusal reads the setup again");
+    elsewhere.revision = 6;
+    elsewhere.tech_stack.push("tauri".into());
+    screen.apply(&read, Ok(SetupView::Setup(Some(Box::new(elsewhere)))));
+    assert_eq!(
+        screen.general.as_ref().unwrap().error.as_deref(),
+        Some(
+            "Changed elsewhere: tech stack. Enter saves your edit over it; Esc keeps the saved one."
+        ),
+        "fields already named are compared from the setup the owner was last shown"
+    );
 }
 
 #[test]
