@@ -6,12 +6,12 @@ use crate::engine::EngineError;
 use crate::engine::owner::failure;
 use crate::protocol::ProjectId;
 use crate::storage::versioned;
-use rusqlite::{Connection, Transaction, TransactionBehavior, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use serde_json::Value;
 
-/// The most rows one harness keeps at one scope: every key a catalog lists, and as many
-/// again that later catalogs stopped listing.
-pub const ROWS_MAX: usize = 2 * KEYS_MAX;
+/// The most stored keys the catalog no longer lists that one scope reads, in key order.
+/// Later ones are read once the owner resets earlier ones.
+pub const UNLISTED_MAX: usize = KEYS_MAX;
 
 const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS harness_settings (
     scope TEXT NOT NULL CHECK (scope IN ('app', 'project')),
@@ -24,39 +24,63 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS harness_settings (
     PRIMARY KEY (scope, project, harness, key)
 ) WITHOUT ROWID;";
 
-/// Reads the values one harness has stored at one scope, by key. Input: a connection or
-/// transaction on `engine.db`, the harness and the scope. Output: the values, or
-/// `harness_settings_unavailable` when the table cannot be read or holds a row no set
-/// could have written.
-pub fn stored(db: &Connection, harness: &str, scope: &Scope) -> Result<Stored, EngineError> {
+/// Reads the values one harness has stored at one scope, by key: every key the catalog
+/// lists, then at most `UNLISTED_MAX` keys it no longer lists, so old rows never make a
+/// scope unreadable. Input: a connection or transaction on `engine.db`, the catalog and
+/// the scope. Output: the values, or `harness_settings_unavailable` when the table cannot
+/// be read or holds a row no set could have written.
+pub fn stored(db: &Connection, catalog: &Catalog, scope: &Scope) -> Result<Stored, EngineError> {
     if !exists(db)? {
         return Ok(Stored::new());
     }
     let (scope_text, project) = columns(scope);
-    let mut statement = db
+    let mut values = Stored::new();
+    let mut one = db
         .prepare(
-            "SELECT key, value_json FROM harness_settings
-             WHERE scope = ?1 AND project = ?2 AND harness = ?3 ORDER BY key LIMIT ?4",
+            "SELECT value_json FROM harness_settings
+             WHERE scope = ?1 AND project = ?2 AND harness = ?3 AND key = ?4",
         )
         .map_err(unavailable)?;
-    let limit = i64::try_from(ROWS_MAX + 1).unwrap_or(i64::MAX);
-    let rows = statement
-        .query_map(params![scope_text, project, harness, limit], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-        })
+    for key in &catalog.keys {
+        let json: Option<String> = one
+            .query_row(
+                params![scope_text, project, catalog.harness, key.key],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(unavailable)?;
+        if let Some(json) = json {
+            values.insert(key.key.clone(), parsed(&json)?);
+        }
+    }
+    let listed = values.len();
+    let mut every = db
+        .prepare(
+            "SELECT key, value_json FROM harness_settings
+             WHERE scope = ?1 AND project = ?2 AND harness = ?3 ORDER BY key",
+        )
         .map_err(unavailable)?;
-    let mut values = Stored::new();
-    for row in rows {
-        let (key, json) = row.map_err(unavailable)?;
-        if !key_valid(&key) || json.len() > VALUE_JSON_MAX {
+    let mut rows = every
+        .query(params![scope_text, project, catalog.harness])
+        .map_err(unavailable)?;
+    let mut unlisted = 0;
+    while unlisted < UNLISTED_MAX {
+        let Some(row) = rows.next().map_err(unavailable)? else {
+            break;
+        };
+        let key: String = row.get(0).map_err(unavailable)?;
+        if catalog.key(&key).is_some() {
+            continue;
+        }
+        if !key_valid(&key) {
             return Err(unavailable(()));
         }
-        let value: Value = serde_json::from_str(&json).map_err(unavailable)?;
-        values.insert(key, value);
+        let json: String = row.get(1).map_err(unavailable)?;
+        values.insert(key, parsed(&json)?);
+        unlisted += 1;
     }
-    if values.len() > ROWS_MAX {
-        return Err(unavailable(()));
-    }
+    assert_eq!(values.len(), listed + unlisted);
+    assert!(values.len() <= catalog.keys.len() + UNLISTED_MAX);
     Ok(values)
 }
 
@@ -73,7 +97,7 @@ pub fn values(
 ) -> Result<Page, EngineError> {
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Deferred).map_err(unavailable)?;
     project_known(&tx, scope)?;
-    let (app, project) = layers(&tx, &catalog.harness, scope)?;
+    let (app, project) = layers(&tx, catalog, scope)?;
     let here = match scope {
         Scope::App => &app,
         Scope::Project(_) => &project,
@@ -101,7 +125,8 @@ pub fn values(
 
 /// Sets one key at one scope as the next version of its item, when the owner read the
 /// current one. Checks run in order: the key name, the project, whether the key may be set
-/// here, the value, then the version. Inputs: the engine database, the catalog, the
+/// here, the value, then the version. A reset may also remove a stored key the catalog no
+/// longer lists, whatever version is installed. Inputs: the engine database, the catalog, the
 /// installed version, the scope, the key, the value and the version the owner read.
 /// Output: Saved or Stale with the key's row, Refused with the code and the row, or
 /// `harness_settings_key_invalid`, `harness_settings_project_unknown`,
@@ -142,13 +167,9 @@ pub fn resolved(
     project: Option<&ProjectId>,
 ) -> Result<Vec<Resolved>, EngineError> {
     let tx = Transaction::new_unchecked(db, TransactionBehavior::Deferred).map_err(unavailable)?;
-    let app = stored(&tx, &catalog.harness, &Scope::App)?;
+    let app = stored(&tx, catalog, &Scope::App)?;
     let overrides = match project {
-        Some(project) => Some(stored(
-            &tx,
-            &catalog.harness,
-            &Scope::Project(project.clone()),
-        )?),
+        Some(project) => Some(stored(&tx, catalog, &Scope::Project(project.clone()))?),
         None => None,
     };
     Ok(resolve(catalog, installed, &app, overrides.as_ref()))
@@ -170,20 +191,21 @@ fn write(
     project_known(&tx, scope)?;
     let item = item(&catalog.harness, scope, key)?;
     let row = |tx: &Transaction<'_>| -> Result<Setting, EngineError> {
-        let (app, project) = layers(tx, &catalog.harness, scope)?;
+        let (app, project) = layers(tx, catalog, scope)?;
         let version = versioned::current(tx, &item)?.version;
         Ok(setting(
             catalog, installed, scope, key, &app, &project, version,
         ))
     };
-    if let Some(code) = refusal(catalog, installed, scope, key) {
+    let definition = catalog.key(key);
+    let retired = value.is_none() && definition.is_none() && holds(&tx, catalog, scope, key)?;
+    if let Some(code) = refusal(catalog, installed, scope, key).filter(|_| !retired) {
         return Ok(Written::Refused {
             code: code.into(),
             setting: row(&tx)?,
         });
     }
-    let definition = catalog.key(key);
-    assert!(definition.is_some());
+    assert!(definition.is_some() || retired);
     if let (Some(definition), Some(value)) = (definition, value) {
         check_value(definition, value)?;
     }
@@ -232,13 +254,48 @@ fn write(
     Ok(Written::Saved { setting })
 }
 
-fn layers(db: &Connection, harness: &str, scope: &Scope) -> Result<(Stored, Stored), EngineError> {
-    let app = stored(db, harness, &Scope::App)?;
+fn layers(
+    db: &Connection,
+    catalog: &Catalog,
+    scope: &Scope,
+) -> Result<(Stored, Stored), EngineError> {
+    let app = stored(db, catalog, &Scope::App)?;
     let project = match scope {
         Scope::App => Stored::new(),
-        Scope::Project(_) => stored(db, harness, scope)?,
+        Scope::Project(_) => stored(db, catalog, scope)?,
     };
     Ok((app, project))
+}
+
+/// Tells whether one key has a stored row at one scope, whether or not `stored` reads it.
+/// Inputs: the transaction, the catalog, the scope and a valid key. Output: true when the
+/// row exists, or `harness_settings_unavailable`.
+fn holds(
+    db: &Connection,
+    catalog: &Catalog,
+    scope: &Scope,
+    key: &str,
+) -> Result<bool, EngineError> {
+    if !exists(db)? {
+        return Ok(false);
+    }
+    let (scope_text, project) = columns(scope);
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM harness_settings
+         WHERE scope = ?1 AND project = ?2 AND harness = ?3 AND key = ?4)",
+        params![scope_text, project, catalog.harness, key],
+        |row| row.get(0),
+    )
+    .map_err(unavailable)
+}
+
+/// Reads one stored value. Input: its JSON text. Output: the value, or
+/// `harness_settings_unavailable` for text longer than any set writes or not JSON.
+fn parsed(json: &str) -> Result<Value, EngineError> {
+    if json.len() > VALUE_JSON_MAX {
+        return Err(unavailable(()));
+    }
+    serde_json::from_str(json).map_err(unavailable)
 }
 
 fn project_known(db: &Connection, scope: &Scope) -> Result<(), EngineError> {

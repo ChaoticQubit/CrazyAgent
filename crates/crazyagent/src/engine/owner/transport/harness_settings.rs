@@ -297,7 +297,8 @@ async fn handle(
     let executable = registered(engine, authority, &catalog.harness);
     let root = super::changes::engine_root(authority)?;
     tokio::task::spawn_blocking(move || {
-        let version = executable.and_then(|path| installed::version_of(&path, installed::LIMIT));
+        let version =
+            executable.and_then(|path| installed::version_cached(&path, installed::LIMIT));
         run(&root, &catalog, version.as_deref(), action)
     })
     .await
