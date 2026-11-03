@@ -434,6 +434,18 @@ fn input_over_each_bound_is_refused_plainly() {
             limit: RESULTS_PER_RUN_MAX
         })
     );
+    let cases: String = (0..=RESULTS_PER_RUN_MAX)
+        .map(|n| format!("<testcase name=\"t{n}\"/>"))
+        .collect();
+    assert_eq!(
+        parse(
+            ResultFormat::Junit,
+            format!("<testsuite>{cases}</testsuite>").as_bytes()
+        ),
+        Err(ParseRefusal::TooManyResults {
+            limit: RESULTS_PER_RUN_MAX
+        })
+    );
 
     let longest = "n".repeat(RESULT_NAME_BYTES_MAX);
     assert!(
@@ -489,7 +501,7 @@ fn input_over_each_bound_is_refused_plainly() {
 }
 
 #[test]
-fn a_repeated_name_gets_a_numbered_suffix() {
+fn a_repeated_name_is_suffixed_on_every_occurrence() {
     let names = [
         "works".to_string(),
         "works".to_string(),
@@ -500,6 +512,75 @@ fn a_repeated_name_gets_a_numbered_suffix() {
     let got: Vec<&str> = parsed.rows.iter().map(|row| row.name.as_str()).collect();
     assert_eq!(
         got,
-        vec!["works", "works [2]", "works [2] [2]", "works [3]"]
+        vec!["works [1]", "works [3]", "works [2]", "works [4]"]
     );
+
+    let shadowed = format!(
+        "{}running 1 test\ntest tests::it_works ... FAILED\n\nfailures:\n\nfailures:\n    tests::it_works\n\ntest result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n",
+        libtest_block(&["tests::it_works".to_string()])
+    );
+    let parsed = parse(ResultFormat::Libtest, shadowed.as_bytes()).expect("parses");
+    assert!(parsed.rows.iter().all(|row| row.name != "tests::it_works"));
+    assert_eq!(
+        parsed
+            .rows
+            .iter()
+            .map(|row| (row.name.as_str(), row.outcome))
+            .collect::<Vec<_>>(),
+        vec![
+            ("tests::it_works [1]", ResultOutcome::Passed),
+            ("tests::it_works [2]", ResultOutcome::Failed),
+        ]
+    );
+
+    let joined = "<testsuite><testcase classname=\"a\" name=\"b.c\"/><testcase classname=\"a.b\" name=\"c\"/><testcase classname=\"a\" name=\"d\"/></testsuite>";
+    let parsed = parse(ResultFormat::Junit, joined.as_bytes()).expect("parses");
+    let got: Vec<&str> = parsed.rows.iter().map(|row| row.name.as_str()).collect();
+    assert_eq!(got, vec!["a.b.c [1]", "a.b.c [2]", "a.d"]);
+}
+
+#[test]
+fn test_output_inside_a_failure_section_never_changes_the_report_structure() {
+    let original = parse(ResultFormat::Libtest, LIBTEST_FAILED.as_bytes()).expect("parses");
+    let marker = "assertion failed: !process_group_alive(second.process_group.unwrap())\n";
+    assert!(LIBTEST_FAILED.contains(marker));
+    let printed = LIBTEST_FAILED.replace(
+        marker,
+        &format!(
+            "{marker}error[E0001]: printed by the test\nerror: could not compile `printed`\nrunning 3 tests\ntest injected ... ok\ntest result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n"
+        ),
+    );
+    let parsed = parse(ResultFormat::Libtest, printed.as_bytes())
+        .expect("printed output stays inside its section");
+    assert!(!parsed.build_failed);
+    assert_eq!(parsed.summary, original.summary);
+    let outcomes = |parsed: &ParsedResults| {
+        parsed
+            .rows
+            .iter()
+            .map(|row| (row.name.clone(), row.outcome))
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(outcomes(&parsed), outcomes(&original));
+    let failed = row(
+        &parsed,
+        "research_that_runs_out_of_time_is_stopped_and_retried_then_failed",
+    );
+    assert_eq!(failed.outcome, ResultOutcome::Failed);
+    assert!(
+        failed
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("error[E0001]: printed by the test")),
+        "{failed:?}"
+    );
+
+    let uncaptured = LIBTEST_FAILED.replace(
+        "running 9 tests\n",
+        "running 9 tests\nerror[E0002]: printed with --nocapture\n",
+    );
+    assert_ne!(uncaptured, LIBTEST_FAILED);
+    let parsed = parse(ResultFormat::Libtest, uncaptured.as_bytes()).expect("parses");
+    assert!(!parsed.build_failed);
+    assert_eq!(outcomes(&parsed), outcomes(&original));
 }
