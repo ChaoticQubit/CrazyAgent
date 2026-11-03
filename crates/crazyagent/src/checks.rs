@@ -21,6 +21,8 @@ pub mod snapshot;
 #[cfg(all(test, unix))]
 mod tests {
     mod profile;
+    #[cfg(target_os = "macos")]
+    mod record;
 }
 
 pub use profile::{
