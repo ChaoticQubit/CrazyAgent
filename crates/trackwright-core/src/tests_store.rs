@@ -1742,10 +1742,7 @@ fn record<T: Serialize>(
     )
 }
 
-fn prepare<'t>(
-    tx: &'t Transaction<'_>,
-    sql: &'static str,
-) -> rusqlite::Result<Statement<'t>> {
+fn prepare<'t>(tx: &'t Transaction<'_>, sql: &'static str) -> rusqlite::Result<Statement<'t>> {
     assert!(
         STATEMENTS.contains(&sql),
         "every test model statement is listed"
