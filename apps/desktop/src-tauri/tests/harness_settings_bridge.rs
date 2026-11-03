@@ -287,9 +287,15 @@ async fn locked_and_layered(root: std::path::PathBuf) -> Result<(), Box<dyn Erro
             reason: "CrazyAgent runs every agent in its own sandbox.".into()
         }
     );
+    let engine_value = &fixture
+        .key("sandbox_mode")
+        .and_then(|key| key.locked.as_ref())
+        .unwrap()
+        .engine_value;
     assert_eq!(
         (&sandbox.value, sandbox.source, &sandbox.here),
-        (&json!("workspace-write"), "engine", &Value::Null)
+        (engine_value, "engine", &Value::Null),
+        "a locked key shows the catalog's engine value, null when the engine writes none"
     );
     assert_eq!(
         sandbox.options,
@@ -353,11 +359,9 @@ async fn locked_and_layered(root: std::path::PathBuf) -> Result<(), Box<dyn Erro
         (&json!("high"), &json!("high"), "app")
     );
     assert!(high.version > effort.version);
-    assert_eq!(
-        row(&saved, "sandbox_mode").value,
-        json!("workspace-write"),
-        "no set reaches a locked key"
-    );
+    let sandbox = row(&saved, "sandbox_mode");
+    assert_eq!(&sandbox.value, engine_value, "no set reaches a locked key");
+    assert_ne!(sandbox.value, json!("danger-full-access"));
 
     let scoped = fixture_page(&root, QUALIFIED, &project, Some(id.clone()));
     assert_eq!(scoped.project_id.as_deref(), Some(id.as_str()));
