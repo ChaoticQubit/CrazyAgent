@@ -2,7 +2,7 @@
 
 mod pane_support;
 
-use crazyagent::coord::adoption::Flag;
+use crazyagent::coord::adoption::{Adoption, Flag};
 use crazyagent::coord::settings::{CoordSettings, Nudges, Overlaps};
 use crazyagent::protocol::ProjectId;
 use crazyagent::usage::capture::{Attribution, Format, RunKind};
@@ -614,21 +614,23 @@ fn with_first_edit_the_hook_returns_the_reminder_once() {
     );
 }
 
-/// Runs the FirstEdit engine fallback (DEC-111 R4) for two agents of one harness: one whose
-/// real session record edits a file before any graphify call and one whose record queried
-/// the graph first. The engine's usage scan of each real home and the adoption tick run
-/// twice. Inputs: the team, the harness id, whether its launch fires no hooks, the record's
-/// path inside a home, and the edit and graph-query lines. Output: the engine notes of the
-/// editing agent and of the grounded one.
+/// Runs the engine's own nudges path, the one with no hook (DEC-111 R4, OQ-8), for two
+/// agents of one harness: one whose real session record edits a file before any graphify
+/// call and one whose record queried the graph first. The engine's usage scan of each real
+/// home and the adoption tick run twice. Inputs: the team, the nudges option, the harness
+/// id, whether its launch fires no hooks, the record's path inside a home, and the edit and
+/// graph-query lines. Output: the engine notes of the editing agent and of the grounded
+/// one, and the project's adoption view after the ticks.
 fn engine_fallback(
     team: &Team,
+    nudges: Nudges,
     harness: &str,
     hookless: bool,
     record: &str,
     edit: &Value,
     graph: &Value,
-) -> [Vec<String>; 2] {
-    let (db, project) = engine(team, Nudges::FirstEdit);
+) -> ([Vec<String>; 2], Adoption) {
+    let (db, project) = engine(team, nudges);
     let format = Format::of(harness).unwrap();
     let agents = [vec![edit], vec![graph, edit]].map(|lines| {
         let agent = tools_agent(&db, harness, hookless);
@@ -658,7 +660,8 @@ fn engine_fallback(
         }
         crazyagent::coord::adoption::tick(&db, &project, now_ms()).unwrap();
     }
-    agents.map(|(agent, _)| engine_notes(&db, agent))
+    let view = crazyagent::coord::adoption::view(&db, &project, &[], now_ms()).unwrap();
+    (agents.map(|(agent, _)| engine_notes(&db, agent)), view)
 }
 
 /// Under FirstEdit an agent without hooks gets the same reminder from the engine (DEC-111
@@ -674,8 +677,9 @@ fn with_first_edit_a_codex_agent_without_hooks_gets_the_engine_reminder_once() {
         "type": "function_call", "name": "exec_command",
         "arguments": json!({"cmd": "graphify query \"parser\""}).to_string(),
     }});
-    let [edited, grounded] = engine_fallback(
+    let ([edited, grounded], _) = engine_fallback(
         &Team::new(),
+        Nudges::FirstEdit,
         "codex",
         false,
         "sessions/2026/11/01/rollout-2026-11-01T14-00-00-t.jsonl",
@@ -703,6 +707,32 @@ fn with_first_edit_a_codex_agent_without_hooks_gets_the_engine_reminder_once() {
 /// first gets none, and a Claude Code agent with hooks is left to its hook.
 #[test]
 fn with_first_edit_a_bare_claude_agent_gets_the_engine_reminder_once() {
+    let ([edited, grounded], _) = claude_fallback(Nudges::FirstEdit, true);
+    assert_eq!(
+        edited,
+        [
+            "You are editing before any code-graph query. Run graphify query first if this touches code you have not mapped."
+        ],
+        "one engine reminder, the hook's own words"
+    );
+    assert_eq!(
+        grounded,
+        Vec::<String>::new(),
+        "a bare Claude agent that queried the graph first"
+    );
+    let ([hooked, _], _) = claude_fallback(Nudges::FirstEdit, false);
+    assert_eq!(
+        hooked,
+        Vec::<String>::new(),
+        "a Claude agent with hooks gets its reminder from the hook, not the engine"
+    );
+}
+
+/// Runs `engine_fallback` for two Claude Code agents whose real transcripts hold an Edit
+/// before any graphify call, and a graphify call then an Edit. Inputs: the nudges option
+/// and whether the launch fires no hooks. Output: the notes of the editing and the
+/// grounded agent, and the adoption view.
+fn claude_fallback(nudges: Nudges, hookless: bool) -> ([Vec<String>; 2], Adoption) {
     let call = |id: &str, name: &str, input: Value| {
         json!({"type": "assistant", "message": {
             "id": id, "role": "assistant",
@@ -720,26 +750,85 @@ fn with_first_edit_a_bare_claude_agent_gets_the_engine_reminder_once() {
         json!({"command": "graphify query \"parser\""}),
     );
     let record = "projects/-repo/0b6f1c52-5a8e-4f43-9a51-1f2d7c3e9a10.jsonl";
-    let [edited, grounded] =
-        engine_fallback(&Team::new(), "claude-code", true, record, &edit, &graphify);
+    engine_fallback(
+        &Team::new(),
+        nudges,
+        "claude-code",
+        hookless,
+        record,
+        &edit,
+        &graphify,
+    )
+}
+
+/// The bare agents' rows of an adoption view: the editing one, then the grounded one,
+/// checked to count each one's real transcript calls. Inputs: the view. Output: the rows.
+fn bare_rows(view: &Adoption) -> [&crazyagent::coord::adoption::AgentAdoption; 2] {
     assert_eq!(
-        edited,
+        view.counted.iter().position(|tool| tool == "graphify"),
+        Some(6)
+    );
+    let [grounded, edited] = &view.agents[..] else {
+        panic!("two agents, newest first: {view:?}");
+    };
+    assert!(edited.hookless && grounded.hookless);
+    assert_eq!(
+        edited.counts, [0; 8],
+        "the editing agent called no counted tool"
+    );
+    assert_eq!(edited.graphify, 0);
+    assert_eq!(
+        grounded.counts,
+        [0, 0, 0, 0, 0, 0, 1, 0],
+        "the grounded agent's graphify call, counted from its transcript"
+    );
+    assert_eq!(grounded.graphify, 1);
+    [edited, grounded]
+}
+
+/// With nudges Off, the default, a Claude Code agent launched with --bare (DEC-104
+/// bare-hooks) shows its real counts and its flags on the Process page like any other
+/// agent (OQ-8), and no reminder is sent.
+#[test]
+fn with_nudges_off_a_bare_claude_agent_shows_counts_and_flags_and_gets_no_reminder() {
+    assert_eq!(CoordSettings::default().nudges, Nudges::Off);
+    let ([edited_notes, grounded_notes], view) = claude_fallback(Nudges::Off, true);
+    let [edited, grounded] = bare_rows(&view);
+    assert_eq!(
+        edited.flags,
+        [Flag::EditsWithoutWork, Flag::Ungrounded],
+        "an edit with no declared work and ten busy minutes with no graph query"
+    );
+    assert_eq!(grounded.flags, [Flag::EditsWithoutWork]);
+    assert!(edited.reminded.is_empty() && grounded.reminded.is_empty());
+    assert_eq!(
+        [edited_notes, grounded_notes],
+        [Vec::<String>::new(), Vec::new()],
+        "nudges off sends nothing"
+    );
+}
+
+/// With the TenMinutes nudges a Claude Code agent launched with --bare gets one engine
+/// reminder per flag (OQ-8), however often the usage scan and the tick run, and the view
+/// marks each flag reminded.
+#[test]
+fn with_ten_minutes_a_bare_claude_agent_gets_one_reminder_per_flag() {
+    let ([edited_notes, grounded_notes], view) = claude_fallback(Nudges::TenMinutes, true);
+    assert_eq!(
+        edited_notes,
         [
-            "You are editing before any code-graph query. Run graphify query first if this touches code you have not mapped."
-        ],
-        "one engine reminder, the hook's own words"
+            Flag::EditsWithoutWork.reminder(),
+            Flag::Ungrounded.reminder()
+        ]
     );
     assert_eq!(
-        grounded,
-        Vec::<String>::new(),
-        "a bare Claude agent that queried the graph first"
+        grounded_notes,
+        [Flag::EditsWithoutWork.reminder()],
+        "its graph query grounds it, its edit still had no declared work"
     );
-    let [hooked, _] = engine_fallback(&Team::new(), "claude-code", false, record, &edit, &graphify);
-    assert_eq!(
-        hooked,
-        Vec::<String>::new(),
-        "a Claude agent with hooks gets its reminder from the hook, not the engine"
-    );
+    let [edited, grounded] = bare_rows(&view);
+    assert_eq!(edited.reminded, [Flag::EditsWithoutWork, Flag::Ungrounded]);
+    assert_eq!(grounded.reminded, [Flag::EditsWithoutWork]);
 }
 
 #[test]
