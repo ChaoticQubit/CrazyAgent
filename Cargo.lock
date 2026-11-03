@@ -5515,6 +5515,11 @@ dependencies = [
 name = "trackwright-cli"
 version = "0.2.0"
 dependencies = [
+ "crossterm",
+ "ratatui",
+ "serde",
+ "serde_json",
+ "tempfile",
  "trackwright-core",
 ]
 
@@ -5534,6 +5539,9 @@ dependencies = [
 name = "trackwright-mcp"
 version = "0.2.0"
 dependencies = [
+ "rusqlite",
+ "serde_json",
+ "tempfile",
  "trackwright-core",
 ]
 

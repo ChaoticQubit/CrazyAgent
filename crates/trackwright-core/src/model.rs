@@ -484,24 +484,86 @@ named_enum! {
         ImportPreview => "import_preview",
         ImportApply => "import_apply",
         PolicySet => "policy_set",
+        CaseList => "case_list",
+        CaseShow => "case_show",
+        SetShow => "set_show",
+        PlanList => "plan_list",
+        PlanShow => "plan_show",
+        RunList => "run_list",
+        RunShow => "run_show",
+        Coverage => "coverage",
+        CaseCreate => "case_create",
+        CaseEdit => "case_edit",
+        CaseLink => "case_link",
+        CaseUnlink => "case_unlink",
+        SetUpsert => "set_upsert",
+        SetAdd => "set_add",
+        SetRemove => "set_remove",
+        PlanUpsert => "plan_upsert",
+        PlanAdd => "plan_add",
+        PlanRemove => "plan_remove",
+        RunStart => "run_start",
+        RunRecord => "run_record",
+        RunFinish => "run_finish",
+        RunCancel => "run_cancel",
     }
 }
 
 impl OpKind {
     /// Tells whether the operation is one of the contract's writes. Output: false for the
-    /// eight reads (ready, list, show, history, roadmap, policy_get, export, schema).
+    /// nine ticket reads (ready, list, show, history, roadmap, policy_get, export,
+    /// import_preview, schema) and the eight test reads (`is_test_read`).
     pub fn is_write(self) -> bool {
-        !matches!(
+        !self.is_test_read()
+            && !matches!(
+                self,
+                OpKind::Ready
+                    | OpKind::List
+                    | OpKind::Show
+                    | OpKind::History
+                    | OpKind::Roadmap
+                    | OpKind::PolicyGet
+                    | OpKind::Export
+                    | OpKind::ImportPreview
+                    | OpKind::Schema
+            )
+    }
+
+    /// Tells whether the operation reads the test model: cases, sets, plans, runs or
+    /// coverage. Output: true for the eight test reads.
+    pub fn is_test_read(self) -> bool {
+        matches!(
             self,
-            OpKind::Ready
-                | OpKind::List
-                | OpKind::Show
-                | OpKind::History
-                | OpKind::Roadmap
-                | OpKind::PolicyGet
-                | OpKind::Export
-                | OpKind::ImportPreview
-                | OpKind::Schema
+            OpKind::CaseList
+                | OpKind::CaseShow
+                | OpKind::SetShow
+                | OpKind::PlanList
+                | OpKind::PlanShow
+                | OpKind::RunList
+                | OpKind::RunShow
+                | OpKind::Coverage
+        )
+    }
+
+    /// Tells whether the operation writes the test model. Output: true for the fourteen
+    /// case, set, plan and run writes.
+    pub fn is_test_write(self) -> bool {
+        matches!(
+            self,
+            OpKind::CaseCreate
+                | OpKind::CaseEdit
+                | OpKind::CaseLink
+                | OpKind::CaseUnlink
+                | OpKind::SetUpsert
+                | OpKind::SetAdd
+                | OpKind::SetRemove
+                | OpKind::PlanUpsert
+                | OpKind::PlanAdd
+                | OpKind::PlanRemove
+                | OpKind::RunStart
+                | OpKind::RunRecord
+                | OpKind::RunFinish
+                | OpKind::RunCancel
         )
     }
 }
