@@ -2334,13 +2334,16 @@ fn plan_roadmap(
 
 /// The tables whose rows belong to one project and go with it when it is removed.
 /// Live team agents are not listed: the team runtime stops them and keeps their rows.
-const REMOVED_WITH_PROJECT: [&str; 29] = [
+const REMOVED_WITH_PROJECT: [&str; 32] = [
     "research_jobs",
     "onboarding",
     "team_messages",
     "team_tasks",
     "team_owner_prompts",
     "team_settings",
+    "team_wake_rules",
+    "team_nesting",
+    "team_new_folder_limit",
     "team_time_limits",
     "team_master_switch",
     "team_session_switches",
@@ -2464,15 +2467,17 @@ fn set_agent_policy(
 /// Removes a project from CrazyAgent and leaves its folder on disk where it is.
 /// Takes the transaction, the project and the revision before the removal. Its open master
 /// conversation ends in the same change; its onboarding, research jobs, team conversation,
-/// tasks, settings and ended agents are deleted, so a waiting step is never claimed and a
-/// running one stops; its read folders, agent access, agent settings and its agents' own
-/// instructions go too. Its project-scoped MCP servers, skills, secrets and per-project
-/// switches are cleared too, so a new project reusing the id never inherits them. The
-/// versions of its read folders, agent access, agent settings, project instructions and
-/// team settings move on once more, so a project added again under the same id refuses a
-/// save from a screen read before the removal (V2V-1, V2SYNC-2); agent ids are never
-/// reused, so its agents' instruction versions are dropped. Returns `invalid_project` for
-/// an unknown project.
+/// tasks, settings (sub-agent nesting and the new folder limit among them), wake rules and
+/// ended agents are deleted, so a waiting step is never
+/// claimed and a running one stops; its read folders, agent access, agent settings and its
+/// agents' own instructions go too. Its project-scoped MCP servers, skills, secrets and
+/// per-project switches are cleared too, so a new project reusing the id never inherits
+/// them. The versions of its read folders, agent access, agent settings, project
+/// instructions, team settings and project wake rule move on once more, so a project added
+/// again under the same id refuses a save from a screen read before the removal (V2V-1,
+/// V2SYNC-2); agent ids are never reused, so its agents' instruction versions are dropped
+/// and their wake rule versions need no move. Returns `invalid_project` for an unknown
+/// project.
 fn remove(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
@@ -2507,6 +2512,7 @@ fn remove(
         crate::storage::versioned::instruction_settings_item(project_id),
         crate::storage::versioned::process_text_item(Some(project_id)),
         crate::storage::versioned::team_settings_item(project_id),
+        crate::storage::versioned::team_rule_item(Some(project_id), 0),
     ] {
         crate::storage::versioned::retire(tx, &item)?;
     }
