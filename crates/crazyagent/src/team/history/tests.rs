@@ -1056,3 +1056,49 @@ fn a_native_teammates_record_in_the_mates_home_is_found_and_read() {
         "{page}"
     );
 }
+
+/// OP-25 OP25-1: webhook URLs whose path is their secret (Slack, Discord) are masked.
+#[test]
+fn webhook_url_secrets_are_masked() {
+    assert_masked(
+        "POST https://hooks.slack.com/services/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\n\
+         POST https://discord.com/api/webhooks/123456789012345678/\
+         AbCdEfGhIjKlMnOpQrStUvWxYz0123456789-_AbCdEfGhIjKlMnOpQrStUvWxYz0123\n\
+         quokkafern done",
+        &[
+            "x9Yz8Wv7Ut6Sr5Qp4On3Ml2K",
+            "AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
+        ],
+        "quokkafern",
+    );
+}
+
+/// OP-25 OP25-1: an AWS temporary access key id (`ASIA...`) is masked like a long-lived
+/// one.
+#[test]
+fn an_aws_temporary_access_key_id_is_masked() {
+    assert_masked(
+        "aws_access_key_id = ASIAY34FZKBOKMUTVV7A\nquokkafern done",
+        &["ASIAY34FZKBOKMUTVV7A"],
+        "quokkafern",
+    );
+}
+
+/// OP-25 OP25-1: a `private_key` field and a key block written JSON-escaped on one line,
+/// as in a cloud service account file, are masked.
+#[test]
+fn a_private_key_field_and_a_json_escaped_key_block_are_masked() {
+    assert_masked(
+        "private_key: Kq9xW2LmP4nB7vR\n\
+         {\"type\": \"service_account\", \"private_key\": \"-----BEGIN PRIVATE KEY-----\\nMIIEvQIBADAN\\n\
+         Bg/kq+hk/iG9w\\n-----END PRIVATE KEY-----\\n\"}\n\
+         quokkafern done",
+        &[
+            "Kq9xW2LmP4nB7vR",
+            "MIIEvQIBADAN",
+            "Bg/kq+hk/iG9w",
+            "service_account",
+        ],
+        "quokkafern",
+    );
+}
