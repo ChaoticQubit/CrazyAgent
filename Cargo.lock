@@ -5514,7 +5514,10 @@ dependencies = [
 name = "trackwright-cli"
 version = "0.2.0"
 dependencies = [
+ "serde_json",
+ "tempfile",
  "trackwright-core",
+ "trackwright-mcp",
 ]
 
 [[package]]
