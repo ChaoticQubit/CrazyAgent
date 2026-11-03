@@ -13,8 +13,14 @@ pub const SERVER_NAME: &str = "trackwright";
 
 /// The longest JSON-RPC line the server reads, newline excluded: one request at the core's
 /// 16 KiB bound plus its JSON-RPC wrapping and escapes. A longer line is answered with
-/// `Request too large`, skipped to its newline, and serving goes on.
+/// `Request too large` and its top-level id when it has one, skipped to its newline without
+/// buffering it, and serving goes on.
 pub const LINE_BYTES_MAX: usize = 2 * REQUEST_BYTES_MAX;
+
+/// The most requests one JSON-RPC batch may hold (MCP 2025-03-26 batches). A longer or an
+/// empty batch gets one `Invalid Request` and none of it runs, so one line never fans out
+/// into an unbounded reply.
+pub const BATCH_REQUESTS_MAX: usize = 32;
 
 /// The MCP protocol versions the server speaks, oldest first. A client that asks for any
 /// other version is offered the latest, which it may accept or close on.
@@ -25,9 +31,12 @@ const PARSE_ERROR: i64 = -32700;
 const INVALID_REQUEST: i64 = -32600;
 const METHOD_NOT_FOUND: i64 = -32601;
 const INVALID_PARAMS: i64 = -32602;
+const ID_BYTES_MAX: usize = 256;
 
 const _: () = assert!(LINE_BYTES_MAX > REQUEST_BYTES_MAX);
 const _: () = assert!(REQUEST_BYTES_MAX == 16 * 1024);
+const _: () = assert!(BATCH_REQUESTS_MAX == 32);
+const _: () = assert!(ID_BYTES_MAX < LINE_BYTES_MAX);
 
 /// One MCP client's link to a tracker: the database connection, the host that answers for
 /// links, evidence and authority, and the actor every call runs as. The actor is fixed when
@@ -60,11 +69,11 @@ impl<H: Host> Session<H> {
     }
 }
 
-/// Serves the catalog as an MCP server over stdio JSON-RPC, one message per line, until the
-/// client closes its input. Inputs: the client's input and output, and the session every
-/// call runs in. Output: Ok at the end of input, or the input or output failure, or the
-/// failure of a database that cannot end a call's transaction; every request, refused ones
-/// included, gets its reply, and notifications get none.
+/// Serves the catalog as an MCP server over stdio JSON-RPC, one message or batch per line,
+/// until the client closes its input. Inputs: the client's input and output, and the session
+/// every call runs in. Output: Ok at the end of input, or the input or output failure, or the
+/// failure of a database that cannot end a call's transaction. Every request gets its reply,
+/// a batch gets one array of them, and notifications get none.
 pub fn serve<H: Host>(
     mut input: impl BufRead,
     mut output: impl Write,
@@ -74,7 +83,7 @@ pub fn serve<H: Host>(
     loop {
         let answered = match read_line(&mut input, &mut line)? {
             Line::End => return Ok(()),
-            Line::TooLong => Some(failure(Value::Null, INVALID_REQUEST, "Request too large")),
+            Line::TooLong(id) => Some(failure(id, INVALID_REQUEST, "Request too large")),
             Line::Read if line.trim_ascii().is_empty() => None,
             Line::Read => answer(line.trim_ascii(), session)?,
         };
@@ -86,7 +95,7 @@ pub fn serve<H: Host>(
 
 enum Line {
     Read,
-    TooLong,
+    TooLong(Value),
     End,
 }
 
@@ -108,11 +117,13 @@ fn read_line(input: &mut impl BufRead, line: &mut Vec<u8>) -> std::io::Result<Li
     if line.len() <= LINE_BYTES_MAX {
         return Ok(Line::Read);
     }
-    skip_line(input)?;
-    Ok(Line::TooLong)
+    let mut scan = IdScan::default();
+    scan.feed(line);
+    skip_line(input, &mut scan)?;
+    Ok(Line::TooLong(scan.id()))
 }
 
-fn skip_line(input: &mut impl BufRead) -> std::io::Result<()> {
+fn skip_line(input: &mut impl BufRead, scan: &mut IdScan) -> std::io::Result<()> {
     loop {
         let buffer = match input.fill_buf() {
             Ok(buffer) => buffer,
@@ -124,13 +135,149 @@ fn skip_line(input: &mut impl BufRead) -> std::io::Result<()> {
         }
         match buffer.iter().position(|&byte| byte == b'\n') {
             Some(end) => {
+                scan.feed(&buffer[..end]);
                 input.consume(end + 1);
                 return Ok(());
             }
             None => {
+                scan.feed(buffer);
                 let length = buffer.len();
                 input.consume(length);
             }
+        }
+    }
+}
+
+/// Finds the top-level `id` of one JSON-RPC object fed in pieces, keeping at most
+/// `ID_BYTES_MAX` bytes of it, so an oversized line is still answered with its own id.
+/// Strings, escapes and nested values are skipped; the id is null when the line is not an
+/// object, has no top-level id, or its id is not a short string or number.
+#[derive(Default)]
+struct IdScan {
+    depth: usize,
+    in_string: bool,
+    escaped: bool,
+    in_value: bool,
+    reading_key: bool,
+    key: Vec<u8>,
+    key_other: bool,
+    capturing: bool,
+    captured: Vec<u8>,
+    overflow: bool,
+    found: Option<Vec<u8>>,
+    stopped: bool,
+}
+
+impl IdScan {
+    fn feed(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            if self.stopped {
+                return;
+            }
+            self.step(byte);
+        }
+    }
+
+    fn step(&mut self, byte: u8) {
+        if self.in_string {
+            self.string_byte(byte);
+            return;
+        }
+        if self.depth == 0 {
+            match byte {
+                b'{' => self.depth = 1,
+                b' ' | b'\t' | b'\r' => {}
+                _ => self.stopped = true,
+            }
+            return;
+        }
+        if self.depth == 1 {
+            match byte {
+                b',' => return self.end_member(),
+                b'}' | b']' => {
+                    self.end_member();
+                    self.stopped = true;
+                    return;
+                }
+                b':' if !self.in_value => {
+                    self.in_value = true;
+                    self.capturing = self.key == b"id" && !self.key_other && self.found.is_none();
+                    return;
+                }
+                _ => {}
+            }
+        }
+        self.keep(byte);
+        match byte {
+            b'"' => {
+                self.in_string = true;
+                self.reading_key = self.depth == 1 && !self.in_value;
+                if self.reading_key {
+                    self.key.clear();
+                    self.key_other = false;
+                }
+            }
+            b'{' | b'[' => self.depth = self.depth.saturating_add(1),
+            b'}' | b']' => self.depth -= 1,
+            _ => {}
+        }
+        assert!(
+            self.depth >= 1,
+            "a nested close never ends the top-level object"
+        );
+    }
+
+    fn string_byte(&mut self, byte: u8) {
+        self.keep(byte);
+        if self.escaped {
+            self.escaped = false;
+            self.key_other |= self.reading_key;
+            return;
+        }
+        match byte {
+            b'\\' => self.escaped = true,
+            b'"' => {
+                self.in_string = false;
+                self.reading_key = false;
+            }
+            _ if self.reading_key && self.key.len() < 2 => self.key.push(byte),
+            _ => self.key_other |= self.reading_key,
+        }
+        assert!(self.key.len() <= 2);
+    }
+
+    fn keep(&mut self, byte: u8) {
+        if !self.capturing || self.overflow {
+            return;
+        }
+        if self.captured.len() == ID_BYTES_MAX {
+            self.overflow = true;
+            return;
+        }
+        self.captured.push(byte);
+        assert!(self.captured.len() <= ID_BYTES_MAX);
+    }
+
+    fn end_member(&mut self) {
+        if self.capturing && !self.overflow {
+            assert!(
+                self.found.is_none(),
+                "only the first top-level id is captured"
+            );
+            self.found = Some(std::mem::take(&mut self.captured));
+        }
+        self.capturing = false;
+        self.in_value = false;
+    }
+
+    fn id(&self) -> Value {
+        let Some(bytes) = &self.found else {
+            return Value::Null;
+        };
+        assert!(bytes.len() <= ID_BYTES_MAX);
+        match serde_json::from_slice::<Value>(bytes.trim_ascii()) {
+            Ok(id) if id.is_string() || id.is_number() => id,
+            _ => Value::Null,
         }
     }
 }
@@ -156,8 +303,30 @@ fn answer<H: Host>(text: &[u8], session: &Session<H>) -> std::io::Result<Option<
     let Ok(message) = serde_json::from_slice::<Value>(text) else {
         return Ok(Some(failure(Value::Null, PARSE_ERROR, "Parse error")));
     };
+    let batch = match message {
+        Value::Array(batch) => batch,
+        single => return answer_one(&single, session),
+    };
+    if batch.is_empty() || batch.len() > BATCH_REQUESTS_MAX {
+        let why = "Invalid Request: a batch holds 1 to 32 requests";
+        return Ok(Some(failure(Value::Null, INVALID_REQUEST, why)));
+    }
+    let mut replies = Vec::with_capacity(batch.len());
+    for message in &batch {
+        if let Some(reply) = answer_one(message, session)? {
+            replies.push(reply);
+        }
+    }
+    assert!(replies.len() <= batch.len());
+    if replies.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(Value::Array(replies)))
+}
+
+fn answer_one<H: Host>(message: &Value, session: &Session<H>) -> std::io::Result<Option<Value>> {
     let Some(message) = message.as_object() else {
-        let why = "Invalid Request: one JSON-RPC object per line";
+        let why = "Invalid Request: a JSON-RPC request is an object";
         return Ok(Some(failure(Value::Null, INVALID_REQUEST, why)));
     };
     let Some(id) = message.get("id") else {

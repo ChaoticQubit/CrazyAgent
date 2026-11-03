@@ -369,7 +369,10 @@ fn an_oversized_line_is_answered_with_its_top_level_id_wherever_it_stands() {
         &session,
         &[
             oversized(
-                r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"create","arguments":{"project":"CA","title":""#,
+                concat!(
+                    r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"create","#,
+                    r#""arguments":{"project":"CA","title":""#,
+                ),
                 r#""}},"id":"late-7"}"#,
             ),
             oversized(
