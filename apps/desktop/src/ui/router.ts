@@ -8,7 +8,7 @@ export const ADD_PROJECT_WAYS = ["clone", "folder"] as const;
 const PROJECT_ID_MAX = 256;
 const ACCOUNT_ID = /^[A-Za-z0-9_.:-]{1,128}$/;
 const SKILL_ID = /^[a-z0-9-]{1,64}$/;
-const HARNESS_ID = /^[a-z0-9-]{1,64}$/;
+const HARNESS_ID = /^[a-z0-9-]{1,32}$/;
 
 export type SettingsTab = typeof SETTINGS_TABS[number];
 export type ProjectTab = typeof PROJECT_TABS[number];

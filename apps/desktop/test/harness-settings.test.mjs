@@ -33,7 +33,7 @@ const screen = (loaded, extra = {}) => renderToStaticMarkup(createElement(view.H
   page: loaded, scope: "app", query: "", drafts: {}, busy: null, notes: {},
   onQuery: () => {}, onDraft: () => {}, onSave: () => {}, onReset: () => {}, onRetry: () => {}, ...extra,
 }));
-const controls = /<input|<select|role="switch"|>Save<|>Use default<|>Use app value</;
+const controls = /<input|<select|role="switch"|>Save<|>Use default<|>Clear project value</;
 
 test("a locked key shows its reason and no control", () => {
   const markup = row(locked());
@@ -67,10 +67,10 @@ test("an ordinary key is a switch, select or field with help, Save once changed 
   assert.match(stored, /<button[^>]*>Use default<\/button>/);
   const override = row(setting({ here: true, value: true, source: "project", version: 2 }), { scope: "project" });
   assert.match(override, />Set for this project</);
-  assert.match(override, /<button[^>]*>Use app value<\/button>/);
+  assert.match(override, /<button[^>]*>Clear project value<\/button>/);
   const inherited = row(setting({ value: false, source: "app" }), { scope: "project" });
   assert.match(inherited, />From the app setting</);
-  assert.doesNotMatch(inherited, />Use app value</, "a project page resets only its own override");
+  assert.doesNotMatch(inherited, />Clear project value</, "a project page resets only its own override");
   const choice = row(setting({ key: "theme", label: "Theme", type: "enum", options: ["dark", "light"], default: "dark", value: "dark" }));
   assert.match(choice, /<select[^>]*>/);
   assert.match(choice, /<option value="light">light<\/option>/);
@@ -220,11 +220,15 @@ test("the harness page has a route, and its commands go through the bridge with 
   const { parseRoute, formatRoute } = await import("../src/ui/router.ts");
   assert.deepEqual(parseRoute("#/settings/harnesses?harness=claude-code"), { name: "settings", tab: "harnesses", harness: "claude-code" });
   assert.equal(formatRoute({ name: "settings", tab: "harnesses", harness: "claude-code" }), "#/settings/harnesses?harness=claude-code");
-  for (const hash of ["#/settings/harnesses?harness=Claude", "#/settings/harnesses?harness=../x", "#/settings/harnesses?harness=", "#/settings/pools?harness=codex"]) {
+  for (const hash of ["#/settings/harnesses?harness=Claude", "#/settings/harnesses?harness=../x", "#/settings/harnesses?harness=", "#/settings/harnesses?harness=" + "a".repeat(33), "#/settings/pools?harness=codex"]) {
     assert.equal(parseRoute(hash).harness, undefined, hash);
   }
   assert.equal(client.harnessIdValid("qwen-code"), true);
-  assert.equal(client.harnessIdValid("a".repeat(65)), false);
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/harness_settings.rs", import.meta.url), "utf8");
+  assert.match(engine, /pub const HARNESS_BYTES_MAX: usize = 32;/, "the window bound below is the engine's");
+  assert.equal(client.harnessIdValid("a".repeat(32)), true);
+  assert.equal(client.harnessIdValid("a".repeat(33)), false, "the engine takes at most HARNESS_BYTES_MAX = 32 bytes");
+  assert.equal(parseRoute("#/settings/harnesses?harness=" + "a".repeat(32)).harness, "a".repeat(32));
   const source = readFileSync(new URL("../src/api-harness-settings.ts", import.meta.url), "utf8");
   assert.match(source, /call<HarnessSettingsPage>\("desktop_harness_settings", \{ harness, projectId \}\)/);
   assert.match(source, /call<void>\("desktop_set_harness_setting", \{ harness, projectId, key, value, version \}\)/);

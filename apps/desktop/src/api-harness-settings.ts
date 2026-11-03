@@ -67,7 +67,7 @@ export const VALUE_BYTES_MAX = 1024;
  * key, then keys stored there that the catalog no longer lists. */
 export const ROWS_MAX = 512;
 
-const HARNESS_ID = /^[a-z0-9-]{1,64}$/;
+const HARNESS_ID = /^[a-z0-9-]{1,32}$/;
 
 function assert(condition: boolean, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -240,9 +240,11 @@ export function canReset(key: Pick<HarnessSetting, "access" | "here">): boolean 
   return key.access.kind === "editable" && key.here !== null;
 }
 
-/** The reset button's words for the page's scope. Input: the scope. Output: the label. */
+/** The reset button's words for the page's scope. A project reset clears only the project's
+ * value, which then follows the app value or, with none, the default. Input: the scope.
+ * Output: the label. */
 export function resetLabel(scope: SettingScope): string {
-  return scope === "app" ? "Use default" : "Use app value";
+  return scope === "app" ? "Use default" : "Clear project value";
 }
 
 /** Reads one harness's settings page. Inputs: the harness id and the project id, or null for
