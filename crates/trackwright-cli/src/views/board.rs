@@ -1,5 +1,5 @@
 use super::text::{pad, safe};
-use super::wire::{Refused, Row, Rows, ask};
+use super::wire::{Refused, Row, Rows, Shown, ask};
 use super::{Client, Key, Notice, Outcome, Theme, Tone, fit, put, status_label, title_row};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -25,7 +25,8 @@ struct Column {
 }
 
 /// The board page: one column per working status, each holding the first `list` page of
-/// that status, with a move to the next or previous column sent as `move`.
+/// that status, with a move to the next or previous column sent as `move` carrying the
+/// version `show` read when the card was selected.
 pub struct Board {
     project: ProjectKey,
     columns: Vec<Column>,
@@ -52,8 +53,14 @@ impl Board {
     }
 
     /// Reads every column again, keeping each column's selected ticket selected while it
-    /// stays in that column. Input: the client. Output: Ok, or the first refusal.
+    /// stays in that column, then reads the selected card's version. Input: the client.
+    /// Output: Ok, or the first refusal.
     pub fn load(&mut self, client: &mut dyn Client) -> Result<(), Refused> {
+        self.read_columns(client)?;
+        self.read_selected(client)
+    }
+
+    fn read_columns(&mut self, client: &mut dyn Client) -> Result<(), Refused> {
         for column in &mut self.columns {
             let (page, cursor) = ask::<Rows>(
                 client,
@@ -67,6 +74,18 @@ impl Board {
                 .and_then(|id| column.rows.iter().position(|row| row.id == id))
                 .unwrap_or(0)
                 .min(column.rows.len().saturating_sub(1));
+        }
+        Ok(())
+    }
+
+    fn read_selected(&mut self, client: &mut dyn Client) -> Result<(), Refused> {
+        let column = &mut self.columns[self.focus];
+        let Some(row) = column.rows.get_mut(column.selected) else {
+            return Ok(());
+        };
+        if row.version.is_none() {
+            let (shown, _) = ask::<Shown>(client, OpKind::Show, json!({ "id": row.id }))?;
+            row.version = Some(shown.ticket.version);
         }
         Ok(())
     }
@@ -92,7 +111,10 @@ impl Board {
             Key::Char('<') => return self.shift(client, false),
             _ => return Outcome::Unused,
         }
-        Outcome::Used
+        match self.read_selected(client) {
+            Ok(()) => Outcome::Used,
+            Err(refused) => Outcome::Said(Notice::refused(&refused)),
+        }
     }
 
     fn shift(&mut self, client: &mut dyn Client, forward: bool) -> Outcome {
@@ -120,24 +142,30 @@ impl Board {
         else {
             return Outcome::Said(Notice::info("Nothing to move."));
         };
+        let Some(version) = card.version else {
+            return Outcome::Said(Notice::info(format!(
+                "Select {} again to read its version.",
+                safe(&card.id)
+            )));
+        };
         let moved = ask::<serde_json::Value>(
             client,
             OpKind::Move,
             json!({
                 "id": card.id,
                 "status": self.columns[to].status.as_str(),
-                "version": card.version,
+                "version": version,
             }),
         );
         match moved {
             Ok(_) => {
                 self.focus = to;
-                let loaded = self.load(client);
+                let loaded = self.read_columns(client);
                 let column = &mut self.columns[to];
                 if let Some(index) = column.rows.iter().position(|row| row.id == card.id) {
                     column.selected = index;
                 }
-                match loaded {
+                match loaded.and_then(|()| self.read_selected(client)) {
                     Ok(()) => Outcome::Used,
                     Err(refused) => Outcome::Said(Notice::refused(&refused)),
                 }

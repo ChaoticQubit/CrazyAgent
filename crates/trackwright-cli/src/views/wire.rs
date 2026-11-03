@@ -47,14 +47,17 @@ pub fn ask<T: DeserializeOwned>(
     Ok((data, envelope.cursor))
 }
 
-fn unreadable(op: OpKind) -> Refused {
+/// The refusal for a reply the views cannot read. Input: the operation. Output: the
+/// `reply_unreadable` refusal naming it.
+pub fn unreadable(op: OpKind) -> Refused {
     Refused {
         code: "reply_unreadable".to_owned(),
         message: format!("the {} reply is not one the views can read", op.as_str()),
     }
 }
 
-/// One row of a `list` or `ready` page.
+/// One row of a `list` or `ready` page. A `list` row carries no version; the board reads
+/// it with `show` when a card is selected and sends that version on `move`.
 #[derive(Clone, Debug, Deserialize)]
 pub struct Row {
     pub id: String,
@@ -65,35 +68,51 @@ pub struct Row {
     pub priority: u8,
     #[serde(default)]
     pub assignee: Option<String>,
-    pub version: i64,
+    #[serde(default)]
+    pub version: Option<i64>,
 }
 
 /// The data of a `list` or `ready` reply.
 #[derive(Debug, Deserialize)]
 pub struct Rows {
+    #[serde(rename = "tickets")]
     pub rows: Vec<Row>,
 }
 
-/// The data of a `show` reply.
+/// The data of a first `show` page: the ticket's fields and the first part of the rest.
 #[derive(Clone, Debug, Deserialize)]
 pub struct Shown {
+    pub ticket: ShownTicket,
+    #[serde(flatten)]
+    pub part: ShownPart,
+}
+
+/// The fields of the ticket a `show` reply names.
+#[derive(Clone, Debug, Deserialize)]
+pub struct ShownTicket {
     pub id: String,
+    pub version: i64,
     pub title: String,
-    #[serde(default)]
-    pub body: String,
     pub kind: TicketKind,
     pub status: TicketStatus,
     pub priority: u8,
     #[serde(default)]
     pub assignee: Option<String>,
     #[serde(default)]
-    pub release: Option<String>,
-    #[serde(default)]
-    pub cycle: Option<u32>,
-    #[serde(default)]
     pub closed_by: Option<String>,
     #[serde(default)]
     pub close_reason: Option<String>,
+}
+
+/// What one `show` page adds after the ticket's fields: a part of the body starting at
+/// `body_at`, then criteria, links and events, each continuing where the last page
+/// stopped.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct ShownPart {
+    #[serde(default)]
+    pub body_at: usize,
+    #[serde(default)]
+    pub body: String,
     #[serde(default)]
     pub criteria: Vec<ShownCriterion>,
     #[serde(default)]

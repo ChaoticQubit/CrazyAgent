@@ -1,5 +1,5 @@
 use super::text::{pad, safe, wrap};
-use super::wire::{Refused, Shown, ask};
+use super::wire::{Refused, Shown, ShownPart, ask, unreadable};
 use super::{
     Client, Key, Theme, check_label, criterion_label, criterion_mark, evidence_label, kind_label,
     put, status_label,
@@ -9,13 +9,19 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use serde_json::json;
 use std::cell::Cell;
-use trackwright_core::model::{CriterionState, OpKind};
+use trackwright_core::model::{
+    CRITERIA_PER_TICKET_MAX, CriterionState, LINKS_PER_TICKET_MAX, OpKind,
+};
+use trackwright_core::ops::SHOWN_EVENTS_MAX;
+use trackwright_core::text::BODY_BYTES_MAX;
 
 const STATE_CELLS: usize = 8;
 const EVIDENCE_CELLS: usize = 12;
 const LINK_KIND_CELLS: usize = 12;
 const LINK_STATE_CELLS: usize = 10;
 const EVENT_OP_CELLS: usize = 18;
+const SHOW_PAGES_MAX: usize =
+    1 + BODY_BYTES_MAX / 1024 + CRITERIA_PER_TICKET_MAX + LINKS_PER_TICKET_MAX + SHOWN_EVENTS_MAX;
 
 #[derive(Clone, Copy)]
 enum Role {
@@ -33,10 +39,30 @@ pub struct Detail {
 }
 
 impl Detail {
-    /// Reads one ticket with `show`. Inputs: the short id and the client. Output: the
-    /// detail, or the refusal.
+    /// Reads one ticket with `show`, following the cursor until every page is in: each
+    /// page must move the cursor and continue the body where the last one stopped. Inputs:
+    /// the short id and the client. Output: the detail, or the refusal.
     pub fn load(id: &str, client: &mut dyn Client) -> Result<Self, Refused> {
-        let (shown, _) = ask::<Shown>(client, OpKind::Show, json!({ "id": id }))?;
+        let (mut shown, mut cursor) = ask::<Shown>(client, OpKind::Show, json!({ "id": id }))?;
+        let mut pages = 1;
+        while let Some(at) = cursor {
+            if pages == SHOW_PAGES_MAX {
+                return Err(unreadable(OpKind::Show));
+            }
+            let (part, next) =
+                ask::<ShownPart>(client, OpKind::Show, json!({ "id": id, "cursor": at }))?;
+            let joins = part.body.is_empty() || part.body_at == shown.part.body.len();
+            if !joins || next.as_deref() == Some(at.as_str()) {
+                return Err(unreadable(OpKind::Show));
+            }
+            shown.part.body.push_str(&part.body);
+            shown.part.criteria.extend(part.criteria);
+            shown.part.links.extend(part.links);
+            shown.part.events.extend(part.events);
+            cursor = next;
+            pages += 1;
+        }
+        assert!(pages <= SHOW_PAGES_MAX);
         Ok(Self {
             shown,
             scroll: 0,
@@ -46,7 +72,7 @@ impl Detail {
 
     /// The ticket's short id. Output: the id as the reply gave it.
     pub fn id(&self) -> &str {
-        &self.shown.id
+        &self.shown.ticket.id
     }
 
     /// Acts on a key: Up, Down, PageUp and PageDown scroll, no further than the last
@@ -64,22 +90,21 @@ impl Detail {
     }
 
     fn lines(&self, limit: usize) -> Vec<(String, Role)> {
-        let shown = &self.shown;
+        let ticket = &self.shown.ticket;
+        let shown = &self.shown.part;
         let mut lines = vec![(
-            format!(" {}  {}", safe(&shown.id), safe(&shown.title)),
+            format!(" {}  {}", safe(&ticket.id), safe(&ticket.title)),
             Role::Heading,
         )];
         let mut facts = vec![
-            kind_label(shown.kind).to_owned(),
-            status_label(shown.status).to_owned(),
-            format!("P{}", shown.priority),
+            kind_label(ticket.kind).to_owned(),
+            status_label(ticket.status).to_owned(),
+            format!("P{}", ticket.priority),
         ];
-        facts.extend(shown.assignee.as_deref().map(safe));
-        facts.extend(shown.release.as_deref().map(safe));
-        facts.extend(shown.cycle.map(|number| format!("Cycle {number}")));
+        facts.extend(ticket.assignee.as_deref().map(safe));
         lines.push((format!(" {}", facts.join("  ")), Role::Muted));
-        if let Some(by) = &shown.closed_by {
-            let reason = shown.close_reason.as_deref().unwrap_or("");
+        if let Some(by) = &ticket.closed_by {
+            let reason = ticket.close_reason.as_deref().unwrap_or("");
             lines.push((
                 format!(" Closed by {}: {}", safe(by), safe(reason)),
                 Role::Muted,

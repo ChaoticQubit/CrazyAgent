@@ -73,7 +73,7 @@ fn data(client: &mut dyn Client, op: OpKind, input: Value) -> Value {
 }
 
 fn version(client: &mut dyn Client, id: &str) -> i64 {
-    data(client, OpKind::Show, json!({ "id": id }))["version"]
+    data(client, OpKind::Show, json!({ "id": id }))["ticket"]["version"]
         .as_i64()
         .unwrap()
 }
@@ -84,7 +84,7 @@ fn write(client: &mut dyn Client, op: OpKind, mut input: Value) -> Value {
     data(client, op, input)
 }
 
-fn create(client: &mut dyn Client, title: &str, kind: &str, priority: u8, release: &str) {
+fn create(client: &mut dyn Client, title: &str, kind: &str, priority: u8) {
     data(
         client,
         OpKind::Create,
@@ -94,7 +94,6 @@ fn create(client: &mut dyn Client, title: &str, kind: &str, priority: u8, releas
             "body": "",
             "kind": kind,
             "priority": priority,
-            "release": release,
         }),
     );
 }
@@ -152,39 +151,14 @@ fn seed(path: &Path) -> Local {
             "body": "The core opens or creates its own SQLite file, 0600 inside a 0700 folder.\nA host migrates the same tables into its own database instead.",
             "kind": "feature",
             "priority": 1,
-            "release": "0.1 Core",
         }),
     );
-    create(
-        client,
-        "Ready queue orders by priority",
-        "feature",
-        2,
-        "0.1 Core",
-    );
-    create(client, "Export escapes agent text", "bug", 0, "0.1 Core");
-    create(
-        client,
-        "Roadmap import reads RM-1 sections",
-        "feature",
-        3,
-        "0.2 Hosts",
-    );
-    create(
-        client,
-        "Schema v1 matches the catalog",
-        "chore",
-        2,
-        "0.1 Core",
-    );
-    create(client, LONG_TITLE, "feature", 1, "0.1 Core");
-    create(
-        client,
-        "Claim races leave exactly one winner",
-        "spike",
-        2,
-        "0.1 Core",
-    );
+    create(client, "Ready queue orders by priority", "feature", 2);
+    create(client, "Export escapes agent text", "bug", 0);
+    create(client, "Roadmap import reads RM-1 sections", "feature", 3);
+    create(client, "Schema v1 matches the catalog", "chore", 2);
+    create(client, LONG_TITLE, "feature", 1);
+    create(client, "Claim races leave exactly one winner", "spike", 2);
     move_to(client, "TW-1", "in_progress");
     move_to(client, "TW-2", "todo");
     move_to(client, "TW-3", "in_review");
@@ -199,37 +173,44 @@ fn seed(path: &Path) -> Local {
     write(
         client,
         OpKind::Depend,
-        json!({ "id": "TW-2", "blocks": "TW-7" }),
+        json!({ "id": "TW-7", "on": "TW-2" }),
     );
-    write(
+    data(
         client,
         OpKind::CriterionAdd,
         json!({ "id": "TW-1", "text": "The file is created 0600 in a 0700 folder" }),
     );
-    write(
+    data(
         client,
         OpKind::CriterionAdd,
         json!({ "id": "TW-1", "text": "Reopening the file keeps every row" }),
     );
-    write(
+    data(
         client,
         OpKind::CheckAdd,
         json!({
             "id": "TW-1",
-            "criterion": 1,
+            "position": 1,
             "kind": "test",
             "ref": "tests/store.rs::the_standalone_file_is_0600",
         }),
     );
-    write(
+    data(
         client,
         OpKind::CheckAdd,
-        json!({ "id": "TW-1", "criterion": 2, "kind": "manual", "ref": "reopen check" }),
+        json!({ "id": "TW-1", "position": 2, "kind": "manual", "ref": "reopen check" }),
     );
     data(
         client,
         OpKind::EvidenceRecord,
-        json!({ "id": "TW-1", "criterion": 1, "check": 1, "result": "pass", "ref": "local run" }),
+        json!({
+            "id": "TW-1",
+            "position": 1,
+            "kind": "test",
+            "ref": "tests/store.rs::the_standalone_file_is_0600",
+            "result": "pass",
+            "evidence": "local run",
+        }),
     );
     let shown = data(client, OpKind::Show, json!({ "id": "TW-1" }));
     data(
@@ -237,12 +218,12 @@ fn seed(path: &Path) -> Local {
         OpKind::CriterionSet,
         json!({
             "id": "TW-1",
-            "criterion": 1,
+            "position": 1,
             "state": "met",
             "version": shown["criteria"][0]["version"],
         }),
     );
-    write(
+    data(
         client,
         OpKind::Link,
         json!({ "id": "TW-1", "kind": "branch", "target": "feat/v3a-at1-core" }),
@@ -381,19 +362,25 @@ fn back_from_the_detail_view_returns_to_the_list_it_came_from() {
     assert!(!views.key(Key::Back, &mut owner));
 }
 
-fn row_version(replies: &[Value], id: &str) -> i64 {
-    let rows: Vec<&Value> = replies
+fn shown_version(replies: &[Value], id: &str) -> i64 {
+    let listed = replies
         .iter()
-        .filter_map(|reply| reply["data"]["rows"].as_array())
+        .filter_map(|reply| reply["data"]["tickets"].as_array())
         .flatten()
         .filter(|row| row["id"] == json!(id))
+        .count();
+    assert_eq!(listed, 1, "{id} must appear in exactly one board column");
+    let shown: Vec<&Value> = replies
+        .iter()
+        .map(|reply| &reply["data"]["ticket"])
+        .filter(|ticket| ticket["id"] == json!(id))
         .collect();
     assert_eq!(
-        rows.len(),
+        shown.len(),
         1,
-        "{id} must appear in exactly one board column"
+        "the board reads {id} once, when it is selected"
     );
-    rows[0]["version"].as_i64().unwrap()
+    shown[0]["version"].as_i64().unwrap()
 }
 
 #[test]
@@ -403,7 +390,7 @@ fn a_board_move_sends_the_version_it_read() {
     let mut recorder = Recorder::new(&mut owner);
     let mut views = Views::new(key());
     views.open(Page::Board, &mut recorder);
-    let read = row_version(&recorder.received, "TW-2");
+    let read = shown_version(&recorder.received, "TW-2");
     recorder.sent.clear();
     assert!(views.key(Key::Char('>'), &mut recorder));
     let (op, input) = recorder.sent.first().unwrap().clone();
@@ -414,8 +401,8 @@ fn a_board_move_sends_the_version_it_read() {
     );
     assert!(views.notice().is_none(), "{:?}", views.notice());
     let after = data(&mut owner, OpKind::Show, json!({ "id": "TW-2" }));
-    assert_eq!(after["status"], json!("in_progress"));
-    assert!(after["version"].as_i64().unwrap() > read);
+    assert_eq!(after["ticket"]["status"], json!("in_progress"));
+    assert!(after["ticket"]["version"].as_i64().unwrap() > read);
 }
 
 #[test]
@@ -465,8 +452,8 @@ fn a_stale_board_move_shows_one_line_and_changes_nothing() {
     );
     assert_eq!(rows[23].trim_end(), format!(" {line}"));
     let after = data(&mut owner, OpKind::Show, json!({ "id": "TW-2" }));
-    assert_eq!(after["status"], json!("todo"));
-    assert_eq!(after["priority"], json!(1));
+    assert_eq!(after["ticket"]["status"], json!("todo"));
+    assert_eq!(after["ticket"]["priority"], json!(1));
 }
 
 #[test]
@@ -500,7 +487,7 @@ fn the_list_loads_the_next_page_at_its_last_row() {
         recorder.received[0]
     );
     assert_eq!(
-        recorder.received[0]["data"]["rows"]
+        recorder.received[0]["data"]["tickets"]
             .as_array()
             .unwrap()
             .len(),

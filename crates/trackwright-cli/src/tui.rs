@@ -16,9 +16,10 @@ use std::fmt;
 use std::io::{IsTerminal, Write};
 use std::path::Path;
 use trackwright_core::model::{Actor, OpKind, ProjectKey, codes};
+use trackwright_core::ops::dispatch;
+use trackwright_core::requests::Request;
 use trackwright_core::standalone::Standalone;
 use trackwright_core::store::{Store, StoreError};
-use trackwright_core::{Request, dispatch};
 
 /// Why the standalone TUI could not start or stopped: one line for the person.
 #[derive(Debug)]
@@ -63,12 +64,12 @@ impl Client for Local {
             Err(error) => return failed(codes::STORE_FAILED, &error.to_string()),
         };
         let reply = dispatch(&tx, &Standalone, &self.actor, request);
-        let wire: Value = match serde_json::from_str(&reply.json) {
+        let wire: Value = match serde_json::from_str(reply.json()) {
             Ok(wire) => wire,
             Err(error) => return failed(codes::STORE_FAILED, &error.to_string()),
         };
-        assert_eq!(wire["ok"].as_bool(), Some(reply.ok));
-        if !reply.ok {
+        assert_eq!(wire["ok"].as_bool(), Some(reply.is_ok()));
+        if !reply.is_ok() {
             return wire;
         }
         match tx.commit() {
