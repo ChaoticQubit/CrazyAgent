@@ -52,7 +52,8 @@ BACKGROUND_ENDS = (
 )
 BACKGROUND_TOLD = "Commands you start in the background stop when your turn ends."
 FIRST_EDIT_REMINDER = "You are editing before any code-graph query. Run graphify query first if this touches code you have not mapped."
-PHRASES = (BACKGROUND_TOLD, FIRST_EDIT_REMINDER)
+REASK_EMPTY = "Your master got no reply text from your last turn. Reply now with a short summary of what you did for your task."
+PHRASES = (BACKGROUND_TOLD, FIRST_EDIT_REMINDER, REASK_EMPTY)
 NUDGE_KEYS = (
     ("first_edit", "adoption-first_edit-"),
     ("ten_minutes", "adoption-edits_without_start_work-"),
@@ -69,6 +70,7 @@ GIT_ENV = dict(os.environ, GIT_OPTIONAL_LOCKS="0", GIT_TERMINAL_PROMPT="0")
 GIT_SAFE = ("-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false")
 ROWS_PER_READ_MAX = 200
 READS_PER_CHECK_MAX = 400
+STEPS_MAX = 10_000
 CITES_PER_CHECK_MAX = 16
 EXCERPT_BYTES_MAX = 2000
 VALUE_BYTES_MAX = 4096
@@ -394,6 +396,7 @@ class Trial:
         self.project_mark, self.answer = project_mark, answer
         self.reads = None
         self.cites = None
+        self.out = None
         self.pid = self.find_project()
         if self.pid is None:
             return
@@ -1202,8 +1205,45 @@ def check_adoption(t):
     )
 
 
+def tui_steps(out):
+    try:
+        handle = (out / "steps.jsonl").open("r", encoding="utf-8", errors="replace")
+    except OSError:
+        return None, 0
+    steps, skipped = [], 0
+    with handle:
+        for number, line in enumerate(handle, 1):
+            if number > STEPS_MAX:
+                skipped += 1
+                break
+            if not line.strip():
+                continue
+            try:
+                step = json.loads(line)
+            except ValueError:
+                skipped += 1
+                continue
+            if isinstance(step, dict) and step.get("surface") == "tui":
+                steps.append(step)
+    return steps, skipped
+
+
 def check_tui(t):
-    return verdict("UNKNOWN", "not in the engine store: read the recorded frames for a clean Claude input border and Ctrl-T opening Team")
+    frames = len(list((t.out / "frames").glob("*"))) if (t.out / "frames").is_dir() else 0
+    gif = (t.out / "trial.gif").is_file()
+    steps, skipped = tui_steps(t.out)
+    extra = tui_frames(t.out) + ([{"kind": "log", "path": "steps.jsonl", "caption": "the run's recorded steps"}] if steps is not None else [])
+    failed = [f"step {step.get('n')} {step.get('title')}" for step in steps or () if step.get("ok") is False]
+    detail = (
+        f"frames={frames} trial.gif={'yes' if gif else 'no'}; "
+        + (f"TUI steps={len(steps)} failed={len(failed)}" if steps is not None else "no steps.jsonl")
+        + (f" unread step lines={skipped}" if skipped else "")
+    )
+    if not frames and not gif:
+        return verdict("FAIL", detail + "; no TUI recording in the run folder", extra=extra)
+    if failed:
+        return verdict("FAIL", detail + f"; failed TUI steps: {listed(failed)}", extra=extra)
+    return verdict("UNKNOWN", detail + "; manual check: read the recorded frames for a clean Claude input border and Ctrl-T opening Team", extra=extra)
 
 
 def check_import(t):
@@ -1598,12 +1638,37 @@ def check_nudges(t):
 
 
 def check_reask(t):
-    tables = [row[0] for row in t.db.execute("SELECT name FROM sqlite_master WHERE type='table' AND (name LIKE '%reask%' OR name LIKE '%re_ask%')")]
-    keys = [key for key in coord_json(t) if "reask" in key.replace("_", "").lower()]
-    empty = t.q("SELECT COUNT(*) FROM team_messages WHERE project=? AND author='engine' AND text LIKE ?", t.pid, f"{EMPTY_REPLY_NOTE}%")[0][0]
-    if not tables and not keys:
-        return verdict("UNKNOWN", f"not in this build: no re-ask setting (feat/reask-empty-reply has no commits); empty master replies noted={empty}")
-    return verdict("UNKNOWN", f"a re-ask setting exists ({listed(tables + keys)}) but this audit has no evidence rule for it yet; empty master replies noted={empty}")
+    noted = t.q("SELECT COUNT(*) FROM team_messages WHERE project=? AND author='engine' AND text LIKE ?", t.pid, f"{EMPTY_REPLY_NOTE}%")[0][0]
+    master = f"empty master replies noted={noted}, which the setting does not cover"
+    if not t.columns("team_reask_empty"):
+        return verdict("UNKNOWN", f"not in this build: no team_reask_empty table; {master}")
+    stored = t.q("SELECT reask FROM team_reask_empty WHERE project=?", t.pid)
+    on = not stored or stored[0][0] != 0
+    blank = Counter()
+    for agent_id, result in t.q("SELECT agent, result FROM team_tasks WHERE project=? AND agent IS NOT NULL AND status='done' ORDER BY id", t.pid):
+        if not (result or "").strip():
+            blank[agent_id] += 1
+    asked = Counter({a: s["phrases"][REASK_EMPTY] for a, s in t.transcripts.items() if s["phrases"][REASK_EMPTY]})
+    for a in sorted(asked):
+        t.cite(t.transcripts[a], t.transcripts[a]["first"][REASK_EMPTY], f"agent {a} first re-ask turn")
+    unread = sorted(a for a in blank if a not in t.transcripts or not t.transcripts[a]["files"])
+    short = [f"agent {a} empty={n} re-asks={asked[a]}" for a, n in sorted(blank.items()) if a not in unread and asked[a] < n]
+    detail = (
+        f"setting={'on' if on else 'off'}{'' if stored else ' (no row: on by default)'}; "
+        f"done tasks with no reply text={sum(blank.values())} ({listed(f'agent {a} x{n}' for a, n in sorted(blank.items())) or 'none'}); "
+        f"re-ask turns in transcripts={sum(asked.values())} ({listed(f'agent {a} x{n}' for a, n in sorted(asked.items())) or 'none'}); {master}"
+        + (f"; no transcript read for agents {listed(unread)}" if unread else "")
+    )
+    idle = "" if unread else "; not exercised: no sub-agent ended a task with no reply text"
+    if on:
+        if short:
+            return verdict("FAIL", detail + f"; no re-ask before the empty reply was reported: {listed(short)}")
+        return verdict("PASS", detail) if asked else verdict("UNKNOWN", detail + idle)
+    if asked:
+        return verdict("FAIL", detail + "; re-asked while the setting is off")
+    if len(unread) < len(blank):
+        return verdict("PASS", detail + "; reported with no re-ask, as the setting says")
+    return verdict("UNKNOWN", detail + idle)
 
 
 CHECKS = (
@@ -1696,7 +1761,7 @@ CHECKS = (
         "title": "The TUI shows a clean Claude input border and Ctrl-T opens Team",
         "proves": "The recorded TUI frames show the owner-facing screens; a person reads them.",
         "why": "Trial TUI surface (DEC-112 decision 1). Trial 2: UNKNOWN (read from frames only).",
-        "how": "Not in the engine store: the recorded frames and trial.gif in the run folder.",
+        "how": "The run folder's frames/, trial.gif and steps.jsonl: FAIL with no recording or a failed TUI step, otherwise a manual check of the frames.",
     },
     {
         "id": "T3-14", "name": "import", "run": check_import,
@@ -1777,10 +1842,10 @@ CHECKS = (
     },
     {
         "id": "T3-25", "name": "re-ask", "run": check_reask,
-        "title": "The master is asked again after an empty reply",
-        "proves": "An empty master reply leads to a second ask as the setting says.",
-        "why": "18.13 re-ask on an empty reply (feat/reask-empty-reply). UNKNOWN while the setting does not exist.",
-        "how": "A re-ask table or coord_settings key; engine team_messages noting an empty master reply.",
+        "title": "A sub-agent that ends a task with no reply text is asked once more, as the setting says",
+        "proves": "With re-ask on, the default, the engine re-asks the sub-agent before an empty reply is reported; with it off the empty reply is reported as is.",
+        "why": "Owner DEC-111: re-ask a sub-agent that ends a task with no reply text, a setting, default On. New in 18.13, no trial-2 result. UNKNOWN while the build has no team_reask_empty table.",
+        "how": "team_reask_empty for the project (no row is on); done team_tasks with a blank result per agent; the engine's re-ask turn text in each agent's transcript; engine notes of an empty master reply, which the setting does not cover.",
     },
 )
 
@@ -1851,6 +1916,7 @@ def tui_frames(out):
 
 def run_checks(t, out, chosen):
     results = []
+    t.out = out
     write_json(out / "db" / "agents.json", {"project": t.pid, "folder": t.repo, "reads": t.load_reads})
     for check in chosen:
         t.reads, t.cites = [], []
@@ -1861,8 +1927,6 @@ def run_checks(t, out, chosen):
         except Exception as failure:
             outcome = verdict("UNKNOWN", f"audit error: {type(failure).__name__}: {failure}")
         outcome["cites"] = t.cites
-        if check["id"] == "T3-13":
-            outcome["extra"] = outcome["extra"] + tui_frames(out)
         reads = t.reads
         t.reads = t.cites = None
         record(t, out, check, outcome, reads)

@@ -391,15 +391,31 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(record["result"], "FAIL")
         self.assertIn("Skill calls with no stored skill count: tdd=1", record["detail"])
 
-    def test_t3_13_tui_is_read_from_frames_and_points_at_the_recording(self):
+    def test_t3_13_tui_fails_without_a_recording_or_on_a_failed_tui_step_and_is_a_manual_check_otherwise(self):
         w = self.world
+        record = w.audit("T3-13")
+        self.assertEqual(record["result"], "FAIL")
+        self.assertIn("no TUI recording", record["detail"])
         (w.out / "frames").mkdir(parents=True)
         for name in ("0001.png", "0002.png", "0003.png"):
             (w.out / "frames" / name).write_bytes(b"\x89PNG")
         (w.out / "trial.gif").write_bytes(b"GIF89a")
+        steps = [
+            {"n": 1, "surface": "desktop", "title": "Open the project", "ok": False},
+            {"n": 2, "surface": "tui", "title": "Start the TUI recorder", "ok": True},
+        ]
+        (w.out / "steps.jsonl").write_text("".join(json.dumps(step) + "\n" for step in steps))
         record = w.audit("T3-13")
         self.assertEqual(record["result"], "UNKNOWN")
+        self.assertIn("manual check", record["detail"])
         self.assertEqual([item["path"] for item in record["evidence"] if item["kind"] in ("gif", "frame")], ["trial.gif", "frames/0001.png", "frames/0003.png"])
+        self.assertIn("steps.jsonl", [item["path"] for item in record["evidence"]])
+        with (w.out / "steps.jsonl").open("a") as handle:
+            handle.write(json.dumps({"n": 3, "surface": "tui", "title": "Open Team with Ctrl-T", "ok": False}) + "\n")
+        record = w.audit("T3-13")
+        self.assertEqual(record["result"], "FAIL")
+        self.assertIn("step 3 Open Team with Ctrl-T", record["detail"])
+        self.assertNotIn("Open the project", record["detail"])
 
     def imported(self, original_left):
         w = self.world
@@ -664,13 +680,49 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(record["result"], "FAIL")
         self.assertIn("ten-minute nudges sent under first_edit", record["detail"])
 
-    def test_t3_25_re_ask_is_unknown_while_no_setting_exists_and_counts_empty_master_replies(self):
+    def reask(self, setting, asked):
+        w = self.world
+        w.db.executescript("CREATE TABLE team_reask_empty (project TEXT PRIMARY KEY, reask INTEGER NOT NULL CHECK(reask IN (0,1)));")
+        if setting is not None:
+            w.row("team_reask_empty", project=PROJECT, reask=setting)
+        lead = w.agent("sub", mode="app_spawned")
+        w.row("team_tasks", project=PROJECT, source="master", harness="claude-code", tools=1, prompt="add calc.py", status="done",
+              agent=lead, result="", created_ms=w.now)
+        w.row("team_tasks", project=PROJECT, source="master", harness="claude-code", tools=1, prompt="add a test", status="done",
+              agent=lead, result="Added test_calc.py.", created_ms=w.now)
+        w.transcript(lead, [prompt(w.now - 5000, "add calc.py")] + ([prompt(w.now, audit.REASK_EMPTY)] if asked else []))
+
+    def test_t3_25_re_ask_fails_when_an_empty_reply_is_not_re_asked_as_the_setting_says(self):
         w = self.world
         w.row("team_messages", project=PROJECT, author="engine", state="note", created_ms=w.now,
               text="The master replied with no text, so no work was handed out. Send the message again, or hand a task to a sub-agent yourself.")
         record = w.audit("T3-25")
         self.assertEqual(record["result"], "UNKNOWN")
+        self.assertIn("not in this build", record["detail"])
         self.assertIn("empty master replies noted=1", record["detail"])
+        self.assertNotIn("feat/", record["detail"])
+        cases = (
+            (None, False, "FAIL", "no re-ask"),
+            (None, True, "PASS", "setting=on (no row: on by default)"),
+            (1, False, "FAIL", "no re-ask"),
+            (1, True, "PASS", "re-ask turns in transcripts=1"),
+            (0, False, "PASS", "setting=off"),
+            (0, True, "FAIL", "re-asked while the setting is off"),
+        )
+        for setting, asked, result, shown in cases:
+            self.tearDown()
+            self.setUp()
+            self.reask(setting, asked)
+            record = self.world.audit("T3-25")
+            self.assertEqual(record["result"], result, (setting, asked, record["detail"]))
+            self.assertIn(shown, record["detail"])
+            self.assertIn("done tasks with no reply text=1", record["detail"])
+        self.tearDown()
+        self.setUp()
+        self.world.db.executescript("CREATE TABLE team_reask_empty (project TEXT PRIMARY KEY, reask INTEGER NOT NULL CHECK(reask IN (0,1)));")
+        record = self.world.audit("T3-25")
+        self.assertEqual(record["result"], "UNKNOWN")
+        self.assertIn("not exercised", record["detail"])
 
     def test_every_check_writes_its_contract_record_with_evidence(self):
         w = self.world
