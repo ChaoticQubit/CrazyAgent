@@ -1,3 +1,6 @@
+use crate::tests_model::{
+    CaseProtectedVisibility, RunRetention, RunWriters, SkippedCounts, TestEvidence,
+};
 use serde::{Deserialize, Deserializer, Serialize, de};
 use std::fmt;
 
@@ -50,6 +53,7 @@ pub mod codes {
     pub const AGENT_EDIT_REFUSED: &str = "agent_edit_refused";
     pub const OWNER_ONLY: &str = "owner_only";
     pub const POLICY_VALUE_INVALID: &str = "policy_value_invalid";
+    pub const POLICY_LOCKED: &str = "policy_locked";
     pub const CRITERION_HAS_CHECKS: &str = "criterion_has_checks";
     pub const CHECKS_FULL: &str = "checks_full";
     pub const CHECK_EXISTS: &str = "check_exists";
@@ -146,6 +150,7 @@ pub mod codes {
         AGENT_EDIT_REFUSED,
         OWNER_ONLY,
         POLICY_VALUE_INVALID,
+        POLICY_LOCKED,
         CRITERION_HAS_CHECKS,
         CHECKS_FULL,
         CHECK_EXISTS,
@@ -393,6 +398,11 @@ named_enum! {
         CycleDays => "cycle_days",
         Rollover => "rollover",
         Import => "import",
+        TestEvidence => "test_evidence",
+        SkippedCounts => "skipped_counts",
+        CaseProtectedVisibility => "case_protected_visibility",
+        RunWriters => "run_writers",
+        RunRetention => "run_retention",
     }
 }
 
@@ -749,6 +759,11 @@ pub struct Policy {
     pub cycle_days: CycleDays,
     pub rollover: RolloverPolicy,
     pub import: ImportPolicy,
+    pub test_evidence: TestEvidence,
+    pub skipped_counts: SkippedCounts,
+    pub case_protected_visibility: CaseProtectedVisibility,
+    pub run_writers: RunWriters,
+    pub run_retention: RunRetention,
 }
 
 impl Default for Policy {
@@ -760,6 +775,11 @@ impl Default for Policy {
             cycle_days: CycleDays(14),
             rollover: RolloverPolicy::Auto,
             import: ImportPolicy::AutoOnce,
+            test_evidence: TestEvidence::Latest,
+            skipped_counts: SkippedCounts::Fail,
+            case_protected_visibility: CaseProtectedVisibility::Hidden,
+            run_writers: RunWriters::Any,
+            run_retention: RunRetention::PruneCount,
         }
     }
 }

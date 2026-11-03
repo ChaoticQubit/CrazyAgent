@@ -505,8 +505,9 @@ pub fn record(
 
 /// Finishes a running run and stores its verdict by the core's locked rules, with the
 /// host's integrity evidence. `not_started` needs a one-line reason and `report_unreadable`
-/// may carry one; no other end takes a reason. Inputs: the transaction, the writer, the
-/// finish and the time. Output: the finished run, or an error that wrote nothing.
+/// may carry one; no other end takes a reason. It leaves tickets as they were: the
+/// `run_finish` op and engines call `coverage::finish`. Inputs: the transaction, the writer,
+/// the finish and the time. Output: the finished run, or an error that wrote nothing.
 pub fn finish(
     tx: &Transaction<'_>,
     actor: &Actor,
@@ -535,9 +536,10 @@ pub fn finish(
     })
 }
 
-/// Interrupts a running run: no verdict, the reason `cancelled` or `timed_out`. Inputs:
-/// the transaction, the writer, the cancel and the time. Output: the interrupted run, or
-/// an error that wrote nothing.
+/// Interrupts a running run: no verdict, the reason `cancelled` or `timed_out`. It leaves
+/// tickets as they were; the `run_cancel` op and engines call `coverage::cancel`, which
+/// re-evaluates them. Inputs: the transaction, the writer, the cancel and the time. Output:
+/// the interrupted run, or an error that wrote nothing.
 pub fn cancel(
     tx: &Transaction<'_>,
     actor: &Actor,
@@ -928,7 +930,14 @@ fn prune(
     Ok(())
 }
 
-fn fill<T: Serialize>(rows: Vec<T>, rows_max: usize, bytes_max: usize) -> (Vec<T>, bool) {
+/// Fills a page in order to at most `rows_max` rows and `bytes_max` bytes of compact JSON,
+/// keeping at least one row. Inputs: the rows fetched, one more than a page when there are
+/// more, and the bounds. Output: the rows kept and whether rows were left over.
+pub(crate) fn fill<T: Serialize>(
+    rows: Vec<T>,
+    rows_max: usize,
+    bytes_max: usize,
+) -> (Vec<T>, bool) {
     assert!(rows_max >= 1);
     assert!(bytes_max >= 1);
     let fetched = rows.len();
@@ -1174,7 +1183,9 @@ fn list_row(key: &ProjectKey, row: &Row<'_>) -> rusqlite::Result<RunRow> {
     })
 }
 
-fn cut(mut text: String, bytes_max: usize) -> (String, bool) {
+/// Cuts a text to at most `bytes_max` bytes on a character boundary. Inputs: the text and
+/// the bound. Output: the text and whether it was cut.
+pub(crate) fn cut(mut text: String, bytes_max: usize) -> (String, bool) {
     if text.len() <= bytes_max {
         return (text, false);
     }

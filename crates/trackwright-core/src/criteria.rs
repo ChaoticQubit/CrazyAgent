@@ -76,6 +76,7 @@ enum Proof<'a> {
     Check(CheckKind, &'a str),
     Event(&'a HostEvent),
     Criterion(u32, &'a Actor),
+    Changed(&'a str),
 }
 
 impl Proof<'_> {
@@ -84,6 +85,7 @@ impl Proof<'_> {
             Proof::Check(kind, reference) => format!("{kind} check {reference}"),
             Proof::Event(event) => format!("{} {} changed", event.kind, event.target),
             Proof::Criterion(position, actor) => format!("criterion {position} set by {actor}"),
+            Proof::Changed(change) => (*change).to_owned(),
         }
     }
 }
@@ -403,6 +405,37 @@ pub fn notify(
             touched.push(ticket.short_id);
         }
         assert!(touched.len() <= NOTIFY_TICKETS_MAX);
+        Ok(touched)
+    })
+}
+
+/// Re-evaluates open tickets after a record beside them changed, such as an ended run: each
+/// criterion with checks is re-derived through the host, and under `close = evidence` a fully
+/// proven ticket closes as `host:evidence`. Inputs: the transaction, the host, open tickets'
+/// row ids (at most `NOTIFY_TICKETS_MAX`), what changed (at most `LINK_TARGET_BYTES_MAX`
+/// bytes, named in the close reason) and the time. Output: the tickets in order, or a refusal.
+pub(crate) fn reevaluate(
+    tx: &Transaction<'_>,
+    host: &impl Host,
+    tickets: &[i64],
+    change: &str,
+    now_ms: i64,
+) -> Result<Vec<ShortId>, StoreError> {
+    assert!(tickets.len() <= NOTIFY_TICKETS_MAX);
+    assert!(!change.is_empty());
+    assert!(change.len() <= text::LINK_TARGET_BYTES_MAX);
+    store::write(tx, || {
+        let mut touched = Vec::with_capacity(tickets.len());
+        for row in tickets {
+            let ticket = store::ticket_by_id(tx, *row)?;
+            assert!(
+                !ticket.status.is_closed(),
+                "only open tickets are re-evaluated"
+            );
+            evaluate(tx, host, &ticket, None, &Proof::Changed(change), now_ms)?;
+            touched.push(ticket.short_id);
+        }
+        assert_eq!(touched.len(), tickets.len());
         Ok(touched)
     })
 }
