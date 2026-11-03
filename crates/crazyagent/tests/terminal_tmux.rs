@@ -1378,6 +1378,20 @@ impl Drop for Lead {
     }
 }
 
+/// Waits until nothing accepts connections at `socket`, as after kill-server, whose server
+/// ends a moment after the command returns. Takes the socket.
+fn until_refused(socket: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while crazyagent::spawn_gate::connect_unix_std(socket).is_ok() {
+        assert!(
+            Instant::now() < deadline,
+            "{} still accepts connections",
+            socket.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn wait_text(path: &Path) -> String {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -1623,12 +1637,7 @@ fn a_native_lead_s_team_pane_calls_never_reach_its_own_server_once_its_teammates
     )
     .unwrap();
     assert!(killed.success());
-    assert_eq!(
-        crazyagent::spawn_gate::connect_unix_std(&lead.mates)
-            .unwrap_err()
-            .kind(),
-        std::io::ErrorKind::ConnectionRefused
-    );
+    until_refused(&lead.mates);
 
     let ended = "terminal_teammates_server_ended";
     assert_eq!(host.panes(&leader).unwrap_err().0, ended);
