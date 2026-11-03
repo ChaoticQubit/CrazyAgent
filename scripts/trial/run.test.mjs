@@ -7,7 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import { setTimeout as pause } from "node:timers/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { mask, renderPrompt } from "./run.mjs";
+import { mask, options, renderPrompt } from "./run.mjs";
 
 const TRIAL = dirname(fileURLToPath(import.meta.url));
 const RUN = join(TRIAL, "run.mjs");
@@ -417,4 +417,43 @@ test("a runner failure mid-run stops the desktop group, records the failure in t
   assert.ok(existsSync(join(paths.root, "audit-seen.json")));
   assert.ok(existsSync(join(paths.evidence, "report.html")));
   assertNoSecret(paths.evidence);
+});
+
+/** The fixture runner arguments with some flag pairs left out, so the runner takes their defaults. Input: the fixture, the trial number and the flags to drop. Output: the argv. */
+function defaults(paths, trial, ...flags) {
+  const argv = args(paths);
+  argv[argv.indexOf("--trial") + 1] = trial;
+  for (const flag of flags) argv.splice(argv.indexOf(flag), 2);
+  return argv;
+}
+
+test("--trial 4 runs the trial 4 spec, and the default report command builds the trial report", () => {
+  const paths = fixture("ca-trial-opts-");
+  const opts = options(defaults(paths, "4", "--desktop-cmd", "--report-cmd"));
+  assert.equal(opts.commands.desktop.at(-1), join(TRIAL, "..", "..", "apps", "desktop", "test", "native", "trial4.wdio.conf.mjs"));
+  assert.deepEqual(opts.commands.report, [process.execPath, join(TRIAL, "report.mjs"), "trial", paths.evidence]);
+  assert.equal(opts.mark, "TRIAL4-PROJECT-RULE");
+});
+
+test("with no --project the trial project goes in the owner's projects folder the engine holds, and none set refuses", () => {
+  const paths = fixture("ca-trial-home-");
+  const argv = defaults(paths, "4", "--project");
+  assert.throws(() => options(argv), /the engine has no projects folder .*set it in the app or pass --project/);
+  const home = join(paths.root, "CrazyAgent");
+  const db = new DatabaseSync(join(paths.engine, "engine.db"));
+  db.exec("CREATE TABLE projects_home (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), path TEXT NOT NULL)");
+  assert.throws(() => options(argv), /the engine has no projects folder; set it in the app or pass --project/);
+  db.prepare("INSERT INTO projects_home VALUES (1, ?)").run(home);
+  db.close();
+  assert.equal(options(argv).project, join(home, "ca-trial-4"));
+});
+
+test("the desktop run is told the Land on branch the runner seeded for its trial", async () => {
+  const paths = fixture("ca-trial-land-");
+  const seen = join(paths.root, "land-seen.json");
+  const desktop = [process.execPath, "--input-type=module", "-e", "import { writeFileSync } from \"node:fs\"; writeFileSync(process.env.TRIAL_EVIDENCE + \"/../land-seen.json\", JSON.stringify({ land: process.env.TRIAL_LAND_ON }));"];
+  const result = await runner(args(paths, { commands: { desktop } }), paths.env);
+  assert.ok([0, 1].includes(result.code), result.out);
+  assert.deepEqual(JSON.parse(readFileSync(seen, "utf8")), { land: "trial3-land" });
+  assert.match(git(paths.project, "branch", "--list", "trial3-land"), /trial3-land/);
 });

@@ -94,7 +94,7 @@ export function renderPrompt(template, project) {
 }
 
 /** Parses and validates the runner arguments. Input: argv after the script. Output: the options with resolved paths and command arrays; a bad argument throws a Refusal. */
-function options(argv) {
+export function options(argv) {
   const { values } = parseArgs({
     args: argv,
     strict: true,
@@ -120,9 +120,9 @@ function options(argv) {
   const trial = Number(values.trial);
   if (!Number.isInteger(trial) || trial < 1 || trial > 99) throw new Refusal(`--trial must be a whole number from 1 to 99, got ${values.trial}`);
   if (!/^[0-9a-f]{8}$/.test(values.build ?? "")) throw new Refusal("--build must be the stage sha8 the app was built from");
-  const project = absolute("--project", values.project ?? join(homedir(), "Projects", `ca-trial-${trial}`));
-  const evidence = absolute("--evidence", values.evidence ?? process.env.TRIAL_EVIDENCE ?? "");
   const engine = absolute("--engine", values.engine ?? process.env.CRAZYAGENT_ENGINE_ROOT ?? join(homedir(), "Library", "Application Support", "CrazyAgent", "engine"));
+  const project = absolute("--project", values.project ?? join(projectsHome(engine), `ca-trial-${trial}`));
+  const evidence = absolute("--evidence", values.evidence ?? process.env.TRIAL_EVIDENCE ?? "");
   const app = absolute("--app", values.app);
   if (values["frames-cmd"] === undefined && !/^[A-Za-z0-9:._-]{1,64}$/.test(values.pane ?? "")) throw new Refusal("--pane must name the herdr pane that shows the TUI");
   const mark = `TRIAL${trial}-PROJECT-RULE`;
@@ -130,7 +130,7 @@ function options(argv) {
     frames: command("--frames-cmd", values["frames-cmd"], ["herdr", "pane", "read", values.pane ?? ""]),
     desktop: command("--desktop-cmd", values["desktop-cmd"], [process.execPath, join(DESKTOP, "node_modules", "@wdio", "cli", "bin", "wdio.js"), "run", join(DESKTOP, "test", "native", `trial${trial}.wdio.conf.mjs`)]),
     audit: command("--audit-cmd", values["audit-cmd"], ["python3", "-I", join(TRIAL, "audit.py"), project, "--engine", engine, "--evidence", evidence, "--project-mark", mark]),
-    report: command("--report-cmd", values["report-cmd"], [process.execPath, join(TRIAL, "report.mjs"), evidence]),
+    report: command("--report-cmd", values["report-cmd"], [process.execPath, join(TRIAL, "report.mjs"), "trial", evidence]),
   };
   const needed = [PROMPT, join(engine, "engine.db"), join(app, "Contents", "Info.plist")];
   if (values["desktop-cmd"] === undefined) needed.push(commands.desktop[1], commands.desktop[3]);
@@ -152,6 +152,24 @@ function options(argv) {
     psAfterMs: seconds("--ps-after-s", values["ps-after-s"], 24 * 3600) * 1000,
     psEveryMs: seconds("--ps-every-s", values["ps-every-s"], 3600) * 1000,
   };
+}
+
+/** Reads the owner's projects folder, where the app lists projects, from the engine store, read only. Input: the engine root. Output: the folder; a store without one throws a Refusal. */
+function projectsHome(engine) {
+  if (!existsSync(join(engine, "engine.db"))) throw new Refusal(`missing ${join(engine, "engine.db")}`);
+  let row;
+  try {
+    const db = readOnly(engine);
+    try {
+      row = db.prepare("SELECT path FROM projects_home WHERE singleton=1").get();
+    } finally {
+      db.close();
+    }
+  } catch (error) {
+    throw new Refusal(`the engine has no projects folder (${error.message}); set it in the app or pass --project`);
+  }
+  if (typeof row?.path !== "string" || row.path.length === 0) throw new Refusal("the engine has no projects folder; set it in the app or pass --project");
+  return row.path;
 }
 
 /** Resolves one path argument and requires it to be absolute. Input: the flag name and its text. Output: the normalized path; a relative or empty one throws a Refusal. */
@@ -662,7 +680,7 @@ export async function main(argv) {
     finish();
     return 1;
   }
-  const env = childEnv({ TRIAL_EVIDENCE: opts.evidence, TRIAL_PROJECT: project, TRIAL_PROMPT: PROMPT, TRIAL_ENGINE: opts.engine });
+  const env = childEnv({ TRIAL_EVIDENCE: opts.evidence, TRIAL_PROJECT: project, TRIAL_PROMPT: PROMPT, TRIAL_ENGINE: opts.engine, TRIAL_LAND_ON: `trial${opts.trial}-land` });
   const envNames = Object.keys(env).sort();
   let recorder = null;
   let snapshots = null;
