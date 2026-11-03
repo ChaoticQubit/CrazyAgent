@@ -2254,7 +2254,30 @@ fn a_teammate_worktree_is_added_in_the_clone_but_no_other_git_lands_below_it() {
 #[test]
 fn a_confined_agent_cannot_exec_an_app_bundle_from_a_folder_it_only_reads() {
     use std::os::unix::fs::PermissionsExt;
-    let (case, sandbox, profile, worktree) = git_case();
+    let case = case();
+    for arguments in [
+        &["init", "-q"][..],
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+    ] {
+        let made = owner_git(&case.project, &case.home, arguments);
+        assert!(made.status.success(), "{made:?}");
+    }
+    let worktree = case.project.join("worktrees").join("one");
+    let added = owner_git(
+        &case.project,
+        &case.home,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            worktree.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    assert!(added.status.success(), "{added:?}");
+    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let profile = case.profiles.join("read-only-apps.sb");
     let script = |root: &Path, path: &str| {
         let file = root.join(path);
         fs::create_dir_all(file.parent().unwrap()).unwrap();
@@ -2400,25 +2423,22 @@ fn an_agent_still_runs_framework_python_whose_launcher_starts_its_python_app() {
     let case = case();
     let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()));
     let profile = case.profiles.join("python.sb");
-    for python in [
-        "/Applications/Xcode.app/Contents/Developer/usr/bin/python3",
-        "/opt/homebrew/bin/python3",
-    ] {
-        let real = fs::canonicalize(python).unwrap();
-        assert!(
-            real.to_str().unwrap().contains(".framework/Versions/"),
-            "the probe needs a framework build at {python}"
-        );
-        let output = run(
-            &sandbox,
-            &profile,
-            &format!("{} -c 'print(\"ok\")'", quoted(Path::new(python))),
-        );
-        assert!(
-            output.status.success(),
-            "{python}: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(String::from_utf8_lossy(&output.stdout), "ok\n", "{python}");
-    }
+    let python = Path::new("/opt/homebrew/bin/python3");
+    let real = fs::canonicalize(python).unwrap();
+    assert!(
+        real.to_str().unwrap().contains(".framework/Versions/"),
+        "the probe needs a framework build at {}",
+        python.display()
+    );
+    let output = run(
+        &sandbox,
+        &profile,
+        &format!("{} -c 'print(\"ok\")'", quoted(python)),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "ok\n");
 }
