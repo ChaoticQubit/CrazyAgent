@@ -42,9 +42,12 @@ pub const PYTHON_UNITTEST_SKIP_UNLESS: &str = "skipUnless";
 pub const PYTHON_IMPORTORSKIP: &str = "importorskip(";
 /// The Python marker `expectedFailure`, as in `@unittest.expectedFailure`.
 pub const PYTHON_EXPECTED_FAILURE: &str = "expectedFailure";
+/// The Python marker for a raised `unittest.SkipTest`, as in `raise SkipTest(...)`.
+pub const PYTHON_SKIP_EXCEPTION: &str = "raise SkipTest";
 
 const ATTRIBUTE_TOKENS_MAX: usize = 256;
 const CHAR_ESCAPE_CHARS_MAX: usize = 16;
+const INTERPOLATION_DEPTH_MAX: usize = 8;
 const REGEX_KEYWORDS: [&str; 14] = [
     "return",
     "typeof",
@@ -128,8 +131,9 @@ struct Before {
 /// untouched or moved skip is not new, a removed one is never listed and a marker inside
 /// a string or a comment is never a marker. Inputs: the language, the base text (empty
 /// for an added file) and the head text. Output: the added markers in head line order, or
-/// None when the head leaves a string, regular expression or comment open, since every
-/// later line could then be misread.
+/// None when the head leaves a string, regular expression or comment open, or nests
+/// interpolations past `INTERPOLATION_DEPTH_MAX`, since every later line could then be
+/// misread.
 pub fn added(language: Language, base: &str, head: &str) -> Option<Vec<Marker>> {
     let (head_hits, head_closed) = found(language, head);
     if !head_closed {
@@ -268,6 +272,14 @@ fn python_hits(tokens: &[Token<'_>]) -> Vec<(u32, &'static str)> {
             "skipUnless" => PYTHON_UNITTEST_SKIP_UNLESS,
             "importorskip" => PYTHON_IMPORTORSKIP,
             "expectedFailure" => PYTHON_EXPECTED_FAILURE,
+            "SkipTest"
+                if at
+                    .checked_sub(1)
+                    .is_some_and(|before| matches!(tokens[before].text, "raise" | "."))
+                    || texts(tokens, at + 1, 1) == ["("] =>
+            {
+                PYTHON_SKIP_EXCEPTION
+            }
             "pytest" if texts(tokens, at, 5) == ["pytest", ".", "mark", ".", "skip"] => PYTHON_SKIP,
             "pytest" if texts(tokens, at, 3) == ["pytest", ".", "skip"] => PYTHON_SKIP_CALL,
             "unittest" if texts(tokens, at, 3) == ["unittest", ".", "skip"] => PYTHON_UNITTEST_SKIP,
@@ -380,7 +392,7 @@ fn node_literal(chars: &[char], at: usize, code: &str, after_value: bool) -> Opt
         '/' if next == Some('*') => Some(block_comment_end(chars, at)),
         '/' if !after_value && regex_allowed(code) => Some(regex_end(chars, at)),
         quote @ ('"' | '\'') => Some(quoted_end(chars, at, quote, false)),
-        '`' => Some(quoted_end(chars, at, '`', true)),
+        '`' => Some(template_end(chars, at, 0)),
         _ => None,
     }
 }
@@ -388,16 +400,202 @@ fn node_literal(chars: &[char], at: usize, code: &str, after_value: bool) -> Opt
 fn python_literal(chars: &[char], at: usize) -> Option<Span> {
     match chars[at] {
         '#' => Some(line_end(chars, at)),
-        quote @ ('"' | '\'') => {
-            let triple = chars.get(at + 1) == Some(&quote) && chars.get(at + 2) == Some(&quote);
-            Some(if triple {
-                triple_end(chars, at, quote)
-            } else {
-                quoted_end(chars, at, quote, false)
-            })
-        }
+        '"' | '\'' => Some(python_string_end(chars, at, 0)),
         _ => None,
     }
+}
+
+/// Finds the end of one JavaScript template starting at its backtick, lexing each `${...}`
+/// field so a quote or backtick inside it never ends the template. Inputs: the text, the
+/// backtick's index and the nesting depth. Output: the span, open when the text ends
+/// first or a field stays open.
+fn template_end(chars: &[char], at: usize, depth: usize) -> Span {
+    let mut index = at + 1;
+    while index < chars.len() {
+        match chars[index] {
+            '\\' => index += 2,
+            '`' => {
+                return Span {
+                    end: index + 1,
+                    closed: true,
+                    value: true,
+                };
+            }
+            '$' if chars.get(index + 1) == Some(&'{') => {
+                match template_field_end(chars, index + 2, depth) {
+                    Some(end) => index = end,
+                    None => break,
+                }
+            }
+            _ => index += 1,
+        }
+    }
+    Span {
+        end: chars.len(),
+        closed: false,
+        value: true,
+    }
+}
+
+/// Finds the end of one `${...}` field of a JavaScript template, lexing the strings and
+/// templates inside it. Inputs: the text, the index after `${` and the nesting depth.
+/// Output: the index after the closing brace, or None when a literal inside stays open,
+/// the text ends or the nesting reaches `INTERPOLATION_DEPTH_MAX`.
+fn template_field_end(chars: &[char], from: usize, depth: usize) -> Option<usize> {
+    if depth >= INTERPOLATION_DEPTH_MAX {
+        return None;
+    }
+    let mut braces = 1usize;
+    let mut index = from;
+    while index < chars.len() {
+        let span = match chars[index] {
+            '{' => {
+                braces += 1;
+                index += 1;
+                continue;
+            }
+            '}' => {
+                braces -= 1;
+                index += 1;
+                if braces == 0 {
+                    return Some(index);
+                }
+                continue;
+            }
+            quote @ ('"' | '\'') => quoted_end(chars, index, quote, false),
+            '`' => template_end(chars, index, depth + 1),
+            _ => {
+                index += 1;
+                continue;
+            }
+        };
+        if !span.closed {
+            return None;
+        }
+        index = span.end;
+    }
+    None
+}
+
+/// Finds the end of one Python string starting at its quote, single or triple quoted; in
+/// an f-string or t-string each `{...}` field is lexed with its own strings, so a quote
+/// inside a field never ends the outer string. Inputs: the text, the quote's index and
+/// the nesting depth. Output: the span, open when the text ends first, a single-quoted
+/// string meets a newline or a field stays open.
+fn python_string_end(chars: &[char], at: usize, depth: usize) -> Span {
+    let quote = chars[at];
+    let triple = chars.get(at + 1) == Some(&quote) && chars.get(at + 2) == Some(&quote);
+    let fields = interpolated(chars, at);
+    let width = if triple { 3 } else { 1 };
+    let mut index = at + width;
+    while index < chars.len() {
+        let c = chars[index];
+        let closes = c == quote
+            && (!triple
+                || (chars.get(index + 1) == Some(&quote) && chars.get(index + 2) == Some(&quote)));
+        if closes {
+            return Span {
+                end: index + width,
+                closed: true,
+                value: true,
+            };
+        }
+        if c == '\n' && !triple {
+            return Span {
+                end: index,
+                closed: false,
+                value: true,
+            };
+        }
+        index = match c {
+            '\\' => index + 2,
+            '{' if fields && chars.get(index + 1) == Some(&'{') => index + 2,
+            '{' if fields => match python_field_end(chars, index + 1, depth) {
+                Some(end) => end,
+                None => break,
+            },
+            _ => index + 1,
+        };
+    }
+    Span {
+        end: chars.len(),
+        closed: false,
+        value: true,
+    }
+}
+
+/// Finds the end of one `{...}` field of a Python f-string: its expression with nested
+/// strings, brackets and braces, then a format spec after a top-level `:`. Inputs: the
+/// text, the index after `{` and the nesting depth. Output: the index after the closing
+/// brace, or None when a string inside stays open, the text ends or the nesting reaches
+/// `INTERPOLATION_DEPTH_MAX`.
+fn python_field_end(chars: &[char], from: usize, depth: usize) -> Option<usize> {
+    if depth >= INTERPOLATION_DEPTH_MAX {
+        return None;
+    }
+    let mut braces = 1usize;
+    let mut brackets = 0usize;
+    let mut index = from;
+    while index < chars.len() {
+        match chars[index] {
+            '{' => braces += 1,
+            '}' => {
+                braces -= 1;
+                if braces == 0 {
+                    return Some(index + 1);
+                }
+            }
+            '(' | '[' => brackets += 1,
+            ')' | ']' => brackets = brackets.saturating_sub(1),
+            ':' if braces == 1 && brackets == 0 => return python_spec_end(chars, index + 1, depth),
+            '"' | '\'' => {
+                let span = python_string_end(chars, index, depth + 1);
+                if !span.closed {
+                    return None;
+                }
+                index = span.end;
+                continue;
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+fn python_spec_end(chars: &[char], from: usize, depth: usize) -> Option<usize> {
+    let mut index = from;
+    while index < chars.len() {
+        match chars[index] {
+            '{' => index = python_field_end(chars, index + 1, depth + 1)?,
+            '}' => return Some(index + 1),
+            _ => index += 1,
+        }
+    }
+    None
+}
+
+/// Tells an f-string or t-string by the one or two prefix letters before its quote, each
+/// one of `r`, `b`, `u`, `f`, `t` in any case, with no name character before them and at
+/// least one `f` or `t`. Inputs: the text and the quote's index. Output: whether `{`
+/// opens a field.
+fn interpolated(chars: &[char], at: usize) -> bool {
+    let prefix = chars[..at]
+        .iter()
+        .rev()
+        .take(3)
+        .take_while(|c| is_word(**c))
+        .count();
+    if prefix == 0 || prefix > 2 {
+        return false;
+    }
+    let letters = &chars[at - prefix..at];
+    letters
+        .iter()
+        .all(|c| matches!(c.to_ascii_lowercase(), 'r' | 'b' | 'u' | 'f' | 't'))
+        && letters
+            .iter()
+            .any(|c| matches!(c.to_ascii_lowercase(), 'f' | 't'))
 }
 
 /// Tells a JavaScript regular expression from a division by the code before the slash,
@@ -526,38 +724,12 @@ fn quoted_end(chars: &[char], at: usize, quote: char, multiline: bool) -> Span {
             '\n' if !multiline => {
                 return Span {
                     end: index,
-                    closed: true,
+                    closed: false,
                     value: true,
                 };
             }
             _ => index += 1,
         }
-    }
-    Span {
-        end: chars.len(),
-        closed: false,
-        value: true,
-    }
-}
-
-fn triple_end(chars: &[char], at: usize, quote: char) -> Span {
-    let mut index = at + 3;
-    while index < chars.len() {
-        if chars[index] == '\\' {
-            index += 2;
-            continue;
-        }
-        if chars[index] == quote
-            && chars.get(index + 1) == Some(&quote)
-            && chars.get(index + 2) == Some(&quote)
-        {
-            return Span {
-                end: index + 3,
-                closed: true,
-                value: true,
-            };
-        }
-        index += 1;
     }
     Span {
         end: chars.len(),

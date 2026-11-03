@@ -20,9 +20,9 @@ pub const SCAN_FILES_MAX: usize = 256;
 /// The most results one baseline run is read with, the contract's bound per run.
 pub const BASELINE_RESULTS_MAX: usize = 20_000;
 /// The marker recorded for a changed test file the engine could not read for markers: too
-/// large, not text, unreadable by name, past `SCAN_FILES_MAX`, or a head that leaves a
-/// string, regular expression or comment open. It counts as a new skip, so `refuse` fails
-/// closed.
+/// large, not text, unreadable by name, past `SCAN_FILES_MAX`, or a head the lexer cannot
+/// follow: a string, regular expression or comment left open, or interpolations nested too
+/// deep. It counts as a new skip, so `refuse` fails closed.
 pub const UNSCANNED: &str = "unscanned";
 /// The marker recorded for a test the baseline run executed that this run reports skipped
 /// or not run, whatever skipped it at run time.
