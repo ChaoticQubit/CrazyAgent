@@ -505,8 +505,9 @@ pub fn record(
 
 /// Finishes a running run and stores its verdict by the core's locked rules, with the
 /// host's integrity evidence. `not_started` needs a one-line reason and `report_unreadable`
-/// may carry one; no other end takes a reason. Inputs: the transaction, the writer, the
-/// finish and the time. Output: the finished run, or an error that wrote nothing.
+/// may carry one; no other end takes a reason. It leaves tickets as they were: the
+/// `run_finish` op and engines call `coverage::finish`. Inputs: the transaction, the writer,
+/// the finish and the time. Output: the finished run, or an error that wrote nothing.
 pub fn finish(
     tx: &Transaction<'_>,
     actor: &Actor,
@@ -535,9 +536,10 @@ pub fn finish(
     })
 }
 
-/// Interrupts a running run: no verdict, the reason `cancelled` or `timed_out`. Inputs:
-/// the transaction, the writer, the cancel and the time. Output: the interrupted run, or
-/// an error that wrote nothing.
+/// Interrupts a running run: no verdict, the reason `cancelled` or `timed_out`. It leaves
+/// tickets as they were; the `run_cancel` op and engines call `coverage::cancel`, which
+/// re-evaluates them. Inputs: the transaction, the writer, the cancel and the time. Output:
+/// the interrupted run, or an error that wrote nothing.
 pub fn cancel(
     tx: &Transaction<'_>,
     actor: &Actor,

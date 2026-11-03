@@ -53,6 +53,7 @@ pub mod codes {
     pub const AGENT_EDIT_REFUSED: &str = "agent_edit_refused";
     pub const OWNER_ONLY: &str = "owner_only";
     pub const POLICY_VALUE_INVALID: &str = "policy_value_invalid";
+    pub const POLICY_LOCKED: &str = "policy_locked";
     pub const CRITERION_HAS_CHECKS: &str = "criterion_has_checks";
     pub const CHECKS_FULL: &str = "checks_full";
     pub const CHECK_EXISTS: &str = "check_exists";
@@ -149,6 +150,7 @@ pub mod codes {
         AGENT_EDIT_REFUSED,
         OWNER_ONLY,
         POLICY_VALUE_INVALID,
+        POLICY_LOCKED,
         CRITERION_HAS_CHECKS,
         CHECKS_FULL,
         CHECK_EXISTS,

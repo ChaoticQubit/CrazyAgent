@@ -409,13 +409,11 @@ pub fn notify(
     })
 }
 
-/// Re-evaluates open tickets after a record the core keeps beside them changed, for example
-/// the tickets whose `test` checks name a case a finished run reported: every criterion with
-/// checks is re-derived through the host and, under `close = evidence`, a fully proven ticket
-/// closes as `host:evidence`, all in the caller's transaction. Inputs: the transaction, the
-/// host, the open tickets' row ids (at most `NOTIFY_TICKETS_MAX`), what changed (at most
-/// `LINK_TARGET_BYTES_MAX` bytes, named in a close reason) and the time. Output: the tickets
-/// re-evaluated, in the order given, or the host's refusal.
+/// Re-evaluates open tickets after a record beside them changed, such as an ended run: each
+/// criterion with checks is re-derived through the host, and under `close = evidence` a fully
+/// proven ticket closes as `host:evidence`. Inputs: the transaction, the host, open tickets'
+/// row ids (at most `NOTIFY_TICKETS_MAX`), what changed (at most `LINK_TARGET_BYTES_MAX`
+/// bytes, named in the close reason) and the time. Output: the tickets in order, or a refusal.
 pub(crate) fn reevaluate(
     tx: &Transaction<'_>,
     host: &impl Host,
