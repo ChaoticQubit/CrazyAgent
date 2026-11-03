@@ -1,4 +1,5 @@
 use super::*;
+use crate::harness_settings::catalog::{self, Catalog};
 use crate::harness_settings::{APP_ONLY, Scope as Layer, Stored, catalog_page, setting};
 use crate::tui::client::OwnerEvent;
 use crate::tui::glyphs::Status;
@@ -12,6 +13,21 @@ const SANDBOX: &str = "CrazyAgent runs every agent in its own sandbox.";
 
 fn alpha() -> ProjectId {
     ProjectId::new("alpha").unwrap()
+}
+
+/// The fixture Codex catalog with the sandbox key locked and kept unset by the engine, as
+/// the catalog HS-3 reserves engine keys with. Output: the catalog; a fixture without the
+/// sandbox key fails the calling test.
+fn codex() -> Catalog {
+    let mut document = crate::harness_settings::tests::fixture_json();
+    let sandbox = document["keys"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|key| key["key"] == "sandbox_mode")
+        .unwrap();
+    sandbox["locked"]["engine_value"] = Value::Null;
+    catalog::parse(&serde_json::to_vec(&document).unwrap()).unwrap()
 }
 
 fn stored(values: &[(&str, Value)]) -> Stored {
@@ -30,7 +46,7 @@ fn read(
     app: &[(&str, Value)],
     project: &[(&str, Value)],
 ) -> HarnessRead {
-    let catalog = crate::harness_settings::tests::fixture("codex");
+    let catalog = codex();
     let (app, project) = (stored(app), stored(project));
     let here = match layer {
         Layer::App => &app,
@@ -169,7 +185,7 @@ fn after(
     project: &[(&str, Value)],
     version: u64,
 ) -> Setting {
-    let catalog = crate::harness_settings::tests::fixture("codex");
+    let catalog = codex();
     setting(
         &catalog,
         QUALIFIED,
@@ -586,7 +602,7 @@ fn values_and_kinds_read_plainly() {
     assert_eq!(shown(&json!(false)), "Off");
     assert_eq!(shown(&json!(32768)), "32768");
     assert_eq!(shown(&json!("")), "Empty");
-    assert_eq!(shown(&Value::Null), "Not applied");
+    assert_eq!(shown(&Value::Null), "Not set");
     assert_eq!(shown(&json!("tab\there\u{1b}[2J")), "tab?here?[2J");
     assert_eq!(shown(&json!(["a", 1])), "[\"a\",1]");
     let catalog = crate::harness_settings::tests::fixture("codex");

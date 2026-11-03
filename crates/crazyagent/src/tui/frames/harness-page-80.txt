@@ -11,7 +11,7 @@
     Reasoning effort          high                    App                       
     Project doc limit         32768                   Default                   
     Status label              Empty                   Default                   
-  > Sandbox                   workspace-write         ⊘ Locked                  
+  > Sandbox                   Not set                 ⊘ Locked                  
     Approvals                 never                   ⊘ Locked                  
                                                                                 
   Sandbox                                                         sandbox_mode  

@@ -77,7 +77,7 @@ pub(in crate::tui) fn message(code: &str) -> String {
 }
 
 /// A value as the page shows it: On or Off, the number, the text, "Empty" for empty
-/// text and "Not applied" for no value; control characters show as `?`. Input: the value.
+/// text and "Not set" for no value; control characters show as `?`. Input: the value.
 /// Output: one line of text.
 pub(in crate::tui) fn shown(value: &Value) -> String {
     let printable = |text: &str| -> String {
@@ -94,7 +94,7 @@ pub(in crate::tui) fn shown(value: &Value) -> String {
     match value {
         Value::Bool(true) => "On".into(),
         Value::Bool(false) => "Off".into(),
-        Value::Null => "Not applied".into(),
+        Value::Null => "Not set".into(),
         Value::String(text) if text.is_empty() => "Empty".into(),
         Value::String(text) => printable(text),
         other => printable(&other.to_string()),

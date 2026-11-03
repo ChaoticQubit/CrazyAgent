@@ -9,7 +9,7 @@
     Reasoning effort                  low                               Project                                         
     Project doc limit                 32768                             Default                                         
     Status label                      Empty                             ⊘ Read-only                                     
-    Sandbox                           workspace-write                   ⊘ Locked                                        
+    Sandbox                           Not set                           ⊘ Locked                                        
     Approvals                         never                             ⊘ Locked                                        
                                                                                                                         
   Hide agent reasoning                                                                            hide_agent_reasoning  
