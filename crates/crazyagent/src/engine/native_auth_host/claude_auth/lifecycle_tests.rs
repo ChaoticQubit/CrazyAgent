@@ -135,7 +135,7 @@ impl Case {
         self.spawn(Command::new("/bin/cat"), Stdio::null())
     }
 
-    fn reap(&mut self, input: ChildStdin, group: Pid) {
+    fn exited(&mut self, input: ChildStdin) {
         drop(input);
         let deadline = Instant::now() + CHILD_TIME;
         loop {
@@ -149,10 +149,23 @@ impl Case {
             );
             std::thread::sleep(Duration::from_millis(2));
         }
-        assert_eq!(
-            rustix::process::test_kill_process_group(group),
-            Err(rustix::io::Errno::SRCH)
-        );
+    }
+
+    fn reap(&mut self, input: ChildStdin, group: Pid) {
+        self.exited(input);
+        let deadline = Instant::now() + CHILD_TIME;
+        loop {
+            match rustix::process::test_kill_process_group(group) {
+                Err(rustix::io::Errno::SRCH) => break,
+                Err(rustix::io::Errno::PERM) => {}
+                other => panic!("the reaped child's group still has a member: {other:?}"),
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the reaped child's group outlived its retirement bound"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
     }
 
     fn locked(&self) {
@@ -426,8 +439,12 @@ fn claude_auth_lifecycle_retained_executable_rejects_replacement_before_status_c
     let output = case.session().child_mut().unwrap().stdout.take().unwrap();
     super::executable_fixture_tests::await_fresh_cat(&mut input, output);
     let original_id = case.session().child_mut().unwrap().id();
-    case.reap(input, group);
+    case.exited(input);
     case.session().prepare_status_child().unwrap();
+    assert_eq!(
+        rustix::process::test_kill_process_group(group),
+        Err(rustix::io::Errno::SRCH)
+    );
     assert_eq!(registered.verified_sha256().unwrap(), digest);
     fs::rename(
         &executable,

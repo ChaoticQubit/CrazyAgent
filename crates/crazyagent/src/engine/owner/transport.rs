@@ -1326,7 +1326,11 @@ impl OwnerServer {
     pub async fn run(self, mut stop: oneshot::Receiver<()>) -> Result<(), EngineError> {
         let mut tasks = Tasks::default();
         let mut handshakes = tokio::task::JoinSet::new();
-        let upkeep = tokio::spawn(changes::upkeep(Arc::downgrade(&self.authority)));
+        let (upkeep_stop, upkeep_stopped) = oneshot::channel();
+        let upkeep = tokio::spawn(changes::upkeep(
+            Arc::downgrade(&self.authority),
+            upkeep_stopped,
+        ));
         let backfill = setup::engine_root(&self.authority).ok().map(|root| {
             tokio::spawn(setup::backfill_hooks(
                 self.engine.storage.sender.clone(),
@@ -1390,7 +1394,7 @@ impl OwnerServer {
             assert!(tasks.custody.len() <= 1);
             assert!(tasks.terminals.len() <= crate::terminal::VIEWERS_MAX);
         };
-        upkeep.abort();
+        drop(upkeep_stop);
         if let Some(backfill) = backfill {
             backfill.abort();
         }
@@ -1411,6 +1415,7 @@ impl OwnerServer {
         while tasks.custody.join_next().await.is_some() {}
         while tasks.clients.join_next().await.is_some() {}
         while tasks.refusals.join_next().await.is_some() {}
+        log_panic(&upkeep.await, "landing_upkeep_panicked");
         let drained = self
             .authority
             .drain_native_auth_dispatch(&self.engine)

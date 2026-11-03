@@ -474,6 +474,7 @@ pub struct TeamRuntime {
     instruction_restarts: BTreeMap<i64, ProjectId>,
     master_restarts: BTreeSet<ProjectId>,
     restarted_for: BTreeMap<i64, u64>,
+    waited_for: BTreeMap<i64, u64>,
     #[cfg(unix)]
     callers: BTreeMap<i64, Option<super::caller::Callers>>,
     #[cfg(unix)]
@@ -639,6 +640,7 @@ impl TeamRuntime {
             instruction_restarts: BTreeMap::new(),
             master_restarts: BTreeSet::new(),
             restarted_for: BTreeMap::new(),
+            waited_for: BTreeMap::new(),
         })
     }
 
@@ -1426,9 +1428,11 @@ impl TeamRuntime {
         Ok(true)
     }
 
-    /// Marks stopped the native teammates of a lead that just ended, since they ran in the
-    /// lead's own terminal server and ended with it. Sub-agents a worker runs go on. Takes
-    /// the lead. Returns any SQLite failure.
+    /// Marks stopped the native teammates of a lead that just ended. They run on their own
+    /// tmux server, which ends itself once the engine clears the lead's short temp folder,
+    /// and may outlive the lead until then; the lead's caller socket node stays there, so a
+    /// teammate's hook meanwhile is refused and never takes the lead's place (rv-secreview
+    /// RH2R2-1). Sub-agents a worker runs go on. Takes the lead. Returns any SQLite failure.
     fn lead_ended(&self, lead: i64) -> Result<(), EngineError> {
         let children: Vec<i64> = {
             let mut statement = self
@@ -3310,7 +3314,8 @@ impl TeamRuntime {
     /// and the owner is not typing, with the owner's prompts to sub-agents it has not heard,
     /// and under the Next task choice the owner's instruction edit first, once, cut to the
     /// room the input limit leaves beside the message; when not even the cut block fits, a
-    /// team note says the edit waits for a later message (DEC-111 QR1). Takes the project.
+    /// team note says the edit waits for a later message, once per edited text until it is
+    /// delivered (DEC-111 QR1). Takes the project.
     /// Returns any SQLite failure; a message that cannot be typed is failed with a team
     /// note, one that must wait stays pending.
     fn feed_live(&mut self, project: &ProjectId) -> Result<(), EngineError> {
@@ -3345,7 +3350,10 @@ impl TeamRuntime {
         let block = edit.as_ref().and_then(|edit| {
             edit.message_within(super::master::INPUT_TEXT_MAX.saturating_sub(typed.len()))
         });
-        let missed = edit.is_some() && block.is_none();
+        let missed = match (&edit, &block) {
+            (Some(edit), None) => Some(edit.text_hash()),
+            _ => None,
+        };
         let (edit, typed) = match block {
             Some(block) => (edit, format!("{block}{}", typed.trim_start())),
             None => (None, typed),
@@ -3377,8 +3385,14 @@ impl TeamRuntime {
         if let Some(edit) = &edit {
             let _ = crate::instruction_files::delivered(edit, &home);
         }
-        if missed {
-            self.note(project, INSTRUCTIONS_WAIT_FOR_ROOM)?;
+        match missed {
+            Some(hash) if self.waited_for.insert(id, hash) != Some(hash) => {
+                self.note(project, INSTRUCTIONS_WAIT_FOR_ROOM)?;
+            }
+            Some(_) => {}
+            None => {
+                self.waited_for.remove(&id);
+            }
         }
         if let Some(newest) = newest {
             super::direct::delivered(&self.connection, project, newest)?;
@@ -6108,6 +6122,7 @@ impl TeamRuntime {
             }
             Report::Ended { problem } => {
                 let mut worker = self.workers.remove(&id).expect("worker exists");
+                self.waited_for.remove(&id);
                 crate::coord::requeue_dead(&self.connection, id, now_ms())?;
                 if !worker.leave.load(Ordering::SeqCst) {
                     self.lead_ended(id)?;
@@ -6115,7 +6130,10 @@ impl TeamRuntime {
                 if worker.live {
                     super::master::pane_ended(&self.connection, &worker.project, id)?;
                 }
-                let _ = toolchains::remove_tmp(&self.agent_folder(id).join("home"));
+                let _ = toolchains::remove_tmp_keeping(
+                    &self.agent_folder(id).join("home"),
+                    super::caller::CALLER_SOCKET,
+                );
                 self.connection
                     .execute("DELETE FROM team_panes WHERE agent=?1", [id])
                     .map_err(error)?;

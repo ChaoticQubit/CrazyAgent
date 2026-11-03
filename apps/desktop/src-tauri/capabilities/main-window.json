@@ -28,6 +28,8 @@
     "allow-desktop-delete-project-context",
     "allow-desktop-project-read-paths",
     "allow-desktop-set-project-read-paths",
+    "allow-desktop-project-hidden-paths",
+    "allow-desktop-set-project-hidden-paths",
     "allow-desktop-project-agent-policy",
     "allow-desktop-set-project-agent-policy",
     "allow-desktop-project-files",

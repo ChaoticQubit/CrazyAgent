@@ -4575,6 +4575,73 @@ fn with_next_message_an_edit_past_the_input_limit_reaches_the_live_master_once_c
     assert!(text.contains("Plan the footer"), "{text}");
 }
 
+/// With the default choice, typed messages that leave the live master no room for an owner
+/// edit say so in one team note per edited text: task results filling its whole input three
+/// times in a row leave one note, and after a later edit to other text the next full input
+/// notes once again.
+#[cfg(target_os = "macos")]
+#[test]
+fn with_next_message_full_inputs_note_the_waiting_edit_once_per_edited_text() {
+    const NEWER_TEXT: &str = "## Style\n\nUse spaces.\n\n## Tests\n\nRun them last.\n";
+    let mut fixture = Fixture::new(1);
+    let host = fixture.host();
+    edit_settings(
+        &fixture,
+        crate::instruction_files::EditDelivery::NextMessage,
+    );
+    let mut team = live_runtime(&fixture, &host, &recording_codex());
+    let project = fixture.setup.project_id.clone();
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the live master's pane runs", |f| {
+        live_agent(&f.connection).is_some()
+    });
+    let master = masters(&fixture.connection)[0];
+    tell_master(&fixture, "Plan the page");
+    fixture.until(&mut team, "the live master's turn ends", |f| {
+        typed(f, master).contains("Plan the page") && live_turns(&f.connection) == (1, false)
+    });
+    let mut notes = Vec::new();
+    for (turns, edit) in [
+        (2, Some(EDITED_TEXT)),
+        (3, None),
+        (4, None),
+        (5, Some(NEWER_TEXT)),
+        (6, None),
+    ] {
+        if let Some(edit) = edit {
+            crate::agent_home::save_app(&fixture.base, edit).unwrap();
+        }
+        let label = format!("Results {turns}:");
+        let line = format!("{}\n", "Task done. ".repeat(50));
+        let results = format!("{label}\n{}", line.repeat(40));
+        assert!(results.len() > crate::team::master::INPUT_TEXT_MAX);
+        let tx = fixture.connection.transaction().unwrap();
+        append_message(
+            &tx,
+            &project,
+            MessageAuthor::Engine,
+            &results,
+            MessageState::Pending,
+            now_ms(),
+        )
+        .unwrap()
+        .unwrap();
+        tx.commit().unwrap();
+        fixture.until(&mut team, "the live master's turn ends", |f| {
+            typed(f, master).contains(&label) && live_turns(&f.connection) == (turns, false)
+        });
+        notes.push(noted(&fixture, INSTRUCTIONS_WAIT_FOR_ROOM));
+    }
+    let text = typed(&fixture, master);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    assert_eq!(notes, [1, 1, 1, 2, 2], "wait notes after each full input");
+    assert!(
+        !text.contains(CHANGED_HEADER),
+        "no full input carried a change block"
+    );
+}
+
 /// With Restart chosen, an idle live master stops after each owner edit and starts again
 /// in its own conversation with the new text, types nothing, and stays live: three
 /// restarts in a row never count as the start failures that turn the live master off.
@@ -9783,6 +9850,57 @@ fn a_native_lead_without_the_team_tool_still_has_its_caller_socket_answered() {
     assert_eq!(
         reply, b"no\n",
         "a process in no pane of the lead is told so on the next tick"
+    );
+}
+
+/// A native lead that ends leaves its caller socket's node in its short temp folder while
+/// everything else there goes, which ends its own and its teammates' tmux servers. A
+/// teammate still running until then is refused when its hook asks, held as no one, and
+/// never takes the lead's place (rv-secreview RH2R2-1).
+#[test]
+fn a_teammate_asking_after_its_lead_ended_is_held_not_taken_for_the_lead() {
+    struct TmpRemoved(PathBuf);
+    impl Drop for TmpRemoved {
+        fn drop(&mut self) {
+            let _ = crate::sandbox::toolchains::remove_tmp(&self.0);
+        }
+    }
+    let f = Fixture::new(1);
+    let mut team = f.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let lead = f.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    f.connection
+        .execute("UPDATE team_agents SET mode='native' WHERE id=?1", [lead])
+        .unwrap();
+    team.workers
+        .insert(lead, between_turns(&project, AgentRole::Sub, true, true));
+    let home = agent_home(&team.state, lead);
+    let scratch = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let _scratch = TmpRemoved(home);
+    let socket = scratch.join(crate::team::caller::CALLER_SOCKET);
+    let bound = || {
+        std::fs::symlink_metadata(&socket)
+            .is_ok_and(|metadata| std::os::unix::fs::FileTypeExt::is_socket(&metadata.file_type()))
+    };
+    team.serve_agent_calls(&f.setup, &f.access);
+    assert!(bound());
+    let mates = scratch.join("teammates-0123456789abcdef.sock");
+    std::fs::write(&mates, b"").unwrap();
+    let work = scratch.join("work");
+    std::fs::create_dir(&work).unwrap();
+    std::fs::write(work.join("left"), b"agent data").unwrap();
+
+    team.collect().unwrap();
+    assert!(!team.workers.contains_key(&lead), "the lead ended");
+    assert!(
+        !mates.exists() && !work.exists(),
+        "the rest of the lead's temp folder is gone"
+    );
+    assert!(bound(), "the caller socket's node stays");
+    assert_eq!(
+        crate::team::caller::own_place(&team.mailbox(lead), Duration::from_secs(1)),
+        crate::team::caller::Place::Unplaced,
+        "a hook asking after the lead ended is held"
     );
 }
 
