@@ -42,18 +42,38 @@ const RESEARCH_LOG_TAIL_BYTES: u64 = 64 * 1024;
 const RESEARCH_LOG_FILES: [&str; 3] = ["events.jsonl", "output.md", "stderr.log"];
 #[cfg(unix)]
 const RESEARCH_RUNS_SCANNED_MAX: usize = 4096;
-const SECRET_MARKERS: [&str; 10] = [
+const SECRET_MARKERS: [&str; 13] = [
     "api_key",
     "api-key",
     "apikey",
     "secret",
     "password",
+    "passwd",
     "authorization",
     "bearer ",
     "access_token",
     "refresh_token",
     "id_token",
+    "cookie",
+    "private key",
 ];
+const SECRET_KEY_ENDS: [&str; 10] = [
+    "token",
+    "auth",
+    "pass",
+    "passwd",
+    "_pwd",
+    "credential",
+    "credentials",
+    "sessionid",
+    "session_id",
+    "_key",
+];
+const KEY_BLOCK_BEGIN: &str = "-----begin";
+const KEY_BLOCK_END: &str = "-----end";
+const BASE64_RUN_MIN: usize = 20;
+const WRAPPED_TAIL_MIN: usize = 8;
+const PGPASS_FIELDS_MIN: usize = 5;
 const SECRET_PREFIXES: [&str; 13] = [
     "sk-",
     "sk_",
@@ -3036,35 +3056,171 @@ fn event_text(event: &serde_json::Value) -> Option<String> {
 
 /// Hides words and lines that look like credentials before text leaves the engine: a
 /// research log line, or a past conversation's message, tool input or tool output. Takes
-/// the text, one line or many. Returns it with the same line breaks and white space, each
-/// token-like word replaced, and each line that names a credential field a fixed notice.
+/// the text, one line or many. Returns it with the same line breaks and white space: each
+/// line naming a credential field, and each line of a private key block from its BEGIN line
+/// to its END line, a fixed notice; each credential-like word, the value after a key named
+/// like a credential, a URL's user part and a wrapped token's tail replaced. This masks
+/// known shapes, not every secret: one in another shape, a short value under a key not
+/// named like a credential or one split across messages stays.
 pub(crate) fn redact(text: &str) -> String {
+    let mut key_block = false;
+    let mut wrapped = false;
     text.split('\n')
         .map(|line| {
             let lower = line.to_ascii_lowercase();
-            if SECRET_MARKERS.iter().any(|marker| lower.contains(marker)) {
+            key_block |= lower.contains(KEY_BLOCK_BEGIN);
+            let hidden = key_block || SECRET_MARKERS.iter().any(|marker| lower.contains(marker));
+            if key_block && lower.contains(KEY_BLOCK_END) {
+                key_block = false;
+            }
+            if hidden {
+                wrapped = false;
                 return HIDDEN_LINE.to_owned();
             }
-            let mut kept = String::with_capacity(line.len());
-            for piece in line.split_inclusive(char::is_whitespace) {
-                let word = piece.trim_end_matches(char::is_whitespace);
-                kept.push_str(if secret_like(word) { HIDDEN_WORD } else { word });
-                kept.push_str(&piece[word.len()..]);
-            }
+            let (kept, ends_hidden) = redact_words(line, wrapped);
+            wrapped = ends_hidden;
             kept
         })
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-/// Whether a word looks like a credential: the word without the punctuation around it, or
-/// any run of letters, digits, `-` and `_` inside it (the value of `KEY=value` or
-/// `"key":"value"`), starting with a known token prefix and at least 16 bytes long, or an
-/// opaque run of at least 32 such bytes mixing letters and digits. Takes the word.
+/// Where the value of a key named like a credential sits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyValue {
+    /// In the key's own word: `KEY=value`, `"key":"value"`, `--key=value`.
+    Inline,
+    /// In the next word: `key: value`, `"key": "value"`, `--key value`.
+    Next,
+}
+
+/// Masks the credential-like words of one line that names no credential field: a word
+/// [`secret_like`] finds, a key's value [`secret_key`] finds, the `user:password` after
+/// `-u` or `--user`, a URL's user part and, when the line before ended in a masked word, a
+/// token tail at the line's start. Takes the line and whether the line before ended in a
+/// masked word. Returns the line and whether it ends in one.
+fn redact_words(line: &str, wrapped: bool) -> (String, bool) {
+    let mut kept = String::with_capacity(line.len());
+    let mut value_next = false;
+    let mut user_next = false;
+    let mut ends_hidden = false;
+    for (index, piece) in line.split_inclusive(char::is_whitespace).enumerate() {
+        let word = piece.trim_end_matches(char::is_whitespace);
+        if word.is_empty() {
+            kept.push_str(piece);
+            continue;
+        }
+        let key = secret_key(word);
+        let hide = value_next
+            || (user_next && word.contains(':'))
+            || (wrapped && index == 0 && wrapped_tail(word))
+            || key == Some(KeyValue::Inline)
+            || secret_like(word);
+        value_next = key == Some(KeyValue::Next);
+        user_next = matches!(word, "-u" | "--user");
+        if hide {
+            kept.push_str(HIDDEN_WORD);
+        } else {
+            push_without_user_part(&mut kept, word);
+        }
+        kept.push_str(&piece[word.len()..]);
+        ends_hidden = hide && word.len() == piece.len();
+    }
+    (kept, ends_hidden)
+}
+
+/// Finds a key named like a credential in a word: a run of letters, digits, `-` and `_`
+/// whose name, in any ASCII case and `-` read as `_`, ends with one of `SECRET_KEY_ENDS`,
+/// followed, after any closing quote, by `=` or a single `:`, or a whole-word `--key`
+/// flag. Takes the word. Returns where the key's value sits, or none.
+fn secret_key(word: &str) -> Option<KeyValue> {
+    let bytes = word.as_bytes();
+    let name = |b: u8| b.is_ascii_alphanumeric() || b == b'-' || b == b'_';
+    let mut start = 0;
+    while start < bytes.len() {
+        if !name(bytes[start]) {
+            start += 1;
+            continue;
+        }
+        let end = start + bytes[start..].iter().take_while(|&&b| name(b)).count();
+        let run = &bytes[start..end];
+        let named = SECRET_KEY_ENDS.iter().any(|ending| {
+            let ending = ending.as_bytes();
+            run.len() >= ending.len()
+                && run[run.len() - ending.len()..]
+                    .iter()
+                    .zip(ending)
+                    .all(|(&have, &want)| {
+                        have.to_ascii_lowercase() == want || (have == b'-' && want == b'_')
+                    })
+        });
+        if named {
+            if start == 0 && end == bytes.len() && bytes[0] == b'-' {
+                return Some(KeyValue::Next);
+            }
+            let after = end
+                + bytes[end..]
+                    .iter()
+                    .take_while(|&&b| matches!(b, b'"' | b'\''))
+                    .count();
+            let separator = bytes.get(after);
+            if matches!(separator, Some(b'=' | b':')) && bytes.get(after + 1) != separator {
+                let value = &bytes[after + 1..];
+                return Some(if value.iter().any(u8::is_ascii_alphanumeric) {
+                    KeyValue::Inline
+                } else {
+                    KeyValue::Next
+                });
+            }
+        }
+        start = end;
+    }
+    None
+}
+
+/// Whether a word at a line's start can be the wrapped tail of a token masked at the end of
+/// the line before: at least `WRAPPED_TAIL_MIN` bytes of the token and base64 alphabets,
+/// holding a digit. Takes the word.
+fn wrapped_tail(word: &str) -> bool {
+    word.len() >= WRAPPED_TAIL_MIN
+        && word.bytes().any(|b| b.is_ascii_digit())
+        && word
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'/' | b'=' | b'-' | b'_'))
+}
+
+/// Appends a word with the user part of each URL in it, `scheme://user:password@host`,
+/// replaced by the hidden mark, keeping the scheme, host and path. Takes the text to extend
+/// and the word.
+fn push_without_user_part(kept: &mut String, word: &str) {
+    let mut rest = word;
+    while let Some(at) = rest.find("://") {
+        let (head, tail) = rest.split_at(at + 3);
+        kept.push_str(head);
+        let authority = tail.find(['/', '?', '#']).map_or(tail, |end| &tail[..end]);
+        rest = match authority.rfind('@') {
+            Some(user_end) => {
+                kept.push_str(HIDDEN_WORD);
+                &tail[user_end..]
+            }
+            None => tail,
+        };
+    }
+    kept.push_str(rest);
+}
+
+/// Whether a word looks like a credential on its own: a run of letters, digits, `-` and
+/// `_` inside it (the value of `KEY=value` or `"key":"value"`) starting with a known token
+/// prefix and at least 16 bytes long, or an opaque such run of at least 32 bytes mixing
+/// letters and digits; a base64 run of at least `BASE64_RUN_MIN` bytes mixing upper case,
+/// lower case and digits with no plain lowercase folder name between its `/`; a
+/// `.pgpass`-style line of at least `PGPASS_FIELDS_MIN` filled fields; a `-p<password>` or
+/// `--user=user:password` flag; or a path to a credential the sandbox guards. Takes the
+/// word.
 fn secret_like(word: &str) -> bool {
     let token = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
     let core = word.trim_matches(|c: char| !token(c));
-    std::iter::once(core)
+    let tokenish = std::iter::once(core)
         .chain(core.split(|c: char| !token(c)))
         .any(|part| {
             let prefixed = SECRET_PREFIXES
@@ -3075,6 +3231,52 @@ fn secret_like(word: &str) -> bool {
                 && part.bytes().any(|b| b.is_ascii_digit())
                 && part.bytes().any(|b| b.is_ascii_alphabetic());
             prefixed || opaque
+        });
+    let base64 = |c: char| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=');
+    let encoded = word.split(|c: char| !base64(c)).any(|run| {
+        run.len() >= BASE64_RUN_MIN
+            && run.bytes().any(|b| b.is_ascii_digit())
+            && run.bytes().any(|b| b.is_ascii_uppercase())
+            && run.bytes().any(|b| b.is_ascii_lowercase())
+            && !run
+                .split('/')
+                .any(|folder| folder.len() >= 3 && folder.bytes().all(|b| b.is_ascii_lowercase()))
+    });
+    let pgpass = word.split(':').count() >= PGPASS_FIELDS_MIN
+        && word.split(':').all(|field| {
+            !field.is_empty()
+                && field
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'*'))
+        });
+    let flag = word.strip_prefix("-p").is_some_and(|value| {
+        !value.is_empty()
+            && !value.starts_with('-')
+            && !value.bytes().all(|b| b.is_ascii_lowercase())
+    }) || word
+        .strip_prefix("--user=")
+        .is_some_and(|value| value.contains(':'));
+    tokenish || encoded || pgpass || flag || credential_path(word)
+}
+
+/// Whether a word names a credential file or folder the sandbox guards
+/// ([`crate::sandbox::credential_places`]) as a whole part of a path, in any ASCII case.
+/// Takes the word.
+fn credential_path(word: &str) -> bool {
+    if !word.contains(['.', '/']) {
+        return false;
+    }
+    let bytes = word.as_bytes();
+    let part = |b: u8| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-');
+    (0..bytes.len())
+        .filter(|&at| at == 0 || !part(bytes[at - 1]))
+        .any(|at| {
+            crate::sandbox::credential_places().any(|place| {
+                let end = at + place.len();
+                end <= bytes.len()
+                    && bytes[at..end].eq_ignore_ascii_case(place.as_bytes())
+                    && bytes.get(end).is_none_or(|&b| b == b'/' || !part(b))
+            })
         })
 }
 

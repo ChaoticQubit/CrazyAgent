@@ -194,9 +194,9 @@ pub fn serve_agent_calls(
 }
 
 /// Searches every past conversation of the project, newest first: master sessions' engine
-/// turns, the team's messages and every harness record in its agents' homes. Every word
-/// of the query must appear in one message, ASCII letters in any case. An empty query
-/// lists the conversations instead. Takes the engine database, the project, the folder of
+/// turns, the team's messages and every harness record in its agents' homes, native
+/// teammates' included. Every word of the query must appear in one message, ASCII letters
+/// in any case. An empty query lists the conversations instead. Takes the engine database, the project, the folder of
 /// team agents' own folders and the query. Returns at most `ANSWER_BYTES_MAX` bytes of
 /// hits, each with the conversation id and message number `session` reads, and false.
 pub fn sessions(
@@ -383,8 +383,9 @@ fn listing(found: &[Conversation]) -> String {
 
 /// Finds every past conversation of a project, newest first: each master session with
 /// engine turns, the team's messages and every harness record in the homes of the
-/// project's team agents. Records are found without following a link, only under a home's
-/// own record folders. A source that cannot be read is left out. Takes the engine
+/// project's team agents, and in the home a native Claude Code lead's teammates run with
+/// beside its own (TPH-2 C). Records are found without following a link, only under a
+/// home's own record folders. A source that cannot be read is left out. Takes the engine
 /// database, the project and the folder of team agents' own folders. Returns at most
 /// `RECORDS_MAX` records with the stored conversations.
 fn conversations(connection: &Connection, project: &ProjectId, agents: &Path) -> Vec<Conversation> {
@@ -414,28 +415,39 @@ fn conversations(connection: &Connection, project: &ProjectId, agents: &Path) ->
         if !plain_dir(&own) || !plain_dir(&home) {
             continue;
         }
-        let mut paths = Vec::new();
-        walk(&home.join(folder), DEPTH_MAX, &mut paths, &mut visits);
         let label = agent_label(connection, project, agent, &role, harness);
-        for (path, at_ms) in paths {
-            let Some(stem) = path
-                .file_stem()
-                .and_then(|stem| stem.to_str())
-                .map(|stem| format!("agent-{agent}/{stem}"))
-                .filter(|id| id_valid(id))
-            else {
-                continue;
-            };
-            let label = match kept.get(&path) {
-                Some(session) => format!("{label}, master session {session}"),
-                None => label.clone(),
-            };
-            records.push(Conversation {
-                id: stem,
-                label,
-                at_ms,
-                source: Source::Record { harness, path },
-            });
+        let mut places = vec![(home.join(folder), format!("agent-{agent}"), label.clone())];
+        let mates = crate::launch_context::mates_home(&home);
+        if harness == "claude-code" && plain_dir(&mates) {
+            places.push((
+                mates.join(folder),
+                format!("agent-{agent}/mates"),
+                format!("native teammates of {label}"),
+            ));
+        }
+        for (place, prefix, label) in places {
+            let mut paths = Vec::new();
+            walk(&place, DEPTH_MAX, &mut paths, &mut visits);
+            for (path, at_ms) in paths {
+                let Some(stem) = path
+                    .file_stem()
+                    .and_then(|stem| stem.to_str())
+                    .map(|stem| format!("{prefix}/{stem}"))
+                    .filter(|id| id_valid(id))
+                else {
+                    continue;
+                };
+                let label = match kept.get(&path) {
+                    Some(session) => format!("{label}, master session {session}"),
+                    None => label.clone(),
+                };
+                records.push(Conversation {
+                    id: stem,
+                    label,
+                    at_ms,
+                    source: Source::Record { harness, path },
+                });
+            }
         }
     }
     records.sort_by_key(|one| std::cmp::Reverse(one.at_ms));
