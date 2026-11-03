@@ -15,7 +15,7 @@ const POOL = process.env.TRIAL_POOL ?? "";
 const TEAM_MS = Number(process.env.TRIAL_TEAM_MS ?? 7200000);
 const SETUP_MS = Number(process.env.TRIAL_SETUP_MS ?? 1800000);
 const MASTER_MS = Math.min(TEAM_MS, 600000);
-const STOP_MS = 300000;
+const STOP_MS = Math.min(TEAM_MS, 300000);
 const UI_MS = 30000;
 const FIXTURE_INSTRUCTIONS = "# Mandatory workflow\n\nFixture instruction set for the trial 3 offline proof.\n";
 const INSTRUCTIONS = { first: "# Mandatory workflow", bytes: MODE === "fixture" ? Buffer.byteLength(FIXTURE_INSTRUCTIONS) : 12848 };
@@ -284,7 +284,9 @@ describe(`CrazyAgent trial 3 owner actions on the desktop app (${MODE})`, () => 
         assert.equal(action, "Open project", `the row offers Set up, Continue or Open: ${action}`);
       }
       run.project = await openedProject();
-      return `${action}${line ? `; setup said: ${line}` : ""}; the project's Overview is open`;
+      const move = await shown("button=Commit the move")
+        ? "; the instruction import moved the project's CLAUDE.md and its move stays uncommitted, so main keeps the seed commit" : "";
+      return `${action}${line ? `; setup said: ${line}` : ""}; the project's Overview is open${move}`;
     }));
 
   it("shows the new instruction set on the Process page", () => step("process-instructions", "Process page shows the instruction set",
@@ -335,7 +337,8 @@ describe(`CrazyAgent trial 3 owner actions on the desktop app (${MODE})`, () => 
       await tab("agents");
       const done = await choose("agents", "Worker skills", SETTINGS.worker);
       const boxes = "//*[@role=\"group\"][@aria-label=\"Skills per role\"]/div[.//*[@aria-label=\"Worker skills\"]]//input[@type=\"checkbox\"]";
-      const states = await Promise.all((await $$(boxes)).map((box) => box.isSelected()));
+      const states = [];
+      for (const box of await $$(boxes)) states.push(await box.isSelected());
       const master = await $(segment("Master skills", "All approved skills")).getAttribute("aria-checked");
       const lead = await $(segment("Lead skills", "All approved skills")).getAttribute("aria-checked");
       return `${done}; worker ticks ${states.filter(Boolean).length} of ${states.length} approved skills; master all: ${master}, lead all: ${lead}`;
@@ -422,7 +425,7 @@ describe(`CrazyAgent trial 3 owner actions on the desktop app (${MODE})`, () => 
       const send = "//form[contains(@class, \"tg-composer\")]//button[normalize-space(.)=\"Send\"]";
       await waitFor(async () => {
         const live = await shown(box) && await $(send).isEnabled();
-        return { done: live, seen: live ? "the master terminal is live" : mask((await text("main")).slice(0, 400)) };
+        return { done: live, seen: live ? "the master terminal is live" : mask(String(await browser.execute(() => document.querySelector("main")?.innerText ?? "")).slice(0, 400)) };
       }, MASTER_MS, "the master's message box never became ready to send");
       await paste(box, message);
       await click(send);

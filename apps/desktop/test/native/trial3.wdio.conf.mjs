@@ -124,8 +124,9 @@ function bridge(...args) {
 
 /** Puts the team a live trial grows on the fixture project once it exists, through the
  * engine's own tables and functions: a native Claude lead with two teammates, an app-spawned
- * lead with two sub-agents, one committed change set per lead and one question for the
- * owner from the first sub-agent. Output: what was seeded, for the fixture log. */
+ * lead with two sub-agents, one change set per lead from the edit its worktree holds at turn
+ * end and one question for the owner from the first sub-agent. Output: what was seeded, for
+ * the fixture log. */
 async function seedTeam() {
   const runtime = join(fixture, "engine");
   const project = await projectId(runtime);
@@ -148,8 +149,6 @@ async function seedTeam() {
       const worktree = join(fixture, "worktrees", name);
       git(repo, "worktree", "add", "-q", "-b", `crazyagent/${name}`, worktree, "main");
       writeFileSync(join(worktree, `${name}.py`), `def ${name.replace("-", "_")}():\n    """Says which lead wrote it."""\n    return "${name}"\n`);
-      git(worktree, "add", ".");
-      git(worktree, "commit", "-q", "-m", `Add ${name}`);
       const gitDir = join(repo, ".git", "worktrees", name);
       store.prepare("INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?,?,?,?,?)").run(lead, project, repo, worktree, gitDir);
       leads.push({ lead, worktree, gitDir, name });
@@ -220,7 +219,7 @@ export const config = {
   capabilities: [{ browserName: "tauri", "tauri:options": { application: app } }],
   services: [["@wdio/tauri-service", {
     driverProvider: "embedded", autoInstallTauriDriver: false, embeddedPort: port,
-    appArgs: [], startTimeout: 60000, captureBackendLogs: false, backendLogLevel: "warn",
+    appArgs: [], startTimeout: 60000, captureBackendLogs: Boolean(fixture), backendLogLevel: "info",
     env: appEnv,
   }]],
   framework: "mocha",
