@@ -2357,3 +2357,7 @@ mod claude_turn_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "master_host_launch/codex_turn_tests.rs"]
 mod codex_turn_tests;
+
+#[cfg(all(test, target_os = "macos"))]
+#[path = "master_host_launch/untrusted_tests.rs"]
+mod untrusted_tests;

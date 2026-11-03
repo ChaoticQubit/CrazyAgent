@@ -6949,3 +6949,7 @@ fn an_adopted_agent_keeps_the_session_time_it_ran_before_the_engine_restarted() 
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
 }
+
+#[cfg(target_os = "macos")]
+#[path = "untrusted_tests.rs"]
+mod untrusted_tests;
