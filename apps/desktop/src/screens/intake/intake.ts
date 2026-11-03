@@ -298,11 +298,13 @@ export function dependencyView(dependency: Dependency): { title: string; about: 
 }
 
 /** Badge word, tone and detail line for a default-pack entry state.
- * Input: the state. Output: the fixed word, its tone and one line or null. */
-export function packStateView(state: PackState): { word: string; tone: Tone; line: string | null } {
+ * Inputs: the state and, for an installed entry, why the engine refused its hooks.
+ * Output: the fixed word, its tone and one line or null. */
+export function packStateView(state: PackState, hooksRefused: string | null = null): { word: string; tone: Tone; line: string | null } {
+  const hooks = hooksRefused ? `Hooks not added: ${displayText(hooksRefused)}` : null;
   switch (state.state) {
-    case "on": return { word: "On", tone: "ok", line: null };
-    case "off": return { word: "Off", tone: "neutral", line: null };
+    case "on": return { word: "On", tone: "ok", line: hooks };
+    case "off": return { word: "Off", tone: "neutral", line: hooks };
     case "installing": return { word: "Installing", tone: "info", line: null };
     case "failed": return { word: "Failed", tone: "danger", line: displayText(state.reason) };
     default: return { word: "Not installed", tone: "neutral", line: null };

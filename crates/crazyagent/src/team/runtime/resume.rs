@@ -25,6 +25,7 @@ const NOT_RESUMABLE: &str = "its harness session has no id it can be resumed by"
 const NO_TERMINAL: &str = "its harness cannot resume in a terminal pane here";
 const STOPPED: &str = "it stopped before its session resumed";
 const NOTHING_WAITING: &str = "its task or message is no longer waiting";
+const TEAMMATE: &str = "a teammate starts only from its harness";
 const LIVE_OFF: &str = "the live master is turned off";
 const LET_GO: &str = "Its task or message was let go, so it is never typed twice";
 const RETRY_ONCE: &str =
@@ -200,8 +201,8 @@ impl TeamRuntime {
     /// Starts a stopped agent again under its own id, worktree and home, resuming the
     /// harness session its run recorded, then hands it the run's work. A sub-agent that
     /// still runs in the pane this engine took over gets its work there instead. Waits
-    /// while any other agent still runs or the team has no room; fails the run when it
-    /// cannot resume.
+    /// while any other agent still runs, the team has no room or an account still waits for
+    /// its sign-in re-check; fails the run when it cannot resume.
     /// Takes the setup, live access, paused accounts and the run. Returns any SQLite failure.
     fn restart(
         &mut self,
@@ -231,6 +232,7 @@ impl TeamRuntime {
             return self.give_up(run, RunState::Interrupted, NOTHING_WAITING);
         };
         let tools = match run.kind {
+            AgentRole::Teammate => return self.give_up(run, RunState::Interrupted, TEAMMATE),
             AgentRole::Sub => {
                 let Some(slot) = super::super::slot(&stored.team, &run.harness) else {
                     return self.fail(
@@ -269,7 +271,8 @@ impl TeamRuntime {
             return Ok(());
         }
         let account = match self.account_for(access, project, &run.harness, paused) {
-            Ok(account) => account,
+            Ok(Some(account)) => account,
+            Ok(None) => return Ok(()),
             Err(reason) => {
                 return self.fail_for_now(
                     run,
@@ -426,6 +429,10 @@ impl TeamRuntime {
             crate::team::time_limits(&self.connection, &run.project)?,
             self.workers[&run.agent].ran(),
         );
+        let background = match busy {
+            Busy::Task(_) => crate::team::background_at_end(&self.connection, &run.project)?,
+            Busy::Message(_) => crate::team::BackgroundAtEnd::Wait,
+        };
         let worker = self
             .workers
             .get_mut(&run.agent)
@@ -436,7 +443,10 @@ impl TeamRuntime {
             .send(Order::Turn(
                 note(run, Some(&item)),
                 grant,
-                bound.map(|(limit, _)| limit),
+                super::TurnRules {
+                    limit: bound.map(|(limit, _)| limit),
+                    background,
+                },
             ))
             .is_err()
         {
@@ -512,7 +522,7 @@ impl TeamRuntime {
         let worker = self.workers.get_mut(&id).expect("worker exists");
         let held = worker.held;
         if let Some(busy) = worker.busy.take() {
-            self.release(busy)?;
+            self.release(id, busy)?;
         }
         if held {
             recovery::mark(

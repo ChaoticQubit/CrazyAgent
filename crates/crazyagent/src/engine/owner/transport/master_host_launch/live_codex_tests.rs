@@ -46,6 +46,7 @@ async fn a_real_codex_master_turn_is_signed_in_inside_the_master_sandbox() {
         &connection.endpoint,
         &AgentPolicy::default(),
         crate::trust::Trust::Reviewed,
+        &[],
     )
     .unwrap();
     let mut master = CodexHost::spawn(
@@ -134,6 +135,7 @@ async fn a_real_codex_master_with_tools_on_works_in_its_worktree_and_delegates()
         worktree: &worktree,
         policy: &AgentPolicy::default(),
         trust: crate::trust::Trust::Reviewed,
+        hidden: &[],
     };
     let budget = ResourceBudget {
         wall_time_ms: 240_000,
@@ -356,6 +358,7 @@ async fn browsky_master_turn(prompt: &str, tools_section: bool) -> BrowskyTurn {
         worktree: &worktree,
         policy: &AgentPolicy::default(),
         trust: crate::trust::Trust::Reviewed,
+        hidden: &[],
     };
     let budget = ResourceBudget {
         wall_time_ms: 240_000,

@@ -81,7 +81,7 @@ export function PackSettingsView({ status, busy, problem, skills, onSwitch, onAs
       <h2>{group.title}</h2>
       {group.about && <p className="pj-help">{group.about}</p>}
       <ul className="in-list">{group.entries.map((entry) => {
-        const state = packStateView(entry.state);
+        const state = packStateView(entry.state, entry.hooks_refused);
         const locked = running || busy !== null;
         return <li className="in-row" key={entry.id}>
           <span className="in-row-main">

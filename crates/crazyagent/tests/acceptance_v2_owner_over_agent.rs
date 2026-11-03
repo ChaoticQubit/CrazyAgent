@@ -2,16 +2,17 @@
 
 mod e2e_support;
 
-use crazyagent::client_controller::OwnerController;
-use crazyagent::config::{ModelAccess, resolve_config};
-use crazyagent::engine::owner::{OwnerClientKind, OwnerResult};
-use crazyagent::memory::{KnowledgeEntry, ReviewDecision};
+use crazyagent::config::ModelAccess;
+use crazyagent::engine::owner::OwnerResult;
+use crazyagent::memory::library::{
+    AgentWrites, LibraryAction, MemoryOrigin, MemoryScope, SavedMemory,
+};
 use crazyagent::project_setup::load_setup;
 use crazyagent::protocol::ProjectId;
 use crazyagent::team::master::{Answering, serve_calls, set_live};
-use crazyagent::team::runtime::{ConfigSource, agent_home};
-use crazyagent::team::tool::{LIVE_SERVER_COMMAND, MAILBOX_FOLDER, MEMORIES_TOOL, REMEMBER_TOOL};
-use e2e_support::{ENGINE, Engine, Owner, profile, rejected, result, scratch};
+use crazyagent::team::runtime::agent_home;
+use crazyagent::team::tool::{LIVE_SERVER_COMMAND, MAILBOX_FOLDER, REMEMBER_TOOL};
+use e2e_support::{ENGINE, Engine, Owner, profile, result, scratch};
 use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use std::io::{Read, Write};
@@ -20,16 +21,16 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const ATTACH_TIME: Duration = Duration::from_secs(10);
 const TURN_TIME: Duration = Duration::from_secs(60);
 const PROJECT: &str = "memory-shop";
-const AGENT_RULE: &str = "Agent suggestion: run the linter before each commit.";
-const AGENT_STYLE: &str = "Agent suggestion: name test files after the module.";
+const MASTER: &str = "Master";
 const OWNER_RULE: &str = "Run the linter and the tests before each commit.";
-const AGENT_REDO: &str = "Agent change: run only the linter before each commit.";
-const AGENT_STYLE_CHANGE: &str = "Agent change: name test files after the feature.";
-const OWNER_STYLE: &str = "Name test files after the module they test.";
-const AGENT_LATE: &str = "Agent change after the owner's edit: name test files freely.";
+const AGENT_RULE: &str = "Agent suggestion: run only the linter before each commit.";
+const AGENT_STYLE: &str = "Agent suggestion: name test files after the feature.";
+const SAVED: &str = "Saved to memory. recall finds it now, and agents started from now on get it.";
+const HELD: &str =
+    "Saved for the owner's approval. Agents get it once the owner approves it in the Memory tab.";
+const DUPLICATE: &str = "Not saved: This memory is already saved.";
 
 fn now_ms() -> i64 {
     i64::try_from(
@@ -66,18 +67,10 @@ fn private_folder(path: &Path) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
 }
 
-fn tool_call(id: u64, name: &str, arguments: Value) -> String {
+fn remember(id: u64, text: &str) -> String {
     let call = json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
-        "params": {"name": name, "arguments": arguments}});
+        "params": {"name": REMEMBER_TOOL, "arguments": {"text": text, "scope": "project"}}});
     format!("{call}\n")
-}
-
-fn remember(id: u64, text: &str, read: Option<(&str, u64)>) -> String {
-    let arguments = match read {
-        None => json!({"text": text}),
-        Some((memory, version)) => json!({"text": text, "memory": memory, "version": version}),
-    };
-    tool_call(id, REMEMBER_TOOL, arguments)
 }
 
 /// Runs one turn of the project's live master while the engine process is stopped: the real
@@ -106,10 +99,8 @@ fn master_turn(engine: &Engine, master: i64, calls: &[String]) -> Vec<(String, b
             .unwrap()
             .expect("the owner created the project")
     };
-    let folder = agent_home(&root.join("team"), master)
-        .parent()
-        .unwrap()
-        .to_path_buf();
+    let state = root.join("team");
+    let folder = agent_home(&state, master).parent().unwrap().to_path_buf();
     let mailbox = folder.join("tmp").join(MAILBOX_FOLDER);
     for path in [folder.clone(), folder.join("tmp"), mailbox.clone()] {
         private_folder(&path);
@@ -145,22 +136,20 @@ fn master_turn(engine: &Engine, master: i64, calls: &[String]) -> Vec<(String, b
         output
     });
 
-    let (global, settings) = (root.join("global.toml"), root.join("project.toml"));
-    let config: ConfigSource = Box::new(move || resolve_config(&global, &settings).ok());
-    assert!(config().is_some(), "the engine's settings resolve");
     let access = ModelAccess::default();
+    let agents = state.join("agents");
     let answering = Answering {
         access: &access,
         stored: &stored,
         landing: root,
+        agents: &agents,
         events: None,
         host: None,
-        config: Some(&config),
     };
     let deadline = Instant::now() + TURN_TIME;
     while server.try_wait().unwrap().is_none() {
         assert!(Instant::now() < deadline, "the master's turn never ended");
-        serve_calls(&mut connection, &answering, &mailbox).unwrap();
+        serve_calls(&mut connection, &answering, master, &mailbox).unwrap();
         std::thread::sleep(Duration::from_millis(20));
     }
     set_live(&connection, &project, false).unwrap();
@@ -194,68 +183,34 @@ fn master_turn(engine: &Engine, master: i64, calls: &[String]) -> Vec<(String, b
         .collect()
 }
 
-fn saved(answer: &(String, bool), version: u64) -> String {
-    let (text, error) = answer;
-    assert!(!error, "{text}");
-    let id = text
-        .split_whitespace()
-        .nth(2)
-        .unwrap_or_default()
-        .to_owned();
-    assert_eq!(
-        text,
-        &format!(
-            "Saved memory {id} at version {version} as a suggestion the owner keeps or rejects. Name version {version} to change it."
-        )
-    );
-    id
+fn answer(text: &str, error: bool) -> (String, bool) {
+    (text.to_owned(), error)
 }
 
-fn stale(id: &str, read: u64, current: u64) -> (String, bool) {
-    (
-        format!(
-            "Stale: re-read and redo. Memory {id} is at version {current} now, changed by the owner since version {read} you read. Call memories(), then redo your change on the current text naming version {current}."
-        ),
-        true,
-    )
-}
-
-fn held(id: &str, version: u64) -> (String, bool) {
-    (
-        format!(
-            "Not saved: the owner reviewed memory {id} at version {version}, and agents do not change a memory the owner reviewed. Suggest a new memory with remember() if it still matters."
-        ),
-        true,
-    )
-}
-
-fn entry<'a>(entries: &'a [KnowledgeEntry], id: &str) -> &'a KnowledgeEntry {
-    entries
-        .iter()
-        .find(|entry| entry.id.as_str() == id)
-        .unwrap_or_else(|| {
-            let listed: Vec<&str> = entries.iter().map(|entry| entry.id.as_str()).collect();
-            panic!("memory {id} is not listed: {listed:?}")
-        })
-}
-
-fn shown(entry: &KnowledgeEntry) -> (u64, &str, &str, bool) {
-    (
-        entry.version,
-        entry.text.as_str(),
-        entry.curator_session.as_str(),
-        entry.human_reviewed,
-    )
-}
-
-async fn desktop(engine: &Engine) -> OwnerController {
-    OwnerController::attach(engine.path(), OwnerClientKind::Desktop, ATTACH_TIME)
+async fn listed(tui: &mut Owner, scope: &MemoryScope) -> Vec<SavedMemory> {
+    let page = tui
+        .controller
+        .memories(scope.clone(), None, None)
         .await
-        .unwrap()
+        .unwrap();
+    assert_eq!(
+        page.next, None,
+        "one page holds every memory of the project"
+    );
+    page.items
+}
+
+fn origin(memories: &[SavedMemory], text: &str) -> MemoryOrigin {
+    let found: Vec<&SavedMemory> = memories
+        .iter()
+        .filter(|memory| memory.text == text)
+        .collect();
+    assert_eq!(found.len(), 1, "{text} is saved once: {memories:#?}");
+    found[0].origin.clone()
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_owner_s_memory_edit_wins_over_the_live_master_s_and_the_master_cannot_undo_it() {
+async fn the_owner_s_memory_stays_as_the_owner_saved_it_whatever_the_live_master_remembers() {
     let mut engine = Engine::start("ca-av2-memory-");
     let mut tui = Owner::attach(&engine).await;
     assert_eq!(tui.save_profile(profile()).await, OwnerResult::Applied);
@@ -267,53 +222,51 @@ async fn the_owner_s_memory_edit_wins_over_the_live_master_s_and_the_master_cann
         tui.create_project(PROJECT, "Memory shop").await,
         OwnerResult::Applied
     );
-    let project = ProjectId::new(PROJECT).unwrap();
-    drop(tui);
-    engine.stop();
-
-    let master = add_master(&engine);
-    let curator = format!("team-{master}");
-    let suggested = master_turn(
-        &engine,
-        master,
-        &[
-            remember(2, AGENT_RULE, None),
-            remember(3, AGENT_STYLE, None),
-        ],
-    );
-    let rule = saved(&suggested[0], 1);
-    let style = saved(&suggested[1], 1);
-    assert_ne!(rule, style);
-
-    engine.launch();
-    let mut tui = Owner::attach(&engine).await;
-    let mut desk = desktop(&engine).await;
-    let opened = desk.project_memories(project.clone(), None).await.unwrap();
-    let style_opened = entry(&opened, &style).version;
-    assert_eq!(
-        shown(entry(&opened, &style)),
-        (1, AGENT_STYLE, curator.as_str(), false),
-        "the desktop shows the master's suggestion as the master's"
-    );
-    let listed = tui
-        .controller
-        .project_memories(project.clone(), None)
-        .await
-        .unwrap();
-    assert_eq!(
-        shown(entry(&listed, &rule)),
-        (1, AGENT_RULE, curator.as_str(), false)
-    );
+    let scope = MemoryScope::Project {
+        project_id: ProjectId::new(PROJECT).unwrap(),
+    };
     let generation = tui.next();
     assert_eq!(
         result(
             tui.controller
-                .review_memory(
-                    project.clone(),
-                    entry(&listed, &rule).id.clone(),
-                    1,
-                    ReviewDecision::Edit {
-                        text: OWNER_RULE.into()
+                .add_memory(scope.clone(), OWNER_RULE.into(), generation)
+                .await
+                .unwrap()
+        ),
+        OwnerResult::Applied,
+        "the owner saves the memory from the TUI"
+    );
+    let first = listed(&mut tui, &scope).await;
+    assert_eq!(first.len(), 1, "{first:#?}");
+    let owners = first[0].clone();
+    assert_eq!(
+        (owners.text.as_str(), &owners.origin),
+        (OWNER_RULE, &MemoryOrigin::Written)
+    );
+    drop(tui);
+    engine.stop();
+
+    let master = add_master(&engine);
+    let saved = master_turn(
+        &engine,
+        master,
+        &[remember(2, OWNER_RULE), remember(3, AGENT_RULE)],
+    );
+    assert_eq!(
+        saved,
+        [answer(DUPLICATE, true), answer(SAVED, false)],
+        "the master cannot save the owner's memory again as its own, and its other text is a new memory"
+    );
+
+    engine.launch();
+    let mut tui = Owner::attach(&engine).await;
+    let generation = tui.next();
+    assert_eq!(
+        result(
+            tui.controller
+                .change_memory(
+                    LibraryAction::AgentWrites {
+                        writes: AgentWrites::Ask
                     },
                     generation,
                 )
@@ -321,126 +274,55 @@ async fn the_owner_s_memory_edit_wins_over_the_live_master_s_and_the_master_cann
                 .unwrap()
         ),
         OwnerResult::Applied,
-        "the owner edits the master's suggestion from the TUI"
+        "the owner turns on Ask me first for agent memory writes"
     );
-    drop(desk);
     drop(tui);
     engine.stop();
 
-    let refused = master_turn(
+    let held = master_turn(
         &engine,
         master,
         &[
-            remember(2, AGENT_REDO, Some((&rule, 1))),
-            remember(3, AGENT_REDO, Some((&rule, 2))),
-            remember(4, AGENT_STYLE_CHANGE, Some((&style, 1))),
+            remember(2, OWNER_RULE),
+            remember(3, AGENT_RULE),
+            remember(4, AGENT_STYLE),
         ],
     );
     assert_eq!(
-        refused[0],
-        stale(&rule, 1, 2),
-        "the master's change from before the owner's edit is refused as stale, naming the owner"
-    );
-    assert_eq!(
-        refused[1],
-        held(&rule, 2),
-        "after re-reading, the master still cannot change what the owner reviewed"
-    );
-    assert_eq!(saved(&refused[2], 2), style);
-
-    engine.launch();
-    let mut desk = desktop(&engine).await;
-    assert_eq!(
-        result(
-            desk.review_memory(
-                project.clone(),
-                entry(&opened, &style).id.clone(),
-                style_opened,
-                ReviewDecision::Edit {
-                    text: OWNER_STYLE.into()
-                },
-                1,
-            )
-            .await
-            .unwrap()
-        ),
-        rejected("knowledge_version_conflict"),
-        "the desktop screen opened before the master's change is refused, not merged"
-    );
-    let reread = desk.project_memories(project.clone(), None).await.unwrap();
-    assert_eq!(
-        shown(entry(&reread, &style)),
-        (2, AGENT_STYLE_CHANGE, curator.as_str(), false),
-        "the refused edit changed nothing; the owner reads the master's version 2"
-    );
-    assert_eq!(
-        (
-            entry(&reread, &rule).version,
-            entry(&reread, &rule).text.as_str(),
-            entry(&reread, &rule).human_reviewed
-        ),
-        (2, OWNER_RULE, true),
-        "the master's refused calls left the owner's edit in place"
-    );
-    assert_eq!(
-        result(
-            desk.review_memory(
-                project.clone(),
-                entry(&reread, &style).id.clone(),
-                2,
-                ReviewDecision::Edit {
-                    text: OWNER_STYLE.into()
-                },
-                2,
-            )
-            .await
-            .unwrap()
-        ),
-        OwnerResult::Applied,
-        "the owner's edit on the re-read version replaces the master's"
-    );
-    drop(desk);
-    engine.stop();
-
-    let late = master_turn(
-        &engine,
-        master,
-        &[
-            remember(2, AGENT_LATE, Some((&style, 2))),
-            remember(3, AGENT_LATE, Some((&style, 3))),
-            tool_call(4, MEMORIES_TOOL, json!({})),
+        held,
+        [
+            answer(DUPLICATE, true),
+            answer(DUPLICATE, true),
+            answer(HELD, false)
         ],
+        "under Ask me first the owner's memory is still refused and the master's new text waits for approval"
     );
-    assert_eq!(late[0], stale(&style, 2, 3));
-    assert_eq!(late[1], held(&style, 3));
-    let (memories, error) = &late[2];
-    assert!(!error, "{memories}");
-    for line in [
-        format!("- {rule} version 2 (reviewed by the owner): {OWNER_RULE}"),
-        format!("- {style} version 3 (reviewed by the owner): {OWNER_STYLE}"),
-    ] {
-        assert!(
-            memories.lines().any(|listed| listed == line),
-            "the master reads the owner's text: {memories}"
-        );
-    }
 
     engine.launch();
     let mut tui = Owner::attach(&engine).await;
-    let last = tui
-        .controller
-        .project_memories(project.clone(), None)
-        .await
-        .unwrap();
-    assert_eq!(last.len(), 2, "the master's refused calls added no memory");
-    for (id, version, text) in [(&rule, 2, OWNER_RULE), (&style, 3, OWNER_STYLE)] {
-        let kept = entry(&last, id);
-        assert_eq!(
-            (kept.version, kept.text.as_str(), kept.human_reviewed),
-            (version, text, true),
-            "the owner's edit of {id} survives the master's later turns and the restarts"
-        );
-    }
+    let last = listed(&mut tui, &scope).await;
+    assert_eq!(last.len(), 3, "{last:#?}");
+    let kept = last
+        .iter()
+        .find(|memory| memory.id == owners.id)
+        .expect("the owner's memory is still listed");
+    assert_eq!(
+        kept, &owners,
+        "the owner's memory keeps its id, place, order, origin and text after the master's turns and the restarts"
+    );
+    assert_eq!(origin(&last, OWNER_RULE), MemoryOrigin::Written);
+    assert_eq!(
+        origin(&last, AGENT_RULE),
+        MemoryOrigin::Agent {
+            agent: MASTER.into()
+        }
+    );
+    assert_eq!(
+        origin(&last, AGENT_STYLE),
+        MemoryOrigin::Requested {
+            agent: MASTER.into()
+        }
+    );
     drop(tui);
     engine.stop();
 }

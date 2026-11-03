@@ -1,4 +1,4 @@
-use super::capture::{Attribution, Format, RunKind, scan_home, scan_runs};
+use super::capture::{Attribution, Format, RunKind, scan_agent_home, scan_runs};
 use super::health::{UsageStep, clear, record_panic, record_recovered};
 use super::poll::{CLAUDE_USAGE_URL, CODEX_USAGE_URL, Provider, poll};
 use super::report::{mark_unreported, reports_usage};
@@ -240,7 +240,7 @@ impl Usage {
             let mut statement = match self.db.prepare(
                 "SELECT id,project,role,harness,connection,
                     status IN ('starting','idle','working'),stopped_ms FROM team_agents
-                 WHERE status IN ('starting','idle','working') OR stopped_ms>=?1
+                 WHERE role<>'teammate' AND (status IN ('starting','idle','working') OR stopped_ms>=?1)
                  ORDER BY id DESC LIMIT ?2",
             ) {
                 Ok(statement) => statement,
@@ -289,7 +289,7 @@ impl Usage {
                 .join("agents")
                 .join(format!("agent-{id}"))
                 .join("home");
-            scan_home(&self.db, &home, format, &attribution, now_ms)?;
+            scan_agent_home(&self.db, &home, format, &attribution, id, now_ms)?;
         }
         Ok(())
     }

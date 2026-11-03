@@ -47,7 +47,7 @@ impl NativeBridge {
         if !self.status().connected {
             return Err(failure("not_connected"));
         }
-        self.allow_new_auth()?;
+        self.allow_change()?;
         if self.blocked() {
             return Err(failure("pending_intent"));
         }
@@ -96,11 +96,12 @@ impl NativeBridge {
         secret: Option<AccountSecret>,
         generation: u64,
     ) -> Result<AccountProfileView, BridgeError> {
-        self.allow_new_auth()?;
+        self.allow_change()?;
         if generation == 0 || generation > 9_007_199_254_740_991 {
             return Err(failure("draft_generation_limit"));
         }
         let (scope, connection) = self.selected_model_connection(ticket)?;
+        self.allow_account_change(|stuck| crazyagent::config::same_account(stuck, &connection))?;
         validate_profile_connection(&connection, secret.is_some())?;
         let request = AccountProfileRequest {
             request_id: profile_id()?,

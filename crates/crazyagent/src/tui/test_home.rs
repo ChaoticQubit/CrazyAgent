@@ -62,3 +62,51 @@ pub(in crate::tui) fn engine_config() -> crate::config::EffectiveConfig {
     );
     config
 }
+
+/// Runs real git in a folder with no system, global or hook config, for tests that build
+/// a project checkout. Inputs: the folder and the git arguments. Output: git's standard
+/// output; panics when git fails.
+pub(in crate::tui) fn git(folder: &std::path::Path, args: &[&str]) -> String {
+    let output = crate::spawn_gate::output(
+        std::process::Command::new("/usr/bin/git")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .args(["-c", "core.hooksPath=/dev/null", "-C"])
+            .arg(folder)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
+    assert!(output.status.success(), "git {args:?}: {output:?}");
+    String::from_utf8(output.stdout).unwrap()
+}
+
+/// Makes a folder a git checkout on main with its own identity and a committed README,
+/// then writes each instruction file as "<name> rule": the tracked ones committed, the
+/// untracked ones left out of git. Inputs: the folder and the two name lists. Output: the
+/// tip commit id.
+pub(in crate::tui) fn instruction_repo(
+    folder: &std::path::Path,
+    tracked: &[&str],
+    untracked: &[&str],
+) -> String {
+    git(folder, &["init", "-q", "-b", "main"]);
+    git(folder, &["config", "user.name", "Owner"]);
+    git(folder, &["config", "user.email", "owner@example.invalid"]);
+    std::fs::write(folder.join("README.md"), "notes\n").unwrap();
+    git(folder, &["add", "README.md"]);
+    for name in tracked {
+        std::fs::write(folder.join(name), format!("{name} rule\n")).unwrap();
+        git(folder, &["add", name]);
+    }
+    git(folder, &["commit", "-q", "-m", "start"]);
+    for name in untracked {
+        std::fs::write(folder.join(name), format!("{name} rule\n")).unwrap();
+    }
+    git(folder, &["rev-parse", "HEAD"]).trim().to_owned()
+}

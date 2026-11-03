@@ -51,10 +51,31 @@ pub struct AgentName {
     pub handle: Option<String>,
 }
 
-/// Creates the tables that keep sub-agent names and the roles the master gave tasks.
+/// Creates the tables that keep sub-agent names and the roles the master gave tasks, and
+/// clears every kept handle in a numbered form ([`numbered`]), stored before such handles
+/// were refused, so no label shows a name that now reaches another agent.
 /// Takes the engine connection.
 /// Returns any SQLite failure.
 pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
+    create(connection)?;
+    let stored = connection
+        .prepare("SELECT agent,handle FROM team_names WHERE handle GLOB '*[0-9]'")
+        .map_err(error)?
+        .query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(error)?;
+    for (agent, _) in stored.iter().filter(|(_, handle)| numbered(handle)) {
+        connection
+            .execute("UPDATE team_names SET handle=NULL WHERE agent=?1", [agent])
+            .map_err(error)?;
+    }
+    Ok(())
+}
+
+fn create(connection: &Connection) -> Result<(), EngineError> {
     connection
         .execute_batch(
             "CREATE TABLE IF NOT EXISTS team_names (
@@ -75,7 +96,8 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
 
 /// Turns free text into a role handle: lower-case ASCII letters and digits joined by single
 /// hyphens, at most `HANDLE_CHARS_MAX` characters. Takes the text, a leading `@` allowed.
-/// Returns the handle, or None when no letter or digit is left.
+/// Returns the handle, or None when no letter or digit is left or the handle reads as an
+/// agent number ([`numbered`]).
 pub fn handle(text: &str) -> Option<String> {
     let text = text.trim();
     let text = text.strip_prefix('@').unwrap_or(text);
@@ -96,7 +118,22 @@ pub fn handle(text: &str) -> Option<String> {
     }
     let kept = kept.trim_end_matches('-');
     assert!(kept.len() <= HANDLE_CHARS_MAX);
-    (!kept.is_empty()).then(|| kept.to_owned())
+    (!kept.is_empty() && !numbered(kept)).then(|| kept.to_owned())
+}
+
+/// Says whether a name reads as an agent number in a form a master names agents by
+/// (RV-DS-62): bare digits, `team-<n>`, `sub-agent-<n>` or `<harness>-<n>`, which
+/// [`super::events::resolve`] reads as that agent, so no handle may take it. Takes the name
+/// without its `@`. Returns true for such a form, in any case.
+pub(crate) fn numbered(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    let (prefix, digits) = name.rsplit_once('-').unwrap_or(("", name.as_str()));
+    !digits.is_empty()
+        && digits.bytes().all(|byte| byte.is_ascii_digit())
+        && (prefix.is_empty()
+            || prefix == "team"
+            || prefix == "sub-agent"
+            || crate::harnesses::spec(prefix).is_some())
 }
 
 /// Names an agent the way every client shows it: "Ada (@onboarding-fix)", "Ada" before its
@@ -105,7 +142,7 @@ pub fn handle(text: &str) -> Option<String> {
 pub fn label(role: AgentRole, id: i64, name: Option<&AgentName>) -> String {
     match (role, name) {
         (
-            AgentRole::Sub,
+            AgentRole::Sub | AgentRole::Teammate,
             Some(AgentName {
                 persona,
                 handle: Some(handle),
@@ -114,13 +151,15 @@ pub fn label(role: AgentRole, id: i64, name: Option<&AgentName>) -> String {
             format!("{persona} (@{handle})")
         }
         (
-            AgentRole::Sub,
+            AgentRole::Sub | AgentRole::Teammate,
             Some(AgentName {
                 persona,
                 handle: None,
             }),
         ) => persona.clone(),
-        (AgentRole::Master, _) | (AgentRole::Sub, None) => role.agent_label(id),
+        (AgentRole::Master, _) | (AgentRole::Sub | AgentRole::Teammate, None) => {
+            role.agent_label(id)
+        }
     }
 }
 
@@ -151,7 +190,7 @@ fn sub_agent(
 ) -> Result<bool, EngineError> {
     connection
         .query_row(
-            "SELECT 1 FROM team_agents WHERE id=?1 AND project=?2 AND role='sub'",
+            "SELECT 1 FROM team_agents WHERE id=?1 AND project=?2 AND role IN ('sub','teammate')",
             params![agent, project.as_str()],
             |_| Ok(()),
         )
@@ -339,7 +378,10 @@ fn store_handle(
     }
     let taken = held(connection, project, agent, "handle")?;
     let free = |candidate: &str| {
-        candidate != MASTER_HANDLE && !taken.contains(candidate) && !id_shaped(&prefixes, candidate)
+        candidate != MASTER_HANDLE
+            && !numbered(candidate)
+            && !taken.contains(candidate)
+            && !id_shaped(&prefixes, candidate)
     };
     let attempts = if suffix { SUFFIXES_MAX } else { 1 };
     let Some(chosen) = (1..=attempts)
@@ -550,7 +592,9 @@ pub fn rename(
 }
 
 /// Finds the live agent of a project that a name addresses: `@handle`, `@master`, a persona
-/// in any case, or a bare handle. Takes the connection, project and the name text.
+/// in any case, or a bare handle. A name in a numbered form ([`numbered`]) is an agent
+/// number, never a name, even for a handle stored before such handles were refused.
+/// Takes the connection, project and the name text.
 /// Returns the team agent id, or None when no live agent of the project carries that name.
 pub fn resolve(
     connection: &Connection,
@@ -565,6 +609,9 @@ pub fn resolve(
         Some(bare) => (true, bare.to_ascii_lowercase()),
         None => (false, text.to_ascii_lowercase()),
     };
+    if numbered(&bare) {
+        return Ok(None);
+    }
     if bare == MASTER_HANDLE {
         return connection
             .query_row(
@@ -598,6 +645,7 @@ pub fn resolve(
 /// Finds the finished sub-agent of a project that a name addresses, for a wake (DEC-102):
 /// a persona in any case first, then an `@handle` or bare handle, among the project's
 /// sub-agents that stopped or failed, the most recently stopped one when several carried it.
+/// A name in a numbered form is left to the number lookup, as in [`resolve`].
 /// Takes the connection, project and the name text. Returns the team agent id, or None.
 pub fn resolve_finished(
     connection: &Connection,
@@ -612,6 +660,9 @@ pub fn resolve_finished(
         Some(bare) => (true, bare.to_ascii_lowercase()),
         None => (false, text.to_ascii_lowercase()),
     };
+    if numbered(&bare) {
+        return Ok(None);
+    }
     let by = |column: &str| {
         connection
             .query_row(
