@@ -817,8 +817,9 @@ fn rows_stored_before_the_upgrade_are_masked_from_the_first_read() {
 }
 
 /// Writes one Claude Code record whose tool output is `output`, then reads it through the
-/// real search and page: no value in `secrets` is found or shown, and the plain word `kept`
-/// still finds the output. Inputs: the output text, the values and the plain word.
+/// real search and page: no value in `secrets`, each one search word, is found or shown, and
+/// the plain word `kept` still finds the output. Inputs: the output text, the values and the
+/// plain word.
 fn assert_masked(output: &str, secrets: &[&str], kept: &str) {
     let fixture = Fixture::new();
     let (agent, home) = fixture.agent("claude-code");
@@ -832,6 +833,12 @@ fn assert_masked(output: &str, secrets: &[&str], kept: &str) {
     let (page, missing) = fixture.session(&format!("agent-{agent}/shapes"), 0);
     assert!(!missing, "{page}");
     for secret in secrets {
+        assert!(
+            !secret.is_empty()
+                && secret.len() <= WORD_BYTES_MAX
+                && !secret.contains(char::is_whitespace),
+            "{secret} is not one search word"
+        );
         let found = fixture.sessions(secret);
         assert!(hit_lines(&found).is_empty(), "{secret} is found: {found}");
         assert!(!page.contains(secret), "{secret} is shown: {page}");
@@ -953,7 +960,8 @@ fn a_private_key_block_is_masked_from_begin_to_end() {
          quokkafern done",
         &[
             "OPENSSH",
-            "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtzc2gtZW",
+            "b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQ",
+            "MwAAAAtzc2gtZW",
             "Ab/Zx",
             "AAAEC4k9w",
         ],
