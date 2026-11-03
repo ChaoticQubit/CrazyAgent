@@ -205,13 +205,17 @@ pub(crate) fn sync(
         if wanted_values[name] == current_values[name] {
             continue;
         }
+        let word = match &wanted_values[name] {
+            serde_json::Value::String(word) => word.clone(),
+            number => number.to_string(),
+        };
         policy::set(
             tx,
             &Host,
             &owner(),
             &key,
             entry.key,
-            &wanted_values[name],
+            &word,
             entry.version,
             now_ms,
         )

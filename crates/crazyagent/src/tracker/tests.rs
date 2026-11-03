@@ -252,7 +252,7 @@ fn an_agent_link_to_another_projects_worktree_is_refused_in_engine_db() {
             ..TicketOverride::default()
         },
     );
-    let (id, version) = create(&tx, "owner", "CA", "Wire the host");
+    let (id, _) = create(&tx, "owner", "CA", "Wire the host");
     let own = case.worktree(1).to_str().unwrap().to_owned();
     let other = case.worktree(2).to_str().unwrap().to_owned();
     let links_before = case.count("SELECT count(*) FROM tk_links");
@@ -263,14 +263,14 @@ fn an_agent_link_to_another_projects_worktree_is_refused_in_engine_db() {
             &tx,
             who,
             "link",
-            json!({"id": id, "kind": "worktree", "target": other, "version": version}),
+            json!({"id": id, "kind": "worktree", "target": other}),
         );
         assert_eq!(code, LINK_CROSS_PROJECT, "{who}");
         let code = refused(
             &tx,
             who,
             "link",
-            json!({"id": id, "kind": "branch", "target": "crazyagent/agent-2", "version": version}),
+            json!({"id": id, "kind": "branch", "target": "crazyagent/agent-2"}),
         );
         assert_eq!(code, LINK_CROSS_PROJECT, "{who}");
     }
@@ -278,24 +278,23 @@ fn an_agent_link_to_another_projects_worktree_is_refused_in_engine_db() {
         &tx,
         "agent:2",
         "link",
-        json!({"id": id, "kind": "worktree", "target": own, "version": version}),
+        json!({"id": id, "kind": "worktree", "target": own}),
     );
     assert_eq!(code, ACTOR_OTHER_PROJECT);
     assert_eq!(case.count("SELECT count(*) FROM tk_links"), links_before);
     assert_eq!(case.count("SELECT count(*) FROM tk_events"), events_before);
 
-    let linked = ok(
-        &tx,
-        "agent:1",
-        "link",
-        json!({"id": id, "kind": "worktree", "target": own, "version": version}),
-    );
-    let version = linked["data"]["version"].as_i64().unwrap_or(version);
     ok(
         &tx,
         "agent:1",
         "link",
-        json!({"id": id, "kind": "branch", "target": "crazyagent/agent-1", "version": version}),
+        json!({"id": id, "kind": "worktree", "target": own}),
+    );
+    ok(
+        &tx,
+        "agent:1",
+        "link",
+        json!({"id": id, "kind": "branch", "target": "crazyagent/agent-1"}),
     );
     let shown = ok(&tx, "agent:1", "show", json!({"id": id}));
     let links = shown["data"]["links"].as_array().unwrap();
@@ -315,12 +314,12 @@ fn a_removed_change_set_shows_gone_and_the_ticket_still_reads() {
     case.agent(1, &one, "sub");
     let change = case.turn_end(1, &one);
     let tx = case.tx();
-    let (id, version) = create(&tx, "owner", "CA", "Land the readme");
+    let (id, _) = create(&tx, "owner", "CA", "Land the readme");
     ok(
         &tx,
         "owner",
         "link",
-        json!({"id": id, "kind": "change_set", "target": change.as_str(), "version": version}),
+        json!({"id": id, "kind": "change_set", "target": change.as_str()}),
     );
     let shown = ok(&tx, "owner", "show", json!({"id": id}));
     let link = &shown["data"]["links"][0];
@@ -406,13 +405,15 @@ fn the_project_override_wins_over_the_app_default() {
     );
 
     let (mine, version) = create(&tx, "agent:1", "CA", "Close it myself");
-    let closed = ok(
+    ok(
         &tx,
         "agent:1",
         "close",
         json!({"id": mine, "reason": "done in agent 1", "version": version}),
     );
-    assert_eq!(closed["data"]["status"], "done", "{closed}");
+    let closed = store::ticket(&tx, &ShortId::parse(&mine).unwrap()).unwrap();
+    assert_eq!(closed.status, TicketStatus::Done);
+    assert_eq!(closed.closed_by, Some(actor("agent:1")));
     let (theirs, version) = create(&tx, "agent:2", "CB", "Wait for the owner");
     let code = refused(
         &tx,
@@ -420,8 +421,8 @@ fn the_project_override_wins_over_the_app_default() {
         "close",
         json!({"id": theirs, "reason": "done in agent 2", "version": version}),
     );
-    assert_ne!(
-        code, ACTOR_OTHER_PROJECT,
+    assert_eq!(
+        code, "close_owner_only",
         "the policy refuses, not the membership check"
     );
     let ticket = store::ticket(&tx, &ShortId::parse(&theirs).unwrap()).unwrap();
@@ -479,7 +480,7 @@ fn an_agent_cannot_record_owner_evidence() {
                 kind: CheckKind::Manual,
                 check: "review:owner".to_owned(),
                 result: EvidenceResult::Pass,
-                reference: format!("looked at by {who}"),
+                reference: Some(format!("looked at by {who}")),
             },
             NOW + 10,
         )
