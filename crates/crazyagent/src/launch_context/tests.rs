@@ -1803,22 +1803,77 @@ fn request_capture() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
     (port, bodies)
 }
 
+/// Installs the Seatbelt profile the team runtime builds for a tools-on agent of a project
+/// with the default agent policy: that policy's network beside the model port, its
+/// toolchains, the agent's scratch folder, graphify, the harness install folders and the
+/// launch context's server folders. Inputs: the test folder, the agent home, the project,
+/// the context, the model port and the install folders. Output: the profile path.
+#[cfg(target_os = "macos")]
+fn tools_on_profile(
+    base: &Path,
+    home: &Path,
+    project: &Path,
+    context: &AgentContext,
+    port: u16,
+    installs: &[&Path],
+) -> PathBuf {
+    use crate::sandbox::policy::AgentPolicy;
+    use crate::sandbox::toolchains::{self, ToolHomes, Toolchains};
+    use crate::sandbox::{ProjectSandbox, SandboxRemote};
+    let policy = AgentPolicy::default();
+    let homes = ToolHomes::owner().unwrap();
+    let tmp = private_folder(&base.join("tmp"));
+    let scratch = toolchains::make_tmp(home).unwrap();
+    let network = policy.network.sandbox(Some(SandboxRemote::Loopback(port)));
+    let (mut sandbox, _) = ProjectSandbox::new(project, home, &tmp, network)
+        .unwrap()
+        .allow_tools(&Toolchains::grant(&homes, &policy.allowed(project)))
+        .unwrap()
+        .allow_scratch(&scratch)
+        .unwrap()
+        .allow_extra_reads(&toolchains::graphify(&homes))
+        .unwrap();
+    for install in installs {
+        sandbox = sandbox.allow_read(install).unwrap();
+    }
+    for server in context.read_paths() {
+        sandbox = sandbox.allow_read(server.parent().unwrap()).unwrap();
+    }
+    let profile = base.join("agent.sb");
+    sandbox.install(&profile).unwrap();
+    profile
+}
+
+/// The last bytes of a log file, read lossily, or a word saying it is missing. Inputs: the
+/// path and the byte bound. Output: the text.
+#[cfg(target_os = "macos")]
+fn log_tail(path: &Path, bytes: usize) -> String {
+    match fs::read(path) {
+        Ok(data) => String::from_utf8_lossy(&data[data.len().saturating_sub(bytes)..]).into_owned(),
+        Err(_) => "(no log)".to_owned(),
+    }
+}
+
 /// A fresh Claude Code agent the engine launches with its launch context, context-mode
-/// started from the engine's shared install, lists the context-mode tools it actually has:
-/// real Claude Code sends its first model request to a local endpoint that records it and
-/// answers 500, and that request offers the ctx tools. Needs Claude Code and
-/// `CRAZYAGENT_CONTEXT_MODE_INSTALL`; spends no tokens. The handshake test covers the server
-/// inside the agent sandbox.
+/// started from the engine's shared install, inside the deny-default Seatbelt profile the
+/// runtime builds for a tools-on agent, is offered the context-mode tools: real Claude Code
+/// sends its first model request to a local endpoint that records it and answers 500, and
+/// that request's tool list names `ctx_execute`, `ctx_batch_execute` and `ctx_search`
+/// exactly. Claude Code's stderr goes to a log in the agent home, quoted on failure. Needs
+/// Claude Code and `CRAZYAGENT_CONTEXT_MODE_INSTALL`; spends no tokens.
 #[cfg(target_os = "macos")]
 #[test]
 #[ignore = "live: needs Claude Code and CRAZYAGENT_CONTEXT_MODE_INSTALL"]
 fn a_fresh_claude_agent_lists_the_context_mode_tools_of_the_engine_install() {
     use crate::harnesses::launch::{AccountBinding, LaunchLimits, LaunchRequest, Session};
+    use std::os::unix::fs::PermissionsExt;
     const TASK: &str = "Name the tools you have for check 4471.";
     const SERVER: &str = "plugin_context-mode_context-mode";
+    const STDERR_TAIL_BYTES: usize = 4096;
     let Some(claude) = on_path("claude") else {
         panic!("UNAVAILABLE: no claude executable on PATH");
     };
+    let claude = claude.canonicalize().unwrap();
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let (context, _connection, _install) = shared_context_mode(&base);
@@ -1831,13 +1886,35 @@ fn a_fresh_claude_agent_lists_the_context_mode_tools_of_the_engine_install() {
     )
     .unwrap();
     assert!(initialized.success());
-    let profile = base.join("agent.sb");
-    fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    let stderr = home.join("claude-stderr.log");
+    let bin = private_folder(&base.join("bin"));
+    let wrapper = bin.join("claude");
+    for path in [&claude, &stderr] {
+        assert!(!path.to_string_lossy().contains('\''), "{}", path.display());
+    }
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nexec '{}' \"$@\" 2>'{}'\n",
+            claude.display(),
+            stderr.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
     let (port, bodies) = request_capture();
+    let profile = tools_on_profile(
+        &base,
+        &home,
+        &work,
+        &context,
+        port,
+        &[&bin, claude.parent().unwrap()],
+    );
     let mut session = Session::start_with_context(
         LaunchRequest {
             harness: "claude-code".into(),
-            executable: claude.canonicalize().unwrap(),
+            executable: wrapper,
             working_dir: work,
             account: AccountBinding::Url {
                 home,
@@ -1871,15 +1948,32 @@ fn a_fresh_claude_agent_lists_the_context_mode_tools_of_the_engine_install() {
         let seen = bodies.lock().unwrap().len();
         assert!(
             std::time::Instant::now() < deadline,
-            "no model request carried the task with its tools ({seen} requests seen)"
+            "no model request carried the task with its tools ({seen} requests seen); stderr: {}",
+            log_tail(&stderr, STDERR_TAIL_BYTES)
         );
         if session.next_event(Duration::from_millis(500)).is_err() {
-            panic!("the agent ended before its first model request ({seen} requests seen)");
+            panic!(
+                "the agent ended before its first model request ({seen} requests seen); stderr: {}",
+                log_tail(&stderr, STDERR_TAIL_BYTES)
+            );
         }
     };
     session.stop().unwrap();
+    let request: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let offered: Vec<&str> = request["tools"]
+        .as_array()
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| tool["name"].as_str())
+                .collect()
+        })
+        .unwrap_or_default();
     for tool in ["ctx_execute", "ctx_batch_execute", "ctx_search"] {
         let name = format!("mcp__{SERVER}__{tool}");
-        assert!(body.contains(&name), "the agent is offered {name}");
+        assert!(
+            offered.contains(&name.as_str()),
+            "the agent is offered exactly {name}: {offered:?}"
+        );
     }
 }
