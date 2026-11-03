@@ -809,12 +809,12 @@ fn link_row_of(row: &Row<'_>) -> rusqlite::Result<Link> {
 /// Reads a stored actor, the core's own `host:` actors included. Inputs: the row and the
 /// column. Output: the actor, or a conversion error for a bad shape.
 pub(crate) fn actor(row: &Row<'_>, index: usize) -> rusqlite::Result<Actor> {
-    Actor::try_from(row.get::<_, String>(index)?).map_err(|refused| conversion(index, refused))
+    Actor::stored(&row.get::<_, String>(index)?).map_err(|refused| conversion(index, refused))
 }
 
 fn optional_actor(row: &Row<'_>, index: usize) -> rusqlite::Result<Option<Actor>> {
     row.get::<_, Option<String>>(index)?
-        .map(Actor::try_from)
+        .map(|text| Actor::stored(&text))
         .transpose()
         .map_err(|refused| conversion(index, refused))
 }
