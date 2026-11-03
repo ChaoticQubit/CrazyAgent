@@ -11124,24 +11124,73 @@ fn a_managed_tools_on_agent_under_no_network_cannot_reach_a_non_model_host_on_44
     );
 }
 
-/// Under the None network a signed-in agent with tools reaches the network only through its
-/// own model proxy (S4b): its profile allows that one loopback port, no other port and no
-/// DNS, the proxy opens tunnels only to its harness's model hosts, the launch's variables
-/// name the proxy for the headless and the pane launch alike, and the proxy closes with
-/// its plan.
+/// Prepares a signed-in codex sub-agent with tools under the None network and checks that it
+/// got a model proxy. Input: the fixture. Output: the runtime, the agent id, its plan and
+/// the proxy's port.
 #[cfg(target_os = "macos")]
-#[test]
-fn a_managed_tools_on_agent_under_no_network_reaches_the_network_only_through_its_model_proxy() {
-    let fixture = Fixture::new(1);
-    let (runtime, account) = none_network_runtime(&fixture);
-    let (id, plan) = prepare_tools_on(&fixture, &runtime, &account);
+fn proxied_agent(fixture: &Fixture) -> (TeamRuntime, i64, Plan, u16) {
+    let (runtime, account) = none_network_runtime(fixture);
+    let (id, plan) = prepare_tools_on(fixture, &runtime, &account);
     let plan = plan.unwrap();
     let port = plan.proxy.as_ref().map(|proxy| proxy.port());
     assert!(
         port.is_some(),
         "an agent with tools under None gets a model proxy"
     );
-    let port = port.unwrap();
+    (runtime, id, plan, port.unwrap())
+}
+
+/// Builds the proxied agent's launch request on its signed-in home at Sandboxed and the
+/// launch context the runtime gives it. Inputs: the fixture, the runtime, the agent and its
+/// plan. Output: the request and the context.
+#[cfg(target_os = "macos")]
+fn proxied_launch(
+    fixture: &Fixture,
+    runtime: &TeamRuntime,
+    id: i64,
+    plan: &Plan,
+) -> (LaunchRequest, AgentContext) {
+    let context = runtime
+        .context(
+            &fixture.setup.project_id,
+            id,
+            AgentRole::Sub,
+            true,
+            Layout::Linked,
+        )
+        .unwrap();
+    let request = plan
+        .request(
+            AccountBinding::Subscription {
+                home: runtime.agent_folder(id).join("home"),
+            },
+            AgentAccess::Sandboxed,
+        )
+        .unwrap();
+    (request, plan.team_context(context))
+}
+
+/// The variables every proxied launch carries, for the proxy on `port`. Input: the port.
+/// Output: the name and value pairs.
+#[cfg(target_os = "macos")]
+fn proxy_variables(port: u16) -> Vec<(String, String)> {
+    let url = format!("http://127.0.0.1:{port}");
+    ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy"]
+        .into_iter()
+        .map(|name| (name.to_owned(), url.clone()))
+        .chain(["NO_PROXY", "no_proxy"].map(|name| (name.to_owned(), String::new())))
+        .collect()
+}
+
+/// Under the None network a signed-in agent with tools reaches the network only through its
+/// own model proxy (S4b): its profile allows that one loopback port, no other port and no
+/// DNS, the proxy opens tunnels only to its harness's model hosts, and it closes with its
+/// plan.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_managed_tools_on_agent_under_no_network_reaches_the_network_only_through_its_model_proxy() {
+    let fixture = Fixture::new(1);
+    let (runtime, id, plan, port) = proxied_agent(&fixture);
     let profile = std::fs::read_to_string(&plan.sandbox_profile).unwrap();
     assert!(
         profile.contains(&format!(
@@ -11168,30 +11217,41 @@ fn a_managed_tools_on_agent_under_no_network_reaches_the_network_only_through_it
     ] {
         assert_eq!(proxy_status(port, target), status, "{target}");
     }
-    let url = format!("http://127.0.0.1:{port}");
-    let context = runtime
-        .context(
-            &fixture.setup.project_id,
-            id,
-            AgentRole::Sub,
-            true,
-            Layout::Linked,
-        )
-        .unwrap();
-    let request = plan
-        .request(
-            AccountBinding::Subscription {
-                home: runtime.agent_folder(id).join("home"),
-            },
-            AgentAccess::Sandboxed,
-        )
-        .unwrap();
+    drop(plan);
+    assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
+}
+
+/// A proxied agent's headless launch names its model proxy in its variables and exempts no
+/// host (S4b).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_proxied_agent_s_headless_launch_names_its_model_proxy() {
+    let fixture = Fixture::new(1);
+    let (runtime, id, plan, port) = proxied_agent(&fixture);
+    let (request, context) = proxied_launch(&fixture, &runtime, id, &plan);
     let (command, installed) =
-        crate::harnesses::launch::command_with_context(&request, &plan.team_context(context))
-            .unwrap();
+        crate::harnesses::launch::command_with_context(&request, &context).unwrap();
     assert_eq!(installed.model_proxy(), Some(port));
-    let headless: BTreeMap<&std::ffi::OsStr, Option<&std::ffi::OsStr>> =
-        command.get_envs().collect();
+    let env: Vec<(String, String)> = command
+        .get_envs()
+        .filter_map(|(name, value)| Some((name.to_str()?.to_owned(), value?.to_str()?.to_owned())))
+        .collect();
+    for variable in proxy_variables(port) {
+        assert!(env.contains(&variable), "{variable:?}: {env:?}");
+    }
+}
+
+/// A proxied agent's pane launch names its model proxy in its variables, which its native
+/// teammates' command repeats, and exempts no host (S4b).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_proxied_agent_s_pane_launch_names_its_model_proxy() {
+    let fixture = Fixture::new(1);
+    let (runtime, id, plan, port) = proxied_agent(&fixture);
+    let (request, context) = proxied_launch(&fixture, &runtime, id, &plan);
+    let installed = context
+        .install("codex", request.account.home(), true)
+        .unwrap();
     let pane = crate::harnesses::interactive::command(
         &request,
         Some(&installed),
@@ -11202,41 +11262,25 @@ fn a_managed_tools_on_agent_under_no_network_reaches_the_network_only_through_it
         },
     )
     .unwrap();
-    for (name, value) in [
-        ("HTTPS_PROXY", url.as_str()),
-        ("https_proxy", url.as_str()),
-        ("HTTP_PROXY", url.as_str()),
-        ("http_proxy", url.as_str()),
-        ("NO_PROXY", ""),
-        ("no_proxy", ""),
-    ] {
-        assert_eq!(
-            headless.get(std::ffi::OsStr::new(name)),
-            Some(&Some(std::ffi::OsStr::new(value))),
-            "{name}"
-        );
-        assert!(
-            pane.env.contains(&(name.to_owned(), value.to_owned())),
-            "{name}: {:?}",
-            pane.env
-        );
+    for variable in proxy_variables(port) {
+        assert!(pane.env.contains(&variable), "{variable:?}: {:?}", pane.env);
     }
-    drop(installed);
-    let context = runtime
-        .context(
-            &fixture.setup.project_id,
-            id,
-            AgentRole::Sub,
-            true,
-            Layout::Linked,
-        )
-        .unwrap();
+}
+
+/// A proxied agent's pane record keeps its model proxy's port, so a later engine binds the
+/// port the running pane's profile names again (S4b).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_proxied_agent_s_pane_record_keeps_its_model_proxy_port() {
+    let fixture = Fixture::new(1);
+    let (runtime, id, plan, port) = proxied_agent(&fixture);
+    let (request, context) = proxied_launch(&fixture, &runtime, id, &plan);
     let host = fixture.host();
     let session = crate::harnesses::terminal_session::TerminalSession::start(
         host.clone(),
         AgentId::team(id).unwrap(),
         request,
-        Some(plan.team_context(context)),
+        Some(context),
     )
     .unwrap();
     assert_eq!(
@@ -11246,8 +11290,6 @@ fn a_managed_tools_on_agent_under_no_network_reaches_the_network_only_through_it
     );
     drop(session);
     host.close(&[]).unwrap();
-    drop(plan);
-    assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err());
 }
 
 /// Under the None network an endpoint agent with tools keeps its direct grant for a local
