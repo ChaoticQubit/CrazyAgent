@@ -96,12 +96,14 @@ fn stopped_shown(agents: &[TeamAgent]) -> Vec<i64> {
 
 /// Builds a project's team graph from its team status, with no extra read.
 /// Takes the status; live and failed sub-agents and the `STOPPED_SHOWN_MAX` newest stopped
-/// ones become nodes, and every listed task an edge.
+/// ones become nodes, except finished ones while the owner hides them, and every listed task
+/// an edge.
 /// Returns the master first, then harness groups, then agents, and edges in task order.
 pub fn graph(status: &TeamStatus) -> TeamGraph {
     let stopped = stopped_shown(&status.agents);
     let shown = |agent: &TeamAgent| {
         agent.role == AgentRole::Sub
+            && (status.show_finished || !agent.finished)
             && (agent.status != AgentStatus::Stopped || stopped.contains(&agent.id))
     };
     let masters = || {

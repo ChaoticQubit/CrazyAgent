@@ -59,7 +59,7 @@ const COPY: Record<string, string> = {
   folder_size_interrupted: "Measuring the folder stopped. Try again.",
   crazyagent_folder_invalid: "The project's .crazyagent folder isn't a plain folder. Rename or remove it, then try again.",
   crazyagent_folder_unwritable: "CrazyAgent can't write the project's .crazyagent folder. Check the folder's permissions.",
-  git_exclude_invalid: "The project's git exclude file can't be updated. Check .git/info/exclude.",
+  git_exclude_invalid: "The project's git exclude file can't be updated: .git/info must be a plain folder and .git/info/exclude a plain file under 1 MiB, not links. Fix them, then try again.",
   owner_home_unknown: "Your home folder couldn't be found.",
   onboarding_folder_missing: "This folder isn't there anymore. Choose it again.",
   onboarding_folder_unsafe: "This folder can't be set up. Choose a project's own folder, not your home folder or the app's data.",

@@ -1029,18 +1029,21 @@ fn a_dirty_submodule_is_ignored_and_its_configured_command_never_runs() {
     write(&sub.join("inner.txt"), "inner\n");
     git_in(&case.home, &sub, &["add", "inner.txt"]);
     git_in(&case.home, &sub, &["commit", "-q", "-m", "Sub start"]);
-    let sub_head = git_in(&case.home, &sub, &["rev-parse", "HEAD"])
-        .trim()
-        .to_owned();
 
-    let marker = case.home.join("submodule-fsmonitor-ran");
-    let fsmonitor = case.home.join("fsmonitor.sh");
-    marker_script(&fsmonitor, &marker);
+    let marker = case.home.join("submodule-clean-filter-ran");
+    let filter = case.home.join("clean-filter.sh");
+    marker_script(&filter, &marker);
     git_in(
         &case.home,
         &sub,
-        &["config", "core.fsmonitor", fsmonitor.to_str().unwrap()],
+        &["config", "filter.guard.clean", filter.to_str().unwrap()],
     );
+    write(&sub.join(".gitattributes"), "inner.txt filter=guard\n");
+    git_in(&case.home, &sub, &["add", ".gitattributes"]);
+    git_in(&case.home, &sub, &["commit", "-q", "-m", "Sub filter"]);
+    let sub_head = git_in(&case.home, &sub, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
 
     git_in(
         &case.home,
@@ -1074,7 +1077,114 @@ fn a_dirty_submodule_is_ignored_and_its_configured_command_never_runs() {
     );
     assert!(
         !marker.exists(),
-        "engine git ran the submodule's configured fsmonitor"
+        "engine git entered the submodule and ran its clean filter"
+    );
+}
+
+#[test]
+fn accept_lands_with_a_dirty_submodule_in_the_owner_checkout() {
+    let case = Case::new();
+    let sub = case.repo.join("vendor");
+    std::fs::create_dir(&sub).unwrap();
+    git_in(
+        &case.home,
+        &sub,
+        &["init", "-q", "--template=", "-b", "main"],
+    );
+    git_in(&case.home, &sub, &["config", "user.name", "Vendor Owner"]);
+    git_in(
+        &case.home,
+        &sub,
+        &["config", "user.email", "vendor@example.invalid"],
+    );
+    write(&sub.join("inner.txt"), "inner\n");
+    git_in(&case.home, &sub, &["add", "inner.txt"]);
+    git_in(&case.home, &sub, &["commit", "-q", "-m", "Vendor start"]);
+    let sub_head = git_in(&case.home, &sub, &["rev-parse", "HEAD"])
+        .trim()
+        .to_owned();
+
+    git_in(
+        &case.home,
+        &case.repo,
+        &[
+            "update-index",
+            "--add",
+            "--cacheinfo",
+            &format!("160000,{sub_head},vendor"),
+        ],
+    );
+    write(
+        &case.repo.join(".gitmodules"),
+        "[submodule \"vendor\"]\n\tpath = vendor\n\turl = ./vendor\n",
+    );
+    git_in(&case.home, &case.repo, &["add", ".gitmodules"]);
+    git_in(
+        &case.home,
+        &case.repo,
+        &["commit", "-q", "-m", "Add submodule"],
+    );
+    let with_submodule = case.tip();
+    case.agent(&["reset", "-q", "--hard", &with_submodule]);
+
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+
+    write(&sub.join("inner.txt"), "changed\n");
+    write(&sub.join("untracked.txt"), "new\n");
+
+    let AcceptOutcome::Landed { commit, branch } = case.accept(&id).unwrap() else {
+        panic!("a dirty owner submodule blocked the accept");
+    };
+    assert_eq!((branch.as_str(), case.tip()), ("main", commit.clone()));
+    assert_eq!(
+        case.owner(&["ls-tree", "--name-only", &commit])
+            .lines()
+            .filter(|name| *name == "vendor")
+            .count(),
+        1,
+        "the landed commit dropped the submodule gitlink"
+    );
+    assert_eq!(
+        std::fs::read_to_string(sub.join("inner.txt")).unwrap(),
+        "changed\n",
+        "the accept reset the owner's dirty submodule work"
+    );
+}
+
+#[test]
+fn an_embedded_repository_left_in_the_worktree_is_refused_when_the_turn_is_committed() {
+    let case = Case::new();
+    let worktree = case.workspace.worktree.clone();
+    let embedded = worktree.join("vendored");
+    std::fs::create_dir(&embedded).unwrap();
+    git_in(
+        &case.home,
+        &embedded,
+        &["init", "-q", "--template=", "-b", "main"],
+    );
+    git_in(&case.home, &embedded, &["config", "user.name", "Vendor"]);
+    git_in(
+        &case.home,
+        &embedded,
+        &["config", "user.email", "vendor@example.invalid"],
+    );
+    write(&embedded.join("code.rs"), "fn main() {}\n");
+    git_in(&case.home, &embedded, &["add", "code.rs"]);
+    git_in(
+        &case.home,
+        &embedded,
+        &["commit", "-q", "-m", "Vendor start"],
+    );
+
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Vendor a dependency".into(),
+    };
+    assert_eq!(
+        refused(record_turn_end(&case.db, &case.workspace, &turn)),
+        "changes_embedded_repository"
     );
 }
 
@@ -1904,6 +2014,8 @@ fn an_edited_message_lands_and_an_invalid_one_changes_nothing() {
         " \r\n\t ",
         "Bad \u{1b}[31m red",
         "Bad\rreturn",
+        "Owner title\u{e0041}\u{e0042}",
+        "Zero\u{200b}width",
         long.as_str(),
     ] {
         assert_eq!(
@@ -1925,6 +2037,39 @@ fn an_edited_message_lands_and_an_invalid_one_changes_nothing() {
         case.landed_message(&commit),
         "Owner title\n\nWhy it changed\twith a tab"
     );
+}
+
+#[test]
+fn hidden_characters_in_an_agent_subject_reach_the_owner_and_the_commit_only_as_escapes() {
+    let case = Case::new();
+    case.start();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Formats changed files.\u{e0041}\u{e0042}\u{200b}");
+    let id = case
+        .turn_with(TurnOutcome::Succeeded, "Ignored prompt line")
+        .unwrap();
+    assert_eq!(
+        case.view(&id).message,
+        "Formats changed files.\\u{e0041}\\u{e0042}\\u200b"
+    );
+    let roots = [case.repo.as_path()];
+    assert_eq!(
+        flow::subject("Fix\u{2060}the\u{e0001} parser", &roots),
+        "Fix\\u2060the\\u{e0001} parser"
+    );
+    case.db
+        .execute(
+            "UPDATE landing_change_sets SET message = ?1",
+            ["Stored before.\u{e0041}\u{feff}"],
+        )
+        .unwrap();
+    let stored = "Stored before.\\u{e0041}\\ufeff";
+    assert_eq!(case.view(&id).message, stored);
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!(case.landed_message(&commit), stored);
+    assert!(!crate::memory::hidden_text(&case.landed_message(&commit)));
 }
 
 #[test]
@@ -2343,4 +2488,926 @@ fn accept_refuses_a_merge_whose_predicted_object_was_planted_first() {
         std::fs::read_to_string(case.repo.join("README")).unwrap(),
         "ONE\ntwo\nthree\nfour\n"
     );
+}
+
+impl Case {
+    /// The same owner repository with the agent in its own clone (DEC-102 Own branch)
+    /// instead of a linked worktree, its start recorded. Output: the case.
+    fn own_branch() -> Self {
+        let mut case = Self::new();
+        let worktree = case.repo.parent().unwrap().join("agent-own");
+        add_agent_clone(&case.repo, &worktree).unwrap();
+        case.workspace.git_dir = crate::agent_git::git_dir(&worktree);
+        case.workspace.worktree = worktree;
+        case.start();
+        case
+    }
+
+    /// The owner repository's refs under one prefix, name and commit, one per line.
+    /// Input: the prefix. Output: the listing.
+    fn owner_refs(&self, prefix: &str) -> String {
+        self.owner(&["for-each-ref", "--format=%(refname) %(objectname)", prefix])
+    }
+
+    /// Plants in the agent's own clone, under a blob id its commit stored there, the
+    /// stored bytes of another text, as an agent with full git in its clone can.
+    /// Inputs: the id and the text.
+    fn plant_in_clone(&self, id: &str, text: &str) {
+        let source = self._tmp.path().join("clone-planted.txt");
+        std::fs::write(&source, text).unwrap();
+        let other = self.agent(&["hash-object", "-w", source.to_str().unwrap()]);
+        let objects = self.workspace.git_dir.join("objects");
+        let other = other.trim();
+        let bytes = std::fs::read(objects.join(&other[..2]).join(&other[2..])).unwrap();
+        let target = objects.join(&id[..2]).join(&id[2..]);
+        assert!(
+            target.exists(),
+            "the agent's commit stored no blob in its clone"
+        );
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::write(&target, bytes).unwrap();
+        assert_ne!(id, other);
+    }
+
+    /// Tells whether the owner repository's object store holds an object, read as the
+    /// owner's git reads it. Input: the id. Output: the answer.
+    fn owner_has(&self, id: &str) -> bool {
+        crate::spawn_gate::output(
+            Command::new("/usr/bin/git")
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &self.home)
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .arg("-C")
+                .arg(&self.repo)
+                .args(["cat-file", "-e", id])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .unwrap()
+        .status
+        .success()
+    }
+
+    /// Makes a repository beside the owner's that the agent's sandbox would not let it
+    /// read, with one commit holding one file. Inputs: the folder name and the file's text.
+    /// Output: the repository folder and its commit.
+    fn foreign(&self, name: &str, text: &str) -> (PathBuf, String) {
+        let foreign = self.repo.parent().unwrap().join(name);
+        std::fs::create_dir(&foreign).unwrap();
+        git_in(
+            &self.home,
+            &foreign,
+            &["init", "-q", "--template=", "-b", "main"],
+        );
+        write(&foreign.join("secret.txt"), text);
+        git_in(&self.home, &foreign, &["add", "secret.txt"]);
+        git_in(
+            &self.home,
+            &foreign,
+            &[
+                "-c",
+                "user.name=Other",
+                "-c",
+                "user.email=other@example.invalid",
+                "commit",
+                "-q",
+                "-m",
+                "Other",
+            ],
+        );
+        let commit = git_in(&self.home, &foreign, &["rev-parse", "HEAD"]);
+        (foreign, commit.trim().to_owned())
+    }
+}
+
+fn own_branch_turn() -> TurnEnd {
+    TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Add the fourth line".into(),
+    }
+}
+
+#[test]
+fn an_own_branch_agent_commits_on_its_branch_and_the_project_refs_stay_as_they_were() {
+    let case = Case::own_branch();
+    let base = case.tip();
+    let clone = case.workspace.git_dir.clone();
+    assert!(std::fs::symlink_metadata(&clone).unwrap().is_dir());
+    assert_eq!(
+        std::fs::read_to_string(clone.join("HEAD")).unwrap(),
+        "ref: refs/heads/agent/agent-own\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(clone.join("objects/info/alternates")).unwrap(),
+        format!("{}\n", case.repo.join(".git/objects").display())
+    );
+    assert_eq!(
+        (case.agent_head(), case.agent(&["status", "--porcelain"])),
+        (base.clone(), String::new())
+    );
+    let heads = case.owner_refs("refs/heads");
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let first = case.agent_commit("Add the fourth line");
+    case.agent(&["branch", "side"]);
+    case.agent(&["tag", "v1"]);
+    assert_eq!(case.owner_refs("refs/heads"), heads);
+    assert_eq!(case.owner_refs("refs/tags"), "");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let view = case.view(&id);
+    assert_eq!(
+        (view.base.as_str(), view.head.as_str(), view.files),
+        (base.as_str(), first.as_str(), 1)
+    );
+    assert_eq!(case.owner(&["cat-file", "-t", &first]), "commit\n");
+    assert_eq!(case.owner_refs("refs/heads"), heads);
+    assert_eq!(case.owner_refs("refs/tags"), "");
+    assert_eq!(
+        case.owner_refs("refs/crazyagent"),
+        format!("refs/crazyagent/pending/{} {first}\n", id.as_str())
+    );
+    case.edit("README", "uncommitted\n");
+    assert_eq!(case.turn(TurnOutcome::Succeeded), Some(id.clone()));
+    assert_eq!(
+        case.view(&id).head,
+        first,
+        "uncommitted work entered the change set"
+    );
+    assert_eq!(case.tip(), base);
+}
+
+#[test]
+fn accept_lands_the_commits_an_own_branch_agent_made_and_leaves_its_branch_alone() {
+    let case = Case::own_branch();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    case.edit("src/new.rs", "fn main() {}\n");
+    let head = case.agent_commit("Add main");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let before = case.owner_commit("other.txt", "owner work\n", "Owner work");
+    let AcceptOutcome::Landed { commit, branch } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!((branch.as_str(), case.tip()), ("main", commit.clone()));
+    assert_eq!(
+        case.owner(&["log", "-1", "--format=%P|%an <%ae>", &commit])
+            .trim(),
+        format!("{before}|Repo Owner <owner@example.invalid>")
+    );
+    assert_eq!(
+        case.owner(&["ls-tree", "-r", "--name-only", &commit]),
+        "README\nother.txt\nsrc/new.rs\n"
+    );
+    assert_eq!(case.owner(&["status", "--porcelain"]), "");
+    assert_eq!(case.view(&id).state, ChangeState::Accepted);
+    assert_eq!(case.agent_head(), head, "Accept moved the agent's branch");
+    assert_eq!(case.turn(TurnOutcome::Succeeded), None);
+    case.edit("README", "one\ntwo\nthree\nfour\nfive\n");
+    case.agent_commit("Add the fifth line");
+    let next = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(case.view(&next).base, head);
+    let AcceptOutcome::Landed { commit: second, .. } = case.accept(&next).unwrap() else {
+        panic!("the second accept conflicted");
+    };
+    assert_eq!(
+        case.owner(&["show", &format!("{second}:README")]),
+        "one\ntwo\nthree\nfour\nfive\n"
+    );
+    assert_eq!(
+        case.owner(&["ls-tree", "-r", "--name-only", &second]),
+        "README\nother.txt\nsrc/new.rs\n"
+    );
+}
+
+#[test]
+fn an_own_branch_agent_resolves_an_update_on_its_branch_and_accept_lands_it() {
+    let case = Case::own_branch();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let head = case.agent_commit("Add the fourth line");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let tip = case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edit");
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Conflict { .. }
+    ));
+    update(&case.db, &id).unwrap();
+    let merged = case.view(&id).head;
+    assert_eq!(case.agent_head(), head, "update moved the agent's branch");
+    let prompt = resolve_task_prompt(&case.db, &id).unwrap();
+    assert!(
+        prompt.contains(&format!("git merge {merged}")) && !prompt.contains("--ff-only"),
+        "{prompt}"
+    );
+    case.agent(&["merge", "-q", "--ff-only", &merged]);
+    case.edit("README", "one\ntwo\nTHREE\nfour\n");
+    case.agent_commit("Resolve the owner's edit");
+    assert_eq!(case.turn(TurnOutcome::Succeeded), Some(id.clone()));
+    let view = case.view(&id);
+    assert_eq!(
+        (view.state, view.base.as_str()),
+        (ChangeState::Pending, tip.as_str())
+    );
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
+        panic!("the resolved accept conflicted");
+    };
+    assert_eq!(
+        case.owner(&["show", &format!("{commit}:README")]),
+        "one\ntwo\nTHREE\nfour\n"
+    );
+}
+
+#[test]
+fn an_own_branch_agent_cannot_move_the_owner_branch_or_change_what_accept_lands() {
+    let case = Case::own_branch();
+    let tip = case.tip();
+    let heads = case.owner_refs("refs/heads");
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    let reviewed = case.agent_commit("Add the fourth line");
+    case.agent(&["update-ref", "refs/heads/main", &reviewed]);
+    case.agent(&["symbolic-ref", "HEAD", "refs/heads/main"]);
+    case.agent(&[
+        "symbolic-ref",
+        "refs/heads/agent/agent-own",
+        "refs/heads/main",
+    ]);
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    assert_eq!(case.view(&id).head, reviewed);
+    assert_eq!(
+        case.owner_refs("refs/heads"),
+        heads,
+        "a clone ref moved an owner ref"
+    );
+    case.edit("README", "one\ntwo\nthree\nfour\nunreviewed\n");
+    let swapped = case.agent_commit("Swap after review");
+    assert_ne!(swapped, reviewed);
+    assert_eq!(case.tip(), tip);
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
+        panic!("the accept conflicted");
+    };
+    assert_eq!(
+        case.owner(&["show", &format!("{commit}:README")]),
+        "one\ntwo\nthree\nfour\n",
+        "Accept landed what the agent swapped in after review"
+    );
+    let git_dir = case.workspace.git_dir.clone();
+    std::fs::rename(&git_dir, case.repo.parent().unwrap().join("moved-git")).unwrap();
+    std::os::unix::fs::symlink(case.repo.join(".git"), &git_dir).unwrap();
+    let heads = case.owner_refs("refs/heads");
+    assert_eq!(
+        refused(record_turn_end(
+            &case.db,
+            &case.workspace,
+            &own_branch_turn()
+        )),
+        "changes_workspace_invalid"
+    );
+    assert_eq!(case.owner_refs("refs/heads"), heads);
+}
+
+#[test]
+fn objects_planted_in_an_own_branch_clone_never_reach_a_change_set() {
+    let case = Case::own_branch();
+    let tip = case.tip();
+    case.edit("README", "one\ntwo\nthree\nreviewed four\n");
+    case.agent_commit("Add the fourth line");
+    let blob = case.blob_id("one\ntwo\nthree\nreviewed four\n");
+    case.plant_in_clone(&blob, "one\ntwo\nthree\nunreviewed four\n");
+    let before = case.checkout();
+    assert_eq!(
+        refused(record_turn_end(
+            &case.db,
+            &case.workspace,
+            &own_branch_turn()
+        )),
+        "changes_agent_branch_invalid"
+    );
+    assert!(list(&case.db, &case.workspace.project).unwrap().is_empty());
+    assert_eq!(case.owner_refs("refs/crazyagent"), "");
+    assert_eq!(case.tip(), tip);
+    assert_eq!(
+        case.checkout(),
+        before,
+        "a refused fetch changed the checkout"
+    );
+}
+
+/// An agent in its own clone that commits on its old head instead of merging the update
+/// is refused at its turn end, and the set shows as waiting for its agent again with a
+/// prompt that merges without `--ff-only`, so one more resolve lands its work (GA-R3).
+#[test]
+fn an_own_branch_agent_that_skips_the_update_merge_is_asked_again_and_its_merge_lands() {
+    let case = Case::own_branch();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    let id = case.turn(TurnOutcome::Succeeded).unwrap();
+    let tip = case.owner_commit("README", "one\ntwo\nTHREE\n", "Owner edit");
+    assert!(matches!(
+        case.accept(&id).unwrap(),
+        AcceptOutcome::Conflict { .. }
+    ));
+    update(&case.db, &id).unwrap();
+    resolve_handed_over(&case.db, &id).unwrap();
+    let merged = case.view(&id).head;
+    assert!(!case.view(&id).waiting);
+    case.edit("src/new.rs", "fn main() {}\n");
+    case.agent_commit("Add main on the old head");
+    assert_eq!(
+        refused(record_turn_end(
+            &case.db,
+            &case.workspace,
+            &own_branch_turn()
+        )),
+        "changes_branch_not_above_base"
+    );
+    let view = case.view(&id);
+    assert_eq!(
+        (view.state, view.waiting, view.head.as_str()),
+        (ChangeState::Updating, true, merged.as_str()),
+        "the refused set does not wait for its agent"
+    );
+    let prompt = resolve_task_prompt(&case.db, &id).unwrap();
+    assert!(
+        prompt.contains(&format!("git merge {merged}")) && !prompt.contains("--ff-only"),
+        "{prompt}"
+    );
+    case.agent(&[
+        "-c",
+        "user.name=Agent",
+        "-c",
+        "user.email=agent@example.invalid",
+        "merge",
+        "-q",
+        "--no-edit",
+        &merged,
+    ]);
+    case.edit("README", "one\ntwo\nTHREE\nfour\n");
+    case.agent_commit("Resolve the owner's edit");
+    assert_eq!(case.turn(TurnOutcome::Succeeded), Some(id.clone()));
+    let view = case.view(&id);
+    assert_eq!(
+        (view.state, view.base.as_str()),
+        (ChangeState::Pending, tip.as_str())
+    );
+    let AcceptOutcome::Landed { commit, .. } = case.accept(&id).unwrap() else {
+        panic!("the resolved accept conflicted");
+    };
+    assert_eq!(
+        case.owner(&["show", &format!("{commit}:README")]),
+        "one\ntwo\nTHREE\nfour\n"
+    );
+    assert_eq!(
+        case.owner(&["ls-tree", "-r", "--name-only", &commit]),
+        "README\nsrc/new.rs\n"
+    );
+}
+
+/// The engine's fetch never reads an object store the agent added to its clone: a second
+/// alternates line, or a pack linked in from another repository, is refused before git
+/// runs, and none of that repository's objects reach the project (DEC102-F1).
+#[test]
+fn a_clone_that_borrows_another_object_store_is_refused_and_imports_nothing() {
+    let case = Case::own_branch();
+    let (foreign, commit) = case.foreign("foreign", "not for the agent\n");
+    let secret = case.blob_id("not for the agent\n");
+    let alternates = case.workspace.git_dir.join("objects/info/alternates");
+    let engine_line = std::fs::read_to_string(&alternates).unwrap();
+    std::fs::write(
+        &alternates,
+        format!("{engine_line}{}\n", foreign.join(".git/objects").display()),
+    )
+    .unwrap();
+    case.agent(&["update-ref", "refs/heads/agent/agent-own", &commit]);
+    let heads = case.owner_refs("refs/heads");
+    assert_eq!(
+        refused(record_turn_end(
+            &case.db,
+            &case.workspace,
+            &own_branch_turn()
+        )),
+        "changes_workspace_invalid"
+    );
+    assert!(
+        !case.owner_has(&secret),
+        "a foreign object reached the project"
+    );
+
+    std::fs::write(&alternates, &engine_line).unwrap();
+    git_in(&case.home, &foreign, &["repack", "-a", "-d", "-q"]);
+    let packs = foreign.join(".git/objects/pack");
+    for entry in std::fs::read_dir(&packs).unwrap() {
+        let name = entry.unwrap().file_name();
+        std::os::unix::fs::symlink(
+            packs.join(&name),
+            case.workspace.git_dir.join("objects/pack").join(&name),
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        refused(record_turn_end(
+            &case.db,
+            &case.workspace,
+            &own_branch_turn()
+        )),
+        "changes_workspace_invalid"
+    );
+    assert!(
+        !case.owner_has(&secret),
+        "a foreign object reached the project"
+    );
+    assert!(list(&case.db, &case.workspace.project).unwrap().is_empty());
+    assert_eq!(case.owner_refs("refs/heads"), heads);
+    assert_eq!(case.owner_refs("refs/crazyagent"), "");
+}
+
+/// One way an agent can make git serve another repository, history or object source
+/// from its clone: its name with the rows of rv-audit's DEC102-F1 redirect list it covers,
+/// and how it is planted given the case, the foreign repository and its commit.
+struct Redirect {
+    name: &'static str,
+    plant: fn(&Case, &Path, &str),
+}
+
+/// Appends a section to the clone's config. Inputs: the case and the text.
+fn configure(case: &Case, text: &str) {
+    let path = case.workspace.git_dir.join("config");
+    let mut config = std::fs::read_to_string(&path).unwrap();
+    config.push_str(text);
+    std::fs::write(path, config).unwrap();
+}
+
+/// Points the agent's branch in its clone at a commit by writing the ref file, as the
+/// agent can without git checking that the commit is there. Inputs: the case and the
+/// commit.
+fn branch_at(case: &Case, commit: &str) {
+    write(
+        &case.workspace.git_dir.join("refs/heads/agent/agent-own"),
+        &format!("{commit}\n"),
+    );
+}
+
+/// The files in the foreign repository's loose object folders, or in its pack folder after
+/// packing it when `packed`. Inputs: the case, the foreign repository and whether to pack.
+/// Output: each file's folder and name.
+fn foreign_files(case: &Case, foreign: &Path, packed: bool) -> Vec<(PathBuf, std::ffi::OsString)> {
+    let objects = foreign.join(".git/objects");
+    if packed {
+        git_in(&case.home, foreign, &["repack", "-a", "-d", "-q"]);
+    }
+    let mut files = Vec::new();
+    for folder in std::fs::read_dir(&objects).unwrap() {
+        let folder = folder.unwrap().path();
+        let name = folder.file_name().unwrap().to_string_lossy().into_owned();
+        if (packed && name == "pack") || (!packed && name.len() == 2) {
+            for file in std::fs::read_dir(&folder).unwrap() {
+                files.push((folder.clone(), file.unwrap().file_name()));
+            }
+        }
+    }
+    assert!(!files.is_empty());
+    files
+}
+
+const REDIRECTS: [Redirect; 21] = [
+    Redirect {
+        name: "#1 commondir",
+        plant: |case, foreign, _| {
+            write(
+                &case.workspace.git_dir.join("commondir"),
+                &format!("{}\n", foreign.join(".git").display()),
+            );
+        },
+    },
+    Redirect {
+        name: "#2 nested .git folder",
+        plant: |case, foreign, _| {
+            let nested = case.workspace.git_dir.join(".git");
+            git_in(
+                &case.home,
+                foreign,
+                &[
+                    "clone",
+                    "--bare",
+                    "-q",
+                    "--no-local",
+                    ".",
+                    nested.to_str().unwrap(),
+                ],
+            );
+        },
+    },
+    Redirect {
+        name: "#2 nested .git file",
+        plant: |case, foreign, _| {
+            write(
+                &case.workspace.git_dir.join(".git"),
+                &format!("gitdir: {}\n", foreign.join(".git").display()),
+            );
+        },
+    },
+    Redirect {
+        name: "#2 nested .git link",
+        plant: |case, foreign, _| {
+            std::os::unix::fs::symlink(foreign.join(".git"), case.workspace.git_dir.join(".git"))
+                .unwrap();
+        },
+    },
+    Redirect {
+        name: "#3 .git.git file beside an unreadable HEAD (RL-1)",
+        plant: |case, foreign, _| {
+            write(&case.workspace.git_dir.join("HEAD"), "not a head\n");
+            write(
+                &case.workspace.worktree.join(".git.git"),
+                &format!("gitdir: {}\n", foreign.join(".git").display()),
+            );
+        },
+    },
+    Redirect {
+        name: "#3 .git.git link beside moved refs (RL-1)",
+        plant: |case, foreign, _| {
+            let git_dir = &case.workspace.git_dir;
+            std::fs::rename(git_dir.join("refs"), git_dir.join("refs-moved")).unwrap();
+            std::os::unix::fs::symlink(
+                foreign.join(".git"),
+                case.workspace.worktree.join(".git.git"),
+            )
+            .unwrap();
+        },
+    },
+    Redirect {
+        name: "#4 clone .git as a gitdir file",
+        plant: |case, foreign, _| {
+            let git_dir = &case.workspace.git_dir;
+            std::fs::rename(git_dir, git_dir.with_file_name("git-aside")).unwrap();
+            write(
+                git_dir,
+                &format!("gitdir: {}\n", foreign.join(".git").display()),
+            );
+        },
+    },
+    Redirect {
+        name: "#4 clone .git as a link",
+        plant: |case, foreign, _| {
+            let git_dir = &case.workspace.git_dir;
+            std::fs::rename(git_dir, git_dir.with_file_name("git-aside")).unwrap();
+            std::os::unix::fs::symlink(foreign.join(".git"), git_dir).unwrap();
+        },
+    },
+    Redirect {
+        name: "#5 alternates naming only a foreign store",
+        plant: |case, foreign, commit| {
+            write(
+                &case.workspace.git_dir.join("objects/info/alternates"),
+                &format!("{}\n", foreign.join(".git/objects").display()),
+            );
+            branch_at(case, commit);
+        },
+    },
+    Redirect {
+        name: "#7 loose objects as links",
+        plant: |case, foreign, commit| {
+            for (folder, name) in foreign_files(case, foreign, false) {
+                let target = case
+                    .workspace
+                    .git_dir
+                    .join("objects")
+                    .join(folder.file_name().unwrap());
+                std::fs::create_dir_all(&target).unwrap();
+                std::os::unix::fs::symlink(folder.join(&name), target.join(&name)).unwrap();
+            }
+            branch_at(case, commit);
+        },
+    },
+    Redirect {
+        name: "#8 fanout folders as links",
+        plant: |case, foreign, commit| {
+            let mut linked = 0;
+            for (folder, _) in foreign_files(case, foreign, false) {
+                let target = case
+                    .workspace
+                    .git_dir
+                    .join("objects")
+                    .join(folder.file_name().unwrap());
+                if std::fs::read_dir(&target).is_ok_and(|mut entries| entries.next().is_none()) {
+                    std::fs::remove_dir(&target).unwrap();
+                }
+                if std::fs::symlink_metadata(&target).is_err() {
+                    std::os::unix::fs::symlink(&folder, target).unwrap();
+                    linked += 1;
+                }
+            }
+            assert!(linked > 0, "no fan-out folder was linked");
+            branch_at(case, commit);
+        },
+    },
+    Redirect {
+        name: "#9 packs as links",
+        plant: |case, foreign, commit| {
+            let packs = case.workspace.git_dir.join("objects/pack");
+            for (folder, name) in foreign_files(case, foreign, true) {
+                std::os::unix::fs::symlink(folder.join(&name), packs.join(&name)).unwrap();
+            }
+            branch_at(case, commit);
+        },
+    },
+    Redirect {
+        name: "#10 packs as hard links",
+        plant: |case, foreign, commit| {
+            let packs = case.workspace.git_dir.join("objects/pack");
+            for (folder, name) in foreign_files(case, foreign, true) {
+                std::fs::hard_link(folder.join(&name), packs.join(&name)).unwrap();
+            }
+            branch_at(case, commit);
+        },
+    },
+    Redirect {
+        name: "#11 objects folder as a link",
+        plant: |case, foreign, commit| {
+            let objects = case.workspace.git_dir.join("objects");
+            std::fs::rename(&objects, objects.with_file_name("objects-aside")).unwrap();
+            std::os::unix::fs::symlink(foreign.join(".git/objects"), &objects).unwrap();
+            branch_at(case, commit);
+        },
+    },
+    Redirect {
+        name: "#12 multi-pack-index (RL-2)",
+        plant: |case, foreign, commit| {
+            foreign_files(case, foreign, true);
+            git_in(&case.home, foreign, &["multi-pack-index", "write"]);
+            std::fs::copy(
+                foreign.join(".git/objects/pack/multi-pack-index"),
+                case.workspace.git_dir.join("objects/pack/multi-pack-index"),
+            )
+            .unwrap();
+            branch_at(case, commit);
+        },
+    },
+    Redirect {
+        name: "#22 shallow",
+        plant: |case, _, _| {
+            let head = case.agent(&["rev-parse", "HEAD"]);
+            write(&case.workspace.git_dir.join("shallow"), &head);
+        },
+    },
+    Redirect {
+        name: "#21 info/grafts",
+        plant: |case, _, _| {
+            let head = case.agent(&["rev-parse", "HEAD"]);
+            let info = case.workspace.git_dir.join("info");
+            std::fs::create_dir_all(&info).unwrap();
+            write(&info.join("grafts"), &head);
+        },
+    },
+    Redirect {
+        name: "#17 include.path",
+        plant: |case, foreign, _| {
+            configure(
+                case,
+                &format!(
+                    "[include]\n\tpath = {}\n",
+                    foreign.join(".git/config").display()
+                ),
+            );
+        },
+    },
+    Redirect {
+        name: "#16 #18 includeIf path and extensions.worktreeConfig",
+        plant: |case, foreign, _| {
+            configure(
+                case,
+                &format!(
+                    "[includeIf \"gitdir:/\"]\n\tpath = {}\n[extensions]\n\tworktreeConfig = true\n",
+                    foreign.join(".git/config").display()
+                ),
+            );
+            write(
+                &case.workspace.git_dir.join("config.worktree"),
+                "[core]\n\tbare = false\n",
+            );
+        },
+    },
+    Redirect {
+        name: "#15 extensions.refStorage",
+        plant: |case, _, _| {
+            configure(
+                case,
+                "[core]\n\trepositoryformatversion = 1\n[extensions]\n\trefStorage = files\n",
+            );
+        },
+    },
+    Redirect {
+        name: "#19 promisor remote and extensions.partialClone",
+        plant: |case, foreign, _| {
+            configure(
+                case,
+                &format!(
+                    "[remote \"origin\"]\n\turl = {}\n\tpromisor = true\n[Extensions]\n\tPartialClone = origin\n",
+                    foreign.display()
+                ),
+            );
+        },
+    },
+];
+
+/// The engine's fetch never serves another repository, history or object source an agent
+/// names from its clone (DEC102-F1, AL-1, DEC102-F2, RL-1, RL-2): every row of rv-audit's
+/// redirect list that lands objects, and the config, history and lazy-fetch rows, is
+/// planted in a clone of its own and refused as `changes_workspace_invalid`, with none of
+/// the foreign repository's objects in the project, no change set and no ref left. Every
+/// row is tried before the test reports.
+#[test]
+fn a_clone_that_redirects_its_repository_is_refused_and_imports_nothing() {
+    let mut held = Vec::new();
+    for redirect in &REDIRECTS {
+        let case = Case::own_branch();
+        let text = format!("not for the agent: {}\n", redirect.name);
+        let (foreign, commit) = case.foreign("foreign", &text);
+        git_in(&case.home, &foreign, &["branch", "agent/agent-own"]);
+        let secret = case.blob_id(&text);
+        let heads = case.owner_refs("refs/heads");
+        (redirect.plant)(&case, &foreign, &commit);
+        let code = record_turn_end(&case.db, &case.workspace, &own_branch_turn())
+            .map(|_| "accepted".to_owned())
+            .unwrap_or_else(|error| error.0);
+        let leaked = case.owner_has(&secret);
+        let sets = list(&case.db, &case.workspace.project).unwrap().len();
+        let moved = case.owner_refs("refs/heads") != heads
+            || !case.owner_refs("refs/crazyagent").is_empty();
+        if code != "changes_workspace_invalid" || leaked || sets != 0 || moved {
+            held.push(format!(
+                "{}: {code}, foreign object imported {leaked}, change sets {sets}, refs moved {moved}",
+                redirect.name
+            ));
+        }
+    }
+    assert!(held.is_empty(), "{held:#?}");
+}
+
+/// Git serves the clone's git folder itself even when the agent changes its clone after
+/// the engine checked it: a `.git.git` made between the checks and the fetch, beside a
+/// git folder git cannot read, is never served (upload-pack `--strict`, RL-1).
+#[test]
+fn a_redirect_made_after_the_checks_is_never_served() {
+    let case = Case::own_branch();
+    let text = "not for the agent: after the checks\n";
+    let (foreign, _) = case.foreign("foreign", text);
+    git_in(&case.home, &foreign, &["branch", "agent/agent-own"]);
+    let secret = case.blob_id(text);
+    let heads = case.owner_refs("refs/heads");
+    super::clone::BETWEEN_CHECK_AND_FETCH.set(Some(|git_dir: &Path| {
+        let worktree = git_dir.parent().unwrap();
+        let foreign = worktree.parent().unwrap().join("foreign/.git");
+        std::fs::write(git_dir.join("HEAD"), "not a head\n").unwrap();
+        std::fs::write(
+            worktree.join(".git.git"),
+            format!("gitdir: {}\n", foreign.display()),
+        )
+        .unwrap();
+    }));
+    let code = refused(record_turn_end(
+        &case.db,
+        &case.workspace,
+        &own_branch_turn(),
+    ));
+    super::clone::BETWEEN_CHECK_AND_FETCH.set(None);
+    assert_eq!(code, "changes_agent_branch_invalid");
+    assert!(
+        !case.owner_has(&secret),
+        "the fallback repository was served"
+    );
+    assert!(list(&case.db, &case.workspace.project).unwrap().is_empty());
+    assert_eq!(case.owner_refs("refs/heads"), heads);
+    assert_eq!(case.owner_refs("refs/crazyagent"), "");
+}
+
+/// Temp files an interrupted git command leaves in the clone's pack folder do not stop
+/// the agent's turn end, since git never serves them; any other name there still does.
+#[test]
+fn git_temp_files_left_in_a_clone_s_pack_folder_let_the_turn_end() {
+    let case = Case::own_branch();
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    let packs = case.workspace.git_dir.join("objects/pack");
+    write(&packs.join("tmp_pack_x.idx"), "partial");
+    assert_eq!(
+        refused(record_turn_end(
+            &case.db,
+            &case.workspace,
+            &own_branch_turn()
+        )),
+        "changes_workspace_invalid"
+    );
+    std::fs::remove_file(packs.join("tmp_pack_x.idx")).unwrap();
+    for name in ["tmp_pack_Ab3dE9", "tmp_idx_zZ09aq", "tmp_rev_000000"] {
+        write(&packs.join(name), "partial");
+    }
+    let id = record_turn_end(&case.db, &case.workspace, &own_branch_turn())
+        .unwrap()
+        .expect("the turn's commit makes a change set");
+    let listed = list(&case.db, &case.workspace.project).unwrap();
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].id, id);
+    assert_eq!(listed[0].files, 1);
+}
+
+/// The store folders of a clone, `pack` and the 256 loose-object folders, that the Own
+/// branch sandbox keeps the agent from making, moving or replacing (RL-3).
+/// Input: the clone's git folder. Output: each folder.
+fn store_folder_paths(git_dir: &Path) -> Vec<PathBuf> {
+    let objects = git_dir.join("objects");
+    std::iter::once(objects.join("pack"))
+        .chain((0..=u8::MAX).map(|byte| objects.join(format!("{byte:02x}"))))
+        .collect()
+}
+
+/// A new clone already holds its pack folder and all 256 loose-object folders, so the
+/// Own branch sandbox can deny making, moving or replacing them, and the agent's git still
+/// commits, repacks, collects garbage and prunes, and its turn end lands (RL-3).
+#[test]
+fn a_new_clone_holds_its_store_folders_and_its_git_still_commits_repacks_and_prunes() {
+    let case = Case::own_branch();
+    let missing: Vec<PathBuf> = store_folder_paths(&case.workspace.git_dir)
+        .into_iter()
+        .filter(|folder| !std::fs::symlink_metadata(folder).is_ok_and(|found| found.is_dir()))
+        .collect();
+    assert!(missing.is_empty(), "{} missing: {missing:?}", missing.len());
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+    case.agent_commit("Add the fourth line");
+    case.agent(&["repack", "-a", "-d", "-q"]);
+    case.agent(&["gc", "-q"]);
+    case.agent(&["prune", "--expire=now"]);
+    case.edit("NEW", "new\n");
+    case.agent_commit("Add a file");
+    case.agent(&["fsck", "--no-progress"]);
+    let id = record_turn_end(&case.db, &case.workspace, &own_branch_turn())
+        .unwrap()
+        .expect("the agent's commits make a change set");
+    let listed = list(&case.db, &case.workspace.project).unwrap();
+    assert_eq!((listed.len(), &listed[0].id, listed[0].files), (1, &id, 2));
+}
+
+/// A clone launched again gets back any store folder its git removed, and the engine
+/// never follows a link the agent put in place of its object folder (RL-3).
+#[test]
+fn a_reused_clone_gets_its_store_folders_back_and_a_linked_object_folder_is_refused() {
+    let case = Case::own_branch();
+    let git_dir = case.workspace.git_dir.clone();
+    for name in ["00", "ab", "ff"] {
+        std::fs::remove_dir(git_dir.join("objects").join(name)).unwrap();
+    }
+    ready_agent_clone(&case.workspace.worktree).unwrap();
+    assert!(
+        store_folder_paths(&git_dir)
+            .iter()
+            .all(|folder| std::fs::symlink_metadata(folder).is_ok_and(|found| found.is_dir()))
+    );
+
+    let elsewhere = case.repo.parent().unwrap().join("elsewhere");
+    std::fs::create_dir(&elsewhere).unwrap();
+    let objects = git_dir.join("objects");
+    std::fs::rename(&objects, git_dir.join("objects-aside")).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &objects).unwrap();
+    assert_eq!(
+        refused(ready_agent_clone(&case.workspace.worktree)),
+        "changes_workspace_invalid"
+    );
+    assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
+}
+
+/// A clone holding more object bytes than the change bounds allow is refused before the
+/// engine fetches, so none of its objects reach the project's store (DEC102-F2).
+#[test]
+fn a_clone_past_the_byte_bound_is_refused_before_its_objects_reach_the_project() {
+    let case = Case::own_branch();
+    let bounds = crate::worktrees::TreeBounds {
+        files: 64,
+        bytes: 1024,
+        components: 8,
+    };
+    let mut noise = String::new();
+    let mut digest = Sha256::digest(b"noise");
+    while noise.len() < 16 * 1024 {
+        noise.push_str(&format!("{digest:x}\n"));
+        digest = Sha256::digest(digest);
+    }
+    case.edit("big.txt", &noise);
+    case.agent_commit("Add a big file");
+    let blob = case.blob_id(&noise);
+    assert_eq!(
+        refused(flow::record(
+            &case.db,
+            &case.workspace,
+            &own_branch_turn(),
+            &bounds,
+            NOW_MS
+        )),
+        "changes_too_large"
+    );
+    assert!(
+        !case.owner_has(&blob),
+        "a refused clone's object reached the project"
+    );
+    assert!(list(&case.db, &case.workspace.project).unwrap().is_empty());
+    assert_eq!(case.owner_refs("refs/crazyagent"), "");
 }

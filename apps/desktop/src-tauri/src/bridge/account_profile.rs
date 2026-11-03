@@ -234,38 +234,19 @@ fn unsafe_text(value: &str) -> bool {
     })
 }
 
+/// Checks an account address with the engine's own rule, so the window refuses what the
+/// engine would refuse at save: a keyed address is HTTPS, or plain HTTP only on this
+/// machine, and a local model is plain HTTP on this machine. Inputs: the raw address and
+/// whether it is a local model. Output: Ok, or `invalid_account_endpoint`.
 fn validate_endpoint(value: &str, local: bool) -> Result<(), BridgeError> {
-    if value.len() > 2048
-        || value
-            .chars()
-            .any(|c| c.is_whitespace() || c.is_control() || c == '\\')
-    {
-        return Err(failure("invalid_account_endpoint"));
-    }
-    let url = tauri::Url::parse(value).map_err(|_| failure("invalid_account_endpoint"))?;
-    if !matches!(url.scheme(), "http" | "https")
-        || !url.has_host()
-        || !url.username().is_empty()
-        || url.password().is_some()
-        || url.query().is_some()
-        || url.fragment().is_some()
-    {
-        return Err(failure("invalid_account_endpoint"));
-    }
-    if local {
-        let host = url
-            .host_str()
-            .ok_or_else(|| failure("invalid_account_endpoint"))?;
-        let loopback = host == "localhost"
-            || host
-                .trim_matches(['[', ']'])
-                .parse::<std::net::IpAddr>()
-                .is_ok_and(|address| address.is_loopback());
-        if url.scheme() != "http" || !loopback {
-            return Err(failure("invalid_account_endpoint"));
-        }
-    }
-    Ok(())
+    let checked = if local {
+        crazyagent::accounts::local_url(value)
+    } else {
+        crazyagent::accounts::account_url(value)
+    };
+    checked
+        .map(|_| ())
+        .map_err(|_| failure("invalid_account_endpoint"))
 }
 
 fn configured_plan(
@@ -398,4 +379,42 @@ fn profile_error(error: EngineError) -> BridgeError {
         },
         &error.0,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_keyed_address_never_carries_its_key_over_plain_http_to_another_machine() {
+        for remote in [
+            "http://models.example/v1",
+            "http://10.0.0.5:8080/v1",
+            "http://[2001:db8::1]/v1",
+        ] {
+            assert_eq!(
+                validate_inputs("api_key", "Lab", remote, "lab-model")
+                    .unwrap_err()
+                    .code,
+                "invalid_account_endpoint"
+            );
+        }
+        for kept in [
+            "https://models.example/v1",
+            "http://127.0.0.1:8080/v1",
+            "http://localhost/v1",
+            "http://[::1]/v1",
+        ] {
+            assert!(validate_inputs("api_key", "Lab", kept, "lab-model").is_ok());
+        }
+        for refused in ["https://127.0.0.1/v1", "http://models.example/v1"] {
+            assert_eq!(
+                validate_inputs("local", "Lab", refused, "lab-model")
+                    .unwrap_err()
+                    .code,
+                "invalid_account_endpoint"
+            );
+        }
+        assert!(validate_inputs("local", "Lab", "http://127.0.0.1:11434/v1", "lab-model").is_ok());
+    }
 }

@@ -78,6 +78,13 @@ async fn ide_tab_reads_the_build_and_never_opens_a_server_before_it_is_ready() {
             "an open refused while installing the built-in extension or issuing its capability names why"
         );
     }
+    for code in ["git_exclude_invalid", "ide_project_folder_invalid"] {
+        assert_eq!(
+            public_code(EngineError(code.into())),
+            code,
+            "an open refused for the project's git exclude file or its folder names why (FN-R2b)"
+        );
+    }
     assert_eq!(
         public_code(EngineError("rusqlite says no".into())),
         "ide_tab_outcome_unknown",

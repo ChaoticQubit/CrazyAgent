@@ -14,11 +14,11 @@
   Work to start   Market, Competitor, Front-end design
   Pool            Main
   Team            Codex leads. Codex x3. Tools on.
+  Agent access    < Own branch >
 
   Research starts right away. You can close CrazyAgent and agents keep
   working.
 
   [ Back ]   [> Create project ]
-
 
  Enter Create project  Shift-Tab Back  Shift-←→ Steps                    ? Help

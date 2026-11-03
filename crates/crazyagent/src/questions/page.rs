@@ -1,12 +1,14 @@
 use super::{
     AnsweredBy, COLUMNS, PENDING_PER_PROJECT_MAX, Question, QuestionStatus, STORED_BYTES_MAX,
-    asker_label, ensure, immediate, is_terminal, select, unavailable,
+    asker_label, ensure, immediate, is_terminal, item, select, unavailable,
 };
 use crate::engine::EngineError;
 use crate::engine::owner::failure;
 use crate::memory::visible_text;
 use crate::protocol::ProjectId;
+use crate::storage::versioned::{self, LastWriter};
 use rusqlite::{Connection, Transaction, params};
+use std::collections::HashSet;
 use std::path::Path;
 
 /// The read-only questions page inside a project's `.crazyagent/` folder.
@@ -52,7 +54,29 @@ fn rewrite(db: &Connection, project: &ProjectId) -> Result<(), EngineError> {
         return Err(failure("questions_page_unavailable"));
     }
     let (pending, settled) = shown(&tx, project)?;
-    replace(&folder, render(&pending, &settled).as_bytes())
+    let closed = closed_unanswered(&tx, project, &settled)?;
+    replace(&folder, render(&pending, &settled, &closed).as_bytes())
+}
+
+/// Reads which dismissed questions closed without the owner: those whose last writer is
+/// their agent, as a terminal box that left its screen with no owner key does; a question
+/// the owner dismissed is not among them. Inputs: the transaction, the project and the
+/// settled questions. Output: their ids.
+fn closed_unanswered(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    settled: &[Question],
+) -> Result<HashSet<u64>, EngineError> {
+    let mut closed = HashSet::new();
+    for question in settled
+        .iter()
+        .filter(|question| question.status == QuestionStatus::Dismissed)
+    {
+        if let LastWriter::Agent(_) = versioned::current(tx, &item(project, question.id)?)?.writer {
+            closed.insert(question.id);
+        }
+    }
+    Ok(closed)
 }
 
 /// Reads what the page shows: every pending question oldest first and the newest
@@ -84,14 +108,15 @@ fn shown(
 /// newest first, while they fit `PAGE_BYTES_MAX`. Every text an asker or answer gave sits
 /// in its own fence with hidden characters shown as escapes, so it can neither add a
 /// heading or markup of its own nor reorder what the owner reads. Inputs: the pending and
-/// settled questions. Output: the Markdown text.
-pub(super) fn render(pending: &[Question], settled: &[Question]) -> String {
+/// settled questions and the ids of the dismissed ones their agent closed without the
+/// owner. Output: the Markdown text.
+pub(super) fn render(pending: &[Question], settled: &[Question], closed: &HashSet<u64>) -> String {
     let mut page = String::from(HEADER);
     page.push_str(&format!("\n## Waiting for the owner ({})\n", pending.len()));
     if pending.is_empty() {
         page.push_str("\nNo question waits for you.\n");
     }
-    let left = entries(&mut page, pending);
+    let left = entries(&mut page, pending, closed);
     if left > 0 {
         page.push_str(&format!(
             "\n{left} more waiting questions are only in the Questions view.\n"
@@ -101,7 +126,7 @@ pub(super) fn render(pending: &[Question], settled: &[Question]) -> String {
     if settled.is_empty() {
         page.push_str("\nNone yet.\n");
     }
-    let left = entries(&mut page, settled);
+    let left = entries(&mut page, settled, closed);
     if left > 0 {
         page.push_str(&format!(
             "\n{left} older questions are only in the Questions view.\n"
@@ -112,12 +137,13 @@ pub(super) fn render(pending: &[Question], settled: &[Question]) -> String {
 }
 
 /// Adds the questions that fit, in order, keeping room for the closing lines. Inputs: the
-/// page and the questions. Output: how many did not fit.
-fn entries(page: &mut String, questions: &[Question]) -> usize {
+/// page, the questions and the dismissed ones closed without the owner. Output: how many
+/// did not fit.
+fn entries(page: &mut String, questions: &[Question], closed: &HashSet<u64>) -> usize {
     let mut left = questions.len();
     for question in questions {
         let mut one = String::new();
-        entry(&mut one, question);
+        entry(&mut one, question, closed);
         if page.len() + one.len() + 2 * TAIL_BYTES_MAX > PAGE_BYTES_MAX {
             break;
         }
@@ -127,7 +153,7 @@ fn entries(page: &mut String, questions: &[Question]) -> usize {
     left
 }
 
-fn entry(page: &mut String, question: &Question) {
+fn entry(page: &mut String, question: &Question, closed: &HashSet<u64>) {
     page.push_str(&format!(
         "\n### Question {} from {}\n\n",
         question.id,
@@ -165,6 +191,9 @@ fn entry(page: &mut String, question: &Question) {
             page.push_str("\nWaiting for your answer in that agent's terminal.\n");
         }
         (QuestionStatus::Pending, _) => page.push_str("\nWaiting for your answer.\n"),
+        (QuestionStatus::Dismissed, _) if closed.contains(&question.id) => {
+            page.push_str("\nClosed without an answer.\n");
+        }
         (QuestionStatus::Dismissed, _) => page.push_str("\nDismissed by the owner.\n"),
         (QuestionStatus::AnsweredInTerminal, _) => {
             page.push_str("\nAnswered by the owner in that agent's terminal.\n");

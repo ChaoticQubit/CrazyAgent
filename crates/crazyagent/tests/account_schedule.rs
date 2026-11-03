@@ -211,3 +211,45 @@ async fn scheduling_choices_go_through_the_engine_and_survive_a_restart() {
     drop(controller);
     case.close().await;
 }
+
+/// A schedule larger than one owner reply still takes changes and can be shrunk: a change
+/// reads only the small owner profile for freshness, never the whole schedule.
+#[tokio::test]
+async fn a_schedule_larger_than_one_reply_still_takes_changes() {
+    let case = Case::new().await;
+    let mut controller = case.controller().await;
+    let project = |n: usize| reference(&format!("{n:04}{}", "p".repeat(120)));
+    let overrides = 600;
+    let stored = Schedule {
+        projects: (0..overrides)
+            .map(|n| ScopedStrategy {
+                id: project(n),
+                strategy: Strategy::Balanced,
+            })
+            .collect(),
+        ..Schedule::default()
+    };
+    assert!(serde_json::to_vec(&stored).unwrap().len() > crazyagent::protocol::FRAME_BYTES_MAX);
+    for n in 0..overrides {
+        let change = ScheduleChange::ProjectStrategy {
+            project: project(n),
+            strategy: Some(Strategy::Balanced),
+        };
+        assert_eq!(
+            send(&mut controller, change).await,
+            OwnerResult::Applied,
+            "{n}"
+        );
+    }
+    let shrink = ScheduleChange::ProjectStrategy {
+        project: project(0),
+        strategy: None,
+    };
+    assert_eq!(
+        send(&mut controller, shrink).await,
+        OwnerResult::Applied,
+        "the owner can still shrink a schedule past one reply"
+    );
+    drop(controller);
+    case.close().await;
+}

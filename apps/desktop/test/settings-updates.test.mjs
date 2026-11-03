@@ -160,6 +160,14 @@ test("Version and channel names the engine's version beside the app's and offers
   assert.match(render({ engine: { kind: "ok", value: { engine: "0.1.0", app: "0.2.0", message } }, engineRestart: { kind: "failed", message: "CrazyAgent couldn't set up its background engine. Try again." } }),
     /role="alert"[^>]*>CrazyAgent couldn&#x27;t set up its background engine/);
 
+  const outdated = { engine: { kind: "ok", value: { engine: "0.1.0", app: "0.2.0", message } } };
+  const installing = { kind: "installing", update: found, step: { kind: "stopping_engine" } };
+  assert.match(render(outdated), /<button[^>]*class="btn"[^>]*>(?:(?!<\/button>).)*Restart engine<\/button>/);
+  assert.doesNotMatch(render(outdated), /disabled=""[^>]*>(?:(?!<\/button>).)*Restart engine/);
+  for (const phase of [installing, { kind: "installed", update: found, engineStarted: true }]) {
+    assert.match(render({ ...outdated, phase }), /disabled=""[^>]*>(?:(?!<\/button>).)*Restart engine<\/button>/, `${phase.kind} holds Restart engine off`);
+  }
+
   assert.match(render({ engine: { kind: "ok", value: { engine: null, app: "0.2.0", message: null } } }), /The engine isn&#x27;t answering\./);
   assert.doesNotMatch(render({ engine: { kind: "loading" } }), /Engine 0/);
   assert.match(render({ engine: { kind: "not_ready" } }), /CrazyAgent 0\.2\.0-dev/);

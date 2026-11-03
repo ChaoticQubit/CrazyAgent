@@ -2,9 +2,10 @@ import { nextGeneration, poolSummaries } from "../../api";
 import type { Result } from "../../api";
 import { useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { failureCopy, loadProjectCatalog, loadProjects, loadReadPaths, receiptState, removeProject, saveReadPaths, setProjectPool, updateProjectSetup, type ReadPaths } from "../../api-projects";
-import type { ProjectCatalog, StoredSetup } from "../../api-projects";
+import { failureCopy, loadAgentPolicy, loadProjectCatalog, loadProjects, loadReadPaths, receiptState, removeProject, saveAgentPolicy, saveReadPaths, setProjectPool, updateProjectSetup, type ReadPaths } from "../../api-projects";
+import type { AgentAccess, PolicyView, ProjectCatalog, StoredSetup } from "../../api-projects";
 import type { IntentReceipt } from "../../engine-client";
+import { AccessLevels, FULL_ACCESS_WARNING, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, ToolchainSwitches, accessLabel, confirmFirst, policyOf } from "./access";
 import { Button, ConfirmDialog } from "../../ui";
 import { displayText } from "../conversation";
 import { BasicsFields, ResearchSwitches } from "../new-project/fields";
@@ -26,6 +27,7 @@ const SECTIONS = [
   { id: "pool", label: "Pool" },
   { id: "team", label: "Team" },
   { id: "plugins", label: "Plugins and skills" },
+  { id: "access", label: "Agent access" },
   { id: "sandbox", label: "Sandbox" },
   { id: "remove", label: "Remove project" },
 ] as const;
@@ -235,10 +237,14 @@ export function addReadPath(paths: string[], typed: string): { paths: string[] }
  * them, once it shows the saved folders again. */
 export const READ_PATHS_STALE = "These folders changed since you opened them. The list now shows the saved folders; make your change again.";
 
-/** Whether a read-only folders save was refused because the folders changed since the screen
- * read them, so the screen reads them again instead of resending the same old version.
- * Input: the save's result. Output: true for that refusal. */
-export function readPathsStale(result: Result<IntentReceipt>): boolean {
+/** What Agent access says after a save refused because the policy changed since the page read
+ * it, once it shows the saved access again. */
+export const ACCESS_STALE = "Agent access changed since you opened it. The page now shows the saved access; make your change again.";
+
+/** Whether a versioned save, such as read-only folders or agent access, was refused because
+ * the value changed since the screen read it, so the screen reads it again instead of
+ * resending the same old version. Input: the save's result. Output: true for that refusal. */
+export function savedStale(result: Result<IntentReceipt>): boolean {
   if (result.kind !== "ok") return result.kind === "error" && result.code === "stale_revision";
   const state = receiptState(result.value);
   return state.kind === "rejected" && state.code === "stale_revision";
@@ -280,7 +286,7 @@ function SandboxSection({ data }: { data: ProjectData }) {
     if (saved === null) return;
     setBusy(true);
     const result = await saveReadPaths(data.id, paths, saved.version, nextGeneration());
-    if (readPathsStale(result)) {
+    if (savedStale(result)) {
       const shown = await reread();
       setBusy(false);
       return setNote(shown ? READ_PATHS_STALE : "These folders changed since you opened them. Reopen this page to see them.");
@@ -315,6 +321,78 @@ function SandboxSection({ data }: { data: ProjectData }) {
   </div>;
 }
 
+function AccessSection({ data }: { data: ProjectData }) {
+  const [view, setView] = useState<PolicyView | null>(null);
+  const [access, setAccess] = useState<AgentAccess>("sandboxed");
+  const [allowed, setAllowed] = useState<boolean[]>([]);
+  const [ideGitHooks, setIdeGitHooks] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+  const notReady = "Not ready yet: agent access isn't in this build.";
+  function seed(next: PolicyView) {
+    setView(next);
+    setAccess(next.access);
+    setAllowed(next.toolchains.map((row) => row.allowed));
+    setIdeGitHooks(next.ide_git_hooks);
+  }
+  useEffect(() => {
+    let live = true;
+    void loadAgentPolicy(data.id).then((result) => {
+      if (!live) return;
+      if (result.kind === "ok") seed(result.value);
+      else setNote(result.kind === "not_ready" ? notReady : failureCopy(result));
+    });
+    return () => { live = false; };
+  }, [data.id]);
+
+  async function save() {
+    if (!view) return;
+    setConfirming(false);
+    setBusy(true);
+    const result = await saveAgentPolicy(data.id, policyOf(view, access, allowed, ideGitHooks), view.version, nextGeneration());
+    if (savedStale(result)) {
+      const fresh = await loadAgentPolicy(data.id);
+      setBusy(false);
+      if (fresh.kind !== "ok") return setNote("Agent access changed since you opened it. Reopen this page to see it.");
+      seed(fresh.value);
+      return setNote(ACCESS_STALE);
+    }
+    if (result.kind !== "ok") {
+      setBusy(false);
+      return setNote(result.kind === "not_ready" ? notReady : failureCopy(result));
+    }
+    const state = receiptState(result.value);
+    if (state.kind !== "applied") {
+      setBusy(false);
+      return setNote(state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check it and save again.");
+    }
+    const fresh = await loadAgentPolicy(data.id);
+    setBusy(false);
+    if (fresh.kind === "ok") seed(fresh.value);
+    setNote("");
+    data.notify(`Agent access saved: ${accessLabel(access)}. Agents and master turns started from now on use it.`);
+  }
+
+  const changed = view !== null && (access !== view.access || ideGitHooks !== view.ide_git_hooks || allowed.some((on, index) => on !== view.toolchains[index]?.allowed));
+  return <div className="pj-stack">
+    <h2>Agent access</h2>
+    <p className="pj-secondary">What this project's agents may touch. It applies to the master, sub-agents and research jobs; research jobs write reports, so they run Sandboxed unless you choose Full access.</p>
+    {view === null && !note && <p className="pj-muted" role="status">Loading...</p>}
+    {view && <AccessLevels name="ps-access" value={access} unavailable={(level) => view.levels.find((item) => item.access === level)?.unavailable ?? null} onChange={setAccess} />}
+    {view && <p className="pj-help">{LOWERING_STOPS_AGENTS}</p>}
+    {view && <ToolchainSwitches prefix="ps" view={view} allowed={allowed} onChange={setAllowed} />}
+    {view && <IdeGitHooksSwitch prefix="ps" checked={ideGitHooks} onChange={setIdeGitHooks} />}
+    {note && <p className="pj-note warn" role="status">{note}</p>}
+    <div><Button variant="primary" pending={busy} pendingLabel="Saving..." disabled={!changed || busy}
+      onClick={() => confirmFirst(access) ? setConfirming(true) : void save()}>Save agent access</Button></div>
+    <ConfirmDialog open={confirming} title="Give this project's agents Full access?" confirmLabel="Allow Full access" cancelLabel="Keep current access" pending={busy}
+      onCancel={() => setConfirming(false)} onConfirm={() => void save()}>
+      {FULL_ACCESS_WARNING}
+    </ConfirmDialog>
+  </div>;
+}
+
 /** Picks the Settings section a route asks for. Links from before skills and MCP servers shared
  * one section still open it. Input: the route's section, if any. Output: a known section. */
 export function settingsSection(wanted: string | null | undefined): SectionId {
@@ -322,7 +400,7 @@ export function settingsSection(wanted: string | null | undefined): SectionId {
   return SECTIONS.find((item) => item.id === wanted)?.id ?? "general";
 }
 
-/** Project Settings tab: General, Pool, Team, Plugins and skills, Sandbox and Remove project. A setup
+/** Project Settings tab: General, Pool, Team, Plugins and skills, Agent access, Sandbox and Remove project. A setup
  * that belongs to another project counts as still loading, so no form seeds from it.
  * Inputs: the project data and an optional section from the route. Output: the tab. */
 export function SettingsTab({ data, section }: { data: ProjectData; section?: string }) {
@@ -346,6 +424,7 @@ export function SettingsTab({ data, section }: { data: ProjectData; section?: st
         <p className="pj-secondary">What you add here applies to this project only. Items from Settings, Plugins and skills can be switched off for this project.</p>
         <PluginsAndSkills projectId={data.id} />
       </div>}
+      {active === "access" && <AccessSection data={data} />}
       {active === "sandbox" && <SandboxSection data={data} />}
       {active === "remove" && <RemoveSection data={data} setup={setup} />}
     </div>

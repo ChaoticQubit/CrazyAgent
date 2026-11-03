@@ -15,6 +15,7 @@ use crate::project_setup::{
     SetupQuery, SetupView, StoredSetup, TeamPlan,
 };
 use crate::protocol::{CredentialRef, ProjectId, ProjectSpec};
+use crate::sandbox::policy::{AgentAccess, AgentPolicy, LevelView, PolicyView};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::os::unix::fs::PermissionsExt;
 
@@ -81,6 +82,12 @@ async fn serve(controller: &mut OwnerController, query: SetupQuery) -> Result<Se
         SetupQuery::ReadPaths { project } => SetupView::ReadPaths(
             controller
                 .project_read_paths(project)
+                .await
+                .map_err(problem)?,
+        ),
+        SetupQuery::AgentPolicy { project } => SetupView::AgentPolicy(
+            controller
+                .project_agent_policy(project)
                 .await
                 .map_err(problem)?,
         ),
@@ -511,6 +518,14 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
     assert_eq!(screen.key(key(KeyCode::Esc)), ProjectReply::Handled);
     assert!(screen.reading);
     assert_eq!(screen.key(key(KeyCode::Char('e'))), ProjectReply::Handled);
+    assert!(
+        screen.edit.is_none() && screen.review.is_some(),
+        "e must show the whole memory before its editor opens"
+    );
+    for _ in 0..40 {
+        assert_eq!(screen.key(key(KeyCode::PageDown)), ProjectReply::Handled);
+    }
+    assert_eq!(screen.key(key(KeyCode::Char('e'))), ProjectReply::Handled);
     assert!(screen.edit.is_some());
     screen.edit = None;
     screen.preview = None;
@@ -519,7 +534,34 @@ async fn project_screen_reads_a_real_project_and_saves_its_research_to_memory() 
     screen.width = 120;
 
     assert_eq!(screen.key(key(KeyCode::Char('e'))), ProjectReply::Handled);
+    assert!(
+        screen.edit.is_none(),
+        "e must show the whole memory before its editor opens"
+    );
+    let drawn = project_screen(&mut screen, 120, 36, &look);
+    assert!(text(&drawn.rows).contains("# Competitors"));
+    assert!(
+        !drawn.help.contains(&("e", "Edit first")),
+        "{:?}",
+        drawn.help
+    );
+    assert_eq!(screen.key(key(KeyCode::Char('e'))), ProjectReply::Handled);
+    assert!(
+        screen.edit.is_none(),
+        "e edits only once the last line was on screen"
+    );
+    for _ in 0..40 {
+        assert_eq!(screen.key(key(KeyCode::PageDown)), ProjectReply::Handled);
+    }
+    let drawn = project_screen(&mut screen, 120, 36, &look);
+    assert!(
+        drawn.help.contains(&("e", "Edit first")),
+        "{:?}",
+        drawn.help
+    );
+    assert_eq!(screen.key(key(KeyCode::Char('e'))), ProjectReply::Handled);
     assert!(screen.edit.is_some());
+    assert!(screen.review.is_none());
     let drawn = project_screen(&mut screen, 120, 36, &look);
     assert!(text(&drawn.rows).contains("Save to memory"));
     assert!(drawn.cursor.is_some());
@@ -2116,6 +2158,109 @@ fn the_read_only_folders_box_saves_colon_separated_folders_and_shows_refusals() 
 
 /// Answers the screen's reads as unavailable until it asks for the read-only folders.
 /// Inputs: the screen and the time of the first read. Output: the folders read.
+fn access_view(access: AgentAccess, version: u64) -> PolicyView {
+    PolicyView {
+        access,
+        levels: AgentAccess::ALL
+            .into_iter()
+            .map(|level| LevelView {
+                access: level,
+                label: level.label().to_owned(),
+                unavailable: None,
+            })
+            .collect(),
+        toolchains: Vec::new(),
+        ide_git_hooks: false,
+        version,
+    }
+}
+
+fn next_access_read(screen: &mut ProjectScreen, from: i64) -> SetupQuery {
+    for now in from..from + 6 {
+        let query = screen.next_query(now).expect("a read is due");
+        if matches!(query, SetupQuery::AgentPolicy { .. }) {
+            return query;
+        }
+        screen.apply(&query, Err("trusted_connection_unavailable".into()));
+    }
+    panic!("the Settings tab reads the agent access");
+}
+
+/// An Agent access save names the version the box opened at; refused as stale it keeps the
+/// owner's level, reads the saved policy again and shows it, and Enter then saves the
+/// owner's level at the version just read (Q35).
+#[test]
+fn a_stale_access_save_keeps_the_level_and_enter_saves_it_over_the_re_read() {
+    let project = ProjectId::new("access-stale").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Settings);
+    let read = next_access_read(&mut screen, 20);
+    screen.apply(
+        &read,
+        Ok(SetupView::AgentPolicy(access_view(
+            AgentAccess::OwnBranch,
+            3,
+        ))),
+    );
+    screen.key(key(KeyCode::Char('c')));
+    assert_eq!(screen.key(key(KeyCode::Left)), ProjectReply::Handled);
+    let save_at = |version: u64| SetupAction::SetAgentPolicy {
+        project_id: project.clone(),
+        version,
+        policy: AgentPolicy {
+            access: AgentAccess::Sandboxed,
+            toolchains: Vec::new(),
+            ide_git_hooks: false,
+        },
+    };
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Change(Box::new(save_at(3)))
+    );
+    screen.apply(
+        &SetupQuery::Change {
+            action: save_at(3),
+            generation: 2,
+        },
+        Ok(SetupView::Changed(OwnerResult::Rejected {
+            code: "stale_revision".into(),
+        })),
+    );
+    let access = screen.access.as_ref().unwrap();
+    assert!(!access.busy);
+    assert_eq!(
+        access.access,
+        AgentAccess::Sandboxed,
+        "the owner's level is kept"
+    );
+    assert_eq!(
+        access.error.as_deref(),
+        Some(
+            "This project changed since you opened the form. Your edit is kept while the saved one is read."
+        )
+    );
+    assert_eq!(screen.agent_policy, None);
+
+    let read = next_access_read(&mut screen, 40);
+    screen.apply(
+        &read,
+        Ok(SetupView::AgentPolicy(access_view(AgentAccess::Full, 4))),
+    );
+    let access = screen.access.as_ref().unwrap();
+    assert_eq!(access.access, AgentAccess::Sandboxed);
+    assert_eq!(
+        access.error.as_deref(),
+        Some(
+            "Saved now: Full access · no toolchains. Enter saves your edit over it; Esc keeps the saved one."
+        )
+    );
+    assert_eq!(
+        screen.key(key(KeyCode::Enter)),
+        ProjectReply::Change(Box::new(save_at(4))),
+        "Enter keeps the owner's level over the saved one"
+    );
+}
+
 fn next_folders_read(screen: &mut ProjectScreen, from: i64) -> SetupQuery {
     for now in from..from + 6 {
         let query = screen.next_query(now).expect("a read is due");
@@ -2744,6 +2889,56 @@ fn v_on_the_context_tab_asks_for_the_selected_file_in_the_editor_from_the_folder
         screen.project_folder(),
         Some(std::path::PathBuf::from("/private/tmp/ca-notes-cli")),
         "changed files are the owner's copies in the project folder, never in the state folder"
+    );
+}
+
+#[test]
+fn shift_o_on_the_context_tab_is_in_the_key_help_and_says_why_when_the_ide_cannot_open_the_file() {
+    use crate::ide::bridge::reveal::RevealTarget;
+    use crate::project_setup::{ContextItem, ProjectContext};
+    let project = ProjectId::new("notes-cli").unwrap();
+    let mut screen = loaded(&project);
+    screen.open(Tab::Context);
+    let listed = |folder: &str| ProjectContext {
+        project_id: project.clone(),
+        folder: folder.into(),
+        items: vec![ContextItem {
+            path: "context/documents/spec.md".into(),
+            kind: ContextKind::Document,
+            bytes: 20,
+        }],
+    };
+    screen.context = Some(listed("/private/tmp/ca-notes-cli/.crazyagent"));
+    let look = Look::plain();
+    let drawn = project_screen(&mut screen, 120, 36, &look);
+    assert!(
+        drawn.help.contains(&("O", "Open in IDE")),
+        "{:?}",
+        drawn.help
+    );
+    assert_eq!(
+        screen.key(key(KeyCode::Char('O'))),
+        ProjectReply::Reveal(RevealTarget::Project {
+            path: ".crazyagent/context/documents/spec.md".into(),
+        })
+    );
+    assert_eq!(screen.problem, None);
+
+    screen.context = Some(listed("/private/tmp/ca-elsewhere/.crazyagent"));
+    assert_eq!(screen.key(key(KeyCode::Char('O'))), ProjectReply::Handled);
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some("This file is outside the project folder, so the IDE can't open it."),
+        "a context folder outside the project folder has no IDE path, and the owner is told"
+    );
+
+    screen.context = Some(listed("/private/tmp/ca-notes-cli/.crazyagent"));
+    screen.setup = None;
+    assert_eq!(screen.key(key(KeyCode::Char('O'))), ProjectReply::Handled);
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some("Still loading the project. Try again."),
+        "before the project folder is read the key says so instead of doing nothing"
     );
 }
 

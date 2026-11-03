@@ -6,6 +6,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 const BUILD: &str = "vscodium-1.143.17183";
 const GONE_WAIT: Duration = Duration::from_secs(15);
+const PREPARATION_HELD: Duration = Duration::from_secs(15);
+const CUT_START_LIMIT: Duration = Duration::from_secs(3);
 
 /// The pinned VSCodium reh-web build that IDE-1 extracted into the project-local cache, in
 /// the `.local-state/ide-cache` of the nearest checkout above this crate. A machine without
@@ -34,6 +36,7 @@ fn servers_in(data: &Path, idle: Duration) -> Servers {
     Servers::new(
         data,
         idle,
+        START_LIMIT,
         Arc::default(),
         data.join("engine").join("owner.sock"),
     )
@@ -142,7 +145,7 @@ async fn ide_server_listens_only_on_loopback() {
     let servers = servers_in(data.path(), IDLE_LIMIT);
     let project = project("loopback");
     let info = servers
-        .open(&project, checkout.path(), &cached_build())
+        .open(&project, checkout.path(), &cached_build(), false)
         .await
         .unwrap();
     let group = servers.group(&project).unwrap();
@@ -169,7 +172,7 @@ async fn ide_server_listens_only_on_loopback() {
     );
     assert_eq!(
         servers
-            .open(&project, checkout.path(), &cached_build())
+            .open(&project, checkout.path(), &cached_build(), false)
             .await
             .unwrap(),
         info
@@ -188,7 +191,7 @@ async fn request_without_the_token_is_refused() {
     let servers = servers_in(data.path(), IDLE_LIMIT);
     let project = project("refused");
     let info = servers
-        .open(&project, checkout.path(), &cached_build())
+        .open(&project, checkout.path(), &cached_build(), false)
         .await
         .unwrap();
     let host = format!("127.0.0.1:{}", info.port);
@@ -265,7 +268,7 @@ async fn token_file_is_0600_new_per_launch_and_outside_every_agent_read_allowlis
     let project = project("token");
     let build = cached_build();
     let first = servers
-        .open(&project, checkout.path(), &build)
+        .open(&project, checkout.path(), &build, false)
         .await
         .unwrap();
     let folder = servers.project_folder(&project).unwrap();
@@ -286,7 +289,7 @@ async fn token_file_is_0600_new_per_launch_and_outside_every_agent_read_allowlis
     assert!(servers.stop(&project).await);
     assert!(!first.token_path.exists());
     let second = servers
-        .open(&project, checkout.path(), &build)
+        .open(&project, checkout.path(), &build, false)
         .await
         .unwrap();
     assert_eq!(second.token_path, first.token_path);
@@ -362,6 +365,7 @@ fn server_env_holds_only_allowlisted_names() {
         ("GIT_CONFIG_COUNT", "2"),
         ("GIT_CONFIG_KEY_0", "core.fsmonitor"),
         ("GIT_CONFIG_VALUE_0", "/private/tmp/evil-monitor"),
+        ("GIT_CEILING_DIRECTORIES", "/private/tmp/forged-ceiling"),
     ];
     let source = given
         .iter()
@@ -369,7 +373,8 @@ fn server_env_holds_only_allowlisted_names() {
     let capability = Path::new("/private/tmp/ide/project/capability");
     let socket = Path::new("/private/tmp/data/engine/owner.sock");
     let locked = Path::new("/private/tmp/ide/project/locked-settings.json");
-    let built = env::server_env(source, capability, socket, locked);
+    let ceiling = std::ffi::OsStr::new("/private/tmp/project/.crazyagent/worktrees");
+    let built = env::server_env(source, capability, socket, locked, ceiling);
     assert!(built.len() <= env::ENV_MAX);
     let mut command = Command::new("/usr/bin/env");
     command
@@ -396,6 +401,10 @@ fn server_env_holds_only_allowlisted_names() {
         crate::ide::settings::LOCKED_VARIABLE,
         "/private/tmp/ide/project/locked-settings.json",
     ));
+    expected.push((
+        crate::ide::git::CEILING_VARIABLE,
+        "/private/tmp/project/.crazyagent/worktrees",
+    ));
     expected.extend(crate::ide::git::CONFIG_ENV);
     expected.sort();
     assert_eq!(seen, expected);
@@ -405,6 +414,7 @@ fn server_env_holds_only_allowlisted_names() {
             || *name == env::CAPABILITY_VARIABLE
             || *name == env::SOCKET_VARIABLE
             || *name == crate::ide::settings::LOCKED_VARIABLE
+            || *name == crate::ide::git::CEILING_VARIABLE
             || crate::ide::git::CONFIG_ENV
                 .iter()
                 .any(|(fixed, _)| name == fixed)
@@ -424,7 +434,7 @@ async fn port_is_stable_for_a_project_across_restarts() {
     let project = project("ports");
     let servers = servers_in(data.path(), IDLE_LIMIT);
     let first = servers
-        .open(&project, checkout.path(), &build)
+        .open(&project, checkout.path(), &build, false)
         .await
         .unwrap();
     let folder = servers.project_folder(&project).unwrap();
@@ -438,7 +448,7 @@ async fn port_is_stable_for_a_project_across_restarts() {
     );
     assert!(servers.stop(&project).await);
     let again = servers
-        .open(&project, checkout.path(), &build)
+        .open(&project, checkout.path(), &build, false)
         .await
         .unwrap();
     assert_eq!(
@@ -451,7 +461,7 @@ async fn port_is_stable_for_a_project_across_restarts() {
     let held = crate::spawn_gate::bind_tcp_std(("127.0.0.1", first.server_port)).unwrap();
     let restarted = servers_in(data.path(), IDLE_LIMIT);
     let moved = restarted
-        .open(&project, checkout.path(), &build)
+        .open(&project, checkout.path(), &build, false)
         .await
         .unwrap();
     assert_ne!(moved.server_port, first.server_port);
@@ -466,12 +476,42 @@ async fn port_is_stable_for_a_project_across_restarts() {
     drop(held);
     assert!(restarted.stop(&project).await);
     let kept = restarted
-        .open(&project, checkout.path(), &build)
+        .open(&project, checkout.path(), &build, false)
         .await
         .unwrap();
     assert_eq!(kept.server_port, moved.server_port);
     assert_eq!(kept.port, first.port);
     restarted.stop_all().await;
+}
+
+/// INT1-4: the IDE hooks switch reaches the git shim through the product's launch path. A
+/// launch with it on writes the shim that lets git run hooks in the canonical project
+/// folder alone; the next launch with it off writes the plain shim again.
+#[tokio::test]
+async fn the_hooks_switch_reaches_the_git_shim_through_open() {
+    let checkout = scratch();
+    let data = scratch();
+    let build = cached_build();
+    let project = project("hooks");
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    servers.open(&project, &root, &build, true).await.unwrap();
+    let folder = servers.project_folder(&project).unwrap();
+    let shim = settings::machine_folder(&folder.join(SERVER_DATA)).join(crate::ide::git::SHIM);
+    let on = fs::read_to_string(&shim).unwrap();
+    assert_eq!(on, crate::ide::git::shim_text(Some(&root)).unwrap());
+    assert_ne!(on, crate::ide::git::SHIM_TEXT);
+    assert!(
+        on.contains(&format!("if [ \"$(pwd -P)\" = '{}' ]", root.display())),
+        "{on}"
+    );
+    assert!(servers.stop(&project).await);
+    servers.open(&project, &root, &build, false).await.unwrap();
+    assert_eq!(
+        fs::read_to_string(&shim).unwrap(),
+        crate::ide::git::SHIM_TEXT
+    );
+    servers.stop_all().await;
 }
 
 #[tokio::test]
@@ -482,7 +522,7 @@ async fn idle_server_stops_after_the_idle_limit() {
     let servers = servers_in(data.path(), idle);
     let project = project("idle");
     let info = servers
-        .open(&project, checkout.path(), &cached_build())
+        .open(&project, checkout.path(), &cached_build(), false)
         .await
         .unwrap();
     let group = servers.group(&project).unwrap();
@@ -510,7 +550,7 @@ async fn idle_server_stops_after_the_idle_limit() {
 /// pending its launch cannot have passed `ready`. Inputs: the register, the project, the
 /// checkout and the build. Output: the cut launch's process group.
 async fn cut_open(servers: &Servers, project: &ProjectId, checkout: &Path, build: &Path) -> i32 {
-    let open = servers.open(project, checkout, build);
+    let open = servers.open(project, checkout, build, false);
     tokio::pin!(open);
     let deadline = Instant::now() + START_LIMIT;
     loop {
@@ -563,7 +603,7 @@ async fn an_open_cut_while_its_server_starts_is_never_handed_back() {
     assert!(present(cut));
 
     let info = servers
-        .open(&project, checkout.path(), &build)
+        .open(&project, checkout.path(), &build, false)
         .await
         .unwrap();
     let group = servers.group(&project).unwrap();
@@ -574,11 +614,78 @@ async fn an_open_cut_while_its_server_starts_is_never_handed_back() {
         "the new launch, which passed its port check, holds the server port"
     );
     let again = servers
-        .open(&project, checkout.path(), &build)
+        .open(&project, checkout.path(), &build, false)
         .await
         .unwrap();
     assert_eq!(again, info, "a ready launch is handed back");
     assert_eq!(servers.group(&project), Some(group));
+    servers.stop_all().await;
+    gone(group).await;
+}
+
+/// A cut launch that nobody opens again stops once its start limit passes, long before
+/// the idle limit, since it never passed `ready`: with the production idle limit only the
+/// start limit can end it.
+#[tokio::test]
+async fn an_open_cut_while_its_server_starts_stops_at_its_start_limit_well_before_idle() {
+    let checkout = scratch();
+    let data = scratch();
+    let servers = Servers::new(
+        data.path(),
+        IDLE_LIMIT,
+        CUT_START_LIMIT,
+        Arc::default(),
+        data.path().join("engine").join("owner.sock"),
+    );
+    let project = project("cut-start");
+    let group = cut_open(&servers, &project, checkout.path(), &cached_build()).await;
+    assert!(
+        present(group),
+        "the cut launch runs on with nobody waiting for it"
+    );
+    gone(group).await;
+    assert_eq!(servers.group(&project), None);
+    assert!(!servers.touch(&project));
+}
+
+/// An open that finds an extension preparation still running on its folder, as one an open
+/// cut by the IDE tab's timeout leaves behind, waits for it and starts nothing beside it,
+/// so two installs never race on one extensions folder; it goes on once that one ends.
+#[tokio::test]
+async fn an_open_waits_for_an_extension_preparation_still_running_on_its_folder() {
+    let checkout = scratch();
+    let data = scratch();
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let project = project("prepare-wait");
+    let extensions = servers.project_folder(&project).unwrap().join(EXTENSIONS);
+    let (holding, held) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    let holder = std::thread::spawn(move || {
+        let running = preparation(&extensions);
+        let _running = locked(&running);
+        holding.send(()).unwrap();
+        let _ = released.recv();
+    });
+    held.recv().unwrap();
+    let build = cached_build();
+    let open = servers.open(&project, checkout.path(), &build, false);
+    tokio::pin!(open);
+    let deadline = Instant::now() + PREPARATION_HELD;
+    while Instant::now() < deadline {
+        tokio::select! {
+            opened = &mut open => panic!("the open ran beside a running preparation: {opened:?}"),
+            () = tokio::time::sleep(Duration::from_millis(20)) => {}
+        }
+        assert_eq!(
+            servers.group(&project),
+            None,
+            "the open started its server beside a running preparation"
+        );
+    }
+    release.send(()).unwrap();
+    holder.join().unwrap();
+    open.await.unwrap();
+    let group = servers.group(&project).unwrap();
     servers.stop_all().await;
     gone(group).await;
 }
@@ -603,7 +710,7 @@ async fn no_ide_server_process_survives_engine_stop() {
     let project = project("engine-stop");
     let servers = service.owner_runtime().unwrap().ide_servers();
     let info = servers
-        .open(&project, checkout.path(), &cached_build())
+        .open(&project, checkout.path(), &cached_build(), false)
         .await
         .unwrap();
     assert!(
@@ -653,10 +760,10 @@ async fn a_server_left_by_a_crashed_engine_is_ended_before_its_project_opens_aga
             .unwrap();
         let crashed = servers_in(&left, IDLE_LIMIT);
         let info = runtime
-            .block_on(crashed.open(&name, &opened, &path))
+            .block_on(crashed.open(&name, &opened, &path, false))
             .unwrap();
         runtime
-            .block_on(crashed.open(&other, &other_opened, &path))
+            .block_on(crashed.open(&other, &other_opened, &path, false))
             .unwrap();
         let group = crashed.group(&name).unwrap();
         let other_group = crashed.group(&other).unwrap();
@@ -686,7 +793,7 @@ async fn a_server_left_by_a_crashed_engine_is_ended_before_its_project_opens_aga
             .exists()
     );
     let info = servers
-        .open(&project, checkout.path(), &build)
+        .open(&project, checkout.path(), &build, false)
         .await
         .unwrap();
     let leader = Pid::from_raw(old_group).unwrap();
@@ -709,7 +816,7 @@ async fn the_server_log_never_holds_the_token() {
     let servers = servers_in(data.path(), IDLE_LIMIT);
     let project = project("log");
     let info = servers
-        .open(&project, checkout.path(), &cached_build())
+        .open(&project, checkout.path(), &cached_build(), false)
         .await
         .unwrap();
     let token = fs::read_to_string(&info.token_path).unwrap();
@@ -755,7 +862,7 @@ async fn the_workbench_page_gets_the_webview_endpoint_the_defaults_and_a_closed_
     let servers = servers_in(data.path(), IDLE_LIMIT);
     let project = project("page");
     let info = servers
-        .open(&project, checkout.path(), &build)
+        .open(&project, checkout.path(), &build, false)
         .await
         .unwrap();
     let token = fs::read_to_string(&info.token_path).unwrap();
@@ -870,7 +977,7 @@ async fn websocket_upgrades_pass_the_proxy_only_with_the_token() {
     let servers = servers_in(data.path(), IDLE_LIMIT);
     let project = project("socket");
     let info = servers
-        .open(&project, checkout.path(), &cached_build())
+        .open(&project, checkout.path(), &cached_build(), false)
         .await
         .unwrap();
     let token = fs::read_to_string(&info.token_path).unwrap();
@@ -909,6 +1016,183 @@ async fn websocket_upgrades_pass_the_proxy_only_with_the_token() {
     servers.stop_all().await;
 }
 
+/// The git ceiling one built server command hands the IDE server. Inputs: the register,
+/// the project and its folder. Output: the value.
+fn command_ceiling(servers: &Servers, project: &ProjectId, root: &Path) -> OsString {
+    let folder = servers.prepare(project).unwrap();
+    let (token_path, _) = token::issue(&folder).unwrap();
+    let info = ServerInfo {
+        url: "http://127.0.0.1:47943/".to_owned(),
+        port: 47_943,
+        server_port: 47_941,
+        token_path,
+        capability_path: folder.join(CAPABILITY),
+        workspace: folder.join(WORKSPACE),
+    };
+    let (_reader, writer) = crate::spawn_gate::guarded(std::io::pipe).unwrap();
+    let command = command(
+        project,
+        &cached_build(),
+        &folder,
+        root,
+        &info,
+        &servers.socket,
+        writer,
+        false,
+    )
+    .unwrap();
+    let ceiling = command
+        .get_envs()
+        .find(|(name, _)| *name == crate::ide::git::CEILING_VARIABLE)
+        .and_then(|(_, value)| value)
+        .expect("the server's environment holds the git ceiling");
+    ceiling.to_owned()
+}
+
+/// INT1-R3-1: the server's git ceiling follows the engine's records. A project that gained
+/// a `.crazyagent` folder gets the new layout's agents root alone while the engine records
+/// no agent of it in `<project>/worktrees`, another project's record there counting for
+/// nothing; once the engine records one of its agents there, the older root is added.
+#[test]
+fn the_server_ceiling_keeps_the_older_agents_root_while_the_engine_records_an_agent_there() {
+    let checkout = scratch();
+    let data = scratch();
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let project = project("gained");
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    fs::create_dir_all(root.join(".crazyagent").join("worktrees")).unwrap();
+    let db = crate::landing::open(data.path()).unwrap();
+    crate::team::initialize(&db).unwrap();
+    let record = |owner: &str, worktree: &Path| {
+        db.execute(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms)
+             VALUES (?1,'sub','codex',0,'stopped',1,1)",
+            [owner],
+        )
+        .unwrap();
+        let agent = db.last_insert_rowid();
+        db.execute(
+            "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir)
+             VALUES (?1,?2,?3,?4,?5)",
+            rusqlite::params![
+                agent,
+                owner,
+                root.to_str().unwrap(),
+                worktree.to_str().unwrap(),
+                root.join(".git")
+                    .join("worktrees")
+                    .join("agent")
+                    .to_str()
+                    .unwrap()
+            ],
+        )
+        .unwrap();
+    };
+    record("elsewhere", &root.join("worktrees").join("agent-1"));
+    record(
+        project.as_str(),
+        &root.join(".crazyagent").join("worktrees").join("agent-2"),
+    );
+    assert_eq!(
+        command_ceiling(&servers, &project, &root),
+        crate::ide::git::ceiling(&root, false).unwrap()
+    );
+    assert_eq!(
+        command_ceiling(&servers, &project, &root),
+        root.join(".crazyagent").join("worktrees").into_os_string()
+    );
+
+    record(project.as_str(), &root.join("worktrees").join("agent-3"));
+    let both = command_ceiling(&servers, &project, &root);
+    assert_eq!(both, crate::ide::git::ceiling(&root, true).unwrap());
+    assert_eq!(
+        both.to_str().unwrap(),
+        format!(
+            "{}:{}",
+            root.join(".crazyagent").join("worktrees").display(),
+            root.join("worktrees").display()
+        )
+    );
+}
+
+/// INT1R3-L1: a research job's worktree is not a team record, yet it stays in the older
+/// agents root after its job. The ceiling keeps that root while a folder there carries the
+/// name the research runner gives a launch of one of the project's own jobs; another
+/// project's job, the owner's own folder of a like name, a link and the new layout's
+/// research folders count for nothing.
+#[test]
+fn the_server_ceiling_keeps_the_older_root_while_a_research_worktree_stays_there() {
+    let checkout = scratch();
+    let data = scratch();
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let project = project("gained");
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let older = root.join("worktrees");
+    let layout = root.join(".crazyagent").join("worktrees");
+    fs::create_dir_all(&older).unwrap();
+    fs::create_dir_all(&layout).unwrap();
+    let jobs = crate::research::jobs::ResearchJobs::open(&data.path().join("engine.db")).unwrap();
+    let elsewhere = jobs.enqueue("elsewhere", "market", "codex", false).unwrap();
+    let mine = jobs
+        .enqueue(project.as_str(), "market", "codex", false)
+        .unwrap();
+    let layout_only = crate::ide::git::ceiling(&root, false).unwrap();
+    assert_eq!(layout_only, layout.clone().into_os_string());
+
+    fs::create_dir(older.join(format!("research-market-{elsewhere}-1"))).unwrap();
+    fs::create_dir(layout.join(format!("research-market-{mine}-1"))).unwrap();
+    fs::create_dir(older.join("research-notes")).unwrap();
+    fs::create_dir(older.join(format!("research-other-{mine}-1"))).unwrap();
+    std::os::unix::fs::symlink(
+        layout.join(format!("research-market-{mine}-1")),
+        older.join(format!("research-market-{mine}-2")),
+    )
+    .unwrap();
+    assert_eq!(
+        command_ceiling(&servers, &project, &root),
+        layout_only,
+        "no folder in the older root is a research worktree of this project's jobs"
+    );
+
+    fs::create_dir(older.join(format!("research-market-{mine}-1-2"))).unwrap();
+    let both = command_ceiling(&servers, &project, &root);
+    assert_eq!(both, crate::ide::git::ceiling(&root, true).unwrap());
+    assert_eq!(
+        both.to_str().unwrap(),
+        format!("{}:{}", layout.display(), older.display()),
+        "a later launch's worktree of the project's job keeps the older root"
+    );
+}
+
+/// A project's older agents root with more entries than the engine reads for research
+/// worktrees keeps the git stop rather than guessing it away.
+#[test]
+fn an_older_agents_root_too_large_to_read_keeps_the_git_stop() {
+    let checkout = scratch();
+    let data = scratch();
+    let servers = servers_in(data.path(), IDLE_LIMIT);
+    let project = project("crowded");
+    let root = fs::canonicalize(checkout.path()).unwrap();
+    let older = root.join("worktrees");
+    fs::create_dir_all(root.join(".crazyagent").join("worktrees")).unwrap();
+    fs::create_dir_all(&older).unwrap();
+    crate::research::jobs::ResearchJobs::open(&data.path().join("engine.db")).unwrap();
+    for index in 0..crate::ide::workspace::OLDER_ENTRIES_MAX {
+        fs::create_dir(older.join(format!("owner-{index}"))).unwrap();
+    }
+    assert_eq!(
+        command_ceiling(&servers, &project, &root),
+        crate::ide::git::ceiling(&root, false).unwrap(),
+        "a root at the limit is read in full"
+    );
+    fs::create_dir(older.join("owner-last")).unwrap();
+    assert_eq!(
+        command_ceiling(&servers, &project, &root),
+        crate::ide::git::ceiling(&root, true).unwrap(),
+        "one entry past the limit keeps the older root"
+    );
+}
+
 #[test]
 fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
     let checkout = scratch();
@@ -928,7 +1212,17 @@ fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
     };
     let (_reader, writer) = crate::spawn_gate::guarded(std::io::pipe).unwrap();
     let socket = data.path().join("engine").join("owner.sock");
-    let command = command(&build, &folder, checkout.path(), &info, &socket, writer).unwrap();
+    let command = command(
+        &project,
+        &build,
+        &folder,
+        checkout.path(),
+        &info,
+        &socket,
+        writer,
+        false,
+    )
+    .unwrap();
     assert_eq!(command.get_program(), crate::sandbox::SANDBOX_EXEC);
     let profile = folder.join(sandbox::PROFILE);
     let expected: Vec<OsString> = [
@@ -983,6 +1277,11 @@ fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
     assert!(envs.contains(&(
         std::ffi::OsStr::new(env::CAPABILITY_VARIABLE),
         Some(info.capability_path.as_os_str())
+    )));
+    let ceiling = crate::ide::git::ceiling(checkout.path(), false).unwrap();
+    assert!(envs.contains(&(
+        std::ffi::OsStr::new(crate::ide::git::CEILING_VARIABLE),
+        Some(ceiling.as_os_str())
     )));
     assert!(
         envs.iter()
@@ -1056,10 +1355,16 @@ async fn a_launch_hands_the_built_in_extension_its_capability_until_it_stops() {
     let data = scratch();
     let grants: Arc<bridge::Grants> = Arc::default();
     let socket = data.path().join("engine").join("owner.sock");
-    let servers = Servers::new(data.path(), IDLE_LIMIT, Arc::clone(&grants), socket);
+    let servers = Servers::new(
+        data.path(),
+        IDLE_LIMIT,
+        START_LIMIT,
+        Arc::clone(&grants),
+        socket,
+    );
     let project = project("built-in");
     let info = servers
-        .open(&project, checkout.path(), &cached_build())
+        .open(&project, checkout.path(), &cached_build(), false)
         .await
         .unwrap();
     let extensions = servers.project_folder(&project).unwrap().join(EXTENSIONS);
@@ -1099,7 +1404,7 @@ async fn a_launch_hands_the_built_in_extension_its_capability_until_it_stops() {
         "a stopped server's capability is revoked"
     );
     let again = servers
-        .open(&project, checkout.path(), &cached_build())
+        .open(&project, checkout.path(), &cached_build(), false)
         .await
         .unwrap();
     let renewed = capability_packet(&again.capability_path);
@@ -1125,14 +1430,14 @@ async fn a_start_stops_waiting_once_stop_all_began() {
     let slot = Slot::default();
     let group = Pid::from_raw(std::process::id() as i32).unwrap();
     assert_eq!(
-        ready(&slot, 0, 1, group, &AtomicBool::new(true))
+        ready(&slot, 0, 1, group, START_LIMIT, &AtomicBool::new(true))
             .await
             .unwrap_err()
             .0,
         "ide_servers_closed"
     );
     assert_eq!(
-        ready(&slot, 0, 1, group, &AtomicBool::new(false))
+        ready(&slot, 0, 1, group, START_LIMIT, &AtomicBool::new(false))
             .await
             .unwrap_err()
             .0,

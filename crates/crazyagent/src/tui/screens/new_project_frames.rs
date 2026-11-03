@@ -175,6 +175,33 @@ fn wizard_frames() -> Vec<(String, String)> {
 }
 
 #[test]
+fn a_window_narrower_than_the_frame_minimum_never_breaks_the_wizard() {
+    let look = Look::plain();
+    let mut wizard = about();
+    load_catalog(&mut wizard, &["c-codex"]);
+    let steps = [
+        Step::About,
+        Step::Stack,
+        Step::Documents,
+        Step::Work,
+        Step::Pool,
+        Step::Team,
+        Step::Review,
+    ];
+    for step in steps {
+        wizard.done[step.index()] = true;
+    }
+    for step in steps {
+        wizard.go(step);
+        let minimum = compose(&wizard_screen(&wizard, 80, 24, &look), 80, 24, "", &look);
+        for width in [0, 1, 4, 8, 9, 10, 40, 79] {
+            let narrow = compose(&wizard_screen(&wizard, width, 24, &look), 80, 24, "", &look);
+            assert_eq!(narrow, minimum, "{step:?} at width {width}");
+        }
+    }
+}
+
+#[test]
 fn wizard_frames_match_the_design() {
     let drawn = wizard_frames();
     for (id, text) in &drawn {

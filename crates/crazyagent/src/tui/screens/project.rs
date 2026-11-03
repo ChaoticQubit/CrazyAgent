@@ -4,6 +4,7 @@ use super::new_project::PoolChoice;
 use super::new_project_input::TextInput;
 use super::new_project_view::wrap_words;
 use super::planning_line::{Planning, planning, planning_key};
+use super::project_access::{AccessEdit, AccessKey};
 use super::project_markdown::{MdLine, render, sanitize};
 use super::project_plugins::ProjectPlugins;
 use super::questions::ProjectQuestions;
@@ -274,7 +275,7 @@ pub(in crate::tui) struct MemoryEdit {
 
 /// The whole text of a suggested memory, shown before the owner saves it.
 /// Holds the memory, its stored text and the first line on screen.
-/// y saves once the last line is on screen; e edits, n dismisses, Esc goes back.
+/// y saves and e edits once the last line is on screen; n dismisses, Esc goes back.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) struct MemoryReview {
     pub entry: RequestId,
@@ -573,6 +574,8 @@ pub(in crate::tui) struct ProjectScreen {
     pub adding: Option<AddFile>,
     pub folders: Option<AddFile>,
     pub read_paths: Option<crate::project_setup::ReadPaths>,
+    pub access: Option<AccessEdit>,
+    pub agent_policy: Option<crate::sandbox::policy::PolicyView>,
     pub schedule: Option<crate::scheduling::Schedule>,
     pub general: Option<GeneralEdit>,
     pub removed: bool,
@@ -590,6 +593,8 @@ pub(in crate::tui) struct ProjectScreen {
     read_paths_read_ms: Option<i64>,
     folders_version: u64,
     folders_stale: bool,
+    agent_policy_read_ms: Option<i64>,
+    access_stale: bool,
     memories_read_ms: Option<i64>,
     setup_failed_ms: Option<i64>,
     setup_due: bool,
@@ -645,6 +650,8 @@ impl ProjectScreen {
             adding: None,
             folders: None,
             read_paths: None,
+            access: None,
+            agent_policy: None,
             schedule: None,
             general: None,
             removed: false,
@@ -657,6 +664,8 @@ impl ProjectScreen {
             read_paths_read_ms: None,
             folders_version: 0,
             folders_stale: false,
+            agent_policy_read_ms: None,
+            access_stale: false,
             memories_read_ms: None,
             setup_failed_ms: None,
             setup_due: false,
@@ -676,6 +685,7 @@ impl ProjectScreen {
         self.confirm_plan = None;
         self.adding = None;
         self.folders = None;
+        self.access = None;
         self.general = None;
         self.typing = tab == Tab::Conversation;
         if tab == Tab::Changes {
@@ -714,6 +724,11 @@ impl ProjectScreen {
             && due(self.read_paths_read_ms)
         {
             SetupQuery::ReadPaths { project }
+        } else if self.agent_policy.is_none()
+            && self.tab == Tab::Settings
+            && due(self.agent_policy_read_ms)
+        {
+            SetupQuery::AgentPolicy { project }
         } else if due(self.memories_read_ms)
             && (self.memories.is_none() || matches!(self.tab, Tab::Overview))
         {
@@ -835,6 +850,9 @@ impl ProjectScreen {
                     SetupQuery::Jobs { .. } => self.jobs_read_ms = Some(self.now_ms),
                     SetupQuery::Context { .. } => self.context_read_ms = Some(self.now_ms),
                     SetupQuery::ReadPaths { .. } => self.read_paths_read_ms = Some(self.now_ms),
+                    SetupQuery::AgentPolicy { .. } => {
+                        self.agent_policy_read_ms = Some(self.now_ms);
+                    }
                     SetupQuery::Memories { .. } => self.memories_read_ms = Some(self.now_ms),
                     SetupQuery::Item { path, .. } => {
                         if let Some(preview) = self.preview.as_mut().filter(|p| &p.path == path) {
@@ -899,6 +917,19 @@ impl ProjectScreen {
                 self.read_paths = Some(saved);
                 self.read_paths_read_ms = Some(self.now_ms);
             }
+            SetupView::AgentPolicy(view) => {
+                if std::mem::take(&mut self.access_stale)
+                    && let Some(access) = self.access.as_mut()
+                {
+                    access.view.version = view.version;
+                    access.error = Some(format!(
+                        "Saved now: {}. {KEEP_MINE}",
+                        super::project_access::summary(Some(&view))
+                    ));
+                }
+                self.agent_policy = Some(view);
+                self.agent_policy_read_ms = Some(self.now_ms);
+            }
             SetupView::Item(chunk) => {
                 if let Some(preview) = self.preview.as_mut().filter(|p| p.path == chunk.path) {
                     preview.loaded = true;
@@ -926,8 +957,9 @@ impl ProjectScreen {
         self.assert_consistent();
     }
 
-    /// Puts a refused add, edit or remove back in its box with the reason. A General or
-    /// read-only folders edit refused as stale keeps its draft and reads the saved value again.
+    /// Puts a refused add, edit or remove back in its box with the reason. A General,
+    /// read-only folders or Agent access edit refused as stale keeps its draft and reads the
+    /// saved value again.
     /// Takes the change query and the plain problem code.
     /// Returns true when an open box took the refusal.
     fn refused(&mut self, query: &SetupQuery, code: &str) -> bool {
@@ -960,6 +992,18 @@ impl ProjectScreen {
                     self.folders_stale = true;
                     self.read_paths = None;
                     self.read_paths_read_ms = None;
+                }
+                true
+            }
+            SetupAction::SetAgentPolicy { .. } if self.access.is_some() => {
+                if let Some(access) = self.access.as_mut() {
+                    access.busy = false;
+                    access.error = reason;
+                }
+                if stale {
+                    self.access_stale = true;
+                    self.agent_policy = None;
+                    self.agent_policy_read_ms = None;
                 }
                 true
             }
@@ -1021,6 +1065,16 @@ impl ProjectScreen {
                 self.read_paths_read_ms = None;
                 if applied {
                     self.folders = None;
+                }
+            }
+            SetupQuery::Change {
+                action: SetupAction::SetAgentPolicy { .. },
+                ..
+            } => {
+                self.agent_policy = None;
+                self.agent_policy_read_ms = None;
+                if applied {
+                    self.access = None;
                 }
             }
             SetupQuery::Change {
@@ -1177,6 +1231,7 @@ impl ProjectScreen {
             || self.review.is_some()
             || self.adding.is_some()
             || self.folders.is_some()
+            || self.access.is_some()
             || self.general.is_some()
             || self.confirm_remove
             || self.pool_picker.is_some()
@@ -1200,6 +1255,9 @@ impl ProjectScreen {
         }
         if self.folders.is_some() {
             return self.folders_key(key);
+        }
+        if self.access.is_some() {
+            return self.access_key(key);
         }
         if self.general.is_some() {
             return self.general_key(key);
@@ -1620,22 +1678,18 @@ impl ProjectScreen {
             return ProjectReply::Handled;
         };
         match code {
-            KeyCode::Char('y') => {
-                self.review = Some(MemoryReview {
-                    entry,
-                    version,
-                    text,
-                    scroll: 0,
-                });
-                ProjectReply::Handled
-            }
             KeyCode::Char('n') => ProjectReply::Review {
                 entry,
                 version,
                 decision: ReviewDecision::Reject,
             },
             _ => {
-                self.edit_memory(entry, version, &text);
+                self.review = Some(MemoryReview {
+                    entry,
+                    version,
+                    text,
+                    scroll: 0,
+                });
                 ProjectReply::Handled
             }
         }
@@ -1690,7 +1744,7 @@ impl ProjectScreen {
                     decision: ReviewDecision::Reject,
                 };
             }
-            KeyCode::Char('e') => {
+            KeyCode::Char('e') if review.at_end() => {
                 if let Some(review) = self.review.take() {
                     self.edit_memory(review.entry, review.version, &review.text);
                 }
@@ -1908,8 +1962,19 @@ impl ProjectScreen {
                 }
             }
             KeyCode::Char('O') => {
-                if let Some(target) = item.and_then(|item| self.ide_target(&item.path)) {
-                    return ProjectReply::Reveal(target);
+                if let Some(item) = item {
+                    match self.ide_target(&item.path) {
+                        Some(target) => return ProjectReply::Reveal(target),
+                        None if self.setup.is_none() => {
+                            self.problem = Some("Still loading the project. Try again.".into());
+                        }
+                        None => {
+                            self.problem = Some(
+                                "This file is outside the project folder, so the IDE can't open it."
+                                    .into(),
+                            );
+                        }
+                    }
                 }
             }
             KeyCode::Char('a') => {
@@ -2070,6 +2135,18 @@ impl ProjectScreen {
                 }
                 ProjectReply::Handled
             }
+            KeyCode::Char('c') => {
+                match &self.agent_policy {
+                    Some(view) => {
+                        self.access = Some(AccessEdit::of(view));
+                        self.access_stale = false;
+                    }
+                    None => {
+                        self.problem = Some("Still loading the agent access. Try again.".into());
+                    }
+                }
+                ProjectReply::Handled
+            }
             KeyCode::Char('i') => ProjectReply::Process,
             KeyCode::Char('h') => ProjectReply::Harnesses,
             KeyCode::Char('u') => match &self.schedule {
@@ -2208,6 +2285,37 @@ impl ProjectScreen {
         }
     }
 
+    /// Handles one key in the Agent access box (see [`AccessEdit::key`]): a save sends the
+    /// policy and keeps the box busy until the engine answers.
+    /// Takes the key event.
+    /// Returns the change to send, or what the box did with the key.
+    fn access_key(&mut self, key: KeyEvent) -> ProjectReply {
+        let Some(access) = self.access.as_mut() else {
+            return ProjectReply::Ignored;
+        };
+        match access.key(key) {
+            AccessKey::Handled => ProjectReply::Handled,
+            AccessKey::Close => {
+                self.access = None;
+                ProjectReply::Handled
+            }
+            AccessKey::Save(policy) => {
+                let action = SetupAction::SetAgentPolicy {
+                    project_id: self.project.clone(),
+                    version: access.view.version,
+                    policy,
+                };
+                if let Err(error) = action.validate() {
+                    access.error = Some(plain_problem(&error.0));
+                    return ProjectReply::Handled;
+                }
+                access.busy = true;
+                access.error = None;
+                ProjectReply::Change(Box::new(action))
+            }
+        }
+    }
+
     fn add_key(&mut self, key: KeyEvent) -> ProjectReply {
         let Some(adding) = self.adding.as_mut() else {
             return ProjectReply::Ignored;
@@ -2314,6 +2422,7 @@ impl ProjectScreen {
             self.review.is_some(),
             self.adding.is_some(),
             self.folders.is_some(),
+            self.access.is_some(),
             self.general.is_some(),
             self.confirm_remove,
         ];
@@ -2327,7 +2436,11 @@ impl ProjectScreen {
         if self.adding.is_some() {
             assert_eq!(self.tab, Tab::Context);
         }
-        if self.general.is_some() || self.confirm_remove || self.folders.is_some() {
+        if self.general.is_some()
+            || self.confirm_remove
+            || self.folders.is_some()
+            || self.access.is_some()
+        {
             assert_eq!(self.tab, Tab::Settings);
         }
         if let Some(job) = self.confirm_stop {
@@ -2401,6 +2514,9 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         }
         "context_item_protected" => "The project brief can't be deleted.",
         "read_path_not_absolute" => "Type the full path of each folder, starting with /.",
+        "agent_access_unavailable" => "That access level can't run agents on this computer.",
+        "agent_policy_invalid" => "Each toolchain can be listed once.",
+        "agent_policy_unreadable" => "CrazyAgent couldn't read this project's agent access.",
         "read_path_missing" => "One of those folders doesn't exist on this computer.",
         "read_path_not_folder" => "One of those paths is a file. Add folders only.",
         "read_path_holds_home" => {

@@ -103,6 +103,31 @@ fn the_channel_file_defaults_to_stable_round_trips_and_refuses_bad_values() {
 }
 
 #[test]
+fn saving_the_channel_creates_a_missing_data_folder_the_engine_accepts() {
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("CrazyAgent").join("engine");
+    save_channel(&root, Channel::Dev).unwrap();
+    assert_eq!(read_channel(&root).unwrap(), Channel::Dev);
+    crate::paths::Layout::new(root.clone())
+        .unwrap()
+        .prepare()
+        .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for folder in [root.parent().unwrap(), root.as_path()] {
+            assert_eq!(
+                std::fs::metadata(folder).unwrap().permissions().mode() & 0o7777,
+                0o700
+            );
+        }
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(code(save_channel(&root, Channel::Stable)), "update_io");
+        assert_eq!(read_channel(&root).unwrap(), Channel::Dev);
+    }
+}
+
+#[test]
 fn channels_name_their_release_manifests() {
     assert_eq!(Channel::parse("stable"), Some(Channel::Stable));
     assert_eq!(Channel::parse("dev"), Some(Channel::Dev));

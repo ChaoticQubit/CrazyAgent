@@ -587,3 +587,76 @@ fn stale_task_role_write_is_refused() {
         "without a recorded master the owner's turn wrote it"
     );
 }
+
+/// A woken sub-agent gets its names back (WK-R2): its persona, and its role handle while it
+/// is free; when a live agent took the handle while it was stopped, the woken agent gets the
+/// first free suffix and the live one keeps its own, so no two live agents share a handle.
+#[test]
+fn a_woken_agent_reclaims_its_names_and_never_shares_a_live_handle() {
+    let (_directory, connection) = engine();
+    let alpha = project("alpha");
+    let ada = agent(&connection, "alpha", "sub", "working");
+    assert_eq!(
+        assign_role(&connection, &alpha, ada, "onboarding-fix").unwrap(),
+        Ok("onboarding-fix".into())
+    );
+    let persona = stored_name(&connection, ada).unwrap().persona;
+    stop(&connection, ada);
+    let newer = agent(&connection, "alpha", "sub", "working");
+    assert_eq!(
+        assign_role(&connection, &alpha, newer, "onboarding-fix").unwrap(),
+        Ok("onboarding-fix".into())
+    );
+    assert_eq!(
+        resolve_finished(&connection, &alpha, "@onboarding-fix").unwrap(),
+        Some(ada)
+    );
+    assert_eq!(
+        resolve(&connection, &alpha, "@onboarding-fix").unwrap(),
+        Some(newer)
+    );
+
+    connection
+        .execute(
+            "UPDATE team_agents SET status='starting' WHERE id=?1",
+            [ada],
+        )
+        .unwrap();
+    assert_eq!(
+        reclaim(&connection, &alpha, ada).unwrap(),
+        AgentName {
+            persona: persona.clone(),
+            handle: Some("onboarding-fix-2".into()),
+        }
+    );
+    assert_eq!(
+        stored_name(&connection, newer).unwrap().handle.as_deref(),
+        Some("onboarding-fix"),
+        "the live agent keeps the handle its master knows"
+    );
+    assert_eq!(
+        resolve(&connection, &alpha, "@onboarding-fix-2").unwrap(),
+        Some(ada)
+    );
+    assert_eq!(
+        resolve(&connection, &alpha, "@onboarding-fix").unwrap(),
+        Some(newer)
+    );
+
+    stop(&connection, newer);
+    stop(&connection, ada);
+    connection
+        .execute(
+            "UPDATE team_agents SET status='starting' WHERE id=?1",
+            [newer],
+        )
+        .unwrap();
+    assert_eq!(
+        reclaim(&connection, &alpha, newer)
+            .unwrap()
+            .handle
+            .as_deref(),
+        Some("onboarding-fix"),
+        "a free handle is kept as it was"
+    );
+}

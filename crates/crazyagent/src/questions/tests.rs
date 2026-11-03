@@ -735,6 +735,50 @@ fn record_from_chat_takes_only_a_newer_owner_message_for_the_masters_own_questio
 }
 
 #[test]
+fn one_owner_turn_answers_only_one_of_the_masters_questions() {
+    let case = Case::new();
+    let first = case.ask(&MASTER, "Ship on Friday?");
+    let second = case.ask(&MASTER, "Rename the app?");
+    let turn = case.said(PROJECT, "Yes.");
+
+    assert_eq!(
+        record_from_chat(&case.db, &case.project, 41, first, 0, turn).unwrap(),
+        Settlement::Settled
+    );
+    assert_eq!(
+        code(record_from_chat(
+            &case.db,
+            &case.project,
+            41,
+            second,
+            0,
+            turn
+        )),
+        "questions_owner_turn_invalid"
+    );
+    let waiting = case.get(second);
+    assert_eq!(
+        (waiting.status, waiting.answer),
+        (QuestionStatus::Pending, None)
+    );
+    assert_eq!(
+        case.count("SELECT COUNT(*) FROM team_owner_turns WHERE project='alpha'"),
+        0
+    );
+
+    let next = case.said(PROJECT, "No, keep the name.");
+    assert_eq!(
+        record_from_chat(&case.db, &case.project, 41, second, 0, next).unwrap(),
+        Settlement::Settled
+    );
+    assert_eq!(
+        case.get(second).answer.as_deref(),
+        Some("No, keep the name.")
+    );
+    assert_eq!(case.get(first).answer.as_deref(), Some("Yes."));
+}
+
+#[test]
 fn a_settle_notice_quoting_a_masters_own_question_is_never_an_owner_turn() {
     let case = Case::new();
     let waiting = case.ask(&MASTER, "Ship on Friday?");
@@ -955,12 +999,25 @@ fn terminal_questions_are_answered_on_screen_and_never_delivered() {
         code(answer(&case.db, id, 0, &Answer::Option(0))),
         "questions_in_terminal"
     );
-    assert_eq!(terminal_settled(&case.db, id).unwrap(), Settlement::Settled);
-    assert_eq!(terminal_settled(&case.db, id).unwrap(), Settlement::Stale);
+    let typed = Some(i64::try_from(case.get(id).created_ms).unwrap());
+    assert_eq!(
+        terminal_settled(&case.db, id, typed).unwrap(),
+        Settlement::Settled
+    );
+    assert_eq!(
+        terminal_settled(&case.db, id, typed).unwrap(),
+        Settlement::Stale
+    );
     let question = case.get(id);
     assert_eq!(
         (question.status, question.version, question.answer),
         (QuestionStatus::AnsweredInTerminal, 1, None)
+    );
+    assert_eq!(
+        versioned::current(&case.db, &item(&case.project, id).unwrap())
+            .unwrap()
+            .writer,
+        versioned::LastWriter::Owner
     );
     assert!(
         case.page()
@@ -974,10 +1031,91 @@ fn terminal_questions_are_answered_on_screen_and_never_delivered() {
     );
     let master = case.ask(&MASTER, "Ship on Friday?");
     assert_eq!(
-        code(terminal_settled(&case.db, master)),
+        code(terminal_settled(&case.db, master, typed)),
         "questions_not_terminal"
     );
-    assert_eq!(code(terminal_settled(&case.db, 999)), "questions_not_found");
+    assert_eq!(
+        code(terminal_settled(&case.db, 999, typed)),
+        "questions_not_found"
+    );
+    assert!(case.messages().is_empty());
+}
+
+/// A terminal box that leaves its screen with no owner key typed into that terminal since
+/// it was asked is closed as dismissed by its agent, never as answered by the owner.
+#[test]
+fn a_terminal_box_leaving_without_an_owner_key_is_closed_unanswered() {
+    let case = Case::new();
+    let unkeyed = case.ask(&Asker::Terminal(7), "Allow this command?");
+    let asked = i64::try_from(case.get(unkeyed).created_ms).unwrap();
+    assert_eq!(
+        terminal_settled(&case.db, unkeyed, None).unwrap(),
+        Settlement::Settled
+    );
+    let keyed_before = case.ask(&Asker::Terminal(7), "Allow this other command?");
+    let asked_later = i64::try_from(case.get(keyed_before).created_ms).unwrap();
+    assert!(asked <= asked_later);
+    assert_eq!(
+        terminal_settled(&case.db, keyed_before, Some(asked_later - 1)).unwrap(),
+        Settlement::Settled
+    );
+    for id in [unkeyed, keyed_before] {
+        let question = case.get(id);
+        assert_eq!(
+            (question.status, question.version, question.answer),
+            (QuestionStatus::Dismissed, 1, None)
+        );
+        assert_eq!(
+            versioned::current(&case.db, &item(&case.project, id).unwrap())
+                .unwrap()
+                .writer,
+            versioned::LastWriter::Agent(AgentId::team(7).unwrap())
+        );
+    }
+    let page = case.page();
+    assert!(page.contains("Closed without an answer.\n"), "{page}");
+    assert!(!page.contains("in that agent's terminal.\n"), "{page}");
+    assert!(!page.contains("Dismissed by the owner."), "{page}");
+    assert!(case.messages().is_empty());
+}
+
+/// A terminal question the owner dismissed in the Questions view reads as dismissed by the
+/// owner, not as closed unanswered, while a box that left with no owner key still reads as
+/// closed without an answer on the same page.
+#[test]
+fn a_terminal_question_the_owner_dismissed_reads_as_dismissed_by_the_owner() {
+    let case = Case::new();
+    let dismissed = case.ask(&Asker::Terminal(7), "Allow this command?");
+    assert_eq!(
+        dismiss(&case.db, dismissed, 0).unwrap(),
+        Settlement::Settled
+    );
+    assert_eq!(
+        versioned::current(&case.db, &item(&case.project, dismissed).unwrap())
+            .unwrap()
+            .writer,
+        versioned::LastWriter::Owner
+    );
+    let page = case.page();
+    assert!(page.contains("Dismissed by the owner.\n"), "{page}");
+    assert!(!page.contains("Closed without an answer."), "{page}");
+
+    let closed = case.ask(&Asker::Terminal(7), "Allow this other command?");
+    assert_eq!(
+        terminal_settled(&case.db, closed, None).unwrap(),
+        Settlement::Settled
+    );
+    let page = case.page();
+    assert_eq!(
+        page.matches("Dismissed by the owner.\n").count(),
+        1,
+        "{page}"
+    );
+    assert_eq!(
+        page.matches("Closed without an answer.\n").count(),
+        1,
+        "{page}"
+    );
     assert!(case.messages().is_empty());
 }
 
@@ -1090,7 +1228,7 @@ fn hidden_characters_never_reach_the_page_unescaped() {
     question.context = Some("~~~\n# Planted heading\n~~~~".into());
     question.answer = Some("Yes\u{2066}".into());
     question.answered_by = Some(AnsweredBy::Owner);
-    let rendered = page::render(&[], &[question]);
+    let rendered = page::render(&[], &[question], &std::collections::HashSet::new());
     assert!(!hidden_text(&rendered), "{rendered}");
     for escaped in ["\\u202e", "\\u200b", "\\u2066"] {
         assert!(rendered.contains(escaped), "{escaped} in {rendered}");
@@ -1126,7 +1264,7 @@ fn the_page_keeps_every_pending_question_and_cuts_settled_ones_at_its_bound() {
             question
         })
         .collect();
-    let rendered = page::render(&pending, &settled);
+    let rendered = page::render(&pending, &settled, &std::collections::HashSet::new());
     assert!(rendered.len() <= page::PAGE_BYTES_MAX);
     let shown = headings(&rendered)
         .iter()

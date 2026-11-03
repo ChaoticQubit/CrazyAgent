@@ -979,3 +979,155 @@ async fn a_parked_session_s_owner_messages_are_read_back_for_its_turns_only() {
     );
     case.close().await;
 }
+
+#[tokio::test]
+async fn a_master_turn_s_input_outlives_conversation_pruning() {
+    let case = Case::new().await;
+    assert_eq!(case.open("open-capacity").await, OwnerResult::Applied);
+    let session = case.shown().await;
+    assert_eq!(
+        case.submit(
+            "capacity-message",
+            &session.session_id,
+            "Plan the first slice"
+        )
+        .await,
+        OwnerResult::Applied
+    );
+    let turn = case.turns(&session.session_id).await.remove(0);
+    for n in 0..=crate::conversation::ENTRIES_MAX {
+        let appended = case
+            .apply(
+                &format!("capacity-{n}"),
+                OwnerMutation::Conversation {
+                    mutation: ConversationMutation::AppendMessage {
+                        project_id: case.project.clone(),
+                        text: format!("filler {n}"),
+                    },
+                },
+            )
+            .await;
+        assert_eq!(appended, OwnerResult::Applied);
+    }
+    let db = case.db();
+    let oldest: Vec<String> = db
+        .prepare(
+            "SELECT text FROM conversation_entries WHERE project=?1 ORDER BY event_cursor LIMIT 3",
+        )
+        .unwrap()
+        .query_map([case.project.as_str()], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        oldest,
+        ["Plan the first slice", "filler 1", "filler 2"],
+        "the oldest plain message went and the turn's input stayed"
+    );
+    let total: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM conversation_entries WHERE project=?1",
+            [case.project.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(total, crate::conversation::ENTRIES_MAX as i64 + 1);
+    drop(db);
+    assert_eq!(case.turns(&session.session_id).await, vec![turn.clone()]);
+    let OwnerData::ProjectMasterInputs { entries } = case
+        .read(OwnerRead::ProjectMasterInputs {
+            project_id: case.project.clone(),
+            session_id: session.session_id.clone(),
+            cursors: vec![turn.input_cursor.clone()],
+        })
+        .await
+        .data
+    else {
+        panic!("the owner messages are read");
+    };
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].text, "Plan the first slice");
+    let mut db = case.db();
+    let tx = db.transaction().unwrap();
+    assert_eq!(
+        turn_message(&tx, &session, &turn).unwrap().as_deref(),
+        Some("Plan the first slice")
+    );
+    drop(tx);
+    case.close().await;
+}
+
+#[tokio::test]
+async fn turns_whose_input_an_older_engine_pruned_still_read_and_end() {
+    let case = Case::new().await;
+    assert_eq!(case.open("open-pruned").await, OwnerResult::Applied);
+    let first = case.shown().await;
+    assert_eq!(
+        case.submit("pruned-message", &first.session_id, "Plan the first slice")
+            .await,
+        OwnerResult::Applied
+    );
+    assert_eq!(case.renew("renew-pruned", true).await, OwnerResult::Applied);
+    let second = case.shown().await;
+    assert_eq!(
+        case.submit("queued-message", &second.session_id, "Add a dark theme")
+            .await,
+        OwnerResult::Applied
+    );
+    let ended = case.turns(&first.session_id).await.remove(0);
+    let queued = case.turns(&second.session_id).await.remove(0);
+    assert_eq!(ended.phase, MasterTurnPhase::Cancelled);
+    assert_eq!(queued.phase, MasterTurnPhase::Queued);
+    let db = case.db();
+    for turn in [&ended, &queued] {
+        assert_eq!(
+            db.execute(
+                "DELETE FROM conversation_entries WHERE event_cursor=?1",
+                [signed(turn.input_cursor.value()).unwrap()],
+            )
+            .unwrap(),
+            1,
+            "an older engine pruned the turn's input"
+        );
+    }
+    drop(db);
+    assert_eq!(case.turns(&first.session_id).await, vec![ended.clone()]);
+    assert_eq!(case.turns(&second.session_id).await, vec![queued.clone()]);
+    let second = case.shown().await;
+    assert_eq!(second.current_turn, Some(queued.id.clone()));
+    let OwnerData::ProjectMasterInputs { entries } = case
+        .read(OwnerRead::ProjectMasterInputs {
+            project_id: case.project.clone(),
+            session_id: first.session_id.clone(),
+            cursors: vec![ended.input_cursor.clone()],
+        })
+        .await
+        .data
+    else {
+        panic!("the owner messages are read");
+    };
+    assert!(
+        entries.is_empty(),
+        "a pruned input is left out, not refused"
+    );
+    let mut db = case.db();
+    let tx = db.transaction().unwrap();
+    assert_eq!(turn_message(&tx, &first, &ended).unwrap(), None);
+    assert_eq!(
+        prompt(&tx, &second, &queued).unwrap_err().0,
+        "master_input_provenance",
+        "a turn about to run still needs its message"
+    );
+    drop(tx);
+    drop(db);
+    assert_eq!(
+        case.renew("renew-after-prune", true).await,
+        OwnerResult::Applied,
+        "the session still parks, cancelling its turn"
+    );
+    assert_eq!(
+        case.turns(&second.session_id).await[0].phase,
+        MasterTurnPhase::Cancelled
+    );
+    case.close().await;
+}

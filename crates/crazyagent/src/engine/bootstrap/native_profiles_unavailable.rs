@@ -108,6 +108,17 @@ impl NativeProfileUse {
     }
 }
 
+impl NativeProfileUse {
+    /// Matches the Unix read of an account's access token for one engine usage poll. No
+    /// value is ever made here. Input: the harness executable, unused. Output: none.
+    pub(crate) fn usage_credential(
+        &self,
+        _executable: &Path,
+    ) -> Result<crate::usage::poll::PollCredential, EngineError> {
+        match *self {}
+    }
+}
+
 impl Drop for NativeProfileUse {
     /// Matches the Unix lease, which releases its profile locks when dropped, so the
     /// callers that end a lease at a chosen point mean the same on every target.

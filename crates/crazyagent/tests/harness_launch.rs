@@ -47,6 +47,7 @@ fn request(harness: &str, home: &Path, work: &Path, account: AccountBinding) -> 
         model: Some(LOCAL_MODEL.into()),
         tools: false,
         sandbox_profile: Some(project_profile(work, home)),
+        unconfined: false,
         git_identity: None,
         limits: LaunchLimits {
             run_time: Duration::from_secs(420),
@@ -129,6 +130,10 @@ fn codex_tools_off_command_pins_read_only_config_and_only_the_account_home() {
         ("LC_ALL".into(), "C".into()),
         ("PATH".into(), "/usr/bin:/bin".into()),
         ("TMPDIR".into(), home_text),
+        (
+            "TMPPREFIX".into(),
+            home.path().join("zsh").to_str().unwrap().to_owned(),
+        ),
     ]);
     expected.extend(
         crazyagent::sandbox::AGENT_GIT_ENV
@@ -138,6 +143,51 @@ fn codex_tools_off_command_pins_read_only_config_and_only_the_account_home() {
     );
     assert_eq!(environment(&built), expected);
     assert_eq!(built.get_current_dir(), Some(work.path()));
+}
+
+#[test]
+fn a_full_access_agent_starts_without_seatbelt_but_with_the_same_cleared_environment() {
+    let home = private_dir("ca-launch-home-");
+    let work = private_dir("ca-launch-work-");
+    let subscription = || AccountBinding::Subscription {
+        home: home.path().to_path_buf(),
+    };
+    let confined = command(&request("codex", home.path(), work.path(), subscription())).unwrap();
+    let full = LaunchRequest {
+        sandbox_profile: None,
+        unconfined: true,
+        ..request("codex", home.path(), work.path(), subscription())
+    };
+    let built = command(&full).unwrap();
+    assert_ne!(built.get_program(), "/usr/bin/sandbox-exec");
+    assert_eq!(built.get_program(), crazyagent::sandbox::SESSION_SHIM[0]);
+    let mut start: Vec<String> = crazyagent::sandbox::SESSION_SHIM[1..]
+        .iter()
+        .map(|part| (*part).to_owned())
+        .collect();
+    start.push(installed("codex").to_str().unwrap().to_owned());
+    let args = arguments(&built);
+    assert_eq!(args[..start.len()], start);
+    assert!(!args.iter().any(|arg| arg.ends_with("project.sb")));
+    let confined_args = arguments(&confined);
+    assert_eq!(
+        args[start.len()..],
+        confined_args[confined_args.len() - (args.len() - start.len())..],
+        "only the Seatbelt prefix differs"
+    );
+    assert_eq!(environment(&built), environment(&confined));
+    assert_eq!(built.get_current_dir(), Some(work.path()));
+
+    let neither = LaunchRequest {
+        sandbox_profile: None,
+        ..request("codex", home.path(), work.path(), subscription())
+    };
+    assert_eq!(command(&neither).unwrap_err().0, "launch_sandbox_required");
+    let both = LaunchRequest {
+        unconfined: true,
+        ..request("codex", home.path(), work.path(), subscription())
+    };
+    assert_eq!(command(&both).unwrap_err().0, "launch_sandbox_conflict");
 }
 
 #[test]
@@ -209,6 +259,7 @@ fn a_real_api_key_never_reaches_the_agent_and_a_routed_launch_reads_its_token_fr
         model: None,
         tools: false,
         sandbox_profile: Some(project_profile(work.path(), home.path())),
+        unconfined: false,
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -591,6 +642,7 @@ fn sandboxed_stand_in(
         model: None,
         tools: false,
         sandbox_profile: Some(profile),
+        unconfined: false,
         git_identity: None,
         limits: LaunchLimits::default(),
     })
