@@ -705,6 +705,21 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state) .await? .team_land_on(&id, branch, generation) .await }.await;
             routed(result)
         }
+        "desktop_team_background" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                choice: crazyagent::team::BackgroundAtEnd,
+                generation: u64,
+            }
+            let Args { id, choice, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .team_background(&id, choice, generation) .await }.await;
+            routed(result)
+        }
         "desktop_team_ask_before_merge" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]

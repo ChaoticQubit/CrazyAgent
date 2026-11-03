@@ -1,6 +1,6 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
-import type { ActionReceipt, BranchMode, ChildLanding, CoordHarness, CoordSettings, Delivery, PendingIntent, SubagentMode, SwitchMode, ToolSwitch, ToolView } from "./engine-client";
+import type { ActionReceipt, BackgroundAtEnd, BranchMode, ChildLanding, CoordHarness, CoordSettings, Delivery, PendingIntent, SubagentMode, SwitchMode, ToolSwitch, ToolView } from "./engine-client";
 import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill, QuestionsInbox } from "./engine-client";
 
 export type { AgentMemoryWrites, SavedMemory, SavedMemoryPage } from "./engine-client";
@@ -124,6 +124,15 @@ const COPY: Record<string, string> = {
   read_path_owner_unknown: "CrazyAgent couldn't find your home folder, so it can't check that path.",
   read_paths_too_many: "A project can share at most 8 extra folders.",
   read_paths_invalid: "Each folder must be one plain path of up to 1024 characters.",
+  hidden_paths_too_many: "A project can hide at most 8 folders.",
+  hidden_paths_invalid: "Each folder must be one plain path of up to 1024 characters.",
+  hidden_path_not_absolute: "Each hidden folder must be one absolute path of up to 1024 characters.",
+  hidden_path_missing: "That folder can't be found. Pick a folder that exists.",
+  hidden_path_not_folder: "That path isn't a folder. Pick a folder.",
+  hidden_path_outside_project: "A hidden folder must sit inside the project. Pick a folder within it.",
+  hidden_path_not_plain: "A hidden folder path can't hold quotes, backslashes or control characters.",
+  hidden_path_tracked: "Git tracks files in that folder. Hidden folders cover only files git doesn't track; pick a folder git ignores.",
+  hidden_path_unchecked: "CrazyAgent couldn't check that folder against git. Try again.",
   agent_access_unavailable: "That agent access level can't run on this computer. Pick another level.",
   agent_policy_invalid: "That agent access choice isn't valid. Open Agent access and save again.",
   agent_policy_unreadable: "CrazyAgent couldn't read this project's agent access. Try again.",
@@ -301,6 +310,7 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   project_documents: "adding project documents",
   project_context_delete: "removing a project file",
   project_read_paths: "saving extra folders agents can read",
+  project_hidden_paths: "saving folders agents can't open",
   project_agent_policy: "saving agent access",
   account_schedule: "saving the account order",
   memory_review: "reviewing a memory",
@@ -1196,6 +1206,13 @@ export function setMasterBranch(id: string, branch: string | null): Promise<Resu
  * for the master's branch. Output: the engine receipt, not ready, or a plain error. */
 export function setLandOn(id: string, branch: string | null): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_land_on", { id, branch, generation: nextGeneration() });
+}
+
+/** Sets what the project's tasks do at their turn end while commands their agents started in
+ * the background still run. Inputs: the project id and the choice. Output: the engine
+ * receipt, not ready, or a plain error; the engine refuses a grace time outside 10 to 3600 s. */
+export function setBackgroundAtEnd(id: string, choice: BackgroundAtEnd): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_background", { id, choice, generation: nextGeneration() });
 }
 
 /** Turns the project's "Ask me before merging into the master's branch" setting on or off;

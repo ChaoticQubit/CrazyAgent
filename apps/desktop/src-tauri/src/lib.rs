@@ -665,6 +665,16 @@ async fn desktop_project_read_paths(
 }
 
 #[tauri::command]
+async fn desktop_project_hidden_paths(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+) -> Result<Vec<String>, BridgeError> {
+    main_window(&window)?;
+    read(&state).await?.project_hidden_paths(&id).await
+}
+
+#[tauri::command]
 async fn desktop_project_agent_policy(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -712,6 +722,21 @@ async fn desktop_set_project_read_paths(
     lock(&state)
         .await?
         .set_project_read_paths(&id, paths, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_set_project_hidden_paths(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    paths: Vec<String>,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .set_project_hidden_paths(&id, paths, generation)
         .await
 }
 
@@ -889,6 +914,21 @@ async fn desktop_team_land_on(
     lock(&state)
         .await?
         .team_land_on(&id, branch, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_background(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    choice: crazyagent::team::BackgroundAtEnd,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_background(&id, choice, generation)
         .await
 }
 
@@ -3003,8 +3043,10 @@ pub fn run() {
             desktop_add_project_documents,
             desktop_delete_project_context,
             desktop_project_read_paths,
+            desktop_project_hidden_paths,
             desktop_project_files,
             desktop_set_project_read_paths,
+            desktop_set_project_hidden_paths,
             desktop_project_agent_policy,
             desktop_set_project_agent_policy,
             desktop_team_status,
@@ -3020,6 +3062,7 @@ pub fn run() {
             desktop_team_agent_branches,
             desktop_team_master_branch,
             desktop_team_land_on,
+            desktop_team_background,
             desktop_team_ask_before_merge,
             desktop_team_new_folder_limit,
             desktop_team_coordination,

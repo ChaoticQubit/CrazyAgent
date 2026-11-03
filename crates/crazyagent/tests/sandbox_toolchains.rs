@@ -1083,3 +1083,462 @@ fn a_lead_profile_runs_its_own_tmux_server_and_never_reaches_another() {
         "{stderr}"
     );
 }
+
+/// Runs a probe script in one of a native lead's two sandboxes.
+type Probe = fn(&LiveTeam, &str) -> Output;
+
+/// Neither a native lead nor its teammates can bind, block or take the engine's caller
+/// socket (DEC-111 Q18, rv-secreview RH-1): with the path free, a listener, a folder or a
+/// file either places there is refused; once the engine listens, both reach it and get its
+/// answer, yet removing, flagging or moving its node is refused, and the engine's socket
+/// stays the one it bound, so every hook's answer on it comes from the engine.
+#[test]
+fn neither_a_native_lead_nor_its_teammates_bind_block_or_take_the_caller_socket() {
+    use std::os::macos::fs::MetadataExt;
+    let team = LiveTeam::start();
+    let c = quoted(&team.callers);
+    let roles: [(&str, Probe); 2] = [
+        ("lead", LiveTeam::as_lead),
+        ("teammate", LiveTeam::teammate),
+    ];
+    for (role, run) in roles {
+        let free = run(
+            &team,
+            &format!(
+                "{}; echo bind=$?\nmkdir {c}; echo mkdir=$?\n/usr/bin/touch {c}; echo file=$?\n",
+                team.session(&team.callers, "planted")
+            ),
+        );
+        let text = String::from_utf8_lossy(&free.stdout).into_owned();
+        for name in ["bind", "mkdir", "file"] {
+            assert_ne!(
+                status_of(&text, name),
+                "0",
+                "the {role}'s {name} at the free caller socket path succeeded: {}",
+                String::from_utf8_lossy(&free.stderr)
+            );
+        }
+        assert!(
+            fs::symlink_metadata(&team.callers).is_err(),
+            "the {role} left a node at the caller socket path"
+        );
+    }
+
+    let listener = crazyagent::spawn_gate::bind_unix_std(&team.callers).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let node = |path: &Path| {
+        fs::symlink_metadata(path).ok().map(|meta| {
+            (
+                meta.st_dev(),
+                meta.st_ino(),
+                meta.st_mode(),
+                meta.st_flags(),
+            )
+        })
+    };
+    let bound = node(&team.callers);
+    assert!(bound.is_some());
+    let engine = std::thread::spawn(move || {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut answered = 0;
+        while answered < roles.len() && std::time::Instant::now() < deadline {
+            match crazyagent::spawn_gate::accept_unix_std(&listener) {
+                Ok(mut stream) => {
+                    stream.set_nonblocking(false).unwrap();
+                    let mut line = String::new();
+                    std::io::BufRead::read_line(
+                        &mut std::io::BufReader::new(&mut stream),
+                        &mut line,
+                    )
+                    .unwrap();
+                    assert_eq!(line, "who\n");
+                    std::io::Write::write_all(&mut stream, b"engine\n").unwrap();
+                    answered += 1;
+                }
+                Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        }
+        answered
+    });
+    for (role, run) in roles {
+        let taken = run(
+            &team,
+            &format!(
+                "printf 'who\\n' | /usr/bin/nc -U {c}; echo reach=$?\nrm -f {c}; echo rm=$?\nchflags uchg {c}; echo chflags=$?\nmv -f {c} {c}.away; echo mv=$?\n"
+            ),
+        );
+        let text = String::from_utf8_lossy(&taken.stdout).into_owned();
+        let errors = String::from_utf8_lossy(&taken.stderr);
+        assert!(
+            text.lines().any(|line| line == "engine"),
+            "the {role} reached the engine: {text} {errors}"
+        );
+        assert_eq!(status_of(&text, "reach"), "0", "{errors}");
+        for name in ["rm", "chflags", "mv"] {
+            assert_ne!(
+                status_of(&text, name),
+                "0",
+                "the {role}'s {name} of the caller socket succeeded: {errors}"
+            );
+        }
+        assert_eq!(
+            node(&team.callers),
+            bound,
+            "the engine's socket survives the {role}"
+        );
+    }
+    assert_eq!(engine.join().unwrap(), roles.len());
+}
+
+/// Reads one `name=status` line a probe script printed. Takes the output text and the name.
+/// Returns the status, panicking when the line is missing.
+fn status_of(text: &str, name: &str) -> String {
+    text.lines()
+        .find_map(|line| line.strip_prefix(&format!("{name}=")))
+        .unwrap_or_else(|| panic!("no {name}= in {text}"))
+        .to_owned()
+}
+
+#[test]
+fn a_teammates_profile_serves_its_tmux_socket_but_never_reaches_unlinks_or_takes_the_leads() {
+    let case = case();
+    let tmux = crazyagent::terminal::tmux::installed(&case.project).expect("tmux is installed");
+    let tmp = toolchains::make_tmp(&case.home).unwrap();
+    let own = tmp.join("tmux.sock");
+    let mates = tmp.join("teammates-0123456789abcdef.sock");
+    let scratch = || {
+        ProjectSandbox::new(
+            &case.project,
+            &case.home,
+            &case.tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap()
+        .allow_scratch(&tmp)
+        .unwrap()
+    };
+    let invalid = |result: Result<ProjectSandbox, SandboxError>| match result {
+        Err(SandboxError::Invalid(reason)) => reason,
+        other => panic!("granted: {:?}", other.map(|_| ())),
+    };
+    let teammates = scratch()
+        .serve_tmux_server(&mates, &tmux)
+        .unwrap()
+        .shut_unix_socket(&own)
+        .unwrap();
+    assert!(invalid(teammates.clone().reach_unix_socket(&mates)).contains("already has a grant"));
+    assert!(
+        invalid(teammates.clone().allow_tmux_server(&own, &tmux)).contains("already has a tmux")
+    );
+    let lead = scratch()
+        .allow_tmux_server(&own, &tmux)
+        .unwrap()
+        .reach_unix_socket(&mates)
+        .unwrap();
+
+    let served = run(
+        &teammates,
+        &case.profiles.join("teammates.sb"),
+        &format!(
+            "{t} -S {m} new-session -d -s mates 'sleep 60'; echo start=$?\n\
+             {t} -S {m} list-sessions; echo own=$?\n\
+             rm -f {m}; echo rm=$?\n\
+             mv {m} {m}.away; echo mv=$?\n\
+             touch {o}; echo lead=$?\n",
+            t = quoted(&tmux),
+            m = quoted(&mates),
+            o = quoted(&own),
+        ),
+    );
+    let reached = run(
+        &lead,
+        &case.profiles.join("lead.sb"),
+        &format!(
+            "{t} -S {m} list-sessions -F '#{{session_name}}'; echo reach=$?\nrm -f {m}; echo rm=$?\n",
+            t = quoted(&tmux),
+            m = quoted(&mates),
+        ),
+    );
+    let still = fs::symlink_metadata(&mates)
+        .is_ok_and(|metadata| std::os::unix::fs::FileTypeExt::is_socket(&metadata.file_type()));
+    let _ = tmux_at(&tmux, &mates, &["kill-server"]);
+    let _ = fs::remove_file(&mates);
+    toolchains::remove_tmp(&case.home).unwrap();
+
+    let served_text = String::from_utf8_lossy(&served.stdout).into_owned();
+    let served_errors = String::from_utf8_lossy(&served.stderr);
+    assert_eq!(status_of(&served_text, "start"), "0", "{served_errors}");
+    for name in ["own", "rm", "mv", "lead"] {
+        assert_ne!(
+            status_of(&served_text, name),
+            "0",
+            "a teammate's {name} attempt succeeded: {served_errors}"
+        );
+    }
+    assert!(!own.exists(), "a teammate made the lead's socket path");
+    let reached_text = String::from_utf8_lossy(&reached.stdout).into_owned();
+    let reached_errors = String::from_utf8_lossy(&reached.stderr);
+    assert!(
+        reached_text.starts_with("mates\n"),
+        "{reached_text} {reached_errors}"
+    );
+    assert_eq!(status_of(&reached_text, "reach"), "0", "{reached_errors}");
+    assert_ne!(status_of(&reached_text, "rm"), "0", "{reached_errors}");
+    assert!(still, "the teammates' socket was removed or replaced");
+}
+
+/// One native lead's two sandboxes from the production grant set
+/// (`ProjectSandbox::native_team`) with the lead's own tmux server and its teammates' server
+/// live, each started inside its own installed profile as the engine starts them, and the
+/// engine's caller socket path still free. Dropping it ends every tmux server at its paths
+/// and removes the temp folder.
+struct LiveTeam {
+    case: Case,
+    tmux: PathBuf,
+    own: PathBuf,
+    mates: PathBuf,
+    callers: PathBuf,
+    other: PathBuf,
+    lead: ProjectSandbox,
+    teammates: ProjectSandbox,
+}
+
+impl LiveTeam {
+    /// Builds both sandboxes and starts the lead's `lead` session and the teammates' `mates`
+    /// session. Takes nothing. Returns the live team, panicking when a server does not start.
+    fn start() -> Self {
+        let case = case();
+        let tmux = crazyagent::terminal::tmux::installed(&case.project).expect("tmux is installed");
+        let tmp = toolchains::make_tmp(&case.home).unwrap();
+        let own = tmp.join("tmux.sock");
+        let mates = tmp.join("teammates-0123456789abcdef.sock");
+        let callers = tmp.join(crazyagent::team::caller::CALLER_SOCKET);
+        let (lead, teammates) = ProjectSandbox::new(
+            &case.project,
+            &case.home,
+            &case.tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap()
+        .allow_scratch(&tmp)
+        .unwrap()
+        .native_team(&own, &mates, &callers, &tmux)
+        .unwrap();
+        let team = Self {
+            case,
+            tmux,
+            own,
+            mates,
+            callers,
+            other: tmp.join("other.sock"),
+            lead,
+            teammates,
+        };
+        for (output, server) in [
+            (team.as_lead(&team.session(&team.own, "lead")), "lead"),
+            (team.teammate(&team.session(&team.mates, "mates")), "mates"),
+        ] {
+            assert!(
+                output.status.success(),
+                "the {server} server did not start: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        team
+    }
+
+    /// The script line that starts one detached tmux session at a socket. Takes the socket
+    /// and the session name. Returns the line.
+    fn session(&self, socket: &Path, name: &str) -> String {
+        format!(
+            "{} -S {} new-session -d -s {name} 'sleep 120'",
+            quoted(&self.tmux),
+            quoted(socket)
+        )
+    }
+
+    /// Runs a script the way a native lead runs, in the lead's installed profile. Takes the
+    /// script. Returns its output.
+    fn as_lead(&self, script: &str) -> Output {
+        run(&self.lead, &self.case.profiles.join("lead.sb"), script)
+    }
+
+    /// Runs a script the way a teammate pane runs, in the teammates' installed profile.
+    /// Takes the script. Returns its output.
+    fn teammate(&self, script: &str) -> Output {
+        run(
+            &self.teammates,
+            &self.case.profiles.join("teammates.sb"),
+            script,
+        )
+    }
+
+    /// Starts a tmux server outside any sandbox at a socket, standing for a listener the
+    /// engine or another process holds there. Takes the socket and the session name.
+    fn listen(&self, socket: &Path, name: &str) {
+        let started = tmux_at(
+            &self.tmux,
+            socket,
+            &["new-session", "-d", "-s", name, "sleep 120"],
+        );
+        assert!(
+            started.status.success(),
+            "{}",
+            String::from_utf8_lossy(&started.stderr)
+        );
+    }
+
+    /// The session names the tmux server at a socket lists, asked from outside any sandbox.
+    /// Takes the socket. Returns the listing, or the client's error text.
+    fn sessions(&self, socket: &Path) -> String {
+        let listed = tmux_at(
+            &self.tmux,
+            socket,
+            &["list-sessions", "-F", "#{session_name}"],
+        );
+        if listed.status.success() {
+            String::from_utf8_lossy(&listed.stdout).into_owned()
+        } else {
+            String::from_utf8_lossy(&listed.stderr).into_owned()
+        }
+    }
+}
+
+impl Drop for LiveTeam {
+    fn drop(&mut self) {
+        for socket in [&self.own, &self.mates, &self.callers, &self.other] {
+            let _ = tmux_at(&self.tmux, socket, &["kill-server"]);
+        }
+        let _ = toolchains::remove_tmp(&self.case.home);
+    }
+}
+
+/// A native lead's teammate never holds a listener where the lead's team servers name their
+/// calls (rv-audit TTDL F1 (1)): with the caller socket path free, a tmux server it starts
+/// there never binds, and once a listener holds the path it can neither remove nor move the
+/// node, so the listener there stays the one that bound it.
+#[test]
+fn a_teammate_never_binds_or_takes_the_caller_socket_path() {
+    let team = LiveTeam::start();
+    let free = team.teammate(&format!(
+        "{}; echo bind=$?\n",
+        team.session(&team.callers, "planted")
+    ));
+    let free_text = String::from_utf8_lossy(&free.stdout).into_owned();
+    let free_errors = String::from_utf8_lossy(&free.stderr).into_owned();
+    assert_ne!(
+        status_of(&free_text, "bind"),
+        "0",
+        "a teammate bound a server at the caller socket path: {}",
+        team.sessions(&team.callers)
+    );
+    assert!(
+        fs::symlink_metadata(&team.callers).is_err(),
+        "a teammate left a node at the caller socket path: {free_errors}"
+    );
+
+    team.listen(&team.callers, "engine");
+    let taken = team.teammate(&format!(
+        "rm -f {c}; echo rm=$?\nmv -f {c} {c}.away; echo mv=$?\n",
+        c = quoted(&team.callers)
+    ));
+    let taken_text = String::from_utf8_lossy(&taken.stdout).into_owned();
+    let taken_errors = String::from_utf8_lossy(&taken.stderr);
+    for name in ["rm", "mv"] {
+        assert_ne!(
+            status_of(&taken_text, name),
+            "0",
+            "a teammate's {name} of the caller socket succeeded: {taken_errors}"
+        );
+    }
+    assert_eq!(team.sessions(&team.callers), "engine\n");
+}
+
+/// A teammate cannot swap the live teammates' socket for another listener (rv-audit TTDL F1
+/// (2)): renaming a live listener's node from the same folder, or the caller socket's node,
+/// onto it is refused, as is a forced link over it, and the lead's tmux still lists the
+/// teammates' `mates` session there.
+#[test]
+fn a_teammate_cannot_rename_another_listener_onto_the_live_teammates_socket() {
+    let team = LiveTeam::start();
+    team.listen(&team.other, "other");
+    team.listen(&team.callers, "engine");
+    let swapped = team.teammate(&format!(
+        "mv -f {o} {m}; echo other=$?\nmv -f {c} {m}; echo caller=$?\nln -sf {o} {m}; echo link=$?\n",
+        o = quoted(&team.other),
+        c = quoted(&team.callers),
+        m = quoted(&team.mates),
+    ));
+    let swapped_text = String::from_utf8_lossy(&swapped.stdout).into_owned();
+    let swapped_errors = String::from_utf8_lossy(&swapped.stderr);
+    for name in ["other", "caller", "link"] {
+        assert_ne!(
+            status_of(&swapped_text, name),
+            "0",
+            "a teammate's {name} swap onto the teammates' socket succeeded: {swapped_errors}"
+        );
+    }
+    let reached = team.as_lead(&format!(
+        "{} -S {} list-sessions -F '#{{session_name}}'; echo reach=$?\n",
+        quoted(&team.tmux),
+        quoted(&team.mates)
+    ));
+    let reached_text = String::from_utf8_lossy(&reached.stdout).into_owned();
+    let reached_errors = String::from_utf8_lossy(&reached.stderr);
+    assert!(
+        reached_text.starts_with("mates\n"),
+        "{reached_text} {reached_errors}"
+    );
+    assert_eq!(status_of(&reached_text, "reach"), "0", "{reached_errors}");
+    assert_eq!(team.sessions(&team.other), "other\n");
+    assert_eq!(team.sessions(&team.callers), "engine\n");
+}
+
+/// A link at the caller socket path naming the lead's live tmux socket reaches nothing
+/// (rv-audit TTDL F1 (3)): a teammate places neither a symbolic nor a hard link there, and
+/// through either link placed from outside the sandbox it still cannot connect, since
+/// Seatbelt checks the path the listener bound.
+#[test]
+fn a_link_at_the_caller_socket_path_never_reaches_the_lead_s_server() {
+    let team = LiveTeam::start();
+    let placed = team.teammate(&format!(
+        "ln -s {o} {c}; echo symbolic=$?\nrm -f {c}\nln {o} {c}; echo hard=$?\nrm -f {c}\n",
+        o = quoted(&team.own),
+        c = quoted(&team.callers),
+    ));
+    let placed_text = String::from_utf8_lossy(&placed.stdout).into_owned();
+    let placed_errors = String::from_utf8_lossy(&placed.stderr);
+    for name in ["symbolic", "hard"] {
+        assert_ne!(
+            status_of(&placed_text, name),
+            "0",
+            "a teammate placed a {name} link at the caller socket path: {placed_errors}"
+        );
+    }
+
+    let connect = format!(
+        "{} -S {} list-sessions -F '#{{session_name}}'; echo connect=$?\n",
+        quoted(&team.tmux),
+        quoted(&team.callers)
+    );
+    for kind in ["symbolic", "hard"] {
+        match kind {
+            "symbolic" => std::os::unix::fs::symlink(&team.own, &team.callers).unwrap(),
+            _ => fs::hard_link(&team.own, &team.callers).unwrap(),
+        }
+        let through = team.teammate(&connect);
+        fs::remove_file(&team.callers).unwrap();
+        let through_text = String::from_utf8_lossy(&through.stdout).into_owned();
+        let through_errors = String::from_utf8_lossy(&through.stderr);
+        assert!(
+            !through_text.contains("lead"),
+            "a teammate reached the lead's server through a {kind} link: {through_text}"
+        );
+        assert_ne!(
+            status_of(&through_text, "connect"),
+            "0",
+            "{kind}: {through_errors}"
+        );
+    }
+    assert_eq!(team.sessions(&team.own), "lead\n");
+}

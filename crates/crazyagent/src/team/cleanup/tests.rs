@@ -934,3 +934,31 @@ fn a_clone_with_a_huge_file_at_a_tracked_path_is_kept_as_dirty_without_hashing_i
     );
     assert!(case.kept(1) && case.base_known(1));
 }
+
+/// A removed native lead's teammates' profile and the record of its teammates' socket name
+/// go with its own profile (rv-audit TTDL F2), and an agent left in place keeps its own.
+#[test]
+fn a_removed_native_lead_takes_its_teammates_profile_and_socket_record_with_it() {
+    let case = Case::new();
+    case.agent(1, "sub", "stopped");
+    case.agent(2, "sub", "stopped");
+    let teammates = |id: i64| {
+        [
+            crate::team::runtime::agent_teammates_profile(&case.team, id),
+            crate::team::runtime::agent_teammates_socket_name(&case.team, id),
+        ]
+    };
+    for id in [1, 2] {
+        for file in teammates(id) {
+            write(&file, b"written by the engine\n");
+        }
+    }
+    assert_eq!(case.remove(&[1]), removed(&[1]));
+    assert!(!case.profile(1).exists());
+    for file in teammates(1) {
+        assert!(!file.exists(), "{} was left behind", file.display());
+    }
+    for file in teammates(2).into_iter().chain([case.profile(2)]) {
+        assert!(file.exists(), "{} went with another agent", file.display());
+    }
+}

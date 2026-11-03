@@ -845,6 +845,7 @@ fn finished_team() -> crate::team::TeamStatus {
         teammates: Vec::new(),
         pane: None,
         hookless: false,
+        instructions_changed: false,
     };
     TeamStatus {
         project_id: project(),
@@ -865,6 +866,7 @@ fn finished_team() -> crate::team::TeamStatus {
         agent_branches: crate::team::BranchMode::Named,
         master_branch: None,
         land_on: None,
+        background_at_end: crate::team::BackgroundAtEnd::Wait,
         ask_before_merge: false,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
         coordination: None,
@@ -1133,6 +1135,7 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
         agent_branches: crate::team::BranchMode::Named,
         master_branch: None,
         land_on: None,
+        background_at_end: crate::team::BackgroundAtEnd::Wait,
         ask_before_merge: false,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
         coordination: None,
@@ -1171,6 +1174,7 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
                 teammates: Vec::new(),
                 pane: None,
                 hookless: false,
+                instructions_changed: false,
             })
             .collect(),
         tasks: [1, 2, 3, 4, 3]
@@ -1545,6 +1549,7 @@ fn switched(
         agent_branches: crate::team::BranchMode::Named,
         master_branch: None,
         land_on: None,
+        background_at_end: crate::team::BackgroundAtEnd::Wait,
         ask_before_merge: false,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
         coordination: None,

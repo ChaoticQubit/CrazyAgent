@@ -219,6 +219,7 @@ const copy: Record<string, string> = {
   team_handle_taken: "Another running agent of this project already has that name. Pick another.",
   team_master_branch_invalid: "Type a branch name such as main or release/2.0, or leave it empty for the repository default.",
   team_land_on_invalid: "Type a branch name such as stage or release/2.0, or leave it empty for the master's branch.",
+  team_background_grace_invalid: "Pick a grace time from 10 to 3600 seconds.",
   coord_native_unsupported: "This harness has no native teammates, so its sub-agents are app-spawned.",
   coord_settings_invalid: "Count at most 32 tools, each named once with letters, digits, _, - or *.",
   coord_project_unknown: "This project was not found.",
@@ -521,6 +522,18 @@ export function loadProjectFiles(id: string, query: string): Promise<Result<stri
  * Inputs: project id, the folders and a generation. Output: the receipt. */
 export function saveReadPaths(id: string, paths: string[], generation: number): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_set_project_read_paths", { id, paths, generation });
+}
+
+/** Reads the folders this project's agents are kept out of, read, write and run.
+ * Input: project id. Output: the folders in saved order. */
+export function loadHiddenPaths(id: string): Promise<Result<string[]>> {
+  return call<string[]>("desktop_project_hidden_paths", { id });
+}
+
+/** Replaces the folders this project's agents are kept out of; the engine refuses a path
+ * outside the project. Inputs: project id, the folders and a generation. Output: the receipt. */
+export function saveHiddenPaths(id: string, paths: string[], generation: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_set_project_hidden_paths", { id, paths, generation });
 }
 
 /** Reads this project's agent access level and the toolchains its agents may use.

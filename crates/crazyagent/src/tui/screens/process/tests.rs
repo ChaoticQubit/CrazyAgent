@@ -484,6 +484,8 @@ fn a_project_page_offers_every_agent_setting_and_saves_each_change_at_once() {
         "{shown}"
     );
     assert!(shown.contains("Ctrl-F changes"), "{shown}");
+    assert!(shown.contains("Instruction edits: Next task"), "{shown}");
+    assert!(shown.contains("Ctrl-R changes"), "{shown}");
     let flat = shown.lines().map(str::trim).collect::<Vec<_>>().join(" ");
     assert!(
         flat.contains("then this project's instructions.md appended."),
@@ -527,12 +529,43 @@ fn a_project_page_offers_every_agent_setting_and_saves_each_change_at_once() {
                 .contains(&format!("Keep transcripts for headless Claude runs{words}"))
         );
     }
+    for (edits, words, note) in [
+        (
+            crate::instruction_files::EditDelivery::Restart,
+            "Instruction edits: Restart when idle",
+            "restarts when it is next idle",
+        ),
+        (
+            crate::instruction_files::EditDelivery::Badge,
+            "Instruction edits: Badge only",
+            "shows Instructions changed",
+        ),
+        (
+            crate::instruction_files::EditDelivery::NextMessage,
+            "Instruction edits: Next task",
+            "next task starts with the sections you changed",
+        ),
+    ] {
+        shell.key(Key::Ctrl('r'));
+        stored.edits = edits;
+        let save = ProcessQuery::SaveSettings {
+            project: project.clone(),
+            settings: stored,
+        };
+        assert_eq!(requests(&mut shell), vec![save.clone()]);
+        shell.arrive(settings(save, Ok(stored)));
+        let shown = screen(&mut shell);
+        let flat = shown.lines().map(str::trim).collect::<Vec<_>>().join(" ");
+        assert!(shown.contains(words), "{shown}");
+        assert!(flat.contains(note), "{shown}");
+    }
     shell.key(Key::Ctrl('t'));
     let refused = ProcessQuery::SaveSettings {
         project: project.clone(),
         settings: InstructionSettings {
             mode: Mode::Both,
             transcripts: false,
+            edits: crate::instruction_files::EditDelivery::NextMessage,
         },
     };
     assert_eq!(requests(&mut shell), vec![refused.clone()]);
@@ -583,6 +616,7 @@ fn unreadable_agent_settings_say_why_and_a_change_replaces_them_from_the_default
             settings: InstructionSettings {
                 mode: Mode::ProjectOnly,
                 transcripts: true,
+                edits: crate::instruction_files::EditDelivery::NextMessage,
             },
         }]
     );

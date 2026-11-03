@@ -204,7 +204,7 @@ const escaped = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const html = (text) => text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll("'", "&#x27;");
 
 test("a project's agent settings offer every instructions mode and the transcript switch, the defaults first", () => {
-  assert.deepEqual(client.DEFAULT_INSTRUCTION_SETTINGS, { mode: "both", transcripts: true });
+  assert.deepEqual(client.DEFAULT_INSTRUCTION_SETTINGS, { mode: "both", transcripts: true, edits: "next_message" });
   assert.deepEqual(client.INSTRUCTION_MODES.map((choice) => [choice.value, choice.label]),
     [["project_only", "Project only"], ["app_only", "App only"], ["both", "Both (app, then project appended)"]]);
   const engine = readFileSync(new URL("../../../crates/crazyagent/src/instruction_files.rs", import.meta.url), "utf8");
@@ -225,6 +225,27 @@ test("a project's agent settings offer every instructions mode and the transcrip
     assert.match(shown, /role="switch"[^>]*aria-checked="false"/);
     assert.match(shown, /keep no transcript/);
   }
+});
+
+test("every way an instruction edit reaches running agents is offered with what it does, Next task first", () => {
+  assert.deepEqual(client.EDIT_DELIVERIES.map((choice) => [choice.value, choice.label]),
+    [["next_message", "Next task"], ["restart", "Restart when idle"], ["badge", "Badge only"]]);
+  const engine = readFileSync(new URL("../../../crates/crazyagent/src/instruction_files.rs", import.meta.url), "utf8");
+  for (const choice of client.EDIT_DELIVERIES) assert.match(engine, new RegExp(`=> "${choice.value}"`), `${choice.value} is an engine option`);
+  const markup = agentSettings();
+  assert.match(markup, /When you edit instructions/);
+  for (const choice of client.EDIT_DELIVERIES) assert.match(markup, new RegExp(`role="radio"[^>]*>${escaped(choice.label)}</button>`));
+  assert.match(markup, /role="radio" aria-checked="true"[^>]*>Next task</);
+  assert.match(markup, /next task starts with the sections you changed/);
+  for (const choice of client.EDIT_DELIVERIES) {
+    const shown = agentSettings({ settings: { kind: "ok", value: { mode: "both", transcripts: true, edits: choice.value } } });
+    assert.match(shown, new RegExp(`role="radio" aria-checked="true"[^>]*>${escaped(choice.label)}</`));
+    assert.ok(shown.includes(html(choice.note)), choice.value);
+  }
+  assert.match(agentSettings({ settings: { kind: "ok", value: { mode: "both", transcripts: true } } }),
+    /role="radio" aria-checked="true"[^>]*>Next task</, "an engine reply without the choice shows the default");
+  assert.match(client.EDIT_DELIVERIES[1].note, /restarts when it is next idle/);
+  assert.match(client.EDIT_DELIVERIES[2].note, /shows Instructions changed/);
 });
 
 test("unreadable agent settings say why and show the defaults so a change replaces them", () => {
@@ -252,21 +273,29 @@ test("a project's Process page reads and saves its agent settings through the en
   }
 });
 
-test("picking an instructions mode or the transcript switch saves the whole setting as mode and transcripts, never a files field", async () => {
+test("picking an instructions mode, the transcript switch or an edit choice saves the whole setting, never a files field", async () => {
   const { bundle, withPage } = await import("./browser.mjs");
   const fixture = await bundle(new URL("./fixtures/agent-settings.mjs", import.meta.url).pathname);
   const seen = await withPage(async ({ evaluate }) => {
     await evaluate(fixture);
     await evaluate(`Fixture.mount(${JSON.stringify(client.DEFAULT_INSTRUCTION_SETTINGS)})`);
     const clicks = [];
-    for (const label of ["Project only", "App only", "agent-transcripts"]) clicks.push(await evaluate(`Fixture.click(${JSON.stringify(label)})`));
-    return { clicks, saves: await evaluate("Fixture.saves()") };
+    for (const label of ["Project only", "App only", "agent-transcripts", "Restart when idle", "Badge only"]) {
+      clicks.push(await evaluate(`Fixture.click(${JSON.stringify(label)})`));
+    }
+    const first = await evaluate("Fixture.saves()");
+    await evaluate(`Fixture.mount(${JSON.stringify({ ...client.DEFAULT_INSTRUCTION_SETTINGS, edits: "badge" })})`);
+    clicks.push(await evaluate(`Fixture.click("Next task")`));
+    return { clicks, saves: [...first, ...await evaluate("Fixture.saves()")] };
   });
-  assert.deepEqual(seen.clicks, [true, true, true]);
+  assert.deepEqual(seen.clicks, [true, true, true, true, true, true]);
   assert.deepEqual(seen.saves, [
-    { mode: "project_only", transcripts: true },
-    { mode: "app_only", transcripts: true },
-    { mode: "both", transcripts: false },
+    { mode: "project_only", transcripts: true, edits: "next_message" },
+    { mode: "app_only", transcripts: true, edits: "next_message" },
+    { mode: "both", transcripts: false, edits: "next_message" },
+    { mode: "both", transcripts: true, edits: "restart" },
+    { mode: "both", transcripts: true, edits: "badge" },
+    { mode: "both", transcripts: true, edits: "next_message" },
   ]);
 });
 

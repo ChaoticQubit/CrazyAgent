@@ -337,7 +337,7 @@ fn served_in_a_teammate_pane(
     let mut names = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(20);
     let answered = loop {
-        callers.serve(&mut listed);
+        callers.serve(&mut listed, &mut |_| None);
         for (id, call, digest) in take_calls(&mailbox, CALLS_PER_TICK_MAX) {
             names.push(digest.as_ref().and_then(|digest| callers.take(&id, digest)));
             taken.push(call);
@@ -511,10 +511,13 @@ fn the_agent_binary_remembers_and_recalls_under_the_sub_agents_name_and_refuses_
         while server.try_wait().unwrap().is_none() {
             assert!(Instant::now() < deadline, "the agent server never finished");
             if let Some(callers) = callers.as_mut() {
-                callers.serve(&mut || {
-                    pane.map(|pane| vec![(pane.to_owned(), pid)])
-                        .unwrap_or_default()
-                });
+                callers.serve(
+                    &mut || {
+                        pane.map(|pane| vec![(pane.to_owned(), pid)])
+                            .unwrap_or_default()
+                    },
+                    &mut |_| None,
+                );
             }
             crazyagent::team::history::serve_agent_calls(
                 connection,

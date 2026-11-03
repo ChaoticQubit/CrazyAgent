@@ -24,12 +24,22 @@ const STAMPS_MAX: usize = 64;
 /// (DEC-111 S1R1-3).
 const STAMPS_PER_PANE_MAX: usize = 8;
 const STAMP_TTL: Duration = Duration::from_secs(60);
+/// The most panes whose first naming process the socket remembers; the oldest makes room.
+const PINS_MAX: usize = 64;
 const ID_BYTES: usize = 32;
 const DIGEST_BYTES: usize = 32;
 const LINE_BYTES: usize = ID_BYTES + 1 + 2 * DIGEST_BYTES + 1;
 const PROCESSES_BYTES_MAX: usize = 1 << 20;
 const NAMED: &[u8; 3] = b"ok\n";
 const UNNAMED: &[u8; 3] = b"no\n";
+const WHO: &[u8; 4] = b"who\n";
+/// The most bytes of the pane id in the engine's answer to `who`.
+const PANE_REPLY_BYTES_MAX: usize = 16;
+const TEAMMATE_WORD: &str = " teammate ";
+/// The most bytes of the engine's whole answer to `who`: a pane id, the teammate word, a
+/// worktree name and the newline.
+const WHO_REPLY_BYTES_MAX: usize =
+    PANE_REPLY_BYTES_MAX + TEAMMATE_WORD.len() + crate::agent_git::WORKTREE_NAME_BYTES_MAX + 1;
 
 const _: () = assert!(PENDING_PER_PANE_MAX < PENDING_MAX && STAMPS_PER_PANE_MAX < STAMPS_MAX);
 
@@ -83,6 +93,64 @@ pub fn name_call(mailbox: &Path, id: &str, digest: &[u8; DIGEST_BYTES]) -> bool 
         && &reply == NAMED
 }
 
+/// Asks the engine where the asking process runs (DEC-111 Q18, RH-2): connects to the
+/// lead's caller socket, sends `who` and waits up to `wait` for the pane the engine reached
+/// from the process the kernel says connected and who the engine's rows put there, never
+/// from the caller's environment or the agents' files. Takes the mailbox and the wait.
+/// Returns `Alone` for a mailbox outside the engine's layout or no node at the socket path,
+/// the agent leading no native team; `Placed` for an answer; `Unplaced` for no, a malformed
+/// reply, a socket no engine answers on or no reply in time.
+pub fn own_place(mailbox: &Path, wait: Duration) -> Place {
+    let Some(socket) = socket_for_mailbox(mailbox) else {
+        return Place::Alone;
+    };
+    if let Err(error) = std::fs::symlink_metadata(&socket)
+        && error.kind() == std::io::ErrorKind::NotFound
+    {
+        return Place::Alone;
+    }
+    ask_place(&socket, wait).map_or(Place::Unplaced, |(pane, whom)| Place::Placed(pane, whom))
+}
+
+/// Sends `who` on the caller socket and reads one answer line within `wait`. Takes the
+/// socket and the wait. Returns the pane and who runs in it, or None.
+fn ask_place(socket: &Path, wait: Duration) -> Option<(String, Whom)> {
+    let mut stream = crate::spawn_gate::connect_unix_std(socket).ok()?;
+    stream.set_read_timeout(Some(wait)).ok()?;
+    stream.set_write_timeout(Some(wait)).ok()?;
+    stream.write_all(WHO).ok()?;
+    let deadline = Instant::now() + wait;
+    let mut reply = Vec::with_capacity(WHO_REPLY_BYTES_MAX);
+    let mut byte = [0_u8; 1];
+    while reply.len() < WHO_REPLY_BYTES_MAX && Instant::now() < deadline {
+        stream.read_exact(&mut byte).ok()?;
+        if byte[0] == b'\n' {
+            return parse_place(&reply);
+        }
+        reply.push(byte[0]);
+    }
+    None
+}
+
+/// Reads one `who` answer without its newline: `<pane> lead` or `<pane> teammate <name>`,
+/// with a plain pane id and a name that names a worktree. Takes the bytes. Returns the
+/// pane and who runs in it, or None for anything else.
+fn parse_place(reply: &[u8]) -> Option<(String, Whom)> {
+    let text = std::str::from_utf8(reply).ok()?;
+    let mut parts = text.split(' ');
+    let pane = parts
+        .next()
+        .filter(|pane| crate::terminal::pane_id_valid(pane) && pane.len() < PANE_REPLY_BYTES_MAX)?;
+    let whom = match (parts.next()?, parts.next(), parts.next()) {
+        ("lead", None, None) => Whom::Lead,
+        ("teammate", Some(name), None) if crate::agent_git::worktree_name_valid(name) => {
+            Whom::Teammate(name.to_owned())
+        }
+        _ => return None,
+    };
+    Some((pane.to_owned(), whom))
+}
+
 fn parse_line(line: &[u8]) -> Option<(String, [u8; DIGEST_BYTES])> {
     if line.len() != LINE_BYTES || line[ID_BYTES] != b' ' || line[LINE_BYTES - 1] != b'\n' {
         return None;
@@ -105,13 +173,36 @@ fn parse_line(line: &[u8]) -> Option<(String, [u8; DIGEST_BYTES])> {
     Some((id.to_owned(), digest))
 }
 
+/// Who the engine says runs in the pane a `who` request came from, from its own rows and
+/// never from a file the agents write (DEC-111 Q18, RH-2): the native lead itself, or one of
+/// its live teammates by the name the engine first registered for that teammate.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Whom {
+    Lead,
+    Teammate(String),
+}
+
+/// Where the engine places a hook or monitor that asked `who` (DEC-111 Q18, RH-2): alone
+/// when its agent leads no native team, at a pane with who runs there, or nowhere when the
+/// engine said no or gave no answer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Place {
+    Alone,
+    Placed(String, Whom),
+    Unplaced,
+}
+
 /// One native lead's caller socket (DEC-111 Q18): the engine names each team call by the
 /// process the kernel says connected, walked up its parents to a pane the lead's tmux
 /// server lists, never by anything the call or the caller's environment says. A name
 /// holds the call id and the digest of the call's bytes, so a teammate that shares the
 /// mailbox can neither reuse another caller's name nor swap the named call's contents.
 /// The folder and the socket node are pinned by (device, inode) when bound, so the engine
-/// can tell either replaced and never acts through a folder an agent swapped.
+/// can tell either replaced and never acts through a folder an agent swapped. Each pane is
+/// also pinned to the pane process it first named a call by, so a pane respawned with
+/// another process under the same id names nothing. Dropping it leaves the node, so a hook
+/// that asks while no engine answers is refused, never taken for an agent that leads no
+/// native team (RH-2).
 pub struct Callers {
     listener: UnixListener,
     path: PathBuf,
@@ -119,11 +210,12 @@ pub struct Callers {
     node: (u64, u64),
     pending: Vec<Pending>,
     stamps: Vec<Stamp>,
+    pins: Vec<(String, u32)>,
 }
 
 struct Pending {
     stream: UnixStream,
-    pane: Option<String>,
+    pane: Option<(String, u32)>,
     line: Vec<u8>,
     since: Instant,
 }
@@ -138,6 +230,7 @@ struct Stamp {
 enum Received {
     Partial,
     Broken,
+    Who,
     Line(String, [u8; DIGEST_BYTES]),
 }
 
@@ -151,7 +244,9 @@ impl Pending {
                 self.line.extend_from_slice(&buffer[..read]);
                 assert!(self.line.len() <= LINE_BYTES);
                 if self.line.len() < LINE_BYTES {
-                    return if self.line.contains(&b'\n') {
+                    return if self.line == WHO {
+                        Received::Who
+                    } else if self.line.contains(&b'\n') {
                         Received::Broken
                     } else {
                         Received::Partial
@@ -202,7 +297,23 @@ impl Callers {
             node,
             pending: Vec::new(),
             stamps: Vec::new(),
+            pins: Vec::new(),
         })
+    }
+
+    /// Carries the pane pins of the socket this one replaces in the same folder, so binding
+    /// again never frees a pane to be named by another process. Takes the new socket and
+    /// the old one's pins. Returns the socket.
+    #[must_use]
+    pub fn with_pins(mut self, pins: Vec<(String, u32)>) -> Self {
+        assert!(self.pins.is_empty() && pins.len() <= PINS_MAX);
+        self.pins = pins;
+        self
+    }
+
+    /// The pane pins held, for [`Self::with_pins`]. Takes the socket. Returns them.
+    pub fn pins(&self) -> Vec<(String, u32)> {
+        self.pins.clone()
     }
 
     /// Tells whether the socket node at the path is still the one bound, in one look: false
@@ -221,12 +332,17 @@ impl Callers {
     /// Accepts the connections waiting on the socket, at most `CALLERS_PER_TICK_MAX`, finds
     /// on accepting each the pane whose process is the connecting process or one of its
     /// first `ANCESTORS_MAX` parents, then reads each one's call id and digest and names the
-    /// call by that pane, answering yes or no. A connection whose line has not fully arrived
-    /// waits, at most `PENDING_PER_PANE_MAX` of one pane at once, and is dropped with no
-    /// full line within `PENDING_WAIT`. Takes the lead's panes as (pane id, pid), listed
-    /// with the process table at most once a tick, only when a connection arrives. Returns
-    /// how many it named.
-    pub fn serve(&mut self, panes: &mut dyn FnMut() -> Vec<(String, u32)>) -> usize {
+    /// call by that pane, answering yes or no; a `who` request is answered with that pane and
+    /// who the engine's rows put there, or no (DEC-111 Q18, RH-2). A connection whose line
+    /// has not fully arrived waits, at most `PENDING_PER_PANE_MAX` of one pane at once, and
+    /// is dropped with no full line within `PENDING_WAIT`. Takes the lead's panes as (pane
+    /// id, pid), listed with the process table at most once a tick, only when a connection
+    /// arrives, and the lookup of who runs in a pane. Returns how many it named.
+    pub fn serve(
+        &mut self,
+        panes: &mut dyn FnMut() -> Vec<(String, u32)>,
+        whom: &mut dyn FnMut(&str) -> Option<Whom>,
+    ) -> usize {
         let now = Instant::now();
         self.stamps
             .retain(|stamp| now.duration_since(stamp.at) < STAMP_TTL);
@@ -271,6 +387,7 @@ impl Callers {
                     }
                 }
                 Received::Broken => {}
+                Received::Who => self.tell(pending, whom),
                 Received::Line(call, digest) => {
                     named += usize::from(self.answer(pending, call, digest, now));
                 }
@@ -280,6 +397,7 @@ impl Callers {
             match pending.receive() {
                 Received::Partial => self.pending.push(pending),
                 Received::Broken => {}
+                Received::Who => self.tell(pending, whom),
                 Received::Line(call, digest) => {
                     named += usize::from(self.answer(pending, call, digest, now));
                 }
@@ -302,6 +420,9 @@ impl Callers {
     ) -> bool {
         let fresh = !self.stamps.iter().any(|stamp| stamp.call == call);
         let pane = if fresh { pending.pane.take() } else { None };
+        let pane = pane
+            .filter(|(pane, pid)| self.pinned(pane, *pid))
+            .map(|(pane, _)| pane);
         let named = pane.is_some();
         if let Some(pane) = pane {
             self.make_room(&pane);
@@ -316,6 +437,45 @@ impl Callers {
             .stream
             .write_all(if named { NAMED } else { UNNAMED });
         named
+    }
+
+    /// Answers a `who` request with the pane the connection reached, under the same pin a
+    /// call is named by, and who the engine's rows put there: `<pane> lead` or `<pane>
+    /// teammate <name>` (DEC-111 Q18, RH-2). A process in no pane, a pane respawned under
+    /// another process, a pane id that is not plain, a pane the rows name no one by and a
+    /// name that names no worktree get no. Takes the socket, the connection and the lookup.
+    fn tell(&mut self, mut pending: Pending, whom: &mut dyn FnMut(&str) -> Option<Whom>) {
+        let reply = pending
+            .pane
+            .take()
+            .filter(|(pane, pid)| self.pinned(pane, *pid))
+            .map(|(pane, _)| pane)
+            .filter(|pane| {
+                crate::terminal::pane_id_valid(pane) && pane.len() < PANE_REPLY_BYTES_MAX
+            })
+            .and_then(|pane| match whom(&pane)? {
+                Whom::Lead => Some(format!("{pane} lead\n")),
+                Whom::Teammate(name) => crate::agent_git::worktree_name_valid(&name)
+                    .then(|| format!("{pane}{TEAMMATE_WORD}{name}\n")),
+            })
+            .map_or_else(|| UNNAMED.to_vec(), String::into_bytes);
+        let _ = pending.stream.write_all(&reply);
+    }
+
+    /// Whether a pane may name a call by this pane process: the first one seen pins the pane
+    /// to itself, and any other process under that pane id later is refused. The oldest pin
+    /// makes room past `PINS_MAX`. Takes the socket, the pane id and the pane process.
+    /// Returns the answer.
+    fn pinned(&mut self, pane: &str, pid: u32) -> bool {
+        if let Some((_, held)) = self.pins.iter().find(|(pinned, _)| pinned == pane) {
+            return *held == pid;
+        }
+        if self.pins.len() >= PINS_MAX {
+            self.pins.remove(0);
+        }
+        self.pins.push((pane.to_owned(), pid));
+        assert!(self.pins.len() <= PINS_MAX);
+        true
     }
 
     /// Frees a place for one more name of `pane`: its own oldest when it holds
@@ -367,8 +527,6 @@ impl Drop for Callers {
             .and_then(crate::sandbox::toolchains::private_folder_pin);
         if folder != Some(self.folder) {
             eprintln!("team_caller_folder_changed");
-        } else if self.intact() {
-            let _ = std::fs::remove_file(&self.path);
         }
     }
 }
@@ -399,11 +557,15 @@ fn peer_pid(_stream: &UnixStream) -> Option<u32> {
     None
 }
 
-fn pane_of(pid: u32, panes: &[(String, u32)], parents: &HashMap<u32, u32>) -> Option<String> {
+fn pane_of(
+    pid: u32,
+    panes: &[(String, u32)],
+    parents: &HashMap<u32, u32>,
+) -> Option<(String, u32)> {
     let mut current = pid;
     for _ in 0..ANCESTORS_MAX {
-        if let Some((pane, _)) = panes.iter().find(|(_, listed)| *listed == current) {
-            return Some(pane.clone());
+        if let Some(found) = panes.iter().find(|(_, listed)| *listed == current) {
+            return Some(found.clone());
         }
         if current <= 1 {
             return None;
