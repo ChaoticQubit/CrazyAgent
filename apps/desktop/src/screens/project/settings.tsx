@@ -1,11 +1,11 @@
 import { nextGeneration, poolSummaries } from "../../api";
-import type { Result } from "../../api";
+import type { HarnessEntry, Result } from "../../api";
 import { useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { failureCopy, loadProjectCatalog, loadProjects, loadReadPaths, receiptState, removeProject, saveReadPaths, setProjectPool, updateProjectSetup, type ReadPaths } from "../../api-projects";
 import type { ProjectCatalog, StoredSetup } from "../../api-projects";
 import type { IntentReceipt } from "../../engine-client";
-import { Button, ConfirmDialog } from "../../ui";
+import { Button, ConfirmDialog, Select } from "../../ui";
 import { displayText } from "../conversation";
 import { BasicsFields, ResearchSwitches } from "../new-project/fields";
 import { PoolPicker } from "../new-project/pool-picker";
@@ -17,6 +17,7 @@ import { changeOutcome } from "./research";
 import { PlanningLine } from "./planning";
 import { SessionContext, useLoad } from "../../state";
 import { ProjectAccountOrder } from "../settings/account-choice";
+import { HarnessPage } from "../settings/harness-page";
 import { PluginsAndSkills } from "../settings/plugins";
 import { NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
@@ -25,6 +26,7 @@ const SECTIONS = [
   { id: "general", label: "General" },
   { id: "pool", label: "Pool" },
   { id: "team", label: "Team" },
+  { id: "harnesses", label: "Harnesses" },
   { id: "plugins", label: "Plugins and skills" },
   { id: "sandbox", label: "Sandbox" },
   { id: "remove", label: "Remove project" },
@@ -125,6 +127,30 @@ function TeamSection({ data, setup }: { data: ProjectData; setup: StoredSetup })
     {note && <p className="pj-note warn" role="status">{note}</p>}
     <div className="pj-summary"><span>Running agents keep their current harness. Changes apply to agents started after you save; waiting research moves to the new team.</span>
       <button type="button" className="btn primary" disabled={!teamValid(team, harnesses) || JSON.stringify(wireTeam(team)) === JSON.stringify(setup.team)} onClick={() => void save()}>Save team</button></div>
+  </div>;
+}
+
+/** The harnesses Project Settings offers overrides for: this Mac's Ready and Limited control
+ * harnesses, in catalog order. Input: the catalog. Output: the choices. */
+export function projectHarnesses(entries: readonly HarnessEntry[]): HarnessEntry[] {
+  return entries.filter((entry) => entry.status.kind !== "not_installed");
+}
+
+function HarnessesSection({ data }: { data: ProjectData }) {
+  const entries = projectHarnesses(valueOf(data.harnesses) ?? []);
+  const [chosen, setChosen] = useState<string | null>(null);
+  const current = entries.find((entry) => entry.id === chosen) ?? entries[0];
+  return <div className="pj-stack">
+    <h2>Harnesses</h2>
+    <p className="pj-secondary">A value set here applies to this project only and wins over the app value in Settings, Harnesses. Settings CrazyAgent enforces stay locked.</p>
+    {data.harnesses === undefined && <p className="pj-muted" role="status">Loading...</p>}
+    {data.harnesses?.kind === "not_ready" && <NotReady what="the harness list isn't in this build." />}
+    {data.harnesses?.kind === "error" && <p className="pj-error" role="alert">{failureCopy(data.harnesses)}</p>}
+    {data.harnesses?.kind === "ok" && entries.length === 0 && <p className="pj-muted">No harness is installed on this Mac. Install one, then choose Check again in Settings, Harnesses.</p>}
+    {current && <>
+      <Select id="ps-harness" label="Harness" value={current.id} options={entries.map((entry) => ({ value: entry.id, label: entry.name }))} onValue={setChosen} />
+      <HarnessPage key={current.id} harness={current.id} projectId={data.id} />
+    </>}
   </div>;
 }
 
@@ -322,7 +348,7 @@ export function settingsSection(wanted: string | null | undefined): SectionId {
   return SECTIONS.find((item) => item.id === wanted)?.id ?? "general";
 }
 
-/** Project Settings tab: General, Pool, Team, Plugins and skills, Sandbox and Remove project. A setup
+/** Project Settings tab: General, Pool, Team, Harnesses, Plugins and skills, Sandbox and Remove project. A setup
  * that belongs to another project counts as still loading, so no form seeds from it.
  * Inputs: the project data and an optional section from the route. Output: the tab. */
 export function SettingsTab({ data, section }: { data: ProjectData; section?: string }) {
@@ -341,6 +367,7 @@ export function SettingsTab({ data, section }: { data: ProjectData; section?: st
       {active === "general" && needsSetup(() => <><GeneralSection data={data} setup={setup!} /><PlanningLine data={data} /></>)}
       {active === "pool" && <PoolSection data={data} setup={setup} />}
       {active === "team" && needsSetup(() => <TeamSection data={data} setup={setup!} />)}
+      {active === "harnesses" && <HarnessesSection data={data} />}
       {active === "plugins" && <div className="pj-stack">
         <h2>Plugins and skills</h2>
         <p className="pj-secondary">What you add here applies to this project only. Items from Settings, Plugins and skills can be switched off for this project.</p>

@@ -32,15 +32,16 @@ const TABS: { id: SettingsTab; label: string; icon: IconName }[] = [
 
 /** Settings: the header, the tabs and the selected tab's panel.
  * Inputs: the tab, optional action ("add" opens Add account, "new" opens a new pool,
- * "sign_in" opens the sign-in of the given account) and the skill whose detail is open. */
-export function Settings({ tab, action, account, skill }: { tab: SettingsTab; action?: SettingsAction; account?: string; skill?: string }) {
+ * "sign_in" opens the sign-in of the given account), the skill whose detail is open and the
+ * harness whose settings page is open. */
+export function Settings({ tab, action, account, skill, harness }: { tab: SettingsTab; action?: SettingsAction; account?: string; skill?: string; harness?: string }) {
   return <>
     <PageHeader title="Settings" />
     <Tabs label="Settings sections" current={tab} tabs={TABS.map((item) => ({ ...item, href: formatRoute({ name: "settings", tab: item.id }) }))} />
     <div role="tabpanel" aria-labelledby={`tab-${tab}`}>
       {tab === "accounts" ? <Accounts adding={action === "add"} signingIn={action === "sign_in" ? account : undefined} />
         : tab === "pools" ? <Pools creating={action === "new"} />
-        : tab === "harnesses" ? <Harnesses />
+        : tab === "harnesses" ? <Harnesses harness={harness} />
         : tab === "plugins" ? <PluginsAndSkills skill={skill} />
         : tab === "process" ? <ProcessSettings />
         : tab === "pack" ? <PackSettings />
