@@ -36,6 +36,10 @@ pub use transport::recovery::{
     RecoveryBanner, RunShown,
 };
 pub use transport::terminal::{TerminalControl, TerminalOutput, TerminalSession};
+pub use transport::tracker::{
+    CustomBounds, SettingChoices, SettingsSaved, TRACKER_CODES, TRACKER_REPLY_BYTES_MAX,
+    TicketSettingsView, TrackedProject,
+};
 pub use transport::usage::USAGE_CODES;
 pub use transport::{
     OwnerClient, OwnerRuntimeHandle, OwnerServer, RunnerClient, runner_bootstrap, runner_ready,

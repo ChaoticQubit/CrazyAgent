@@ -1207,6 +1207,9 @@ impl ResearchRunner {
             let plan = crate::planning::publish(&state, body, harness.label())?;
             crate::planning::raise(self.database(), &job.project, &plan)
                 .map_err(|_| crate::planning::QUESTIONS_UNLOGGED)?;
+            #[cfg(unix)]
+            crate::tracker::context_import::after_planning(self.database(), &job.project)
+                .map_err(|_| crate::tracker::context_import::UNIMPORTED)?;
             return Ok(state.join(crate::planning::ROADMAP));
         }
         let report = render_report(&kind_label(&job.kind), harness.label(), body);

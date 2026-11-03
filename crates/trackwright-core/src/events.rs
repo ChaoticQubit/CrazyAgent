@@ -18,6 +18,10 @@ pub const CRITERION_EDIT: &str = "criterion.edit";
 pub const CHECK_ADD: &str = "check.add";
 pub const EVIDENCE_RECORD: &str = "evidence.record";
 pub const POLICY_SET: &str = "policy.set";
+pub const VERSION_UPSERT: &str = "version.upsert";
+pub const CYCLE_UPSERT: &str = "cycle.upsert";
+pub const DEP_ADD: &str = "dep.add";
+pub const DEP_REMOVE: &str = "dep.remove";
 
 /// Every event op the core writes and replays.
 pub const OPS: &[&str] = &[
@@ -32,6 +36,10 @@ pub const OPS: &[&str] = &[
     CHECK_ADD,
     EVIDENCE_RECORD,
     POLICY_SET,
+    VERSION_UPSERT,
+    CYCLE_UPSERT,
+    DEP_ADD,
+    DEP_REMOVE,
 ];
 
 pub(crate) const EVENT_INSERT: &str = "INSERT INTO tk_events(ticket, project, at_ms, actor, op, \
@@ -101,7 +109,7 @@ pub fn replay(tx: &Transaction<'_>, key: &ProjectKey) -> Result<State, StoreErro
     let mut evidence: BTreeMap<i64, Evidence> = BTreeMap::new();
     for event in read(tx, EVENTS_OF_PROJECT, project.id)? {
         match event.op.as_str() {
-            PROJECT_CREATE | POLICY_SET => {}
+            PROJECT_CREATE | POLICY_SET | VERSION_UPSERT | CYCLE_UPSERT | DEP_ADD | DEP_REMOVE => {}
             TICKET_CREATE | TICKET_UPDATE => {
                 let ticket: Ticket = row(event.after)?;
                 tickets.insert(ticket.id, ticket);
