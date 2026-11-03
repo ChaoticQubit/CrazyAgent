@@ -171,6 +171,12 @@ function tab(id) {
   return go(`#/projects/${encodeURIComponent(project())}/${id}`);
 }
 
+/** Scrolls a control to the middle of the window, so the step's screenshot shows the setting
+ * it read back. Input: the selector. */
+async function inView(selector) {
+  await $(selector).scrollIntoView({ block: "center" });
+}
+
 /** Opens another tab and comes back, so the tab reads what the engine saved rather than
  * what the form still holds. Input: the tab id. */
 async function reopen(id) {
@@ -214,6 +220,7 @@ async function choose(where, group, option) {
   await until(async () => await $(segment(group, option)).getAttribute("aria-checked") === "true", UI_MS, `${group} did not take ${option}`);
   await reopen(where);
   await until(async () => await shown(segment(group, option)) && await $(segment(group, option)).getAttribute("aria-checked") === "true", UI_MS, `${group} did not read ${option} after reopening`);
+  await inView(segment(group, option));
   return `${group} reads ${option} after reopening the tab${was ? " (it already was)" : ""}`;
 }
 
@@ -368,6 +375,7 @@ describe(`CrazyAgent trial 3 owner actions on the desktop app (${MODE})`, () => 
       await until(async () => !(await $(save).isEnabled()), UI_MS, "Land on Save did not finish");
       await reopen("agents");
       await until(async () => await shown(field) && (await $(field).getValue()) === SETTINGS.landOn, UI_MS, "Land on did not read back");
+      await inView(field);
       return `Land on reads ${SETTINGS.landOn} after reopening the Agents tab`;
     }));
 
@@ -378,6 +386,7 @@ describe(`CrazyAgent trial 3 owner actions on the desktop app (${MODE})`, () => 
       const changed = await pick(field, SETTINGS.background);
       await reopen("agents");
       await until(async () => await shown(field) && (await $(field).getValue()) === SETTINGS.background, UI_MS, "Background commands did not read back");
+      await inView(field);
       return `Background commands reads Wait for them after reopening${changed ? "" : " (it already was; no row also means Wait)"}`;
     }));
 
@@ -394,6 +403,7 @@ describe(`CrazyAgent trial 3 owner actions on the desktop app (${MODE})`, () => 
       await until(async () => (await workerSkills()).length === boxes.length, UI_MS, "the worker skill boxes did not come back after reopening");
       const after = await workerSkills();
       assert.deepEqual(after.filter((box) => box.on).map((box) => box.name), [keep], `workers read only ${keep} after reopening`);
+      await inView(WORKER_BOX);
       const master = await $(segment("Master skills", "All approved skills")).getAttribute("aria-checked");
       const lead = await $(segment("Lead skills", "All approved skills")).getAttribute("aria-checked");
       const only = after.length === 1 ? " (the only approved skill, so this cannot show a subset)" : "";
@@ -424,6 +434,7 @@ describe(`CrazyAgent trial 3 owner actions on the desktop app (${MODE})`, () => 
       await tab("overview");
       await section();
       await until(async () => await shown("//*[@role=\"radiogroup\"][@aria-label=\"Agent network\"]") && await $(radio).isSelected(), UI_MS, "the network did not read back");
+      await inView("//*[@role=\"radiogroup\"][@aria-label=\"Agent network\"]");
       return `network reads Port 443 only after reopening Settings, Agent access${was ? " (it already was)" : ""}`;
     }));
 
@@ -453,6 +464,7 @@ describe(`CrazyAgent trial 3 owner actions on the desktop app (${MODE})`, () => 
       await tab("overview");
       await section();
       await until(async () => await shown(list) && (await text(list)).includes(folder), UI_MS, "the hidden folder did not read back");
+      await inView(list);
       return `Hidden folders lists ${folder} after reopening Settings, Sandbox${was ? " (it already did)" : ""}`;
     }));
 
@@ -468,6 +480,7 @@ describe(`CrazyAgent trial 3 owner actions on the desktop app (${MODE})`, () => 
       await go("#/settings/process");
       await go("#/settings/profile");
       await until(async () => await shown(segment("Master input", SETTINGS.input)) && await $(segment("Master input", SETTINGS.input)).getAttribute("aria-checked") === "true", UI_MS, "Master input did not read back");
+      await inView(segment("Master input", SETTINGS.input));
       return `Master input reads Both after reopening Settings, Profile (it was ${run.input})`;
     }));
 
