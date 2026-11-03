@@ -3,9 +3,10 @@ use super::settings::{self, CiEvidence, ManualEvidence};
 use crate::protocol::ProjectId;
 use rusqlite::{OptionalExtension, Transaction, params};
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use trackwright_core::host::{
-    Authority, CheckView, Evidence, EvidenceState, LinkKind, LinkState, Links, TicketView,
+    self as core_host, Authority, CheckView, Evidence, EvidenceState, LinkKind, LinkState, Links,
+    Paths, TicketView,
 };
 use trackwright_core::model::{Actor, CheckKind, OpKind, ProjectKey, Refusal, codes};
 use trackwright_core::standalone::Standalone;
@@ -33,6 +34,8 @@ const OWNER: &str = "owner";
 const ENGINE_PREFIX: &str = "engine:";
 const GONE: &str = "gone";
 const HEAD_BYTES_MAX: u64 = 512;
+/// The folder under a project's `.crazyagent/` that `export` writes into.
+pub const EXPORTS_DIRECTORY: &str = "exports";
 const WORKTREES_SCANNED_MAX: i64 = 4096;
 
 /// The link kinds the engine declares, each resolved against its own table in the same
@@ -442,5 +445,104 @@ impl Authority for Host {
             }
             _ => Ok(()),
         }
+    }
+}
+
+/// Finds a project's `.crazyagent/` folder from its stored setup and checks it is a real
+/// folder, never a link. Inputs: the transaction, the engine project and the refusal code
+/// of the operation. Output: the folder, or the refusal.
+pub(crate) fn state_of(
+    tx: &Transaction<'_>,
+    engine: &ProjectId,
+    code: &'static str,
+) -> Result<PathBuf, Refusal> {
+    let setup = crate::project_setup::load_setup(tx, engine)
+        .map_err(|_| Refusal::host(HOST_FAILED, "the engine could not read the project"))?
+        .ok_or_else(|| Refusal::host(HOST_FAILED, "the engine has no folder for this project"))?;
+    let folder = setup.project_folder();
+    if !folder.is_absolute() {
+        return Err(Refusal::host(
+            HOST_FAILED,
+            "the engine stores a relative project folder",
+        ));
+    }
+    let state = folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
+    real_folder(&state, code, "the project's .crazyagent folder")?;
+    assert!(state.starts_with(&folder));
+    Ok(state)
+}
+
+/// Checks that a path is a real folder, not a link and not missing. Inputs: the path, the
+/// refusal code and the folder's name in words. Output: Ok, or the refusal.
+fn real_folder(path: &Path, code: &'static str, named: &str) -> Result<(), Refusal> {
+    match std::fs::symlink_metadata(path) {
+        Ok(listed) if listed.file_type().is_dir() => Ok(()),
+        _ => Err(Refusal::new(
+            code,
+            format!("{named} is missing, a link or not a folder"),
+        )),
+    }
+}
+
+/// Makes `.crazyagent/exports/` at the first export, readable by the owner only. A name
+/// already there is left for `real_folder` to check. Inputs: the folder and the refusal
+/// code. Output: Ok, or the refusal.
+fn exports_folder(path: &Path, code: &'static str) -> Result<(), Refusal> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    match builder.create(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(_) => Err(Refusal::new(
+            code,
+            "the project's exports folder could not be made",
+        )),
+    }
+}
+
+impl Paths for Host {
+    /// Confines `export` to `<project>/.crazyagent/exports/` and the import ops to
+    /// `<project>/.crazyagent/context/`, after the actor check `actor_may` makes, so an
+    /// agent never names a file outside its own project's folders. Inputs: the
+    /// transaction, the key, the actor, the operation and the requested relative path.
+    /// Output: the path to open, or `export_path_refused` / `import_path_refused`.
+    fn resolve_path(
+        &self,
+        tx: &Transaction<'_>,
+        project: &ProjectKey,
+        actor: &Actor,
+        op: OpKind,
+        requested: &Path,
+    ) -> Result<PathBuf, Refusal> {
+        let (code, below) = match op {
+            OpKind::Export => (codes::EXPORT_PATH_REFUSED, EXPORTS_DIRECTORY),
+            OpKind::ImportPreview | OpKind::ImportApply => (
+                codes::IMPORT_PATH_REFUSED,
+                crate::project_setup::CONTEXT_DIRECTORY,
+            ),
+            other => panic!("{other} opens no file"),
+        };
+        let engine = project_of(tx, project)?;
+        member(tx, &engine, actor)?;
+        let state = state_of(tx, &engine, code)?;
+        let root = state.join(below);
+        if op == OpKind::Export {
+            exports_folder(&root, code)?;
+        }
+        real_folder(
+            &root,
+            code,
+            &format!("the project's .crazyagent/{below} folder"),
+        )?;
+        let path = core_host::confined(&root, requested).map_err(|why| {
+            Refusal::new(
+                code,
+                format!("{why}; name a .md file inside .crazyagent/{below}"),
+            )
+        })?;
+        assert!(path.starts_with(&root));
+        assert!(path.starts_with(&state));
+        Ok(path)
     }
 }
