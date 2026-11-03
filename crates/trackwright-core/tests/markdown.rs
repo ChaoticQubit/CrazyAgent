@@ -3,14 +3,15 @@ use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use trackwright_core::catalog;
 use trackwright_core::criteria::{self, NewEvidence};
 use trackwright_core::events;
 use trackwright_core::export::{self, EXPORT_HEADER};
 use trackwright_core::host;
 use trackwright_core::import::{self, Change, IMPORT_BYTES_MAX, Preview, Unparsed, Why};
 use trackwright_core::model::{
-    Actor, CheckKind, EvidenceResult, OPEN_TICKETS_CREATED_PER_ACTOR_MAX, PolicyKey, Priority,
-    ProjectKey, ShortId, TicketKind, TicketStatus, VersionStatus, codes,
+    Actor, CheckKind, EvidenceResult, OPEN_TICKETS_CREATED_PER_ACTOR_MAX, OpKind, PolicyKey,
+    Priority, ProjectKey, ShortId, TicketKind, TicketStatus, VersionStatus, codes,
 };
 use trackwright_core::ops;
 use trackwright_core::policy;
@@ -1217,15 +1218,14 @@ fn export_and_import_answer_through_dispatch_inside_the_hosts_folder() {
         json!({"project": "CA", "path": path, "accept": accept}),
     );
     let data = answered(&applied);
-    let names: Vec<&Value> = data["versions"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|version| &version["name"])
-        .collect();
-    assert_eq!(names, [&json!("V1"), &json!("V2")]);
-    assert_eq!(data["versions"][0]["target_day"], "2026-12-01");
+    assert_eq!(data["versions"], json!(["V1", "V2"]));
     assert_eq!(data["tickets"], json!(["CA-2", "CA-3", "CA-4"]));
+    let roadmap = call(&tx, &me, "roadmap", json!({"project": "CA"}));
+    assert_eq!(answered(&roadmap)["versions"][0]["name"], "V1");
+    assert_eq!(
+        answered(&roadmap)["versions"][0]["target_day"],
+        "2026-12-01"
+    );
     let again = import::preview(&tx, &Standalone, &me, &key(), &roadmap).unwrap();
     assert!(again.items.is_empty(), "{:?}", again.items);
     assert_eq!(
@@ -1291,4 +1291,60 @@ fn an_export_or_preview_larger_than_one_reply_is_refused_and_writes_nothing() {
     let preview = import::preview(&tx, &Standalone, &me, &key(), &long).unwrap();
     assert_eq!(preview.items.len(), 121);
     tx.commit().unwrap();
+}
+
+#[test]
+fn the_largest_import_apply_reply_fits_the_default_reply_bound() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = opened(dir.path());
+    let mut roadmap = String::from("# Roadmap\n\n");
+    for section in 0..64_usize {
+        roadmap.push_str(&format!(
+            "## V1000.1000.{}: release {section}\nTarget: 2026-12-01\n",
+            1000 + section
+        ));
+        if section < OPEN_TICKETS_CREATED_PER_ACTOR_MAX {
+            roadmap.push_str(&format!("Scope:\n- Item {section:02} of the plan\n"));
+        }
+        roadmap.push('\n');
+    }
+    let path = written(dir.path(), "roadmap.md", &roadmap);
+    let tx = store.transaction().unwrap();
+    project(&tx);
+    let preview = import::preview(&tx, &Standalone, &owner(), &key(), &path).unwrap();
+    assert_eq!(preview.items.len(), 64 + OPEN_TICKETS_CREATED_PER_ACTOR_MAX);
+    assert!(preview.unparsed.is_empty(), "{:?}", preview.unparsed);
+
+    let applied = call(
+        &tx,
+        &owner(),
+        "import_apply",
+        json!({"project": "CA", "path": path.to_str().unwrap(), "accept": keys(&preview)}),
+    );
+    let data = answered(&applied);
+    let versions = data["versions"].as_array().unwrap();
+    assert_eq!(versions.len(), 64);
+    assert_eq!(versions[0], "V1000.1000.1000");
+    assert_eq!(versions[63], "V1000.1000.1063");
+    let tickets = data["tickets"].as_array().unwrap();
+    assert_eq!(tickets.len(), OPEN_TICKETS_CREATED_PER_ACTOR_MAX);
+    assert_eq!(tickets[0], "CA-1");
+    assert!(
+        applied.to_string().len() <= 8 * 1024,
+        "{}",
+        applied.to_string().len()
+    );
+    tx.commit().unwrap();
+}
+
+#[test]
+fn an_import_preview_is_a_read_and_takes_no_request_id() {
+    assert!(!OpKind::ImportPreview.is_write());
+    assert!(!OpKind::Export.is_write());
+    assert!(OpKind::ImportApply.is_write());
+    let spec = catalog::spec(OpKind::ImportPreview);
+    assert!(spec.fields.iter().all(|field| field.name != "request_id"));
+    let args = json!({"project": "CA", "path": "roadmap.md", "request_id": "r-1"});
+    let refused = Request::parse("import_preview", args.to_string().as_bytes()).unwrap_err();
+    assert_eq!(refused.code, codes::UNKNOWN_FIELD);
 }

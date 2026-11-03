@@ -5,7 +5,6 @@ use crate::model::{
     Ticket, TicketKind, TicketStatus, VERSIONS_PER_PROJECT_MAX, VersionStatus, codes,
 };
 use crate::ops::{self, Cx, Failure};
-use crate::plan;
 use crate::policy;
 use crate::store::{self, NewTicket, StoreError};
 use crate::text::{self, TextField};
@@ -37,7 +36,13 @@ const CHECKLIST_TITLES: [&str; 2] = ["# Release checklist", "# Release process"]
 const SCOPE_LABELS: [&str; 2] = ["scope", "in scope"];
 const TARGET_LABEL: &str = "target:";
 
+const IMPORTED_NAME_BYTES_MAX: usize = VERSION_PARTS_MAX * (VERSION_PART_DIGITS_MAX + 1);
+const SHORT_ID_BYTES_MAX: usize = 8 + 1 + 10;
+const APPLIED_DATA_BYTES_MAX: usize = 32 + IMPORT_ACCEPT_MAX * (SHORT_ID_BYTES_MAX + 3);
+
 const _: () = assert!(IMPORT_ACCEPT_MAX <= IMPORT_ITEMS_MAX);
+const _: () = assert!(IMPORTED_NAME_BYTES_MAX <= SHORT_ID_BYTES_MAX);
+const _: () = assert!(APPLIED_DATA_BYTES_MAX < 7 * 1024);
 const _: () = assert!(VERSIONS_PER_PROJECT_MAX <= IMPORT_ITEMS_MAX);
 
 macro_rules! version_select {
@@ -1018,9 +1023,11 @@ pub(crate) fn import_preview<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome
     })
 }
 
-/// Runs `import_apply` for dispatch. Input: the context. Output: the versions added or
-/// changed and the ids of the tickets created, in file order; a reply longer than one page
-/// refuses the apply, which then writes nothing.
+/// Runs `import_apply` for dispatch. The reply names each version and ticket only, so even
+/// the largest apply (`IMPORT_ACCEPT_MAX` items, each the longest name or id) fits the
+/// smallest reply bound; `roadmap` and `show` read the rest. Input: the context. Output:
+/// the names of the versions added or changed and the ids of the tickets created, in file
+/// order.
 pub(crate) fn import_apply<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Failure> {
     let requested = Path::new(cx.args.need::<&str>("path"));
     let accept = cx.args.need::<&[String]>("accept");
@@ -1034,21 +1041,26 @@ pub(crate) fn import_apply<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, 
         cx.at_ms,
     )?;
     assert!(applied.versions.len() + applied.tickets.len() <= accept.len());
+    assert!(accept.len() <= IMPORT_ACCEPT_MAX);
     let tickets: Vec<String> = applied
         .tickets
         .iter()
         .map(|ticket| ticket.short_id.to_string())
         .collect();
-    let versions: Vec<serde_json::Value> =
-        applied.versions.iter().map(plan::version_json).collect();
+    assert!(tickets.iter().all(|id| id.len() <= SHORT_ID_BYTES_MAX));
+    let versions: Vec<&str> = applied
+        .versions
+        .iter()
+        .map(|version| {
+            assert!(version.name.len() <= IMPORTED_NAME_BYTES_MAX);
+            version.name.as_str()
+        })
+        .collect();
     let data = json!({"versions": versions, "tickets": tickets});
+    assert!(APPLIED_DATA_BYTES_MAX <= cx.data_bytes_max);
+    assert!(data.to_string().len() <= APPLIED_DATA_BYTES_MAX);
     Ok(ops::Outcome {
-        data: ops::whole(
-            cx,
-            data,
-            codes::IMPORT_TOO_LARGE,
-            "accept fewer items in one apply",
-        )?,
+        data,
         next: Vec::new(),
         cursor: None,
     })

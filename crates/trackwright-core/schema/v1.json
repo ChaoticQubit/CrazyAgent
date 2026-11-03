@@ -828,13 +828,6 @@
             "description": "The project's key, for example CA.",
             "pattern": "^[A-Z]{2,8}$",
             "type": "string"
-          },
-          "request_id": {
-            "description": "Your key for this write; repeating it with the same fields returns the first reply.",
-            "maxLength": 64,
-            "minLength": 1,
-            "pattern": "^[A-Za-z0-9._:-]+$",
-            "type": "string"
           }
         },
         "required": [
@@ -844,7 +837,7 @@
         "type": "object"
       },
       "summary": "Reads a roadmap or release checklist file and lists what an import would change.",
-      "write": true
+      "write": false
     },
     "link": {
       "args": {

@@ -509,8 +509,9 @@ fn failed(what: &str, error: &io::Error) -> StoreError {
 
 /// Runs `export` for dispatch: the project's open tickets, or the one ticket `id` names,
 /// written to `path` when given and carried in the reply otherwise, so an export longer
-/// than one reply needs a path. Input: the context. Output: the text, or the path written
-/// and its length.
+/// than one reply needs a path. It reads the store and writes no event, so even with a path
+/// it is a read: the file is the host's, confined by its Paths, and a rewrite replaces it
+/// whole. Input: the context. Output: the text, or the path written and its length.
 pub(crate) fn export<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Failure> {
     let key = cx.project();
     let text = match cx.args.get::<&ShortId>("id") {
