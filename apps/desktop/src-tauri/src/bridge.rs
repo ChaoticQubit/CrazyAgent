@@ -44,6 +44,7 @@ pub mod questions;
 mod queue;
 mod recovery;
 mod scheduling;
+pub mod scorecard;
 mod team;
 pub mod terminal;
 mod usage;

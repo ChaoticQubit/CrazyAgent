@@ -26,6 +26,7 @@ mod project_setup;
 mod questions;
 mod recovery;
 mod scheduling;
+mod scorecard;
 mod setup;
 mod team;
 mod usage;

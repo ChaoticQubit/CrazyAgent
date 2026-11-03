@@ -2,6 +2,7 @@ use crate::config::{ModelAccess, ModelAuthentication, ModelEndpoint};
 use crate::engine::EngineError;
 use crate::project_setup::{HarnessSlot, StoredSetup, TEAM_AGENTS_MAX, TeamPlan};
 use crate::protocol::{CredentialRef, Outcome, ProjectId, RequestId, SessionId};
+use crate::scorecard::Kind as Mark;
 use crate::storage::versioned::{self, STALE_CODE};
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
@@ -2137,6 +2138,8 @@ fn perform(
                     if typed {
                         owner_turn(tx, project, message)?;
                     }
+                    let subject = message.to_string();
+                    crate::scorecard::mark(tx, project, Mark::OwnerMessage, &subject, now)?;
                     Outcome::Applied
                 }
                 Err(code) => rejected(code),
@@ -3567,7 +3570,8 @@ pub(crate) fn owner_stop(
             params![agent, project.as_str(), now, DEPTH_WALK_MAX],
         )
         .map_err(error)?;
-    Ok(())
+    let subject = agent.to_string();
+    crate::scorecard::mark(connection, project, Mark::OwnerStop, &subject, now)
 }
 
 /// Clears the owner's stop of an agent the owner woke and of every agent it leads, so a

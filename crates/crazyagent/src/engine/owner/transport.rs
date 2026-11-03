@@ -56,6 +56,7 @@ pub(crate) mod process;
 mod projects_home;
 pub(crate) mod questions;
 pub(crate) mod recovery;
+pub(crate) mod scorecard;
 mod setup;
 pub(crate) mod terminal;
 pub(crate) mod usage;
@@ -2048,6 +2049,7 @@ enum Protocol {
     IdeExtensions,
     Recovery,
     Questions,
+    Scorecard,
     NativeAuth,
     Process,
     Ide,
@@ -2080,6 +2082,7 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("ide_extensions", Protocol::IdeExtensions),
         ("recovery", Protocol::Recovery),
         ("questions", Protocol::Questions),
+        ("scorecard", Protocol::Scorecard),
         ("native_auth", Protocol::NativeAuth),
         ("process", Protocol::Process),
         ("ide", Protocol::Ide),
@@ -2150,6 +2153,7 @@ async fn serve_admitted(
             Protocol::Usage => return Ok(Some(Deferred::Usage(a))),
             Protocol::Recovery => return Ok(Some(Deferred::Recovery(a))),
             Protocol::Questions => return Ok(Some(Deferred::Questions(a))),
+            Protocol::Scorecard => return Ok(Some(Deferred::Scorecard(a))),
             Protocol::NativeAuth => {
                 return native_auth::serve(stream, engine, authority, auth, &a, body)
                     .await
@@ -2323,6 +2327,10 @@ async fn serve_admitted(
             let served = questions::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(questions::QUESTIONS_TIMEOUT, served).await;
         }
+        Deferred::Scorecard(a) => {
+            let served = scorecard::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(scorecard::SCORECARD_TIMEOUT, served).await;
+        }
         Deferred::Cleanup(a) => {
             let served = cleanup::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(cleanup::CLEANUP_TIMEOUT, served).await;
@@ -2383,7 +2391,8 @@ struct Tasks {
 /// owner's checkout, IDE extension approvals, which download and check a VSIX, Recovery
 /// requests, which wait for the action ledger under the owner barrier, IDE tab requests,
 /// which wait for an IDE server to start, Questions requests, which wait for the database
-/// write lock and rewrite a project's questions page, Cleanup requests, which size and
+/// write lock and rewrite a project's questions page, Scorecard requests, which read the
+/// engine records behind the go/no-go numbers, Cleanup requests, which size and
 /// remove finished agents' worktrees and folders, skill import scans and imports, which
 /// copy skill folders, and Usage requests, which read and write the usage store. Each
 /// carries the admission, and the projects home its validated request; the others read
@@ -2399,6 +2408,7 @@ enum Deferred {
     Ide(Admission),
     IdeTab(Admission),
     Questions(Admission),
+    Scorecard(Admission),
     Cleanup(Admission),
     SkillImport(Admission),
     Usage(Admission),
@@ -2443,6 +2453,7 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::IdeExtensions => ide_extensions::refusal(code)?,
         Protocol::Recovery => recovery::refusal(code)?,
         Protocol::Questions => questions::refusal(code)?,
+        Protocol::Scorecard => scorecard::refusal(code)?,
         Protocol::NativeAuth => native_auth::refusal(body, code)?,
         Protocol::Process => process::refusal(code)?,
         Protocol::Ide => ide::refusal(code)?,

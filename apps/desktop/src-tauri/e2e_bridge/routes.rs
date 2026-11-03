@@ -2280,6 +2280,33 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { let call = lock(state) .await? .usage_set_reset(account, window_kind, at_ms)?; call.await }.await;
             routed(result)
         }
+        "desktop_scorecard" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                offset_minutes: i32,
+            }
+            let Args { offset_minutes } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.scorecard_report(offset_minutes)?; call.await }.await;
+            routed(result)
+        }
+        "desktop_scorecard_set" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                settings: crazyagent::scorecard::Settings,
+                version: u64,
+            }
+            let Args { settings, version } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { let call = lock(state).await?.scorecard_set(settings, version)?; call.await }.await;
+            routed(result)
+        }
         "desktop_ide_extension_approve" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]

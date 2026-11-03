@@ -27,6 +27,7 @@ pub(in crate::tui) mod project_time;
 pub(in crate::tui) mod project_view;
 pub(in crate::tui) mod questions;
 pub(in crate::tui) mod recovery_banner;
+pub(in crate::tui) mod scorecard;
 pub(in crate::tui) mod sessions;
 pub mod settings;
 pub mod settings_accounts;

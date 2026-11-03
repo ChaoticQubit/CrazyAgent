@@ -52,6 +52,7 @@ pub mod research;
 pub mod routing;
 pub mod sandbox;
 pub mod scheduling;
+pub mod scorecard;
 pub mod service;
 pub mod setup;
 pub mod skills;

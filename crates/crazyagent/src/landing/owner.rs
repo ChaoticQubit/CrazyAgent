@@ -653,8 +653,9 @@ pub(super) fn commit_deletions(
 }
 
 /// Marks a change set landed as `landed`, closes its agent's workers' open sets with it
-/// (F3, DEC-107), drops its pending ref, forgets the owner edits settled on it and points the
-/// agent's worktree at the landed commit when the worktree holds nothing newer than the set.
+/// (F3, DEC-107), drops its pending ref, records the Accept for the scorecard with whether
+/// the owner edited it, forgets the owner edits settled on it and points the agent's worktree
+/// at the landed commit when the worktree holds nothing newer than the set.
 /// A worker set that cannot be closed now is logged by its plain code and left open, so the
 /// Accept itself never fails on it.
 fn finish(db: &Connection, record: &mut Record, landed: &str) -> Result<(), EngineError> {
@@ -676,6 +677,10 @@ fn finish(db: &Connection, record: &mut Record, landed: &str) -> Result<(), Engi
         &pending_ref(&record.id),
         None,
     )?;
+    let accepted = i64::try_from(record.updated_ms)
+        .map_err(|_| failure("changes_unavailable"))
+        .and_then(|at| crate::scorecard::accepted(db, &record.project, record.id.as_str(), at));
+    crate::scorecard::logged(crate::scorecard::Kind::Accept, accepted);
     super::owner_edit::logged("forget", super::owner_edit::forget(db, &record.id));
     let head = record.head.clone();
     reset_if_quiet(db, record, &head, landed)

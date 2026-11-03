@@ -174,7 +174,11 @@ impl Score {
 
     fn link(&self, ticket: &ShortId, id: &ChangeSetId) {
         let tx = Transaction::new_unchecked(&self.case.db, TransactionBehavior::Immediate).unwrap();
-        let args = json!({"id": String::from(ticket.clone()), "kind": "change_set", "target": id.as_str()});
+        let args = json!({
+            "id": String::from(ticket.clone()),
+            "kind": "change_set",
+            "target": id.as_str()
+        });
         dispatch(&tx, "link", args);
         tx.commit().unwrap();
     }
@@ -428,6 +432,32 @@ fn owner_messages_answers_and_stops_count_per_task_against_the_baseline() {
 }
 
 #[test]
+fn owner_stops_interrupts_and_restarts_from_the_agents_page_count_as_interventions() {
+    let score = Score::new();
+    for kind in [Kind::OwnerStop, Kind::OwnerInterrupt, Kind::OwnerRestart] {
+        intervened(&score.case.root, &score.case.project, kind, "agent-7");
+    }
+    let card = score.report();
+    let kinds: Vec<Kind> = card.acts.iter().map(|act| act.kind).collect();
+    assert_eq!(
+        kinds.len(),
+        3,
+        "every act on a running agent is listed: {kinds:?}"
+    );
+    for kind in [Kind::OwnerStop, Kind::OwnerInterrupt, Kind::OwnerRestart] {
+        assert!(kinds.contains(&kind), "{kind:?} in {kinds:?}");
+    }
+    assert!(card.acts.iter().all(|act| act.subject == "agent-7"));
+    let counted =
+        card.coordination.baseline.interventions + card.coordination.measured.interventions;
+    assert_eq!(counted, 3);
+    assert_eq!(
+        card.coordination.baseline.messages + card.coordination.measured.messages,
+        0
+    );
+}
+
+#[test]
 fn the_rolling_window_holds_the_last_fourteen_days_and_moves_on() {
     let mut score = Score::new();
     assert_eq!(
@@ -438,7 +468,10 @@ fn the_rolling_window_holds_the_last_fourteen_days_and_moves_on() {
     let now = now_ms();
     let card = report(&score.case.db, now, 0).unwrap();
     assert_eq!(card.real, 1);
-    assert_eq!(card.window.end_ms, now);
+    assert_eq!(
+        card.window.end_ms,
+        (day_number(&score.today()).unwrap() + 1) * DAY_MS
+    );
     assert_eq!(
         card.window.start_ms,
         (day_number(&score.today()).unwrap() - 13) * DAY_MS

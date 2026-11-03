@@ -64,7 +64,11 @@ fn the_owner_reads_the_scorecard_and_saves_its_settings_by_version() {
     assert_eq!(second.settings, settings);
     assert_eq!(
         serde_json::to_value(&second.settings).unwrap(),
-        json!({"window": {"from_day": "2026-11-03"}, "baseline": "previous_window", "daily_question": "on"})
+        json!({
+            "window": {"from_day": "2026-11-03"},
+            "baseline": "previous_window",
+            "daily_question": "on"
+        })
     );
 }
 
@@ -80,19 +84,25 @@ fn a_malformed_or_oversized_request_is_refused_before_it_runs() {
         refused(json!({"scorecard": {"kind": "report", "offset_minutes": 15 * 60}})),
         "scorecard_request_invalid"
     );
+    let settings = |window: serde_json::Value| {
+        json!({"scorecard": {"kind": "set", "version": 0, "settings": {
+            "window": window,
+            "baseline": "first_days",
+            "daily_question": "off"
+        }}})
+    };
     assert_eq!(
-        refused(
-            json!({"scorecard": {"kind": "set", "version": 0, "settings": {"window": "weekly", "baseline": "first_days", "daily_question": "off"}}})
-        ),
+        refused(settings(json!("weekly"))),
         "scorecard_request_invalid"
     );
     assert_eq!(
-        refused(
-            json!({"scorecard": {"kind": "set", "version": 0, "settings": {"window": {"from_day": "2026-02-30"}, "baseline": "first_days", "daily_question": "off"}}})
-        ),
+        refused(settings(json!({"from_day": "2026-02-30"}))),
         "scorecard_settings_invalid"
     );
-    let padded = json!({"scorecard": {"kind": "report", "offset_minutes": 0}, "pad": "x".repeat(REQUEST_BYTES_MAX)});
+    let padded = json!({
+        "scorecard": {"kind": "report", "offset_minutes": 0},
+        "pad": "x".repeat(REQUEST_BYTES_MAX)
+    });
     let bytes = serde_json::to_vec(&padded).unwrap();
     assert_eq!(parse(&bytes).unwrap_err().0, "scorecard_request_bounds");
     assert_eq!(read(&root).version, 0);

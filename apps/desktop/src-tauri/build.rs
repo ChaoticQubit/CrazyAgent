@@ -224,6 +224,8 @@ fn main() {
         "desktop_usage_report",
         "desktop_usage_refresh",
         "desktop_usage_set_reset",
+        "desktop_scorecard",
+        "desktop_scorecard_set",
         "desktop_ide_extension_asks",
         "desktop_ide_extension_approve",
         "desktop_ide_extension_decline",

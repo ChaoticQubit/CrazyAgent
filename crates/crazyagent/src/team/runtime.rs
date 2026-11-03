@@ -60,6 +60,7 @@ const DELEGATION_ROUNDS_MAX: i64 = 3;
 const PROGRESS_EVERY: Duration = Duration::from_secs(1);
 const EVENT_WAIT: Duration = Duration::from_millis(200);
 const ORDER_WAIT: Duration = Duration::from_millis(100);
+const DAILY_EVERY: Duration = Duration::from_secs(60);
 const IDLE_EVENT_WAIT: Duration = Duration::from_millis(5);
 const JOIN_WAIT: Duration = Duration::from_secs(15);
 /// How often a project's running agents are checked for an owner instruction edit under
@@ -460,6 +461,7 @@ pub struct TeamRuntime {
     watch: super::events::Watch,
     master_watch: super::screen_questions::MasterWatch,
     teammates_next: Option<Instant>,
+    daily_next: Option<Instant>,
     receipts_next: BTreeMap<ProjectId, Instant>,
     live_starts: BTreeMap<ProjectId, Vec<Instant>>,
     resuming: Option<(i64, Resume)>,
@@ -624,6 +626,7 @@ impl TeamRuntime {
             watch: super::events::Watch::default(),
             master_watch: super::screen_questions::MasterWatch::default(),
             teammates_next: None,
+            daily_next: None,
             receipts_next: BTreeMap::new(),
             live_starts: BTreeMap::new(),
             resuming: None,
@@ -944,8 +947,9 @@ impl TeamRuntime {
     /// register, sends pending messages to the master, delivers finished results, starts or
     /// reuses sub-agents within the plan's limits, stops idle or cancelled agents, ends team
     /// panes no agent owns, rewrites each followed IDE workspace whose sections changed, logs
-    /// the questions masters' harnesses ask the owner in their own terminals, then alerts the
-    /// owner to new questions and terminal waits by severity.
+    /// the questions masters' harnesses ask the owner in their own terminals, asks the
+    /// scorecard's daily question when it is due, then alerts the owner to new questions and
+    /// terminal waits by severity.
     pub fn tick(&mut self) -> Result<(), EngineError> {
         self.settle()?;
         self.collect()?;
@@ -964,7 +968,29 @@ impl TeamRuntime {
         self.sweep()?;
         crate::ide::workspace::follow(&self.connection, &self.root)?;
         self.watch_master_questions()?;
+        self.ask_daily()?;
         super::questions::tick(&mut self.connection, now_ms())
+    }
+
+    /// Asks the owner the scorecard's daily question, checked at most once each
+    /// `DAILY_EVERY`; `scorecard::ask_daily` asks only while its setting is on and none was
+    /// asked in the last 20 hours. A failure is logged by its plain code and retried at the
+    /// next check, so the tick goes on.
+    fn ask_daily(&mut self) -> Result<(), EngineError> {
+        let now = Instant::now();
+        if self.daily_next.is_some_and(|next| now < next) {
+            return Ok(());
+        }
+        self.daily_next = Some(now + DAILY_EVERY);
+        let projects = self.active_projects()?;
+        if let Err(problem) = crate::scorecard::ask_daily(&self.connection, &projects, now_ms()) {
+            eprintln!(
+                "scorecard_daily_failed cause={}",
+                crate::protocol::plain_code(&problem.0)
+            );
+        }
+        assert!(self.daily_next.is_some_and(|next| next > now));
+        Ok(())
     }
 
     /// Logs each question a live master's harness asks the owner in its own terminal as
