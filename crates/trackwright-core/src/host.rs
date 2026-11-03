@@ -121,6 +121,17 @@ pub trait Authority {
     /// false when actors declare themselves, as in the standalone host, so policy binds
     /// honest agents only; a `policy_get` reply says which.
     fn actors_verified(&self) -> bool;
+
+    /// Checks one actor recording evidence for one check, before anything is written. It
+    /// has no default, so every host decides who may prove its checks. Inputs: the
+    /// transaction, the project, the actor and the check. Output: Ok, or the refusal.
+    fn evidence_may(
+        &self,
+        tx: &Transaction<'_>,
+        project: &ProjectKey,
+        actor: &Actor,
+        check: &CheckView,
+    ) -> Result<(), Refusal>;
 }
 
 /// Everything a host supplies: links, evidence and authority. Any type with the three is

@@ -107,9 +107,11 @@ pub fn add_criterion(
 }
 
 /// Rewrites a criterion's text at the version the caller read, keeping its state and checks.
-/// The same text writes nothing. Inputs: the transaction, the host, the actor, the ticket,
+/// The same text writes nothing. A waived criterion is the owner's to rewrite, since the
+/// waiver was given for its text. Inputs: the transaction, the host, the actor, the ticket,
 /// the position, the version, the text and the time. Output: the criterion, or
-/// `criterion_unknown`, `stale_version`, `ticket_closed`, a text or the host's refusal.
+/// `criterion_unknown`, `stale_version`, `owner_only`, `ticket_closed`, a text or the host's
+/// refusal.
 #[allow(clippy::too_many_arguments)]
 pub fn edit_criterion(
     tx: &Transaction<'_>,
@@ -130,6 +132,12 @@ pub fn edit_criterion(
             before.version,
             version,
         )?;
+        if before.state == CriterionState::Waived && policy::role(actor) != Role::Owner {
+            return Err(store::refusal(
+                codes::OWNER_ONLY,
+                format!("the owner waived {id} criterion {position}; only the owner rewrites it"),
+            ));
+        }
         if before.text == criterion {
             return Ok(before);
         }
@@ -233,12 +241,13 @@ pub fn add_check(
     })
 }
 
-/// Appends one evidence record for a check of an open ticket, then re-derives the check's
-/// criterion: met when every check is satisfied, open again on a failing one. Under
-/// `close = evidence` the last satisfied check closes the ticket as `host:evidence`, with a
-/// reason naming the proof. Inputs: the transaction, the host, the actor, the evidence and
-/// the time. Output: the evidence row and what it left, or `check_unknown`,
-/// `criterion_unknown`, `ticket_closed`, a text refusal or the host's refusal.
+/// Appends one evidence record for a check of an open ticket, once the host's
+/// `evidence_may` lets the actor prove that check, then re-derives the check's criterion:
+/// met when every check is satisfied, open again on a failing one. Under `close = evidence`
+/// the last satisfied check closes the ticket as `host:evidence`, with a reason naming the
+/// proof. Inputs: the transaction, the host, the actor, the evidence and the time. Output:
+/// the evidence row and what it left, or `check_unknown`, `criterion_unknown`,
+/// `ticket_closed`, a text refusal or the host's refusal.
 pub fn record_evidence(
     tx: &Transaction<'_>,
     host: &impl Host,
@@ -255,6 +264,13 @@ pub fn record_evidence(
         let ticket = open_ticket(tx, host, actor, OpKind::EvidenceRecord, &new.ticket)?;
         let criterion = criterion_at(tx, &ticket, new.criterion)?;
         let check = check_of(tx, &criterion, new.kind, &new.check)?;
+        host.evidence_may(
+            tx,
+            ticket.short_id.key(),
+            actor,
+            &view_of(&ticket, &criterion, &check),
+        )
+        .map_err(StoreError::Refused)?;
         store::prepare(tx, EVIDENCE_INSERT)?.execute(params![
             check.id,
             new.result.as_str(),
@@ -298,10 +314,12 @@ pub fn record_evidence(
 
 /// Sets a criterion's state by hand at the version the caller read. A criterion with checks
 /// follows them: it is never set met or reopened by hand, only waived by the owner or taken
-/// back from waived to open. Waiving is the owner's. Under `close = evidence` the last met
-/// criterion closes the ticket. Inputs: the transaction, the host, the actor, the ticket,
-/// the position, the version, the state and the time. Output: what the write left, or
-/// `owner_only`, `criterion_has_checks`, `stale_version`, `ticket_closed` or a refusal.
+/// back from waived to open. Waiving is the owner's. Under `close = evidence` an agent may
+/// not set a criterion without checks met, so no agent closes a ticket on its own word, and
+/// the last met criterion closes the ticket. Inputs: the transaction, the host, the actor,
+/// the ticket, the position, the version, the state and the time. Output: what the write
+/// left, or `owner_only`, `criterion_has_checks`, `criterion_needs_check`, `stale_version`,
+/// `ticket_closed` or a refusal.
 #[allow(clippy::too_many_arguments)]
 pub fn set_criterion(
     tx: &Transaction<'_>,
@@ -322,10 +340,20 @@ pub fn set_criterion(
                 "only the owner waives a criterion",
             ));
         }
-        if !checks_of(tx, before.id)?.is_empty() && !by_hand_with_checks(before.state, state) {
+        let checked = !checks_of(tx, before.id)?.is_empty();
+        if checked && !by_hand_with_checks(before.state, state) {
             return Err(store::refusal(
                 codes::CRITERION_HAS_CHECKS,
                 format!("{id} criterion {position} follows its checks; record evidence"),
+            ));
+        }
+        if !checked && state == CriterionState::Met && self_certified(tx, actor, id)? {
+            return Err(store::refusal(
+                codes::CRITERION_NEEDS_CHECK,
+                format!(
+                    "under close = evidence an agent proves {id} criterion {position} with a \
+                     check; add one or ask the owner"
+                ),
             ));
         }
         let set = store::set_criterion(tx, actor, id, position, version, state, now_ms)?;
@@ -506,12 +534,7 @@ fn derive(
     }
     let mut satisfied = true;
     for check in &checks {
-        let view = CheckView {
-            ticket: ticket.short_id.clone(),
-            criterion: criterion.position,
-            kind: check.kind,
-            reference: check.reference.clone(),
-        };
+        let view = view_of(ticket, criterion, check);
         let found = host
             .check(tx, ticket.short_id.key(), &view)
             .map_err(StoreError::Refused)?;
@@ -538,6 +561,14 @@ fn derive(
         assert_eq!(set.state, state);
     }
     Ok(state)
+}
+
+/// Whether a hand `met` would be the actor's own word standing in for proof: an agent under
+/// `close = evidence`. The owner and the host's engine actors are trusted to say so.
+fn self_certified(tx: &Transaction<'_>, actor: &Actor, id: &ShortId) -> Result<bool, StoreError> {
+    let agent = policy::role(actor) == Role::Agent;
+    let evidence = policy::load(tx, id.key())?.close == ClosePolicy::Evidence;
+    Ok(agent && evidence)
 }
 
 /// Whether a criterion with checks may move by hand from one state to another: to waived,
@@ -615,6 +646,23 @@ fn check_of(
                 format!("criterion {} has no such {kind} check", criterion.position),
             )
         })
+}
+
+fn view_of(ticket: &Ticket, criterion: &Criterion, check: &Check) -> CheckView {
+    assert_eq!(
+        criterion.ticket, ticket.id,
+        "the criterion is on this ticket"
+    );
+    assert_eq!(
+        check.criterion, criterion.id,
+        "the check proves this criterion"
+    );
+    CheckView {
+        ticket: ticket.short_id.clone(),
+        criterion: criterion.position,
+        kind: check.kind,
+        reference: check.reference.clone(),
+    }
 }
 
 fn latest_of(tx: &Transaction<'_>, check: i64) -> Result<Option<Evidence>, StoreError> {

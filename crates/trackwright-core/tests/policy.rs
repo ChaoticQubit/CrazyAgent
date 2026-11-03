@@ -16,8 +16,8 @@ use trackwright_core::standalone::Standalone;
 use trackwright_core::store::{self, NewTicket, Store, StoreError};
 
 /// A host shaped like an engine: branches and change sets live in its own tables in the
-/// tracker's database and are read in the core's transaction; authority and every other
-/// check kind follow the standalone host.
+/// tracker's database and are read in the core's transaction, so nobody records evidence
+/// for a change check; authority and every other check kind follow the standalone host.
 struct EngineLike;
 
 const ENGINE_KINDS: [LinkKind; 2] = [
@@ -61,7 +61,7 @@ impl Links for EngineLike {
             "change_set" => "SELECT project, accepted FROM host_change_sets WHERE id = ?1",
             _ => {
                 return Err(Refusal::new(
-                    "link_kind_unknown",
+                    codes::LINK_KIND_UNKNOWN,
                     format!("this host links no {kind}"),
                 ));
             }
@@ -69,10 +69,10 @@ impl Links for EngineLike {
         let found: Option<(String, i64)> = tx
             .query_row(sql, [target], |row| Ok((row.get(0)?, row.get(1)?)))
             .optional()
-            .map_err(|error| Refusal::new("host_failed", error.to_string()))?;
+            .map_err(|error| Refusal::host("host_failed", error.to_string()))?;
         match found {
-            None => Err(Refusal::new("link_broken", format!("no {kind} {target}"))),
-            Some((owner, _)) if owner != project.as_str() => Err(Refusal::new(
+            None => Err(Refusal::host("link_broken", format!("no {kind} {target}"))),
+            Some((owner, _)) if owner != project.as_str() => Err(Refusal::host(
                 "link_cross_project",
                 format!("{kind} {target} belongs to another project"),
             )),
@@ -102,7 +102,7 @@ impl Evidence for EngineLike {
                 |row| row.get(0),
             )
             .optional()
-            .map_err(|error| Refusal::new("host_failed", error.to_string()))?;
+            .map_err(|error| Refusal::host("host_failed", error.to_string()))?;
         Ok(match accepted {
             Some(1) => EvidenceState {
                 satisfied: true,
@@ -134,6 +134,25 @@ impl Authority for EngineLike {
 
     fn actors_verified(&self) -> bool {
         true
+    }
+
+    fn evidence_may(
+        &self,
+        tx: &Transaction<'_>,
+        project: &ProjectKey,
+        actor: &Actor,
+        check: &CheckView,
+    ) -> Result<(), Refusal> {
+        if check.kind == CheckKind::Change {
+            return Err(Refusal::host(
+                "change_from_host",
+                format!(
+                    "change set {} is read from this host, never recorded",
+                    check.reference
+                ),
+            ));
+        }
+        Standalone.evidence_may(tx, project, actor, check)
     }
 }
 
@@ -275,10 +294,11 @@ fn the_last_passing_evidence_closes_the_ticket_and_records_why() {
     )
     .unwrap();
 
+    let runner = actor("engine:ci");
     let (_, first) = criteria::record_evidence(
         &tx,
         &Standalone,
-        &agent,
+        &runner,
         &proof(
             &id,
             build.position,
@@ -336,7 +356,7 @@ fn the_last_passing_evidence_closes_the_ticket_and_records_why() {
     let late = criteria::record_evidence(
         &tx,
         &Standalone,
-        &agent,
+        &runner,
         &proof(
             &id,
             build.position,
@@ -387,11 +407,12 @@ fn a_failing_evidence_reopens_a_met_criterion() {
         )
         .unwrap();
     }
+    let runner = actor("engine:ci");
     let record = |check: &str, result: EvidenceResult, at_ms: i64| {
         criteria::record_evidence(
             &tx,
             &Standalone,
-            &agent,
+            &runner,
             &proof(&id, tests.position, CheckKind::Ci, check, result),
             at_ms,
         )
@@ -564,7 +585,7 @@ fn each_close_option_allows_and_refuses_the_right_actors() {
             )
         };
         let (recorded, _) =
-            criteria::record_evidence(&tx, &Standalone, &others[0], &unnamed, 1_900).unwrap();
+            criteria::record_evidence(&tx, &Standalone, &owner(), &unnamed, 1_900).unwrap();
         assert_eq!(recorded.reference, "");
         let proven = store::ticket(&tx, &id).unwrap();
         if option == ClosePolicy::Evidence {
@@ -914,6 +935,332 @@ fn notify_reevaluates_only_tickets_linked_to_that_target() {
         store::ticket(&tx, &unlinked).unwrap().status,
         TicketStatus::Todo
     );
+    assert_eq!(
+        events::replay(&tx, &key()).unwrap(),
+        store::state(&tx, &key()).unwrap()
+    );
+    tx.commit().unwrap();
+}
+
+#[test]
+fn under_evidence_only_the_owner_or_engine_proves_a_criterion_without_checks() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = opened(dir.path());
+    let tx = store.transaction().unwrap();
+    project(&tx);
+    let agent = actor("agent:w1");
+    let theirs = ticket(&tx, &owner(), "The owner's ticket");
+    let done = criteria::add_criterion(&tx, &Standalone, &agent, &theirs, "done", 1_200).unwrap();
+    let own = ticket(&tx, &agent, "The agent's own ticket");
+    let mine =
+        criteria::add_criterion(&tx, &Standalone, &agent, &own, "Mine works", 1_210).unwrap();
+    let before = count(&tx, "tk_events");
+    for (id, criterion) in [(&theirs, &done), (&own, &mine)] {
+        let by_hand = criteria::set_criterion(
+            &tx,
+            &Standalone,
+            &agent,
+            id,
+            criterion.position,
+            criterion.version,
+            CriterionState::Met,
+            1_300,
+        );
+        assert_eq!(refused(by_hand), codes::CRITERION_NEEDS_CHECK);
+        assert_eq!(store::ticket(&tx, id).unwrap().status, TicketStatus::Todo);
+        assert_eq!(
+            criteria::criteria(&tx, id).unwrap()[0].state,
+            CriterionState::Open
+        );
+    }
+    assert_eq!(
+        count(&tx, "tk_events"),
+        before,
+        "a refused set writes nothing"
+    );
+
+    let by_engine = criteria::set_criterion(
+        &tx,
+        &Standalone,
+        &actor("engine:ci"),
+        &theirs,
+        done.position,
+        done.version,
+        CriterionState::Met,
+        1_400,
+    )
+    .unwrap();
+    assert_eq!(by_engine.criterion.state, CriterionState::Met);
+    assert_eq!(by_engine.ticket.status, TicketStatus::Done);
+    assert_eq!(by_engine.ticket.closed_by, Some(Actor::host("evidence")));
+    let by_owner = criteria::set_criterion(
+        &tx,
+        &Standalone,
+        &owner(),
+        &own,
+        mine.position,
+        mine.version,
+        CriterionState::Met,
+        1_410,
+    )
+    .unwrap();
+    assert_eq!(by_owner.ticket.status, TicketStatus::Done);
+
+    set_policy(&tx, PolicyKey::Close, "agents");
+    let later = ticket(&tx, &owner(), "Agents close this one");
+    let it = criteria::add_criterion(&tx, &Standalone, &agent, &later, "done", 1_500).unwrap();
+    let set = criteria::set_criterion(
+        &tx,
+        &Standalone,
+        &agent,
+        &later,
+        it.position,
+        it.version,
+        CriterionState::Met,
+        1_510,
+    )
+    .unwrap();
+    assert_eq!(set.criterion.state, CriterionState::Met);
+    assert_eq!(
+        set.ticket.status,
+        TicketStatus::Todo,
+        "only close = evidence closes on its own"
+    );
+    assert_eq!(
+        events::replay(&tx, &key()).unwrap(),
+        store::state(&tx, &key()).unwrap()
+    );
+    tx.commit().unwrap();
+}
+
+#[test]
+fn only_the_owner_rewrites_a_waived_criterion() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = opened(dir.path());
+    let tx = store.transaction().unwrap();
+    project(&tx);
+    let id = ticket(&tx, &owner(), "Waived docs");
+    let docs =
+        criteria::add_criterion(&tx, &Standalone, &owner(), &id, "Docs updated", 1_200).unwrap();
+    let ships =
+        criteria::add_criterion(&tx, &Standalone, &owner(), &id, "It ships", 1_210).unwrap();
+    let waived = criteria::set_criterion(
+        &tx,
+        &Standalone,
+        &owner(),
+        &id,
+        docs.position,
+        docs.version,
+        CriterionState::Waived,
+        1_220,
+    )
+    .unwrap();
+    assert_eq!(waived.ticket.status, TicketStatus::Todo);
+    let before = count(&tx, "tk_events");
+    for who in [actor("agent:w1"), actor("engine:ci")] {
+        let rewrite = criteria::edit_criterion(
+            &tx,
+            &Standalone,
+            &who,
+            &id,
+            docs.position,
+            waived.criterion.version,
+            "Security review passed",
+            1_300,
+        );
+        assert_eq!(refused(rewrite), codes::OWNER_ONLY, "{who}");
+    }
+    assert_eq!(
+        count(&tx, "tk_events"),
+        before,
+        "a refused edit writes nothing"
+    );
+    let kept = &criteria::criteria(&tx, &id).unwrap()[0];
+    assert_eq!(kept.text, "Docs updated");
+    assert_eq!(kept.state, CriterionState::Waived);
+
+    let open = criteria::edit_criterion(
+        &tx,
+        &Standalone,
+        &actor("agent:w1"),
+        &id,
+        ships.position,
+        ships.version,
+        "It ships to users",
+        1_400,
+    )
+    .unwrap();
+    assert_eq!(open.state, CriterionState::Open);
+    let owned = criteria::edit_criterion(
+        &tx,
+        &Standalone,
+        &owner(),
+        &id,
+        docs.position,
+        waived.criterion.version,
+        "Docs and changelog updated",
+        1_410,
+    )
+    .unwrap();
+    assert_eq!(
+        owned.state,
+        CriterionState::Waived,
+        "the owner waives the new text"
+    );
+    assert_eq!(owned.text, "Docs and changelog updated");
+    assert_eq!(
+        events::replay(&tx, &key()).unwrap(),
+        store::state(&tx, &key()).unwrap()
+    );
+    tx.commit().unwrap();
+}
+
+#[test]
+fn only_the_owner_or_an_engine_records_manual_or_ci_evidence_on_the_standalone_host() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = opened(dir.path());
+    let tx = store.transaction().unwrap();
+    project(&tx);
+    let agent = actor("agent:w1");
+    let id = ticket(&tx, &agent, "Proof an agent cannot give itself");
+    let kinds = [
+        (CheckKind::Manual, "look:release-notes"),
+        (CheckKind::Ci, "ci:build"),
+        (CheckKind::Test, "test:unit"),
+    ];
+    let mut positions = Vec::new();
+    for (kind, check) in kinds {
+        let criterion = criteria::add_criterion(
+            &tx,
+            &Standalone,
+            &agent,
+            &id,
+            &format!("Proven by {check}"),
+            1_200,
+        )
+        .unwrap();
+        criteria::add_check(
+            &tx,
+            &Standalone,
+            &agent,
+            &id,
+            criterion.position,
+            kind,
+            check,
+            1_210,
+        )
+        .unwrap();
+        positions.push(criterion.position);
+    }
+    let pass = |position: u32, (kind, check): (CheckKind, &str)| {
+        proof(&id, position, kind, check, EvidenceResult::Pass)
+    };
+    let written = events::history(&tx, &id).unwrap().len();
+
+    for (position, kind) in positions.iter().zip(kinds).take(2) {
+        let attempt =
+            criteria::record_evidence(&tx, &Standalone, &agent, &pass(*position, kind), 1_300);
+        assert_eq!(
+            refused(attempt),
+            codes::EVIDENCE_NOT_FOR_AGENTS,
+            "{}",
+            kind.0
+        );
+    }
+    assert_eq!(count(&tx, "tk_evidence"), 0);
+    assert_eq!(events::history(&tx, &id).unwrap().len(), written);
+    assert_eq!(store::ticket(&tx, &id).unwrap().status, TicketStatus::Todo);
+
+    let (_, tested) = criteria::record_evidence(
+        &tx,
+        &Standalone,
+        &agent,
+        &pass(positions[2], kinds[2]),
+        1_400,
+    )
+    .unwrap();
+    assert_eq!(tested.criterion.state, CriterionState::Met);
+    assert_eq!(tested.ticket.status, TicketStatus::Todo);
+    let (by_engine, built) = criteria::record_evidence(
+        &tx,
+        &Standalone,
+        &actor("engine:ci"),
+        &pass(positions[1], kinds[1]),
+        1_500,
+    )
+    .unwrap();
+    assert_eq!(by_engine.recorded_by, actor("engine:ci"));
+    assert_eq!(built.criterion.state, CriterionState::Met);
+    assert_eq!(built.ticket.status, TicketStatus::Todo);
+    let (by_owner, looked) = criteria::record_evidence(
+        &tx,
+        &Standalone,
+        &owner(),
+        &pass(positions[0], kinds[0]),
+        1_600,
+    )
+    .unwrap();
+    assert_eq!(by_owner.recorded_by, owner());
+    assert_eq!(looked.ticket.status, TicketStatus::Done);
+    assert_eq!(looked.ticket.closed_by, Some(Actor::host("evidence")));
+    assert_eq!(count(&tx, "tk_evidence"), 3);
+    assert_eq!(
+        events::replay(&tx, &key()).unwrap(),
+        store::state(&tx, &key()).unwrap()
+    );
+    tx.commit().unwrap();
+}
+
+#[test]
+fn a_host_refusing_evidence_leaves_no_row_even_for_the_owner() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = opened(dir.path());
+    let tx = store.transaction().unwrap();
+    project(&tx);
+    engine_tables(&tx);
+    tx.execute(
+        "INSERT INTO host_change_sets(project, id, accepted) VALUES ('CA', 'CS-1', 0)",
+        [],
+    )
+    .unwrap();
+    let id = ticket(&tx, &owner(), "Proven by the host's own change set");
+    let criterion =
+        criteria::add_criterion(&tx, &EngineLike, &owner(), &id, "The change lands", 1_200)
+            .unwrap();
+    criteria::add_check(
+        &tx,
+        &EngineLike,
+        &owner(),
+        &id,
+        criterion.position,
+        CheckKind::Change,
+        "CS-1",
+        1_210,
+    )
+    .unwrap();
+    let written = events::history(&tx, &id).unwrap().len();
+
+    for who in [owner(), actor("engine:landing"), actor("agent:w1")] {
+        let attempt = criteria::record_evidence(
+            &tx,
+            &EngineLike,
+            &who,
+            &proof(
+                &id,
+                criterion.position,
+                CheckKind::Change,
+                "CS-1",
+                EvidenceResult::Pass,
+            ),
+            1_300,
+        );
+        assert_eq!(refused(attempt), "change_from_host", "{who}");
+    }
+    assert_eq!(count(&tx, "tk_evidence"), 0);
+    assert_eq!(events::history(&tx, &id).unwrap().len(), written);
+    let ticket = store::ticket(&tx, &id).unwrap();
+    assert_eq!(ticket.status, TicketStatus::Todo);
+    assert_eq!(ticket.closed_by, None);
     assert_eq!(
         events::replay(&tx, &key()).unwrap(),
         store::state(&tx, &key()).unwrap()

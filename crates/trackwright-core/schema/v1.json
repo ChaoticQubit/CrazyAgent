@@ -54,7 +54,9 @@
     "check_exists",
     "check_unknown",
     "link_kind_unknown",
-    "notify_too_wide"
+    "notify_too_wide",
+    "criterion_needs_check",
+    "evidence_not_for_agents"
   ],
   "ops": {
     "check_add": {

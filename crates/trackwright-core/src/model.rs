@@ -56,6 +56,8 @@ pub mod codes {
     pub const CHECK_UNKNOWN: &str = "check_unknown";
     pub const LINK_KIND_UNKNOWN: &str = "link_kind_unknown";
     pub const NOTIFY_TOO_WIDE: &str = "notify_too_wide";
+    pub const CRITERION_NEEDS_CHECK: &str = "criterion_needs_check";
+    pub const EVIDENCE_NOT_FOR_AGENTS: &str = "evidence_not_for_agents";
 
     /// Every code above, so a host can map each core refusal to its own vocabulary.
     pub const ALL: &[&str] = &[
@@ -111,6 +113,8 @@ pub mod codes {
         CHECK_UNKNOWN,
         LINK_KIND_UNKNOWN,
         NOTIFY_TOO_WIDE,
+        CRITERION_NEEDS_CHECK,
+        EVIDENCE_NOT_FOR_AGENTS,
     ];
 }
 
