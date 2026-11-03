@@ -8734,8 +8734,11 @@ fn a_lead_runs_native_only_as_its_own_row_says_whatever_the_setting_says_later()
         team.native_lead(&project, spawned, AgentRole::Sub, "claude-code"),
         Ok(false)
     );
-    assert_eq!(team.stored_mode(native).as_deref(), Some("native"));
-    assert_eq!(team.stored_mode(spawned).as_deref(), Some("app_spawned"));
+    assert_eq!(team.stored_mode(native).unwrap().as_deref(), Some("native"));
+    assert_eq!(
+        team.stored_mode(spawned).unwrap().as_deref(),
+        Some("app_spawned")
+    );
     let planted = |harness: &str, parent: Option<i64>| -> i64 {
         fixture
             .connection

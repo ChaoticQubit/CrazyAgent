@@ -3272,7 +3272,7 @@ impl TeamRuntime {
                 Some(Some(callers)) if callers.intact() => continue,
                 Some(Some(callers)) => (Some(true), callers.pins()),
                 Some(None) => (Some(false), self.caller_pins.remove(id).unwrap_or_default()),
-                None if self.stored_mode(*id).as_deref()
+                None if self.stored_mode(*id).ok().flatten().as_deref()
                     == Some(crate::coord::settings::SubagentMode::Native.as_str()) =>
                 {
                     (None, Vec::new())
@@ -3315,8 +3315,9 @@ impl TeamRuntime {
     /// mailbox, split into the lead's part and its teammates' for a native lead, applies
     /// their reported activity and waits, answers their overlap questions and, at most once
     /// each `events::SCAN_EVERY` per project, marks read receipts from their transcripts. A
-    /// relay that fails is skipped until the next tick, like the agents' team calls. Takes
-    /// the project.
+    /// relay that fails is skipped until the next tick, like the agents' team calls, and so
+    /// is one whose agent's stored mode cannot be read, never served in the single layout a
+    /// native lead's teammates could write into. Takes the project.
     fn serve_relays(&mut self, project: &ProjectId) {
         let now = Instant::now();
         let receipts = self
@@ -3343,12 +3344,15 @@ impl TeamRuntime {
             if !crate::coord::relay::installed(&home) {
                 continue;
             }
-            let layout = if self.stored_mode(id).as_deref()
-                == Some(crate::coord::settings::SubagentMode::Native.as_str())
-            {
-                crate::coord::relay::Layout::Split
-            } else {
-                crate::coord::relay::Layout::Single
+            let layout = match self.stored_mode(id) {
+                Ok(mode)
+                    if mode.as_deref()
+                        == Some(crate::coord::settings::SubagentMode::Native.as_str()) =>
+                {
+                    crate::coord::relay::Layout::Split
+                }
+                Ok(_) => crate::coord::relay::Layout::Single,
+                Err(_) => continue,
             };
             let _ = crate::coord::relay::serve(
                 &self.connection,
@@ -3931,9 +3935,9 @@ impl TeamRuntime {
                         && !w.stopping
                         && !paused.contains(&w.connection)
                         && pin.map_or(w.parent == parent, |pin| pin == **id)
-                        && mode
-                            .as_deref()
-                            .is_none_or(|mode| self.stored_mode(**id).as_deref() == Some(mode))
+                        && mode.as_deref().is_none_or(|mode| {
+                            self.stored_mode(**id).ok().flatten().as_deref() == Some(mode)
+                        })
                 })
                 .map(|(id, _)| *id);
             let mut woken_fresh = false;
@@ -4946,17 +4950,16 @@ impl TeamRuntime {
         super::caller::Callers::bind(&socket, pinned)
     }
 
-    /// The sub-agent mode name stored on an agent's row, if any. Takes the agent. Returns
-    /// the name, or None for a row without one or a failed read.
-    fn stored_mode(&self, id: i64) -> Option<String> {
+    /// The sub-agent mode name stored on an agent's row. Takes the agent. Returns the name,
+    /// None for a row without one, or the SQLite failure.
+    fn stored_mode(&self, id: i64) -> Result<Option<String>, EngineError> {
         self.connection
             .query_row("SELECT mode FROM team_agents WHERE id=?1", [id], |row| {
                 row.get::<_, Option<String>>(0)
             })
             .optional()
-            .ok()
-            .flatten()
-            .flatten()
+            .map(Option::flatten)
+            .map_err(error)
     }
 
     /// Tells whether a team agent was started by a lead agent rather than by the master,
