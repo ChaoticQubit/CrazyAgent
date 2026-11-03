@@ -580,6 +580,75 @@ fn left_behind(root: &Path) -> (usize, i64, usize) {
     (tickets, marks, asked)
 }
 
+/// Reads the ticket settings view of the app (None) or project `alpha` over the owner
+/// protocol. Inputs: the engine root and the project. Output: the view.
+fn viewed(root: &Path, project: Option<&str>) -> TicketSettingsView {
+    let body = json!({"tracker": {"kind": "settings", "project": project}});
+    match send(root, body).unwrap() {
+        Reply::Settings { settings } => settings,
+        other => panic!("expected the settings view, got {other:?}"),
+    }
+}
+
+#[test]
+fn the_test_settings_save_at_app_and_project_scope_and_run_writers_stays_locked() {
+    let (_tmp, root, _folder) = engine();
+    attached(&root);
+    let app = json!({"tracker": {"kind": "save_settings", "project": null,
+        "values": {"run_retention": "prune_age", "skipped_counts": "neutral"}, "version": 0}});
+    match send(&root, app).unwrap() {
+        Reply::Saved {
+            saved: SettingsSaved::Saved { version },
+        } => assert_eq!(version, 1),
+        other => panic!("expected a saved version, got {other:?}"),
+    }
+    let values = json!({
+        "test_evidence": "plan",
+        "skipped_counts": "fail",
+        "case_protected_visibility": "full"
+    });
+    assert_eq!(saved(&root, values, 0), 1);
+
+    let mine = viewed(&root, Some(PROJECT));
+    assert_eq!(mine.values.test_evidence, Some(TestEvidence::Plan));
+    assert_eq!(mine.values.run_retention, None);
+    let policy = mine.effective.policy;
+    assert_eq!(policy.test_evidence, TestEvidence::Plan);
+    assert_eq!(policy.skipped_counts, SkippedCounts::Fail);
+    assert_eq!(
+        policy.case_protected_visibility,
+        CaseProtectedVisibility::Full
+    );
+    assert_eq!(policy.run_retention, RunRetention::PruneAge, "from the app");
+    assert_eq!(policy.run_writers, RunWriters::EngineOnly);
+    let core = op(&root, "policy_get", json!({"project": KEY}));
+    let held = |key: &str| {
+        let entries = core["data"]["settings"].as_array().unwrap();
+        let entry = entries.iter().find(|entry| entry["key"] == key);
+        entry.unwrap_or_else(|| panic!("{key} in {core}"))["value"].clone()
+    };
+    assert_eq!(held("test_evidence"), "plan");
+    assert_eq!(held("skipped_counts"), "fail");
+    assert_eq!(held("case_protected_visibility"), "full");
+    assert_eq!(held("run_retention"), "prune_age");
+    assert_eq!(held("run_writers"), "engine_only");
+
+    let writers = mine
+        .choices
+        .iter()
+        .find(|choice| choice.key == "run_writers")
+        .unwrap();
+    assert_eq!(writers.options, [json!("engine_only")]);
+    assert_eq!(writers.proposed, json!("engine_only"));
+    let locked = json!({"tracker": {"kind": "save_settings", "project": PROJECT,
+        "values": {"run_writers": "any"}, "version": 1}});
+    assert_eq!(
+        send(&root, locked).unwrap_err().0,
+        "tracker_request_invalid"
+    );
+    assert_eq!(viewed(&root, Some(PROJECT)).version, 1);
+}
+
 #[test]
 fn an_on_request_project_imports_nothing_after_planning() {
     let (_tmp, root, folder) = engine();
