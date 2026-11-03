@@ -688,7 +688,9 @@ fn named<T: Serialize>(all: &[T]) -> Vec<serde_json::Value> {
 }
 
 /// Every ticket setting's choices: the core policy keys in their order, then the engine's
-/// `manual_evidence` and `ci_evidence`. Output: every setting, one per core key and two.
+/// `manual_evidence` and `ci_evidence`. `run_writers` lists only the value the host locks
+/// it to, so it shows locked and no save can change it. Output: every setting, one per core
+/// key and two.
 fn choices() -> Vec<SettingChoices> {
     let proposed =
         serde_json::to_value(TicketSettings::default()).expect("settings are plain data");
@@ -704,7 +706,7 @@ fn choices() -> Vec<SettingChoices> {
             PolicyKey::TestEvidence => named(TestEvidence::ALL),
             PolicyKey::SkippedCounts => named(SkippedCounts::ALL),
             PolicyKey::CaseProtectedVisibility => named(CaseProtectedVisibility::ALL),
-            PolicyKey::RunWriters => named(RunWriters::ALL),
+            PolicyKey::RunWriters => named(&[RunWriters::EngineOnly]),
             PolicyKey::RunRetention => named(RunRetention::ALL),
         };
         all.push(SettingChoices {
@@ -729,6 +731,10 @@ fn choices() -> Vec<SettingChoices> {
         });
     }
     assert_eq!(all.len(), PolicyKey::ALL.len() + 2);
+    assert_eq!(
+        crate::tracker::host::locked(PolicyKey::RunWriters),
+        Some(RunWriters::EngineOnly.as_str())
+    );
     assert!(
         all.iter()
             .all(|choice| choice.options.contains(&choice.proposed))
