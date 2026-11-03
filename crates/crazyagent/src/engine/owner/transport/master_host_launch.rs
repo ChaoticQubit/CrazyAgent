@@ -129,6 +129,7 @@ impl OwnerRuntimeHandle {
             repository: &prepared.repository,
             worktree: &prepared.cwd,
             policy: &prepared.agent_policy,
+            hidden: &prepared.hidden_paths,
         };
         let engine = if prepared.tools {
             Some(self.registered_engine_executable()?)
@@ -266,6 +267,7 @@ pub(super) struct MasterTurnPlace<'a> {
     pub(super) repository: &'a Path,
     pub(super) worktree: &'a Path,
     pub(super) policy: &'a AgentPolicy,
+    pub(super) hidden: &'a [PathBuf],
 }
 
 /// One master turn's command and Seatbelt boundary, the home both name, the account
@@ -318,6 +320,7 @@ pub(super) fn claude_master_turn(
                 executable,
                 &connection.endpoint,
                 place.policy,
+                place.hidden,
             )?,
             None,
         ),
@@ -332,6 +335,7 @@ pub(super) fn claude_master_turn(
                 &connection.endpoint,
                 engine,
                 place.policy,
+                place.hidden,
             )?;
             let drop = sandbox
                 .sandbox()
@@ -393,6 +397,7 @@ pub(super) fn codex_master_turn(
                 executable,
                 &connection.endpoint,
                 place.policy,
+                place.hidden,
             )?,
             home,
             credential,
@@ -409,6 +414,7 @@ pub(super) fn codex_master_turn(
         &connection.endpoint,
         engine,
         place.policy,
+        place.hidden,
     )?;
     let drop = sandbox
         .sandbox()
@@ -798,8 +804,9 @@ fn delegate_servers(
 /// master writes only in its leased worktree, the account's managed home and the turn's own
 /// temp folder; it reads the project repository, never writing its refs, reflogs or other
 /// worktrees' admin folders, since the engine makes every ref move, and it reads the harness
-/// install folder and the turn directory, and reaches only its model endpoint (HTTPS for a
-/// native account). Output: the installed sandbox, or `master_sandbox_unavailable` on a refusal.
+/// install folder and the turn directory, and reaches only its model endpoint's port, on
+/// loopback for a local model, otherwise on any host (443 for a native account). Output:
+/// the installed sandbox, or `master_sandbox_unavailable` on a refusal.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn master_sandbox(
@@ -811,6 +818,7 @@ pub(super) fn master_sandbox(
     executable: &Path,
     endpoint: &ModelEndpoint,
     policy: &AgentPolicy,
+    hidden: &[PathBuf],
 ) -> Result<InstalledSandbox, EngineError> {
     turn_sandbox(
         root,
@@ -822,6 +830,7 @@ pub(super) fn master_sandbox(
         endpoint,
         None,
         policy,
+        hidden,
     )
 }
 
@@ -842,6 +851,7 @@ pub(super) fn master_tools_sandbox(
     endpoint: &ModelEndpoint,
     engine: &Path,
     policy: &AgentPolicy,
+    hidden: &[PathBuf],
 ) -> Result<InstalledSandbox, EngineError> {
     turn_sandbox(
         root,
@@ -853,6 +863,7 @@ pub(super) fn master_tools_sandbox(
         endpoint,
         Some(engine),
         policy,
+        hidden,
     )
 }
 
@@ -868,10 +879,12 @@ fn turn_sandbox(
     endpoint: &ModelEndpoint,
     engine: Option<&Path>,
     policy: &AgentPolicy,
+    hidden: &[PathBuf],
 ) -> Result<InstalledSandbox, EngineError> {
     if policy.access.unavailable().is_some() {
         return Err(failure("agent_access_unavailable"));
     }
+    crate::sandbox::hidden_paths::none_tracked(repository, hidden).map_err(failure)?;
     let refused = |_: SandboxError| failure("master_sandbox_unavailable");
     let remote = match endpoint {
         ModelEndpoint::Native {} => SandboxRemote::AnyHost(HTTPS_PORT),
@@ -915,6 +928,10 @@ fn turn_sandbox(
     .and_then(|sandbox| sandbox.allow_tools(&tools))
     .and_then(|sandbox| sandbox.guard_engine(&root.path))
     .map_err(refused)?;
+    let sandbox = hidden
+        .iter()
+        .try_fold(sandbox, |sandbox, folder| sandbox.hide(folder))
+        .map_err(refused)?;
     let installed =
         InstalledSandbox::install(sandbox, &runtime.path.join(MASTER_PROFILE)).map_err(refused)?;
     let installed = if policy.access == AgentAccess::Full {
@@ -943,6 +960,7 @@ fn turn_sandbox(
 /// Takes the owner root, turn reference, repository, worktree, home, executable and
 /// endpoint, all unused. Returns `master_sandbox_unavailable`.
 #[cfg(not(unix))]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn master_sandbox(
     _root: &Root,
     _runtime_ref: &RequestId,
@@ -952,6 +970,7 @@ pub(super) fn master_sandbox(
     _executable: &Path,
     _endpoint: &ModelEndpoint,
     _policy: &AgentPolicy,
+    _hidden: &[PathBuf],
 ) -> Result<InstalledSandbox, EngineError> {
     Err(failure("master_sandbox_unavailable"))
 }
@@ -971,6 +990,7 @@ pub(super) fn master_tools_sandbox(
     _endpoint: &ModelEndpoint,
     _engine: &Path,
     _policy: &AgentPolicy,
+    _hidden: &[PathBuf],
 ) -> Result<InstalledSandbox, EngineError> {
     Err(failure("master_sandbox_unavailable"))
 }
@@ -1369,6 +1389,7 @@ mod tests {
             &executable,
             &ModelEndpoint::Native {},
             &AgentPolicy::default(),
+            &[],
         )
         .unwrap();
         let turn = base.join(format!("master-runtime-{}", runtime_ref.as_str()));
@@ -1409,7 +1430,7 @@ mod tests {
     }
 
     #[test]
-    fn the_live_master_keeps_the_model_only_network_under_every_project_choice() {
+    fn the_live_master_keeps_only_its_model_port_under_every_project_choice() {
         use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
         let temporary = private_root();
         let base = temporary.path().canonicalize().unwrap();
@@ -1440,6 +1461,7 @@ mod tests {
                 &executable,
                 &native,
                 &policy,
+                &[],
             )
             .unwrap();
             let profile = sandbox.sandbox().profile();
@@ -1488,6 +1510,7 @@ mod tests {
                 &executable,
                 &native,
                 &policy,
+                &[],
             )
             .unwrap();
             assert!(!sandbox.is_unconfined(), "{access:?}");
@@ -1523,6 +1546,7 @@ mod tests {
             &executable,
             &native,
             &AgentPolicy::default(),
+            &[],
         )
         .unwrap();
         let turn = base.join(format!("master-runtime-{}", runtime_ref.as_str()));
@@ -1692,6 +1716,7 @@ mod tests {
                 &executable,
                 &native,
                 &AgentPolicy::default(),
+                &[],
             )
             .is_err()
         );
@@ -1719,6 +1744,7 @@ mod tests {
                     &executable,
                     endpoint,
                     &AgentPolicy::default(),
+                    &[],
                 )
                 .unwrap_err()
                 .0,
@@ -1744,6 +1770,7 @@ mod tests {
             &executable,
             &endpoint,
             &AgentPolicy::default(),
+            &[],
         )
         .unwrap()
         .sandbox()
@@ -1751,6 +1778,123 @@ mod tests {
         assert!(text.contains("(allow network-outbound (remote ip \"localhost:11434\"))"));
         assert!(!text.contains("*:443"));
         assert!(!text.contains("(allow network*)"));
+    }
+
+    /// A hidden folder inside the project reaches the master's own boundary: the installed
+    /// master profile denies it and a real sandboxed read of a file inside it is refused,
+    /// while a plain file elsewhere in the repository stays readable.
+    #[test]
+    fn master_sandbox_hides_a_listed_folder_from_a_real_child() {
+        use std::process::{Command, Stdio};
+        let temporary = private_root();
+        let base = temporary.path().canonicalize().unwrap();
+        let root = Root::open(&base).unwrap();
+        let repository = base.join("repository");
+        let worktree = base.join("worktrees").join("lease");
+        let home = base.join("profile-home");
+        let install = base.join("install").join("bin");
+        let hidden = repository.join("secret");
+        for directory in [&repository, &worktree, &home, &install, &hidden] {
+            private_directory(directory);
+        }
+        std::fs::write(hidden.join("key.txt"), "owner secret\n").unwrap();
+        std::fs::write(repository.join("open.txt"), "open\n").unwrap();
+        let executable = install.join("codex");
+        std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (runtime_ref, _, _) = allocate_master_capture(&root).unwrap();
+        let sandbox = master_sandbox(
+            &root,
+            &runtime_ref,
+            &repository,
+            &worktree,
+            &home,
+            &executable,
+            &ModelEndpoint::Native {},
+            &AgentPolicy::default(),
+            std::slice::from_ref(&hidden),
+        )
+        .unwrap();
+        assert!(
+            sandbox
+                .sandbox()
+                .profile()
+                .contains(hidden.to_str().unwrap())
+        );
+        let read = |target: &Path| {
+            let mut harness = Command::new("/bin/sh");
+            harness
+                .arg("-c")
+                .arg("cat \"$0\"")
+                .arg(target)
+                .current_dir(&worktree);
+            let mut child = sandbox.wrap(&harness).unwrap();
+            child
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            crate::spawn_gate::status(&mut child).unwrap().success()
+        };
+        assert!(read(&repository.join("open.txt")));
+        assert!(!read(&hidden.join("key.txt")));
+        assert_eq!(
+            std::fs::read_to_string(hidden.join("key.txt")).unwrap(),
+            "owner secret\n"
+        );
+    }
+
+    /// A master launch refuses a hidden folder git now tracks: the same none_tracked gate the
+    /// team and research launches use, here on the master turn sandbox, fails the launch with
+    /// the plain code rather than install a profile that promises to hide a file in history.
+    #[test]
+    fn master_sandbox_refuses_a_folder_git_now_tracks() {
+        use std::process::{Command, Stdio};
+        let temporary = private_root();
+        let base = temporary.path().canonicalize().unwrap();
+        let root = Root::open(&base).unwrap();
+        let repository = base.join("repository");
+        let worktree = base.join("worktrees").join("lease");
+        let home = base.join("profile-home");
+        let install = base.join("install").join("bin");
+        let hidden = repository.join("secret");
+        for directory in [&repository, &worktree, &home, &install, &hidden] {
+            private_directory(directory);
+        }
+        std::fs::write(hidden.join("key.txt"), "tracked\n").unwrap();
+        let git = |args: &[&str]| {
+            let mut command = Command::new("/usr/bin/git");
+            command
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .current_dir(&repository)
+                .args(args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            assert!(crate::spawn_gate::status(&mut command).unwrap().success());
+        };
+        git(&["init", "-q"]);
+        git(&["add", "secret/key.txt"]);
+        let executable = install.join("codex");
+        std::fs::write(&executable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let (runtime_ref, _, _) = allocate_master_capture(&root).unwrap();
+        assert_eq!(
+            master_sandbox(
+                &root,
+                &runtime_ref,
+                &repository,
+                &worktree,
+                &home,
+                &executable,
+                &ModelEndpoint::Native {},
+                &AgentPolicy::default(),
+                std::slice::from_ref(&hidden),
+            )
+            .unwrap_err()
+            .0,
+            "hidden_path_tracked"
+        );
     }
 
     /// A tools-off master in a real git worktree lease reads the repository's refs but
@@ -1839,6 +1983,7 @@ mod tests {
             &executable,
             &ModelEndpoint::Native {},
             &AgentPolicy::default(),
+            &[],
         )
         .unwrap();
         let run = |program: &Path, args: &[&str]| {
@@ -1981,6 +2126,7 @@ mod tests {
             &ModelEndpoint::Native {},
             &engine,
             &AgentPolicy::default(),
+            &[],
         )
         .unwrap();
         let turn = base.join(format!("master-runtime-{}", runtime_ref.as_str()));

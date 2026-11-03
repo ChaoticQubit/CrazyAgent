@@ -74,12 +74,31 @@ test("Settings says beside the level choice that lowering it stops agents runnin
   assert.ok(tui.includes(`"${access.LOWERING_STOPS_AGENTS}"`));
 });
 
-test("None explains the Port 443 overlap and Full access annotates the network choice as moot", () => {
+test("None says it limits agents to their model's port, not yet the model host, and Full access annotates the network choice as moot", () => {
   const none = access.NETWORK_CHOICES.find((choice) => choice.network === "none");
-  assert.match(none.help, /same as Port 443 only/);
+  assert.equal(none.help, "None limits agents to their model's port: port 443 to any host for a hosted model, or only the local model's port. It does not yet limit them to the model host. The plugin check reaches nothing.");
+  for (const choice of access.NETWORK_CHOICES) assert.doesNotMatch(choice.help, /only the model|port 443 \(HTTPS to any host\)/);
+  const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/project_access.rs", import.meta.url), "utf8");
+  assert.ok(tui.includes(`"${none.help}"`), "the TUI shows the same None line");
   assert.equal(access.NETWORK_IGNORED_UNDER_FULL, "Full access runs agents without a sandbox, so this choice does not apply.");
   const card = readFileSync(new URL("../src/screens/project/access.tsx", import.meta.url), "utf8");
   assert.match(card, /access === "full"[^\n]*NETWORK_IGNORED_UNDER_FULL/);
   const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
   assert.match(page, /<NetworkChoices[^>]*access=\{access\}/);
+});
+
+test("Hiding a folder takes an absolute path, rejects duplicates and caps at the engine's limit", () => {
+  assert.deepEqual(settings.addHiddenPath([], "/Users/you/project/secrets"), { paths: ["/Users/you/project/secrets"] });
+  assert.ok("error" in settings.addHiddenPath([], "secrets"));
+  assert.ok("error" in settings.addHiddenPath([], "/Users/you/a\"b"));
+  assert.ok("error" in settings.addHiddenPath([], "/Users/you/a\\b"));
+  assert.ok("error" in settings.addHiddenPath([], "/Users/you/a'b"));
+  assert.ok("error" in settings.addHiddenPath(["/a"], "/a"));
+  const full = Array.from({ length: settings.HIDDEN_PATHS_MAX }, (_, index) => `/dir${index}`);
+  assert.ok("error" in settings.addHiddenPath(full, "/one-more"));
+  const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
+  assert.match(page, /<HiddenSection data=\{data\} \/>/);
+  for (const code of ["hidden_paths_too_many", "hidden_paths_invalid", "hidden_path_not_absolute", "hidden_path_not_plain", "hidden_path_missing", "hidden_path_not_folder", "hidden_path_outside_project", "hidden_path_tracked", "hidden_path_unchecked"]) {
+    assert.ok(api.KNOWN_ERROR_CODES.includes(code), code);
+  }
 });
