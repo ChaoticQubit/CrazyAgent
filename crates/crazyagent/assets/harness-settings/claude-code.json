@@ -1352,7 +1352,7 @@
     {
       "key": "cleanupPeriodDays",
       "label": "Cleanup period days",
-      "help": "Set how many days Claude Code keeps session transcripts and other application data before deleting them. Claude Code runs the deletion as a background sweep after a session starts, as long as it can safely determine the retention period. The sweep deletes transcripts without showing a message, so a session you haven't used for longer than the retention period no longer appears in the `/resume` picker.",
+      "help": "Set how many days Claude Code keeps session transcripts and other application data before deleting them. Claude Code runs the deletion as a background sweep after a session starts, as long as it can safely determine the retention period. The sweep deletes transcripts without showing a message, so a session you haven't used for longer than the retention period no longer appears in the `/resume` picker. CrazyAgent loses them too: its past-conversation search and master resume read those transcripts.",
       "type": "integer",
       "default": 30,
       "min": 1,

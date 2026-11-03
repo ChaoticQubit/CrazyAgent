@@ -147,10 +147,10 @@ struct Process {
 
 /// The files one launch wrote into its agent home, whether a headless Claude run keeps its
 /// transcript, whether its generated plugin holds hooks, the Claude Code tool names the
-/// owner switched off, whether the lead runs its own agent team, the owner's settings for its harness, and the
-/// lock that keeps a
-/// second launch out of that home. Dropping it deletes every file holding a secret and the
-/// copied skills and hooks, unless `keep` left them to a pane that still runs.
+/// owner switched off, whether the lead runs its own agent team, the owner's settings for
+/// its harness, and the lock that keeps a second launch out of that home. Dropping it
+/// deletes every file holding a secret and the copied skills and hooks, unless `keep` left
+/// them to a pane that still runs.
 #[derive(Debug)]
 pub struct Installed {
     arguments: Vec<OsString>,
