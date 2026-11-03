@@ -319,6 +319,7 @@ fn live_calls_keep_only_bounded_plain_arguments_and_a_valid_role() {
             harness: Some("codex".into()),
             role: Some("page-writer".into()),
             mode: None,
+            ticket: None,
         })
     );
     assert_eq!(
@@ -328,6 +329,7 @@ fn live_calls_keep_only_bounded_plain_arguments_and_a_valid_role() {
             harness: None,
             role: None,
             mode: None,
+            ticket: None,
         })
     );
     for role in ["@", "???", &"r".repeat(65)] {
@@ -466,6 +468,7 @@ fn the_engine_checks_again_every_call_read_from_a_mailbox() {
         harness: Some("Codex".into()),
         role: None,
         mode: None,
+        ticket: None,
     };
     assert_eq!(checked(planted), Err(CALL_INVALID));
     let planted = Call::UpdateWork {
@@ -484,6 +487,7 @@ fn the_engine_checks_again_every_call_read_from_a_mailbox() {
         harness: None,
         role: Some("Page".into()),
         mode: None,
+        ticket: None,
     };
     assert_eq!(checked(planted), Err(CALL_INVALID));
 }
@@ -701,7 +705,12 @@ fn the_live_server_needs_an_absolute_plain_mailbox_and_lists_the_tools_left_on()
         .filter(|name| *name != STOP_TOOL)
         .chain(QUESTION_TOOLS)
         .collect();
-    assert_eq!(names, left_on);
+    let tickets: Vec<Value> = tracker::tools();
+    assert_eq!(names[..left_on.len()], left_on[..]);
+    assert_eq!(names.len(), left_on.len() + tickets.len());
+    for (name, ticket) in names[left_on.len()..].iter().zip(&tickets) {
+        assert_eq!(ticket["name"], *name);
+    }
     let tools = answer["result"]["tools"].as_array().unwrap();
     let ask = left_on.len() - QUESTION_TOOLS.len();
     assert_eq!(tools[ask], ask_tool());
@@ -976,6 +985,7 @@ fn a_spawn_names_its_lead_s_mode_only_as_native_or_app_spawned() {
             harness: None,
             role: None,
             mode: None,
+            ticket: None,
         })
     );
     for refused in [json!("teams"), json!(3), json!(["native"])] {
@@ -986,6 +996,7 @@ fn a_spawn_names_its_lead_s_mode_only_as_native_or_app_spawned() {
         harness: Some("claude-code".into()),
         role: None,
         mode: Some(SubagentMode::Native),
+        ticket: None,
     };
     assert_eq!(checked(planted.clone()), Ok(planted));
     let line =

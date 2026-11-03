@@ -5741,9 +5741,10 @@ impl TeamRuntime {
     /// Reads what one team agent launch receives: the project context and approved
     /// memories, the approved skills and MCP servers with tools on, the engine's `delegate`
     /// tool for a master with tools on, served by the captured engine while the file at its
-    /// path is still that one, and the team's skill and server names for a master with tools
-    /// off. Takes the project, the agent id, its role, tools switch and git layout, which
-    /// picks how its work lands.
+    /// path is still that one, the ticket rules after a live master's or sub-agent's team
+    /// tools, and the team's skill and server names for a master with tools off. Takes the
+    /// project, the agent id, its role, tools switch and git layout, which picks how its
+    /// work lands.
     fn context(
         &self,
         project: &ProjectId,
@@ -5781,6 +5782,7 @@ impl TeamRuntime {
                 })?;
                 context
                     .with_live_team_tool(engine, &self.mailbox(id), &off)
+                    .and_then(|context| context.with_ticket_rules(&self.connection, project))
                     .map_err(unread)
             }
             Some(engine) if master && tools => {
@@ -5803,6 +5805,7 @@ impl TeamRuntime {
                 })?;
                 context
                     .with_agent_team_tool(engine, &self.mailbox(id), &off)
+                    .and_then(|context| context.with_ticket_rules(&self.connection, project))
                     .map_err(unread)
             }
             _ => Ok(context),

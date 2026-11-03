@@ -953,16 +953,23 @@ fn answer(
             harness,
             role,
             mode,
+            ticket,
         } => {
             return delegate(
                 connection,
                 answering,
                 &task,
-                harness.as_deref(),
-                role.as_deref(),
+                (harness.as_deref(), role.as_deref()),
                 mode,
+                ticket.as_deref(),
             );
         }
+        Call::Ticket { op, arguments } => tool::tracker::answer(
+            connection,
+            tool::tracker::Caller::Master(master),
+            op,
+            &arguments,
+        ),
         Call::Stop { agent } => return work::stop(connection, answering, master, true, &agent),
         Call::Merge { agent } => return merge::merge(connection, answering, &agent),
         call @ (Call::Sessions { .. } | Call::Session { .. }) => {
@@ -1015,14 +1022,21 @@ pub(super) fn answer_sub(
             harness,
             role,
             mode: None,
+            ticket,
         } => lead_delegate(
             connection,
             answering,
             agent,
             &task,
-            harness.as_deref(),
-            role.as_deref(),
+            (harness.as_deref(), role.as_deref()),
+            ticket.as_deref(),
         )?,
+        Call::Ticket { op, arguments } => tool::tracker::answer(
+            connection,
+            tool::tracker::Caller::Agent(agent),
+            op,
+            &arguments,
+        ),
         Call::Stop { agent: name } => work::stop(connection, answering, agent, false, &name)?,
         Call::Merge { agent: name } => work::lead_merge(connection, answering, agent, &name)?,
         call @ (Call::Ask { .. } | Call::RecordAnswer { .. }) => {
@@ -1144,16 +1158,17 @@ fn is_worker(
 
 /// Starts a worker of a lead (N1) when Sub-agent depth and Max teammates per harness allow
 /// it (DEC-104 K8): admitted as the master's task would be, only for a harness kind with a
-/// signed-in account, cut from the lead's commit and reporting back to the lead. Takes the
-/// database, what the answers need, the lead, the task, harness and role. Returns the
-/// sentence the lead reads and whether it is a refusal, or a SQLite failure.
+/// signed-in account, cut from the lead's commit and reporting back to the lead, and linked
+/// to the ticket the call names (TI-3). Takes the database, what the answers need, the
+/// lead, the task, harness and role, and the ticket. Returns the sentence the lead reads
+/// and whether it is a refusal, which wrote nothing, or a SQLite failure.
 fn lead_delegate(
     connection: &mut Connection,
     answering: &Answering<'_>,
     lead: i64,
     task: &str,
-    harness: Option<&str>,
-    role: Option<&str>,
+    (harness, role): (Option<&str>, Option<&str>),
+    ticket: Option<&str>,
 ) -> Result<(String, bool), EngineError> {
     let project = &answering.stored.project_id;
     let tx = connection
@@ -1226,6 +1241,11 @@ fn lead_delegate(
         && super::names::set_task_role(&tx, project, id, role, 0)?.is_err()
     {
         return Err(state("team_task_role_stale"));
+    }
+    if let Some(ticket) = ticket
+        && let Err(reason) = tool::tracker::link_task(&tx, project, ticket, id, now_ms())?
+    {
+        return Ok((format!("Not started: {reason}."), true));
     }
     tx.commit().map_err(state)?;
     Ok((
@@ -1642,13 +1662,18 @@ fn unlogged(problem: &EngineError) -> String {
     )
 }
 
+/// Admits the task a live master's `spawn` names at once, with its role and mode, and
+/// links it to the ticket the call names (TI-3), all in one transaction. Takes the
+/// database, what the answers need, the task, its harness and role, the mode and the
+/// ticket. Returns the sentence the master reads and whether it is a refusal, which wrote
+/// nothing, or a SQLite failure.
 fn delegate(
     connection: &mut Connection,
     answering: &Answering<'_>,
     task: &str,
-    harness: Option<&str>,
-    role: Option<&str>,
+    (harness, role): (Option<&str>, Option<&str>),
     mode: Option<crate::coord::settings::SubagentMode>,
+    ticket: Option<&str>,
 ) -> Result<(String, bool), EngineError> {
     let project = &answering.stored.project_id;
     let tx = connection
@@ -1703,6 +1728,11 @@ fn delegate(
             params![id, mode.as_str()],
         )
         .map_err(state)?;
+    }
+    if let Some(ticket) = ticket
+        && let Err(reason) = tool::tracker::link_task(&tx, project, ticket, id, now_ms())?
+    {
+        return Ok((format!("Not handed off: {reason}."), true));
     }
     tx.commit().map_err(state)?;
     let waiting = if status == "needs_pool" {
