@@ -1,3 +1,7 @@
+pub mod events;
 pub mod host;
 pub mod model;
+#[path = "schema_sql.rs"]
+pub mod schema;
+pub mod store;
 pub mod text;
