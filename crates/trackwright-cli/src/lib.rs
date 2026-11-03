@@ -3,6 +3,8 @@
 mod args;
 mod human;
 mod locate;
+pub mod tui;
+pub mod views;
 
 pub use args::ARGUMENTS_MAX;
 
