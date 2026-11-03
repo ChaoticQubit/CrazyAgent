@@ -2764,7 +2764,7 @@ fn a_conversation_master_s_delegate_calls_reach_the_team_queue_and_refusals_leav
     let turn = RequestId::new("conversation-turn").unwrap();
     let mut admitted = Vec::new();
     for project in teams.iter().chain([&unplanned]) {
-        tool::serve(calls.as_bytes(), Vec::new(), &drop).unwrap();
+        tool::serve(calls.as_bytes(), Vec::new(), &drop, None, &[]).unwrap();
         let proposed = tool::take(&drop);
         assert_eq!(proposed.len(), 2);
         assert!(!drop.exists());

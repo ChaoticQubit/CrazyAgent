@@ -284,7 +284,14 @@ struct Recorded {
 /// Serves the master's `delegate` tool as an MCP server over stdio until its client closes input.
 /// Takes the client's input and output and the absolute drop file in the master's private temporary folder.
 /// Returns an input or output failure; each call only records a proposal, which the engine admits after the turn.
-pub fn serve(input: impl BufRead, output: impl Write, drop: &Path) -> std::io::Result<()> {
+pub fn serve(
+    input: impl BufRead,
+    output: impl Write,
+    drop: &Path,
+    mailbox: Option<&Path>,
+    off: &[String],
+) -> std::io::Result<()> {
+    let _ = (mailbox, off);
     if !drop.is_absolute() {
         return Err(std::io::Error::other(
             "the drop file must be an absolute path",

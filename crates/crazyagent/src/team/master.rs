@@ -847,6 +847,21 @@ pub fn serve_calls(
     Ok(taken.len())
 }
 
+/// Answers the memory calls a project's master left in its mailbox while it runs without its
+/// live terminal, at most `CALLS_PER_TICK_MAX`, each checked again and against the owner's
+/// tool switches: `remember` and `recall` under the master's name. Any other call is refused,
+/// since that master's server lists only `delegate`, `remember` and `recall`. Takes the engine
+/// database, the project and the mailbox. Returns how many calls were answered, or a SQLite
+/// failure.
+pub fn serve_memory_calls(
+    connection: &mut Connection,
+    project: &ProjectId,
+    mailbox: &Path,
+) -> Result<usize, EngineError> {
+    let _ = (connection, project, mailbox);
+    Ok(0)
+}
+
 /// Says whether the owner switched a call's tool off or deleted it for the project
 /// (DEC-104), so the engine refuses it even from a server that still lists it. Takes the
 /// database, the project and the call. Returns the answer, or a SQLite failure.

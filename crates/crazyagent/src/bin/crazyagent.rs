@@ -109,6 +109,8 @@ fn main() -> ExitCode {
                 io::stdin().lock(),
                 io::stdout().lock(),
                 Path::new(&args[1]),
+                None,
+                &[],
             )
             .map_err(|e| e.to_string())
         };
