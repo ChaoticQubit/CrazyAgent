@@ -361,3 +361,68 @@ fn answering_a_closed_or_other_project_question_is_refused() {
         assert_eq!(action.validate().unwrap_err().0, "team_answer_invalid");
     }
 }
+
+/// Every inbox question names whom its asker meant it for (OP-50): Me for a question to
+/// the owner, Master for one the master asks for itself, and the asker's lead for a lead
+/// question while the project sends lead questions to the owner.
+#[test]
+fn each_inbox_question_names_whom_its_asker_meant_it_for() {
+    use crate::coord::settings::{CoordSettings, QuestionsTo};
+    let engine = Engine::new();
+    let project = engine.project.clone();
+    let master = engine.agent_in(&project, "master", "working");
+    let lead = engine.agent("working");
+    let worker = engine.agent("working");
+    engine
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?1 WHERE id=?2",
+            params![lead, worker],
+        )
+        .unwrap();
+    crate::coord::settings::write(
+        &engine.connection,
+        &project,
+        &CoordSettings {
+            questions_to: QuestionsTo::Me,
+            ..CoordSettings::default()
+        },
+    )
+    .unwrap();
+    let ask = |from: i64, target: QuestionFor, body: &str| {
+        crate::coord::send(
+            &engine.connection,
+            NewMessage {
+                project: project.clone(),
+                from: Party::Agent(from),
+                to: Party::Owner,
+                kind: MessageKind::Question,
+                question: Some((target, Severity::Normal)),
+                work: None,
+                reply_to: None,
+                body: body.into(),
+                idempotency_key: None,
+            },
+            NOW,
+        )
+        .unwrap()
+    };
+    let mine = ask(worker, QuestionFor::Me, "For me?");
+    let masters = ask(master, QuestionFor::Master, "For the master?");
+    let leads = ask(worker, QuestionFor::Lead, "For the lead?");
+    let lead_label = asker(&engine.connection, &project, lead).unwrap().label;
+    assert_ne!(lead_label, AgentRole::Master.agent_label(master));
+    let inbox = engine.inbox();
+    assert_eq!(
+        inbox
+            .questions
+            .iter()
+            .map(|question| (question.id, question.asked_for, question.for_label.as_str()))
+            .collect::<Vec<_>>(),
+        [
+            (mine, QuestionFor::Me, OWNER_LABEL),
+            (masters, QuestionFor::Master, "Master"),
+            (leads, QuestionFor::Lead, lead_label.as_str()),
+        ]
+    );
+}
