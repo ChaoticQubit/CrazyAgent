@@ -1,5 +1,5 @@
  TW-1  Open the standalone database                                             
- Feature  In progress  P1  agent:store                                          
+ Feature  In progress  P1  agent:store  0.1 Core  Cycle 1                       
                                                                                 
  The core opens or creates its own SQLite file, 0600 inside a 0700 folder.      
  A host migrates the same tables into its own database instead.                 

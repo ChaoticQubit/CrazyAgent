@@ -84,7 +84,7 @@ fn write(client: &mut dyn Client, op: OpKind, mut input: Value) -> Value {
     data(client, op, input)
 }
 
-fn create(client: &mut dyn Client, title: &str, kind: &str, priority: u8) {
+fn create(client: &mut dyn Client, title: &str, kind: &str, priority: u8, release: &str) {
     data(
         client,
         OpKind::Create,
@@ -94,6 +94,7 @@ fn create(client: &mut dyn Client, title: &str, kind: &str, priority: u8) {
             "body": "",
             "kind": kind,
             "priority": priority,
+            "release": release,
         }),
     );
 }
@@ -151,14 +152,40 @@ fn seed(path: &Path) -> Local {
             "body": "The core opens or creates its own SQLite file, 0600 inside a 0700 folder.\nA host migrates the same tables into its own database instead.",
             "kind": "feature",
             "priority": 1,
+            "release": "0.1 Core",
+            "cycle": 1,
         }),
     );
-    create(client, "Ready queue orders by priority", "feature", 2);
-    create(client, "Export escapes agent text", "bug", 0);
-    create(client, "Roadmap import reads RM-1 sections", "feature", 3);
-    create(client, "Schema v1 matches the catalog", "chore", 2);
-    create(client, LONG_TITLE, "feature", 1);
-    create(client, "Claim races leave exactly one winner", "spike", 2);
+    create(
+        client,
+        "Ready queue orders by priority",
+        "feature",
+        2,
+        "0.1 Core",
+    );
+    create(client, "Export escapes agent text", "bug", 0, "0.1 Core");
+    create(
+        client,
+        "Roadmap import reads RM-1 sections",
+        "feature",
+        3,
+        "0.2 Hosts",
+    );
+    create(
+        client,
+        "Schema v1 matches the catalog",
+        "chore",
+        2,
+        "0.1 Core",
+    );
+    create(client, LONG_TITLE, "feature", 1, "0.1 Core");
+    create(
+        client,
+        "Claim races leave exactly one winner",
+        "spike",
+        2,
+        "0.1 Core",
+    );
     move_to(client, "TW-1", "in_progress");
     move_to(client, "TW-2", "todo");
     move_to(client, "TW-3", "in_review");
