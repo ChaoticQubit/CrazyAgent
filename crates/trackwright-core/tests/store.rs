@@ -523,7 +523,7 @@ fn bounds_and_hidden_characters_are_refused_plainly() {
 }
 
 #[test]
-#[should_panic]
+#[should_panic(expected = "source.bytes().all(actor_byte)")]
 fn the_core_s_own_actor_takes_only_a_plain_source() {
     Actor::host("two words");
 }
@@ -626,4 +626,134 @@ fn a_store_hands_over_its_migrated_connection_with_foreign_keys_on() {
         )
         .unwrap();
     assert_eq!(version, schema::SCHEMA_VERSION);
+}
+
+#[test]
+fn a_caller_cannot_pose_as_the_core_s_own_actor() {
+    #[derive(Debug, serde::Deserialize)]
+    struct Request {
+        assignee: Option<Actor>,
+    }
+    let posed = serde_json::from_str::<Request>(r#"{"assignee":"host:evidence"}"#).unwrap_err();
+    assert!(posed.to_string().contains(codes::ACTOR_INVALID), "{posed}");
+    let named = serde_json::from_str::<Request>(r#"{"assignee":"agent:w1"}"#).unwrap();
+    assert_eq!(named.assignee, Some(actor("agent:w1")));
+    assert_eq!(
+        Actor::try_from("host:evidence".to_owned())
+            .unwrap_err()
+            .code,
+        codes::ACTOR_INVALID
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = opened(dir.path());
+    let core = Actor::host("import");
+    let tx = store.transaction().unwrap();
+    store::create_project(&tx, &core, &key(), "CrazyAgent", 4_000).unwrap();
+    let imported =
+        store::create_ticket(&tx, &core, &key(), &new_ticket("Imported"), 4_001).unwrap();
+    store::update_ticket(
+        &tx,
+        &core,
+        &imported.short_id,
+        imported.version,
+        &TicketChange {
+            assignee: Some(Some(core.clone())),
+            ..TicketChange::default()
+        },
+        4_002,
+    )
+    .unwrap();
+    store::add_link(&tx, &core, &imported.short_id, "roadmap", "V3a", 4_003).unwrap();
+    let current = store::state(&tx, &key()).unwrap();
+    assert!(current.tickets[0].created_by.is_host());
+    assert_eq!(current.tickets[0].assignee.as_ref(), Some(&core));
+    assert_eq!(
+        events::replay(&tx, &key()).unwrap(),
+        current,
+        "the core's own actors still read back from rows and events"
+    );
+}
+
+#[test]
+fn the_core_runs_sql_only_through_its_listed_statements() {
+    let allowed = [
+        ("store.rs", "tx.prepare(sql)"),
+        ("store.rs", "tx.execute_batch(\"SAVEPOINTtk_write\")"),
+        ("store.rs", "tx.execute_batch(\"RELEASEtk_write\")"),
+        (
+            "store.rs",
+            "tx.execute_batch(\"ROLLBACKTOtk_write;RELEASEtk_write\")",
+        ),
+        ("schema_sql.rs", "tx.execute_batch(META)"),
+        ("schema_sql.rs", "tx.execute_batch(migration)"),
+    ];
+    let receivers = ["tx", "connection", "transaction", "conn", "db"];
+    let methods = [
+        "execute",
+        "execute_batch",
+        "query_row",
+        "query_row_and_then",
+        "prepare",
+        "prepare_cached",
+        "prepare_with_flags",
+        "pragma_query",
+        "pragma_query_value",
+    ];
+    let mut folders = vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+    let mut found: Vec<(String, String)> = Vec::new();
+    let mut files = 0;
+    while let Some(folder) = folders.pop() {
+        for entry in fs::read_dir(&folder).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                folders.push(path);
+                continue;
+            }
+            if path.extension().and_then(|extension| extension.to_str()) != Some("rs") {
+                continue;
+            }
+            files += 1;
+            let name = path.file_name().unwrap().to_string_lossy().into_owned();
+            let compact: String = fs::read_to_string(&path)
+                .unwrap()
+                .chars()
+                .filter(|c| !c.is_whitespace())
+                .collect();
+            for receiver in receivers {
+                for method in methods {
+                    let call = format!("{receiver}.{method}(");
+                    for (at, _) in compact.match_indices(&call) {
+                        let before = compact[..at].chars().next_back();
+                        if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                            continue;
+                        }
+                        let end = compact[at..]
+                            .find(')')
+                            .map_or(compact.len(), |close| at + close + 1);
+                        found.push((name.clone(), compact[at..end].to_owned()));
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        files >= 6,
+        "the scan read the core's sources ({files} files)"
+    );
+    let direct: Vec<&(String, String)> = found
+        .iter()
+        .filter(|(file, call)| !allowed.contains(&(file.as_str(), call.as_str())))
+        .collect();
+    assert!(
+        direct.is_empty(),
+        "SQL outside store::prepare and its STATEMENTS list: {direct:?}"
+    );
+    for (file, call) in allowed {
+        let seen = found
+            .iter()
+            .filter(|(at, text)| at == file && text == call)
+            .count();
+        assert_eq!(seen, 1, "{file}: {call}");
+    }
 }

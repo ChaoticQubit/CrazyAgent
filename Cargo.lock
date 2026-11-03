@@ -5533,6 +5533,9 @@ dependencies = [
 name = "trackwright-mcp"
 version = "0.2.0"
 dependencies = [
+ "rusqlite",
+ "serde_json",
+ "tempfile",
  "trackwright-core",
 ]
 
