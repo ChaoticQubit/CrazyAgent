@@ -1697,12 +1697,12 @@ fn the_master_framing_names_the_harnesses_an_empty_plan_can_use() {
     for team in ["Your sub-agents", "- codex", "- claude-code"] {
         assert!(!live.contains(team), "{team}: {live}");
     }
-    let tools = live_framing(&setup, true, &["codex"], &[]);
+    let tools = live_instructions(&setup, true);
     assert!(
-        tools.contains("ask(question, options?, recommended?, context?) asks the owner one question and logs it, record_answer(question, version, owner_turn) records an answer the owner gave you in chat"),
+        tools.contains("ask(question, options?, recommended?, context?) for one the owner answers in the Questions view; record_answer(question, version, owner_turn) records an answer the owner gave you in chat"),
         "{tools}"
     );
-    let typed = live_framing(&setup, false, &["codex"], &[]);
+    let typed = live_instructions(&setup, false);
     assert!(!typed.contains("ask(question"));
     assert!(!typed.contains("record_answer"));
 }
@@ -9585,6 +9585,7 @@ fn between_turns(
         managed,
         tools: true,
         team_tool: true,
+        ask_tool: role != AgentRole::Master,
         grants: 0,
         thread: None,
         hosted: None,
@@ -13343,6 +13344,7 @@ fn max_harnesses_each_choice_holds_the_next_harness_until_the_cap_rises() {
             turn_secs: None,
             session_secs: None,
             idle_secs: None,
+            version: crate::team::settings_version(&fixture.connection, &project).unwrap(),
         }],
     );
     let mut handed = 0;
@@ -13426,6 +13428,7 @@ fn max_harnesses_holds_a_woken_harness_until_the_cap_rises() {
             turn_secs: None,
             session_secs: None,
             idle_secs: None,
+            version: crate::team::settings_version(&fixture.connection, &project).unwrap(),
         }],
     );
     max_harnesses(&fixture, Some(1));
@@ -13602,6 +13605,7 @@ fn max_harnesses_holds_keep_warm_at_each_choice_and_no_limit_fills_the_floor() {
     let host = fixture.host();
     let mut team = limited_runtime(&fixture, &host, WORKING_CODEX, TeamLimits::default());
     let project = fixture.setup.project_id.clone();
+    let version = crate::team::settings_version(&fixture.connection, &project).unwrap();
     owner(
         &fixture,
         &[
@@ -13610,10 +13614,12 @@ fn max_harnesses_holds_keep_warm_at_each_choice_and_no_limit_fills_the_floor() {
                 turn_secs: None,
                 session_secs: None,
                 idle_secs: None,
+                version,
             },
             crate::team::TeamAction::KeepWarm {
                 project_id: project.clone(),
                 on: true,
+                version: version + 1,
             },
         ],
     );
@@ -13657,6 +13663,7 @@ fn spread_accounts_puts_the_next_harness_on_an_unused_account_and_falls_back() {
         {
             let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
             let tx = connection.transaction().unwrap();
+            let version = crate::scheduling::load(&tx).unwrap().version;
             assert_eq!(
                 crate::scheduling::apply(
                     &tx,
@@ -13669,6 +13676,7 @@ fn spread_accounts_puts_the_next_harness_on_an_unused_account_and_falls_back() {
                             pin: None,
                         },
                     },
+                    version,
                 )
                 .unwrap(),
                 crate::protocol::Outcome::Applied
@@ -13683,6 +13691,7 @@ fn spread_accounts_puts_the_next_harness_on_an_unused_account_and_falls_back() {
                     turn_secs: None,
                     session_secs: None,
                     idle_secs: None,
+                    version: crate::team::settings_version(&fixture.connection, &project).unwrap(),
                 },
                 crate::team::TeamAction::SpreadAccounts {
                     project_id: project.clone(),
