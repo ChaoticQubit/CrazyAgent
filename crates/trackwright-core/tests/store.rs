@@ -609,3 +609,21 @@ fn no_trackwright_crate_depends_on_crazyagent() {
         "the check read every dependency table ({seen} entries)"
     );
 }
+
+#[test]
+fn a_store_hands_over_its_migrated_connection_with_foreign_keys_on() {
+    let dir = tempfile::tempdir().unwrap();
+    let connection = opened(dir.path()).into_connection();
+    let foreign_keys: i64 = connection
+        .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(foreign_keys, 1);
+    let version: i64 = connection
+        .query_row(
+            "SELECT value FROM tk_meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, schema::SCHEMA_VERSION);
+}
