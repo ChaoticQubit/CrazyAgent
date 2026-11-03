@@ -118,9 +118,12 @@ const CHECK_BYTES_MAX: u64 = 64 * 1024;
 /// git does not track; a tracked file is copied into each agent's worktree and lives in
 /// history, so hiding one would be a false promise. Run outside any sandbox with a deadline
 /// that kills git. Inputs: the project root and the canonical folder. Output: `Ok(true)` when
-/// a file is tracked, `Ok(false)` when the folder is outside the root or the root has no real
-/// `.git` folder, and `Err("hidden_path_unchecked")` on any git error, timeout or unreadable
-/// answer, so the caller fails closed.
+/// git names any path (whatever its exit status, so a listing past the read cap still counts
+/// as tracked), `Ok(false)` when the folder is outside the root or the root has no `.git` at
+/// all or git lists nothing and exits clean, and `Err("hidden_path_unchecked")` when `.git`
+/// exists but is not a real folder (a linked worktree or submodule gitlink), or on any git
+/// error, non-zero exit with no output, timeout or unreadable answer, so the caller fails
+/// closed.
 #[cfg(unix)]
 pub fn git_tracks(project_root: &Path, folder: &Path) -> Result<bool, &'static str> {
     use std::io::Read;
@@ -132,8 +135,11 @@ pub fn git_tracks(project_root: &Path, folder: &Path) -> Result<bool, &'static s
         return Ok(false);
     };
     let git_dir = root.join(".git");
-    if !std::fs::symlink_metadata(&git_dir).is_ok_and(|meta| meta.is_dir()) {
-        return Ok(false);
+    match std::fs::symlink_metadata(&git_dir) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(_) => return Err(unchecked),
+        Ok(meta) if !meta.is_dir() => return Err(unchecked),
+        Ok(_) => {}
     }
     let mut command = Command::new(crate::research::runner::setup_git());
     command
@@ -184,8 +190,10 @@ pub fn git_tracks(project_root: &Path, folder: &Path) -> Result<bool, &'static s
         std::thread::sleep(CHECK_POLL);
     };
     let bytes = reader.join().map_err(|_| unchecked)?;
-    if status.success() {
-        Ok(!bytes.is_empty())
+    if !bytes.is_empty() {
+        Ok(true)
+    } else if status.success() {
+        Ok(false)
     } else {
         Err(unchecked)
     }
@@ -376,6 +384,50 @@ mod tests {
         std::fs::write(path.join(".git").join("index"), b"not a git index\n").unwrap();
         assert_eq!(git_tracks(&path, &folder), Err("hidden_path_unchecked"));
         assert_eq!(none_tracked(&path, &[folder]), Err("hidden_path_unchecked"));
+    }
+
+    #[test]
+    fn a_dot_git_file_fails_the_check_closed() {
+        let root = project();
+        let path = root.path().canonicalize().unwrap();
+        let folder = path.join("secret");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::write(folder.join("key.txt"), "k\n").unwrap();
+        std::fs::write(path.join(".git"), b"gitdir: /elsewhere/.git/worktrees/x\n").unwrap();
+        assert_eq!(git_tracks(&path, &folder), Err("hidden_path_unchecked"));
+        assert_eq!(none_tracked(&path, &[folder]), Err("hidden_path_unchecked"));
+    }
+
+    #[test]
+    fn a_folder_with_more_than_64_kib_of_tracked_names_is_still_tracked() {
+        let root = project();
+        let path = root.path().canonicalize().unwrap();
+        let git = |args: &[&str]| {
+            let mut command = std::process::Command::new("/usr/bin/git");
+            command
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .current_dir(&path)
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null());
+            assert!(crate::spawn_gate::status(&mut command).unwrap().success());
+        };
+        git(&["init", "-q"]);
+        let folder = path.join("bulk");
+        std::fs::create_dir(&folder).unwrap();
+        let mut total = 0usize;
+        let mut index = 0usize;
+        while total <= CHECK_BYTES_MAX as usize {
+            let name = format!("{index:06}-{}.txt", "x".repeat(200));
+            std::fs::write(folder.join(&name), "t\n").unwrap();
+            total += "bulk/".len() + name.len() + 1;
+            index += 1;
+        }
+        git(&["add", "bulk"]);
+        assert_eq!(git_tracks(&path, &folder), Ok(true));
+        assert_eq!(none_tracked(&path, &[folder]), Err("hidden_path_tracked"));
     }
 
     #[test]
