@@ -1220,12 +1220,9 @@ fn export_and_import_answer_through_dispatch_inside_the_hosts_folder() {
     let data = answered(&applied);
     assert_eq!(data["versions"], json!(["V1", "V2"]));
     assert_eq!(data["tickets"], json!(["CA-2", "CA-3", "CA-4"]));
-    let roadmap = call(&tx, &me, "roadmap", json!({"project": "CA"}));
-    assert_eq!(answered(&roadmap)["versions"][0]["name"], "V1");
-    assert_eq!(
-        answered(&roadmap)["versions"][0]["target_day"],
-        "2026-12-01"
-    );
+    let board = call(&tx, &me, "roadmap", json!({"project": "CA"}));
+    assert_eq!(answered(&board)["versions"][0]["name"], "V1");
+    assert_eq!(answered(&board)["versions"][0]["target_day"], "2026-12-01");
     let again = import::preview(&tx, &Standalone, &me, &key(), &roadmap).unwrap();
     assert!(again.items.is_empty(), "{:?}", again.items);
     assert_eq!(
