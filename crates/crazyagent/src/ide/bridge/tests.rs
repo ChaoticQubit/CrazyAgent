@@ -1193,14 +1193,15 @@ fn ide_writes_run_under_their_own_bound_and_answer_an_unknown_outcome_past_it() 
 /// Input: the engine root. Output: the connection, holding the lock until it rolls back.
 fn held_writes(root: &Path) -> rusqlite::Connection {
     let held = rusqlite::Connection::open(root.join("engine.db")).unwrap();
-    held.busy_timeout(Duration::from_secs(5)).unwrap();
+    held.busy_timeout(crate::landing::BUSY_WAIT).unwrap();
     held.execute_batch("BEGIN IMMEDIATE").unwrap();
     held
 }
 
 /// Over a real connection, a write still waiting on the engine database when its bound
 /// passes is answered with its own outcome-unknown code and nothing else, never the plain
-/// timeout, since it may still take effect.
+/// timeout, since it may still take effect. The handshake keeps 2 s to read the frame, so
+/// only the write runs out of time while it waits within the busy timeout.
 #[tokio::test]
 async fn a_write_past_its_bound_answers_its_unknown_outcome_over_the_connection() {
     let mut case = Case::start().await;
@@ -1208,15 +1209,19 @@ async fn a_write_past_its_bound_answers_its_unknown_outcome_over_the_connection(
     let path = issue(&case.runtime, &alpha).unwrap();
     let socket = case.socket(&path);
     let ide = packet(MAGIC, 0, &session(&socket, &path).await);
+    let handshake = Duration::from_secs(2);
+    assert!(
+        handshake < crate::landing::BUSY_WAIT,
+        "the write still waits when its bound passes"
+    );
     let held = held_writes(case.root.path());
     let (mut client, server) = UnixStream::pair().unwrap();
-    let short = Duration::from_millis(300);
     let serving = tokio::spawn(serve_within(
         server,
         ide,
         case.runtime.clone(),
-        Instant::now() + short,
-        short,
+        Instant::now() + handshake,
+        Duration::from_millis(300),
     ));
     let body = request(
         "alpha",
@@ -1225,10 +1230,10 @@ async fn a_write_past_its_bound_answers_its_unknown_outcome_over_the_connection(
     let mut frame = (body.len() as u32).to_be_bytes().to_vec();
     frame.extend(body);
     client.write_all(&frame).await.unwrap();
-    assert_eq!(
-        read_reply(&mut client).await,
-        rejected("ide_show_all_agents_outcome_unknown")
-    );
+    let reply = tokio::time::timeout(Duration::from_secs(20), read_reply(&mut client))
+        .await
+        .expect("the write's bound ends the wait");
+    assert_eq!(reply, rejected("ide_show_all_agents_outcome_unknown"));
     assert_eq!(
         read_reply(&mut client).await,
         None,
@@ -1251,7 +1256,7 @@ async fn a_write_that_finishes_after_its_capability_was_revoked_still_reports_it
     let ide = packet(MAGIC, 0, &session(&socket, &path).await);
     let past = handshake_timeout(&case) + Duration::from_secs(1);
     assert!(
-        past < Duration::from_secs(5),
+        past < crate::landing::BUSY_WAIT,
         "the write still waits within the busy timeout"
     );
     let held = held_writes(case.root.path());
