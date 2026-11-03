@@ -1185,6 +1185,45 @@ fn each_project_reports_its_unseen_question_notifications_beyond_the_listed_wind
     assert!(listed < asked, "the window lists only {listed} of {asked}");
 }
 
+/// A Normal work question to the owner notifies with the same `question` kind as the
+/// questions log, but only the questions log's notification counts as a pending question, so
+/// the app neither drops the work question from the sidebar count nor counts it twice.
+#[test]
+fn a_work_question_alert_counts_as_unseen_but_not_as_a_pending_question() {
+    let fixture = Fixture::new();
+    let tx = fixture.connection.unchecked_transaction().unwrap();
+    notify(
+        &tx,
+        &project(),
+        NotificationKind::Question,
+        "Which database?",
+        1,
+    )
+    .unwrap();
+    let alert = notify(
+        &tx,
+        &project(),
+        NotificationKind::Question,
+        "Ada asks you: Which port?",
+        2,
+    )
+    .unwrap();
+    tx.execute(
+        "INSERT INTO team_owner_alerts(source,ref,since,project,agent,notification) VALUES ('question',9,2,?1,7,?2)",
+        params![PROJECT, alert],
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    assert_eq!(
+        app(&fixture.connection).unwrap().projects,
+        [ProjectUnseen {
+            project_id: project(),
+            unseen: 2,
+            questions: 1,
+        }]
+    );
+}
+
 #[test]
 fn busy_projects_never_hide_another_projects_unseen_count_or_its_escalation() {
     let fixture = Fixture::new();

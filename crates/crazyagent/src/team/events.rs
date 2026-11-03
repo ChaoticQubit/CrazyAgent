@@ -417,7 +417,8 @@ pub struct AppEvents {
 }
 
 /// How many of one project's owner notifications are unseen, for its sidebar count, and how
-/// many of those are question notifications, which the app counts as pending questions.
+/// many of those are questions-log notifications, which the app counts as pending
+/// questions; a work question's alert is not one of them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectUnseen {
     pub project_id: ProjectId,
@@ -1311,14 +1312,17 @@ fn app_notifications(connection: &Connection) -> Result<Vec<Notification>, Engin
     Ok(read)
 }
 
-/// Counts the unseen notifications of each project that has any, and the question
+/// Counts the unseen notifications of each project that has any, and the questions-log
 /// notifications among them, by project id, so a project's count never depends on what fits
-/// in the app window. Takes the connection. Returns at most `UNSEEN_PROJECTS_MAX` projects,
-/// each with a count above zero.
+/// in the app window. A question notification a work question raised, which
+/// `team_owner_alerts` records, stays out of the questions count. Takes the connection.
+/// Returns at most `UNSEEN_PROJECTS_MAX` projects, each with a count above zero.
 fn unseen_by_project(connection: &Connection) -> Result<Vec<ProjectUnseen>, EngineError> {
     let mut statement = connection
         .prepare(
-            "SELECT project, COUNT(*), SUM(kind = 'question') FROM team_notifications
+            "SELECT project, COUNT(*), SUM(kind = 'question' AND id NOT IN
+                 (SELECT notification FROM team_owner_alerts WHERE notification IS NOT NULL))
+             FROM team_notifications
              WHERE seen_ms IS NULL GROUP BY project ORDER BY project LIMIT ?1",
         )
         .map_err(error)?;
