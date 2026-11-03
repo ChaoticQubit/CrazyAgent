@@ -151,6 +151,7 @@ test("a trial folder becomes a report with a cover, a summary table and one sect
     assert.ok(svgImages(html).some((svg) => svg.includes("ca-trial-3") && svg.includes("Team")), "a text frame is drawn as an image");
     assert.ok(html.includes("T3-03 has no evidence item."), "a check with no evidence says so");
     assert.ok(html.includes("Answer the For: Me question") && html.includes("the owner answers questions from Questions"), "steps show what and why");
+    assert.ok(html.includes("<th>Why</th><th>OK</th>"), "contract steps show why and whether they worked");
     const images = html.slice(html.indexOf('<section class="images">'));
     assert.ok(images.includes("screenshots/01-open-project.png") && images.includes("trial.gif"), "every unmasked image is listed");
     assert.ok(!images.includes("02-key.svg") && !images.includes("f00001.txt"), "masked images are not in the unmasked list");
@@ -281,7 +282,7 @@ test("the retro mode reads trials 1 and 2 from the saved audit, plan, timeline, 
     await put(root, "trial-plan-2.md", "# DEC-104 second and final trial\n\nBuild 18.7 = chore/b18-stage after F1-F9.\n\n## Steps (TUI)\n1. Home: a, e, path ~/Projects/ca-trial-2.\n\n## Checks (each PASS/FAIL)\n4. For: Me question reaches Questions; I answer Hello. [not exercised]\n13. F8 TUI: terminal box renders cleanly. [border broken]\n\n## After\n- trial-audit.sh ~/Projects/ca-trial-2 > audit-2.txt\n");
     await put(root, "audit-2.txt", "PASS 4 owner question: For: Me questions to owner=1\n  4 detail line for check four\nUNKNOWN 13 tui: read the recorded frames\nSUMMARY project=ca-trial-2 pass=1 fail=0 unknown=1\n");
     await put(root, "timeline-2.txt", "23:50:47 trial-2 start\n23:54:39 answered Hello\n00:04:43 stop all\n");
-    await put(root, "tokens-2.txt", "agent 45 {'input': 10, 'output': 100, 'cache_read': 1000, 'cache_create': 50, 'turns': 2}\n  ('claude-account-f2fac034ae8d7eb16c75', 49.0, 23.0)\n");
+    await put(root, "tokens-2.txt", "45 {'input': 10, 'output': 100, 'cache_read': 1000, 'cache_create': 50, 'turns': 2}\n  ('claude-account-f2fac034ae8d7eb16c75', 49.0, 23.0)\n");
     await put(root, "limits-before-2.txt", "at 2026-10-28 23:50:30\n('claude-account-f2fac034ae8d7eb16c75', 'max', 48.0, 22.0)\n");
     await put(root, "frames-2/f00000.txt", " [◆▪◆▪] CrazyAgent  /  ca-trial-2  /  Team\n");
     await put(root, "trial-2.gif", GIF);
@@ -292,6 +293,7 @@ test("the retro mode reads trials 1 and 2 from the saved audit, plan, timeline, 
     ]);
     assert.deepEqual(model.trials[0].accounts, ["claude-subscription ×2", "codex-chatgpt ×1"]);
     assert.equal(model.trials[0].tokens.join(", "), "input 22, output 3146, cache read 357777, cache create 59396, turns 11 (2 agents)");
+    assert.equal(model.trials[1].tokens.join(", "), "input 10, output 100, cache read 1000, cache create 50, turns 2 (1 agent)", "trial 2 lines have no agent prefix");
     const html = renderReport(model);
     assert.match(html, /<h1>Trials 1 and 2/);
     assert.ok(html.includes("Graph tree: master -&gt; Lead A -&gt; 2 teammates."), "proves comes from the plan");
@@ -300,6 +302,7 @@ test("the retro mode reads trials 1 and 2 from the saved audit, plan, timeline, 
     assert.ok(html.includes("leader/trial-audit.sh &lt;project&gt;"), "how comes from the plan");
     assert.ok(html.includes("Spawn two Claude leads."), "the master message is shown");
     assert.ok(html.includes("answered Hello"), "the timeline is shown");
+    assert.ok(!html.includes("<th>Why</th><th>OK</th>"), "a steps table drops the columns no step fills");
     assert.equal(svgImages(html).length, 3, "every frame is drawn as an image");
     for (const value of [SECRETS.chatgpt, SECRETS.account, SECRETS.email]) assert.ok(![html, ...svgImages(html)].join("\n").includes(value));
     const images = html.slice(html.indexOf('<section class="images">'));
