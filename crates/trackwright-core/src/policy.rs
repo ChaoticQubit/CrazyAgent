@@ -21,6 +21,8 @@ pub(crate) const POLICY_UPDATE: &str = "UPDATE tk_policy SET value_json = ?3, \
 pub const OWNER: &str = "owner";
 /// The prefix of a host's trusted automation, for example `engine:landing`.
 pub const ENGINE_PREFIX: &str = "engine:";
+/// The most bytes of a policy value word.
+pub const POLICY_WORD_BYTES_MAX: usize = 32;
 /// The smallest and largest custom `cycle_days`.
 pub const CYCLE_DAYS_CUSTOM: CustomRange = CustomRange { min: 1, max: 90 };
 
@@ -107,9 +109,10 @@ pub fn describe(tx: &Transaction<'_>, key: &ProjectKey) -> Result<Vec<Setting>, 
 
 /// Sets one policy key at the version the caller read, and records it. Only the owner sets
 /// policy. Setting the value in force writes nothing. Inputs: the transaction, the host's
-/// authority, the actor, the project key, the setting, its new value, the version (0 for a
-/// key never set) and the time. Output: the policy now in force, or `owner_only`,
-/// `policy_value_invalid` or `stale_version`.
+/// authority, the actor, the project key, the setting, its new value as a word (an option's
+/// name, or a number of days for `cycle_days`), the version (0 for a key never set) and the
+/// time. Output: the policy now in force, or `owner_only`, `policy_value_invalid` or
+/// `stale_version`.
 #[allow(clippy::too_many_arguments)]
 pub fn set(
     tx: &Transaction<'_>,
@@ -117,7 +120,7 @@ pub fn set(
     actor: &Actor,
     key: &ProjectKey,
     setting: PolicyKey,
-    value: &Value,
+    value: &str,
     version: i64,
     now_ms: i64,
 ) -> Result<Policy, StoreError> {
@@ -130,7 +133,7 @@ pub fn set(
         store::current(&format!("policy {setting}"), stored_version, version)?;
         let mut object = as_object(&before);
         let old = object[setting.as_str()].clone();
-        object[setting.as_str()] = value.clone();
+        object[setting.as_str()] = word_value(setting, value).ok_or_else(|| invalid(setting))?;
         let after: Policy = serde_json::from_value(object).map_err(|_| invalid(setting))?;
         let new = as_object(&after)[setting.as_str()].clone();
         if stored_version > 0 && new == old {
@@ -443,6 +446,19 @@ fn stored(
         StoreError::Corrupt("a stored policy value is not one of its options".to_owned())
     })?;
     Ok((policy, versions))
+}
+
+fn word_value(setting: PolicyKey, word: &str) -> Option<Value> {
+    if word.is_empty() || word.len() > POLICY_WORD_BYTES_MAX {
+        return None;
+    }
+    if setting == PolicyKey::CycleDays {
+        if !word.bytes().all(|byte| byte.is_ascii_digit()) {
+            return None;
+        }
+        return word.parse::<u8>().ok().map(|days| json!(days));
+    }
+    Some(json!(word))
 }
 
 fn as_object(policy: &Policy) -> Value {

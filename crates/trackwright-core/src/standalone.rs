@@ -61,10 +61,14 @@ impl Evidence for Standalone {
             },
             Some(recorded) => EvidenceState {
                 satisfied: recorded.result == EvidenceResult::Pass,
-                detail: format!(
-                    "{} recorded by {}: {}",
-                    recorded.result, recorded.recorded_by, recorded.reference
-                ),
+                detail: if recorded.reference.is_empty() {
+                    format!("{} recorded by {}", recorded.result, recorded.recorded_by)
+                } else {
+                    format!(
+                        "{} recorded by {}: {}",
+                        recorded.result, recorded.recorded_by, recorded.reference
+                    )
+                },
             },
         };
         assert!(!state.detail.is_empty());

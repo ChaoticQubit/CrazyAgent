@@ -197,11 +197,11 @@ fn proof(
         kind,
         check: check.to_owned(),
         result,
-        reference: format!("run of {check}"),
+        reference: Some(format!("run of {check}")),
     }
 }
 
-fn set_policy(tx: &Transaction<'_>, setting: PolicyKey, value: serde_json::Value) {
+fn set_policy(tx: &Transaction<'_>, setting: PolicyKey, value: &str) {
     let version = policy::describe(tx, &key())
         .unwrap()
         .into_iter()
@@ -214,12 +214,15 @@ fn set_policy(tx: &Transaction<'_>, setting: PolicyKey, value: serde_json::Value
         &owner(),
         &key(),
         setting,
-        &value,
+        value,
         version,
         1_050,
     )
     .unwrap();
-    assert_eq!(serde_json::to_value(set).unwrap()[setting.as_str()], value);
+    assert_eq!(
+        serde_json::to_value(set).unwrap()[setting.as_str()],
+        json!(value)
+    );
 }
 
 fn engine_tables(tx: &Transaction<'_>) {
@@ -465,7 +468,7 @@ fn each_close_option_allows_and_refuses_the_right_actors() {
         let mut store = opened(dir.path());
         let tx = store.transaction().unwrap();
         project(&tx);
-        set_policy(&tx, PolicyKey::Close, json!(option.as_str()));
+        set_policy(&tx, PolicyKey::Close, option.as_str());
         assert_eq!(policy::load(&tx, &key()).unwrap().close, option);
 
         for other in &others {
@@ -550,20 +553,19 @@ fn each_close_option_allows_and_refuses_the_right_actors() {
             1_810,
         )
         .unwrap();
-        criteria::record_evidence(
-            &tx,
-            &Standalone,
-            &others[0],
-            &proof(
+        let unnamed = NewEvidence {
+            reference: None,
+            ..proof(
                 &id,
                 criterion.position,
                 CheckKind::Manual,
                 "look:release-notes",
                 EvidenceResult::Pass,
-            ),
-            1_900,
-        )
-        .unwrap();
+            )
+        };
+        let (recorded, _) =
+            criteria::record_evidence(&tx, &Standalone, &others[0], &unnamed, 1_900).unwrap();
+        assert_eq!(recorded.reference, "");
         let proven = store::ticket(&tx, &id).unwrap();
         if option == ClosePolicy::Evidence {
             assert_eq!(proven.status, TicketStatus::Done);
@@ -579,36 +581,33 @@ fn each_close_option_allows_and_refuses_the_right_actors() {
     let mut store = opened(dir.path());
     let tx = store.transaction().unwrap();
     project(&tx);
-    let set_by = |who: &Actor, value: serde_json::Value, version: i64| {
+    let set_by = |who: &Actor, value: &str, version: i64| {
         policy::set(
             &tx,
             &Standalone,
             who,
             &key(),
             PolicyKey::Close,
-            &value,
+            value,
             version,
             2_000,
         )
     };
     assert_eq!(
-        refused(set_by(&actor("agent:w1"), json!("agents"), 0)),
+        refused(set_by(&actor("agent:w1"), "agents", 0)),
         codes::OWNER_ONLY
     );
     assert_eq!(
-        refused(set_by(&actor("engine:landing"), json!("agents"), 0)),
+        refused(set_by(&actor("engine:landing"), "agents", 0)),
         codes::OWNER_ONLY
     );
     assert_eq!(
-        refused(set_by(&owner(), json!("everyone"), 0)),
+        refused(set_by(&owner(), "everyone", 0)),
         codes::POLICY_VALUE_INVALID
     );
-    assert_eq!(
-        refused(set_by(&owner(), json!("agents"), 3)),
-        codes::STALE_VERSION
-    );
+    assert_eq!(refused(set_by(&owner(), "agents", 3)), codes::STALE_VERSION);
     assert_eq!(count(&tx, "tk_policy"), 0);
-    set_by(&owner(), json!("owner"), 0).unwrap();
+    set_by(&owner(), "owner", 0).unwrap();
     assert_eq!(policy::load(&tx, &key()).unwrap().close, ClosePolicy::Owner);
     let close = policy::describe(&tx, &key())
         .unwrap()
@@ -622,10 +621,39 @@ fn each_close_option_allows_and_refuses_the_right_actors() {
         close.options,
         vec![json!("agents"), json!("evidence"), json!("owner")]
     );
+    assert_eq!(refused(set_by(&owner(), "agents", 0)), codes::STALE_VERSION);
+    let days = |word: &str, version: i64| {
+        policy::set(
+            &tx,
+            &Standalone,
+            &owner(),
+            &key(),
+            PolicyKey::CycleDays,
+            word,
+            version,
+            2_100,
+        )
+    };
+    for word in ["0", "91", "two", "-7", ""] {
+        assert_eq!(
+            refused(days(word, 0)),
+            codes::POLICY_VALUE_INVALID,
+            "{word}"
+        );
+    }
+    assert_eq!(days("21", 0).unwrap().cycle_days.get(), 21);
+    assert_eq!(days("90", 1).unwrap().cycle_days.get(), 90);
+    let cycle = policy::describe(&tx, &key())
+        .unwrap()
+        .into_iter()
+        .find(|entry| entry.key == PolicyKey::CycleDays)
+        .unwrap();
+    assert_eq!(cycle.value, json!(90));
     assert_eq!(
-        refused(set_by(&owner(), json!("agents"), 0)),
-        codes::STALE_VERSION
+        cycle.options,
+        vec![json!(7), json!(14), json!(21), json!(28)]
     );
+    assert_eq!(cycle.custom, Some(policy::CYCLE_DAYS_CUSTOM));
     tx.commit().unwrap();
 }
 
@@ -643,7 +671,7 @@ fn each_create_and_agent_edit_option_is_enforced() {
 
     assert_eq!(CreatePolicy::ALL.len(), 3);
     for option in CreatePolicy::ALL.iter().copied() {
-        set_policy(&tx, PolicyKey::Create, json!(option.as_str()));
+        set_policy(&tx, PolicyKey::Create, option.as_str());
         let policy = policy::load(&tx, &key()).unwrap();
         assert_eq!(policy.create, option);
         Standalone
@@ -677,7 +705,7 @@ fn each_create_and_agent_edit_option_is_enforced() {
 
     assert_eq!(AgentEditPolicy::ALL.len(), 3);
     for option in AgentEditPolicy::ALL.iter().copied() {
-        set_policy(&tx, PolicyKey::AgentEdit, json!(option.as_str()));
+        set_policy(&tx, PolicyKey::AgentEdit, option.as_str());
         let theirs = ticket(&tx, &owner(), "The owner's ticket");
         let own = ticket(&tx, &agent, "The agent's own ticket");
         let view = TicketView::of(&store::ticket(&tx, &theirs).unwrap());

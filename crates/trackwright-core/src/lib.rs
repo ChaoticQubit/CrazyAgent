@@ -1,8 +1,12 @@
+pub mod catalog;
 pub mod criteria;
 pub mod events;
 pub mod host;
 pub mod model;
+pub mod ops;
 pub mod policy;
+pub mod reply;
+pub mod requests;
 #[path = "schema_sql.rs"]
 pub mod schema;
 pub mod standalone;
