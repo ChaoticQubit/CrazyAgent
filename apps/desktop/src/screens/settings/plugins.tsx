@@ -765,7 +765,7 @@ export function PluginsAndSkills({ projectId, skill }: { projectId?: string; ski
   };
   const toggleHook = (hook: HookView, on: boolean) => {
     const target = pluginSwitch(hook, projectId);
-    void act<unknown>(hook.id, () => target.project && projectId ? switchPlugin(projectId, hook.id, on) : setHookEnabled(hook.id, on),
+    void act<unknown>(hook.id, () => target.project && projectId ? switchPlugin(projectId, hook.id, on, hook.version) : setHookEnabled(hook.id, on),
       () => on ? "Hook turned on." : "Hook turned off.", reloadHooks);
   };
   const toggleServer = (server: McpServerView, on: boolean) => {
