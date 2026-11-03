@@ -37,17 +37,17 @@ export function keyArgs(name) {
  * fresh socket name and its own config), so no command can reach the owner's tmux or herdr
  * panes. Input: { argv with an absolute program, env for the program, evidence folder, the
  * project name go() opens, cols, rows, waitMs }. Output: the TUI kit { socket, type, key,
- * pane, waitFor, until, capture, go, stop }; frames are saved masked under frames/. */
+ * pane, waitFor, until, capture, go, stop }; frames are saved masked under tui4/, apart from
+ * the runner's TUI recorder, which alone writes frames/. */
 export async function startTui({ argv, env, evidence, project = "", cols = COLS, rows = ROWS, waitMs = WAIT_MS }) {
   assert(Array.isArray(argv) && argv.length > 0 && argv.every((part) => typeof part === "string"), "argv is a list of strings");
   assert(isAbsolute(argv[0]), `argv[0] must be an absolute path, got ${argv[0]}`);
   assert(isAbsolute(evidence), "the evidence folder is an absolute path");
   assert(Number.isInteger(waitMs) && waitMs > 0, "the wait limit is a positive number of ms");
   const socket = `ca-trial-tui-${process.pid}-${Date.now()}`;
-  const frames = join(evidence, "frames");
-  const config = join(evidence, "tui", "tmux.conf");
+  const frames = join(evidence, "tui4");
+  const config = join(frames, "tmux.conf");
   mkdirSync(frames, { recursive: true, mode: 0o700 });
-  mkdirSync(join(evidence, "tui"), { recursive: true, mode: 0o700 });
   writeFileSync(config, "set -g remain-on-exit on\nset -g history-limit 5000\nset -g status off\n", { mode: 0o600 });
   const tmuxEnv = { PATH: process.env.PATH ?? "/usr/bin:/bin", HOME: process.env.HOME ?? evidence, LANG: "en_US.UTF-8", TERM: "xterm-256color" };
 
@@ -127,13 +127,13 @@ export async function startTui({ argv, env, evidence, project = "", cols = COLS,
      * Conversation, then /master) and project-team the Team screen. Input: the place.
      * Output: the pane text once the header shows the place; throws with the last pane. */
     go,
-    /** Saves the pane, masked, as frames/<name>.txt in the run folder. Input: the file stem.
+    /** Saves the pane, masked, as tui4/<name>.txt in the run folder. Input: the file stem.
      * Output: { path relative to the run folder, the masked text }. */
     capture: (name) => {
       assert(FRAME.test(name), `the frame name is a file stem, got ${name}`);
       const masked = mask(pane());
       writeFileSync(join(frames, `${name}.txt`), masked, { mode: 0o600 });
-      return { path: `frames/${name}.txt`, text: masked };
+      return { path: `tui4/${name}.txt`, text: masked };
     },
     /** Ends the private tmux server and the program in it. */
     stop: async () => {

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -42,7 +42,8 @@ test("the TUI kit runs a program in its own tmux server, types, reads the pane, 
     await tui.waitFor(`got ${KEY}`, 10000);
     assert.match(tui.pane(), /got hello\n/);
     const frame = tui.capture("05-n-t1-1-two-lines");
-    assert.equal(frame.path, "frames/05-n-t1-1-two-lines.txt");
+    assert.equal(frame.path, "tui4/05-n-t1-1-two-lines.txt");
+    assert.ok(!existsSync(join(evidence, "frames")), "the runner's recorder alone writes frames/");
     const saved = readFileSync(join(evidence, frame.path), "utf8");
     assert.match(saved, /got hello/);
     assert.doesNotMatch(saved, /sk-ant-api03-Ab1/);
