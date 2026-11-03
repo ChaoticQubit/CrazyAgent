@@ -218,9 +218,9 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
 
 /// Queues one run of each check of the change set's current profile that `trigger` names,
 /// holdouts included, as one batch: every such check when `only` is empty, else just the
-/// ones it names. An agent's or master's request counts against the project's
-/// `agent_requests` per hour, and a change set whose head already has a queued or running
-/// job of a check gets no second one. Inputs: the engine connection, the change set, the
+/// ones it names. Each agent's or master's request counts against its own
+/// `agent_requests` per hour in the project, and a change set whose head already has a
+/// queued or running job of a check gets no second one. Inputs: the engine connection, the change set, the
 /// trigger, the actor the engine set and the check ids. Output: the batch, or
 /// `checks_change_set_unknown`, `checks_change_set_discarded`, `checks_change_set_accepted`,
 /// `checks_no_profile`, `checks_check_unknown`, `checks_nothing_to_run`,
@@ -271,9 +271,9 @@ pub fn submit(
         let asked: i64 = tx
             .query_row(
                 "SELECT COUNT(DISTINCT batch) FROM check_jobs
-                  WHERE project = ?1 AND trigger = 'on_request' AND actor <> 'owner'
-                    AND queued_ms > ?2",
-                params![project.as_str(), now - HOUR_MS],
+                  WHERE project = ?1 AND trigger = 'on_request' AND actor = ?2
+                    AND queued_ms > ?3",
+                params![project.as_str(), actor_text(actor), now - HOUR_MS],
                 |row| row.get(0),
             )
             .map_err(unavailable)?;
@@ -482,17 +482,31 @@ struct Queued {
 /// was queued.
 pub fn after_turn(db: &Connection, change_set: &ChangeSetId) -> Option<BatchId> {
     let batch = submit(db, change_set, Trigger::TurnEnd, Actor::Owner, &[]).ok()?;
-    let runtime = db
+    start(db, change_set);
+    Some(batch)
+}
+
+/// Starts the project's `parallel` check runners in the background, each on its own
+/// connection to the same `engine.db`, running queued jobs until none can start. Inputs:
+/// the engine connection on `<runtime>/engine.db` and the change set whose project sets
+/// `parallel`. Output: how many runners started, 0 when the database has no absolute
+/// folder or no thread could start.
+pub fn start(db: &Connection, change_set: &ChangeSetId) -> u8 {
+    let Some(runtime) = db
         .path()
         .map(Path::new)
         .and_then(Path::parent)
-        .filter(|runtime| runtime.is_absolute())?
-        .to_path_buf();
+        .filter(|runtime| runtime.is_absolute())
+        .map(Path::to_path_buf)
+    else {
+        return 0;
+    };
     let parallel = landing::change_set(db, change_set)
         .ok()
         .flatten()
         .and_then(|(project, _)| settings::effective(db, &project).ok())
         .map_or(1, |settings| settings.parallel.max(1));
+    let mut started = 0;
     for _ in 0..parallel {
         let runtime = runtime.clone();
         let spawned = std::thread::Builder::new()
@@ -506,17 +520,10 @@ pub fn after_turn(db: &Connection, change_set: &ChangeSetId) -> Option<BatchId> 
         if spawned.is_err() {
             break;
         }
+        started += 1;
     }
-    Some(batch)
-}
-
-/// Starts the project's `parallel` check runners in the background, each on its own
-/// connection to the same `engine.db`, running queued jobs until none can start. Inputs:
-/// the engine connection on `<runtime>/engine.db` and the change set whose project sets
-/// `parallel`. Output: how many runners started, 0 when the database has no absolute
-/// folder or no thread could start.
-pub fn start(db: &Connection, change_set: &ChangeSetId) -> u8 {
-    todo!()
+    assert!(started <= parallel);
+    started
 }
 
 /// What one pick of the queue found: nothing to start, a job it cancelled at once, or a

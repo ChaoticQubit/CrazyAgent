@@ -170,7 +170,34 @@ fn every_bundled_manifest_entry_finds_its_skills_in_the_bundle() {
         assert!(!skill_folders(&folder).unwrap().is_empty(), "{}", entry.id);
         checked += 1;
     }
-    assert_eq!(checked, 10);
+    assert_eq!(checked, 11);
+}
+
+#[test]
+fn the_default_pack_bundles_the_checks_skill() {
+    let manifest = default_pack().unwrap();
+    let checks = manifest
+        .entries
+        .iter()
+        .find(|entry| entry.id == "crazyagent-checks")
+        .expect("the default pack lists the checks skill");
+    assert!(checks.on_by_default);
+    let (_, bytes) = FILES
+        .iter()
+        .find(|(path, _)| *path == "skills/crazyagent-checks/SKILL.md")
+        .expect("the checks skill is compiled into the engine");
+    let text = std::str::from_utf8(bytes).unwrap();
+    let (name, description) = crate::plugins::skill_folder::frontmatter(text).unwrap();
+    assert_eq!(name, "crazyagent-checks");
+    assert!(description.contains("failing results"), "{description}");
+    for tool in crate::team::tool::CHECKS_TOOLS {
+        assert!(text.contains(&format!("`{tool}` tool")), "{tool}");
+    }
+    assert!(text.contains(&format!("`{}`", crate::team::tool::SERVER_NAME)));
+    let proposed = crate::checks::settings::ChecksSettings::default().agent_requests;
+    assert!(text.contains(&format!("{proposed} requests per hour")));
+    assert!(!text.contains('\u{2014}'));
+    assert!(!text.contains("<!--"));
 }
 
 #[test]

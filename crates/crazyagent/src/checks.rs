@@ -364,7 +364,47 @@ pub fn profiles(
     project: &ProjectId,
     after: Option<u64>,
 ) -> Result<ProfilePage, CheckRefusal> {
-    todo!()
+    let tx = Transaction::new_unchecked(db, TransactionBehavior::Deferred).map_err(unavailable)?;
+    project_known(&tx, project)?;
+    let before = after.map_or(i64::MAX, |after| i64::try_from(after).unwrap_or(i64::MAX));
+    let limit = i64::try_from(PROFILES_PAGE_MAX + 1).expect("the page bound fits in i64");
+    let rows: Vec<(i64, String)> = tx
+        .prepare(
+            "SELECT rowid, id FROM check_profiles WHERE project=?1 AND rowid < ?2
+             ORDER BY rowid DESC LIMIT ?3",
+        )
+        .map_err(unavailable)?
+        .query_map(params![project.as_str(), before, limit], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .map_err(unavailable)?
+        .collect::<Result<_, _>>()
+        .map_err(unavailable)?;
+    let more = rows.len() > PROFILES_PAGE_MAX;
+    let shown = &rows[..rows.len().min(PROFILES_PAGE_MAX)];
+    let mut profiles = Vec::with_capacity(shown.len());
+    for (_, id) in shown {
+        let id = ProfileId::new(id.clone()).map_err(unavailable)?;
+        let known = stored(&tx, project, &id)?.ok_or_else(|| failure("checks_unavailable"))?;
+        profiles.push(ProfileSummary {
+            id: known.id,
+            state: known.state,
+            proposed_by: known.proposed_by,
+            proposed_ms: known.proposed_ms,
+            approved_ms: known.approved_ms,
+            revoked_ms: known.revoked_ms,
+            question: known.question,
+            checks: u32::try_from(known.profile.checks.len()).map_err(unavailable)?,
+            holdouts: u32::try_from(known.profile.holdouts.len()).map_err(unavailable)?,
+        });
+    }
+    let next = match shown.last() {
+        Some((rowid, _)) if more => Some(u64::try_from(*rowid).map_err(unavailable)?),
+        _ => None,
+    };
+    assert!(profiles.len() <= PROFILES_PAGE_MAX);
+    assert!(next.is_none() || profiles.len() == PROFILES_PAGE_MAX);
+    Ok(ProfilePage { profiles, next })
 }
 
 /// The project's current admitted profile. Inputs: the engine connection or a transaction
@@ -722,7 +762,9 @@ fn holdout_stored(
 
 /// Refuses a project the engine does not know. Inputs: the connection and the project.
 /// Output: Ok, or `checks_project_missing` or `checks_unavailable`.
-fn project_known(db: &Connection, project: &ProjectId) -> Result<(), CheckRefusal> {
+/// Refuses a project the engine does not know. Inputs: the connection and the project.
+/// Output: Ok, or `checks_project_missing` or `checks_unavailable`.
+pub(crate) fn project_known(db: &Connection, project: &ProjectId) -> Result<(), CheckRefusal> {
     let known: bool = db
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM projects WHERE id=?1)",

@@ -365,9 +365,11 @@ pub fn serve_live(
 /// Says whether every name is one of the team tools, as the engine subcommands check the
 /// tools they are told to leave out. Takes the names. Returns the answer.
 pub fn known_tools(names: &[String]) -> bool {
-    names.len() <= TEAM_TOOLS.len() + QUESTION_TOOLS.len()
+    names.len() <= TEAM_TOOLS.len() + QUESTION_TOOLS.len() + CHECKS_TOOLS.len()
         && names.iter().all(|name| {
-            TEAM_TOOLS.contains(&name.as_str()) || QUESTION_TOOLS.contains(&name.as_str())
+            TEAM_TOOLS.contains(&name.as_str())
+                || QUESTION_TOOLS.contains(&name.as_str())
+                || CHECKS_TOOLS.contains(&name.as_str())
         })
 }
 
@@ -468,7 +470,8 @@ fn answer(request: &Value, drop: &Path) -> Option<Value> {
     Some(json!({"jsonrpc": "2.0", "id": id, "result": result}))
 }
 
-/// The team tools a server lists, in `BUILTIN_TOOLS` order, without the ones left out.
+/// The team tools a server lists, in `BUILTIN_TOOLS` order, then the questions and checks
+/// tools, without the ones left out.
 /// Takes the tools left out. Returns the MCP `tools/list` result.
 fn team_tools(off: &[String]) -> Value {
     let on = |name: &str| !off.iter().any(|tool| tool == name);
@@ -483,7 +486,13 @@ fn team_tools(off: &[String]) -> Value {
     if on(RECORD_TOOL) {
         tools.push(record_tool());
     }
-    assert!(tools.len() <= TEAM_TOOLS.len() + QUESTION_TOOLS.len());
+    if on(CHECKS_RUN_TOOL) {
+        tools.push(checks::run_listing());
+    }
+    if on(CHECKS_RESULTS_TOOL) {
+        tools.push(checks::results_listing());
+    }
+    assert!(tools.len() <= TEAM_TOOLS.len() + QUESTION_TOOLS.len() + CHECKS_TOOLS.len());
     json!({ "tools": tools })
 }
 
