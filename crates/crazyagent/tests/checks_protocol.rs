@@ -3,6 +3,7 @@
 mod e2e_support;
 
 use base64::Engine as _;
+use crazyagent::checks::profile::HOLDOUT_FILE_BYTES_MAX;
 use crazyagent::checks::queue::JobState;
 use crazyagent::checks::settings::{GateMode, RemovedTests};
 use crazyagent::checks::{ChecksChoice, ChecksSettings, ProfileState, Trigger};
@@ -185,6 +186,25 @@ async fn owner_checks_requests_round_trip_every_op() {
         other => panic!("{other:?}"),
     };
     assert_eq!(digest.len(), 64);
+    for (size, stored) in [
+        (HOLDOUT_FILE_BYTES_MAX, true),
+        (HOLDOUT_FILE_BYTES_MAX + 1, false),
+    ] {
+        let answered = asking
+            .ask(ChecksRequest::HoldoutStore {
+                project: project.clone(),
+                base64: base64::engine::general_purpose::STANDARD.encode(vec![0xA5; size]),
+            })
+            .await;
+        match (answered, stored) {
+            (Ok(ChecksReply::HoldoutStored { digest }), true) => assert_eq!(digest.len(), 64),
+            (Err(code), false) => assert_eq!(
+                code, "checks_holdout_invalid",
+                "the store's own per-file bound refuses it, not the request bound"
+            ),
+            (other, _) => panic!("{size}: {other:?}"),
+        }
+    }
     let profile = json!({
         "version": 1,
         "checks": [check("slow", &["sh", "slow.sh"])],
