@@ -2251,6 +2251,7 @@ async fn start_onboarding_saves_own_branch_access_and_a_restart_keeps_the_owners
         .owner
         .set_project_agent_policy(
             project.clone(),
+            saved.version,
             AgentPolicy {
                 access: AgentAccess::Sandboxed,
                 network: crazyagent::sandbox::policy::AgentNetwork::default(),

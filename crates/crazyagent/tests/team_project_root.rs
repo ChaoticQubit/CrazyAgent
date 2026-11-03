@@ -153,8 +153,13 @@ async fn wire(chosen: Option<AgentAccess>) -> Wired {
             network: AgentNetwork::Open,
             ide_git_hooks: false,
         };
+        let version = owner
+            .project_agent_policy(project.clone())
+            .await
+            .unwrap()
+            .version;
         let set = owner
-            .set_project_agent_policy(project.clone(), policy, generation)
+            .set_project_agent_policy(project.clone(), version, policy, generation)
             .await
             .unwrap();
         assert_eq!(rejection(&set), None, "{set:?}");
