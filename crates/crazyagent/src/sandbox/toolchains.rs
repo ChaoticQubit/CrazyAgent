@@ -618,10 +618,10 @@ pub fn fresh_native_lead_tmp(scratch: &Path) -> io::Result<PathBuf> {
     Ok(path)
 }
 
-/// Makes the folder just made at `path` private through one descriptor opened without
-/// following a link, then refuses it unless it is still empty and still the private folder
-/// the name holds, so a link or a folder a teammate swaps in meanwhile is refused, never
-/// followed or kept. Input: the new folder's path. Output: done, or the refusal.
+/// Checks the folder just made at `path` with mode 0700 through one descriptor opened
+/// without following a link: it must be empty and still the private folder the name holds,
+/// so a link or a folder a teammate swaps in meanwhile is refused, never followed, changed
+/// or kept. Input: the new folder's path. Output: done, or the refusal.
 #[cfg(unix)]
 fn seal_new_folder(path: &Path) -> io::Result<()> {
     use rustix::fs::{CWD, Dir, Mode, OFlags};
@@ -638,7 +638,6 @@ fn seal_new_folder(path: &Path) -> io::Result<()> {
         Err(Errno::LOOP | Errno::NOTDIR) => return Err(changed()),
         Err(error) => return Err(error.into()),
     };
-    folder.set_permissions(fs::Permissions::from_mode(0o700))?;
     for entry in Dir::read_from(&folder)? {
         if !matches!(entry?.file_name().to_bytes(), b"." | b"..") {
             return Err(changed());
