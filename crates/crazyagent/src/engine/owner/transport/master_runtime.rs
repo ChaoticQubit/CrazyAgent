@@ -1106,7 +1106,9 @@ fn reason_for_error(error: &EngineError) -> MasterReason {
         "native_profile_in_use" => MasterReason::ProfileBusy,
         "gateway_health_unknown"
         | "master_sign_in_missing"
-        | "native_profile_credential_unavailable" => MasterReason::ReadinessUnknown,
+        | "native_profile_credential_unavailable"
+        | "native_profile_codex_api_key"
+        | "native_profile_codex_token_unreadable" => MasterReason::ReadinessUnknown,
         "gateway_invalid_authentication"
         | "native_profile_credential_expiring"
         | "native_profile_sign_in_revoked" => MasterReason::InvalidAuthentication,

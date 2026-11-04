@@ -7,7 +7,7 @@ import { setTimeout as pause } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { SevereServiceError } from "webdriverio";
 import { closedPort, start, stop, value } from "./e2e-harness.mjs";
-import { attach, stopRelaunched } from "./trial-app.mjs";
+import { PICKS_VARIABLE, attach, stopRelaunched } from "./trial-app.mjs";
 
 process.umask(0o077);
 const mode = process.env.TRIAL3_MODE;
@@ -43,9 +43,11 @@ if (mode === "live") {
 }
 process.env.TRIAL_PROMPT ??= fileURLToPath(new URL("../../../../scripts/trial/prompt.md", import.meta.url));
 process.env.CRAZYAGENT_DESKTOP_TEST_EVIDENCE = join(evidence, "screenshots");
+process.env[PICKS_VARIABLE] = join(evidence, "picks");
+const picks = { [PICKS_VARIABLE]: process.env[PICKS_VARIABLE] };
 const appEnv = fixture
-  ? { CRAZYAGENT_DESKTOP_SOCKET: process.env.CRAZYAGENT_DESKTOP_SOCKET, HOME: join(fixture, "home"), TMPDIR: join(fixture, "tmp") }
-  : { CRAZYAGENT_DESKTOP_SOCKET: process.env.CRAZYAGENT_DESKTOP_SOCKET };
+  ? { CRAZYAGENT_DESKTOP_SOCKET: process.env.CRAZYAGENT_DESKTOP_SOCKET, HOME: join(fixture, "home"), TMPDIR: join(fixture, "tmp"), ...picks }
+  : { CRAZYAGENT_DESKTOP_SOCKET: process.env.CRAZYAGENT_DESKTOP_SOCKET, ...picks };
 
 /** Runs git with no system or user config. Inputs: the folder and git's arguments.
  * Output: git's trimmed stdout; throws with git's stderr when it fails. */

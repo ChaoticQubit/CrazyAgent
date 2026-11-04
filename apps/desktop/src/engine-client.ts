@@ -160,7 +160,7 @@ export type HarnessStatus = { kind: "ready" } | { kind: "not_installed" } | { ki
 
 export type ToolControl = { kind: "switchable" } | { kind: "limited"; reason: string };
 
-export type TeamUse = { kind: "available" } | { kind: "unavailable"; reason: string };
+export type TeamUse = { kind: "available" } | { kind: "master_only"; reason: string } | { kind: "unavailable"; reason: string };
 
 export type AccountKind = "subscription" | "api_key" | "open_ai_compatible_url" | "local";
 
