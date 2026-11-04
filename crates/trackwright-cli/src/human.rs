@@ -61,6 +61,13 @@ pub fn help(topic: Topic, catalog: &[OpSpec]) -> String {
             "trackwright mcp --actor ACTOR [--db PATH]\n\
              Serves every operation as an MCP tool over stdin and stdout, as ACTOR.\n",
         ),
+        Topic::Import => out.push_str(
+            "trackwright run import --format junit|allure|libtest --file PATH\n\
+             \x20   (--project KEY | --run KEY-Rn) [--db PATH] [--actor ACTOR] [--json]\n\
+             Reads one test report here, refusing a link or a file over its format's bound.\n\
+             --project starts a run with the file name as its declared source and finishes it.\n\
+             --run records into that running run and leaves finishing it to its writer.\n",
+        ),
         Topic::Op(spec) => operation(&mut out, spec),
     }
     assert!(out.starts_with("trackwright"));
@@ -73,6 +80,7 @@ fn overview(out: &mut String, catalog: &[OpSpec]) {
          trackwright <operation> --help\n\
          trackwright init --key KEY [--name NAME]\n\
          trackwright mcp --actor ACTOR\n\
+         trackwright run import --format FORMAT --file PATH (--project KEY | --run KEY-Rn)\n\
          Operations:\n",
     );
     for spec in catalog {
@@ -112,6 +120,9 @@ fn shape(field: &FieldSpec) -> String {
     match field.ty {
         FieldType::Project => "KEY".to_owned(),
         FieldType::Ticket => "KEY-N".to_owned(),
+        FieldType::Test(object) => format!("KEY-{}N", object.letter()),
+        FieldType::Line { .. } => "text".to_owned(),
+        FieldType::Shape(_) => "JSON".to_owned(),
         FieldType::Actor => "actor".to_owned(),
         FieldType::Text(_) => "text".to_owned(),
         FieldType::Version => "version".to_owned(),

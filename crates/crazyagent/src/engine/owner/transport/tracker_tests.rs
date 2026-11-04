@@ -9,7 +9,7 @@ use crate::tracker::host::{
 use rusqlite::TransactionBehavior;
 use serde_json::json;
 use std::os::unix::fs::PermissionsExt;
-use trackwright_core::catalog::{self, FieldType, OpSpec};
+use trackwright_core::catalog::{self, FieldType, OpSpec, Shape};
 use trackwright_core::export::{self, EXPORT_HEADER};
 use trackwright_core::model::{ClosePolicy, codes};
 
@@ -97,6 +97,9 @@ fn sample(spec: &OpSpec) -> serde_json::Value {
         let value = match field.ty {
             FieldType::Project => json!(KEY),
             FieldType::Ticket => json!("CA-1"),
+            FieldType::Test(object) => json!(format!("CA-{}1", object.letter())),
+            FieldType::Line { .. } => json!("sample"),
+            FieldType::Shape(shape) => sample_shape(shape),
             FieldType::Actor => json!("owner"),
             FieldType::Text(_) => json!("Sample text"),
             FieldType::Version => json!(1),
@@ -114,6 +117,36 @@ fn sample(spec: &OpSpec) -> serde_json::Value {
         args.insert(field.name.to_owned(), value);
     }
     serde_json::Value::Object(args)
+}
+
+/// Builds the smallest valid value of one structured catalog field, as the core's own op
+/// tests build it. Input: the shape. Output: the value.
+fn sample_shape(shape: Shape) -> serde_json::Value {
+    match shape {
+        Shape::Steps => json!(["Sample step"]),
+        Shape::Results => json!([{"name": "sample", "outcome": "passed"}]),
+        Shape::Source => json!({"kind": "declared", "ref": "local"}),
+        Shape::Policy => json!({
+            "profile": "d".repeat(64),
+            "profile_approved_ms": 0,
+            "check": "unit",
+            "kind": "unit",
+            "argv": [],
+            "toolchain": {"family": "none", "version": ""},
+            "sandbox": "e".repeat(64),
+            "network": "off",
+            "timeout_s": 0,
+            "environment": "f".repeat(64),
+        }),
+        Shape::Integrity => json!({
+            "executed": 0,
+            "inventory": {"baseline_run": null, "removed": [], "removed_total": 0},
+            "new_skips": [],
+            "protected_touched": [],
+            "holdouts_ran": false,
+            "build_ok": true,
+        }),
+    }
 }
 
 struct Served {

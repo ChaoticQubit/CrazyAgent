@@ -72,6 +72,10 @@ pub const FILES: &[(&str, &[u8])] = &[
         ),
     ),
     (
+        "skills/crazyagent-checks/SKILL.md",
+        include_bytes!("../../assets/pack/skills/crazyagent-checks/SKILL.md"),
+    ),
+    (
         "skills/grill/SKILL.md",
         include_bytes!("../../assets/pack/skills/grill/SKILL.md"),
     ),
