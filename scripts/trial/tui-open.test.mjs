@@ -6,50 +6,65 @@ import test from "node:test";
 import { startTui } from "./tui-kit.mjs";
 
 const HOME = `
-let state = "home";
+let view = "home";
+let sel = 0;
 let name = "";
 let msg = "";
+let typed = "";
+let open = "";
+let esc = 0;
 const P = "ca-trial-4";
 const E = "\\u001b";
+const cards = [P + "-readd-05", P];
 function draw(crumbs, footer, body) {
   process.stdout.write(E + "[2J" + E + "[H");
-  process.stdout.write("  " + crumbs.join("  /  ") + "\\n");
+  process.stdout.write(" [logo] " + crumbs.join("  /  ") + "\\n");
   process.stdout.write((body || "") + "\\n\\n");
   process.stdout.write(footer + "\\n");
 }
+function list(bars) {
+  return cards.map((c, i) => (bars && i === sel ? "\\u258c " : "  ") + c + "    ready").join("\\n");
+}
 function render() {
-  if (state === "home") draw(["CrazyAgent", "Home"], "n  New project    /  Filter    Ctrl-K  Go to    Enter  Open", "  > " + P + "\\n    another project");
-  else if (state === "filter") draw(["CrazyAgent", "Home"], "Enter  Keep filter    Esc  Clear filter", "  > " + P);
-  else if (state === "overview") draw(["CrazyAgent", P, "Overview"], "[  Prev    ]  Next    Esc  Home", "  Overview of the project");
-  else if (state === "conversation") draw(["CrazyAgent", P, "Conversation"], "Ctrl-T  Team    Enter  Send", "  conversation " + msg);
-  else if (state === "master") draw(["CrazyAgent", P, "Master"], "Enter  Send", "  master terminal");
-  else if (state === "team") draw(["CrazyAgent", P, "Team"], "h  Switch harness", "  team settings");
-  else if (state === "newproject") draw(["CrazyAgent", "Home", "New project", "About"], "Tab  Next field", "  Name\\n  [ " + name + " ]");
+  if (view === "home") draw(["CrazyAgent", "Home"], "n  New project    /  Filter    Ctrl-K  Go to    Enter  Open", list(true));
+  else if (view === "filter") draw(["CrazyAgent", "Home"], "Enter  Keep filter    Esc  Clear filter", "/ " + typed + "\\n" + list(false));
+  else if (view === "overview") draw(["CrazyAgent", "Home", open], "[  Prev    ]  Next    Esc  Home", "  Overview of the project");
+  else if (view === "conversation") draw(["CrazyAgent", "Home", open, "Conversation"], "Ctrl-T  Team    Enter  Send", "  conversation " + msg);
+  else if (view === "master") draw(["CrazyAgent", open, "Master"], "Enter  Send", "  master terminal");
+  else if (view === "team") draw(["CrazyAgent", open, "Team"], "h  Switch harness", "  team settings");
+  else if (view === "newproject") draw(["CrazyAgent", "Home", "New project", "About"], "Tab  Next field", "  Name\\n  [ " + name + " ]");
+}
+function down() {
+  if (view === "home") sel = Math.min(sel + 1, cards.length - 1);
+}
+function onByte(b) {
+  if (esc === 1) { esc = b === 0x5b ? 2 : 0; return; }
+  if (esc === 2) { if (b === 0x42) down(); esc = 0; return; }
+  if (b === 0x1b) { esc = 1; return; }
+  if (b === 0x2f) {
+    if (view === "home") { view = "filter"; }
+    else if (view === "conversation") { msg += "/"; }
+    return;
+  }
+  if (b === 0x0d) {
+    if (view === "filter") { view = "home"; }
+    else if (view === "home") { open = cards[sel]; view = "overview"; }
+    else if (view === "conversation") { if (msg === "/master") view = "master"; msg = ""; }
+    return;
+  }
+  if (b === 0x5d) { if (view === "overview") view = "conversation"; return; }
+  if (b === 0x14) { if (view === "conversation") view = "team"; return; }
+  if (b >= 0x20 && b < 0x7f) {
+    const c = String.fromCharCode(b);
+    if (view === "home" && c === "n") view = "newproject";
+    else if (view === "filter") { typed += c; }
+    else if (view === "conversation") { msg += c; }
+    else if (view === "newproject") { name += c; }
+  }
 }
 process.stdin.setRawMode(true);
 render();
-process.stdin.on("data", (d) => {
-  for (const b of d) {
-    if (b === 0x2f) {
-      if (state === "home") state = "filter";
-      else if (state === "conversation") msg += "/";
-    } else if (b === 0x0d) {
-      if (state === "filter") state = "home";
-      else if (state === "home") state = "overview";
-      else if (state === "conversation") { if (msg === "/master") state = "master"; msg = ""; }
-    } else if (b === 0x5d) {
-      if (state === "overview") state = "conversation";
-    } else if (b === 0x14) {
-      if (state === "conversation") state = "team";
-    } else if (b >= 0x20 && b < 0x7f) {
-      const c = String.fromCharCode(b);
-      if (state === "home" && c === "n") state = "newproject";
-      else if (state === "conversation") msg += c;
-      else if (state === "newproject") name += c;
-    }
-  }
-  render();
-});
+process.stdin.on("data", (d) => { for (const b of d) onByte(b); render(); });
 `;
 
 async function withHome(body) {
@@ -79,20 +94,21 @@ test("the stand-in reproduces the live leak: a name typed on Home opens New proj
   });
 });
 
-test("go('project-master') opens the existing project from Home without leaking into New project", async () => {
+test("go('project-master') walks past the re-add sibling to the exact project and opens Master", async () => {
   await withHome(async (tui) => {
     const pane = await tui.go("project-master");
-    assert.match(pane.split("\n", 1)[0], /ca-trial-4 {2}\/ {2}Master$/);
+    assert.match(pane.split("\n", 1)[0], /\/ {2}ca-trial-4 {2}\/ {2}Master$/);
     assert.match(pane, /master terminal/);
+    assert.doesNotMatch(pane, /readd/);
     assert.doesNotMatch(pane, /New project/);
   });
 });
 
-test("go('project-team') opens the Team screen from Home through the Conversation tab", async () => {
+test("go('project-team') opens the Team screen through the Conversation tab of the exact project", async () => {
   await withHome(async (tui) => {
     const pane = await tui.go("project-team");
-    assert.match(pane.split("\n", 1)[0], /ca-trial-4 {2}\/ {2}Team$/);
+    assert.match(pane.split("\n", 1)[0], /\/ {2}ca-trial-4 {2}\/ {2}Team$/);
     assert.match(pane, /team settings/);
-    assert.doesNotMatch(pane, /New project/);
+    assert.doesNotMatch(pane, /readd/);
   });
 });
