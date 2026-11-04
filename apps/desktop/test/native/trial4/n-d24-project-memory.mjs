@@ -30,11 +30,14 @@ export const checks = [{
     await kit.until(() => shown(WRITES), UI_MS, "Settings, Memory never showed Agent memory writes");
     const writes = await $(WRITES).getValue();
     await kit.tab("conversation");
+    const request = rememberPrompt(token);
+    await kit.until(() => shown(BOX), UI_MS, "the master's message box was never shown");
+    await kit.paste(BOX, request);
     await kit.waitFor(async () => {
-      const ready = await shown(BOX) && await $(SEND).isEnabled();
-      return { done: ready, seen: ready ? "the master's message box is ready" : "the master's message box is not ready" };
-    }, MASTER_MS, "the master's message box never became ready to send");
-    await kit.paste(BOX, rememberPrompt(token));
+      if ((await $(BOX).getValue()) !== request) await kit.paste(BOX, request);
+      const ready = await $(SEND).isEnabled();
+      return { done: ready, seen: ready ? "Send is enabled with the request in the box" : "Send is off with the request in the box" };
+    }, MASTER_MS, "Send never became enabled with the request in the box: the master terminal never went live");
     await click(SEND);
     await kit.until(async () => (await $(BOX).getValue()) === "", UI_MS, "the message box kept the request: it was not sent");
     await kit.waitFor(async () => {

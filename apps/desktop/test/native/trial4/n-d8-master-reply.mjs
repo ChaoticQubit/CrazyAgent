@@ -96,8 +96,11 @@ export async function terminalLive(kit, timeout) {
  * kit and the text. Output: which input it used. */
 export async function sendToMaster(kit, text) {
   if (await shown(BOX)) {
-    await kit.until(async () => await $(SEND).isEnabled(), UI_MS, "the master's Send button stayed off");
     await kit.paste(BOX, text);
+    await kit.until(async () => {
+      if ((await $(BOX).getValue()) !== text) await kit.paste(BOX, text);
+      return $(SEND).isEnabled();
+    }, UI_MS, "the master's Send button stayed off with the text in the box");
     await click(SEND);
     await kit.until(async () => (await $(BOX).getValue()) === "", UI_MS, "the message box kept the text: it was not sent");
     return "message box";
