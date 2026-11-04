@@ -29,9 +29,16 @@ const HOLDER_COMMAND: &str =
 const HOLDER_SHELL: [&str; 2] = ["/bin/sh", "-c"];
 const SERVER_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
 
-/// The pid a native lead's teammates' server first answered with, none until then, shared by
-/// every engine client on that server's socket (PLC c).
-type ServerPin = Arc<Mutex<Option<u32>>>;
+/// A native lead's teammates' server pin (PLC c): the pid that server first answered with at
+/// one socket, none until read or kept, shared by every engine client on that socket and kept
+/// in a record beside the socket's name, so it outlives the engine and a kill of the lead
+/// (PC-L1).
+struct ServerPin {
+    root: PathBuf,
+    lead: AgentId,
+    socket: PathBuf,
+    pid: Mutex<Option<u32>>,
+}
 const ENV_PROGRAM: &str = "/usr/bin/env -i";
 /// The program a native-mode lead's own server starts the lead with: it runs the command in
 /// the environment the server hands every pane, the lead's own variables plus the tmux
@@ -84,7 +91,7 @@ pub struct Tmux {
     socket: PathBuf,
     confined: Option<PathBuf>,
     starts_in: Option<PathBuf>,
-    pin: Option<ServerPin>,
+    pin: Option<Arc<ServerPin>>,
     control: Mutex<Option<Arc<Control>>>,
     spawning: Mutex<()>,
 }
@@ -191,7 +198,7 @@ impl Tmux {
         socket: &Path,
         profile: &Path,
         server_profile: &Path,
-        pin: ServerPin,
+        pin: Arc<ServerPin>,
     ) -> Result<Self, HostError> {
         if !server_profile.is_absolute() || server_profile == profile {
             return Err(failure("terminal_folder_unsafe"));
@@ -715,9 +722,11 @@ fn variable_names(lines: &[Vec<u8>]) -> Vec<String> {
 /// Pins a teammates' server to the pid it first answered with (PLC c): a server under
 /// another pid at the same socket, such as one a process bound there after the teammates'
 /// server ended, is refused, so no listing or input of its is taken for the lead's team.
-/// Takes the new control and the socket's pin. Returns Ok, `terminal_command_failed` for an
-/// unreadable pid, or `terminal_teammates_server_replaced`.
-fn pinned(control: &Control, pin: &Mutex<Option<u32>>) -> Result<(), HostError> {
+/// The pin is read from its record before the first check and recorded before the first pid
+/// is taken (PC-L1). Takes the new control and the socket's pin. Returns Ok,
+/// `terminal_command_failed` for an unreadable pid, `terminal_own_server_unavailable` for a
+/// record that cannot be read or kept, or `terminal_teammates_server_replaced`.
+fn pinned(control: &Control, pin: &ServerPin) -> Result<(), HostError> {
     let lines = control.ask(&format!("display-message -p '#{{pid}}{FORMAT_END}'"))?;
     let pid = lines
         .first()
@@ -725,9 +734,18 @@ fn pinned(control: &Control, pin: &Mutex<Option<u32>>) -> Result<(), HostError> 
         .and_then(|text| text.trim().parse::<u32>().ok())
         .filter(|pid| *pid > 0)
         .ok_or_else(|| failure("terminal_command_failed"))?;
-    let mut kept = pin.lock().map_err(|_| failure("terminal_unavailable"))?;
+    let mut kept = pin
+        .pid
+        .lock()
+        .map_err(|_| failure("terminal_unavailable"))?;
+    if kept.is_none() {
+        *kept = super::teammates_server_pid(&pin.root, &pin.lead, &pin.socket)?;
+    }
     match *kept {
-        None => *kept = Some(pid),
+        None => {
+            super::keep_teammates_server_pid(&pin.root, &pin.lead, &pin.socket, pid)?;
+            *kept = Some(pid);
+        }
         Some(first) if first != pid => return Err(failure(TEAMMATES_SERVER_REPLACED)),
         Some(_) => {}
     }

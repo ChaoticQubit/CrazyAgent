@@ -34,7 +34,7 @@ pub struct Servers {
     leads: Mutex<BTreeMap<AgentId, Arc<Tmux>>>,
     mates: Mutex<BTreeMap<AgentId, Arc<Tmux>>>,
     members: Mutex<BTreeMap<AgentId, AgentId>>,
-    pins: Mutex<BTreeMap<AgentId, (PathBuf, ServerPin)>>,
+    pins: Mutex<BTreeMap<AgentId, Arc<ServerPin>>>,
 }
 
 /// Whether a lead's own socket is a live socket of this user, read without following a link.
@@ -197,15 +197,17 @@ impl Servers {
     /// The pin a native lead's teammates' server pid is kept in for the socket its latest
     /// start named (PLC c): one per socket while the engine runs, kept across the clients it
     /// opens and drops there, so a server under another pid is refused even after a client
-    /// was dropped while none listened; a new socket gets a new pin. Takes the lead and the
-    /// socket. Returns the pin, or `terminal_unavailable` when too many are kept.
-    fn pin(&self, lead: &AgentId, socket: &Path) -> Result<ServerPin, HostError> {
+    /// was dropped while none listened; a new socket gets a new pin. Each pin reads and keeps
+    /// its pid in a record on disk, so a pin made again after a restart or a kill holds the
+    /// same pid (PC-L1). Takes the lead and the socket. Returns the pin, or
+    /// `terminal_unavailable` when too many are kept.
+    fn pin(&self, lead: &AgentId, socket: &Path) -> Result<Arc<ServerPin>, HostError> {
         let mut pins = self
             .pins
             .lock()
             .map_err(|_| failure("terminal_unavailable"))?;
-        if let Some((kept, pin)) = pins.get(lead)
-            && kept == socket
+        if let Some(pin) = pins.get(lead)
+            && pin.socket == socket
         {
             return Ok(pin.clone());
         }
@@ -218,8 +220,13 @@ impl Servers {
                 return Err(failure("terminal_unavailable"));
             }
         }
-        let pin = ServerPin::default();
-        pins.insert(lead.clone(), (socket.to_path_buf(), pin.clone()));
+        let pin = Arc::new(ServerPin {
+            root: self.root.clone(),
+            lead: lead.clone(),
+            socket: socket.to_path_buf(),
+            pid: Mutex::new(None),
+        });
+        pins.insert(lead.clone(), pin.clone());
         assert!(pins.len() <= LEADS_KEPT_MAX);
         Ok(pin)
     }
