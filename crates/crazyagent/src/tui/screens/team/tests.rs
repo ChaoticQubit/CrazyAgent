@@ -2565,6 +2565,12 @@ async fn q_lists_the_engines_questions_an_answer_reaches_the_asker_and_enter_ope
     let rows = render(&mut shell).join("\n");
     assert!(rows.contains("May I delete the old fixtures?"), "{rows}");
     assert!(rows.contains("I keep them until you say."), "{rows}");
+    assert_eq!(read.questions[0].for_label, "Me");
+    assert!(
+        rows.lines()
+            .any(|row| row.contains("For: Me") && row.contains("Urgent, the agent is paused")),
+        "the question's head says whom it is for (OP-50): {rows}"
+    );
 
     shell.key(Key::Enter);
     for typed in "Keep them.".chars() {
