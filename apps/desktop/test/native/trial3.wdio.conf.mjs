@@ -7,6 +7,7 @@ import { setTimeout as pause } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { SevereServiceError } from "webdriverio";
 import { closedPort, start, stop, value } from "./e2e-harness.mjs";
+import { attach, stopRelaunched } from "./trial-app.mjs";
 
 process.umask(0o077);
 const mode = process.env.TRIAL3_MODE;
@@ -252,10 +253,15 @@ export const config = {
     }
   },
   before: async function () {
-    await globalThis.browser.setWindowSize(1440, 960);
+    await attach(globalThis.browser);
   },
   onComplete: async function () {
-    if (seeding) await seeding;
-    await stop(engine);
+    try {
+      const stopped = await stopRelaunched(evidence);
+      if (stopped) console.log(`trial: ${stopped}`);
+    } finally {
+      if (seeding) await seeding;
+      await stop(engine);
+    }
   },
 };
