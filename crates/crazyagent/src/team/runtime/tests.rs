@@ -2028,8 +2028,17 @@ fn a_team_master_s_delegate_server_is_the_engine_the_runtime_started_with() {
         args,
         &[
             tool::SERVER_COMMAND.to_owned(),
-            runtime.tool_record(1).to_str().unwrap().to_owned()
-        ]
+            runtime.tool_record(1).to_str().unwrap().to_owned(),
+            runtime.mailbox(1).to_str().unwrap().to_owned()
+        ],
+        "a master without its live terminal remembers through its own mailbox"
+    );
+    assert!(
+        master
+            .instructions()
+            .contains("- remember: Save a memory for the owner's approval.\n"),
+        "{}",
+        master.instructions()
     );
     let sub = runtime
         .context(&project, 2, AgentRole::Sub, true, Layout::Linked)

@@ -2107,13 +2107,28 @@ fn a_master_with_tools_on_starts_with_the_engine_delegate_tool() {
         .join(format!("agent-{}", master.id))
         .join("tmp")
         .join(tool::DROP_FILE);
+    let mailbox = record.with_file_name(tool::MAILBOX_FOLDER);
     assert_eq!(
         server["args"],
         toml::Value::Array(vec![
             tool::SERVER_COMMAND.into(),
-            record.to_str().unwrap().into()
+            record.to_str().unwrap().into(),
+            mailbox.to_str().unwrap().into()
         ]),
         "the master records its calls in its own private temporary folder"
+    );
+    assert!(
+        std::fs::symlink_metadata(&mailbox).is_ok_and(|metadata| metadata.is_dir()),
+        "the engine made the mailbox the master's memory tools write to"
+    );
+    assert_eq!(
+        std::fs::symlink_metadata(&mailbox)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700,
+        "only the engine's user can read or write the master's memory calls"
     );
     team.shutdown().unwrap();
 }
@@ -2764,7 +2779,7 @@ fn a_conversation_master_s_delegate_calls_reach_the_team_queue_and_refusals_leav
     let turn = RequestId::new("conversation-turn").unwrap();
     let mut admitted = Vec::new();
     for project in teams.iter().chain([&unplanned]) {
-        tool::serve(calls.as_bytes(), Vec::new(), &drop).unwrap();
+        tool::serve(calls.as_bytes(), Vec::new(), &drop, None, &[]).unwrap();
         let proposed = tool::take(&drop);
         assert_eq!(proposed.len(), 2);
         assert!(!drop.exists());
