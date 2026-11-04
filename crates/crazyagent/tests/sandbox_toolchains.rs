@@ -1194,7 +1194,9 @@ fn neither_a_native_lead_nor_its_teammates_bind_block_or_take_the_caller_socket(
 /// where the engine keeps the lead's letters, reports, asks and answers: reading a letter,
 /// listing the part, taking a letter by rename, planting an entry, and removing or moving
 /// the part are all refused, and only the roster the engine keeps there is readable. The
-/// lead reads and takes its own letters (DEC-111 relay mailbox forgery, C1).
+/// same reads, plants and moves spelled in another letter case, and a hard link of a
+/// letter out of the part, are refused too (relay RC-1). The lead reads and takes its own
+/// letters (DEC-111 relay mailbox forgery, C1).
 #[test]
 fn native_teammates_neither_read_nor_change_the_leads_part_of_the_relay_mailbox() {
     let team = LiveTeam::start();
@@ -1212,8 +1214,28 @@ fn native_teammates_neither_read_nor_change_the_leads_part_of_the_relay_mailbox(
     );
     let shown = quoted(&part.join(format!("{:032x}.shown", 5)));
     let away = quoted(&mailbox.join("away"));
+    let upper = mailbox
+        .join(crazyagent::coord::relay::LEAD_PART.to_uppercase())
+        .join(letter.file_name().unwrap());
+    let mixed = mailbox.join("Lead");
+    let linked = mailbox.join("linked");
+    let calls = team
+        .case
+        .tmp
+        .join(crazyagent::team::tool::MAILBOX_FOLDER.to_uppercase());
+    assert!(
+        upper.is_file() && mixed.is_dir() && calls.is_dir(),
+        "the volume finds the part and the mailbox in any letter case"
+    );
+    let (u, x, k, c) = (
+        quoted(&upper),
+        quoted(&mixed),
+        quoted(&linked),
+        quoted(&calls),
+    );
+    let gone = quoted(&team.case.tmp.join("calls-away"));
     let probed = team.teammate(&format!(
-        "/bin/cat {l}; echo read=$?\n/bin/cat {r} >/dev/null; echo roster=$?\n/bin/ls {p}; echo list=$?\n/bin/mv {l} {shown}; echo take=$?\n/usr/bin/touch {p}/planted; echo plant=$?\n/bin/rm -r {p}; echo rm=$?\n/bin/mv {p} {away}; echo move=$?\n"
+        "/bin/cat {l}; echo read=$?\n/bin/cat {r} >/dev/null; echo roster=$?\n/bin/ls {p}; echo list=$?\n/bin/mv {l} {shown}; echo take=$?\n/usr/bin/touch {p}/planted; echo plant=$?\n/bin/rm -r {p}; echo rm=$?\n/bin/mv {p} {away}; echo move=$?\n/bin/cat {u}; echo read_case=$?\n/usr/bin/touch {x}/planted; echo plant_case=$?\n/bin/ln {l} {k}; echo link=$?\n/bin/mv {c} {gone}; echo move_case=$?\n"
     ));
     let text = String::from_utf8_lossy(&probed.stdout).into_owned();
     let errors = String::from_utf8_lossy(&probed.stderr);
@@ -1221,7 +1243,18 @@ fn native_teammates_neither_read_nor_change_the_leads_part_of_the_relay_mailbox(
         !text.contains("letter for the lead"),
         "a teammate read the lead's letter: {text}"
     );
-    for name in ["read", "list", "take", "plant", "rm", "move"] {
+    for name in [
+        "read",
+        "list",
+        "take",
+        "plant",
+        "rm",
+        "move",
+        "read_case",
+        "plant_case",
+        "link",
+        "move_case",
+    ] {
         assert_ne!(
             status_of(&text, name),
             "0",
@@ -1230,7 +1263,10 @@ fn native_teammates_neither_read_nor_change_the_leads_part_of_the_relay_mailbox(
     }
     assert_eq!(status_of(&text, "roster"), "0", "{errors}");
     assert!(
-        letter.is_file() && !part.join("planted").exists(),
+        letter.is_file()
+            && !part.join("planted").exists()
+            && fs::symlink_metadata(&linked).is_err()
+            && mailbox.is_dir(),
         "the lead's part is as the engine left it"
     );
 
