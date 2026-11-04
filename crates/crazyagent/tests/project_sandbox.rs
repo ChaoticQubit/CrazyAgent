@@ -2177,6 +2177,9 @@ fn a_native_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_clone() {
     let mates_home = case.home.with_file_name("mates-home");
     fs::create_dir_all(&mates_home).unwrap();
     fs::set_permissions(&mates_home, fs::Permissions::from_mode(0o700)).unwrap();
+    let mailbox = case.tmp.join(crazyagent::team::tool::MAILBOX_FOLDER);
+    fs::create_dir(&mailbox).unwrap();
+    fs::set_permissions(&mailbox, fs::Permissions::from_mode(0o700)).unwrap();
     let (lead, teammates) = sandbox(&case, SandboxNetwork::Only(Vec::new()))
         .allow_scratch(&tmp)
         .unwrap()
@@ -2439,6 +2442,9 @@ fn a_linked_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_worktree()
     let mates_home = case.home.with_file_name("mates-home");
     fs::create_dir_all(&mates_home).unwrap();
     fs::set_permissions(&mates_home, fs::Permissions::from_mode(0o700)).unwrap();
+    let mailbox = case.tmp.join(crazyagent::team::tool::MAILBOX_FOLDER);
+    fs::create_dir(&mailbox).unwrap();
+    fs::set_permissions(&mailbox, fs::Permissions::from_mode(0o700)).unwrap();
     let (_lead, teammates) = sandbox(&case, SandboxNetwork::Only(Vec::new()))
         .allow_scratch(&tmp)
         .unwrap()
