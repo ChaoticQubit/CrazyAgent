@@ -1164,6 +1164,38 @@ fn with_first_edit_a_teammate_that_queried_the_graph_first_gets_no_reminder() {
     assert_eq!(native.tools(native.greet), ["Bash", "graphify"]);
 }
 
+/// Under the FirstEdit nudges a native teammate whose compound command line ran graphify
+/// after another program, such as `cd <dir> && graphify query`, queried the code graph too
+/// and gets no reminder (relay B F1).
+#[test]
+fn with_first_edit_a_teammate_whose_command_line_ran_graphify_later_gets_no_reminder() {
+    let team = Team::new();
+    let native = Native::new(
+        &team,
+        CoordSettings {
+            nudges: Nudges::FirstEdit,
+            ..CoordSettings::default()
+        },
+    );
+    team.hook(
+        "post-tool",
+        Some(MATE_PANE),
+        tool(
+            MATE_SESSION,
+            None,
+            "Bash",
+            json!({"command": "cd .worktrees/greet && graphify query \"parser\""}),
+        ),
+    );
+    let own = team.root.join(".worktrees").join("greet").join("a.rs");
+    assert_eq!(
+        team.hook("edit", Some(MATE_PANE), edit(MATE_SESSION, &own)),
+        "",
+        "a session whose command line ran graphify gets no reminder"
+    );
+    assert_eq!(native.tools(native.greet), ["Bash", "graphify"]);
+}
+
 /// Under the split layout the engine keeps `relay.json` in the lead's part alone, where no
 /// teammate writes, and a native teammate's edit guard, which never opens that part, still
 /// reads the lead's worktree from it (DEC-111 relay mailbox forgery, C1).

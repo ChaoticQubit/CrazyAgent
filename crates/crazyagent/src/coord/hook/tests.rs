@@ -39,6 +39,14 @@ fn log_tools_counts_each_skill_by_name_and_graphify_once() {
         "Bash\ngraphify\n"
     );
     assert_eq!(
+        logged(json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "cd /repo && graphify query \"pools\""}
+        })),
+        "Bash\ngraphify\n",
+        "a command line that runs graphify after another program counts it too"
+    );
+    assert_eq!(
         logged(json!({"tool_name": "Skill", "tool_input": {"skill": "bad name"}})),
         "Skill\n",
         "a skill name that is not plain is not counted by name"
