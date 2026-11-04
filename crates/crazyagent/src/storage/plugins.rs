@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::PathBuf;
 
+#[cfg(any(unix, test))]
 macro_rules! items_columns {
     () => {
         "(
