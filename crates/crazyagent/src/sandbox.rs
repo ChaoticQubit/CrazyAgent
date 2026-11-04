@@ -2287,6 +2287,21 @@ fn owner_home() -> Result<PathBuf, SandboxError> {
     Ok(home.canonicalize().unwrap_or(home))
 }
 
+/// Names the credential files and folders the sandbox guards as they appear in a path: the
+/// owner's under the home, the system's without their leading `/` and the credential names
+/// no allowed root may hold. Takes nothing. Returns the names.
+pub(crate) fn credential_places() -> impl Iterator<Item = &'static str> {
+    OWNER_SECRET_PATHS
+        .iter()
+        .chain(CREDENTIAL_NAMES)
+        .copied()
+        .chain(
+            SYSTEM_SECRET_PATHS
+                .iter()
+                .map(|path| path.trim_start_matches('/')),
+        )
+}
+
 fn owner_secrets(owner: &Path) -> impl Iterator<Item = PathBuf> {
     OWNER_SECRET_PATHS
         .iter()

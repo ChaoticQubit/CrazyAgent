@@ -1218,7 +1218,7 @@ impl Mailbox {
 /// Reads an entry's last change time from its status, the epoch when it does not fit.
 /// Takes the status. Returns the time.
 #[cfg(unix)]
-fn modified(stat: &rustix::fs::Stat) -> std::time::SystemTime {
+pub(super) fn modified(stat: &rustix::fs::Stat) -> std::time::SystemTime {
     let seconds = u64::try_from(stat.st_mtime).ok();
     let nanos = u32::try_from(stat.st_mtime_nsec)
         .ok()
