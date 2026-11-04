@@ -84,7 +84,7 @@ fn write(client: &mut dyn Client, op: OpKind, mut input: Value) -> Value {
     data(client, op, input)
 }
 
-fn create(client: &mut dyn Client, title: &str, kind: &str, priority: u8) {
+fn create(client: &mut dyn Client, title: &str, kind: &str, priority: u8, release: &str) {
     data(
         client,
         OpKind::Create,
@@ -94,6 +94,7 @@ fn create(client: &mut dyn Client, title: &str, kind: &str, priority: u8) {
             "body": "",
             "kind": kind,
             "priority": priority,
+            "release": release,
         }),
     );
 }
@@ -151,14 +152,40 @@ fn seed(path: &Path) -> Local {
             "body": "The core opens or creates its own SQLite file, 0600 inside a 0700 folder.\nA host migrates the same tables into its own database instead.",
             "kind": "feature",
             "priority": 1,
+            "release": "0.1 Core",
+            "cycle": 1,
         }),
     );
-    create(client, "Ready queue orders by priority", "feature", 2);
-    create(client, "Export escapes agent text", "bug", 0);
-    create(client, "Roadmap import reads RM-1 sections", "feature", 3);
-    create(client, "Schema v1 matches the catalog", "chore", 2);
-    create(client, LONG_TITLE, "feature", 1);
-    create(client, "Claim races leave exactly one winner", "spike", 2);
+    create(
+        client,
+        "Ready queue orders by priority",
+        "feature",
+        2,
+        "0.1 Core",
+    );
+    create(client, "Export escapes agent text", "bug", 0, "0.1 Core");
+    create(
+        client,
+        "Roadmap import reads RM-1 sections",
+        "feature",
+        3,
+        "0.2 Hosts",
+    );
+    create(
+        client,
+        "Schema v1 matches the catalog",
+        "chore",
+        2,
+        "0.1 Core",
+    );
+    create(client, LONG_TITLE, "feature", 1, "0.1 Core");
+    create(
+        client,
+        "Claim races leave exactly one winner",
+        "spike",
+        2,
+        "0.1 Core",
+    );
     move_to(client, "TW-1", "in_progress");
     move_to(client, "TW-2", "todo");
     move_to(client, "TW-3", "in_review");
@@ -454,6 +481,81 @@ fn a_stale_board_move_shows_one_line_and_changes_nothing() {
     let after = data(&mut owner, OpKind::Show, json!({ "id": "TW-2" }));
     assert_eq!(after["ticket"]["status"], json!("todo"));
     assert_eq!(after["ticket"]["priority"], json!(1));
+}
+
+#[test]
+fn a_board_move_into_done_closes_and_out_of_done_reopens_with_the_version_read() {
+    let (_folder, path) = database();
+    let mut owner = seed(&path);
+    let mut recorder = Recorder::new(&mut owner);
+    let mut views = Views::new(key());
+    views.open(Page::Board, &mut recorder);
+    for _ in 0..2 {
+        assert!(views.key(Key::Right, &mut recorder));
+    }
+    let read = shown_version(&recorder.received, "TW-3");
+    recorder.sent.clear();
+    assert!(views.key(Key::Char('>'), &mut recorder));
+    assert_eq!(
+        recorder.sent[0],
+        (
+            OpKind::Close,
+            json!({ "id": "TW-3", "version": read, "status": "done" })
+        )
+    );
+    assert!(views.notice().is_none(), "{:?}", views.notice());
+    let closed = data(&mut recorder, OpKind::Show, json!({ "id": "TW-3" }));
+    assert_eq!(closed["ticket"]["status"], json!("done"));
+    assert_eq!(closed["ticket"]["closed_by"], json!("owner"));
+    let rows = render(&views, 80, 24);
+    let marked: Vec<&String> = rows.iter().filter(|row| row.contains('>')).collect();
+    assert_eq!(marked.len(), 1, "{rows:#?}");
+    let column = marked[0].find('>').unwrap();
+    assert_eq!(column, 60, "{rows:#?}");
+    assert!(marked[0][column..].starts_with(">TW-3"), "{rows:#?}");
+
+    let version = closed["ticket"]["version"].as_i64().unwrap();
+    recorder.sent.clear();
+    assert!(views.key(Key::Char('<'), &mut recorder));
+    assert_eq!(
+        recorder.sent[0],
+        (
+            OpKind::Reopen,
+            json!({ "id": "TW-3", "version": version, "status": "in_review" })
+        )
+    );
+    assert!(views.notice().is_none(), "{:?}", views.notice());
+    let reopened = data(&mut recorder, OpKind::Show, json!({ "id": "TW-3" }));
+    assert_eq!(reopened["ticket"]["status"], json!("in_review"));
+    assert_eq!(reopened["ticket"]["closed_by"], Value::Null);
+}
+
+#[test]
+fn a_board_close_the_policy_refuses_shows_one_line_and_changes_nothing() {
+    let (_folder, path) = database();
+    drop(seed(&path));
+    let mut agent = Local::open(&path, actor("agent:export")).unwrap();
+    let mut views = Views::new(key());
+    views.open(Page::Board, &mut agent);
+    for _ in 0..2 {
+        assert!(views.key(Key::Right, &mut agent));
+    }
+    assert!(views.key(Key::Char('>'), &mut agent));
+    let line = "close_owner_only: policy close is owner: only the owner may close";
+    assert_eq!(
+        views.notice().map(|notice| notice.text.as_str()),
+        Some(line)
+    );
+    let rows = render(&views, 80, 24);
+    assert_eq!(
+        rows.iter().filter(|row| row.contains(line)).count(),
+        1,
+        "{rows:#?}"
+    );
+    assert_eq!(rows[23].trim_end(), format!(" {line}"));
+    let after = data(&mut agent, OpKind::Show, json!({ "id": "TW-3" }));
+    assert_eq!(after["ticket"]["status"], json!("in_review"));
+    assert_eq!(after["ticket"]["closed_by"], Value::Null);
 }
 
 #[test]

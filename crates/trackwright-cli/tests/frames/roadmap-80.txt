@@ -5,7 +5,7 @@
    0.2 Hosts           2026-12-11  Planned   [..........] 0 of 1 closed         
                                                                                 
    Cycle     Dates                     Status    Progress                       
-   Cycle 1   2026-11-02 to 2026-11-15  Active    [..........] 0 of 0 closed     
+   Cycle 1   2026-11-02 to 2026-11-15  Active    [..........] 0 of 1 closed     
                                                                                 
                                                                                 
                                                                                 

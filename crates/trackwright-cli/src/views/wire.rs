@@ -99,6 +99,10 @@ pub struct ShownTicket {
     #[serde(default)]
     pub assignee: Option<String>,
     #[serde(default)]
+    pub release: Option<String>,
+    #[serde(default)]
+    pub cycle: Option<u32>,
+    #[serde(default)]
     pub closed_by: Option<String>,
     #[serde(default)]
     pub close_reason: Option<String>,

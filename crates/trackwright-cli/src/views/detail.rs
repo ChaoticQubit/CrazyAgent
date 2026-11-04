@@ -102,6 +102,8 @@ impl Detail {
             format!("P{}", ticket.priority),
         ];
         facts.extend(ticket.assignee.as_deref().map(safe));
+        facts.extend(ticket.release.as_deref().map(safe));
+        facts.extend(ticket.cycle.map(|number| format!("Cycle {number}")));
         lines.push((format!(" {}", facts.join("  ")), Role::Muted));
         if let Some(by) = &ticket.closed_by {
             let reason = ticket.close_reason.as_deref().unwrap_or("");
