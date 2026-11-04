@@ -551,9 +551,10 @@ mod tests {
         );
         assert_eq!(
             narrowing(
-                Some(&chose(AgentAccess::Full, None, &[])),
+                Some(&chose(AgentAccess::Full, &[])),
                 root,
                 full,
+                None,
                 &rust
             ),
             None

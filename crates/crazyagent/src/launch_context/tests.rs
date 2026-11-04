@@ -261,6 +261,7 @@ fn a_refused_keyed_launch_on_a_busy_home_keeps_the_running_agents_key_file() {
         off_tools: Vec::new(),
         native_team: None,
         relay: None,
+        model_proxy: None,
     };
     let held = context().install("codex", &home, false).unwrap();
     let key_path = home.join(".crazyagent-key");
@@ -312,6 +313,7 @@ fn a_refused_context_less_durable_launch_on_a_busy_home_keeps_the_running_agents
         off_tools: Vec::new(),
         native_team: None,
         relay: None,
+        model_proxy: None,
     };
     let held = context().install("codex", &home, false).unwrap();
     let key_path = home.join(".crazyagent-key");
