@@ -607,7 +607,8 @@ fn command_of(pid: Pid) -> String {
     let listed = crazyagent::spawn_gate::output(
         Command::new("/bin/ps")
             .args(["-o", "command=", "-p"])
-            .arg(pid.as_raw_nonzero().get().to_string()),
+            .arg(pid.as_raw_nonzero().get().to_string())
+            .stdout(Stdio::piped()),
     )
     .unwrap();
     assert!(listed.status.success(), "ps lists the pane's first process");
