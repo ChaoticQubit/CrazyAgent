@@ -815,7 +815,7 @@ pools = []
                 OwnerMutation::ModelAccess {
                     expected_config_id: pools.config_id.clone(),
                     expected_source_hash: source_hash.clone(),
-                    edit: crate::config::ModelAccessEdit::ReplacePool {
+                    edit: crate::config::ModelAccessEdit::CreatePool {
                         pool: crate::config::AccountPool {
                             id: reference("pool-live"),
                             name: None,
@@ -830,10 +830,15 @@ pools = []
                 1,
             )
             .unwrap();
-        assert!(matches!(
-            controller.send_pending().await.unwrap(),
-            OwnerResponse::Applied { .. } | OwnerResponse::Committed { .. }
-        ));
+        let assigned = controller.send_pending().await.unwrap();
+        assert!(
+            matches!(
+                &assigned,
+                OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation }
+                    if operation.result == crate::engine::owner::OwnerResult::Applied
+            ),
+            "the pool is created and assigned: {assigned:?}"
+        );
         assert_eq!(
             master_session(controller, &project).await,
             None,
