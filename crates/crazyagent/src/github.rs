@@ -251,10 +251,21 @@ fn cancel_waiting(pending: &mut BTreeMap<PathBuf, Pending>, root: &Path) {
     }
 }
 
-fn settle(root: &Path, cancel: &Arc<AtomicBool>, error: Option<EngineError>) {
-    let mut pending = pending();
+fn settle(root: &Path, cancel: &AtomicBool, error: Option<EngineError>) {
+    settle_held(&mut pending(), root, cancel, error);
+}
+
+/// Ends one device sign-in's waiting and records its problem, if that sign-in is still the
+/// root's current one. Inputs: the held pending map, the root, the sign-in's cancel flag
+/// and its failure, if any.
+fn settle_held(
+    pending: &mut BTreeMap<PathBuf, Pending>,
+    root: &Path,
+    cancel: &AtomicBool,
+    error: Option<EngineError>,
+) {
     if let Some(entry) = pending.get_mut(root)
-        && Arc::ptr_eq(&entry.cancel, cancel)
+        && std::ptr::eq(Arc::as_ptr(&entry.cancel), cancel)
     {
         entry.waiting = false;
         entry.problem = error
@@ -316,15 +327,18 @@ impl GitHub {
     }
 
     /// Reads what the settings page shows. A saved sign-in counts only while its token is
-    /// still in the store; any failure becomes a plain problem sentence.
-    /// Output: the status, which never carries the token.
+    /// still in the store; any failure becomes a plain problem sentence. The waiting flag and
+    /// the saved sign-in are read under the pending lock every save takes, so a sign-in
+    /// never reads as saved and still waiting. Output: the status, which never carries the
+    /// token.
     pub fn status(&self) -> GitHubStatus {
-        let (waiting, last) = pending()
+        let pending = pending();
+        let (waiting, last) = pending
             .get(&self.root)
             .map(|entry| (entry.waiting, entry.problem.clone()))
             .unwrap_or((false, None));
         paused_at(&self.root, Pause::InStatus);
-        match state::load(&self.root) {
+        let status = match state::load(&self.root) {
             Ok(Some(saved)) => match self.store.get(&saved.credential) {
                 Ok(_) => GitHubStatus {
                     signed_in: true,
@@ -342,7 +356,9 @@ impl GitHub {
                 self.signed_out(waiting, last.or(setup))
             }
             Err(error) => self.signed_out(waiting, Some(problem(&error.0))),
-        }
+        };
+        drop(pending);
+        status
     }
 
     /// Starts a device sign-in and finishes it on a background thread once the owner
@@ -427,10 +443,11 @@ impl GitHub {
         })
     }
 
-    /// Saves a token GitHub accepted. A device sign-in passes its cancel flag and saves
-    /// nothing once a sign-out or newer sign-in set it; any other sign-in that saved its
-    /// token cancels the one waiting. All of it runs under the pending lock sign-out holds
-    /// throughout, so no token lands during or after a sign-out.
+    /// Saves a token GitHub accepted. A device sign-in passes its cancel flag, saves
+    /// nothing once a sign-out or newer sign-in set it, and ends its own waiting once saved;
+    /// any other sign-in that saved its token cancels the one waiting. All of it runs under
+    /// the pending lock sign-out and status hold throughout, so no token lands during or
+    /// after a sign-out and no status reads a saved sign-in as still waiting.
     /// Inputs: the token, the method and the device flag. Output: the login, or the refusal.
     fn keep(
         &self,
@@ -452,8 +469,9 @@ impl GitHub {
                 credential,
             },
         )?;
-        if device.is_none() {
-            cancel_waiting(&mut pending, &self.root);
+        match device {
+            Some(cancel) => settle_held(&mut pending, &self.root, cancel, None),
+            None => cancel_waiting(&mut pending, &self.root),
         }
         Ok(login)
     }
