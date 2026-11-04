@@ -2101,13 +2101,20 @@ fn clone_store_denies(clone: &Path) -> String {
 }
 
 /// Spells plain text as a Seatbelt regex that matches it in any letter case, for names a
-/// case-insensitive volume finds however they are typed. Input: text without a quote or
-/// backslash. Output: the pattern text, without anchors.
+/// case-insensitive volume finds however they are typed. APFS folds case by Unicode rules,
+/// so `k` also matches U+212A KELVIN SIGN and `s` U+017F LATIN SMALL LETTER LONG S, the
+/// only other letters that fold to ASCII; those two are spelled as groups, so each matches
+/// its whole UTF-8 sequence (LL2S-2). Input: text without a quote or backslash. Output: the
+/// pattern text, without anchors.
 fn any_case(text: &str) -> String {
     regex_escape(text)
         .chars()
         .map(|character| {
-            if character.is_ascii_alphabetic() {
+            if character.eq_ignore_ascii_case(&'k') {
+                "(k|K|\u{212a})".to_owned()
+            } else if character.eq_ignore_ascii_case(&'s') {
+                "(s|S|\u{17f})".to_owned()
+            } else if character.is_ascii_alphabetic() {
                 format!(
                     "[{}{}]",
                     character.to_ascii_lowercase(),
@@ -2285,14 +2292,15 @@ fn clear_of_secrets(root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError
 /// The Seatbelt rules that keep an agent from changing what its harness loads from its own
 /// home as instructions, skills, hooks or settings (LL-2): no write in the launch folder or
 /// the relay plugin the engine writes before each launch, nor in the subagents, commands,
-/// output styles and rules folders Claude Code reads, none to the global instruction files
-/// of Claude Code and Codex, the Codex override that would replace them, the Codex
-/// `config.toml` holding its developer instructions or Claude Code's `settings.json`, none
-/// under `skills` but Codex's own `.system` skills, which Codex installs at its start, and no
-/// move or removal of the `skills` folder, so no folder built elsewhere is moved in, each
-/// name in any letter case. Its own run cannot change the text it runs with until the next
-/// launch rewrites it. They must follow every write allow. Input: the home. Output: the
-/// rule text.
+/// output styles and rules folders Claude Code reads or the `.agents` folder whose skills
+/// Codex reads from its home, none to the global instruction files of Claude Code and Codex,
+/// the Codex override that would replace them, the Codex `config.toml` holding its developer
+/// instructions or Claude Code's `settings.json`, none under `skills` but Codex's own
+/// `.system` skills, which Codex installs at its start and the engine removes before each
+/// Codex launch, and no move or removal of the `skills` folder, so no folder built elsewhere
+/// is moved in, each name in any letter case. Its own run cannot change the text it runs
+/// with until the next launch rewrites it. They must follow every write allow. Input: the
+/// home. Output: the rule text.
 fn launch_denies(home: &Path) -> String {
     use crate::agent_home::Harness;
     use crate::launch_context::STATE;
@@ -2305,6 +2313,7 @@ fn launch_denies(home: &Path) -> String {
         "commands",
         "output-styles",
         "rules",
+        ".agents",
     ];
     let files = [
         Harness::Claude.instruction_file(),
@@ -2325,9 +2334,9 @@ fn launch_denies(home: &Path) -> String {
     }
     text.push_str(&format!(
         "  (regex #\"^{skills}/{}\"))\n(deny {PINNED_WRITES} (regex #\"^{skills}$\"))\n",
-        other_than(".system")
+        other_than(crate::launch_context::CODEX_SYSTEM_SKILLS)
     ));
-    assert_eq!(text.matches("(regex #\"^/").count(), 13);
+    assert_eq!(text.matches("(regex #\"^/").count(), 14);
     text
 }
 

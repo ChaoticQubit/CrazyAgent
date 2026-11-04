@@ -76,6 +76,9 @@ const SKILL_FILE_USE: &str = "To use one, read its SKILL.md at the path shown an
 const FOLDER_BYTES_MAX: usize = 1024;
 const HEADER_TITLE: &str = "# Project context from CrazyAgent\n\n";
 pub(crate) const STATE: &str = "crazyagent";
+/// The folder under a Codex home's `skills` where Codex 0.164.0 installs its own system
+/// skills at each start.
+pub(crate) const CODEX_SYSTEM_SKILLS: &str = ".system";
 const CONTEXT_MODE_SERVER: &str = "context-mode";
 const CONTEXT_MODE_DECLARED: &str = "plugin_context-mode_context-mode";
 const TEAMMATE_COMMAND: &str = "teammate";
@@ -1338,10 +1341,13 @@ fn lock(home: &Path) -> Result<File, LaunchError> {
     Ok(file)
 }
 
-/// Removes the Codex skill copies at `<home>/skills/crazyagent` without resolving `skills`
-/// by path, because the agent may have replaced that folder with a link: the copies are
-/// moved up into the verified home through descriptors and removed there. A `skills` that
-/// is not a real folder of this user is left alone. Input: the validated agent home.
+/// Removes the Codex skill copies at `<home>/skills/crazyagent` and Codex's own system
+/// skills at `<home>/skills/.system`, which the agent can write during a run and Codex would
+/// keep while their marker matches, so Codex installs them fresh at its next start (LL2S-1).
+/// It never resolves `skills` by path, because the agent may have replaced that folder with
+/// a link: each entry is moved up into the verified home through descriptors and removed
+/// there. A `skills` that is not a real folder of this user is left alone. Input: the
+/// validated agent home.
 #[cfg(unix)]
 fn remove_copies(home: &Path) {
     let folder = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
@@ -1356,10 +1362,12 @@ fn remove_copies(home: &Path) {
     {
         return;
     }
-    let parked = format!(".{STATE}-skills-{}", std::process::id());
-    remove(&home.join(&parked));
-    if rustix::fs::renameat(&skills, STATE, &parent, parked.as_str()).is_ok() {
+    for (entry, kind) in [(STATE, "skills"), (CODEX_SYSTEM_SKILLS, "system")] {
+        let parked = format!(".{STATE}-{kind}-{}", std::process::id());
         remove(&home.join(&parked));
+        if rustix::fs::renameat(&skills, entry, &parent, parked.as_str()).is_ok() {
+            remove(&home.join(&parked));
+        }
     }
 }
 
