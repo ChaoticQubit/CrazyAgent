@@ -237,7 +237,7 @@ def slug_of(path):
 def blank_scan():
     return {
         "files": 0, "calls": 0, "ctx": 0, "graphify": 0, "Skill": 0, "overlap": 0, "first": {}, "at": {},
-        "skills": Counter(), "tools": Counter(), "codes": Counter(), "xcrun": 0, "git": 0, "git_ok": 0,
+        "skills": Counter(), "tools": Counter(), "codes": Counter(), "xcrun": 0, "toolchain_xcrun": 0, "git": 0, "git_ok": 0,
         "work_ok": Counter(), "work_failed": Counter(), "prompts": [], "launches": [], "repo_reads": [],
         "phrases": Counter(),
     }
@@ -348,9 +348,6 @@ def scan_file(path, found, root, project_mark):
                             found["codes"][code] += 1
                             first(code)
                     xcrun = bool(XCRUN.search(text))
-                    if xcrun:
-                        found["xcrun"] += 1
-                        first("xcrun")
                     key, git_call = uses.get(part.get("tool_use_id"), (None, False))
                     if key in WORK_TOOLS:
                         (found["work_failed"] if failed else found["work_ok"])[key] += 1
@@ -359,8 +356,14 @@ def scan_file(path, found, root, project_mark):
                             first("overlap")
                     if git_call:
                         found["git"] += 1
-                        if not failed and not xcrun:
+                        if xcrun:
+                            found["xcrun"] += 1
+                            first("xcrun")
+                        elif not failed:
                             found["git_ok"] += 1
+                    elif xcrun:
+                        found["toolchain_xcrun"] += 1
+                        first("toolchain_xcrun")
     if top:
         chosen = launch or snapshot
         found["launches"].append(launch_record(chosen[0], chosen[1], early, project_mark) if chosen else {"spot": where, "app": None})
@@ -1025,9 +1028,12 @@ def check_git(t):
     notes, bad = [], []
     for a in t.tree:
         s = t.transcripts[a["id"]]
-        if not s["git"] and not s["xcrun"]:
+        if not s["git"] and not s["xcrun"] and not s["toolchain_xcrun"]:
             continue
         note = f"{t.label(a)} git calls={s['git']} ok={s['git_ok']} xcrun errors={s['xcrun']}" + (f" first {s['first']['xcrun']}" if s["xcrun"] else "")
+        if s["toolchain_xcrun"]:
+            note += f", toolchain xcrun notes={s['toolchain_xcrun']} first {s['first']['toolchain_xcrun']}"
+            t.cite(s, s["first"]["toolchain_xcrun"], f"agent {a['id']} first toolchain xcrun note, a cache write the sandbox refuses (DEC-104)")
         if s["xcrun"]:
             t.cite(s, s["first"]["xcrun"], f"agent {a['id']} first xcrun error")
         (bad if s["xcrun"] else notes).append(note)
@@ -1831,7 +1837,7 @@ CHECKS = (
         "title": "Git works inside every agent's sandbox",
         "proves": "Agent git calls succeed with no xcrun shim errors under the sandbox.",
         "why": "Sandbox git through the real binary (Q73, IMP-AWF). Trial 2: PASS (every agent's git calls ok, 0 xcrun errors).",
-        "how": "Shell tool calls naming git in each transcript and their results; xcrun_db or xcrun: error in any result.",
+        "how": "Shell tool calls naming git in each transcript and their results; xcrun_db or xcrun: error in a git call's result fails. The same lines in other calls' results, a toolchain's xcrun cache write the sandbox refuses (DEC-104), are a note.",
     },
     {
         "id": "T3-10", "name": "stop all", "run": check_stopped,
