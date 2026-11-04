@@ -4,6 +4,9 @@ import { click } from "./settings-steps.mjs";
 /** The longest an agents check waits for one screen change, in ms. */
 export const UI_MS = 30000;
 
+/** The longest a wheel turn may take to show on a terminal, in ms. */
+export const TURN_MS = 1500;
+
 /** The engine statuses of an agent that still runs. */
 export const RUNNING = ["starting", "idle", "working"];
 
@@ -128,6 +131,14 @@ export function moved(before, after) {
     return move !== null && move.to > move.from;
   }
   return before.top !== after.top || (!before.jump && after.jump);
+}
+
+/** Whether a read still answers a wheel turn: it was taken within TURN_MS of the turn, so a
+ * condition that waited out a slow read cannot pass late. Inputs: the turn's and the read's
+ * times in ms. Output: a boolean. */
+export function inTurn(turned, read) {
+  assert(read >= turned, "a read comes after its turn");
+  return read - turned <= TURN_MS;
 }
 
 /** Whether a fullscreen agent scrolled with the wheel: the turn up moved a block of its rows

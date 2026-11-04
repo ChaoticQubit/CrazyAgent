@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { cardOf, copyRow, finishedRow, fromRows, moved, notShown, overlapping, paired, redrawMove, roleName, showsTask, spilled, statusWord } from "./agents-cards.mjs";
+import { TURN_MS, UI_MS, cardOf, copyRow, finishedRow, fromRows, inTurn, moved, notShown, overlapping, paired, redrawMove, roleName, showsTask, spilled, statusWord } from "./agents-cards.mjs";
 
 /** A card as readCards reads it, at a place and size, with one text box inside it unless
  * given others. Inputs: the title, the box and the text boxes. Output: the card. */
@@ -132,6 +132,16 @@ test("a fullscreen scroll counts only when the turn back down puts the block the
 test("a redraw with no wheel behind it, a spinner line gone at the end of a turn, never passes as a scroll", () => {
   assert.equal(paired(SPINNING, SPINNER_GONE, SPINNER_GONE), false);
   assert.equal(paired(SPINNING, SPINNER_GONE, APPENDED), false);
+});
+
+test("a read answers a wheel turn only within TURN_MS, so a redraw and its exact reverse cannot wait the screen out", () => {
+  assert.equal(TURN_MS, 1500);
+  assert.equal(paired(SPINNING, SPINNER_GONE, SPINNING), true);
+  assert.equal(inTurn(10000, 10000), true);
+  assert.equal(inTurn(10000, 10000 + TURN_MS), true);
+  assert.equal(inTurn(10000, 10001 + TURN_MS), false);
+  assert.equal(inTurn(10000, 10000 + UI_MS), false);
+  assert.throws(() => inTurn(10000, 9999), /a read comes after its turn/);
 });
 
 test("copied text counts only when it is part of the terminal's rows", () => {

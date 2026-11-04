@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { click } from "../settings-steps.mjs";
-import { RUNNING, UI_MS, cardOf, copyRow, fromRows, moved, openCard, paired, readCards, rowTexts, selectRow, terminalNote, terminalView, wheel } from "../agents-cards.mjs";
+import { RUNNING, TURN_MS, UI_MS, cardOf, copyRow, fromRows, inTurn, moved, openCard, paired, readCards, rowTexts, selectRow, terminalNote, terminalView, wheel } from "../agents-cards.mjs";
 
-const SCROLL_MS = 1500;
 const STEP_PX = 120;
 const COPIED = "Copied the selection.";
 const REFUSED = "The clipboard refused the copy.";
@@ -53,18 +52,20 @@ async function scroll(kit, label) {
   let up = null;
   await kit.until(async () => {
     const after = await terminalView(label);
-    if (after && moved(before, after)) {
-      took = Date.now() - started;
+    const at = Date.now();
+    if (after && moved(before, after) && inTurn(started, at)) {
+      took = at - started;
       up = after;
     }
     return took !== null;
-  }, SCROLL_MS, `${label}'s terminal did not scroll within ${SCROLL_MS} ms of turning the wheel up${before.mouse ? " (the agent reads the mouse, so its own screen had to move)" : ""}`);
+  }, TURN_MS, `${label}'s terminal did not scroll within ${TURN_MS} ms of turning the wheel up${before.mouse ? " (the agent reads the mouse, so its own screen had to move)" : ""}`);
+  const down = Date.now();
   if (!await wheel(label, STEP_PX)) throw new Error(`${label}'s terminal screen was not drawn for the wheel`);
   if (before.mouse) {
     await kit.until(async () => {
       const view = await terminalView(label);
-      return Boolean(view && paired(before, up, view));
-    }, UI_MS, `${label}'s terminal did not move the rows the wheel moved up back to their row when the wheel turned down, so the move up was its own redraw`);
+      return Boolean(view && paired(before, up, view) && inTurn(down, Date.now()));
+    }, TURN_MS, `${label}'s terminal did not move the rows the wheel moved up back to their row within ${TURN_MS} ms of turning the wheel down, so the move up was its own redraw`);
     return { took, mouse: true };
   }
   if ((await terminalView(label))?.jump) await click(inTerminal(label, '//button[normalize-space(.)="Jump to latest"]'));
