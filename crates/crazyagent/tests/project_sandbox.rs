@@ -2270,6 +2270,91 @@ fn a_native_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_clone() {
         &format!("mkdir {}", quoted(&admin)),
         &admin,
     );
+    let record = git.join("worktrees").join("greet");
+    let links: Vec<(PathBuf, Vec<u8>)> = [
+        record.join("gitdir"),
+        record.join("commondir"),
+        greet.join(".git"),
+    ]
+    .into_iter()
+    .map(|file| {
+        let bytes = fs::read(&file).unwrap();
+        (file, bytes)
+    })
+    .collect();
+    let lead_only = clone.join("lead-only");
+    fs::create_dir(&lead_only).unwrap();
+    let folder = clone.join(crazyagent::agent_git::TEAMMATES_FOLDER);
+    let bob = folder.join("bob");
+    let mut escaped: Vec<String> = Vec::new();
+    for (label, script) in [
+        (
+            "GITDIR",
+            format!("printf 'x\\n' >> {}", quoted(&record.join("GITDIR"))),
+        ),
+        (
+            "COMMONDIR",
+            format!("printf 'x\\n' >> {}", quoted(&record.join("COMMONDIR"))),
+        ),
+        (
+            ".GIT",
+            format!("printf 'x\\n' >> {}", quoted(&greet.join(".GIT"))),
+        ),
+        (
+            "symlink at a teammate folder",
+            format!("ln -s {} {}", quoted(&lead_only), quoted(&bob)),
+        ),
+        (
+            "symlink moved in as a teammate folder",
+            format!(
+                "ln -s {} {} && mv {} {}",
+                quoted(&lead_only),
+                quoted(&greet.join("link")),
+                quoted(&greet.join("link")),
+                quoted(&bob)
+            ),
+        ),
+    ] {
+        if run(&teammates, &teammates_profile, &script)
+            .status
+            .success()
+        {
+            escaped.push(label.to_owned());
+        }
+    }
+    for (file, before) in &links {
+        if &fs::read(file).unwrap() != before {
+            escaped.push(format!("changed {}", file.display()));
+        }
+    }
+    if fs::symlink_metadata(&bob).is_ok() {
+        escaped.push(format!("made {}", bob.display()));
+    }
+    let replaced = run(
+        &teammates,
+        &teammates_profile,
+        &format!(
+            "mv {} {} && ln -s {} {}",
+            quoted(&folder),
+            quoted(&record.join("moved")),
+            quoted(&lead_only),
+            quoted(&folder)
+        ),
+    );
+    if replaced.status.success() {
+        escaped.push("teammates folder entry replaced".to_owned());
+    }
+    if !fs::symlink_metadata(&folder).unwrap().is_dir() || !greet.join(".git").is_file() {
+        escaped.push(format!("moved {}", folder.display()));
+    }
+    assert!(
+        fs::read_dir(&lead_only).unwrap().next().is_none(),
+        "nothing lands in the lead's folder"
+    );
+    assert!(
+        escaped.is_empty(),
+        "a teammate changes what ties its worktree to the clone: {escaped:?}"
+    );
 }
 
 #[test]

@@ -8949,6 +8949,61 @@ fn native_lead_clone_in_the_project(fixture: &Fixture) -> (i64, String, PathBuf)
     (lead, branch, clone)
 }
 
+/// OP-9 r2: the engine runs its lead-rights `git worktree add` only at a real teammates'
+/// folder, so a symlink at `.worktrees` or at `.worktrees/<name>` that points at a folder
+/// the lead may write never gets a teammate's tree, a worktree record or a branch.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_engine_never_adds_a_teammate_worktree_through_a_symlink() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let (lead, branch, clone) = native_lead_clone_in_the_project(&fixture);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let lead_only = clone.join("lead-only");
+    std::fs::create_dir(&lead_only).unwrap();
+    let folder = clone.join(crate::agent_git::TEAMMATES_FOLDER);
+    std::os::unix::fs::symlink(&lead_only, &folder).unwrap();
+    let home = agent_home(&fixture.base.join("team"), lead);
+    let team_folder = home.join("teams").join("session-1");
+    std::fs::create_dir_all(&team_folder).unwrap();
+    std::fs::write(
+        team_folder.join("config.json"),
+        r#"{"members":[{"name":"greet","tmuxPaneId":"%7"}]}"#,
+    )
+    .unwrap();
+    crate::coord::ensure(&fixture.connection).unwrap();
+    super::teammates::register(&fixture.connection, &project, lead, &home, &["%7"], 1, 5).unwrap();
+    let untouched = |when: &str| {
+        assert!(
+            std::fs::read_dir(&lead_only).unwrap().next().is_none(),
+            "{when}: nothing lands in the lead's folder"
+        );
+        assert!(
+            !clone.join(".git").join("worktrees").join("greet").exists(),
+            "{when}: no worktree record"
+        );
+        assert!(
+            !clone
+                .join(".git")
+                .join("refs")
+                .join("heads")
+                .join(format!("{branch}--greet"))
+                .exists(),
+            "{when}: no teammate branch"
+        );
+    };
+
+    team.make_teammate_worktrees(&project, lead).unwrap();
+    untouched("a symlinked teammates' folder");
+
+    std::fs::remove_file(&folder).unwrap();
+    std::fs::create_dir(&folder).unwrap();
+    std::os::unix::fs::symlink(&lead_only, folder.join("greet")).unwrap();
+    team.make_teammate_worktrees(&project, lead).unwrap();
+    untouched("a symlinked teammate folder");
+    team.shutdown().unwrap();
+}
+
 /// OP-9 r1 F1 (leader 14:29, option 1): the engine makes each live native teammate's own
 /// worktree in its lead's clone, `.worktrees/<name>` on `<task branch>--<name>` cut from the
 /// lead's commit, running git there under the lead's installed profile, and records it on
