@@ -1063,6 +1063,47 @@ pub fn unlanded_teammates(
     }
 }
 
+/// Names the native teammates of a harness's own clone that work in their own worktree,
+/// `<clone>/.worktrees/<name>`, on their own branch `<task branch>--<name>` (DEC-111 Q17),
+/// read from the clone's git records as data, so no git runs in it. Inputs: the store, the
+/// worktree and its git folder. Output: the names, none for a linked worktree, or the code
+/// that kept the clone from being read.
+pub fn teammate_worktrees(
+    db: &Connection,
+    worktree: &Path,
+    git_dir: &Path,
+) -> Result<Vec<String>, EngineError> {
+    #[cfg(unix)]
+    return retire::own_teammates(db, worktree, git_dir);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, worktree, git_dir);
+        Err(unavailable())
+    }
+}
+
+/// Makes one native teammate's own worktree in its lead's own clone (OP-9):
+/// `<clone>/.worktrees/<name>` on `<task branch>--<name>`, cut from the lead's HEAD for a new
+/// branch and checked out as it stands for one an earlier run left, with git run only with
+/// the lead's rights. Inputs: the store, the lead's worktree and git folder, the teammate's
+/// name and the lead's git. Output: Ok once the clone records the worktree on that branch,
+/// else a plain `changes_*` refusal.
+pub fn add_teammate_worktree(
+    db: &Connection,
+    worktree: &Path,
+    git_dir: &Path,
+    name: &str,
+    git: &LeadGit<'_>,
+) -> Result<(), EngineError> {
+    #[cfg(unix)]
+    return subagent::add_teammate(db, worktree, git_dir, name, git);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, worktree, git_dir, name, git);
+        Err(unavailable())
+    }
+}
+
 /// Removes a finished agent's worktree with the host git, never forcing, or an agent's
 /// own clone as a folder with no git, after checking `retire_blocker` again while no
 /// landing step can run on its repository. Inputs: the store, the owner's checkout root,

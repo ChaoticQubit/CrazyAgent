@@ -2156,6 +2156,230 @@ fn an_agent_cannot_exec_an_app_bundle_binary_in_any_case_but_bundle_tools_still_
     }
 }
 
+/// OP-9 r1 (leader 14:29): a native lead's teammates write only the teammates' folder of the
+/// lead's clone and the git parts their own commits need. A teammate commits in the worktree
+/// the engine made for it on its own `<task>--<name>` branch, but never writes the lead's
+/// files, the clone's hooks, config or HEAD, the lead's task branch, the links that tie a
+/// teammate worktree to the clone, or a new worktree record.
+#[test]
+fn a_native_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_clone() {
+    use std::os::unix::fs::PermissionsExt;
+    assert!(Path::new(AGENT_GIT).is_file());
+    let (case, clone, _head) = clone_case();
+    let task = "crazyagent/write-the-page";
+    let switched = owner_git(&clone, &case.home, &["switch", "-q", "-c", task]);
+    assert!(switched.status.success(), "{switched:?}");
+    let tmux = crazyagent::terminal::tmux::installed(&case.project).expect("tmux is installed");
+    let tmp = crazyagent::sandbox::toolchains::make_tmp(&case.home).unwrap();
+    for folder in crazyagent::sandbox::CLAUDE_TEAM_SHARED {
+        fs::create_dir_all(case.home.join(folder)).unwrap();
+    }
+    let mates_home = case.home.with_file_name("mates-home");
+    fs::create_dir_all(&mates_home).unwrap();
+    fs::set_permissions(&mates_home, fs::Permissions::from_mode(0o700)).unwrap();
+    let (lead, teammates) = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .allow_scratch(&tmp)
+        .unwrap()
+        .confine_to_clone(&clone)
+        .unwrap()
+        .native_team(
+            &tmp.join("tmux.sock"),
+            &tmp.join("teammates-0123456789abcdef.sock"),
+            &tmp.join(crazyagent::team::caller::CALLER_SOCKET),
+            &tmux,
+            &mates_home,
+        )
+        .unwrap();
+    let (lead_profile, teammates_profile) = (
+        case.profiles.join("lead.sb"),
+        case.profiles.join("teammates.sb"),
+    );
+    let greet = clone
+        .join(crazyagent::agent_git::TEAMMATES_FOLDER)
+        .join("greet");
+    let added = run(
+        &lead,
+        &lead_profile,
+        &format!(
+            "cd {} && {AGENT_GIT} -c core.hooksPath=/dev/null worktree add -q -b {task}--greet {} HEAD",
+            quoted(&clone),
+            quoted(&greet)
+        ),
+    );
+    assert!(added.status.success(), "{added:?}");
+    let committed = run(
+        &teammates,
+        &teammates_profile,
+        &format!(
+            "cd {} && printf 'hello\\n' > greet.txt && {AGENT_GIT} add greet.txt && {AGENT_GIT} -c user.name=greet -c user.email=greet@local -c core.hooksPath=/dev/null commit -q -m greet",
+            quoted(&greet)
+        ),
+    );
+    assert!(
+        committed.status.success(),
+        "a teammate commits in its own worktree: {}",
+        String::from_utf8_lossy(&committed.stderr)
+    );
+    let teammate_tip = owner_git(
+        &clone,
+        &case.home,
+        &["log", "-1", "--format=%s", &format!("{task}--greet")],
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&teammate_tip.stdout).trim(),
+        "greet"
+    );
+    let git = clone.join(".git");
+    let kept: Vec<(PathBuf, Vec<u8>)> = [
+        git.join("config"),
+        git.join("HEAD"),
+        git.join("refs").join("heads").join(task),
+        greet.join(".git"),
+        git.join("worktrees").join("greet").join("gitdir"),
+    ]
+    .into_iter()
+    .map(|file| {
+        let bytes = fs::read(&file).unwrap();
+        (file, bytes)
+    })
+    .collect();
+    for (file, before) in &kept {
+        let output = run(
+            &teammates,
+            &teammates_profile,
+            &format!("printf 'x\\n' >> {}", quoted(file)),
+        );
+        assert!(!output.status.success(), "{}", file.display());
+        assert_eq!(&fs::read(file).unwrap(), before, "{}", file.display());
+    }
+    for target in [
+        clone.join("lead.txt"),
+        git.join("hooks").join("post-commit"),
+    ] {
+        write_refused(
+            &teammates,
+            &teammates_profile,
+            &format!("printf x > {}", quoted(&target)),
+            &target,
+        );
+    }
+    let admin = git.join("worktrees").join("other");
+    write_refused(
+        &teammates,
+        &teammates_profile,
+        &format!("mkdir {}", quoted(&admin)),
+        &admin,
+    );
+    let record = git.join("worktrees").join("greet");
+    let links: Vec<(PathBuf, Vec<u8>)> = [
+        record.join("gitdir"),
+        record.join("commondir"),
+        greet.join(".git"),
+    ]
+    .into_iter()
+    .map(|file| {
+        let bytes = fs::read(&file).unwrap();
+        (file, bytes)
+    })
+    .collect();
+    let lead_only = clone.join("lead-only");
+    fs::create_dir(&lead_only).unwrap();
+    let folder = clone.join(crazyagent::agent_git::TEAMMATES_FOLDER);
+    let [bob, carl, dave, erin] = ["bob", "carl", "dave", "erin"].map(|name| folder.join(name));
+    let planted = case.home.join("teams").join("planted.lock");
+    let mut escaped: Vec<String> = Vec::new();
+    for (label, script) in [
+        (
+            "GITDIR",
+            format!("printf 'x\\n' >> {}", quoted(&record.join("GITDIR"))),
+        ),
+        (
+            "COMMONDIR",
+            format!("printf 'x\\n' >> {}", quoted(&record.join("COMMONDIR"))),
+        ),
+        (
+            ".GIT",
+            format!("printf 'x\\n' >> {}", quoted(&greet.join(".GIT"))),
+        ),
+        (
+            ".GIT made in a new teammate folder",
+            format!(
+                "mkdir {} && printf 'gitdir: {}\\n' > {}",
+                quoted(&erin),
+                git.display(),
+                quoted(&erin.join(".GIT"))
+            ),
+        ),
+        (
+            "symlink at a teammate folder",
+            format!("ln -s {} {}", quoted(&lead_only), quoted(&bob)),
+        ),
+        (
+            "symlink moved in as a teammate folder",
+            format!(
+                "ln -s {} {} && mv {} {}",
+                quoted(&lead_only),
+                quoted(&greet.join("link")),
+                quoted(&greet.join("link")),
+                quoted(&carl)
+            ),
+        ),
+        (
+            "team folder holding a .git moved in as a teammate folder",
+            format!(
+                "mkdir {} && printf 'gitdir: {}\\n' > {} && mv {} {}",
+                quoted(&planted),
+                git.display(),
+                quoted(&planted.join(".git")),
+                quoted(&planted),
+                quoted(&dave)
+            ),
+        ),
+    ] {
+        if run(&teammates, &teammates_profile, &script)
+            .status
+            .success()
+        {
+            escaped.push(label.to_owned());
+        }
+    }
+    for (file, before) in &links {
+        if &fs::read(file).unwrap() != before {
+            escaped.push(format!("changed {}", file.display()));
+        }
+    }
+    for made in [&bob, &carl, &dave, &erin.join(".git")] {
+        if fs::symlink_metadata(made).is_ok() {
+            escaped.push(format!("made {}", made.display()));
+        }
+    }
+    let replaced = run(
+        &teammates,
+        &teammates_profile,
+        &format!(
+            "mv {} {} && ln -s {} {}",
+            quoted(&folder),
+            quoted(&record.join("moved")),
+            quoted(&lead_only),
+            quoted(&folder)
+        ),
+    );
+    if replaced.status.success() {
+        escaped.push("teammates folder entry replaced".to_owned());
+    }
+    if !fs::symlink_metadata(&folder).unwrap().is_dir() || !greet.join(".git").is_file() {
+        escaped.push(format!("moved {}", folder.display()));
+    }
+    assert!(
+        escaped.is_empty(),
+        "a teammate changes what ties its worktree to the clone: {escaped:?}"
+    );
+    assert!(
+        fs::read_dir(&lead_only).unwrap().next().is_none(),
+        "nothing lands in the lead's folder"
+    );
+}
+
 #[test]
 fn an_agent_cannot_exec_an_app_bundle_it_put_in_its_own_folders_but_bundle_tools_still_run() {
     use std::os::unix::fs::PermissionsExt;
