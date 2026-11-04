@@ -8959,5 +8959,8 @@ mod live_claude_tests;
 #[path = "runtime/live_codex_tests.rs"]
 mod live_codex_tests;
 #[cfg(all(test, target_os = "macos"))]
+#[path = "runtime/live_failover_tests.rs"]
+mod live_failover_tests;
+#[cfg(all(test, target_os = "macos"))]
 #[path = "runtime/live_native_lead_tests.rs"]
 mod live_native_lead_tests;
