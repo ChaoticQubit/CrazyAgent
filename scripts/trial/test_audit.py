@@ -354,6 +354,17 @@ class AuditTests(unittest.TestCase):
             self.assertNotIn(leaked, (w.out / "checks" / "T3-09.json").read_text())
         self.assertIn(audit.MASK, record["log"])
 
+    def test_t3_09_counts_xcrun_errors_only_in_git_call_results_and_notes_toolchain_cache_lines(self):
+        w = self.world
+        sub = w.agent("sub", mode="app_spawned")
+        cache = "  = note: xcrun: error: couldn't create cache file '/var/folders/x/T/xcrun_db-AbCd1234' (errno=Operation not permitted)"
+        w.transcript(sub, call(1, "Bash", {"command": "cargo test 2>&1 | grep -E \"^test result|error\" ; cat calc.py; ls"}, f"{cache}\ntest result: ok. 1 passed"))
+        w.transcript(sub, call(2, "Bash", {"command": "git add calc.py && git commit -qm \"feat: add sub\""}, "[main 376e354] feat: add sub"))
+        record = w.audit("T3-09")
+        self.assertEqual(record["result"], "PASS", record["detail"])
+        self.assertIn("git calls=1 ok=1 xcrun errors=0", record["detail"])
+        self.assertIn("toolchain xcrun notes=1", record["detail"])
+
     def test_t3_10_stop_all_passes_on_a_paused_project_and_fails_while_an_agent_process_lives(self):
         w = self.world
         lead = w.agent("sub", mode="app_spawned")
