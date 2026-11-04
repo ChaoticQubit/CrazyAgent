@@ -2761,3 +2761,104 @@ fn shift_b_steps_background_commands_and_shift_g_steps_the_grace_time() {
         Some(Notice::problem("Pick a grace time from 10 s to 1 h."))
     );
 }
+
+/// Stop teammate (S3, feat/harness-comms b07fcf11): p on a harness with no running teammate
+/// says so; otherwise p asks which one, the panel numbers the running teammates p then 1 up,
+/// oldest first and past finished and stopped ones, a number past them keeps asking, Esc
+/// keeps them, and a number sends one StopTeammate for that teammate's pane.
+#[test]
+fn p_then_a_number_stops_that_running_teammate_of_the_selected_harness() {
+    let mut view = loaded();
+    view.key(press(KeyCode::Down));
+    let lead = view.agents()[1].id;
+    assert_eq!(lead, 2);
+    assert_eq!(view.key(press(KeyCode::Char('p'))), TeamReply::Handled);
+    assert_eq!(view.ask, None);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("That harness has no running teammates."))
+    );
+    let teammate = |pane: &str, ended: bool, stopped: bool, minutes: i64| crate::team::Teammate {
+        pane: pane.into(),
+        ended,
+        stopped,
+        seen_ms: NOW - minutes * MINUTE,
+    };
+    let mut status = team();
+    status.agents[1].teammates = vec![
+        teammate("%7", false, false, 5),
+        teammate("%8", true, false, 4),
+        teammate("%9", false, true, 3),
+        teammate("%11", false, false, 2),
+    ];
+    reread(&mut view, status, NOW + MINUTE);
+    let rows = frame(&view, 120, 60);
+    assert!(find(&rows, "%7").contains("running, p then 1"));
+    assert!(find(&rows, "%8").contains("finished"));
+    assert!(find(&rows, "%9").contains("stopped"));
+    assert!(find(&rows, "%11").contains("running, p then 2"));
+    assert_eq!(view.key(press(KeyCode::Char('p'))), TeamReply::Handled);
+    assert_eq!(view.ask, Some(Ask::Teammate(lead)));
+    assert_eq!(view.help(), vec![("1-9", "Stop teammate"), ("Esc", "Keep")]);
+    assert!(find(&frame(&view, 120, 60), "Stop which teammate of").contains("1-2 Teammate"));
+    assert_eq!(view.key(press(KeyCode::Char('3'))), TeamReply::Handled);
+    assert_eq!(
+        view.ask,
+        Some(Ask::Teammate(lead)),
+        "a number past the running teammates keeps asking"
+    );
+    assert_eq!(view.key(press(KeyCode::Esc)), TeamReply::Handled);
+    assert_eq!(view.ask, None);
+    view.key(press(KeyCode::Char('p')));
+    let TeamReply::Change(action) = view.key(press(KeyCode::Char('2'))) else {
+        panic!("p then 2 sends a change");
+    };
+    assert_eq!(
+        action,
+        TeamAction::StopTeammate {
+            project_id: project(),
+            agent: lead,
+            pane: "%11".into(),
+        }
+    );
+    assert_eq!(view.ask, None);
+    view.apply(
+        &SetupQuery::TeamChange {
+            action,
+            generation: 9,
+        },
+        Ok(SetupView::Changed(OwnerResult::Applied)),
+    );
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "Stopping that teammate. Its harness is told."
+        ))
+    );
+}
+
+/// The team view's help (S3, feat/harness-comms b07fcf11) names every key once, each with
+/// its own label, Stop teammate on p beside Stop agent on z.
+#[test]
+fn the_team_help_lists_every_key_once_with_stop_teammate_on_p() {
+    let help = loaded().help();
+    for (at, (key, label)) in help.iter().enumerate() {
+        assert!(
+            help[..at].iter().all(|(seen, _)| seen != key),
+            "{key} is listed twice: {help:?}"
+        );
+        assert!(
+            help[..at].iter().all(|(_, seen)| seen != label),
+            "{label} is listed twice: {help:?}"
+        );
+    }
+    for pair in [
+        ("p", "Stop teammate"),
+        ("z", "Stop agent"),
+        ("m", "Master's branch"),
+        ("g", "Ask before merge"),
+        ("T", "Token budget"),
+    ] {
+        assert!(help.contains(&pair), "{pair:?} is missing: {help:?}");
+    }
+}
