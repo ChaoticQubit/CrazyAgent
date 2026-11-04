@@ -28,11 +28,11 @@ use trackwright_core::policy;
 use trackwright_core::requests::Request;
 use trackwright_core::runs::{
     self, NewResult, ResultOutcome, RunEnd, RunFinish, RunList, RunRecord, RunShow, RunStart,
-    RunState, RunView, Sighted, SourceRef, Verdict,
+    RunState, RunView, Sighted, SourceRef, TestId, Verdict,
 };
 use trackwright_core::store::StoreError;
 use trackwright_core::tests_model::{CaseKind, CaseStatus};
-use trackwright_core::tests_store::{self, NewCase};
+use trackwright_core::tests_store::{self, CaseFilter, NewCase};
 
 const NOW: i64 = 1_800_000_000_000;
 
@@ -1038,6 +1038,16 @@ fn an_agent_reading_a_holdout_run_through_the_tracker_sees_only_its_verdict() {
         let page = coverage::coverage_as(&tx, &Host, actor, &query).unwrap();
         page.rows[0].cases[0].latest.clone()
     };
+    let oracle = TestId::parse(&oracle).unwrap();
+    let case_latest = |actor: &core::Actor| {
+        let tx = case.db.unchecked_transaction().unwrap();
+        let shown = tests_store::case_show_as(&tx, &Host, actor, &oracle).unwrap();
+        let listed =
+            tests_store::case_list_as(&tx, &Host, actor, &key(), &CaseFilter::default()).unwrap();
+        let row = listed.into_iter().find(|row| row.id == oracle).unwrap();
+        (shown.latest, row.latest)
+    };
+    let failed = (Some(ResultOutcome::Failed), Some(ResultOutcome::Failed));
 
     let Sighted::Outcome(outcome) = show(&agent, holdout) else {
         panic!("an agent reads a holdout run in full");
@@ -1055,6 +1065,11 @@ fn an_agent_reading_a_holdout_run_through_the_tracker_sees_only_its_verdict() {
         None,
         "an agent reads no per-test outcome of a holdout run"
     );
+    assert_eq!(
+        case_latest(&agent),
+        (None, None),
+        "an agent reads no hidden case's outcome from a holdout run"
+    );
 
     let Sighted::Full(page) = show(&owner(), holdout) else {
         panic!("the owner reads a holdout run as its outcome only");
@@ -1062,6 +1077,7 @@ fn an_agent_reading_a_holdout_run_through_the_tracker_sees_only_its_verdict() {
     assert_eq!(page.run.title, "hidden");
     assert_eq!(page.results[0].name, "oracle::answers");
     assert_eq!(title(&owner(), holdout), "hidden");
+    assert_eq!(case_latest(&owner()), failed);
     assert_eq!(
         latest_of(&owner()).map(|latest| (latest.run, latest.outcome)),
         Some((holdout.id.clone(), ResultOutcome::Failed))
@@ -1086,4 +1102,5 @@ fn an_agent_reading_a_holdout_run_through_the_tracker_sees_only_its_verdict() {
         "case_protected_visibility full shows holdout runs to agents"
     );
     assert_eq!(title(&agent, holdout), "hidden");
+    assert_eq!(case_latest(&agent), failed);
 }
