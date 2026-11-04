@@ -207,10 +207,12 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
         access: None,
         context: None,
         proxy: Some(49_152),
+        network: None,
     };
     let text = record.encode().unwrap();
     assert_eq!(PaneRecord::decode(&text), Some(record.clone()));
     assert!(!text.contains("access"), "{text}");
+    assert!(!text.contains("network"), "{text}");
     assert!(text.contains("\"proxy\":49152"), "{text}");
     let unproxied = PaneRecord {
         proxy: None,
@@ -226,6 +228,13 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
     let leveled = started.encode().unwrap();
     assert!(leveled.contains("\"access\":\"own_branch\""), "{leveled}");
     assert_eq!(PaneRecord::decode(&leveled), Some(started));
+    let narrowed = PaneRecord {
+        network: Some(crate::sandbox::policy::AgentNetwork::None),
+        ..record.clone()
+    };
+    let networked = narrowed.encode().unwrap();
+    assert!(networked.contains("\"network\":\"none\""), "{networked}");
+    assert_eq!(PaneRecord::decode(&networked), Some(narrowed));
     let mut relative = record.clone();
     relative.cwd = PathBuf::from("worktrees/agent-3");
     assert_eq!(PaneRecord::decode(&relative.encode().unwrap()), None);

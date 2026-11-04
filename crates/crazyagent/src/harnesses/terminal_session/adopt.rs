@@ -3,7 +3,7 @@ use crate::harnesses::interactive::Transcript;
 use crate::harnesses::launch::{LaunchError, LaunchLimits, failure};
 use crate::harnesses::transcript::{TranscriptEvent, TranscriptReader};
 use crate::launch_context::{Installed, InstalledFiles};
-use crate::sandbox::policy::AgentAccess;
+use crate::sandbox::policy::{AgentAccess, AgentNetwork};
 use crate::terminal::{AgentId, Host};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, VecDeque};
@@ -30,9 +30,10 @@ pub enum RecordSource {
 /// harness started, the pane's first process, the key file the harness reads, if any, for a
 /// resumed conversation its record and the offset where this pane's turns begin, the
 /// project access level the agent started at, where its launch wrote the project
-/// context files that hold MCP secrets, and the loopback port of the model proxy its
-/// profile and variables name (S4b). A record from an engine that did not keep the level,
-/// the files or the port has none.
+/// context files that hold MCP secrets, the loopback port of the model proxy its
+/// profile and variables name (S4b), and the project network it started under (CS-2). A
+/// record from an engine that did not keep the level, the files, the port or the network
+/// has none.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PaneRecord {
@@ -50,6 +51,8 @@ pub struct PaneRecord {
     pub context: Option<InstalledFiles>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proxy: Option<u16>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub network: Option<AgentNetwork>,
 }
 
 impl PaneRecord {
@@ -83,6 +86,7 @@ impl PaneRecord {
             access: None,
             context: None,
             proxy: None,
+            network: None,
         })
     }
 

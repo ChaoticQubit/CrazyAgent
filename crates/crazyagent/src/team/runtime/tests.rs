@@ -6902,6 +6902,7 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         tools: true,
         sandbox_profile: PathBuf::from("/tmp/agent-1.sb"),
         access: AgentAccess::Full,
+        network: crate::sandbox::policy::AgentNetwork::Open,
         layout,
         git_identity: None,
         limits: LaunchLimits::default(),
@@ -8481,7 +8482,9 @@ fn between_turns(
         spawned: Instant::now(),
         handoff: None,
         access: AgentAccess::Sandboxed,
+        network: crate::sandbox::policy::AgentNetwork::Open,
         lowered: false,
+        narrowed: false,
         ran_before: Duration::ZERO,
         told_finished: BTreeSet::new(),
         parent: None,
@@ -10497,6 +10500,7 @@ fn hooks_plan(harness: &str, hookless: bool) -> Plan {
         tools: true,
         sandbox_profile: PathBuf::from("/tmp/agent-1.sb"),
         access: AgentAccess::OwnBranch,
+        network: crate::sandbox::policy::AgentNetwork::Open,
         layout: Layout::Linked,
         git_identity: None,
         limits: LaunchLimits::default(),
@@ -11052,6 +11056,7 @@ fn reap_keeps_a_kept_lead_past_its_idle_limit_while_its_teammate_works() {
                 executable: PathBuf::from("/bin/sh"),
             }),
             access: AgentAccess::Sandboxed,
+            network: crate::sandbox::policy::AgentNetwork::Open,
             proxy: None,
         })),
         Seat {
@@ -11130,6 +11135,7 @@ fn kept_lead_with_a_task(fixture: &Fixture) -> (TeamRuntime, i64, i64) {
                 executable: PathBuf::from("/bin/sh"),
             }),
             access: AgentAccess::Sandboxed,
+            network: crate::sandbox::policy::AgentNetwork::Open,
             proxy: None,
         })),
         Seat {
@@ -11265,6 +11271,7 @@ fn wiring_a_native_lead_adopted_without_its_account_is_killed() {
                 executable: PathBuf::from("/bin/sh"),
             }),
             access: AgentAccess::Sandboxed,
+            network: crate::sandbox::policy::AgentNetwork::Open,
             proxy: None,
         };
         let (orders, ordered) = channel();
@@ -11552,6 +11559,7 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
         tools: true,
         sandbox_profile: PathBuf::from("/private/tmp/agent-1.sb"),
         access: AgentAccess::Sandboxed,
+        network: crate::sandbox::policy::AgentNetwork::Open,
         layout: Layout::Linked,
         git_identity: None,
         limits: LaunchLimits::default(),
@@ -12128,6 +12136,103 @@ fn a_kept_pane_gets_its_model_proxy_back_on_its_saved_port_or_ends() {
         "The terminal of team agent {taken} was closed: its model proxy port {held} is taken."
     )));
     assert!(again.shutdown().unwrap().is_empty());
+    host.close(&[]).unwrap();
+}
+
+/// Makes the project's master an agent with tools and records one in its terminal pane, as
+/// an earlier engine left it. Inputs: the fixture and the host. Output: the agent id.
+fn kept_master_with_tools(fixture: &mut Fixture, host: &Arc<dyn Host>) -> i64 {
+    fixture.setup.team.master_tools = true;
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?2 WHERE project=?1",
+            params![PROJECT, serde_json::to_string(&fixture.setup).unwrap()],
+        )
+        .unwrap();
+    let kept = fixture.agent(AgentRole::Master, "codex", AgentStatus::Idle);
+    fixture
+        .connection
+        .execute("UPDATE team_agents SET tools=1 WHERE id=?1", [kept])
+        .unwrap();
+    let record = fixture.pane(host, kept);
+    fixture.keep(kept, &record);
+    kept
+}
+
+/// A kept pane with tools that started under a wider network than the project saves now is
+/// not taken over: the owner chose None while no engine ran, and the agent would keep
+/// reaching more than None allows. A record from an engine that did not keep the network
+/// counts as Open (CS-2).
+#[test]
+fn a_kept_pane_with_tools_started_under_a_wider_network_is_not_taken_over() {
+    use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+    let mut fixture = Fixture::new(1);
+    let host = fixture.host();
+    let kept = kept_master_with_tools(&mut fixture, &host);
+    crate::sandbox::policy::save(
+        &fixture.connection,
+        PROJECT,
+        &AgentPolicy {
+            network: AgentNetwork::None,
+            ..AgentPolicy::default()
+        },
+    )
+    .unwrap();
+    let mut team = fixture.runtime().with_terminal(host.clone()).unwrap();
+    assert!(
+        !host
+            .alive()
+            .unwrap()
+            .contains(&AgentId::team(kept).unwrap()),
+        "{:#?}",
+        fixture.status()
+    );
+    assert!(
+        fixture.note(&format!(
+            "The terminal of team agent {kept} was closed: it started under a wider network than the project allows now."
+        )),
+        "{:#?}",
+        fixture.status()
+    );
+    assert!(team.shutdown().unwrap().is_empty());
+    host.close(&[]).unwrap();
+}
+
+/// A running agent with tools whose launch network is wider than the one the owner saves
+/// now is stopped with the reason, as a lowered access level stops it (CS-2, AL-2).
+#[test]
+fn an_agent_with_tools_running_under_a_wider_network_than_the_saved_one_is_stopped() {
+    use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+    let mut fixture = Fixture::new(1);
+    let host = fixture.host();
+    let kept = kept_master_with_tools(&mut fixture, &host);
+    let mut team = fixture.runtime().with_terminal(host.clone()).unwrap();
+    fixture.until(&mut team, "the pane under Open is taken over", |f| {
+        f.agent_status(kept) == (AgentStatus::Idle, None)
+    });
+    crate::sandbox::policy::save(
+        &fixture.connection,
+        PROJECT,
+        &AgentPolicy {
+            network: AgentNetwork::None,
+            ..AgentPolicy::default()
+        },
+    )
+    .unwrap();
+    fixture.until(
+        &mut team,
+        "the agent under a wider network is stopped",
+        |f| f.agent_status(kept).0 == AgentStatus::Stopped,
+    );
+    let (_, problem) = fixture.agent_status(kept);
+    assert!(
+        problem
+            .as_deref()
+            .is_some_and(|problem| problem.contains("the project's agent network was narrowed")),
+        "{problem:?}"
+    );
+    team.shutdown().unwrap();
     host.close(&[]).unwrap();
 }
 

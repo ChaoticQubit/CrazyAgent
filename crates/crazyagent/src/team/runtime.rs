@@ -174,7 +174,8 @@ struct Grant {
 /// marks a launch Claude Code starts `--bare`, which fires no hooks (DEC-104 bare-hooks);
 /// `scratch_pin` is the agent's short temp folder as the engine made it (DEC-111 S1R1-1);
 /// `proxy` is the model proxy an agent with tools under the None network reaches its model
-/// through, the only network its profile allows (S4b).
+/// through, the only network its profile allows (S4b); `network` is the project network its
+/// profile was made for, which a narrower saved choice stops it for (CS-2).
 struct Plan {
     harness: String,
     executable: PathBuf,
@@ -183,6 +184,7 @@ struct Plan {
     tools: bool,
     sandbox_profile: PathBuf,
     access: AgentAccess,
+    network: AgentNetwork,
     layout: Layout,
     git_identity: Option<GitIdentity>,
     limits: LaunchLimits,
@@ -318,8 +320,8 @@ impl Launch {
 
 /// A pane an earlier engine left running, taken over from its record: the host and pane
 /// name, the record, the bounds, whether it is a live master, what a signed-in account needs
-/// again, the access level it started at, and its model proxy, bound again on the port its
-/// profile names (S4b).
+/// again, the access level it started at, the project network its profile was made for, and
+/// its model proxy, bound again on the port its profile names (S4b).
 struct Adoption {
     host: Arc<dyn Host>,
     agent: AgentId,
@@ -328,6 +330,7 @@ struct Adoption {
     live: bool,
     managed: Option<Managed>,
     access: AgentAccess,
+    network: AgentNetwork,
     proxy: Option<Arc<ModelProxy>>,
 }
 
@@ -450,6 +453,8 @@ struct Worker {
     handoff: Option<String>,
     access: AgentAccess,
     lowered: bool,
+    network: AgentNetwork,
+    narrowed: bool,
     ran_before: Duration,
     told_finished: BTreeSet<i64>,
     parent: Option<i64>,
@@ -810,7 +815,9 @@ impl TeamRuntime {
     /// signed-in account for a live master or a native-mode lead, whose worker hands the
     /// credential to its home again before it serves. The pane keeps the
     /// access level its record says it started at, Full access for a record without one, so
-    /// a level lowered while no engine ran stops it on the next tick. Takes the host, the
+    /// a level lowered while no engine ran stops it on the next tick. A pane with tools whose
+    /// record names a wider network than the saved one, Open for a record without one, is not
+    /// taken over (CS-2). Takes the host, the
     /// agent id, its pane record and the live access. Returns Ok, or why the pane must end.
     fn adopt(
         &mut self,
@@ -872,6 +879,14 @@ impl TeamRuntime {
         };
         if !in_plan {
             return Ok(Err("the team plan no longer has room for it".into()));
+        }
+        let saved = crate::sandbox::policy::load(&self.connection, project.as_str())
+            .map_or(AgentNetwork::None, |policy| policy.network);
+        let started = record.network.unwrap_or(AgentNetwork::Open);
+        if tools && started.wider_than(saved) {
+            return Ok(Err(
+                "it started under a wider network than the project allows now".into(),
+            ));
         }
         if self.panes(&project) >= PANES_PER_PROJECT_MAX {
             return Ok(Err(format!(
@@ -943,6 +958,7 @@ impl TeamRuntime {
             live,
             managed,
             access: record.access.unwrap_or(AgentAccess::Full),
+            network: record.network.unwrap_or(AgentNetwork::Open),
             proxy,
         };
         let session = if live {
@@ -2022,6 +2038,7 @@ impl TeamRuntime {
         let paused = self.paused()?;
         self.retire_rejected(project, access);
         self.retire_lowered(project);
+        self.retire_narrowed(project);
         self.sync_pool(&stored, access)?;
         self.request_cancels(project)?;
         self.keep_live(&stored, access, &paused)?;
@@ -2480,6 +2497,39 @@ impl TeamRuntime {
             let worker = self.workers.get_mut(&id).expect("worker exists");
             worker.stopping = true;
             worker.lowered = true;
+            worker.cancel.store(true, Ordering::SeqCst);
+            let _ = worker.orders.send(Order::Stop);
+        }
+    }
+
+    /// Stops the project's agents with tools whose profile was made for a wider network than
+    /// the one the owner saved now (CS-2): a running, kept or live agent at once, and an idle
+    /// per-turn agent too, since its next turn would run in the same profile. Every next start
+    /// makes its profile for the saved network. An unreadable choice counts as None. Takes
+    /// the project.
+    fn retire_narrowed(&mut self, project: &ProjectId) {
+        if !self.workers.values().any(|worker| {
+            &worker.project == project
+                && worker.tools
+                && !worker.stopping
+                && worker.network != AgentNetwork::None
+        }) {
+            return;
+        }
+        let saved = crate::sandbox::policy::load(&self.connection, project.as_str())
+            .map_or(AgentNetwork::None, |policy| policy.network);
+        let narrowed: Vec<i64> = self
+            .workers
+            .iter()
+            .filter(|(_, w)| {
+                &w.project == project && w.tools && !w.stopping && w.network.wider_than(saved)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in narrowed {
+            let worker = self.workers.get_mut(&id).expect("worker exists");
+            worker.stopping = true;
+            worker.narrowed = true;
             worker.cancel.store(true, Ordering::SeqCst);
             let _ = worker.orders.send(Order::Stop);
         }
@@ -4951,9 +5001,9 @@ impl TeamRuntime {
             Launch::Adopt(adoption) => adoption.managed.is_some() && !adoption.live,
         };
         assert!(!(kept_session && live));
-        let access = match &launch {
-            Launch::Fresh(plan, _) => plan.access,
-            Launch::Adopt(adoption) => adoption.access,
+        let (access, network) = match &launch {
+            Launch::Fresh(plan, _) => (plan.access, plan.network),
+            Launch::Adopt(adoption) => (adoption.access, adoption.network),
         };
         let thread = std::thread::Builder::new()
             .name(format!("team-agent-{id}"))
@@ -5004,7 +5054,9 @@ impl TeamRuntime {
                 spawned: Instant::now(),
                 handoff: None,
                 access,
+                network,
                 lowered: false,
+                narrowed: false,
                 ran_before: Duration::ZERO,
                 told_finished: BTreeSet::new(),
                 parent,
@@ -5785,6 +5837,7 @@ impl TeamRuntime {
             tools,
             sandbox_profile: profile,
             access: policy.access,
+            network: policy.network,
             layout,
             git_identity: owner_git_identity(&root),
             limits: self.launch_limits(),
@@ -6105,7 +6158,12 @@ impl TeamRuntime {
                     worker.spawned = Instant::now();
                 }
                 let access = Some(self.workers[&id].access);
-                let pane = pane.map(|record| PaneRecord { access, ..record });
+                let network = Some(self.workers[&id].network);
+                let pane = pane.map(|record| PaneRecord {
+                    access,
+                    network,
+                    ..record
+                });
                 if let Some(record) = pane.as_ref().and_then(PaneRecord::encode) {
                     self.connection
                         .execute(
@@ -6436,14 +6494,23 @@ impl TeamRuntime {
                 } else {
                     AgentStatus::Stopped
                 };
-                let problem = problem.or_else(|| {
-                    worker.lowered.then(|| {
-                        with_code(
-                            "the project's agent access was lowered, so the agent was stopped; its next start uses the new level",
-                            Some("agent_access_lowered"),
-                        )
+                let problem = problem
+                    .or_else(|| {
+                        worker.lowered.then(|| {
+                            with_code(
+                                "the project's agent access was lowered, so the agent was stopped; its next start uses the new level",
+                                Some("agent_access_lowered"),
+                            )
+                        })
                     })
-                });
+                    .or_else(|| {
+                        worker.narrowed.then(|| {
+                            with_code(
+                                "the project's agent network was narrowed, so the agent was stopped; its next start uses the new network",
+                                Some("agent_network_narrowed"),
+                            )
+                        })
+                    });
                 if let Some(hosted) = worker.hosted.take() {
                     let state = if status == AgentStatus::Failed {
                         RunState::Failed

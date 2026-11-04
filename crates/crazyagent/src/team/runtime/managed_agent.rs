@@ -747,6 +747,7 @@ impl ManagedAgent {
                 executable: self.plan.executable.clone(),
             }),
             access: crate::sandbox::policy::AgentAccess::Sandboxed,
+            network: crate::sandbox::policy::AgentNetwork::Open,
             proxy: None,
         };
         let (orders, ordered) = channel();

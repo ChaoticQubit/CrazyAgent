@@ -119,6 +119,14 @@ impl AgentNetwork {
         }
     }
 
+    /// Tells whether this choice lets agents reach more than `other`: Open more than Port
+    /// 443 only, Port 443 only more than None (CS-2). Input: the choice to compare with.
+    /// Output: true when this one is wider.
+    pub fn wider_than(self, other: Self) -> bool {
+        let rank = |choice: Self| Self::ALL.iter().position(|each| *each == choice);
+        rank(self) < rank(other)
+    }
+
     /// The sandbox reach this choice grants. Input: the model endpoint the agent still
     /// needs, or None for the plugin check, which needs no model. Output: Open for Open,
     /// port 443 plus the model's port for Https, and for None the model only on loopback:
@@ -368,6 +376,25 @@ mod tests {
             ])
         );
         assert_eq!(AgentNetwork::Open.sandbox(None), SandboxNetwork::Open);
+    }
+
+    #[test]
+    fn a_network_choice_is_wider_only_than_the_narrower_ones() {
+        let (open, https, none) = (AgentNetwork::Open, AgentNetwork::Https, AgentNetwork::None);
+        assert!(open.wider_than(https) && open.wider_than(none) && https.wider_than(none));
+        for (one, other) in [
+            (https, open),
+            (none, open),
+            (none, https),
+            (open, open),
+            (https, https),
+            (none, none),
+        ] {
+            assert!(
+                !one.wider_than(other),
+                "{one:?} is not wider than {other:?}"
+            );
+        }
     }
 
     #[test]
