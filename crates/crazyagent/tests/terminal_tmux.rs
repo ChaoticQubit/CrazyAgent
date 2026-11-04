@@ -1696,8 +1696,8 @@ fn a_server_started_at_a_native_lead_s_teammates_socket_after_its_own_ended_is_r
         until_refused(socket);
     }
     assert!(
-        host.kill(&leader).is_err(),
-        "nothing listens for the lead, so the host drops its clients"
+        host.panes(&leader).is_err(),
+        "no server lists the lead's panes while none runs"
     );
     for socket in [&lead.socket, &lead.mates] {
         match std::fs::remove_file(socket) {
