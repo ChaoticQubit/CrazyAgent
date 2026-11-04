@@ -29,7 +29,7 @@ function shownMarks(selector) {
 /** Runs in the page: fetches each favicon its link rel=icon names, as the window loads it.
  * Inputs: the most bytes to return and the WebDriver callback. Answers [{ href, status, size,
  * bytes }], bytes empty when the file is bigger, or { failed } when a fetch threw. */
-function faviconReadings(max, done) {
+export function faviconReadings(max, done) {
   Promise.all([...document.querySelectorAll("link[rel~=\"icon\"]")].map(async (link) => {
     const reply = await fetch(link.href);
     const bytes = new Uint8Array(await reply.arrayBuffer());
