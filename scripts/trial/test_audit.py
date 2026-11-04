@@ -16,6 +16,7 @@ import audit
 HERE = Path(__file__).resolve().parent
 SCHEMA = (HERE / "fixture-schema.sql").read_text(encoding="utf-8")
 MARK = "TRIAL3-PROJECT-RULE"
+APP_SET = "# Mandatory workflow\n\nUse tdd."
 PROJECT = "trial"
 GIT_ENV_KEYS = ("PATH", "TMPDIR", "LANG")
 
@@ -635,10 +636,11 @@ class AuditTests(unittest.TestCase):
         lead = w.agent("sub", mode="native", worktree="/w/agent-lead")
         for pane in ("%2", "%3"):
             w.row("team_teammates", agent=lead, project=PROJECT, pane=pane, seen_ms=w.now)
-        self.given(lead, rendered(f"{audit.APP_MARK}\n\nUse tdd.", MARK))
+        (w.root / "instructions.md").write_text(f"\n{APP_SET}\n")
+        self.given(lead, rendered(APP_SET, MARK))
         codex = w.agent("sub", harness="codex")
         w.home(codex).mkdir(parents=True)
-        (w.home(codex) / "AGENTS.md").write_text(rendered(f"{audit.APP_MARK}\n\nUse tdd.", MARK))
+        (w.home(codex) / "AGENTS.md").write_text(rendered(APP_SET, MARK))
         w.transcript(lead, [launch(f"Claude.\n{audit.APP_MARK}\n{MARK}")], worktree="/w/agent-lead")
         w.transcript(lead, [launch(f"Mate.\n{audit.APP_MARK}\n")], worktree="/w/agent-lead/.worktrees/mate-one")
         w.transcript(lead, [launch(f"Mate.\n{audit.APP_MARK if mate_reached else 'no set'}\n")], worktree="/w/agent-lead/.worktrees/mate-two")
@@ -650,6 +652,8 @@ class AuditTests(unittest.TestCase):
         self.assertIn("lead 1 teammates=2 transcripts=2 with the set=2", record["stdout"])
         self.assertIn("agents bad=0", record["detail"])
         self.assertIn("2(lead app_spawned) home AGENTS.md opening=['# Instructions from CrazyAgent', '## App instructions', '# Mandatory workflow']", record["stdout"])
+        same = hashlib.sha256(APP_SET.encode()).hexdigest()[:12]
+        self.assertEqual(record["stdout"].count(f"app part sha256={same} app copy sha256={same}"), 2, record["stdout"])
         self.tearDown()
         self.setUp()
         self.part_one(mate_reached=False)
@@ -658,10 +662,13 @@ class AuditTests(unittest.TestCase):
         self.assertIn("with the set=1", record["stdout"])
 
     def test_t3_22_part_one_fails_when_the_given_set_does_not_follow_the_title(self):
+        replaced = f"{audit.APP_MARK}\n\nUse anything."
         for claude, codex in (
-            (f"{audit.APP_MARK}\n\nUse tdd.\n", rendered(audit.APP_MARK)),
-            (rendered(f"Use tdd.\n\n{audit.APP_MARK}"), rendered(audit.APP_MARK)),
-            (rendered(audit.APP_MARK), rendered("", f"{audit.APP_MARK}\n\n{MARK}")),
+            (f"{APP_SET}\n", rendered(APP_SET)),
+            (rendered(f"Use tdd.\n\n{audit.APP_MARK}"), rendered(APP_SET)),
+            (rendered(APP_SET), rendered("", APP_SET)),
+            (rendered(replaced, MARK), rendered(APP_SET, MARK)),
+            (rendered(APP_SET, MARK), rendered(replaced, MARK)),
         ):
             self.tearDown()
             self.setUp()
