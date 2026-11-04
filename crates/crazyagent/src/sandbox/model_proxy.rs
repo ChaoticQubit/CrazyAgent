@@ -29,6 +29,8 @@ const SERVER_NAME: u16 = 0x0000;
 const ENCRYPTED_CLIENT_HELLO: u16 = 0xfe0d;
 const ENCRYPTED_SERVER_NAME: u16 = 0xffce;
 const BIND_TRIES: usize = 16;
+const REFUSALS_SHOWN: u64 = 20;
+const REFUSAL_TOTAL_EVERY: Duration = Duration::from_secs(60);
 
 /// One host a model proxy lets an agent reach: a DNS name, never an IP literal, and its
 /// port. Names are kept in lower case, as hosts compare.
@@ -105,9 +107,69 @@ pub fn variables(port: u16) -> [(&'static str, String); 6] {
 /// listeners and, within a poll, every open tunnel.
 pub struct ModelProxy {
     port: u16,
-    stop: Arc<AtomicBool>,
-    open: Arc<AtomicUsize>,
+    shared: Arc<Shared>,
     listener: Option<JoinHandle<()>>,
+}
+
+/// What one proxy's threads share: the agent its log lines name, its hosts, the stop flag,
+/// the open-tunnel count, the refusals so far, when its last refusal total was logged (in
+/// milliseconds from `started`), and whether its tunnels may dial an address on this machine,
+/// which only a test's proxy may.
+struct Shared {
+    agent: i64,
+    hosts: Vec<ModelHost>,
+    stop: AtomicBool,
+    open: AtomicUsize,
+    refusals: AtomicU64,
+    totaled: AtomicU64,
+    started: Instant,
+    any_address: bool,
+}
+
+impl Shared {
+    /// Counts one refusal and logs its line while the proxy has logged fewer than
+    /// `REFUSALS_SHOWN`, after that a total at most once per `REFUSAL_TOTAL_EVERY`, so a
+    /// client refused in a loop cannot fill the engine log (CS-5). Input: the line, which
+    /// names no client secret. Output: none.
+    fn log(&self, line: &str) {
+        let count = self.refusals.fetch_add(1, Ordering::SeqCst) + 1;
+        let now = u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        let last = self.totaled.load(Ordering::SeqCst);
+        match shown_refusal(count, Duration::from_millis(now.saturating_sub(last))) {
+            Shown::Line => eprintln!("{line}"),
+            Shown::Total
+                if self
+                    .totaled
+                    .compare_exchange(last, now, Ordering::SeqCst, Ordering::SeqCst)
+                    .is_ok() =>
+            {
+                eprintln!("model_proxy_refusals agent={} total={count}", self.agent);
+            }
+            Shown::Total | Shown::Quiet => {}
+        }
+    }
+}
+
+/// What a proxy logs for one refusal: its line, a running total, or nothing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Shown {
+    Line,
+    Total,
+    Quiet,
+}
+
+/// Which refusals a proxy logs: the first `REFUSALS_SHOWN` in full, then a total once at
+/// least `REFUSAL_TOTAL_EVERY` has passed since the last total (CS-5). Inputs: the
+/// refusal's count, from 1, and the time since the last total. Output: what to log.
+fn shown_refusal(count: u64, since_total: Duration) -> Shown {
+    assert!(count >= 1);
+    if count <= REFUSALS_SHOWN {
+        Shown::Line
+    } else if since_total >= REFUSAL_TOTAL_EVERY {
+        Shown::Total
+    } else {
+        Shown::Quiet
+    }
 }
 
 impl std::fmt::Debug for ModelProxy {
@@ -125,6 +187,35 @@ impl ModelProxy {
     /// its refusal lines name, its hosts (1 to `HOSTS_MAX`) and the port. Output: the running
     /// proxy, or the bind error, such as a saved port another process took on either address.
     pub fn bind(agent: i64, hosts: Vec<ModelHost>, port: Option<u16>) -> io::Result<Self> {
+        Self::start(agent, hosts, port, false)
+    }
+
+    /// The same proxy, except that its tunnels may also dial addresses on this machine, so a
+    /// test's tunnels reach a local listener. Inputs and output as [`ModelProxy::bind`].
+    #[cfg(test)]
+    pub(crate) fn bind_local(
+        agent: i64,
+        hosts: Vec<ModelHost>,
+        port: Option<u16>,
+    ) -> io::Result<Self> {
+        Self::start(agent, hosts, port, true)
+    }
+
+    /// How many refusals the proxy has counted. Output: the count.
+    #[cfg(test)]
+    pub(crate) fn refusals(&self) -> u64 {
+        self.shared.refusals.load(Ordering::SeqCst)
+    }
+
+    /// Starts the proxy [`ModelProxy::bind`] describes. Inputs: the agent, its hosts, the
+    /// port, and whether its tunnels may dial addresses on this machine. Output: the
+    /// running proxy, or the bind error.
+    fn start(
+        agent: i64,
+        hosts: Vec<ModelHost>,
+        port: Option<u16>,
+        any_address: bool,
+    ) -> io::Result<Self> {
         assert!(!hosts.is_empty() && hosts.len() <= HOSTS_MAX);
         let listeners = loopback_pair(port)?;
         let bound = listeners[0].local_addr()?.port();
@@ -134,16 +225,23 @@ impl ModelProxy {
             assert!(address.ip().is_loopback() && address.port() == bound);
             listener.set_nonblocking(true)?;
         }
-        let stop = Arc::new(AtomicBool::new(false));
-        let open = Arc::new(AtomicUsize::new(0));
-        let (flag, count, hosts) = (stop.clone(), open.clone(), Arc::new(hosts));
+        let shared = Arc::new(Shared {
+            agent,
+            hosts,
+            stop: AtomicBool::new(false),
+            open: AtomicUsize::new(0),
+            refusals: AtomicU64::new(0),
+            totaled: AtomicU64::new(0),
+            started: Instant::now(),
+            any_address,
+        });
+        let serving = shared.clone();
         let thread = std::thread::Builder::new()
             .name(format!("model-proxy-{agent}"))
-            .spawn(move || serve(agent, &listeners, &hosts, &flag, &count))?;
+            .spawn(move || serve(&listeners, &serving))?;
         Ok(Self {
             port: bound,
-            stop,
-            open,
+            shared,
             listener: Some(thread),
         })
     }
@@ -177,46 +275,48 @@ fn loopback_pair(port: Option<u16>) -> io::Result<[TcpListener; 2]> {
 }
 
 impl Drop for ModelProxy {
-    /// Stops the listeners, which the serving thread sees within one accept poll, and
-    /// waits a short bound for the open tunnels to notice the stop. Takes the proxy.
+    /// Stops the listeners, which the serving thread sees within one accept poll, waits a
+    /// short bound for the open tunnels to notice the stop, and logs the refusal total when
+    /// the proxy logged only some of its refusal lines. Takes the proxy.
     fn drop(&mut self) {
-        self.stop.store(true, Ordering::SeqCst);
+        self.shared.stop.store(true, Ordering::SeqCst);
         if let Some(thread) = self.listener.take() {
             let _ = thread.join();
         }
         let deadline = Instant::now() + POLL * 8;
-        while self.open.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
+        while self.shared.open.load(Ordering::SeqCst) > 0 && Instant::now() < deadline {
             std::thread::sleep(POLL / 10);
+        }
+        let count = self.shared.refusals.load(Ordering::SeqCst);
+        if count > REFUSALS_SHOWN {
+            eprintln!(
+                "model_proxy_refusals agent={} total={count}",
+                self.shared.agent
+            );
         }
     }
 }
 
 /// Counts one open tunnel for as long as it lives.
-struct Held(Arc<AtomicUsize>);
+struct Held(Arc<Shared>);
 
 impl Drop for Held {
     fn drop(&mut self) {
-        let before = self.0.fetch_sub(1, Ordering::SeqCst);
+        let before = self.0.open.fetch_sub(1, Ordering::SeqCst);
         assert!((1..=TUNNELS_MAX).contains(&before));
     }
 }
 
 /// Accepts the agent's connections on both non-blocking listeners until the proxy stops,
-/// polling every `ACCEPT_POLL` while neither has one waiting. Inputs: the agent, the
-/// listeners, its hosts, the stop flag and the open-tunnel count. Output: none.
-fn serve(
-    agent: i64,
-    listeners: &[TcpListener; 2],
-    hosts: &Arc<Vec<ModelHost>>,
-    stop: &Arc<AtomicBool>,
-    open: &Arc<AtomicUsize>,
-) {
-    while !stop.load(Ordering::SeqCst) {
+/// polling every `ACCEPT_POLL` while neither has one waiting. Inputs: the listeners and
+/// what the proxy's threads share. Output: none.
+fn serve(listeners: &[TcpListener; 2], shared: &Arc<Shared>) {
+    while !shared.stop.load(Ordering::SeqCst) {
         let mut waiting = false;
         for listener in listeners {
             if let Ok((client, _)) = spawn_gate::accept_tcp_std(listener) {
                 waiting = true;
-                admit(agent, client, hosts, stop, open);
+                admit(client, shared);
             }
         }
         if !waiting {
@@ -226,34 +326,29 @@ fn serve(
 }
 
 /// Starts a tunnel thread for one accepted connection, or answers a 503 to one past
-/// `TUNNELS_MAX`. Inputs: the agent, the connection, its hosts, the stop flag and the
-/// open-tunnel count. Output: none.
-fn admit(
-    agent: i64,
-    client: TcpStream,
-    hosts: &Arc<Vec<ModelHost>>,
-    stop: &Arc<AtomicBool>,
-    open: &Arc<AtomicUsize>,
-) {
-    let admitted = open.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
-        (count < TUNNELS_MAX).then_some(count + 1)
-    });
+/// `TUNNELS_MAX`. Inputs: the connection and what the proxy's threads share. Output: none.
+fn admit(client: TcpStream, shared: &Arc<Shared>) {
+    let admitted = shared
+        .open
+        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+            (count < TUNNELS_MAX).then_some(count + 1)
+        });
     if admitted.is_err() {
         refuse(
+            shared,
             &client,
             "503 Service Unavailable",
-            &format!("model_proxy_refused agent={agent} reason=too_many_tunnels"),
+            &format!(
+                "model_proxy_refused agent={} reason=too_many_tunnels",
+                shared.agent
+            ),
         );
         return;
     }
-    let held = Held(open.clone());
-    let (hosts, stop) = (hosts.clone(), stop.clone());
+    let held = Held(shared.clone());
     let _ = std::thread::Builder::new()
-        .name(format!("model-tunnel-{agent}"))
-        .spawn(move || {
-            let _held = held;
-            tunnel(agent, client, &hosts, &stop);
-        });
+        .name(format!("model-tunnel-{}", shared.agent))
+        .spawn(move || tunnel(client, &held.0));
 }
 
 /// The log line for a refused request: the agent, the request's method and the host and
@@ -298,23 +393,26 @@ fn refusal(agent: i64, line: &str) -> String {
     )
 }
 
-/// Answers a connection the proxy will not tunnel and logs why. Inputs: the client, the
-/// status line and the log line, which names no client secret. Output: none.
-fn refuse(mut client: &TcpStream, status: &str, line: &str) {
-    eprintln!("{line}");
+/// Answers a connection the proxy will not tunnel and counts it, logging why within the
+/// proxy's bound. Inputs: what the proxy's threads share, the client, the status line and
+/// the log line, which names no client secret. Output: none.
+fn refuse(shared: &Shared, mut client: &TcpStream, status: &str, line: &str) {
+    shared.log(line);
     let _ = client.write_all(
         format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes(),
     );
     let _ = client.shutdown(Shutdown::Both);
 }
 
-/// Cuts a tunnel the proxy already answered with 200 and logs why. Inputs: the agent, the
-/// client, the host and the reason. Output: none.
-fn cut(agent: i64, client: &TcpStream, host: &str, reason: &str) {
-    eprintln!(
-        "model_proxy_cut agent={agent} host={} reason={reason}",
+/// Cuts a tunnel the proxy already answered with 200 and counts it, logging why within the
+/// proxy's bound. Inputs: what the proxy's threads share, the client, the host and the
+/// reason. Output: none.
+fn cut(shared: &Shared, client: &TcpStream, host: &str, reason: &str) {
+    shared.log(&format!(
+        "model_proxy_cut agent={} host={} reason={reason}",
+        shared.agent,
         shown(host)
-    );
+    ));
     let _ = client.shutdown(Shutdown::Both);
 }
 
@@ -331,46 +429,62 @@ fn shown(asked: &str) -> String {
 
 /// Serves one client: its CONNECT request must name a host on the list, its first TLS
 /// record must be a ClientHello whose server name is that host, and only then does the
-/// proxy resolve the host, connect and pass bytes both ways. Inputs: the agent, the client,
-/// its hosts and the stop flag. Output: none; the tunnel ends when either side closes.
-fn tunnel(agent: i64, client: TcpStream, hosts: &[ModelHost], stop: &AtomicBool) {
+/// proxy resolve the host, connect and pass bytes both ways. Inputs: the client and what
+/// the proxy's threads share. Output: none; the tunnel ends when either side closes.
+fn tunnel(client: TcpStream, shared: &Shared) {
     let deadline = Instant::now() + HANDSHAKE_TIME;
     let Ok((head, rest)) = read_head(&client, deadline) else {
         refuse(
+            shared,
             &client,
             "403 Forbidden",
-            &format!("model_proxy_refused agent={agent} reason=unreadable_request"),
+            &format!(
+                "model_proxy_refused agent={} reason=unreadable_request",
+                shared.agent
+            ),
         );
         return;
     };
     let first = head.lines().next().unwrap_or_default();
-    let Some(host) = connect_target(first).filter(|target| hosts.contains(target)) else {
-        refuse(&client, "403 Forbidden", &refusal(agent, first));
+    let Some(host) = connect_target(first).filter(|target| shared.hosts.contains(target)) else {
+        refuse(
+            shared,
+            &client,
+            "403 Forbidden",
+            &refusal(shared.agent, first),
+        );
         return;
     };
     if (&client).write_all(ESTABLISHED).is_err() {
         return;
     }
     let Ok((hello, record)) = read_record(&client, rest, deadline) else {
-        cut(agent, &client, host.name(), "no ClientHello");
+        cut(shared, &client, host.name(), "no ClientHello");
         return;
     };
     if !server_name(&hello[..record]).is_some_and(|name| name.eq_ignore_ascii_case(host.name())) {
-        cut(agent, &client, host.name(), "server name differs");
+        cut(shared, &client, host.name(), "server name differs");
         return;
     }
-    if stop.load(Ordering::SeqCst) {
-        cut(agent, &client, host.name(), "proxy stopped");
+    if shared.stop.load(Ordering::SeqCst) {
+        cut(shared, &client, host.name(), "proxy stopped");
         return;
     }
-    let Ok(upstream) = open_upstream(&host, deadline) else {
-        cut(agent, &client, host.name(), "unreachable");
-        return;
+    let upstream = match open_upstream(&host, deadline, shared.any_address) {
+        Ok(upstream) => upstream,
+        Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+            cut(shared, &client, host.name(), "resolves to this machine");
+            return;
+        }
+        Err(_) => {
+            cut(shared, &client, host.name(), "unreachable");
+            return;
+        }
     };
     if (&upstream).write_all(&hello).is_err() {
         return;
     }
-    pump(client, upstream, stop);
+    pump(client, upstream, &shared.stop);
 }
 
 /// Reads a request head, up to its blank line, within `HEADER_BYTES_MAX` and the deadline.
@@ -551,9 +665,11 @@ fn host_name(data: &[u8]) -> Option<&str> {
 }
 
 /// Resolves one host on the engine's side and connects to the first address that answers
-/// before the deadline. Each socket is made inside the spawn gate, which is not held while
-/// connecting. Inputs: the host and the deadline. Output: the blocking connection.
-fn open_upstream(host: &ModelHost, deadline: Instant) -> io::Result<TcpStream> {
+/// before the deadline, skipping every address [`dialable`] refuses unless `any_address`
+/// says otherwise. Each socket is made inside the spawn gate, which is not held while
+/// connecting. Inputs: the host, the deadline and that choice. Output: the blocking
+/// connection, or PermissionDenied when every address the name gave was refused.
+fn open_upstream(host: &ModelHost, deadline: Instant, any_address: bool) -> io::Result<TcpStream> {
     let left = deadline.saturating_duration_since(Instant::now());
     if left.is_zero() {
         return Err(io::ErrorKind::TimedOut.into());
@@ -562,15 +678,47 @@ fn open_upstream(host: &ModelHost, deadline: Instant) -> io::Result<TcpStream> {
         .enable_all()
         .build()?;
     let connected = runtime.block_on(async {
-        tokio::time::timeout(left, spawn_gate::connect_tcp((host.name(), host.port())))
-            .await
-            .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??
-            .into_std()
+        tokio::time::timeout(left, async {
+            let resolved: Vec<std::net::SocketAddr> =
+                tokio::net::lookup_host((host.name(), host.port()))
+                    .await?
+                    .collect();
+            let allowed: Vec<std::net::SocketAddr> = resolved
+                .iter()
+                .copied()
+                .filter(|address| any_address || dialable(address.ip()))
+                .collect();
+            if allowed.is_empty() && !resolved.is_empty() {
+                return Err(io::Error::from(io::ErrorKind::PermissionDenied));
+            }
+            spawn_gate::connect_tcp(&allowed[..]).await
+        })
+        .await
+        .map_err(|_| io::Error::from(io::ErrorKind::TimedOut))??
+        .into_std()
     });
     runtime.shutdown_background();
     let stream = connected?;
     stream.set_nonblocking(false)?;
     Ok(stream)
+}
+
+/// Tells whether a tunnel may dial `address`, one a model host's name resolved to: not
+/// loopback, unspecified, link-local or in 0.0.0.0/8, also as an IPv4 address inside an
+/// IPv6 one. The engine dials outside the sandbox, so a host's DNS must not steer it to this
+/// machine (CS-4); private network addresses stay allowed for an owner's endpoint on the
+/// local network. Input: the address. Output: true when the proxy may dial it.
+fn dialable(address: IpAddr) -> bool {
+    let v4 = |ip: Ipv4Addr| {
+        !(ip.is_loopback() || ip.is_unspecified() || ip.is_link_local() || ip.octets()[0] == 0)
+    };
+    match address {
+        IpAddr::V4(ip) => v4(ip),
+        IpAddr::V6(ip) => {
+            !(ip.is_loopback() || ip.is_unspecified() || ip.is_unicast_link_local())
+                && ip.to_ipv4().is_none_or(v4)
+        }
+    }
 }
 
 /// Passes bytes both ways until either side closes, the proxy stops or nothing moved for

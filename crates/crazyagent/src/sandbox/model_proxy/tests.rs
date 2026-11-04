@@ -208,7 +208,7 @@ fn a_request_head_past_its_bound_is_refused_with_403() {
 fn an_allowed_host_gets_the_client_hello_and_both_ways_untouched() {
     let upstream = spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = upstream.local_addr().unwrap().port();
-    let proxy = ModelProxy::bind(7, vec![host("localhost", port)], None).unwrap();
+    let proxy = ModelProxy::bind_local(7, vec![host("localhost", port)], None).unwrap();
     let mut sent = hello(Some("localhost"));
     sent.extend(b"after the hello");
     let mut client = ask(&proxy, &connect(&format!("localhost:{port}")));
@@ -246,7 +246,7 @@ fn a_client_hello_naming_another_host_or_none_never_reaches_the_host() {
     let upstream = spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = upstream.local_addr().unwrap().port();
     upstream.set_nonblocking(true).unwrap();
-    let proxy = ModelProxy::bind(7, vec![host("localhost", port)], None).unwrap();
+    let proxy = ModelProxy::bind_local(7, vec![host("localhost", port)], None).unwrap();
     for sent in [
         hello(Some("example.com")),
         hello(None),
@@ -268,6 +268,35 @@ fn a_client_hello_naming_another_host_or_none_never_reaches_the_host() {
             .as_ref()
             .is_err_and(|error| error.kind() == io::ErrorKind::WouldBlock),
         "a tunnel reached the host: {reached:?}"
+    );
+}
+
+/// A model host whose name resolves only to loopback is never dialled: the engine opens
+/// tunnels outside the sandbox, so a host's DNS must not steer it to the engine's own
+/// machine. The tunnel is cut and nothing reaches the local listener (CS-4).
+#[test]
+fn a_model_host_that_resolves_to_loopback_is_never_dialled() {
+    let upstream = spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, 0)).unwrap();
+    let port = upstream.local_addr().unwrap().port();
+    upstream.set_nonblocking(true).unwrap();
+    let proxy = ModelProxy::bind(7, vec![host("localhost", port)], None).unwrap();
+    let mut client = ask(&proxy, &connect(&format!("localhost:{port}")));
+    assert_eq!(
+        head(&mut client),
+        "HTTP/1.1 200 Connection Established\r\n\r\n"
+    );
+    client.write_all(&hello(Some("localhost"))).unwrap();
+    client
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    let mut rest = Vec::new();
+    assert_eq!(client.read_to_end(&mut rest).unwrap_or(0), 0);
+    let reached = spawn_gate::accept_tcp_std(&upstream);
+    assert!(
+        reached
+            .as_ref()
+            .is_err_and(|error| error.kind() == io::ErrorKind::WouldBlock),
+        "a tunnel reached a loopback host: {reached:?}"
     );
 }
 
@@ -315,7 +344,7 @@ fn a_saved_port_another_process_holds_is_refused_and_a_free_one_is_kept() {
 fn dropping_the_proxy_closes_its_port_and_its_open_tunnels() {
     let upstream = spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = upstream.local_addr().unwrap().port();
-    let proxy = ModelProxy::bind(7, vec![host("localhost", port)], None).unwrap();
+    let proxy = ModelProxy::bind_local(7, vec![host("localhost", port)], None).unwrap();
     let listening = proxy.port();
     let mut client = ask(&proxy, &connect(&format!("localhost:{port}")));
     assert!(head(&mut client).starts_with("HTTP/1.1 200 "));
@@ -335,7 +364,7 @@ fn a_client_hello_with_an_encrypted_name_trailing_bytes_or_two_names_never_reach
     let upstream = spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, 0)).unwrap();
     let port = upstream.local_addr().unwrap().port();
     upstream.set_nonblocking(true).unwrap();
-    let proxy = ModelProxy::bind(7, vec![host("localhost", port)], None).unwrap();
+    let proxy = ModelProxy::bind_local(7, vec![host("localhost", port)], None).unwrap();
     let versions = extension(0x002b, &[0x02, 0x03, 0x04]);
     assert_eq!(
         server_name(&hello_with(Some("localhost"), &versions, &[])),
@@ -443,4 +472,72 @@ fn a_refusal_line_names_the_method_and_host_but_no_user_info_path_or_query() {
             "{request}: {line}"
         );
     }
+}
+
+#[test]
+fn a_tunnel_dials_no_address_on_this_machine_but_keeps_the_local_network() {
+    for address in [
+        "127.0.0.1",
+        "127.8.9.10",
+        "0.0.0.0",
+        "0.1.2.3",
+        "169.254.169.254",
+        "::1",
+        "::",
+        "fe80::1",
+        "::ffff:127.0.0.1",
+        "::ffff:169.254.169.254",
+        "::ffff:0.0.0.0",
+        "::127.0.0.1",
+    ] {
+        assert!(!dialable(address.parse().unwrap()), "{address}");
+    }
+    for address in [
+        "10.0.0.7",
+        "172.16.4.2",
+        "192.168.1.20",
+        "100.64.0.1",
+        "8.8.8.8",
+        "fd12::7",
+        "2001:db8::1",
+        "::ffff:192.168.1.20",
+    ] {
+        assert!(dialable(address.parse().unwrap()), "{address}");
+    }
+}
+
+#[test]
+fn refusal_lines_show_the_first_ones_then_a_total_at_most_once_a_period() {
+    assert_eq!(shown_refusal(1, Duration::ZERO), Shown::Line);
+    assert_eq!(shown_refusal(REFUSALS_SHOWN, Duration::ZERO), Shown::Line);
+    assert_eq!(
+        shown_refusal(
+            REFUSALS_SHOWN + 1,
+            REFUSAL_TOTAL_EVERY - Duration::from_millis(1)
+        ),
+        Shown::Quiet
+    );
+    assert_eq!(
+        shown_refusal(REFUSALS_SHOWN + 1, REFUSAL_TOTAL_EVERY),
+        Shown::Total
+    );
+    assert_eq!(shown_refusal(1_000_000, Duration::ZERO), Shown::Quiet);
+}
+
+#[test]
+fn the_proxy_counts_every_refused_request_and_cut_tunnel() {
+    let proxy = ModelProxy::bind(7, vec![host("localhost", 4_433)], None).unwrap();
+    let refused = REFUSALS_SHOWN + 5;
+    for _ in 0..refused {
+        let said = answer(ask(&proxy, &connect("example.com:443")));
+        assert!(said.starts_with("HTTP/1.1 403 "), "{said}");
+    }
+    let mut client = ask(&proxy, &connect("localhost:4433"));
+    assert_eq!(
+        head(&mut client),
+        "HTTP/1.1 200 Connection Established\r\n\r\n"
+    );
+    client.write_all(&hello(Some("example.com"))).unwrap();
+    assert!(answer(client).is_empty());
+    assert_eq!(proxy.refusals(), refused + 1);
 }
