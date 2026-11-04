@@ -175,6 +175,27 @@ test("Get set up stays hidden until every read it uses has settled, so Home neve
   assert.match(settled, /<h2>Get set up<\/h2>/);
 });
 
+test("OP-35: Home never shows Get set up beside the projects only to drop it when the first tools check ends", () => {
+  const harnesses = ok([harness("codex", "ready")]);
+  const pool = { id: "pool-1", name: "Main", summary: "1 ChatGPT", members: [], project_count: 0 };
+  const checking = toolsRead({ state: "checking" }, { state: "checking" }, { state: "checking" });
+  const props = { projects: ok([{ id: "p1", name: "Harbor", repository_count: 0 }]), harnesses, onRetryProjects: () => {} };
+  const home = (accounts, pools, tools) => renderToStaticMarkup(createElement(HomeView, { ...props, accounts, pools, tools }));
+  const frames = [{ kind: "loading" }, checking, toolsRead(found, { state: "checking" }, found), toolsReady]
+    .map((tools) => home(ok([account({})]), ok([pool]), tools));
+  for (const [index, frame] of frames.entries()) {
+    assert.match(frame, /Harbor/, `frame ${index}`);
+    assert.match(frame, /class="home"/, `frame ${index}: the project cards take the full width`);
+    assert.doesNotMatch(frame, /Get set up|with-setup|Checking tmux/, `frame ${index}: no side panel while the tools check runs`);
+  }
+  const unset = [checking, toolsReady].map((tools) => home(ok([]), ok([]), tools));
+  for (const [index, frame] of unset.entries()) {
+    assert.match(frame, /class="home with-setup"/, `frame ${index}: with no account the panel shows and stays`);
+    assert.match(frame, /<h2>Get set up<\/h2>/, `frame ${index}`);
+  }
+  assert.match(unset[0], /Checking tmux, uv and graphify on this computer\./);
+});
+
 test("Add an account is done only when an account is ready for agents, and says which; otherwise it links to Accounts", () => {
   const harnesses = ok([]);
   const claude = (id, status) => account({ id, name: "ChaoticQubit", provider: "claude", provider_name: "Claude", status });
@@ -235,7 +256,7 @@ test("Get set up keeps Install tools until tmux, uv and graphify are found; the 
     const checking = item(tools);
     assert.equal(checking.done, false);
     assert.equal(checking.body, "Checking tmux, uv and graphify on this computer.");
-    assert.equal(steps(tools).visible, tools.kind !== "loading", "a read still loading hides the panel; tools still being checked keep it");
+    assert.equal(steps(tools).visible, false, "with an account and a pool ready, the panel waits for the tools check instead of showing only to vanish");
   }
   assert.equal(item(toolsRead({ state: "installing" }, found, missing)).body, "Setup is installing the tools. This updates when it finishes.");
   assert.equal(item(toolsRead(found, found, found, { running: true })).done, true);

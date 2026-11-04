@@ -103,8 +103,9 @@ function accountStep(owned: number, usable: AccountView[]): Pick<SetupItem, "bod
  * (signed in, a saved key, or a reachable URL or local model) and names it, Create a pool when one
  * pool exists, Install tools when tmux, uv and graphify are installed; harnesses never block.
  * Accounts that exist but none ready send the owner to Accounts. The panel shows until those
- * three are done, and never while one of the four reads is still loading, so it cannot flash in
- * and out. Inputs: the four engine reads. Output: items and whether the panel shows. */
+ * three are done, and never while one of the four reads is still loading or, once an account and
+ * a pool are ready, while the tools are still being checked, so it cannot flash in and out beside
+ * the projects (OP-35). Inputs: the four engine reads. Output: items and whether the panel shows. */
 export function setupSteps(accounts: Loaded<AccountView[]>, pools: Loaded<PoolSummary[]>, harnesses: Loaded<HarnessEntry[]>,
   tools: Loaded<SetupStatus>): { items: SetupItem[]; visible: boolean } {
   const owned = accounts.kind === "ok" ? accounts.value : [];
@@ -124,7 +125,8 @@ export function setupSteps(accounts: Loaded<AccountView[]>, pools: Loaded<PoolSu
       action: "Set up tools", href: formatRoute({ name: "settings", tab: "pack" }) },
   ];
   const settled = [accounts, pools, harnesses, tools].every((read) => read.kind !== "loading");
-  return { items, visible: settled && !(accountsDone && poolsDone && installTools.done) };
+  const checking = tools.kind === "ok" && toolsChecking(tools.value);
+  return { items, visible: settled && !(accountsDone && poolsDone && (installTools.done || checking)) };
 }
 
 /** One Needs you row: the project it is about (none for an account), one sentence and one link. */

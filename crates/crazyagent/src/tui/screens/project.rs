@@ -2008,7 +2008,7 @@ impl ProjectScreen {
                 }
                 ProjectReply::Handled
             }
-            KeyCode::Char('d') => {
+            KeyCode::Char('p') => {
                 match &self.hidden_paths {
                     Some(paths) => {
                         let mut input = TextInput::single(FOLDERS_BYTES_MAX);

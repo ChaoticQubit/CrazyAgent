@@ -881,6 +881,7 @@ export interface TeamStatus {
   land_on?: string | null;
   background_at_end?: BackgroundAtEnd;
   ask_before_merge?: boolean;
+  reask_empty_reply?: boolean;
   new_folder_files_max?: number;
   coordination?: CoordinationView | null;
   partial?: boolean;
@@ -948,14 +949,15 @@ export interface TeamNotification {
 export type QuestionSeverity = "high" | "normal" | "low";
 
 /** One open question an agent put to the owner: who asked, how urgent it is, whom the asker
- * meant it for, the question, what the asker assumes until answered, when it was asked and
- * the asker's terminal while it runs. */
+ * meant it for and that party's name (Me for the owner), the question, what the asker assumes
+ * until answered, when it was asked and the asker's terminal while it runs. */
 export interface OwnerQuestion {
   id: number;
   agent: number;
   label: string;
   severity: QuestionSeverity;
   asked_for: "me" | "master" | "lead";
+  for_label: string;
   text: string;
   assumption: string | null;
   created_ms: number;

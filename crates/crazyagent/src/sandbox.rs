@@ -88,10 +88,21 @@ const SOCKET_GRANTS_MAX: usize = 4;
 /// The writes that move, remove, replace or re-permission a folder's own node while its
 /// contents stay writable: the scratch root's and a native lead's home for its teammates.
 const FIXED_WRITES: &str = "file-write-unlink file-write-create file-write-mode file-write-acl";
+/// The folders of a Claude Code config home whose scripts Claude Code 2.1.309 runs ahead of
+/// every Bash command: its shell snapshot and the session hook scripts (TPH-2).
+const CLAUDE_BASH_PRELUDES: [&str; 2] = ["shell-snapshots", "session-env"];
+/// The folders of a Claude Code config home that its agent team shares, the members'
+/// mailboxes and task lists. Claude Code 2.1.309 keeps them under each member's config home,
+/// with no variable of their own, so a native lead's teammates write the lead's (TPH-2).
+pub const CLAUDE_TEAM_SHARED: [&str; 2] = ["teams", "tasks"];
+/// The Seatbelt pattern of a lock folder's path, `<file>.lock`: the only folder a teammate
+/// may still make in a shared team folder, where it may make no other folder or link.
+const LOCK_FOLDER: &str = r#"\.lock$"#;
 /// The longest Unix socket path macOS binds, `sun_path` less its closing NUL.
 const SOCKET_PATH_BYTES_MAX: usize = 103;
 const TOOL_ROOTS_MAX: usize = 24;
 const TOOL_FILES_MAX: usize = 4;
+const EXECS_MAX: usize = 4;
 const GIT_LINK_BYTES_MAX: u64 = 2 * PATH_BYTES_MAX as u64;
 const REMOTES_MAX: usize = 8;
 const PROFILE_BYTES_MAX: usize = 64 * 1024;
@@ -525,7 +536,7 @@ pub fn agent_command<'a>(
 
 /// Network reach of a sandboxed agent: open when the agent's tools are on, except that
 /// it never binds or listens on an [`OWNER_PORTS`] port or one [`ProjectSandbox::keep_ports`]
-/// keeps, otherwise only the listed model endpoints.
+/// keeps, otherwise only the listed remotes, each one port on loopback or on any host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SandboxNetwork {
     Open,
@@ -607,6 +618,7 @@ pub struct ProjectSandbox {
     read_roots: Vec<PathBuf>,
     tool_roots: Vec<PathBuf>,
     tool_files: Vec<PathBuf>,
+    execs: Vec<PathBuf>,
     scratch: Option<PathBuf>,
     hidden: Vec<PathBuf>,
     network: SandboxNetwork,
@@ -621,6 +633,8 @@ pub struct ProjectSandbox {
     shut: Vec<PathBuf>,
     read_only: Vec<PathBuf>,
     fixed: Vec<PathBuf>,
+    shared: Vec<PathBuf>,
+    teammates_of: Option<PathBuf>,
 }
 
 /// The one git worktree a confined agent writes in place of the whole project folder,
@@ -664,6 +678,7 @@ impl ProjectSandbox {
             read_roots: Vec::new(),
             tool_roots: Vec::new(),
             tool_files: Vec::new(),
+            execs: Vec::new(),
             scratch: None,
             hidden: Vec::new(),
             network,
@@ -678,6 +693,8 @@ impl ProjectSandbox {
             shut: Vec::new(),
             read_only: Vec::new(),
             fixed: Vec::new(),
+            shared: Vec::new(),
+            teammates_of: None,
         })
     }
 
@@ -954,6 +971,40 @@ impl ProjectSandbox {
         Ok(self)
     }
 
+    /// Lets the agent start one exact program the engine itself launches, such as its
+    /// harness or the engine executable, from an app bundle's `Contents/MacOS`, which no
+    /// agent may start otherwise (OP-24). One inside a folder the agent can write stays
+    /// denied, since the agent could replace it. Input: a canonical existing regular file
+    /// clear of [`Self::secret_paths`]. Output: the widened sandbox, or `Invalid`.
+    pub fn allow_exec(mut self, program: &Path) -> Result<Self, SandboxError> {
+        clear_of_secrets(program, &self.secret_paths())?;
+        if !clean_absolute(program) || !program.is_file() || canonical(program)? != *program {
+            return Err(invalid(
+                "an allowed program must be an existing canonical file",
+            ));
+        }
+        if self.execs.iter().any(|exec| exec == program) {
+            return Ok(self);
+        }
+        if self.execs.len() >= EXECS_MAX {
+            return Err(invalid("too many allowed programs"));
+        }
+        self.execs.push(program.to_path_buf());
+        Ok(self)
+    }
+
+    /// Lets the agent run the engine executable that serves its team tools, relay hooks and
+    /// monitor: the engine's folder read-only and, by [`Self::allow_exec`], the file itself
+    /// startable by exact path, even from `CrazyAgent.app/Contents/MacOS` where the macOS
+    /// service runs it (OP24R2-1). Input: the engine's canonical path. Output: the widened
+    /// sandbox, or `Invalid`.
+    pub fn allow_engine(self, engine: &Path) -> Result<Self, SandboxError> {
+        let folder = engine
+            .parent()
+            .ok_or_else(|| invalid("the engine must sit in a folder"))?;
+        self.allow_read(folder)?.allow_exec(engine)
+    }
+
     /// Grants a project's toolchains read-only (see [`toolchains::Toolchains::detect`]):
     /// each folder as [`Self::allow_read`] checks it, with every credential name below it
     /// denied, and each file when it is a canonical regular file clear of
@@ -1089,30 +1140,68 @@ impl ProjectSandbox {
     /// rv-secreview RH-1) and no teammate holds a listener or places a node where the lead
     /// connects. They read but never write the launch folders the engine installs in the
     /// lead's home, its hooks, skills and relay plugin, which the lead's Claude Code runs
-    /// (TPH), nor move, replace or re-permission that home itself (TPH r1 F1). Inputs: the
-    /// three sockets and the canonical tmux program. Output: the lead's and the teammates'
-    /// sandboxes, `Invalid`, or `Unavailable` off macOS.
+    /// (TPH), nor move, replace or re-permission that home itself (TPH r1 F1), nor the
+    /// shell snapshot and session scripts its Bash commands run first (TPH-2). The teammates
+    /// run in their own home and only read the lead's, except the team folders Claude Code
+    /// shares, where they make no link or folder but a lock, and never write the `git` on the
+    /// lead's path (TPH-2 C). Both are shut out of the name the engine binds the caller
+    /// socket at before it moves it over `callers`, so neither swaps its own listener in
+    /// there (rv-secreview RH2R2-1). Inputs: the three sockets, the canonical tmux program
+    /// and the teammates' home beside the lead's, its team folders already made. Output: the
+    /// lead's and the teammates' sandboxes, `Invalid`, or `Unavailable` off macOS.
     pub fn native_team(
         self,
         own: &Path,
         mates: &Path,
         callers: &Path,
         tmux: &Path,
+        mates_home: &Path,
     ) -> Result<(Self, Self), SandboxError> {
+        let home = self.agent_home.clone();
+        granted_root(mates_home, &self.owner_home, &self.secret_paths())?;
+        if mates_home.starts_with(&home) || home.starts_with(mates_home) {
+            return Err(invalid("the teammates' home must sit beside the lead's"));
+        }
+        let shared: Vec<PathBuf> = CLAUDE_TEAM_SHARED
+            .iter()
+            .map(|folder| home.join(folder))
+            .collect();
+        for folder in &shared {
+            granted_root(folder, &self.owner_home, &self.secret_paths())?;
+        }
+        let binding = crate::team::caller::binding_path(callers);
         let mut teammates = self
             .clone()
             .serve_tmux_server(mates, tmux)?
             .reach_unix_socket(callers)?
-            .shut_unix_socket(own)?;
+            .shut_unix_socket(own)?
+            .shut_unix_socket(&binding)?
+            .allow_read(&home)?;
+        teammates.agent_home = mates_home.to_path_buf();
         teammates.read_only = vec![
-            self.agent_home.join(crate::launch_context::STATE),
-            self.agent_home.join(crate::coord::relay::PLUGIN_FOLDER),
+            home.join(crate::launch_context::STATE),
+            home.join(crate::coord::relay::PLUGIN_FOLDER),
         ];
-        teammates.fixed = vec![self.agent_home.clone()];
+        teammates
+            .read_only
+            .extend(CLAUDE_BASH_PRELUDES.iter().map(|folder| home.join(folder)));
+        teammates.read_only.extend(
+            self.scratch
+                .iter()
+                .map(|scratch| scratch.join(toolchains::GIT_FOLDER)),
+        );
+        teammates.fixed = vec![home.clone()];
+        teammates.fixed.extend(shared.iter().cloned());
+        teammates.shared = shared;
+        teammates.teammates_of = teammates.clone.clone();
+        if teammates.writes(&home) {
+            return Err(invalid("a teammates' writable root holds the lead's home"));
+        }
         let lead = self
             .allow_tmux_server(own, tmux)?
             .reach_unix_socket(callers)?
-            .reach_unix_socket(mates)?;
+            .reach_unix_socket(mates)?
+            .shut_unix_socket(&binding)?;
         Ok((lead, teammates))
     }
 
@@ -1218,7 +1307,8 @@ impl ProjectSandbox {
     /// Every folder this sandbox lets the agent write: the project folder, or for a
     /// confined agent its worktree, that worktree's git admin folder and the git object
     /// store, or for a clone-confined agent its clone alone, then its own home and temp
-    /// dirs, its short temp folder, then its extra worktrees.
+    /// dirs, its short temp folder, then its extra worktrees, then for a native lead's
+    /// teammates the team folders they share in the lead's home.
     pub fn writable_roots(&self) -> impl Iterator<Item = &PathBuf> {
         assert!(self.checkout.is_none() || self.clone.is_none());
         let project: Vec<&PathBuf> = match (&self.checkout, &self.clone) {
@@ -1231,6 +1321,7 @@ impl ProjectSandbox {
             .chain([&self.agent_home, &self.agent_tmp])
             .chain(self.scratch.iter())
             .chain(self.worktrees.iter())
+            .chain(self.shared.iter())
     }
 
     /// The read-only toolchain folders, Seatbelt only, with credential names carved out.
@@ -1249,7 +1340,10 @@ impl ProjectSandbox {
     pub fn profile(&self) -> String {
         let mut text = String::from("(version 1)\n(deny default)\n");
         text.push_str("(allow process-exec)\n(allow process-fork)\n");
-        text.push_str(&app_exec_denies(&self.owner_home));
+        text.push_str(&app_exec_denies(
+            self.writable_roots(),
+            self.execs.iter().filter(|program| !self.writes(program)),
+        ));
         text.push_str("(allow signal (target same-sandbox))\n");
         text.push_str("(allow process-info* (target same-sandbox))\n");
         text.push_str("(allow sysctl-read)\n");
@@ -1394,6 +1488,12 @@ impl ProjectSandbox {
                 folder.display()
             ));
         }
+        for folder in &self.shared {
+            text.push_str(&shared_denies(folder));
+        }
+        if let Some(clone) = &self.teammates_of {
+            text.push_str(&teammates_clone_denies(clone));
+        }
         assert_eq!(
             text.matches("unix-socket").count(),
             2 * self.sockets.len() + self.served.len() + self.reached.len()
@@ -1412,8 +1512,15 @@ impl ProjectSandbox {
                     "(deny {FIXED_WRITES} (literal \"{}\"))",
                     folder.display()
                 )) > last_write_allow
-            }),
-            "a read-only or fixed folder's write deny must follow every write allow, since the last match wins"
+            }) && self
+                .shared
+                .iter()
+                .all(|folder| text.rfind(&shared_denies(folder)) > last_write_allow)
+                && self
+                    .teammates_of
+                    .iter()
+                    .all(|clone| text.rfind(&teammates_clone_denies(clone)) > last_write_allow),
+            "a read-only, fixed, shared or teammates' clone write deny must follow every write allow, since the last match wins"
         );
         let denied_last = |operations: &str, socket: &PathBuf| {
             text.rfind(&format!(
@@ -1593,8 +1700,9 @@ impl ProjectSandbox {
     /// top-level `.git` is a legitimate repository link the engine adds, and every other
     /// writable root, where no `.git` may ever appear. A `.git` anywhere below a working
     /// tree, and a `.git` at any depth (top level included) in an admin folder, object
-    /// store, home, temp or scratch root, is denied so no agent can create a repository to
-    /// rename whole into a worktree.
+    /// store, home, temp or scratch root, or a team folder a native lead shares with its
+    /// teammates, is denied so no agent can create a repository to rename whole into a
+    /// worktree (OP-9 r2).
     fn git_deny_roots(&self) -> (Vec<&Path>, Vec<&Path>) {
         let mut working: Vec<&Path> = Vec::new();
         let mut other: Vec<&Path> = Vec::new();
@@ -1613,6 +1721,7 @@ impl ProjectSandbox {
         if let Some(scratch) = &self.scratch {
             other.push(scratch.as_path());
         }
+        other.extend(self.shared.iter().map(PathBuf::as_path));
         for worktree in &self.worktrees {
             working.push(worktree.as_path());
         }
@@ -1975,33 +2084,53 @@ fn seatbelt_pattern(path: &Path) -> String {
     regex_escape(&text)
 }
 
-/// The Seatbelt rule that keeps an agent from starting a macOS app: no exec of a main
-/// executable in an app bundle's `Contents/MacOS` under `/Applications`,
-/// `/System/Applications` or the owner's `~/Applications`, the Data volume path of each
-/// included, each name in any letter case. A GUI app started inside the agent profile
-/// aborts at launch and macOS shows a crash report for every attempt (Chrome crash
-/// popups, decision C1). Command-line tools a bundle ships under `Contents/Resources` or
-/// `Contents/Developer` stay allowed. It must follow the exec allow, since the last
-/// matching rule wins. Input: the owner's home. Output: the rule text.
-fn app_exec_denies(owner_home: &Path) -> String {
+/// The Seatbelt rules that keep an agent from starting a macOS app: no exec of a main
+/// executable in any app bundle's `Contents/MacOS`, wherever it sits and in any letter
+/// case, since a GUI app started inside the agent profile aborts at launch and macOS shows
+/// a crash report for every attempt (Chrome crash popups, decision C1, OP-24). The
+/// interpreter a framework Python's launcher starts, `<name>.framework/Versions/<v>/
+/// Resources/Python.app/Contents/MacOS/Python`, stays allowed, except in the folders the
+/// agent can write, where it could plant a bundle under that name; their Data volume path
+/// is denied too. Command-line tools a bundle ships under `Contents/Resources` or
+/// `Contents/Developer` stay allowed, as does each exact program the engine launches from
+/// outside those folders. It must follow the exec allow, since the last matching rule
+/// wins. Inputs: the agent's writable roots and those programs. Output: the rule text.
+fn app_exec_denies<'a>(
+    writable: impl Iterator<Item = &'a PathBuf>,
+    launched: impl Iterator<Item = &'a PathBuf>,
+) -> String {
     let data = format!(
         "/{}/{}/{}",
         any_case("System"),
         any_case("Volumes"),
         any_case("Data")
     );
-    let bundle = format!(
-        "/{}/.+{}/{}/{}/",
-        any_case("Applications"),
+    let app = format!(
+        ".+{}/{}/{}/",
         any_case(".app"),
         any_case("Contents"),
         any_case("MacOS")
     );
-    format!(
-        "(deny process-exec\n  (regex #\"^(/{}|{data})?{bundle}\")\n  (regex #\"^({data})?{}{bundle}\"))\n",
-        any_case("System"),
-        seatbelt_pattern(owner_home)
-    )
+    let mut rule = format!(
+        "(deny process-exec\n  (regex #\"^/{app}\"))\n(allow process-exec\n  (regex #\"^/.+\\.framework/Versions/[^/]+/Resources/Python\\.app/Contents/MacOS/Python$\"))\n(deny process-exec"
+    );
+    for root in writable {
+        let root = root.display().to_string();
+        rule.push_str(&format!(
+            "\n  (regex #\"^({data})?{}/{app}\")",
+            any_case(&root)
+        ));
+    }
+    rule.push_str(")\n");
+    let launched: Vec<&PathBuf> = launched.collect();
+    if !launched.is_empty() {
+        rule.push_str("(allow process-exec");
+        for program in launched {
+            rule.push_str(&format!("\n  (literal \"{}\")", program.display()));
+        }
+        rule.push_str(")\n");
+    }
+    rule
 }
 
 /// The Seatbelt rules that keep an Own branch agent from repointing the object store its
@@ -2032,6 +2161,32 @@ fn clone_store_denies(clone: &Path) -> String {
     );
     assert_eq!(text.matches("(regex #\"^/").count(), 10);
     assert!(text.contains("(vnode-type SYMLINK)"));
+    text
+}
+
+/// The writes a clone lead's teammates may not make in the lead's clone (OP-9): anything but
+/// the teammates' folder, the clone's object store, the inside of each worktree record git
+/// keeps in `.git/worktrees`, and the refs and reflogs of `crazyagent/<task>--<name>`
+/// teammate branches; nor the links that tie a teammate worktree to the clone, which the
+/// engine writes with the lead's rights, each name in any letter case; nor the teammates'
+/// folder entry or a symlink at a teammate's folder in it, where the engine's lead-rights
+/// `git worktree add` writes. It must follow every write allow, since the last match wins.
+/// Input: the clone. Output: the rule text.
+fn teammates_clone_denies(clone: &Path) -> String {
+    let path = clone.display();
+    let root = seatbelt_pattern(clone);
+    let folder = crate::agent_git::TEAMMATES_FOLDER;
+    let teammates = any_case(folder);
+    let git = any_case(".git");
+    let branches = regex_escape(crate::agent_git::LINKED_PREFIX);
+    let text = format!(
+        "(deny file-write*\n  (require-all\n    (subpath \"{path}\")\n    (require-not (subpath \"{path}/{folder}\"))\n    (require-not (subpath \"{path}/.git/objects\"))\n    (require-not (regex #\"^{root}/\\.git/worktrees/[^/]+/.+$\"))\n    (require-not (regex #\"^{root}/\\.git/(logs/)?refs/heads/{branches}[a-z0-9-]+--[a-z0-9-]+(\\.lock)?$\"))))\n(deny file-write*\n  (regex #\"^{root}/{teammates}$\")\n  (regex #\"^{root}/{teammates}/[^/]+/{git}$\")\n  (regex #\"^{root}/{git}/{}/[^/]+/({}|{})$\"))\n(deny file-write-create\n  (require-all (regex #\"^{root}/{teammates}/[^/]+$\") (vnode-type SYMLINK)))\n",
+        any_case("worktrees"),
+        any_case("commondir"),
+        any_case("gitdir")
+    );
+    assert_eq!(text.matches("(regex #\"^/").count(), 6);
+    assert_eq!(text.matches("(subpath \"/").count(), 3);
     text
 }
 
@@ -2215,6 +2370,16 @@ fn clear_of_secrets(root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError
         return Err(invalid(SECRET_ROOT_REFUSED));
     }
     Ok(())
+}
+
+/// The Seatbelt rules that keep a shared team folder free of links and moved-in folders: no
+/// link may be made there and no folder but a lock, so no teammate places a path the lead's
+/// own Claude Code writes through (TPH-2 C). Input: the folder. Output: the rules.
+fn shared_denies(folder: &Path) -> String {
+    let folder = folder.display();
+    format!(
+        "(deny file-write-create (require-all (subpath \"{folder}\") (vnode-type SYMLINK)))\n(deny file-write-create (require-all (subpath \"{folder}\") (vnode-type DIRECTORY) (require-not (regex #\"{LOCK_FOLDER}\"))))\n"
+    )
 }
 
 fn granted_root(root: &Path, owner: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError> {

@@ -242,6 +242,7 @@ fn a_team_master_with_tools_on_gets_the_engine_delegate_tool() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
     let record = root.join("tmp").join(crate::team::tool::DROP_FILE);
+    let mailbox = root.join("tmp").join(crate::team::tool::MAILBOX_FOLDER);
     let engine = Path::new("/usr/local/bin/crazyagent");
     let fresh = || AgentContext {
         plugins: LaunchPlugins::default(),
@@ -253,7 +254,9 @@ fn a_team_master_with_tools_on_gets_the_engine_delegate_tool() {
         relay: None,
         model_proxy: None,
     };
-    let context = fresh().with_team_tool(engine, &record).unwrap();
+    let context = fresh()
+        .with_team_tool(engine, &record, &mailbox, &[])
+        .unwrap();
     assert_eq!(
         context.read_paths(),
         [engine.to_path_buf()],
@@ -279,7 +282,11 @@ fn a_team_master_with_tools_on_gets_the_engine_delegate_tool() {
     );
     assert_eq!(
         server["args"],
-        toml::Value::Array(vec!["team-mcp".into(), record.to_str().unwrap().into()])
+        toml::Value::Array(vec![
+            "team-mcp".into(),
+            record.to_str().unwrap().into(),
+            mailbox.to_str().unwrap().into()
+        ])
     );
     assert!(
         !server.contains_key("env"),
@@ -307,7 +314,7 @@ fn a_team_master_with_tools_on_gets_the_engine_delegate_tool() {
         serde_json::json!({
             "type": "stdio",
             "command": "/usr/local/bin/crazyagent",
-            "args": ["team-mcp", record.to_str().unwrap()],
+            "args": ["team-mcp", record.to_str().unwrap(), mailbox.to_str().unwrap()],
             "env": {},
         })
     );
@@ -315,20 +322,30 @@ fn a_team_master_with_tools_on_gets_the_engine_delegate_tool() {
 
     assert_eq!(
         fresh()
-            .with_team_tool(Path::new("crazyagent"), &record)
+            .with_team_tool(Path::new("crazyagent"), &record, &mailbox, &[])
             .unwrap_err()
             .0,
         "launch_context_team_tool_invalid"
     );
     assert_eq!(
         fresh()
-            .with_team_tool(engine, Path::new("tmp/record.jsonl"))
+            .with_team_tool(engine, Path::new("tmp/record.jsonl"), &mailbox, &[])
             .unwrap_err()
             .0,
         "launch_context_team_tool_invalid"
     );
     assert_eq!(
-        context.with_team_tool(engine, &record).unwrap_err().0,
+        fresh()
+            .with_team_tool(engine, &record, Path::new("tmp/calls"), &[])
+            .unwrap_err()
+            .0,
+        "launch_context_team_tool_invalid"
+    );
+    assert_eq!(
+        context
+            .with_team_tool(engine, &record, &mailbox, &[])
+            .unwrap_err()
+            .0,
         "launch_context_team_tool_taken"
     );
 }
@@ -1688,12 +1705,13 @@ fn on_path(name: &str) -> Option<PathBuf> {
     })
 }
 
+/// The engine's shared context-mode install under a test folder: an engine root whose
+/// `setup/npm` holds context-mode copied from the npm prefix `CRAZYAGENT_CONTEXT_MODE_INSTALL`
+/// names, approved for the project `app`. Input: the test folder. Output: the project's
+/// launch context, the engine's database and the shared install folder, or a panic naming
+/// what is unavailable.
 #[cfg(target_os = "macos")]
-#[test]
-fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandboxed_home() {
-    use crate::sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
-    use crate::sandbox::{ProjectSandbox, SandboxNetwork};
-    const CLAUDE_CONNECT_LIMIT: Duration = Duration::from_secs(30);
+fn shared_context_mode(base: &Path) -> (AgentContext, rusqlite::Connection, PathBuf) {
     let Some(source) = std::env::var_os("CRAZYAGENT_CONTEXT_MODE_INSTALL") else {
         panic!(
             "UNAVAILABLE: CRAZYAGENT_CONTEXT_MODE_INSTALL, an npm prefix holding node_modules/context-mode@{CONTEXT_MODE_VERSION}"
@@ -1703,8 +1721,6 @@ fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandb
         panic!("UNAVAILABLE: npx and node on PATH");
     };
     let bin = npx.parent().unwrap().to_path_buf();
-    let directory = tempfile::tempdir().unwrap();
-    let base = directory.path().canonicalize().unwrap();
     let root = private_folder(&base.join("engine"));
     let npm = private_folder(&root.join("setup").join("npm"));
     let install = npm.join(format!("context-mode@{CONTEXT_MODE_VERSION}"));
@@ -1716,9 +1732,20 @@ fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandb
     )
     .unwrap();
     assert!(copied.success());
-
     let mut connection = store_context_mode(&root, &bin);
     let context = context_mode_context(launch_app(&mut connection, &root));
+    (context, connection, install)
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandboxed_home() {
+    use crate::sandbox::toolchains::{ToolHomes, Toolchain, Toolchains};
+    use crate::sandbox::{ProjectSandbox, SandboxNetwork};
+    const CLAUDE_CONNECT_LIMIT: Duration = Duration::from_secs(30);
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let (context, _connection, install) = shared_context_mode(&base);
     let home = private_folder(&base.join("home"));
     let (command, args) = claude_context_mode(&context, &home);
     assert_ne!(
@@ -1756,4 +1783,226 @@ fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandb
         fs::read_dir(&install).unwrap().count() > 0,
         "the shared install stays in place for the next agent"
     );
+}
+
+/// Starts a local model endpoint that records each request body and answers 500, so a real
+/// harness sends its first model request and no reply is made up. Output: the port and the
+/// recorded bodies.
+#[cfg(target_os = "macos")]
+fn request_capture() -> (u16, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+    use std::io::{BufRead, BufReader, Read, Write};
+    const BODY_BYTES_MAX: usize = 8 * 1024 * 1024;
+    let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let bodies = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = bodies.clone();
+    std::thread::spawn(move || {
+        for stream in crate::spawn_gate::incoming_tcp_std(&listener).flatten() {
+            let sink = sink.clone();
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        return;
+                    }
+                    if line == "\r\n" {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':')
+                        && name.eq_ignore_ascii_case("content-length")
+                    {
+                        length = value.trim().parse().unwrap_or(0);
+                    }
+                }
+                let mut body = vec![0; length.min(BODY_BYTES_MAX)];
+                if reader.read_exact(&mut body).is_ok() {
+                    sink.lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&body).into_owned());
+                }
+                let mut stream = stream;
+                let _ = stream.write_all(
+                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                );
+            });
+        }
+    });
+    (port, bodies)
+}
+
+/// Installs the Seatbelt profile the team runtime builds for a tools-on agent of a project
+/// with the default agent policy: that policy's network beside the model port, its
+/// toolchains, the agent's scratch folder, graphify, the harness install folders and the
+/// launch context's server folders. Inputs: the test folder, the agent home, the project,
+/// the context, the model port and the install folders. Output: the profile path.
+#[cfg(target_os = "macos")]
+fn tools_on_profile(
+    base: &Path,
+    home: &Path,
+    project: &Path,
+    context: &AgentContext,
+    port: u16,
+    installs: &[&Path],
+) -> PathBuf {
+    use crate::sandbox::policy::AgentPolicy;
+    use crate::sandbox::toolchains::{self, ToolHomes, Toolchains};
+    use crate::sandbox::{ProjectSandbox, SandboxRemote};
+    let policy = AgentPolicy::default();
+    let homes = ToolHomes::owner().unwrap();
+    let tmp = private_folder(&base.join("tmp"));
+    let scratch = toolchains::make_tmp(home).unwrap();
+    let network = policy.network.sandbox(Some(SandboxRemote::Loopback(port)));
+    let (mut sandbox, _) = ProjectSandbox::new(project, home, &tmp, network)
+        .unwrap()
+        .allow_tools(&Toolchains::grant(&homes, &policy.allowed(project)))
+        .unwrap()
+        .allow_scratch(&scratch)
+        .unwrap()
+        .allow_extra_reads(&toolchains::graphify(&homes))
+        .unwrap();
+    for install in installs {
+        sandbox = sandbox.allow_read(install).unwrap();
+    }
+    for server in context.read_paths() {
+        sandbox = sandbox.allow_read(server.parent().unwrap()).unwrap();
+    }
+    let profile = base.join("agent.sb");
+    sandbox.install(&profile).unwrap();
+    profile
+}
+
+/// The last bytes of a log file, read lossily, or a word saying it is missing. Inputs: the
+/// path and the byte bound. Output: the text.
+#[cfg(target_os = "macos")]
+fn log_tail(path: &Path, bytes: usize) -> String {
+    match fs::read(path) {
+        Ok(data) => String::from_utf8_lossy(&data[data.len().saturating_sub(bytes)..]).into_owned(),
+        Err(_) => "(no log)".to_owned(),
+    }
+}
+
+/// A fresh Claude Code agent the engine launches with its launch context, context-mode
+/// started from the engine's shared install, inside the deny-default Seatbelt profile the
+/// runtime builds for a tools-on agent, is offered the context-mode tools: real Claude Code
+/// sends its first model request to a local endpoint that records it and answers 500, and
+/// that request's tool list names `ctx_execute`, `ctx_batch_execute` and `ctx_search`
+/// exactly. Claude Code's stderr goes to a log in the agent home, quoted on failure. Needs
+/// Claude Code and `CRAZYAGENT_CONTEXT_MODE_INSTALL`; spends no tokens.
+#[cfg(target_os = "macos")]
+#[test]
+#[ignore = "live: needs Claude Code and CRAZYAGENT_CONTEXT_MODE_INSTALL"]
+fn a_fresh_claude_agent_lists_the_context_mode_tools_of_the_engine_install() {
+    use crate::harnesses::launch::{AccountBinding, LaunchLimits, LaunchRequest, Session};
+    use std::os::unix::fs::PermissionsExt;
+    const TASK: &str = "Name the tools you have for check 4471.";
+    const SERVER: &str = "plugin_context-mode_context-mode";
+    const STDERR_TAIL_BYTES: usize = 4096;
+    let Some(claude) = on_path("claude") else {
+        panic!("UNAVAILABLE: no claude executable on PATH");
+    };
+    let claude = claude.canonicalize().unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let (context, _connection, _install) = shared_context_mode(&base);
+    let home = private_folder(&base.join("home"));
+    let work = private_folder(&base.join("work"));
+    let initialized = crate::spawn_gate::status(
+        std::process::Command::new("/usr/bin/git")
+            .args(["init", "-q"])
+            .arg(&work),
+    )
+    .unwrap();
+    assert!(initialized.success());
+    let stderr = home.join("claude-stderr.log");
+    let bin = private_folder(&base.join("bin"));
+    let wrapper = bin.join("claude");
+    for path in [&claude, &stderr] {
+        assert!(!path.to_string_lossy().contains('\''), "{}", path.display());
+    }
+    fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\nexec '{}' \"$@\" 2>'{}'\n",
+            claude.display(),
+            stderr.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&wrapper, fs::Permissions::from_mode(0o700)).unwrap();
+    let (port, bodies) = request_capture();
+    let profile = tools_on_profile(
+        &base,
+        &home,
+        &work,
+        &context,
+        port,
+        &[&bin, claude.parent().unwrap()],
+    );
+    let mut session = Session::start_with_context(
+        LaunchRequest {
+            harness: "claude-code".into(),
+            executable: wrapper,
+            working_dir: work,
+            account: AccountBinding::Url {
+                home,
+                base_url: format!("http://127.0.0.1:{port}"),
+                key: None,
+            },
+            model: Some("qwen2.5:0.5b".into()),
+            tools: true,
+            sandbox_profile: Some(profile),
+            unconfined: false,
+            git_identity: None,
+            limits: LaunchLimits {
+                run_time: Duration::from_secs(180),
+                ..LaunchLimits::default()
+            },
+        },
+        context,
+    )
+    .unwrap();
+    session.send(TASK).unwrap();
+    let deadline = std::time::Instant::now() + Duration::from_secs(120);
+    let body = loop {
+        if let Some(body) = bodies
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|body| body.contains("check 4471") && body.contains("\"tools\""))
+        {
+            break body.clone();
+        }
+        let seen = bodies.lock().unwrap().len();
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no model request carried the task with its tools ({seen} requests seen); stderr: {}",
+            log_tail(&stderr, STDERR_TAIL_BYTES)
+        );
+        if session.next_event(Duration::from_millis(500)).is_err() {
+            panic!(
+                "the agent ended before its first model request ({seen} requests seen); stderr: {}",
+                log_tail(&stderr, STDERR_TAIL_BYTES)
+            );
+        }
+    };
+    session.stop().unwrap();
+    let request: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let offered: Vec<&str> = request["tools"]
+        .as_array()
+        .map(|tools| {
+            tools
+                .iter()
+                .filter_map(|tool| tool["name"].as_str())
+                .collect()
+        })
+        .unwrap_or_default();
+    for tool in ["ctx_execute", "ctx_batch_execute", "ctx_search"] {
+        let name = format!("mcp__{SERVER}__{tool}");
+        assert!(
+            offered.contains(&name.as_str()),
+            "the agent is offered exactly {name}: {offered:?}"
+        );
+    }
 }

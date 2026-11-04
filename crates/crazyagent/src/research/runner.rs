@@ -822,6 +822,7 @@ impl ResearchRunner {
         for folder in read_folders(executable, &context, job.tools)? {
             sandbox = sandbox.allow_read(&folder)?;
         }
+        sandbox = sandbox.allow_exec(&executable.canonicalize()?)?;
         let profile = self.state.join("profiles").join(format!("{name}.sb"));
         sandbox.install(&profile)?;
         let setup = self.setup.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1323,9 +1324,11 @@ impl ResearchRunner {
             SandboxNetwork::Only(vec![model_remote(run.account)?]),
         )?
         .allow_read(&folder)?;
-        if let Some(parent) = executable.canonicalize()?.parent() {
+        let program = executable.canonicalize()?;
+        if let Some(parent) = program.parent() {
             sandbox = sandbox.allow_read(parent)?;
         }
+        sandbox = sandbox.allow_exec(&program)?;
         let hidden = match run.project {
             Some(project) => ResearchJobs::open(&self.database)?
                 .hidden_paths(project)
@@ -1502,9 +1505,10 @@ fn read_folders(
 }
 
 /// The sandbox network a research job runs under (DEC-111 Q17, S4R1-2): a tools-off job
-/// reaches only its model endpoint, and a tools-on job follows the project's network choice
-/// with the model still reachable. Inputs: the project's agent policy, whether the job has
-/// tools, and the model endpoint. Output: the sandbox network.
+/// reaches only its model endpoint's port, on loopback for a local model, otherwise on any
+/// host, and a tools-on job follows the project's network choice with the model still
+/// reachable. Inputs: the project's agent policy, whether the job has tools, and the model
+/// endpoint. Output: the sandbox network.
 pub(crate) fn job_network(
     policy: &crate::sandbox::policy::AgentPolicy,
     tools: bool,

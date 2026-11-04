@@ -121,9 +121,9 @@ impl AgentNetwork {
 
     /// The sandbox reach this choice grants. Input: the model endpoint the agent still
     /// needs, or None for the plugin check, which needs no model. Output: Open for Open,
-    /// port 443 plus the model for Https, and for None the model only on loopback: a model
-    /// on any host is reached under None only through a model proxy's loopback port, so no
-    /// None path grants a host port or DNS (S4B-M1).
+    /// port 443 plus the model's port for Https, and for None the model only on loopback:
+    /// a model on any host is reached under None only through a model proxy's loopback
+    /// port, so no None path grants a host port or DNS (S4B-M1).
     pub fn sandbox(self, model: Option<super::SandboxRemote>) -> super::SandboxNetwork {
         match self {
             Self::Open => super::SandboxNetwork::Open,

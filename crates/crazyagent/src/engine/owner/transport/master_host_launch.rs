@@ -806,8 +806,9 @@ fn delegate_servers(
 /// master writes only in its leased worktree, the account's managed home and the turn's own
 /// temp folder; it reads the project repository, never writing its refs, reflogs or other
 /// worktrees' admin folders, since the engine makes every ref move, and it reads the harness
-/// install folder and the turn directory, and reaches only its model endpoint (HTTPS for a
-/// native account). Output: the installed sandbox, or `master_sandbox_unavailable` on a refusal.
+/// install folder and the turn directory, and reaches only its model endpoint's port, on
+/// loopback for a local model, otherwise on any host (443 for a native account). Output:
+/// the installed sandbox, or `master_sandbox_unavailable` on a refusal.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn master_sandbox(
@@ -908,8 +909,8 @@ fn turn_sandbox(
         .create(&tmp)
         .map_err(io_error)?;
     let home = std::fs::canonicalize(home).map_err(io_error)?;
-    let install = std::fs::canonicalize(executable)
-        .map_err(io_error)?
+    let program = std::fs::canonicalize(executable).map_err(io_error)?;
+    let install = program
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| failure("master_sandbox_unavailable"))?;
@@ -922,17 +923,14 @@ fn turn_sandbox(
         None => ProjectSandbox::new(worktree, &home, &tmp, network)
             .and_then(|sandbox| sandbox.allow_read(repository)),
         Some(engine) => {
-            let folder = std::fs::canonicalize(engine)
-                .map_err(io_error)?
-                .parent()
-                .map(Path::to_path_buf)
-                .ok_or_else(|| failure("master_sandbox_unavailable"))?;
+            let engine = std::fs::canonicalize(engine).map_err(io_error)?;
             ProjectSandbox::new(worktree, &home, &tmp, network)
                 .and_then(|sandbox| sandbox.allow_read(repository))
-                .and_then(|sandbox| sandbox.allow_read(&folder))
+                .and_then(|sandbox| sandbox.allow_engine(&engine))
         }
     }
     .and_then(|sandbox| sandbox.allow_read(&install))
+    .and_then(|sandbox| sandbox.allow_exec(&program))
     .and_then(|sandbox| sandbox.allow_read(&runtime.path))
     .and_then(|sandbox| sandbox.allow_tools(&tools))
     .and_then(|sandbox| sandbox.guard_engine(&root.path))
@@ -1439,7 +1437,7 @@ mod tests {
     }
 
     #[test]
-    fn the_live_master_keeps_the_model_only_network_under_every_project_choice() {
+    fn the_live_master_keeps_only_its_model_port_under_every_project_choice() {
         use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
         let temporary = private_root();
         let base = temporary.path().canonicalize().unwrap();
@@ -1585,6 +1583,10 @@ mod tests {
                 .contains("(allow network-outbound (remote ip \"*:443\"))")
         );
         assert!(!sandbox.sandbox().profile().contains("(allow network*)"));
+        assert!(sandbox.sandbox().profile().contains(&format!(
+            "(allow process-exec\n  (literal \"{}\"))\n",
+            std::fs::canonicalize(&executable).unwrap().display()
+        )));
 
         let master = master_command(&executable, &home, &worktree, "admitted-model", None).unwrap();
         let wrapped = sandbox.wrap(&master).unwrap();
