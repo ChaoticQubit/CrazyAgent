@@ -452,7 +452,14 @@ fn a_skills_link_a_sandboxed_agent_plants_never_steers_a_removal_outside_its_hom
     drop(installed);
     assert!(marker.exists(), "cleanup removed a folder through the link");
 
-    agents.shell(&format!("rm -f '{}'", skills.display()));
+    assert!(
+        !agents
+            .run(&format!("rm -f '{}'", skills.display()))
+            .status
+            .success(),
+        "the agent cannot move or remove its skills entry once it is there (LL-2)"
+    );
+    fs::remove_file(&skills).unwrap();
     let installed = context.install("codex", &agents.home, false).unwrap();
     agents.shell(&plant);
     drop(installed);
