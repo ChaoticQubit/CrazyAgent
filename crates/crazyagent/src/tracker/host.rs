@@ -3,11 +3,14 @@ use super::settings::{self, CiEvidence, ManualEvidence};
 use crate::protocol::ProjectId;
 use rusqlite::{OptionalExtension, Transaction, params};
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use trackwright_core::coverage;
 use trackwright_core::host::{
-    Authority, CheckView, Evidence, EvidenceState, LinkKind, LinkState, Links, TicketView,
+    self as core_host, Authority, CheckView, Evidence, EvidenceState, LinkKind, LinkState, Links,
+    Paths, TicketView,
 };
-use trackwright_core::model::{Actor, CheckKind, OpKind, ProjectKey, Refusal, codes};
+use trackwright_core::model::{Actor, CheckKind, OpKind, PolicyKey, ProjectKey, Refusal, codes};
+use trackwright_core::runs::{RunWriters, SourceRef};
 use trackwright_core::standalone::Standalone;
 
 /// A target that exists in the host's tables but belongs to another project.
@@ -33,6 +36,8 @@ const OWNER: &str = "owner";
 const ENGINE_PREFIX: &str = "engine:";
 const GONE: &str = "gone";
 const HEAD_BYTES_MAX: u64 = 512;
+/// The folder under a project's `.crazyagent/` that `export` writes into.
+pub const EXPORTS_DIRECTORY: &str = "exports";
 const WORKTREES_SCANNED_MAX: i64 = 4096;
 
 /// The link kinds the engine declares, each resolved against its own table in the same
@@ -76,6 +81,17 @@ const WORKTREE: &str = "SELECT project, agent FROM team_worktrees WHERE worktree
 const WORKTREES: &str = "SELECT project, agent, git_dir FROM team_worktrees
     ORDER BY project = ?1 DESC, agent LIMIT ?2";
 const CHANGE_SET: &str = "SELECT project, state, pruned FROM landing_change_sets WHERE id = ?1";
+const CURRENT_SOURCE: &str = "WITH linked AS (
+    SELECT l.target FROM tk_links l
+      JOIN tk_tickets t ON t.id = l.ticket
+      JOIN tk_projects p ON p.id = t.project
+     WHERE p.key = ?1 AND t.number = ?2 AND l.kind = 'change_set'
+     ORDER BY l.created_ms DESC, l.target LIMIT 1)
+SELECT c.id, c.base, c.head,
+       (SELECT r.tree FROM check_runs r WHERE r.change_set = c.id AND r.commit_id = c.head
+         ORDER BY r.run DESC LIMIT 1)
+  FROM linked JOIN landing_change_sets c ON c.id = linked.target
+ WHERE c.project = ?3";
 const MEMORY: &str = "SELECT project FROM memory_library WHERE id = ?1";
 const KNOWLEDGE: &str = "SELECT project FROM knowledge_heads WHERE id = ?1";
 const QUESTION: &str = "SELECT project, status FROM owner_questions WHERE id = ?1";
@@ -322,10 +338,12 @@ impl Evidence for Host {
     ) -> Result<EvidenceState, Refusal> {
         match check.kind {
             CheckKind::Manual | CheckKind::Ci => Standalone.check(tx, project, check),
-            CheckKind::Test => Ok(EvidenceState {
-                satisfied: false,
-                detail: "test checks wait for test runs".to_owned(),
-            }),
+            CheckKind::Test => Ok(coverage::test_check(tx, self, project, check)?.unwrap_or(
+                EvidenceState {
+                    satisfied: false,
+                    detail: "a test check names a test case".to_owned(),
+                },
+            )),
             CheckKind::Change => {
                 let engine = project_of(tx, project)?;
                 let row: Option<(String, String, bool)> = tx
@@ -344,6 +362,40 @@ impl Evidence for Host {
                 Ok(EvidenceState { satisfied, detail })
             }
         }
+    }
+
+    fn tracks_source(&self) -> bool {
+        true
+    }
+
+    /// The source a ticket's work is at: the head of the change set it links most recently,
+    /// with that head's tree as the engine's checks recorded it. Inputs: the transaction,
+    /// the project and the ticket. Output: the source, None when the ticket links no change
+    /// set of this project or no check has recorded its head yet, or `host_failed`.
+    fn current_source(
+        &self,
+        tx: &Transaction<'_>,
+        project: &ProjectKey,
+        ticket: &TicketView,
+    ) -> Result<Option<SourceRef>, Refusal> {
+        let engine = project_of(tx, project)?;
+        let row: Option<(String, String, String, Option<String>)> = tx
+            .query_row(
+                CURRENT_SOURCE,
+                params![project.as_str(), ticket.id.number(), engine.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(failed)?;
+        Ok(row.and_then(|(change_set, base, head, tree)| {
+            Some(SourceRef::Git {
+                repository: engine.as_str().to_owned(),
+                commit: head,
+                tree: tree?,
+                base: Some(base),
+                change_set: Some(change_set),
+            })
+        }))
     }
 }
 
@@ -442,5 +494,115 @@ impl Authority for Host {
             }
             _ => Ok(()),
         }
+    }
+
+    fn policy_locked(&self, setting: PolicyKey) -> Option<&'static str> {
+        locked(setting)
+    }
+}
+
+/// The one value the engine allows for a core policy key: `run_writers` is `engine_only`,
+/// since only the engine's checks record automated runs and the gate counts only those.
+/// Every other key is free. Input: the key. Output: the locked value word, or None.
+pub(crate) fn locked(setting: PolicyKey) -> Option<&'static str> {
+    (setting == PolicyKey::RunWriters).then(|| RunWriters::EngineOnly.as_str())
+}
+
+/// Finds a project's `.crazyagent/` folder from its stored setup and checks it is a real
+/// folder, never a link. Inputs: the transaction, the engine project and the refusal code
+/// of the operation. Output: the folder, or the refusal.
+pub(crate) fn state_of(
+    tx: &Transaction<'_>,
+    engine: &ProjectId,
+    code: &'static str,
+) -> Result<PathBuf, Refusal> {
+    let setup = crate::project_setup::load_setup(tx, engine)
+        .map_err(|_| Refusal::host(HOST_FAILED, "the engine could not read the project"))?
+        .ok_or_else(|| Refusal::host(HOST_FAILED, "the engine has no folder for this project"))?;
+    let folder = setup.project_folder();
+    if !folder.is_absolute() {
+        return Err(Refusal::host(
+            HOST_FAILED,
+            "the engine stores a relative project folder",
+        ));
+    }
+    let state = folder.join(crate::projects_home::CRAZYAGENT_DIRECTORY);
+    real_folder(&state, code, "the project's .crazyagent folder")?;
+    assert!(state.starts_with(&folder));
+    Ok(state)
+}
+
+/// Checks that a path is a real folder, not a link and not missing. Inputs: the path, the
+/// refusal code and the folder's name in words. Output: Ok, or the refusal.
+fn real_folder(path: &Path, code: &'static str, named: &str) -> Result<(), Refusal> {
+    match std::fs::symlink_metadata(path) {
+        Ok(listed) if listed.file_type().is_dir() => Ok(()),
+        _ => Err(Refusal::new(
+            code,
+            format!("{named} is missing, a link or not a folder"),
+        )),
+    }
+}
+
+/// Makes `.crazyagent/exports/` at the first export, readable by the owner only. A name
+/// already there is left for `real_folder` to check. Inputs: the folder and the refusal
+/// code. Output: Ok, or the refusal.
+fn exports_folder(path: &Path, code: &'static str) -> Result<(), Refusal> {
+    let mut builder = std::fs::DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    match builder.create(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(_) => Err(Refusal::new(
+            code,
+            "the project's exports folder could not be made",
+        )),
+    }
+}
+
+impl Paths for Host {
+    /// Confines `export` to `<project>/.crazyagent/exports/` and the import ops to
+    /// `<project>/.crazyagent/context/`, after the actor check `actor_may` makes, so an
+    /// agent never names a file outside its own project's folders. Inputs: the
+    /// transaction, the key, the actor, the operation and the requested relative path.
+    /// Output: the path to open, or `export_path_refused` / `import_path_refused`.
+    fn resolve_path(
+        &self,
+        tx: &Transaction<'_>,
+        project: &ProjectKey,
+        actor: &Actor,
+        op: OpKind,
+        requested: &Path,
+    ) -> Result<PathBuf, Refusal> {
+        let (code, below) = match op {
+            OpKind::Export => (codes::EXPORT_PATH_REFUSED, EXPORTS_DIRECTORY),
+            OpKind::ImportPreview | OpKind::ImportApply => (
+                codes::IMPORT_PATH_REFUSED,
+                crate::project_setup::CONTEXT_DIRECTORY,
+            ),
+            other => panic!("{other} opens no file"),
+        };
+        let engine = project_of(tx, project)?;
+        member(tx, &engine, actor)?;
+        let state = state_of(tx, &engine, code)?;
+        let root = state.join(below);
+        if op == OpKind::Export {
+            exports_folder(&root, code)?;
+        }
+        real_folder(
+            &root,
+            code,
+            &format!("the project's .crazyagent/{below} folder"),
+        )?;
+        let path = core_host::confined(&root, requested).map_err(|why| {
+            Refusal::new(
+                code,
+                format!("{why}; name a .md file inside .crazyagent/{below}"),
+            )
+        })?;
+        assert!(path.starts_with(&root));
+        assert!(path.starts_with(&state));
+        Ok(path)
     }
 }

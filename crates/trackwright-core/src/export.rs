@@ -1,11 +1,13 @@
 use crate::criteria;
-use crate::host::Paths;
+use crate::host::{Host, Paths};
 use crate::import;
 use crate::model::{
     Actor, Cycle, CycleStatus, Evidence, OpKind, ProjectKey, ReleaseVersion, ShortId, Ticket, codes,
 };
+use crate::ops::{self, Cx, Failure};
 use crate::store::{self, StoreError};
 use rusqlite::{Row, Transaction};
+use serde_json::json;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::io::{self, Read, Write};
@@ -503,4 +505,35 @@ fn failed(what: &str, error: &io::Error) -> StoreError {
         codes::STORE_FAILED,
         format!("the export could not be {what}: {}", error.kind()),
     )
+}
+
+/// Runs `export` for dispatch: the project's open tickets, or the one ticket `id` names,
+/// written to `path` when given and carried in the reply otherwise, so an export longer
+/// than one reply needs a path. It reads the store and writes no event, so even with a path
+/// it is a read: the file is the host's, confined by its Paths, and a rewrite replaces it
+/// whole. Input: the context. Output: the text, or the path written and its length.
+pub(crate) fn export<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Failure> {
+    let key = cx.project();
+    let text = match cx.args.get::<&ShortId>("id") {
+        Some(id) => ticket(cx.tx, id)?,
+        None => project(cx.tx, key)?,
+    };
+    assert!(text.starts_with(EXPORT_HEADER));
+    let data = match cx.args.get::<&str>("path") {
+        Some(requested) => {
+            write(cx.tx, cx.host, cx.actor, key, Path::new(requested), &text)?;
+            json!({"path": requested, "bytes": text.len()})
+        }
+        None => ops::whole(
+            cx,
+            json!({"text": text}),
+            codes::EXPORT_TOO_LARGE,
+            "give a path to write the export to a file",
+        )?,
+    };
+    Ok(ops::Outcome {
+        data,
+        next: Vec::new(),
+        cursor: None,
+    })
 }

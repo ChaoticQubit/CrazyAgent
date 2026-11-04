@@ -1,5 +1,5 @@
 use rusqlite::{OptionalExtension, Transaction, params};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use trackwright_core::criteria::{self, NewEvidence};
 use trackwright_core::events;
@@ -11,7 +11,9 @@ use trackwright_core::model::{
     Actor, AgentEditPolicy, CheckKind, ClosePolicy, CreatePolicy, CriterionState, EvidenceResult,
     OpKind, PolicyKey, Priority, ProjectKey, Refusal, ShortId, TicketKind, TicketStatus, codes,
 };
+use trackwright_core::ops;
 use trackwright_core::policy::{self, Role};
+use trackwright_core::requests::Request;
 use trackwright_core::standalone::Standalone;
 use trackwright_core::store::{self, NewTicket, Store, StoreError};
 
@@ -256,6 +258,29 @@ fn set_policy(tx: &Transaction<'_>, setting: PolicyKey, value: &str) {
         serde_json::to_value(set).unwrap()[setting.as_str()],
         json!(value)
     );
+}
+
+/// Runs one request through the core's dispatch on the standalone host, as MCP and the CLI
+/// do. Inputs: the transaction, the actor, the operation and its arguments. Output: the
+/// reply envelope.
+fn call(tx: &Transaction<'_>, by: &Actor, op: &str, args: Value) -> Value {
+    let request = Request::parse(op, args.to_string().as_bytes()).unwrap();
+    let reply = ops::dispatch(tx, &Standalone, by, request);
+    let envelope: Value = serde_json::from_str(reply.json()).unwrap();
+    assert_eq!(envelope["ok"], json!(reply.is_ok()));
+    envelope
+}
+
+/// The data of a reply that must succeed. Input: the envelope. Output: its data.
+fn answered(envelope: &Value) -> &Value {
+    assert_eq!(envelope["ok"], json!(true), "{envelope}");
+    &envelope["data"]
+}
+
+/// The code of a reply that must be refused. Input: the envelope. Output: its code.
+fn denied(envelope: &Value) -> &str {
+    assert_eq!(envelope["ok"], json!(false), "{envelope}");
+    envelope["code"].as_str().unwrap()
 }
 
 fn engine_tables(tx: &Transaction<'_>) {
@@ -1275,6 +1300,258 @@ fn a_host_refusing_evidence_leaves_no_row_even_for_the_owner() {
     let ticket = store::ticket(&tx, &id).unwrap();
     assert_eq!(ticket.status, TicketStatus::Todo);
     assert_eq!(ticket.closed_by, None);
+    assert_eq!(
+        events::replay(&tx, &key()).unwrap(),
+        store::state(&tx, &key()).unwrap()
+    );
+    tx.commit().unwrap();
+}
+
+#[test]
+fn every_criteria_policy_and_close_op_answers_through_dispatch() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = opened(dir.path());
+    let tx = store.transaction().unwrap();
+    project(&tx);
+    let id = ticket(&tx, &owner(), "Prove it");
+    let (me, agent) = (owner(), actor("agent:w1"));
+
+    let read = call(&tx, &me, "policy_get", json!({"project": "CA"}));
+    let settings = answered(&read)["settings"].as_array().unwrap().clone();
+    assert_eq!(settings.len(), PolicyKey::ALL.len());
+    let close = settings
+        .iter()
+        .find(|entry| entry["key"] == "close")
+        .unwrap();
+    assert_eq!(close["value"], "evidence");
+    assert_eq!(close["version"], 0);
+    assert_eq!(close["options"], json!(["agents", "evidence", "owner"]));
+    let set = call(
+        &tx,
+        &me,
+        "policy_set",
+        json!({"project": "CA", "key": "close", "value": "owner"}),
+    );
+    assert_eq!(answered(&set)["setting"]["key"], "close");
+    assert_eq!(answered(&set)["setting"]["value"], "owner");
+    assert_eq!(answered(&set)["setting"]["version"], 1);
+    let again = json!({"project": "CA", "key": "close", "value": "agents"});
+    assert_eq!(
+        denied(&call(&tx, &me, "policy_set", again.clone())),
+        "stale_version"
+    );
+    assert_eq!(
+        denied(&call(&tx, &agent, "policy_set", again)),
+        "owner_only"
+    );
+    assert_eq!(policy::load(&tx, &key()).unwrap().close, ClosePolicy::Owner);
+
+    let added = call(
+        &tx,
+        &me,
+        "criterion_add",
+        json!({"id": "CA-1", "text": "It is proven"}),
+    );
+    assert_eq!(answered(&added)["id"], "CA-1");
+    let criterion = &answered(&added)["criterion"];
+    assert_eq!(criterion["position"], 1);
+    assert_eq!(criterion["state"], "open");
+    assert_eq!(criterion["version"], 1);
+    let edited = call(
+        &tx,
+        &me,
+        "criterion_edit",
+        json!({"id": "CA-1", "position": 1, "version": 1, "text": "It is proven twice"}),
+    );
+    assert_eq!(answered(&edited)["criterion"]["text"], "It is proven twice");
+    assert_eq!(answered(&edited)["criterion"]["version"], 2);
+    let check = call(
+        &tx,
+        &me,
+        "check_add",
+        json!({"id": "CA-1", "position": 1, "kind": "test", "ref": "tests::proof"}),
+    );
+    assert_eq!(answered(&check)["position"], 1);
+    assert_eq!(
+        answered(&check)["check"],
+        json!({"kind": "test", "ref": "tests::proof"})
+    );
+    let manual = call(
+        &tx,
+        &me,
+        "check_add",
+        json!({"id": "CA-1", "position": 1, "kind": "manual", "ref": "looked at it"}),
+    );
+    assert_eq!(answered(&manual)["check"]["kind"], "manual");
+    let by_agent = json!({"id": "CA-1", "position": 1, "kind": "manual",
+        "ref": "looked at it", "result": "pass"});
+    assert_eq!(
+        denied(&call(&tx, &agent, "evidence_record", by_agent.clone())),
+        "evidence_not_for_agents"
+    );
+    let first = call(&tx, &me, "evidence_record", by_agent);
+    assert_eq!(answered(&first)["evidence"]["result"], "pass");
+    assert_eq!(answered(&first)["evidence"]["by"], "owner");
+    assert_eq!(answered(&first)["criterion"]["state"], "open");
+    let recorded = call(
+        &tx,
+        &me,
+        "evidence_record",
+        json!({"id": "CA-1", "position": 1, "kind": "test", "ref": "tests::proof",
+            "result": "pass", "evidence": "run 1"}),
+    );
+    let data = answered(&recorded);
+    assert_eq!(data["id"], "CA-1");
+    assert_eq!(data["position"], 1);
+    assert_eq!(data["evidence"]["evidence"], "run 1");
+    assert_eq!(data["criterion"]["state"], "met");
+    assert_eq!(
+        data["ticket"]["status"], "todo",
+        "close = owner keeps it open"
+    );
+    let version = data["criterion"]["version"].as_i64().unwrap();
+    let waived = call(
+        &tx,
+        &me,
+        "criterion_set",
+        json!({"id": "CA-1", "position": 1, "version": version, "state": "waived"}),
+    );
+    assert_eq!(answered(&waived)["criterion"]["state"], "waived");
+    assert_eq!(answered(&waived)["criterion"]["version"], version + 1);
+    let ticket_version = answered(&waived)["ticket"]["version"].as_i64().unwrap();
+
+    let closing = json!({"id": "CA-1", "version": ticket_version, "reason": "Shipped"});
+    assert_eq!(
+        denied(&call(&tx, &agent, "close", closing.clone())),
+        "close_owner_only"
+    );
+    let closed = call(&tx, &me, "close", closing);
+    assert_eq!(answered(&closed)["status"], "done");
+    assert_eq!(answered(&closed)["close_reason"], "Shipped");
+    assert_eq!(answered(&closed)["closed_by"], "owner");
+    let closed_version = answered(&closed)["version"].as_i64().unwrap();
+    let reopened = call(
+        &tx,
+        &me,
+        "reopen",
+        json!({"id": "CA-1", "version": closed_version}),
+    );
+    assert_eq!(answered(&reopened)["status"], "todo");
+    assert_eq!(answered(&reopened)["closed_by"], Value::Null);
+    assert_eq!(store::ticket(&tx, &id).unwrap().status, TicketStatus::Todo);
+    assert_eq!(count(&tx, "tk_evidence"), 2);
+    assert_eq!(
+        events::replay(&tx, &key()).unwrap(),
+        store::state(&tx, &key()).unwrap()
+    );
+    tx.commit().unwrap();
+}
+
+#[test]
+fn stale_closed_and_open_refusals_through_dispatch_name_what_to_read_next() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = opened(dir.path());
+    let tx = store.transaction().unwrap();
+    project(&tx);
+    let id = ticket(&tx, &owner(), "Prove it");
+    let me = owner();
+    let added = call(
+        &tx,
+        &me,
+        "criterion_add",
+        json!({"id": "CA-1", "text": "It is proven"}),
+    );
+    assert_eq!(answered(&added)["criterion"]["version"], 1);
+    let written = count(&tx, "tk_events");
+
+    for (op, args) in [
+        (
+            "criterion_edit",
+            json!({"id": "CA-1", "position": 1, "version": 5, "text": "It is proven twice"}),
+        ),
+        (
+            "criterion_set",
+            json!({"id": "CA-1", "position": 1, "version": 5, "state": "waived"}),
+        ),
+    ] {
+        let stale = call(&tx, &me, op, args);
+        assert_eq!(denied(&stale), "stale_version", "{op}");
+        assert_eq!(
+            stale["data"],
+            json!({"id": "CA-1", "position": 1, "version": 1}),
+            "{op}"
+        );
+        assert_eq!(stale["next"][0]["op"], "show", "{op}");
+        assert_eq!(stale["next"][0]["id"], "CA-1", "{op}");
+    }
+
+    let version = store::ticket(&tx, &id).unwrap().version;
+    let stale = call(
+        &tx,
+        &me,
+        "close",
+        json!({"id": "CA-1", "version": version + 1}),
+    );
+    assert_eq!(denied(&stale), "stale_version");
+    assert_eq!(stale["data"], json!({"id": "CA-1", "version": version}));
+    assert_eq!(stale["next"][0]["op"], "show");
+    let open = call(
+        &tx,
+        &me,
+        "reopen",
+        json!({"id": "CA-1", "version": version}),
+    );
+    assert_eq!(denied(&open), "ticket_open");
+    assert_eq!(open["next"][0]["op"], "close");
+    assert_eq!(open["next"][0]["id"], "CA-1");
+    assert_eq!(count(&tx, "tk_events"), written, "refusals write nothing");
+
+    let closed = call(
+        &tx,
+        &me,
+        "close",
+        json!({"id": "CA-1", "version": version, "reason": "Shipped"}),
+    );
+    let closed_version = answered(&closed)["version"].as_i64().unwrap();
+    let again = call(
+        &tx,
+        &me,
+        "close",
+        json!({"id": "CA-1", "version": closed_version}),
+    );
+    assert_eq!(denied(&again), "ticket_closed");
+    assert_eq!(again["next"][0]["op"], "reopen");
+    assert_eq!(again["next"][0]["id"], "CA-1");
+    let stale = call(
+        &tx,
+        &me,
+        "reopen",
+        json!({"id": "CA-1", "version": closed_version + 1}),
+    );
+    assert_eq!(denied(&stale), "stale_version");
+    assert_eq!(
+        stale["data"],
+        json!({"id": "CA-1", "version": closed_version})
+    );
+    assert_eq!(stale["next"][0]["op"], "show");
+
+    let set = call(
+        &tx,
+        &me,
+        "policy_set",
+        json!({"project": "CA", "key": "close", "value": "owner"}),
+    );
+    assert_eq!(answered(&set)["setting"]["version"], 1);
+    let stale = call(
+        &tx,
+        &me,
+        "policy_set",
+        json!({"project": "CA", "key": "close", "value": "agents"}),
+    );
+    assert_eq!(denied(&stale), "stale_version");
+    assert_eq!(stale["data"], json!({"key": "close", "version": 1}));
+    assert_eq!(stale["next"][0]["op"], "policy_get");
+    assert_eq!(policy::load(&tx, &key()).unwrap().close, ClosePolicy::Owner);
     assert_eq!(
         events::replay(&tx, &key()).unwrap(),
         store::state(&tx, &key()).unwrap()

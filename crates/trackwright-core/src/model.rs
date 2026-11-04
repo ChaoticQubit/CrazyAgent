@@ -1,4 +1,7 @@
-use serde::{Deserialize, Serialize};
+use crate::tests_model::{
+    CaseProtectedVisibility, RunRetention, RunWriters, SkippedCounts, TestEvidence,
+};
+use serde::{Deserialize, Deserializer, Serialize, de};
 use std::fmt;
 
 /// The refusal codes the core itself returns. A host adds its own codes beside these.
@@ -50,6 +53,7 @@ pub mod codes {
     pub const AGENT_EDIT_REFUSED: &str = "agent_edit_refused";
     pub const OWNER_ONLY: &str = "owner_only";
     pub const POLICY_VALUE_INVALID: &str = "policy_value_invalid";
+    pub const POLICY_LOCKED: &str = "policy_locked";
     pub const CRITERION_HAS_CHECKS: &str = "criterion_has_checks";
     pub const CHECKS_FULL: &str = "checks_full";
     pub const CHECK_EXISTS: &str = "check_exists";
@@ -68,6 +72,57 @@ pub mod codes {
     pub const IMPORT_ITEM_NEEDS_VERSION: &str = "import_item_needs_version";
     pub const IMPORT_KEYS_COLLIDE: &str = "import_keys_collide";
     pub const VERSIONS_FULL: &str = "versions_full";
+    pub const ALREADY_CLAIMED: &str = "already_claimed";
+    pub const NOT_CLAIMANT: &str = "not_claimant";
+    pub const DEPENDENCY_INVALID: &str = "dependency_invalid";
+    pub const DEPENDENCY_EXISTS: &str = "dependency_exists";
+    pub const DEPENDENCY_UNKNOWN: &str = "dependency_unknown";
+    pub const DEPENDENCY_CYCLE: &str = "dependency_cycle";
+    pub const DEPENDENCIES_FULL: &str = "dependencies_full";
+    pub const PARENT_INVALID: &str = "parent_invalid";
+    pub const VERSION_UNKNOWN: &str = "version_unknown";
+    pub const CYCLE_UNKNOWN: &str = "cycle_unknown";
+    pub const CYCLE_CLOSED: &str = "cycle_closed";
+    pub const CYCLES_FULL: &str = "cycles_full";
+    pub const CYCLE_OVERLAPS: &str = "cycle_overlaps";
+
+    pub const ACTIVE_PLAN_EXISTS: &str = "active_plan_exists";
+    pub const CASES_FULL: &str = "cases_full";
+    pub const CASE_LINKS_FULL: &str = "case_links_full";
+    pub const CASE_LINK_EXISTS: &str = "case_link_exists";
+    pub const CASE_LINK_UNKNOWN: &str = "case_link_unknown";
+    pub const CASE_PROTECTED: &str = "case_protected";
+    pub const CASE_UNKNOWN: &str = "case_unknown";
+    pub const CROSS_PROJECT: &str = "cross_project";
+    pub const OPTION_NEEDS_HOST: &str = "option_needs_host";
+    pub const PLANS_FULL: &str = "plans_full";
+    pub const PLAN_CLOSED: &str = "plan_closed";
+    pub const PLAN_ITEMS_FULL: &str = "plan_items_full";
+    pub const PLAN_ITEM_EXISTS: &str = "plan_item_exists";
+    pub const PLAN_ITEM_UNKNOWN: &str = "plan_item_unknown";
+    pub const PLAN_UNKNOWN: &str = "plan_unknown";
+    pub const RELEASE_UNKNOWN: &str = "release_unknown";
+    pub const RESULTS_EMPTY: &str = "results_empty";
+    pub const RESULTS_TOO_MANY: &str = "results_too_many";
+    pub const RESULT_NAME_REPEATED: &str = "result_name_repeated";
+    pub const RUNS_FULL: &str = "runs_full";
+    pub const RUN_BATCH_INVALID: &str = "run_batch_invalid";
+    pub const RUN_CLOSED: &str = "run_closed";
+    pub const RUN_FINISH_INVALID: &str = "run_finish_invalid";
+    pub const RUN_INTEGRITY_INVALID: &str = "run_integrity_invalid";
+    pub const RUN_POLICY_INVALID: &str = "run_policy_invalid";
+    pub const RUN_RESULTS_FULL: &str = "run_results_full";
+    pub const RUN_SOURCE_INVALID: &str = "run_source_invalid";
+    pub const RUN_UNKNOWN: &str = "run_unknown";
+    pub const RUN_WRITER_REFUSED: &str = "run_writer_refused";
+    pub const SETS_FULL: &str = "sets_full";
+    pub const SET_CASES_FULL: &str = "set_cases_full";
+    pub const SET_CASE_EXISTS: &str = "set_case_exists";
+    pub const SET_CASE_UNKNOWN: &str = "set_case_unknown";
+    pub const SET_UNKNOWN: &str = "set_unknown";
+    pub const STABLE_NAME_TAKEN: &str = "stable_name_taken";
+    pub const STEPS_FULL: &str = "steps_full";
+    pub const TEST_ID_INVALID: &str = "test_id_invalid";
 
     /// Every code above, so a host can map each core refusal to its own vocabulary.
     pub const ALL: &[&str] = &[
@@ -117,6 +172,7 @@ pub mod codes {
         AGENT_EDIT_REFUSED,
         OWNER_ONLY,
         POLICY_VALUE_INVALID,
+        POLICY_LOCKED,
         CRITERION_HAS_CHECKS,
         CHECKS_FULL,
         CHECK_EXISTS,
@@ -135,6 +191,56 @@ pub mod codes {
         IMPORT_ITEM_NEEDS_VERSION,
         IMPORT_KEYS_COLLIDE,
         VERSIONS_FULL,
+        ALREADY_CLAIMED,
+        NOT_CLAIMANT,
+        DEPENDENCY_INVALID,
+        DEPENDENCY_EXISTS,
+        DEPENDENCY_UNKNOWN,
+        DEPENDENCY_CYCLE,
+        DEPENDENCIES_FULL,
+        PARENT_INVALID,
+        VERSION_UNKNOWN,
+        CYCLE_UNKNOWN,
+        CYCLE_CLOSED,
+        CYCLES_FULL,
+        CYCLE_OVERLAPS,
+        ACTIVE_PLAN_EXISTS,
+        CASES_FULL,
+        CASE_LINKS_FULL,
+        CASE_LINK_EXISTS,
+        CASE_LINK_UNKNOWN,
+        CASE_PROTECTED,
+        CASE_UNKNOWN,
+        CROSS_PROJECT,
+        OPTION_NEEDS_HOST,
+        PLANS_FULL,
+        PLAN_CLOSED,
+        PLAN_ITEMS_FULL,
+        PLAN_ITEM_EXISTS,
+        PLAN_ITEM_UNKNOWN,
+        PLAN_UNKNOWN,
+        RELEASE_UNKNOWN,
+        RESULTS_EMPTY,
+        RESULTS_TOO_MANY,
+        RESULT_NAME_REPEATED,
+        RUNS_FULL,
+        RUN_BATCH_INVALID,
+        RUN_CLOSED,
+        RUN_FINISH_INVALID,
+        RUN_INTEGRITY_INVALID,
+        RUN_POLICY_INVALID,
+        RUN_RESULTS_FULL,
+        RUN_SOURCE_INVALID,
+        RUN_UNKNOWN,
+        RUN_WRITER_REFUSED,
+        SETS_FULL,
+        SET_CASES_FULL,
+        SET_CASE_EXISTS,
+        SET_CASE_UNKNOWN,
+        SET_UNKNOWN,
+        STABLE_NAME_TAKEN,
+        STEPS_FULL,
+        TEST_ID_INVALID,
     ];
 }
 
@@ -247,6 +353,8 @@ macro_rules! named_enum {
     };
 }
 
+pub(crate) use named_enum;
+
 named_enum! {
     /// What a ticket is: new work, a defect, upkeep, or a time-boxed investigation.
     TicketKind { Feature => "feature", Bug => "bug", Chore => "chore", Spike => "spike" }
@@ -334,6 +442,11 @@ named_enum! {
         CycleDays => "cycle_days",
         Rollover => "rollover",
         Import => "import",
+        TestEvidence => "test_evidence",
+        SkippedCounts => "skipped_counts",
+        CaseProtectedVisibility => "case_protected_visibility",
+        RunWriters => "run_writers",
+        RunRetention => "run_retention",
     }
 }
 
@@ -387,6 +500,7 @@ impl OpKind {
                 | OpKind::Roadmap
                 | OpKind::PolicyGet
                 | OpKind::Export
+                | OpKind::ImportPreview
                 | OpKind::Schema
         )
     }
@@ -512,7 +626,8 @@ impl fmt::Display for ShortId {
 
 /// Who acts: a host-set identity (`owner`, `master:<session>`, `agent:<team id>`) or a
 /// standalone self-declared name. 1 to 128 bytes of letters, digits and `: _ . - @ /`.
-/// The `host:` prefix belongs to the core's own writes (for example `host:evidence`).
+/// The `host:` prefix belongs to the core's own writes (for example `host:evidence`), so
+/// `new`, `TryFrom` and deserializing refuse it; only the core's stored rows read it back.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct Actor(String);
@@ -521,7 +636,7 @@ impl Actor {
     /// Checks a caller's identity. Input: the text. Output: the actor, or `actor_invalid`
     /// for a bad shape or the reserved `host:` prefix.
     pub fn new(text: &str) -> Result<Self, Refusal> {
-        let actor = Self::shaped(text)?;
+        let actor = Self::stored(text)?;
         if actor.is_host() {
             return Err(Refusal::new(
                 codes::ACTOR_INVALID,
@@ -549,7 +664,9 @@ impl Actor {
         &self.0
     }
 
-    fn shaped(text: &str) -> Result<Self, Refusal> {
+    /// Reads an actor the core stored itself, its own `host:` actors included. Input: the
+    /// stored text. Output: the actor, or `actor_invalid` for a bad shape.
+    pub(crate) fn stored(text: &str) -> Result<Self, Refusal> {
         if text.is_empty() || text.len() > ACTOR_BYTES_MAX || !text.bytes().all(actor_byte) {
             return Err(Refusal::new(
                 codes::ACTOR_INVALID,
@@ -560,6 +677,19 @@ impl Actor {
     }
 }
 
+fn stored_actor<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Actor, D::Error> {
+    Actor::stored(&String::deserialize(deserializer)?).map_err(de::Error::custom)
+}
+
+fn stored_actor_option<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Actor>, D::Error> {
+    Option::<String>::deserialize(deserializer)?
+        .map(|text| Actor::stored(&text))
+        .transpose()
+        .map_err(de::Error::custom)
+}
+
 fn actor_byte(b: u8) -> bool {
     b.is_ascii_alphanumeric() || matches!(b, b':' | b'_' | b'.' | b'-' | b'@' | b'/')
 }
@@ -568,7 +698,7 @@ impl TryFrom<String> for Actor {
     type Error = Refusal;
 
     fn try_from(text: String) -> Result<Self, Refusal> {
-        Self::shaped(&text)
+        Self::new(&text)
     }
 }
 
@@ -674,6 +804,11 @@ pub struct Policy {
     pub cycle_days: CycleDays,
     pub rollover: RolloverPolicy,
     pub import: ImportPolicy,
+    pub test_evidence: TestEvidence,
+    pub skipped_counts: SkippedCounts,
+    pub case_protected_visibility: CaseProtectedVisibility,
+    pub run_writers: RunWriters,
+    pub run_retention: RunRetention,
 }
 
 impl Default for Policy {
@@ -685,6 +820,11 @@ impl Default for Policy {
             cycle_days: CycleDays(14),
             rollover: RolloverPolicy::Auto,
             import: ImportPolicy::AutoOnce,
+            test_evidence: TestEvidence::Latest,
+            skipped_counts: SkippedCounts::Fail,
+            case_protected_visibility: CaseProtectedVisibility::Hidden,
+            run_writers: RunWriters::Any,
+            run_retention: RunRetention::PruneCount,
         }
     }
 }
@@ -743,11 +883,14 @@ pub struct Ticket {
     pub(crate) version_id: Option<i64>,
     pub(crate) cycle_id: Option<i64>,
     pub(crate) parent_id: Option<i64>,
+    #[serde(deserialize_with = "stored_actor_option")]
     pub assignee: Option<Actor>,
+    #[serde(deserialize_with = "stored_actor")]
     pub created_by: Actor,
     pub created_ms: i64,
     pub updated_ms: i64,
     pub closed_ms: Option<i64>,
+    #[serde(deserialize_with = "stored_actor_option")]
     pub closed_by: Option<Actor>,
     pub close_reason: Option<String>,
     pub version: i64,
@@ -783,6 +926,7 @@ pub struct Evidence {
     pub(crate) check: i64,
     pub result: EvidenceResult,
     pub reference: String,
+    #[serde(deserialize_with = "stored_actor")]
     pub recorded_by: Actor,
     pub recorded_ms: i64,
 }
@@ -794,6 +938,7 @@ pub struct Link {
     pub(crate) ticket: i64,
     pub kind: String,
     pub target: String,
+    #[serde(deserialize_with = "stored_actor")]
     pub created_by: Actor,
     pub created_ms: i64,
 }

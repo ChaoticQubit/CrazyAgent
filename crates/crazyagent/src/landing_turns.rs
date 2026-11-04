@@ -32,6 +32,7 @@ pub(crate) fn record(
     if after.is_some() && after == before {
         return Ok(Landed::Waiting(id));
     }
+    crate::checks::queue::after_turn(db, &id);
     Ok(Landed::Added(id))
 }
 

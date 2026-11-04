@@ -1181,15 +1181,19 @@ impl ProjectSandbox {
     }
 
     /// Paths no agent may write although they sit in a writable root: both `context/`
-    /// folders, the git hooks, config and its lock, `.git/modules` and, for an agent confined
+    /// folders, the tracker's `.crazyagent/exports/` folder and `.crazyagent/tickets.md`
+    /// view, the git hooks, config and its lock, `.git/modules` and, for an agent confined
     /// to a worktree, its admin folder's `modules`, where git keeps submodule repositories.
     /// Every platform boundary keeps these read-only, except that Windows guards the config
     /// but not its lock (`windows::GIT_CONFIG_LOCK`).
     pub fn protected_paths(&self) -> Vec<PathBuf> {
         let git = self.project_root.join(".git");
+        let state = self.project_root.join(".crazyagent");
         let mut paths = vec![
             self.project_root.join("context"),
-            self.project_root.join(".crazyagent").join("context"),
+            state.join("context"),
+            state.join(crate::tracker::host::EXPORTS_DIRECTORY),
+            state.join(crate::tracker::render::VIEW_FILE),
             git.join("hooks"),
             git.join("config"),
             git.join("config.lock"),
@@ -1317,7 +1321,7 @@ impl ProjectSandbox {
         }
         let project = self.project_root.display();
         text.push_str(&format!(
-            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\")\n  (literal \"{project}/.git/index\")\n  (literal \"{project}/.git\")\n  (literal \"{project}/.git/commondir\")\n  (literal \"{project}/.git/config.worktree\")\n  (subpath \"{project}/.git/info\")\n  (literal \"{project}/.git/shallow\")\n  (literal \"{project}/.git/objects\")\n  (literal \"{project}/.git/objects/info\")\n  (literal \"{project}/.git/objects/info/alternates\")\n  (literal \"{project}/.git/objects/info/http-alternates\")\n  (subpath \"{project}/.git/modules\")\n  (literal \"{project}/.crazyagent\"))\n"
+            "(deny file-write*\n  (subpath \"{project}/context\")\n  (subpath \"{project}/.crazyagent/context\")\n  (subpath \"{project}/.crazyagent/exports\")\n  (literal \"{project}/.crazyagent/tickets.md\")\n  (subpath \"{project}/.git/hooks\")\n  (literal \"{project}/.git/config\")\n  (literal \"{project}/.git/config.lock\")\n  (literal \"{project}/.git/index\")\n  (literal \"{project}/.git\")\n  (literal \"{project}/.git/commondir\")\n  (literal \"{project}/.git/config.worktree\")\n  (subpath \"{project}/.git/info\")\n  (literal \"{project}/.git/shallow\")\n  (literal \"{project}/.git/objects\")\n  (literal \"{project}/.git/objects/info\")\n  (literal \"{project}/.git/objects/info/alternates\")\n  (literal \"{project}/.git/objects/info/http-alternates\")\n  (subpath \"{project}/.git/modules\")\n  (literal \"{project}/.crazyagent\"))\n"
         ));
         if let Some(scratch) = &self.scratch {
             text.push_str(&format!(

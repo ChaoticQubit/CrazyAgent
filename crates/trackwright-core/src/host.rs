@@ -1,8 +1,9 @@
 use crate::model::{
-    Actor, CheckKind, Link, OpKind, ProjectKey, Refusal, ShortId, Ticket, TicketKind, TicketStatus,
-    codes,
+    Actor, CheckKind, Link, OpKind, PolicyKey, ProjectKey, Refusal, ShortId, Ticket, TicketKind,
+    TicketStatus, codes,
 };
 use crate::policy;
+use crate::runs::SourceRef;
 use crate::store::{self, StoreError};
 use crate::text::{self, TextField};
 use rusqlite::Transaction;
@@ -107,6 +108,26 @@ pub trait Evidence {
         project: &ProjectKey,
         check: &CheckView,
     ) -> Result<EvidenceState, Refusal>;
+
+    /// Tells whether this host knows the source a ticket's work is at, so a project may set
+    /// `test_evidence = current_source`. Output: false unless the host also gives
+    /// `current_source`; the standalone host keeps this default.
+    fn tracks_source(&self) -> bool {
+        false
+    }
+
+    /// The source a ticket's work is at now. Under `test_evidence = current_source` a `test`
+    /// check counts only results from runs of that source. Inputs: the transaction, the
+    /// project and the ticket. Output: the source, None when the host does not know it (the
+    /// default), or a refusal.
+    fn current_source(
+        &self,
+        _tx: &Transaction<'_>,
+        _project: &ProjectKey,
+        _ticket: &TicketView,
+    ) -> Result<Option<SourceRef>, Refusal> {
+        Ok(None)
+    }
 }
 
 /// Decides who may run which operation.
@@ -137,6 +158,15 @@ pub trait Authority {
         actor: &Actor,
         check: &CheckView,
     ) -> Result<(), Refusal>;
+
+    /// Tells which value, if any, the host locks one policy setting to, for example
+    /// `run_writers = engine_only` where only the engine writes runs. `policy_set` refuses
+    /// any other value with `policy_locked`, even from the owner, and still takes the locked
+    /// value, so the host can store it at setup. Input: the setting. Output: the one value
+    /// word allowed, or None (the default) when the setting is free.
+    fn policy_locked(&self, _setting: PolicyKey) -> Option<&'static str> {
+        None
+    }
 }
 
 /// Says where export and import may touch files. It has no default, so every host confines

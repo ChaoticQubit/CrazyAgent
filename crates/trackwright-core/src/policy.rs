@@ -1,10 +1,14 @@
 use crate::events::{self, Recorded};
-use crate::host::{Authority, TicketView};
+use crate::host::{Authority, Host, TicketView};
 use crate::model::{
     Actor, AgentEditPolicy, ClosePolicy, CreatePolicy, CycleDays, ImportPolicy, OpKind, Policy,
     PolicyKey, ProjectKey, Refusal, RolloverPolicy, ShortId, Ticket, TicketStatus, codes,
 };
+use crate::ops::{self, Candidate, Cx, Failure};
 use crate::store::{self, StoreError, TicketChange};
+use crate::tests_model::{
+    CaseProtectedVisibility, RunRetention, RunWriters, SkippedCounts, TestEvidence,
+};
 use rusqlite::{Transaction, params};
 use serde::Serialize;
 use serde_json::{Value, json};
@@ -26,7 +30,7 @@ pub const POLICY_WORD_BYTES_MAX: usize = 32;
 /// The smallest and largest custom `cycle_days`.
 pub const CYCLE_DAYS_CUSTOM: CustomRange = CustomRange { min: 1, max: 90 };
 
-const _: () = assert!(PolicyKey::ALL.len() == 6);
+const _: () = assert!(PolicyKey::ALL.len() == 11);
 const _: () = assert!(CYCLE_DAYS_CUSTOM.min < CYCLE_DAYS_CUSTOM.max);
 
 /// What an actor is to policy: the owner, the host's trusted automation (`engine:<source>`),
@@ -112,12 +116,14 @@ pub fn describe(tx: &Transaction<'_>, key: &ProjectKey) -> Result<Vec<Setting>, 
 /// even at its default, at version 1. Inputs: the transaction, the host's authority, the
 /// actor, the project key, the setting, its new value as a word (an option's name, or a
 /// number of days for `cycle_days`), the version (0 for a key never set) and the time.
-/// Output: the policy now in force, or `owner_only`, `policy_value_invalid` or
+/// A key the host locks takes only its locked value, and `test_evidence = current_source`
+/// needs a host that tracks each ticket's source. Output: the policy now in force, or
+/// `owner_only`, `policy_locked`, `option_needs_host`, `policy_value_invalid` or
 /// `stale_version`.
 #[allow(clippy::too_many_arguments)]
 pub fn set(
     tx: &Transaction<'_>,
-    host: &impl Authority,
+    host: &impl Host,
     actor: &Actor,
     key: &ProjectKey,
     setting: PolicyKey,
@@ -127,6 +133,7 @@ pub fn set(
 ) -> Result<Policy, StoreError> {
     host.actor_may(tx, key, actor, OpKind::PolicySet, None)
         .map_err(StoreError::Refused)?;
+    host_permits(host, setting, value)?;
     store::write(tx, || {
         let project = store::project(tx, key)?;
         let (before, versions) = stored(tx, project.id)?;
@@ -178,11 +185,12 @@ pub fn set(
 }
 
 /// Decides whether a policy lets an actor run an operation. The owner may run every
-/// operation. Reads and `import_preview` are open to all. `close` and `reopen` follow
-/// `close`; `create` follows `create`; `policy_set` is the owner's. Engine actors may make
-/// every other write. Agents follow `agent_edit` on tickets they did not create and may run
-/// planning writes only under `agent_edit = any`. Inputs: the policy, the actor, the
-/// operation and the ticket it acts on, if any. Output: Ok, or the refusal.
+/// operation. Reads, `import_preview` and `export` among them, are open to all. `close`
+/// and `reopen` follow `close`; `create` follows `create`; `policy_set` is the owner's.
+/// Engine actors may make every other write. Agents follow `agent_edit` on tickets they
+/// did not create and may run planning writes only under `agent_edit = any`. Inputs: the
+/// policy, the actor, the operation and the ticket it acts on, if any. Output: Ok, or the
+/// refusal.
 pub fn permits(
     policy: &Policy,
     actor: &Actor,
@@ -345,6 +353,31 @@ pub(crate) fn authorize(
     .map_err(StoreError::Refused)
 }
 
+/// Checks a new value against what the host allows, before anything is written: a key the
+/// host locks takes only its locked value, and `test_evidence = current_source` needs a host
+/// that tracks each ticket's source. Inputs: the host, the setting and the value word.
+/// Output: Ok, or `policy_locked` or `option_needs_host`.
+fn host_permits(host: &impl Host, setting: PolicyKey, value: &str) -> Result<(), StoreError> {
+    if let Some(locked) = host.policy_locked(setting) {
+        assert!(!locked.is_empty(), "a host locks a key to a value word");
+        assert!(locked.len() <= POLICY_WORD_BYTES_MAX);
+        if value != locked {
+            return Err(store::refusal(
+                codes::POLICY_LOCKED,
+                format!("the host locks {setting} to {locked}"),
+            ));
+        }
+    }
+    let current_source = TestEvidence::CurrentSource.as_str();
+    if setting == PolicyKey::TestEvidence && value == current_source && !host.tracks_source() {
+        return Err(store::refusal(
+            codes::OPTION_NEEDS_HOST,
+            format!("{setting} {current_source} needs a host that knows each ticket's source"),
+        ));
+    }
+    Ok(())
+}
+
 fn close_permits(option: ClosePolicy, op: OpKind) -> Result<(), Refusal> {
     match option {
         ClosePolicy::Agents => Ok(()),
@@ -485,6 +518,11 @@ fn options(setting: PolicyKey) -> Vec<Value> {
         PolicyKey::CycleDays => CycleDays::PRESETS.iter().map(|days| json!(days)).collect(),
         PolicyKey::Rollover => names(RolloverPolicy::ALL),
         PolicyKey::Import => names(ImportPolicy::ALL),
+        PolicyKey::TestEvidence => names(TestEvidence::ALL),
+        PolicyKey::SkippedCounts => names(SkippedCounts::ALL),
+        PolicyKey::CaseProtectedVisibility => names(CaseProtectedVisibility::ALL),
+        PolicyKey::RunWriters => names(RunWriters::ALL),
+        PolicyKey::RunRetention => names(RunRetention::ALL),
     };
     assert!(options.len() >= 2, "every setting offers a choice");
     options
@@ -504,4 +542,149 @@ fn invalid(setting: PolicyKey) -> StoreError {
         codes::POLICY_VALUE_INVALID,
         format!("{setting} takes one of {}{custom}", offered.join(", ")),
     )
+}
+
+/// One policy setting as a reply shows it. Input: the setting. Output: its key, value,
+/// proposed default, options, custom range (null when none) and stored version.
+fn setting_json(setting: &Setting) -> Value {
+    assert!(setting.options.len() >= 2);
+    json!({
+        "key": setting.key.as_str(),
+        "value": setting.value,
+        "default": setting.default,
+        "options": setting.options,
+        "custom": setting.custom.map(|range| json!({"min": range.min, "max": range.max})),
+        "version": setting.version,
+    })
+}
+
+/// Runs `policy_get` for dispatch. Input: the context. Output: the project and every
+/// setting of its policy, in key order.
+pub(crate) fn policy_get<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Failure> {
+    let settings = describe(cx.tx, cx.project())?;
+    assert_eq!(settings.len(), PolicyKey::ALL.len());
+    let shown: Vec<Value> = settings.iter().map(setting_json).collect();
+    Ok(ops::Outcome {
+        data: json!({"project": cx.project().as_str(), "settings": shown}),
+        next: Vec::new(),
+        cursor: None,
+    })
+}
+
+/// Runs `policy_set` for dispatch; a key never set is at version 0, so `version` may be
+/// left out until it was set once. Input: the context. Output: the setting as stored.
+pub(crate) fn policy_set<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Failure> {
+    let setting = cx.args.need::<PolicyKey>("key");
+    let value = cx.args.need::<&str>("value");
+    let version = cx.args.get::<i64>("version").unwrap_or(0);
+    let read = describe(cx.tx, cx.project())?
+        .into_iter()
+        .find(|entry| entry.key == setting)
+        .expect("describe lists every policy key");
+    if read.version != version {
+        return Err(Failure::new(
+            codes::STALE_VERSION,
+            format!(
+                "policy {setting} is at version {}, not {version}; read the policy and retry",
+                read.version
+            ),
+        )
+        .with_data(json!({"key": setting.as_str(), "version": read.version}))
+        .with_next(vec![Candidate::project(
+            OpKind::PolicyGet,
+            cx.project(),
+            "read the policy's current versions, then retry",
+        )]));
+    }
+    set(
+        cx.tx,
+        cx.host,
+        cx.actor,
+        cx.project(),
+        setting,
+        value,
+        version,
+        cx.at_ms,
+    )?;
+    let stored = describe(cx.tx, cx.project())?
+        .into_iter()
+        .find(|entry| entry.key == setting)
+        .expect("describe lists every policy key");
+    assert!(stored.version >= version);
+    Ok(ops::Outcome {
+        data: json!({"setting": setting_json(&stored)}),
+        next: Vec::new(),
+        cursor: None,
+    })
+}
+
+/// Runs `close` for dispatch: done when no status is named. A closed ticket proposes
+/// `reopen`, and a version other than the one read proposes `show`, as other ticket writes
+/// do. Input: the context. Output: the ticket as closed.
+pub(crate) fn close_ticket<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Failure> {
+    let ticket = cx.ticket();
+    if ticket.status.is_closed() {
+        return Err(Failure::new(
+            codes::TICKET_CLOSED,
+            format!("{} is already closed", ticket.short_id),
+        )
+        .with_next(vec![Candidate::ticket(
+            OpKind::Reopen,
+            ticket,
+            "reopen it to work on it again",
+        )]));
+    }
+    let version = ops::fresh(cx, ticket)?;
+    let status = cx
+        .args
+        .get::<TicketStatus>("status")
+        .unwrap_or(TicketStatus::Done);
+    let closed = close(
+        cx.tx,
+        cx.host,
+        cx.actor,
+        &ticket.short_id,
+        version,
+        status,
+        cx.args.get::<&str>("reason"),
+        cx.at_ms,
+    )?;
+    assert_eq!(closed.status, status);
+    assert!(closed.status.is_closed());
+    ops::written(cx, &closed)
+}
+
+/// Runs `reopen` for dispatch: todo when no status is named. An open ticket proposes
+/// `close`, and a version other than the one read proposes `show`. Input: the context.
+/// Output: the ticket as reopened.
+pub(crate) fn reopen_ticket<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Failure> {
+    let ticket = cx.ticket();
+    if !ticket.status.is_closed() {
+        return Err(
+            Failure::new(codes::TICKET_OPEN, format!("{} is open", ticket.short_id)).with_next(
+                vec![Candidate::ticket(
+                    OpKind::Close,
+                    ticket,
+                    "close it as done or cancelled",
+                )],
+            ),
+        );
+    }
+    let version = ops::fresh(cx, ticket)?;
+    let status = cx
+        .args
+        .get::<TicketStatus>("status")
+        .unwrap_or(TicketStatus::Todo);
+    let reopened = reopen(
+        cx.tx,
+        cx.host,
+        cx.actor,
+        &ticket.short_id,
+        version,
+        status,
+        cx.at_ms,
+    )?;
+    assert_eq!(reopened.status, status);
+    assert!(!reopened.status.is_closed());
+    ops::written(cx, &reopened)
 }

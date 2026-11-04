@@ -5,10 +5,12 @@ use crate::model::{
     Criterion, CriterionState, Evidence, EvidenceResult, OpKind, ShortId, TICKETS_PER_PROJECT_MAX,
     Ticket, TicketStatus, codes,
 };
+use crate::ops::{self, Candidate, Cx, Failure};
 use crate::policy::{self, Role};
 use crate::store::{self, StoreError, TicketChange};
 use crate::text::{self, CLOSE_REASON_BYTES_MAX, TextField};
 use rusqlite::{OptionalExtension, Row, Transaction, params};
+use serde_json::{Value, json};
 
 pub(crate) const CRITERIA_OF_TICKET: &str = "SELECT id, ticket, position, text, state, version \
      FROM tk_criteria WHERE ticket = ?1 ORDER BY position";
@@ -76,6 +78,7 @@ enum Proof<'a> {
     Check(CheckKind, &'a str),
     Event(&'a HostEvent),
     Criterion(u32, &'a Actor),
+    Changed(&'a str),
 }
 
 impl Proof<'_> {
@@ -84,6 +87,7 @@ impl Proof<'_> {
             Proof::Check(kind, reference) => format!("{kind} check {reference}"),
             Proof::Event(event) => format!("{} {} changed", event.kind, event.target),
             Proof::Criterion(position, actor) => format!("criterion {position} set by {actor}"),
+            Proof::Changed(change) => (*change).to_owned(),
         }
     }
 }
@@ -407,6 +411,37 @@ pub fn notify(
     })
 }
 
+/// Re-evaluates open tickets after a record beside them changed, such as an ended run: each
+/// criterion with checks is re-derived through the host, and under `close = evidence` a fully
+/// proven ticket closes as `host:evidence`. Inputs: the transaction, the host, open tickets'
+/// row ids (at most `NOTIFY_TICKETS_MAX`), what changed (at most `LINK_TARGET_BYTES_MAX`
+/// bytes, named in the close reason) and the time. Output: the tickets in order, or a refusal.
+pub(crate) fn reevaluate(
+    tx: &Transaction<'_>,
+    host: &impl Host,
+    tickets: &[i64],
+    change: &str,
+    now_ms: i64,
+) -> Result<Vec<ShortId>, StoreError> {
+    assert!(tickets.len() <= NOTIFY_TICKETS_MAX);
+    assert!(!change.is_empty());
+    assert!(change.len() <= text::LINK_TARGET_BYTES_MAX);
+    store::write(tx, || {
+        let mut touched = Vec::with_capacity(tickets.len());
+        for row in tickets {
+            let ticket = store::ticket_by_id(tx, *row)?;
+            assert!(
+                !ticket.status.is_closed(),
+                "only open tickets are re-evaluated"
+            );
+            evaluate(tx, host, &ticket, None, &Proof::Changed(change), now_ms)?;
+            touched.push(ticket.short_id);
+        }
+        assert_eq!(touched.len(), tickets.len());
+        Ok(touched)
+    })
+}
+
 /// A ticket's criteria by position. Inputs: the transaction and the ticket. Output: the
 /// criteria, or `ticket_unknown`.
 pub fn criteria(tx: &Transaction<'_>, id: &ShortId) -> Result<Vec<Criterion>, StoreError> {
@@ -695,4 +730,177 @@ fn evidence_row(row: &Row<'_>) -> rusqlite::Result<Evidence> {
         recorded_by: store::actor(row, 4)?,
         recorded_ms: row.get(5)?,
     })
+}
+
+/// One criterion as a reply shows it, as `show` lists it without its checks. Input: the
+/// criterion. Output: its position, text, state and row version.
+fn criterion_json(criterion: &Criterion) -> Value {
+    assert!(criterion.position >= 1);
+    json!({
+        "position": criterion.position,
+        "text": criterion.text,
+        "state": criterion.state.as_str(),
+        "version": criterion.version,
+    })
+}
+
+/// The criterion position a request names, which the catalog bounds from 1. Input: the
+/// context. Output: the position.
+fn position<H: Host>(cx: &Cx<'_, '_, H>) -> u32 {
+    let position = cx.args.need::<i64>("position");
+    let position = u32::try_from(position).expect("the catalog bounds a position");
+    assert!((1..=CRITERIA_PER_TICKET_MAX as u32).contains(&position));
+    position
+}
+
+/// The reply to a write on a criterion: the data and the next actions of its ticket as it
+/// stands after the write. Inputs: the context and the data. Output: the outcome.
+fn criterion_written<H: Host>(cx: &Cx<'_, '_, H>, data: Value) -> Result<ops::Outcome, Failure> {
+    assert!(data.is_object());
+    let ticket = store::ticket(cx.tx, &cx.ticket().short_id)?;
+    assert_eq!(ticket.id, cx.ticket().id);
+    Ok(ops::Outcome {
+        data,
+        next: ops::ticket_next(cx.tx, &ticket)?,
+        cursor: None,
+    })
+}
+
+/// Refuses a criterion write unless it carries the version of the criterion this
+/// transaction read, as `ops::fresh` does for a ticket; a position with no criterion is left
+/// to the store's refusal. Inputs: the context, the position and the version sent. Output:
+/// Ok, or `stale_version` naming the current version with `show` next.
+fn criterion_fresh<H: Host>(cx: &Cx<'_, '_, H>, at: u32, version: i64) -> Result<(), Failure> {
+    let ticket = cx.ticket();
+    let criteria = criteria_of(cx.tx, ticket.id)?;
+    assert!(criteria.len() <= CRITERIA_PER_TICKET_MAX);
+    let Some(found) = criteria
+        .into_iter()
+        .find(|criterion| criterion.position == at)
+    else {
+        return Ok(());
+    };
+    if found.version == version {
+        return Ok(());
+    }
+    Err(Failure::new(
+        codes::STALE_VERSION,
+        format!(
+            "criterion {at} of {} is at version {}, not {version}; show it and retry",
+            ticket.short_id, found.version
+        ),
+    )
+    .with_data(json!({
+        "id": ticket.short_id.to_string(),
+        "position": at,
+        "version": found.version,
+    }))
+    .with_next(vec![Candidate::ticket(
+        OpKind::Show,
+        ticket,
+        "read the criterion's current version, then retry",
+    )]))
+}
+
+/// Runs `criterion_add` for dispatch. Input: the context. Output: the ticket's id and the
+/// new criterion.
+pub(crate) fn criterion_add<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Failure> {
+    let id = &cx.ticket().short_id;
+    let text = cx.args.need::<&str>("text");
+    let added = add_criterion(cx.tx, cx.host, cx.actor, id, text, cx.at_ms)?;
+    assert_eq!(added.ticket, cx.ticket().id);
+    assert_eq!(added.text, text);
+    criterion_written(
+        cx,
+        json!({"id": id.to_string(), "criterion": criterion_json(&added)}),
+    )
+}
+
+/// Runs `criterion_edit` for dispatch. Input: the context. Output: the ticket's id and the
+/// criterion as rewritten.
+pub(crate) fn criterion_edit<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Failure> {
+    let id = &cx.ticket().short_id;
+    let (at, version) = (position(cx), cx.args.need::<i64>("version"));
+    let text = cx.args.need::<&str>("text");
+    criterion_fresh(cx, at, version)?;
+    let edited = edit_criterion(cx.tx, cx.host, cx.actor, id, at, version, text, cx.at_ms)?;
+    assert_eq!(edited.position, at);
+    assert!(edited.version >= version);
+    criterion_written(
+        cx,
+        json!({"id": id.to_string(), "criterion": criterion_json(&edited)}),
+    )
+}
+
+/// Runs `check_add` for dispatch. Input: the context. Output: the ticket's id, the
+/// criterion's position and the new check.
+pub(crate) fn check_add<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Failure> {
+    let id = &cx.ticket().short_id;
+    let at = position(cx);
+    let kind = cx.args.need::<CheckKind>("kind");
+    let reference = cx.args.need::<&str>("ref");
+    let check = add_check(cx.tx, cx.host, cx.actor, id, at, kind, reference, cx.at_ms)?;
+    assert_eq!(check.kind, kind);
+    assert_eq!(check.reference, reference);
+    criterion_written(
+        cx,
+        json!({
+            "id": id.to_string(),
+            "position": at,
+            "check": {"kind": check.kind.as_str(), "ref": check.reference},
+        }),
+    )
+}
+
+/// Runs `evidence_record` for dispatch. Input: the context. Output: the ticket's id, the
+/// criterion's position, the evidence, and the criterion and ticket after it.
+pub(crate) fn evidence_record<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Failure> {
+    let id = &cx.ticket().short_id;
+    let new = NewEvidence {
+        ticket: id.clone(),
+        criterion: position(cx),
+        kind: cx.args.need::<CheckKind>("kind"),
+        check: cx.args.need::<&str>("ref").to_owned(),
+        result: cx.args.need::<EvidenceResult>("result"),
+        reference: cx.args.get::<&str>("evidence").map(str::to_owned),
+    };
+    let (evidence, outcome) = record_evidence(cx.tx, cx.host, cx.actor, &new, cx.at_ms)?;
+    assert_eq!(evidence.result, new.result);
+    assert_eq!(outcome.criterion.position, new.criterion);
+    criterion_written(
+        cx,
+        json!({
+            "id": id.to_string(),
+            "position": new.criterion,
+            "evidence": {
+                "result": evidence.result.as_str(),
+                "evidence": evidence.reference,
+                "by": evidence.recorded_by.as_str(),
+                "at_ms": evidence.recorded_ms,
+            },
+            "criterion": criterion_json(&outcome.criterion),
+            "ticket": ops::ticket_json(cx.tx, &outcome.ticket)?,
+        }),
+    )
+}
+
+/// Runs `criterion_set` for dispatch. Input: the context. Output: the ticket's id, the
+/// criterion's position, and the criterion and ticket after it.
+pub(crate) fn criterion_set<H: Host>(cx: &Cx<'_, '_, H>) -> Result<ops::Outcome, Failure> {
+    let id = &cx.ticket().short_id;
+    let (at, version) = (position(cx), cx.args.need::<i64>("version"));
+    let state = cx.args.need::<CriterionState>("state");
+    criterion_fresh(cx, at, version)?;
+    let outcome = set_criterion(cx.tx, cx.host, cx.actor, id, at, version, state, cx.at_ms)?;
+    assert_eq!(outcome.criterion.position, at);
+    assert_eq!(outcome.ticket.id, cx.ticket().id);
+    criterion_written(
+        cx,
+        json!({
+            "id": id.to_string(),
+            "position": at,
+            "criterion": criterion_json(&outcome.criterion),
+            "ticket": ops::ticket_json(cx.tx, &outcome.ticket)?,
+        }),
+    )
 }
