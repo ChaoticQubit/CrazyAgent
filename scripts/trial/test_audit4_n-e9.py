@@ -5,6 +5,7 @@ Run: python3 scripts/trial/test_audit4_n-e9.py. Exit 0 when every case holds.
 """
 
 import importlib.util
+import json
 from pathlib import Path
 import sqlite3
 import tempfile
@@ -129,6 +130,28 @@ class LeadDoneTests(unittest.TestCase):
         outcome, detail = self.run_check_for(bg="late")
         self.assertEqual(outcome, "FAIL", detail)
         self.assertIn("ended before its background command bub9bmz4a ended (30000 ms later)", detail)
+
+    def test_a_native_lead_done_before_its_teammate_s_last_reply_in_the_teammate_home_fails(self):
+        w = self.world
+        now = w.now
+        lead = w.agent("sub", mode="native", worktree="/w/agent-lead")
+        w.row("team_names", agent=lead, project=PROJECT, persona="Grace", handle="greet-lead")
+        mate = w.agent("teammate", parent=lead, pane="%1", worktree="/w/agent-lead/.worktrees/greeter")
+        w.row("team_names", agent=mate, project=PROJECT, persona="Greeter", handle="greeter")
+        w.row("team_tasks", project=PROJECT, source="master", harness="claude-code", tools=1, status="done", agent=lead,
+              prompt="Lead A: a native team writes greet.py.", result="Merged greet.py from greeter.",
+              created_ms=now - 300_000, started_ms=now - 300_000, finished_ms=now - 10_000)
+        w.transcript(lead, [launch("x")], worktree="/w/agent-lead")
+        folder = w.root / "team" / "agents" / f"agent-{lead}" / audit.MATES_HOME / "projects" / audit.slug_of("/w/agent-lead")
+        folder.mkdir(parents=True, exist_ok=True)
+        reply = {"type": "assistant", "timestamp": iso(now - 2_000), "message": {"content": [{"type": "text", "text": "Wrote greet.py."}]}}
+        with (folder / "greeter.jsonl").open("w", encoding="utf-8") as handle:
+            for entry in (launch("Mate."), reply):
+                handle.write(json.dumps(dict(entry, agentName="greeter", teamName="session-1")) + "\n")
+        outcome, detail = self.run_check()
+        self.assertEqual(outcome, "FAIL", detail)
+        self.assertIn("leads compared=1", detail)
+        self.assertIn(f"done 8000 ms before {mate}(teammate)'s work ended", detail)
 
     def test_a_run_whose_leads_started_no_background_command_is_unknown(self):
         outcome, detail = self.run_check_for(bg=None)

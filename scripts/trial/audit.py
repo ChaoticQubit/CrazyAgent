@@ -76,6 +76,21 @@ ROWS_PER_READ_MAX = 200
 READS_PER_CHECK_MAX = 400
 STEPS_MAX = 10_000
 FINISHED_HIDE_STEP = "Set Finished agents to Hide"
+HIDE_CHECK_STEP = "N-D25 "
+HIDE_LEFT = re.compile(r"under Hide it left the graph for Finished \((\d+)\)")
+HIDE_STAYED = "did not leave the graph for the Finished list"
+HIDE_NOT_REACHED = "no sub-agent left on its own"
+HIDE_PASSED_FIRST = ("Wake is disabled", "did not run again as the same agent after Wake", "could not be set back to Show")
+MATES_HOME = "mates-home"
+SKILL_LISTING = "skill_listing"
+OUR_SKILL = "crazyagent:"
+CLAUDE_SKILL = re.compile(r"^- crazyagent:([^:\s]+):", re.M)
+CODEX_SKILLS_FOLDER = "/skills/crazyagent/"
+CODEX_SKILL = re.compile(r"/skills/crazyagent/([^/\s()\\\"]+)/SKILL\.md\)")
+HIDDEN_FROM_MODEL = re.compile(r"^disable-model-invocation:\s*true\s*$", re.M)
+SKILL_HEAD_BYTES_MAX = 8192
+LISTING_LINES_MAX = 200_000
+AGENT_NAME_LINES_MAX = 64
 STOP_ALL_STEP = "Stop all"
 FINISHED_COUNT = re.compile(r"Finished \((\d+)\)")
 DRAWN = re.compile(r"drawn: ([^;]*)")
@@ -232,6 +247,42 @@ def stamp_ms(value):
 
 def slug_of(path):
     return re.sub(r"[^A-Za-z0-9]", "-", path)
+
+
+def transcript_files(entries):
+    """Lists the transcript files an agent's entries name: a folder gives every .jsonl file
+    under it, a file is itself. Input: folder or file paths. Output: the files in order."""
+    files = []
+    for entry in entries:
+        path = Path(entry)
+        if path.is_file():
+            files.append(path)
+        elif path.is_dir():
+            files.extend(sorted(path.glob("**/*.jsonl")))
+    return files
+
+
+def agent_name(path):
+    """The agent-team name a native teammate's Claude Code writes on its transcript lines.
+    Input: the transcript file. Output: the name from its first AGENT_NAME_LINES_MAX lines,
+    or None."""
+    try:
+        handle = path.open("r", encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    with handle:
+        for number, line in enumerate(handle, 1):
+            if number > AGENT_NAME_LINES_MAX:
+                break
+            if '"agentName"' not in line:
+                continue
+            try:
+                name = json.loads(line).get("agentName")
+            except (ValueError, AttributeError):
+                continue
+            if isinstance(name, str) and name:
+                return name
+    return None
 
 
 def blank_scan():
@@ -516,13 +567,19 @@ class Trial:
         except Missing:
             self.panes = {lead["id"]: [] for lead in self.leads}
         self.load_reads, self.reads = self.reads, None
+        self.mate_names = {}
         self.dirs_of = {agent_id: self.transcript_dirs(agent) for agent_id, agent in self.agents.items()}
         self.transcripts = {agent_id: self.scan(self.dirs_of[agent_id]) for agent_id in self.agents}
-        claimed = {folder for folders in self.dirs_of.values() for folder in folders}
+        claimed = {Path(entry) for entries in self.dirs_of.values() for entry in entries}
         self.pane_scans = []
         for lead in self.leads:
+            if self.mode_of(lead) != "native":
+                continue
+            for path, name in self.mates_transcripts(lead["id"]):
+                if path not in claimed:
+                    self.pane_scans.append((f"lead {lead['id']} mate {name or path.stem[:8]}", lead, self.scan([path])))
             base = self.home(lead["id"]) / "projects"
-            if self.mode_of(lead) != "native" or not base.is_dir() or self.dirs_of[lead["id"]] in ([], [base]):
+            if not base.is_dir() or self.dirs_of[lead["id"]] in ([], [base]):
                 continue
             for folder in sorted(base.iterdir()):
                 if folder.is_dir() and folder not in claimed and any(folder.glob("*.jsonl")):
@@ -569,10 +626,23 @@ class Trial:
             branch = git(wt, "symbolic-ref", "--short", "-q", "HEAD")
         return branch[len("refs/heads/"):] if branch and branch.startswith("refs/heads/") else branch
 
+    def mates_transcripts(self, lead_id):
+        """The transcripts a native lead's teammates write in its teammates' config home, each
+        with the agent-team name on its lines, read once. Input: the lead id. Output: (file,
+        name or None) pairs in order."""
+        if lead_id not in self.mate_names:
+            base = self.root / "team" / "agents" / f"agent-{lead_id}" / MATES_HOME / "projects"
+            files = sorted(base.glob("*/*.jsonl")) if base.is_dir() else []
+            self.mate_names[lead_id] = [(path, agent_name(path)) for path in files]
+        return self.mate_names[lead_id]
+
     def transcript_dirs(self, agent):
         own = self.home(agent["id"]) / "projects"
         base = own
         if not own.is_dir() and agent["role"] == "teammate" and agent["parent"] in self.agents:
+            named = [path for path, name in self.mates_transcripts(agent["parent"]) if name and name == agent["handle"]]
+            if named:
+                return named
             base = self.home(agent["parent"]) / "projects"
         if not base.is_dir():
             return []
@@ -583,9 +653,8 @@ class Trial:
 
     def scan(self, dirs):
         found = blank_scan()
-        for folder in dirs:
-            for path in sorted(folder.glob("**/*.jsonl")):
-                scan_file(path, found, self.root, self.project_mark)
+        for path in transcript_files(dirs):
+            scan_file(path, found, self.root, self.project_mark)
         return found
 
     def owned_by(self, agent, process):
@@ -1126,6 +1195,13 @@ def check_delivery(t):
 
 
 def enabled_skills(t):
+    return sorted(approved_skill_folders(t))
+
+
+def approved_skill_folders(t):
+    """The skills the project approves, each with the folder of the engine's copy, a
+    project skill shadowing a global one of its name. Input: the trial. Output: {name:
+    folder} for each skill whose copy has a SKILL.md."""
     off = {row[0] for row in t.q("SELECT item FROM plugin_switches WHERE project=?", t.pid)}
     records = []
     for (body,) in t.q("SELECT body FROM plugin_items WHERE kind='skill' ORDER BY scope, name"):
@@ -1140,13 +1216,65 @@ def enabled_skills(t):
         if (local and place.get("project_id") != t.pid) or (not local and record.get("id") in off):
             continue
         records.append((record["name"], local, record.get("folder")))
-    names = []
+    folders = {}
     for name, local, folder in records:
         shadowed = not local and any(other_local and other == name for other, other_local, _ in records)
         described = isinstance(folder, str) and (t.root / folder / "SKILL.md").is_file()
-        if not shadowed and described and name not in names:
-            names.append(name)
-    return sorted(names)
+        if not shadowed and described and name not in folders:
+            folders[name] = t.root / folder
+    return folders
+
+
+def hidden_from_model(folder):
+    """Whether Claude Code leaves a skill out of the model's skill listing: its SKILL.md
+    front matter sets disable-model-invocation: true. Input: the skill's folder. Output:
+    the answer."""
+    text = (read_text(folder / "SKILL.md") or "")[:SKILL_HEAD_BYTES_MAX]
+    end = text.find("\n---", 3) if text.startswith("---") else -1
+    return end != -1 and HIDDEN_FROM_MODEL.search(text[3:end]) is not None
+
+
+def listed_skills(t, agent):
+    """The approved skills an agent's harness listed as installed: Claude Code's crazyagent:*
+    names in the skill_listing attachments of its transcripts, Codex's names in the skills
+    index of its rollouts. Inputs: the trial and the agent. Output: the sorted names, or
+    None when no listing was read."""
+    claude = agent["harness"].startswith("claude")
+    if claude:
+        files, mark = transcript_files(t.dirs_of.get(agent["id"], [])), f'"{SKILL_LISTING}"'
+    else:
+        base = t.home(agent["id"]) / "sessions"
+        files, mark = (sorted(base.glob("**/rollout-*.jsonl")) if base.is_dir() else []), CODEX_SKILLS_FOLDER
+    names, seen = set(), False
+    for path in files:
+        try:
+            handle = path.open("r", encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with handle:
+            for number, line in enumerate(handle, 1):
+                if number > LISTING_LINES_MAX:
+                    break
+                if mark not in line:
+                    continue
+                if not claude:
+                    seen = True
+                    names.update(CODEX_SKILL.findall(line))
+                    continue
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                attachment = entry.get("attachment") if isinstance(entry, dict) else None
+                if not isinstance(attachment, dict) or attachment.get("type") != SKILL_LISTING:
+                    continue
+                seen = True
+                given = attachment.get("names")
+                if isinstance(given, list):
+                    names.update(name[len(OUR_SKILL):] for name in given if isinstance(name, str) and name.startswith(OUR_SKILL))
+                else:
+                    names.update(CLAUDE_SKILL.findall(str(attachment.get("content") or "")))
+    return sorted(names) if seen else None
 
 
 def short(tool):
@@ -1571,30 +1699,47 @@ def check_role_skills(t):
         return verdict("UNKNOWN", "not exercised: no role has a skill choice, so every role gets all approved skills")
     nesting = t.q("SELECT depth FROM team_nesting WHERE project=?", t.pid) if t.columns("team_nesting") else []
     limit = nesting[0][0] if nesting else DEPTH_DEFAULT
-    approved = enabled_skills(t)
-    lines, bad, checked = [], [], 0
+    folders = approved_skill_folders(t)
+    approved = sorted(folders)
+    hidden = {name for name, folder in folders.items() if hidden_from_model(folder)}
+    lines, bad, checked, unread = [], [], 0, []
     for a in t.tree:
         if a["role"] == "teammate":
             continue
         role = "master" if a["role"] == "master" else "lead" if a["role"] == "sub" and depth_of(t, a) < limit else "worker"
         record = given_record(t, "agent-skills", a["id"])
         got = sorted(line.strip() for line in (record or "").splitlines() if line.strip())
-        folder = t.home(a["id"]) / ("crazyagent/plugin/skills" if a["harness"].startswith("claude") else "skills/crazyagent")
-        installed = sorted(p.name for p in folder.iterdir() if p.is_dir()) if folder.is_dir() else []
+        installed = listed_skills(t, a)
+        shown = "unknown (no skill listing in its transcripts)" if installed is None else listed(installed) or "none"
+        claude = a["harness"].startswith("claude")
         choice = choices.get(role)
         if isinstance(choice, list):
-            checked += 1
-            expected = sorted(name for name in choice if isinstance(name, str))
-            line = f"{t.label(a)} role {role} chose {listed(expected) or 'none'}; given {listed(got) or 'none'}; installed {listed(installed) or 'none'}"
-            if record is None or got != expected or installed != expected:
-                bad.append(line + (" (no skills record)" if record is None else ""))
+            chosen = sorted(name for name in choice if isinstance(name, str))
+            expected = [name for name in chosen if not (claude and name in hidden)]
+            line = f"{t.label(a)} role {role} chose {listed(chosen) or 'none'}; given {listed(got) or 'none'}; installed {shown}"
+            if claude and set(chosen) & hidden:
+                line += f"; Claude Code lists none of {listed(sorted(set(chosen) & hidden))} to the model (disable-model-invocation)"
+            if installed is None:
+                unread.append(t.label(a))
+                if record is None or got != chosen:
+                    bad.append(line + (" (no skills record)" if record is None else ""))
+            else:
+                checked += 1
+                if record is None or got != chosen or installed != expected:
+                    bad.append(line + (" (no skills record)" if record is None else ""))
         else:
-            line = f"{t.label(a)} role {role} all approved ({len(approved)}); given {len(got)}; installed {len(installed)}"
+            count = "unknown" if installed is None else len(installed)
+            line = f"{t.label(a)} role {role} all approved ({len(approved)}); given {len(got)}; installed {count}"
         lines.append(line)
-    detail = f"role choices: {'; '.join(f'{r}=' + ('all' if not isinstance(choices.get(r), list) else listed(choices[r]) or 'none') for r in SKILL_ROLES)}; Sub-agent depth={limit}; agents checked={checked} bad={len(bad)}; teammates use their lead's set"
+    detail = (
+        f"role choices: {'; '.join(f'{r}=' + ('all' if not isinstance(choices.get(r), list) else listed(choices[r]) or 'none') for r in SKILL_ROLES)}; "
+        f"Sub-agent depth={limit}; agents checked={checked} bad={len(bad)}; teammates use their lead's set"
+        + (f"; skills Claude Code lists to no model: {listed(sorted(hidden))}" if hidden else "")
+        + (f"; no skill listing read for {listed(unread)}" if unread else "")
+    )
     if bad:
         return verdict("FAIL", detail, lines)
-    return verdict("PASS" if checked else "UNKNOWN", detail if checked else detail + "; no agent of a role with a choice", lines)
+    return verdict("PASS" if checked else "UNKNOWN", detail if checked else detail + "; no agent of a role with a choice and a skill listing", lines)
 
 
 def nudge_mode(value):
@@ -1691,21 +1836,24 @@ def check_finished(t):
     early = [a for a in finished if stop_at is not None and a["stopped"] is not None and a["stopped"] < stop_at]
     reused = t.q("SELECT agent, COUNT(*) FROM team_tasks WHERE project=? AND agent IS NOT NULL GROUP BY agent HAVING COUNT(*) > 1", t.pid)
     step = next((step for step in reversed(every) if str(step.get("title", "")).startswith(FINISHED_HIDE_STEP)), None)
-    shots = [path for path in (step or {}).get("evidence") or () if isinstance(path, str) and not os.path.isabs(path)]
+    check = next((step for step in reversed(every) if str(step.get("title", "")).startswith(HIDE_CHECK_STEP)), None)
+    chosen = step or check
+    shots = [path for path in (chosen or {}).get("evidence") or () if isinstance(path, str) and not os.path.isabs(path)]
     extra = [
-        {"kind": "screenshot", "path": path, "caption": f"step {step.get('n')} {FINISHED_HIDE_STEP}"}
+        {"kind": "screenshot", "path": path, "caption": f"step {chosen.get('n')} {str(chosen.get('title', ''))[:80]}"}
         for path in shots if under(t.out / path, t.out) and (t.out / path).is_file()
     ]
     detail = (
-        f"setting={'show' if show else 'hide'}{'' if stored else ' (no row: hide by default)'}; "
+        f"setting at the end={'show' if show else 'hide'}{'' if stored else ' (no row: hide by default)'}"
+        f"{', a note: the trial sets Show for its final tree' if show else ''}; "
         f"finished in the store={len(finished)} ({listed(t.label(a) for a in finished) or 'none'}); "
         f"left on their own before Stop all={len(early) if stop_at is not None else 'unknown'}; "
         f"agents given more than one task={len(reused)}"
     )
-    if show:
-        return verdict("FAIL", detail + "; Finished agents is Show at the end of the run, so finished agents stay in the list and graph", extra=extra)
+    if step is None and check is not None:
+        return hide_at_check(check, detail, extra)
     if step is None:
-        return verdict("UNKNOWN", detail + f"; not exercised: no '{FINISHED_HIDE_STEP}' step in steps.jsonl", extra=extra)
+        return verdict("UNKNOWN", detail + f"; not exercised: no '{FINISHED_HIDE_STEP}' or N-D25 step in steps.jsonl", extra=extra)
     said = str(step.get("detail") or "")
     detail += f"; step {step.get('n')} ok={step.get('ok')} said: {said[:300]}"
     if step.get("ok") is not True:
@@ -1725,6 +1873,29 @@ def check_finished(t):
     if not finished:
         return verdict("UNKNOWN", detail + "; not exercised: no finished agent", extra=extra)
     return verdict("PASS", detail, extra=extra)
+
+
+def hide_at_check(step, detail, extra):
+    """Judges Finished agents set to Hide at the N-D25 step, which hides finished agents
+    once one left on its own: under Hide that agent left the graph for Finished (N). A
+    failure before Hide is not exercised; one after it, in Wake or in setting Show back,
+    is N-D25's. Inputs: the step, the detail so far and the evidence. Output: the verdict."""
+    said = str(step.get("detail") or "")
+    detail += f"; N-D25 step {step.get('n')} ok={step.get('ok')} said: {said[:300]}"
+    if step.get("ok") is True:
+        left = HIDE_LEFT.search(said)
+        if left is None:
+            return verdict("FAIL", detail + "; the step recorded no Finished (N) count under Hide", extra=extra)
+        if int(left.group(1)) < 1:
+            return verdict("FAIL", detail + "; under Hide the Finished list was empty", extra=extra)
+        return verdict("PASS", detail, extra=extra)
+    if HIDE_STAYED in said:
+        return verdict("FAIL", detail + "; under Hide the finished agent stayed in the graph", extra=extra)
+    if HIDE_NOT_REACHED in said:
+        return verdict("UNKNOWN", detail + "; not exercised: N-D25 did not reach Hide", extra=extra)
+    if any(part in said for part in HIDE_PASSED_FIRST):
+        return verdict("PASS", detail + "; Hide held before the step failed, which is N-D25's", extra=extra)
+    return verdict("UNKNOWN", detail + "; not exercised: N-D25 failed before Hide could be told", extra=extra)
 
 
 def check_shared_account(t):
@@ -1929,7 +2100,7 @@ CHECKS = (
         "title": "Each role gets the skills chosen for it",
         "proves": "Masters, leads and workers launch with exactly the skills the project chose for their role.",
         "why": "DEC-111 R3, 18.13 fix (feat/role-skills). New in trial 3.",
-        "how": "coord_settings role_skills and team_nesting depth; the engine's agent-skills record per agent home and the skill folders installed in it.",
+        "how": "coord_settings role_skills and team_nesting depth; the engine's agent-skills record per agent home and the skills its harness listed: Claude Code's crazyagent:* skill_listing in its transcripts, which leaves out skills whose SKILL.md sets disable-model-invocation, and Codex's skills index in its rollouts. The installed folders are gone once a launch ends.",
     },
     {
         "id": "T3-24", "name": "nudges", "run": check_nudges,
@@ -1950,7 +2121,7 @@ CHECKS = (
         "title": "Finished agents leave the Agents list and graph for the Finished fold-out",
         "proves": "With Finished agents on Hide, the default, stopped and failed sub-agents and teammates leave the Team panel and graph, and the Finished (N) fold-out lists each of them.",
         "why": "OP-27, owner 10-27: sub-agents that finished their work and sat idle never left. DEC-102 decision 2 as the owner changed it after the DEC-104 trial: an idle agent stays until Idle stop or Stop all ends it (125e3173). Fix B-51, fix/agent-view-finished 84e5ec76. Trial 2: not checked; trial 3 sets Show for its tree checks.",
-        "how": "team_finished_view for the project (no row is Hide); stopped or failed sub-agent and teammate rows; the desktop step 'Set Finished agents to Hide' in steps.jsonl with its Finished (N) count, drawn cards and screenshots; team_tasks per agent for reuse.",
+        "how": "team_finished_view for the project (no row is Hide); stopped or failed sub-agent and teammate rows; the desktop step 'Set Finished agents to Hide' in steps.jsonl with its Finished (N) count, drawn cards and screenshots, or else the N-D25 step, where under Hide an agent that left on its own leaves the graph for Finished (N); the setting at the end of the run is a note, since trial scripts set Show for their final tree; team_tasks per agent for reuse.",
     },
     {
         "id": "T3-27", "name": "shared account", "run": check_shared_account,

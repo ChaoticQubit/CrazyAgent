@@ -10,7 +10,6 @@ sandbox's port rule, not a dead network.
 """
 
 import json
-from pathlib import Path
 import re
 
 import audit
@@ -30,32 +29,31 @@ def probes(folders):
     """Reads the last port probe outputs from Claude Code transcripts. Input: the folders.
     Output: {port: (code, output)} for each port a probe call printed."""
     calls, found = set(), {}
-    for folder in folders:
-        for path in sorted(Path(folder).glob("**/*.jsonl")):
-            try:
-                handle = path.open("r", encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            with handle:
-                for number, line in enumerate(handle, 1):
-                    if number > LINES_PER_FILE_MAX:
-                        break
-                    try:
-                        entry = json.loads(line)
-                    except ValueError:
+    for path in audit.transcript_files(folders):
+        try:
+            handle = path.open("r", encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with handle:
+            for number, line in enumerate(handle, 1):
+                if number > LINES_PER_FILE_MAX:
+                    break
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                message = entry.get("message") if isinstance(entry, dict) else None
+                content = message.get("content") if isinstance(message, dict) else None
+                for part in content if isinstance(content, list) else []:
+                    if not isinstance(part, dict):
                         continue
-                    message = entry.get("message") if isinstance(entry, dict) else None
-                    content = message.get("content") if isinstance(message, dict) else None
-                    for part in content if isinstance(content, list) else []:
-                        if not isinstance(part, dict):
-                            continue
-                        if part.get("type") == "tool_use" and isinstance(part.get("id"), str):
-                            if MARKER.search(json.dumps(part.get("input"), ensure_ascii=False)):
-                                calls.add(part["id"])
-                        elif part.get("type") == "tool_result" and part.get("tool_use_id") in calls:
-                            output = audit.result_text(part.get("content"))
-                            for port, code in PROBE.findall(output):
-                                found[port] = (code, output)
+                    if part.get("type") == "tool_use" and isinstance(part.get("id"), str):
+                        if MARKER.search(json.dumps(part.get("input"), ensure_ascii=False)):
+                            calls.add(part["id"])
+                    elif part.get("type") == "tool_result" and part.get("tool_use_id") in calls:
+                        output = audit.result_text(part.get("content"))
+                        for port, code in PROBE.findall(output):
+                            found[port] = (code, output)
     return found
 
 

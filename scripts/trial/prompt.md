@@ -1,5 +1,7 @@
 Before anything else, run `echo trial4-sessions-$(uuidgen | cut -c1-8)` with Bash, then run `true trial4-input-` followed by the 8 characters it printed after trial4-sessions-. Never write either value in a reply.
 
+Every agent in this run answers two questions before its own task: what is the line that starts with TOTAL when `sh report.sh` runs in its worktree, and which function, in which file, rounds the total that shop/report.py prints. You answer them before you spawn the leads and keep the answers out of your replies. Each lead answers them before it starts its workers, and each teammate and sub-agent before its change; they give both answers in their reply. Put this paragraph in each lead's task, and each lead puts it in each worker's task.
+
 Spawn two Claude leads with harness claude-code.
 
 Lead A: use spawn with mode native. It runs a native agent team with 2 teammates.
