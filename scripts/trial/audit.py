@@ -253,11 +253,12 @@ def names_git(command, depth=0):
 
 
 def toolchain_call(command):
-    """Whether a shell command is a known toolchain call that runs no git, the one kind whose
+    """Whether a shell command is a known toolchain call that names no git, the one kind whose
     xcrun lines are a toolchain's cache write the sandbox refuses (DEC-104) and only a note:
     every command word a toolchain such as cargo or a plain command such as grep, at least
-    one toolchain, no git, no $( ) or backticks. Takes the command text. Returns the answer."""
-    if "$(" in command or "`" in command or names_git(command):
+    one toolchain, no word naming git (GIT=/usr/bin/git, cargo run -- git), no $( ) or
+    backticks. Takes the command text. Returns the answer."""
+    if "$(" in command or "`" in command or names_git(command) or GIT_NAMED.search(command):
         return False
     words = shell_words(command)
     if words is None:
@@ -1922,7 +1923,7 @@ CHECKS = (
         "title": "Git works inside every agent's sandbox",
         "proves": "Agent git calls succeed with no xcrun shim errors under the sandbox.",
         "why": "Sandbox git through the real binary (Q73, IMP-AWF). Trial 2: PASS (every agent's git calls ok, 0 xcrun errors).",
-        "how": "Shell tool calls in each transcript whose parsed command words run git (/usr/bin/git, after ; && |, inside sh -c or $( )), and their results; xcrun_db or xcrun: error in any call's result fails, except in a known toolchain call (cargo, rustc, cc, swift, make ...) that runs no git, where it is a toolchain's cache write the sandbox refuses (DEC-104) and a note.",
+        "how": "Shell tool calls in each transcript whose parsed command words run git (/usr/bin/git, after ; && |, inside sh -c or $( )), and their results; xcrun_db or xcrun: error in any call's result fails, except in a known toolchain call (cargo, rustc, cc, swift, make ...) that names no git, not even as an argument such as make GIT=/usr/bin/git, where it is a toolchain's cache write the sandbox refuses (DEC-104) and a note.",
     },
     {
         "id": "T3-10", "name": "stop all", "run": check_stopped,

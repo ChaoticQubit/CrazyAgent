@@ -438,6 +438,19 @@ class AuditTests(unittest.TestCase):
                 self.assertEqual(record["result"], "PASS", record["detail"])
                 self.assertIn("git calls=1 ok=1 xcrun errors=0, toolchain xcrun notes=1", record["detail"])
 
+    def test_t3_09_fails_an_xcrun_line_in_a_toolchain_call_whose_words_name_git(self):
+        shim = "xcrun: error: couldn't create cache file '/var/folders/x/T/xcrun_db-AbCd1234' (errno=Operation not permitted)"
+        for command in (
+            "make GIT=/usr/bin/git",
+            "make release GIT=git",
+            "cargo run -q -- git status",
+            "cargo build --config 'net.git-fetch-with-cli=true' && /usr/bin/git status",
+        ):
+            with self.subTest(command=command):
+                record = self.t3_09_alone(command, shim)
+                self.assertEqual(record["result"], "FAIL", record["detail"])
+                self.assertIn("xcrun errors=1", record["detail"])
+
     def test_t3_10_stop_all_passes_on_a_paused_project_and_fails_while_an_agent_process_lives(self):
         w = self.world
         lead = w.agent("sub", mode="app_spawned")
