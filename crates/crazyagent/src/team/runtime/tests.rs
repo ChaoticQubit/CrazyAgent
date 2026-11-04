@@ -13766,15 +13766,15 @@ fn a_fresh_switch_whose_new_harness_ends_before_reporting_starts_fresh_again() {
     );
     switch_session(&fixture.connection, "s-one");
     super::super::master::set_live(&fixture.connection, &project, true).unwrap();
-    fixture.until(&mut team, "the Codex master is briefed and kept", |f| {
-        live_turns(&f.connection) == (1, false)
-            && kept_conversation(&f.connection, "s-one").is_some()
+    fixture.until(&mut team, "the Codex master runs and is kept", |f| {
+        live_agent(&f.connection).is_some() && kept_conversation(&f.connection, "s-one").is_some()
     });
+    assert_eq!(live_turns(&fixture.connection), (0, false), "nothing typed");
     let first = masters(&fixture.connection)[0];
     host.input(&AgentId::team(first).unwrap(), b"hello\r")
         .unwrap();
     fixture.until(&mut team, "the owner's turn ends", |f| {
-        live_turns(&f.connection) == (2, false)
+        live_turns(&f.connection) == (1, false)
     });
     stop_live(&fixture, &mut team);
     let codex_kept = kept_conversation(&fixture.connection, "s-one");
@@ -13795,12 +13795,11 @@ fn a_fresh_switch_whose_new_harness_ends_before_reporting_starts_fresh_again() {
     );
 
     super::super::master::set_live(&fixture.connection, &project, true).unwrap();
-    fixture.until(
-        &mut team,
-        "the Claude Code master starts again and is briefed",
-        |f| launches(f, second).len() == 2 && !typed(f, second).is_empty(),
-    );
-    let briefed = typed(&fixture, second);
+    fixture.until(&mut team, "the Claude Code master starts again", |f| {
+        launches(f, second).len() == 2
+    });
+    let briefed = instructions_file(&fixture, second).unwrap();
+    assert_eq!(typed(&fixture, second), "", "nothing is typed");
     assert!(!briefed.contains("You: Done."), "{briefed}");
     assert!(
         !briefed.contains("earlier harness conversation"),
