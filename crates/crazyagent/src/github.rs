@@ -124,6 +124,56 @@ pub(crate) fn use_loopback(root: &Path, port: Option<u16>) {
     };
 }
 
+/// Where a test may hold one engine root's GitHub work: a device sign-in between saving
+/// its token and settling, or a status read between the waiting flag and the saved sign-in.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Pause {
+    AfterKeep,
+    InStatus,
+}
+
+#[cfg(all(test, target_os = "macos"))]
+type Paused = (std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>);
+
+#[cfg(all(test, target_os = "macos"))]
+static PAUSES: Mutex<BTreeMap<(PathBuf, Pause), Paused>> = Mutex::new(BTreeMap::new());
+
+/// Holds the next pass of one engine root through a pause point. Test builds only.
+/// Inputs: the engine root and the point. Output: the receiver told once the work reaches
+/// the point, and the sender that lets it go on.
+#[cfg(all(test, target_os = "macos"))]
+fn pause_at(
+    root: &Path,
+    point: Pause,
+) -> (std::sync::mpsc::Receiver<()>, std::sync::mpsc::Sender<()>) {
+    let (reached, told) = std::sync::mpsc::channel();
+    let (go, resume) = std::sync::mpsc::channel();
+    PAUSES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert((root.to_path_buf(), point), (reached, resume));
+    (told, go)
+}
+
+/// Waits at a pause point while a test holds it for this root, once. Test builds only.
+/// Inputs: the engine root and the point.
+#[cfg(all(test, target_os = "macos"))]
+fn paused_at(root: &Path, point: Pause) {
+    let paused = PAUSES
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .remove(&(root.to_path_buf(), point));
+    if let Some((reached, resume)) = paused
+        && reached.send(()).is_ok()
+    {
+        let _ = resume.recv();
+    }
+}
+
+/// A pause point outside test builds: nothing ever waits. Inputs: unused.
+#[cfg(not(all(test, target_os = "macos")))]
+fn paused_at(_root: &Path, _point: Pause) {}
+
 /// The GitHub an engine root talks to. Input: the engine root. Output: the real GitHub.
 #[cfg(not(all(test, target_os = "macos")))]
 fn endpoints(_root: &Path) -> Endpoints {
@@ -273,6 +323,7 @@ impl GitHub {
             .get(&self.root)
             .map(|entry| (entry.waiting, entry.problem.clone()))
             .unwrap_or((false, None));
+        paused_at(&self.root, Pause::InStatus);
         match state::load(&self.root) {
             Ok(Some(saved)) => match self.store.get(&saved.credential) {
                 Ok(_) => GitHubStatus {
@@ -319,6 +370,7 @@ impl GitHub {
                     .and_then(|token| {
                         account.keep(&token, GitHubMethod::Device, Some(flag.as_ref()))
                     });
+                paused_at(&account.root, Pause::AfterKeep);
                 settle(&account.root, &flag, outcome.err());
             });
         if spawned.is_err() {
