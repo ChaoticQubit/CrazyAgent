@@ -655,7 +655,9 @@ impl Page<'_> {
         rows.into_iter()
             .map(|(id, author, kind, text, at_ms)| {
                 let from = Speaker::parse(&author)
-                    .filter(|from| matches!(from, Speaker::Master | Speaker::Owner))
+                    .filter(|from| {
+                        matches!(from, Speaker::Master | Speaker::Owner | Speaker::Engine)
+                    })
                     .ok_or_else(|| failure("team_agent_message_invalid"))?;
                 let kind =
                     EntryKind::said(&kind).ok_or_else(|| failure("team_agent_message_invalid"))?;

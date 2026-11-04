@@ -862,9 +862,9 @@ fn an_old_kept_messages_table_is_rebuilt_on_open_with_every_row_and_a_notice_rec
             DELETE FROM team_agent_messages WHERE id=4;",
         )
         .unwrap();
-    let rows =
-        |connection: &Connection| -> Vec<(i64, String, i64, String, String, Option<String>, i64)> {
-            connection
+    type Row = (i64, String, i64, String, String, Option<String>, i64);
+    let rows = |connection: &Connection| -> Vec<Row> {
+        connection
             .prepare("SELECT id,project,agent,author,kind,text,created_ms FROM team_agent_messages ORDER BY id")
             .unwrap()
             .query_map([], |row| {
@@ -881,7 +881,7 @@ fn an_old_kept_messages_table_is_rebuilt_on_open_with_every_row_and_a_notice_rec
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap()
-        };
+    };
     let before = rows(&connection);
     assert_eq!(before.len(), 3);
 
