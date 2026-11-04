@@ -614,9 +614,17 @@ pub fn fresh_native_lead_tmp(scratch: &Path) -> io::Result<PathBuf> {
         Err(error) => return Err(error),
     }
     fs::DirBuilder::new().mode(0o700).create(&path)?;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
-    assert!(private_folder(&path));
+    seal_new_folder(&path)?;
     Ok(path)
+}
+
+/// Makes the folder just made at `path` private. Input: the new folder's path. Output:
+/// done, or the error.
+#[cfg(unix)]
+fn seal_new_folder(path: &Path) -> io::Result<()> {
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    assert!(private_folder(path));
+    Ok(())
 }
 
 /// Removes the agent's short temp folder with everything in it. Input: the agent home.
