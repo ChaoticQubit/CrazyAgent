@@ -686,4 +686,201 @@ mod tests {
         drop(native);
         service.shutdown().await.unwrap();
     }
+
+    /// One API key account and its connection, for a project whose pool lets the owner's
+    /// default Open pick a master.
+    const LIVE_ACCESS: &str = r#"version = 1
+timeout_ms = 10000
+allowed_destinations = []
+
+[model_access]
+accounts = ["api-1"]
+connections = [
+  { id = "api-a", provider = "openrouter", harness = "rcli", protocol = "openai-chat", account_ref = "api-1", endpoint = { kind = "http", url = "https://openrouter.ai/api/v1" }, model = { id = "some/model", author = "openrouter" }, auth = { method = "api_key", credential_ref = "api-key-ref" } },
+]
+pools = []
+"#;
+
+    /// Reads a project's master session as the engine holds it. Inputs: the controller and
+    /// the project. Output: the session id and phase, or None before any session.
+    async fn master_session(
+        controller: &mut OwnerController,
+        project: &ProjectId,
+    ) -> Option<(
+        crate::protocol::SessionId,
+        crate::master_session::MasterSessionPhase,
+    )> {
+        let state = controller
+            .read(OwnerRead::ProjectMaster {
+                project_id: project.clone(),
+            })
+            .await
+            .unwrap();
+        let OwnerData::ProjectMaster { session } = state.data else {
+            panic!("project master read required");
+        };
+        session.map(|session| (session.session_id, session.phase))
+    }
+
+    /// Turning a project's live master on from the TUI first opens the owner's default
+    /// master session when the project has none, so the live master runs in a session its
+    /// turns mark used and the Sessions list shows (LMS-1); turning it on again keeps that
+    /// session and opens no second one.
+    #[tokio::test]
+    async fn turning_the_live_master_on_opens_the_owner_s_default_session_first() {
+        let root = tempfile::Builder::new()
+            .prefix("ca-tui-live-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let global = root.path().join("global.toml");
+        std::fs::write(&global, LIVE_ACCESS).unwrap();
+        std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        let mut service = EngineService::start_with_settings_sources(
+            root.path(),
+            "e.sock",
+            &global,
+            &root.path().join("project.toml"),
+            &stopped,
+        )
+        .await
+        .unwrap();
+        let mut native = NativeOwner::new(
+            root.path().join("e.sock"),
+            crate::tui::test_home::ENGINE_WAIT,
+        );
+        let (_, access) = native.attach().await;
+        let mut app = App::new();
+        app.apply_owner(access).unwrap();
+        assert!(app.owner_ready);
+        let _home =
+            crate::tui::test_home::projects_home(native.controller.as_mut().unwrap(), 1).await;
+        let setup = ProjectSetup {
+            about: "Notes kept by a live master.".into(),
+            tech_stack: vec!["rust".into()],
+            platforms: vec![Platform::Cli],
+            research: vec![],
+            pool: None,
+            team: None,
+            documents: vec![],
+        };
+        let spec = ProjectSpec {
+            name: "Live notes".into(),
+            repositories: vec![],
+        };
+        app.queue_project_setup(spec, setup).unwrap();
+        let job = app.take_creation_job().unwrap();
+        let project = job.submission.project_id.clone();
+        let event = native.creation(job).await;
+        assert!(
+            matches!(event.result.as_deref(), Ok(OwnerResponse::Applied { .. })),
+            "creation must commit: {:?}",
+            event.result
+        );
+        app.apply_owner(OwnerEvent::Creation(Box::new(event)))
+            .unwrap();
+        let snapshot = Client::new(
+            root.path().join("e.sock"),
+            crate::tui::test_home::ENGINE_WAIT,
+        )
+        .unwrap()
+        .request(crate::protocol::WireRequest {
+            protocol_version: crate::protocol::PROTOCOL_VERSION,
+            client_id: crate::protocol::ClientId::new("tui-live-test").unwrap(),
+            request_id: RequestId::new("tui-live-snapshot").unwrap(),
+            expected_revision: Cursor::new(0),
+            command: crate::protocol::Command::Snapshot,
+        })
+        .await
+        .unwrap();
+        app.apply_reply(snapshot).unwrap();
+        assert!(!app.has_unresolved_creation());
+
+        let controller = native.controller.as_mut().unwrap();
+        let pools = controller
+            .read(OwnerRead::ModelAccessPage {
+                collection: crate::engine::owner::ModelAccessCollection::Pools,
+                cursor: None,
+                limit: 1,
+            })
+            .await
+            .unwrap();
+        let OwnerData::ModelAccessPage { source_hash, .. } = &pools.data else {
+            panic!("pool page required");
+        };
+        let reference = |value: &str| crate::protocol::CredentialRef::new(value).unwrap();
+        controller
+            .begin_mutation(
+                OwnerMutation::ModelAccess {
+                    expected_config_id: pools.config_id.clone(),
+                    expected_source_hash: source_hash.clone(),
+                    edit: crate::config::ModelAccessEdit::ReplacePool {
+                        pool: crate::config::AccountPool {
+                            id: reference("pool-live"),
+                            name: None,
+                            members: vec![reference("api-a")],
+                            projects: vec![reference(project.as_str())],
+                            roles: vec![reference("project_leader")],
+                            fallback_allowed: false,
+                            provider_quota_policy: crate::config::ProviderQuotaPolicy::default(),
+                        },
+                    },
+                },
+                1,
+            )
+            .unwrap();
+        assert!(matches!(
+            controller.send_pending().await.unwrap(),
+            OwnerResponse::Applied { .. } | OwnerResponse::Committed { .. }
+        ));
+        assert_eq!(
+            master_session(controller, &project).await,
+            None,
+            "a new project has no master session"
+        );
+
+        let mut opened = Vec::new();
+        for _ in 0..2 {
+            app.request_team_change(crate::team::TeamAction::LiveMaster {
+                project_id: project.clone(),
+                on: true,
+            })
+            .unwrap();
+            let query = app.take_setup_query().unwrap();
+            let event = native.project_setup(query).await;
+            app.apply_owner(OwnerEvent::Setup(Box::new(event))).unwrap();
+            assert!(
+                matches!(
+                    &app.setup_view,
+                    Some((
+                        SetupQuery::TeamChange { .. },
+                        SetupView::Changed(crate::engine::owner::OwnerResult::Applied)
+                    ))
+                ),
+                "the live switch turns on: {:?} {:?}",
+                app.setup_view,
+                app.setup_problem
+            );
+            opened.push(master_session(native.controller.as_mut().unwrap(), &project).await);
+        }
+        let Some((session, phase)) = opened[0].clone() else {
+            panic!("turning the live master on opened no master session: {opened:?}");
+        };
+        assert_eq!(
+            phase,
+            crate::master_session::MasterSessionPhase::Configured,
+            "the opened session is the live one"
+        );
+        assert_eq!(
+            opened[1],
+            Some((
+                session,
+                crate::master_session::MasterSessionPhase::Configured
+            )),
+            "turning it on again keeps the live session"
+        );
+        drop(native);
+        service.shutdown().await.unwrap();
+    }
 }

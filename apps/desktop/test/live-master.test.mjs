@@ -318,3 +318,20 @@ test("the head word for a stopped team warns, and only a good read of the same p
   assert.equal(live.teamPaused({ kind: "not_ready" }, "alpha"), false);
   assert.equal(live.teamPaused(undefined, "alpha"), false, "no read yet");
 });
+
+test("starting the live master opens the owner's default session first when none is live, then turns the switch on (LMS-1)", () => {
+  const source = readFileSync(new URL("../src/screens/project/live-master.tsx", import.meta.url), "utf8");
+  const start = source.slice(source.indexOf("const start = async () => {"), source.indexOf("useEffect(", source.indexOf("const start = async () => {")));
+  const read = start.indexOf("openBeforeLive(");
+  const open = start.indexOf("startMaster(");
+  const on = start.indexOf("setLiveMaster(id, true)");
+  assert.ok(on > 0, "start turns the live switch on");
+  assert.ok(read > 0 && open > read && on > open, `the owner's Open goes out after the master read and before the switch turns on: read ${read}, open ${open}, on ${on}`);
+  const state = (session) => ({ kind: "ok", value: { project_id: "alpha", ticket: "1", session } });
+  const session = (phase) => ({ session_id: "master-1", phase, current_turn: null });
+  assert.equal(live.openBeforeLive(state(null)), true, "a project with no session gets one");
+  for (const phase of ["parked", "closed"]) assert.equal(live.openBeforeLive(state(session(phase))), true, `only a ${phase} session: a new one opens`);
+  for (const phase of ["configured", "closing"]) assert.equal(live.openBeforeLive(state(session(phase))), false, `a ${phase} session is left alone`);
+  assert.equal(live.openBeforeLive({ kind: "not_ready" }), false, "no master read, no Open");
+  assert.equal(live.openBeforeLive({ kind: "error", code: "stale_selection", message: "" }), false, "a failed read opens nothing");
+});
