@@ -2841,3 +2841,74 @@ async fn commit_refusal_keeps_offer() {
     );
     assert!(shown.contains("Ctrl-G Commit the move"), "{shown}");
 }
+
+/// Pumps the shell until its top screen is the given place. Takes the shell, the connection
+/// and the place. Returns nothing; fails with the screen shown after 30 s.
+async fn until_place(shell: &mut Shell, connection: &mut Connection, place: &Place) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while shell.place().as_ref() != Some(place) {
+        assert!(
+            Instant::now() < deadline,
+            "never opened {place:?}:\n{}",
+            render(shell, 100, 40)
+        );
+        pump(shell, connection).await;
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// A session switch the owner starts from the live master view (S2, fix/session-resume-open
+/// e4cb1277) opens that view again once the engine applied it: l there resumes the parked
+/// session from the sessions list, n there starts a new one, and each lands back on the
+/// master view on the session the engine now holds.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_session_switch_from_the_master_view_opens_the_master_view_again() {
+    let mut engine = Engine::start().await;
+    let (notes, mut shell, mut connection, first) =
+        conversation_with_a_settled_turn(&mut engine).await;
+    let master = Place::Master {
+        id: notes.clone(),
+        name: "Notes CLI".into(),
+    };
+    shell.key(Key::Esc);
+    until(&mut shell, &mut connection, |shown| {
+        shown.contains("Session  started")
+    })
+    .await;
+    shell.key(Key::Char('n'));
+    until(&mut shell, &mut connection, |shown| {
+        shown.contains("No messages yet.")
+    })
+    .await;
+    say(&mut shell, &mut connection, "Plan the second slice").await;
+    let second = settled_master(&mut engine, &notes, &mut shell, &mut connection, 1).await;
+    assert_ne!(second.session_id, first.session_id);
+
+    say(&mut shell, &mut connection, "/master").await;
+    until_place(&mut shell, &mut connection, &master).await;
+    shell.key(Key::Char('l'));
+    let shown = until(&mut shell, &mut connection, |shown| {
+        shown.contains("Sessions  2")
+    })
+    .await;
+    assert_ne!(shell.place().as_ref(), Some(&master), "{shown}");
+    let parked = shown
+        .lines()
+        .find(|line| line.contains("Parked"))
+        .unwrap_or_else(|| panic!("no parked row:\n{shown}"));
+    assert!(parked.contains("Plan the first slice"), "{shown}");
+    if !parked.contains("> Parked") {
+        shell.key(Key::Down);
+    }
+    shell.key(Key::Enter);
+    until_place(&mut shell, &mut connection, &master).await;
+    let (resumed, _) = latest_master(&mut engine, &notes).await;
+    assert_eq!(resumed.unwrap().session_id, first.session_id);
+
+    shell.key(Key::Char('n'));
+    until_place(&mut shell, &mut connection, &master).await;
+    let (fresh, _) = latest_master(&mut engine, &notes).await;
+    let fresh = fresh.unwrap();
+    assert_ne!(fresh.session_id, first.session_id);
+    assert_ne!(fresh.session_id, second.session_id);
+}

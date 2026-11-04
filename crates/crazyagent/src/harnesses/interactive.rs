@@ -51,7 +51,17 @@ const CLAUDE_TOOLS_ON: [&str; 4] = [
 ];
 const CLAUDE_TOOLS_OFF: [&str; 3] = ["--tools", "", "--disable-slash-commands"];
 const CLAUDE_TEAMMATE_MODE: [&str; 2] = ["--teammate-mode", "tmux"];
+/// Makes Claude Code 2.1.309 render its system prompt fresh on every request. Signed in, it
+/// otherwise records the prompt of a conversation's first request and sends that record on
+/// every resume, so a relaunch would run with the instructions of the session's first launch,
+/// not the ones it installed (QR2).
+const CLAUDE_PROMPT_FRESH: [&str; 2] = ["--system-prompt-snapshot", "off"];
 const CLAUDE_AGENT_TEAMS: (&str, &str) = ("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1");
+/// Gives a native-team lead, and through its teammate script every teammate, Claude Code's
+/// task list tools. Claude Code 2.1.309 offers TaskCreate, TaskGet, TaskUpdate and TaskList
+/// to a model newer than its fixed list only with this set or with `--tools` naming one, and
+/// a lead without them cannot share its team's tasks (OP-3).
+const CLAUDE_TODO_TOOLS: (&str, &str) = ("CLAUDE_CODE_ENABLE_TODO_TOOLS", "1");
 const CLAUDE_TEAMMATE_COMMAND: &str = "CLAUDE_CODE_TEAMMATE_COMMAND";
 const CLAUDE_INSTRUCTIONS_FLAG: &str = "--append-system-prompt-file";
 const CLAUDE_BARE: &str = "--bare";
@@ -487,6 +497,7 @@ fn claude(
         .to_owned(),
         session_id_checked(run.session_id)?.to_owned(),
     ];
+    arguments.extend(CLAUDE_PROMPT_FRESH.map(str::to_owned));
     match installed {
         Some(installed) => {
             for argument in installed.arguments() {
@@ -527,8 +538,9 @@ fn claude(
 }
 
 /// Builds Claude Code's own variables for one launch. A native-team lead also gets agent
-/// teams turned on and the command its teammates run. Inputs: the request, the agent home
-/// and, for a native-team lead, the teammate command path. Output: the variables.
+/// teams and the task list tools turned on and the command its teammates run. Inputs: the
+/// request, the agent home and, for a native-team lead, the teammate command path. Output:
+/// the variables.
 fn claude_environment(
     request: &LaunchRequest,
     home: &str,
@@ -559,6 +571,10 @@ fn claude_environment(
         environment.push((
             CLAUDE_AGENT_TEAMS.0.to_owned(),
             CLAUDE_AGENT_TEAMS.1.to_owned(),
+        ));
+        environment.push((
+            CLAUDE_TODO_TOOLS.0.to_owned(),
+            CLAUDE_TODO_TOOLS.1.to_owned(),
         ));
         environment.push((CLAUDE_TEAMMATE_COMMAND.to_owned(), command.to_owned()));
     }

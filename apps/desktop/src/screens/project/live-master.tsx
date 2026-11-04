@@ -6,6 +6,7 @@ import type { GraphNode, TeamStatus } from "../../engine-client";
 import { Button, Icon } from "../../ui";
 import { displayText } from "../conversation";
 import { harnessName } from "../new-project/team-editor";
+import { entry } from "../new-project/wizard";
 import { TerminalPanel } from "../team";
 import { changeNote } from "../team/controls";
 import "../team/team-graph.css";
@@ -76,12 +77,15 @@ export function wantSettled(want: Want | null, readAt: number): boolean {
 /** The project's master area. A Codex or Claude Code master is its own app in a live
  * terminal filling the area, where Enter sends and Shift+Enter starts a new line; every open
  * of the area starts it, and it stops only on the master idle stop or when the app quits.
+ * The plan's master is read through the harness catalog, so an alias such as "claude" is the
+ * same Claude Code master (OP-28), and nothing is shown before the plan and catalog are read.
  * Input: the project data. Output: the area;
  * any other master, a project without a team plan and a plan that couldn't be read keep the
  * engine-driven conversation. */
 export function MasterArea({ data }: { data: ProjectData }) {
-  if (data.setup === undefined) return <p className="pj-small pj-muted" role="status">Loading the master...</p>;
-  const harness = valueOf(data.setup)?.team.master;
+  if (data.setup === undefined || data.harnesses === undefined) return <p className="pj-small pj-muted" role="status">Loading the master...</p>;
+  const stored = valueOf(data.setup)?.team.master;
+  const harness = stored === undefined ? undefined : entry(valueOf(data.harnesses), stored)?.id ?? stored;
   if (harness === undefined || !runsLive(harness)) return <ConversationTab data={data} />;
   return <LiveMaster key={data.id} data={data} harness={harness} />;
 }

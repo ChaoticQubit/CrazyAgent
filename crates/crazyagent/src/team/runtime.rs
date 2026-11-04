@@ -96,6 +96,9 @@ enum TurnBound {
     Session(Duration),
 }
 const EMPTY_REPLY_NOTE: &str = "The master replied with no text, so no work was handed out. Send the message again, or hand a task to a sub-agent yourself.";
+/// The one turn a sub-agent gets when its task turn ended with no reply text and the
+/// project's re-ask setting is on (DEC-111): the master asks it once for its reply.
+const REASK_EMPTY: &str = "Your master got no reply text from your last turn. Reply now with a short summary of what you did for your task.";
 
 /// Bounds every team agent obeys. The task, session and sub-agent idle limits are the
 /// owner's team settings, read per project when a turn or an agent starts or an idle agent
@@ -426,6 +429,8 @@ struct Worker {
     told_finished: BTreeSet<i64>,
     parent: Option<i64>,
     ready: bool,
+    reask: Option<i64>,
+    reasked: Option<i64>,
 }
 
 impl Worker {
@@ -458,6 +463,7 @@ pub struct TeamRuntime {
     events: Option<super::master::TeamEvents>,
     watch: super::events::Watch,
     teammates_next: Option<Instant>,
+    teammate_worktree_tries: BTreeMap<i64, BTreeMap<String, u8>>,
     receipts_next: BTreeMap<ProjectId, Instant>,
     live_starts: BTreeMap<ProjectId, Vec<Instant>>,
     resuming: Option<(i64, Resume)>,
@@ -668,6 +674,7 @@ impl TeamRuntime {
             events: None,
             watch: super::events::Watch::default(),
             teammates_next: None,
+            teammate_worktree_tries: BTreeMap::new(),
             receipts_next: BTreeMap::new(),
             live_starts: BTreeMap::new(),
             resuming: None,
@@ -1035,6 +1042,8 @@ impl TeamRuntime {
             .filter(|(_, worker)| worker.role == AgentRole::Sub && !worker.stopping)
             .map(|(id, worker)| (*id, worker.project.clone()))
             .collect();
+        self.teammate_worktree_tries
+            .retain(|lead, _| harnesses.iter().any(|(agent, _)| agent == lead));
         for (agent, project) in harnesses {
             let cap = super::teammate_cap(&self.connection, &project)?;
             if let Some(cap) = cap {
@@ -1083,6 +1092,7 @@ impl TeamRuntime {
                 i64::try_from(lead.since_ms).unwrap_or(i64::MAX),
                 at,
             )?;
+            self.make_teammate_worktrees(&project, agent)?;
             for (teammate, pane) in teammates::working(&self.connection, &project, agent)? {
                 if !live.contains(&pane.as_str()) {
                     continue;
@@ -1992,6 +2002,7 @@ impl TeamRuntime {
         self.hand_leads(project, access)?;
         self.wake_for_messages(&stored, access, &asleep)?;
         self.instruction_edits(&stored, access, &paused)?;
+        self.send_reasks(&stored, access, &paused)?;
         self.dispatch(&stored, access, &paused)?;
         self.keep_warm(&stored, access, &paused)?;
         self.reap_idle(&stored)
@@ -3153,7 +3164,8 @@ impl TeamRuntime {
         Ok(())
     }
 
-    /// Answers the team calls a project's live master made since the last tick.
+    /// Answers the team calls a project's live master made since the last tick, or only the
+    /// memory calls of a master with tools running without its live terminal.
     /// Takes the setup and live access. Returns any SQLite failure.
     fn serve_live_calls(
         &mut self,
@@ -3163,10 +3175,18 @@ impl TeamRuntime {
         let Some(id) = self.master(&stored.project_id) else {
             return Ok(());
         };
-        if !self.workers[&id].live || !self.workers[&id].team_tool {
+        if !self.workers[&id].team_tool {
             return Ok(());
         }
         let mailbox = self.mailbox(id);
+        if !self.workers[&id].live {
+            return super::master::serve_memory_calls(
+                &mut self.connection,
+                &stored.project_id,
+                &mailbox,
+            )
+            .map(drop);
+        }
         let agents = self.state.join("agents");
         let answering = super::master::Answering {
             access,
@@ -3493,6 +3513,111 @@ impl TeamRuntime {
             )?;
         }
         tx.commit().map_err(error)
+    }
+
+    /// Tells whether a sub-agent's task turn that just ended is asked once more for its
+    /// reply: it ended well with no reply text, the project's re-ask setting is on and the
+    /// task has not had its re-ask yet (DEC-111). Takes the agent, its task, the turn's text
+    /// and how it ended. Returns the answer, or any SQLite failure.
+    fn reasks(&self, id: i64, task: i64, text: &str, end: TurnEnd) -> Result<bool, EngineError> {
+        let worker = &self.workers[&id];
+        if worker.role != AgentRole::Sub
+            || end != TurnEnd::Success
+            || !text.trim().is_empty()
+            || worker.reasked == Some(task)
+        {
+            return Ok(false);
+        }
+        super::reask_empty_reply(&self.connection, &worker.project)
+    }
+
+    /// Sends each of the project's sub-agents whose task turn ended with no reply text its
+    /// one re-ask turn, with the grant and turn rules a task turn gets. A sub-agent that
+    /// cannot take it finishes the task with no reply text, as with the setting off; one on
+    /// a rate-limited connection waits for it, as a task does, and a kept native lead waits
+    /// while its app runs a turn of its own, as instruction edits do (RER-L1). A kept lead
+    /// whose teammates still work is not asked or held: its task finishes as with the
+    /// setting off and it turns again when their results arrive (RER2-L1). A message on its
+    /// way to the lead does not hold the re-ask: typing that message waits for the lead to
+    /// be idle. Takes the project setup, the live model access and the paused connections.
+    /// Returns any SQLite failure.
+    fn send_reasks(
+        &mut self,
+        stored: &StoredSetup,
+        access: &ModelAccess,
+        paused: &BTreeSet<CredentialRef>,
+    ) -> Result<(), EngineError> {
+        let project = &stored.project_id;
+        let due: Vec<(i64, i64)> = self
+            .workers
+            .iter()
+            .filter(|(_, worker)| {
+                &worker.project == project
+                    && !worker.stopping
+                    && worker.own_turn.is_none()
+                    && !paused.contains(&worker.connection)
+            })
+            .filter_map(|(id, worker)| worker.reask.map(|task| (*id, task)))
+            .collect();
+        for (agent, task) in due {
+            assert_eq!(self.workers[&agent].busy, Some(Busy::Task(task)));
+            if self.workers[&agent].kept_session && self.teammates_working(agent)? {
+                self.finish_unasked(project, agent, task)?;
+                continue;
+            }
+            let handed = self.workers[&agent].kept_session && self.workers[&agent].briefed;
+            let grant = if self.workers[&agent].managed && !handed {
+                match self.grant(access, agent, project) {
+                    Ok(Some(grant)) => Some(grant),
+                    Ok(None) => continue,
+                    Err(_) => {
+                        self.finish_unasked(project, agent, task)?;
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+            let background = super::background_at_end(&self.connection, project)?;
+            let bound = turn_bound(
+                super::time_limits(&self.connection, project)?,
+                self.workers[&agent].ran(),
+            );
+            let rules = TurnRules {
+                limit: bound.map(|(limit, _)| limit),
+                background,
+            };
+            let worker = self.workers.get_mut(&agent).expect("worker exists");
+            if worker
+                .orders
+                .send(Order::Turn(REASK_EMPTY.to_owned(), grant, rules))
+                .is_err()
+            {
+                self.finish_unasked(project, agent, task)?;
+                continue;
+            }
+            worker.bound = bound.map(|(_, by)| by);
+            worker.reask = None;
+            worker.reasked = Some(task);
+        }
+        Ok(())
+    }
+
+    /// Finishes a task whose re-ask turn could not be sent, as a task turn with no reply
+    /// text finishes with the setting off: Done, its edits landed, the agent idle. Takes the
+    /// project, the agent and the task. Returns any SQLite failure.
+    fn finish_unasked(
+        &mut self,
+        project: &ProjectId,
+        agent: i64,
+        task: i64,
+    ) -> Result<(), EngineError> {
+        let worker = self.workers.get_mut(&agent).expect("worker exists");
+        worker.reask = None;
+        let busy = worker.busy.take();
+        self.finish_task(task, "", TurnEnd::Success, None)?;
+        self.land(agent, project, busy, TurnEnd::Success)?;
+        self.mark_agent(agent, AgentStatus::Idle, None)
     }
 
     fn mark_agent(
@@ -4105,6 +4230,7 @@ impl TeamRuntime {
             }
             worker.bound = bound.map(|(_, by)| by);
             worker.busy = Some(Busy::Task(task));
+            worker.reasked = None;
             worker.briefed |= worker.kept_session;
             if let Some(edit) = &edit {
                 let _ = crate::instruction_files::delivered(edit, &home);
@@ -4273,12 +4399,26 @@ impl TeamRuntime {
     /// wake turn has carried to it yet. Takes the lead. Returns the answer, or any SQLite
     /// failure.
     fn lead_waits(&self, id: i64) -> Result<bool, EngineError> {
+        if self.teammates_working(id)? {
+            return Ok(true);
+        }
+        self.connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM coord_messages WHERE to_kind='agent' AND to_agent=?1
+                           AND receipt='sent')",
+                [id],
+                |row| row.get(0),
+            )
+            .map_err(error)
+    }
+
+    /// Whether a teammate of a kept native lead is still starting or working. Takes the
+    /// lead. Returns the answer, or any SQLite failure.
+    fn teammates_working(&self, id: i64) -> Result<bool, EngineError> {
         self.connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM team_agents WHERE parent=?1 AND role='teammate'
-                                AND status IN ('starting','working'))
-                 OR EXISTS(SELECT 1 FROM coord_messages WHERE to_kind='agent' AND to_agent=?1
-                           AND receipt='sent')",
+                                AND status IN ('starting','working'))",
                 [id],
                 |row| row.get(0),
             )
@@ -4824,6 +4964,8 @@ impl TeamRuntime {
                 told_finished: BTreeSet::new(),
                 parent,
                 ready: false,
+                reask: None,
+                reasked: None,
             },
         );
         assert!(self.panes(&self.workers[&id].project) <= PANES_PER_PROJECT_MAX);
@@ -5001,6 +5143,93 @@ impl TeamRuntime {
         name
     }
 
+    /// Makes each running native teammate's own worktree in its lead's own clone (OP-9),
+    /// `.worktrees/<name>` on `<task branch>--<name>`, with git run under the lead's installed
+    /// profile, at most `TEAMMATE_WORKTREE_TRIES` times per name, then records each
+    /// teammate's worktree. Takes the project and the lead. Returns Ok, or a SQLite failure;
+    /// a worktree git could not make is left without one.
+    fn make_teammate_worktrees(
+        &mut self,
+        project: &ProjectId,
+        lead: i64,
+    ) -> Result<(), EngineError> {
+        let place: Option<(String, String, String)> = self
+            .connection
+            .query_row(
+                "SELECT repository,worktree,git_dir FROM team_worktrees WHERE agent=?1 AND project=?2",
+                params![lead, project.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(error)?;
+        let Some((repository, worktree, git_dir)) = place else {
+            return teammates::keep_worktrees(&self.connection, project, lead);
+        };
+        let (worktree, git_dir) = (PathBuf::from(worktree), PathBuf::from(git_dir));
+        if git_dir != crate::agent_git::git_dir(&worktree) {
+            return teammates::keep_worktrees(&self.connection, project, lead);
+        }
+        let made = crate::landing::teammate_worktrees(&self.connection, &worktree, &git_dir)
+            .unwrap_or_default();
+        let mut wanted = Vec::new();
+        for (teammate, _) in teammates::working(&self.connection, project, lead)? {
+            let Some(name) = teammates::name(&self.connection, teammate) else {
+                continue;
+            };
+            let tries = self.teammate_worktree_tries.entry(lead).or_default();
+            if made.contains(&name)
+                || (!tries.contains_key(&name) && tries.len() >= TEAMMATE_WORKTREE_NAMES_MAX)
+            {
+                continue;
+            }
+            let tried = tries.entry(name.clone()).or_insert(0);
+            if *tried < TEAMMATE_WORKTREE_TRIES {
+                *tried += 1;
+                wanted.push(name);
+            }
+        }
+        let sandbox = (!wanted.is_empty())
+            .then(|| Path::new(&repository).canonicalize().ok())
+            .flatten()
+            .and_then(|root| {
+                ProjectSandbox::new(
+                    &root,
+                    &agent_home(&self.state, lead),
+                    &self.agent_folder(lead).join("tmp"),
+                    SandboxNetwork::Only(Vec::new()),
+                )
+                .ok()
+            });
+        match &sandbox {
+            Some(sandbox) => {
+                let profile = agent_profile(&self.state, lead);
+                let git = crate::landing::LeadGit {
+                    sandbox,
+                    profile: &profile,
+                };
+                for name in &wanted {
+                    if let Err(problem) = crate::landing::add_teammate_worktree(
+                        &self.connection,
+                        &worktree,
+                        &git_dir,
+                        name,
+                        &git,
+                    ) {
+                        eprintln!(
+                            "teammate_worktree_failed cause={}",
+                            crate::protocol::plain_code(&problem.0)
+                        );
+                    }
+                }
+            }
+            None if !wanted.is_empty() => {
+                eprintln!("teammate_worktree_failed cause=lead_sandbox_unavailable");
+            }
+            None => {}
+        }
+        teammates::keep_worktrees(&self.connection, project, lead)
+    }
+
     /// What a harness reads about its git branch with each task (DEC-100): its task branch
     /// and, for a native lead in its own clone only (DEC-111 Q10), where its agent team's
     /// teammates work, each in `.worktrees/<name>` on `<task branch>--<name>`, merged into
@@ -5048,7 +5277,7 @@ impl TeamRuntime {
             );
         }
         format!(
-            "\nYour task branch is {branch}, checked out in your worktree: commit your work there. Each teammate of your agent team works in its own worktree and branch inside your worktree, made with git worktree add {folder}/<name> -b {branch}--<name>, and only there. Merge each finished teammate branch into {branch} before you report done; nothing under {folder} lands by itself.",
+            "\nYour task branch is {branch}, checked out in your worktree: commit your work there. Each teammate of your agent team works only in its own worktree {folder}/<name> inside your worktree, on its own branch {branch}--<name>, which CrazyAgent makes for it when it starts. Merge each finished teammate branch into {branch} before you report done; nothing under {folder} lands by itself.",
             folder = crate::agent_git::TEAMMATES_FOLDER
         )
     }
@@ -5230,7 +5459,7 @@ impl TeamRuntime {
         }
         let live = self.live_master(&stored.project_id, role, launch);
         let agent_tools = role == AgentRole::Sub && tools && self.delegation_tool.is_some();
-        if (live && tools) || agent_tools {
+        if (role == AgentRole::Master && tools) || agent_tools {
             private_directory(&tmp.join(tool::MAILBOX_FOLDER)).map_err(|e| {
                 with_code("the master's tool mailbox could not be made", Some(&e.0))
             })?;
@@ -5279,13 +5508,23 @@ impl TeamRuntime {
             .and_then(|sandbox| sandbox.allow_scratch(&scratch))
             .and_then(|sandbox| sandbox.allow_extra_reads(&extra))
             .map_err(sandboxed)?;
-        let install = executable
+        let program = executable
             .canonicalize()
-            .map_err(|e| with_code("the harness install could not be found", Some(io_code(&e))))?
+            .map_err(|e| with_code("the harness install could not be found", Some(io_code(&e))))?;
+        let install = program
             .parent()
             .map(Path::to_path_buf)
             .ok_or("harness install folder")?;
-        sandbox = sandbox.allow_read(&install).map_err(sandboxed)?;
+        sandbox = sandbox
+            .allow_read(&install)
+            .and_then(|sandbox| sandbox.allow_exec(&program))
+            .map_err(sandboxed)?;
+        if let Some(engine) = &self.delegation_tool {
+            let engine = engine
+                .verified_path()
+                .map_err(|e| with_code("the delegate engine changed", Some(&e.0)))?;
+            sandbox = sandbox.allow_engine(engine).map_err(sandboxed)?;
+        }
         (sandbox, _) = sandbox
             .allow_extra_reads(&toolchains::graphify(&homes))
             .map_err(sandboxed)?;
@@ -5618,8 +5857,11 @@ impl TeamRuntime {
                 let engine = engine
                     .verified_path()
                     .map_err(|e| with_code("the delegate engine changed", Some(&e.0)))?;
+                let off = self.off_tools(project, id, role).map_err(|e| {
+                    with_code("the team tool switches could not be read", Some(&e.0))
+                })?;
                 context
-                    .with_team_tool(engine, &self.tool_record(id))
+                    .with_team_tool(engine, &self.tool_record(id), &self.mailbox(id), &off)
                     .map_err(unread)
             }
             _ if master && !tools => context
@@ -5929,6 +6171,15 @@ impl TeamRuntime {
                 self.connection
                     .execute("UPDATE team_agents SET turns=turns+1 WHERE id=?1", [id])
                     .map_err(error)?;
+                if let Some(Busy::Task(task)) = busy
+                    && self.reasks(id, task, &text, end)?
+                {
+                    let worker = self.workers.get_mut(&id).expect("worker exists");
+                    worker.busy = Some(Busy::Task(task));
+                    worker.reask = Some(task);
+                    self.mark_agent(id, AgentStatus::Working, Some(task))?;
+                    return Ok(false);
+                }
                 match busy {
                     Some(busy) if held && end != TurnEnd::Success => self.release(id, busy)?,
                     Some(Busy::Task(task)) => {
@@ -7692,6 +7943,12 @@ const OWNER_WOKE: &str = "The owner woke it again in its own worktree. It is idl
 const OWNER_STOPPED_AGENT: &str = "The owner stopped it and its teammates. Its task waits for it until the owner starts it again; do not hand that work to another agent.";
 /// The most teammate rows one harness keeps: its running teammates and the newest ended ones.
 const TEAMMATE_ROWS_KEPT: i64 = 32;
+/// The most times the engine runs git to make one native teammate's worktree (OP-9), so a
+/// worktree git refuses never costs a git run on every pass.
+const TEAMMATE_WORKTREE_TRIES: u8 = 3;
+/// The most teammate names of one lead whose worktree tries the engine counts.
+const TEAMMATE_WORKTREE_NAMES_MAX: usize = 64;
+const _: () = assert!(TEAMMATE_WORKTREE_NAMES_MAX >= TEAMMATE_ROWS_KEPT as usize);
 const _: () = assert!(TEAMMATE_ROWS_KEPT as usize >= super::TEAMMATES_SHOWN_MAX);
 /// The most owner-stopped native teammates one tick ends, so a long list never stalls it.
 const UNMANAGED_STOPS_PER_TICK_MAX: usize = 16;
@@ -8729,6 +8986,9 @@ mod live_claude_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "runtime/live_codex_tests.rs"]
 mod live_codex_tests;
+#[cfg(all(test, target_os = "macos"))]
+#[path = "runtime/live_failover_tests.rs"]
+mod live_failover_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "runtime/live_native_lead_tests.rs"]
 mod live_native_lead_tests;

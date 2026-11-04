@@ -19,7 +19,7 @@ fn call_line(id: u64, arguments: Value) -> Value {
 
 fn served(input: Cursor<Vec<u8>>, drop: &Path) -> Vec<Value> {
     let mut output = Vec::new();
-    serve(input, &mut output, drop).unwrap();
+    serve(input, &mut output, drop, None, &[]).unwrap();
     output
         .split(|byte| *byte == b'\n')
         .filter(|line| !line.is_empty())
@@ -300,7 +300,9 @@ fn the_server_needs_an_absolute_drop_file() {
         serve(
             Cursor::new(Vec::new()),
             &mut output,
-            Path::new("relative.jsonl")
+            Path::new("relative.jsonl"),
+            None,
+            &[]
         )
         .is_err()
     );

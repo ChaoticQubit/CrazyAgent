@@ -473,8 +473,9 @@ fn question_lines(
     let theme = &ctx.theme;
     let mark = if picked { "> " } else { "  " };
     let head = format!(
-        "{mark}{}  {}",
+        "{mark}{}  For: {}  {}",
         super::plain(&question.label),
+        super::plain(&question.for_label),
         urgency(question.severity)
     );
     let role = match (picked, question.severity) {

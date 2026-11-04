@@ -548,10 +548,8 @@ fn guard(folder: &Mailbox, who: &Identity, input: &Value) -> Option<String> {
             let own = resolved(&root.join(crate::agent_git::TEAMMATES_FOLDER).join(name));
             if !target.starts_with(&own) {
                 return Some(format!(
-                    "CrazyAgent: you are teammate {name}. Edit files only inside your own worktree {own}. If it does not exist yet, run `git worktree add {folder}/{name} -b <task branch>--{name}` in {root} first, then work there.",
+                    "CrazyAgent: you are teammate {name}. Edit files only inside your own worktree {own}, on your own branch <task branch>--{name}, which CrazyAgent makes for you when you start. If it does not exist yet, wait a few seconds and try again; do not make it yourself.",
                     own = own.display(),
-                    folder = crate::agent_git::TEAMMATES_FOLDER,
-                    root = root.display(),
                 ));
             }
             own

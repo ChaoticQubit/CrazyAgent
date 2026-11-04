@@ -1,13 +1,11 @@
-use super::managed_agent::{AGENT, ManagedAgent, NativeTeam, SignedIn, claude};
+use super::managed_agent::{AGENT, ManagedAgent, NativeTeam, SignedIn, claude, shown};
 use super::{Order, Report, TurnEnd, TurnRules};
 use crate::sandbox::policy::AgentAccess;
-use crate::team::AgentRole;
-use crate::terminal::tmux::{Tmux, installed};
-use crate::terminal::{AgentId, FOLDER, Host, harness_socket, teammates_socket};
+use crate::terminal::tmux::installed;
+use crate::terminal::{AgentId, harness_socket, teammates_socket};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -22,31 +20,18 @@ const TEAM_TURN: Duration = Duration::from_secs(420);
 const POLL: Duration = Duration::from_millis(250);
 const GRACE: Duration = Duration::from_secs(30);
 
-/// A real Claude Code lead prepared by the team runtime on the owner's signed-in account,
-/// in a pane of a tmux host of its own test folder. Output: the lead and the folder.
-fn native_lead() -> (ManagedAgent, tempfile::TempDir) {
-    let root = tempfile::Builder::new()
-        .prefix("ca-live-lead-")
-        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
-        .unwrap();
-    let base = root.path().canonicalize().unwrap();
-    let tmux = installed(&base).expect("BLOCKED: tmux must be installed");
-    let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &base.join(FOLDER)));
-    let lead = ManagedAgent::in_pane("claude-code", &claude(), host, AgentRole::Sub);
-    (lead, root)
-}
-
-/// The same lead started as a real worker of its team runtime at `access`, with its first
-/// turn granted on the owner's account, as the runtime's first dispatch to it does.
-/// Inputs: the held account, the launch's name and the saved level. Output: the team and
-/// the first turn's reports, the finished turn last.
+/// A real Claude Code lead the team runtime plans and starts as a native-mode lead on the
+/// owner's signed-in account, on the engine's own terminal host, started as a real worker of
+/// its team runtime at `access` with its first turn granted, as the runtime's first dispatch
+/// to it does. Inputs: the held account, the launch's name and the saved level. Output: the
+/// team and the first turn's reports, the finished turn last.
 fn native_worker(
     signed_in: &mut SignedIn,
     launch: &str,
     access: AgentAccess,
 ) -> (NativeTeam, Vec<Report>) {
-    let (lead, root) = native_lead();
-    let team = lead.into_native_worker(signed_in.acquire(launch), ONE, TURN, access, Some(root));
+    let lead = ManagedAgent::engine_native_lead(&claude());
+    let team = lead.into_native_worker(signed_in.acquire(launch), ONE, TURN, access);
     let first = team.until_finished(TURN);
     (team, first)
 }
@@ -87,7 +72,7 @@ fn finished(reports: &[Report]) -> Vec<(String, TurnEnd, Option<String>)> {
 #[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
 fn live_native_lead_managed_keeps_one_session() {
     let mut signed_in = SignedIn::claude();
-    let (mut lead, _root) = native_lead();
+    let mut lead = ManagedAgent::engine_native_lead(&claude());
     let profile = signed_in.acquire("claude-live-native-lead");
     let (reports, problem) = lead.run_native_lead(
         profile,
@@ -129,7 +114,7 @@ fn live_native_lead_managed_keeps_one_session() {
 #[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
 fn live_native_lead_managed_adopted_gets_credential() {
     let mut signed_in = SignedIn::claude();
-    let (mut lead, _root) = native_lead();
+    let mut lead = ManagedAgent::engine_native_lead(&claude());
     let (reports, problem) = lead.run_native_lead(
         signed_in.acquire("claude-live-native-left"),
         &["Reply with exactly the word ONE and nothing else."],
@@ -364,17 +349,18 @@ impl LeadServers {
         )
     }
 
-    /// Reads one teammate pane's screen and recent history as the lead's own tmux client
-    /// does: inside the lead's installed profile, on the teammates' server its `TMUX`
-    /// names. Input: the pane. Output: the text, empty when the read was refused.
-    fn read_as_lead(&self, pane: &str) -> String {
+    /// Reads one pane's screen and recent history as the lead's own tmux client does:
+    /// inside the lead's installed profile, on the lead's own server or the teammates' one
+    /// its `TMUX` names. Inputs: the server's socket and the pane. Output: the text, empty
+    /// when the read was refused.
+    fn read_as_lead(&self, socket: &Path, pane: &str) -> String {
         crate::spawn_gate::output(
             Command::new(crate::sandbox::SANDBOX_EXEC)
                 .arg("-f")
                 .arg(&self.profile)
                 .arg(&self.tmux)
                 .arg("-S")
-                .arg(&self.mates)
+                .arg(socket)
                 .args(["capture-pane", "-p", "-J", "-S", "-200", "-t", pane])
                 .env_clear()
                 .stdin(Stdio::null())
@@ -385,6 +371,25 @@ impl LeadServers {
         .filter(|output| output.status.success())
         .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
         .unwrap_or_default()
+    }
+
+    /// Every pane of both servers with its text as the lead's client reads it, so a failed
+    /// wait shows what the lead and its teammates had on screen. Output: each server's
+    /// socket, pane and text.
+    fn screens(&self) -> Vec<(PathBuf, String, String)> {
+        [&self.own, &self.mates]
+            .into_iter()
+            .flat_map(|socket| {
+                self.panes(socket)
+                    .unwrap_or_default()
+                    .into_keys()
+                    .map(|pane| {
+                        let text = self.read_as_lead(socket, &pane);
+                        (socket.clone(), pane, text)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
 
     /// Polls both servers until `wait` passed, or `done` is set and either the lead's client
@@ -404,7 +409,7 @@ impl LeadServers {
                 (Some(own), Some(mates)) => {
                     seen.own.extend(own.into_keys());
                     for (pane, window) in mates {
-                        if pane != anchor && self.read_as_lead(&pane).contains(token) {
+                        if pane != anchor && self.read_as_lead(&self.mates, &pane).contains(token) {
                             seen.read.insert(pane.clone());
                         }
                         seen.mates.insert(pane, window);
@@ -486,7 +491,6 @@ fn live_native_lead_splits_teammates_into_mates_server() {
         &team_prompt(&token),
         TEAM_TURN,
         AgentAccess::Sandboxed,
-        None,
     );
     let started = team.reports_until(TEAM_TURN, |report| matches!(report, Report::Ready { .. }));
     assert_eq!(
@@ -501,9 +505,9 @@ fn live_native_lead_splits_teammates_into_mates_server() {
         .panes(&servers.mates)
         .expect("the teammates' server answers");
     assert_eq!(
-        own.len(),
-        1,
-        "the lead's own server holds only the lead: {own:?}"
+        (own.len(), own.values().collect::<BTreeSet<_>>().len()),
+        (2, 2),
+        "the lead's own server holds only its holder window and the lead's, one pane each: {own:?}"
     );
     assert_eq!(
         mates.len(),
@@ -578,7 +582,6 @@ fn live_a_teammate_cannot_plant_a_command_in_its_lead_s_shell_snapshot() {
         BASH_ONE,
         TURN,
         AgentAccess::Sandboxed,
-        None,
     );
     let first = finished(&team.until_finished(TURN));
     assert!(answered(&first, "ONE"), "{first:?}");
@@ -677,6 +680,58 @@ fn files_under(root: &Path, depth: usize) -> Vec<PathBuf> {
     found
 }
 
+/// The team tool uses Claude Code transcripts record and the result each got: every
+/// `TeamCreate`, `Agent` and `SendMessage` call with its input, then its tool result, each
+/// cut to `SHOWN_MAX` characters, so a failed wait shows whether a lead tried to start a
+/// teammate and what Claude Code answered. Input: the files. Output: one line per use or
+/// result, in file order.
+fn team_calls(files: &[PathBuf]) -> Vec<String> {
+    const SHOWN_MAX: usize = 400;
+    const TEAM_TOOLS: [&str; 3] = ["TeamCreate", "Agent", "SendMessage"];
+    let cut = |text: String| text.chars().take(SHOWN_MAX).collect::<String>();
+    let mut uses = BTreeSet::new();
+    let mut lines = Vec::new();
+    for text in files
+        .iter()
+        .filter(|file| {
+            file.extension()
+                .is_some_and(|extension| extension == "jsonl")
+        })
+        .filter_map(|file| std::fs::read_to_string(file).ok())
+    {
+        for line in text.lines() {
+            let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let blocks = entry
+                .pointer("/message/content")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            for block in blocks {
+                let field = |name: &str| block.get(name).cloned().unwrap_or_default();
+                match (field("type").as_str(), field("name").as_str()) {
+                    (Some("tool_use"), Some(name)) if TEAM_TOOLS.contains(&name) => {
+                        uses.insert(field("id").to_string());
+                        lines.push(format!("use {name} {}", cut(field("input").to_string())));
+                    }
+                    (Some("tool_result"), _)
+                        if uses.contains(&field("tool_use_id").to_string()) =>
+                    {
+                        lines.push(format!(
+                            "result error={} {}",
+                            field("is_error"),
+                            cut(field("content").to_string())
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    lines
+}
+
 /// The files of `files` whose text holds `word`. Inputs: the files and the word. Output:
 /// the matching files.
 fn holding(files: &[PathBuf], word: &str) -> Vec<PathBuf> {
@@ -685,6 +740,83 @@ fn holding(files: &[PathBuf], word: &str) -> Vec<PathBuf> {
         .filter(|file| std::fs::read_to_string(file).is_ok_and(|text| text.contains(word)))
         .cloned()
         .collect()
+}
+
+/// Tells whether one line of the files holds every one of `words`, such as a teammate
+/// message Claude Code recorded in a transcript together with its text. Inputs: the files
+/// and the words. Output: the answer.
+fn line_holding(files: &[PathBuf], words: &[&str]) -> bool {
+    files
+        .iter()
+        .filter_map(|file| std::fs::read_to_string(file).ok())
+        .any(|text| {
+            text.lines()
+                .any(|line| words.iter().all(|word| line.contains(word)))
+        })
+}
+
+/// The texts of the tool results that are not errors, for every `tool` call in a Claude Code
+/// transcript among the files whose input holds every one of `words`. Inputs: the files, the
+/// tool name and the words. Output: the result texts, in file order.
+fn succeeded(files: &[PathBuf], tool: &str, words: &[&str]) -> Vec<String> {
+    let mut calls = BTreeSet::new();
+    let mut results = Vec::new();
+    for text in files
+        .iter()
+        .filter(|file| {
+            file.extension()
+                .is_some_and(|extension| extension == "jsonl")
+        })
+        .filter_map(|file| std::fs::read_to_string(file).ok())
+    {
+        for line in text.lines() {
+            let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let blocks = entry
+                .pointer("/message/content")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            for block in blocks {
+                let field = |name: &str| block.get(name).cloned().unwrap_or_default();
+                match field("type").as_str() {
+                    Some("tool_use") if field("name").as_str() == Some(tool) => {
+                        let input = field("input").to_string();
+                        if words.iter().all(|word| input.contains(word)) {
+                            calls.insert(field("id").to_string());
+                        }
+                    }
+                    Some("tool_result")
+                        if calls.contains(&field("tool_use_id").to_string())
+                            && field("is_error") != serde_json::Value::Bool(true) =>
+                    {
+                        results.push(match field("content") {
+                            serde_json::Value::String(text) => text,
+                            serde_json::Value::Array(parts) => parts
+                                .iter()
+                                .filter_map(|part| part.get("text")?.as_str())
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                            other => other.to_string(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    results
+}
+
+/// The id Claude Code 2.1.309 gave the task one of `results` reports, from its TaskCreate
+/// result `Task #<id> created successfully: <subject>`. Input: the TaskCreate result texts.
+/// Output: the first id, or none.
+fn created_task(results: &[String]) -> Option<String> {
+    results.iter().find_map(|text| {
+        let (id, rest) = text.strip_prefix("Task #")?.split_once(' ')?;
+        (!id.is_empty() && rest.starts_with("created successfully")).then(|| id.to_owned())
+    })
 }
 
 /// The lead's name in its Claude Code team, which names its inbox `inboxes/team-lead.json`.
@@ -729,12 +861,17 @@ fn own_home_prompt(token: &str) -> String {
 /// lead only through the team folders the lead shares. A real Claude Code lead, started by
 /// the runtime on the owner's account, makes a task, creates one teammate, messages it and
 /// waits for its answer. Checked: the teammate starts signed in and answers, past every
-/// first-run, trust and sign-in screen (1); its answer to the lead's message lands in the
-/// lead's own inbox through the linked `teams/`, a file only a teammate writes that answer to
-/// (2); it, not the lead, completes the lead's task in the linked `tasks/`, so the task's
-/// owner is the teammate (3); its transcript sits in the mates home, where the engine's
-/// record walk, which usage and the relay's read receipts use, finds it (4); and Seatbelt
-/// denied nothing at or under the lead's `teams` or `tasks` folders during the run (5).
+/// first-run, trust and sign-in screen (1); its answer to the lead's message reaches the lead
+/// through the lead's own inbox in the linked `teams/`: that inbox file exists and the lead's
+/// transcript records the answer as a teammate message, which tmux teammates deliver only
+/// through it (2); it, not the lead, completes the task the lead made in its own `tasks/`, so
+/// the teammate's own update completing the id the lead's TaskCreate reported succeeds
+/// through the linked folder (3). Claude Code
+/// 2.1.309 deletes delivered inbox entries and, once every task is completed, the task files,
+/// so (2) and (3) read the transcripts, not those files. The teammate's transcript sits in
+/// the mates home, where the engine's record walk, which usage and the relay's read receipts
+/// use, finds it (4); and Seatbelt denied nothing at or under the lead's `teams` or `tasks`
+/// folders during the run (5).
 #[test]
 #[ignore = "live qualification: needs a signed-in Claude account, CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
 fn live_native_teammates_work_from_their_own_home_through_the_lead_s_team_folders() {
@@ -750,6 +887,13 @@ fn live_native_teammates_work_from_their_own_home_through_the_lead_s_team_folder
     .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
     .unwrap();
     let lead = ManagedAgent::engine_native_lead(&claude());
+    let name = AgentId::team(AGENT).unwrap();
+    let servers = LeadServers {
+        tmux: installed(&lead.base).expect("BLOCKED: tmux must be installed"),
+        own: harness_socket(&lead.base, &name).unwrap(),
+        mates: teammates_socket(&lead.base, &name).unwrap(),
+        profile: lead.sandbox_profile.clone(),
+    };
     let token = format!(
         "OWNHOME{:x}",
         SystemTime::now()
@@ -763,14 +907,31 @@ fn live_native_teammates_work_from_their_own_home_through_the_lead_s_team_folder
         &own_home_prompt(&token),
         TEAM_TURN,
         AgentAccess::Sandboxed,
-        None,
     );
-    let reports = team.reports_until(TEAM_TURN, |report| token_turn(report, &answer).is_some());
+    let mates = crate::launch_context::mates_home(&team.home);
+    let reports = team
+        .reports_within(TEAM_TURN, |report| token_turn(report, &answer).is_some())
+        .unwrap_or_else(|(why, seen)| {
+            for (socket, pane, text) in servers.screens() {
+                println!("screen {} {pane}:\n{text}", socket.display());
+            }
+            println!(
+                "mates transcripts={:?} shared={:?} tasks={:?}",
+                files_under(&mates.join("projects"), 3),
+                files_under(&team.home.join("teams"), 3),
+                files_under(&team.home.join("tasks"), 2)
+            );
+            println!(
+                "lead team calls={:?} teammate team calls={:?}",
+                team_calls(&files_under(&team.home.join("projects"), 3)),
+                team_calls(&files_under(&mates.join("projects"), 3))
+            );
+            panic!("{why}, after {} others: {:?}", seen.len(), shown(&seen))
+        });
     let (end, text) = reports
         .last()
         .and_then(|report| token_turn(report, &answer))
         .expect("the wait ends on the lead's turn holding the teammate's answer");
-    let mates = crate::launch_context::mates_home(&team.home);
     let transcripts = files_under(&mates.join("projects"), 3);
     let shared = files_under(&team.home.join("teams"), 3);
     let tasks = files_under(&team.home.join("tasks"), 2);
@@ -811,20 +972,24 @@ fn live_native_teammates_work_from_their_own_home_through_the_lead_s_team_folder
         .cloned()
         .collect();
     let mates_names = teammate_names(&shared);
-    let completed_by_teammate = holding(&tasks, &format!("{token}TASK")).iter().any(|file| {
-        std::fs::read(file)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-            .is_some_and(|task| {
-                task.get("status").and_then(serde_json::Value::as_str) == Some("completed")
-                    && task
-                        .get("owner")
-                        .and_then(serde_json::Value::as_str)
-                        .is_some_and(|owner| mates_names.contains(owner))
-            })
-    });
+    let lead_transcripts = files_under(&team.home.join("projects"), 3);
+    let task = format!("{token}TASK");
+    let made = created_task(&succeeded(
+        &lead_transcripts,
+        "TaskCreate",
+        &[task.as_str()],
+    ));
+    let bound = made.as_deref().map(|id| format!(r#""taskId":"{id}""#));
+    let completing = |files: &[PathBuf]| {
+        bound.as_deref().is_some_and(|id| {
+            !succeeded(files, "TaskUpdate", &[id, r#""status":"completed""#]).is_empty()
+        })
+    };
+    let completed_by_teammate = completing(&transcripts);
+    let completed_by_lead = completing(&lead_transcripts);
+    let delivered = line_holding(&lead_transcripts, &["teammate-message", answer.as_str()]);
     println!(
-        "real claude native team in its own home: end={end:?} text={text:?} transcripts={transcripts:?} shared={shared:?} lead_inboxes={lead_inboxes:?} teammates={mates_names:?} tasks={tasks:?} walked={walked:?} denied={denied:?} log_exit={:?} turns={:?}",
+        "real claude native team in its own home: end={end:?} text={text:?} transcripts={transcripts:?} lead_transcripts={lead_transcripts:?} shared={shared:?} lead_inboxes={lead_inboxes:?} delivered={delivered} teammates={mates_names:?} tasks={tasks:?} made={made:?} completed_by_teammate={completed_by_teammate} completed_by_lead={completed_by_lead} walked={walked:?} denied={denied:?} log_exit={:?} turns={:?}",
         denials.status.code(),
         finished(&reports)
     );
@@ -840,16 +1005,16 @@ fn live_native_teammates_work_from_their_own_home_through_the_lead_s_team_folder
         "the teammate's own transcript holds no answer to the lead's message"
     );
     assert!(
-        !holding(&lead_inboxes, &answer).is_empty(),
-        "the teammate's answer did not reach the lead's own inbox in the lead's teams folder: {lead_inboxes:?} {shared:?}"
+        !lead_inboxes.is_empty() && delivered,
+        "the teammate's answer did not reach the lead through the lead's own inbox in the lead's teams folder: inboxes {lead_inboxes:?} delivered {delivered} {shared:?}"
     );
     assert!(
         !mates_names.is_empty(),
         "the lead's team config names no teammate: {shared:?}"
     );
     assert!(
-        completed_by_teammate,
-        "the lead's task was not completed by its teammate in the lead's own tasks folder: teammates={mates_names:?} tasks={tasks:?}"
+        made.is_some() && completed_by_teammate && !completed_by_lead,
+        "the task the lead made was not completed by its teammate through the lead's own tasks folder: made {made:?} by teammate {completed_by_teammate} by lead {completed_by_lead} tasks={tasks:?}"
     );
     assert!(
         walked

@@ -1,4 +1,6 @@
-use super::flow::{check_places, hold, now_ms, pending_ref, set_engine_ref, shared, tip};
+use super::flow::{
+    check_places, clone_branch, hold, now_ms, pending_ref, set_engine_ref, shared, tip,
+};
 use super::git::{failure, object_id};
 use super::{ChangeState, LeadGit, MergeOutcome, clone, store};
 use crate::agent_git::{self, Layout};
@@ -694,6 +696,66 @@ pub(super) fn merge(
         .collect();
     assert!(files.len() <= CONFLICTS_SHOWN_MAX);
     Ok(MergeOutcome::Conflict { branch, files })
+}
+
+/// Makes one native teammate's worktree in its lead's own clone, as
+/// [`super::add_teammate_worktree`] says: nothing runs when the clone already records it on
+/// the teammate's branch, and the record is read again after git. Inputs: the store, the
+/// lead's worktree and git folder, the teammate's name and the lead's git. Output: Ok, or
+/// a `changes_*` refusal.
+pub(super) fn add_teammate(
+    db: &Connection,
+    worktree: &Path,
+    git_dir: &Path,
+    name: &str,
+    git: &LeadGit<'_>,
+) -> Result<(), EngineError> {
+    let invalid = || failure("changes_workspace_invalid");
+    if git_dir != agent_git::git_dir(worktree) {
+        return Err(failure("changes_lead_not_own_clone"));
+    }
+    if !agent_git::worktree_name_valid(name) {
+        return Err(invalid());
+    }
+    let task = clone_branch(db, worktree)?;
+    let branch = agent_git::teammate_branch(&task, name).ok_or_else(invalid)?;
+    let on_branch = || -> Result<bool, EngineError> {
+        Ok(clone::teammates(worktree, &task)?.iter().any(|teammate| {
+            teammate.folder.file_name() == Some(std::ffi::OsStr::new(name))
+                && teammate.head == clone::TeammateHead::Branch(branch.clone())
+        }))
+    };
+    if on_branch()? {
+        return Ok(());
+    }
+    let run = |arguments: &[&str]| -> Result<AgentGit, EngineError> {
+        crate::research::runner::agent_git(
+            git.sandbox,
+            git.profile,
+            worktree,
+            arguments,
+            &[],
+            ID_BYTES_MAX,
+        )
+        .map_err(|_| failure("changes_git_failed"))
+    };
+    let folder = format!("{}/{name}", agent_git::TEAMMATES_FOLDER);
+    let held = run(&[
+        "rev-parse",
+        "-q",
+        "--verify",
+        "--end-of-options",
+        &format!("refs/heads/{branch}^{{commit}}"),
+    ])?;
+    let added = match held.code {
+        Some(0) => run(&["worktree", "add", "-q", &folder, &branch])?,
+        Some(1) => run(&["worktree", "add", "-q", "-b", &branch, &folder, "HEAD"])?,
+        _ => return Err(failure("changes_git_failed")),
+    };
+    if added.code != Some(0) || !on_branch()? {
+        return Err(failure("changes_git_failed"));
+    }
+    Ok(())
 }
 
 /// Closes a sub-agent's open change set once its lead merged the work it holds, as

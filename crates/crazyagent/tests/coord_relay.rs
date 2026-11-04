@@ -365,6 +365,10 @@ fn a_teammate_edit_outside_its_own_worktree_is_denied_whatever_the_path_says() {
             "{}: {reason}",
             outside.display()
         );
+        assert!(
+            reason.ends_with(", on your own branch <task branch>--greet, which CrazyAgent makes for you when you start. If it does not exist yet, wait a few seconds and try again; do not make it yourself."),
+            "OP-9: the engine makes a teammate's worktree: {reason}"
+        );
     }
     let notebook = team.hook(
         "edit",
@@ -388,93 +392,203 @@ fn a_teammate_edit_outside_its_own_worktree_is_denied_whatever_the_path_says() {
     );
 }
 
-#[test]
-fn under_overlaps_block_an_edit_on_another_agents_claim_is_denied_once_the_engine_answers() {
-    let team = Team::new();
-    let repo = team.root.join("repo");
-    std::fs::create_dir_all(repo.join("src")).unwrap();
-    let db = Connection::open(team.root.join("engine.db")).unwrap();
-    db.execute_batch("CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, body TEXT NOT NULL); INSERT INTO projects VALUES ('alpha','{}');")
-        .unwrap();
-    crazyagent::team::initialize(&db).unwrap();
-    crazyagent::project_setup::initialize(&db).unwrap();
-    crazyagent::coord::ensure(&db).unwrap();
-    let project = ProjectId::new("alpha").unwrap();
-    let agent = || {
+/// A project `alpha` set to Overlaps Block in the team's real engine database, with a lead
+/// agent working in `repo` and another agent holding a claim on `src/a.rs`.
+struct Claimed {
+    db: Connection,
+    project: ProjectId,
+    lead: i64,
+    other: i64,
+    repo: PathBuf,
+    home: PathBuf,
+}
+
+impl Claimed {
+    /// Opens the team's engine database with the claim and serves the lead's relay once.
+    /// Input: the team. Output: the claim.
+    fn new(team: &Team) -> Self {
+        let repo = team.root.join("repo");
+        std::fs::create_dir_all(repo.join("src")).unwrap();
+        let db = Connection::open(team.root.join("engine.db")).unwrap();
+        db.execute_batch("CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, body TEXT NOT NULL); INSERT INTO projects VALUES ('alpha','{}');")
+            .unwrap();
+        crazyagent::team::initialize(&db).unwrap();
+        crazyagent::project_setup::initialize(&db).unwrap();
+        crazyagent::coord::ensure(&db).unwrap();
+        let project = ProjectId::new("alpha").unwrap();
+        let agent = || {
+            db.execute(
+                "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms)
+                 VALUES ('alpha','sub_agent','claude-code',1,'working',0,0)",
+                [],
+            )
+            .unwrap();
+            db.last_insert_rowid()
+        };
+        let lead = agent();
+        let other = agent();
         db.execute(
-            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms)
-             VALUES ('alpha','sub_agent','claude-code',1,'working',0,0)",
-            [],
+            "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir)
+             VALUES (?1,'alpha',?2,?2,?3)",
+            params![
+                lead,
+                repo.to_str().unwrap(),
+                repo.join(".git").to_str().unwrap()
+            ],
         )
         .unwrap();
-        db.last_insert_rowid()
-    };
-    let lead = agent();
-    let other = agent();
-    db.execute(
-        "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir)
-         VALUES (?1,'alpha',?2,?2,?3)",
-        params![
+        crazyagent::coord::settings::write(
+            &db,
+            &project,
+            &CoordSettings {
+                overlaps: Overlaps::Block,
+                ..CoordSettings::default()
+            },
+        )
+        .unwrap();
+        crazyagent::coord::start_work(
+            &db,
+            &project,
+            other,
+            "Parser".to_owned(),
+            vec!["src/a.rs".to_owned()],
+            now_ms(),
+        )
+        .unwrap();
+        let home = team.root.join("agent-1").join("home");
+        std::fs::create_dir_all(&home).unwrap();
+        let claimed = Self {
+            db,
+            project,
             lead,
-            repo.to_str().unwrap(),
-            repo.join(".git").to_str().unwrap()
-        ],
-    )
-    .unwrap();
-    crazyagent::coord::settings::write(
-        &db,
-        &project,
-        &CoordSettings {
-            overlaps: Overlaps::Block,
-            ..CoordSettings::default()
-        },
-    )
-    .unwrap();
-    crazyagent::coord::start_work(
-        &db,
-        &project,
-        other,
-        "Parser".to_owned(),
-        vec!["src/a.rs".to_owned()],
-        now_ms(),
-    )
-    .unwrap();
-    let home = team.root.join("agent-1").join("home");
-    std::fs::create_dir_all(&home).unwrap();
-    let serve = || {
-        crazyagent::coord::relay::serve(&db, &project, lead, &home, &team.mailbox, false, now_ms())
-            .unwrap()
-    };
-    serve();
-    let answered = |path: PathBuf| {
-        let mut child = team.start_hook("edit", None, edit(LEAD_SESSION, &path));
+            other,
+            repo,
+            home,
+        };
+        claimed.serve(team);
+        claimed
+    }
+
+    fn serve(&self, team: &Team) {
+        crazyagent::coord::relay::serve(
+            &self.db,
+            &self.project,
+            self.lead,
+            &self.home,
+            &team.mailbox,
+            false,
+            now_ms(),
+        )
+        .unwrap();
+    }
+
+    /// Waits for one edit hook run, serving the lead's relay so the engine answers it, and
+    /// returns its output. Inputs: the team and the started hook. Output: what it printed.
+    fn answered(&self, team: &Team, mut child: PaneRun) -> String {
         let started = Instant::now();
         while child.try_wait().unwrap().is_none() {
             assert!(
                 started.elapsed() < Duration::from_secs(5),
                 "the engine answered in time"
             );
-            serve();
+            self.serve(team);
             std::thread::sleep(Duration::from_millis(50));
         }
         finished(child)
-    };
+    }
 
-    let reason = denial(&answered(repo.join("src").join("a.rs")));
-    let holder = crazyagent::team::events::label(&db, other).unwrap();
-    assert_eq!(
-        reason,
-        format!(
-            "CrazyAgent: src/a.rs is claimed by {holder} (src/a.rs). Overlapping edits are set to Block in this project: message the holder with update_work, or start_work on other files."
-        )
-    );
-    assert_eq!(answered(repo.join("src").join("b.rs")), "");
-    let left: Vec<String> = std::fs::read_dir(&team.mailbox)
-        .unwrap()
-        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
-        .filter(|name| name.ends_with(".ask") || name.ends_with(".answer"))
-        .collect();
-    assert!(left.is_empty(), "{left:?}");
+    /// Checks the hook's answers to an edit of the claimed file and of a free one, and that
+    /// no question is left in the mailbox. Inputs: the team and how to start an edit hook.
+    fn denies_only_the_claimed_file(&self, team: &Team, start: impl Fn(&Path) -> PaneRun) {
+        let reason = denial(&self.answered(team, start(&self.repo.join("src").join("a.rs"))));
+        let holder = crazyagent::team::events::label(&self.db, self.other).unwrap();
+        assert_eq!(
+            reason,
+            format!(
+                "CrazyAgent: src/a.rs is claimed by {holder} (src/a.rs). Overlapping edits are set to Block in this project: message the holder with update_work, or start_work on other files."
+            )
+        );
+        assert_eq!(
+            self.answered(team, start(&self.repo.join("src").join("b.rs"))),
+            ""
+        );
+        let left: Vec<String> = std::fs::read_dir(&team.mailbox)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .filter(|name| name.ends_with(".ask") || name.ends_with(".answer"))
+            .collect();
+        assert!(left.is_empty(), "{left:?}");
+    }
+}
+
+#[test]
+fn under_overlaps_block_an_edit_on_another_agents_claim_is_denied_once_the_engine_answers() {
+    let team = Team::new();
+    let claimed = Claimed::new(&team);
+    claimed.denies_only_the_claimed_file(&team, |path| {
+        team.start_hook("edit", None, edit(LEAD_SESSION, path))
+    });
+}
+
+/// The Block edit hook still blocks when the engine runs from an app bundle, as the macOS
+/// service runs it from `CrazyAgent.app/Contents/MacOS`, and the hook runs under the agent's
+/// Seatbelt profile with the engine granted as the team runtime grants it, so a denied
+/// start cannot let the edit through (OP24R2-1).
+#[cfg(target_os = "macos")]
+#[test]
+fn under_overlaps_block_the_edit_hook_still_denies_from_an_engine_in_an_app_bundle_under_the_profile()
+ {
+    use crazyagent::sandbox::{ProjectSandbox, SANDBOX_EXEC, SandboxNetwork};
+    let team = Team::new();
+    let claimed = Claimed::new(&team);
+    let folder = team
+        .root
+        .join("CrazyAgent.app")
+        .join("Contents")
+        .join("MacOS");
+    std::fs::create_dir_all(&folder).unwrap();
+    let engine = folder.join("crazyagent");
+    std::fs::copy(env!("CARGO_BIN_EXE_crazyagent"), &engine).unwrap();
+    let socket = crazyagent::team::caller::socket_for_mailbox(&team.mailbox).unwrap();
+    let sandbox = ProjectSandbox::new(
+        &claimed.repo,
+        &claimed.home,
+        team.mailbox.parent().unwrap(),
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_read(&team.config)
+    .unwrap()
+    .reach_unix_socket(&socket)
+    .unwrap()
+    .allow_engine(&engine)
+    .unwrap();
+    let profiles = team.root.join("profiles");
+    std::fs::create_dir(&profiles).unwrap();
+    let profile = profiles.join("agent.sb");
+    sandbox.install(&profile).unwrap();
+    claimed.denies_only_the_claimed_file(&team, |path| {
+        let mut command = Command::new(SANDBOX_EXEC);
+        command
+            .arg("-f")
+            .arg(&profile)
+            .arg(&engine)
+            .args(["coord-hook", "edit"])
+            .arg(&team.mailbox)
+            .current_dir(&claimed.repo)
+            .env("CLAUDE_CONFIG_DIR", &team.config)
+            .env("HOME", &claimed.home)
+            .env_remove("CLAUDE_PROJECT_DIR")
+            .env_remove("TMUX_PANE");
+        let mut child = team.callers.run(LEAD_PANE, &command);
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(edit(LEAD_SESSION, path).to_string().as_bytes())
+            .unwrap();
+        child
+    });
 }
 
 /// What one nudges option does through the real chain: the engine's relay writes the

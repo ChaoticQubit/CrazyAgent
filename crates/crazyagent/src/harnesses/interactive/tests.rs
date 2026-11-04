@@ -431,6 +431,51 @@ fn a_resumed_harness_continues_the_conversation_it_recorded() {
     );
 }
 
+/// A Claude Code app renders its system prompt fresh on every request (QR2): Claude Code
+/// 2.1.309 otherwise records the prompt of a conversation's first request and sends that
+/// record on every resume, so a relaunch after an instructions edit would run with the old
+/// text. A signed-in launch, where recording is on by default, and a keyed `--bare` one
+/// both turn it off, fresh and resumed, tools on and off.
+#[test]
+fn a_claude_app_renders_its_system_prompt_fresh_so_a_resume_runs_with_the_relaunch_s_text() {
+    let case = Case::new();
+    let key = case.keyed(None);
+    let key_file = write_key(&case.home(), key.key().unwrap()).unwrap();
+    for keyed in [false, true] {
+        let fresh = run(keyed.then_some(key_file.as_path()));
+        let resumed = Run {
+            resume: true,
+            ..fresh
+        };
+        for tools in [true, false] {
+            let account = if keyed {
+                case.keyed(None)
+            } else {
+                case.subscription()
+            };
+            let request = case.request("claude-code", account, tools);
+            assert_eq!(claude_bare(&request.account), keyed);
+            for launch in [fresh, resumed] {
+                let built = command(&request, None, &launch).unwrap();
+                let at = built
+                    .argv
+                    .iter()
+                    .position(|argument| argument == "--system-prompt-snapshot")
+                    .unwrap_or_else(|| panic!("no snapshot setting: {:?}", built.argv));
+                assert_eq!(built.argv[at + 1], "off", "{:?}", built.argv);
+                assert_eq!(
+                    built
+                        .argv
+                        .iter()
+                        .filter(|argument| *argument == "--system-prompt-snapshot")
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+}
+
 #[test]
 fn a_keyed_codex_reads_its_key_from_the_key_file_and_never_from_its_environment() {
     let case = Case::new();
@@ -612,6 +657,8 @@ fn claude_runs_its_own_app_under_a_known_session_and_keeps_its_transcript() {
         "{\"attribution\":{\"commit\":\"\",\"pr\":\"\"},\"disableAllHooks\":true,\"includeCoAuthoredBy\":false,\"skipDangerousModePermissionPrompt\":true}",
         "--session-id",
         SESSION,
+        "--system-prompt-snapshot",
+        "off",
     ]);
     argv.extend(strings(&CLAUDE_NO_MCP));
     argv.extend(strings(&[
@@ -1199,6 +1246,46 @@ fn a_native_lead_runs_agent_teams_and_its_teammates_get_a_plain_quoted_script() 
             "Claude Code passes {inherited} to each teammate itself"
         );
     }
+    drop(installed);
+}
+
+/// A native lead and every teammate its script starts get Claude Code's task list tools
+/// (OP-3): Claude Code 2.1.309 offers TaskCreate, TaskGet, TaskUpdate and TaskList to a
+/// current model only when `CLAUDE_CODE_ENABLE_TODO_TOOLS` is set, and without them a lead
+/// cannot share its team's tasks. An agent outside a native team does not get the variable.
+#[test]
+fn a_native_lead_and_its_teammates_get_claude_code_s_task_list_tools() {
+    let case = Case::new();
+    let request = case.request("claude-code", case.subscription(), true);
+    let tmux = case.executable("tmux", "#!/bin/sh\nexit 0\n");
+    let todo = |built: &InteractiveCommand| -> Vec<String> {
+        built
+            .env
+            .iter()
+            .filter(|(name, _)| name == "CLAUDE_CODE_ENABLE_TODO_TOOLS")
+            .map(|(_, value)| value.clone())
+            .collect()
+    };
+    let alone = project_context(&case, "alone")
+        .install("claude-code", &case.home(), true)
+        .unwrap();
+    let agent = command(&request, Some(&alone), &run(None)).unwrap();
+    assert!(todo(&agent).is_empty(), "{:?}", agent.env);
+    drop(alone);
+
+    let installed = project_context(&case, "data")
+        .with_native_team(&tmux, &case.path().join("work"))
+        .install("claude-code", &case.home(), true)
+        .unwrap();
+    let lead = command(&request, Some(&installed), &run(None)).unwrap();
+    assert_eq!(todo(&lead), ["1"], "{:?}", lead.env);
+    write_teammate_command(&case.home(), &lead, &request, installed.native().unwrap()).unwrap();
+    let written =
+        std::fs::read_to_string(crate::launch_context::teammate_command(&case.home())).unwrap();
+    assert!(
+        written.contains(" 'CLAUDE_CODE_ENABLE_TODO_TOOLS=1' "),
+        "{written}"
+    );
     drop(installed);
 }
 

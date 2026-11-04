@@ -101,6 +101,7 @@ const LOCK_FOLDER: &str = r#"\.lock$"#;
 const SOCKET_PATH_BYTES_MAX: usize = 103;
 const TOOL_ROOTS_MAX: usize = 24;
 const TOOL_FILES_MAX: usize = 4;
+const EXECS_MAX: usize = 4;
 const GIT_LINK_BYTES_MAX: u64 = 2 * PATH_BYTES_MAX as u64;
 const REMOTES_MAX: usize = 8;
 const PROFILE_BYTES_MAX: usize = 64 * 1024;
@@ -616,6 +617,7 @@ pub struct ProjectSandbox {
     read_roots: Vec<PathBuf>,
     tool_roots: Vec<PathBuf>,
     tool_files: Vec<PathBuf>,
+    execs: Vec<PathBuf>,
     scratch: Option<PathBuf>,
     hidden: Vec<PathBuf>,
     network: SandboxNetwork,
@@ -631,6 +633,7 @@ pub struct ProjectSandbox {
     read_only: Vec<PathBuf>,
     fixed: Vec<PathBuf>,
     shared: Vec<PathBuf>,
+    teammates_of: Option<PathBuf>,
 }
 
 /// The one git worktree a confined agent writes in place of the whole project folder,
@@ -674,6 +677,7 @@ impl ProjectSandbox {
             read_roots: Vec::new(),
             tool_roots: Vec::new(),
             tool_files: Vec::new(),
+            execs: Vec::new(),
             scratch: None,
             hidden: Vec::new(),
             network,
@@ -689,6 +693,7 @@ impl ProjectSandbox {
             read_only: Vec::new(),
             fixed: Vec::new(),
             shared: Vec::new(),
+            teammates_of: None,
         })
     }
 
@@ -965,6 +970,40 @@ impl ProjectSandbox {
         Ok(self)
     }
 
+    /// Lets the agent start one exact program the engine itself launches, such as its
+    /// harness or the engine executable, from an app bundle's `Contents/MacOS`, which no
+    /// agent may start otherwise (OP-24). One inside a folder the agent can write stays
+    /// denied, since the agent could replace it. Input: a canonical existing regular file
+    /// clear of [`Self::secret_paths`]. Output: the widened sandbox, or `Invalid`.
+    pub fn allow_exec(mut self, program: &Path) -> Result<Self, SandboxError> {
+        clear_of_secrets(program, &self.secret_paths())?;
+        if !clean_absolute(program) || !program.is_file() || canonical(program)? != *program {
+            return Err(invalid(
+                "an allowed program must be an existing canonical file",
+            ));
+        }
+        if self.execs.iter().any(|exec| exec == program) {
+            return Ok(self);
+        }
+        if self.execs.len() >= EXECS_MAX {
+            return Err(invalid("too many allowed programs"));
+        }
+        self.execs.push(program.to_path_buf());
+        Ok(self)
+    }
+
+    /// Lets the agent run the engine executable that serves its team tools, relay hooks and
+    /// monitor: the engine's folder read-only and, by [`Self::allow_exec`], the file itself
+    /// startable by exact path, even from `CrazyAgent.app/Contents/MacOS` where the macOS
+    /// service runs it (OP24R2-1). Input: the engine's canonical path. Output: the widened
+    /// sandbox, or `Invalid`.
+    pub fn allow_engine(self, engine: &Path) -> Result<Self, SandboxError> {
+        let folder = engine
+            .parent()
+            .ok_or_else(|| invalid("the engine must sit in a folder"))?;
+        self.allow_read(folder)?.allow_exec(engine)
+    }
+
     /// Grants a project's toolchains read-only (see [`toolchains::Toolchains::detect`]):
     /// each folder as [`Self::allow_read`] checks it, with every credential name below it
     /// denied, and each file when it is a canonical regular file clear of
@@ -1162,6 +1201,7 @@ impl ProjectSandbox {
         teammates.fixed = vec![home.clone()];
         teammates.fixed.extend(shared.iter().cloned());
         teammates.shared = shared;
+        teammates.teammates_of = teammates.clone.clone();
         if teammates.writes(&home) {
             return Err(invalid("a teammates' writable root holds the lead's home"));
         }
@@ -1308,7 +1348,10 @@ impl ProjectSandbox {
     pub fn profile(&self) -> String {
         let mut text = String::from("(version 1)\n(deny default)\n");
         text.push_str("(allow process-exec)\n(allow process-fork)\n");
-        text.push_str(&app_exec_denies(&self.owner_home));
+        text.push_str(&app_exec_denies(
+            self.writable_roots(),
+            self.execs.iter().filter(|program| !self.writes(program)),
+        ));
         text.push_str("(allow signal (target same-sandbox))\n");
         text.push_str("(allow process-info* (target same-sandbox))\n");
         text.push_str("(allow sysctl-read)\n");
@@ -1456,6 +1499,9 @@ impl ProjectSandbox {
         for folder in &self.shared {
             text.push_str(&shared_denies(folder));
         }
+        if let Some(clone) = &self.teammates_of {
+            text.push_str(&teammates_clone_denies(clone));
+        }
         assert_eq!(
             text.matches("unix-socket").count(),
             2 * self.sockets.len() + self.served.len() + self.reached.len()
@@ -1477,8 +1523,12 @@ impl ProjectSandbox {
             }) && self
                 .shared
                 .iter()
-                .all(|folder| text.rfind(&shared_denies(folder)) > last_write_allow),
-            "a read-only, fixed or shared folder's write deny must follow every write allow, since the last match wins"
+                .all(|folder| text.rfind(&shared_denies(folder)) > last_write_allow)
+                && self
+                    .teammates_of
+                    .iter()
+                    .all(|clone| text.rfind(&teammates_clone_denies(clone)) > last_write_allow),
+            "a read-only, fixed, shared or teammates' clone write deny must follow every write allow, since the last match wins"
         );
         let denied_last = |operations: &str, socket: &PathBuf| {
             text.rfind(&format!(
@@ -1658,8 +1708,9 @@ impl ProjectSandbox {
     /// top-level `.git` is a legitimate repository link the engine adds, and every other
     /// writable root, where no `.git` may ever appear. A `.git` anywhere below a working
     /// tree, and a `.git` at any depth (top level included) in an admin folder, object
-    /// store, home, temp or scratch root, is denied so no agent can create a repository to
-    /// rename whole into a worktree.
+    /// store, home, temp or scratch root, or a team folder a native lead shares with its
+    /// teammates, is denied so no agent can create a repository to rename whole into a
+    /// worktree (OP-9 r2).
     fn git_deny_roots(&self) -> (Vec<&Path>, Vec<&Path>) {
         let mut working: Vec<&Path> = Vec::new();
         let mut other: Vec<&Path> = Vec::new();
@@ -1678,6 +1729,7 @@ impl ProjectSandbox {
         if let Some(scratch) = &self.scratch {
             other.push(scratch.as_path());
         }
+        other.extend(self.shared.iter().map(PathBuf::as_path));
         for worktree in &self.worktrees {
             working.push(worktree.as_path());
         }
@@ -2040,33 +2092,53 @@ fn seatbelt_pattern(path: &Path) -> String {
     regex_escape(&text)
 }
 
-/// The Seatbelt rule that keeps an agent from starting a macOS app: no exec of a main
-/// executable in an app bundle's `Contents/MacOS` under `/Applications`,
-/// `/System/Applications` or the owner's `~/Applications`, the Data volume path of each
-/// included, each name in any letter case. A GUI app started inside the agent profile
-/// aborts at launch and macOS shows a crash report for every attempt (Chrome crash
-/// popups, decision C1). Command-line tools a bundle ships under `Contents/Resources` or
-/// `Contents/Developer` stay allowed. It must follow the exec allow, since the last
-/// matching rule wins. Input: the owner's home. Output: the rule text.
-fn app_exec_denies(owner_home: &Path) -> String {
+/// The Seatbelt rules that keep an agent from starting a macOS app: no exec of a main
+/// executable in any app bundle's `Contents/MacOS`, wherever it sits and in any letter
+/// case, since a GUI app started inside the agent profile aborts at launch and macOS shows
+/// a crash report for every attempt (Chrome crash popups, decision C1, OP-24). The
+/// interpreter a framework Python's launcher starts, `<name>.framework/Versions/<v>/
+/// Resources/Python.app/Contents/MacOS/Python`, stays allowed, except in the folders the
+/// agent can write, where it could plant a bundle under that name; their Data volume path
+/// is denied too. Command-line tools a bundle ships under `Contents/Resources` or
+/// `Contents/Developer` stay allowed, as does each exact program the engine launches from
+/// outside those folders. It must follow the exec allow, since the last matching rule
+/// wins. Inputs: the agent's writable roots and those programs. Output: the rule text.
+fn app_exec_denies<'a>(
+    writable: impl Iterator<Item = &'a PathBuf>,
+    launched: impl Iterator<Item = &'a PathBuf>,
+) -> String {
     let data = format!(
         "/{}/{}/{}",
         any_case("System"),
         any_case("Volumes"),
         any_case("Data")
     );
-    let bundle = format!(
-        "/{}/.+{}/{}/{}/",
-        any_case("Applications"),
+    let app = format!(
+        ".+{}/{}/{}/",
         any_case(".app"),
         any_case("Contents"),
         any_case("MacOS")
     );
-    format!(
-        "(deny process-exec\n  (regex #\"^(/{}|{data})?{bundle}\")\n  (regex #\"^({data})?{}{bundle}\"))\n",
-        any_case("System"),
-        seatbelt_pattern(owner_home)
-    )
+    let mut rule = format!(
+        "(deny process-exec\n  (regex #\"^/{app}\"))\n(allow process-exec\n  (regex #\"^/.+\\.framework/Versions/[^/]+/Resources/Python\\.app/Contents/MacOS/Python$\"))\n(deny process-exec"
+    );
+    for root in writable {
+        let root = root.display().to_string();
+        rule.push_str(&format!(
+            "\n  (regex #\"^({data})?{}/{app}\")",
+            any_case(&root)
+        ));
+    }
+    rule.push_str(")\n");
+    let launched: Vec<&PathBuf> = launched.collect();
+    if !launched.is_empty() {
+        rule.push_str("(allow process-exec");
+        for program in launched {
+            rule.push_str(&format!("\n  (literal \"{}\")", program.display()));
+        }
+        rule.push_str(")\n");
+    }
+    rule
 }
 
 /// The Seatbelt rules that keep an Own branch agent from repointing the object store its
@@ -2097,6 +2169,32 @@ fn clone_store_denies(clone: &Path) -> String {
     );
     assert_eq!(text.matches("(regex #\"^/").count(), 10);
     assert!(text.contains("(vnode-type SYMLINK)"));
+    text
+}
+
+/// The writes a clone lead's teammates may not make in the lead's clone (OP-9): anything but
+/// the teammates' folder, the clone's object store, the inside of each worktree record git
+/// keeps in `.git/worktrees`, and the refs and reflogs of `crazyagent/<task>--<name>`
+/// teammate branches; nor the links that tie a teammate worktree to the clone, which the
+/// engine writes with the lead's rights, each name in any letter case; nor the teammates'
+/// folder entry or a symlink at a teammate's folder in it, where the engine's lead-rights
+/// `git worktree add` writes. It must follow every write allow, since the last match wins.
+/// Input: the clone. Output: the rule text.
+fn teammates_clone_denies(clone: &Path) -> String {
+    let path = clone.display();
+    let root = seatbelt_pattern(clone);
+    let folder = crate::agent_git::TEAMMATES_FOLDER;
+    let teammates = any_case(folder);
+    let git = any_case(".git");
+    let branches = regex_escape(crate::agent_git::LINKED_PREFIX);
+    let text = format!(
+        "(deny file-write*\n  (require-all\n    (subpath \"{path}\")\n    (require-not (subpath \"{path}/{folder}\"))\n    (require-not (subpath \"{path}/.git/objects\"))\n    (require-not (regex #\"^{root}/\\.git/worktrees/[^/]+/.+$\"))\n    (require-not (regex #\"^{root}/\\.git/(logs/)?refs/heads/{branches}[a-z0-9-]+--[a-z0-9-]+(\\.lock)?$\"))))\n(deny file-write*\n  (regex #\"^{root}/{teammates}$\")\n  (regex #\"^{root}/{teammates}/[^/]+/{git}$\")\n  (regex #\"^{root}/{git}/{}/[^/]+/({}|{})$\"))\n(deny file-write-create\n  (require-all (regex #\"^{root}/{teammates}/[^/]+$\") (vnode-type SYMLINK)))\n",
+        any_case("worktrees"),
+        any_case("commondir"),
+        any_case("gitdir")
+    );
+    assert_eq!(text.matches("(regex #\"^/").count(), 6);
+    assert_eq!(text.matches("(subpath \"/").count(), 3);
     text
 }
 

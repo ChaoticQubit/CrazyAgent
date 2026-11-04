@@ -2107,13 +2107,28 @@ fn a_master_with_tools_on_starts_with_the_engine_delegate_tool() {
         .join(format!("agent-{}", master.id))
         .join("tmp")
         .join(tool::DROP_FILE);
+    let mailbox = record.with_file_name(tool::MAILBOX_FOLDER);
     assert_eq!(
         server["args"],
         toml::Value::Array(vec![
             tool::SERVER_COMMAND.into(),
-            record.to_str().unwrap().into()
+            record.to_str().unwrap().into(),
+            mailbox.to_str().unwrap().into()
         ]),
         "the master records its calls in its own private temporary folder"
+    );
+    assert!(
+        std::fs::symlink_metadata(&mailbox).is_ok_and(|metadata| metadata.is_dir()),
+        "the engine made the mailbox the master's memory tools write to"
+    );
+    assert_eq!(
+        std::fs::symlink_metadata(&mailbox)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700,
+        "only the engine's user can read or write the master's memory calls"
     );
     team.shutdown().unwrap();
 }
@@ -2764,7 +2779,7 @@ fn a_conversation_master_s_delegate_calls_reach_the_team_queue_and_refusals_leav
     let turn = RequestId::new("conversation-turn").unwrap();
     let mut admitted = Vec::new();
     for project in teams.iter().chain([&unplanned]) {
-        tool::serve(calls.as_bytes(), Vec::new(), &drop).unwrap();
+        tool::serve(calls.as_bytes(), Vec::new(), &drop, None, &[]).unwrap();
         let proposed = tool::take(&drop);
         assert_eq!(proposed.len(), 2);
         assert!(!drop.exists());
@@ -4997,6 +5012,57 @@ fn every_new_folder_limit_choice_is_saved_and_shown() {
     assert_eq!(
         new_folder_files_max(&connection, &ProjectId::new("team-elsewhere").unwrap()).unwrap(),
         NEW_FOLDER_FILES_DEFAULT,
+        "the choice is per project"
+    );
+}
+
+/// Re-ask empty reply is On for a project with no choice saved, the team status keeps the
+/// owner's Off and then On again, and the choice is per project (DEC-111).
+#[test]
+fn reask_empty_reply_is_on_until_the_owner_turns_it_off_and_on_again() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-reask",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-reask", &["local-a"]);
+    let project = setup.project_id.clone();
+    assert!(
+        status(&connection, &setup).unwrap().reask_empty_reply,
+        "On is the default"
+    );
+    for on in [false, true, false] {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::ReaskEmptyReply {
+                    project_id: project.clone(),
+                    on,
+                },
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+        tx.commit().unwrap();
+        assert_eq!(status(&connection, &setup).unwrap().reask_empty_reply, on);
+    }
+    assert!(
+        reask_empty_reply(&connection, &ProjectId::new("team-elsewhere").unwrap()).unwrap(),
         "the choice is per project"
     );
 }

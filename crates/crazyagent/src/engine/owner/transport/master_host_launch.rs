@@ -899,8 +899,8 @@ fn turn_sandbox(
         .create(&tmp)
         .map_err(io_error)?;
     let home = std::fs::canonicalize(home).map_err(io_error)?;
-    let install = std::fs::canonicalize(executable)
-        .map_err(io_error)?
+    let program = std::fs::canonicalize(executable).map_err(io_error)?;
+    let install = program
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| failure("master_sandbox_unavailable"))?;
@@ -913,17 +913,14 @@ fn turn_sandbox(
         None => ProjectSandbox::new(worktree, &home, &tmp, network)
             .and_then(|sandbox| sandbox.allow_read(repository)),
         Some(engine) => {
-            let folder = std::fs::canonicalize(engine)
-                .map_err(io_error)?
-                .parent()
-                .map(Path::to_path_buf)
-                .ok_or_else(|| failure("master_sandbox_unavailable"))?;
+            let engine = std::fs::canonicalize(engine).map_err(io_error)?;
             ProjectSandbox::new(worktree, &home, &tmp, network)
                 .and_then(|sandbox| sandbox.allow_read(repository))
-                .and_then(|sandbox| sandbox.allow_read(&folder))
+                .and_then(|sandbox| sandbox.allow_engine(&engine))
         }
     }
     .and_then(|sandbox| sandbox.allow_read(&install))
+    .and_then(|sandbox| sandbox.allow_exec(&program))
     .and_then(|sandbox| sandbox.allow_read(&runtime.path))
     .and_then(|sandbox| sandbox.allow_tools(&tools))
     .and_then(|sandbox| sandbox.guard_engine(&root.path))
@@ -1576,6 +1573,10 @@ mod tests {
                 .contains("(allow network-outbound (remote ip \"*:443\"))")
         );
         assert!(!sandbox.sandbox().profile().contains("(allow network*)"));
+        assert!(sandbox.sandbox().profile().contains(&format!(
+            "(allow process-exec\n  (literal \"{}\"))\n",
+            std::fs::canonicalize(&executable).unwrap().display()
+        )));
 
         let master = master_command(&executable, &home, &worktree, "admitted-model", None).unwrap();
         let wrapped = sandbox.wrap(&master).unwrap();
