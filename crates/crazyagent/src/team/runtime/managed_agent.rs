@@ -628,6 +628,23 @@ impl ManagedAgent {
         finished.unwrap_or_else(|| panic!("the turn never finished: {problem:?}"))
     }
 
+    /// The instructions the runtime's launch context gives this agent with tools on, which a
+    /// Codex launch writes as `developer_instructions` in its home's `config.toml`. Input:
+    /// none. Output: the text.
+    pub(super) fn instructions(&self) -> String {
+        self.runtime
+            .context(
+                &ProjectId::new(PROJECT).unwrap(),
+                AGENT,
+                self.role,
+                true,
+                crate::agent_git::Layout::Linked,
+            )
+            .unwrap()
+            .instructions()
+            .to_owned()
+    }
+
     /// Checks that the runtime planned this agent as a native-mode lead (DEC-104), as only
     /// [`Self::engine_native_lead`] prepares one: its teammates' profile installed, their
     /// server named and its pane on its own server of the engine's terminal host. Input:

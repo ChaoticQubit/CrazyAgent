@@ -92,6 +92,10 @@ const SOCKET_GRANTS_MAX: usize = 4;
 /// The writes that move, remove, replace or re-permission a folder's own node while its
 /// contents stay writable: the scratch root's and a native lead's home for its teammates.
 const FIXED_WRITES: &str = "file-write-unlink file-write-create file-write-mode file-write-acl";
+/// The writes that move, remove or re-permission a folder's own node but still let it be made
+/// where it is missing: an agent home's `skills` folder, which Codex makes in a fresh home for
+/// its own skills, while no folder built elsewhere replaces the one holding the engine's copies.
+const PINNED_WRITES: &str = "file-write-unlink file-write-mode file-write-acl";
 /// The folders of a Claude Code config home whose scripts Claude Code 2.1.309 runs ahead of
 /// every Bash command: its shell snapshot and the session hook scripts (TPH-2).
 #[cfg(unix)]
@@ -612,8 +616,9 @@ impl From<io::Error> for SandboxError {
 
 /// The Seatbelt boundary for one agent of one project: writes only inside the
 /// project folder (never its `context/` or git hooks and config), the agent's
-/// worktrees and its own home and temp dirs, reads of system paths plus those
-/// roots, and network per [`SandboxNetwork`].
+/// worktrees and its own home and temp dirs, never the launch files, instructions,
+/// skills or settings its harness loads from that home, reads of system paths plus
+/// those roots, and network per [`SandboxNetwork`].
 #[derive(Debug, Clone)]
 pub struct ProjectSandbox {
     project_root: PathBuf,
@@ -1623,6 +1628,8 @@ impl ProjectSandbox {
                 folder.display()
             ));
         }
+        let launch = launch_denies(&self.agent_home);
+        text.push_str(&launch);
         for folder in &self.fixed {
             text.push_str(&format!(
                 "(deny {FIXED_WRITES} (literal \"{}\"))\n",
@@ -1647,15 +1654,17 @@ impl ProjectSandbox {
                     "(deny file-write* (subpath \"{}\"))",
                     folder.display()
                 )) > last_write_allow
-            }) && self.fixed.iter().all(|folder| {
-                text.rfind(&format!(
-                    "(deny {FIXED_WRITES} (literal \"{}\"))",
-                    folder.display()
-                )) > last_write_allow
-            }) && self
-                .shared
-                .iter()
-                .all(|folder| text.rfind(&shared_denies(folder)) > last_write_allow)
+            }) && text.rfind(&launch) > last_write_allow
+                && self.fixed.iter().all(|folder| {
+                    text.rfind(&format!(
+                        "(deny {FIXED_WRITES} (literal \"{}\"))",
+                        folder.display()
+                    )) > last_write_allow
+                })
+                && self
+                    .shared
+                    .iter()
+                    .all(|folder| text.rfind(&shared_denies(folder)) > last_write_allow)
                 && (teammates.is_empty() || text.rfind(&teammates) > last_write_allow),
             "a read-only, fixed, shared or teammates' write deny must follow every write allow, since the last match wins"
         );
@@ -2343,13 +2352,20 @@ fn teammates_clone_denies(clone: &Path) -> String {
 }
 
 /// Spells plain text as a Seatbelt regex that matches it in any letter case, for names a
-/// case-insensitive volume finds however they are typed. Input: text without a quote or
-/// backslash. Output: the pattern text, without anchors.
+/// case-insensitive volume finds however they are typed. APFS folds case by Unicode rules,
+/// so `k` also matches U+212A KELVIN SIGN and `s` U+017F LATIN SMALL LETTER LONG S, the
+/// only other letters that fold to ASCII; those two are spelled as groups, so each matches
+/// its whole UTF-8 sequence (LL2S-2). Input: text without a quote or backslash. Output: the
+/// pattern text, without anchors.
 fn any_case(text: &str) -> String {
     regex_escape(text)
         .chars()
         .map(|character| {
-            if character.is_ascii_alphabetic() {
+            if character.eq_ignore_ascii_case(&'k') {
+                "(k|K|\u{212a})".to_owned()
+            } else if character.eq_ignore_ascii_case(&'s') {
+                "(s|S|\u{17f})".to_owned()
+            } else if character.is_ascii_alphabetic() {
                 format!(
                     "[{}{}]",
                     character.to_ascii_lowercase(),
@@ -2537,6 +2553,87 @@ fn clear_of_secrets(root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError
         return Err(invalid(SECRET_ROOT_REFUSED));
     }
     Ok(())
+}
+
+/// The Seatbelt rules that keep an agent from changing what its harness loads from its own
+/// home as instructions, skills, hooks or settings (LL-2): no write in the launch folder or
+/// the relay plugin the engine writes before each launch, nor in the subagents, commands,
+/// output styles and rules folders Claude Code reads or the `.agents` folder whose skills
+/// Codex reads from its home, none to the global instruction files of Claude Code and Codex,
+/// the Codex override that would replace them, the Codex `config.toml` holding its developer
+/// instructions or Claude Code's `settings.json`, none under `skills` but Codex's own
+/// `.system` skills, which Codex installs at its start and the engine removes before each
+/// Codex launch, and no move or removal of the `skills` folder, so no folder built elsewhere
+/// is moved in, each name in any letter case. Its own run cannot change the text it runs
+/// with until the next launch rewrites it. They must follow every write allow. Input: the
+/// home. Output: the rule text.
+fn launch_denies(home: &Path) -> String {
+    use crate::agent_home::Harness;
+    use crate::launch_context::STATE;
+    let home = seatbelt_pattern(home);
+    let skills = format!("{home}/{}", any_case("skills"));
+    let folders = [
+        STATE,
+        crate::coord::relay::PLUGIN_FOLDER,
+        "agents",
+        "commands",
+        "output-styles",
+        "rules",
+        ".agents",
+    ];
+    let files = [
+        Harness::Claude.instruction_file(),
+        Harness::Codex.instruction_file(),
+        "AGENTS.override.md",
+        "config.toml",
+        "settings.json",
+    ];
+    let mut text = String::from("(deny file-write*\n");
+    for folder in folders {
+        text.push_str(&format!(
+            "  (regex #\"^{home}/{}(/.*)?$\")\n",
+            any_case(folder)
+        ));
+    }
+    for file in files {
+        text.push_str(&format!("  (regex #\"^{home}/{}$\")\n", any_case(file)));
+    }
+    text.push_str(&format!(
+        "  (regex #\"^{skills}/{}\"))\n(deny {PINNED_WRITES} (regex #\"^{skills}$\"))\n",
+        other_than(crate::launch_context::CODEX_SYSTEM_SKILLS)
+    ));
+    assert_eq!(text.matches("(regex #\"^/").count(), 14);
+    text
+}
+
+/// Spells a Seatbelt regex for one path component other than `name` in any letter case,
+/// with whatever follows it: a component that differs from `name` at some character, stops
+/// short of it or runs past it. Input: a name of letters, digits and dots. Output: the
+/// pattern text, a group without anchors.
+fn other_than(name: &str) -> String {
+    assert!(
+        !name.is_empty()
+            && name
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '.')
+    );
+    let characters: Vec<char> = name.chars().collect();
+    let mut alternatives = Vec::with_capacity(2 * characters.len());
+    for at in 0..characters.len() {
+        let prefix = any_case(&characters[..at].iter().collect::<String>());
+        let character = characters[at];
+        alternatives.push(format!(
+            "{prefix}[^{}{}/]",
+            character.to_ascii_lowercase(),
+            character.to_ascii_uppercase()
+        ));
+        if at > 0 {
+            alternatives.push(format!("{prefix}(/|$)"));
+        }
+    }
+    alternatives.push(format!("{}[^/]", any_case(name)));
+    assert_eq!(alternatives.len(), 2 * characters.len());
+    format!("({})", alternatives.join("|"))
 }
 
 /// The Seatbelt rules that keep a shared team folder free of links and moved-in folders: no
