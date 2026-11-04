@@ -13,7 +13,7 @@ const MASTER_MS = Math.min(TEAM_MS, 600000);
 const STOP_MS = Math.min(TEAM_MS, 300000);
 const FIXTURE_INSTRUCTIONS = "# Mandatory workflow\n\nFixture instruction set for the trial 3 offline proof.\n";
 const INSTRUCTIONS = { first: "# Mandatory workflow", bytes: MODE === "fixture" ? Buffer.byteLength(FIXTURE_INSTRUCTIONS) : 12848 };
-const SETTINGS = { landOn: process.env.TRIAL_LAND_ON ?? "trial3-land", background: "wait", worker: "Chosen skills", nudges: "First edit", finished: "Show", network: "https", input: "Both" };
+export const SETTINGS = { landOn: process.env.TRIAL_LAND_ON ?? "trial3-land", background: "wait", worker: "Chosen skills", nudges: "First edit", finished: "Show", network: "https", input: "Both" };
 const RUNNING = ["starting", "idle", "working"];
 const WORKER_BOX = "//*[@role=\"group\"][@aria-label=\"Skills per role\"]/div[.//*[@aria-label=\"Worker skills\"]]//label[.//input[@type=\"checkbox\"]]";
 const STATE_WORDS = ["Ready to review", "Conflicts with your branch", "Agent is updating", "Accepted", "Discarded", "Landed outside the app"];
