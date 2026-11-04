@@ -165,6 +165,23 @@ export async function openFinished(kit) {
   await kit.until(() => browser.execute(() => document.querySelector('details[aria-label="Finished agents"]')?.open === true), UI_MS, "the Finished fold-out did not unfold");
 }
 
+/** The page a window shows when it is not on one project tab, so a check that reads that tab
+ * can take the window back first. Inputs: the window's hash, the project id and the tab id.
+ * Output: null on that tab, a query after it included, else the hash the window shows. */
+export function offTab(hash, project, tab) {
+  assert(typeof hash === "string", "a window hash is text");
+  return hash.split("?")[0] === `#/projects/${encodeURIComponent(project)}/${tab}` ? null : hash;
+}
+
+/** Takes the window back to one tab of the trial project when it shows another page, as a check
+ * does before it reads that tab. Inputs: the kit and the tab id. Output: the hash the window
+ * was on, or null when it already showed the tab. */
+export async function backTo(kit, tab) {
+  const away = offTab(await kit.hash(), kit.project(), tab);
+  if (away !== null) await kit.tab(tab);
+  return away;
+}
+
 /** Opens an agent's terminal as the owner does, by clicking its card. Input: the agent's
  * label, without a double quote. */
 export async function openCard(label) {

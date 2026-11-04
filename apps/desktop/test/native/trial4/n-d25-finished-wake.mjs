@@ -1,5 +1,5 @@
 import { click } from "../settings-steps.mjs";
-import { RUNNING, UI_MS, cardOf, finishedList, finishedRow, openFinished, readCards } from "../agents-cards.mjs";
+import { RUNNING, UI_MS, backTo, cardOf, finishedList, finishedRow, openFinished, readCards } from "../agents-cards.mjs";
 
 const IDLE_WAIT_MS = 20 * 60 * 1000;
 const WAKE_MS = 5 * 60 * 1000;
@@ -7,10 +7,15 @@ const OWNER_STOP = "Stopped by you";
 const FINISHED_COUNT = /^Finished \((\d+)\)$/;
 
 /** Waits under Show for a sub-agent or teammate the engine finished on its own, listed in the
- * Finished fold-out and not stopped by the owner. Input: the kit. Output: { label, agent }. */
+ * Finished fold-out and not stopped by the owner. The fold-out is on the Agents tab, so each
+ * read first takes a window that left it back there and names the page it was on. Input: the
+ * kit. Output: { label, agent, moves }, moves the pages the window was taken back from. */
 async function leftAlone(kit) {
   let found = null;
+  const moves = [];
   await kit.waitFor(async () => {
+    const away = await backTo(kit, "agents");
+    if (away !== null) moves.push(away);
     const { nodes } = await kit.graph();
     const { rows } = await finishedList();
     const ended = nodes.filter((node) => (node.kind === "sub" || node.kind === "teammate") && node.agent != null && (node.status === "stopped" || node.status === "failed"));
@@ -18,10 +23,16 @@ async function leftAlone(kit) {
       const row = finishedRow(rows, node.label);
       return row && !row.ended.startsWith(OWNER_STOP);
     });
-    found = match ? { label: match.label, agent: match.agent } : null;
-    return { done: found !== null, seen: `${ended.length} ended agents (${ended.map((node) => node.label).join(", ") || "none"}); Finished list: ${rows.map((row) => `${row.name} ${row.ended}`).join("; ") || "empty"}` };
+    found = match ? { label: match.label, agent: match.agent, moves } : null;
+    return { done: found !== null, seen: `${ended.length} ended agents (${ended.map((node) => node.label).join(", ") || "none"}); Finished list: ${rows.map((row) => `${row.name} ${row.ended}`).join("; ") || "empty"}${awayNote(moves)}` };
   }, Math.min(kit.team(), IDLE_WAIT_MS), "no sub-agent left on its own after its idle stop");
   return found;
+}
+
+/** Names the pages the window was taken back to Agents from, for a check's detail. Input: the
+ * hashes. Output: the clause, empty when the window never left. */
+function awayNote(moves) {
+  return moves.length === 0 ? "" : `; the window left Agents ${moves.length} times (${[...new Set(moves)].join(", ")}) and was taken back`;
 }
 
 /** Hides finished agents and checks the agent left the graph for the Finished fold-out.
@@ -30,6 +41,7 @@ async function hidden(kit, { label, agent }) {
   await kit.choose("agents", "Finished agents", "Hide");
   let toggle = "";
   await kit.until(async () => {
+    await backTo(kit, "agents");
     const { nodes } = await kit.graph();
     const cards = await readCards();
     const list = await finishedList();
@@ -43,6 +55,7 @@ async function hidden(kit, { label, agent }) {
 /** Wakes the agent from the Finished fold-out and waits until the same agent row runs again,
  * with no second agent under its name. Inputs: the kit and the agent. Output: its status. */
 async function woken(kit, { label, agent }) {
+  await backTo(kit, "agents");
   const row = finishedRow((await finishedList()).rows, label);
   if (!row.wakeable) throw new Error(`${label}'s Wake is disabled${row.note ? `: ${row.note}` : ""}`);
   await openFinished(kit);
@@ -74,7 +87,7 @@ export const checks = [{
       await kit.screen();
       const status = await woken(kit, agent);
       await kit.screen();
-      detail = `${agent.label} left on its own; under Hide it left the graph for ${toggle}; Wake ran the same agent ${agent.agent} again (${status})`;
+      detail = `${agent.label} left on its own; under Hide it left the graph for ${toggle}; Wake ran the same agent ${agent.agent} again (${status})${awayNote(agent.moves)}`;
     } catch (error) {
       failure = error;
     }

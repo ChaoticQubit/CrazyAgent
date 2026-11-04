@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { cardOf, copyRow, finishedRow, fromRows, moved, notShown, overlapping, roleName, showsTask, spilled, statusWord } from "./agents-cards.mjs";
+import { cardOf, copyRow, finishedRow, fromRows, moved, notShown, offTab, overlapping, roleName, showsTask, spilled, statusWord } from "./agents-cards.mjs";
 
 /** A card as readCards reads it, at a place and size, with one text box inside it unless
  * given others. Inputs: the title, the box and the text boxes. Output: the card. */
@@ -84,4 +84,15 @@ test("the row to copy is the newest one with at least three visible characters",
   assert.equal(copyRow(["abc"]), 0);
   assert.equal(copyRow([" a b ", "", "  "]), -1);
   assert.equal(copyRow([]), -1);
+});
+
+test("a window is off a project tab when its hash shows another page, another tab or another project", () => {
+  assert.equal(offTab("#/projects/ca-trial-4b/agents", "ca-trial-4b", "agents"), null);
+  assert.equal(offTab("#/projects/ca-trial-4b/agents?section=finished", "ca-trial-4b", "agents"), null);
+  assert.equal(offTab("#/projects/ca%20trial/agents", "ca trial", "agents"), null);
+  assert.equal(offTab("#/projects/ca-trial-4b/conversation", "ca-trial-4b", "agents"), "#/projects/ca-trial-4b/conversation");
+  assert.equal(offTab("#/settings/memory", "ca-trial-4b", "agents"), "#/settings/memory");
+  assert.equal(offTab("#/projects/ca-trial-4/agents", "ca-trial-4b", "agents"), "#/projects/ca-trial-4/agents");
+  assert.equal(offTab("#/projects/ca-trial-4b/agents-old", "ca-trial-4b", "agents"), "#/projects/ca-trial-4b/agents-old");
+  assert.equal(offTab("", "ca-trial-4b", "agents"), "");
 });
