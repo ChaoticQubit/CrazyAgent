@@ -3039,6 +3039,173 @@ impl Clones {
     }
 }
 
+/// OP-9b (leader 17:32, answer a) and OP9B-M1: a linked lead cannot report its work
+/// Complete while one of its native teammates still works, nor while a resting teammate's
+/// change set waits to land on the lead's task branch, since the engine lands each
+/// teammate's work there only once it rests and the lead is idle; finish_work names the
+/// teammate each time, then completes once its work has landed, however many teammates
+/// the lead had before (OP9B-R2-L1).
+#[test]
+fn a_linked_lead_finishes_only_once_its_native_teammates_work_landed() {
+    let mut fixture = Fixture::new();
+    let (home, project) = owner_repository(&fixture);
+    let lead = project
+        .join(".crazyagent/worktrees")
+        .join(format!("agent-{LEAD}"));
+    git_in(
+        &home,
+        &project,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            lead.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    let git_dir = project.join(".git/worktrees").join(format!("agent-{LEAD}"));
+    let db = crate::landing::open(&fixture.base).unwrap();
+    let branch = crate::landing::claim_task_branch(&db, &project, &lead, "lead").unwrap();
+    assert_eq!(
+        crate::landing::name_agent_branch(&db, &project, &lead, &git_dir).unwrap(),
+        branch
+    );
+    team_agent(&fixture, LEAD, "claude-code", "working", None);
+    fixture
+        .connection
+        .execute_batch(&format!(
+            "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES ({LEAD},'{PROJECT}','{}','{}','{}');
+             INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms,parent,pane)
+             VALUES ({WORKER},'{PROJECT}','teammate','claude-code',1,'working',{NOW},{NOW},{LEAD},'%7');
+             INSERT INTO team_teammate_names(agent,name) VALUES ({WORKER},'greet');",
+            project.display(),
+            lead.display(),
+            git_dir.display()
+        ))
+        .unwrap();
+    let agents = fixture.base.join("team/agents");
+    let access = ModelAccess::default();
+    let (answer, error) = lead_call(
+        &mut fixture,
+        &access,
+        &agents,
+        LEAD,
+        Call::StartWork {
+            title: "Lead the greeting".into(),
+            claims: vec!["hello.txt".into()],
+        },
+    );
+    assert!(!error, "{answer}");
+    let work: i64 = answer
+        .strip_prefix("Started work #")
+        .and_then(|rest| rest.split_once(' '))
+        .and_then(|(id, _)| id.parse().ok())
+        .unwrap_or_else(|| panic!("no work id in {answer}"));
+    let finish = |fixture: &mut Fixture| {
+        lead_call(
+            fixture,
+            &access,
+            &agents,
+            LEAD,
+            Call::FinishWork {
+                work,
+                version: 1,
+                outcome: crate::coord::Finish::Complete,
+                evidence: "Greeted.".into(),
+            },
+        )
+    };
+
+    let (answer, error) = finish(&mut fixture);
+    assert_eq!(
+        (answer.as_str(), error),
+        (
+            "Not finished: these teammates still work: greet. CrazyAgent lands each teammate's work on your task branch once it rests and you are idle; finish again once they rest.",
+            true
+        )
+    );
+    fixture
+        .connection
+        .execute("UPDATE team_agents SET status='idle' WHERE id=?1", [WORKER])
+        .unwrap();
+    let mate = lead.join(crate::agent_git::TEAMMATES_FOLDER).join("greet");
+    git_in(
+        &home,
+        &project,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            mate.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    let mate_git = project.join(".git/worktrees/greet");
+    crate::landing::name_agent_branch(&db, &project, &mate, &mate_git).unwrap();
+    crate::landing::record_worktree_start(&db, &project, &mate, &mate_git).unwrap();
+    std::fs::write(mate.join("hello.txt"), "Hello.\n").unwrap();
+    let waiting = crate::landing::record_turn_end(
+        &db,
+        &crate::landing::Workspace {
+            project: ProjectId::new(PROJECT).unwrap(),
+            agent: crate::landing::ChangeAgent {
+                kind: crate::landing::AgentKind::Sub,
+                id: WORKER.to_string(),
+                label: "greet \u{b7} teammate".into(),
+            },
+            repository: project.clone(),
+            worktree: mate.clone(),
+            git_dir: mate_git.clone(),
+        },
+        &crate::landing::TurnEnd {
+            outcome: crate::landing::TurnOutcome::Succeeded,
+            turn: "rest-1".into(),
+            prompt_line: "Work of teammate greet".into(),
+        },
+    )
+    .unwrap()
+    .expect("greet's rest waits as its change set");
+    let waiting = crate::landing::change_set(&db, &waiting)
+        .unwrap()
+        .expect("greet's change set reads")
+        .1;
+    let (answer, error) = finish(&mut fixture);
+    assert_eq!(
+        (answer.as_str(), error),
+        (
+            "Not finished: the work of these teammates waits to land on your task branch: greet. CrazyAgent lands it while you are idle and tells you then; finish again after that.",
+            true
+        )
+    );
+    let landed =
+        crate::landing::accept_into(&db, &home, &waiting.id, &waiting.head, None, &branch).unwrap();
+    assert!(
+        matches!(landed, crate::landing::AcceptOutcome::Landed { .. }),
+        "greet's work lands on the lead's task branch"
+    );
+    let ended: String = (0..65)
+        .map(|index| {
+            let id = WORKER + 100 + index;
+            format!(
+                "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms,parent,pane)
+                 VALUES ({id},'{PROJECT}','teammate','claude-code',1,'stopped',{NOW},{NOW},{LEAD},'%{id}');
+                 INSERT INTO team_teammate_names(agent,name) VALUES ({id},'ended-{index}');"
+            )
+        })
+        .collect();
+    fixture.connection.execute_batch(&ended).unwrap();
+    let (answer, error) = finish(&mut fixture);
+    assert_eq!(
+        (answer.as_str(), error),
+        (
+            format!("Work #{work} is complete at version 2.").as_str(),
+            false
+        )
+    );
+}
+
 /// A lead cannot report its work Complete while a worker's branch holds a commit its task
 /// branch does not: finish_work names the worker's branch until the lead merges it, then
 /// completes (feat/coord-spawn 4f372a7e).
@@ -3065,6 +3232,47 @@ fn finish_work_waits_for_an_unmerged_sub_agent() {
         &lead,
         &["merge", "--no-ff", "-q", "--no-edit", "FETCH_HEAD"],
     );
+    let (answer, error) = clones.finish(work, 1);
+    assert_eq!(
+        (answer.as_str(), error),
+        (
+            format!("Work #{work} is complete at version 2.").as_str(),
+            false
+        )
+    );
+}
+
+/// OP9B-C3: a lead in its own clone cannot report its work Complete while one of its
+/// native teammates still works, since no commit holds that teammate's edits yet:
+/// finish_work names the teammate, then completes once it rests.
+#[test]
+fn a_clone_lead_finishes_only_once_its_native_teammates_rest() {
+    let mut clones = Clones::new();
+    let work = clones.started();
+    let mate = WORKER + 1;
+    clones
+        .fixture
+        .connection
+        .execute_batch(&format!(
+            "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms,parent,pane)
+             VALUES ({mate},'{PROJECT}','teammate','claude-code',1,'working',{NOW},{NOW},{LEAD},'%7');
+             INSERT INTO team_teammate_names(agent,name) VALUES ({mate},'greet');"
+        ))
+        .unwrap();
+
+    let (answer, error) = clones.finish(work, 1);
+    assert_eq!(
+        (answer.as_str(), error),
+        (
+            "Not finished: these teammates still work: greet. Finish again once they rest and you have merged their branches into yours.",
+            true
+        )
+    );
+    clones
+        .fixture
+        .connection
+        .execute("UPDATE team_agents SET status='idle' WHERE id=?1", [mate])
+        .unwrap();
     let (answer, error) = clones.finish(work, 1);
     assert_eq!(
         (answer.as_str(), error),

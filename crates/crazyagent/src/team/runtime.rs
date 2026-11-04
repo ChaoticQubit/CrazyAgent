@@ -24,10 +24,11 @@ use crate::master_sessions::ResumePlan;
 use crate::project_setup::{StoredSetup, load_setup};
 use crate::protocol::{CredentialRef, ProjectId, RequestId, SessionId};
 use crate::research::runner::{
-    ResearchAccount, RunError, add_worktree_at, confined_unavailable, ensure_repository,
-    model_remote,
+    CLAUDE_MODEL_HOSTS, CODEX_MODEL_HOSTS, ResearchAccount, RunError, add_worktree_at,
+    confined_unavailable, endpoint_model_host, ensure_repository, model_remote,
 };
-use crate::sandbox::policy::AgentAccess;
+use crate::sandbox::model_proxy::{ModelHost, ModelProxy};
+use crate::sandbox::policy::{AgentAccess, AgentNetwork};
 use crate::sandbox::toolchains::{self, ToolHomes, Toolchains};
 use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
 use crate::terminal::{AgentId, Host, PANES_PER_PROJECT_MAX};
@@ -171,7 +172,10 @@ struct Grant {
 /// native-mode lead (DEC-104), which runs in a tmux server of its own inside its profile,
 /// and `tmux` is that server's program, which its teammates are split off with; `hookless`
 /// marks a launch Claude Code starts `--bare`, which fires no hooks (DEC-104 bare-hooks);
-/// `scratch_pin` is the agent's short temp folder as the engine made it (DEC-111 S1R1-1).
+/// `scratch_pin` is the agent's short temp folder as the engine made it (DEC-111 S1R1-1);
+/// `proxy` is the model proxy an agent with tools under the None network reaches its model
+/// through, the only network its profile allows (S4b); `network` is the project network its
+/// profile was made for, which a narrower saved choice stops it for (CS-2).
 struct Plan {
     harness: String,
     executable: PathBuf,
@@ -180,6 +184,7 @@ struct Plan {
     tools: bool,
     sandbox_profile: PathBuf,
     access: AgentAccess,
+    network: AgentNetwork,
     layout: Layout,
     git_identity: Option<GitIdentity>,
     limits: LaunchLimits,
@@ -192,6 +197,7 @@ struct Plan {
     hookless: bool,
     #[cfg(unix)]
     scratch_pin: Option<(u64, u64)>,
+    proxy: Option<Arc<ModelProxy>>,
 }
 
 /// Why a native-mode lead does not start at Full access: its own tmux server, its teammate
@@ -208,14 +214,19 @@ const OVERLAP_BLOCK_NEEDS_HOOKS: &str = "Overlaps set to Block needs hooks, and 
 
 impl Plan {
     /// Gives a native-mode lead's launch context its agent team (DEC-104 K5a): agent teams on,
-    /// `--teammate-mode tmux`, tmux on its PATH and the teammates' instructions. Other plans
-    /// keep the context as it is. Takes the context. Returns it.
+    /// `--teammate-mode tmux`, tmux on its PATH and the teammates' instructions. A plan with a
+    /// model proxy also points the launch's variables at it (S4b). Other plans keep the
+    /// context as it is. Takes the context. Returns it.
     fn team_context(&self, context: AgentContext) -> AgentContext {
         assert_eq!(
             self.native,
             self.tmux.is_some(),
             "a native plan carries its tmux"
         );
+        let context = match &self.proxy {
+            Some(proxy) => context.with_model_proxy(proxy.port()),
+            None => context,
+        };
         match &self.tmux {
             Some(tmux) => context.with_native_team(tmux, &self.working_dir),
             None => context,
@@ -296,6 +307,21 @@ enum Launch {
     Adopt(Box<Adoption>),
 }
 
+impl Launch {
+    /// Names the model proxy the launch's agent reaches its model through, which its worker
+    /// thread holds until the thread ends (S4b). Takes the launch. Returns the proxy, if any.
+    fn proxy(&self) -> Option<Arc<ModelProxy>> {
+        match self {
+            Launch::Fresh(plan, _) => plan.proxy.clone(),
+            Launch::Adopt(adoption) => adoption.proxy.clone(),
+        }
+    }
+}
+
+/// A pane an earlier engine left running, taken over from its record: the host and pane
+/// name, the record, the bounds, whether it is a live master, what a signed-in account needs
+/// again, the access level it started at, the project network its profile was made for, and
+/// its model proxy, bound again on the port its profile names (S4b).
 struct Adoption {
     host: Arc<dyn Host>,
     agent: AgentId,
@@ -304,6 +330,8 @@ struct Adoption {
     live: bool,
     managed: Option<Managed>,
     access: AgentAccess,
+    network: AgentNetwork,
+    proxy: Option<Arc<ModelProxy>>,
 }
 
 /// What a live master on a signed-in account needs when a later engine takes its pane over:
@@ -425,6 +453,8 @@ struct Worker {
     handoff: Option<String>,
     access: AgentAccess,
     lowered: bool,
+    network: AgentNetwork,
+    narrowed: bool,
     ran_before: Duration,
     told_finished: BTreeSet<i64>,
     parent: Option<i64>,
@@ -464,6 +494,10 @@ pub struct TeamRuntime {
     watch: super::events::Watch,
     teammates_next: Option<Instant>,
     teammate_worktree_tries: BTreeMap<i64, BTreeMap<String, u8>>,
+    teammates_rested: BTreeMap<i64, BTreeSet<i64>>,
+    teammate_turn_tries: BTreeMap<i64, BTreeMap<i64, u8>>,
+    teammates_unreadable_told: BTreeSet<i64>,
+    teammate_conflicts_told: BTreeMap<i64, BTreeMap<String, (String, String)>>,
     receipts_next: BTreeMap<ProjectId, Instant>,
     live_starts: BTreeMap<ProjectId, Vec<Instant>>,
     resuming: Option<(i64, Resume)>,
@@ -664,6 +698,10 @@ impl TeamRuntime {
             watch: super::events::Watch::default(),
             teammates_next: None,
             teammate_worktree_tries: BTreeMap::new(),
+            teammates_rested: BTreeMap::new(),
+            teammate_turn_tries: BTreeMap::new(),
+            teammates_unreadable_told: BTreeSet::new(),
+            teammate_conflicts_told: BTreeMap::new(),
             receipts_next: BTreeMap::new(),
             live_starts: BTreeMap::new(),
             resuming: None,
@@ -774,7 +812,9 @@ impl TeamRuntime {
     /// signed-in account for a live master or a native-mode lead, whose worker hands the
     /// credential to its home again before it serves. The pane keeps the
     /// access level its record says it started at, Full access for a record without one, so
-    /// a level lowered while no engine ran stops it on the next tick. Takes the host, the
+    /// a level lowered while no engine ran stops it on the next tick. A pane with tools whose
+    /// record names a wider network than the saved one, Open for a record without one, is not
+    /// taken over (CS-2). Takes the host, the
     /// agent id, its pane record and the live access. Returns Ok, or why the pane must end.
     fn adopt(
         &mut self,
@@ -837,6 +877,14 @@ impl TeamRuntime {
         if !in_plan {
             return Ok(Err("the team plan no longer has room for it".into()));
         }
+        let saved = crate::sandbox::policy::load(&self.connection, project.as_str())
+            .map_or(AgentNetwork::None, |policy| policy.network);
+        let started = record.network.unwrap_or(AgentNetwork::Open);
+        if tools && started.wider_than(saved) {
+            return Ok(Err(
+                "it started under a wider network than the project allows now".into(),
+            ));
+        }
         if self.panes(&project) >= PANES_PER_PROJECT_MAX {
             return Ok(Err(format!(
                 "the project already runs {PANES_PER_PROJECT_MAX} agents"
@@ -844,13 +892,16 @@ impl TeamRuntime {
         }
         let live = self.live_master(&project, role, launch);
         let native = !live && matches!(self.native_lead(&project, id, role, launch), Ok(true));
-        let reach = match eligible_accounts(access, &project, launch) {
+        let account_reach = match eligible_accounts(access, &project, launch) {
             Accounts::Usable(accounts) => accounts
                 .iter()
                 .find(|account| account.connection == connection)
-                .map(|account| matches!(account.reach, TeamReach::Endpoint { .. })),
+                .map(|account| account.reach.clone()),
             _ => None,
         };
+        let reach = account_reach
+            .as_ref()
+            .map(|reach| matches!(reach, TeamReach::Endpoint { .. }));
         let managed = match reach {
             Some(true) => None,
             Some(false) if live || native => match self.executables.get(launch) {
@@ -866,6 +917,22 @@ impl TeamRuntime {
                 ));
             }
             None => return Ok(Err("its account is no longer in the project's pool".into())),
+        };
+        let proxy = match (record.proxy, &account_reach) {
+            (None, _) => None,
+            (Some(port), Some(reach)) => {
+                let hosts = match model_hosts(launch, reach) {
+                    Ok(hosts) => hosts,
+                    Err(problem) => return Ok(Err(problem)),
+                };
+                match ModelProxy::bind(id, hosts, Some(port)) {
+                    Ok(proxy) => Some(Arc::new(proxy)),
+                    Err(_) => return Ok(Err(format!("its model proxy port {port} is taken"))),
+                }
+            }
+            (Some(_), None) => {
+                return Ok(Err("its account is no longer in the project's pool".into()));
+            }
         };
         let Ok(agent) = AgentId::team(id) else {
             return Ok(Err("its record is not valid".into()));
@@ -888,6 +955,8 @@ impl TeamRuntime {
             live,
             managed,
             access: record.access.unwrap_or(AgentAccess::Full),
+            network: record.network.unwrap_or(AgentNetwork::Open),
+            proxy,
         };
         let session = if live {
             crate::master_sessions::live_session(&self.connection, &project)?
@@ -1033,6 +1102,14 @@ impl TeamRuntime {
             .collect();
         self.teammate_worktree_tries
             .retain(|lead, _| harnesses.iter().any(|(agent, _)| agent == lead));
+        self.teammates_rested
+            .retain(|lead, _| harnesses.iter().any(|(agent, _)| agent == lead));
+        self.teammate_turn_tries
+            .retain(|lead, _| harnesses.iter().any(|(agent, _)| agent == lead));
+        self.teammates_unreadable_told
+            .retain(|lead| harnesses.iter().any(|(agent, _)| agent == lead));
+        self.teammate_conflicts_told
+            .retain(|lead, _| harnesses.iter().any(|(agent, _)| agent == lead));
         for (agent, project) in harnesses {
             let cap = super::teammate_cap(&self.connection, &project)?;
             if let Some(cap) = cap {
@@ -1082,6 +1159,8 @@ impl TeamRuntime {
                 at,
             )?;
             self.make_teammate_worktrees(&project, agent)?;
+            self.record_teammate_turns(&project, agent)?;
+            self.land_teammates(&project, agent)?;
             for (teammate, pane) in teammates::working(&self.connection, &project, agent)? {
                 if !live.contains(&pane.as_str()) {
                     continue;
@@ -1966,6 +2045,7 @@ impl TeamRuntime {
         let paused = self.paused()?;
         self.retire_rejected(project, access);
         self.retire_lowered(project);
+        self.retire_narrowed(project);
         self.sync_pool(&stored, access)?;
         self.request_cancels(project)?;
         self.keep_live(&stored, access, &paused)?;
@@ -2424,6 +2504,39 @@ impl TeamRuntime {
             let worker = self.workers.get_mut(&id).expect("worker exists");
             worker.stopping = true;
             worker.lowered = true;
+            worker.cancel.store(true, Ordering::SeqCst);
+            let _ = worker.orders.send(Order::Stop);
+        }
+    }
+
+    /// Stops the project's agents with tools whose profile was made for a wider network than
+    /// the one the owner saved now (CS-2): a running, kept or live agent at once, and an idle
+    /// per-turn agent too, since its next turn would run in the same profile. Every next start
+    /// makes its profile for the saved network. An unreadable choice counts as None. Takes
+    /// the project.
+    fn retire_narrowed(&mut self, project: &ProjectId) {
+        if !self.workers.values().any(|worker| {
+            &worker.project == project
+                && worker.tools
+                && !worker.stopping
+                && worker.network != AgentNetwork::None
+        }) {
+            return;
+        }
+        let saved = crate::sandbox::policy::load(&self.connection, project.as_str())
+            .map_or(AgentNetwork::None, |policy| policy.network);
+        let narrowed: Vec<i64> = self
+            .workers
+            .iter()
+            .filter(|(_, w)| {
+                &w.project == project && w.tools && !w.stopping && w.network.wider_than(saved)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in narrowed {
+            let worker = self.workers.get_mut(&id).expect("worker exists");
+            worker.stopping = true;
+            worker.narrowed = true;
             worker.cancel.store(true, Ordering::SeqCst);
             let _ = worker.orders.send(Order::Stop);
         }
@@ -4920,9 +5033,9 @@ impl TeamRuntime {
             Launch::Adopt(adoption) => adoption.managed.is_some() && !adoption.live,
         };
         assert!(!(kept_session && live));
-        let access = match &launch {
-            Launch::Fresh(plan, _) => plan.access,
-            Launch::Adopt(adoption) => adoption.access,
+        let (access, network) = match &launch {
+            Launch::Fresh(plan, _) => (plan.access, plan.network),
+            Launch::Adopt(adoption) => (adoption.access, adoption.network),
         };
         let thread = std::thread::Builder::new()
             .name(format!("team-agent-{id}"))
@@ -4973,7 +5086,9 @@ impl TeamRuntime {
                 spawned: Instant::now(),
                 handoff: None,
                 access,
+                network,
                 lowered: false,
+                narrowed: false,
                 ran_before: Duration::ZERO,
                 told_finished: BTreeSet::new(),
                 parent,
@@ -5156,9 +5271,10 @@ impl TeamRuntime {
         name
     }
 
-    /// Makes each running native teammate's own worktree in its lead's own clone (OP-9),
-    /// `.worktrees/<name>` on `<task branch>--<name>`, with git run under the lead's installed
-    /// profile, at most `TEAMMATE_WORKTREE_TRIES` times per name, then records each
+    /// Makes each running native teammate's own worktree inside its lead's worktree (OP-9,
+    /// OP-9b), `.worktrees/<name>` on `<task branch>--<name>`, with git run under the lead's
+    /// installed profile in its own clone, or under its teammates' setup profile for a
+    /// linked lead, at most `TEAMMATE_WORKTREE_TRIES` times per name, then records each
     /// teammate's worktree. Takes the project and the lead. Returns Ok, or a SQLite failure;
     /// a worktree git could not make is left without one.
     fn make_teammate_worktrees(
@@ -5179,9 +5295,7 @@ impl TeamRuntime {
             return teammates::keep_worktrees(&self.connection, project, lead);
         };
         let (worktree, git_dir) = (PathBuf::from(worktree), PathBuf::from(git_dir));
-        if git_dir != crate::agent_git::git_dir(&worktree) {
-            return teammates::keep_worktrees(&self.connection, project, lead);
-        }
+        let linked = git_dir != crate::agent_git::git_dir(&worktree);
         let made = crate::landing::teammate_worktrees(&self.connection, &worktree, &git_dir)
             .unwrap_or_default();
         let mut wanted = Vec::new();
@@ -5201,23 +5315,13 @@ impl TeamRuntime {
                 wanted.push(name);
             }
         }
-        let sandbox = (!wanted.is_empty())
-            .then(|| Path::new(&repository).canonicalize().ok())
-            .flatten()
-            .and_then(|root| {
-                ProjectSandbox::new(
-                    &root,
-                    &agent_home(&self.state, lead),
-                    &self.agent_folder(lead).join("tmp"),
-                    SandboxNetwork::Only(Vec::new()),
-                )
-                .ok()
-            });
-        match &sandbox {
-            Some(sandbox) => {
-                let profile = agent_profile(&self.state, lead);
+        if wanted.is_empty() {
+            return teammates::keep_worktrees(&self.connection, project, lead);
+        }
+        match self.teammates_git(Path::new(&repository), &worktree, lead, linked) {
+            Ok((sandbox, profile)) => {
                 let git = crate::landing::LeadGit {
-                    sandbox,
+                    sandbox: &sandbox,
                     profile: &profile,
                 };
                 for name in &wanted {
@@ -5235,12 +5339,321 @@ impl TeamRuntime {
                     }
                 }
             }
-            None if !wanted.is_empty() => {
-                eprintln!("teammate_worktree_failed cause=lead_sandbox_unavailable");
-            }
-            None => {}
+            Err(cause) => eprintln!("teammate_worktree_failed cause={cause}"),
         }
         teammates::keep_worktrees(&self.connection, project, lead)
+    }
+
+    /// The sandbox and installed profile the engine's git runs under to make a lead's native
+    /// teammates' worktrees: the lead's own launch profile for its own clone, or for a
+    /// linked lead its teammates' setup profile, installed now (OP-9b). Takes the project
+    /// folder, the lead's worktree, the lead and whether the worktree is linked. Returns
+    /// both, or the plain cause.
+    fn teammates_git(
+        &self,
+        repository: &Path,
+        worktree: &Path,
+        lead: i64,
+        linked: bool,
+    ) -> Result<(ProjectSandbox, PathBuf), &'static str> {
+        let unavailable = |_| "lead_sandbox_unavailable";
+        let sandbox = ProjectSandbox::new(
+            &repository
+                .canonicalize()
+                .map_err(|_| "lead_sandbox_unavailable")?,
+            &agent_home(&self.state, lead),
+            &self.agent_folder(lead).join("tmp"),
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .map_err(unavailable)?;
+        if !linked {
+            return Ok((sandbox, agent_profile(&self.state, lead)));
+        }
+        let setup = |_| "teammates_setup_unavailable";
+        let sandbox = sandbox
+            .confine_to_teammates_setup(worktree)
+            .map_err(setup)?;
+        let profile = agent_teammates_setup_profile(&self.state, lead);
+        sandbox.install(&profile).map_err(setup)?;
+        Ok((sandbox, profile))
+    }
+
+    /// The owner checkout root, worktree and git folder of a lead in a linked worktree of
+    /// the project (OP-9b). Takes the project and the lead. Returns them, None for a lead in
+    /// its own clone or with no worktree, or a SQLite failure.
+    fn linked_lead(
+        &self,
+        project: &ProjectId,
+        lead: i64,
+    ) -> Result<Option<(PathBuf, PathBuf, PathBuf)>, EngineError> {
+        let place: Option<(String, String, String)> = self
+            .connection
+            .query_row(
+                "SELECT repository,worktree,git_dir FROM team_worktrees WHERE agent=?1 AND project=?2",
+                params![lead, project.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(error)?;
+        Ok(place
+            .map(|(repository, worktree, git_dir)| {
+                (
+                    PathBuf::from(repository),
+                    PathBuf::from(worktree),
+                    PathBuf::from(git_dir),
+                )
+            })
+            .filter(|(_, worktree, git_dir)| *git_dir != crate::agent_git::git_dir(worktree)))
+    }
+
+    /// Commits each resting native teammate's turn of a linked lead in its own linked
+    /// worktree on its own branch `<task branch>--<name>` (OP-9b), once each time it rests,
+    /// as a linked agent's turn end does, so its work waits as its own change set; a
+    /// teammate that works again is committed at its next rest. A turn the engine could not
+    /// commit is tried again at the next pass, up to `TEAMMATE_TURN_TRIES` times for each
+    /// rest, then the lead is told once that it stays in the teammate's worktree (OP9B-L1);
+    /// a teammates' folder the engine cannot read is told to the lead once until it reads
+    /// again (OP9B-L2). Takes the project and the lead. Returns Ok, or a SQLite or
+    /// coordination failure.
+    fn record_teammate_turns(&mut self, project: &ProjectId, lead: i64) -> Result<(), EngineError> {
+        let Some((repository, worktree, git_dir)) = self.linked_lead(project, lead)? else {
+            self.teammates_rested.remove(&lead);
+            self.teammate_turn_tries.remove(&lead);
+            self.teammates_unreadable_told.remove(&lead);
+            return Ok(());
+        };
+        let rows = teammates::resting(&self.connection, project, lead)?;
+        self.teammate_turn_tries
+            .entry(lead)
+            .or_default()
+            .retain(|teammate, _| rows.contains(&(*teammate, true)));
+        let rested = self.teammates_rested.entry(lead).or_default();
+        rested.retain(|teammate| rows.contains(&(*teammate, true)));
+        let due: Vec<i64> = rows
+            .iter()
+            .filter(|(teammate, resting)| *resting && !rested.contains(teammate))
+            .map(|(teammate, _)| *teammate)
+            .collect();
+        if due.is_empty() {
+            return Ok(());
+        }
+        let db = match crate::landing::open(&self.root) {
+            Ok(db) => db,
+            Err(problem) => {
+                eprintln!(
+                    "teammate_turn_failed cause={}",
+                    crate::protocol::plain_code(&problem.0)
+                );
+                return Ok(());
+            }
+        };
+        match crate::landing::teammate_worktrees(&db, &worktree, &git_dir) {
+            Ok(_) => {
+                self.teammates_unreadable_told.remove(&lead);
+            }
+            Err(problem) => {
+                let code = crate::protocol::plain_code(&problem.0);
+                eprintln!("teammate_turn_failed cause={code}");
+                if !self.teammates_unreadable_told.contains(&lead) {
+                    self.note_lead(
+                        project,
+                        lead,
+                        format!(
+                            "CrazyAgent cannot save or land your teammates' work: your teammates' folder {} holds something other than the worktrees CrazyAgent made for them ({code}). Remove what you or a teammate added there; CrazyAgent saves their work again at the next pass after that.",
+                            crate::agent_git::TEAMMATES_FOLDER
+                        ),
+                    )?;
+                    self.teammates_unreadable_told.insert(lead);
+                }
+                return Ok(());
+            }
+        }
+        for teammate in due {
+            let Some(name) = teammates::name(&self.connection, teammate) else {
+                continue;
+            };
+            let Ok(Some((own, own_git))) =
+                crate::landing::linked_teammate_place(&db, &worktree, &git_dir, &name)
+            else {
+                continue;
+            };
+            let workspace = crate::landing::Workspace {
+                project: project.clone(),
+                agent: crate::landing::ChangeAgent {
+                    kind: crate::landing::AgentKind::Sub,
+                    id: teammate.to_string(),
+                    label: format!("{name} \u{b7} teammate"),
+                },
+                repository: repository.clone(),
+                worktree: own,
+                git_dir: own_git,
+            };
+            let ended = crate::landing::TurnEnd {
+                outcome: crate::landing::TurnOutcome::Succeeded,
+                turn: format!("rest-{}", now_ms()),
+                prompt_line: format!("Work of teammate {name}"),
+            };
+            let tries = self.teammate_turn_tries.entry(lead).or_default();
+            if let Err(problem) = crate::landing_turns::record(&db, &workspace, &ended) {
+                let code = crate::landing::refusal_code(&problem).to_owned();
+                eprintln!("teammate_turn_failed cause={code}");
+                let tried = tries.entry(teammate).or_insert(0);
+                *tried += 1;
+                if *tried < TEAMMATE_TURN_TRIES {
+                    continue;
+                }
+                tries.remove(&teammate);
+                self.note_lead(
+                    project,
+                    lead,
+                    format!(
+                        "CrazyAgent could not save teammate {name}'s work on its own branch ({code}), {TEAMMATE_TURN_TRIES} times. It stays uncommitted in its worktree {}/{name}; CrazyAgent saves it again after {name} works and rests again.",
+                        crate::agent_git::TEAMMATES_FOLDER
+                    ),
+                )?;
+            } else {
+                tries.remove(&teammate);
+            }
+            self.teammates_rested
+                .entry(lead)
+                .or_default()
+                .insert(teammate);
+        }
+        Ok(())
+    }
+
+    /// Lands each resting native teammate's waiting change set on its linked lead's task
+    /// branch (OP-9b, leader 17:32 answer a) as one squash commit with the owner's identity,
+    /// as an owner's Accept onto that branch does, only while the lead is idle and the
+    /// owner lets a lead's workers land on it, then records the lead's change set again so
+    /// the landed work waits for the owner there and tells the lead whose work landed, so a
+    /// lead that could not finish while it waited finishes then (OP9B-M1). A conflicting set
+    /// stays on the teammate's branch and the lead is told its files, each quoted on its own
+    /// line (OP9B-C2), once for each teammate head and lead tip.
+    /// Takes the project and the lead. Returns Ok, or a SQLite or coordination failure.
+    fn land_teammates(&mut self, project: &ProjectId, lead: i64) -> Result<(), EngineError> {
+        let Some((repository, worktree, git_dir)) = self.linked_lead(project, lead)? else {
+            self.teammate_conflicts_told.remove(&lead);
+            return Ok(());
+        };
+        let idle: bool = self
+            .connection
+            .query_row(
+                "SELECT status='idle' FROM team_agents WHERE id=?1 AND project=?2",
+                params![lead, project.as_str()],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(error)?
+            .unwrap_or(false);
+        if !idle
+            || self
+                .workers
+                .get(&lead)
+                .is_some_and(|worker| worker.busy.is_some())
+            || super::nesting(&self.connection, project)?.lands != super::ChildLanding::Lead
+        {
+            return Ok(());
+        }
+        let resting: Vec<i64> = teammates::resting(&self.connection, project, lead)?
+            .into_iter()
+            .filter(|(_, resting)| *resting)
+            .map(|(teammate, _)| teammate)
+            .collect();
+        if resting.is_empty() {
+            return Ok(());
+        }
+        let opened = crate::landing::open(&self.root).and_then(|db| {
+            let sets = crate::landing::list(&db, project)?;
+            let branch = crate::landing::agent_branch(&db, &worktree, &git_dir)?;
+            Ok((db, sets, branch))
+        });
+        let (db, sets, branch) = match opened {
+            Ok((db, sets, Some(branch))) => (db, sets, branch),
+            Ok(_) => return Ok(()),
+            Err(problem) => {
+                eprintln!(
+                    "teammate_landing_failed cause={}",
+                    crate::protocol::plain_code(&problem.0)
+                );
+                return Ok(());
+            }
+        };
+        let mut landed = Vec::new();
+        for teammate in resting {
+            let id = teammate.to_string();
+            let Some(set) = sets.iter().find(|set| {
+                set.agent.kind == crate::landing::AgentKind::Sub
+                    && set.agent.id == id
+                    && matches!(
+                        set.state,
+                        crate::landing::ChangeState::Pending
+                            | crate::landing::ChangeState::Conflict
+                    )
+            }) else {
+                continue;
+            };
+            let tip = crate::landing::agent_tip(&db, &repository, &worktree, &git_dir)
+                .unwrap_or_default();
+            let seen = (set.head.clone(), tip);
+            let told = self.teammate_conflicts_told.entry(lead).or_default();
+            if told.get(set.id.as_str()) == Some(&seen) {
+                continue;
+            }
+            let outcome = crate::projects_home::owner_home().and_then(|home| {
+                crate::landing::accept_into(&db, &home, &set.id, &set.head, None, &branch)
+            });
+            match outcome {
+                Ok(crate::landing::AcceptOutcome::Landed { .. }) => {
+                    told.remove(set.id.as_str());
+                    landed.push(
+                        teammates::name(&self.connection, teammate)
+                            .unwrap_or_else(|| format!("teammate {teammate}")),
+                    );
+                }
+                Ok(crate::landing::AcceptOutcome::Conflict { files }) => {
+                    if told.len() >= TEAMMATE_WORKTREE_NAMES_MAX {
+                        told.clear();
+                    }
+                    told.insert(set.id.as_str().to_owned(), seen);
+                    let name = teammates::name(&self.connection, teammate)
+                        .unwrap_or_else(|| format!("teammate {teammate}"));
+                    let branch = bound_text(&branch, crate::landing::BRANCH_BYTES_MAX);
+                    self.note_lead(
+                        project,
+                        lead,
+                        format!(
+                            "CrazyAgent could not land teammate {name}'s work on your task branch {branch}. It stays on {name}'s own branch {branch}--{name}. Ask {name} to make these files agree with yours; CrazyAgent lands its work again after its next rest. The files that conflict, one per line, each quoted:{}",
+                            quoted_lines(&files, TEAMMATE_CONFLICT_FILES_SHOWN_MAX)
+                        ),
+                    )?;
+                }
+                Err(problem) => eprintln!(
+                    "teammate_landing_failed cause={}",
+                    crate::protocol::plain_code(&problem.0)
+                ),
+            }
+        }
+        if !landed.is_empty() {
+            self.land_turn(
+                lead,
+                project,
+                format!("teammates-{}", now_ms()),
+                "Land the teammates' work".to_owned(),
+                "its teammates' work",
+                TurnEnd::Success,
+            )?;
+            self.note_lead(
+                project,
+                lead,
+                format!(
+                    "CrazyAgent landed the work of your teammates {} on your task branch {}. If your work is done, finish it again.",
+                    bound_text(&landed.join(", "), TEAMMATE_CONFLICT_FILES_SHOWN_MAX),
+                    bound_text(&branch, crate::landing::BRANCH_BYTES_MAX)
+                ),
+            )?;
+        }
+        Ok(())
     }
 
     /// What a harness reads about its git branch with each task (DEC-100): its task branch
@@ -5575,10 +5988,22 @@ impl TeamRuntime {
         if let Some(reason) = policy.access.unavailable() {
             return Err(with_code(reason, Some("agent_access_unavailable")));
         }
-        let network = if tools {
-            policy.network.sandbox(Some(remote))
+        let proxy = if tools
+            && policy.network == AgentNetwork::None
+            && !matches!(remote, SandboxRemote::Loopback(_))
+        {
+            let hosts = model_hosts(launch, &account.reach)?;
+            let proxy = ModelProxy::bind(id, hosts, None).map_err(|e| {
+                with_code("the agent's model proxy could not start", Some(io_code(&e)))
+            })?;
+            Some(Arc::new(proxy))
         } else {
-            SandboxNetwork::Only(vec![remote])
+            None
+        };
+        let network = match &proxy {
+            Some(proxy) => SandboxNetwork::Only(vec![SandboxRemote::Loopback(proxy.port())]),
+            None if tools => policy.network.sandbox(Some(remote)),
+            None => SandboxNetwork::Only(vec![remote]),
         };
         let homes = ToolHomes::owner().map_err(sandboxed)?;
         let scratch = toolchains::make_tmp(&home)
@@ -5790,6 +6215,7 @@ impl TeamRuntime {
             tools,
             sandbox_profile: profile,
             access: policy.access,
+            network: policy.network,
             layout,
             git_identity: owner_git_identity(&root),
             limits: self.launch_limits(),
@@ -5812,6 +6238,7 @@ impl TeamRuntime {
             hookless,
             #[cfg(unix)]
             scratch_pin,
+            proxy,
         };
         let mode = match &account.reach {
             TeamReach::Endpoint { base_url, .. } => Mode::Kept {
@@ -6109,7 +6536,12 @@ impl TeamRuntime {
                     worker.spawned = Instant::now();
                 }
                 let access = Some(self.workers[&id].access);
-                let pane = pane.map(|record| PaneRecord { access, ..record });
+                let network = Some(self.workers[&id].network);
+                let pane = pane.map(|record| PaneRecord {
+                    access,
+                    network,
+                    ..record
+                });
                 if let Some(record) = pane.as_ref().and_then(PaneRecord::encode) {
                     self.connection
                         .execute(
@@ -6441,14 +6873,23 @@ impl TeamRuntime {
                 } else {
                     AgentStatus::Stopped
                 };
-                let problem = problem.or_else(|| {
-                    worker.lowered.then(|| {
-                        with_code(
-                            "the project's agent access was lowered, so the agent was stopped; its next start uses the new level",
-                            Some("agent_access_lowered"),
-                        )
+                let problem = problem
+                    .or_else(|| {
+                        worker.lowered.then(|| {
+                            with_code(
+                                "the project's agent access was lowered, so the agent was stopped; its next start uses the new level",
+                                Some("agent_access_lowered"),
+                            )
+                        })
                     })
-                });
+                    .or_else(|| {
+                        worker.narrowed.then(|| {
+                            with_code(
+                                "the project's agent network was narrowed, so the agent was stopped; its next start uses the new network",
+                                Some("agent_network_narrowed"),
+                            )
+                        })
+                    });
                 if let Some(hosted) = worker.hosted.take() {
                     let state = if status == AgentStatus::Failed {
                         RunState::Failed
@@ -7110,6 +7551,7 @@ fn work(
     interrupt: Arc<AtomicBool>,
     leave: Arc<AtomicBool>,
 ) {
+    let _proxy = launch.proxy();
     let launch = match launch {
         Launch::Fresh(plan, mode) if plan.live => {
             let problem = live(&plan, *mode, &orders, &reports, &cancel, &leave);
@@ -8003,6 +8445,10 @@ const TEAMMATE_ROWS_KEPT: i64 = 32;
 /// The most times the engine runs git to make one native teammate's worktree (OP-9), so a
 /// worktree git refuses never costs a git run on every pass.
 const TEAMMATE_WORKTREE_TRIES: u8 = 3;
+/// The most passes the engine tries to commit one resting native teammate's turn (OP9B-L1)
+/// before it tells the lead and waits for that teammate's next rest.
+const TEAMMATE_TURN_TRIES: u8 = 3;
+const TEAMMATE_CONFLICT_FILES_SHOWN_MAX: usize = 400;
 /// The most teammate names of one lead whose worktree tries the engine counts.
 const TEAMMATE_WORKTREE_NAMES_MAX: usize = 64;
 const _: () = assert!(TEAMMATE_WORKTREE_NAMES_MAX >= TEAMMATE_ROWS_KEPT as usize);
@@ -8014,6 +8460,23 @@ const LEAD_ENDED_TEAMMATE: &str = "Its lead stopped, and its terminal ended with
 const OVER_TEAMMATE_CAP: &str = "The engine ended it: its lead ran more sub-agents than the owner's Max teammates per harness allows.";
 const OWNER_WAKES_PER_TICK_MAX: usize = 8;
 const HANDOFF_BYTES_MAX: usize = 1000;
+
+/// Lists file names for an engine note one per line, each quoted with its quotes,
+/// backslashes, newlines and other control characters escaped, so no name an agent chose
+/// reads as a line of the note (OP9B-C2). Takes the names and the byte bound of the list.
+/// Returns the lines, whole names only, then how many names were left out.
+fn quoted_lines(names: &[String], max: usize) -> String {
+    let mut text = String::new();
+    for (shown, name) in names.iter().enumerate() {
+        let line = format!("\n- \"{}\"", name.escape_debug());
+        if text.len() + line.len() > max {
+            text.push_str(&format!("\n- and {} more", names.len() - shown));
+            break;
+        }
+        text.push_str(&line);
+    }
+    text
+}
 
 /// Keeps the harness conversation a sub-agent's pane records, replacing the one kept
 /// before, so waking the agent continues it (DEC-102). A record path that is not plain text
@@ -8409,6 +8872,40 @@ fn io_code(error: &std::io::Error) -> &'static str {
         ErrorKind::InvalidInput | ErrorKind::InvalidData => "io_invalid",
         _ => "io_failed",
     }
+}
+
+/// Lists the hosts a team agent under the None network reaches through its model proxy
+/// (S4b): its harness's model hosts on a signed-in account, its base URL's host on an
+/// endpoint. Inputs: the launch harness and the account's reach. Output: the hosts, or the
+/// plain refusal for an endpoint no proxy can reach by name or a harness with no list.
+fn model_hosts(launch: &str, reach: &TeamReach) -> Result<Vec<ModelHost>, String> {
+    let fixed = |hosts: &[(&str, u16)]| -> Vec<ModelHost> {
+        hosts
+            .iter()
+            .filter_map(|(name, port)| ModelHost::new(name, *port))
+            .collect()
+    };
+    let hosts = match (reach, launch) {
+        (TeamReach::Endpoint { base_url, .. }, _) => match endpoint_model_host(base_url) {
+            Some(host) => vec![host],
+            None => {
+                return Err(with_code(
+                    "With no network, an agent with tools reaches only an https endpoint named by a host name. Use such an endpoint or choose another network setting.",
+                    Some("network_none_endpoint_unnamed"),
+                ));
+            }
+        },
+        (TeamReach::Managed { .. }, "codex") => fixed(CODEX_MODEL_HOSTS),
+        (TeamReach::Managed { .. }, "claude-code") => fixed(CLAUDE_MODEL_HOSTS),
+        (TeamReach::Managed { .. }, _) => {
+            return Err(with_code(
+                "this harness has no model hosts for the no network setting",
+                Some("network_none_harness_unlisted"),
+            ));
+        }
+    };
+    assert!(!hosts.is_empty() && hosts.len() <= crate::sandbox::model_proxy::HOSTS_MAX);
+    Ok(hosts)
 }
 
 /// The plain code for a failed agent sandbox step. Input: the error. Output: the code.
@@ -8913,6 +9410,17 @@ pub fn agent_teammates_profile(state: &Path, id: i64) -> PathBuf {
         .join(format!("agent-{id}-teammates.sb"))
 }
 
+/// The Seatbelt profile the engine's own git runs inside while it adds a linked native-mode
+/// lead's teammates' linked worktrees (OP-9b): it writes only the teammates' folder of the
+/// lead's worktree, the project repository's worktree records and teammate branch refs.
+/// Inputs: the team state folder and the lead's id. Output:
+/// `<state>/profiles/agent-<id>-teammates-setup.sb`.
+pub fn agent_teammates_setup_profile(state: &Path, id: i64) -> PathBuf {
+    state
+        .join("profiles")
+        .join(format!("agent-{id}-teammates-setup.sb"))
+}
+
 /// Where the engine keeps the socket name a native-mode lead's latest start chose for its
 /// teammates' tmux server (see `terminal::renew_teammates_socket`), beside the profiles no
 /// agent writes. Inputs: the team state folder and the lead's id. Output:
@@ -8921,6 +9429,17 @@ pub fn agent_teammates_socket_name(state: &Path, id: i64) -> PathBuf {
     state
         .join("profiles")
         .join(format!("agent-{id}-teammates.socket"))
+}
+
+/// Where the engine keeps the pid a native-mode lead's teammates' tmux server first answered
+/// with at the socket its latest start named (PLC c, PC-L1), beside that socket's name, so an
+/// engine restart or a kill of the lead never pins another server there afresh. Inputs: the
+/// team state folder and the lead's id. Output:
+/// `<state>/profiles/agent-<id>-teammates-server.pid`.
+pub fn agent_teammates_server_pid(state: &Path, id: i64) -> PathBuf {
+    state
+        .join("profiles")
+        .join(format!("agent-{id}-teammates-server.pid"))
 }
 
 /// Starts the team runtime for a running engine: team state in `<runtime>/team`,
@@ -9086,3 +9605,6 @@ mod live_failover_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "runtime/live_native_lead_tests.rs"]
 mod live_native_lead_tests;
+#[cfg(all(test, target_os = "macos"))]
+#[path = "runtime/live_network_none_tests.rs"]
+mod live_network_none_tests;

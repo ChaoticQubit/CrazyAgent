@@ -790,6 +790,87 @@ pub(super) struct Teammate {
     pub(super) head: TeammateHead,
 }
 
+/// Lists the teammate worktrees inside a linked lead's worktree (OP-9b), read as data with
+/// no git run and no link followed: every entry of `<worktree>/.worktrees` must be a plain
+/// folder whose `.git` file names a record in the project repository's `.git/worktrees`,
+/// a record that names that folder back and holds a HEAD on a teammate branch of the task
+/// branch or at a commit, so nothing there is left uncounted. Inputs: the owner checkout
+/// root, the lead's worktree and its task branch. Output: the teammates, at most
+/// `TEAMMATES_MAX`, else `changes_workspace_invalid` for anything else there, or
+/// `changes_too_large`.
+pub(super) fn linked_teammates(
+    repository: &Path,
+    worktree: &Path,
+    branch: &str,
+) -> Result<Vec<Teammate>, EngineError> {
+    use rustix::fs::{CWD, Dir, Mode, OFlags, openat};
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let root = openat(CWD, worktree, flags, Mode::empty()).map_err(|_| invalid())?;
+    let folders = match openat(&root, agent_git::TEAMMATES_FOLDER, flags, Mode::empty()) {
+        Ok(folders) => folders,
+        Err(rustix::io::Errno::NOENT) => return Ok(Vec::new()),
+        Err(_) => return Err(invalid()),
+    };
+    let records_path = repository.join(".git").join("worktrees");
+    let records = openat(CWD, &records_path, flags, Mode::empty()).map_err(|_| invalid())?;
+    let place = worktree.join(agent_git::TEAMMATES_FOLDER);
+    let mut found = Vec::new();
+    for entry in Dir::read_from(&folders).map_err(|_| invalid())? {
+        let entry = entry.map_err(|_| invalid())?;
+        let name = entry
+            .file_name()
+            .to_str()
+            .map_err(|_| invalid())?
+            .to_owned();
+        if matches!(name.as_str(), "." | "..") {
+            continue;
+        }
+        if found.len() >= TEAMMATES_MAX {
+            return Err(failure("changes_too_large"));
+        }
+        let folder =
+            openat(&folders, name.as_str(), flags, Mode::empty()).map_err(|_| invalid())?;
+        let link = read_at(&folder, ".git", HEAD_BYTES_MAX)?.ok_or_else(invalid)?;
+        let admin = std::str::from_utf8(&link)
+            .ok()
+            .and_then(|link| link.strip_prefix("gitdir: "))
+            .and_then(|link| link.strip_suffix('\n'))
+            .map(Path::new)
+            .filter(|admin| admin.parent() == Some(records_path.as_path()))
+            .and_then(Path::file_name)
+            .and_then(std::ffi::OsStr::to_str)
+            .ok_or_else(invalid)?;
+        let record = openat(&records, admin, flags, Mode::empty()).map_err(|_| invalid())?;
+        let back = read_at(&record, "gitdir", HEAD_BYTES_MAX)?.ok_or_else(invalid)?;
+        let own = place.join(&name).join(".git");
+        if std::str::from_utf8(&back)
+            .ok()
+            .and_then(|back| back.strip_suffix('\n'))
+            .map(Path::new)
+            != Some(own.as_path())
+        {
+            return Err(invalid());
+        }
+        let head = read_at(&record, "HEAD", HEAD_BYTES_MAX)?.ok_or_else(invalid)?;
+        let head = std::str::from_utf8(&head)
+            .ok()
+            .and_then(|head| head.strip_suffix('\n'))
+            .ok_or_else(invalid)?;
+        let head = match head.strip_prefix("ref: refs/heads/") {
+            Some(name) if agent_git::is_teammate_branch(branch, name) => {
+                TeammateHead::Branch(name.to_owned())
+            }
+            None if super::git::is_object_id(head) => TeammateHead::Commit(head.to_owned()),
+            _ => return Err(invalid()),
+        };
+        found.push(Teammate {
+            folder: place.join(&name),
+            head,
+        });
+    }
+    Ok(found)
+}
+
 /// Lists the teammate worktrees of a harness's clone, read as data from the clone's git
 /// folder and its teammates' folder with no git run and no link followed: each record in
 /// `.git/worktrees` must name a plain folder directly inside `<clone>/.worktrees` and hold

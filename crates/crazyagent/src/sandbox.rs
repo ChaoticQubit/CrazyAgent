@@ -17,6 +17,7 @@ pub mod extra_paths;
 pub mod hidden_paths;
 #[cfg(target_os = "linux")]
 pub mod linux;
+pub mod model_proxy;
 pub mod policy;
 #[cfg(all(test, target_os = "macos"))]
 pub(crate) mod test_agent;
@@ -639,7 +640,17 @@ pub struct ProjectSandbox {
     read_only: Vec<PathBuf>,
     fixed: Vec<PathBuf>,
     shared: Vec<PathBuf>,
-    teammates_of: Option<PathBuf>,
+    teammates: bool,
+    setup: Option<TeammatesSetup>,
+}
+
+/// What the engine's git may write, with a linked lead's rights, while it adds the lead's
+/// native teammates' linked worktrees (OP-9b): the teammates' folder inside the lead's
+/// worktree and the project repository's worktree records.
+#[derive(Debug, Clone)]
+struct TeammatesSetup {
+    folder: PathBuf,
+    records: PathBuf,
 }
 
 /// The one git worktree a confined agent writes in place of the whole project folder,
@@ -700,7 +711,8 @@ impl ProjectSandbox {
             read_only: Vec::new(),
             fixed: Vec::new(),
             shared: Vec::new(),
-            teammates_of: None,
+            teammates: false,
+            setup: None,
         })
     }
 
@@ -877,7 +889,7 @@ impl ProjectSandbox {
     /// worktree in `worktrees/` whose `.git` link and admin folder name each other.
     /// Output: the confined sandbox, `Invalid` or the disk error.
     pub fn confine_to_worktree(mut self, worktree: &Path) -> Result<Self, SandboxError> {
-        if self.checkout.is_some() || self.clone.is_some() {
+        if self.checkout.is_some() || self.clone.is_some() || self.setup.is_some() {
             return Err(invalid("the sandbox is already confined to a worktree"));
         }
         if self.read_roots.len() >= READ_ROOTS_MAX {
@@ -938,7 +950,7 @@ impl ProjectSandbox {
     /// read-only. Input: a canonical folder in the project's `worktrees/` folder whose
     /// `.git` is a real folder, not a link. Output: the confined sandbox, or `Invalid`.
     pub fn confine_to_clone(mut self, worktree: &Path) -> Result<Self, SandboxError> {
-        if self.checkout.is_some() || self.clone.is_some() {
+        if self.checkout.is_some() || self.clone.is_some() || self.setup.is_some() {
             return Err(invalid("the sandbox is already confined to a worktree"));
         }
         if self.read_roots.len() >= READ_ROOTS_MAX {
@@ -962,6 +974,59 @@ impl ProjectSandbox {
         assert!(worktree.starts_with(&self.project_root) && worktree != self.project_root);
         self.read_roots.push(self.project_root.clone());
         self.clone = Some(worktree.to_path_buf());
+        Ok(self)
+    }
+
+    /// Confines the engine's own git, run with a linked lead's rights, to adding the lead's
+    /// native teammates' linked worktrees (OP-9b): it writes only the teammates' folder of
+    /// the lead's worktree, the project repository's `.git/worktrees` records and the refs
+    /// and reflogs of `crazyagent/<task>--<name>` teammate branches with their `crazyagent`
+    /// folders, beside the lead's home and temp dir; the project stays readable. Makes the teammates' folder as a plain
+    /// folder. Input: the lead's canonical linked worktree in `worktrees/`, whose `.git`
+    /// link names a record in `.git/worktrees`. Output: the confined sandbox, `Invalid` or
+    /// the disk error.
+    pub fn confine_to_teammates_setup(mut self, worktree: &Path) -> Result<Self, SandboxError> {
+        if self.checkout.is_some() || self.clone.is_some() || self.setup.is_some() {
+            return Err(invalid("the sandbox is already confined to a worktree"));
+        }
+        if self.read_roots.len() >= READ_ROOTS_MAX {
+            return Err(invalid("too many read roots"));
+        }
+        let worktrees = crate::projects_home::state_folder(&self.project_root).join("worktrees");
+        if !clean_absolute(worktree)
+            || worktree.parent() != Some(worktrees.as_path())
+            || canonical(worktree)? != worktree
+        {
+            return Err(invalid(
+                "the worktree must be a canonical folder in worktrees/",
+            ));
+        }
+        let records = self.project_root.join(".git").join("worktrees");
+        let admin = canonical(&worktree.join(git_link(&worktree.join(".git"), "gitdir: ")?))?;
+        if admin.parent() != Some(records.as_path()) || canonical(&records)? != records {
+            return Err(invalid(
+                "the lead's worktree must be a linked worktree of the project",
+            ));
+        }
+        let folder = worktree.join(crate::agent_git::TEAMMATES_FOLDER);
+        ensure_store(&folder).map_err(|problem| match problem.kind() {
+            io::ErrorKind::InvalidData => invalid("the teammates' folder must be a plain folder"),
+            _ => SandboxError::Io(problem),
+        })?;
+        if canonical(&folder)? != folder {
+            return Err(invalid("the teammates' folder must be a plain folder"));
+        }
+        let secrets = self.secret_paths();
+        for root in [folder.as_path(), records.as_path()] {
+            clear_of_secrets(root, &secrets)?;
+        }
+        assert!(
+            [folder.as_path(), records.as_path()]
+                .iter()
+                .all(|root| root.starts_with(&self.project_root) && *root != self.project_root)
+        );
+        self.read_roots.push(self.project_root.clone());
+        self.setup = Some(TeammatesSetup { folder, records });
         Ok(self)
     }
 
@@ -1216,7 +1281,7 @@ impl ProjectSandbox {
         teammates.fixed = vec![home.clone(), self.agent_tmp.clone(), mailbox];
         teammates.fixed.extend(shared.iter().cloned());
         teammates.shared = shared;
-        teammates.teammates_of = teammates.clone.clone();
+        teammates.teammates = true;
         if teammates.writes(&home) {
             return Err(invalid("a teammates' writable root holds the lead's home"));
         }
@@ -1226,6 +1291,37 @@ impl ProjectSandbox {
             .reach_unix_socket(mates)?
             .shut_unix_socket(&binding)?;
         Ok((lead, teammates))
+    }
+
+    /// The writes a native lead's teammates may not make in the lead's worktree (OP-9,
+    /// OP-9b), none for any other profile: in the lead's own clone, those
+    /// [`teammates_clone_denies`] names; in a linked worktree, anything but the teammates'
+    /// folder, and the lead's worktree record and the object store, since the engine
+    /// commits the teammates' turns, nor the teammates' folder entry, nor make, move or
+    /// remove anything directly in it, such as a teammate's folder, where the engine's
+    /// setup git adds each teammate worktree (OP-9 r2, OP9B-C1). Output: the rule text,
+    /// empty when none applies.
+    fn teammates_denies(&self) -> String {
+        if !self.teammates {
+            return String::new();
+        }
+        match (&self.clone, &self.checkout) {
+            (Some(clone), _) => teammates_clone_denies(clone),
+            (None, Some(checkout)) => {
+                let worktree = checkout.worktree.display();
+                let root = seatbelt_pattern(&checkout.worktree);
+                let teammates = any_case(crate::agent_git::TEAMMATES_FOLDER);
+                let text = format!(
+                    "(deny file-write*\n  (require-all\n    (subpath \"{worktree}\")\n    (require-not (subpath \"{worktree}/{}\"))))\n(deny file-write*\n  (subpath \"{}\")\n  (subpath \"{}\")\n  (regex #\"^{root}/{teammates}$\"))\n(deny file-write-create file-write-unlink\n  (regex #\"^{root}/{teammates}/[^/]+$\"))\n",
+                    crate::agent_git::TEAMMATES_FOLDER,
+                    checkout.admin.display(),
+                    checkout.objects.display()
+                );
+                assert_eq!(text.matches("(subpath \"/").count(), 4);
+                text
+            }
+            (None, None) => String::new(),
+        }
     }
 
     /// Grants one tmux server in the agent temp folder, served and reached or served only.
@@ -1327,17 +1423,26 @@ impl ProjectSandbox {
         paths
     }
 
+    /// How many confinements the sandbox holds: its own worktree, its own clone or the
+    /// teammates' setup, at most one. Output: the count.
+    fn confinements(&self) -> usize {
+        usize::from(self.checkout.is_some())
+            + usize::from(self.clone.is_some())
+            + usize::from(self.setup.is_some())
+    }
+
     /// Every folder this sandbox lets the agent write: the project folder, or for a
     /// confined agent its worktree, that worktree's git admin folder and the git object
     /// store, or for a clone-confined agent its clone alone, then its own home and temp
     /// dirs, its short temp folder, then its extra worktrees, then for a native lead's
     /// teammates the team folders they share in the lead's home.
     pub fn writable_roots(&self) -> impl Iterator<Item = &PathBuf> {
-        assert!(self.checkout.is_none() || self.clone.is_none());
-        let project: Vec<&PathBuf> = match (&self.checkout, &self.clone) {
-            (Some(checkout), _) => vec![&checkout.worktree, &checkout.admin, &checkout.objects],
-            (None, Some(clone)) => vec![clone],
-            (None, None) => vec![&self.project_root],
+        assert!(self.confinements() <= 1);
+        let project: Vec<&PathBuf> = match (&self.checkout, &self.clone, &self.setup) {
+            (Some(checkout), _, _) => vec![&checkout.worktree, &checkout.admin, &checkout.objects],
+            (None, Some(clone), _) => vec![clone],
+            (None, None, Some(setup)) => vec![&setup.folder, &setup.records],
+            (None, None, None) => vec![&self.project_root],
         };
         project
             .into_iter()
@@ -1415,6 +1520,13 @@ impl ProjectSandbox {
             text.push_str(&format!("\n  (subpath \"{}\")", root.display()));
         }
         text.push_str(")\n");
+        if self.setup.is_some() {
+            text.push_str(&format!(
+                "(allow file-write*\n  (regex #\"^{}/\\.git/(logs/)?refs/heads/{}(/[a-z0-9-]+--[a-z0-9-]+(\\.lock)?)?$\"))\n",
+                seatbelt_pattern(&self.project_root),
+                regex_escape(crate::agent_git::LINKED_PREFIX.trim_end_matches('/'))
+            ));
+        }
         text.push_str("(deny file-read* file-write*");
         for secret in self.secret_paths() {
             if clean_absolute(&secret) {
@@ -1520,9 +1632,8 @@ impl ProjectSandbox {
         for folder in &self.shared {
             text.push_str(&shared_denies(folder));
         }
-        if let Some(clone) = &self.teammates_of {
-            text.push_str(&teammates_clone_denies(clone));
-        }
+        let teammates = self.teammates_denies();
+        text.push_str(&teammates);
         assert_eq!(
             text.matches("unix-socket").count(),
             2 * self.sockets.len() + self.served.len() + self.reached.len()
@@ -1545,11 +1656,8 @@ impl ProjectSandbox {
                 .shared
                 .iter()
                 .all(|folder| text.rfind(&shared_denies(folder)) > last_write_allow)
-                && self
-                    .teammates_of
-                    .iter()
-                    .all(|clone| text.rfind(&teammates_clone_denies(clone)) > last_write_allow),
-            "a read-only, fixed, shared or teammates' clone write deny must follow every write allow, since the last match wins"
+                && (teammates.is_empty() || text.rfind(&teammates) > last_write_allow),
+            "a read-only, fixed, shared or teammates' write deny must follow every write allow, since the last match wins"
         );
         let denied_last = |operations: &str, socket: &PathBuf| {
             text.rfind(&format!(
@@ -1709,6 +1817,12 @@ impl ProjectSandbox {
                 regex_escape(crate::agent_git::TEAMMATES_FOLDER)
             ));
         }
+        if let Some(setup) = &self.setup {
+            exempt.push_str(&format!(
+                "\n    (require-not (regex #\"^{}/[^/]+/{dot_git}$\"))",
+                seatbelt_pattern(&setup.folder)
+            ));
+        }
         for worktree in &self.worktrees {
             exempt.push_str(&format!(
                 "\n    (require-not (literal \"{}\"))",
@@ -1719,7 +1833,11 @@ impl ProjectSandbox {
             format!("(deny file-write*\n  (require-all\n    (require-any{nested}){exempt}))\n");
         assert!(
             text.matches("(regex #\"^/").count()
-                == working.len() + other.len() + 1 + usize::from(self.clone.is_some())
+                == working.len()
+                    + other.len()
+                    + 1
+                    + usize::from(self.clone.is_some())
+                    + usize::from(self.setup.is_some())
         );
         assert!(text.ends_with(")\n"));
         text
@@ -1735,15 +1853,19 @@ impl ProjectSandbox {
     fn git_deny_roots(&self) -> (Vec<&Path>, Vec<&Path>) {
         let mut working: Vec<&Path> = Vec::new();
         let mut other: Vec<&Path> = Vec::new();
-        assert!(self.checkout.is_none() || self.clone.is_none());
-        match (&self.checkout, &self.clone) {
-            (Some(checkout), _) => {
+        assert!(self.confinements() <= 1);
+        match (&self.checkout, &self.clone, &self.setup) {
+            (Some(checkout), _, _) => {
                 working.push(checkout.worktree.as_path());
                 other.push(checkout.admin.as_path());
                 other.push(checkout.objects.as_path());
             }
-            (None, Some(clone)) => working.push(clone.as_path()),
-            (None, None) => working.push(self.project_root.as_path()),
+            (None, Some(clone), _) => working.push(clone.as_path()),
+            (None, None, Some(setup)) => {
+                working.push(setup.folder.as_path());
+                other.push(setup.records.as_path());
+            }
+            (None, None, None) => working.push(self.project_root.as_path()),
         }
         other.push(self.agent_home.as_path());
         other.push(self.agent_tmp.as_path());
@@ -2198,8 +2320,9 @@ fn clone_store_denies(clone: &Path) -> String {
 /// keeps in `.git/worktrees`, and the refs and reflogs of `crazyagent/<task>--<name>`
 /// teammate branches; nor the links that tie a teammate worktree to the clone, which the
 /// engine writes with the lead's rights, each name in any letter case; nor the teammates'
-/// folder entry or a symlink at a teammate's folder in it, where the engine's lead-rights
-/// `git worktree add` writes. It must follow every write allow, since the last match wins.
+/// folder entry, nor make, move or remove anything directly in it, such as a teammate's
+/// folder, where the engine's lead-rights `git worktree add` writes (OP9B-C1). It must
+/// follow every write allow, since the last match wins.
 /// Input: the clone. Output: the rule text.
 fn teammates_clone_denies(clone: &Path) -> String {
     let path = clone.display();
@@ -2209,7 +2332,7 @@ fn teammates_clone_denies(clone: &Path) -> String {
     let git = any_case(".git");
     let branches = regex_escape(crate::agent_git::LINKED_PREFIX);
     let text = format!(
-        "(deny file-write*\n  (require-all\n    (subpath \"{path}\")\n    (require-not (subpath \"{path}/{folder}\"))\n    (require-not (subpath \"{path}/.git/objects\"))\n    (require-not (regex #\"^{root}/\\.git/worktrees/[^/]+/.+$\"))\n    (require-not (regex #\"^{root}/\\.git/(logs/)?refs/heads/{branches}[a-z0-9-]+--[a-z0-9-]+(\\.lock)?$\"))))\n(deny file-write*\n  (regex #\"^{root}/{teammates}$\")\n  (regex #\"^{root}/{teammates}/[^/]+/{git}$\")\n  (regex #\"^{root}/{git}/{}/[^/]+/({}|{})$\"))\n(deny file-write-create\n  (require-all (regex #\"^{root}/{teammates}/[^/]+$\") (vnode-type SYMLINK)))\n",
+        "(deny file-write*\n  (require-all\n    (subpath \"{path}\")\n    (require-not (subpath \"{path}/{folder}\"))\n    (require-not (subpath \"{path}/.git/objects\"))\n    (require-not (regex #\"^{root}/\\.git/worktrees/[^/]+/.+$\"))\n    (require-not (regex #\"^{root}/\\.git/(logs/)?refs/heads/{branches}[a-z0-9-]+--[a-z0-9-]+(\\.lock)?$\"))))\n(deny file-write*\n  (regex #\"^{root}/{teammates}$\")\n  (regex #\"^{root}/{teammates}/[^/]+/{git}$\")\n  (regex #\"^{root}/{git}/{}/[^/]+/({}|{})$\"))\n(deny file-write-create file-write-unlink\n  (regex #\"^{root}/{teammates}/[^/]+$\"))\n",
         any_case("worktrees"),
         any_case("commondir"),
         any_case("gitdir")

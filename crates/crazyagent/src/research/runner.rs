@@ -11,6 +11,7 @@ use crate::harnesses::launch::{
 use crate::harnesses::terminal_session::TerminalSession;
 use crate::launch_context::AgentContext;
 use crate::protocol::{CredentialRef, ProjectId, RequestId};
+use crate::sandbox::model_proxy::{ModelHost, ModelProxy};
 use crate::sandbox::policy::AgentAccess;
 use crate::sandbox::toolchains::{self, ToolHomes, Toolchains};
 use crate::sandbox::warden::Warden;
@@ -773,6 +774,17 @@ impl ResearchRunner {
             ),
             None => None,
         };
+        let policy = jobs
+            .agent_policy(&project)
+            .map_err(|_| RunError::Invalid("project agent access unreadable".into()))?;
+        if let Some(reason) = policy.access.unavailable() {
+            return Err(RunError::Invalid(reason.into()));
+        }
+        let (network, proxy) = job_reach(&policy, job.tools, account, job.id)?;
+        let context = match &proxy {
+            Some(proxy) => context.with_model_proxy(proxy.port()),
+            None => context,
+        };
         let installed = context
             .install(harness.id(), &home, job.tools)
             .map_err(|problem| {
@@ -785,13 +797,6 @@ impl ResearchRunner {
         private_directory(&agent)?;
         let tmp = agent.join("tmp");
         private_directory(&tmp)?;
-        let policy = jobs
-            .agent_policy(&project)
-            .map_err(|_| RunError::Invalid("project agent access unreadable".into()))?;
-        if let Some(reason) = policy.access.unavailable() {
-            return Err(RunError::Invalid(reason.into()));
-        }
-        let network = job_network(&policy, job.tools, model_remote(account)?);
         let unconfined = policy.access == AgentAccess::Full;
         let homes = ToolHomes::owner()?;
         let scratch = toolchains::ScopedTmp::make(&home)?;
@@ -895,6 +900,9 @@ impl ResearchRunner {
             }
         };
         launch.current_dir(&worktree);
+        if let Some(proxy) = &proxy {
+            launch.envs(crate::sandbox::model_proxy::variables(proxy.port()));
+        }
         let mut command = if unconfined {
             sandbox.wrap_unconfined(&launch)?
         } else {
@@ -1515,6 +1523,50 @@ pub(crate) fn job_network(
     }
 }
 
+/// The sandbox network a research job runs under and the model proxy it reaches its model
+/// through (S4B-M1). A tools-on job under None whose model is not on loopback gets a proxy
+/// for its account's hosts and reaches only the proxy's port; any other job gets
+/// [`job_network`]. Inputs: the project's agent policy, whether the job has tools, its
+/// account and its id, which the proxy's refusal lines name. Output: the network and the
+/// proxy, which must live as long as the job runs, or the refusal of an endpoint no proxy
+/// can reach by name or a proxy that could not start.
+pub(crate) fn job_reach(
+    policy: &crate::sandbox::policy::AgentPolicy,
+    tools: bool,
+    account: &ResearchAccount,
+    job: i64,
+) -> Result<(SandboxNetwork, Option<ModelProxy>), RunError> {
+    let model = model_remote(account)?;
+    let proxied = tools
+        && policy.network == crate::sandbox::policy::AgentNetwork::None
+        && matches!(model, SandboxRemote::AnyHost(_));
+    if !proxied {
+        return Ok((job_network(policy, tools, model), None));
+    }
+    let fixed = |hosts: &[(&str, u16)]| -> Vec<ModelHost> {
+        hosts
+            .iter()
+            .filter_map(|(name, port)| ModelHost::new(name, *port))
+            .collect()
+    };
+    let hosts = match account {
+        ResearchAccount::ManagedCodex { .. } => fixed(CODEX_MODEL_HOSTS),
+        ResearchAccount::ManagedClaude { .. } => fixed(CLAUDE_MODEL_HOSTS),
+        ResearchAccount::Endpoint { base_url, .. }
+        | ResearchAccount::AnthropicEndpoint { base_url, .. } => {
+            endpoint_model_host(base_url).into_iter().collect()
+        }
+    };
+    if hosts.is_empty() {
+        return Err(RunError::Invalid(
+            "with no network, a research job with tools reaches only an https endpoint named by a host name".into(),
+        ));
+    }
+    let proxy = ModelProxy::bind(job, hosts, None)?;
+    let network = SandboxNetwork::Only(vec![SandboxRemote::Loopback(proxy.port())]);
+    Ok((network, Some(proxy)))
+}
+
 pub(crate) fn model_remote(account: &ResearchAccount) -> Result<SandboxRemote, RunError> {
     match account {
         ResearchAccount::ManagedCodex { .. } | ResearchAccount::ManagedClaude { .. } => {
@@ -1538,6 +1590,29 @@ pub(crate) fn model_remote(account: &ResearchAccount) -> Result<SandboxRemote, R
                 SandboxRemote::AnyHost(port)
             })
         }
+    }
+}
+
+/// The hosts a signed-in Claude account's model traffic goes to, the only ones a Claude
+/// Code agent under the None network reaches through its model proxy (S4b).
+pub(crate) const CLAUDE_MODEL_HOSTS: &[(&str, u16)] = &[("api.anthropic.com", 443)];
+
+/// The hosts a signed-in Codex account's model traffic goes to: chatgpt.com for a ChatGPT
+/// sign-in, api.openai.com for an API key. A managed profile does not say at launch which
+/// one it holds, so a Codex agent under the None network may reach both (S4b).
+pub(crate) const CODEX_MODEL_HOSTS: &[(&str, u16)] =
+    &[("chatgpt.com", 443), ("api.openai.com", 443)];
+
+/// The one host an endpoint account's traffic goes to through a model proxy (S4b): its
+/// base URL's DNS name and port. Input: the base URL. Output: the host, or none for an
+/// http URL or an IP literal, which a CONNECT proxy checking names cannot tell apart from
+/// any other address.
+pub(crate) fn endpoint_model_host(base_url: &str) -> Option<ModelHost> {
+    let url = endpoint_url(base_url).ok()?;
+    let port = url.port_or_known_default()?;
+    match url.host()? {
+        url::Host::Domain(name) if url.scheme() == "https" => ModelHost::new(name, port),
+        _ => None,
     }
 }
 
@@ -1980,6 +2055,60 @@ pub(crate) fn add_worktree_at(
     setup_step(&mut checkout, "worktree_checkout_failed")?;
     assert!(worktree.starts_with(sandbox.project_root()));
     Ok(())
+}
+
+/// Adds a linked lead's native teammate's own linked worktree of the project (OP-9b) at
+/// `worktree`, in the lead's teammates' folder, on `branch`: a new branch cut from `base`,
+/// or with no base the branch an earlier run left, checked out as it stands. Git runs
+/// under the lead's teammates' setup profile as [`add_worktree_at`] runs it: added
+/// without a checkout, its effective config listed in the new worktree, then checked out
+/// with every filter driver that listing names blanked. Takes the sandbox, its installed
+/// profile, the new worktree path, the branch and the commit. Returns unit, or the step
+/// that failed.
+#[cfg(unix)]
+pub(crate) fn add_teammate_worktree_at(
+    sandbox: &ProjectSandbox,
+    profile: &Path,
+    worktree: &Path,
+    branch: &str,
+    base: Option<&str>,
+) -> Result<(), RunError> {
+    if !worktree.starts_with(sandbox.project_root())
+        || worktree
+            .parent()
+            .and_then(Path::file_name)
+            .is_none_or(|folder| folder != crate::agent_git::TEAMMATES_FOLDER)
+        || !branch.starts_with(crate::agent_git::LINKED_PREFIX)
+        || base.is_some_and(|base| {
+            !matches!(base.len(), 40 | 64) || !base.bytes().all(|b| b.is_ascii_hexdigit())
+        })
+    {
+        return Err(RunError::Invalid(
+            "a teammate's worktree must sit in its lead's teammates' folder on a teammate branch"
+                .into(),
+        ));
+    }
+    let _setup = repository_setup(sandbox.project_root());
+    let mut add = worktree_git(sandbox, profile);
+    add.args(["worktree", "add", "-q", "--no-checkout"]);
+    match base {
+        Some(base) => add.args(["-b", branch]).arg(worktree).arg(base),
+        None => add.arg(worktree).arg(branch),
+    };
+    setup_step(&mut add, "worktree_add_failed")?;
+    let mut listing = worktree_git(sandbox, profile);
+    listing
+        .arg("-C")
+        .arg(worktree)
+        .args(["config", "--list", "--name-only", "-z"]);
+    let overrides = filter_overrides(&bounded_stdout(&mut listing)?)?;
+    let mut checkout = worktree_git(sandbox, profile);
+    checkout
+        .args(&overrides)
+        .arg("-C")
+        .arg(worktree)
+        .args(["reset", "-q", "--hard", "HEAD"]);
+    setup_step(&mut checkout, "worktree_checkout_failed")
 }
 
 /// Runs one worktree setup git step within the setup time limit. Takes the command and
@@ -2852,8 +2981,76 @@ mod tests {
         assert!(https.contains("(remote ip \"*:443\")"), "{https}");
         assert!(!https.contains("(remote ip \"*:*\")"), "{https}");
         let none = profile(AgentNetwork::None, true);
-        assert!(none.contains("(remote ip \"*:8443\")"), "{none}");
-        assert!(!none.contains("(remote ip \"*:*\")"), "{none}");
+        assert!(!none.contains("(remote ip \"*:"), "{none}");
+        assert!(!none.contains("mDNSResponder"), "{none}");
+    }
+
+    /// A research job with tools under None reaches its model only through a model proxy
+    /// for its account's hosts; a job with tools off, or on a loopback endpoint, reaches its
+    /// model directly, and an endpoint no proxy can name is refused (S4B-M1).
+    #[test]
+    fn a_research_job_with_tools_under_no_network_reaches_its_model_only_through_a_model_proxy() {
+        use crate::sandbox::policy::{AgentNetwork, AgentPolicy};
+        use std::io::{BufRead, Write};
+        let none = AgentPolicy {
+            network: AgentNetwork::None,
+            ..AgentPolicy::default()
+        };
+        let account = ResearchAccount::ManagedCodex {
+            connection: codex_connection(),
+            model: None,
+        };
+        let (network, proxy) = job_reach(&none, true, &account, 41).unwrap();
+        assert!(
+            proxy.is_some(),
+            "a tools-on job under None gets a model proxy, not {network:?}"
+        );
+        let port = proxy.as_ref().unwrap().port();
+        assert_eq!(
+            network,
+            SandboxNetwork::Only(vec![SandboxRemote::Loopback(port)])
+        );
+        for (target, status) in [
+            ("chatgpt.com:443", "HTTP/1.1 200 Connection Established"),
+            ("api.openai.com:443", "HTTP/1.1 200 Connection Established"),
+            ("example.com:443", "HTTP/1.1 403 Forbidden"),
+        ] {
+            let mut client = crate::spawn_gate::connect_tcp_std(("127.0.0.1", port)).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(15)))
+                .unwrap();
+            client
+                .write_all(
+                    format!("CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n\r\n").as_bytes(),
+                )
+                .unwrap();
+            let mut line = String::new();
+            std::io::BufReader::new(client)
+                .read_line(&mut line)
+                .unwrap();
+            assert_eq!(line.trim_end(), status, "{target}");
+        }
+        let (off, unproxied) = job_reach(&none, false, &account, 41).unwrap();
+        assert!(unproxied.is_none());
+        assert_eq!(off, SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)]));
+        let local = ResearchAccount::Endpoint {
+            base_url: "http://localhost:11434/v1".into(),
+            model: "qwen2.5:0.5b".into(),
+        };
+        let (direct, unproxied) = job_reach(&none, true, &local, 41).unwrap();
+        assert!(unproxied.is_none());
+        assert_eq!(
+            direct,
+            SandboxNetwork::Only(vec![SandboxRemote::Loopback(11_434)])
+        );
+        let unnamed = ResearchAccount::Endpoint {
+            base_url: "http://203.0.113.9:8080/v1".into(),
+            model: "qwen2.5:0.5b".into(),
+        };
+        assert!(matches!(
+            job_reach(&none, true, &unnamed, 41),
+            Err(RunError::Invalid(_))
+        ));
     }
 
     #[test]
