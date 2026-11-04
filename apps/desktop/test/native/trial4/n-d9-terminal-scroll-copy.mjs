@@ -40,22 +40,33 @@ async function liveTerminal(kit) {
 }
 
 /** Turns the wheel up over a terminal and times how long until it scrolls, then turns it
- * back down and returns to the latest output. Inputs: the kit and the agent's label.
- * Output: the milliseconds the scroll took. */
+ * back down and returns to the latest output. An agent that reads the mouse redraws its own
+ * screen, so each read is also compared with the one before it, which new output between the
+ * first read and the turn cannot hide. Inputs: the kit and the agent's label. Output: { took,
+ * mouse }, the milliseconds the scroll took and whether the agent read the mouse. */
 async function scroll(kit, label) {
   const before = await terminalView(label);
   const started = Date.now();
   if (!await wheel(label, -STEP_PX)) throw new Error(`${label}'s terminal screen was not drawn for the wheel`);
   let took = null;
+  let last = before;
   await kit.until(async () => {
     const after = await terminalView(label);
-    if (after && moved(before, after)) took = Date.now() - started;
+    if (after && (moved(before, after, true) || (before.mouse && moved(last, after, true)))) took = Date.now() - started;
+    if (after) last = after;
     return took !== null;
-  }, SCROLL_MS, `${label}'s terminal did not scroll within ${SCROLL_MS} ms of turning the wheel up`);
+  }, SCROLL_MS, `${label}'s terminal did not scroll within ${SCROLL_MS} ms of turning the wheel up${before.mouse ? " (the agent reads the mouse, so its own screen had to move)" : ""}`);
   await wheel(label, STEP_PX);
+  if (before.mouse) {
+    await kit.until(async () => {
+      const view = await terminalView(label);
+      return Boolean(view && moved(last, view, false));
+    }, UI_MS, `${label}'s terminal did not scroll back down after the wheel turned down`);
+    return { took, mouse: true };
+  }
   if ((await terminalView(label))?.jump) await click(inTerminal(label, '//button[normalize-space(.)="Jump to latest"]'));
   await kit.until(async () => !(await terminalView(label))?.jump, UI_MS, `${label}'s terminal did not return to the latest output`);
-  return took;
+  return { took, mouse: false };
 }
 
 /** Selects the newest row of a terminal, copies it from the right-click menu and reads the
@@ -90,8 +101,8 @@ export const checks = [{
   run: async (kit) => {
     await kit.tab("agents");
     const label = await liveTerminal(kit);
-    const took = await scroll(kit, label);
+    const { took, mouse } = await scroll(kit, label);
     const chars = await copy(kit, label);
-    return `${label}'s live terminal scrolled ${took} ms after the wheel turned; Copy put the selected row on the clipboard (${chars} characters)`;
+    return `${label}'s live terminal scrolled ${took} ms after the wheel turned${mouse ? " (the agent reads the mouse and redrew its own screen)" : ""}; Copy put the selected row on the clipboard (${chars} characters)`;
   },
 }];

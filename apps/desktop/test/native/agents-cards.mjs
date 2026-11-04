@@ -16,6 +16,7 @@ const EDGE_PX = 1;
 const COPY_CHARS = 3;
 const CONNECTING = "Connecting to the terminal";
 const WHEEL_TICKS = 3;
+const BLOCK_ROWS = 3;
 
 /** The status word a node's card names, as the app picks it: the engine's status label,
  * else the fixed word for the status. Input: a graph node. Output: the word, empty when the
@@ -84,10 +85,40 @@ export function notShown(summary) {
   return found ? Number(found[1]) : 0;
 }
 
-/** Whether a wheel turn scrolled a terminal view: its scroll offset changed or Jump to latest
- * appeared. New rows alone do not count, since a live agent prints them on its own.
- * Inputs: the view before and after the turn. Output: a boolean. */
-export function moved(before, after) {
+/** How far the screen's rows moved between two reads: the first block of BLOCK_ROWS non-blank
+ * rows that each read holds exactly once and that changed place, compared without trailing
+ * spaces. Inputs: the row texts before and after, top first. Output: the rows it moved down,
+ * negative when up, 0 when no such block moved. */
+export function redrawShift(before, after) {
+  assert(Array.isArray(before) && Array.isArray(after), "a redraw compares two lists of row texts");
+  const [was, now] = [before, after].map((rows) => rows.map((row) => row.replace(/\s+$/, "")));
+  const places = (rows, block) => {
+    const found = [];
+    for (let at = 0; at + BLOCK_ROWS <= rows.length; at += 1) if (rows.slice(at, at + BLOCK_ROWS).join("\n") === block) found.push(at);
+    return found;
+  };
+  for (let at = 0; at + BLOCK_ROWS <= was.length; at += 1) {
+    const rows = was.slice(at, at + BLOCK_ROWS);
+    if (rows.some((row) => row.trim() === "")) continue;
+    const block = rows.join("\n");
+    if (places(was, block).length !== 1) continue;
+    const there = places(now, block);
+    if (there.length === 1 && there[0] !== at) return there[0] - at;
+  }
+  return 0;
+}
+
+/** Whether a wheel turn scrolled a terminal view. An agent that reads the mouse, such as a
+ * fullscreen TUI, gets the wheel and redraws its own screen, so its rows must move the wheel's
+ * way: down for a turn up. Otherwise the offset must change or Jump to latest appear; new rows
+ * alone never count, since a live agent prints them on its own. Inputs: the views before and
+ * after and whether the turn was up. Output: a boolean. */
+export function moved(before, after, up) {
+  assert.equal(typeof up, "boolean", "a wheel turn is up or down");
+  if (before.mouse) {
+    const shift = redrawShift(before.lines, after.lines);
+    return up ? shift > 0 : shift < 0;
+  }
   return before.top !== after.top || (!before.jump && after.jump);
 }
 
@@ -127,8 +158,9 @@ export function summary() {
 }
 
 /** Reads one agent's terminal view as the owner sees it: the state line, the rows xterm
- * draws, the scroll offset, whether it is live and whether Jump to latest shows. Input: the
- * agent's label. Output: the view, or null while none is shown. */
+ * draws as text and one by one, the scroll offset, whether it is live, whether Jump to latest
+ * shows and whether the agent reads the mouse. Input: the agent's label. Output: the view,
+ * or null while none is shown. */
 export function terminalView(label) {
   return browser.execute((label) => {
     const section = [...document.querySelectorAll("section.tg-terminal")]
@@ -138,7 +170,9 @@ export function terminalView(label) {
     return {
       state: section.querySelector(".tg-terminal-state")?.innerText ?? "",
       rows: section.querySelector(".xterm-rows")?.innerText ?? "",
+      lines: [...section.querySelectorAll(".xterm-rows > div")].map((row) => row.innerText),
       top: section.querySelector(".xterm-viewport")?.scrollTop ?? 0,
+      mouse: Boolean(section.querySelector(".xterm.enable-mouse-events")),
       live: Boolean(section.querySelector(".tg-terminal-note")),
       jump,
     };
