@@ -9059,6 +9059,17 @@ pub fn agent_teammates_socket_name(state: &Path, id: i64) -> PathBuf {
         .join(format!("agent-{id}-teammates.socket"))
 }
 
+/// Where the engine keeps the pid a native-mode lead's teammates' tmux server first answered
+/// with at the socket its latest start named (PLC c, PC-L1), beside that socket's name, so an
+/// engine restart or a kill of the lead never pins another server there afresh. Inputs: the
+/// team state folder and the lead's id. Output:
+/// `<state>/profiles/agent-<id>-teammates-server.pid`.
+pub fn agent_teammates_server_pid(state: &Path, id: i64) -> PathBuf {
+    state
+        .join("profiles")
+        .join(format!("agent-{id}-teammates-server.pid"))
+}
+
 /// Starts the team runtime for a running engine: team state in `<runtime>/team`,
 /// pool assignment read live from the engine's settings files on every tick.
 /// Takes the runtime folder, both settings files, the launch executables by harness, the
