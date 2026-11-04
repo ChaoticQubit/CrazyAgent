@@ -167,7 +167,7 @@ async fn the_team_view_reads_a_sub_agents_messages_and_saves_their_settings_thro
             rows.join("\n")
         );
         assert!(
-            find(&rows, "Agent < question: Which database should I use?")
+            find(&rows, "Agent < question: Which database(31m should I use?")
                 .contains(&clock(AT + MINUTE, 0))
         );
         for row in &rows {
