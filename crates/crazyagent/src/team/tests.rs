@@ -3695,14 +3695,14 @@ fn a_native_teammate_row_reads_idle_while_its_session_rests_and_working_once_it_
     );
 }
 
-/// The late team columns of `team_agents` and `team_tasks` an engine database has. Takes
-/// the connection. Returns (table, column) pairs in name order.
+/// The late team columns of `team_agents`, `team_tasks` and `team_task_pins` an engine
+/// database has. Takes the connection. Returns (table, column) pairs in name order.
 fn late_columns(connection: &Connection) -> Vec<(String, String)> {
     let mut statement = connection
         .prepare(
             "SELECT m.name,p.name FROM sqlite_schema m, pragma_table_info(m.name) p
-             WHERE m.type='table' AND m.name IN ('team_agents','team_tasks')
-             AND p.name IN ('pane','mode','hookless') ORDER BY 1,2",
+             WHERE m.type='table' AND m.name IN ('team_agents','team_tasks','team_task_pins')
+             AND p.name IN ('pane','mode','hookless','held') ORDER BY 1,2",
         )
         .unwrap();
     statement
@@ -3734,8 +3734,12 @@ fn an_engine_db_from_before_lead_modes_gains_its_late_columns_once() {
                 created_ms INTEGER NOT NULL, started_ms INTEGER, finished_ms INTEGER,
                 session TEXT, parent INTEGER
             );
+            CREATE TABLE team_task_pins (
+                task INTEGER PRIMARY KEY, project TEXT NOT NULL, agent INTEGER NOT NULL
+            );
             INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms)
-                VALUES ('old','sub','claude-code',1,'stopped',1,1);",
+                VALUES ('old','sub','claude-code',1,'stopped',1,1);
+            INSERT INTO team_task_pins(task,project,agent) VALUES (7,'old',1);",
         )
         .unwrap();
     assert!(late_columns(&connection).is_empty());
@@ -3743,6 +3747,7 @@ fn an_engine_db_from_before_lead_modes_gains_its_late_columns_once() {
         ("team_agents", "hookless"),
         ("team_agents", "mode"),
         ("team_agents", "pane"),
+        ("team_task_pins", "held"),
         ("team_tasks", "mode"),
     ]
     .iter()
@@ -3760,6 +3765,15 @@ fn an_engine_db_from_before_lead_modes_gains_its_late_columns_once() {
         )
         .unwrap();
     assert_eq!(old, (None, None, 0));
+    let held: i64 = connection
+        .query_row("SELECT held FROM team_task_pins WHERE task=7", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        held, 0,
+        "a pin from before the mark counts as its task's own"
+    );
 }
 
 #[test]
