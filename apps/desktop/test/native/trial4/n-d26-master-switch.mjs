@@ -55,14 +55,14 @@ export const checks = [{
   after: "end",
   run: async (kit) => {
     await kit.tab("conversation");
-    await startIfPaused();
+    await startIfPaused(kit, kit.project());
     const messages = messageCount(await liveLine());
     if (!messages) throw new Error(`the trial session should be live with messages; the Sessions bar reads "${await liveLine()}"`);
     const seen = [];
     for (const { id, name } of SWITCHES) {
       await chooseMaster(kit, id);
       await kit.tab("conversation");
-      await startIfPaused();
+      await startIfPaused(kit, kit.project());
       let verdict = null;
       await kit.waitFor(async () => {
         verdict = switchSeen(await area(), name, messages);

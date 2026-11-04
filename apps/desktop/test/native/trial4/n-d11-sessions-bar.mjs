@@ -65,7 +65,7 @@ export const checks = [{
     const was = await input(kit, "Both");
     try {
       await kit.tab("conversation");
-      const started = await startIfPaused();
+      const started = await startIfPaused(kit, kit.project());
       await terminalLive(kit, REPLY_MS);
       const trial = messageCount(await liveLine());
       if (!trial) throw new Error(`the trial session should be live with messages; the Sessions bar reads "${await liveLine()}"`);

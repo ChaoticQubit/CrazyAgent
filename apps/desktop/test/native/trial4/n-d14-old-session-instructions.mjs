@@ -59,7 +59,7 @@ export const checks = [{
     try {
       await saveInstructions(kit, edited);
       await kit.go(`${base}/conversation`);
-      started = await startIfPaused();
+      started = await startIfPaused(kit, id);
       await terminalLive(kit, REPLY_MS);
       let turns = messageCount(await liveLine());
       let resumed = "it was the live session";
