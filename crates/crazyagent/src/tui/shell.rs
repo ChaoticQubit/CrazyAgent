@@ -90,6 +90,11 @@ pub fn targets(ctx: &Ctx) -> Vec<Target> {
         kind: "Settings",
         place: Place::Setup { first_run: false },
     });
+    out.push(Target {
+        label: "Settings / Checks".into(),
+        kind: "Settings",
+        place: Place::CheckSettings { project: None },
+    });
     for (label, place) in [
         ("New project", Place::NewProject),
         ("Add account", Place::AddAccount),

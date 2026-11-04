@@ -4,6 +4,7 @@ use super::new_project_view::{Look, Row, columns, list_row, spread, wrap_words};
 use super::project::plain_problem;
 use super::project_team::{Help, Notice, TABS, window};
 use super::project_time::duration;
+use super::tests::SetChecks;
 use crate::ide::bridge::reveal::RevealTarget;
 use crate::landing::{
     AcceptOutcome, AgentKind, ChangeDiff, ChangeSetId, ChangeSetView, ChangeState, ChangedFile,
@@ -11,6 +12,7 @@ use crate::landing::{
 };
 use crate::protocol::ProjectId;
 use crate::tui::client::changes::{ChangesEvent, ChangesQuery, ChangesView};
+use crate::tui::client::checks::ChecksJob;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::style::Style;
 
@@ -133,6 +135,7 @@ pub(in crate::tui) struct ProjectChanges {
     read_ms: i64,
     edit: Option<String>,
     reveal: Option<RevealTarget>,
+    pub checks: SetChecks,
 }
 
 impl ProjectChanges {
@@ -141,6 +144,7 @@ impl ProjectChanges {
     /// Returns the view; reads start with `next_query`.
     pub fn new(project: ProjectId) -> Self {
         Self {
+            checks: SetChecks::new(project.clone()),
             project,
             sets: Vec::new(),
             loaded: false,
@@ -164,6 +168,16 @@ impl ProjectChanges {
             edit: None,
             reveal: None,
         }
+    }
+
+    /// The next checks request of the change set shown: its checks once it opens and while
+    /// any of them waits or runs, and a start the owner asked for. Input: the time now in
+    /// milliseconds. Output: the job, or none.
+    pub fn checks_job(&mut self, now_ms: i64) -> Option<ChecksJob> {
+        if let Some(diff) = &self.diff {
+            self.checks.want(&diff.id, now_ms);
+        }
+        self.checks.next_job()
     }
 
     /// Asks for a fresh list on the next `next_query`, as when the owner opens the tab.
@@ -472,6 +486,12 @@ impl ProjectChanges {
             }
             (KeyCode::Char('r'), Some(actions)) if actions.restore => {
                 self.restore();
+                true
+            }
+            (KeyCode::Char('k'), _) if self.diff.is_some() => {
+                if let Some(diff) = &self.diff {
+                    self.checks.run(&diff.id);
+                }
                 true
             }
             (KeyCode::Char('v'), _) if self.diff.is_some() => {
@@ -803,6 +823,7 @@ impl ProjectChanges {
                 state_row(set, look),
             ));
             lines.extend(details(set, content, now_ms, look).into_iter().skip(1));
+            lines.extend(self.checks.rows(&diff.id, &diff.head, content, look));
         }
         let listed = listed_files(&diff.files);
         for file in listed.shown {
@@ -999,6 +1020,7 @@ impl ProjectChanges {
             help.push(("O", "Open in IDE"));
         }
         if self.diff.is_some() {
+            help.push(("k", "Run checks"));
             help.push(("v", "Edit your copy"));
             help.push(("Esc", "Back to the list"));
         } else {

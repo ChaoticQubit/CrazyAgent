@@ -11,6 +11,7 @@ use super::project_trust::{TrustEdit, TrustKey};
 use super::questions::ProjectQuestions;
 use super::recovery_banner::ProjectRecovery;
 use super::sessions::{Sessions, SessionsAction, SessionsReply};
+use super::tests::ProjectTests;
 use crate::ide::bridge::reveal::RevealTarget;
 use crate::memory::{KnowledgeEntry, KnowledgeStatus, ReviewDecision};
 use crate::pools::PoolSummary;
@@ -40,7 +41,7 @@ pub(in crate::tui) const GENERAL_FIELDS: usize = 3 + Platform::ALL.len() + Resea
 const STALE_READING: &str = "This project changed since you opened the form. Your edit is kept while the saved one is read.";
 const KEEP_MINE: &str = "Enter saves your edit over it; Esc keeps the saved one.";
 
-/// Names the seven tabs of a project.
+/// Names the eight tabs of a project.
 /// Each tab has a label and a section glyph for the tab strip.
 /// The order is the tab order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -51,17 +52,19 @@ pub(in crate::tui) enum Tab {
     Changes,
     Questions,
     Context,
+    Tests,
     Settings,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 7] = [
+    pub const ALL: [Tab; 8] = [
         Self::Overview,
         Self::Conversation,
         Self::Agents,
         Self::Changes,
         Self::Questions,
         Self::Context,
+        Self::Tests,
         Self::Settings,
     ];
 
@@ -76,6 +79,7 @@ impl Tab {
             Self::Changes => "Changes",
             Self::Questions => "Questions",
             Self::Context => "Context",
+            Self::Tests => "Tests",
             Self::Settings => "Settings",
         }
     }
@@ -91,6 +95,7 @@ impl Tab {
             Self::Changes => "\u{2213}",
             Self::Questions => "\u{225f}",
             Self::Context => "\u{29c9}",
+            Self::Tests => "\u{2713}",
             Self::Settings => "\u{2630}",
         }
     }
@@ -589,6 +594,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub plugins: ProjectPlugins,
     pub changes: ProjectChanges,
     pub questions: ProjectQuestions,
+    pub tests: ProjectTests,
     pub recovery: ProjectRecovery,
     pub sessions: Sessions,
     pub now_ms: i64,
@@ -618,6 +624,7 @@ impl ProjectScreen {
             plugins: ProjectPlugins::new(project.clone()),
             changes: ProjectChanges::new(project.clone()),
             questions: ProjectQuestions::new(project.clone()),
+            tests: ProjectTests::new(project.clone(), name.clone()),
             recovery: ProjectRecovery::new(project.clone()),
             sessions: Sessions::default(),
             project,
@@ -913,6 +920,7 @@ impl ProjectScreen {
                     general.error = Some(format!("This project changed elsewhere. {KEEP_MINE}"));
                 }
                 self.name = setup.name.clone();
+                self.tests.rename(&setup.name);
                 self.setup = Some(*setup);
                 self.setup_due = false;
                 self.setup_failed_ms = None;
@@ -1453,6 +1461,7 @@ impl ProjectScreen {
             Tab::Agents => self.agents_key(key),
             Tab::Changes => ProjectReply::Ignored,
             Tab::Questions => ProjectReply::Ignored,
+            Tab::Tests => ProjectReply::Ignored,
             Tab::Context => self.context_key(key),
             Tab::Settings => self.settings_key(key),
         };
@@ -1504,6 +1513,9 @@ impl ProjectScreen {
             return ProjectReply::Handled;
         }
         if self.tab == Tab::Questions && self.questions.paste(text) {
+            return ProjectReply::Handled;
+        }
+        if self.tab == Tab::Tests && self.tests.paste(text) {
             return ProjectReply::Handled;
         }
         ProjectReply::Ignored

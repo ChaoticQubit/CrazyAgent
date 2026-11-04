@@ -12,11 +12,11 @@
   ▌ From Competitor research   │   Tidepool / Changes                Project tab        │, 1 not signed in              
                                │   Tidepool / Questions              Project tab        │                               
     Done check                 │   Tidepool / Context                Project tab        │                               
-    Front-end design asks you t│   Tidepool / Settings               Project tab        │Charts component started       
-    Enter Review               │                                                        │Market research finished       
-                               │ Projects, tabs, settings, actions. Enter goes there.   │competitors.md updated         
-  Work                         └────────────────────────────────────────────────────────┘Competitor research started    
-    ◔ Market research       ✓ Done 10:38                research/market.md      │ 10:24  Market research started        
+    Front-end design asks you t│   Tidepool / Tests                  Project tab        │Charts component started       
+    Enter Review               │   Tidepool / Settings               Project tab        │Market research finished       
+                               │                                                        │competitors.md updated         
+  Work                         │ Projects, tabs, settings, actions. Enter goes there.   │Competitor research started    
+    ◔ Market research       ✓ D└────────────────────────────────────────────────────────┘Market research started        
     ≷ Competitor research   ▸ Running  ━━━━━━──── 3 of 5research/competitors.md │ 10:22  Project created                
     ▭ Front-end design      ◌ Queued                                            │                                       
                                                                                                                         
