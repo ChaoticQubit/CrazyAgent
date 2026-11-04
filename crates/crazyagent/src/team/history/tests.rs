@@ -1155,8 +1155,8 @@ fn the_codex_lowercase_p_passwords_are_masked_and_find_print_stays() {
 #[test]
 fn a_p_password_starting_with_a_dash_is_masked() {
     assert_masked(
-        "$ mysql -u admin -p-secret9 shop\nquietheron listed",
-        &["-p-secret9"],
+        "$ mysql -u admin -p-quokka9 shop\nquietheron listed",
+        &["-p-quokka9"],
         "quietheron",
     );
 }
