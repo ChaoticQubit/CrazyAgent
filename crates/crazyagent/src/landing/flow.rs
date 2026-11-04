@@ -1751,8 +1751,9 @@ pub(super) fn resolve_prompt(db: &Connection, id: &ChangeSetId) -> Result<String
 }
 
 /// Discards an open change set: keeps its head under a discarded ref, then points the
-/// agent's worktree at the owner's current commit when it holds nothing newer. A lead's
-/// workers' open sets close with it (DEC-107). Inputs: the store, the change set, the head
+/// agent's worktree at the owner's current commit when it holds nothing newer, and records
+/// the owner's discard for the scorecard. A lead's workers' open sets close with it
+/// (DEC-107). Inputs: the store, the change set, the head
 /// the owner reviewed and the time now. Output: the time it stays restorable until.
 pub(super) fn discard(
     db: &Connection,
@@ -1768,6 +1769,13 @@ pub(super) fn discard(
         return Err(failure("changes_stale"));
     }
     let until = discard_held(db, &mut record, now)?;
+    let discarded = i64::try_from(now)
+        .map_err(|_| failure("changes_unavailable"))
+        .and_then(|at| {
+            let kind = crate::scorecard::Kind::Discard;
+            crate::scorecard::mark(db, &record.project, kind, record.id.as_str(), at)
+        });
+    crate::scorecard::logged(crate::scorecard::Kind::Discard, discarded);
     if let Err(error) = super::subagent::close_with_lead(db, &record) {
         eprintln!(
             "landing_settle_failed cause={}",

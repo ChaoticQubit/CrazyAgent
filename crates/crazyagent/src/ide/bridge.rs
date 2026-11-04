@@ -17,7 +17,7 @@ use tokio::time::Instant;
 
 pub mod agents;
 pub mod memory;
-mod owner_edit;
+pub(crate) mod owner_edit;
 pub mod reveal;
 
 /// The first four handshake bytes of an IDE capability connection on the owner socket.

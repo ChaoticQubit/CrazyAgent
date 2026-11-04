@@ -41,6 +41,13 @@ pub(in crate::tui) enum SettingsJob {
         offset_minutes: i32,
     },
     RefreshUsage,
+    Scorecard {
+        offset_minutes: i32,
+    },
+    ScorecardSet {
+        settings: crate::scorecard::Settings,
+        version: u64,
+    },
     SignIn(SignInJob),
     JoinPools {
         account: CredentialRef,
@@ -196,6 +203,8 @@ impl std::fmt::Debug for SettingsJob {
             Self::Harnesses => "Harnesses",
             Self::Usage { .. } => "Usage",
             Self::RefreshUsage => "RefreshUsage",
+            Self::Scorecard { .. } => "Scorecard",
+            Self::ScorecardSet { .. } => "ScorecardSet",
             Self::SignIn(_) => "SignIn",
             Self::JoinPools { .. } => "JoinPools",
             Self::Memories { .. } => "Memories",
@@ -312,6 +321,8 @@ pub(in crate::tui) enum SettingsEvent {
     Harnesses(Result<Vec<HarnessEntry>, String>),
     Usage(Result<Box<UsageReport>, String>),
     UsageRefreshed(Result<(), String>),
+    Scorecard(Result<Box<crate::scorecard::Scorecard>, String>),
+    ScorecardSaved(Result<crate::engine::owner::ScorecardSaved, String>),
     SignIn(Result<(SignInTicket, SignInView), String>),
     PoolsJoined(Result<usize, String>),
     Memories(Result<Vec<SavedMemory>, String>),
@@ -356,6 +367,8 @@ impl SettingsEvent {
             SettingsJob::Harnesses => Self::Harnesses(Err(problem)),
             SettingsJob::Usage { .. } => Self::Usage(Err(problem)),
             SettingsJob::RefreshUsage => Self::UsageRefreshed(Err(problem)),
+            SettingsJob::Scorecard { .. } => Self::Scorecard(Err(problem)),
+            SettingsJob::ScorecardSet { .. } => Self::ScorecardSaved(Err(problem)),
             SettingsJob::SignIn(_) => Self::SignIn(Err(problem)),
             SettingsJob::JoinPools { .. } => Self::PoolsJoined(Err(problem)),
             SettingsJob::Memories { .. } => Self::Memories(Err(problem)),
@@ -524,6 +537,25 @@ impl NativeOwner {
                 SettingsEvent::UsageRefreshed(match self.settings_controller() {
                     Ok(controller) => controller
                         .usage_refresh()
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                })
+            }
+            SettingsJob::Scorecard { offset_minutes } => {
+                SettingsEvent::Scorecard(match self.settings_controller() {
+                    Ok(controller) => controller
+                        .scorecard_report(offset_minutes)
+                        .await
+                        .map(Box::new)
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                })
+            }
+            SettingsJob::ScorecardSet { settings, version } => {
+                SettingsEvent::ScorecardSaved(match self.settings_controller() {
+                    Ok(controller) => controller
+                        .scorecard_set(settings, version)
                         .await
                         .map_err(|error| problem(&error, lost)),
                     Err(error) => Err(error),

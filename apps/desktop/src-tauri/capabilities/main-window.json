@@ -198,6 +198,8 @@
     "allow-desktop-usage-report",
     "allow-desktop-usage-refresh",
     "allow-desktop-usage-set-reset",
+    "allow-desktop-scorecard",
+    "allow-desktop-scorecard-set",
     "allow-desktop-ide-extension-asks",
     "allow-desktop-ide-extension-approve",
     "allow-desktop-ide-extension-decline",

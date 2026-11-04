@@ -2686,6 +2686,29 @@ async fn desktop_usage_set_reset(
 }
 
 #[tauri::command]
+async fn desktop_scorecard(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    offset_minutes: i32,
+) -> Result<crazyagent::scorecard::Scorecard, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.scorecard_report(offset_minutes)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_scorecard_set(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    settings: crazyagent::scorecard::Settings,
+    version: u64,
+) -> Result<bridge::scorecard::ScorecardSave, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.scorecard_set(settings, version)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_ide_extension_asks(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -3737,6 +3760,8 @@ pub fn run() {
             desktop_usage_report,
             desktop_usage_refresh,
             desktop_usage_set_reset,
+            desktop_scorecard,
+            desktop_scorecard_set,
             desktop_ide_extension_asks,
             desktop_ide_extension_approve,
             desktop_ide_extension_decline,

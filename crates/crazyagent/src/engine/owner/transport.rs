@@ -57,6 +57,7 @@ pub(crate) mod process;
 mod projects_home;
 pub(crate) mod questions;
 pub(crate) mod recovery;
+pub(crate) mod scorecard;
 mod setup;
 pub(crate) mod terminal;
 pub(crate) mod tracker;
@@ -2052,6 +2053,7 @@ enum Protocol {
     Recovery,
     Questions,
     Tracker,
+    Scorecard,
     NativeAuth,
     Process,
     Ide,
@@ -2086,6 +2088,7 @@ fn protocol(body: &[u8]) -> Result<Protocol, EngineError> {
         ("recovery", Protocol::Recovery),
         ("questions", Protocol::Questions),
         ("tracker", Protocol::Tracker),
+        ("scorecard", Protocol::Scorecard),
         ("native_auth", Protocol::NativeAuth),
         ("process", Protocol::Process),
         ("ide", Protocol::Ide),
@@ -2158,6 +2161,7 @@ async fn serve_admitted(
             Protocol::Questions => return Ok(Some(Deferred::Questions(a))),
             Protocol::Tracker => return Ok(Some(Deferred::Tracker(a))),
             Protocol::HarnessSettings => return Ok(Some(Deferred::HarnessSettings(a))),
+            Protocol::Scorecard => return Ok(Some(Deferred::Scorecard(a))),
             Protocol::NativeAuth => {
                 return native_auth::serve(stream, engine, authority, auth, &a, body)
                     .await
@@ -2335,6 +2339,10 @@ async fn serve_admitted(
             let served = tracker::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(tracker::TRACKER_TIMEOUT, served).await;
         }
+        Deferred::Scorecard(a) => {
+            let served = scorecard::serve(stream, engine, authority, auth, &a, body);
+            let _ = tokio::time::timeout(scorecard::SCORECARD_TIMEOUT, served).await;
+        }
         Deferred::Cleanup(a) => {
             let served = cleanup::serve(stream, engine, authority, auth, &a, body);
             let _ = tokio::time::timeout(cleanup::CLEANUP_TIMEOUT, served).await;
@@ -2400,7 +2408,8 @@ struct Tasks {
 /// requests, which wait for the action ledger under the owner barrier, IDE tab requests,
 /// which wait for an IDE server to start, Questions requests, which wait for the database
 /// write lock and rewrite a project's questions page, Tracker requests, which wait for the
-/// same lock and rewrite a project's ticket view, Cleanup requests, which size and
+/// same lock and rewrite a project's ticket view, Scorecard requests, which read the
+/// engine records behind the go/no-go numbers, Cleanup requests, which size and
 /// remove finished agents' worktrees and folders, skill import scans and imports, which
 /// copy skill folders, Usage requests, which read and write the usage store, and harness
 /// settings requests, which ask the installed harness for its version. Each carries the
@@ -2418,6 +2427,7 @@ enum Deferred {
     IdeTab(Admission),
     Questions(Admission),
     Tracker(Admission),
+    Scorecard(Admission),
     Cleanup(Admission),
     SkillImport(Admission),
     Usage(Admission),
@@ -2465,6 +2475,7 @@ fn refusal(runner: bool, body: &[u8], code: &str) -> Result<Option<Vec<u8>>, Eng
         Protocol::Recovery => recovery::refusal(code)?,
         Protocol::Questions => questions::refusal(code)?,
         Protocol::Tracker => tracker::refusal(code)?,
+        Protocol::Scorecard => scorecard::refusal(code)?,
         Protocol::NativeAuth => native_auth::refusal(body, code)?,
         Protocol::Process => process::refusal(code)?,
         Protocol::Ide => ide::refusal(code)?,
