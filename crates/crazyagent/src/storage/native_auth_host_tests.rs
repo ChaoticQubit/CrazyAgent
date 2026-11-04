@@ -1072,7 +1072,12 @@ fn a_read_after_the_settings_changed_ends_a_sign_in_only_once_it_stopped() {
         case.begin(case.start("stale-running", "connection-a"))
             .unwrap(),
     );
-    std::fs::write(&case.global, format!("\n{CATALOG}")).unwrap();
+    std::fs::write(
+        &case.global,
+        CATALOG.replace(r#"id = "model-a""#, r#"id = "model-a2""#),
+    )
+    .unwrap();
+    case.config = case.sources.config().unwrap();
     let before = case.snapshot();
     let refused = case
         .read(&running)
