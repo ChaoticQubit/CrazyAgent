@@ -1666,10 +1666,55 @@ fn a_native_lead_s_team_pane_calls_never_reach_its_own_server_once_its_teammates
     host.close(&[]).unwrap();
 }
 
+/// Starts a stand-in tmux server at one of a native lead's sockets, as another process could
+/// once the engine's server there ended, shaped like the engine's: its session and holder
+/// window, whose one pane is tagged as the lead's. Takes the tmux program, the socket and
+/// the lead.
+fn stand_in(tmux: &Path, socket: &Path, lead: &AgentId) {
+    match std::fs::remove_file(socket) {
+        Ok(()) => {}
+        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound),
+    }
+    let started = crazyagent::spawn_gate::status(
+        Command::new(tmux)
+            .args(["-u", "-f", "/dev/null", "-S"])
+            .arg(socket)
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                "crazyagent",
+                "-n",
+                "_crazyagent",
+                "cat",
+            ])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    assert!(started.success());
+    tmux_reply(
+        tmux,
+        socket,
+        &[
+            "set-option",
+            "-p",
+            "-t",
+            "crazyagent:=_crazyagent",
+            "@crazyagent",
+            lead.as_str(),
+        ],
+    );
+}
+
 /// PLC (c): the engine pins a native lead's teammates' server to the pid it first answered
-/// with. Once that server and the lead's own ended, another server started at the same
-/// socket under another pid, here by a second engine host, is refused for the lead's team
-/// panes, even though the first host dropped its client while nothing listened there.
+/// with. Once that server and the lead's own ended, stand-in servers another process started
+/// at both sockets are refused for the lead's team panes: by the same host, though it dropped
+/// its teammates' client while nothing listened there, and by a host opened again on the
+/// same engine root, as after an engine restart, since the pin is kept on disk (PC-L1).
 #[cfg(target_os = "macos")]
 #[test]
 fn a_server_started_at_a_native_lead_s_teammates_socket_after_its_own_ended_is_refused() {
@@ -1695,27 +1740,51 @@ fn a_server_started_at_a_native_lead_s_teammates_socket_after_its_own_ended_is_r
         assert!(killed.success());
         until_refused(socket);
     }
-    assert!(
-        host.panes(&leader).is_err(),
-        "no server lists the lead's panes while none runs"
+    assert_eq!(
+        host.panes(&leader).unwrap_err().0,
+        "terminal_teammates_server_ended",
+        "no server lists the lead's panes while none runs, and the host drops its teammates' client"
     );
     for socket in [&lead.socket, &lead.mates] {
-        match std::fs::remove_file(socket) {
-            Ok(()) => {}
-            Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound),
-        }
+        stand_in(&lead.tmux, socket, &leader);
     }
-    let other = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
-    other.spawn_own_server(&leader, &command).unwrap();
-    assert_eq!(other.panes(&leader).unwrap().len(), 1);
 
     let replaced = "terminal_teammates_server_replaced";
     assert_eq!(host.panes(&leader).unwrap_err().0, replaced);
     assert_eq!(
-        host.input_pane(&leader, "%1", b"x\n").unwrap_err().0,
+        host.input_pane(&leader, "%0", b"x\n").unwrap_err().0,
         replaced
     );
-    other.close(&[]).unwrap();
+    let restarted = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
+    assert_eq!(restarted.panes(&leader).unwrap_err().0, replaced);
+    assert_eq!(
+        restarted.input_pane(&leader, "%0", b"x\n").unwrap_err().0,
+        replaced
+    );
+}
+
+/// PLC (c) PC-L1: a native lead's teammates' server pin outlives the engine's kill of that
+/// lead, which forgets its clients: stand-in servers another process started at both sockets
+/// after the kill are refused for the lead's team panes.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_server_started_at_a_native_lead_s_teammates_socket_after_the_lead_was_killed_is_refused() {
+    let lead = Lead::new();
+    let root = lead.path();
+    let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
+    let leader = AgentId::team(1).unwrap();
+    host.spawn_own_server(&leader, &lead.confined("lead$ ", &["/bin/sh"]))
+        .unwrap();
+    assert_eq!(host.panes(&leader).unwrap().len(), 1);
+    host.kill(&leader).unwrap();
+    for socket in [&lead.socket, &lead.mates] {
+        until_refused(socket);
+        stand_in(&lead.tmux, socket, &leader);
+    }
+    assert_eq!(
+        host.panes(&leader).unwrap_err().0,
+        "terminal_teammates_server_replaced"
+    );
 }
 
 #[test]
