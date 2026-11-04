@@ -38,6 +38,7 @@ const HANDOFF_TURN_MIN_BYTES: usize = 160;
 /// The longest title a handoff part has, naming the conversation it comes from.
 const HANDOFF_TITLE_BYTES_MAX: usize = 128;
 
+#[cfg(unix)]
 const MARKS: &str = "CREATE TABLE IF NOT EXISTS session_marks (
     session TEXT PRIMARY KEY CHECK(length(session) BETWEEN 1 AND 128),
     project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),
@@ -45,6 +46,7 @@ const MARKS: &str = "CREATE TABLE IF NOT EXISTS session_marks (
     active_ms INTEGER NOT NULL CHECK(active_ms >= started_ms)
 )";
 
+#[cfg(unix)]
 const OWNER_TURNS: &str = "CREATE TABLE session_owner_turns (
     session TEXT PRIMARY KEY CHECK(length(session) BETWEEN 1 AND 128),
     project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128)
@@ -104,6 +106,7 @@ pub const LOST_NOTE: &str = "This session continues in a new harness conversatio
 /// the engine database opens. The first creation counts every session that kept a harness
 /// conversation as having one, so sessions used only in the live terminal stay listed.
 /// Takes the engine connection. Returns any SQLite failure.
+#[cfg(unix)]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(MARKS).map_err(error)?;
     if table_exists(connection, "session_owner_turns")? {
@@ -180,6 +183,7 @@ pub(crate) fn has_owner_turn(
 /// Migration part that gives team tasks and team agents their owning session column.
 /// Tables not created yet are left to `team::initialize`, which makes the column.
 /// Takes the upgrade transaction. Returns Ok once both tables have the column.
+#[cfg(unix)]
 pub(crate) fn add_ownership_columns(tx: &Transaction<'_>) -> Result<(), EngineError> {
     for table in ["team_tasks", "team_agents"] {
         let exists: bool = tx

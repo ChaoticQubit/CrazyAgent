@@ -49,6 +49,7 @@ struct Record {
 
 /// The folder beside the engine database that holds account keys, one 0600 file per key
 /// named by its credential reference.
+#[cfg(unix)]
 pub(crate) const ACCOUNT_KEYS: &str = "account-keys";
 
 /// Deletes one account key file from the engine root's owner-only key folder, for the start
@@ -83,14 +84,6 @@ pub(crate) fn remove_key_file(root: &Path, name: &str) -> Result<(), EngineError
         Ok(()) | Err(rustix::io::Errno::NOENT) => Ok(()),
         Err(_) => Err(error("account_key_store_unavailable")),
     }
-}
-
-/// Refuses to delete an account key where the Unix owner-only key folder does not exist.
-/// Takes the engine root and the reference, both unused. Returns
-/// `account_key_store_unavailable`.
-#[cfg(not(unix))]
-pub(crate) fn remove_key_file(_root: &Path, _name: &str) -> Result<(), EngineError> {
-    Err(error("account_key_store_unavailable"))
 }
 
 fn encode(record: &Record) -> Result<Vec<u8>, EngineError> {

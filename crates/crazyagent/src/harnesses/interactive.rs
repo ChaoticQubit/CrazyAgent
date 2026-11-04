@@ -60,13 +60,16 @@ const CLAUDE_TEAMMATE_MODE: [&str; 2] = ["--teammate-mode", "tmux"];
 const CLAUDE_PROMPT_FRESH: [&str; 2] = ["--system-prompt-snapshot", "off"];
 const CLAUDE_AGENT_TEAMS: (&str, &str) = ("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1");
 const CLAUDE_TEAMMATE_COMMAND: &str = "CLAUDE_CODE_TEAMMATE_COMMAND";
+#[cfg(unix)]
 const CLAUDE_INSTRUCTIONS_FLAG: &str = "--append-system-prompt-file";
 const CLAUDE_BARE: &str = "--bare";
+#[cfg(unix)]
 const TEAMMATE_SCRIPT_BYTES_MAX: usize = 64 * 1024;
 /// The variables of a native lead's command that name a place in its home, which its
 /// teammates get at the same place in their own home (TPH-2 C).
 /// `CLAUDE_SECURESTORAGE_CONFIG_DIR` stays the lead's, where the engine keeps the
 /// account's sign-in copy that teammates read.
+#[cfg(unix)]
 const TEAMMATE_HOME_VARIABLES: [&str; 4] = [
     "CLAUDE_CONFIG_DIR",
     "CLAUDE_CODE_TMPDIR",

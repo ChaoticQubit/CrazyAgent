@@ -19,6 +19,7 @@ fn project(root: &Path) -> AgentProject {
     }
 }
 
+#[cfg(unix)]
 fn given(text: &str) -> Given {
     Given {
         text: text.into(),

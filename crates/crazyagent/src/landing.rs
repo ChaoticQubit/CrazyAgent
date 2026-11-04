@@ -555,6 +555,7 @@ pub fn record_worktree_start(
     }
 }
 
+#[cfg(unix)]
 const TRACKED_LISTING_BYTES_MAX: usize = 4096;
 
 /// Tells which of some paths the owner's checkout's git index tracks, with one engine git

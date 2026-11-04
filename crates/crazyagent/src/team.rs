@@ -3208,6 +3208,7 @@ pub(crate) fn lead_mode(
 /// each task and agent records the lead that started it, NULL for the master's own. A
 /// table the engine has not opened yet gets the column from `initialize`. Takes the
 /// upgrade transaction. Returns any SQLite failure.
+#[cfg(unix)]
 pub(crate) fn add_parent_columns(tx: &Transaction<'_>) -> Result<(), EngineError> {
     for table in ["team_tasks", "team_agents"] {
         let exists: bool = tx
