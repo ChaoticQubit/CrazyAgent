@@ -1448,6 +1448,7 @@ fn agents(screen: &ProjectScreen, width: usize, content: usize, room: usize, loo
     help.extend([
         ("Enter", "Open report"),
         ("t", "Team"),
+        ("s", "Team settings"),
         TABS,
         ("Esc", "Home"),
     ]);
@@ -1524,12 +1525,16 @@ fn agents(screen: &ProjectScreen, width: usize, content: usize, room: usize, loo
                 ),
                 look.muted,
             ),
-            (_, Some(start), None) => Row::of(
+            (ResearchStatus::Running, Some(start), None) => Row::of(
                 format!(
                     "Started {}, running {}",
                     clock(start, screen.offset),
                     duration(screen.now_ms - start)
                 ),
+                look.muted,
+            ),
+            (_, Some(start), None) => Row::of(
+                format!("Started {}", clock(start, screen.offset)),
                 look.muted,
             ),
             _ => Row::of(
@@ -1545,7 +1550,7 @@ fn agents(screen: &ProjectScreen, width: usize, content: usize, room: usize, loo
         if let Some(error) = job
             .error
             .as_ref()
-            .filter(|_| job.status == ResearchStatus::Failed)
+            .filter(|_| matches!(job.status, ResearchStatus::Failed | ResearchStatus::Queued))
         {
             for line in wrap_words(error, content) {
                 lines.push(Row::of(line, look.fg));

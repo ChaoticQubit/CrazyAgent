@@ -263,7 +263,12 @@ fn validate_dispatch(
 ) -> Result<NativeAuthFact, EngineError> {
     dispatch.work.physical.verify()?;
     let admission = dispatch.admission();
-    validate_scope(tx, config, sources, admission, &dispatch.work.command)?;
+    let command = &dispatch.work.command;
+    if let Err(refused) = validate_scope(tx, config, sources, admission, command)
+        && held_scope(tx, config, sources, command).is_none()
+    {
+        return Err(refused);
+    }
     let fact = validate_continuation(
         tx,
         config,
@@ -694,11 +699,74 @@ pub(crate) fn read_native_auth(
     let tx = db
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(error)?;
-    let connection = validate_scope(&tx, config, sources, admission, &command)?;
+    let connection = match validate_scope(&tx, config, sources, admission, &command) {
+        Err(refused) if refused.0 == "native_profile_source_conflict" => {
+            match held_scope(&tx, config, sources, &command) {
+                Some(connection) => connection,
+                None => return Err(stale_read(&tx, request)),
+            }
+        }
+        checked => checked?,
+    };
     let fact = existing(&tx, connection, admission, &command)?
         .ok_or_else(|| error("native_auth_operation_missing"))?;
     tx.commit().map_err(error)?;
     Ok(reply(admission, &command, fact))
+}
+
+/// Finds the connection of an operation whose settings moved on in a way that left its own
+/// connection entry as it was, so the sign-in goes on: it is bound to that entry, not to the
+/// whole settings file. The request must name the operation with the scope it started with.
+/// Inputs: the transaction, the settings and the request. Output: the current connection, or
+/// None when that entry changed or the operation is unknown.
+fn held_scope<'a>(
+    tx: &Transaction<'_>,
+    config: &'a EffectiveConfig,
+    sources: Option<&settings::SettingsSources>,
+    command: &Command,
+) -> Option<&'a crate::config::ModelConnection> {
+    settings::verified_source_hash(config, sources).ok()?;
+    let scope = command.scope();
+    let fact = load_fact(tx, command.operation_id()).ok()?;
+    let current = native_profile_connection(config, &scope.connection).ok()?;
+    (fact.binding.database_instance == scope.expected_database_instance
+        && fact.binding.config_id == scope.expected_config_id
+        && fact.binding.source_hash == scope.expected_source_hash
+        && &fact.binding.connection == current)
+        .then_some(current)
+}
+
+/// Answers a read whose settings changed after its operation started, without the
+/// operation's content: `native_auth_not_active` once the engine no longer runs it or holds
+/// its profile, else the settings conflict, so a client never forgets a sign-in the engine
+/// may still finish. Inputs: the transaction and the read. Output: the refusal to send.
+fn stale_read(tx: &Transaction<'_>, request: &NativeAuthQuery) -> EngineError {
+    let conflict = || error("native_profile_source_conflict");
+    let fact = match load_fact(tx, &request.operation_id) {
+        Ok(fact) => fact,
+        Err(refused) => return refused,
+    };
+    let scope = &request.scope;
+    if fact.binding.database_instance != scope.expected_database_instance
+        || fact.binding.connection.id != scope.connection
+        || fact.binding.config_id != scope.expected_config_id
+        || fact.binding.source_hash != scope.expected_source_hash
+    {
+        return conflict();
+    }
+    let fenced = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM native_auth_fences WHERE operation_id=?1)",
+        [fact.operation_id.as_str()],
+        |row| row.get::<_, bool>(0),
+    );
+    match fenced {
+        Err(failed) => error(failed),
+        Ok(true) => conflict(),
+        Ok(false) if fact.phase.unfinished() || fact.phase == NativeAuthPhase::Uncertain => {
+            conflict()
+        }
+        Ok(false) => error("native_auth_not_active"),
+    }
 }
 
 pub(crate) fn cancel_native_auth(
@@ -715,7 +783,12 @@ pub(crate) fn cancel_native_auth(
     let tx = db
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(error)?;
-    let connection = validate_scope(&tx, config, sources, admission, &command)?;
+    let connection = match validate_scope(&tx, config, sources, admission, &command) {
+        Err(refused) if refused.0 == "native_profile_source_conflict" => {
+            held_scope(&tx, config, sources, &command).ok_or(refused)?
+        }
+        checked => checked?,
+    };
     if command.operation_id() != &expected.operation_id
         || connection != &expected.binding.connection
     {
@@ -863,13 +936,9 @@ fn validate_continuation(
     {
         return Err(error("native_auth_operation_scope_conflict"));
     }
-    let source_hash = settings::verified_source_hash(config, sources)
+    settings::verified_source_hash(config, sources)
         .map_err(|_| error("native_profile_source_conflict"))?;
-    if fact.binding.config_id != config.id
-        || fact.binding.source_hash != source_hash
-        || native_profile_connection(config, &fact.binding.connection.id)?
-            != &fact.binding.connection
-    {
+    if native_profile_connection(config, &fact.binding.connection.id)? != &fact.binding.connection {
         return Err(error("native_profile_source_conflict"));
     }
     let origin: Option<(String, i64)> = tx.query_row(

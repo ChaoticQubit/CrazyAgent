@@ -50,6 +50,7 @@ pub mod recovery;
 pub mod research;
 pub mod routing;
 pub mod sandbox;
+pub mod sandbox_settings;
 pub mod scheduling;
 pub mod service;
 pub mod setup;

@@ -563,7 +563,8 @@ impl Wizard {
 
     /// Applies the engine's catalog: choices, limits and the smart team defaults.
     /// Takes the pool and research it was read for and the engine result.
-    /// Returns nothing; a team the owner edited is kept.
+    /// Returns nothing; a team the owner edited is kept, and a team the catalog replaces
+    /// closes the harness picker opened over it.
     pub fn apply_catalog(
         &mut self,
         pool: Option<CredentialRef>,
@@ -579,6 +580,7 @@ impl Wizard {
                 self.catalog_problem = None;
                 let current = key == (self.pool.clone(), self.research_sorted());
                 if current && !self.team_edited {
+                    self.picker = None;
                     self.set_team(catalog.default_team.clone());
                     self.fit_team();
                 }
@@ -1624,6 +1626,13 @@ impl Wizard {
         if let Some(team) = &self.team {
             assert!(team.sub_harnesses.len() <= SUB_HARNESSES_MAX);
             assert!(self.team_row <= team.sub_harnesses.len() + 1);
+            if let Some(Picker {
+                target: PickFor::Slot(index),
+                ..
+            }) = &self.picker
+            {
+                assert!(*index < team.sub_harnesses.len());
+            }
         }
     }
 }

@@ -205,6 +205,7 @@ fn a_question_on_a_real_sub_agent_screen_is_recorded_once_and_its_typed_answer_r
             host.as_ref(),
             &project(),
             &format!("codex-{agent}"),
+            Said::Answer,
             "1"
         )
         .unwrap(),
@@ -525,7 +526,15 @@ fn a_master_reaches_only_its_own_live_sub_agents_by_name() {
         "the master is not a sub-agent to send to"
     );
     let send = |agent: String, text: &str| {
-        send_to_agent(&fixture.connection, host.as_ref(), &project(), &agent, text).unwrap()
+        send_to_agent(
+            &fixture.connection,
+            host.as_ref(),
+            &project(),
+            &agent,
+            Said::Message,
+            text,
+        )
+        .unwrap()
     };
     assert_eq!(send(live.to_string(), "  \n"), Err("team_message_invalid"));
     assert_eq!(
@@ -680,6 +689,7 @@ fn a_numbered_name_reaches_that_agent_not_one_whose_handle_reads_as_it() {
             host.as_ref(),
             &project(),
             &named.to_string(),
+            Said::Message,
             "hi"
         )
         .unwrap(),
@@ -2450,4 +2460,192 @@ fn a_task_a_lead_delegated_ends_carried() {
     let queued = task_ended(connection, owned, 21).unwrap().unwrap();
     assert_eq!(event_state(connection, carried), "carried");
     assert_eq!(event_state(connection, queued), "queued");
+}
+
+/// What the master typed into a sub-agent is kept for the agent's Messages timeline only once
+/// its terminal took it (MSG-A): a message and an answer are kept with the master as speaker
+/// and their kind, their escape, control and bidirectional characters dropped, while blank
+/// or long text and an agent that is stopped or has no terminal keep nothing. With the
+/// project's keep setting off the timeline still shows a message was sent, with no text.
+#[test]
+fn only_a_master_message_or_answer_the_terminal_took_is_kept_for_the_timeline() {
+    use super::super::agent_messages::{EntryKind, MessageSettings, Speaker, read, save_settings};
+    let fixture = Fixture::new();
+    let host = fixture.host();
+    let live = fixture.agent(PROJECT, "sub", "codex", "working");
+    let stopped = fixture.agent(PROJECT, "sub", "codex", "stopped");
+    let paneless = fixture.agent(PROJECT, "sub", "codex", "working");
+    fixture.pane(&host, live, &["/bin/sh", "-c", "exec cat"]);
+    let kept = || -> i64 {
+        fixture
+            .connection
+            .query_row("SELECT COUNT(*) FROM team_agent_messages", [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    };
+    let send = |agent: i64, said: Said, text: &str| {
+        send_to_agent(
+            &fixture.connection,
+            host.as_ref(),
+            &project(),
+            &agent.to_string(),
+            said,
+            text,
+        )
+        .unwrap()
+    };
+
+    assert_eq!(
+        send(live, Said::Message, "Check the login page first"),
+        Ok(live)
+    );
+    assert_eq!(
+        send(
+            live,
+            Said::Answer,
+            "Use option 2\u{1b}[31m red\u{0} \u{9b}1m \u{202e}reversed\u{2066} done"
+        ),
+        Ok(live)
+    );
+    assert_eq!(kept(), 2);
+    for (agent, text) in [
+        (live, "  \n".to_owned()),
+        (live, "x".repeat(SEND_BYTES_MAX + 1)),
+        (stopped, "hi".to_owned()),
+        (paneless, "hi".to_owned()),
+    ] {
+        assert!(send(agent, Said::Message, &text).is_err(), "{agent}");
+    }
+    assert_eq!(kept(), 2, "a refused or untyped text is never kept");
+
+    let page = read(&fixture.connection, &project(), live, None, None).unwrap();
+    let said: Vec<(Speaker, EntryKind, Option<&str>)> = page
+        .entries
+        .iter()
+        .map(|entry| (entry.from, entry.kind, entry.text.as_deref()))
+        .collect();
+    assert_eq!(
+        said,
+        vec![
+            (
+                Speaker::Master,
+                EntryKind::Answer,
+                Some("Use option 2(31m red 1m reversed done")
+            ),
+            (
+                Speaker::Master,
+                EntryKind::Message,
+                Some("Check the login page first")
+            ),
+        ]
+    );
+    assert!(!page.older);
+
+    let tx =
+        Transaction::new_unchecked(&fixture.connection, TransactionBehavior::Immediate).unwrap();
+    save_settings(
+        &tx,
+        &project(),
+        &MessageSettings {
+            keep_master_messages: false,
+            ..MessageSettings::default()
+        },
+    )
+    .unwrap();
+    tx.commit().unwrap();
+    assert_eq!(send(live, Said::Message, "Secret plan"), Ok(live));
+    let newest = read(&fixture.connection, &project(), live, None, None)
+        .unwrap()
+        .entries
+        .remove(0);
+    assert_eq!(
+        (newest.from, newest.kind, newest.text),
+        (Speaker::Master, EntryKind::Message, None),
+        "with the setting off only the fact of the message is kept"
+    );
+    let stored: Option<String> = fixture
+        .connection
+        .query_row(
+            "SELECT text FROM team_agent_messages ORDER BY id DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, None, "no text is stored when the setting is off");
+}
+
+/// The master's status reply keeps its newest events within the reply cap: past the cap the
+/// oldest events are left out with a line saying how many, never the newest, and the
+/// finished list before them stays whole (WKC-3).
+#[test]
+fn a_full_status_keeps_the_newest_events_and_the_finished_list_within_the_reply_cap() {
+    let fixture = Fixture::new();
+    let connection = &fixture.connection;
+    for n in 0..FINISHED_LISTED_MAX {
+        let agent = fixture.agent(PROJECT, "sub", "codex", "stopped");
+        connection
+            .execute(
+                "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir) VALUES (?1,?2,'.',?3,'.git')",
+                params![agent, PROJECT, format!("worktrees/agent-{agent}")],
+            )
+            .unwrap();
+        let task = fixture.task(agent, "owner", "done", Some("Done."));
+        connection
+            .execute(
+                "UPDATE team_tasks SET prompt=?1 WHERE id=?2",
+                params![format!("Finished task {n} {}", "w".repeat(200)), task],
+            )
+            .unwrap();
+    }
+    let workers: Vec<i64> = (0..5)
+        .map(|_| fixture.agent(PROJECT, "sub", "codex", "working"))
+        .collect();
+    for n in 0..STATUS_EVENTS_MAX {
+        let text = format!("event-{n:02} {}", "x".repeat(EVENT_TEXT_BYTES_MAX - 12));
+        let worker = workers[usize::try_from(n).unwrap() % workers.len()];
+        assert!(
+            record(
+                connection,
+                &project(),
+                worker,
+                None,
+                EventKind::Finished,
+                &text,
+                10 + n
+            )
+            .unwrap()
+            .is_some()
+        );
+    }
+    let told = status(connection, &project()).unwrap().text();
+    assert!(
+        told.len() <= crate::team::tool::REPLY_TEXT_MAX,
+        "{} bytes",
+        told.len()
+    );
+    assert_eq!(
+        crate::team::bound_text(&told, crate::team::tool::REPLY_TEXT_MAX),
+        told
+    );
+    assert!(
+        told.contains(&format!("event-{:02} ", STATUS_EVENTS_MAX - 1)),
+        "the newest event reaches the master"
+    );
+    assert!(!told.contains("event-00 "), "the oldest event is left out");
+    assert_eq!(
+        told.lines().filter(|line| line.starts_with("- ")).count(),
+        FINISHED_LISTED_MAX,
+        "the finished list stays whole"
+    );
+    let left = told
+        .lines()
+        .find(|line| line.ends_with(" older events left out to fit this reply."))
+        .unwrap_or_else(|| panic!("no left-out line in {told}"));
+    let count: i64 = left.split(' ').next().unwrap().parse().unwrap();
+    let shown = told
+        .lines()
+        .filter(|line| line.starts_with("[team] "))
+        .count();
+    assert_eq!(count + i64::try_from(shown).unwrap(), STATUS_EVENTS_MAX);
 }

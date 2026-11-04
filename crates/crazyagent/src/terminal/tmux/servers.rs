@@ -447,6 +447,10 @@ impl Host for Servers {
         self.on(agent, |server| server.panes(agent))
     }
 
+    fn pane_pid(&self, agent: &AgentId) -> Result<Option<u32>, HostError> {
+        self.on(agent, |server| server.pane_pid(agent))
+    }
+
     fn kill_pane(&self, agent: &AgentId, pane: &str) -> Result<(), HostError> {
         self.on_panes(agent, |server| server.kill_pane(agent, pane))
     }

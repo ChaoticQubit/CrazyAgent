@@ -165,6 +165,7 @@ struct Views {
     next: u64,
     viewers: HashMap<AgentId, Viewer>,
     opening: HashMap<AgentId, u64>,
+    cleared: u64,
 }
 
 impl Views {
@@ -185,7 +186,8 @@ impl Views {
 
     /// Makes one opened place the agent's view. A place older than a view of the same agent
     /// that opened after it never replaces that view, so a closed panel's late attach cannot
-    /// take over the newer one. Takes the agent, the place's serial and its request queue.
+    /// take over the newer one, and a place taken before the last page load never lands.
+    /// Takes the agent, the place's serial and its request queue.
     /// Returns unit, `terminal_view_replaced` or `terminal_viewers_full`.
     fn install(
         &mut self,
@@ -193,7 +195,8 @@ impl Views {
         serial: u64,
         requests: mpsc::Sender<TerminalRequest>,
     ) -> Result<(), BridgeError> {
-        let newer = self.opening.get(agent).is_some_and(|open| *open > serial)
+        let newer = serial <= self.cleared
+            || self.opening.get(agent).is_some_and(|open| *open > serial)
             || self
                 .viewers
                 .get(agent)
@@ -331,6 +334,20 @@ impl Terminals {
         Ok(())
     }
 
+    /// Ends every view of the page the main webview is leaving, as a reload or a new page
+    /// load starts: that page can no longer read or detach its views, so they would hold the
+    /// viewer slots for good. Dropping a view closes its request queue, which detaches it
+    /// from the engine, and an attach the old page still had opening is refused when it
+    /// lands. Takes nothing. Returns nothing.
+    pub fn page_started(&self) {
+        if let Ok(mut views) = self.0.lock() {
+            views.viewers.clear();
+            views.opening.clear();
+            views.cleared = views.next;
+            assert_eq!(views.held(), 0);
+        }
+    }
+
     fn forget(&self, agent: &AgentId, serial: u64) {
         if let Ok(mut views) = self.0.lock()
             && views.viewers.get(agent).is_some_and(|v| v.serial == serial)
@@ -444,5 +461,68 @@ mod tests {
         terminals.detach(&agent, new.serial).unwrap();
         assert_eq!(shown(&terminals, &agent), None);
         terminals.detach(&agent, new.serial).unwrap();
+    }
+
+    /// The main webview reloads while three views are open and a fourth is still opening:
+    /// the new page gets every viewer slot back, the old views' request queues close so their
+    /// writers detach from the engine, and the old page's late attach never takes a slot.
+    #[test]
+    fn a_page_load_frees_every_view_the_old_page_held() {
+        let terminals = Arc::new(Terminals::default());
+        let mut queues = Vec::new();
+        for index in 1..VIEWERS_MAX as i64 {
+            let agent = AgentId::team(index).unwrap();
+            let place = terminals.room(&agent).unwrap();
+            let (requests, queue) = mpsc::channel(1);
+            terminals
+                .views()
+                .unwrap()
+                .install(&agent, place.serial, requests)
+                .unwrap();
+            queues.push(queue);
+        }
+        let opening = AgentId::team(VIEWERS_MAX as i64).unwrap();
+        let late = terminals.room(&opening).unwrap();
+        let fifth = AgentId::team(VIEWERS_MAX as i64 + 1).unwrap();
+        assert_eq!(
+            terminals.room(&fifth).err().map(|e| e.code),
+            Some("terminal_viewers_full"),
+            "the old page holds every slot before the reload"
+        );
+
+        terminals.page_started();
+
+        assert!(
+            queues.iter().all(|queue| queue.is_closed()),
+            "every old view's request queue is closed, so its writer detaches"
+        );
+        let (requests, _queue) = mpsc::channel(1);
+        let landed = terminals
+            .views()
+            .unwrap()
+            .install(&opening, late.serial, requests.clone());
+        assert_eq!(
+            landed.err().map(|e| e.code),
+            Some("terminal_view_replaced"),
+            "the old page's attach that lands after the reload is refused"
+        );
+        assert_eq!(shown(&terminals, &opening), None);
+        drop(late);
+        let fresh: Vec<_> = (VIEWERS_MAX as i64 + 1..=2 * VIEWERS_MAX as i64)
+            .map(|index| {
+                let agent = AgentId::team(index).unwrap();
+                terminals.room(&agent).map(|place| (agent, place))
+            })
+            .collect::<Result<_, _>>()
+            .expect("the new page opens a full set of other agents");
+        for (agent, place) in &fresh {
+            terminals
+                .views()
+                .unwrap()
+                .install(agent, place.serial, requests.clone())
+                .unwrap();
+            assert_eq!(shown(&terminals, agent), Some(place.serial));
+        }
+        assert_eq!(terminals.views().unwrap().held(), VIEWERS_MAX);
     }
 }

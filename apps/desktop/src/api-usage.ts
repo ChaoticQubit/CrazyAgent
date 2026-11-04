@@ -84,6 +84,7 @@ export interface UsageReport {
   limits: AccountLimits[];
   not_reported_by?: string[];
   health?: StepHealth[];
+  partial_homes: number;
 }
 
 const REFUSALS: Record<string, string> = {

@@ -138,6 +138,7 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                         SetupQuery::ReviewMemory { .. } => "review",
                         SetupQuery::Team { .. } => "team",
                         SetupQuery::TeamChange { .. } => "team change",
+                        SetupQuery::TeamMessages { .. } => "team messages",
                         SetupQuery::Library(_) => "library",
                         SetupQuery::Log { .. } => "log",
                         SetupQuery::ReadPaths { .. } => "read paths",
@@ -389,6 +390,71 @@ fn the_wizard_reads_harness_states_and_limits_from_the_real_catalog() {
     assert_eq!(
         (gemini.state, gemini.limited.as_deref()),
         (HarnessState::NotInstalled, None)
+    );
+}
+
+/// A project made in the projects home keeps its context in `.crazyagent/context`: `o` on
+/// each context file the engine listed opens that file, not a missing one beside the project.
+#[test]
+fn o_opens_each_listed_context_file_from_the_folder_the_engine_listed_it_in() {
+    let root = tempfile::Builder::new()
+        .prefix("ca-tui-ctx-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let project = root.path().canonicalize().unwrap().join("notes-cli");
+    let state = project.join(".crazyagent");
+    std::fs::create_dir_all(state.join("context/research")).unwrap();
+    std::fs::write(state.join("context/brief.md"), "# Brief").unwrap();
+    std::fs::write(state.join("context/research/market.md"), "# Market").unwrap();
+    let id = ProjectId::new("notes-cli").unwrap();
+    let stored = crate::project_setup::StoredSetup {
+        project_id: id.clone(),
+        name: "Notes CLI".into(),
+        about: "Terminal-first notes.".into(),
+        tech_stack: vec!["rust".into()],
+        platforms: vec![Platform::Cli],
+        research: vec![ResearchKind::CompetitorResearch],
+        pool: None,
+        team: crate::project_setup::TeamPlan {
+            master: "codex".into(),
+            master_tools: true,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: 1,
+        },
+        documents: vec![],
+        folder: project.display().to_string(),
+        created_ms: 1_793_000_000_000,
+        revision: 1,
+    };
+    let context = crate::project_setup::list_context(&stored).unwrap();
+    let paths: Vec<&str> = context
+        .items
+        .iter()
+        .map(|item| item.path.as_str())
+        .collect();
+    assert_eq!(paths, ["context/brief.md", "context/research/market.md"]);
+    let mut screen = super::project::ProjectScreen::new(id, "Notes CLI".into(), None);
+    screen.setup = Some(stored);
+    screen.context = Some(context.clone());
+
+    let opened: Vec<_> = context
+        .items
+        .iter()
+        .map(|item| {
+            screen
+                .context_request(&item.path)
+                .map(|request| opening(&request))
+        })
+        .collect();
+
+    assert_eq!(
+        opened,
+        vec![
+            Some(Ok(Opening::Open(state.join("context/brief.md")))),
+            Some(Ok(Opening::Open(state.join("context/research/market.md")))),
+        ],
+        "every listed context file opens from the project's .crazyagent folder"
     );
 }
 
@@ -763,6 +829,7 @@ async fn a_project_is_edited_given_a_file_and_removed_through_the_engine() {
         about: String::new(),
         platforms: vec![Platform::Cli],
         pool: None,
+        pool_id: None,
         research: Default::default(),
         created_ms: None,
         activity: Default::default(),
@@ -1412,6 +1479,7 @@ async fn removing_a_project_with_an_open_master_conversation_ends_it_and_lands_o
         about: String::new(),
         platforms: vec![Platform::Cli],
         pool: None,
+        pool_id: None,
         research: Default::default(),
         created_ms: None,
         activity: Default::default(),
@@ -1817,6 +1885,7 @@ async fn a_file_the_engine_cannot_write_into_the_project_says_why() {
         about: String::new(),
         platforms: vec![Platform::Cli],
         pool: None,
+        pool_id: None,
         research: Default::default(),
         created_ms: None,
         activity: Default::default(),
@@ -3098,4 +3167,606 @@ async fn commit_refusal_keeps_offer() {
         "the banner stays: {shown}"
     );
     assert!(shown.contains("Ctrl-G Commit the move"), "{shown}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn s_on_the_agents_tab_opens_team_settings_and_each_setting_reaches_the_engine() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let mut connection = engine.connect();
+    let mut ctx = ctx(120, 30);
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Agents,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 120, 30);
+    assert!(shown.contains("s Team settings"), "{shown}");
+
+    shell.key(Key::Char('s'));
+    assert_eq!(shell.depth(), 2);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"team"), "{sent:?}");
+    let shown = render(&mut shell, 120, 30);
+    assert!(shown.contains("Notes CLI  /  Team settings"), "{shown}");
+    assert!(shown.contains("Keep warm  Off"), "{shown}");
+    assert!(shown.contains("t Task limit"), "{shown}");
+
+    for key in ['t', 'l', 'i', 'h'] {
+        shell.key(Key::Char(key));
+        let sent = pump(&mut shell, &mut connection).await;
+        assert_eq!(sent.first(), Some(&"team change"), "{key}: {sent:?}");
+        assert!(
+            sent.contains(&"team"),
+            "{key} reads the team again: {sent:?}"
+        );
+    }
+    let status = engine.controller.team_status(notes.clone()).await.unwrap();
+    assert_eq!(
+        (
+            status.turn_limit_secs,
+            status.session_limit_secs,
+            status.idle_stop_secs,
+            status.on_harness_switch,
+        ),
+        (
+            Some(1800),
+            Some(1800),
+            Some(3600),
+            crate::team::SwitchMode::Fresh
+        )
+    );
+    let shown = render(&mut shell, 120, 30);
+    assert!(
+        shown.contains("When the master harness changes, the new harness starts fresh."),
+        "{shown}"
+    );
+
+    shell.key(Key::Esc);
+    assert_eq!(shell.depth(), 1);
+    assert_eq!(
+        shell.place(),
+        Some(Place::Project {
+            id: notes,
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Agents,
+        })
+    );
+}
+
+fn git_in(home: &std::path::Path, dir: &std::path::Path, args: &[&str]) {
+    let output = crate::spawn_gate::output(
+        std::process::Command::new("/usr/bin/git")
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", home)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("LC_ALL", "C")
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    )
+    .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn pending_change(
+    root: &std::path::Path,
+    home: &std::path::Path,
+    repo: &std::path::Path,
+    project: &ProjectId,
+    name: &str,
+) -> crate::landing::ChangeSetId {
+    use crate::landing::{AgentKind, ChangeAgent, TurnEnd, TurnOutcome, Workspace};
+    let worktree = repo.parent().unwrap().join(name);
+    git_in(
+        home,
+        repo,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            worktree.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    let db = crate::landing::open(root).unwrap();
+    db.execute(
+        "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms)
+         VALUES (?1,'sub','codex',1,'stopped',1,1)",
+        [project.as_str()],
+    )
+    .unwrap();
+    let member = db.last_insert_rowid();
+    let git_dir = repo.join(".git/worktrees").join(name);
+    db.execute(
+        "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir)
+         VALUES (?1,?2,?3,?4,?5)",
+        rusqlite::params![
+            member,
+            project.as_str(),
+            repo.to_str().unwrap(),
+            worktree.to_str().unwrap(),
+            git_dir.to_str().unwrap()
+        ],
+    )
+    .unwrap();
+    std::fs::write(worktree.join("README"), format!("one\n{name}\n")).unwrap();
+    let workspace = Workspace {
+        project: project.clone(),
+        agent: ChangeAgent {
+            kind: AgentKind::Sub,
+            id: member.to_string(),
+            label: name.into(),
+        },
+        repository: repo.to_path_buf(),
+        worktree,
+        git_dir,
+    };
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: format!("Work as {name}"),
+    };
+    crate::landing::record_turn_end(&db, &workspace, &turn)
+        .unwrap()
+        .expect("an edited worktree makes a change set")
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_status_line_counts_the_change_sets_that_wait_for_the_owner() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let work = tempfile::Builder::new()
+        .prefix("ca-tui-wait-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = std::fs::canonicalize(work.path()).unwrap();
+    let (repo, home) = (base.join("repo"), base.join("home"));
+    std::fs::create_dir(&repo).unwrap();
+    std::fs::create_dir(&home).unwrap();
+    let owner = |args: &[&str]| git_in(&home, &repo, args);
+    owner(&["init", "-q", "--template=", "-b", "main"]);
+    owner(&["config", "user.name", "Repo Owner"]);
+    owner(&["config", "user.email", "owner@example.invalid"]);
+    owner(&["config", "commit.gpgsign", "false"]);
+    std::fs::write(repo.join("README"), "one\n").unwrap();
+    owner(&["add", "README"]);
+    owner(&["commit", "-q", "-m", "Start"]);
+    let root = engine.root.path().to_path_buf();
+    pending_change(&root, &home, &repo, &notes, "agent-1");
+    pending_change(&root, &home, &repo, &notes, "agent-2");
+    let removed = ProjectId::new("removed-project").unwrap();
+    pending_change(&root, &home, &repo, &removed, "agent-3");
+
+    let mut connection = engine.connect();
+    let mut ctx = ctx(120, 30);
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Agents,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    let header = |shell: &mut Shell| render(shell, 120, 30).lines().next().unwrap().to_owned();
+    shell.tick();
+    pump(&mut shell, &mut connection).await;
+    let line = header(&mut shell);
+    assert!(line.contains("2 change sets wait in Changes"), "{line}");
+
+    let sets = engine.controller.change_sets(notes.clone()).await.unwrap();
+    assert_eq!(sets.len(), 2);
+    engine
+        .controller
+        .discard_changes(sets[0].id.clone(), sets[0].head.clone())
+        .await
+        .unwrap();
+    shell.tick();
+    pump(&mut shell, &mut connection).await;
+    let line = header(&mut shell);
+    assert!(line.contains("1 change set waits in Changes"), "{line}");
+
+    engine
+        .controller
+        .discard_changes(sets[1].id.clone(), sets[1].head.clone())
+        .await
+        .unwrap();
+    shell.tick();
+    pump(&mut shell, &mut connection).await;
+    let line = header(&mut shell);
+    assert!(!line.contains("in Changes"), "{line}");
+}
+
+async fn waiting_header(engine: &Engine, place: Place) -> String {
+    let mut connection = engine.connect();
+    let mut ctx = ctx(160, 30);
+    let screen = open(&place, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    shell.tick();
+    pump(&mut shell, &mut connection).await;
+    render(&mut shell, 160, 30)
+        .lines()
+        .next()
+        .unwrap()
+        .to_owned()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_project_page_counts_its_own_change_sets_and_the_rest_as_other_projects() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let todo = engine.project("todo-app", "Todo App", 2).await;
+    let work = tempfile::Builder::new()
+        .prefix("ca-tui-here-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    let base = std::fs::canonicalize(work.path()).unwrap();
+    let (repo, home) = (base.join("repo"), base.join("home"));
+    std::fs::create_dir(&repo).unwrap();
+    std::fs::create_dir(&home).unwrap();
+    let owner = |args: &[&str]| git_in(&home, &repo, args);
+    owner(&["init", "-q", "--template=", "-b", "main"]);
+    owner(&["config", "user.name", "Repo Owner"]);
+    owner(&["config", "user.email", "owner@example.invalid"]);
+    owner(&["config", "commit.gpgsign", "false"]);
+    std::fs::write(repo.join("README"), "one\n").unwrap();
+    owner(&["add", "README"]);
+    owner(&["commit", "-q", "-m", "Start"]);
+    let root = engine.root.path().to_path_buf();
+    pending_change(&root, &home, &repo, &notes, "agent-1");
+    pending_change(&root, &home, &repo, &notes, "agent-2");
+    pending_change(&root, &home, &repo, &todo, "agent-3");
+    let removed = ProjectId::new("removed-project").unwrap();
+    pending_change(&root, &home, &repo, &removed, "agent-4");
+    let notes_page = || Place::Project {
+        id: notes.clone(),
+        name: "Notes CLI".into(),
+        tab: ProjectTab::Agents,
+    };
+    let todo_page = || Place::Project {
+        id: todo.clone(),
+        name: "Todo App".into(),
+        tab: ProjectTab::Agents,
+    };
+
+    let line = waiting_header(&engine, notes_page()).await;
+    assert!(
+        line.contains("2 change sets wait in Changes, 1 in other projects"),
+        "{line}"
+    );
+    let line = waiting_header(&engine, todo_page()).await;
+    assert!(
+        line.contains("1 change set waits in Changes, 2 in other projects"),
+        "{line}"
+    );
+    let line = waiting_header(&engine, Place::Home).await;
+    assert!(
+        line.contains("3 change sets wait in your projects"),
+        "{line}"
+    );
+    assert!(!line.contains("in Changes"), "{line}");
+    let line = waiting_header(
+        &engine,
+        Place::Team {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+        },
+    )
+    .await;
+    assert!(
+        line.contains("2 change sets wait in Changes, 1 in other projects"),
+        "{line}"
+    );
+
+    let set = engine.controller.change_sets(todo.clone()).await.unwrap();
+    assert_eq!(set.len(), 1);
+    engine
+        .controller
+        .discard_changes(set[0].id.clone(), set[0].head.clone())
+        .await
+        .unwrap();
+    let line = waiting_header(&engine, notes_page()).await;
+    assert!(line.contains("2 change sets wait in Changes"), "{line}");
+    assert!(!line.contains("other projects"), "{line}");
+    let line = waiting_header(&engine, todo_page()).await;
+    assert!(
+        line.contains("2 change sets wait in other projects"),
+        "{line}"
+    );
+    assert!(!line.contains("in Changes"), "{line}");
+}
+
+async fn desktop_time_limits(engine: &Engine, project: &ProjectId, session_secs: u32) {
+    let client = Client::new(
+        engine.root.path().join("e.sock"),
+        crate::tui::test_home::ENGINE_WAIT,
+    )
+    .unwrap();
+    let (_, mut desktop) = OwnerController::attach_configured(client, OwnerClientKind::Desktop)
+        .await
+        .unwrap();
+    let read = desktop.team_status(project.clone()).await.unwrap();
+    let action = crate::team::TeamAction::TimeLimits {
+        project_id: project.clone(),
+        turn_secs: read.turn_limit_secs,
+        session_secs: Some(session_secs),
+        idle_secs: read.idle_stop_secs,
+        version: read.settings_version,
+    };
+    match desktop.team_action(action, 1).await.unwrap() {
+        OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation } => {
+            assert_eq!(
+                operation.result,
+                crate::engine::owner::OwnerResult::Applied,
+                "the desktop change from its own read applies"
+            )
+        }
+        other => panic!("desktop team change not applied: {other:?}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_tui_team_setting_from_before_a_desktop_change_is_refused_and_the_desktop_value_stays() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let mut connection = engine.connect();
+    let mut ctx = ctx(120, 30);
+    let screen = open(
+        &Place::TeamSettings {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    let shown = render(&mut shell, 120, 30);
+    assert!(shown.contains("t Task limit"), "{shown}");
+
+    desktop_time_limits(&engine, &notes, 7200).await;
+
+    shell.key(Key::Char('t'));
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(sent.first(), Some(&"team change"), "{sent:?}");
+    let status = engine.controller.team_status(notes.clone()).await.unwrap();
+    assert_eq!(
+        (status.turn_limit_secs, status.session_limit_secs),
+        (None, Some(7200)),
+        "the TUI change from the old read must not revert the desktop session limit"
+    );
+    assert!(
+        sent.contains(&"team"),
+        "a refused change reads the team again: {sent:?}"
+    );
+    let shown = render(&mut shell, 120, 30);
+    assert!(
+        shown.contains("These settings changed elsewhere."),
+        "{shown}"
+    );
+
+    shell.key(Key::Char('t'));
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(sent.first(), Some(&"team change"), "{sent:?}");
+    let status = engine.controller.team_status(notes.clone()).await.unwrap();
+    assert_eq!(
+        (status.turn_limit_secs, status.session_limit_secs),
+        (Some(1800), Some(7200)),
+        "a change from the fresh read applies and keeps the desktop session limit"
+    );
+}
+
+async fn team_settings_after(keys: &[char]) -> (crate::team::TeamStatus, String) {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let mut connection = engine.connect();
+    let mut ctx = ctx(80, 24);
+    let screen = open(
+        &Place::Project {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+            tab: ProjectTab::Agents,
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::Char('s'));
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"team"), "{sent:?}");
+    for key in keys {
+        shell.key(Key::Char(*key));
+        let sent = pump(&mut shell, &mut connection).await;
+        assert_eq!(sent.first(), Some(&"team change"), "{key}: {sent:?}");
+        assert!(
+            sent.contains(&"team"),
+            "{key} reads the team again: {sent:?}"
+        );
+    }
+    let status = engine.controller.team_status(notes).await.unwrap();
+    (status, render(&mut shell, 80, 24))
+}
+
+fn shows_once(shown: &str, setting: &str) {
+    assert_eq!(
+        shown.lines().filter(|row| row.contains(setting)).count(),
+        1,
+        "{setting:?} shows once, whole, at 80x24:\n{shown}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_show_every_setting_whole_at_80_by_24() {
+    let (status, shown) = team_settings_after(&[]).await;
+    assert_eq!(
+        (
+            status.keep_warm,
+            status.turn_limit_secs,
+            status.session_limit_secs,
+            status.idle_stop_secs,
+            status.on_harness_switch,
+        ),
+        (false, None, None, Some(600), crate::team::SwitchMode::Carry)
+    );
+    for setting in [
+        "Keep warm  Off",
+        "Task  Off",
+        "Session  Off",
+        "Idle stop  10 min",
+        "On harness switch  Carry over",
+    ] {
+        shows_once(&shown, setting);
+    }
+    assert!(
+        shown.lines().all(|row| row.chars().count() <= 80),
+        "{shown}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_turn_keep_warm_on() {
+    let (status, shown) = team_settings_after(&['w']).await;
+    assert!(status.keep_warm);
+    shows_once(&shown, "Keep warm  On");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_turn_keep_warm_off_again() {
+    let (status, shown) = team_settings_after(&['w', 'w']).await;
+    assert!(!status.keep_warm);
+    shows_once(&shown, "Keep warm  Off");
+}
+
+async fn task_limit_after(presses: usize, secs: Option<u32>, label: &str) {
+    let (status, shown) = team_settings_after(&vec!['t'; presses]).await;
+    assert_eq!(
+        (status.turn_limit_secs, status.session_limit_secs),
+        (secs, None)
+    );
+    shows_once(&shown, &format!("Task  {label}"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_set_the_task_limit_to_30_min() {
+    task_limit_after(1, Some(1800), "30 min").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_set_the_task_limit_to_1_h() {
+    task_limit_after(2, Some(3600), "1 h").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_set_the_task_limit_to_2_h() {
+    task_limit_after(3, Some(7200), "2 h").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_set_the_task_limit_to_4_h() {
+    task_limit_after(4, Some(14_400), "4 h").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_set_the_task_limit_to_8_h() {
+    task_limit_after(5, Some(28_800), "8 h").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_set_the_task_limit_back_to_off() {
+    task_limit_after(6, None, "Off").await;
+}
+
+async fn session_limit_after(presses: usize, secs: Option<u32>, label: &str) {
+    let (status, shown) = team_settings_after(&vec!['l'; presses]).await;
+    assert_eq!(
+        (status.turn_limit_secs, status.session_limit_secs),
+        (None, secs)
+    );
+    shows_once(&shown, &format!("Session  {label}"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_set_the_session_limit_to_30_min() {
+    session_limit_after(1, Some(1800), "30 min").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_set_the_session_limit_to_1_h() {
+    session_limit_after(2, Some(3600), "1 h").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_set_the_session_limit_to_2_h() {
+    session_limit_after(3, Some(7200), "2 h").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_set_the_session_limit_to_4_h() {
+    session_limit_after(4, Some(14_400), "4 h").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_set_the_session_limit_to_8_h() {
+    session_limit_after(5, Some(28_800), "8 h").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_set_the_session_limit_back_to_off() {
+    session_limit_after(6, None, "Off").await;
+}
+
+async fn idle_stop_after(presses: usize, secs: Option<u32>, label: &str) {
+    let (status, shown) = team_settings_after(&vec!['i'; presses]).await;
+    assert_eq!(status.idle_stop_secs, secs);
+    shows_once(&shown, &format!("Idle stop  {label}"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_set_the_idle_stop_to_1_h() {
+    idle_stop_after(1, Some(3600), "1 h").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_set_the_idle_stop_to_off() {
+    idle_stop_after(2, None, "Off").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_set_the_idle_stop_to_2_min() {
+    idle_stop_after(3, Some(120), "2 min").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_set_the_idle_stop_back_to_10_min() {
+    idle_stop_after(4, Some(600), "10 min").await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_make_a_harness_switch_start_fresh() {
+    let (status, shown) = team_settings_after(&['h']).await;
+    assert_eq!(status.on_harness_switch, crate::team::SwitchMode::Fresh);
+    shows_once(&shown, "On harness switch  Start fresh");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn team_settings_make_a_harness_switch_carry_over_again() {
+    let (status, shown) = team_settings_after(&['h', 'h']).await;
+    assert_eq!(status.on_harness_switch, crate::team::SwitchMode::Carry);
+    shows_once(&shown, "On harness switch  Carry over");
 }

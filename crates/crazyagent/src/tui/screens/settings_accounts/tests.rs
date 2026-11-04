@@ -1154,3 +1154,89 @@ auth = { method = "native_managed", profile_ref = "profile-claude" }
             .unwrap();
     }
 }
+
+/// Two pools share the display name "Team", one account in each, and one project is
+/// assigned to the first pool: that project counts only for the first pool and its
+/// account, in the pools list and in the account details.
+#[test]
+fn pools_sharing_a_name_show_only_the_projects_assigned_to_each() {
+    let member = |id: &CredentialRef| PoolMember {
+        id: id.clone(),
+        kind: MemberKind::Claude,
+        provider: "Claude".into(),
+        status: MemberStatus::SignedIn,
+        status_label: "Signed in".into(),
+    };
+    let first = account(
+        0,
+        "Claude one",
+        Provider::Claude,
+        SignInMethod::Subscription,
+        AccountStatus::SignedIn,
+    );
+    let second = account(
+        1,
+        "Claude two",
+        Provider::Claude,
+        SignInMethod::Subscription,
+        AccountStatus::SignedIn,
+    );
+    let pool = |name: &str, holder: &AccountView, projects: usize| PoolSummary {
+        id: id(name),
+        name: "Team".into(),
+        summary: String::new(),
+        members: vec![member(&holder.id)],
+        project_count: projects,
+        provider_quota_policy: crate::config::ProviderQuotaPolicy::default(),
+    };
+    let pools = vec![
+        pool("pool-team-a", &first, 1),
+        pool("pool-team-b", &second, 0),
+    ];
+    let project = crate::protocol::StoredProject {
+        project_id: crate::protocol::ProjectId::new("alpha").unwrap(),
+        spec: crate::protocol::ProjectSpec {
+            name: "Alpha".into(),
+            repositories: vec![],
+        },
+    };
+    let setup = crate::project_setup::StoredSetup {
+        project_id: project.project_id.clone(),
+        name: "Alpha".into(),
+        about: String::new(),
+        tech_stack: vec![],
+        platforms: vec![],
+        research: vec![],
+        pool: Some(pools[0].id.clone()),
+        team: crate::project_setup::TeamPlan {
+            master: "claude-code".into(),
+            master_tools: true,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: 1,
+        },
+        documents: vec![],
+        folder: "/private/tmp/ca-alpha".into(),
+        created_ms: 1_793_000_000_000,
+        revision: 1,
+    };
+    let mut ctx = list_ctx(80, 24, pools.clone());
+    ctx.store.projects = Load::Ready(vec![crate::tui::seam::ProjectCard::build(
+        &project,
+        Some(&setup),
+        &[],
+        &pools,
+    )]);
+
+    let pools_list: Vec<String> = pools
+        .iter()
+        .map(|pool| crate::tui::screens::settings::pools::used_by(pool, true, &ctx))
+        .collect();
+    let details: Vec<String> = [first, second]
+        .into_iter()
+        .map(|account| AccountDetails::new(account, Accounts::with(Vec::new())).used_by(&ctx))
+        .collect();
+
+    assert_eq!(pools_list, ["Alpha", "Not used"]);
+    assert_eq!(details, ["Alpha", "No projects"]);
+}

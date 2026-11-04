@@ -1059,3 +1059,71 @@ fn logout_no_effect_retirement_preserves_its_real_intent_and_replay() {
     assert_eq!(replay.reply.fact, finished.fact);
     assert_eq!(case.snapshot(), before);
 }
+
+#[test]
+fn a_read_after_the_settings_changed_ends_a_sign_in_only_once_it_stopped() {
+    let mut case = HostCase::new();
+    let (ended, work) = fresh_work(
+        case.begin(case.start("stale-ended", "connection-a"))
+            .unwrap(),
+    );
+    case.finish(work).unwrap();
+    let (running, _work) = fresh_work(
+        case.begin(case.start("stale-running", "connection-a"))
+            .unwrap(),
+    );
+    std::fs::write(&case.global, format!("\n{CATALOG}")).unwrap();
+    let before = case.snapshot();
+    let refused = case
+        .read(&running)
+        .err()
+        .expect("a running sign-in read under changed settings");
+    assert_eq!(refused.0, "native_profile_source_conflict");
+    assert!(
+        !crate::engine::owner::ends_operation(&refused.0),
+        "the engine still runs this sign-in"
+    );
+    assert_code(case.read(&ended), "native_auth_not_active");
+    let mut unknown = running.clone();
+    unknown.operation_id = request_id("stale-unknown");
+    assert_code(case.read(&unknown), "native_auth_operation_missing");
+    assert_eq!(case.snapshot(), before);
+}
+
+#[test]
+fn a_sign_in_goes_on_after_another_account_changed_but_not_after_its_own() {
+    let mut other = HostCase::new();
+    let (fact, _work) = fresh_work(
+        other
+            .begin(other.start("scoped-other", "connection-a"))
+            .unwrap(),
+    );
+    std::fs::write(
+        &other.global,
+        CATALOG.replace(r#"id = "model-z""#, r#"id = "model-z2""#),
+    )
+    .unwrap();
+    other.config = other.sources.config().unwrap();
+    assert_ne!(other.config.id, fact.binding.config_id);
+    let published = other
+        .publish(&fact, NativeAuthHostUpdate::Unavailable)
+        .unwrap();
+    assert_eq!(published.phase, NativeAuthPhase::Unavailable);
+    assert_eq!(other.read(&fact).unwrap().fact, published);
+
+    let mut own = HostCase::new();
+    let (fact, _work) = fresh_work(own.begin(own.start("scoped-own", "connection-a")).unwrap());
+    std::fs::write(
+        &own.global,
+        CATALOG.replace(r#"id = "model-a""#, r#"id = "model-a2""#),
+    )
+    .unwrap();
+    own.config = own.sources.config().unwrap();
+    let before = own.snapshot();
+    assert_code(
+        own.publish(&fact, NativeAuthHostUpdate::Unavailable),
+        "native_profile_source_conflict",
+    );
+    assert_code(own.read(&fact), "native_profile_source_conflict");
+    assert_eq!(own.snapshot(), before);
+}

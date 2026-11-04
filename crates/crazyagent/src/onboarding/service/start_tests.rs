@@ -28,7 +28,7 @@ fn every_start_failure_has_a_plain_cause_code_without_its_text() {
             "sandbox_io_permission_denied",
         ),
         (
-            RunError::Context(LaunchError(PRIVATE.into())),
+            RunError::Context(LaunchError(PRIVATE.into(), None)),
             "context_refused",
         ),
         (RunError::Account(PRIVATE.into()), "account_unavailable"),

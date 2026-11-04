@@ -206,6 +206,7 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
         resumed: None,
         access: None,
         context: None,
+        toolchains: None,
     };
     let text = record.encode().unwrap();
     assert_eq!(PaneRecord::decode(&text), Some(record.clone()));
@@ -217,6 +218,25 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
     let leveled = started.encode().unwrap();
     assert!(leveled.contains("\"access\":\"own_branch\""), "{leveled}");
     assert_eq!(PaneRecord::decode(&leveled), Some(started));
+    assert!(!text.contains("toolchains"), "{text}");
+    let granted = PaneRecord {
+        toolchains: Some(vec![
+            crate::sandbox::toolchains::Toolchain::Rust,
+            crate::sandbox::toolchains::Toolchain::Node,
+        ]),
+        ..record.clone()
+    };
+    let listed = granted.encode().unwrap();
+    assert!(
+        listed.contains("\"toolchains\":[\"rust\",\"node\"]"),
+        "{listed}"
+    );
+    assert_eq!(PaneRecord::decode(&listed), Some(granted));
+    let too_many = listed.replace(
+        "[\"rust\",\"node\"]",
+        "[\"rust\",\"node\",\"python\",\"rust\"]",
+    );
+    assert_eq!(PaneRecord::decode(&too_many), None);
     let mut relative = record.clone();
     relative.cwd = PathBuf::from("worktrees/agent-3");
     assert_eq!(PaneRecord::decode(&relative.encode().unwrap()), None);
@@ -243,6 +263,12 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
     let mut no_process = record.clone();
     no_process.pid = 0;
     assert_eq!(PaneRecord::decode(&no_process.encode().unwrap()), None);
+    no_process.pid = 1;
+    assert_eq!(
+        PaneRecord::decode(&no_process.encode().unwrap()),
+        None,
+        "a stored pane never names pid 1, whose group a stop would kill"
+    );
     assert_eq!(PaneRecord::decode("{\"source\":1}"), None);
     let mut long = record;
     long.cwd = PathBuf::from(format!("/{}", "a".repeat(RECORD_BYTES_MAX)));
@@ -282,7 +308,7 @@ fn an_adopted_pane_removes_its_key_file_when_it_stops_but_not_when_left() {
 
     let session =
         TerminalSession::adopt(host.clone(), agent, &record, LaunchLimits::default()).unwrap();
-    assert_eq!(session.stop(), None);
+    assert_eq!(session.stop().unwrap(), None);
     assert!(
         !key.exists(),
         "stopping the adopted pane removes its key file"
@@ -341,4 +367,105 @@ fn an_adopted_pane_counts_the_events_it_already_had_against_its_budget() {
         TerminalSession::adopt(host.clone(), agent, &record, LaunchLimits::default()).unwrap();
     drop(session);
     assert!(host.alive().unwrap().is_empty());
+}
+
+/// Makes a real FIFO at `path` with the system `mkfifo`. Input: the path. Output: none.
+fn fifo(path: &std::path::Path) {
+    let made = crate::spawn_gate::status(
+        std::process::Command::new("/usr/bin/mkfifo")
+            .arg(path)
+            .env_clear()
+            .stdin(std::process::Stdio::null()),
+    )
+    .unwrap();
+    assert!(made.success());
+}
+
+/// Opens the FIFO at `path` for writing without waiting and closes it, so a reader a
+/// failing test left blocked on it ends. Input: the path. Output: none.
+fn release_fifo(path: &std::path::Path) {
+    use std::os::unix::fs::OpenOptionsExt;
+    let _ = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
+        .open(path);
+}
+
+/// A private folder under the canonical `/tmp` for one key file test.
+fn key_folder() -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let folder = tempfile::Builder::new()
+        .prefix("ca-key-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(folder.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    folder
+}
+
+/// The longest key the engine writes: a relay token.
+fn longest_key() -> String {
+    format!(
+        "{}{}",
+        crate::model_gateway::relay::TOKEN_PREFIX,
+        "a".repeat(64)
+    )
+}
+
+/// A pane record with only its key path set to `key`.
+fn keyed(key: &std::path::Path) -> PaneRecord {
+    PaneRecord {
+        source: RecordSource::CodexRollouts {
+            sessions: PathBuf::from("/private/tmp/home/sessions"),
+        },
+        cwd: PathBuf::from("/private/tmp/project"),
+        since_ms: 1_793_000_000_000,
+        pid: 4242,
+        key: Some(key.to_path_buf()),
+        resumed: None,
+        access: None,
+        context: None,
+        toolchains: None,
+    }
+}
+
+#[test]
+fn an_adopted_key_file_longer_than_the_longest_key_is_not_taken() {
+    let folder = key_folder();
+    let key = folder.path().join(crate::harnesses::interactive::KEY_FILE);
+    std::fs::write(&key, longest_key()).unwrap();
+    assert!(
+        keyed(&key)
+            .key_file()
+            .is_some_and(|taken| taken.path == key),
+        "the longest key the engine writes was refused"
+    );
+    std::fs::File::create(&key)
+        .unwrap()
+        .set_len(16 << 20)
+        .unwrap();
+    let taken = keyed(&key).key_file();
+    assert!(
+        taken.is_none(),
+        "adopt read a 16 MiB file at the key path whole"
+    );
+}
+
+#[test]
+fn an_adopted_key_file_that_is_a_fifo_is_not_taken_and_never_blocks_adopt() {
+    let folder = key_folder();
+    let key = folder.path().join(crate::harnesses::interactive::KEY_FILE);
+    fifo(&key);
+    let record = keyed(&key);
+    let (sent, got) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let taken = record.key_file();
+        let _ = sent.send(taken.is_some());
+    });
+    let taken = got.recv_timeout(Duration::from_secs(5));
+    release_fifo(&key);
+    assert_eq!(
+        taken,
+        Ok(false),
+        "adopt blocked on or took a FIFO at the key path"
+    );
 }

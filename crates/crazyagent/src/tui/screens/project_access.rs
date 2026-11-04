@@ -3,13 +3,15 @@ use crate::sandbox::policy::{AgentAccess, AgentNetwork, AgentPolicy, PolicyView,
 use crossterm::event::{KeyCode, KeyEvent};
 
 /// The plain warning the owner confirms before giving a project's agents Full access.
-pub(in crate::tui) const FULL_ACCESS_WARNING: &str =
-    "Agents run with your user's permissions: they can read your keys and change any file.";
+pub(in crate::tui) const FULL_ACCESS_WARNING: &str = "Agents run with your user's permissions: they can read your keys and change any file. Processes an agent starts outside its terminal can keep running after it stops.";
 
 /// What a lower saved level does to agents already running: the engine stops each one that
-/// started above it.
-pub(in crate::tui) const LOWERING_STOPS_AGENTS: &str =
-    "Lowering the level stops agents running above it; they restart at the new level.";
+/// started above it, but not what a Full access agent started outside its terminal.
+pub(in crate::tui) const LOWERING_STOPS_AGENTS: &str = "Lowering the level stops agents running above it; they restart at the new level. It does not reach processes a Full access agent started outside its terminal.";
+
+/// What turning a toolchain off does to work already running: the engine stops each agent,
+/// research job and master turn whose sandbox granted it.
+pub(in crate::tui) const TOOLCHAIN_OFF_STOPS_AGENTS: &str = "Turning a toolchain off stops agents, research jobs and master turns running with it; their next start goes without it.";
 
 /// The IDE hooks switch's name, the same in Desktop.
 pub(in crate::tui) const IDE_GIT_HOOKS: &str = "IDE git runs the project's hooks";
@@ -208,6 +210,11 @@ impl AccessEdit {
                     .push(format!("   {note}"), look.muted),
             );
         }
+        body.extend(
+            wrap_words(TOOLCHAIN_OFF_STOPS_AGENTS, TEXT_WIDTH)
+                .into_iter()
+                .map(|line| Row::of(line, look.muted)),
+        );
         body.push(Row::default());
         body.push(Row::of("Network for agents with tools on", look.accent));
         let network_row = self.allowed.len() + 1;

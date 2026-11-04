@@ -987,6 +987,7 @@ mod live {
             tools: plan.tools,
             sandbox_profile: plan.sandbox_profile.clone(),
             access: plan.access,
+            toolchains: plan.toolchains.clone(),
             layout: plan.layout,
             git_identity: plan.git_identity.clone(),
             limits: plan.limits,

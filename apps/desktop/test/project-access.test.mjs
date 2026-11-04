@@ -139,3 +139,11 @@ test("Hiding a folder takes an absolute path, rejects duplicates and caps at the
     assert.ok(api.KNOWN_ERROR_CODES.includes(code), code);
   }
 });
+
+test("Settings says beside the toolchain switches that turning one off stops agents, research jobs and master turns running with it, in both UIs", () => {
+  assert.equal(access.TOOLCHAIN_OFF_STOPS_AGENTS, "Turning a toolchain off stops agents, research jobs and master turns running with it; their next start goes without it.");
+  const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
+  assert.match(page, /<ToolchainSwitches prefix="ps"[^\n]*\/>}\n\s*{view && <p className="pj-help">{TOOLCHAIN_OFF_STOPS_AGENTS}<\/p>}/);
+  const tui = readFileSync(new URL("../../../crates/crazyagent/src/tui/screens/project_access.rs", import.meta.url), "utf8");
+  assert.ok(tui.includes(`"${access.TOOLCHAIN_OFF_STOPS_AGENTS}"`));
+});

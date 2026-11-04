@@ -67,6 +67,10 @@ test("every file says how it changed and marks what can change more than its tex
   assert.deepEqual(model.fileMarks(file({ marks: ["executable", "mode"] })), ["Can run as a program", "File mode changed"]);
   assert.deepEqual(model.fileMarks(file({ path: ".gitattributes", marks: ["attributes"] })), [".gitattributes: changes how Git treats files"]);
   assert.deepEqual(model.fileMarks(file({ path: ".gitmodules", marks: ["modules"] })), [".gitmodules: changes the project's submodules"]);
+  assert.deepEqual(model.fileMarks(file({ path: "AGENTS.md", marks: ["instructions"] })), ["Instruction file: changes what every agent of this project is told"]);
+  for (const path of ["claude.md", "web/Agents.md", "AGENTS.override.md", ".claude/commands/x.md"]) {
+    assert.deepEqual(model.fileMarks(file({ path, marks: ["instructions"] })), ["Instruction file: changes what every agent of this project is told"], path);
+  }
   assert.equal(model.fileMarks(file({ marks: ["new_mark"] })).length, 1, "a mark this build does not know is still shown");
   assert.equal(model.fileMarks(file({ marks: ["new_mark"] }))[0], "Marked new mark");
   assert.equal(model.fileLine(file({ path: "evil\u001b[31m.ts" })), "Modified evil\\u001b[31m.ts");
@@ -244,4 +248,14 @@ test("a change set closed outside the app says how, keeps its note and offers no
   const none = { accept: false, discard: false, update: false, restore: false };
   assert.deepEqual(model.actions(landed, NOW), none);
   assert.deepEqual(model.actions(removed, NOW), none);
+});
+test("every diff page is read at the head under review, and a page refused as moved on rereads the list (RV-DS-13)", () => {
+  assert.equal(client.loadChangeDiff.length, 3, "the diff read names the change set, the head and the page");
+  const api = readFileSync(new URL("../src/api-changes.ts", import.meta.url), "utf8");
+  assert.match(api, /call<ChangeDiff>\("desktop_change_diff", \{ id, head, page \}\)/);
+  const source = readFileSync(new URL("../src/screens/changes/index.tsx", import.meta.url), "utf8");
+  assert.match(source, /loadChangeDiff\(set\.id, head, page\)/);
+  assert.match(source, /if \(result\.kind === "error" && result\.code === "changes_stale"\) onMoved\(\);/);
+  assert.match(source, /const \[list, reread\] = useChangeList\(data\.id\);/);
+  assert.match(source, /onMoved=\{reread\}/);
 });

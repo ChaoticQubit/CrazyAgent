@@ -12,7 +12,10 @@ fn now() -> u64 {
 /// The marks of every file in a change set's first diff page, by path.
 fn marks(case: &Case, id: &ChangeSetId) -> Vec<(String, Vec<FileMark>)> {
     let db = crate::landing::open(&case.root).unwrap();
-    crate::landing::diff(&db, id, 0)
+    let head = crate::landing::ide::view(&db, &case.project, id)
+        .unwrap()
+        .head;
+    crate::landing::diff(&db, id, &head, 0)
         .unwrap()
         .files
         .into_iter()

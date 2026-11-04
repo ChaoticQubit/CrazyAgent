@@ -339,6 +339,7 @@ async fn footer_badge_counts_pending_questions() {
         about: "An online shop for house plants.".into(),
         platforms: vec![Platform::Website],
         pool: None,
+        pool_id: None,
         research: Default::default(),
         created_ms: Some(NOW),
         activity: Default::default(),

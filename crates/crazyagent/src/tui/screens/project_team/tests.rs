@@ -150,6 +150,7 @@ fn team() -> TeamStatus {
         budget_reached: false,
         spread_accounts: false,
         show_finished: false,
+        message_settings: crate::team::agent_messages::MessageSettings::default(),
         agent_branches: crate::team::BranchMode::Named,
         master_branch: None,
         land_on: None,
@@ -161,7 +162,7 @@ fn team() -> TeamStatus {
         paused: false,
         live_master: None,
         live_problem: None,
-        settings_version: 0,
+        settings_version: 7,
         min_agents: 1,
         max_agents: 4,
         harnesses: vec![
@@ -218,7 +219,7 @@ fn frame(view: &TeamView, width: u16, height: u16) -> Vec<String> {
     let items = crate::tui::screens::project_view::tab_items(0, columns, &look);
     let mut rows: Vec<Row> = tab_strip(columns, &items, Tab::Agents as usize, &look).into();
     let room = usize::from(height) - 4 - 2;
-    let (lines, help) = view.rows(columns - 4, room, &accounts(), &look);
+    let (lines, help, _) = view.draw(columns - 4, room, &accounts(), &look);
     for line in lines.into_iter().take(room) {
         rows.push(Row::of("  ", Style::new()).cat(line).pad(columns));
     }
@@ -563,7 +564,7 @@ fn keep_warm_turns_on_and_off() {
         TeamReply::Change(TeamAction::KeepWarm {
             project_id: project(),
             on: true,
-            version: 0,
+            version: 7,
         })
     );
     let TeamReply::Change(action) = reply else {
@@ -1420,7 +1421,7 @@ fn a_long_notification_list_stays_inside_a_short_window() {
     view.key(press(KeyCode::Char('a')));
     let room = 24 - 4 - 2;
     let look = Look::plain();
-    let (lines, _) = view.rows(76, room, &accounts(), &look);
+    let (lines, _, _) = view.draw(76, room, &accounts(), &look);
     assert!(lines.len() <= room, "{} rows for {room}", lines.len());
     let text: Vec<String> = lines.iter().map(Row::text).collect();
     assert!(text.iter().any(|row| row.contains("Question number 20")));
@@ -1608,7 +1609,7 @@ fn the_task_and_session_limits_are_off_until_set_and_step_through_the_choices() 
             turn_secs: Some(1800),
             session_secs: None,
             idle_secs: None,
-            version: 0,
+            version: 7,
         })
     );
     let TeamReply::Change(action) = reply else {
@@ -1640,7 +1641,7 @@ fn the_task_and_session_limits_are_off_until_set_and_step_through_the_choices() 
             turn_secs: Some(28_800),
             session_secs: None,
             idle_secs: None,
-            version: 0,
+            version: 7,
         }),
         "past 8 h the session limit goes Off; an Off session holds any task limit"
     );
@@ -1657,7 +1658,7 @@ fn the_task_and_session_limits_are_off_until_set_and_step_through_the_choices() 
             turn_secs: None,
             session_secs: Some(28_800),
             idle_secs: None,
-            version: 0,
+            version: 7,
         }),
         "a task limit turned Off leaves the session limit"
     );
@@ -1669,7 +1670,7 @@ fn the_task_and_session_limits_are_off_until_set_and_step_through_the_choices() 
             turn_secs: None,
             session_secs: Some(1800),
             idle_secs: None,
-            version: 0,
+            version: 7,
         }),
         "a session limit needs no task limit"
     );
@@ -1687,7 +1688,7 @@ fn the_task_and_session_limits_are_off_until_set_and_step_through_the_choices() 
             turn_secs: None,
             session_secs: None,
             idle_secs: Some(3600),
-            version: 0,
+            version: 7,
         }),
         "the idle stop steps from 10 min to 1 h and leaves the task and session limits"
     );
@@ -1719,7 +1720,7 @@ fn the_task_and_session_limits_are_off_until_set_and_step_through_the_choices() 
             turn_secs: None,
             session_secs: None,
             idle_secs: None,
-            version: 0,
+            version: 7,
         }),
         "past 1 h the idle stop goes Off"
     );
@@ -1741,7 +1742,7 @@ fn the_harness_switch_setting_flips_between_carry_over_and_start_fresh() {
         TeamReply::Change(TeamAction::OnHarnessSwitch {
             project_id: project(),
             mode: crate::team::SwitchMode::Fresh,
-            version: 0,
+            version: 7,
         })
     );
     let TeamReply::Change(action) = reply else {
@@ -1770,7 +1771,7 @@ fn the_harness_switch_setting_flips_between_carry_over_and_start_fresh() {
         TeamReply::Change(TeamAction::OnHarnessSwitch {
             project_id: project(),
             mode: crate::team::SwitchMode::Carry,
-            version: 0,
+            version: 7,
         })
     );
 }
@@ -2899,5 +2900,372 @@ fn shift_b_steps_background_commands_and_shift_g_steps_the_grace_time() {
     assert_eq!(
         view.notice,
         Some(Notice::problem("Pick a grace time from 10 s to 1 h."))
+    );
+}
+
+fn messages_reply(agent: i64) -> SetupView {
+    use crate::team::agent_messages::{
+        AgentMessage, AgentMessages, EntryKind, MessageSettings, Source, Speaker,
+    };
+    let entry = |id: i64, ago: i64, from: Speaker, kind: EntryKind, source: Source, text: &str| {
+        AgentMessage {
+            at_ms: NOW - ago * MINUTE,
+            source,
+            id,
+            from,
+            kind,
+            text: Some(text.into()),
+            task: Some(11),
+            state: None,
+            result: None,
+            result_more: false,
+        }
+    };
+    SetupView::TeamMessages(Box::new(AgentMessages {
+        project_id: project(),
+        agent,
+        entries: vec![
+            entry(
+                4,
+                2,
+                Speaker::Agent,
+                EntryKind::Question,
+                Source::Event,
+                "Which chart library?",
+            ),
+            entry(
+                11,
+                6,
+                Speaker::Master,
+                EntryKind::Task,
+                Source::Task,
+                "Build the charts component",
+            ),
+        ],
+        older: false,
+        settings: MessageSettings::default(),
+    }))
+}
+
+#[test]
+fn capital_m_opens_the_focused_sub_agents_messages_and_esc_returns_at_120_and_80_columns() {
+    let mut view = loaded();
+    assert!(view.help().contains(&("M", "Messages")));
+    assert!(view.help().contains(&("o", "Messages settings")));
+    view.key(press(KeyCode::Down));
+    let label = view.agents()[1].label.clone();
+    assert_eq!(view.key(press(KeyCode::Char('M'))), TeamReply::Handled);
+    let query = view.next_query(NOW + 1).unwrap();
+    assert_eq!(
+        query,
+        SetupQuery::TeamMessages {
+            project: project(),
+            agent: 2,
+            before: None,
+        }
+    );
+    assert_eq!(view.next_query(NOW + 2), None, "one page read at a time");
+    view.apply(&query, Ok(messages_reply(2)));
+    for (width, height) in [(120, 36), (80, 24)] {
+        let rows = frame(&view, width, height);
+        find(&rows, &format!("Messages: {label}"));
+        assert!(
+            find(&rows, "Master > task: Build the charts component")
+                .contains(&format!("  {}  Master", clock(NOW - 6 * MINUTE, 0)))
+        );
+        assert!(
+            find(&rows, "Agent < question: Which chart library?")
+                .contains(&format!("> {}  Agent", clock(NOW - 2 * MINUTE, 0)))
+        );
+        assert!(
+            !rows.iter().any(|row| row.contains("Tasks  3")),
+            "the list takes the place of the team lists\n{}",
+            rows.join("\n")
+        );
+    }
+    assert_eq!(view.help(), [("\u{2191}\u{2193}", "Move"), ("Esc", "Back")]);
+    assert_eq!(
+        view.key(press(KeyCode::Char('x'))),
+        TeamReply::Handled,
+        "keys stay in the open list"
+    );
+    assert!(view.confirm.is_none());
+    assert_eq!(view.key(press(KeyCode::Esc)), TeamReply::Handled);
+    assert!(view.messages.is_none());
+    find(&frame(&view, 120, 36), "Tasks  3");
+}
+
+/// B19L merge (18.13 native teammates, b19 Messages): a teammate in the agents list opens
+/// its Messages as a sub-agent does, as on the Team graph screen.
+#[test]
+fn capital_m_opens_a_focused_teammates_messages() {
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    let mut status = team();
+    status.agents.push(agent(
+        7,
+        AgentRole::Teammate,
+        "claude-code",
+        AgentStatus::Working,
+        None,
+    ));
+    view.apply(&query, Ok(SetupView::Team(Box::new(status))));
+    let at = view
+        .agents()
+        .iter()
+        .position(|agent| agent.id == 7)
+        .unwrap();
+    for _ in 0..at {
+        view.key(press(KeyCode::Down));
+    }
+
+    assert_eq!(view.key(press(KeyCode::Char('M'))), TeamReply::Handled);
+    assert_eq!(view.notice, None);
+    assert_eq!(
+        view.next_query(NOW + 1),
+        Some(SetupQuery::TeamMessages {
+            project: project(),
+            agent: 7,
+            before: None,
+        })
+    );
+}
+
+#[test]
+fn capital_m_on_the_master_says_where_its_conversation_is_and_on_a_task_asks_for_an_agent() {
+    let mut view = loaded();
+    assert_eq!(view.key(press(KeyCode::Char('M'))), TeamReply::Handled);
+    assert!(view.messages.is_none());
+    assert_eq!(view.notice, Some(Notice::plain(MASTER_ELSEWHERE)));
+    find(&frame(&view, 120, 36), MASTER_ELSEWHERE);
+    view.key(press(KeyCode::Tab));
+    view.key(press(KeyCode::Char('M')));
+    assert!(view.messages.is_none());
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "Pick an agent in the agents list to read its messages."
+        ))
+    );
+    assert_eq!(view.next_query(NOW + 1), None, "a refused m reads nothing");
+}
+
+fn message_change(view: &mut TeamView, key: KeyCode, settings: MessageSettings, done: &str) {
+    let TeamReply::Change(action) = view.key(press(key)) else {
+        panic!("a Messages settings change expected: {:?}", view.notice);
+    };
+    assert_eq!(
+        action,
+        TeamAction::MessageSettings {
+            project_id: project(),
+            settings,
+        }
+    );
+    assert_eq!(view.key(press(KeyCode::Char(' '))), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::problem(
+            "Still saving the last change. Try again in a moment."
+        )),
+        "one change at a time"
+    );
+    view.apply(
+        &SetupQuery::TeamChange {
+            action,
+            generation: 1,
+        },
+        Ok(SetupView::Changed(OwnerResult::Applied)),
+    );
+    assert_eq!(view.notice, Some(Notice::plain(done)));
+    let now = view.now_ms;
+    let query = view
+        .next_query(now)
+        .expect("the team is read again right after a save");
+    let mut read = team();
+    read.message_settings = settings;
+    view.apply(&query, Ok(SetupView::Team(Box::new(read))));
+}
+
+#[test]
+fn o_opens_messages_settings_and_every_choice_of_every_setting_is_one_change() {
+    let mut waiting = TeamView::new(project());
+    assert_eq!(waiting.key(press(KeyCode::Char('o'))), TeamReply::Handled);
+    assert!(waiting.message_row.is_none());
+    assert_eq!(
+        waiting.notice,
+        Some(Notice::plain("The team is still loading."))
+    );
+
+    let mut view = loaded();
+    assert_eq!(view.key(press(KeyCode::Char('o'))), TeamReply::Handled);
+    for (width, height) in [(120, 36), (80, 24)] {
+        let rows = frame(&view, width, height);
+        assert!(
+            find(&rows, "Messages settings").contains("For every sub-agent's Messages list here")
+        );
+        for (label, value) in [
+            ("Keep the master's messages to agents", "On"),
+            ("Messages kept per project", "2000"),
+            ("Progress events", "Shown"),
+            ("Task results", "First line, Enter shows all"),
+            ("Your own tasks and prompts", "Shown"),
+            ("Entries per page", "50"),
+        ] {
+            assert!(
+                find(&rows, label).contains(&format!("{label:<40}{value}")),
+                "{label} shows {value}\n{}",
+                rows.join("\n")
+            );
+        }
+        assert!(find(&rows, "Keep the master's messages").contains("> Keep"));
+    }
+    assert_eq!(
+        view.help(),
+        [
+            ("\u{2191}\u{2193}", "Move"),
+            ("Space", "Next choice"),
+            ("\u{2190}\u{2192}", "Choice"),
+            ("Esc", "Close"),
+        ]
+    );
+    let mut saved = MessageSettings {
+        keep_master_messages: false,
+        ..MessageSettings::default()
+    };
+    message_change(
+        &mut view,
+        KeyCode::Char(' '),
+        saved,
+        "Keep the master's messages to agents: Off.",
+    );
+    view.key(press(KeyCode::Down));
+    for (key, kept) in [
+        (KeyCode::Right, 5000),
+        (KeyCode::Right, 500),
+        (KeyCode::Left, 5000),
+    ] {
+        saved.kept_per_project = kept;
+        message_change(
+            &mut view,
+            key,
+            saved,
+            &format!("Messages kept per project: {kept}."),
+        );
+    }
+    view.key(press(KeyCode::Down));
+    saved.progress_shown = false;
+    message_change(&mut view, KeyCode::Enter, saved, "Progress events: Hidden.");
+    view.key(press(KeyCode::Down));
+    saved.results = ResultsShown::Full;
+    message_change(
+        &mut view,
+        KeyCode::Char(' '),
+        saved,
+        "Task results: Full text.",
+    );
+    view.key(press(KeyCode::Down));
+    saved.owner_items_shown = false;
+    message_change(
+        &mut view,
+        KeyCode::Right,
+        saved,
+        "Your own tasks and prompts: Hidden.",
+    );
+    view.key(press(KeyCode::Down));
+    view.key(press(KeyCode::Down));
+    for (key, size) in [
+        (KeyCode::Right, 100),
+        (KeyCode::Right, 25),
+        (KeyCode::Left, 100),
+    ] {
+        saved.page_size = size;
+        message_change(&mut view, key, saved, &format!("Entries per page: {size}."));
+    }
+
+    let rows = frame(&view, 80, 24);
+    for (label, value) in [
+        ("Keep the master's messages to agents", "Off"),
+        ("Messages kept per project", "5000"),
+        ("Progress events", "Hidden"),
+        ("Task results", "Full text"),
+        ("Your own tasks and prompts", "Hidden"),
+        ("Entries per page", "100"),
+    ] {
+        assert!(find(&rows, label).contains(&format!("{label:<40}{value}")));
+    }
+    view.key(press(KeyCode::Up));
+    saved.owner_items_shown = true;
+    message_change(
+        &mut view,
+        KeyCode::Char(' '),
+        saved,
+        "Your own tasks and prompts: Shown.",
+    );
+    assert_eq!(view.key(press(KeyCode::Esc)), TeamReply::Handled);
+    assert!(view.message_row.is_none());
+    assert!(
+        !frame(&view, 120, 36)
+            .iter()
+            .any(|row| row.contains("Messages settings"))
+    );
+}
+
+/// A change made after a save but before the team read that follows it would be built
+/// from the older read and undo the save, so it waits for a read sent after the save.
+#[test]
+fn a_settings_change_waits_for_the_team_read_sent_after_the_last_save() {
+    let mut view = loaded();
+    assert_eq!(view.key(press(KeyCode::Char('o'))), TeamReply::Handled);
+    let TeamReply::Change(action) = view.key(press(KeyCode::Char(' '))) else {
+        panic!("a Messages settings change expected: {:?}", view.notice);
+    };
+    let sent_before = view
+        .next_query(NOW + REFRESH_MS)
+        .expect("the paced team read is due");
+    assert!(matches!(sent_before, SetupQuery::Team { .. }));
+    view.apply(
+        &SetupQuery::TeamChange {
+            action,
+            generation: 1,
+        },
+        Ok(SetupView::Changed(OwnerResult::Applied)),
+    );
+    let still = Some(Notice::problem(
+        "Still saving the last change. Try again in a moment.",
+    ));
+    view.key(press(KeyCode::Down));
+    assert_eq!(
+        view.key(press(KeyCode::Char(' '))),
+        TeamReply::Handled,
+        "a change built before the read after the save would undo the save"
+    );
+    assert_eq!(view.notice, still);
+    view.apply(&sent_before, Ok(SetupView::Team(Box::new(team()))));
+    assert_eq!(
+        view.key(press(KeyCode::Char(' '))),
+        TeamReply::Handled,
+        "a read sent before the save still shows the older settings"
+    );
+    assert_eq!(view.notice, still);
+    let sent_after = view
+        .next_query(NOW + REFRESH_MS)
+        .expect("the read after the save goes at once");
+    let saved = MessageSettings {
+        keep_master_messages: false,
+        ..MessageSettings::default()
+    };
+    let mut read = team();
+    read.message_settings = saved;
+    view.apply(&sent_after, Ok(SetupView::Team(Box::new(read))));
+    assert_eq!(
+        view.key(press(KeyCode::Char(' '))),
+        TeamReply::Change(TeamAction::MessageSettings {
+            project_id: project(),
+            settings: MessageSettings {
+                kept_per_project: 5000,
+                ..saved
+            },
+        }),
+        "the next change keeps the saved one"
     );
 }

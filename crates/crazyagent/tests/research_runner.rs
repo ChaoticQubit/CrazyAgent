@@ -361,6 +361,73 @@ fn cancelling_running_research_stops_its_process_group() {
     assert!(!process_group_alive(run.process_group.unwrap()));
 }
 
+/// Turning off a toolchain a running research job was granted stops the job and puts it
+/// back in the queue without spending its attempt, so its next run starts without it.
+#[test]
+fn turning_a_toolchain_off_stops_running_research_and_queues_it_again() {
+    use crazyagent::sandbox::policy::{AgentAccess, AgentPolicy, ToolchainChoice, save};
+    use crazyagent::sandbox::toolchains::Toolchain;
+    let case = case("A plain project.");
+    let jobs = ResearchJobs::open(&case.database).unwrap();
+    let connection = rusqlite::Connection::open(&case.database).unwrap();
+    let rust = |allowed| AgentPolicy {
+        access: AgentAccess::Sandboxed,
+        toolchains: vec![ToolchainChoice {
+            toolchain: Toolchain::Rust,
+            allowed,
+        }],
+        ide_git_hooks: false,
+        network: crazyagent::sandbox::policy::AgentNetwork::default(),
+    };
+    save(&connection, "project-a", &rust(true)).unwrap();
+    let id = jobs
+        .enqueue("project-a", "market_research", "codex", true)
+        .unwrap();
+    let (port, _server) = hanging_endpoint();
+    let runner = Arc::new(runner(&case, limits(Duration::from_secs(120))));
+    let project_root = case.project.clone();
+    let handle = {
+        let runner = runner.clone();
+        std::thread::spawn(move || {
+            runner
+                .run_once(&ResearchProject {
+                    id: "project-a",
+                    root: &project_root,
+                    account: Some(endpoint(port)),
+                })
+                .unwrap()
+                .unwrap()
+        })
+    };
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while jobs.get(id).unwrap().unwrap().status != ResearchStatus::Running {
+        assert!(Instant::now() < deadline);
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::thread::sleep(Duration::from_secs(1));
+    save(&connection, "project-a", &rust(false)).unwrap();
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !handle.is_finished() {
+        if Instant::now() >= deadline {
+            jobs.request_cancel(id).unwrap();
+            let _ = handle.join();
+            panic!("the research job kept running after Rust was turned off");
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let run = handle.join().unwrap();
+    assert_eq!(run.status, ResearchStatus::Queued);
+    let job = jobs.get(id).unwrap().unwrap();
+    assert_eq!((job.status, job.attempts), (ResearchStatus::Queued, 0));
+    assert_eq!(
+        job.error.as_deref(),
+        Some(
+            "A toolchain this research ran with was turned off, so it was stopped and queued again; its next run goes without it"
+        )
+    );
+    assert!(!process_group_alive(run.process_group.unwrap()));
+}
+
 #[test]
 fn spawn_ready_runs_at_most_the_per_project_limit_at_once() {
     let case = case("A plain project.");

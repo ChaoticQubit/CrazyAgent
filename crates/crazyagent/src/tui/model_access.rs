@@ -545,8 +545,9 @@ impl State {
                     self.needs_page = true;
                 }
             }
-            UiEvent::Character('c') if self.native_auth.stuck().is_some() => {
-                self.native_auth.clear(self.identity.clone())?;
+            UiEvent::Character('c') if self.native_auth.stuck(self.basis.as_ref()).is_some() => {
+                self.native_auth
+                    .clear(self.identity.clone(), self.basis.as_ref())?;
                 self.notice = self.native_auth.notice().to_owned();
             }
             UiEvent::Character('x') => {
@@ -732,12 +733,10 @@ impl State {
         edit.validate().map_err(|error| error.to_string())?;
         if self
             .native_auth
-            .stuck()
-            .is_some_and(|stuck| edit.touches(stuck))
+            .open_account()
+            .is_some_and(|open| edit.touches(open))
         {
-            return Err(
-                "A sign-in for this account is still open; c clears a stuck sign-in".into(),
-            );
+            return Err(self.native_auth.open_refusal(Some(&basis)).into());
         }
         let generation = self.advance()?;
         let submission = Submission {

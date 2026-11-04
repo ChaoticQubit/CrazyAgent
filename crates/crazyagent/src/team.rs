@@ -7,6 +7,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+pub mod agent_messages;
 #[cfg(unix)]
 pub mod caller;
 pub mod caps;
@@ -674,6 +675,10 @@ pub enum TeamAction {
         project_id: ProjectId,
         agent: i64,
     },
+    MessageSettings {
+        project_id: ProjectId,
+        settings: agent_messages::MessageSettings,
+    },
     StopAgent {
         project_id: ProjectId,
         agent: i64,
@@ -905,6 +910,7 @@ impl TeamAction {
                     .then_some(())
                     .ok_or_else(|| failure("team_answer_invalid"))
             }
+            Self::MessageSettings { settings, .. } => settings.validate(),
             Self::KeepWarm { .. }
             | Self::SpreadAccounts { .. }
             | Self::ChildLanding { .. }
@@ -939,6 +945,7 @@ impl TeamAction {
             | Self::BackgroundAtEnd { project_id, .. }
             | Self::AskBeforeMerge { project_id, .. }
             | Self::NewFolderLimit { project_id, .. }
+            | Self::MessageSettings { project_id, .. }
             | Self::LiveMaster { project_id, .. }
             | Self::Pause { project_id }
             | Self::Resume { project_id }
@@ -1467,6 +1474,7 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
         .map_err(error)?;
     add_late_columns(connection)?;
     events::initialize(connection)?;
+    agent_messages::initialize(connection)?;
     master::initialize(connection)?;
     names::initialize(connection)?;
     questions::initialize(connection)?;
@@ -2343,6 +2351,10 @@ fn perform(
             crate::coord::settings::set_delivery(tx, project, *harness, *delivery)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::MessageSettings { settings, .. } => {
+            agent_messages::save_settings(tx, project, settings)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::LiveMaster { on, version, .. } => {
             if *on
                 && crate::harnesses::interactive::support(&stored.team.master)
@@ -2895,6 +2907,8 @@ pub struct TeamStatus {
     pub child_landing: ChildLanding,
     #[serde(default)]
     pub show_finished: bool,
+    #[serde(default)]
+    pub message_settings: agent_messages::MessageSettings,
     #[serde(default)]
     pub agent_branches: BranchMode,
     #[serde(default)]
@@ -4106,6 +4120,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         ask_before_merge: ask_before_merge(connection, project)?,
         new_folder_files_max: new_folder_files_max(connection, project)?,
         coordination: Some(coordination(connection, project)?),
+        message_settings: agent_messages::settings(connection, project)?,
         live_switch: live_switch(connection, project)?,
         paused: paused(connection, project)?,
         max_harnesses: limited.harnesses,

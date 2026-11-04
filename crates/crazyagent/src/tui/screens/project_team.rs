@@ -3,6 +3,7 @@ use super::new_project_input::TextInput;
 use super::new_project_view::{Look, Row, columns, list_row, spread, wrap_words};
 use super::project::{REFRESH_MS, plain_problem};
 use super::project_time::{clock, duration};
+use super::team_messages::{ListKey, MASTER_ELSEWHERE, Messages, Shown};
 use crate::coord::settings::{
     COUNTED_TOOL_BYTES_MAX, COUNTED_TOOLS_DEFAULT, COUNTED_TOOLS_MAX, Delivery, HarnessKind,
     Nudges, Overlaps, QuestionsTo, ROLE_SKILLS_MAX, SkillRole, SubagentMode,
@@ -10,13 +11,16 @@ use crate::coord::settings::{
 use crate::engine::owner::OwnerResult;
 use crate::project_setup::{SetupQuery, SetupView};
 use crate::protocol::ProjectId;
+use crate::team::agent_messages::{KEPT_CHOICES, MessageSettings, PAGE_CHOICES, ResultsShown};
 use crate::team::events::{EventKind, HOURLY_CAP_MAX, RuleTarget, WakeRule};
 use crate::team::{
     AgentRole, AgentStatus, BackgroundAtEnd, BranchMode, ChildLanding, CoordinationView,
     DelegationPath, MASTER_BRANCH_BYTES_MAX, SwitchMode, TASK_PROMPT_BYTES_MAX, TaskSource,
     TaskStatus, TeamAction, TeamAgent, TeamHarness, TeamStatus, TeamTask,
 };
+use crate::tui::keys::Key;
 use crate::tui::seam::AccountRow;
+use crate::tui::theme::Role;
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::style::Style;
 
@@ -114,7 +118,18 @@ pub(in crate::tui) struct WakeEdit {
     pub row: usize,
 }
 
+/// Where the team read after a saved change stands: due, or sent after the save. Every change
+/// is built from the team read on screen, so the next change waits for a read sent after the
+/// save; a read sent before it still shows the older settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Reread {
+    Due,
+    Sent,
+}
+
 const WAKE_ROWS: usize = EventKind::ALL.len() + 1;
+const MESSAGE_ROWS: usize = 6;
+const MESSAGE_LABEL: usize = 40;
 
 /// The open coordination editor (DEC-104): the row with the cursor and, while the owner
 /// types the counted tools or one role's skill names, that input. Rows follow `COORD_ROWS`.
@@ -201,6 +216,8 @@ pub(in crate::tui) struct TeamView {
     pub branch_edit: Option<BranchEdit>,
     pub wake: Option<WakeEdit>,
     pub coord: Option<CoordEdit>,
+    pub messages: Option<Messages>,
+    pub message_row: Option<usize>,
     pub alerts: bool,
     pub notice: Option<Notice>,
     pub now_ms: i64,
@@ -208,6 +225,7 @@ pub(in crate::tui) struct TeamView {
     read_ms: Option<i64>,
     waiting: bool,
     changing: Option<String>,
+    reread: Option<Reread>,
 }
 
 impl TeamView {
@@ -227,6 +245,8 @@ impl TeamView {
             branch_edit: None,
             wake: None,
             coord: None,
+            messages: None,
+            message_row: None,
             alerts: false,
             notice: None,
             now_ms: 0,
@@ -234,18 +254,30 @@ impl TeamView {
             read_ms: None,
             waiting: false,
             changing: None,
+            reread: None,
         }
     }
 
-    /// Gives the next team read, at most one at a time and one per refresh period.
+    /// Gives the next read: the open Messages list's page first, else the team read, at
+    /// most one team read at a time and one per refresh period.
     /// Takes the current time in milliseconds.
-    /// Returns `SetupQuery::Team`, or none while a read is out or nothing is due.
+    /// Returns `SetupQuery::TeamMessages` or `SetupQuery::Team`, or none while nothing is due.
     pub fn next_query(&mut self, now_ms: i64) -> Option<SetupQuery> {
         self.now_ms = now_ms;
+        if let Some(query) = self
+            .messages
+            .as_mut()
+            .and_then(|list| list.next_query(now_ms))
+        {
+            return Some(query);
+        }
         if self.waiting || self.read_ms.is_some_and(|last| now_ms - last < REFRESH_MS) {
             return None;
         }
         self.waiting = true;
+        if self.reread.is_some() {
+            self.reread = Some(Reread::Sent);
+        }
         Some(SetupQuery::Team {
             project: self.project.clone(),
         })
@@ -256,20 +288,33 @@ impl TeamView {
     /// Returns nothing.
     pub fn forget_reads(&mut self) {
         self.waiting = false;
+        if let Some(list) = self.messages.as_mut() {
+            list.forget_reads();
+        }
     }
 
     /// Applies one team read or team change result for this project.
     /// Takes the query that was sent and the engine's view or plain problem code.
     /// Returns nothing; other queries and other projects are left alone.
     pub fn apply(&mut self, query: &SetupQuery, result: Result<SetupView, String>) {
+        if self
+            .messages
+            .as_mut()
+            .is_some_and(|list| list.apply(query, &result))
+        {
+            return;
+        }
         match query {
             SetupQuery::Team { project } if project == &self.project => {
                 self.waiting = false;
-                self.read_ms = Some(self.now_ms);
+                self.read_ms = (self.reread != Some(Reread::Due)).then_some(self.now_ms);
                 match result {
                     Ok(SetupView::Team(status)) => {
                         assert_eq!(status.project_id, self.project);
                         self.status = Some(*status);
+                        if self.reread == Some(Reread::Sent) {
+                            self.reread = None;
+                        }
                     }
                     Ok(_) => {}
                     Err(code) => self.notice = Some(Notice::problem(team_plain(&code))),
@@ -299,12 +344,11 @@ impl TeamView {
                         }
                         self.notice = done.map(Notice::plain);
                         self.read_ms = None;
+                        self.reread = Some(Reread::Due);
                     }
                     Ok(SetupView::Changed(OwnerResult::Rejected { code })) | Err(code) => {
-                        if code == crate::storage::versioned::STALE_CODE {
-                            self.read_ms = None;
-                        }
                         self.notice = Some(Notice::problem(team_plain(&code)));
+                        self.read_ms = None;
                     }
                     Ok(_) => {}
                 }
@@ -319,6 +363,19 @@ impl TeamView {
     /// Returns true until the change result arrives.
     pub fn busy(&self) -> bool {
         self.changing.is_some()
+    }
+
+    /// Refuses a change while the last one is with the engine or the team read sent after it
+    /// has not landed, since a change built from an older read can undo the last save.
+    /// Takes the view. Returns true, with the notice set, when the change must wait.
+    fn still_saving(&mut self) -> bool {
+        let saving = self.changing.is_some() || self.reread.is_some();
+        if saving {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+        }
+        saving
     }
 
     /// Says whether the owner is writing a new task or a branch setting, so the host
@@ -467,6 +524,12 @@ impl TeamView {
     /// keep-warm switch, or open the notifications and mark them seen.
     /// Takes the key event. Returns what the host should do next.
     pub fn key(&mut self, key: KeyEvent) -> TeamReply {
+        if let Some(list) = self.messages.as_mut() {
+            if Key::from_event(key).is_some_and(|key| list.key(&key) == ListKey::Closed) {
+                self.messages = None;
+            }
+            return TeamReply::Handled;
+        }
         if self.draft.is_some() {
             return self.draft_key(key);
         }
@@ -478,6 +541,9 @@ impl TeamView {
         }
         if self.coord.is_some() {
             return self.coord_key(key);
+        }
+        if self.message_row.is_some() {
+            return self.message_key(key);
         }
         if self.alerts {
             return match key.code {
@@ -564,6 +630,14 @@ impl TeamView {
                 self.open_wake();
                 TeamReply::Handled
             }
+            KeyCode::Char('M') => {
+                self.open_messages();
+                TeamReply::Handled
+            }
+            KeyCode::Char('o') => {
+                self.open_message_settings();
+                TeamReply::Handled
+            }
             KeyCode::Char('s') => self.mark_seen(),
             KeyCode::Char('a') => {
                 self.alerts = true;
@@ -620,10 +694,7 @@ impl TeamView {
     /// Sends one team change with the line shown once it applied, unless the last change is
     /// still saving. Takes the line and the change. Returns the change, or Handled.
     fn change(&mut self, done: &str, action: TeamAction) -> TeamReply {
-        if self.changing.is_some() {
-            self.notice = Some(Notice::problem(
-                "Still saving the last change. Try again in a moment.",
-            ));
+        if self.still_saving() {
             return TeamReply::Handled;
         }
         self.changing = Some(done.to_owned());
@@ -806,10 +877,7 @@ impl TeamView {
     }
 
     fn cancel(&mut self, id: i64) -> TeamReply {
-        if self.changing.is_some() {
-            self.notice = Some(Notice::problem(
-                "Still saving the last change. Try again in a moment.",
-            ));
+        if self.still_saving() {
             return TeamReply::Handled;
         }
         let Some(task) = self.task(id) else {
@@ -903,10 +971,7 @@ impl TeamView {
             self.notice = Some(Notice::plain("Write what the sub-agent should do first."));
             return TeamReply::Handled;
         }
-        if self.changing.is_some() {
-            self.notice = Some(Notice::problem(
-                "Still saving the last change. Try again in a moment.",
-            ));
+        if self.still_saving() {
             return TeamReply::Handled;
         }
         self.notice = None;
@@ -943,6 +1008,107 @@ impl TeamView {
             agent,
             row: 0,
         });
+    }
+
+    /// Opens the Messages list of the focused sub-agent or teammate. On the master it says
+    /// where the master's own conversation is; on the tasks list it asks for an agent.
+    /// Takes the view. Returns nothing; the list's first read comes from `next_query`.
+    fn open_messages(&mut self) {
+        let picked = match self.focus {
+            TeamFocus::Agents => self
+                .agents()
+                .get(self.agent_cursor)
+                .map(|agent| (agent.id, agent.role, agent.label.clone())),
+            TeamFocus::Tasks => None,
+        };
+        match picked {
+            None => {
+                self.notice = Some(Notice::plain(
+                    "Pick an agent in the agents list to read its messages.",
+                ));
+            }
+            Some((_, AgentRole::Master, _)) => self.notice = Some(Notice::plain(MASTER_ELSEWHERE)),
+            Some((agent, AgentRole::Sub | AgentRole::Teammate, label)) => {
+                self.notice = None;
+                self.messages = Some(Messages::new(
+                    self.project.clone(),
+                    agent,
+                    &label,
+                    self.offset,
+                ));
+            }
+        }
+    }
+
+    fn open_message_settings(&mut self) {
+        if self.status.is_none() {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return;
+        }
+        self.notice = None;
+        self.message_row = Some(0);
+    }
+
+    /// Handles a key in the Messages settings editor: the arrows up and down pick a setting,
+    /// Space, Enter or the right arrow moves it to its next choice, the left arrow to the one
+    /// before, Esc closes. Takes the key. Returns the change, or Handled.
+    fn message_key(&mut self, key: KeyEvent) -> TeamReply {
+        let (Some(row), Some(status)) = (self.message_row, &self.status) else {
+            self.message_row = None;
+            return TeamReply::Handled;
+        };
+        let shown = status.message_settings;
+        let forward = match key.code {
+            KeyCode::Esc => {
+                self.message_row = None;
+                return TeamReply::Handled;
+            }
+            KeyCode::Up | KeyCode::Down => {
+                self.message_row = Some(if key.code == KeyCode::Down {
+                    (row + 1).min(MESSAGE_ROWS - 1)
+                } else {
+                    row.saturating_sub(1)
+                });
+                return TeamReply::Handled;
+            }
+            KeyCode::Char(' ') | KeyCode::Enter | KeyCode::Right => true,
+            KeyCode::Left => false,
+            _ => return TeamReply::Handled,
+        };
+        if self.still_saving() {
+            return TeamReply::Handled;
+        }
+        let settings = next_message_setting(shown, row, forward);
+        let (label, value) = message_setting(&settings, row);
+        self.changing = Some(format!("{label}: {value}."));
+        TeamReply::Change(TeamAction::MessageSettings {
+            project_id: self.project.clone(),
+            settings,
+        })
+    }
+
+    fn message_setting_rows(&self, row: usize, content: usize, look: &Look) -> Vec<Row> {
+        let Some(status) = &self.status else {
+            return Vec::new();
+        };
+        let mut rows = vec![spread(
+            content,
+            Row::of("Messages settings", look.heading),
+            Row::of("For every sub-agent's Messages list here", look.muted),
+        )];
+        for at in 0..MESSAGE_ROWS {
+            let (label, value) = message_setting(&status.message_settings, at);
+            rows.push(list_row(
+                Row::of(label, look.fg)
+                    .pad(MESSAGE_LABEL)
+                    .push(value, look.heading),
+                content,
+                at == row,
+                true,
+                look,
+            ));
+        }
+        rows
     }
 
     /// Gives the rule a level sets itself, if any, and the rule shown for it: its own, else
@@ -1070,10 +1236,7 @@ impl TeamView {
     }
 
     fn wake_change(&mut self, level: WakeLevel, rule: Option<WakeRule>) -> TeamReply {
-        if self.changing.is_some() {
-            self.notice = Some(Notice::problem(
-                "Still saving the last change. Try again in a moment.",
-            ));
+        if self.still_saving() {
             return TeamReply::Handled;
         }
         let target = match level {
@@ -1111,10 +1274,7 @@ impl TeamView {
             self.notice = Some(Notice::plain("There are no new notifications."));
             return TeamReply::Handled;
         };
-        if self.changing.is_some() {
-            self.notice = Some(Notice::problem(
-                "Still saving the last change. Try again in a moment.",
-            ));
+        if self.still_saving() {
             return TeamReply::Handled;
         }
         self.changing = Some("Notifications marked as seen.".to_owned());
@@ -1220,16 +1380,13 @@ impl TeamView {
     }
 
     fn keep_warm(&mut self) -> TeamReply {
+        if self.status.is_some() && self.still_saving() {
+            return TeamReply::Handled;
+        }
         let Some(status) = &self.status else {
             self.notice = Some(Notice::plain("The team is still loading."));
             return TeamReply::Handled;
         };
-        if self.changing.is_some() {
-            self.notice = Some(Notice::problem(
-                "Still saving the last change. Try again in a moment.",
-            ));
-            return TeamReply::Handled;
-        }
         let on = !status.keep_warm;
         let done = match (on, status.min_agents) {
             (false, _) => "Agents now stop when they run out of work.".to_owned(),
@@ -1256,16 +1413,13 @@ impl TeamView {
     /// 2 min, 10 min, 1 h. Takes which limit. Returns the
     /// change, or Handled while the team loads or saves.
     fn time_limit(&mut self, which: Limit) -> TeamReply {
+        if self.status.is_some() && self.still_saving() {
+            return TeamReply::Handled;
+        }
         let Some(status) = &self.status else {
             self.notice = Some(Notice::plain("The team is still loading."));
             return TeamReply::Handled;
         };
-        if self.changing.is_some() {
-            self.notice = Some(Notice::problem(
-                "Still saving the last change. Try again in a moment.",
-            ));
-            return TeamReply::Handled;
-        }
         let below = |a: Option<u32>, b: Option<u32>| matches!((a, b), (Some(a), Some(b)) if a < b);
         let limits = &crate::team::LIMIT_CHOICES_SECS;
         let (turn, kept, idle) = (
@@ -1273,6 +1427,7 @@ impl TeamView {
             status.session_limit_secs,
             status.idle_stop_secs,
         );
+        let version = status.settings_version;
         let (turn, kept, idle) = match which {
             Limit::Task => {
                 let next = next_limit(limits, turn);
@@ -1313,23 +1468,21 @@ impl TeamView {
             turn_secs: turn,
             session_secs: kept,
             idle_secs: idle,
-            version: status.settings_version,
+            version,
         })
     }
 
     /// Flips the On harness switch setting between Carry over and Start fresh.
     /// Output: the change to send, or Handled with a notice while loading or saving.
     fn harness_switch(&mut self) -> TeamReply {
+        if self.status.is_some() && self.still_saving() {
+            return TeamReply::Handled;
+        }
         let Some(status) = &self.status else {
             self.notice = Some(Notice::plain("The team is still loading."));
             return TeamReply::Handled;
         };
-        if self.changing.is_some() {
-            self.notice = Some(Notice::problem(
-                "Still saving the last change. Try again in a moment.",
-            ));
-            return TeamReply::Handled;
-        }
+        let version = status.settings_version;
         let mode = match status.on_harness_switch {
             SwitchMode::Carry => SwitchMode::Fresh,
             SwitchMode::Fresh => SwitchMode::Carry,
@@ -1348,23 +1501,20 @@ impl TeamView {
         TeamReply::Change(TeamAction::OnHarnessSwitch {
             project_id: self.project.clone(),
             mode,
-            version: status.settings_version,
+            version,
         })
     }
 
     /// Moves the Sub-agent depth setting to its next choice, 1 after 3.
     /// Output: the change to send, or Handled with a notice while loading or saving.
     fn sub_agent_depth(&mut self) -> TeamReply {
+        if self.status.is_some() && self.still_saving() {
+            return TeamReply::Handled;
+        }
         let Some(status) = &self.status else {
             self.notice = Some(Notice::plain("The team is still loading."));
             return TeamReply::Handled;
         };
-        if self.changing.is_some() {
-            self.notice = Some(Notice::problem(
-                "Still saving the last change. Try again in a moment.",
-            ));
-            return TeamReply::Handled;
-        }
         let choices = crate::team::DEPTH_CHOICES;
         let depth = choices
             .iter()
@@ -1381,16 +1531,13 @@ impl TeamView {
     /// owner's own. Output: the change to send, or Handled with a notice while loading or
     /// saving.
     fn child_landing(&mut self) -> TeamReply {
+        if self.status.is_some() && self.still_saving() {
+            return TeamReply::Handled;
+        }
         let Some(status) = &self.status else {
             self.notice = Some(Notice::plain("The team is still loading."));
             return TeamReply::Handled;
         };
-        if self.changing.is_some() {
-            self.notice = Some(Notice::problem(
-                "Still saving the last change. Try again in a moment.",
-            ));
-            return TeamReply::Handled;
-        }
         let mode = match status.child_landing {
             ChildLanding::Lead => ChildLanding::Owner,
             ChildLanding::Owner => ChildLanding::Lead,
@@ -1413,16 +1560,13 @@ impl TeamView {
     /// Flips the Agent branches setting between Named branch and Detached.
     /// Output: the change to send, or Handled with a notice while loading or saving.
     fn agent_branches(&mut self) -> TeamReply {
+        if self.status.is_some() && self.still_saving() {
+            return TeamReply::Handled;
+        }
         let Some(status) = &self.status else {
             self.notice = Some(Notice::plain("The team is still loading."));
             return TeamReply::Handled;
         };
-        if self.changing.is_some() {
-            self.notice = Some(Notice::problem(
-                "Still saving the last change. Try again in a moment.",
-            ));
-            return TeamReply::Handled;
-        }
         let mode = match status.agent_branches {
             BranchMode::Named => BranchMode::Detached,
             BranchMode::Detached => BranchMode::Named,
@@ -1482,17 +1626,14 @@ impl TeamView {
     /// the setting's default. Output: the change to send, or Handled with a notice while
     /// saving.
     fn save_branch(&mut self) -> TeamReply {
+        if self.branch_edit.is_some() && self.still_saving() {
+            return TeamReply::Handled;
+        }
         let Some(edit) = &self.branch_edit else {
             return TeamReply::Handled;
         };
         let typed = edit.input.value().trim();
         let branch = (!typed.is_empty()).then(|| typed.to_owned());
-        if self.changing.is_some() {
-            self.notice = Some(Notice::problem(
-                "Still saving the last change. Try again in a moment.",
-            ));
-            return TeamReply::Handled;
-        }
         let setting = edit.setting;
         self.changing = Some(match (setting, &branch) {
             (BranchSetting::Master, Some(name)) => format!("The master now works on {name}."),
@@ -1512,16 +1653,13 @@ impl TeamView {
     /// Flips "Ask me before merging into the master's branch" between Off and On.
     /// Output: the change to send, or Handled with a notice while loading or saving.
     fn ask_before_merge(&mut self) -> TeamReply {
+        if self.status.is_some() && self.still_saving() {
+            return TeamReply::Handled;
+        }
         let Some(status) = &self.status else {
             self.notice = Some(Notice::plain("The team is still loading."));
             return TeamReply::Handled;
         };
-        if self.changing.is_some() {
-            self.notice = Some(Notice::problem(
-                "Still saving the last change. Try again in a moment.",
-            ));
-            return TeamReply::Handled;
-        }
         let on = !status.ask_before_merge;
         self.changing = Some(
             if on {
@@ -1541,16 +1679,13 @@ impl TeamView {
     /// set (DEC-107), to its next choice. Output: the change to send, or Handled with a
     /// notice while loading or saving.
     fn new_folder_limit(&mut self) -> TeamReply {
+        if self.status.is_some() && self.still_saving() {
+            return TeamReply::Handled;
+        }
         let Some(status) = &self.status else {
             self.notice = Some(Notice::plain("The team is still loading."));
             return TeamReply::Handled;
         };
-        if self.changing.is_some() {
-            self.notice = Some(Notice::problem(
-                "Still saving the last change. Try again in a moment.",
-            ));
-            return TeamReply::Handled;
-        }
         let choices = crate::team::NEW_FOLDER_FILES_CHOICES;
         let files = choices
             .iter()
@@ -1956,10 +2091,7 @@ impl TeamView {
     }
 
     fn coord_change(&mut self, action: TeamAction, done: String) -> TeamReply {
-        if self.changing.is_some() {
-            self.notice = Some(Notice::problem(
-                "Still saving the last change. Try again in a moment.",
-            ));
+        if self.still_saving() {
             return TeamReply::Handled;
         }
         self.changing = Some(done);
@@ -2096,7 +2228,8 @@ impl TeamView {
         (lines, help)
     }
 
-    /// Draws the Team view for the Team screen's settings box and places the typing cursor.
+    /// Draws the Team view for the Team screen's settings box and the Team settings screen,
+    /// and places the typing cursor.
     /// When the window is too short for the lists, the panel and any footer question, the
     /// blank rows before the panel and before the tasks go first, then the settings summary
     /// folds toward its first row, so every setting shows while blank rows can make room.
@@ -2137,23 +2270,36 @@ impl TeamView {
             lines.extend(notice);
             return (lines, self.help(), None);
         }
+        if let Some(list) = &self.messages {
+            lines.push(Row::of(list.title(), look.heading));
+            let footer = self.footer(look);
+            let room = room.saturating_sub(lines.len() + footer.len());
+            lines.extend(
+                list.lines(content, room)
+                    .into_iter()
+                    .map(|line| shown_row(line, look)),
+            );
+            lines.extend(footer);
+            return (lines, self.help(), None);
+        }
         if wide {
             lines.push(Row::default());
         }
         let tree = self.agent_tree();
         let agents: Vec<&TeamAgent> = tree.iter().map(|(agent, _)| *agent).collect();
         let tasks = self.tasks();
-        let (panel, caret) = match (&self.draft, &self.branch_edit, self.wake) {
-            (Some(draft), _, _) => {
+        let (panel, caret) = match (&self.draft, &self.branch_edit, self.wake, self.message_row) {
+            (Some(draft), _, _, _) => {
                 let (rows, at) = draft_rows(draft, content, look);
                 (rows, Some(at))
             }
-            (None, Some(edit), _) => {
+            (None, Some(edit), _, _) => {
                 let (rows, at) = branch_rows(edit, content, look);
                 (rows, Some(at))
             }
-            (None, None, Some(edit)) => (self.wake_rows(edit, content, look), None),
-            (None, None, None) => match &self.coord {
+            (None, None, Some(edit), _) => (self.wake_rows(edit, content, look), None),
+            (None, None, None, Some(row)) => (self.message_setting_rows(row, content, look), None),
+            (None, None, None, None) => match &self.coord {
                 Some(edit) => self.coord_rows(edit, content, look),
                 None => (self.panel(content, accounts, look), None),
             },
@@ -2649,6 +2795,17 @@ impl TeamView {
     /// Takes the view. Returns key and label pairs; Esc goes back to the Team screen
     /// once nothing inside the view is open.
     pub fn help(&self) -> Help {
+        if let Some(list) = &self.messages {
+            return list.help();
+        }
+        if self.message_row.is_some() {
+            return vec![
+                ("\u{2191}\u{2193}", "Move"),
+                ("Space", "Next choice"),
+                ("\u{2190}\u{2192}", "Choice"),
+                ("Esc", "Close"),
+            ];
+        }
         if self.draft.is_some() {
             return vec![
                 ("Enter", "Hand over"),
@@ -2746,6 +2903,8 @@ impl TeamView {
             ("G", "Grace time"),
             ("c", "Coordination"),
             ("e", "Wake rules"),
+            ("M", "Messages"),
+            ("o", "Messages settings"),
         ];
         if self
             .status
@@ -2843,6 +3002,96 @@ fn role_label(role: SkillRole) -> &'static str {
         SkillRole::Lead => "Lead",
         SkillRole::Worker => "Worker",
     }
+}
+
+/// One Messages setting as the editor shows it. Takes the settings and the row, 0 to 5 in
+/// the editor's order; any later row is the page size. Returns the label and the value in
+/// words.
+fn message_setting(settings: &MessageSettings, row: usize) -> (&'static str, String) {
+    let shown = |on: bool| if on { "Shown" } else { "Hidden" }.to_owned();
+    match row {
+        0 => (
+            "Keep the master's messages to agents",
+            if settings.keep_master_messages {
+                "On"
+            } else {
+                "Off"
+            }
+            .to_owned(),
+        ),
+        1 => (
+            "Messages kept per project",
+            settings.kept_per_project.to_string(),
+        ),
+        2 => ("Progress events", shown(settings.progress_shown)),
+        3 => (
+            "Task results",
+            match settings.results {
+                ResultsShown::FirstLine => "First line, Enter shows all",
+                ResultsShown::Full => "Full text",
+            }
+            .to_owned(),
+        ),
+        4 => (
+            "Your own tasks and prompts",
+            shown(settings.owner_items_shown),
+        ),
+        _ => ("Entries per page", settings.page_size.to_string()),
+    }
+}
+
+/// The settings with one row moved to its next or previous choice; a stored value outside
+/// the choices goes to the first. Takes the settings, the row and the direction. Returns the
+/// changed settings.
+fn next_message_setting(
+    mut settings: MessageSettings,
+    row: usize,
+    forward: bool,
+) -> MessageSettings {
+    match row {
+        0 => settings.keep_master_messages = !settings.keep_master_messages,
+        1 => {
+            settings.kept_per_project =
+                cycle_or_first(&KEPT_CHOICES, settings.kept_per_project, forward)
+        }
+        2 => settings.progress_shown = !settings.progress_shown,
+        3 => {
+            settings.results = match settings.results {
+                ResultsShown::FirstLine => ResultsShown::Full,
+                ResultsShown::Full => ResultsShown::FirstLine,
+            }
+        }
+        4 => settings.owner_items_shown = !settings.owner_items_shown,
+        _ => settings.page_size = cycle_or_first(&PAGE_CHOICES, settings.page_size, forward),
+    }
+    settings
+}
+
+/// The choice after or before `now` in a ring of choices; one outside them goes to the
+/// first. Takes the choices, the value and the direction. Returns the choice.
+fn cycle_or_first<T: Copy + PartialEq>(choices: &[T], now: T, forward: bool) -> T {
+    let count = choices.len();
+    match choices.iter().position(|choice| *choice == now) {
+        Some(at) if forward => choices[(at + 1) % count],
+        Some(at) => choices[(at + count - 1) % count],
+        None => choices[0],
+    }
+}
+
+/// A Messages list line as a Team view row. Takes the line and the look. Returns the row in
+/// the style of the line's color role.
+fn shown_row(line: Shown, look: &Look) -> Row {
+    let style = match line.role {
+        None => look.fg,
+        Some(Role::Heading) => look.heading,
+        Some(Role::Muted) => look.muted,
+        Some(Role::Accent) => look.accent,
+        Some(Role::Success) => look.success,
+        Some(Role::Warning) => look.warning,
+        Some(Role::Error) => look.error,
+        Some(Role::Running) => look.running,
+    };
+    Row::of(line.text, style)
 }
 
 /// Which team time limit a key moves.

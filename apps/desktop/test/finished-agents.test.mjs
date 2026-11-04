@@ -32,7 +32,7 @@ function teamStatus(show_finished) {
       task(20, "running", { agent: 2 }),
       task(21, "done", { agent: 5, prompt: "Write the docs\nwith care", result: "# Docs\nWrote the guide." }),
       task(22, "done", { agent: 5, prompt: "Fix the links", result: "Fixed 3 links." }),
-      task(23, "done", { agent: 4, prompt: "Read the plan" }),
+      task(23, "done", { agent: 4, prompt: "Read the plan", finished_ms: 45 * MINUTE }),
     ],
   };
 }
@@ -53,7 +53,9 @@ test("Hide keeps only working and waiting agents in the Team panel and moves fin
   });
   assert.equal(rows[0].task, "The agent process closed.");
   assert.equal(rows[0].ended, "Failed just now");
-  assert.equal(rows[2].ended, "Last active 10 min ago");
+  assert.equal(rows[2].ended, "Last active 15 min ago", "an idle agent is last active when its last task finished, not at its heartbeat");
+  const fresh = { ...status, agents: [agent(7, "idle", { finished: true, created_ms: 30 * MINUTE, heartbeat_ms: 60 * MINUTE })] };
+  assert.equal(research.finishedRows(fresh, (id) => id, 60 * MINUTE)[0].ended, "Last active 30 min ago", "an idle agent with no task is last active when it started");
   assert.equal(rows[2].result, null, "a done task without a result offers no result");
   assert.equal(research.finishedLabel(rows.length), "Finished (3)");
   assert.equal(research.finishedLabel(0), "Finished (0)");
@@ -93,6 +95,20 @@ test("the fold-out shows the count, each agent's result and a Wake button with t
     data, team: { result: { kind: "ok", value: idle }, at: 0 }, harnesses: null, reload() {},
   }));
   assert.equal(none, "");
+});
+
+test("a saved team choice stays shown until the engine reports it, and a refused one shows the status again", () => {
+  const held = { choice: "show", from: "hide" };
+  const kept = controls.afterSave(held, "");
+  assert.deepEqual(kept, held, "an applied save keeps the choice while the reload is on its way");
+  assert.equal(controls.shownChoice(kept, "hide"), "show", "the control does not flip back before the status moves");
+  assert.equal(controls.shownChoice(kept, "show"), "show");
+  assert.equal(controls.shownChoice(kept, "other"), "other", "once the status moves, it shows the status");
+  assert.equal(controls.afterSave(held, "Not ready yet: choosing where finished agents show isn't in this build."), null, "a refused save shows the status again");
+  assert.equal(controls.shownChoice(null, "hide"), "hide");
+  const limits = { choice: { turn: 600, session: null, idle: null }, from: { turn: null, session: null, idle: null } };
+  const same = (a, b) => a.turn === b.turn && a.session === b.session && a.idle === b.idle;
+  assert.deepEqual(controls.shownChoice(controls.afterSave(limits, ""), { turn: null, session: null, idle: null }, same), limits.choice);
 });
 
 test("the team controls offer Finished agents Hide and Show with Hide the default", () => {

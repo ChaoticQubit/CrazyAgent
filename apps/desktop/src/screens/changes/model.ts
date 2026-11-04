@@ -34,6 +34,7 @@ const MARKS: Record<string, string> = {
   modules: ".gitmodules: changes the project's submodules",
   owner_edited: "Edited by you",
   ide_config: "IDE settings: changes how the IDE behaves in this project",
+  instructions: "Instruction file: changes what every agent of this project is told",
 };
 
 const MESSAGE_BYTES_MAX = 4096;

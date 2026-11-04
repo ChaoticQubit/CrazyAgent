@@ -1,9 +1,10 @@
-use super::{AgentSession, KeyFile, Resume, TerminalSession, host_failure};
+use super::{AgentSession, KEY_FILE_BYTES_MAX, KeyFile, Resume, TerminalSession, host_failure};
 use crate::harnesses::interactive::Transcript;
 use crate::harnesses::launch::{LaunchError, LaunchLimits, failure};
 use crate::harnesses::transcript::{TranscriptEvent, TranscriptReader};
 use crate::launch_context::{Installed, InstalledFiles};
 use crate::sandbox::policy::AgentAccess;
+use crate::sandbox::toolchains::Toolchain;
 use crate::terminal::{AgentId, Host};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeSet, VecDeque};
@@ -29,9 +30,9 @@ pub enum RecordSource {
 /// without starting the harness again: the session record, the working folder, when the
 /// harness started, the pane's first process, the key file the harness reads, if any, for a
 /// resumed conversation its record and the offset where this pane's turns begin, the
-/// project access level the agent started at, and where its launch wrote the project
-/// context files that hold MCP secrets. A record from an engine that did not keep the
-/// level or the files has none.
+/// project access level the agent started at, where its launch wrote the project context
+/// files that hold MCP secrets, and the toolchains its sandbox granted. A record from an
+/// engine that did not keep the level, the files or the toolchains has none.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PaneRecord {
@@ -47,6 +48,8 @@ pub struct PaneRecord {
     pub access: Option<AgentAccess>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<InstalledFiles>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toolchains: Option<Vec<Toolchain>>,
 }
 
 impl PaneRecord {
@@ -79,6 +82,7 @@ impl PaneRecord {
             resumed: None,
             access: None,
             context: None,
+            toolchains: None,
         })
     }
 
@@ -91,7 +95,8 @@ impl PaneRecord {
     }
 
     /// Reads a stored record. Takes the JSON.
-    /// Returns the record, or none for anything malformed, long or with relative paths.
+    /// Returns the record, or none for anything malformed, long, with relative paths or with
+    /// a toolchain listed twice.
     pub fn decode(text: &str) -> Option<Self> {
         if text.len() > RECORD_BYTES_MAX {
             return None;
@@ -110,12 +115,20 @@ impl PaneRecord {
             .context
             .as_ref()
             .is_none_or(|files| files.home.is_absolute());
+        let toolchains = record.toolchains.as_ref().is_none_or(|toolchains| {
+            toolchains.len() <= Toolchain::ALL.len()
+                && toolchains
+                    .iter()
+                    .enumerate()
+                    .all(|(at, toolchain)| !toolchains[..at].contains(toolchain))
+        });
         (path.is_absolute()
             && record.cwd.is_absolute()
-            && record.pid > 0
+            && record.pid > 1
             && key
             && resumed
-            && context)
+            && context
+            && toolchains)
             .then_some(record)
     }
 
@@ -152,11 +165,14 @@ impl PaneRecord {
         run_time.saturating_sub(ran)
     }
 
+    /// Guards the key file the record names, as the pane's launch wrote it. The file sits in
+    /// the agent-writable account home, so it is read through one open that follows no link
+    /// and waits on no FIFO, and taken only as a regular file of at most
+    /// `KEY_FILE_BYTES_MAX` bytes. Input: the record. Output: the guard, or none.
     fn key_file(&self) -> Option<KeyFile> {
         let path = self.key.as_ref()?;
-        std::fs::symlink_metadata(path)
-            .is_ok_and(|metadata| metadata.file_type().is_file())
-            .then(|| KeyFile(path.clone()))
+        let content = crate::platform::read_plain_file(path, KEY_FILE_BYTES_MAX)?;
+        Some(KeyFile::new(path.clone(), content.as_bytes()))
     }
 }
 
@@ -240,7 +256,7 @@ impl TerminalSession {
                 });
             }
             if !settled {
-                let _ = host.kill(&agent);
+                let _ = super::end_left_pane(host.as_ref(), &agent, "adopt");
                 return Err(failure("launch_adopt_unsettled"));
             }
             replay(&mut reader, &limits, &mut events)?;
@@ -264,6 +280,12 @@ impl TerminalSession {
             background: BTreeSet::new(),
             exited: false,
             stopped: false,
+            group_ended: false,
+            uncertain: false,
+            unconfined: !matches!(
+                record.access,
+                Some(AgentAccess::Sandboxed | AgentAccess::OwnBranch)
+            ),
             record: Some(record.clone()),
             _key: record.key_file(),
             _context: context,

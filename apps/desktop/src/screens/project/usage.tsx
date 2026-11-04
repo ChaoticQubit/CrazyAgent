@@ -2,7 +2,7 @@ import { loadUsage, usageNotReady, usageRefusal, type UsageReport } from "../../
 import type { TeamAgent } from "../../engine-client";
 import { useLoad, type Loaded } from "../../state";
 import { Panel, Skeleton } from "../../ui";
-import { agentLabel, offsetMinutes, rangeStart, tokenText, totalTokens } from "../settings/usage";
+import { agentLabel, offsetMinutes, PartialNotice, rangeStart, tokenText, totalTokens } from "../settings/usage";
 
 const TICK_MS = 30_000;
 
@@ -75,7 +75,10 @@ function cardBody(today: Loaded<UsageReport>, week: Loaded<UsageReport>, agents:
   const failed = today.kind === "error" ? today : week.kind === "error" ? week : null;
   if (failed) return <p className="pj-error" role="alert">Couldn't load usage. {usageRefusal(failed)}</p>;
   if (today.kind !== "ok" || week.kind !== "ok") return <Skeleton shape="card" count={1} />;
-  return <AgentUsageTable rows={agentUsage(today.value, week.value, agents)} />;
+  return <>
+    <PartialNotice homes={week.value.partial_homes} />
+    <AgentUsageTable rows={agentUsage(today.value, week.value, agents)} />
+  </>;
 }
 
 function AgentUsageTable({ rows }: { rows: AgentUsage[] }) {

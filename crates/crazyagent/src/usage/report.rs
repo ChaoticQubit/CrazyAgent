@@ -83,8 +83,9 @@ pub struct AgentLinesRow {
 
 /// The usage page's numbers for one range: app totals, the largest projects, pools,
 /// accounts and agents, tokens per local day, lines changed per project, every account's
-/// limits, the harnesses that ran in the range without reporting usage, and each usage
-/// step kind that panicked since the engine started.
+/// limits, the harnesses that ran in the range without reporting usage, each usage step
+/// kind that panicked since the engine started, and how many agent homes a scan in the
+/// range left records of uncounted.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UsageReport {
@@ -103,6 +104,7 @@ pub struct UsageReport {
     pub not_reported_by: Vec<String>,
     #[serde(default)]
     pub health: Vec<StepHealth>,
+    pub partial_homes: u64,
 }
 
 /// Tells whether the engine counts a harness's usage: from its session records (Claude
@@ -498,6 +500,14 @@ pub fn report(
             .map_err(storage)?
     };
     days.reverse();
+    let partial_homes = db
+        .query_row(
+            "SELECT COUNT(*) FROM usage_cut WHERE cut_ms>=?1 AND (?2 IS NULL OR project=?2)",
+            params![since, project],
+            |row| row.get(0),
+        )
+        .map(count)
+        .map_err(storage)?;
     let mut limits = all_limits(db)?;
     limits.truncate(LIMITS_MAX);
     let report = fit(UsageReport {
@@ -528,6 +538,7 @@ pub fn report(
         limits,
         not_reported_by: unreported_harnesses(db, project, since)?,
         health: health(db)?,
+        partial_homes,
     })?;
     assert!(report.projects.len() <= 2 * ROWS_MAX && report.days.len() <= DAYS_MAX);
     assert!(report.agents.len() <= 2 * ROWS_MAX && report.agent_lines.len() <= ROWS_MAX);

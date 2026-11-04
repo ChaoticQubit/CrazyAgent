@@ -12,6 +12,7 @@ fn project(id: &str, name: &str) -> ProjectCard {
         about: String::new(),
         platforms: Vec::new(),
         pool: None,
+        pool_id: None,
         research: ResearchCounts::default(),
         created_ms: None,
         activity: Default::default(),

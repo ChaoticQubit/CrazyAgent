@@ -3,10 +3,12 @@ use super::launch::{
     LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, Session, failure, harness_id, route,
     validate,
 };
+use super::leftovers::{Lineage, Unstopped};
 use super::transcript::{TranscriptEvent, TranscriptReader};
 use crate::launch_context::{AgentContext, Installed};
 use crate::model_gateway::relay::{Relay, is_placeholder};
 use crate::terminal::{AgentId, Host, HostError, INPUT_BYTES_MAX};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -27,6 +29,11 @@ const OWN_FACTS_MAX: usize = 4096;
 /// The most background commands of the app one session follows at once.
 const BACKGROUND_MAX: usize = 64;
 const ALIVE_EVERY: Duration = Duration::from_secs(1);
+const GROUP_FRESH: Duration = Duration::from_secs(5);
+#[cfg(target_os = "macos")]
+const KEEPER_WAIT: Duration = Duration::from_secs(6);
+#[cfg(target_os = "macos")]
+const KEEPER_POLL: Duration = Duration::from_millis(50);
 const PASTE_START: &str = "\x1b[200~";
 const PASTE_END: &str = "\x1b[201~";
 const ENTER: &[u8] = b"\r";
@@ -54,18 +61,50 @@ pub struct TerminalSession {
     background: BTreeSet<String>,
     exited: bool,
     stopped: bool,
+    group_ended: bool,
+    uncertain: bool,
+    unconfined: bool,
     record: Option<PaneRecord>,
     _key: Option<KeyFile>,
     _context: Option<Installed>,
     _relay: Option<Relay>,
 }
 
-/// An account's key file, removed when the agent session holding it ends.
-pub(super) struct KeyFile(pub(super) PathBuf);
+/// The most bytes a key file the engine reads back may hold: the longest key it writes.
+const KEY_FILE_BYTES_MAX: u64 = crate::model_gateway::relay::KEY_BYTES_MAX as u64;
+
+/// An account's key file and the SHA-256 of the exact bytes this launch wrote into it, so
+/// the guard keeps no copy of the key. The file is removed when the agent session holding it
+/// ends, and only while it still holds those bytes, so a refused or torn-down launch never
+/// deletes a key file another launch has since written for a different, still-running agent
+/// on the same account home.
+pub(super) struct KeyFile {
+    path: PathBuf,
+    digest: [u8; 32],
+}
+
+impl KeyFile {
+    /// Guards the key file at `path` that holds `content`. Inputs: the path and the bytes.
+    /// Output: the guard, which removes the file on drop only while it still holds them.
+    pub(super) fn new(path: PathBuf, content: &[u8]) -> Self {
+        assert!(content.len() as u64 <= KEY_FILE_BYTES_MAX);
+        Self {
+            path,
+            digest: Sha256::digest(content).into(),
+        }
+    }
+}
 
 impl Drop for KeyFile {
+    /// Removes the key file only while it is still a regular file holding this guard's
+    /// bytes, read through one open that follows no link and waits on no FIFO, since the
+    /// path sits in the agent-writable account home. Input: the guard. Output: none.
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.0);
+        if crate::platform::read_plain_file(&self.path, KEY_FILE_BYTES_MAX)
+            .is_some_and(|current| <[u8; 32]>::from(Sha256::digest(current)) == self.digest)
+        {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 
@@ -87,13 +126,14 @@ pub(super) fn write_key_file(request: &LaunchRequest) -> Result<Option<KeyFile>,
         .key()
         .map(|key| {
             assert!(is_placeholder(key.reveal()));
-            interactive::write_key(request.account.home(), key).map(KeyFile)
+            interactive::write_key(request.account.home(), key)
+                .map(|path| KeyFile::new(path, key.reveal().as_bytes()))
         })
         .transpose()
 }
 
 fn host_failure(error: HostError) -> LaunchError {
-    LaunchError(error.0)
+    LaunchError(error.0, None)
 }
 
 impl TerminalSession {
@@ -176,13 +216,24 @@ impl TerminalSession {
             installed.as_ref(),
             &Run {
                 session_id: &session_id,
-                key_file: key.as_ref().map(|key| key.0.as_path()),
+                key_file: key.as_ref().map(|key| key.path.as_path()),
                 resume: resume.is_some(),
             },
         )?;
         if let Some(team) = installed.as_ref().and_then(Installed::native) {
             interactive::write_teammate_command(&home, &command, &request, team)?;
         }
+        #[cfg(target_os = "macos")]
+        let command = if request.unconfined {
+            assert_ne!(command.argv[0], crate::sandbox::SANDBOX_EXEC);
+            command
+        } else {
+            interactive::InteractiveCommand {
+                argv: crate::sandbox::kept_pane(command.argv)
+                    .ok_or_else(|| failure("launch_sandbox_required"))?,
+                ..command
+            }
+        };
         if command.transcript == Transcript::Unavailable {
             return Err(failure("launch_transcript_unavailable"));
         }
@@ -231,12 +282,15 @@ impl TerminalSession {
             background: BTreeSet::new(),
             exited: false,
             stopped: false,
+            group_ended: false,
+            uncertain: false,
+            unconfined: request.unconfined,
             record: PaneRecord::new(
                 &command.transcript,
                 &command.cwd,
                 since,
                 pane.pid,
-                key.as_ref().map(|key| key.0.as_path()),
+                key.as_ref().map(|key| key.path.as_path()),
             )
             .map(|record| PaneRecord {
                 resumed,
@@ -423,11 +477,25 @@ impl TerminalSession {
         }
     }
 
-    /// Ends the pane and every process in it, then removes the key file and the
-    /// generated context. Output: none, since a pane reports no exit code.
-    pub fn stop(mut self) -> Option<i32> {
+    /// Ends the pane and every process its harness started, then removes the key file and
+    /// the generated context. On macOS a sandboxed pane's keeper first has the run's warden
+    /// kill every process in the sandbox, sessions of their own included; then every process
+    /// left in the pane's process group is killed, as a dev server started in the background.
+    /// A Full access pane has no Seatbelt and so no keeper, whose warden only arms inside a
+    /// sandbox, so the processes found in its lineage before the end are checked after it. Output: none, since a pane reports no exit code,
+    /// [`Unstopped::Uncertain`] when the keeper did not confirm in time, or the group outlived
+    /// the wait or was found by an id no longer proven to be this pane's, or
+    /// [`Unstopped::Left`] naming what a Full access pane left running.
+    pub fn stop(mut self) -> Result<Option<i32>, Unstopped> {
+        let lineage = self.unconfined.then(|| Lineage::of(self.pid));
         self.halt();
-        None
+        if self.uncertain {
+            return Err(Unstopped::Uncertain);
+        }
+        if let Some(lineage) = lineage {
+            lineage?.settle()?;
+        }
+        Ok(None)
     }
 
     fn require_live(&self) -> Result<(), LaunchError> {
@@ -461,6 +529,7 @@ impl TerminalSession {
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
                         self.exited = true;
+                        self.end_group(true);
                         return Err(failure("launch_closed"));
                     }
                 }
@@ -556,7 +625,7 @@ impl TerminalSession {
             self.queue.push_back(event);
         }
         if self.checked.elapsed() >= ALIVE_EVERY {
-            self.checked = Instant::now();
+            let seen = self.checked.elapsed() <= GROUP_FRESH;
             let alive = match self.host.alive() {
                 Ok(alive) => alive,
                 Err(problem) => {
@@ -564,9 +633,11 @@ impl TerminalSession {
                     return Err(host_failure(problem));
                 }
             };
+            self.checked = Instant::now();
             if !alive.contains(&self.agent) {
                 self.exited = true;
                 self.turn = false;
+                self.end_group(seen);
                 self.queue.push_back(LaunchEvent::Exited { code: None });
             }
         }
@@ -579,7 +650,41 @@ impl TerminalSession {
         }
         self.stopped = true;
         self.turn = false;
+        let seen = !self.group_ended
+            && (self.checked.elapsed() <= GROUP_FRESH
+                || self
+                    .host
+                    .alive()
+                    .is_ok_and(|alive| alive.contains(&self.agent)));
+        #[cfg(target_os = "macos")]
+        if seen && !self.unconfined && !stop_keeper(self.host.as_ref(), &self.agent, self.pid) {
+            self.uncertain = true;
+        }
         let _ = self.host.kill(&self.agent);
+        self.end_group(seen);
+    }
+
+    /// Kills what the harness left in the pane's process group once the pane is gone, as a
+    /// dev server started in the background, and records whether the group outlived the
+    /// wait. `seen` tells the pane was alive within `GROUP_FRESH`: its id then still names
+    /// this pane's group, which keeps the id while any member lives. An id unseen for longer
+    /// may name a reused group: it is left alone, and a group found by it is uncertain.
+    fn end_group(&mut self, seen: bool) {
+        if std::mem::replace(&mut self.group_ended, true) {
+            return;
+        }
+        if !seen {
+            #[cfg(unix)]
+            {
+                self.uncertain |= super::launch::group_alive(self.pid);
+            }
+            return;
+        }
+        #[cfg(unix)]
+        {
+            super::launch::kill_group(self.pid);
+            self.uncertain |= !super::launch::await_group_exit(self.pid);
+        }
     }
 }
 
@@ -587,6 +692,66 @@ impl Drop for TerminalSession {
     fn drop(&mut self) {
         self.halt();
     }
+}
+
+/// Ends an agent pane no session holds, as one an earlier engine left, and every process its
+/// harness started: on macOS its keeper first empties the run's sandbox, then the window ends
+/// and every process left in the pane's process group is killed, found by the first process
+/// the host names while the pane runs. A cleanup not confirmed is reported on stderr.
+/// Inputs: the host, the pane and the owner's label, such as `research`. Output: whether
+/// every process was confirmed gone, or the host's failure, such as
+/// `terminal_agent_unknown` for a pane already gone.
+pub fn end_left_pane(host: &dyn Host, agent: &AgentId, owner: &str) -> Result<bool, HostError> {
+    let pid = host.pane_pid(agent)?;
+    #[cfg(target_os = "macos")]
+    let kept = pid.is_none_or(|pid| stop_keeper(host, agent, pid));
+    #[cfg(not(target_os = "macos"))]
+    let kept = true;
+    match host.kill(agent) {
+        Ok(()) => {}
+        Err(problem) if problem.0 == "terminal_agent_unknown" => {}
+        Err(problem) => return Err(problem),
+    }
+    #[cfg(unix)]
+    let ended = pid.is_some_and(|pid| {
+        super::launch::kill_group(pid);
+        super::launch::await_group_exit(pid)
+    });
+    #[cfg(not(unix))]
+    let ended = pid.is_none();
+    let confirmed = kept && ended;
+    if !confirmed {
+        eprintln!("{owner}_pane_cleanup_uncertain agent={}", agent.as_str());
+    }
+    Ok(confirmed)
+}
+
+/// Asks a pane's first process to stop with terminate and waits up to `KEEPER_WAIT` for the
+/// pane to end. A [`crate::sandbox::KEEPER`] then has the run's warden kill every process in
+/// the sandbox and ends only once the warden confirmed that or found signals not confined,
+/// so the pane ending in time confirms it. Inputs: the host, the pane and its first process,
+/// proven the pane's within `GROUP_FRESH`. Output: whether the pane is gone.
+#[cfg(target_os = "macos")]
+pub(crate) fn stop_keeper(host: &dyn Host, agent: &AgentId, pid: u32) -> bool {
+    let gone = || host.alive().is_ok_and(|alive| !alive.contains(agent));
+    if gone() {
+        return true;
+    }
+    let Some(process) = i32::try_from(pid)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    else {
+        return false;
+    };
+    let _ = rustix::process::kill_process(process, rustix::process::Signal::TERM);
+    let deadline = Instant::now() + KEEPER_WAIT;
+    while !gone() {
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(KEEPER_POLL);
+    }
+    true
 }
 
 /// Frames a prompt as one bracketed paste the app takes as typed text, split into host
@@ -742,12 +907,14 @@ impl AgentSession {
         }
     }
 
-    /// Stops the agent and every process it started. Output: the exit code when known, or
-    /// `harness_cleanup_uncertain` when a headless agent's warden did not confirm it.
-    pub fn stop(self) -> Result<Option<i32>, LaunchError> {
+    /// Stops the agent and every process it started. Output: the exit code when known,
+    /// [`Unstopped::Uncertain`] when a headless agent's warden did not confirm it or a pane's
+    /// process group was not confirmed gone, or [`Unstopped::Left`] naming what a Full access
+    /// agent left running.
+    pub fn stop(self) -> Result<Option<i32>, Unstopped> {
         match self {
             Self::Piped(session) => session.stop(),
-            Self::Terminal(session) => Ok(session.stop()),
+            Self::Terminal(session) => session.stop(),
         }
     }
 }

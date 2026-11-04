@@ -71,9 +71,10 @@ pub(super) fn handles(request: &OwnerRequest) -> bool {
 /// for one owner. Input: the stream, engine, authority, owner packet and
 /// admission, the validated request and the exchange deadline. Output: the
 /// reply written under the owner egress barrier. The exchange deadline bounds
-/// the replay check, the plan and a grant check under the owner barrier just
-/// before the disk work, which runs under its own bounds and without the
-/// barrier; a fresh owner deadline then bounds the record and the reply, so a finished
+/// the replay check, the plan, a grant check under the owner barrier and, for a
+/// home move, a recheck of agent work under the move's hold just before the disk
+/// work, which runs under its own bounds and without the barrier; a move the
+/// recheck refuses is recorded as Rejected with its code and never runs; a fresh owner deadline then bounds the record and the reply, so a finished
 /// effect is recorded as Applied or as Rejected with the refusal code. A home
 /// move then sends a settle job for this exchange's pending move: one whose
 /// record did not finish it (a stale grant, a slow barrier, a failed record)
@@ -115,14 +116,24 @@ pub(super) async fn serve(
             })
             .await
             .unwrap_or_else(|_| Err(failure(UNKNOWN)));
+            let admitted = match (admitted, &work) {
+                (Ok(()), Work::Move(_)) => tokio::time::timeout_at(
+                    deadline,
+                    engine.owner_job(|reply| Job::HomeMoveRecheck(exchange, reply)),
+                )
+                .await
+                .unwrap_or_else(|_| Err(failure(UNKNOWN))),
+                (admitted, _) => admitted.map(Ok),
+            };
             match admitted {
-                Ok(()) => {
+                Ok(Ok(())) => {
                     let interrupted = work.interrupted();
                     let step = tokio::task::spawn_blocking(move || work.run())
                         .await
                         .map_err(|_| failure(interrupted));
                     (step, Instant::now() + engine.timeout, true)
                 }
+                Ok(Err(code)) => (Ok(Step::Record(Err(code))), deadline, false),
                 Err(e) => (Err(e), deadline, false),
             }
         }

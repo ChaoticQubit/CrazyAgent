@@ -499,6 +499,10 @@ const PROBLEMS: &[(&str, &str)] = &[
         "Enter the secret on one line, up to 8192 characters.",
     ),
     (
+        "server_secret_too_short",
+        "Use a secret of at least 8 characters. A shorter one is part of an agent's launch command, so CrazyAgent cannot keep it hidden.",
+    ),
+    (
         "server_changed",
         "This server changed. Review it again before approving.",
     ),

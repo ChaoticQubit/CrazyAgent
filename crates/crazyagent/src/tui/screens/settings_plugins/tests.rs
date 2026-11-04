@@ -1395,3 +1395,10 @@ fn l_opens_tools_on_the_selected_server_or_on_the_crazyagent_tools() {
         );
     }
 }
+
+#[test]
+fn a_secret_too_short_to_keep_out_of_launch_commands_says_why_it_was_refused() {
+    let reason = plugin_plain("server_secret_too_short");
+    assert!(reason.contains("at least 8 characters"), "{reason}");
+    assert!(reason.contains("launch command"), "{reason}");
+}

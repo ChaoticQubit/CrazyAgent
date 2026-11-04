@@ -3,6 +3,8 @@ use super::settings_plugins::tilde;
 use super::{Flow, Place, Screen, open};
 use crate::github::{GitHubMethod, GitHubStatus};
 use crate::projects_home::{PATH_BYTES_MAX, ProjectsHome, path_text};
+use crate::sandbox::LinuxSockets;
+use crate::sandbox_settings::SandboxSettings;
 use crate::setup::pack::entry_title;
 use crate::setup::{DependencyState, PackEntry, PackKind, PackState, SetupStatus, known_reason};
 use crate::tui::client::app_setup::{AppSetupEvent, AppSetupJob, PackChange};
@@ -36,6 +38,31 @@ const NOT_READY_TEXT: &str =
     "Not ready yet. Setup comes with the setup and default skills and plugins update.";
 const FIRST_RUN_TEXT: &str = "CrazyAgent needs a few tools on this computer and starts every project with the skills and plugins below. Untick anything you don't want.";
 const SETTINGS_TEXT: &str = "The tools CrazyAgent needs on this computer, the skills and plugins every project starts with, the projects home folder and your GitHub account.";
+const SOCKETS_TEXT: &str = "Linux limited-network sockets: how an agent limited to its model reaches the network when CrazyAgent runs on Linux.";
+const SOCKETS_CHOICES: [LinuxSockets; 3] = [
+    LinuxSockets::TcpOnly,
+    LinuxSockets::Refuse,
+    LinuxSockets::TcpPorts,
+];
+
+/// The plain title and explanation of one Linux sockets option, as Settings shows it.
+/// Input: the option. Output: the title and the sentence naming what it allows and risks.
+pub(in crate::tui) fn sockets_words(sockets: LinuxSockets) -> (&'static str, &'static str) {
+    match sockets {
+        LinuxSockets::TcpOnly => (
+            "TCP only, names looked up over TCP (recommended)",
+            "Only TCP to the model's ports; names are looked up over TCP. A harness whose resolver ignores RES_OPTIONS, such as a musl build, cannot look names up, so it does not start. Wrappers are judged by their first file, a script by its interpreter, so one that starts a musl program still starts, then cannot look names up.",
+        ),
+        LinuxSockets::Refuse => (
+            "Do not start limited-network agents",
+            "No agent limited to its model starts on Linux, so the master is unavailable there.",
+        ),
+        LinuxSockets::TcpPorts => (
+            "TCP ports only",
+            "Only the model's TCP ports are limited. Hosts and UDP are not limited: UDP, ping and other sockets reach any host.",
+        ),
+    }
+}
 
 /// A plain sentence for a setup page problem code.
 /// Input: the code. Output: "Not ready yet." until the engine serves the
@@ -154,6 +181,9 @@ enum Ask {
         path: String,
         size: Option<Result<u64, String>>,
     },
+    Sockets {
+        choice: usize,
+    },
 }
 
 enum Sent {
@@ -165,16 +195,18 @@ enum Sent {
 /// skills and plugins pack, with ticks. First run shows it after the projects
 /// home folder: Enter installs and continues to Home, and continuing past the
 /// ticked MCP servers approves them. Settings shows it with on and off,
-/// remove, the projects home folder and the GitHub account.
+/// remove, the projects home folder, the GitHub account and the Linux sockets
+/// setting.
 pub struct AppSetup {
     first_run: bool,
     setup: Load<SetupStatus>,
     home: Load<ProjectsHome>,
     github: Load<GitHubStatus>,
+    sandbox: Load<SandboxSettings>,
     chosen: BTreeMap<String, bool>,
     selected: usize,
     offset: usize,
-    reading: [bool; 3],
+    reading: [bool; 4],
     sent: Option<Sent>,
     started: bool,
     finished_with_problems: bool,
@@ -185,17 +217,18 @@ impl AppSetup {
     /// A setup page with nothing loaded yet.
     /// Input: true during first run. Output: the screen; `shown` asks the
     /// engine for the setup status, and in Settings also for the projects
-    /// home and the GitHub account.
+    /// home, the GitHub account and the sandbox settings.
     pub fn new(first_run: bool) -> Self {
         Self {
             first_run,
             setup: Load::Idle,
             home: Load::Idle,
             github: Load::Idle,
+            sandbox: Load::Idle,
             chosen: BTreeMap::new(),
             selected: 0,
             offset: 0,
-            reading: [false; 3],
+            reading: [false; 4],
             sent: None,
             started: false,
             finished_with_problems: false,
@@ -267,6 +300,10 @@ impl AppSetup {
             self.github = Load::Loading;
         }
         self.read(2, AppSetupJob::GitHub, ctx);
+        if matches!(self.sandbox, Load::Idle) {
+            self.sandbox = Load::Loading;
+        }
+        self.read(3, AppSetupJob::Sandbox, ctx);
     }
 
     fn change(&mut self, job: AppSetupJob, sent: Sent, ctx: &mut Ctx) {
@@ -483,6 +520,37 @@ impl AppSetup {
         self.ask = Some(Ask::HomePath(field));
     }
 
+    fn ask_sockets(&mut self, ctx: &mut Ctx) {
+        let Load::Ready(settings) = &self.sandbox else {
+            ctx.say(Message::warning(
+                "The Linux sockets setting is not known yet.",
+                "",
+            ));
+            return;
+        };
+        let choice = SOCKETS_CHOICES
+            .iter()
+            .position(|sockets| *sockets == settings.linux_sockets)
+            .expect("every option is listed");
+        self.ask = Some(Ask::Sockets { choice });
+    }
+
+    fn set_sockets(&mut self, choice: usize, ctx: &mut Ctx) {
+        assert!(choice < SOCKETS_CHOICES.len());
+        let linux_sockets = SOCKETS_CHOICES[choice];
+        if matches!(&self.sandbox, Load::Ready(settings) if settings.linux_sockets == linux_sockets)
+        {
+            ctx.say(Message::warning("That is already the setting.", ""));
+            return;
+        }
+        let done = format!("Linux sockets: {}.", sockets_words(linux_sockets).0);
+        let job = AppSetupJob::SetSandbox {
+            settings: SandboxSettings { linux_sockets },
+            generation: ctx.next_generation(),
+        };
+        self.change(job, Sent::Done(done), ctx);
+    }
+
     fn ask_sign_out(&mut self, ctx: &mut Ctx) {
         match &self.github {
             Load::Ready(github) if github.signed_in => self.ask = Some(Ask::SignOut),
@@ -579,6 +647,21 @@ impl AppSetup {
                 }
                 Key::Char('n') | Key::Esc => {}
                 _ => self.ask = Some(Ask::SignOut),
+            },
+            Ask::Sockets { choice } => match key {
+                Key::Up => {
+                    self.ask = Some(Ask::Sockets {
+                        choice: choice.saturating_sub(1),
+                    })
+                }
+                Key::Down => {
+                    self.ask = Some(Ask::Sockets {
+                        choice: (choice + 1).min(SOCKETS_CHOICES.len() - 1),
+                    })
+                }
+                Key::Enter => self.set_sockets(choice, ctx),
+                Key::Esc => {}
+                _ => self.ask = Some(Ask::Sockets { choice }),
             },
         }
     }
@@ -822,13 +905,35 @@ impl AppSetup {
             Load::Idle | Load::Loading => ctx.loading("Loading"),
         };
         lines.push(label("GitHub", github));
+        let gap = " ".repeat(LABEL_WIDTH);
+        let under = |text: &str| -> Vec<Line<'static>> {
+            wrap(text, limit.saturating_sub(LABEL_WIDTH).max(1))
+                .into_iter()
+                .map(|part| join([Line::raw(gap.clone()), styled(part, Role::Muted, theme)]))
+                .collect()
+        };
         if let Some(problem) = problem {
-            let gap = " ".repeat(LABEL_WIDTH);
-            lines.extend(
-                wrap(&problem, limit.saturating_sub(LABEL_WIDTH).max(1))
-                    .into_iter()
-                    .map(|part| join([Line::raw(gap.clone()), styled(part, Role::Muted, theme)])),
-            );
+            lines.extend(under(&problem));
+        }
+        let (sockets, detail) = match &self.sandbox {
+            Load::Ready(settings) => {
+                let (title, detail) = sockets_words(settings.linux_sockets);
+                (Line::raw(title), Some(detail))
+            }
+            Load::NotReady => (styled("Not ready yet", Role::Muted, theme), None),
+            Load::Failed(code) => (
+                status(
+                    &format!("Failed to read it. {}", setup_plain(code)),
+                    theme,
+                    glyphs,
+                ),
+                None,
+            ),
+            Load::Idle | Load::Loading => (ctx.loading("Loading"), None),
+        };
+        lines.push(label("Linux sockets", sockets));
+        if let Some(detail) = detail {
+            lines.extend(under(detail));
         }
         lines
     }
@@ -858,6 +963,26 @@ impl AppSetup {
                 lines.extend(sentence(
                     "Changing the home moves nothing by itself; you choose next.",
                 ));
+            }
+            Some(Ask::Sockets { choice }) => {
+                lines.extend(
+                    wrap(SOCKETS_TEXT, limit)
+                        .into_iter()
+                        .map(|part| styled(part, Role::Muted, theme)),
+                );
+                for (index, sockets) in SOCKETS_CHOICES.iter().enumerate() {
+                    let (title, detail) = sockets_words(*sockets);
+                    let mark = if index == *choice { "> " } else { "  " };
+                    lines.push(join([
+                        Line::raw(mark),
+                        styled(title, Role::Heading, theme),
+                    ]));
+                    lines.extend(
+                        wrap(detail, limit.saturating_sub(4).max(1))
+                            .into_iter()
+                            .map(|part| styled(format!("    {part}"), Role::Muted, theme)),
+                    );
+                }
             }
             Some(Ask::HomeChoice {
                 path,
@@ -966,7 +1091,7 @@ impl Screen for AppSetup {
         }
     }
 
-    fn hints(&self, _ctx: &Ctx) -> Vec<Hint> {
+    fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
         match &self.ask {
             Some(Ask::HomePath(_)) => return vec![hint("Enter", "Next"), hint("Esc", "Cancel")],
             Some(Ask::HomeChoice { .. }) => {
@@ -978,6 +1103,14 @@ impl Screen for AppSetup {
             }
             Some(Ask::Remove { .. }) => return vec![hint("y", "Remove"), hint("n", "Keep")],
             Some(Ask::SignOut) => return vec![hint("y", "Sign out"), hint("n", "Stay signed in")],
+            Some(Ask::Sockets { .. }) => {
+                let arrows = format!("{}{}", ctx.glyphs.up, ctx.glyphs.down);
+                return vec![
+                    hint(&arrows, "Choose"),
+                    hint("Enter", "Save"),
+                    hint("Esc", "Cancel"),
+                ];
+            }
             None => {}
         }
         let mut hints = Vec::new();
@@ -1013,6 +1146,7 @@ impl Screen for AppSetup {
             if matches!(&self.github, Load::Ready(github) if github.signed_in) {
                 hints.push(hint("g", "Sign out of GitHub"));
             }
+            hints.push(hint("l", "Linux sockets"));
             hints.push(hint("Esc", "Back"));
         } else {
             hints.push(hint("Ctrl-Q", "Quit"));
@@ -1065,13 +1199,17 @@ impl Screen for AppSetup {
                 self.ask_sign_out(ctx);
                 Flow::Handled
             }
+            Key::Char('l') if !self.first_run => {
+                self.ask_sockets(ctx);
+                Flow::Handled
+            }
             _ => Flow::Ignored,
         }
     }
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
         if matches!(arrival, Arrival::Disconnected(_)) {
-            self.reading = [false; 3];
+            self.reading = [false; 4];
             self.sent = None;
             return Flow::Handled;
         }
@@ -1081,8 +1219,12 @@ impl Screen for AppSetup {
         match event {
             AppSetupEvent::Status(result) => return self.read_setup(result, ctx),
             AppSetupEvent::Ran(result) => self.ran(result, ctx),
-            AppSetupEvent::PackChanged(result) | AppSetupEvent::HomeSet(result) => {
-                self.changed(result, ctx)
+            AppSetupEvent::PackChanged(result)
+            | AppSetupEvent::HomeSet(result)
+            | AppSetupEvent::SandboxSet(result) => self.changed(result, ctx),
+            AppSetupEvent::Sandbox(result) => {
+                self.reading[3] = false;
+                self.sandbox = loaded(result);
             }
             AppSetupEvent::GitHubSignedOut(result) => {
                 let result = result.as_ref().map(|github| {
@@ -1130,6 +1272,7 @@ impl Screen for AppSetup {
             || matches!(self.setup, Load::Loading)
             || matches!(self.home, Load::Loading)
             || matches!(self.github, Load::Loading)
+            || matches!(self.sandbox, Load::Loading)
             || matches!(self.ask, Some(Ask::HomeChoice { size: None, .. }))
     }
 

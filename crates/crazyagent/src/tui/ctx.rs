@@ -63,6 +63,10 @@ pub struct Store {
     pub setup: Load<SetupStatus>,
     pub projects_seen: Option<String>,
     pub questions: Load<Vec<(ProjectId, u32)>>,
+    pub waiting: Option<(
+        Option<crate::protocol::ProjectId>,
+        crate::landing::WaitingChanges,
+    )>,
 }
 
 impl Store {
@@ -88,6 +92,7 @@ impl Default for Store {
             setup: Load::Idle,
             projects_seen: None,
             questions: Load::Idle,
+            waiting: None,
         }
     }
 }

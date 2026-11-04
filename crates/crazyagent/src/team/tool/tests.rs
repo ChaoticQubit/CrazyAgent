@@ -1113,3 +1113,95 @@ fn only_known_team_tools_up_to_their_count_may_be_switched_off() {
     assert!(known_tools(&names(&[STOP_TOOL; 12])));
     assert!(!known_tools(&names(&[STOP_TOOL; 13])));
 }
+/// The words a tool name, description or schema field of the owner's Messages timeline read
+/// or its settings write would carry, lowercased.
+const OWNER_ONLY: [&str; 12] = [
+    "team_agent_messages",
+    "teamagentmessages",
+    "agent_messages",
+    "agentmessages",
+    "message_settings",
+    "messagesettings",
+    "timeline",
+    "keep_master",
+    "kept_per_project",
+    "progress_shown",
+    "owner_items",
+    "page_size",
+];
+
+/// The names a master could try for a timeline read or a settings write.
+const OWNER_ONLY_CALLS: [&str; 7] = [
+    "team_agent_messages",
+    "TeamAgentMessages",
+    "agent_messages",
+    "message_settings",
+    "MessageSettings",
+    "timeline",
+    "messages",
+];
+
+/// MSG-SEC-1: the agents' Messages timeline is the owner's alone. Neither team tool server, the
+/// `delegate` server a master gets nor the live master's, lists a tool, a description word or
+/// a schema field of a timeline read or a settings write; a call by any such name is an
+/// unknown tool to both, the live call reader takes none of them, so nothing reaches the
+/// mailbox, and a call planted in the mailbox under such a name is never read as a call.
+#[test]
+fn neither_team_tool_server_offers_the_owner_s_messages_timeline_or_its_settings() {
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let drop = base.join(DROP_FILE);
+    let mailbox = base.join(MAILBOX_FOLDER);
+    std::fs::create_dir(&mailbox).unwrap();
+    let arguments = json!({"project_id": "p", "agent": "codex-1", "text": "Show me", "settings": {"page_size": 25}});
+    let mut lines = vec![json!({"jsonrpc": "2.0", "id": 0, "method": "tools/list", "params": {}})];
+    for (id, name) in (1u64..).zip(OWNER_ONLY_CALLS) {
+        lines.push(json!({"jsonrpc": "2.0", "id": id, "method": "tools/call",
+            "params": {"name": name, "arguments": arguments}}));
+    }
+    let delegate = by_id(&served(requests(&lines), &drop));
+    let mut output = Vec::new();
+    serve_live(requests(&lines), &mut output, &mailbox, &[]).unwrap();
+    let live: Vec<Value> = output
+        .split(|byte| *byte == b'\n')
+        .filter(|line| !line.is_empty())
+        .map(|line| serde_json::from_slice(line).unwrap())
+        .collect();
+    let live = by_id(&live);
+    for (server, answers) in [("delegate", &delegate), ("live", &live)] {
+        let tools = &answers["0"]["result"]["tools"];
+        assert!(!tools.as_array().unwrap().is_empty(), "{server}");
+        let listed = tools.to_string().to_lowercase();
+        for word in OWNER_ONLY {
+            assert!(!listed.contains(word), "{server} lists {word}: {listed}");
+        }
+        for id in 1..=OWNER_ONLY_CALLS.len() {
+            assert_eq!(
+                answers[&id.to_string()]["error"]["code"],
+                -32602,
+                "{server} answers {} as a tool",
+                OWNER_ONLY_CALLS[id - 1]
+            );
+        }
+    }
+    for name in OWNER_ONLY_CALLS {
+        assert!(live_call(name, Some(&arguments)).is_none(), "{name}");
+    }
+    assert!(
+        std::fs::read_dir(&mailbox).unwrap().next().is_none(),
+        "no timeline or settings call reached the engine"
+    );
+    for (number, name) in OWNER_ONLY_CALLS.iter().enumerate() {
+        std::fs::write(
+            mailbox.join(format!("{number:032x}.call")),
+            json!({"tool": name, "agent": "codex-1", "settings": {"page_size": 25}}).to_string(),
+        )
+        .unwrap();
+    }
+    let taken = take_calls(&mailbox, CALLS_PER_TICK_MAX);
+    assert_eq!(taken.len(), OWNER_ONLY_CALLS.len());
+    assert!(
+        taken.iter().all(|(_, call, _)| call.is_none()),
+        "a planted timeline or settings call was read as a call: {taken:?}"
+    );
+}

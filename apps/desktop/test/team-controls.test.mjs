@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { readFileSync } from "node:fs";
 import "./load-source.mjs";
 
 const controls = await import("../src/screens/team/controls.tsx");
@@ -243,4 +243,17 @@ test("every cap, token budget, depth and landing choice is offered once, from th
   assert.deepEqual([999_999, 1_000_000, 12_500_000, 12_590_000].map(controls.tokenWords), ["999999 tokens", "1M tokens", "12.5M tokens", "12.5M tokens"]);
   assert.equal(controls.DEPTH_DEFAULT, 2);
   assert.deepEqual(controls.LANDING_OPTIONS.map((option) => option.value), ["lead", "owner"]);
+});
+
+test("team settings changes send the version the window read, so the engine refuses a stale one", () => {
+  const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
+  const client = read("../src/engine-client.ts");
+  assert.match(client, /settings_version\?: number;/);
+  assert.doesNotMatch(client, /settings_revision/, "one settings version, no second revision");
+  const lib = read("../src-tauri/src/lib.rs");
+  for (const command of ["desktop_team_time_limits", "desktop_team_on_harness_switch"]) {
+    const start = lib.indexOf(`fn ${command}(`);
+    assert.ok(start >= 0, command);
+    assert.ok(lib.slice(start, lib.indexOf(")", start)).includes("version: u64"), `${command} takes the version`);
+  }
 });

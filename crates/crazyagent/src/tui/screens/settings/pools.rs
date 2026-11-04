@@ -233,7 +233,7 @@ pub fn used_by(pool: &PoolSummary, names: bool, ctx: &Ctx) -> String {
         .map(|cards| {
             cards
                 .iter()
-                .filter(|card| card.pool.as_deref() == Some(pool.name.as_str()))
+                .filter(|card| card.pool_id.as_ref() == Some(&pool.id))
                 .map(|card| card.name.clone())
                 .collect()
         })
@@ -611,6 +611,7 @@ mod tests {
             about: String::new(),
             platforms: Vec::new(),
             pool: Some(pool.into()),
+            pool_id: Some(CredentialRef::new(format!("pool-{pool}")).unwrap()),
             research: Default::default(),
             created_ms: None,
             activity: Default::default(),

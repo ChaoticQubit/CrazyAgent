@@ -17,7 +17,10 @@ use crate::harnesses::launch::{
     AccountBinding, GitIdentity, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest,
     RUN_TIME_MAX, claude_bare,
 };
-use crate::harnesses::terminal_session::{AgentSession, PaneRecord, Resume, TerminalSession};
+use crate::harnesses::leftovers::Unstopped;
+use crate::harnesses::terminal_session::{
+    AgentSession, PaneRecord, Resume, TerminalSession, end_left_pane,
+};
 use crate::harnesses::transcript::TranscriptEvent;
 use crate::launch_context::AgentContext;
 use crate::master_sessions::ResumePlan;
@@ -27,8 +30,8 @@ use crate::research::runner::{
     ResearchAccount, RunError, add_worktree_at, confined_unavailable, ensure_repository,
     model_remote,
 };
-use crate::sandbox::policy::AgentAccess;
-use crate::sandbox::toolchains::{self, ToolHomes, Toolchains};
+use crate::sandbox::policy::{AgentAccess, AgentPolicy, Narrowing};
+use crate::sandbox::toolchains::{self, ToolHomes, Toolchain, Toolchains};
 use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
 use crate::terminal::{AgentId, Host, PANES_PER_PROJECT_MAX};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
@@ -164,7 +167,8 @@ struct Grant {
 /// Everything about an agent's harness launch except the account, so a managed agent
 /// can start a fresh process for each turn. `pane` is the terminal host and the agent's
 /// pane name when the agent runs its interactive app in a pane; `resume` the harness
-/// conversation a live master continues instead of starting one; `native` marks a
+/// conversation a live master continues instead of starting one; `toolchains` the families
+/// its sandbox profile, built once for every turn, lets it use; `native` marks a
 /// native-mode lead (DEC-104), which runs in a tmux server of its own inside its profile,
 /// and `tmux` is that server's program, which its teammates are split off with; `hookless`
 /// marks a launch Claude Code starts `--bare`, which fires no hooks (DEC-104 bare-hooks);
@@ -177,6 +181,7 @@ struct Plan {
     tools: bool,
     sandbox_profile: PathBuf,
     access: AgentAccess,
+    toolchains: Vec<Toolchain>,
     layout: Layout,
     git_identity: Option<GitIdentity>,
     limits: LaunchLimits,
@@ -301,6 +306,7 @@ struct Adoption {
     live: bool,
     managed: Option<Managed>,
     access: AgentAccess,
+    toolchains: Option<Vec<Toolchain>>,
 }
 
 /// What a live master on a signed-in account needs when a later engine takes its pane over:
@@ -388,6 +394,49 @@ enum Busy {
     Message(i64),
 }
 
+/// Why the engine stopped an agent whose running process holds more than the owner saved:
+/// what the saved policy no longer allows, or toolchains a pane from before the engine kept
+/// them may hold.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Narrowed {
+    Saved(Narrowing),
+    Unrecorded,
+}
+
+impl Narrowed {
+    /// The plain reason the stopped agent shows, with its code. Input: the cause.
+    /// Output: the sentence.
+    fn problem(self) -> String {
+        let (text, code) = match self {
+            Self::Saved(Narrowing::Access) => (
+                "the project's agent access was lowered, so the agent was stopped; its next start uses the new level",
+                Narrowing::Access.code(),
+            ),
+            Self::Saved(Narrowing::TurnedOff) => (
+                "the project's toolchain access was turned off, so the agent was stopped; its next start goes without it",
+                Narrowing::TurnedOff.code(),
+            ),
+            Self::Saved(Narrowing::NotAllowed) => (
+                "a toolchain the agent started with is no longer allowed for the project (turned off, or no longer used by the project), so the agent was stopped; its next start goes without it",
+                Narrowing::NotAllowed.code(),
+            ),
+            Self::Saved(Narrowing::PolicyUnreadable) => (
+                "the project's agent access could not be read, so the agent was stopped; it starts again once it can be read",
+                Narrowing::PolicyUnreadable.code(),
+            ),
+            Self::Saved(Narrowing::FolderUnreadable) => (
+                "the project folder could not be read to check the agent's toolchains, so the agent was stopped",
+                Narrowing::FolderUnreadable.code(),
+            ),
+            Self::Unrecorded => (
+                "the agent started before the engine kept the toolchains it was given, so it was stopped; its next start uses the project's toolchain settings",
+                "agent_toolchains_unrecorded",
+            ),
+        };
+        with_code(text, Some(code))
+    }
+}
+
 struct Worker {
     project: ProjectId,
     role: AgentRole,
@@ -422,11 +471,13 @@ struct Worker {
     spawned: Instant,
     handoff: Option<String>,
     access: AgentAccess,
-    lowered: bool,
     ran_before: Duration,
     told_finished: BTreeSet<i64>,
     parent: Option<i64>,
     ready: bool,
+    toolchains: Option<Vec<Toolchain>>,
+    checked: Option<AgentPolicy>,
+    narrowed: Option<Narrowed>,
 }
 
 impl Worker {
@@ -478,10 +529,21 @@ pub struct TeamRuntime {
     caller_folders: BTreeMap<i64, (u64, u64)>,
     #[cfg(unix)]
     caller_pins: BTreeMap<i64, Vec<(String, u32)>>,
+    held_restarts: Vec<HostedRestart>,
 }
 
 fn error(value: impl std::fmt::Display) -> EngineError {
     EngineError(value.to_string())
+}
+
+/// How one agent start ended: started, held back because a projects home move holds the
+/// project folder, so the work that asked for it waits for the move to end with nothing
+/// spent or switched off, or refused for the plain reason.
+#[derive(Debug, PartialEq, Eq)]
+enum Start<T> {
+    Started(T),
+    Held,
+    Refused(String),
 }
 
 /// The most stopped masters of one project the last-master lookup reads.
@@ -642,6 +704,7 @@ impl TeamRuntime {
             instruction_restarts: BTreeMap::new(),
             master_restarts: BTreeSet::new(),
             restarted_for: BTreeMap::new(),
+            held_restarts: Vec::new(),
         })
     }
 
@@ -690,8 +753,8 @@ impl TeamRuntime {
                 None => Some("the engine has no record of it".to_owned()),
             };
             if let Some(reason) = refusal {
-                match host.kill(&agent) {
-                    Ok(()) => {}
+                match end_left_pane(host.as_ref(), &agent, "team") {
+                    Ok(_) => {}
                     Err(problem) if problem.0 == "terminal_agent_unknown" => {}
                     Err(problem) => return Err(problem.into()),
                 }
@@ -733,9 +796,10 @@ impl TeamRuntime {
     /// team plan still hold its role and harness, the team is not paused, the project has
     /// room, and its account is still in the project's pool, as an endpoint, or as a
     /// signed-in account for a live master or a native-mode lead, whose worker hands the
-    /// credential to its home again before it serves. The pane keeps the
-    /// access level its record says it started at, Full access for a record without one, so
-    /// a level lowered while no engine ran stops it on the next tick. Takes the host, the
+    /// credential to its home again before it serves. The pane keeps the access level its
+    /// record says it started at, Full access for a record without one, and the toolchains it
+    /// started with, every family for a record without them, so a level lowered or a
+    /// toolchain turned off while no engine ran stops it on the next tick. Takes the host, the
     /// agent id, its pane record and the live access. Returns Ok, or why the pane must end.
     fn adopt(
         &mut self,
@@ -849,6 +913,7 @@ impl TeamRuntime {
             live,
             managed,
             access: record.access.unwrap_or(AgentAccess::Full),
+            toolchains: record.toolchains.clone(),
         };
         let session = if live {
             crate::master_sessions::live_session(&self.connection, &project)?
@@ -916,8 +981,8 @@ impl TeamRuntime {
             if self.workers.contains_key(&id) {
                 continue;
             }
-            match host.kill(&agent) {
-                Ok(()) => self.closed_note(id, "its agent had stopped")?,
+            match end_left_pane(host.as_ref(), &agent, "team") {
+                Ok(_) => self.closed_note(id, "its agent had stopped")?,
                 Err(problem) if problem.0 == "terminal_agent_unknown" => {}
                 Err(problem) => return Err(problem.into()),
             }
@@ -1159,8 +1224,13 @@ impl TeamRuntime {
             let ended = self.end_teammates(host.as_ref(), &project, agent, &team, pane_cap, at)?;
             assert!(team.iter().all(|pane| pane.pid != lead.pid));
             if let Some(text) = ended {
-                let _ =
-                    super::events::send_to(&self.connection, host.as_ref(), Some(agent), &text)?;
+                let _ = super::events::send_to(
+                    &self.connection,
+                    host.as_ref(),
+                    Some(agent),
+                    super::agent_messages::Said::Notice,
+                    &text,
+                )?;
             }
         }
         Ok(())
@@ -1687,7 +1757,9 @@ impl TeamRuntime {
         let Some(agents) = self.agents.clone() else {
             return Ok(());
         };
-        for restart in agents.take_restarts(TEAM_HOST) {
+        let mut restarts = std::mem::take(&mut self.held_restarts);
+        restarts.extend(agents.take_restarts(TEAM_HOST));
+        for restart in restarts {
             if let Ok(reference) = restart.reference.parse::<i64>() {
                 self.start_again(reference, Some(&restart), access)?;
             }
@@ -1729,7 +1801,9 @@ impl TeamRuntime {
     /// never moves to another agent. A restarted master starts as a fresh process under its
     /// register entry. A Wake (no `again`) of an agent that is no longer finished does
     /// nothing, so a stale Wake never stops or replaces a running agent. A woken sub-agent
-    /// clears the owner stops of the agents it leads too, the one start that does (AW-1).
+    /// clears the owner stops of the agents it leads too, the one start that does (AW-1). A
+    /// restart a projects home move holds back waits and is tried again on each tick until
+    /// it starts.
     fn start_again(
         &mut self,
         reference: i64,
@@ -1841,7 +1915,14 @@ impl TeamRuntime {
                 }
             }
             Ok(Some(account)) => {
-                self.spawn_run(&stored, role, &harness, tools, &account, again, None)?
+                match self.spawn_run(&stored, role, &harness, tools, &account, again, None)? {
+                    Start::Started(id) => Ok(id),
+                    Start::Held => {
+                        self.held_restarts.extend(again.cloned());
+                        return Ok(());
+                    }
+                    Start::Refused(reason) => Err(reason),
+                }
             }
             Err(reason) => Err(reason),
         };
@@ -2028,9 +2109,14 @@ impl TeamRuntime {
             self.hold(project);
             return Ok(());
         }
+        if crate::projects_home::move_holds(&self.connection, &stored.project_folder())
+            .map_err(error)?
+        {
+            return Ok(());
+        }
         let paused = self.paused()?;
         self.retire_rejected(project, access);
-        self.retire_lowered(project);
+        self.retire_narrowed(&stored);
         self.sync_pool(&stored, access)?;
         self.request_cancels(project)?;
         self.resume_interrupted(&stored, access, &paused)?;
@@ -2463,33 +2549,55 @@ impl TeamRuntime {
         }
     }
 
-    /// Stops the project's agents whose running process started at a wider access level
-    /// than the one the owner saved now (AL-2): a kept or live agent at once, a per-turn
-    /// agent while its turn runs. An idle per-turn agent has no process; its next turn reads
-    /// the saved level in its grant. Every next start reads the level again, so a lowered
-    /// level reaches each agent's next launch. An unreadable level counts as Sandboxed.
-    /// Takes the project.
-    fn retire_lowered(&mut self, project: &ProjectId) {
-        if !self.workers.values().any(|worker| {
-            &worker.project == project
-                && !worker.stopping
-                && worker.access != AgentAccess::Sandboxed
-        }) {
-            return;
-        }
-        let saved = crate::sandbox::policy::load(&self.connection, project.as_str())
-            .map_or(AgentAccess::Sandboxed, |policy| policy.access);
-        let lowered: Vec<i64> = self
+    /// Stops the project's agents whose running process holds more than the owner saved now.
+    /// At a wider access level (AL-2) a kept or live agent stops at once and a per-turn agent
+    /// while its turn runs, since an idle one reads the level again in its next grant. With a
+    /// toolchain the saved policy no longer allows any agent stops, since its sandbox profile
+    /// was built once at its start; a pane whose record kept no toolchains counts as holding
+    /// every family. A stopped agent is held, so its task or message waits again without a
+    /// spent attempt, and every next start reads the policy again, so it starts
+    /// with the new level and without that toolchain. Each agent is checked once per saved
+    /// policy. An unreadable policy stops every agent holding more than Sandboxed with no
+    /// toolchain, and a project folder that toolchain detection cannot read stops every agent
+    /// holding a toolchain the owner made no choice for, each under its own reason.
+    /// Takes the project's stored setup.
+    fn retire_narrowed(&mut self, stored: &StoredSetup) {
+        let project = &stored.project_id;
+        let saved = crate::sandbox::policy::load(&self.connection, project.as_str()).ok();
+        let stale: Vec<i64> = self
             .workers
             .iter()
-            .filter(|(_, w)| &w.project == project && !w.stopping && w.access.wider_than(saved))
-            .filter(|(_, w)| !w.managed || w.live || w.kept_session || w.busy.is_some())
+            .filter(|(_, w)| &w.project == project && !w.stopping)
+            .filter(|(_, w)| saved.is_none() || w.checked != saved)
             .map(|(id, _)| *id)
             .collect();
-        for id in lowered {
+        if stale.is_empty() {
+            return;
+        }
+        let root = stored.project_folder().canonicalize().ok();
+        for id in stale {
             let worker = self.workers.get_mut(&id).expect("worker exists");
+            let running =
+                !worker.managed || worker.live || worker.kept_session || worker.busy.is_some();
+            let narrowed = crate::sandbox::policy::narrowing(
+                saved.as_ref(),
+                root.as_deref(),
+                running.then_some(worker.access),
+                worker.toolchains.as_deref().unwrap_or(&Toolchain::ALL),
+            )
+            .map(|cause| match cause {
+                Narrowing::TurnedOff | Narrowing::NotAllowed if worker.toolchains.is_none() => {
+                    Narrowed::Unrecorded
+                }
+                cause => Narrowed::Saved(cause),
+            });
+            let Some(narrowed) = narrowed else {
+                worker.checked = saved.clone();
+                continue;
+            };
             worker.stopping = true;
-            worker.lowered = true;
+            worker.held = true;
+            worker.narrowed = Some(narrowed);
             worker.cancel.store(true, Ordering::SeqCst);
             let _ = worker.orders.send(Order::Stop);
         }
@@ -2685,14 +2793,18 @@ impl TeamRuntime {
                 let harness = stored.team.master.clone();
                 let started = match self.account_for(access, project, &harness, paused) {
                     Ok(None) => return Ok(()),
-                    Ok(Some(account)) => self.spawn(
+                    Ok(Some(account)) => match self.spawn(
                         stored,
                         AgentRole::Master,
                         &harness,
                         stored.team.master_tools,
                         &account,
                         None,
-                    )?,
+                    )? {
+                        Start::Started(id) => Ok(id),
+                        Start::Held => return Ok(()),
+                        Start::Refused(reason) => Err(reason),
+                    },
                     Err(reason) => Err(reason),
                 };
                 match started {
@@ -2919,14 +3031,22 @@ impl TeamRuntime {
                 .push(Instant::now());
         }
         match self.start_master(stored, &harness, &account, session.as_deref())? {
-            Ok((id, note)) => {
+            Start::Started((id, note)) => {
                 super::master::problem(&self.connection, project, None)?;
                 if let Some(note) = note {
                     self.note(project, &note)?;
                 }
                 self.brief(stored, access, id)
             }
-            Err(reason) => self.live_off(
+            Start::Held => {
+                if planned {
+                    self.master_restarts.insert(project.clone());
+                } else if let Some(starts) = self.live_starts.get_mut(project) {
+                    starts.pop();
+                }
+                Ok(())
+            }
+            Start::Refused(reason) => self.live_off(
                 project,
                 &format!("it could not start: {}", bound_text(&reason, 300)),
             ),
@@ -2942,15 +3062,15 @@ impl TeamRuntime {
     /// on another harness follows the owner's On harness switch setting: Carry over seeds
     /// the new conversation with a bounded handoff, Start fresh seeds nothing, and either
     /// note marks the switch. Takes the setup, the master harness, the account and the live
-    /// session. Returns the agent id with the note to show, or the plain reason it could not
-    /// start.
+    /// session. Returns the agent id with the note to show, Held while a projects home move
+    /// holds the project folder, or the plain reason it could not start.
     fn start_master(
         &mut self,
         stored: &StoredSetup,
         harness: &str,
         account: &TeamAccount,
         session: Option<&str>,
-    ) -> Result<Result<(i64, Option<String>), String>, EngineError> {
+    ) -> Result<Start<(i64, Option<String>)>, EngineError> {
         let project = &stored.project_id;
         let tools = stored.team.master_tools;
         let launch = launch_harness(harness).unwrap_or(harness);
@@ -2992,6 +3112,16 @@ impl TeamRuntime {
                     }
                 }
             }
+            (Some(session), None)
+                if crate::master_sessions::fresh_after_switch(
+                    &self.connection,
+                    project,
+                    session,
+                    launch,
+                )? =>
+            {
+                ResumePlan::New
+            }
             (Some(session), None) => crate::master_sessions::resume_harness(
                 &self.connection,
                 project,
@@ -3024,7 +3154,11 @@ impl TeamRuntime {
             self.resuming = None;
             if let Ok(id) = revived? {
                 assert_eq!(id, *agent);
-                return Ok(Ok(self.seat_session(id, session.as_ref(), None)));
+                return Ok(Start::Started(self.seat_session(
+                    id,
+                    session.as_ref(),
+                    None,
+                )));
             }
             let session = session.as_ref().expect("only a session resumes");
             let kept =
@@ -3063,18 +3197,18 @@ impl TeamRuntime {
             None => None,
         };
         let started = match started {
-            Some(id) => Ok(id),
-            None => self.spawn(stored, AgentRole::Master, harness, tools, account, None)?,
+            Some(id) => id,
+            None => match self.spawn(stored, AgentRole::Master, harness, tools, account, None)? {
+                Start::Started(id) => id,
+                Start::Held => return Ok(Start::Held),
+                Start::Refused(reason) => return Ok(Start::Refused(reason)),
+            },
         };
-        if started.is_ok()
-            && let (Some(session), Some(mode)) = (&session, switch_mode)
-        {
+        if let (Some(session), Some(mode)) = (&session, switch_mode) {
             super::record_switch(&self.connection, project, session.as_str(), launch, mode)?;
         }
-        Ok(started.map(|id| {
-            let (id, note) = self.seat_session(id, session.as_ref(), seeded);
-            (id, note.or(switch_note))
-        }))
+        let (id, note) = self.seat_session(started, session.as_ref(), seeded);
+        Ok(Start::Started((id, note.or(switch_note))))
     }
 
     /// Binds a live master that just started to the session it runs, with the seed its
@@ -4052,26 +4186,33 @@ impl TeamRuntime {
                 self.fail_task(task, "The team plan no longer has this harness")?;
                 continue;
             };
-            let idle = self
-                .workers
-                .iter()
-                .find(|(id, w)| {
-                    &w.project == project
-                        && w.role == AgentRole::Sub
-                        && w.harness == harness
-                        && w.busy.is_none()
-                        && w.own_turn.is_none()
-                        && !w.stopping
-                        && !paused.contains(&w.connection)
-                        && pin.map_or(w.parent == parent, |pin| pin == **id)
-                        && mode
-                            .as_deref()
-                            .is_none_or(|mode| self.stored_mode(**id).as_deref() == Some(mode))
-                })
-                .map(|(id, _)| *id);
+            let mut ended = 0;
+            let idle = loop {
+                let found = self
+                    .workers
+                    .iter()
+                    .find(|(id, w)| {
+                        &w.project == project
+                            && w.role == AgentRole::Sub
+                            && w.harness == harness
+                            && w.busy.is_none()
+                            && w.own_turn.is_none()
+                            && !w.stopping
+                            && !paused.contains(&w.connection)
+                            && pin.map_or(w.parent == parent, |pin| pin == **id)
+                            && mode
+                                .as_deref()
+                                .is_none_or(|mode| self.stored_mode(**id).as_deref() == Some(mode))
+                    })
+                    .map(|(id, _)| *id);
+                match found {
+                    Some(agent) if self.end_session(agent)? => ended += 1,
+                    found => break found,
+                }
+                assert!(ended <= self.workers.len());
+            };
             let mut woken_fresh = false;
             let agent = match (idle, pin) {
-                (Some(agent), _) if self.end_session(agent)? => continue,
                 (Some(agent), _) => agent,
                 (None, Some(pinned)) if self.workers.contains_key(&pinned) => continue,
                 (None, Some(pinned)) if super::owner_stopped(&self.connection, pinned)? => {
@@ -4141,11 +4282,12 @@ impl TeamRuntime {
                     );
                     self.naming = None;
                     match spawned? {
-                        Ok(agent) => {
+                        Start::Started(agent) => {
                             assert!(self.live(project, AgentRole::Sub, None) <= subs_max);
                             agent
                         }
-                        Err(problem) => {
+                        Start::Held => continue,
+                        Start::Refused(problem) => {
                             self.fail_task(
                                 task,
                                 &format!(
@@ -4297,31 +4439,33 @@ impl TeamRuntime {
                 else {
                     break;
                 };
-                let started = self.spawn(
+                match self.spawn(
                     stored,
                     AgentRole::Sub,
                     &slot.harness,
                     slot.tools,
                     &account,
                     None,
-                )?;
-                if let Ok(agent) = started {
-                    self.workers.get_mut(&agent).expect("worker exists").warm = true;
-                }
-                if let Err(problem) = started {
-                    self.connection
-                        .execute(
-                            "UPDATE team_settings SET keep_warm=0 WHERE project=?1",
-                            [project.as_str()],
-                        )
-                        .map_err(error)?;
-                    return self.note(
+                )? {
+                    Start::Started(agent) => {
+                        self.workers.get_mut(&agent).expect("worker exists").warm = true;
+                    }
+                    Start::Held => return Ok(()),
+                    Start::Refused(problem) => {
+                        self.connection
+                            .execute(
+                                "UPDATE team_settings SET keep_warm=0 WHERE project=?1",
+                                [project.as_str()],
+                            )
+                            .map_err(error)?;
+                        return self.note(
                         project,
                         &full_stop(format!(
                             "Keeping sub-agents warm was turned off because a sub-agent could not start: {}",
                             bound_text(&problem, 300)
                         )),
                     );
+                    }
                 }
             }
         }
@@ -4531,8 +4675,8 @@ impl TeamRuntime {
 
     /// Starts a new agent of the project, a worker of the lead `parent` names when one does
     /// (N1), so its worktree is cut from that lead's current commit. Takes the setup, role,
-    /// harness, tools switch, account and the lead. Returns the agent, or the plain reason it
-    /// could not start.
+    /// harness, tools switch, account and the lead. Returns the started agent, Held while a
+    /// projects home move holds its folder, or the plain reason it could not start.
     fn spawn(
         &mut self,
         stored: &StoredSetup,
@@ -4541,10 +4685,16 @@ impl TeamRuntime {
         tools: bool,
         account: &TeamAccount,
         parent: Option<i64>,
-    ) -> Result<Result<i64, String>, EngineError> {
+    ) -> Result<Start<i64>, EngineError> {
         self.spawn_run(stored, role, harness, tools, account, None, parent)
     }
 
+    /// Records and launches one new team agent, a worker of the lead `parent` names when one
+    /// does, unless the project already runs the most panes or a projects home move holds its
+    /// folder: the hold is checked in the same write transaction that records the agent, so a
+    /// move planned first holds the start back. Takes the setup, the role, harness, tools
+    /// switch, account, any register restart and the lead. Returns the started agent, Held,
+    /// or the plain reason it could not start.
     #[allow(clippy::too_many_arguments)]
     fn spawn_run(
         &mut self,
@@ -4555,27 +4705,39 @@ impl TeamRuntime {
         account: &TeamAccount,
         again: Option<&HostedRestart>,
         parent: Option<i64>,
-    ) -> Result<Result<i64, String>, EngineError> {
+    ) -> Result<Start<i64>, EngineError> {
         assert!(parent.is_none() || role == AgentRole::Sub);
         if self.panes(&stored.project_id) >= PANES_PER_PROJECT_MAX {
-            return Ok(Err(format!(
+            return Ok(Start::Refused(format!(
                 "the project already runs {PANES_PER_PROJECT_MAX} agents, the most one project may run at once"
             )));
         }
         let now = now_ms();
-        self.connection
-            .execute(
-                "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms,parent,mode)
-                 VALUES (?1,?2,?3,?4,?5,'starting',?6,?6,?7,(SELECT mode FROM team_tasks WHERE id=?8 AND project=?1))",
-                params![stored.project_id.as_str(), role.name(), harness, tools, account.connection.as_str(), now, parent, self.naming],
-            )
+        let tx = self
+            .connection
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
             .map_err(error)?;
-        let id = self.connection.last_insert_rowid();
+        if crate::projects_home::move_holds(&tx, &stored.project_folder()).map_err(error)? {
+            return Ok(Start::Held);
+        }
+        tx.execute(
+            "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms,parent,mode)
+             VALUES (?1,?2,?3,?4,?5,'starting',?6,?6,?7,(SELECT mode FROM team_tasks WHERE id=?8 AND project=?1))",
+            params![stored.project_id.as_str(), role.name(), harness, tools, account.connection.as_str(), now, parent, self.naming],
+        )
+        .map_err(error)?;
+        let id = tx.last_insert_rowid();
+        tx.commit().map_err(error)?;
         assert!(id > 0);
         if role == AgentRole::Sub {
             names::assign_persona(&self.connection, &stored.project_id, id)?;
         }
-        self.launch(stored, id, role, harness, tools, account, again, None)
+        Ok(
+            match self.launch(stored, id, role, harness, tools, account, again, None)? {
+                Ok(agent) => Start::Started(agent),
+                Err(reason) => Start::Refused(reason),
+            },
+        )
     }
 
     /// Wakes a stopped sub-agent (DEC-102), the one way a task pinned to it, the master's
@@ -4936,9 +5098,9 @@ impl TeamRuntime {
             Launch::Adopt(adoption) => adoption.managed.is_some() && !adoption.live,
         };
         assert!(!(kept_session && live));
-        let access = match &launch {
-            Launch::Fresh(plan, _) => plan.access,
-            Launch::Adopt(adoption) => adoption.access,
+        let (access, toolchains) = match &launch {
+            Launch::Fresh(plan, _) => (plan.access, Some(plan.toolchains.clone())),
+            Launch::Adopt(adoption) => (adoption.access, adoption.toolchains.clone()),
         };
         let thread = std::thread::Builder::new()
             .name(format!("team-agent-{id}"))
@@ -4992,11 +5154,13 @@ impl TeamRuntime {
                 spawned: Instant::now(),
                 handoff: None,
                 access,
-                lowered: false,
                 ran_before: Duration::ZERO,
                 told_finished: BTreeSet::new(),
                 parent,
                 ready: false,
+                toolchains,
+                checked: None,
+                narrowed: None,
             },
         );
         assert!(self.panes(&self.workers[&id].project) <= PANES_PER_PROJECT_MAX);
@@ -5447,8 +5611,9 @@ impl TeamRuntime {
         }
         let extra = crate::sandbox::extra_paths::load(&self.connection, stored.project_id.as_str())
             .map_err(|_| with_code("the project's read-only folders could not be read", None))?;
+        let toolchains = policy.allowed(&root);
         (sandbox, _) = sandbox
-            .allow_tools(&Toolchains::grant(&homes, &policy.allowed(&root)))
+            .allow_tools(&Toolchains::grant(&homes, &toolchains))
             .and_then(|sandbox| sandbox.allow_scratch(&scratch))
             .and_then(|sandbox| sandbox.allow_extra_reads(&extra))
             .map_err(sandboxed)?;
@@ -5663,6 +5828,7 @@ impl TeamRuntime {
             tools,
             sandbox_profile: profile,
             access: policy.access,
+            toolchains,
             layout,
             git_identity: owner_git_identity(&root),
             limits: self.launch_limits(),
@@ -5833,7 +5999,7 @@ impl TeamRuntime {
         if role == AgentRole::Master {
             return Ok(SkillRole::Master);
         }
-        let unread = |e: EngineError| LaunchError(e.0);
+        let unread = |e: EngineError| LaunchError(e.0, None);
         let leads = role == AgentRole::Sub
             && super::agent_depth(&self.connection, id).map_err(unread)?
                 < super::nesting(&self.connection, project)
@@ -5984,9 +6150,14 @@ impl TeamRuntime {
                     });
                     worker.spawned = Instant::now();
                 }
-                let access = Some(self.workers[&id].access);
-                let pane = pane.map(|record| PaneRecord { access, ..record });
-                let per_turn = self.workers[&id].managed && !self.workers[&id].live;
+                let worker = &self.workers[&id];
+                let (access, toolchains) = (Some(worker.access), worker.toolchains.clone());
+                let per_turn = worker.managed && !worker.live;
+                let pane = pane.map(|record| PaneRecord {
+                    access,
+                    toolchains,
+                    ..record
+                });
                 if let Some(record) = pane
                     .as_ref()
                     .filter(|_| !per_turn)
@@ -6315,14 +6486,7 @@ impl TeamRuntime {
                 } else {
                     AgentStatus::Stopped
                 };
-                let problem = problem.or_else(|| {
-                    worker.lowered.then(|| {
-                        with_code(
-                            "the project's agent access was lowered, so the agent was stopped; its next start uses the new level",
-                            Some("agent_access_lowered"),
-                        )
-                    })
-                });
+                let problem = problem.or_else(|| worker.narrowed.map(Narrowed::problem));
                 if let Some(hosted) = worker.hosted.take() {
                     let state = if status == AgentStatus::Failed {
                         RunState::Failed
@@ -7022,7 +7186,7 @@ fn work(
                         if resume.is_some() && problem.0 == RESUME_REFUSED {
                             let _ = reports.send(Report::ResumeRefused);
                         }
-                        with_code("The agent could not start", Some(&problem.0))
+                        start_problem(&problem)
                     })
                 })
             }
@@ -7057,7 +7221,7 @@ fn work(
     };
     let problem = match started {
         Ok(AgentSession::Terminal(session)) if adopted_live => {
-            live_serve(*session, &orders, &reports, &cancel, &leave, true)
+            live_serve(*session, &orders, &reports, &cancel, &leave, true, None)
         }
         Ok(session) => serve(
             session, None, &orders, &reports, &cancel, &interrupt, &leave,
@@ -7137,26 +7301,24 @@ fn live(
             )
         }
     };
-    let problem = match started {
+    match started {
         Ok(AgentSession::Terminal(session)) => {
-            live_serve(*session, orders, reports, cancel, leave, keep)
+            live_serve(*session, orders, reports, cancel, leave, keep, held)
         }
-        Ok(other) => {
-            let _ = other.stop();
+        Ok(other) => settle_stop(other.stop(), held).or_else(|| {
             Some(with_code(
                 "The master has no terminal app to run live",
                 Some("team_master_no_terminal"),
             ))
-        }
+        }),
         Err(problem) => {
+            drop(held);
             if resume.is_some() && problem.0 == RESUME_REFUSED {
                 let _ = reports.send(Report::ResumeRefused);
             }
-            Some(with_code("The agent could not start", Some(&problem.0)))
+            Some(start_problem(&problem))
         }
-    };
-    drop(held);
-    problem
+    }
 }
 
 /// Takes over the pane of a live master on a signed-in account that an earlier engine left
@@ -7184,13 +7346,13 @@ fn live_adopted(
     let grant = match next_turn(orders, cancel, None) {
         Next::Start(_, Some(grant)) => grant,
         Next::Start(_, None) | Next::Turn(..) => {
-            let _ = host.kill(&agent);
+            let _ = end_left_pane(host.as_ref(), &agent, "team");
             record.remove_context_files();
             return Some("The live master was taken over without its signed-in account".into());
         }
         Next::Stop | Next::Closed(_) => {
             if !leave.load(Ordering::SeqCst) {
-                let _ = host.kill(&agent);
+                let _ = end_left_pane(host.as_ref(), &agent, "team");
                 record.remove_context_files();
             }
             return None;
@@ -7204,7 +7366,7 @@ fn live_adopted(
     ) {
         Ok(credential) => credential,
         Err(problem) => {
-            let _ = host.kill(&agent);
+            let _ = end_left_pane(host.as_ref(), &agent, "team");
             record.remove_context_files();
             return Some(with_code(
                 "The signed-in account could not reach the agent",
@@ -7212,36 +7374,38 @@ fn live_adopted(
             ));
         }
     };
-    let problem = match AgentSession::adopt(host.clone(), agent.clone(), &record, limits) {
+    let held = Some((credential, profile));
+    match AgentSession::adopt(host.clone(), agent.clone(), &record, limits) {
         Ok(AgentSession::Terminal(session)) => {
-            live_serve(*session, orders, reports, cancel, leave, true)
+            live_serve(*session, orders, reports, cancel, leave, true, held)
         }
-        Ok(other) => {
-            let _ = other.stop();
+        Ok(other) => settle_stop(other.stop(), held).or_else(|| {
             Some(with_code(
                 "The master has no terminal app to run live",
                 Some("team_master_no_terminal"),
             ))
-        }
+        }),
         Err(problem) => {
-            let _ = host.kill(&agent);
+            if matches!(end_left_pane(host.as_ref(), &agent, "team"), Ok(false)) {
+                return settle_stop(Err(Unstopped::Uncertain), held);
+            }
+            drop(held);
             Some(with_code(
                 "The agent's running terminal could not be taken over",
                 Some(&problem.0),
             ))
         }
-    };
-    drop(credential);
-    drop(profile);
-    problem
+    }
 }
 
 /// Follows every turn of a live master's pane, the owner's included, and reports each
 /// start and end with the turn's reply text, bounded, for landing, usage and reply-line
 /// delegation. A turn the provider refused for a rate limit ends the session so the
 /// engine moves the master to another pool account. Nothing is typed into the pane at
-/// start. Takes the session, the worker's channels and flags, and whether a later engine
-/// may take the pane over. Returns the problem that ended it, if any.
+/// start. Takes the session, the worker's channels and flags, whether a later engine may
+/// take the pane over, and the account's credential copy and lease the session holds, if
+/// any, which the stop settles (see [`settle_stop`]). Returns the problem that ended it, if
+/// any, a stop's own problem first.
 fn live_serve(
     mut session: TerminalSession,
     orders: &Receiver<Order>,
@@ -7249,6 +7413,7 @@ fn live_serve(
     cancel: &AtomicBool,
     leave: &AtomicBool,
     keep: bool,
+    held: Option<Held>,
 ) -> Option<String> {
     session.follow_every_turn();
     let _ = reports.send(Report::Ready {
@@ -7316,10 +7481,47 @@ fn live_serve(
     assert!(text.len() <= LIVE_REPLY_BYTES_MAX);
     if problem.is_none() && keep && leave.load(Ordering::SeqCst) {
         session.leave();
-    } else {
-        session.stop();
+        drop(held);
+        return None;
     }
-    problem
+    settle_stop(session.stop(), held).or(problem)
+}
+
+/// The account's credential copy and lease an agent's harness holds while it runs.
+type Held = (AgentCredential, NativeProfileUse);
+
+/// Settles what an agent's harness stop leaves behind: a clean stop drops the credential
+/// copy and lease; a stop no warden confirmed keeps both for the engine's life; a Full
+/// access stop that left processes running, or could not list them, keeps both until a
+/// listing shows none running (see [`crate::harnesses::leftovers::Leftovers::hold`]), with
+/// the copy's keeper stopped so no renewed token reaches it. Inputs: the stop's outcome and what the
+/// harness held, if anything. Output: none for a clean stop, or the plain problem, naming
+/// what still runs and that Full access cannot stop it.
+fn settle_stop(stopped: Result<Option<i32>, Unstopped>, held: Option<Held>) -> Option<String> {
+    match stopped {
+        Ok(_) => {
+            drop(held);
+            None
+        }
+        Err(Unstopped::Uncertain) => {
+            if let Some((credential, profile)) = held {
+                credential.retain();
+                std::mem::forget(profile);
+            }
+            Some(with_code(
+                crate::sandbox::warden::CLEANUP_UNCERTAIN,
+                Some(crate::harnesses::leftovers::UNCERTAIN),
+            ))
+        }
+        Err(Unstopped::Left(left)) => {
+            let problem = with_code(&left.plain(), Some(left.code()));
+            if let Some((mut credential, profile)) = held {
+                credential.stop_renewing();
+                left.hold(Some(profile.account().clone()), (credential, profile));
+            }
+            Some(problem)
+        }
+    }
 }
 
 enum Next {
@@ -7656,7 +7858,8 @@ fn next_lead_turn(
 /// stops the running turn and leaves the pane running for the next engine. A kept
 /// session's credential copy and custody use are released once its process stopped or was
 /// left. A stop its warden did not confirm keeps both for the engine's life and ends the
-/// agent with that problem.
+/// agent with that problem; a Full access stop that left processes running keeps both
+/// until they end, names them and ends the agent.
 fn serve(
     mut session: AgentSession,
     kept: Option<Kept>,
@@ -7714,15 +7917,8 @@ fn serve(
     if problem.is_none() && leave.load(Ordering::SeqCst) {
         let _ = session.interrupt();
         session.leave();
-    } else if let Err(uncertain) = session.stop() {
-        if let Some((credential, profile)) = held {
-            credential.retain();
-            std::mem::forget(profile);
-        }
-        return Some(with_code(
-            crate::sandbox::warden::CLEANUP_UNCERTAIN,
-            Some(&uncertain.0),
-        ));
+    } else {
+        return settle_stop(session.stop(), held).or(problem);
     }
     drop(held);
     problem
@@ -7730,7 +7926,9 @@ fn serve(
 
 /// Serves turns on an agent of a signed-in account, starting its harness for each turn with
 /// the account's credential copy and lease, both released once the turn's harness stops. A
-/// stop its warden did not confirm keeps both for the engine's life and ends the agent.
+/// stop its warden did not confirm keeps both for the engine's life and ends the agent; a
+/// Full access stop that left processes running keeps both until they end, names them and
+/// ends the agent.
 /// A sub-agent's turn continues the conversation its previous turn recorded, or the one the
 /// plan resumes for a woken agent, and a new conversation is reported so a later wake
 /// continues it; a refused resume is reported and ends the agent as a kept one does. A
@@ -7809,7 +8007,7 @@ fn per_turn(
                     end: TurnEnd::Closed,
                     cause: Some(problem.0.clone()),
                 });
-                return Some(with_code("The agent could not start", Some(&problem.0)));
+                return Some(start_problem(&problem));
             }
         };
         if !plan.continues {
@@ -7828,27 +8026,15 @@ fn per_turn(
             let _ = reports.send(Report::Conversation(recorded.clone()));
             resume = Some(recorded);
         }
-        let stopped = session.stop();
-        let reusable = stopped.is_ok()
+        let stopped = settle_stop(session.stop(), Some((credential, profile)));
+        let reusable = stopped.is_none()
             && matches!(
                 end,
                 TurnEnd::Success | TurnEnd::Failed | TurnEnd::Interrupted
             );
-        let closed = match stopped {
-            Ok(_) => {
-                drop(credential);
-                drop(profile);
-                (end == TurnEnd::Closed).then(|| with_code(PROCESS_CLOSED, cause.as_deref()))
-            }
-            Err(uncertain) => {
-                credential.retain();
-                std::mem::forget(profile);
-                Some(with_code(
-                    crate::sandbox::warden::CLEANUP_UNCERTAIN,
-                    Some(&uncertain.0),
-                ))
-            }
-        };
+        let closed = stopped.or_else(|| {
+            (end == TurnEnd::Closed).then(|| with_code(PROCESS_CLOSED, cause.as_deref()))
+        });
         if reports.send(Report::Finished { text, end, cause }).is_err() || !reusable {
             return closed;
         }
@@ -8151,6 +8337,16 @@ fn turn_bound(limits: super::TimeLimits, ran: Duration) -> Option<(Duration, Tur
     match (task, session) {
         (Some(task), Some(session)) => Some(if session.0 < task.0 { session } else { task }),
         (task, session) => task.or(session),
+    }
+}
+
+/// The owner's line for an agent whose harness could not start: a command that would hold
+/// an MCP secret names its server and secret, any other refusal names its plain code.
+/// Input: the launch error. Output: the line.
+fn start_problem(problem: &LaunchError) -> String {
+    match crate::launch_context::secret_in_command_text(problem) {
+        Some(sentence) => format!("The agent could not start. {sentence}"),
+        None => with_code("The agent could not start", Some(&problem.0)),
     }
 }
 

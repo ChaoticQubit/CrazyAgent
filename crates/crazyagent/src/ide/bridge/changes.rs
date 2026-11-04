@@ -207,16 +207,18 @@ fn fit(sets: Vec<IdeChangeSet>) -> Result<Vec<IdeChangeSet>, EngineError> {
     Ok(kept)
 }
 
-/// Answers `ide.change_diff`: one page of a change set of the IDE's project. Inputs: the
-/// store, the project, the change set and the page. Output: the page.
+/// Answers `ide.change_diff`: one page of a change set of the IDE's project, at the head the
+/// set holds now. Inputs: the store, the project, the change set and the page. Output: the
+/// page, or `changes_stale` when the set moves between the read of its head and the page.
 pub(crate) fn change_diff(
     db: &Connection,
     project: &ProjectId,
     id: &ChangeSetId,
     page: u16,
 ) -> Result<ChangeDiff, EngineError> {
-    landing::ide::locate(db, project, id)?;
-    landing::diff(db, id, page)
+    let head = landing::ide::view(db, project, id)?.head;
+    assert!(!head.is_empty(), "a change set always has a head");
+    landing::diff(db, id, &head, page)
 }
 
 /// Answers `ide.base_blob`: one page of the base text of one text file of a change set of

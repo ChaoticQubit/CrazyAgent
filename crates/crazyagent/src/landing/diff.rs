@@ -1,4 +1,4 @@
-use super::git::{OUTPUT_BYTES_MAX, Repo, failure, is_object_id};
+use super::git::{LISTING_BYTES_MAX, OUTPUT_BYTES_MAX, Repo, failure, is_object_id};
 use super::{ChangeDiff, ChangedFile, FileKind, FileMark, FileStatus};
 use crate::engine::EngineError;
 use crate::ide::agent_config;
@@ -13,6 +13,7 @@ const RECENT_BYTES_MAX: usize = 16 * 1024 * 1024;
 pub(super) const RECENT_MAX: usize = 32;
 const LISTS_BYTES_MAX: usize = 4 * 1024 * 1024;
 const LISTS_MAX: usize = 64;
+const FED_SOURCES_MAX: usize = 16;
 
 /// A change's diff computed once: its files and plain patch text, each cut into pages,
 /// and whether git's output stopped at the byte bound.
@@ -103,10 +104,13 @@ pub(super) struct Stats {
 }
 
 /// Replaces every control character but newline and tab, and every bidirectional
-/// override or isolate, with U+FFFD, so text shown to the owner cannot move a terminal
-/// cursor or reorder what it shows. Input: the text. Output: the plain text.
+/// override or isolate, with U+FFFD, then shows every other character a reviewer cannot
+/// see, such as zero-width, tag and line separator characters, as its `memory::visible_text`
+/// escape, so text shown to the owner cannot move a terminal cursor, reorder what it shows
+/// or hide text from it. Input: the text. Output: the plain text.
 pub(super) fn plain(text: &str) -> String {
-    text.chars()
+    let replaced: String = text
+        .chars()
         .map(|c| {
             let bidi = matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{200E}' | '\u{200F}' | '\u{061C}');
             if (c.is_control() && c != '\n' && c != '\t') || bidi {
@@ -115,7 +119,8 @@ pub(super) fn plain(text: &str) -> String {
                 c
             }
         })
-        .collect()
+        .collect();
+    crate::memory::visible_text(&replaced)
 }
 
 fn text(bytes: &[u8]) -> Result<&str, EngineError> {
@@ -209,10 +214,135 @@ fn named(path: &str, name: &str) -> bool {
     agent_config::same_name(path.rsplit('/').next().unwrap_or(path), name)
 }
 
+/// One entry of a git tree listing: its mode, object id and path in the project.
+struct Entry {
+    mode: String,
+    object: String,
+    path: String,
+}
+
+/// Lists one folder of a commit's tree without going into its subfolders, as far as
+/// `LISTING_BYTES_MAX` of listing holds; entries past the bound are left out. Inputs: the
+/// repository, the commit and the folder, None for the root. Output: the entries.
+fn entries(repo: &Repo, commit: &str, folder: Option<&str>) -> Result<Vec<Entry>, EngineError> {
+    let inside = folder.map(|folder| format!("{folder}/"));
+    let mut args = vec![
+        "ls-tree",
+        "-z",
+        "--full-tree",
+        "--format=%(objectmode) %(objectname)%x09%(path)",
+        commit,
+    ];
+    if let Some(inside) = &inside {
+        args.extend(["--", inside.as_str()]);
+    }
+    let output = repo.exec(&args, None, &[], LISTING_BYTES_MAX)?;
+    if output.code != 0 {
+        return Err(failure("changes_git_failed"));
+    }
+    let mut listed: Vec<&[u8]> = output.stdout.split(|byte| *byte == 0).collect();
+    listed.pop();
+    Ok(listed
+        .into_iter()
+        .filter_map(|entry| std::str::from_utf8(entry).ok())
+        .filter_map(|entry| {
+            let (fields, path) = entry.split_once('\t')?;
+            let (mode, object) = fields.split_once(' ')?;
+            Some(Entry {
+                mode: mode.to_owned(),
+                object: object.to_owned(),
+                path: path.to_owned(),
+            })
+        })
+        .collect())
+}
+
+/// Reads a blob's text up to the instruction file bound, with invalid UTF-8 replaced.
+/// Inputs: the repository and the blob id. Output: the text.
+fn blob_text(repo: &Repo, object: &str) -> Result<String, EngineError> {
+    if !is_object_id(object) {
+        return Err(failure("changes_git_failed"));
+    }
+    let output = repo.exec(
+        &["cat-file", "blob", object],
+        None,
+        &[],
+        crate::instruction_files::FILE_BYTES_MAX,
+    )?;
+    if output.code != 0 {
+        return Err(failure("changes_git_failed"));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// The project paths whose text an instruction file of one commit feeds to agents besides
+/// its own: what a root instruction file, or one in a root `.claude` or `.codex` folder,
+/// imports with `@` or links to, and the folder a root `.claude` or `.codex` link points at,
+/// one level deep. A source already read at the same path and object is read once.
+/// Inputs: the repository, the commit and the sources read so far. Output: each path with
+/// whether it is a folder.
+fn fed_paths(
+    repo: &Repo,
+    commit: &str,
+    read: &mut Vec<(String, String)>,
+) -> Result<Vec<(String, bool)>, EngineError> {
+    use crate::instruction_files::{harness_folder, imports, instruction_name, resolved};
+    let mut sources = Vec::new();
+    let mut feeds = Vec::new();
+    for entry in entries(repo, commit, None)? {
+        if harness_folder(&entry.path) {
+            match entry.mode.as_str() {
+                "040000" => sources.extend(
+                    entries(repo, commit, Some(entry.path.as_str()))?
+                        .into_iter()
+                        .filter(|child| {
+                            instruction_name(child.path.rsplit('/').next().unwrap_or_default())
+                        }),
+                ),
+                "120000" => feeds.extend(
+                    resolved(&entry.path, &blob_text(repo, &entry.object)?)
+                        .map(|folder| (folder, true)),
+                ),
+                _ => {}
+            }
+        } else if instruction_name(&entry.path) {
+            sources.push(entry);
+        }
+    }
+    for source in sources.into_iter().take(FED_SOURCES_MAX) {
+        let key = (source.path.clone(), source.object.clone());
+        if read.contains(&key) {
+            continue;
+        }
+        read.push(key);
+        match source.mode.as_str() {
+            "120000" => feeds.extend(
+                resolved(&source.path, &blob_text(repo, &source.object)?).map(|file| (file, false)),
+            ),
+            "100644" | "100755" => feeds.extend(
+                imports(&source.path, &blob_text(repo, &source.object)?)
+                    .into_iter()
+                    .map(|file| (file, false)),
+            ),
+            _ => {}
+        }
+    }
+    Ok(feeds)
+}
+
 /// Lists the files a change touches with their status, kind and the marks the owner
-/// should look at. Inputs: the repository and the two commits. Output: the files.
+/// should look at. A file is marked as an instruction file by its own name or folder, or
+/// when an instruction file of either commit imports it or links to it.
+/// Inputs: the repository and the two commits. Output: the files.
 pub(super) fn files(repo: &Repo, base: &str, head: &str) -> Result<Vec<ChangedFile>, EngineError> {
     let counts = numstat(repo, base, head)?;
+    let mut read = Vec::new();
+    let mut feeds = fed_paths(repo, base, &mut read)?;
+    feeds.extend(fed_paths(repo, head, &mut read)?);
+    let instruction = |path: &str| {
+        crate::instruction_files::instruction_file(path)
+            || crate::instruction_files::fed(&feeds, path)
+    };
     let printed = repo.run(&[
         "diff-tree",
         "-r",
@@ -267,6 +397,9 @@ pub(super) fn files(repo: &Repo, base: &str, head: &str) -> Result<Vec<ChangedFi
         }
         if named(path, ".gitmodules") || old_path.is_some_and(|old| named(old, ".gitmodules")) {
             marks.push(FileMark::Modules);
+        }
+        if instruction(path) || old_path.is_some_and(instruction) {
+            marks.push(FileMark::Instructions);
         }
         if old_mode != "000000" && new_mode != "000000" && old_mode != new_mode {
             marks.push(FileMark::Mode);

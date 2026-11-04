@@ -320,6 +320,14 @@ pub trait Host: Send + Sync {
     ) -> Result<PaneRef, HostError> {
         Err(failure(OWN_SERVER_UNAVAILABLE))
     }
+    /// Names the first process of a live agent terminal's own pane as the host reads it while
+    /// the terminal runs, so a caller holding no session for it can end what its harness left:
+    /// on a lead's server the pane tagged with the agent's name, else its window's first pane.
+    /// Takes the name; an unknown name fails with `terminal_agent_unknown`. Returns the
+    /// process id, or none for a host that cannot tell.
+    fn pane_pid(&self, _agent: &AgentId) -> Result<Option<u32>, HostError> {
+        Ok(None)
+    }
 
     /// Lists the agent terminals still running, reconnecting to the host first when needed.
     /// Takes nothing; after an engine restart this maps surviving terminals back to their agents.
@@ -388,6 +396,10 @@ impl Host for OwnServer {
 
     fn panes(&self, agent: &AgentId) -> Result<Vec<PaneInfo>, HostError> {
         self.0.panes(agent)
+    }
+
+    fn pane_pid(&self, agent: &AgentId) -> Result<Option<u32>, HostError> {
+        self.0.pane_pid(agent)
     }
 
     fn kill_pane(&self, agent: &AgentId, pane: &str) -> Result<(), HostError> {

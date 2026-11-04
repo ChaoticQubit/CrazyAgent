@@ -1,3 +1,4 @@
+pub use super::agent_messages::Said;
 use super::{
     AgentRole, AgentStatus, MessageAuthor, MessageState, append_message, bound_text, error,
     make_room,
@@ -27,6 +28,7 @@ pub const SEND_BYTES_MAX: usize = crate::terminal::PROMPT_BYTES_MAX;
 pub const ESCALATION_BYTES_MAX: usize = 2000;
 pub const NOTIFICATIONS_PER_PROJECT_MAX: i64 = 200;
 pub const STATUS_EVENTS_MAX: i64 = 50;
+const LEFT_OUT_LINE_BYTES_MAX: usize = 64;
 pub const STATUS_AGENTS_MAX: i64 = super::STATUS_AGENTS_MAX;
 pub const VIEW_NOTIFICATIONS_MAX: i64 = 20;
 pub const APP_NOTIFICATIONS_MAX: i64 = 50;
@@ -83,7 +85,7 @@ impl EventKind {
         }
     }
 
-    fn parse(value: &str) -> Option<Self> {
+    pub(super) fn parse(value: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|kind| kind.name() == value)
     }
 
@@ -135,7 +137,7 @@ impl EventState {
         }
     }
 
-    fn parse(value: &str) -> Option<Self> {
+    pub(super) fn parse(value: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|state| state.name() == value)
     }
 }
@@ -297,9 +299,10 @@ pub struct EventsStatus {
 }
 
 impl EventsStatus {
-    /// Writes the status as plain lines for the master's tool reply. Takes the status.
-    /// Returns one line per running agent, the finished agents it can wake, newest first,
-    /// then the newest events, oldest first.
+    /// Writes the status as plain lines for the master's tool reply, within
+    /// `REPLY_TEXT_MAX`. Takes the status. Returns one line per running agent, the finished
+    /// agents it can wake, newest first, then the newest events that fit, oldest first,
+    /// after one line saying how many older events were left out to fit (WKC-3).
     pub fn text(&self) -> String {
         let mut text = String::new();
         if self.agents.is_empty() {
@@ -331,10 +334,29 @@ impl EventsStatus {
         if self.paused {
             text.push_str("Auto-wake is paused at its hourly cap.\n");
         }
-        for event in &self.events {
-            text.push_str(&line(event));
+        let budget =
+            super::tool::REPLY_TEXT_MAX.saturating_sub(text.len() + LEFT_OUT_LINE_BYTES_MAX);
+        let mut used = 0;
+        let mut kept = Vec::new();
+        for event in self.events.iter().rev() {
+            let line = line(event);
+            if used + line.len() + 1 > budget {
+                break;
+            }
+            used += line.len() + 1;
+            kept.push(line);
+        }
+        let left = self.events.len() - kept.len();
+        if left > 0 {
+            text.push_str(&format!(
+                "{left} older events left out to fit this reply.\n"
+            ));
+        }
+        for line in kept.iter().rev() {
+            text.push_str(line);
             text.push('\n');
         }
+        assert!(kept.is_empty() || text.len() <= super::tool::REPLY_TEXT_MAX);
         text
     }
 }
@@ -1004,42 +1026,53 @@ fn by_id_form(
 
 /// Types a master's message or answer into one of its project's sub-agents' terminal as one
 /// submission, the way an owner prompt is typed: control keys are dropped, so the text
-/// cannot press keys. Clears the agent's waiting mark. Takes the connection, the terminal
-/// host, the project, the agent's name as `resolve` reads it and the text. Returns the agent
-/// id, or a plain refusal code for blank or long text, an unknown or stopped agent or an
-/// unreachable terminal.
+/// cannot press keys. Clears the agent's waiting mark and keeps what was typed for the
+/// agent's Messages timeline. Takes the connection, the terminal host, the project, the
+/// agent's name as `resolve` reads it, whether it is a message or an answer and the text.
+/// Returns the agent id, or a plain refusal code for blank or long text, an unknown or
+/// stopped agent or an unreachable terminal.
 pub fn send_to_agent(
     connection: &Connection,
     host: &dyn Host,
     project: &ProjectId,
     agent: &str,
+    said: Said,
     text: &str,
 ) -> Result<Result<i64, &'static str>, EngineError> {
     let found = resolve(connection, project, agent)?;
-    send_to(connection, host, found, text)
+    send_to(connection, host, found, said, text)
 }
 
 /// Types a master's message or answer into the sub-agent [`resolve`] found, as
 /// [`send_to_agent`] does, so a caller that already resolved the name passes its id rather
-/// than a name to read again. Takes the connection, the terminal host, the agent or None
-/// when no agent was found, and the text. Returns the agent id, or the same plain refusal
-/// codes.
+/// than a name to read again. Only text the terminal took is kept, with the waiting mark
+/// cleared in the same transaction. Takes the connection, the terminal host, the agent or
+/// None when no agent was found, whether it is a message, an answer or an engine notice,
+/// and the text.
+/// Returns the agent id, or the same plain refusal codes.
 pub fn send_to(
     connection: &Connection,
     host: &dyn Host,
     found: Option<i64>,
+    said: Said,
     text: &str,
 ) -> Result<Result<i64, &'static str>, EngineError> {
+    assert!(
+        said != Said::Prompt,
+        "the master sends messages and answers, the engine notices"
+    );
     if text.trim().is_empty() || text.len() > SEND_BYTES_MAX {
         return Ok(Err("team_message_invalid"));
     }
     let Some(id) = found else {
         return Ok(Err("team_agent_not_found"));
     };
-    let status: String = connection
-        .query_row("SELECT status FROM team_agents WHERE id=?1", [id], |row| {
-            row.get(0)
-        })
+    let (status, project): (String, String) = connection
+        .query_row(
+            "SELECT status,project FROM team_agents WHERE id=?1",
+            [id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
         .map_err(error)?;
     if !AgentStatus::parse(&status).is_some_and(AgentStatus::live) {
         return Ok(Err("team_agent_not_running"));
@@ -1053,7 +1086,11 @@ pub fn send_to(
         }
         Err(_) => return Ok(Err("team_agent_unreachable")),
     }
-    clear_waiting(connection, id)?;
+    let project = ProjectId::new(project).map_err(|_| error("team_agent_project_invalid"))?;
+    let tx = immediate(connection)?;
+    super::agent_messages::record(&tx, &project, id, said, text, super::now_ms())?;
+    clear_waiting(&tx, id)?;
+    tx.commit().map_err(error)?;
     Ok(Ok(id))
 }
 
@@ -1207,23 +1244,45 @@ pub fn forward_to_parents(
 /// The handlers the live master's `message`, `answer` and `status` tools call, set on the
 /// team runtime with `TeamRuntime::with_events`.
 pub const HANDLERS: super::master::TeamEvents = super::master::TeamEvents {
-    send_to_agent: tool_send,
-    answer: tool_send,
+    send_to_agent: tool_message,
+    answer: tool_answer,
     status: tool_status,
 };
 
-/// Types a live master's message or answer into one of its sub-agents for its team tools.
-/// Takes the connection, terminal host, project, the agent's name and the text.
-/// Returns the sentence the master reads, or the plain reason nothing was typed.
-fn tool_send(
+fn tool_message(
     connection: &Connection,
     host: &dyn Host,
     project: &ProjectId,
     agent: &str,
     text: &str,
 ) -> Result<String, String> {
+    tool_send(connection, host, project, agent, Said::Message, text)
+}
+
+fn tool_answer(
+    connection: &Connection,
+    host: &dyn Host,
+    project: &ProjectId,
+    agent: &str,
+    text: &str,
+) -> Result<String, String> {
+    tool_send(connection, host, project, agent, Said::Answer, text)
+}
+
+/// Types a live master's message or answer into one of its sub-agents for its team tools.
+/// Takes the connection, terminal host, project, the agent's name, whether it is a message
+/// or an answer and the text. Returns the sentence the master reads, or the plain reason
+/// nothing was typed.
+fn tool_send(
+    connection: &Connection,
+    host: &dyn Host,
+    project: &ProjectId,
+    agent: &str,
+    said: Said,
+    text: &str,
+) -> Result<String, String> {
     let refused = |reason: &str| Err(format!("Not sent: {reason}"));
-    match send_to_agent(connection, host, project, agent, text) {
+    match send_to_agent(connection, host, project, agent, said, text) {
         Ok(Ok(id)) => Ok(format!(
             "Typed into {}.",
             label(connection, id).map_err(|_| "Not sent: the team database is unavailable.")?
@@ -1653,6 +1712,10 @@ const CLOSE_BRACKETS: [char; 16] = [
 ];
 
 const QUOTE: &str = "> ";
+const BIDI_CONTROLS: [char; 12] = [
+    '\u{061c}', '\u{200e}', '\u{200f}', '\u{202a}', '\u{202b}', '\u{202c}', '\u{202d}', '\u{202e}',
+    '\u{2066}', '\u{2067}', '\u{2068}', '\u{2069}',
+];
 
 /// Writes text a sub-agent wrote as the master reads it on lines of its own: made plain by
 /// `plain_agent_text`, and every line opened with `> `, so no line of it can start as the
@@ -1695,14 +1758,15 @@ fn line_break(c: char) -> bool {
     )
 }
 
-/// Makes agent text plain for the master: square brackets and the brackets that look like
-/// them, fullwidth, white, lenticular and tortoise shell ones among them, become parentheses,
-/// so agent text can never show a `[owner]` or `[team]` tag, and control characters other
-/// than line feed and tab are dropped, so one escape or carriage return never makes the
-/// master refuse a whole message; IDE review comments use it too. Takes the text. Returns it.
+/// Makes agent text plain for the master, the owner's timelines and IDE review comments:
+/// square brackets and the brackets that look like them, fullwidth, white, lenticular and
+/// tortoise shell ones among them, become parentheses, so agent text never shows a `[owner]`
+/// or `[team]` tag; control characters other than line feed and tab are dropped, so one escape
+/// or carriage return never makes the master refuse a whole message; and bidirectional controls
+/// are dropped, so no text reorders what is shown around it. Takes the text. Returns it.
 pub(crate) fn plain_agent_text(text: &str) -> String {
     text.chars()
-        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+        .filter(|c| (!c.is_control() || matches!(c, '\n' | '\t')) && !BIDI_CONTROLS.contains(c))
         .map(|c| {
             if OPEN_BRACKETS.contains(&c) {
                 '('

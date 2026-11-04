@@ -1,5 +1,6 @@
 use super::{
-    BridgeError, IntentReceipt, NativeBridge, bounded, caused, failure, native_project_id,
+    BridgeError, BridgeQueue, IntentReceipt, NativeBridge, Unlocked, bounded, caused, failure,
+    native_project_id,
 };
 use crazyagent::engine::owner::OwnerMutation;
 use crazyagent::memory::{KnowledgeEntry, KnowledgeStatus, ReviewDecision};
@@ -394,19 +395,30 @@ impl NativeBridge {
     }
 
     /// Lists a set-up project's files for the console's `@` completion: tracked and
-    /// untracked, not ignored paths relative to its folder that contain the query.
-    /// Takes the project id and the query. Returns at most 200 paths in git's order.
-    pub async fn project_files(&self, id: &str, query: &str) -> Result<Vec<String>, BridgeError> {
-        let paths = self
-            .reader()?
-            .project_files(
-                project(id)?,
-                query.to_owned(),
-                crazyagent::project_files::FILES_MAX,
-            )
-            .await
-            .map_err(|e| read_failure(&e.0))?;
-        bounded(paths)
+    /// untracked, not ignored paths relative to its folder that contain the query. The
+    /// listing runs on a copy of the controller without the bridge and leaves the bridge
+    /// controller's view as it was. Takes the project id and the query. Returns the
+    /// listing, which gives at most 200 paths in git's order.
+    pub fn project_files(
+        &self,
+        id: &str,
+        query: &str,
+    ) -> Result<Unlocked<Vec<String>>, BridgeError> {
+        let mut controller = self
+            .controller
+            .as_ref()
+            .ok_or_else(|| failure("not_connected"))?
+            .reader()
+            .map_err(|_| failure("not_connected"))?;
+        let project_id = project(id)?;
+        let query = query.to_owned();
+        Ok(Box::pin(async move {
+            let paths = controller
+                .project_files(project_id, query, crazyagent::project_files::FILES_MAX)
+                .await
+                .map_err(|e| read_failure(&e.0))?;
+            bounded(paths)
+        }))
     }
 
     /// Replaces a project's extra read-only folders; the engine refuses a relative or missing
@@ -649,5 +661,18 @@ impl NativeBridge {
             .await
             .map_err(|e| read_failure(&e.0))?;
         bounded(ResearchLog { lines })
+    }
+}
+
+impl BridgeQueue {
+    /// Lists a set-up project's files for the console's `@` completion through the window's
+    /// bridge queue. Takes a listing place, then the shared bridge only to start the listing,
+    /// so a change asked while git runs does not wait for it. Takes the project id and the
+    /// query. Returns at most 200 paths in git's order, or `busy` when no place or bridge
+    /// comes free within the queue's wait.
+    pub async fn project_files(&self, id: &str, query: &str) -> Result<Vec<String>, BridgeError> {
+        let _place = self.listing().await?;
+        let listing = self.read().await?.project_files(id, query)?;
+        listing.await
     }
 }

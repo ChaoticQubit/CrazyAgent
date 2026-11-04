@@ -235,6 +235,9 @@ export function errorMessage(error: unknown): string {
     connection_not_found: "That connection no longer exists. Refresh and inspect it again.",
     pool_not_found: "That pool no longer exists. Refresh and inspect it again.",
     pool_member_limit: "A pool can hold up to 15 accounts",
+    linux_limited_network_off: "The Linux limited-network sockets setting is 'Do not start limited-network agents', so this master does not start. Pick another Linux limited-network sockets option in Settings.",
+    linux_resolver_needs_udp: "This harness cannot look up names over TCP, which the Linux setting 'TCP only' needs. Choose 'TCP ports only' for Linux limited-network sockets in Settings, which lets UDP and other sockets reach any host.",
+    linux_harness_unchecked: "This harness starts through a script CrazyAgent cannot check for the Linux setting 'TCP only', so it does not start. Start it from a program, or a script whose first line names a program by its full path, or choose 'TCP ports only' for Linux limited-network sockets in Settings, which lets UDP and other sockets reach any host.",
     pool_needs_account: "A pool needs at least one account. Add another account first, or delete the pool.",
     pool_project_limit: "A pool can serve up to 64 projects. Pick another pool for this project.",
     pool_name_bounds: "Use a pool name of 1 to 64 characters, without control characters.",
@@ -272,6 +275,7 @@ export function errorMessage(error: unknown): string {
     server_secret_duplicate: "Each secret needs its own name.",
     server_secret_not_found: "This secret was removed.",
     server_secret_invalid: "Enter the secret on one line, up to 8192 characters.",
+    server_secret_too_short: "Use a secret of at least 8 characters. A shorter one is part of an agent's launch command, so CrazyAgent cannot keep it hidden.",
     server_changed: "This server changed. Review it again before approving.",
     server_check_command_only: "Only command servers can be checked from here.",
     server_check_busy: "Other checks are running. Try again in a moment.",
@@ -316,6 +320,7 @@ export function errorMessage(error: unknown): string {
     agent_restart_conflict: "This agent is already running again. Refresh the list.",
     agent_restart_limit: "This agent was restarted too many times. Start it again from its project.",
     agent_launch_failed: "The agent could not start. Check its harness and account, then restart it.",
+    launch_secret_in_command: "The agent could not start: one of this project's MCP secrets is part of its launch command, so it cannot be kept hidden. Replace that secret in Plugins.",
     agent_spec_invalid: "This agent's saved settings are unreadable. Start it again from its project.",
     agent_registry_unavailable: "CrazyAgent can't read its agent list. Restart CrazyAgent.",
     agent_root_unsafe: "CrazyAgent's state folder is not private. Restart CrazyAgent after fixing its permissions.",
@@ -411,7 +416,7 @@ export interface HistoryPage {
 }
 
 export interface PendingIntent {
-  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "project_hidden_paths" | "project_agent_policy" | "account_schedule" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_approve" | "memory_agent_writes" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "research_cancel" | "research_retry" | "plan_roadmap";
+  kind: "message" | "brief" | "approve_baseline" | "revoke_baseline" | "model_access" | "create_project" | "setup_project" | "research_memory" | "project_documents" | "project_context_delete" | "project_read_paths" | "project_hidden_paths" | "project_agent_policy" | "account_schedule" | "memory_review" | "memory_add" | "memory_promote" | "memory_delete" | "memory_approve" | "memory_agent_writes" | "memory_forget" | "memory_remember" | "memory_selection" | "master" | "owner_profile" | "sandbox_settings" | "projects_home" | "move_projects_home" | "add_existing_folder" | "start_onboarding" | "run_setup" | "pack_set" | "pack_remove" | "team" | "project_setup_update" | "project_remove" | "research_cancel" | "research_retry" | "plan_roadmap";
   generation: string;
   project_id: string | null;
   baseline_id: string | null;
@@ -892,6 +897,7 @@ export interface TeamStatus {
   ask_before_merge?: boolean;
   new_folder_files_max?: number;
   coordination?: CoordinationView | null;
+  message_settings?: MessageSettings;
   partial?: boolean;
   live_switch?: SessionSwitch | null;
   paused: boolean;
@@ -912,6 +918,60 @@ export interface TeamStatus {
   messages: TeamMessage[];
   plan: TeamPlanStep[];
   events: TeamEventsView;
+}
+
+/** How a finished or failed task's result shows in a Messages timeline: its first line until
+ * the owner opens it, or the whole result. */
+export type ResultsShown = "first_line" | "full";
+
+/** A project's Messages settings, stored whole: whether the master's messages and answers to
+ * its sub-agents are kept, how many kept messages the project holds, whether progress events
+ * and the owner's own tasks and prompts show, how results show and the page size. */
+export interface MessageSettings {
+  keep_master_messages: boolean;
+  kept_per_project: number;
+  progress_shown: boolean;
+  results: ResultsShown;
+  owner_items_shown: boolean;
+  page_size: number;
+}
+
+/** Who a Messages entry comes from, as the engine stored it, never as its text says. */
+export type MessageSpeaker = "master" | "owner" | "agent" | "engine";
+
+/** What one Messages entry is. */
+export type MessageKind = "task" | "wake" | "message" | "answer" | "prompt" | "question" | "progress" | "change_set_ready" | "finished" | "failed";
+
+/** Which store a Messages entry comes from; with its time and id it orders the timeline. */
+export type MessageSource = "task" | "message" | "event";
+
+/** Where a Messages page ends; the next page holds the entries before it. */
+export interface MessageCursor {
+  at_ms: number;
+  source: MessageSource;
+  id: number;
+}
+
+/** One entry of a sub-agent's Messages timeline. `text` is null for a master's message the
+ * project kept no text of; `result` is a finished task's result or a failed task's problem. */
+export interface AgentMessage extends MessageCursor {
+  from: MessageSpeaker;
+  kind: MessageKind;
+  text: string | null;
+  task: number | null;
+  state: TeamEventState | null;
+  result: string | null;
+  result_more: boolean;
+}
+
+/** One page of a sub-agent's Messages timeline, newest first, with whether older entries
+ * remain and the settings it was read under. */
+export interface AgentMessages {
+  project_id: string;
+  agent: number;
+  entries: AgentMessage[];
+  older: boolean;
+  settings: MessageSettings;
 }
 
 export type TeamEventKind = "question" | "finished" | "failed" | "change_set_ready" | "progress";
@@ -1987,11 +2047,13 @@ export interface AgentView {
 }
 
 /** Something other than an agent that holds an account's sign-in while it runs: a master
- * conversation's turn, ended by closing that conversation, or a research job, ended by
- * cancelling it. */
+ * conversation's turn, ended by closing that conversation, a research job, ended by
+ * cancelling it, or processes a Full access agent left running, named by `report`, which
+ * signing the account out lets go of while they still run. */
 export type Holder =
   | { kind: "master"; project: string; session: string }
-  | { kind: "research"; project: string; job: number; title: string };
+  | { kind: "research"; project: string; job: number; title: string }
+  | { kind: "leftover"; report: string };
 
 /** Everything that holds one account's sign-in now: its running agents and other holders. */
 export interface AccountUse {

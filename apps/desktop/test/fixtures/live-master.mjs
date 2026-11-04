@@ -7,13 +7,14 @@ import styles from "../../src/style.css?inline";
 import projectStyles from "../../src/screens/project/projects.css?inline";
 import teamStyles from "../../src/screens/team/team-graph.css?inline";
 import { LiveMasterView, MasterArea } from "../../src/screens/project/live-master.tsx";
-import { TerminalMenu, terminalOptions, typeKeys } from "../../src/screens/team/terminal-panel.tsx";
+import { TerminalMenu, TerminalPanel, terminalOptions, typeKeys } from "../../src/screens/team/terminal-panel.tsx";
 import { muteQueries } from "../../src/screens/team/terminal-io.ts";
 import { teamStatus } from "./team-status.mjs";
 
 let root = null;
 let menuRoot = null;
 let terminal = null;
+let seen = null;
 export const notes = [];
 export const typed = [];
 let starts = 0;
@@ -241,5 +242,46 @@ export function menuView() {
     panel: box(document.querySelector(".tg-terminal")),
     screen: box(document.querySelector("#screen .xterm-screen")),
     notes: [...notes],
+  };
+}
+
+/** Mounts the real agent terminal panel for a team node whose terminal has the given name,
+ * keyed by the node as the team page keys it. The page has no engine bridge, so the real
+ * xterm opens and the attach then fails. */
+export function mountPanel(name) {
+  root = createRoot(page());
+  seen = null;
+  retarget(name);
+}
+
+/** Renders the mounted panel again for the same node with this terminal, as a team poll
+ * does when the node's terminal changes or stays the same. */
+export function retarget(name) {
+  flushSync(() => root.render(createElement(TerminalPanel, { key: node.id, node: { ...node, terminal: name } })));
+}
+
+/** Waits until the panel's screen holds an opened xterm terminal other than the one this
+ * last saw, whether or not the earlier one is still in the page, and remembers it. */
+export async function newTerminal() {
+  const fresh = () => [...document.querySelectorAll(".tg-terminal-screen .xterm")].find((element) => element !== seen);
+  for (let waited = 0; !fresh(); waited += 10) {
+    if (waited > 3000) throw new Error("no new terminal opened");
+    await new Promise((done) => setTimeout(done, 10));
+  }
+  seen = fresh();
+}
+
+/** Right-clicks the middle of the panel's terminal screen, as the owner does. */
+export function rightClick() {
+  const screen = document.querySelector(".tg-terminal-screen");
+  const box = screen.getBoundingClientRect();
+  flushSync(() => screen.dispatchEvent(new MouseEvent("contextmenu", { bubbles: true, cancelable: true, button: 2, clientX: box.left + box.width / 2, clientY: box.top + box.height / 2 })));
+}
+
+/** Whether the panel's right-click menu is open and whether focus is on one of its items. */
+export function panelView() {
+  return {
+    menu: Boolean(document.querySelector(".tg-terminal-menu")),
+    menuFocus: Boolean(document.activeElement?.closest(".tg-terminal-menu")),
   };
 }
