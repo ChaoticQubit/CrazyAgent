@@ -23,7 +23,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;
 
 const PAGE_STEP: usize = 10;
