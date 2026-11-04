@@ -1,12 +1,17 @@
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import assert from "node:assert/strict";
+import { mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export const LIB = fileURLToPath(new URL("../../src-tauri/src/lib.rs", import.meta.url));
 export const ROUTES = fileURLToPath(new URL("../../src-tauri/e2e_bridge/routes.rs", import.meta.url));
+export const BRIDGE = fileURLToPath(new URL("../../src-tauri/src/bridge", import.meta.url));
 
 const NATIVE_ONLY = /\bbridge::|\bupdates::|\bterminals\b|\bapp\b|NativeBridge::|Arc::|default_engine\(|SOCKET_OVERRIDE|state\.0/;
 const NATIVE_PARAM = /State<|AppHandle|Channel<|WebviewWindow/;
+const QUEUE_CALL = /^state\.0\.\w+\([^;]*\)\s*\.await$/;
+const IMPL_TYPES = ["NativeBridge", "BridgeQueue"];
+const BRIDGE_FILES_MAX = 256;
 
 /** Splits text at the commas that sit outside every bracket.
  * Input: a parameter list or brace list. Output: the trimmed, non-empty parts. */
@@ -61,19 +66,113 @@ export function commands(source) {
   return found;
 }
 
+/** Reads the bridge's Rust sources, bridge.rs and every file under bridge/, whose impl blocks
+ * say which methods a route may call. Input: none. Output: the sources joined in path order. */
+export function bridgeSource() {
+  const nested = readdirSync(BRIDGE, { recursive: true }).filter((name) => name.endsWith(".rs")).sort();
+  assert.ok(nested.length > 0, "the bridge has module files");
+  assert.ok(nested.length <= BRIDGE_FILES_MAX, `the bridge has at most ${BRIDGE_FILES_MAX} module files`);
+  return [`${BRIDGE}.rs`, ...nested.map((name) => join(BRIDGE, name))].map((file) => readFileSync(file, "utf8")).join("\n");
+}
+
+/** Lists the methods each bridge type defines in its own `impl` blocks, so a route is checked
+ * against the type it calls, not a bare method name. Input: Rust source. Output: a map from
+ * `NativeBridge` and `BridgeQueue` to maps from method name to `{ async, pub, result }`. */
+export function methods(source) {
+  const found = new Map(IMPL_TYPES.map((type) => [type, new Map()]));
+  const heads = source.match(/^impl (?:NativeBridge|BridgeQueue) \{$/gm) ?? [];
+  let blocks = 0;
+  for (const [, type, body] of source.matchAll(/^impl (NativeBridge|BridgeQueue) \{\n([\s\S]*?)^\}/gm)) {
+    blocks += 1;
+    for (const [signature, visibility, asynchronous, name] of body.matchAll(/^ {4}(pub(?:\([\w:]+\))? )?(async )?fn (\w+)\b[^{;]*/gm)) {
+      const method = { async: Boolean(asynchronous), pub: visibility === "pub ", result: /->\s*Result</.test(signature) };
+      const earlier = found.get(type).get(name);
+      if (earlier && JSON.stringify(earlier) !== JSON.stringify(method)) {
+        throw new Error(`routes: ${type}::${name} is defined twice with different signatures`);
+      }
+      found.get(type).set(name, method);
+    }
+  }
+  assert.equal(blocks, heads.length, "every impl block of a bridge type was read to its end");
+  return found;
+}
+
+let real;
+
+/** Reads the app's own bridge impl blocks once per process, the methods every caller that
+ * names none checks routes against. Input: none. Output: `methods` of `bridgeSource()`. */
+function bridgeMethods() {
+  real ??= methods(bridgeSource());
+  return real;
+}
+
+/** Finds the end of the call whose argument list opens at `open`.
+ * Inputs: the body and the index of the call's `(`. Output: the index just past its `)`. */
+function callEnd(body, open) {
+  assert.equal(body[open], "(", "a call opens with a parenthesis");
+  let depth = 0;
+  for (let index = open; index < body.length; index += 1) {
+    if (body[index] === "(") depth += 1;
+    else if (body[index] === ")") depth -= 1;
+    if (depth === 0) return index + 1;
+  }
+  throw new Error(`routes: a call in ${body} never closes`);
+}
+
+/** Checks each bridge call of a route body against the impl blocks of the type it calls:
+ * `state.` is the queue; `lock(state)`, `read(state)` and guards bound from them are the bridge.
+ * The method must be a public one of that type, and `.await` may follow a sync method only when
+ * it gives a future rather than a Result. A name both types define, called on any other
+ * receiver, is refused. Inputs: the command name, the body and `methods` output. Throws. */
+function resolve(name, body, impls) {
+  const guards = [...body.matchAll(/(?<![.\w])let (?:mut )?(\w+) = (?:lock|read)\(state\)\s*\.await\?;/g)].map((match) => match[1]);
+  const receivers = [
+    ["BridgeQueue", /(?<![.\w])state\s*\.(\w+)\(/g],
+    ["NativeBridge", /(?<![.\w])(?:lock|read)\(state\)\s*\.await\?\s*\.(\w+)\(/g],
+    ...guards.map((guard) => ["NativeBridge", new RegExp(`(?<![.\\w])${guard}\\s*\\.(\\w+)\\(`, "g")]),
+  ];
+  const typed = new Set();
+  for (const [type, pattern] of receivers) {
+    for (const match of body.matchAll(pattern)) {
+      const open = match.index + match[0].length - 1;
+      const method = impls.get(type).get(match[1]);
+      if (!method?.pub) throw new Error(`routes: ${name} calls ${type}::${match[1]}, which no impl ${type} defines as pub`);
+      const awaited = /^\s*\.await\b/.test(body.slice(callEnd(body, open)));
+      if (awaited && !method.async && method.result) {
+        throw new Error(`routes: ${name} awaits ${type}::${match[1]}, which is not async and gives a Result`);
+      }
+      typed.add(open);
+    }
+  }
+  for (const match of body.matchAll(/\.(\w+)\(/g)) {
+    const open = match.index + match[0].length - 1;
+    const shared = IMPL_TYPES.every((type) => impls.get(type).has(match[1]));
+    if (shared && !typed.has(open)) {
+      throw new Error(`routes: ${name} calls ${match[1]}, which both ${IMPL_TYPES.join(" and ")} define, on a receiver the generator cannot type`);
+    }
+  }
+}
+
 /** Decides how the end-to-end bridge serves one command: routed with its arguments and body,
  * or left out with the reason (it needs the native window, terminals, updates or a picker).
- * Input: one command record. Output: `{ route }` or `{ skip }`. */
-export function plan(command) {
+ * A body that is one call on the app's bridge queue calls the end-to-end bridge's queue.
+ * Inputs: one command record and `methods` output, the app's bridge when omitted. Output:
+ * `{ route }` or `{ skip }`; throws when a routed call does not match its type's impl block. */
+export function plan(command, impls = bridgeMethods()) {
+  assert.ok(IMPL_TYPES.every((type) => impls?.get(type) instanceof Map), "plan reads the bridge's impl blocks");
   const prefix = "main_window(&window)?;";
   if (!command.body.startsWith(prefix)) return { skip: "no main-window check" };
   const args = command.params.filter((param) => param.name !== "window" && !/^State<'_, NativeState>$/.test(param.type));
   if (!command.params.some((param) => param.name === "window")) return { skip: "no window parameter" };
   if (args.some((param) => NATIVE_PARAM.test(param.type))) return { skip: "native parameter" };
   let body = command.body.slice(prefix.length).replace("ensure_default_engine().await?;", "").replace(/\s+/g, " ").trim();
+  const queued = QUEUE_CALL.test(body);
+  if (queued) body = body.replace(/^state\.0\./, "state.");
   if (NATIVE_ONLY.test(body)) return { skip: "native-only body" };
   body = body.replaceAll("lock(&state)", "lock(state)").replaceAll("read(&state)", "read(state)");
-  if (/\bstate\b/.test(body.replaceAll("lock(state)", "").replaceAll("read(state)", ""))) return { skip: "uses the state directly" };
+  const rest = (queued ? body.slice("state.".length) : body).replaceAll("lock(state)", "").replaceAll("read(state)", "");
+  if (/\bstate\b/.test(rest)) return { skip: "uses the state directly" };
+  resolve(command.name, body, impls);
   return { route: { name: command.name, args: args.map((arg) => ({ name: arg.name, type: arg.type.replaceAll(/\bbridge::/g, "crazyagent_desktop::bridge::") })), body } };
 }
 
@@ -95,9 +194,10 @@ function imports(source) {
 
 /** Renders the bridge binary's route table from lib.rs: one arm per routed command that parses
  * its camelCase arguments like Tauri and runs the command body on the shared bridge.
- * Input: the lib.rs source. Output: the routes.rs text. */
-export function render(source) {
-  const routes = commands(source).map(plan).filter((planned) => planned.route).map((planned) => planned.route);
+ * Inputs: the lib.rs source and `methods` output, the app's bridge when omitted. Output: the
+ * routes.rs text. */
+export function render(source, impls = bridgeMethods()) {
+  const routes = commands(source).map((command) => plan(command, impls)).filter((planned) => planned.route).map((planned) => planned.route);
   const arms = routes.map(({ name, args, body }) => {
     const fields = args.map((arg) => `                ${arg.name}: ${arg.type},\n`).join("");
     const parse = args.length === 0 ? "" : `            #[derive(serde::Deserialize)]
@@ -130,5 +230,5 @@ ${arms}        _ => Routed::Unknown,
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   mkdirSync(dirname(ROUTES), { recursive: true });
-  writeFileSync(ROUTES, render(readFileSync(LIB, "utf8")));
+  writeFileSync(ROUTES, render(readFileSync(LIB, "utf8"), methods(bridgeSource())));
 }
