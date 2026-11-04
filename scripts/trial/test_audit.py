@@ -354,6 +354,103 @@ class AuditTests(unittest.TestCase):
             self.assertNotIn(leaked, (w.out / "checks" / "T3-09.json").read_text())
         self.assertIn(audit.MASK, record["log"])
 
+    def test_t3_09_notes_the_xcrun_lines_of_a_toolchain_call_that_runs_no_git(self):
+        w = self.world
+        sub = w.agent("sub", mode="app_spawned")
+        cache = "  = note: xcrun: error: couldn't create cache file '/var/folders/x/T/xcrun_db-AbCd1234' (errno=Operation not permitted)"
+        w.transcript(sub, call(1, "Bash", {"command": "cargo test 2>&1 | grep -E \"^test result|error\" ; cat calc.py; ls"}, f"{cache}\ntest result: ok. 1 passed"))
+        w.transcript(sub, call(2, "Bash", {"command": "git add calc.py && git commit -qm \"feat: add sub\""}, "[main 376e354] feat: add sub"))
+        record = w.audit("T3-09")
+        self.assertEqual(record["result"], "PASS", record["detail"])
+        self.assertIn("git calls=1 ok=1 xcrun errors=0", record["detail"])
+        self.assertIn("toolchain xcrun notes=1", record["detail"])
+
+    def t3_09_alone(self, command, result, error=False):
+        """Audits T3-09 on a fresh store whose one agent made one shell call, then a clean git
+        call. Takes the call's command, its result and whether it failed. Returns the record."""
+        with tempfile.TemporaryDirectory(prefix="ca-audit-") as folder:
+            world = World(folder)
+            try:
+                agent = world.agent("sub", mode="app_spawned")
+                world.transcript(agent, call(1, "Bash", {"command": command}, result, error=error))
+                world.transcript(agent, call(2, "Bash", {"command": "git status"}, "On branch main"))
+                return world.audit("T3-09")
+            finally:
+                world.close()
+
+    def test_t3_09_finds_git_by_its_parsed_command_word_and_fails_the_xcrun_shim_in_every_shell_form(self):
+        shim = "xcrun: error: couldn't create cache file '/var/folders/x/T/xcrun_db-AbCd1234' (errno=Operation not permitted)"
+        for command in (
+            "/usr/bin/git commit -qm x",
+            "/Library/Developer/CommandLineTools/usr/bin/git status",
+            "cd repo && git status",
+            "true; git log",
+            "echo x | git apply",
+            "false || git fetch",
+            "cd repo && git;",
+            "(git status)",
+            "{ git status; }",
+            "if git diff --quiet; then echo same; fi",
+            "echo `git rev-parse HEAD`",
+            "echo \"$(/usr/bin/git rev-parse HEAD)\"",
+            "$(which git) commit -qm x",
+            "sh -c \"git log\"",
+            "bash -lc 'cd repo && /usr/bin/git status'",
+            "bash -c git",
+            "GIT_DIR=.git git log",
+            "env -i PATH=/usr/bin git log",
+            "xcrun git status",
+            "cd repo\ngit status",
+            "git commit -F - <<'EOF'\nit's done\nEOF",
+        ):
+            with self.subTest(command=command):
+                record = self.t3_09_alone(command, f"{shim}\nfatal: git failed under the sandbox", error=True)
+                self.assertEqual(record["result"], "FAIL", record["detail"])
+                self.assertIn("git calls=2 ok=1 xcrun errors=1", record["detail"])
+
+    def test_t3_09_fails_an_xcrun_line_in_any_call_but_a_known_toolchain_one(self):
+        shim = "xcrun: error: couldn't create cache file '/var/folders/x/T/xcrun_db-AbCd1234' (errno=Operation not permitted)"
+        for command in (
+            "./land.sh",
+            "python3 tools/release.py",
+            "make release && ./land.sh",
+            "cargo test; echo $(date)",
+            "bash -c \"cargo test\"",
+            "xargs cargo build",
+            "cargo test 'open",
+        ):
+            with self.subTest(command=command):
+                record = self.t3_09_alone(command, shim)
+                self.assertEqual(record["result"], "FAIL", record["detail"])
+                self.assertIn("git calls=1 ok=1 xcrun errors=1", record["detail"])
+        for command in (
+            "cargo test 2>&1 | grep -E \"^test result|error\" ; cat calc.py; ls",
+            "cargo build -q",
+            "cd crate && make",
+            "time cargo test",
+            "~/.cargo/bin/cargo test -q",
+            "RUSTFLAGS=-Dwarnings cargo clippy",
+            "rustc main.rs && ls",
+            "swift build 2>&1 | tail -3",
+        ):
+            with self.subTest(command=command):
+                record = self.t3_09_alone(command, f"{shim}\ntest result: ok. 1 passed")
+                self.assertEqual(record["result"], "PASS", record["detail"])
+                self.assertIn("git calls=1 ok=1 xcrun errors=0, toolchain xcrun notes=1", record["detail"])
+
+    def test_t3_09_fails_an_xcrun_line_in_a_toolchain_call_whose_words_name_git(self):
+        shim = "xcrun: error: couldn't create cache file '/var/folders/x/T/xcrun_db-AbCd1234' (errno=Operation not permitted)"
+        for command in (
+            "make GIT=/usr/bin/git",
+            "make release GIT=git",
+            "cargo run -q -- git status",
+            "cargo build --config 'net.git-fetch-with-cli=true' && /usr/bin/git status",
+        ):
+            with self.subTest(command=command):
+                record = self.t3_09_alone(command, shim)
+                self.assertEqual(record["result"], "FAIL", record["detail"])
+                self.assertIn("xcrun errors=1", record["detail"])
+
     def test_t3_10_stop_all_passes_on_a_paused_project_and_fails_while_an_agent_process_lives(self):
         w = self.world
         lead = w.agent("sub", mode="app_spawned")

@@ -17,6 +17,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -45,7 +46,25 @@ CALLER_UNKNOWN = "team_caller_unknown"
 REPLY_INVALID = "coord_reply_invalid"
 ACCOUNT_WAIT = ("native_profile_in_use", "free account")
 XCRUN = re.compile(r"xcrun_db|xcrun: error")
-GIT_WORD = re.compile(r"(^|[\s;&|(])git(\s|$)")
+GIT_NAMED = re.compile(r"(^|[^A-Za-z0-9_.-])git($|[^A-Za-z0-9_.-])")
+SHELL_PUNCTUATION = frozenset("();<>|&")
+SHELL_GROUPS = frozenset({"{", "}"})
+SHELL_KEYWORDS = frozenset({"if", "then", "else", "elif", "while", "until", "do", "!", "time"})
+SHELL_WRAPPERS = frozenset({
+    "env", "command", "builtin", "exec", "nohup", "nice", "sudo", "xargs", "xcrun", "timeout", "find",
+    "sh", "bash", "zsh", "dash", "ksh", "eval",
+})
+SHELL_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+SHELL_DEPTH_MAX = 4
+TOOLCHAIN_WORDS = frozenset({
+    "cargo", "rustc", "rustdoc", "cc", "c++", "clang", "clang++", "gcc", "g++", "ld", "swift", "swiftc",
+    "make", "cmake", "ninja", "xcodebuild", "go",
+})
+PLAIN_WORDS = frozenset({
+    "cd", "ls", "cat", "echo", "printf", "grep", "egrep", "fgrep", "head", "tail", "wc", "sort", "uniq", "tee",
+    "cut", "tr", "true", "false", "test", "[", "pwd", "date", "sleep", "mkdir", "touch", "cp", "mv", "rm",
+    "stat", "basename", "dirname",
+})
 FINISH_EVENTS = ("finished", "change_set_ready")
 BACKGROUND_STEM = "while a command it started in the background still ran; that command was stopped"
 BACKGROUND_ENDS = (
@@ -196,6 +215,73 @@ def shell_command(given):
     return command[:COMMAND_BYTES_MAX] if isinstance(command, str) else None
 
 
+def shell_words(command):
+    """The shlex words of a shell command line, with each newline read as a command separator.
+    Takes the command text. Returns the words, or None when shlex cannot read the line, such as
+    an open quote."""
+    try:
+        return list(shlex.shlex(command.replace("\n", " ; "), posix=True, punctuation_chars=True))
+    except ValueError:
+        return None
+
+
+def separates(word):
+    """Whether a shell word ends a simple command: ; & && | || ( ) or a brace, not a
+    redirection such as >& or <<. Takes the word. Returns the answer."""
+    if word in SHELL_GROUPS:
+        return True
+    return bool(word) and set(word) <= SHELL_PUNCTUATION and (any(c in ";|()" for c in word) or not word.strip("&"))
+
+
+def command_words(words):
+    """The basenames of the words that start each simple command among shell words: the
+    first past assignments and keywords, at the start and after each separator, and every word
+    after a wrapper such as env, xcrun or sh up to the next separator. Takes the words.
+    Returns the basenames in order."""
+    found, start, wrapped = [], True, False
+    for word in words:
+        if separates(word):
+            start, wrapped = True, False
+            continue
+        if start and (word in SHELL_KEYWORDS or SHELL_ASSIGNMENT.match(word)):
+            continue
+        if start or wrapped:
+            name = word.rsplit("/", 1)[-1]
+            found.append(name)
+            wrapped = wrapped or (start and name in SHELL_WRAPPERS)
+        start = False
+    return found
+
+
+def names_git(command, depth=0):
+    """Whether a shell command runs git: a command word with the basename git, as
+    /usr/bin/git, after ; && | or a newline, after a wrapper or inside a quoted argument such
+    as sh -c "git log". A line shlex cannot read, one with $( ) or backticks, or one nested
+    deeper than SHELL_DEPTH_MAX runs git when it names the word at all. Takes the command text.
+    Returns the answer."""
+    words = shell_words(command)
+    if words is None or depth >= SHELL_DEPTH_MAX or "$(" in command or "`" in command:
+        return bool(GIT_NAMED.search(command))
+    if "git" in command_words(words):
+        return True
+    return any((" " in word or "\t" in word) and names_git(word, depth + 1) for word in words)
+
+
+def toolchain_call(command):
+    """Whether a shell command is a known toolchain call that names no git, the one kind whose
+    xcrun lines are a toolchain's cache write the sandbox refuses (DEC-104) and only a note:
+    every command word a toolchain such as cargo or a plain command such as grep, at least
+    one toolchain, no word naming git (GIT=/usr/bin/git, cargo run -- git), no $( ) or
+    backticks. Takes the command text. Returns the answer."""
+    if "$(" in command or "`" in command or names_git(command) or GIT_NAMED.search(command):
+        return False
+    words = shell_words(command)
+    if words is None:
+        return False
+    names = command_words(words)
+    return bool(names) and set(names) <= TOOLCHAIN_WORDS | PLAIN_WORDS and not TOOLCHAIN_WORDS.isdisjoint(names)
+
+
 def tool_key(name, given):
     if not isinstance(name, str):
         return None
@@ -288,7 +374,7 @@ def agent_name(path):
 def blank_scan():
     return {
         "files": 0, "calls": 0, "ctx": 0, "graphify": 0, "Skill": 0, "overlap": 0, "first": {}, "at": {},
-        "skills": Counter(), "tools": Counter(), "codes": Counter(), "xcrun": 0, "git": 0, "git_ok": 0,
+        "skills": Counter(), "tools": Counter(), "codes": Counter(), "xcrun": 0, "toolchain_xcrun": 0, "git": 0, "git_ok": 0,
         "work_ok": Counter(), "work_failed": Counter(), "prompts": [], "launches": [], "repo_reads": [],
         "phrases": Counter(),
     }
@@ -390,7 +476,7 @@ def scan_file(path, found, root, project_mark):
                     if skill:
                         found["skills"][skill] += 1
                     command = shell_command(given) if name in SHELL_TOOLS else None
-                    uses[part.get("id")] = (key, bool(command and GIT_WORD.search(command)))
+                    uses[part.get("id")] = (key, bool(command and names_git(command)), bool(command and toolchain_call(command)))
                 elif part.get("type") == "tool_result":
                     text = result_text(part.get("content"))
                     failed = part.get("is_error") is True
@@ -399,10 +485,7 @@ def scan_file(path, found, root, project_mark):
                             found["codes"][code] += 1
                             first(code)
                     xcrun = bool(XCRUN.search(text))
-                    if xcrun:
-                        found["xcrun"] += 1
-                        first("xcrun")
-                    key, git_call = uses.get(part.get("tool_use_id"), (None, False))
+                    key, git_call, toolchain = uses.get(part.get("tool_use_id"), (None, False, False))
                     if key in WORK_TOOLS:
                         (found["work_failed"] if failed else found["work_ok"])[key] += 1
                         if "overlap" in text.lower():
@@ -412,6 +495,12 @@ def scan_file(path, found, root, project_mark):
                         found["git"] += 1
                         if not failed and not xcrun:
                             found["git_ok"] += 1
+                    if xcrun and toolchain:
+                        found["toolchain_xcrun"] += 1
+                        first("toolchain_xcrun")
+                    elif xcrun:
+                        found["xcrun"] += 1
+                        first("xcrun")
     if top:
         chosen = launch or snapshot
         found["launches"].append(launch_record(chosen[0], chosen[1], early, project_mark) if chosen else {"spot": where, "app": None})
@@ -1094,9 +1183,12 @@ def check_git(t):
     notes, bad = [], []
     for a in t.tree:
         s = t.transcripts[a["id"]]
-        if not s["git"] and not s["xcrun"]:
+        if not s["git"] and not s["xcrun"] and not s["toolchain_xcrun"]:
             continue
         note = f"{t.label(a)} git calls={s['git']} ok={s['git_ok']} xcrun errors={s['xcrun']}" + (f" first {s['first']['xcrun']}" if s["xcrun"] else "")
+        if s["toolchain_xcrun"]:
+            note += f", toolchain xcrun notes={s['toolchain_xcrun']} first {s['first']['toolchain_xcrun']}"
+            t.cite(s, s["first"]["toolchain_xcrun"], f"agent {a['id']} first toolchain xcrun note, a cache write the sandbox refuses (DEC-104)")
         if s["xcrun"]:
             t.cite(s, s["first"]["xcrun"], f"agent {a['id']} first xcrun error")
         (bad if s["xcrun"] else notes).append(note)
@@ -2002,7 +2094,7 @@ CHECKS = (
         "title": "Git works inside every agent's sandbox",
         "proves": "Agent git calls succeed with no xcrun shim errors under the sandbox.",
         "why": "Sandbox git through the real binary (Q73, IMP-AWF). Trial 2: PASS (every agent's git calls ok, 0 xcrun errors).",
-        "how": "Shell tool calls naming git in each transcript and their results; xcrun_db or xcrun: error in any result.",
+        "how": "Shell tool calls in each transcript whose parsed command words run git (/usr/bin/git, after ; && |, inside sh -c or $( )), and their results; xcrun_db or xcrun: error in any call's result fails, except in a known toolchain call (cargo, rustc, cc, swift, make ...) that names no git, not even as an argument such as make GIT=/usr/bin/git, where it is a toolchain's cache write the sandbox refuses (DEC-104) and a note.",
     },
     {
         "id": "T3-10", "name": "stop all", "run": check_stopped,
