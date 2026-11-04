@@ -17,6 +17,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::AtomicBool;
 use std::time::{Duration, Instant};
+use trackwright_core::coverage::{self, CoverageOf, CoverageQuery};
 use trackwright_core::criteria;
 use trackwright_core::host::{Authority, Evidence, TicketView};
 use trackwright_core::model::{
@@ -26,12 +27,12 @@ use trackwright_core::ops;
 use trackwright_core::policy;
 use trackwright_core::requests::Request;
 use trackwright_core::runs::{
-    self, NewResult, ResultOutcome, RunEnd, RunFinish, RunRecord, RunShow, RunStart, RunState,
-    RunView, SourceRef, Verdict,
+    self, NewResult, ResultOutcome, RunEnd, RunFinish, RunList, RunRecord, RunShow, RunStart,
+    RunState, RunView, Sighted, SourceRef, TestId, Verdict,
 };
 use trackwright_core::store::StoreError;
 use trackwright_core::tests_model::{CaseKind, CaseStatus};
-use trackwright_core::tests_store::{self, NewCase};
+use trackwright_core::tests_store::{self, CaseFilter, NewCase};
 
 const NOW: i64 = 1_800_000_000_000;
 
@@ -292,6 +293,14 @@ impl Case {
             NOW,
         )
         .unwrap();
+        tx.commit().unwrap();
+        self.ticket_proven_by(&String::from(case.short_id))
+    }
+
+    /// An owner ticket in `CA` whose one criterion a `test` check naming the case proves,
+    /// closed by evidence (the default). Input: the case id. Output: the ticket.
+    fn ticket_proven_by(&self, case: &str) -> ShortId {
+        let tx = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate).unwrap();
         let request = Request::parse(
             "create",
             &serde_json::to_vec(&json!({"project": "CA", "title": "Checks pass"})).unwrap(),
@@ -311,7 +320,7 @@ impl Case {
             &ticket,
             criterion.position,
             CoreCheck::Test,
-            &String::from(case.short_id),
+            case,
             NOW + 1,
         )
         .unwrap();
@@ -638,6 +647,50 @@ fn the_host_names_the_linked_change_set_head_as_the_current_source() {
 /// Writes one passing run as `actor` straight through the core, with the source and policy
 /// of a run the engine recorded, as an agent forging a pass would. Inputs: the case, the
 /// actor and the engine's run. Output: the forged run, or the core's refusal.
+#[test]
+fn a_job_another_engine_cancelled_while_it_ran_ends_cancelled_without_a_panic() {
+    let case = Case::new();
+    let id = case.change_set(&[("slow.sh", "exec /bin/sleep 5\n")]);
+    case.approve(json!([check(
+        "unit",
+        &["sh", "slow.sh"],
+        "exit_code",
+        None
+    )]));
+    queue::submit(&case.db, &id, Trigger::OnRequest, Actor::Owner, &[]).unwrap();
+    let ended = std::thread::scope(|scope| {
+        let worker = scope.spawn(|| {
+            let db = landing::open(&case.engine).unwrap();
+            queue::run_next(&db, &case.engine)
+        });
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while queue::jobs(&case.db, &id).unwrap()[0].state != JobState::Running {
+            assert!(Instant::now() < deadline, "the job never started");
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let stopped = case
+            .db
+            .execute(
+                "UPDATE check_jobs SET state = 'cancelled', reason = 'checks_engine_stopped',
+                     ended_ms = ?2
+                  WHERE state = 'running' AND runner <> ?1",
+                rusqlite::params!["another-engine", NOW],
+            )
+            .unwrap();
+        assert_eq!(stopped, 1, "the other engine's claim cancels the job");
+        worker
+            .join()
+            .expect("the runner thread ends without a panic")
+    });
+    let job = ended.unwrap().unwrap();
+    assert_eq!(job.state, JobState::Cancelled);
+    assert_eq!(job.reason.as_deref(), Some("checks_engine_stopped"));
+    assert_eq!(job.run, None);
+    assert_eq!(case.count("SELECT COUNT(*) FROM check_runs"), 0);
+    assert_eq!(case.count("SELECT COUNT(*) FROM tk_runs"), 0);
+    assert!(queue::run_next(&case.db, &case.engine).unwrap().is_none());
+}
+
 fn forge(case: &Case, actor: &str, like: &RunView) -> Result<RunView, StoreError> {
     let actor = core::Actor::new(actor).unwrap();
     let tx = Transaction::new_unchecked(&case.db, TransactionBehavior::Immediate).unwrap();
@@ -853,10 +906,9 @@ fn linked(case: &Case, run: &CheckRun) -> Vec<Linked> {
         .unwrap()
 }
 
-#[test]
-fn a_holdout_run_links_its_results_to_the_protected_case_and_stores_no_message() {
-    let case = Case::new();
-    let id = case.change_set(&[("oracle.sh", ORACLE_FAILS)]);
+/// Stores the failing oracle as a holdout file and creates the protected case its one
+/// result names. Input: the case. Output: the holdout file's digest and the case's id.
+fn protected_oracle(case: &Case) -> (String, String) {
     let digest = checks::store_holdout_file(
         &case.db,
         &case.project,
@@ -865,7 +917,7 @@ fn a_holdout_run_links_its_results_to_the_protected_case_and_stores_no_message()
     )
     .unwrap();
     let tx = Transaction::new_unchecked(&case.db, TransactionBehavior::Immediate).unwrap();
-    tests_store::create_case(
+    let created = tests_store::create_case(
         &tx,
         &owner(),
         &key(),
@@ -881,12 +933,26 @@ fn a_holdout_run_links_its_results_to_the_protected_case_and_stores_no_message()
     )
     .unwrap();
     tx.commit().unwrap();
+    (digest, String::from(created.short_id))
+}
+
+/// The holdout entry running the stored oracle as the check `hidden`. Input: the holdout
+/// file's digest. Output: the profile's `holdouts`.
+fn hidden(digest: &str) -> Value {
+    json!([{
+        "check": check("hidden", &["sh", "hidden.sh"], "libtest", None),
+        "files": {"hidden.sh": digest}
+    }])
+}
+
+#[test]
+fn a_holdout_run_links_its_results_to_the_protected_case_and_stores_no_message() {
+    let case = Case::new();
+    let id = case.change_set(&[("oracle.sh", ORACLE_FAILS)]);
+    let (digest, _) = protected_oracle(&case);
     case.approve_with(
         json!([check("visible", &["sh", "oracle.sh"], "libtest", None)]),
-        json!([{
-            "check": check("hidden", &["sh", "hidden.sh"], "libtest", None),
-            "files": {"hidden.sh": digest}
-        }]),
+        hidden(&digest),
     );
     assert_eq!(case.run(&id).len(), 2);
     let latest = record::latest(&case.db, &id).unwrap();
@@ -919,4 +985,122 @@ fn a_holdout_run_links_its_results_to_the_protected_case_and_stores_no_message()
             );
         }
     }
+}
+
+#[test]
+fn an_agent_reading_a_holdout_run_through_the_tracker_sees_only_its_verdict() {
+    let case = Case::new();
+    let id = case.change_set(&[("pass.sh", "exit 0\n")]);
+    let (digest, oracle) = protected_oracle(&case);
+    let ticket = case.ticket_proven_by(&oracle);
+    case.approve_with(
+        json!([check("visible", &["sh", "pass.sh"], "exit_code", None)]),
+        hidden(&digest),
+    );
+    assert_eq!(case.run(&id).len(), 2);
+    let latest = record::latest(&case.db, &id).unwrap();
+    let holdout = latest.iter().find(|run| run.holdout).unwrap();
+    let visible = latest.iter().find(|run| !run.holdout).unwrap();
+    assert_eq!(holdout.verdict, Some(Verdict::Failed));
+    let agent = core::Actor::new("agent:1").unwrap();
+    let listing = RunList {
+        project: key(),
+        plan: None,
+        batch: None,
+        verdict: None,
+        commit: None,
+        before: None,
+    };
+    let query = CoverageQuery {
+        project: key(),
+        of: CoverageOf::Ticket(ticket),
+        after: None,
+    };
+    let show = |actor: &core::Actor, run: &CheckRun| {
+        let tx = case.db.unchecked_transaction().unwrap();
+        let input = RunShow {
+            id: run.id.clone(),
+            after: None,
+        };
+        runs::show_as(&tx, &Host, actor, &input).unwrap()
+    };
+    let title = |actor: &core::Actor, run: &CheckRun| {
+        let tx = case.db.unchecked_transaction().unwrap();
+        let page = runs::list_as(&tx, &Host, actor, &listing).unwrap();
+        page.rows
+            .into_iter()
+            .find(|row| row.id == run.id)
+            .unwrap()
+            .title
+    };
+    let latest_of = |actor: &core::Actor| {
+        let tx = case.db.unchecked_transaction().unwrap();
+        let page = coverage::coverage_as(&tx, &Host, actor, &query).unwrap();
+        page.rows[0].cases[0].latest.clone()
+    };
+    let oracle = TestId::parse(&oracle).unwrap();
+    let case_latest = |actor: &core::Actor| {
+        let tx = case.db.unchecked_transaction().unwrap();
+        let shown = tests_store::case_show_as(&tx, &Host, actor, &oracle).unwrap();
+        let listed =
+            tests_store::case_list_as(&tx, &Host, actor, &key(), &CaseFilter::default()).unwrap();
+        let row = listed.into_iter().find(|row| row.id == oracle).unwrap();
+        (shown.latest, row.latest)
+    };
+    let failed = (Some(ResultOutcome::Failed), Some(ResultOutcome::Failed));
+
+    let Sighted::Outcome(outcome) = show(&agent, holdout) else {
+        panic!("an agent reads a holdout run in full");
+    };
+    assert_eq!(outcome.id, holdout.id);
+    assert_eq!(outcome.verdict, Some(Verdict::Failed));
+    assert_eq!((outcome.totals.total, outcome.totals.failed), (1, 1));
+    let shown = serde_json::to_string(&outcome).unwrap();
+    for withheld in ["hidden", "oracle", "argv", "integrity"] {
+        assert!(!shown.contains(withheld), "{withheld} in {shown}");
+    }
+    assert_eq!(title(&agent, holdout), "");
+    assert_eq!(
+        latest_of(&agent),
+        None,
+        "an agent reads no per-test outcome of a holdout run"
+    );
+    assert_eq!(
+        case_latest(&agent),
+        (None, None),
+        "an agent reads no hidden case's outcome from a holdout run"
+    );
+
+    let Sighted::Full(page) = show(&owner(), holdout) else {
+        panic!("the owner reads a holdout run as its outcome only");
+    };
+    assert_eq!(page.run.title, "hidden");
+    assert_eq!(page.results[0].name, "oracle::answers");
+    assert_eq!(title(&owner(), holdout), "hidden");
+    assert_eq!(case_latest(&owner()), failed);
+    assert_eq!(
+        latest_of(&owner()).map(|latest| (latest.run, latest.outcome)),
+        Some((holdout.id.clone(), ResultOutcome::Failed))
+    );
+    assert!(matches!(show(&agent, visible), Sighted::Full(page) if page.run.title == "visible"));
+    assert_eq!(title(&agent, visible), "visible");
+
+    let full = case
+        .db
+        .execute(
+            "INSERT INTO tk_policy(project, key, value_json, version)
+             SELECT id, 'case_protected_visibility', '\"full\"', 1 FROM tk_projects
+              WHERE key = 'CA'
+             ON CONFLICT(project, key) DO UPDATE
+             SET value_json = excluded.value_json, version = version + 1",
+            [],
+        )
+        .unwrap();
+    assert_eq!(full, 1);
+    assert!(
+        matches!(show(&agent, holdout), Sighted::Full(_)),
+        "case_protected_visibility full shows holdout runs to agents"
+    );
+    assert_eq!(title(&agent, holdout), "hidden");
+    assert_eq!(case_latest(&agent), failed);
 }

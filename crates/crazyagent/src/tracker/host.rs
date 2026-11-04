@@ -7,11 +7,13 @@ use std::path::{Path, PathBuf};
 use trackwright_core::coverage;
 use trackwright_core::host::{
     self as core_host, Authority, CheckView, Evidence, EvidenceState, LinkKind, LinkState, Links,
-    Paths, TicketView,
+    Paths, Sight, TicketView,
 };
 use trackwright_core::model::{Actor, CheckKind, OpKind, PolicyKey, ProjectKey, Refusal, codes};
+use trackwright_core::policy;
 use trackwright_core::runs::{RunWriters, SourceRef};
 use trackwright_core::standalone::Standalone;
+use trackwright_core::tests_model::{CaseProtectedVisibility, TestId, sees_protected};
 
 /// A target that exists in the host's tables but belongs to another project.
 pub const LINK_CROSS_PROJECT: &str = "link_cross_project";
@@ -98,6 +100,7 @@ const QUESTION: &str = "SELECT project, status FROM owner_questions WHERE id = ?
 const LINKED: &str = "SELECT EXISTS(SELECT 1 FROM tk_links l
     JOIN tk_tickets t ON t.id = l.ticket JOIN tk_projects p ON p.id = t.project
     WHERE p.key = ?1 AND l.kind = ?2 AND l.target = ?3)";
+const HOLDOUT_RUN: &str = "SELECT holdout FROM check_runs WHERE short = ?1";
 
 /// CrazyAgent as trackwright's host: links resolve against the team, landing, memory and
 /// question tables of `engine.db`, `change` evidence follows the change sets, and authority
@@ -498,6 +501,32 @@ impl Authority for Host {
 
     fn policy_locked(&self, setting: PolicyKey) -> Option<&'static str> {
         locked(setting)
+    }
+
+    fn run_sight(
+        &self,
+        tx: &Transaction<'_>,
+        project: &ProjectKey,
+        actor: &Actor,
+        run: &TestId,
+    ) -> Result<Sight, Refusal> {
+        if sees_protected(actor) {
+            return Ok(Sight::Full);
+        }
+        let holdout: Option<bool> = tx
+            .query_row(HOLDOUT_RUN, [run.to_string()], |row| row.get(0))
+            .optional()
+            .map_err(failed)?;
+        if holdout != Some(true) {
+            return Ok(Sight::Full);
+        }
+        let visibility = policy::load(tx, project)
+            .map_err(|_| Refusal::host(HOST_FAILED, "the engine could not read the policy"))?
+            .case_protected_visibility;
+        Ok(match visibility {
+            CaseProtectedVisibility::Full => Sight::Full,
+            CaseProtectedVisibility::Hidden | CaseProtectedVisibility::Summary => Sight::Outcome,
+        })
     }
 }
 

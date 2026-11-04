@@ -11,6 +11,7 @@ pub use shape::{
     TIMEOUT_S_MAX, Toolchain, ToolchainFamily, is_commit,
 };
 
+use crate::host::{Authority, Sight};
 use crate::model::{Actor, ProjectKey, Refusal, codes as core_codes};
 use crate::store::{self, StoreError};
 use crate::tests_model::{
@@ -345,6 +346,42 @@ pub struct RunListPage {
     pub cursor: Option<u32>,
 }
 
+/// A run as an actor with `Outcome` sight reads it: its id, state, verdict, times, counts
+/// and version, with no title, source, policy, integrity or result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunOutcome {
+    pub id: TestId,
+    pub state: RunState,
+    pub verdict: Option<Verdict>,
+    pub started_ms: i64,
+    pub finished_ms: Option<i64>,
+    pub totals: Totals,
+    pub version: i64,
+}
+
+impl RunOutcome {
+    fn of(run: &RunView) -> RunOutcome {
+        RunOutcome {
+            id: run.id.clone(),
+            state: run.state,
+            verdict: run.verdict,
+            started_ms: run.started_ms,
+            finished_ms: run.finished_ms,
+            totals: run.totals,
+            version: run.version,
+        }
+    }
+}
+
+/// One run as `run_show` gives it to an actor: the page under `Full` sight, or the outcome
+/// alone under `Outcome` sight.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "sight", rename_all = "snake_case")]
+pub enum Sighted {
+    Full(RunPage),
+    Outcome(RunOutcome),
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct RecordEvent {
     id: TestId,
@@ -640,6 +677,40 @@ pub fn list(tx: &Transaction<'_>, input: &RunList) -> Result<RunListPage, StoreE
         None
     };
     Ok(RunListPage { rows, cursor })
+}
+
+/// Shows one run as the actor may read it under the host's `run_sight`: the page of
+/// `show`, or only its outcome. Inputs: the transaction, the host, the actor and the
+/// request. Output: the sighted run, `run_unknown`, or the host's refusal.
+pub fn show_as(
+    tx: &Transaction<'_>,
+    host: &(impl Authority + ?Sized),
+    actor: &Actor,
+    input: &RunShow,
+) -> Result<Sighted, StoreError> {
+    match host.run_sight(tx, input.id.key(), actor, &input.id)? {
+        Sight::Full => show(tx, input).map(Sighted::Full),
+        Sight::Outcome => Ok(Sighted::Outcome(RunOutcome::of(&load(tx, &input.id)?.view))),
+    }
+}
+
+/// Lists a project's runs as `list` does, with the title of each run the actor reads as
+/// an outcome only left empty. Inputs: the transaction, the host, the actor and the
+/// request. Output: the page, or the host's refusal.
+pub fn list_as(
+    tx: &Transaction<'_>,
+    host: &(impl Authority + ?Sized),
+    actor: &Actor,
+    input: &RunList,
+) -> Result<RunListPage, StoreError> {
+    let mut page = list(tx, input)?;
+    for row in &mut page.rows {
+        if host.run_sight(tx, &input.project, actor, &row.id)? == Sight::Outcome {
+            row.title.clear();
+            row.elided = false;
+        }
+    }
+    Ok(page)
 }
 
 /// Computes a finished run's verdict, the locked rules shared by every host. A completed

@@ -1,5 +1,5 @@
 use crate::criteria;
-use crate::host::{CheckView, Evidence, EvidenceState, Host, TicketView};
+use crate::host::{Authority, CheckView, Evidence, EvidenceState, Host, Sight, TicketView};
 use crate::model::{
     Actor, CHECKS_PER_CRITERION_MAX, CheckKind, CriterionState, ProjectKey, Refusal, ShortId,
     TICKETS_PER_PROJECT_MAX, codes,
@@ -309,6 +309,26 @@ pub fn coverage(tx: &Transaction<'_>, query: &CoverageQuery) -> Result<CoverageP
         uncovered_total,
         cursor,
     })
+}
+
+/// Lists coverage as `coverage` does, without the latest result of any case that came from
+/// a run the actor reads as an outcome only. Inputs: the transaction, the host, the actor
+/// and the query. Output: the page, or the host's refusal.
+pub fn coverage_as(
+    tx: &Transaction<'_>,
+    host: &(impl Authority + ?Sized),
+    actor: &Actor,
+    query: &CoverageQuery,
+) -> Result<CoveragePage, StoreError> {
+    let mut page = coverage(tx, query)?;
+    for case in page.rows.iter_mut().flat_map(|row| row.cases.iter_mut()) {
+        if let Some(latest) = &case.latest
+            && host.run_sight(tx, &query.project, actor, &latest.run)? == Sight::Outcome
+        {
+            case.latest = None;
+        }
+    }
+    Ok(page)
 }
 
 fn case_state(
