@@ -40,8 +40,16 @@ fn a_link_swapped_in_for_the_lead_s_new_temp_folder_is_refused_and_never_followe
         matches!(&sealed, Err(error) if error.kind() == io::ErrorKind::PermissionDenied),
         "{sealed:?}"
     );
-    assert_eq!(fs::symlink_metadata(&victim).unwrap().mode() & 0o7777, 0o755);
-    assert!(fs::symlink_metadata(&lead).unwrap().file_type().is_symlink());
+    assert_eq!(
+        fs::symlink_metadata(&victim).unwrap().mode() & 0o7777,
+        0o755
+    );
+    assert!(
+        fs::symlink_metadata(&lead)
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
 }
 
 #[test]
