@@ -755,11 +755,12 @@ fn line_holding(files: &[PathBuf], words: &[&str]) -> bool {
         })
 }
 
-/// Tells whether a Claude Code transcript among the files holds a `tool` call whose input
-/// holds every one of `words` and whose tool result is not an error. Inputs: the files, the
-/// tool name and the words. Output: the answer.
-fn succeeded(files: &[PathBuf], tool: &str, words: &[&str]) -> bool {
+/// The texts of the tool results that are not errors, for every `tool` call in a Claude Code
+/// transcript among the files whose input holds every one of `words`. Inputs: the files, the
+/// tool name and the words. Output: the result texts, in file order.
+fn succeeded(files: &[PathBuf], tool: &str, words: &[&str]) -> Vec<String> {
     let mut calls = BTreeSet::new();
+    let mut results = Vec::new();
     for text in files
         .iter()
         .filter(|file| {
@@ -790,14 +791,32 @@ fn succeeded(files: &[PathBuf], tool: &str, words: &[&str]) -> bool {
                         if calls.contains(&field("tool_use_id").to_string())
                             && field("is_error") != serde_json::Value::Bool(true) =>
                     {
-                        return true;
+                        results.push(match field("content") {
+                            serde_json::Value::String(text) => text,
+                            serde_json::Value::Array(parts) => parts
+                                .iter()
+                                .filter_map(|part| part.get("text")?.as_str())
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                            other => other.to_string(),
+                        });
                     }
                     _ => {}
                 }
             }
         }
     }
-    false
+    results
+}
+
+/// The id Claude Code 2.1.309 gave the task one of `results` reports, from its TaskCreate
+/// result `Task #<id> created successfully: <subject>`. Input: the TaskCreate result texts.
+/// Output: the first id, or none.
+fn created_task(results: &[String]) -> Option<String> {
+    results.iter().find_map(|text| {
+        let (id, rest) = text.strip_prefix("Task #")?.split_once(' ')?;
+        (!id.is_empty() && rest.starts_with("created successfully")).then(|| id.to_owned())
+    })
 }
 
 /// The lead's name in its Claude Code team, which names its inbox `inboxes/team-lead.json`.
@@ -846,7 +865,8 @@ fn own_home_prompt(token: &str) -> String {
 /// through the lead's own inbox in the linked `teams/`: that inbox file exists and the lead's
 /// transcript records the answer as a teammate message, which tmux teammates deliver only
 /// through it (2); it, not the lead, completes the task the lead made in its own `tasks/`, so
-/// the teammate's own completing update succeeds through the linked folder (3). Claude Code
+/// the teammate's own update completing the id the lead's TaskCreate reported succeeds
+/// through the linked folder (3). Claude Code
 /// 2.1.309 deletes delivered inbox entries and, once every task is completed, the task files,
 /// so (2) and (3) read the transcripts, not those files. The teammate's transcript sits in
 /// the mates home, where the engine's record walk, which usage and the relay's read receipts
@@ -954,13 +974,22 @@ fn live_native_teammates_work_from_their_own_home_through_the_lead_s_team_folder
     let mates_names = teammate_names(&shared);
     let lead_transcripts = files_under(&team.home.join("projects"), 3);
     let task = format!("{token}TASK");
-    let completing = [r#""status":"completed""#];
-    let made_by_lead = succeeded(&lead_transcripts, "TaskCreate", &[task.as_str()]);
-    let completed_by_teammate = succeeded(&transcripts, "TaskUpdate", &completing);
-    let completed_by_lead = succeeded(&lead_transcripts, "TaskUpdate", &completing);
+    let made = created_task(&succeeded(
+        &lead_transcripts,
+        "TaskCreate",
+        &[task.as_str()],
+    ));
+    let bound = made.as_deref().map(|id| format!(r#""taskId":"{id}""#));
+    let completing = |files: &[PathBuf]| {
+        bound.as_deref().is_some_and(|id| {
+            !succeeded(files, "TaskUpdate", &[id, r#""status":"completed""#]).is_empty()
+        })
+    };
+    let completed_by_teammate = completing(&transcripts);
+    let completed_by_lead = completing(&lead_transcripts);
     let delivered = line_holding(&lead_transcripts, &["teammate-message", answer.as_str()]);
     println!(
-        "real claude native team in its own home: end={end:?} text={text:?} transcripts={transcripts:?} lead_transcripts={lead_transcripts:?} shared={shared:?} lead_inboxes={lead_inboxes:?} delivered={delivered} teammates={mates_names:?} tasks={tasks:?} made_by_lead={made_by_lead} completed_by_teammate={completed_by_teammate} completed_by_lead={completed_by_lead} walked={walked:?} denied={denied:?} log_exit={:?} turns={:?}",
+        "real claude native team in its own home: end={end:?} text={text:?} transcripts={transcripts:?} lead_transcripts={lead_transcripts:?} shared={shared:?} lead_inboxes={lead_inboxes:?} delivered={delivered} teammates={mates_names:?} tasks={tasks:?} made={made:?} completed_by_teammate={completed_by_teammate} completed_by_lead={completed_by_lead} walked={walked:?} denied={denied:?} log_exit={:?} turns={:?}",
         denials.status.code(),
         finished(&reports)
     );
@@ -984,8 +1013,8 @@ fn live_native_teammates_work_from_their_own_home_through_the_lead_s_team_folder
         "the lead's team config names no teammate: {shared:?}"
     );
     assert!(
-        made_by_lead && completed_by_teammate && !completed_by_lead,
-        "the task the lead made was not completed by its teammate through the lead's own tasks folder: made {made_by_lead} by teammate {completed_by_teammate} by lead {completed_by_lead} tasks={tasks:?}"
+        made.is_some() && completed_by_teammate && !completed_by_lead,
+        "the task the lead made was not completed by its teammate through the lead's own tasks folder: made {made:?} by teammate {completed_by_teammate} by lead {completed_by_lead} tasks={tasks:?}"
     );
     assert!(
         walked
