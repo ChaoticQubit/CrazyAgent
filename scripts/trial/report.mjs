@@ -28,6 +28,9 @@ const RUNS_MAX = 20;
 const RUN_FILE = /^summary[A-Za-z0-9_.-]*\.txt$/;
 const RUN_COMMIT = /^[0-9a-f]{7,40}$/;
 const RUN_SOURCE_MAX = 300;
+const RUN_LOGS = /^[A-Za-z0-9_][A-Za-z0-9_.-]*(?:\/[A-Za-z0-9_][A-Za-z0-9_.-]*){0,3}$/;
+const RUN_LOGS_MAX = 200;
+const PS_LINES = [/\bPID\b.*\b(?:COMMAND|CMD|ARGS|COMM)\b/, /^\s*\d{1,7}\s+\S/, /^\S+\s+\d{1,7}\s+\d+\.\d+\s+\d+\.\d+\s/];
 const RETRO = [
   { trial: 1, audit: "audit.txt", plan: "trial-plan.md", timeline: "timeline.txt", tokens: "tokens.txt", limits: "limits-before.txt", frames: "frames", gif: "trial-1028.gif" },
   { trial: 2, audit: "audit-2.txt", plan: "trial-plan-2.md", timeline: "timeline-2.txt", tokens: "tokens-2.txt", limits: "limits-before-2.txt", frames: "frames-2", gif: "trial-2.gif" },
@@ -146,7 +149,7 @@ tr { break-inside: avoid; }
 .result { display: inline-block; padding: 0 5pt; border-radius: 3pt; font-weight: 700; font-size: 8.5pt; color: #ffffff; background: var(--idle); white-space: nowrap; }
 .result.pass { background: var(--ok); }
 .result.fail { background: var(--bad); }
-.result.unknown, .result.blocked { background: var(--warn); }
+.result.unknown, .result.blocked, .result.unproven { background: var(--warn); }
 .check { border-top: 0.75pt solid var(--line); margin-top: 12pt; padding-top: 4pt; }
 figure { margin: 6pt 0; break-inside: avoid; }
 figcaption { font-weight: 600; font-size: 9.5pt; margin-bottom: 2pt; }
@@ -673,28 +676,43 @@ function parseSummary(raw) {
   return { results, groups };
 }
 
+async function logFolder(root, path) {
+  const full = join(root, path);
+  const info = await lstat(full).catch((error) => (error.code === "ENOENT" || error.code === "ENOTDIR" ? null : Promise.reject(error)));
+  if (info === null) return `missing: ${path}`;
+  if (info.isSymbolicLink()) return "refused: a link";
+  if (!info.isDirectory()) return "refused: not a folder";
+  const inner = relative(root, await realpath(full));
+  if (inner === "" || inner.startsWith("..") || isAbsolute(inner)) return "refused: outside the run folder";
+  return null;
+}
+
 /**
  * Lists the summaries of a live-pass folder in merge order: the runs runs.json names, or summary.txt alone.
- * Input: the real folder path. Output: each run's file, commit (empty for summary.txt), source, text and time.
- * Throws report_live_runs_invalid for a malformed runs.json or a listed summary that is not a plain file here.
+ * Input: the real folder path. Output: each run's file, commit (empty for summary.txt), source, log folder
+ * (empty for the folder itself), text and time. Throws report_live_runs_invalid for a malformed runs.json,
+ * a listed summary that is not a plain file here or a log folder that is not a plain folder here.
  */
 async function liveRuns(root) {
   if ((await place(root, "runs.json")).problem?.startsWith("missing:")) {
     const summary = await optionalText(root, "summary.txt");
     if (!summary) fail("report_live_summary_missing");
-    return [{ file: "summary.txt", commit: "", source: "", text: summary, written: (await stat(join(root, "summary.txt"))).mtime }];
+    return [{ file: "summary.txt", commit: "", source: "", logs: "", text: summary, written: (await stat(join(root, "summary.txt"))).mtime }];
   }
   const listed = await readJson(root, "runs.json", "report_live_runs_invalid");
   if (!Array.isArray(listed) || listed.length === 0 || listed.length > RUNS_MAX) fail(`report_live_runs_invalid: a list of 1 to ${RUNS_MAX} runs`);
   const runs = [];
   for (const run of listed) {
-    const { file, commit, source } = run ?? {};
+    const { file, commit, source, logs } = run ?? {};
     if (typeof file !== "string" || !RUN_FILE.test(file) || typeof commit !== "string" || !RUN_COMMIT.test(commit) || typeof source !== "string" || source.length > RUN_SOURCE_MAX) {
       fail("report_live_runs_invalid: each run names a summary*.txt file here, its commit hash and a short source");
     }
+    if (typeof logs !== "string" || logs.length > RUN_LOGS_MAX || !RUN_LOGS.test(logs)) fail(`report_live_runs_invalid: ${file} needs logs, the plain folder here that holds its run's logs`);
     const where = await place(root, file);
     if (where.problem) fail(`report_live_runs_invalid: ${file} ${where.problem}`);
-    runs.push({ file, commit, source, text: (await readBounded(where.full, TEXT_BYTES * 4)).bytes.toString("utf8"), written: (await stat(where.full)).mtime });
+    const folderProblem = await logFolder(root, logs);
+    if (folderProblem) fail(`report_live_runs_invalid: ${file} logs ${folderProblem}`);
+    runs.push({ file, commit, source, logs, text: (await readBounded(where.full, TEXT_BYTES * 4)).bytes.toString("utf8"), written: (await stat(where.full)).mtime });
   }
   return runs;
 }
@@ -753,18 +771,40 @@ function sentence(name) {
   return `${words.charAt(0).toUpperCase()}${words.slice(1)}.`;
 }
 
+function passProblem(name, { bytes, truncated }) {
+  if (truncated) return "the log is too large to read whole";
+  const lines = bytes.toString("utf8").split("\n");
+  if (lines.includes(`test ${name} ... ok`) && lines.some((line) => line.startsWith("test result: ok. 1 passed"))) return null;
+  return `the log does not show "test ${name} ... ok" and "test result: ok. 1 passed"`;
+}
+
+function withoutProcessLists(lines) {
+  const kept = [];
+  let left = 0;
+  for (const line of [...lines, null]) {
+    if (line !== null && PS_LINES.some((pattern) => pattern.test(line))) {
+      left += 1;
+      continue;
+    }
+    if (left) kept.push(`[process list left out: ${left} line${left === 1 ? "" : "s"}]`);
+    left = 0;
+    if (line !== null) kept.push(line);
+  }
+  return kept;
+}
+
 function excerpt(raw) {
-  const lines = raw.replace(/\s+$/, "").split("\n");
+  const lines = withoutProcessLists(raw.replace(/\s+$/, "").split("\n"));
   const at = lines.findIndex((line) => /panicked at|^BLOCKED|^error(\[|:)/.test(line));
   const from = at < 0 ? Math.max(0, lines.length - EXCERPT_LINES) : Math.max(0, at - 2);
   return lines.slice(from, from + EXCERPT_LINES).join("\n");
 }
 
 /**
- * Reads a live-pass folder written by leader/live-pass-18.1x.sh: summary.txt, or the summaries runs.json
- * lists with their commits, later runs replacing earlier results, and one log per test.
+ * Reads a live-pass folder written by leader/live-pass-18.1x.sh: summary.txt with one log per test beside it, or
+ * the summaries runs.json lists, each with its commit and its own log folder, later runs replacing earlier results.
  * Input: the folder, the script that lists the tests and the checkout holding their source.
- * Output: one row per listed test with its group, what it proves, result, run, duration and failure excerpt.
+ * Output: one row per listed test with its run and excerpt; a PASS whose own log does not show it passing reads UNPROVEN.
  */
 export async function readLivePass(folder, { script, repo = REPO, ...options } = {}) {
   KNOWN = knownValues(options);
@@ -777,7 +817,7 @@ export async function readLivePass(folder, { script, repo = REPO, ...options } =
   for (const run of runs) {
     const parsed = parseSummary(run.text);
     for (const [group, about] of parsed.groups) groups.set(group, about);
-    for (const [name, outcome] of parsed.results) results.set(name, { ...outcome, run: run.commit });
+    for (const [name, outcome] of parsed.results) results.set(name, { ...outcome, run: run.commit, logs: run.logs });
   }
   const sources = await testSources(repo);
   const known = new Set(listed.map((entry) => entry.name));
@@ -786,13 +826,17 @@ export async function readLivePass(folder, { script, repo = REPO, ...options } =
   for (const [index, entry] of all.entries()) {
     const outcome = results.get(entry.name) ?? { result: "NOT RUN" };
     const doc = docFor(sources, entry.target, entry.name);
+    const log = outcome.logs ? `${outcome.logs}/${entry.name.replaceAll("::", ".")}.log` : `${entry.name.replaceAll("::", ".")}.log`;
+    const where = outcome.result === "NOT RUN" ? null : await place(root, log);
+    let result = outcome.result;
     let detail = "";
-    if (outcome.result === "BLOCKED") detail = outcome.reason;
-    if (outcome.result === "FAIL") {
-      const where = await place(root, `${entry.name.replaceAll("::", ".")}.log`);
-      detail = where.problem ? where.problem : excerpt((await readBounded(where.full, LOG_BYTES)).bytes.toString("utf8"));
+    if (outcome.result === "BLOCKED") detail = outcome.seconds !== undefined && where.problem ? `${outcome.reason} (log ${where.problem})` : outcome.reason;
+    if (outcome.result === "FAIL") detail = where.problem ? where.problem : excerpt((await readBounded(where.full, LOG_BYTES)).bytes.toString("utf8"));
+    if (outcome.result === "PASS") {
+      const problem = where.problem ?? passProblem(entry.name, await readBounded(where.full, LOG_BYTES));
+      if (problem) [result, detail] = ["UNPROVEN", problem];
     }
-    rows.push({ n: index + 1, group: entry.group, name: entry.name, proves: doc || sentence(entry.name), fromName: !doc, result: outcome.result, run: outcome.run ?? "", seconds: outcome.seconds, detail });
+    rows.push({ n: index + 1, group: entry.group, name: entry.name, proves: doc || sentence(entry.name), fromName: !doc, result, run: outcome.run ?? "", seconds: outcome.seconds, detail });
   }
   const count = (result) => rows.filter((row) => row.result === result).length;
   const written = new Date(Math.max(...runs.map((run) => run.written.getTime())));
@@ -805,7 +849,7 @@ export async function readLivePass(folder, { script, repo = REPO, ...options } =
     groups: [...groups],
     runs: runs.filter((run) => run.commit).map(({ file, commit, source }) => ({ file, commit, source })),
     rows,
-    totals: `${count("PASS")} passed, ${count("FAIL")} failed, ${count("BLOCKED")} blocked, ${count("NOT RUN")} not run`,
+    totals: `${count("PASS")} passed, ${count("FAIL")} failed, ${count("BLOCKED")} blocked, ${count("UNPROVEN") ? `${count("UNPROVEN")} unproven, ` : ""}${count("NOT RUN")} not run`,
     time: span(rows.reduce((total, row) => total + (row.seconds ?? 0), 0)),
   };
 }
