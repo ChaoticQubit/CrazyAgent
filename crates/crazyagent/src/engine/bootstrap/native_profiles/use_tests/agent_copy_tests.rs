@@ -307,10 +307,15 @@ fn a_missing_or_unusable_codex_record_is_refused() {
             bytes(json!({"OPENAI_API_KEY": "sk-unit-api-key", "tokens": null})),
             api_key,
         ),
-        (bytes(json!({"OPENAI_API_KEY": "", "tokens": null})), unreadable),
+        (
+            bytes(json!({"OPENAI_API_KEY": "", "tokens": null})),
+            unreadable,
+        ),
         (bytes(json!({"OPENAI_API_KEY": null})), unreadable),
         (
-            bytes(json!({"tokens": {"id_token": "a", "access_token": "no-claims", "refresh_token": "r"}})),
+            bytes(
+                json!({"tokens": {"id_token": "a", "access_token": "no-claims", "refresh_token": "r"}}),
+            ),
             unreadable,
         ),
         (
@@ -318,7 +323,9 @@ fn a_missing_or_unusable_codex_record_is_refused() {
             unreadable,
         ),
         (
-            bytes(json!({"tokens": {"id_token": token(now() + 3600), "access_token": "", "refresh_token": "r"}})),
+            bytes(
+                json!({"tokens": {"id_token": token(now() + 3600), "access_token": "", "refresh_token": "r"}}),
+            ),
             unreadable,
         ),
     ] {

@@ -4180,7 +4180,7 @@ pub(super) fn runtime(
                 turn.cause = Some(cause_code(cause));
                 if turn.phase == MasterTurnPhase::Failed
                     && matches!(
-                        cause,
+                        cause.as_str(),
                         "native_profile_credential_unavailable"
                             | "native_profile_codex_api_key"
                             | "native_profile_codex_token_unreadable"
