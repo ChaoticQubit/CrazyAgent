@@ -1367,6 +1367,42 @@ fn native_teammates_never_move_the_folders_holding_the_leads_part_of_the_relay_m
     );
 }
 
+/// A native lead in a project that hides as many folders as a project may save still gets
+/// its teammates' sandbox, which hides the lead's part of the relay mailbox and the lead's
+/// own temp folder besides (relay C1 merged with lead-own-tmp).
+#[test]
+fn a_native_team_starts_in_a_project_hiding_as_many_folders_as_it_may() {
+    let case = case();
+    let tmux = crazyagent::terminal::tmux::installed(&case.project).expect("tmux is installed");
+    let tmp = toolchains::make_tmp(&case.home).unwrap();
+    let mates_home = team_homes(&case.home);
+    let mailbox = case.tmp.join(crazyagent::team::tool::MAILBOX_FOLDER);
+    fs::create_dir(&mailbox).unwrap();
+    fs::set_permissions(&mailbox, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut sandbox = ProjectSandbox::new(
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_scratch(&tmp)
+    .unwrap();
+    for index in 0..crazyagent::sandbox::hidden_paths::HIDDEN_PATHS_MAX {
+        sandbox = sandbox
+            .hide(&case.project.join(format!("hidden-{index}")))
+            .unwrap();
+    }
+    let team = sandbox.native_team(
+        &tmp.join("tmux.sock"),
+        &tmp.join("teammates-0123456789abcdef.sock"),
+        &tmp.join(crazyagent::team::caller::CALLER_SOCKET),
+        &tmux,
+        &mates_home,
+    );
+    assert!(team.is_ok(), "{:?}", team.as_ref().err());
+}
+
 /// Neither a native lead nor its teammates can place, remove or move a node at the name the
 /// engine binds its caller socket at before one rename moves it over the caller socket's
 /// path (rv-secreview RH2R2-1): with the name free, a listener, a folder or a file either
