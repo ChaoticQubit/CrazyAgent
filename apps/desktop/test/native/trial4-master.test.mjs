@@ -42,6 +42,15 @@ test("the master has ended when it has no agent row or a stopped status; running
   assert.equal(reply.masterState([{ kind: "lead", status: "working" }]).ended, true);
 });
 
+test("Start all is decided from the engine's team read of this project, never from no read", () => {
+  assert.equal(reply.pausedOf({ project_id: "ca-trial-4", paused: true, keep_warm: true }, "ca-trial-4"), true);
+  assert.equal(reply.pausedOf({ project_id: "ca-trial-4", paused: false, keep_warm: true }, "ca-trial-4"), false);
+  assert.throws(() => reply.pausedOf({ failed: "engine_unavailable" }, "ca-trial-4"), /desktop_team_status failed: engine_unavailable/);
+  assert.throws(() => reply.pausedOf({ project_id: "ca-trial-4b", paused: true }, "ca-trial-4"), /answered for "ca-trial-4b", not ca-trial-4/);
+  assert.throws(() => reply.pausedOf({ project_id: "ca-trial-4" }, "ca-trial-4"), /no paused flag/);
+  assert.throws(() => reply.pausedOf(null, "ca-trial-4"), /answered for undefined/);
+});
+
 test("the Sessions bar line gives the live session's messages, 0 for a new one and null for none", () => {
   assert.equal(reply.messageCount("Live session \u00b7 started 3 min ago \u00b7 12 messages"), 12);
   assert.equal(reply.messageCount("Live session \u00b7 started now \u00b7 1 message"), 1);
