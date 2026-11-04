@@ -599,10 +599,16 @@ fn a_received_payload_holds_the_rendered_bound() {
     );
 }
 
-/// Reads the plain codes a source file refuses with, before its tests.
-/// Input: the file text. Output: each `process_` code once.
+/// Reads the plain codes a source file refuses with, before its tests, whichever of
+/// `#[cfg(test)]` or `#[cfg(all(test, ...))]` gates them. Input: the file text. Output:
+/// each `process_` code once.
 fn refusals(source: &str) -> std::collections::BTreeSet<&str> {
-    let code = source.split("#[cfg(test)]").next().unwrap();
+    let end = ["#[cfg(test)]", "#[cfg(all(test"]
+        .into_iter()
+        .filter_map(|gate| source.find(gate))
+        .min()
+        .unwrap_or(source.len());
+    let code = &source[..end];
     ["\"process_", "\"agent_instructions_"]
         .into_iter()
         .flat_map(|prefix| code.match_indices(prefix))
