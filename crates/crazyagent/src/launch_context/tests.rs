@@ -414,6 +414,7 @@ fn a_planted_codex_system_skill_does_not_survive_a_relaunch() {
         off_tools: Vec::new(),
         native_team: None,
         relay: None,
+        model_proxy: None,
     };
     let first = context.install("codex", &home, true).unwrap();
     let planted = home.join("skills").join(".system").join("planted");
