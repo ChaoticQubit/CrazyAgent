@@ -322,7 +322,7 @@ Writes: yes.
 
 | Field | Required | Schema | Meaning |
 | --- | --- | --- | --- |
-| `key` | yes | `{"enum":["close","create","agent_edit","cycle_days","rollover","import"],"type":"string"}` | The policy key. |
+| `key` | yes | `{"enum":["close","create","agent_edit","cycle_days","rollover","import","test_evidence","skipped_counts","case_protected_visibility","run_writers","run_retention"],"type":"string"}` | The policy key. |
 | `project` | yes | `{"pattern":"^[A-Z]{2,8}$","type":"string"}` | The project's key, for example CA. |
 | `request_id` | no | `{"maxLength":64,"minLength":1,"pattern":"^[A-Za-z0-9._:-]+$","type":"string"}` | Your key for this write; repeating it with the same fields returns the first reply. |
 | `value` | yes | `{"maxLength":32,"minLength":1,"pattern":"^[a-z0-9_]+$","type":"string"}` | One of the key's options, or a number of days for cycle_days. |
@@ -662,6 +662,7 @@ Every operation answers with this envelope: `ok` with `data`, the `next` actions
 - `agent_edit_refused`
 - `owner_only`
 - `policy_value_invalid`
+- `policy_locked`
 - `criterion_has_checks`
 - `checks_full`
 - `check_exists`
@@ -693,3 +694,40 @@ Every operation answers with this envelope: `ok` with `data`, the `next` actions
 - `cycle_closed`
 - `cycles_full`
 - `cycle_overlaps`
+- `active_plan_exists`
+- `cases_full`
+- `case_links_full`
+- `case_link_exists`
+- `case_link_unknown`
+- `case_protected`
+- `case_unknown`
+- `cross_project`
+- `option_needs_host`
+- `plans_full`
+- `plan_closed`
+- `plan_items_full`
+- `plan_item_exists`
+- `plan_item_unknown`
+- `plan_unknown`
+- `release_unknown`
+- `results_empty`
+- `results_too_many`
+- `result_name_repeated`
+- `runs_full`
+- `run_batch_invalid`
+- `run_closed`
+- `run_finish_invalid`
+- `run_integrity_invalid`
+- `run_policy_invalid`
+- `run_results_full`
+- `run_source_invalid`
+- `run_unknown`
+- `run_writer_refused`
+- `sets_full`
+- `set_cases_full`
+- `set_case_exists`
+- `set_case_unknown`
+- `set_unknown`
+- `stable_name_taken`
+- `steps_full`
+- `test_id_invalid`
