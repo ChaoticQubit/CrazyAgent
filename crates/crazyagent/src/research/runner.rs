@@ -900,8 +900,8 @@ impl ResearchRunner {
             }
         };
         launch.current_dir(&worktree);
-        if let Some(proxy) = &proxy {
-            launch.envs(crate::sandbox::model_proxy::variables(proxy.port()));
+        if let Some(port) = installed.model_proxy() {
+            launch.envs(crate::sandbox::model_proxy::variables(port));
         }
         let mut command = if unconfined {
             sandbox.wrap_unconfined(&launch)?
