@@ -1,6 +1,6 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
-import type { ActionReceipt, BackgroundAtEnd, BranchMode, ChildLanding, CoordHarness, CoordSettings, Delivery, PendingIntent, SubagentMode, SwitchMode, ToolSwitch, ToolView } from "./engine-client";
+import type { ActionReceipt, BackgroundAtEnd, BranchMode, ChildLanding, CoordHarness, CoordSettings, Delivery, PendingIntent, SubagentMode, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
 import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill, QuestionsInbox } from "./engine-client";
 
 export type { AgentMemoryWrites, SavedMemory, SavedMemoryPage } from "./engine-client";
@@ -716,7 +716,7 @@ export interface HarnessEntry {
   tools: { kind: "switchable" } | { kind: "limited"; reason: string };
   model_selection: boolean;
   account_kinds: HarnessAccountKind[];
-  team: { kind: "available" } | { kind: "unavailable"; reason: string };
+  team: TeamUse;
   aliases: string[];
 }
 
