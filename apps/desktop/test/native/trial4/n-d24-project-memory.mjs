@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { click, shown, text, texts } from "../settings-steps.mjs";
+import { click, shown, texts } from "../settings-steps.mjs";
 import { UI_MS, lit } from "../trial-kit.mjs";
 import { memoryVerdict, rememberPrompt } from "../trial4-context.mjs";
 
@@ -16,6 +16,13 @@ async function projectMemory(kit) {
   await click(MEMORY);
   await kit.until(() => shown("//h2[normalize-space(.)=\"Project memory\"]"), UI_MS, "Context, Project memory did not open");
   return (await texts("main")).join("\n");
+}
+
+/** Reads the source line Settings, Memory shows under one memory row, through WebDriver since
+ * the row is found by XPath. Input: the row's XPath. Output: its text, "" when none is shown. */
+async function sourceOf(row) {
+  const line = `${row}//span[contains(@class, "muted")]`;
+  return (await shown(line)) ? $(line).getText() : "";
 }
 
 export const checks = [{
@@ -47,11 +54,11 @@ export const checks = [{
     await kit.go("#/settings/memory");
     await kit.pick("#memory-scope", kit.project());
     await kit.until(() => shown(row), UI_MS, `Settings, Memory never listed ${token} for the project`);
-    const source = await text(`${row}//span[contains(@class, "muted")]`);
+    const source = await sourceOf(row);
     const approved = await shown(approve);
     if (approved) {
       await click(approve);
-      await kit.until(async () => !(await shown(approve)) && !(await text(`${row}//span[contains(@class, "muted")]`)).startsWith("Waiting"), UI_MS, `${token} still waits after Approve`);
+      await kit.until(async () => !(await shown(approve)) && !(await sourceOf(row)).startsWith("Waiting"), UI_MS, `${token} still waits after Approve`);
     }
     const listed = await projectMemory(kit);
     await kit.screen();
