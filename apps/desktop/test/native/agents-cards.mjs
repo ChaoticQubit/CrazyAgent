@@ -4,6 +4,9 @@ import { click } from "./settings-steps.mjs";
 /** The longest an agents check waits for one screen change, in ms. */
 export const UI_MS = 30000;
 
+/** The longest a wheel turn may take to show on a terminal, in ms. */
+export const TURN_MS = 1500;
+
 /** The engine statuses of an agent that still runs. */
 export const RUNNING = ["starting", "idle", "working"];
 
@@ -16,6 +19,7 @@ const EDGE_PX = 1;
 const COPY_CHARS = 3;
 const CONNECTING = "Connecting to the terminal";
 const WHEEL_TICKS = 3;
+const BLOCK_ROWS = 3;
 
 /** The status word a node's card names, as the app picks it: the engine's status label,
  * else the fixed word for the status. Input: a graph node. Output: the word, empty when the
@@ -84,11 +88,78 @@ export function notShown(summary) {
   return found ? Number(found[1]) : 0;
 }
 
-/** Whether a wheel turn scrolled a terminal view: its scroll offset changed or Jump to latest
- * appeared. New rows alone do not count, since a live agent prints them on its own.
- * Inputs: the view before and after the turn. Output: a boolean. */
+/** The row texts of a screen without trailing spaces. Input: the rows. Output: the rows. */
+function tidy(rows) {
+  assert(Array.isArray(rows), "a screen is a list of row texts");
+  return rows.map((row) => row.replace(/\s+$/, ""));
+}
+
+/** Where a block of rows sits on a screen when the screen holds it exactly once. Inputs: the
+ * tidied rows and the block's rows joined by newlines. Output: its first row, -1 when it is
+ * missing or held more than once. */
+function rowOf(rows, block) {
+  const found = [];
+  for (let at = 0; at + BLOCK_ROWS <= rows.length; at += 1) if (rows.slice(at, at + BLOCK_ROWS).join("\n") === block) found.push(at);
+  return found.length === 1 ? found[0] : -1;
+}
+
+/** How a screen's own redraw moved its rows between two reads: the first block of BLOCK_ROWS
+ * non-blank rows that each read holds exactly once and that changed row, compared without
+ * trailing spaces. Inputs: the row texts before and after, top first. Output: { block, from,
+ * to }, the block's rows joined by newlines and its first row before and after, or null. */
+export function redrawMove(before, after) {
+  const [was, now] = [tidy(before), tidy(after)];
+  for (let at = 0; at + BLOCK_ROWS <= was.length; at += 1) {
+    const rows = was.slice(at, at + BLOCK_ROWS);
+    if (rows.some((row) => row.trim() === "")) continue;
+    const block = rows.join("\n");
+    if (rowOf(was, block) !== at) continue;
+    const to = rowOf(now, block);
+    if (to !== -1 && to !== at) return { block, from: at, to };
+  }
+  return null;
+}
+
+/** Whether a wheel turn up scrolled a terminal view. An agent that reads the mouse, such as a
+ * fullscreen TUI, gets the wheel and redraws its own screen, so a block of its rows must move
+ * down; its own redraws can do that too, so paired decides for it. Otherwise the offset must
+ * change or Jump to latest appear; new rows alone never count. Inputs: the views before and
+ * after the turn. Output: a boolean. */
 export function moved(before, after) {
+  if (before.mouse) {
+    const move = redrawMove(before.lines, after.lines);
+    return move !== null && move.to > move.from;
+  }
   return before.top !== after.top || (!before.jump && after.jump);
+}
+
+/** Whether a read still answers a wheel turn: it was taken within TURN_MS of the turn, so a
+ * condition that waited out a slow read cannot pass late. Inputs: the turn's and the read's
+ * times in ms. Output: a boolean. */
+export function inTurn(turned, read) {
+  assert(read >= turned, "a read comes after its turn");
+  return read - turned <= TURN_MS;
+}
+
+/** The wheel turn up in a run of reads taken from just before the turn: the first read that
+ * moved from the read just before it, which anchors the pair, so output the agent printed
+ * before it took the wheel is not counted against the scroll. Input: the reads in order.
+ * Output: { anchor, up }, or null when no read moved. */
+export function turnUp(reads) {
+  assert(Array.isArray(reads), "a turn is read as a list of views");
+  for (let index = 1; index < reads.length; index += 1) {
+    if (moved(reads[index - 1], reads[index])) return { anchor: reads[index - 1], up: reads[index] };
+  }
+  return null;
+}
+
+/** Whether a fullscreen agent scrolled with the wheel: the turn up moved a block of its rows
+ * down and the same turn back down put that block back on its first row. A redraw of its own
+ * or new output moves rows once, not there and back by the same rows. Inputs: the views before
+ * the turn up, after it and after the turn down. Output: a boolean. */
+export function paired(base, up, down) {
+  const move = redrawMove(base.lines, up.lines);
+  return move !== null && move.to > move.from && rowOf(tidy(down.lines), move.block) === move.from;
 }
 
 /** Whether copied text came from a terminal's rows: it is not blank and, with whitespace
@@ -127,8 +198,9 @@ export function summary() {
 }
 
 /** Reads one agent's terminal view as the owner sees it: the state line, the rows xterm
- * draws, the scroll offset, whether it is live and whether Jump to latest shows. Input: the
- * agent's label. Output: the view, or null while none is shown. */
+ * draws as text and one by one, the scroll offset, whether it is live, whether Jump to latest
+ * shows and whether the agent reads the mouse. Input: the agent's label. Output: the view,
+ * or null while none is shown. */
 export function terminalView(label) {
   return browser.execute((label) => {
     const section = [...document.querySelectorAll("section.tg-terminal")]
@@ -138,7 +210,9 @@ export function terminalView(label) {
     return {
       state: section.querySelector(".tg-terminal-state")?.innerText ?? "",
       rows: section.querySelector(".xterm-rows")?.innerText ?? "",
+      lines: [...section.querySelectorAll(".xterm-rows > div")].map((row) => row.innerText),
       top: section.querySelector(".xterm-viewport")?.scrollTop ?? 0,
+      mouse: Boolean(section.querySelector(".xterm.enable-mouse-events")),
       live: Boolean(section.querySelector(".tg-terminal-note")),
       jump,
     };
