@@ -763,9 +763,11 @@ pub(super) fn add_teammate(
 /// [`super::add_teammate_worktree`] says: `<worktree>/.worktrees/<name>` as a worktree of
 /// the project repository on `<task branch>--<name>`, a new branch cut from the lead's
 /// HEAD or the one an earlier run left as it stands. Nothing runs when the repository
-/// already records it on that branch, and the record is read again after git. Inputs: the
-/// store, the owner checkout root, the lead's worktree and git folder, the teammate's name
-/// and the lead's teammates' setup git. Output: Ok, or a `changes_*` refusal.
+/// already records it on that branch, and the record is read again after git; the store
+/// then keeps that branch as the teammate worktree's own, so its turns record there.
+/// Inputs: the store, the owner checkout root, the lead's worktree and git folder, the
+/// teammate's name and the lead's teammates' setup git. Output: Ok, or a `changes_*`
+/// refusal.
 pub(super) fn add_linked_teammate(
     db: &Connection,
     repository: &Path,
@@ -782,7 +784,9 @@ pub(super) fn add_linked_teammate(
         return Err(invalid());
     }
     let task = agent_branch(db, worktree, Layout::Linked)?.ok_or_else(invalid)?;
-    let branch = agent_git::teammate_branch(&task, name).ok_or_else(invalid)?;
+    let branch = agent_git::teammate_branch(&task, name)
+        .filter(|branch| agent_git::is_agent_branch(branch))
+        .ok_or_else(invalid)?;
     let folder = worktree.join(agent_git::TEAMMATES_FOLDER).join(name);
     let on_branch = || -> Result<bool, EngineError> {
         Ok(clone::linked_teammates(repository, worktree, &task)?
@@ -793,7 +797,7 @@ pub(super) fn add_linked_teammate(
             }))
     };
     if on_branch()? {
-        return Ok(());
+        return store::set_agent_branch(db, repository, &folder, &branch);
     }
     let held = shared(repository)?.exec(
         &[
@@ -823,7 +827,7 @@ pub(super) fn add_linked_teammate(
     if !on_branch()? {
         return Err(failure("changes_git_failed"));
     }
-    Ok(())
+    store::set_agent_branch(db, repository, &folder, &branch)
 }
 
 /// Closes a sub-agent's open change set once its lead merged the work it holds, as
