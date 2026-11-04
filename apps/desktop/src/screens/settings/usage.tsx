@@ -275,7 +275,7 @@ function LimitsCard({ limits, name, nowMs, busy, onSetReset }: {
       {limits.plan && <span className="badge">{limits.plan}</span>}
     </div>
     <span className="muted small">{readLine(limits, nowMs)}</span>
-    {limits.failure && <Notice tone="warn">{pollFailure(limits.failure)}</Notice>}
+    {limits.failure && <Notice tone={limits.failure === "native_profile_codex_api_key" ? "info" : "warn"}>{pollFailure(limits.failure)}</Notice>}
     <WindowLine limits={limits} kind="five_hour" nowMs={nowMs} pending={busy === `${limits.account}/five_hour`} onSetReset={onSetReset} />
     <WindowLine limits={limits} kind="weekly" nowMs={nowMs} pending={busy === `${limits.account}/weekly`} onSetReset={onSetReset} />
   </section>;
