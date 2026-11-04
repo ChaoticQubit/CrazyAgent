@@ -142,7 +142,7 @@ class LeadDoneTests(unittest.TestCase):
               prompt="Lead A: a native team writes greet.py.", result="Merged greet.py from greeter.",
               created_ms=now - 300_000, started_ms=now - 300_000, finished_ms=now - 10_000)
         w.transcript(lead, [launch("x")], worktree="/w/agent-lead")
-        folder = w.root / "team" / "agents" / f"agent-{lead}" / audit.MATES_HOME / "projects" / audit.slug_of("/w/agent-lead")
+        folder = w.root / "team" / "agents" / f"agent-{lead}" / "mates-home" / "projects" / audit.slug_of("/w/agent-lead")
         folder.mkdir(parents=True, exist_ok=True)
         reply = {"type": "assistant", "timestamp": iso(now - 2_000), "message": {"content": [{"type": "text", "text": "Wrote greet.py."}]}}
         with (folder / "greeter.jsonl").open("w", encoding="utf-8") as handle:

@@ -634,7 +634,7 @@ class AuditTests(unittest.TestCase):
         lead's teammates' config home, in the folder of the lead's worktree, each line naming
         the teammate as agent teams do. Inputs: the lead, the agent-team name, the entries."""
         w = self.world
-        folder = w.root / "team" / "agents" / f"agent-{lead}" / audit.MATES_HOME / "projects" / audit.slug_of("/w/agent-lead")
+        folder = w.root / "team" / "agents" / f"agent-{lead}" / "mates-home" / "projects" / audit.slug_of("/w/agent-lead")
         folder.mkdir(parents=True, exist_ok=True)
         with (folder / f"{name}.jsonl").open("a", encoding="utf-8") as handle:
             for entry in entries:
