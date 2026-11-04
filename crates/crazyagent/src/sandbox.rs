@@ -79,9 +79,10 @@ const PATH_BYTES_MAX: usize = 1024;
 const READ_ROOTS_MAX: usize = 16;
 const WORKTREES_MAX: usize = 8;
 /// The most folders one sandbox hides: every hidden folder a project saves
-/// ([`hidden_paths::HIDDEN_PATHS_MAX`]) plus one a step adds itself, such as the graph step's
-/// `.crazyagent/`.
-pub const HIDDEN_MAX: usize = hidden_paths::HIDDEN_PATHS_MAX + 1;
+/// ([`hidden_paths::HIDDEN_PATHS_MAX`]) plus the two a step adds itself at most, such as the
+/// graph step's `.crazyagent/`, or a native lead's part of the relay mailbox and its own temp
+/// folder, which its teammates' sandbox hides.
+pub const HIDDEN_MAX: usize = hidden_paths::HIDDEN_PATHS_MAX + 2;
 /// The most exact Unix sockets one agent may bind and connect: its own Codex app-server's.
 const SOCKETS_MAX: usize = 2;
 /// The most exact Unix socket grants one agent holds, of every use together: a native lead's
