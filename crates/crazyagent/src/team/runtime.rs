@@ -5216,7 +5216,6 @@ impl TeamRuntime {
             return Err(with_code(reason, Some("agent_access_unavailable")));
         }
         let proxy = if tools
-            && !live
             && policy.network == AgentNetwork::None
             && !matches!(remote, SandboxRemote::Loopback(_))
         {

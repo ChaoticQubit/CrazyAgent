@@ -11221,6 +11221,60 @@ fn a_managed_tools_on_agent_under_no_network_reaches_the_network_only_through_it
     assert!(crate::spawn_gate::connect_tcp_std(("127.0.0.1", port)).is_err());
 }
 
+/// Under the None network a live master with tools reaches the network only through its
+/// own model proxy, as any agent does: its profile grants that loopback port and no host
+/// port or DNS (S4B-M1).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_live_master_with_tools_under_no_network_reaches_the_network_only_through_its_model_proxy() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let (runtime, account) = none_network_runtime(&fixture);
+    let runtime = runtime.with_terminal(host.clone()).unwrap();
+    super::super::master::set_live(&fixture.connection, &fixture.setup.project_id, true).unwrap();
+    let id = fixture.agent(AgentRole::Master, "codex", AgentStatus::Starting);
+    let (_, plan, _) = runtime
+        .prepare(
+            &fixture.setup,
+            id,
+            AgentRole::Master,
+            "codex",
+            true,
+            &account,
+            false,
+            crate::agent_git::Layout::Linked,
+        )
+        .unwrap();
+    assert!(plan.live, "the master runs in its live terminal");
+    let port = plan.proxy.as_ref().map(|proxy| proxy.port());
+    let profile = std::fs::read_to_string(&plan.sandbox_profile).unwrap();
+    assert!(
+        port.is_some(),
+        "a live master with tools under None gets a model proxy: {profile}"
+    );
+    let port = port.unwrap();
+    assert!(
+        profile.contains(&format!(
+            "(allow network-outbound (remote ip \"localhost:{port}\"))"
+        )),
+        "{profile}"
+    );
+    assert!(
+        !profile.contains("(remote ip \"*:") && !profile.contains("mDNSResponder"),
+        "{profile}"
+    );
+    assert_eq!(
+        proxy_status(port, "chatgpt.com:443"),
+        "HTTP/1.1 200 Connection Established"
+    );
+    assert_eq!(
+        proxy_status(port, "example.com:443"),
+        "HTTP/1.1 403 Forbidden"
+    );
+    drop(plan);
+    host.close(&[]).unwrap();
+}
+
 /// A proxied agent's headless launch names its model proxy in its variables and exempts no
 /// host (S4b).
 #[cfg(target_os = "macos")]
