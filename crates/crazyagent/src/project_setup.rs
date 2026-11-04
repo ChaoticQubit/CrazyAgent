@@ -69,6 +69,22 @@ const SECRET_KEY_ENDS: [&str; 10] = [
     "session_id",
     "_key",
 ];
+const KEY_SEPARATORS: [&str; 4] = ["=", ":", "=>", ":="];
+const PLAIN_P_FLAGS: [&str; 13] = [
+    "-pthread",
+    "-pedantic",
+    "-pedantic-errors",
+    "-pie",
+    "-pipe",
+    "-pg",
+    "-print",
+    "-print0",
+    "-printf",
+    "-prune",
+    "-path",
+    "-perm",
+    "-pretty",
+];
 const KEY_BLOCK_BEGIN: &str = "-----begin";
 const KEY_BLOCK_END: &str = "-----end";
 const BASE64_RUN_MIN: usize = 20;
@@ -3093,19 +3109,24 @@ enum KeyValue {
     Inline,
     /// In the next word: `key: value`, `"key": "value"`, `--key value`.
     Next,
+    /// In the word after a lone separator word: `key = value`, `"key" : "value"`.
+    Apart,
 }
 
 /// Masks the credential-like words of one line that names no credential field: a word
-/// [`secret_like`] finds, a key's value [`secret_key`] finds, the `user:password` after
-/// `-u` or `--user`, a URL's user part and, when the line before ended in a masked word, a
-/// token tail at the line's start. Takes the line and whether the line before ended in a
-/// masked word. Returns the line and whether it ends in one.
+/// [`secret_like`] finds, a key's value [`secret_key`] finds, also after a lone
+/// `KEY_SEPARATORS` word, the `user:password` after `-u` or `--user`, a URL's user part
+/// and, when the line before ended in a masked word, a token tail as the line's first
+/// word. Takes the line and whether the line before ended in a masked word. Returns the
+/// line and whether it ends in one.
 fn redact_words(line: &str, wrapped: bool) -> (String, bool) {
     let mut kept = String::with_capacity(line.len());
     let mut value_next = false;
+    let mut separator_next = false;
     let mut user_next = false;
+    let mut first = true;
     let mut ends_hidden = false;
-    for (index, piece) in line.split_inclusive(char::is_whitespace).enumerate() {
+    for piece in line.split_inclusive(char::is_whitespace) {
         let word = piece.trim_end_matches(char::is_whitespace);
         if word.is_empty() {
             kept.push_str(piece);
@@ -3114,11 +3135,14 @@ fn redact_words(line: &str, wrapped: bool) -> (String, bool) {
         let key = secret_key(word);
         let hide = value_next
             || (user_next && word.contains(':'))
-            || (wrapped && index == 0 && wrapped_tail(word))
+            || (wrapped && first && wrapped_tail(word))
             || key == Some(KeyValue::Inline)
             || secret_like(word);
-        value_next = key == Some(KeyValue::Next);
+        value_next =
+            key == Some(KeyValue::Next) || (separator_next && KEY_SEPARATORS.contains(&word));
+        separator_next = key == Some(KeyValue::Apart);
         user_next = matches!(word, "-u" | "--user");
+        first = false;
         if hide {
             kept.push_str(HIDDEN_WORD);
         } else {
@@ -3132,8 +3156,9 @@ fn redact_words(line: &str, wrapped: bool) -> (String, bool) {
 
 /// Finds a key named like a credential in a word: a run of letters, digits, `-` and `_`
 /// whose name, in any ASCII case and `-` read as `_`, ends with one of `SECRET_KEY_ENDS`,
-/// followed, after any closing quote, by `=` or a single `:`, or a whole-word `--key`
-/// flag. Takes the word. Returns where the key's value sits, or none.
+/// followed, after any closing quote, by `=` or a single `:`, a whole-word `--key` flag,
+/// or a key ending the word, whose value follows a lone separator word. Takes the word.
+/// Returns where the key's value sits, or none.
 fn secret_key(word: &str) -> Option<KeyValue> {
     let bytes = word.as_bytes();
     let name = |b: u8| b.is_ascii_alphanumeric() || b == b'-' || b == b'_';
@@ -3172,6 +3197,9 @@ fn secret_key(word: &str) -> Option<KeyValue> {
                 } else {
                     KeyValue::Next
                 });
+            }
+            if after == bytes.len() {
+                return Some(KeyValue::Apart);
             }
         }
         start = end;
@@ -3216,9 +3244,9 @@ fn push_without_user_part(kept: &mut String, word: &str) {
 /// letters and digits; a base64 run of at least `BASE64_RUN_MIN` bytes mixing upper case,
 /// lower case and digits with no plain lowercase folder name between its `/`, or one such
 /// part between its `/` alone (a webhook URL's secret path part); a
-/// `.pgpass`-style line of at least `PGPASS_FIELDS_MIN` filled fields; a `-p<password>` or
-/// `--user=user:password` flag; or a path to a credential the sandbox guards. Takes the
-/// word.
+/// `.pgpass`-style line of at least `PGPASS_FIELDS_MIN` filled fields; a `-p<password>` flag
+/// other than the known `PLAIN_P_FLAGS`, or a `--user=user:password` flag; or a path to a
+/// credential the sandbox guards. Takes the word.
 fn secret_like(word: &str) -> bool {
     let token = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
     let core = word.trim_matches(|c: char| !token(c));
@@ -3254,14 +3282,14 @@ fn secret_like(word: &str) -> bool {
                     .bytes()
                     .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'*'))
         });
-    let flag = word.strip_prefix("-p").is_some_and(|value| {
-        !value.is_empty()
-            && !value.starts_with('-')
-            && !value.bytes().all(|b| b.is_ascii_lowercase())
-    }) || word
+    let password_flag = word
+        .strip_prefix("-p")
+        .is_some_and(|value| !value.is_empty() && !value.starts_with('-'))
+        && !PLAIN_P_FLAGS.contains(&word);
+    let user_flag = word
         .strip_prefix("--user=")
         .is_some_and(|value| value.contains(':'));
-    tokenish || encoded || pgpass || flag || credential_path(word)
+    tokenish || encoded || pgpass || password_flag || user_flag || credential_path(word)
 }
 
 /// Whether a word names a credential file or folder the sandbox guards
