@@ -9319,6 +9319,10 @@ fn a_linked_lead_with_unlanded_teammate_work_is_never_retired_whatever_hides_its
                 )
                 .unwrap()
                 .expect("the lead's .gitignore waits in its change set");
+                let set = crate::landing::change_set(&db, &set)
+                    .unwrap()
+                    .expect("the lead's change set reads")
+                    .1;
                 let accepted =
                     crate::landing::accept(&db, &linked.git_home, &set.id, &set.head, None)
                         .unwrap();
@@ -9341,9 +9345,10 @@ fn a_linked_lead_with_unlanded_teammate_work_is_never_retired_whatever_hides_its
         }
         let unlanded = linked.teammate("greet").join("hello.txt");
         std::fs::write(&unlanded, "Hello.\n").unwrap();
+        let now = u64::try_from(now_ms()).unwrap();
 
         let blocker =
-            crate::landing::retire_blocker(&db, &repository, &linked.worktree, &git_dir, now_ms())
+            crate::landing::retire_blocker(&db, &repository, &linked.worktree, &git_dir, now)
                 .unwrap();
 
         if blocker.is_none() {
@@ -9352,14 +9357,8 @@ fn a_linked_lead_with_unlanded_teammate_work_is_never_retired_whatever_hides_its
         if source == "exclude" {
             std::fs::remove_file(&unlanded).unwrap();
             assert_eq!(
-                crate::landing::retire_blocker(
-                    &db,
-                    &repository,
-                    &linked.worktree,
-                    &git_dir,
-                    now_ms()
-                )
-                .unwrap(),
+                crate::landing::retire_blocker(&db, &repository, &linked.worktree, &git_dir, now)
+                    .unwrap(),
                 None,
                 "with nothing to lose the lead's worktree can go"
             );

@@ -3166,6 +3166,10 @@ fn a_linked_lead_finishes_only_once_its_native_teammates_work_landed() {
     )
     .unwrap()
     .expect("greet's rest waits as its change set");
+    let waiting = crate::landing::change_set(&db, &waiting)
+        .unwrap()
+        .expect("greet's change set reads")
+        .1;
     let (answer, error) = finish(&mut fixture);
     assert_eq!(
         (answer.as_str(), error),
