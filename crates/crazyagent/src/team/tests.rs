@@ -5000,3 +5000,54 @@ fn every_new_folder_limit_choice_is_saved_and_shown() {
         "the choice is per project"
     );
 }
+
+/// Re-ask empty reply is On for a project with no choice saved, the team status keeps the
+/// owner's Off and then On again, and the choice is per project (DEC-111).
+#[test]
+fn reask_empty_reply_is_on_until_the_owner_turns_it_off_and_on_again() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-reask",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-reask", &["local-a"]);
+    let project = setup.project_id.clone();
+    assert!(
+        status(&connection, &setup).unwrap().reask_empty_reply,
+        "On is the default"
+    );
+    for on in [false, true, false] {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::ReaskEmptyReply {
+                    project_id: project.clone(),
+                    on,
+                },
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+        tx.commit().unwrap();
+        assert_eq!(status(&connection, &setup).unwrap().reask_empty_reply, on);
+    }
+    assert!(
+        reask_empty_reply(&connection, &ProjectId::new("team-elsewhere").unwrap()).unwrap(),
+        "the choice is per project"
+    );
+}
