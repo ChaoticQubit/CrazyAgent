@@ -589,6 +589,44 @@ mod tests {
             None
         );
         assert_eq!(Narrowing::NotAllowed.code(), "agent_toolchain_lowered");
+        let closed = AgentPolicy {
+            network: AgentNetwork::None,
+            ..sandboxed.clone()
+        };
+        let open = Some(AgentNetwork::Open);
+        assert_eq!(
+            narrowing(Some(&closed), root, None, open, &rust),
+            Some(Narrowing::Network)
+        );
+        assert_eq!(
+            narrowing(Some(&closed), root, full, open, &rust),
+            Some(Narrowing::Access),
+            "a wider level is named before a wider network"
+        );
+        assert_eq!(
+            narrowing(Some(&closed), root, None, Some(AgentNetwork::None), &rust),
+            None
+        );
+        assert_eq!(
+            narrowing(Some(&closed), root, None, None, &rust),
+            None,
+            "a process without tools has no network rule to narrow"
+        );
+        assert_eq!(narrowing(Some(&sandboxed), root, None, open, &rust), None);
+        assert_eq!(
+            narrowing(Some(&closed), None, None, open, &rust),
+            Some(Narrowing::Network),
+            "a wider network is named before an unreadable folder"
+        );
+        assert_eq!(
+            narrowing(None, root, None, open, &[]),
+            Some(Narrowing::PolicyUnreadable)
+        );
+        assert_eq!(
+            narrowing(None, root, None, Some(AgentNetwork::None), &[]),
+            None
+        );
+        assert_eq!(Narrowing::Network.code(), "agent_network_narrowed");
 
         let pinned = sandboxed.pinned(project.path());
         assert_eq!(pinned.allowed(project.path()), rust);
