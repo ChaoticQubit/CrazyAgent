@@ -5,6 +5,8 @@ const OWNER_MS = Number(process.env.TRIAL_OWNER_MS ?? 600000);
 const START = "//dialog[@open]//button[normalize-space(.)=\"Open Claude sign-in\" or normalize-space(.)=\"Try again\" or normalize-space(.)=\"Get a new code\"]";
 const CANCEL = "//dialog[@open]//button[normalize-space(.)=\"Cancel sign-in\"]";
 const CONFLICT = "native_profile_binding_conflict";
+const CLEAR = "//button[normalize-space(.)=\"Clear stuck sign-in\"]";
+const CLEARING = "//button[normalize-space(.)=\"Clearing...\"]";
 
 /** Opens Sign in again from the account's row and starts the Claude sign-in, then waits until
  * the drawer offers Cancel sign-in while the engine reads Signing in. Inputs: the kit and the account. */
@@ -14,6 +16,17 @@ async function start(kit, account) {
   await click(START, kit.UI_MS);
   await kit.until(async () => await shown(CANCEL) && (await statusOf(account.id)) === "signing_in", kit.UI_MS,
     `OP-7: ${account.name} never offered Cancel sign-in while it waited`);
+}
+
+/** Clears a stuck sign-in the way the owner is told to, from the banner at the top of the
+ * window, so an interrupted attempt never keeps its scratch account from being deleted.
+ * Input: the kit. Output: true when the banner was shown and is gone. */
+async function clearStuck(kit) {
+  if (!(await shown(CLEAR))) return false;
+  await click(CLEAR, kit.UI_MS);
+  await kit.until(async () => !(await shown(CLEAR)) && !(await shown(CLEARING)), kit.UI_MS,
+    "OP-7: Clear stuck sign-in left its banner up");
+  return true;
 }
 
 export const checks = [{
@@ -48,6 +61,7 @@ export const checks = [{
       return `${account.name} offered Cancel sign-in while it waited, cancelled cleanly, and after Sign in again on the same row reads Signed in, one row, none left in Signing in`;
     }, async () => {
       await closeDialog(kit);
+      await clearStuck(kit);
       await dropScratch([account.id]);
     });
   },
