@@ -817,6 +817,7 @@ impl ResearchRunner {
         for folder in read_folders(executable, &context, job.tools)? {
             sandbox = sandbox.allow_read(&folder)?;
         }
+        sandbox = sandbox.allow_exec(&executable.canonicalize()?)?;
         let profile = self.state.join("profiles").join(format!("{name}.sb"));
         sandbox.install(&profile)?;
         let setup = self.setup.lock().unwrap_or_else(PoisonError::into_inner);
@@ -1208,7 +1209,9 @@ impl ResearchRunner {
 /// as, `prompt` goes to it on stdin, `wall_time` bounds it.
 pub(crate) struct ReadOnlyRun<'a> {
     pub name: &'a str,
+    #[cfg(unix)]
     pub agent: &'a str,
+    #[cfg(unix)]
     pub project: Option<&'a ProjectId>,
     #[cfg(unix)]
     pub folder: &'a Path,
@@ -1315,9 +1318,11 @@ impl ResearchRunner {
             SandboxNetwork::Only(vec![model_remote(run.account)?]),
         )?
         .allow_read(&folder)?;
-        if let Some(parent) = executable.canonicalize()?.parent() {
+        let program = executable.canonicalize()?;
+        if let Some(parent) = program.parent() {
             sandbox = sandbox.allow_read(parent)?;
         }
+        sandbox = sandbox.allow_exec(&program)?;
         let hidden = match run.project {
             Some(project) => ResearchJobs::open(&self.database)?
                 .hidden_paths(project)
@@ -4023,8 +4028,6 @@ mod windows_tests {
         };
         let run = ReadOnlyRun {
             name: "onboard-m-windows",
-            agent: "onboarding",
-            project: None,
             account: &account,
             wall_time: Duration::from_secs(5),
         };

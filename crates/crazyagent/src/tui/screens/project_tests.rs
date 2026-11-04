@@ -2053,7 +2053,7 @@ fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
     let mut screen = loaded(&project);
     screen.open(Tab::Settings);
     screen.read_paths = Some(vec![]);
-    assert_eq!(screen.key(key(KeyCode::Char('d'))), ProjectReply::Handled);
+    assert_eq!(screen.key(key(KeyCode::Char('p'))), ProjectReply::Handled);
     assert!(screen.hidden.is_none());
     assert_eq!(
         screen.problem.as_deref(),
@@ -2061,7 +2061,7 @@ fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
     );
     let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
     assert!(
-        shown.contains("Hidden    Loading...   d Edit hidden folders"),
+        shown.contains("Hidden    Loading...   p Edit hidden folders"),
         "{shown}"
     );
 
@@ -2087,11 +2087,11 @@ fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
     );
     let shown = text(&project_screen(&mut screen, 80, 24, &look).rows);
     assert!(
-        shown.contains("Hidden    /Users/owner/secret   d Edit hidden folders"),
+        shown.contains("Hidden    /Users/owner/secret   p Edit hidden folders"),
         "{shown}"
     );
 
-    assert_eq!(screen.key(key(KeyCode::Char('d'))), ProjectReply::Handled);
+    assert_eq!(screen.key(key(KeyCode::Char('p'))), ProjectReply::Handled);
     assert_eq!(
         screen.hidden.as_ref().unwrap().input.value(),
         "/Users/owner/secret"
@@ -2160,7 +2160,7 @@ fn the_hidden_folders_box_saves_colon_separated_folders_and_shows_refusals() {
     assert_eq!(screen.hidden_paths, None);
 
     screen.hidden_paths = Some(vec![]);
-    screen.key(key(KeyCode::Char('d')));
+    screen.key(key(KeyCode::Char('p')));
     screen.paste(&format!("/{}", "d".repeat(1100)));
     assert_eq!(screen.key(key(KeyCode::Enter)), ProjectReply::Handled);
     assert_eq!(

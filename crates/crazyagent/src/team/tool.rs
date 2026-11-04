@@ -60,6 +60,9 @@ pub const TEAM_TOOLS: [&str; 12] = [
     SESSIONS_TOOL,
     SESSION_TOOL,
 ];
+/// The team tools a master without its live terminal gets beside `delegate`, answered by the
+/// engine through its mailbox like a live master's.
+pub const MEMORY_TOOLS: [&str; 2] = [REMEMBER_TOOL, RECALL_TOOL];
 /// The team tools only an agent that leads others uses, left out of the list of a
 /// sub-agent the owner's Sub-agent depth setting keeps from leading.
 pub const LEAD_TOOLS: [&str; 3] = [SPAWN_TOOL, STOP_TOOL, MERGE_TOOL];
@@ -69,6 +72,7 @@ pub const CALLS_PENDING_MAX: usize = 16;
 pub const REPLY_TEXT_MAX: usize = 32 * 1024;
 const CALL_BYTES_MAX: u64 = 16 * 1024;
 const REPLY_BYTES_MAX: u64 = 2 * REPLY_TEXT_MAX as u64 + 64;
+#[cfg(unix)]
 const MAILBOX_SCAN_MAX: usize = 256;
 const AGENT_NAME_BYTES_MAX: usize = 64;
 const CALL_SUFFIX: &str = ".call";
@@ -281,16 +285,34 @@ struct Recorded {
     role: Option<String>,
 }
 
-/// Serves the master's `delegate` tool as an MCP server over stdio until its client closes input.
-/// Takes the client's input and output and the absolute drop file in the master's private temporary folder.
-/// Returns an input or output failure; each call only records a proposal, which the engine admits after the turn.
-pub fn serve(input: impl BufRead, output: impl Write, drop: &Path) -> std::io::Result<()> {
+/// Serves the master's `delegate` tool as an MCP server over stdio until its client closes
+/// input, and with a mailbox also its `MEMORY_TOOLS` less the ones switched off, each answered
+/// by the engine through the mailbox. Takes the client's input and output, the absolute drop
+/// file in the master's private temporary folder, the mailbox folder the engine made for a
+/// team master without its live terminal, and the tools left out. Returns an input or output
+/// failure, or a refusal when the mailbox is not a plain folder; a `delegate` call only
+/// records a proposal, which the engine admits after the turn.
+pub fn serve(
+    input: impl BufRead,
+    output: impl Write,
+    drop: &Path,
+    mailbox: Option<&Path>,
+    off: &[String],
+) -> std::io::Result<()> {
     if !drop.is_absolute() {
         return Err(std::io::Error::other(
             "the drop file must be an absolute path",
         ));
     }
-    rpc(input, output, |request| answer(request, drop))
+    if let Some(mailbox) = mailbox
+        && (!mailbox.is_absolute()
+            || !std::fs::symlink_metadata(mailbox).is_ok_and(|metadata| metadata.is_dir()))
+    {
+        return Err(std::io::Error::other(
+            "the mailbox must be an absolute plain folder",
+        ));
+    }
+    rpc(input, output, |request| answer(request, drop, mailbox, off))
 }
 
 /// Serves a live master's or a sub-agent's team tools, `TEAM_TOOLS` less the ones switched
@@ -386,34 +408,75 @@ fn tool_result(text: &str, error: bool) -> Value {
     json!({"content": [{"type": "text", "text": text}], "isError": error})
 }
 
-fn answer(request: &Value, drop: &Path) -> Option<Value> {
+fn answer(request: &Value, drop: &Path, mailbox: Option<&Path>, off: &[String]) -> Option<Value> {
     let method = request.get("method")?.as_str();
     let id = request.get("id")?.clone();
     let params = request.get("params");
+    let name = params
+        .and_then(|params| params.get("name"))
+        .and_then(Value::as_str);
     let result = match method {
         Some("initialize") => initialized(params),
         Some("ping") => json!({}),
-        Some("tools/list") => json!({"tools": [{
-            "name": TOOL_NAME,
-            "description": "Hand one task to a sub-agent of this project's team. The engine checks it against the team plan when your reply ends, runs it in its own git worktree and sends you the result.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "task": {"type": "string", "description": "What the sub-agent should do, in plain words."},
-                    "harness": {"type": "string", "description": "Optional sub-agent harness from the team plan, such as codex or claude-code."},
-                    "role": {"type": "string", "description": "Optional short name for this job in kebab case, such as onboarding-fix. The sub-agent is then addressed as @onboarding-fix."},
+        Some("tools/list") => {
+            let mut tools = vec![json!({
+                "name": TOOL_NAME,
+                "description": "Hand one task to a sub-agent of this project's team. The engine checks it against the team plan when your reply ends, runs it in its own git worktree and sends you the result.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "task": {"type": "string", "description": "What the sub-agent should do, in plain words."},
+                        "harness": {"type": "string", "description": "Optional sub-agent harness from the team plan, such as codex or claude-code."},
+                        "role": {"type": "string", "description": "Optional short name for this job in kebab case, such as onboarding-fix. The sub-agent is then addressed as @onboarding-fix."},
+                    },
+                    "required": ["task"],
+                    "additionalProperties": false,
                 },
-                "required": ["task"],
-                "additionalProperties": false,
+            })];
+            if mailbox.is_some() {
+                tools.extend(
+                    MEMORY_TOOLS
+                        .iter()
+                        .filter(|name| !off.iter().any(|tool| tool == *name))
+                        .map(|name| spec(name)),
+                );
+            }
+            assert!(tools.len() <= 1 + MEMORY_TOOLS.len());
+            json!({ "tools": tools })
+        }
+        Some("tools/call") => match (mailbox, name) {
+            (Some(mailbox), Some(name)) if MEMORY_TOOLS.contains(&name) => {
+                match mailed(mailbox, name, params, off) {
+                    Some(result) => result,
+                    None => return Some(failure(id, -32602, "Unknown tool")),
+                }
+            }
+            _ => match call(params, drop) {
+                Some((text, error)) => tool_result(text, error),
+                None => return Some(failure(id, -32602, "Unknown tool")),
             },
-        }]}),
-        Some("tools/call") => match call(params, drop) {
-            Some((text, error)) => tool_result(text, error),
-            None => return Some(failure(id, -32602, "Unknown tool")),
         },
         _ => return Some(failure(id, -32601, "Method not found")),
     };
     Some(json!({"jsonrpc": "2.0", "id": id, "result": result}))
+}
+
+/// Answers one team tool call through the mailbox: refused when switched off or when an
+/// argument fails its bound, else written for the engine and answered with its reply. Takes
+/// the mailbox, the tool name, the call's parameters and the tools left out. Returns the
+/// `tools/call` result, or none for an unknown tool.
+fn mailed(mailbox: &Path, name: &str, params: Option<&Value>, off: &[String]) -> Option<Value> {
+    if off.iter().any(|tool| tool == name) {
+        return Some(tool_result(SWITCHED_OFF, true));
+    }
+    let arguments = params.and_then(|params| params.get("arguments"));
+    Some(match live_call(name, arguments)? {
+        Ok(call) => {
+            let (text, error) = ask(mailbox, &call, REPLY_WAIT);
+            tool_result(&text, error)
+        }
+        Err(refused) => tool_result(refused, true),
+    })
 }
 
 /// The team tools a server lists, in `BUILTIN_TOOLS` order, without the ones left out.
@@ -528,19 +591,8 @@ fn answer_live(request: &Value, mailbox: &Path, off: &[String]) -> Option<Value>
             let name = params
                 .and_then(|params| params.get("name"))
                 .and_then(Value::as_str);
-            let arguments = params.and_then(|params| params.get("arguments"));
-            match name {
-                Some(name) if off.iter().any(|tool| tool == name) => {
-                    tool_result(SWITCHED_OFF, true)
-                }
-                Some(name) => match live_call(name, arguments) {
-                    Some(Ok(call)) => {
-                        let (text, error) = ask(mailbox, &call, REPLY_WAIT);
-                        tool_result(&text, error)
-                    }
-                    Some(Err(refused)) => tool_result(refused, true),
-                    None => return Some(failure(id, -32602, "Unknown tool")),
-                },
+            match name.and_then(|name| mailed(mailbox, name, params, off)) {
+                Some(result) => result,
                 None => return Some(failure(id, -32602, "Unknown tool")),
             }
         }

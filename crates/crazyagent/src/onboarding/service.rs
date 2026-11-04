@@ -4,7 +4,7 @@ use super::draft::{self, Answer, Drafted};
 use super::graph::{self, GRAPHIFY_MISSING, GraphEnding};
 use super::{Step, now_ms};
 use crate::projects_home::CRAZYAGENT_DIRECTORY;
-use crate::protocol::{CredentialRef, ProjectId};
+use crate::protocol::CredentialRef;
 use crate::research::accounts::AccountPick;
 #[cfg(unix)]
 use crate::research::accounts::SettingsResolver;
@@ -579,10 +579,13 @@ fn mapping_step(
     let name = run_name(claimed);
     #[cfg(unix)]
     let prompt = draft::prompt(&evidence, &found);
-    let project = ProjectId::new(claimed.project.clone()).ok();
+    #[cfg(unix)]
+    let project = crate::protocol::ProjectId::new(claimed.project.clone()).ok();
     let run = ReadOnlyRun {
         name: &name,
+        #[cfg(unix)]
         agent: "onboarding",
+        #[cfg(unix)]
         project: project.as_ref(),
         #[cfg(unix)]
         folder: &claimed.repo,

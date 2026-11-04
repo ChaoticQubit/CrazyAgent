@@ -288,8 +288,8 @@ fn adoption_flags_follow_q18_rules() {
     );
     assert_eq!(
         flags(bare),
-        Vec::<Flag>::new(),
-        "a hookless agent raises no flag"
+        [Flag::EditsWithoutWork, Flag::Ungrounded],
+        "a hookless agent raises the same flags as one with hooks (OQ-8)"
     );
     assert!(row(&view, bare).hookless);
     assert!(!row(&view, both).hookless);
@@ -338,6 +338,10 @@ fn adoption_tick_sends_one_note_per_flag_only_under_ten_minute_nudges() {
     crate::coord::settings::write(&db, &project, &off).unwrap();
     tick(&db, &project, NOW).unwrap();
     assert!(notes(&db, flagged).is_empty(), "nudges off sends nothing");
+    assert!(
+        notes(&db, bare).is_empty(),
+        "nudges off reminds no hookless agent either"
+    );
     let view_off = view(&db, &project, &[], NOW).unwrap();
     assert_eq!(view_off.nudges, Nudges::Off);
     assert_eq!(
@@ -361,9 +365,13 @@ fn adoption_tick_sends_one_note_per_flag_only_under_ten_minute_nudges() {
     );
     tick(&db, &project, NOW + 60_000).unwrap();
     assert_eq!(notes(&db, flagged).len(), 2, "one reminder per flag, ever");
-    assert!(
-        notes(&db, bare).is_empty(),
-        "a hookless agent is never reminded"
+    assert_eq!(
+        notes(&db, bare),
+        [
+            Flag::EditsWithoutWork.reminder(),
+            Flag::Ungrounded.reminder()
+        ],
+        "a hookless agent is reminded once per flag like any other (OQ-8)"
     );
     assert!(
         notes(&db, stopped).is_empty(),
@@ -563,8 +571,11 @@ fn view_keeps_newest_agents_within_budget() {
     );
 }
 
+/// A Claude agent whose launch fires no hooks gets the counts, flags and TenMinutes
+/// reminders of one with hooks (OQ-8): the engine counts its calls from its transcript, so
+/// its habits are as known as any other agent's.
 #[test]
-fn hookless_agent_raises_no_flags() {
+fn a_hookless_agent_gets_the_counts_flags_and_reminders_of_one_with_hooks() {
     let directory = tempfile::tempdir().unwrap();
     let db = Connection::open(directory.path().join("engine.db")).unwrap();
     crate::storage::initialize_authority_schemas(&db).unwrap();
@@ -583,7 +594,8 @@ fn hookless_agent_raises_no_flags() {
         .unwrap();
         let id = db.last_insert_rowid();
         db.execute(
-            "INSERT INTO coord_tool_use(agent,tool,count,last) VALUES (?1,'Edit',3,1)",
+            "INSERT INTO coord_tool_use(agent,tool,count,last)
+             VALUES (?1,'Edit',3,1),(?1,'Skill',2,1),(?1,'start_work',1,1)",
             [id],
         )
         .unwrap();
@@ -608,11 +620,17 @@ fn hookless_agent_raises_no_flags() {
     );
     let bare = row(hookless);
     assert!(bare.hookless);
-    assert!(
-        bare.flags.is_empty(),
-        "a launch without hooks raises no flag: {:?}",
-        bare.flags
+    assert_eq!(
+        bare.flags,
+        row(hooked).flags,
+        "a launch without hooks raises the same flags"
     );
+    assert_eq!(
+        bare.counts,
+        row(hooked).counts,
+        "a launch without hooks shows the same counts"
+    );
+    assert_eq!(bare.counts, [1, 0, 0, 0, 0, 0, 0, 2]);
     assert!(!row(hooked).hookless);
 
     let nudges = crate::coord::settings::CoordSettings {
@@ -632,7 +650,7 @@ fn hookless_agent_raises_no_flags() {
     assert_eq!(notes(hooked), 2, "one reminder per flag");
     assert_eq!(
         notes(hookless),
-        0,
-        "no nudge reaches an agent without hooks"
+        2,
+        "an agent without hooks gets one reminder per flag too"
     );
 }

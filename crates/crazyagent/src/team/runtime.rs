@@ -96,6 +96,9 @@ enum TurnBound {
     Session(Duration),
 }
 const EMPTY_REPLY_NOTE: &str = "The master replied with no text, so no work was handed out. Send the message again, or hand a task to a sub-agent yourself.";
+/// The one turn a sub-agent gets when its task turn ended with no reply text and the
+/// project's re-ask setting is on (DEC-111): the master asks it once for its reply.
+const REASK_EMPTY: &str = "Your master got no reply text from your last turn. Reply now with a short summary of what you did for your task.";
 
 /// Bounds every team agent obeys. The task, session and sub-agent idle limits are the
 /// owner's team settings, read per project when a turn or an agent starts or an idle agent
@@ -426,6 +429,8 @@ struct Worker {
     told_finished: BTreeSet<i64>,
     parent: Option<i64>,
     ready: bool,
+    reask: Option<i64>,
+    reasked: Option<i64>,
 }
 
 impl Worker {
@@ -458,6 +463,7 @@ pub struct TeamRuntime {
     events: Option<super::master::TeamEvents>,
     watch: super::events::Watch,
     teammates_next: Option<Instant>,
+    teammate_worktree_tries: BTreeMap<i64, BTreeMap<String, u8>>,
     receipts_next: BTreeMap<ProjectId, Instant>,
     live_starts: BTreeMap<ProjectId, Vec<Instant>>,
     resuming: Option<(i64, Resume)>,
@@ -536,6 +542,45 @@ fn private_directory(path: &Path) -> Result<(), EngineError> {
         return Err(EngineError("team_state_not_private".into()));
     }
     Ok(())
+}
+
+/// Makes the home a native lead's teammates run with (TPH-2 C): a private folder beside the
+/// lead's home, with its own cargo home and Claude Code's first-run questions answered for
+/// the project, whose `teams` and `tasks` are links to the lead's folders of those names,
+/// made here when missing, since Claude Code keeps the team's mailboxes and task lists there
+/// for every member. A changed entry is refused, not replaced. Inputs: the lead's home, the
+/// owner's tool homes and the lead's working folder. Output: the folder.
+#[cfg(unix)]
+fn prepare_mates_home(
+    home: &Path,
+    homes: &ToolHomes,
+    project: &Path,
+) -> Result<PathBuf, EngineError> {
+    let mates = crate::launch_context::mates_home(home);
+    private_directory(&mates)?;
+    for folder in crate::sandbox::CLAUDE_TEAM_SHARED {
+        let shared = home.join(folder);
+        match std::fs::DirBuilder::new().mode(0o700).create(&shared) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(error(e)),
+        }
+        let link = mates.join(folder);
+        match std::os::unix::fs::symlink(&shared, &link) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(error(e)),
+        }
+        if !std::fs::symlink_metadata(&shared).is_ok_and(|metadata| metadata.is_dir())
+            || std::fs::read_link(&link).ok().as_deref() != Some(shared.as_path())
+        {
+            return Err(EngineError("team_shared_folder_changed".into()));
+        }
+    }
+    toolchains::prepare_cargo_home(&mates, homes).map_err(error)?;
+    crate::harnesses::interactive::prepare_claude_home(&mates, project)
+        .map_err(|e| EngineError(e.0))?;
+    Ok(mates)
 }
 
 impl TeamRuntime {
@@ -618,6 +663,7 @@ impl TeamRuntime {
             events: None,
             watch: super::events::Watch::default(),
             teammates_next: None,
+            teammate_worktree_tries: BTreeMap::new(),
             receipts_next: BTreeMap::new(),
             live_starts: BTreeMap::new(),
             resuming: None,
@@ -985,6 +1031,8 @@ impl TeamRuntime {
             .filter(|(_, worker)| worker.role == AgentRole::Sub && !worker.stopping)
             .map(|(id, worker)| (*id, worker.project.clone()))
             .collect();
+        self.teammate_worktree_tries
+            .retain(|lead, _| harnesses.iter().any(|(agent, _)| agent == lead));
         for (agent, project) in harnesses {
             let cap = super::teammate_cap(&self.connection, &project)?;
             if let Some(cap) = cap {
@@ -1033,6 +1081,7 @@ impl TeamRuntime {
                 i64::try_from(lead.since_ms).unwrap_or(i64::MAX),
                 at,
             )?;
+            self.make_teammate_worktrees(&project, agent)?;
             for (teammate, pane) in teammates::working(&self.connection, &project, agent)? {
                 if !live.contains(&pane.as_str()) {
                     continue;
@@ -1942,6 +1991,7 @@ impl TeamRuntime {
         self.hand_leads(project, access)?;
         self.wake_for_messages(&stored, access, &asleep)?;
         self.instruction_edits(&stored, access, &paused)?;
+        self.send_reasks(&stored, access, &paused)?;
         self.dispatch(&stored, access, &paused)?;
         self.keep_warm(&stored, access, &paused)?;
         self.reap_idle(&stored)
@@ -3103,7 +3153,8 @@ impl TeamRuntime {
         Ok(())
     }
 
-    /// Answers the team calls a project's live master made since the last tick.
+    /// Answers the team calls a project's live master made since the last tick, or only the
+    /// memory calls of a master with tools running without its live terminal.
     /// Takes the setup and live access. Returns any SQLite failure.
     fn serve_live_calls(
         &mut self,
@@ -3113,10 +3164,18 @@ impl TeamRuntime {
         let Some(id) = self.master(&stored.project_id) else {
             return Ok(());
         };
-        if !self.workers[&id].live || !self.workers[&id].team_tool {
+        if !self.workers[&id].team_tool {
             return Ok(());
         }
         let mailbox = self.mailbox(id);
+        if !self.workers[&id].live {
+            return super::master::serve_memory_calls(
+                &mut self.connection,
+                &stored.project_id,
+                &mailbox,
+            )
+            .map(drop);
+        }
         let agents = self.state.join("agents");
         let answering = super::master::Answering {
             access,
@@ -3443,6 +3502,111 @@ impl TeamRuntime {
             )?;
         }
         tx.commit().map_err(error)
+    }
+
+    /// Tells whether a sub-agent's task turn that just ended is asked once more for its
+    /// reply: it ended well with no reply text, the project's re-ask setting is on and the
+    /// task has not had its re-ask yet (DEC-111). Takes the agent, its task, the turn's text
+    /// and how it ended. Returns the answer, or any SQLite failure.
+    fn reasks(&self, id: i64, task: i64, text: &str, end: TurnEnd) -> Result<bool, EngineError> {
+        let worker = &self.workers[&id];
+        if worker.role != AgentRole::Sub
+            || end != TurnEnd::Success
+            || !text.trim().is_empty()
+            || worker.reasked == Some(task)
+        {
+            return Ok(false);
+        }
+        super::reask_empty_reply(&self.connection, &worker.project)
+    }
+
+    /// Sends each of the project's sub-agents whose task turn ended with no reply text its
+    /// one re-ask turn, with the grant and turn rules a task turn gets. A sub-agent that
+    /// cannot take it finishes the task with no reply text, as with the setting off; one on
+    /// a rate-limited connection waits for it, as a task does, and a kept native lead waits
+    /// while its app runs a turn of its own, as instruction edits do (RER-L1). A kept lead
+    /// whose teammates still work is not asked or held: its task finishes as with the
+    /// setting off and it turns again when their results arrive (RER2-L1). A message on its
+    /// way to the lead does not hold the re-ask: typing that message waits for the lead to
+    /// be idle. Takes the project setup, the live model access and the paused connections.
+    /// Returns any SQLite failure.
+    fn send_reasks(
+        &mut self,
+        stored: &StoredSetup,
+        access: &ModelAccess,
+        paused: &BTreeSet<CredentialRef>,
+    ) -> Result<(), EngineError> {
+        let project = &stored.project_id;
+        let due: Vec<(i64, i64)> = self
+            .workers
+            .iter()
+            .filter(|(_, worker)| {
+                &worker.project == project
+                    && !worker.stopping
+                    && worker.own_turn.is_none()
+                    && !paused.contains(&worker.connection)
+            })
+            .filter_map(|(id, worker)| worker.reask.map(|task| (*id, task)))
+            .collect();
+        for (agent, task) in due {
+            assert_eq!(self.workers[&agent].busy, Some(Busy::Task(task)));
+            if self.workers[&agent].kept_session && self.teammates_working(agent)? {
+                self.finish_unasked(project, agent, task)?;
+                continue;
+            }
+            let handed = self.workers[&agent].kept_session && self.workers[&agent].briefed;
+            let grant = if self.workers[&agent].managed && !handed {
+                match self.grant(access, agent, project) {
+                    Ok(Some(grant)) => Some(grant),
+                    Ok(None) => continue,
+                    Err(_) => {
+                        self.finish_unasked(project, agent, task)?;
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+            let background = super::background_at_end(&self.connection, project)?;
+            let bound = turn_bound(
+                super::time_limits(&self.connection, project)?,
+                self.workers[&agent].ran(),
+            );
+            let rules = TurnRules {
+                limit: bound.map(|(limit, _)| limit),
+                background,
+            };
+            let worker = self.workers.get_mut(&agent).expect("worker exists");
+            if worker
+                .orders
+                .send(Order::Turn(REASK_EMPTY.to_owned(), grant, rules))
+                .is_err()
+            {
+                self.finish_unasked(project, agent, task)?;
+                continue;
+            }
+            worker.bound = bound.map(|(_, by)| by);
+            worker.reask = None;
+            worker.reasked = Some(task);
+        }
+        Ok(())
+    }
+
+    /// Finishes a task whose re-ask turn could not be sent, as a task turn with no reply
+    /// text finishes with the setting off: Done, its edits landed, the agent idle. Takes the
+    /// project, the agent and the task. Returns any SQLite failure.
+    fn finish_unasked(
+        &mut self,
+        project: &ProjectId,
+        agent: i64,
+        task: i64,
+    ) -> Result<(), EngineError> {
+        let worker = self.workers.get_mut(&agent).expect("worker exists");
+        worker.reask = None;
+        let busy = worker.busy.take();
+        self.finish_task(task, "", TurnEnd::Success, None)?;
+        self.land(agent, project, busy, TurnEnd::Success)?;
+        self.mark_agent(agent, AgentStatus::Idle, None)
     }
 
     fn mark_agent(
@@ -4055,6 +4219,7 @@ impl TeamRuntime {
             }
             worker.bound = bound.map(|(_, by)| by);
             worker.busy = Some(Busy::Task(task));
+            worker.reasked = None;
             worker.briefed |= worker.kept_session;
             if let Some(edit) = &edit {
                 let _ = crate::instruction_files::delivered(edit, &home);
@@ -4223,12 +4388,26 @@ impl TeamRuntime {
     /// wake turn has carried to it yet. Takes the lead. Returns the answer, or any SQLite
     /// failure.
     fn lead_waits(&self, id: i64) -> Result<bool, EngineError> {
+        if self.teammates_working(id)? {
+            return Ok(true);
+        }
+        self.connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM coord_messages WHERE to_kind='agent' AND to_agent=?1
+                           AND receipt='sent')",
+                [id],
+                |row| row.get(0),
+            )
+            .map_err(error)
+    }
+
+    /// Whether a teammate of a kept native lead is still starting or working. Takes the
+    /// lead. Returns the answer, or any SQLite failure.
+    fn teammates_working(&self, id: i64) -> Result<bool, EngineError> {
         self.connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM team_agents WHERE parent=?1 AND role='teammate'
-                                AND status IN ('starting','working'))
-                 OR EXISTS(SELECT 1 FROM coord_messages WHERE to_kind='agent' AND to_agent=?1
-                           AND receipt='sent')",
+                                AND status IN ('starting','working'))",
                 [id],
                 |row| row.get(0),
             )
@@ -4774,6 +4953,8 @@ impl TeamRuntime {
                 told_finished: BTreeSet::new(),
                 parent,
                 ready: false,
+                reask: None,
+                reasked: None,
             },
         );
         assert!(self.panes(&self.workers[&id].project) <= PANES_PER_PROJECT_MAX);
@@ -4951,6 +5132,93 @@ impl TeamRuntime {
         name
     }
 
+    /// Makes each running native teammate's own worktree in its lead's own clone (OP-9),
+    /// `.worktrees/<name>` on `<task branch>--<name>`, with git run under the lead's installed
+    /// profile, at most `TEAMMATE_WORKTREE_TRIES` times per name, then records each
+    /// teammate's worktree. Takes the project and the lead. Returns Ok, or a SQLite failure;
+    /// a worktree git could not make is left without one.
+    fn make_teammate_worktrees(
+        &mut self,
+        project: &ProjectId,
+        lead: i64,
+    ) -> Result<(), EngineError> {
+        let place: Option<(String, String, String)> = self
+            .connection
+            .query_row(
+                "SELECT repository,worktree,git_dir FROM team_worktrees WHERE agent=?1 AND project=?2",
+                params![lead, project.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(error)?;
+        let Some((repository, worktree, git_dir)) = place else {
+            return teammates::keep_worktrees(&self.connection, project, lead);
+        };
+        let (worktree, git_dir) = (PathBuf::from(worktree), PathBuf::from(git_dir));
+        if git_dir != crate::agent_git::git_dir(&worktree) {
+            return teammates::keep_worktrees(&self.connection, project, lead);
+        }
+        let made = crate::landing::teammate_worktrees(&self.connection, &worktree, &git_dir)
+            .unwrap_or_default();
+        let mut wanted = Vec::new();
+        for (teammate, _) in teammates::working(&self.connection, project, lead)? {
+            let Some(name) = teammates::name(&self.connection, teammate) else {
+                continue;
+            };
+            let tries = self.teammate_worktree_tries.entry(lead).or_default();
+            if made.contains(&name)
+                || (!tries.contains_key(&name) && tries.len() >= TEAMMATE_WORKTREE_NAMES_MAX)
+            {
+                continue;
+            }
+            let tried = tries.entry(name.clone()).or_insert(0);
+            if *tried < TEAMMATE_WORKTREE_TRIES {
+                *tried += 1;
+                wanted.push(name);
+            }
+        }
+        let sandbox = (!wanted.is_empty())
+            .then(|| Path::new(&repository).canonicalize().ok())
+            .flatten()
+            .and_then(|root| {
+                ProjectSandbox::new(
+                    &root,
+                    &agent_home(&self.state, lead),
+                    &self.agent_folder(lead).join("tmp"),
+                    SandboxNetwork::Only(Vec::new()),
+                )
+                .ok()
+            });
+        match &sandbox {
+            Some(sandbox) => {
+                let profile = agent_profile(&self.state, lead);
+                let git = crate::landing::LeadGit {
+                    sandbox,
+                    profile: &profile,
+                };
+                for name in &wanted {
+                    if let Err(problem) = crate::landing::add_teammate_worktree(
+                        &self.connection,
+                        &worktree,
+                        &git_dir,
+                        name,
+                        &git,
+                    ) {
+                        eprintln!(
+                            "teammate_worktree_failed cause={}",
+                            crate::protocol::plain_code(&problem.0)
+                        );
+                    }
+                }
+            }
+            None if !wanted.is_empty() => {
+                eprintln!("teammate_worktree_failed cause=lead_sandbox_unavailable");
+            }
+            None => {}
+        }
+        teammates::keep_worktrees(&self.connection, project, lead)
+    }
+
     /// What a harness reads about its git branch with each task (DEC-100): its task branch
     /// and, for a native lead in its own clone only (DEC-111 Q10), where its agent team's
     /// teammates work, each in `.worktrees/<name>` on `<task branch>--<name>`, merged into
@@ -4998,7 +5266,7 @@ impl TeamRuntime {
             );
         }
         format!(
-            "\nYour task branch is {branch}, checked out in your worktree: commit your work there. Each teammate of your agent team works in its own worktree and branch inside your worktree, made with git worktree add {folder}/<name> -b {branch}--<name>, and only there. Merge each finished teammate branch into {branch} before you report done; nothing under {folder} lands by itself.",
+            "\nYour task branch is {branch}, checked out in your worktree: commit your work there. Each teammate of your agent team works only in its own worktree {folder}/<name> inside your worktree, on its own branch {branch}--<name>, which CrazyAgent makes for it when it starts. Merge each finished teammate branch into {branch} before you report done; nothing under {folder} lands by itself.",
             folder = crate::agent_git::TEAMMATES_FOLDER
         )
     }
@@ -5087,6 +5355,92 @@ impl TeamRuntime {
             })
             .map(Some)
             .map_err(|e| with_code("the lead's current commit could not be read", Some(&e.0)))
+    }
+
+    /// Splits a native lead's sandbox into the lead's and its teammates' (K5c, TPH-2 C): the
+    /// lead's own tmux socket, the teammates' server socket and the engine's caller socket,
+    /// with the teammates' home made beside the lead's. Inputs: the lead, its temp folder,
+    /// home, the owner's tool homes, the working folder and the lead's sandbox. Output: the
+    /// lead's and the teammates' sandboxes with the tmux program, or the plain refusal.
+    #[cfg(unix)]
+    fn native_sandboxes(
+        &self,
+        id: i64,
+        scratch: &Path,
+        home: &Path,
+        homes: &ToolHomes,
+        working_dir: &Path,
+        sandbox: ProjectSandbox,
+    ) -> Result<(ProjectSandbox, ProjectSandbox, PathBuf), String> {
+        let tmux = self
+            .state
+            .parent()
+            .and_then(crate::terminal::tmux::installed)
+            .ok_or_else(|| {
+                with_code(
+                    "native teammates need tmux",
+                    Some(crate::terminal::OWN_SERVER_UNAVAILABLE),
+                )
+            })?;
+        let socket = scratch.join(crate::terminal::HARNESS_SOCKET);
+        assert!(
+            self.state
+                .parent()
+                .zip(AgentId::team(id).ok())
+                .and_then(|(runtime, lead)| crate::terminal::harness_socket(runtime, &lead).ok())
+                .is_some_and(|named| named == socket),
+            "the lead's own socket is the one the terminal host routes to"
+        );
+        let runtime = self
+            .state
+            .parent()
+            .ok_or("the team state folder has no engine root")?;
+        let lead = AgentId::team(id)
+            .map_err(|e| with_code("the lead has no terminal name", Some(&e.0)))?;
+        let mates_socket = crate::terminal::renew_teammates_socket(runtime, &lead)
+            .map_err(|e| with_code("the teammates' socket could not be named", Some(&e.0)))?;
+        assert!(
+            mates_socket.parent() == Some(scratch)
+                && crate::terminal::teammates_socket(runtime, &lead)
+                    .is_ok_and(|named| named == mates_socket),
+            "the teammates' socket is the one the terminal host routes to"
+        );
+        let callers = scratch.join(super::caller::CALLER_SOCKET);
+        assert_eq!(
+            super::caller::socket_for_mailbox(&self.mailbox(id)).as_deref(),
+            Some(callers.as_path()),
+            "the lead's servers find the caller socket its sandbox reaches"
+        );
+        let mates_home = prepare_mates_home(home, homes, working_dir)
+            .map_err(|e| with_code("the teammates' home could not be made", Some(&e.0)))?;
+        let (lead, mates) = sandbox
+            .native_team(&socket, &mates_socket, &callers, &tmux, &mates_home)
+            .map_err(|e| {
+                with_code(
+                    "the agent sandbox could not be set up",
+                    Some(sandbox_code(&e)),
+                )
+            })?;
+        Ok((lead, mates, tmux))
+    }
+
+    /// Refuses a native lead outside Unix, where no tmux server runs. Takes the lead, its
+    /// temp folder, home, the tool homes, the working folder and the sandbox, all unused.
+    /// Returns the plain refusal with `terminal_own_server_unavailable`.
+    #[cfg(not(unix))]
+    fn native_sandboxes(
+        &self,
+        _id: i64,
+        _scratch: &Path,
+        _home: &Path,
+        _homes: &ToolHomes,
+        _working_dir: &Path,
+        _sandbox: ProjectSandbox,
+    ) -> Result<(ProjectSandbox, ProjectSandbox, PathBuf), String> {
+        Err(with_code(
+            "native teammates need tmux",
+            Some(crate::terminal::OWN_SERVER_UNAVAILABLE),
+        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5180,7 +5534,7 @@ impl TeamRuntime {
         }
         let live = self.live_master(&stored.project_id, role, launch);
         let agent_tools = role == AgentRole::Sub && tools && self.delegation_tool.is_some();
-        if (live && tools) || agent_tools {
+        if (role == AgentRole::Master && tools) || agent_tools {
             private_directory(&tmp.join(tool::MAILBOX_FOLDER)).map_err(|e| {
                 with_code("the master's tool mailbox could not be made", Some(&e.0))
             })?;
@@ -5229,13 +5583,23 @@ impl TeamRuntime {
             .and_then(|sandbox| sandbox.allow_scratch(&scratch))
             .and_then(|sandbox| sandbox.allow_extra_reads(&extra))
             .map_err(sandboxed)?;
-        let install = executable
+        let program = executable
             .canonicalize()
-            .map_err(|e| with_code("the harness install could not be found", Some(io_code(&e))))?
+            .map_err(|e| with_code("the harness install could not be found", Some(io_code(&e))))?;
+        let install = program
             .parent()
             .map(Path::to_path_buf)
             .ok_or("harness install folder")?;
-        sandbox = sandbox.allow_read(&install).map_err(sandboxed)?;
+        sandbox = sandbox
+            .allow_read(&install)
+            .and_then(|sandbox| sandbox.allow_exec(&program))
+            .map_err(sandboxed)?;
+        if let Some(engine) = &self.delegation_tool {
+            let engine = engine
+                .verified_path()
+                .map_err(|e| with_code("the delegate engine changed", Some(&e.0)))?;
+            sandbox = sandbox.allow_engine(engine).map_err(sandboxed)?;
+        }
         (sandbox, _) = sandbox
             .allow_extra_reads(&toolchains::graphify(&homes))
             .map_err(sandboxed)?;
@@ -5361,54 +5725,13 @@ impl TeamRuntime {
                     Some("team_native_needs_sandbox"),
                 ));
             }
-            let tmux = self
-                .state
-                .parent()
-                .and_then(crate::terminal::tmux::installed)
-                .ok_or_else(|| {
-                    with_code(
-                        "native teammates need tmux",
-                        Some(crate::terminal::OWN_SERVER_UNAVAILABLE),
-                    )
-                })?;
-            let socket = scratch.join(crate::terminal::HARNESS_SOCKET);
-            assert!(
-                self.state
-                    .parent()
-                    .zip(AgentId::team(id).ok())
-                    .and_then(
-                        |(runtime, lead)| crate::terminal::harness_socket(runtime, &lead).ok()
-                    )
-                    .is_some_and(|named| named == socket),
-                "the lead's own socket is the one the terminal host routes to"
-            );
-            let runtime = self
-                .state
-                .parent()
-                .ok_or("the team state folder has no engine root")?;
-            let lead = AgentId::team(id)
-                .map_err(|e| with_code("the lead has no terminal name", Some(&e.0)))?;
-            let mates_socket = crate::terminal::renew_teammates_socket(runtime, &lead)
-                .map_err(|e| with_code("the teammates' socket could not be named", Some(&e.0)))?;
-            assert!(
-                mates_socket.parent() == Some(scratch.as_path())
-                    && crate::terminal::teammates_socket(runtime, &lead)
-                        .is_ok_and(|named| named == mates_socket),
-                "the teammates' socket is the one the terminal host routes to"
-            );
-            let callers = scratch.join(super::caller::CALLER_SOCKET);
-            assert_eq!(
-                super::caller::socket_for_mailbox(&self.mailbox(id)).as_deref(),
-                Some(callers.as_path()),
-                "the lead's servers find the caller socket its sandbox reaches"
-            );
-            let (lead, mates) = sandbox
-                .native_team(&socket, &mates_socket, &callers, &tmux)
-                .map_err(sandboxed)?;
+            let (lead, mates, tmux) =
+                self.native_sandboxes(id, &scratch, &home, &homes, &working_dir, sandbox)?;
             sandbox = lead;
             teammates = Some(mates);
             native_tmux = Some(tmux);
         }
+        #[cfg(unix)]
         expose_graph(&root, &working_dir);
         if let Some(engine) = self
             .delegation_tool
@@ -5560,8 +5883,11 @@ impl TeamRuntime {
                 let engine = engine
                     .verified_path()
                     .map_err(|e| with_code("the delegate engine changed", Some(&e.0)))?;
+                let off = self.off_tools(project, id, role).map_err(|e| {
+                    with_code("the team tool switches could not be read", Some(&e.0))
+                })?;
                 context
-                    .with_team_tool(engine, &self.tool_record(id))
+                    .with_team_tool(engine, &self.tool_record(id), &self.mailbox(id), &off)
                     .map_err(unread)
             }
             _ if master && !tools => context
@@ -5871,6 +6197,15 @@ impl TeamRuntime {
                 self.connection
                     .execute("UPDATE team_agents SET turns=turns+1 WHERE id=?1", [id])
                     .map_err(error)?;
+                if let Some(Busy::Task(task)) = busy
+                    && self.reasks(id, task, &text, end)?
+                {
+                    let worker = self.workers.get_mut(&id).expect("worker exists");
+                    worker.busy = Some(Busy::Task(task));
+                    worker.reask = Some(task);
+                    self.mark_agent(id, AgentStatus::Working, Some(task))?;
+                    return Ok(false);
+                }
                 match busy {
                     Some(busy) if held && end != TurnEnd::Success => self.release(id, busy)?,
                     Some(Busy::Task(task)) => {
@@ -6017,6 +6352,7 @@ impl TeamRuntime {
                 if worker.live {
                     super::master::pane_ended(&self.connection, &worker.project, id)?;
                 }
+                #[cfg(unix)]
                 let _ = toolchains::remove_tmp_keeping(
                     &self.agent_folder(id).join("home"),
                     super::caller::CALLER_SOCKET,
@@ -7634,6 +7970,12 @@ const OWNER_WOKE: &str = "The owner woke it again in its own worktree. It is idl
 const OWNER_STOPPED_AGENT: &str = "The owner stopped it and its teammates. Its task waits for it until the owner starts it again; do not hand that work to another agent.";
 /// The most teammate rows one harness keeps: its running teammates and the newest ended ones.
 const TEAMMATE_ROWS_KEPT: i64 = 32;
+/// The most times the engine runs git to make one native teammate's worktree (OP-9), so a
+/// worktree git refuses never costs a git run on every pass.
+const TEAMMATE_WORKTREE_TRIES: u8 = 3;
+/// The most teammate names of one lead whose worktree tries the engine counts.
+const TEAMMATE_WORKTREE_NAMES_MAX: usize = 64;
+const _: () = assert!(TEAMMATE_WORKTREE_NAMES_MAX >= TEAMMATE_ROWS_KEPT as usize);
 const _: () = assert!(TEAMMATE_ROWS_KEPT as usize >= super::TEAMMATES_SHOWN_MAX);
 /// The most owner-stopped native teammates one tick ends, so a long list never stalls it.
 const UNMANAGED_STOPS_PER_TICK_MAX: usize = 16;
@@ -8263,9 +8605,9 @@ impl Drop for TeamService {
 /// Names who made a team call in a sub-agent's mailbox (DEC-104). A lead stored as leading
 /// native teammates shares that mailbox with them, so the pane the engine named the call
 /// by from the caller's process decides (DEC-111 Q18): the lead's own pane, found under the
-/// lead's own pane process, is the lead, the pane of one of its live teammate rows is that
-/// teammate, and anything else, no pane included, is nobody (PLC). Every other mailbox
-/// names its own agent. Inputs: the database, the terminal host, the project, the
+/// lead's own pane process, is the lead, the pane of one of its live teammate rows, under
+/// the pane process that row was first named by, is that teammate, and anything else, no
+/// pane included, is nobody (PLC). Every other mailbox names its own agent. Inputs: the database, the terminal host, the project, the
 /// mailbox's agent with its label and the named pane with the pane process it was found
 /// under. Output: the caller's id and label, or none, also when the lead's mode is unread.
 pub fn team_caller(
@@ -8305,10 +8647,11 @@ enum PaneMember {
 /// Finds who runs in one pane of a native lead's team from the engine's own rows, never
 /// from a file the agents write (DEC-111 Q18): the lead when the caller was found under
 /// the process its pane record names and the host lists that pane under it (PLC), or the
-/// newest live teammate row of the lead in that pane. Inputs: the database, the terminal
-/// host, the project, the lead and the pane with the pane process the caller was found
-/// under. Output: the member, or none for a pane id that is not plain or a pane no row
-/// names.
+/// newest live teammate row of the lead in that pane while the caller was found under the
+/// pane process that row is pinned to (PLC (b)). Inputs: the database, the terminal host,
+/// the project, the lead and the pane with the pane process the caller was found under.
+/// Output: the member, or none for a pane id that is not plain, a pane no row names or a
+/// teammate's pane under another process.
 fn pane_member(
     connection: &Connection,
     host: Option<&dyn Host>,
@@ -8319,18 +8662,19 @@ fn pane_member(
     if !crate::terminal::pane_id_valid(pane) {
         return None;
     }
-    let teammate: Option<i64> = connection
+    let teammate: Option<(i64, Option<i64>)> = connection
         .query_row(
-            "SELECT id FROM team_agents WHERE project=?1 AND parent=?2 AND role='teammate'
+            "SELECT id,pane_pid FROM team_agents WHERE project=?1 AND parent=?2 AND role='teammate'
              AND status IN ('starting','idle','working') AND pane=?3 ORDER BY id DESC LIMIT 1",
             params![project.as_str(), lead, pane],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .ok()?;
-    if let Some(teammate) = teammate {
+    if let Some((teammate, pinned)) = teammate {
         assert_ne!(teammate, lead);
-        return Some(PaneMember::Teammate(teammate));
+        return teammate_pinned(connection, teammate, pinned, pid)
+            .then_some(PaneMember::Teammate(teammate));
     }
     let name = AgentId::team(lead).ok()?;
     let record: Option<String> = connection
@@ -8351,6 +8695,36 @@ fn pane_member(
         .iter()
         .any(|listed| listed.pid == own.pid && listed.id == pane)
         .then_some(PaneMember::Lead)
+}
+
+/// Whether a native teammate's row is named by this pane process (PLC (b)): the first
+/// process the engine names it by is kept on the row, so the pin outlives the caller socket
+/// and the engine, and any other process under that pane id is refused. Claude Code writes
+/// the pane into its team config before it respawns the placeholder there, so the pin waits
+/// for the first call or `who`, never the first listing. Takes the connection, the row, the
+/// process it is pinned to, if any, and the caller's pane process. Returns the answer, no
+/// also when the pin cannot be kept.
+fn teammate_pinned(connection: &Connection, teammate: i64, pinned: Option<i64>, pid: u32) -> bool {
+    let pid = i64::from(pid);
+    if let Some(pinned) = pinned {
+        return pinned == pid;
+    }
+    if connection
+        .execute(
+            "UPDATE team_agents SET pane_pid=?2 WHERE id=?1 AND pane_pid IS NULL",
+            params![teammate, pid],
+        )
+        .is_err()
+    {
+        return false;
+    }
+    connection
+        .query_row(
+            "SELECT pane_pid FROM team_agents WHERE id=?1",
+            [teammate],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .is_ok_and(|kept| kept == Some(pid))
 }
 
 /// Who runs in one pane of a native lead's team, for the lead's caller socket to answer
@@ -8400,9 +8774,12 @@ pub fn agent_home(state: &Path, id: i64) -> PathBuf {
 
 /// The project folder graphify keeps its graph in, and the entries of it an agent's
 /// worktree shows: the graph the CLI queries, its report and its wiki.
+#[cfg(unix)]
 const GRAPH_FOLDER: &str = "graphify-out";
+#[cfg(unix)]
 const GRAPH_ENTRIES: [&str; 3] = ["graph.json", "GRAPH_REPORT.md", "wiki"];
 /// The most bytes of a worktree's `.gitignore` read to see whether it ignores the graph.
+#[cfg(unix)]
 const GITIGNORE_BYTES_MAX: u64 = 256 * 1024;
 
 /// Shows the project's graphify graph read-only in an agent's worktree (I3): a real
@@ -8413,6 +8790,7 @@ const GITIGNORE_BYTES_MAX: u64 = 256 * 1024;
 /// and every step works through the folder's own descriptor without following a link. A
 /// failure leaves the agent without the graph, never without its start. Takes the project
 /// folder and the worktree.
+#[cfg(unix)]
 fn expose_graph(root: &Path, worktree: &Path) {
     use rustix::fs::{
         AtFlags, CWD, FileType, Mode, OFlags, mkdirat, openat, readlinkat, statat, symlinkat,
@@ -8461,6 +8839,7 @@ fn expose_graph(root: &Path, worktree: &Path) {
 /// Whether a worktree's `.gitignore` ignores the graph folder by one of its usual spellings,
 /// read as a plain file, never through a link or from a pipe, at most `GITIGNORE_BYTES_MAX`
 /// bytes. Takes the worktree. Returns the answer; anything unreadable reads as no.
+#[cfg(unix)]
 fn ignores_graph(worktree: &Path) -> bool {
     use rustix::fs::{CWD, FileType, Mode, OFlags, fstat, openat};
     use std::io::Read;
@@ -8682,6 +9061,9 @@ mod live_claude_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "runtime/live_codex_tests.rs"]
 mod live_codex_tests;
+#[cfg(all(test, target_os = "macos"))]
+#[path = "runtime/live_failover_tests.rs"]
+mod live_failover_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "runtime/live_native_lead_tests.rs"]
 mod live_native_lead_tests;

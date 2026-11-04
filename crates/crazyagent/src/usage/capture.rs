@@ -349,18 +349,21 @@ fn claude_tools(value: &Value) -> Vec<String> {
 
 /// Lists a home's session records, at most `FILES_PER_SCAN_MAX`, most recently changed
 /// first: Claude Code's `projects/<folder>/<session>.jsonl` with its sub-agent records
-/// further down, or Codex's `sessions/<year>/<month>/<day>/rollout-*.jsonl`. The walk
-/// examines at most `ENTRIES_PER_SCAN_MAX` entries of the home in all, entering the most
-/// recently changed folder first, and keeps only the newest records it saw, so a home an
-/// agent filled costs a bounded scan that leaves out its least recently changed folders.
-/// Inputs: the home and the format. Output: the paths.
+/// further down, also in the home a native lead's teammates run with beside it (TPH-2 C),
+/// or Codex's `sessions/<year>/<month>/<day>/rollout-*.jsonl`. A linked top folder is
+/// never walked. The walk examines at most `ENTRIES_PER_SCAN_MAX` entries in all, entering
+/// the most recently changed folder first, and keeps only the newest records it saw, so a
+/// home an agent filled costs a bounded scan that leaves out its least recently changed
+/// folders. Inputs: the home and the format. Output: the paths.
 pub(crate) fn records(home: &Path, format: Format) -> Vec<PathBuf> {
-    let root = match format {
-        Format::Claude => home.join("projects"),
-        Format::Codex => home.join("sessions"),
+    let mut folders = match format {
+        Format::Claude => vec![
+            (crate::launch_context::mates_home(home).join("projects"), 0),
+            (home.join("projects"), 0),
+        ],
+        Format::Codex => vec![(home.join("sessions"), 0)],
     };
     let mut newest = std::collections::BinaryHeap::with_capacity(FILES_PER_SCAN_MAX + 1);
-    let mut folders = vec![(root, 0)];
     let mut visited = 0;
     let mut examined = 0;
     let changed = |entry: &std::fs::DirEntry| {
@@ -373,6 +376,10 @@ pub(crate) fn records(home: &Path, format: Format) -> Vec<PathBuf> {
         visited += 1;
         if visited > FILES_PER_SCAN_MAX * 4 {
             break;
+        }
+        if level == 0 && !std::fs::symlink_metadata(&folder).is_ok_and(|metadata| metadata.is_dir())
+        {
+            continue;
         }
         let Ok(entries) = std::fs::read_dir(&folder) else {
             continue;
@@ -437,7 +444,7 @@ pub(crate) fn open_record(path: &Path) -> Option<(File, (u64, u64), u64)> {
     }
     let file = File::open(path).ok()?;
     let metadata = file.metadata().ok()?;
-    metadata.is_file().then(|| (file, (0, 0), metadata.len()))
+    metadata.is_file().then_some((file, (0, 0), metadata.len()))
 }
 
 fn session_name(path: &Path) -> String {

@@ -175,7 +175,9 @@ fn agent_state(
     };
     let has_worktree: bool = db
         .query_row(
-            "SELECT EXISTS(SELECT 1 FROM team_worktrees WHERE agent=?1)",
+            "SELECT EXISTS(SELECT 1 FROM team_worktrees WHERE agent=?1)
+             OR EXISTS(SELECT 1 FROM team_agents WHERE id=?1 AND role='teammate'
+                       AND worktree IS NOT NULL)",
             [id],
             |found| found.get(0),
         )

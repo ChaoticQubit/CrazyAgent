@@ -337,6 +337,7 @@ fn engine_draft(
 /// so the onboarding view shows that text as the mapping agent's. The row outlives the
 /// project like the draft's. Takes the connection, the folder and the overview as it reads
 /// back. Returns any storage failure.
+#[cfg(unix)]
 pub(crate) fn seal_overview(
     connection: &Connection,
     repo: &Path,
