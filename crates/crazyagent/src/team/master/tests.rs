@@ -3039,12 +3039,13 @@ impl Clones {
     }
 }
 
-/// OP-9b (leader 17:32, answer a): a linked lead cannot report its work Complete while one
-/// of its native teammates still works, since the engine lands each teammate's work on the
-/// lead's task branch only once it rests; finish_work names the working teammate, then
-/// completes once every teammate rests.
+/// OP-9b (leader 17:32, answer a) and OP9B-M1: a linked lead cannot report its work
+/// Complete while one of its native teammates still works, nor while a resting teammate's
+/// change set waits to land on the lead's task branch, since the engine lands each
+/// teammate's work there only once it rests and the lead is idle; finish_work names the
+/// teammate each time, then completes once its work has landed.
 #[test]
-fn a_linked_lead_finishes_only_once_its_native_teammates_rest() {
+fn a_linked_lead_finishes_only_once_its_native_teammates_work_landed() {
     let mut fixture = Fixture::new();
     let (home, project) = owner_repository(&fixture);
     let lead = project
@@ -3127,6 +3128,58 @@ fn a_linked_lead_finishes_only_once_its_native_teammates_rest() {
         .connection
         .execute("UPDATE team_agents SET status='idle' WHERE id=?1", [WORKER])
         .unwrap();
+    let mate = lead.join(crate::agent_git::TEAMMATES_FOLDER).join("greet");
+    git_in(
+        &home,
+        &project,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            mate.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    let mate_git = project.join(".git/worktrees/greet");
+    crate::landing::name_agent_branch(&db, &project, &mate, &mate_git).unwrap();
+    crate::landing::record_worktree_start(&db, &project, &mate, &mate_git).unwrap();
+    std::fs::write(mate.join("hello.txt"), "Hello.\n").unwrap();
+    let waiting = crate::landing::record_turn_end(
+        &db,
+        &crate::landing::Workspace {
+            project: ProjectId::new(PROJECT).unwrap(),
+            agent: crate::landing::ChangeAgent {
+                kind: crate::landing::AgentKind::Sub,
+                id: WORKER.to_string(),
+                label: "greet \u{b7} teammate".into(),
+            },
+            repository: project.clone(),
+            worktree: mate.clone(),
+            git_dir: mate_git.clone(),
+        },
+        &crate::landing::TurnEnd {
+            outcome: crate::landing::TurnOutcome::Succeeded,
+            turn: "rest-1".into(),
+            prompt_line: "Work of teammate greet".into(),
+        },
+    )
+    .unwrap()
+    .expect("greet's rest waits as its change set");
+    let (answer, error) = finish(&mut fixture);
+    assert_eq!(
+        (answer.as_str(), error),
+        (
+            "Not finished: the work of these teammates waits to land on your task branch: greet. CrazyAgent lands it while you are idle and tells you then; finish again after that.",
+            true
+        )
+    );
+    let landed =
+        crate::landing::accept_into(&db, &home, &waiting.id, &waiting.head, None, &branch).unwrap();
+    assert!(
+        matches!(landed, crate::landing::AcceptOutcome::Landed { .. }),
+        "greet's work lands on the lead's task branch"
+    );
     let (answer, error) = finish(&mut fixture);
     assert_eq!(
         (answer.as_str(), error),

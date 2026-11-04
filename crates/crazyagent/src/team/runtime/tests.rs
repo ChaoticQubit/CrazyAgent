@@ -9110,6 +9110,267 @@ fn the_engine_makes_each_native_teammate_s_own_worktree_on_its_own_branch() {
     team.shutdown().unwrap();
 }
 
+/// OP9B-L1: a resting linked teammate whose turn git could not commit is tried again at
+/// the engine's next pass, so its work still waits as its change set once git can commit
+/// it. After three failed passes of one rest the engine stops and tells the lead once that
+/// the work stays in the teammate's worktree until its next rest.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_linked_teammate_s_turn_git_could_not_commit_is_tried_again() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let linked = LinkedTeam::new(&fixture, &mut team);
+    let start = linked.tip(&linked.branch);
+    let records = fixture.base.join("project").join(".git").join("worktrees");
+    for name in ["greet", "check"] {
+        std::fs::write(linked.teammate(name).join(format!("{name}.txt")), "Work.\n").unwrap();
+        std::fs::write(records.join(name).join("index.lock"), "").unwrap();
+        linked.mark(&fixture, linked.id(&fixture, name), "idle");
+    }
+
+    team.record_teammate_turns(&linked.project, linked.lead)
+        .unwrap();
+    assert_eq!(
+        linked.tip(&format!("{}--greet", linked.branch)),
+        start,
+        "git could not commit greet's turn"
+    );
+    std::fs::remove_file(records.join("greet").join("index.lock")).unwrap();
+    team.record_teammate_turns(&linked.project, linked.lead)
+        .unwrap();
+
+    let greet = linked.tip(&format!("{}--greet", linked.branch));
+    assert_ne!(greet, start, "greet's turn is committed at the next pass");
+    assert_eq!(linked.files(&start, &greet), "greet.txt");
+    for _ in 0..3 {
+        team.record_teammate_turns(&linked.project, linked.lead)
+            .unwrap();
+    }
+    assert_eq!(linked.tip(&format!("{}--check", linked.branch)), start);
+    let told: Vec<String> = linked
+        .notes(&fixture)
+        .into_iter()
+        .filter(|note| note.contains("check") && note.contains(".worktrees/check"))
+        .collect();
+    assert_eq!(
+        told.len(),
+        1,
+        "the lead is told once that check's work stays in its worktree: {told:?}"
+    );
+}
+
+/// OP9B-L2: a linked lead whose teammates' folder holds an entry other than the teammate
+/// worktrees the engine made, so the engine can neither commit nor land its teammates'
+/// work, is told once, not at every pass; once the entry is gone the next pass commits a
+/// resting teammate's turn again.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_linked_lead_is_told_once_when_its_teammates_folder_cannot_be_read() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let linked = LinkedTeam::new(&fixture, &mut team);
+    let start = linked.tip(&linked.branch);
+    let stray = linked
+        .worktree
+        .join(crate::agent_git::TEAMMATES_FOLDER)
+        .join("stray");
+    std::fs::create_dir(&stray).unwrap();
+    std::fs::write(linked.teammate("greet").join("hello.txt"), "Hello.\n").unwrap();
+    linked.mark(&fixture, linked.id(&fixture, "greet"), "idle");
+
+    for _ in 0..3 {
+        team.record_teammate_turns(&linked.project, linked.lead)
+            .unwrap();
+    }
+
+    let told: Vec<String> = linked
+        .notes(&fixture)
+        .into_iter()
+        .filter(|note| note.contains(crate::agent_git::TEAMMATES_FOLDER))
+        .collect();
+    assert_eq!(
+        told.len(),
+        1,
+        "the lead is told once that its teammates' folder cannot be read: {told:?}"
+    );
+    assert_eq!(linked.tip(&format!("{}--greet", linked.branch)), start);
+    std::fs::remove_dir(&stray).unwrap();
+    team.record_teammate_turns(&linked.project, linked.lead)
+        .unwrap();
+    assert_ne!(
+        linked.tip(&format!("{}--greet", linked.branch)),
+        start,
+        "greet's turn is committed once the folder reads again"
+    );
+}
+
+/// OP9B-L3: while a lead's workers land on the lead (Lands Lead), a linked teammate's
+/// change set is measured against its lead's task branch, never the owner's: an Update
+/// merges the lead's branch into the teammate's worktree.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_linked_teammate_s_update_merges_its_lead_s_branch() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let linked = LinkedTeam::new(&fixture, &mut team);
+    let repository = fixture.base.join("project");
+    std::fs::write(repository.join("owner.txt"), "Owner.\n").unwrap();
+    for arguments in [
+        &["add", "owner.txt"][..],
+        &["commit", "-q", "-m", "owner's own work"],
+    ] {
+        let done = level_git(&repository, &linked.git_home, arguments);
+        assert!(done.status.success(), "{done:?}");
+    }
+    std::fs::write(linked.worktree.join("lead.txt"), "Lead.\n").unwrap();
+    let db = crate::landing::open(&fixture.base).unwrap();
+    crate::landing::record_turn_end(
+        &db,
+        &crate::landing::Workspace {
+            project: linked.project.clone(),
+            agent: crate::landing::ChangeAgent {
+                kind: crate::landing::AgentKind::Sub,
+                id: linked.lead.to_string(),
+                label: format!("Sub-agent {}", linked.lead),
+            },
+            repository: repository.clone(),
+            worktree: linked.worktree.clone(),
+            git_dir: repository
+                .join(".git")
+                .join("worktrees")
+                .join(format!("agent-{}", linked.lead)),
+        },
+        &crate::landing::TurnEnd {
+            outcome: crate::landing::TurnOutcome::Succeeded,
+            turn: "task-1".into(),
+            prompt_line: "Write the lead's file".into(),
+        },
+    )
+    .unwrap()
+    .expect("the lead's file waits in its change set");
+    std::fs::write(linked.teammate("greet").join("hello.txt"), "Hello.\n").unwrap();
+    linked.mark(&fixture, linked.id(&fixture, "greet"), "idle");
+    team.record_teammate_turns(&linked.project, linked.lead)
+        .unwrap();
+    let set = crate::landing::open_change_set(&db, &linked.teammate("greet"))
+        .unwrap()
+        .expect("greet's turn waits as its change set");
+
+    crate::landing::update(&db, &set.id).unwrap();
+
+    assert!(
+        linked.teammate("greet").join("lead.txt").is_file(),
+        "the lead's task branch is merged into greet's worktree"
+    );
+    assert!(
+        !linked.teammate("greet").join("owner.txt").exists(),
+        "never the owner's branch"
+    );
+}
+
+/// OP9B-S1: a linked lead's worktree is never retired while one of its teammates'
+/// worktrees holds work not landed on the lead's branch, whichever rule hides the
+/// teammates' folder from the lead's own git: the project's `.gitignore`, the owner's
+/// exclude file, a `.gitignore` the lead's landed work holds, or a `.gitignore` a teammate
+/// left in the folder. Once nothing would be lost, the worktree can go.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_linked_lead_with_unlanded_teammate_work_is_never_retired_whatever_hides_its_teammates() {
+    let mut retired = Vec::new();
+    for source in ["project", "exclude", "lead", "teammate"] {
+        let fixture = Fixture::new(1);
+        let repository = fixture.base.join("project");
+        if source == "project" {
+            std::fs::write(repository.join(".gitignore"), ".worktrees/\n").unwrap();
+        }
+        let mut team = fixture.runtime();
+        let linked = LinkedTeam::new(&fixture, &mut team);
+        let git_dir = repository
+            .join(".git")
+            .join("worktrees")
+            .join(format!("agent-{}", linked.lead));
+        let db = crate::landing::open(&fixture.base).unwrap();
+        match source {
+            "exclude" => {
+                let info = repository.join(".git").join("info");
+                std::fs::create_dir_all(&info).unwrap();
+                std::fs::write(info.join("exclude"), ".worktrees/\n").unwrap();
+            }
+            "lead" => {
+                std::fs::write(linked.worktree.join(".gitignore"), ".worktrees/\n").unwrap();
+                let set = crate::landing::record_turn_end(
+                    &db,
+                    &crate::landing::Workspace {
+                        project: linked.project.clone(),
+                        agent: crate::landing::ChangeAgent {
+                            kind: crate::landing::AgentKind::Sub,
+                            id: linked.lead.to_string(),
+                            label: format!("Sub-agent {}", linked.lead),
+                        },
+                        repository: repository.clone(),
+                        worktree: linked.worktree.clone(),
+                        git_dir: git_dir.clone(),
+                    },
+                    &crate::landing::TurnEnd {
+                        outcome: crate::landing::TurnOutcome::Succeeded,
+                        turn: "task-1".into(),
+                        prompt_line: "Ignore the teammates' folder".into(),
+                    },
+                )
+                .unwrap()
+                .expect("the lead's .gitignore waits in its change set");
+                let accepted =
+                    crate::landing::accept(&db, &linked.git_home, &set.id, &set.head, None)
+                        .unwrap();
+                assert!(
+                    matches!(accepted, crate::landing::AcceptOutcome::Landed { .. }),
+                    "the owner lands the lead's .gitignore"
+                );
+            }
+            "teammate" => {
+                std::fs::write(
+                    linked
+                        .worktree
+                        .join(crate::agent_git::TEAMMATES_FOLDER)
+                        .join(".gitignore"),
+                    "*\n",
+                )
+                .unwrap();
+            }
+            _ => {}
+        }
+        let unlanded = linked.teammate("greet").join("hello.txt");
+        std::fs::write(&unlanded, "Hello.\n").unwrap();
+
+        let blocker =
+            crate::landing::retire_blocker(&db, &repository, &linked.worktree, &git_dir, now_ms())
+                .unwrap();
+
+        if blocker.is_none() {
+            retired.push(source);
+        }
+        if source == "exclude" {
+            std::fs::remove_file(&unlanded).unwrap();
+            assert_eq!(
+                crate::landing::retire_blocker(
+                    &db,
+                    &repository,
+                    &linked.worktree,
+                    &git_dir,
+                    now_ms()
+                )
+                .unwrap(),
+                None,
+                "with nothing to lose the lead's worktree can go"
+            );
+        }
+    }
+    assert!(
+        retired.is_empty(),
+        "unlanded teammate work let its lead's worktree go under: {retired:?}"
+    );
+}
+
 /// OP-9b with OP-9 r2: the engine's teammates' setup git adds a linked teammate's worktree
 /// only at a real teammates' folder, so a symlink at `.worktrees` or at `.worktrees/<name>`
 /// that points at a folder the lead may write never gets a teammate's tree, a worktree
@@ -9434,6 +9695,16 @@ fn an_idle_linked_lead_gets_each_resting_teammate_s_work_on_its_task_branch() {
     assert_eq!(
         (lead.head.as_str(), lead.base.as_str()),
         (landed.as_str(), start.as_str())
+    );
+    let told: Vec<String> = linked
+        .notes(&fixture)
+        .into_iter()
+        .filter(|note| note.contains("greet") && note.contains("landed"))
+        .collect();
+    assert_eq!(
+        told.len(),
+        1,
+        "the lead is told once that greet's work landed, so it finishes again: {told:?}"
     );
 }
 
