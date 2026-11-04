@@ -23,7 +23,7 @@ use ratatui::layout::{Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;
 
 const PAGE_STEP: usize = 10;
@@ -1060,18 +1060,6 @@ impl ProcessPage {
                 Role::Muted
             };
             lines.push(styled(name, role, theme));
-            if agent.hookless {
-                let text = format!(
-                    "Counts and flags {}",
-                    crate::coord::adoption::HOOKLESS_WORDS
-                );
-                lines.extend(
-                    wrap(&text, width.saturating_sub(2).max(1))
-                        .into_iter()
-                        .map(|text| styled(format!("  {text}"), Role::Muted, theme)),
-                );
-                continue;
-            }
             lines.extend(
                 wrap(&counts.join("  "), width.saturating_sub(2).max(1))
                     .into_iter()

@@ -90,6 +90,7 @@ pub(crate) struct Letter {
 impl Letter {
     /// The one line the monitor prints to wake a session: the mark, the sender and the
     /// body's first `PREVIEW_BYTES` bytes on one line. Takes the letter. Returns the line.
+    #[cfg(unix)]
     pub(crate) fn notice(&self) -> String {
         let preview = one_line(clip(&self.body, PREVIEW_BYTES));
         format!("{MARK}{}] from {}: {preview}", self.id, self.from)
@@ -856,13 +857,12 @@ fn real_folder(path: &Path) -> bool {
 /// checks it is a real folder afterwards. Takes the path. Returns Ok or
 /// `coord_relay_unwritable`.
 fn private_folder(path: &Path) -> Result<(), EngineError> {
-    let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::DirBuilderExt;
-        builder.mode(0o700);
-    }
-    match builder.create(path) {
+    let created =
+        std::os::unix::fs::DirBuilderExt::mode(&mut std::fs::DirBuilder::new(), 0o700).create(path);
+    #[cfg(not(unix))]
+    let created = std::fs::DirBuilder::new().create(path);
+    match created {
         Ok(()) => {}
         Err(problem) if problem.kind() == std::io::ErrorKind::AlreadyExists => {}
         Err(_) => return Err(failure("coord_relay_unwritable")),
@@ -883,6 +883,7 @@ pub(crate) fn clip(text: &str, bytes: usize) -> &str {
 }
 
 /// A text on one line: every run of line breaks and tabs becomes one space.
+#[cfg(unix)]
 fn one_line(text: &str) -> String {
     text.split(['\n', '\r', '\t'])
         .filter(|part| !part.is_empty())

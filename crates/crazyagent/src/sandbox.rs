@@ -79,7 +79,10 @@ pub const FULL_ACCESS_NEEDS_MACOS: &str = "Full access agents run only on macOS 
 const PATH_BYTES_MAX: usize = 1024;
 const READ_ROOTS_MAX: usize = 16;
 const WORKTREES_MAX: usize = 8;
-const HIDDEN_MAX: usize = 9;
+/// The most folders one sandbox hides: every hidden folder a project saves
+/// ([`hidden_paths::HIDDEN_PATHS_MAX`]) plus one a step adds itself, such as the graph step's
+/// `.crazyagent/`.
+pub const HIDDEN_MAX: usize = hidden_paths::HIDDEN_PATHS_MAX + 1;
 /// The most exact Unix sockets one agent may bind and connect: its own Codex app-server's.
 const SOCKETS_MAX: usize = 2;
 /// The most exact Unix socket grants one agent holds, of every use together: a native lead's
@@ -90,6 +93,7 @@ const SOCKET_GRANTS_MAX: usize = 4;
 const FIXED_WRITES: &str = "file-write-unlink file-write-create file-write-mode file-write-acl";
 /// The folders of a Claude Code config home whose scripts Claude Code 2.1.309 runs ahead of
 /// every Bash command: its shell snapshot and the session hook scripts (TPH-2).
+#[cfg(unix)]
 const CLAUDE_BASH_PRELUDES: [&str; 2] = ["shell-snapshots", "session-env"];
 /// The folders of a Claude Code config home that its agent team shares, the members'
 /// mailboxes and task lists. Claude Code 2.1.309 keeps them under each member's config home,
@@ -1149,6 +1153,7 @@ impl ProjectSandbox {
     /// there (rv-secreview RH2R2-1). Inputs: the three sockets, the canonical tmux program
     /// and the teammates' home beside the lead's, its team folders already made. Output: the
     /// lead's and the teammates' sandboxes, `Invalid`, or `Unavailable` off macOS.
+    #[cfg(unix)]
     pub fn native_team(
         self,
         own: &Path,
@@ -2281,6 +2286,21 @@ fn owner_home() -> Result<PathBuf, SandboxError> {
         return Err(invalid("owner home must be absolute"));
     }
     Ok(home.canonicalize().unwrap_or(home))
+}
+
+/// Names the credential files and folders the sandbox guards as they appear in a path: the
+/// owner's under the home, the system's without their leading `/` and the credential names
+/// no allowed root may hold. Takes nothing. Returns the names.
+pub(crate) fn credential_places() -> impl Iterator<Item = &'static str> {
+    OWNER_SECRET_PATHS
+        .iter()
+        .chain(CREDENTIAL_NAMES)
+        .copied()
+        .chain(
+            SYSTEM_SECRET_PATHS
+                .iter()
+                .map(|path| path.trim_start_matches('/')),
+        )
 }
 
 fn owner_secrets(owner: &Path) -> impl Iterator<Item = PathBuf> {

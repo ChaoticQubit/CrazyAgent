@@ -1000,6 +1000,6 @@ fn project_folder(root: &Path, project: &ProjectId) -> Result<PathBuf, EngineErr
         .ok_or_else(|| failure("process_project_unknown"))
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "process_tests.rs"]
 mod tests;

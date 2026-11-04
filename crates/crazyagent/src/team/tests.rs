@@ -3999,18 +3999,31 @@ fn add_late_columns_upgrades_an_old_database_once() {
     let agents = columns("team_agents");
     let tasks = columns("team_tasks");
     assert_eq!(
-        agents[agents.len() - 3..],
-        ["pane".to_owned(), "mode".to_owned(), "hookless".to_owned()]
+        agents[agents.len() - 4..],
+        [
+            "pane".to_owned(),
+            "mode".to_owned(),
+            "hookless".to_owned(),
+            "pane_pid".to_owned()
+        ]
     );
     assert_eq!(tasks.last().map(String::as_str), Some("mode"));
-    let kept: (String, Option<String>, Option<String>, bool) = connection
+    let kept: (String, Option<String>, Option<String>, bool, Option<i64>) = connection
         .query_row(
-            "SELECT harness,pane,mode,hookless FROM team_agents WHERE project='team-old'",
+            "SELECT harness,pane,mode,hookless,pane_pid FROM team_agents WHERE project='team-old'",
             [],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
         )
         .unwrap();
-    assert_eq!(kept, ("claude-code".to_owned(), None, None, false));
+    assert_eq!(kept, ("claude-code".to_owned(), None, None, false, None));
     let task_mode: Option<String> = connection
         .query_row("SELECT mode FROM team_tasks", [], |row| row.get(0))
         .unwrap();

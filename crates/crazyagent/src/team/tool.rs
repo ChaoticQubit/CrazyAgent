@@ -72,6 +72,7 @@ pub const CALLS_PENDING_MAX: usize = 16;
 pub const REPLY_TEXT_MAX: usize = 32 * 1024;
 const CALL_BYTES_MAX: u64 = 16 * 1024;
 const REPLY_BYTES_MAX: u64 = 2 * REPLY_TEXT_MAX as u64 + 64;
+#[cfg(unix)]
 const MAILBOX_SCAN_MAX: usize = 256;
 const AGENT_NAME_BYTES_MAX: usize = 64;
 const CALL_SUFFIX: &str = ".call";
@@ -1217,7 +1218,7 @@ impl Mailbox {
 /// Reads an entry's last change time from its status, the epoch when it does not fit.
 /// Takes the status. Returns the time.
 #[cfg(unix)]
-fn modified(stat: &rustix::fs::Stat) -> std::time::SystemTime {
+pub(super) fn modified(stat: &rustix::fs::Stat) -> std::time::SystemTime {
     let seconds = u64::try_from(stat.st_mtime).ok();
     let nanos = u32::try_from(stat.st_mtime_nsec)
         .ok()

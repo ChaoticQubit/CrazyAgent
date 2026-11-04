@@ -13,9 +13,8 @@ use rustix::fs::{FlockOperation, Mode, OFlags};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::fs::{self, File};
-use std::io::Read;
 #[cfg(unix)]
-use std::io::Write;
+use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};

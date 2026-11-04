@@ -446,5 +446,5 @@ fn agent_names(agents: &[String]) -> String {
     agents.join(", ")
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests;

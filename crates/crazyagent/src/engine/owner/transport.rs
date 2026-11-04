@@ -2194,7 +2194,7 @@ impl<'a> Deferral<'a> {
     fn take(count: &'a std::sync::atomic::AtomicUsize) -> Option<Self> {
         use std::sync::atomic::Ordering;
         let before = count
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |running| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |running| {
                 (running < DEFERRED_MAX).then_some(running + 1)
             })
             .ok()?;

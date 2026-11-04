@@ -327,6 +327,7 @@ impl Engine {
 
     /// Returns the agent register only when the engine already opened it, so a caller such
     /// as a terminal viewer never opens it as a side effect. Output: the register, or none.
+    #[cfg(unix)]
     pub(crate) fn agents_if_open(&self) -> Option<Arc<Agents>> {
         self.agents.lock().ok()?.clone()
     }
