@@ -715,6 +715,7 @@ fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
         id: ProjectId::new("process").unwrap(),
         folder: Some(folder),
         mode: crate::instruction_files::Mode::Both,
+        trust: crate::trust::Trust::Reviewed,
     };
     let context = AgentContext {
         plugins: LaunchPlugins::default(),
@@ -916,6 +917,7 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
         git_identity: None,
         limits: crate::harnesses::launch::LaunchLimits::default(),
         unconfined: false,
+        trust: crate::trust::Trust::Reviewed,
     };
     assert!(context().exposes_secret(home.as_os_str().as_encoded_bytes()));
 
@@ -1011,6 +1013,7 @@ impl LeftPane {
             git_identity: None,
             limits: crate::harnesses::launch::LaunchLimits::default(),
             unconfined: false,
+            trust: crate::trust::Trust::Reviewed,
         };
         let tmux = crate::terminal::tmux::installed(&root)
             .expect("tmux must be installed on this machine");
@@ -1221,6 +1224,7 @@ fn context_with(
                 id: ProjectId::new("launch").unwrap(),
                 folder: Some(folder),
                 mode: crate::instruction_files::Mode::Both,
+                trust: crate::trust::Trust::Reviewed,
             },
             hooks: Vec::new(),
             agent: String::new(),
@@ -1524,6 +1528,7 @@ fn a_claude_launch_with_tools_on_writes_only_the_hooks_given_each_rerooted_in_it
                 id: ProjectId::new("hooked").unwrap(),
                 folder: Some(folder),
                 mode: crate::instruction_files::Mode::Both,
+                trust: crate::trust::Trust::Reviewed,
             },
             hooks: vec![
                 hook("SessionStart", None, None),

@@ -140,14 +140,25 @@ pub fn folder(root: &Path, project: &ProjectId) -> Result<PathBuf, EngineError> 
 }
 
 /// Whether git in the project's IDE runs the project's own hooks in its Project section, as
-/// the owner saved it in the project's agent policy; Off when none is saved. Inputs: the
-/// engine root and the project. Output: the switch, or `ide_workspace_unavailable` for a
-/// policy that cannot be read, so a tampered one never turns hooks on.
+/// the owner saved it in the project's agent policy; Off when none is saved and always Off
+/// for an untrusted repository. Inputs: the engine root and the project. Output: the switch,
+/// or `ide_workspace_unavailable` for a policy or trust level that cannot be read, so a
+/// tampered one never turns hooks on.
 pub fn project_hooks(root: &Path, project: &ProjectId) -> Result<bool, EngineError> {
+    let trust = project_trust(root, project)?;
     let db = open(root)?;
     crate::sandbox::policy::load(&db, project.as_str())
-        .map(|policy| policy.ide_git_hooks)
+        .map(|policy| policy.ide_git_hooks_under(trust))
         .map_err(unavailable)
+}
+
+/// How far the owner trusts the project's repository, which decides whether the IDE opens
+/// it in VS Code Restricted Mode. Inputs: the engine root and the project. Output: the
+/// level, or `ide_workspace_unavailable` for a level that cannot be read, so a tampered one
+/// never reads as Reviewed.
+pub fn project_trust(root: &Path, project: &ProjectId) -> Result<crate::trust::Trust, EngineError> {
+    let db = open(root)?;
+    crate::trust::level(&db, project.as_str()).map_err(unavailable)
 }
 
 /// Whether an engine-made worktree of the project is inside the older agents root

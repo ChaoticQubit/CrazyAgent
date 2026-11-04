@@ -2447,9 +2447,15 @@ fn owner_read(
                         &setup.project_folder(),
                         &homes,
                         versioned::current(&tx, &versioned::agent_policy_item(project_id))?.version,
+                        crate::trust::level(&tx, project_id.as_str())
+                            .map_err(|_| error("repository_trust_unreadable"))?,
                     ),
             }
         }
+        OwnerRead::ProjectTrust { project_id } => OwnerData::ProjectTrust {
+            project_id: project_id.clone(),
+            trust: Box::new(crate::trust::view(&tx, project_id)?),
+        },
         OwnerRead::Onboarding { project_id } => OwnerData::Onboarding {
             onboarding: Box::new(
                 crate::onboarding::status(&tx, project_id)?

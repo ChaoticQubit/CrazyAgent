@@ -179,6 +179,12 @@ pub enum OwnerMutation {
         version: u64,
         policy: crate::sandbox::policy::AgentPolicy,
     },
+    SetProjectTrust {
+        project_id: ProjectId,
+        version: u64,
+        trust: crate::trust::Trust,
+        confirm_raise: bool,
+    },
     Team {
         action: crate::team::TeamAction,
     },
@@ -378,6 +384,21 @@ impl OwnerMutation {
                     project_id: project_id.clone(),
                     version: *version,
                     policy: policy.clone(),
+                };
+                action.validate()?;
+                Command::ProjectSetup { action }
+            }
+            Self::SetProjectTrust {
+                project_id,
+                version,
+                trust,
+                confirm_raise,
+            } => {
+                let action = crate::project_setup::SetupAction::SetRepositoryTrust {
+                    project_id: project_id.clone(),
+                    version: *version,
+                    trust: *trust,
+                    confirm_raise: *confirm_raise,
                 };
                 action.validate()?;
                 Command::ProjectSetup { action }
@@ -663,6 +684,9 @@ pub enum OwnerRead {
     ProjectAgentPolicy {
         project_id: ProjectId,
     },
+    ProjectTrust {
+        project_id: ProjectId,
+    },
     ResearchJobs {
         project_id: ProjectId,
     },
@@ -785,6 +809,7 @@ impl OwnerRead {
             | Self::ProjectReadPaths { .. }
             | Self::ProjectHiddenPaths { .. }
             | Self::ProjectAgentPolicy { .. }
+            | Self::ProjectTrust { .. }
             | Self::ResearchJobs { .. }
             | Self::TeamStatus { .. }
             | Self::TeamGraph { .. }
@@ -1150,6 +1175,10 @@ pub enum OwnerData {
     ProjectAgentPolicy {
         project_id: ProjectId,
         policy: crate::sandbox::policy::PolicyView,
+    },
+    ProjectTrust {
+        project_id: ProjectId,
+        trust: Box<crate::trust::TrustView>,
     },
     ResearchJobs {
         project_id: ProjectId,

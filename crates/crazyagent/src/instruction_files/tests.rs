@@ -455,6 +455,7 @@ mod launch {
             unconfined: false,
             git_identity: None,
             limits: LaunchLimits::default(),
+            trust: crate::trust::Trust::Reviewed,
         }
     }
 

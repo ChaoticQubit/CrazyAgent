@@ -28,6 +28,8 @@ fn main() {
         "desktop_set_project_read_paths",
         "desktop_project_agent_policy",
         "desktop_set_project_agent_policy",
+        "desktop_project_trust",
+        "desktop_set_project_trust",
         "desktop_project_files",
         "desktop_team_status",
         "desktop_team_message",

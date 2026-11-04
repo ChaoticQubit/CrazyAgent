@@ -80,6 +80,18 @@ impl AgentAccess {
             None
         }
     }
+
+    /// Why this level cannot run agents of a project at `trust`, or None when it can: this
+    /// computer's reason first, then the trust level's ([`crate::trust::Enforcement`]), so
+    /// an untrusted project's Own branch or Full access is refused naming the trust level.
+    /// Input: the project's trust. Output: the owner's line.
+    pub fn unavailable_under(self, trust: crate::trust::Trust) -> Option<&'static str> {
+        self.unavailable().or_else(|| {
+            crate::trust::Enforcement::for_level(trust)
+                .refusal(self)
+                .map(|(line, _)| line)
+        })
+    }
 }
 
 /// How far one project's tools-on agents and the plugin "Check again" server may reach on
@@ -189,11 +201,18 @@ impl AgentPolicy {
             .collect()
     }
 
-    /// What a client shows: the level, every level with its availability, each toolchain
-    /// family the owner has installed, the project uses or the owner chose, the IDE hooks
-    /// choice and the policy's version, which a save names. Inputs: the project folder, the
-    /// owner's tool homes and the version. Output: the view.
-    pub fn view(&self, project: &Path, homes: &ToolHomes, version: u64) -> PolicyView {
+    /// What a client shows: the level, every level with its availability under the
+    /// project's trust, each toolchain family the owner has installed, the project uses or
+    /// the owner chose, the IDE hooks choice (off for an untrusted project) and the policy's
+    /// version, which a save names. Inputs: the project folder, the owner's tool homes, the
+    /// version and the project's trust. Output: the view.
+    pub fn view(
+        &self,
+        project: &Path,
+        homes: &ToolHomes,
+        version: u64,
+        trust: crate::trust::Trust,
+    ) -> PolicyView {
         let allowed = self.allowed(project);
         let toolchains: Vec<ToolchainView> = Toolchain::ALL
             .into_iter()
@@ -215,7 +234,7 @@ impl AgentPolicy {
                 .map(|access| LevelView {
                     access,
                     label: access.label().to_owned(),
-                    unavailable: access.unavailable().map(str::to_owned),
+                    unavailable: access.unavailable_under(trust).map(str::to_owned),
                 })
                 .collect(),
             networks: AgentNetwork::ALL
@@ -227,8 +246,15 @@ impl AgentPolicy {
                 .collect(),
             toolchains,
             version,
-            ide_git_hooks: self.ide_git_hooks,
+            ide_git_hooks: self.ide_git_hooks_under(trust),
         }
+    }
+
+    /// Whether git in the IDE runs the project's own hooks: the owner's switch for a
+    /// reviewed project, always off for an untrusted one. Input: the project's trust.
+    /// Output: the switch.
+    pub fn ide_git_hooks_under(&self, trust: crate::trust::Trust) -> bool {
+        self.ide_git_hooks && crate::trust::Enforcement::for_level(trust).ide_workspace_trust
     }
 
     fn choice(&self, toolchain: Toolchain) -> Option<bool> {
@@ -392,6 +418,7 @@ mod tests {
             Path::new("/nonexistent"),
             &ToolHomes::at(Path::new("/nonexistent")),
             0,
+            crate::trust::Trust::Reviewed,
         );
         assert!(view.ide_git_hooks);
         connection

@@ -33,6 +33,8 @@
     "allow-desktop-set-project-read-paths",
     "allow-desktop-project-agent-policy",
     "allow-desktop-set-project-agent-policy",
+    "allow-desktop-project-trust",
+    "allow-desktop-set-project-trust",
     "allow-desktop-project-files",
     "allow-desktop-team-status",
     "allow-desktop-team-message",

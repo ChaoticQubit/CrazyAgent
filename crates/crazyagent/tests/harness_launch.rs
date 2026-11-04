@@ -41,6 +41,7 @@ fn request(harness: &str, home: &Path, work: &Path, account: AccountBinding) -> 
     assert_eq!(account.home(), home);
     LaunchRequest {
         harness: harness.into(),
+        trust: crazyagent::trust::Trust::Reviewed,
         executable: installed(harness),
         working_dir: work.to_path_buf(),
         account,
@@ -253,6 +254,7 @@ fn a_real_api_key_never_reaches_the_agent_and_a_routed_launch_reads_its_token_fr
     }
     let unsupported = LaunchRequest {
         harness: "not-a-harness".into(),
+        trust: crazyagent::trust::Trust::Reviewed,
         executable: PathBuf::from("/usr/bin/true"),
         working_dir: work.path().to_path_buf(),
         account: keyed(),
@@ -514,6 +516,7 @@ fn unsafe_launch_inputs_are_refused() {
     );
     let unknown = LaunchRequest {
         harness: "opencode".into(),
+        trust: crazyagent::trust::Trust::Reviewed,
         ..unknown
     };
     assert_eq!(
@@ -636,6 +639,7 @@ fn sandboxed_stand_in(
     .unwrap();
     let session = Session::start(LaunchRequest {
         harness: "claude-code".into(),
+        trust: crazyagent::trust::Trust::Reviewed,
         executable: harness.clone(),
         working_dir: project.clone(),
         account: AccountBinding::Subscription { home },

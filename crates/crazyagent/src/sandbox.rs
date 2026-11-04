@@ -607,6 +607,7 @@ pub struct ProjectSandbox {
     tool_files: Vec<PathBuf>,
     scratch: Option<PathBuf>,
     hidden: Vec<PathBuf>,
+    repository_config: Option<PathBuf>,
     network: SandboxNetwork,
     kept_ports: Vec<u16>,
     owner_home: PathBuf,
@@ -662,6 +663,7 @@ impl ProjectSandbox {
             tool_files: Vec::new(),
             scratch: None,
             hidden: Vec::new(),
+            repository_config: None,
             network,
             kept_ports: Vec::new(),
             owner_home: owner,
@@ -1235,6 +1237,64 @@ impl ProjectSandbox {
         self.writable_roots().any(|root| path.starts_with(root))
     }
 
+    /// Keeps an untrusted repository's own harness files out of the agent's and its
+    /// harness's reach, read and write (threat model H3): each name of
+    /// [`crate::trust::repo_config::HARNESS_NAMES`] at any depth of the repository checkout
+    /// and of the folder the agent works in (its confined worktree or clone, else the
+    /// sandbox's project folder), and each of [`crate::trust::repo_config::WORKTREE_NAMES`]
+    /// at any depth of that work folder, in any letter case. Input: the repository checkout,
+    /// a clean absolute path. Output: the narrowed sandbox, or `Invalid`. Only Seatbelt holds
+    /// it, so the Linux and Windows boundaries refuse it.
+    pub fn hide_repository_config(mut self, repository: &Path) -> Result<Self, SandboxError> {
+        if !clean_absolute(repository) {
+            return Err(invalid("the repository must be a clean absolute path"));
+        }
+        self.repository_config = Some(repository.to_path_buf());
+        Ok(self)
+    }
+
+    /// Whether this sandbox hides the repository's own harness files.
+    pub fn hides_repository_config(&self) -> bool {
+        self.repository_config.is_some()
+    }
+
+    fn work_folder(&self) -> &Path {
+        self.checkout
+            .as_ref()
+            .map(|checkout| checkout.worktree.as_path())
+            .or(self.clone.as_deref())
+            .unwrap_or(&self.project_root)
+    }
+
+    fn repository_config_denies(&self) -> String {
+        let Some(repository) = &self.repository_config else {
+            return String::new();
+        };
+        let names = |list: &[&str]| {
+            list.iter()
+                .map(|name| any_case(name))
+                .collect::<Vec<_>>()
+                .join("|")
+        };
+        let harness = names(&crate::trust::repo_config::HARNESS_NAMES);
+        let work = self.work_folder();
+        let rules = [
+            (repository.as_path(), harness.clone()),
+            (work, harness),
+            (work, names(&crate::trust::repo_config::WORKTREE_NAMES)),
+        ];
+        let mut text = String::from("(deny file-read* file-write*");
+        for (folder, names) in &rules {
+            text.push_str(&format!(
+                "\n  (regex #\"^{}/(.*/)?({names})(/.*)?$\")",
+                seatbelt_pattern(folder)
+            ));
+        }
+        text.push_str(")\n");
+        assert_eq!(text.matches("(regex #\"^/").count(), rules.len());
+        text
+    }
+
     /// The Seatbelt profile text for this agent.
     pub fn profile(&self) -> String {
         let mut text = String::from("(version 1)\n(deny default)\n");
@@ -1342,6 +1402,7 @@ impl ProjectSandbox {
         if let Some(clone) = &self.clone {
             text.push_str(&clone_store_denies(clone));
         }
+        text.push_str(&self.repository_config_denies());
         text.push_str(
             "(allow file-read*\n  (literal \"/dev\")\n  (literal \"/dev/random\")\n  (literal \"/dev/urandom\")\n  (literal \"/dev/stdin\")\n  (literal \"/dev/stdout\")\n  (literal \"/dev/stderr\"))\n(allow file-read* file-write-data file-ioctl\n  (literal \"/dev/null\")\n  (literal \"/dev/zero\")\n  (literal \"/dev/tty\")\n  (literal \"/dev/ptmx\")\n  (literal \"/dev/dtracehelper\")\n  (subpath \"/dev/fd\"))\n(allow file-read-metadata file-ioctl\n  (regex #\"^/dev/ttys[0-9]+$\"))\n(allow file-read* file-write-data\n  (require-all\n    (regex #\"^/dev/ttys[0-9]+$\")\n    (extension \"com.apple.sandbox.pty\")))\n",
         );
@@ -1762,7 +1823,7 @@ impl InstalledSandbox {
     /// install refusal, or `Unavailable` where this system has no boundary.
     pub fn install(sandbox: ProjectSandbox, profile: &Path) -> Result<Self, SandboxError> {
         #[cfg(any(target_os = "linux", target_os = "windows"))]
-        if !sandbox.hidden.is_empty() {
+        if !sandbox.hidden.is_empty() || sandbox.repository_config.is_some() {
             return Err(SandboxError::Unavailable(HIDDEN_NEEDS_SEATBELT.into()));
         }
         #[cfg(target_os = "windows")]

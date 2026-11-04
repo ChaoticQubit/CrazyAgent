@@ -60,6 +60,9 @@ pub(crate) const CODEX_TOOLS_OFF: [&str; 13] = [
     "web_search=\"disabled\"",
     "mcp_servers={}",
 ];
+/// The Codex `-c` setting an untrusted project's launch passes so Codex reads no
+/// repository `AGENTS.md` or `AGENTS.override.md` as project docs.
+pub(crate) const CODEX_NO_PROJECT_DOCS: &str = "project_doc_max_bytes=0";
 /// The Codex 0.164 setting that removes `request_user_input`, the one tool a tools-off
 /// research agent or pane agent is still offered after [`CODEX_TOOLS_OFF`].
 pub(crate) const CODEX_NO_USER_INPUT: &str = "tools.experimental_request_user_input.enabled=false";
@@ -256,9 +259,10 @@ impl Default for LaunchLimits {
 
 /// Everything needed to start one harness: catalog id, executable, working directory,
 /// account, optional model, tools switch, the project sandbox profile, whether the project
-/// gave its agents Full access, the owner's git identity for the agent's own commits and
-/// limits. Every launch is refused unless a sandbox profile is given, or no profile with
-/// `unconfined` set for a Full access project (DEC-102).
+/// gave its agents Full access, the owner's git identity for the agent's own commits,
+/// limits and the project's repository trust. Every launch is refused unless a sandbox
+/// profile is given, or no profile with `unconfined` set for a Full access project
+/// (DEC-102).
 #[derive(Debug)]
 pub struct LaunchRequest {
     pub harness: String,
@@ -271,6 +275,7 @@ pub struct LaunchRequest {
     pub unconfined: bool,
     pub git_identity: Option<GitIdentity>,
     pub limits: LaunchLimits,
+    pub trust: crate::trust::Trust,
 }
 
 const GIT_IDENTITY_BYTES_MAX: usize = 256;
@@ -475,7 +480,7 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         .map(|_| key_file_text(&home.join(KEY_FILE)))
         .transpose()?;
     let (arguments, environment) = match harness_id(request) {
-        "codex" => codex_invocation(request, installed, key_file.as_deref()),
+        "codex" => codex_invocation(request, installed, key_file.as_deref())?,
         "claude-code" => claude_invocation(request, installed, key_file.as_deref()),
         _ => return Err(failure("launch_harness_unsupported")),
     };
@@ -549,7 +554,7 @@ fn codex_invocation(
     request: &LaunchRequest,
     installed: Option<&Installed>,
     key_file: Option<&str>,
-) -> Invocation {
+) -> Result<Invocation, LaunchError> {
     let home = request.account.home().as_os_str().to_owned();
     let environment = vec![("CODEX_HOME", home)];
     let engine = codex_configuration(request, installed.is_some(), key_file);
@@ -566,12 +571,19 @@ fn codex_invocation(
         )
     });
     let mut arguments = Vec::new();
-    for setting in owner.into_iter().chain(engine) {
+    let folder = match request.trust {
+        crate::trust::Trust::Reviewed => None,
+        crate::trust::Trust::Untrusted => Some(
+            codex_project(request.trust, &request.working_dir)
+                .ok_or_else(|| failure("launch_working_dir_unavailable"))?,
+        ),
+    };
+    for setting in owner.into_iter().chain(engine).chain(folder) {
         arguments.push(OsString::from("-c"));
         arguments.push(OsString::from(setting));
     }
     arguments.extend(["app-server", "--listen", "stdio://"].map(OsString::from));
-    (arguments, environment)
+    Ok((arguments, environment))
 }
 
 /// Checks the path of an account's key file before a harness is told to read it: an
@@ -588,8 +600,25 @@ pub(super) fn key_file_text(path: &Path) -> Result<String, LaunchError> {
     Ok(file.to_owned())
 }
 
+/// The `-c` setting naming how far Codex trusts the launch folder: `trusted` for a
+/// reviewed project and `untrusted` for an untrusted one, never omitted for an untrusted
+/// launch (threat model H2). Inputs: the project's level and the folder. Output: the
+/// setting, or None when the folder has no plain text path.
+pub(crate) fn codex_project(trust: crate::trust::Trust, folder: &Path) -> Option<String> {
+    let text = folder
+        .to_str()
+        .filter(|text| !text.chars().any(char::is_control))?;
+    let folder = serde_json::to_string(text).ok()?;
+    let level = match trust {
+        crate::trust::Trust::Reviewed => "trusted",
+        crate::trust::Trust::Untrusted => "untrusted",
+    };
+    Some(format!("projects={{{folder}={{trust_level=\"{level}\"}}}}"))
+}
+
 /// Builds the `-c` settings every Codex launch gets: file credentials in the account home,
-/// the account's provider, the model and the tools switch. A keyed provider reads its
+/// the account's provider, the model and the tools switch, and for an untrusted project no
+/// project docs (`project_doc_max_bytes=0`). A keyed provider reads its
 /// relay token by running `/bin/cat` on `key_file` (see [`key_file_text`]), so the token
 /// is in no argument or variable. Input: the request, whether project context was
 /// installed and the key file of a keyed account. Output: the settings, in order.
@@ -629,6 +658,9 @@ pub(super) fn codex_configuration(
             .filter(|setting| !(context && request.tools && **setting == "mcp_servers={}"))
             .map(|setting| (*setting).to_owned()),
     );
+    if request.trust == crate::trust::Trust::Untrusted {
+        configuration.push(CODEX_NO_PROJECT_DOCS.into());
+    }
     assert!(request.account.key().is_none_or(|key| {
         configuration
             .iter()

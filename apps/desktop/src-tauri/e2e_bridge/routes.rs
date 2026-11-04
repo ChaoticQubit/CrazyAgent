@@ -510,6 +510,36 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
             let result: Result<_, BridgeError> = async { lock(state) .await? .set_project_agent_policy(&id, version, policy, generation) .await }.await;
             routed(result)
         }
+        "desktop_project_trust" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+            }
+            let Args { id } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state).await?.project_trust(&id).await }.await;
+            routed(result)
+        }
+        "desktop_set_project_trust" => {
+            #[derive(serde::Deserialize)]
+            #[serde(rename_all = "camelCase")]
+            struct Args {
+                id: String,
+                version: u64,
+                trust: crazyagent::trust::Trust,
+                confirm_raise: bool,
+                generation: u64,
+            }
+            let Args { id, version, trust, confirm_raise, generation } = match parse(args) {
+                Ok(args) => args,
+                Err(invalid) => return invalid,
+            };
+            let result: Result<_, BridgeError> = async { lock(state) .await? .set_project_trust(&id, version, trust, confirm_raise, generation) .await }.await;
+            routed(result)
+        }
         "desktop_project_files" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]

@@ -653,6 +653,9 @@ impl NativeBridge {
                 Some(project_id.as_str().to_owned()),
                 None,
             ),
+            OwnerMutation::SetProjectTrust { project_id, .. } => {
+                ("project_trust", Some(project_id.as_str().to_owned()), None)
+            }
             OwnerMutation::Team { action } => (
                 "team",
                 action.project().map(|project| project.as_str().to_owned()),

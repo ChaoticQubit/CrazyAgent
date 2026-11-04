@@ -317,8 +317,8 @@ pub(crate) fn teammate_command(home: &Path) -> PathBuf {
 }
 
 /// Names what an agent home of the project receives the owner's instructions from: the
-/// engine data folder (the folder of `engine.db`), the project's recorded folder and which
-/// of the owner's two instruction texts its agents get.
+/// engine data folder (the folder of `engine.db`), the project's recorded folder, which
+/// of the owner's two instruction texts its agents get and the project's repository trust.
 /// Input: a transaction on `engine.db` and the project. Output: the project, or a plain code.
 pub(crate) fn agent_project(
     tx: &Transaction<'_>,
@@ -336,6 +336,8 @@ pub(crate) fn agent_project(
         id: project.clone(),
         folder,
         mode,
+        trust: crate::trust::level(tx, project.as_str())
+            .map_err(|_| failure("repository_trust_unreadable"))?,
     })
 }
 

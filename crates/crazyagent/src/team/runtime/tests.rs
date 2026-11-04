@@ -8025,6 +8025,7 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         sandbox_profile: PathBuf::from("/tmp/agent-1.sb"),
         access: AgentAccess::Full,
         layout,
+        trust: crate::trust::Trust::Reviewed,
         git_identity: None,
         limits: LaunchLimits::default(),
         pane: None,
@@ -9341,6 +9342,10 @@ fn an_adopted_agent_keeps_the_session_time_it_ran_before_the_engine_restarted() 
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
 }
+
+#[cfg(target_os = "macos")]
+#[path = "untrusted_tests.rs"]
+mod untrusted_tests;
 
 /// Runs `agent_git_dir` on its own thread for at most five seconds; past that it opens the
 /// FIFO for writing so the blocked reader can end. Inputs: the root, the worktree and the
@@ -11358,6 +11363,7 @@ fn hooks_plan(harness: &str, hookless: bool) -> Plan {
         tmux: None,
         hookless,
         scratch_pin: None,
+        trust: crate::trust::Trust::Reviewed,
     }
 }
 
@@ -12403,6 +12409,7 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
         tmux: Some(PathBuf::from("/opt/homebrew/bin/tmux")),
         hookless: false,
         scratch_pin: None,
+        trust: crate::trust::Trust::Reviewed,
     };
     let account = || AccountBinding::Subscription {
         home: PathBuf::from("/private/tmp/agent-1-home"),
