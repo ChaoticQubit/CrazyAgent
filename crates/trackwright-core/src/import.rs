@@ -169,7 +169,7 @@ pub fn preview(
     key: &ProjectKey,
     requested: &Path,
 ) -> Result<Preview, StoreError> {
-    let path = host.resolve(tx, key, actor, OpKind::ImportPreview, requested)?;
+    let path = host.resolve_path(tx, key, actor, OpKind::ImportPreview, requested)?;
     preview_at(tx, key, &path)
 }
 
@@ -216,7 +216,7 @@ pub fn apply(
     }
     let project = store::project(tx, key)?;
     host.actor_may(tx, key, actor, OpKind::ImportApply, None)?;
-    let path: PathBuf = host.resolve(tx, key, actor, OpKind::ImportApply, requested)?;
+    let path: PathBuf = host.resolve_path(tx, key, actor, OpKind::ImportApply, requested)?;
     let preview = preview_at(tx, key, &path)?;
     let wanted: BTreeSet<&str> = accept.iter().map(String::as_str).collect();
     let chosen: Vec<&Change> = preview
