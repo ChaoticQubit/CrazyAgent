@@ -407,15 +407,7 @@ fn check(
     if store::open_for(db, text)?.is_some() {
         return Ok(Some("cleanup_changes_open"));
     }
-    let held: i64 = db
-        .query_row(
-            "SELECT COUNT(*) FROM landing_change_sets WHERE worktree=?1 AND (intent IS NOT NULL
-             OR (state='discarded' AND pruned=0 AND restorable_until_ms>?2))",
-            params![text, i64::try_from(now).map_err(unavailable)?],
-            |row| row.get(0),
-        )
-        .map_err(unavailable)?;
-    if held > 0 {
+    if held_sets(db, text, now)? {
         return Ok(Some("cleanup_changes_restorable"));
     }
     let layout = match check_places(repository, worktree, git_dir) {
@@ -468,6 +460,11 @@ fn check(
         }
         Err(_) => None,
     };
+    if let Some(head) = &head
+        && let Some(code) = linked_teammates_landed(db, repository, worktree, head, now)?
+    {
+        return Ok(Some(code));
+    }
     match (head, store::base_of(db, text)?) {
         (Some(head), Some(base)) if head == base => match holds_only(&agent.repo, &head) {
             Err(refused) if refused.0 == "changes_git_failed" => {
@@ -477,6 +474,77 @@ fn check(
         },
         _ => Ok(Some("cleanup_commits_unlanded")),
     }
+}
+
+/// Tells whether a worktree's change sets still hold work the owner can get back: one with
+/// an owner action in flight, or one discarded and still restorable. Inputs: the store,
+/// the worktree path and the time now. Output: the answer.
+fn held_sets(db: &Connection, worktree: &str, now: u64) -> Result<bool, EngineError> {
+    let held: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM landing_change_sets WHERE worktree=?1 AND (intent IS NOT NULL
+             OR (state='discarded' AND pruned=0 AND restorable_until_ms>?2))",
+            params![worktree, i64::try_from(now).map_err(unavailable)?],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    Ok(held > 0)
+}
+
+/// Says whether a linked lead's worktree can go without losing its native teammates' work
+/// (OP9B-S1), whatever ignore rule hides its teammates' folder from the lead's own git:
+/// each teammate worktree has no open or restorable change set, stands at the base its
+/// last landed set left or, never recorded, at a commit in the lead's head, and holds
+/// nothing uncommitted. The folder is read as data and each teammate worktree with the
+/// engine's own git. Inputs: the store, the owner checkout root, the lead's worktree, its
+/// head and the time now. Output: None when nothing would be lost, else the cleanup code.
+fn linked_teammates_landed(
+    db: &Connection,
+    repository: &Path,
+    worktree: &Path,
+    lead_head: &str,
+    now: u64,
+) -> Result<Option<&'static str>, EngineError> {
+    let Some(branch) = agent_branch(db, worktree, Layout::Linked)? else {
+        return Ok(Some("cleanup_worktree_invalid"));
+    };
+    let Ok(teammates) = clone::linked_teammates(repository, worktree, &branch) else {
+        return Ok(Some("cleanup_worktree_unreadable"));
+    };
+    for teammate in &teammates {
+        let Some(text) = teammate.folder.to_str() else {
+            return Ok(Some("cleanup_worktree_invalid"));
+        };
+        if store::open_for(db, text)?.is_some() {
+            return Ok(Some("cleanup_changes_open"));
+        }
+        if held_sets(db, text, now)? {
+            return Ok(Some("cleanup_changes_restorable"));
+        }
+        let Ok(own_git) = linked_git_dir(&teammate.folder) else {
+            return Ok(Some("cleanup_worktree_unreadable"));
+        };
+        let (agent, head) =
+            match open_agent(db, AgentKind::Sub, repository, &teammate.folder, &own_git)
+                .and_then(|agent| agent.head().map(|head| (agent, head)))
+            {
+                Ok(opened) => opened,
+                Err(_) => return Ok(Some("cleanup_worktree_unreadable")),
+            };
+        let landed = match store::base_of(db, text)? {
+            Some(base) => base == head,
+            None => shared(repository)?.test(&["merge-base", "--is-ancestor", &head, lead_head])?,
+        };
+        if !landed {
+            return Ok(Some("cleanup_commits_unlanded"));
+        }
+        match holds_only(&agent.repo, &head) {
+            Ok(true) => {}
+            Ok(false) => return Ok(Some("cleanup_worktree_dirty")),
+            Err(_) => return Ok(Some("cleanup_worktree_unreadable")),
+        }
+    }
+    Ok(None)
 }
 
 /// Removes an agent worktree with git, never forcing it, while holding the repository so

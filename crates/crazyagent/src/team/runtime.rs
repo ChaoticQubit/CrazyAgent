@@ -465,6 +465,8 @@ pub struct TeamRuntime {
     teammates_next: Option<Instant>,
     teammate_worktree_tries: BTreeMap<i64, BTreeMap<String, u8>>,
     teammates_rested: BTreeMap<i64, BTreeSet<i64>>,
+    teammate_turn_tries: BTreeMap<i64, BTreeMap<i64, u8>>,
+    teammates_unreadable_told: BTreeSet<i64>,
     teammate_conflicts_told: BTreeMap<i64, BTreeMap<String, (String, String)>>,
     receipts_next: BTreeMap<ProjectId, Instant>,
     live_starts: BTreeMap<ProjectId, Vec<Instant>>,
@@ -678,6 +680,8 @@ impl TeamRuntime {
             teammates_next: None,
             teammate_worktree_tries: BTreeMap::new(),
             teammates_rested: BTreeMap::new(),
+            teammate_turn_tries: BTreeMap::new(),
+            teammates_unreadable_told: BTreeSet::new(),
             teammate_conflicts_told: BTreeMap::new(),
             receipts_next: BTreeMap::new(),
             live_starts: BTreeMap::new(),
@@ -1050,6 +1054,10 @@ impl TeamRuntime {
             .retain(|lead, _| harnesses.iter().any(|(agent, _)| agent == lead));
         self.teammates_rested
             .retain(|lead, _| harnesses.iter().any(|(agent, _)| agent == lead));
+        self.teammate_turn_tries
+            .retain(|lead, _| harnesses.iter().any(|(agent, _)| agent == lead));
+        self.teammates_unreadable_told
+            .retain(|lead| harnesses.iter().any(|(agent, _)| agent == lead));
         self.teammate_conflicts_told
             .retain(|lead, _| harnesses.iter().any(|(agent, _)| agent == lead));
         for (agent, project) in harnesses {
@@ -5282,15 +5290,24 @@ impl TeamRuntime {
     /// Commits each resting native teammate's turn of a linked lead in its own linked
     /// worktree on its own branch `<task branch>--<name>` (OP-9b), once each time it rests,
     /// as a linked agent's turn end does, so its work waits as its own change set; a
-    /// teammate that works again is committed at its next rest. Takes the project and the
-    /// lead. Returns Ok, or a SQLite failure; a turn the engine could not commit stays in
-    /// the teammate's worktree.
+    /// teammate that works again is committed at its next rest. A turn the engine could not
+    /// commit is tried again at the next pass, up to `TEAMMATE_TURN_TRIES` times for each
+    /// rest, then the lead is told once that it stays in the teammate's worktree (OP9B-L1);
+    /// a teammates' folder the engine cannot read is told to the lead once until it reads
+    /// again (OP9B-L2). Takes the project and the lead. Returns Ok, or a SQLite or
+    /// coordination failure.
     fn record_teammate_turns(&mut self, project: &ProjectId, lead: i64) -> Result<(), EngineError> {
         let Some((repository, worktree, git_dir)) = self.linked_lead(project, lead)? else {
             self.teammates_rested.remove(&lead);
+            self.teammate_turn_tries.remove(&lead);
+            self.teammates_unreadable_told.remove(&lead);
             return Ok(());
         };
         let rows = teammates::resting(&self.connection, project, lead)?;
+        self.teammate_turn_tries
+            .entry(lead)
+            .or_default()
+            .retain(|teammate, _| rows.contains(&(*teammate, true)));
         let rested = self.teammates_rested.entry(lead).or_default();
         rested.retain(|teammate| rows.contains(&(*teammate, true)));
         let due: Vec<i64> = rows
@@ -5311,6 +5328,27 @@ impl TeamRuntime {
                 return Ok(());
             }
         };
+        match crate::landing::teammate_worktrees(&db, &worktree, &git_dir) {
+            Ok(_) => {
+                self.teammates_unreadable_told.remove(&lead);
+            }
+            Err(problem) => {
+                let code = crate::protocol::plain_code(&problem.0);
+                eprintln!("teammate_turn_failed cause={code}");
+                if !self.teammates_unreadable_told.contains(&lead) {
+                    self.note_lead(
+                        project,
+                        lead,
+                        format!(
+                            "CrazyAgent cannot save or land your teammates' work: your teammates' folder {} holds something other than the worktrees CrazyAgent made for them ({code}). Remove what you or a teammate added there; CrazyAgent saves their work again at the next pass after that.",
+                            crate::agent_git::TEAMMATES_FOLDER
+                        ),
+                    )?;
+                    self.teammates_unreadable_told.insert(lead);
+                }
+                return Ok(());
+            }
+        }
         for teammate in due {
             let Some(name) = teammates::name(&self.connection, teammate) else {
                 continue;
@@ -5336,11 +5374,26 @@ impl TeamRuntime {
                 turn: format!("rest-{}", now_ms()),
                 prompt_line: format!("Work of teammate {name}"),
             };
+            let tries = self.teammate_turn_tries.entry(lead).or_default();
             if let Err(problem) = crate::landing_turns::record(&db, &workspace, &ended) {
-                eprintln!(
-                    "teammate_turn_failed cause={}",
-                    crate::landing::refusal_code(&problem)
-                );
+                let code = crate::landing::refusal_code(&problem).to_owned();
+                eprintln!("teammate_turn_failed cause={code}");
+                let tried = tries.entry(teammate).or_insert(0);
+                *tried += 1;
+                if *tried < TEAMMATE_TURN_TRIES {
+                    continue;
+                }
+                tries.remove(&teammate);
+                self.note_lead(
+                    project,
+                    lead,
+                    format!(
+                        "CrazyAgent could not save teammate {name}'s work on its own branch ({code}), {TEAMMATE_TURN_TRIES} times. It stays uncommitted in its worktree {}/{name}; CrazyAgent saves it again after {name} works and rests again.",
+                        crate::agent_git::TEAMMATES_FOLDER
+                    ),
+                )?;
+            } else {
+                tries.remove(&teammate);
             }
             self.teammates_rested
                 .entry(lead)
@@ -5354,8 +5407,10 @@ impl TeamRuntime {
     /// branch (OP-9b, leader 17:32 answer a) as one squash commit with the owner's identity,
     /// as an owner's Accept onto that branch does, only while the lead is idle and the
     /// owner lets a lead's workers land on it, then records the lead's change set again so
-    /// the landed work waits for the owner there. A conflicting set stays on the teammate's
-    /// branch and the lead is told its files once for each teammate head and lead tip.
+    /// the landed work waits for the owner there and tells the lead whose work landed, so a
+    /// lead that could not finish while it waited finishes then (OP9B-M1). A conflicting set
+    /// stays on the teammate's branch and the lead is told its files once for each teammate
+    /// head and lead tip.
     /// Takes the project and the lead. Returns Ok, or a SQLite or coordination failure.
     fn land_teammates(&mut self, project: &ProjectId, lead: i64) -> Result<(), EngineError> {
         let Some((repository, worktree, git_dir)) = self.linked_lead(project, lead)? else {
@@ -5405,7 +5460,7 @@ impl TeamRuntime {
                 return Ok(());
             }
         };
-        let mut landed = false;
+        let mut landed = Vec::new();
         for teammate in resting {
             let id = teammate.to_string();
             let Some(set) = sets.iter().find(|set| {
@@ -5432,7 +5487,10 @@ impl TeamRuntime {
             match outcome {
                 Ok(crate::landing::AcceptOutcome::Landed { .. }) => {
                     told.remove(set.id.as_str());
-                    landed = true;
+                    landed.push(
+                        teammates::name(&self.connection, teammate)
+                            .unwrap_or_else(|| format!("teammate {teammate}")),
+                    );
                 }
                 Ok(crate::landing::AcceptOutcome::Conflict { files }) => {
                     if told.len() >= TEAMMATE_WORKTREE_NAMES_MAX {
@@ -5457,7 +5515,7 @@ impl TeamRuntime {
                 ),
             }
         }
-        if landed {
+        if !landed.is_empty() {
             self.land_turn(
                 lead,
                 project,
@@ -5465,6 +5523,15 @@ impl TeamRuntime {
                 "Land the teammates' work".to_owned(),
                 "its teammates' work",
                 TurnEnd::Success,
+            )?;
+            self.note_lead(
+                project,
+                lead,
+                format!(
+                    "CrazyAgent landed the work of your teammates {} on your task branch {}. If your work is done, finish it again.",
+                    bound_text(&landed.join(", "), TEAMMATE_CONFLICT_FILES_SHOWN_MAX),
+                    bound_text(&branch, crate::landing::BRANCH_BYTES_MAX)
+                ),
             )?;
         }
         Ok(())
@@ -8167,6 +8234,9 @@ const TEAMMATE_ROWS_KEPT: i64 = 32;
 /// The most times the engine runs git to make one native teammate's worktree (OP-9), so a
 /// worktree git refuses never costs a git run on every pass.
 const TEAMMATE_WORKTREE_TRIES: u8 = 3;
+/// The most passes the engine tries to commit one resting native teammate's turn (OP9B-L1)
+/// before it tells the lead and waits for that teammate's next rest.
+const TEAMMATE_TURN_TRIES: u8 = 3;
 const TEAMMATE_CONFLICT_FILES_SHOWN_MAX: usize = 400;
 /// The most teammate names of one lead whose worktree tries the engine counts.
 const TEAMMATE_WORKTREE_NAMES_MAX: usize = 64;

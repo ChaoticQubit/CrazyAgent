@@ -247,7 +247,8 @@ pub(super) fn close_orphaned(
 }
 
 /// The lead whose branch a change set's agent lands on while the owner's Lands setting is
-/// Lead (DEC-107), with the place the lead works, read from the store only. Inputs: the
+/// Lead (DEC-107), with the place the lead works, read from the store only; a native
+/// teammate whose turns the engine commits is its lead's worker too (OP9B-L3). Inputs: the
 /// store, the project, the change set's agent and its repository. Output: the lead and its
 /// place, None for an agent that is not a lead's worker or while Lands is Owner, or
 /// `changes_workspace_invalid` for a lead's worker whose lead has no worktree in that
@@ -266,7 +267,7 @@ pub(super) fn lead_of(
     };
     let lead: Option<i64> = db
         .query_row(
-            "SELECT parent FROM team_agents WHERE id=?1 AND project=?2 AND role='sub'",
+            "SELECT parent FROM team_agents WHERE id=?1 AND project=?2 AND role IN ('sub','teammate')",
             params![id, project.as_str()],
             |row| row.get(0),
         )
