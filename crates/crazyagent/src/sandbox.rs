@@ -1235,7 +1235,9 @@ impl ProjectSandbox {
     /// OP-9b), none for any other profile: in the lead's own clone, those
     /// [`teammates_clone_denies`] names; in a linked worktree, anything but the teammates'
     /// folder, and the lead's worktree record and the object store, since the engine
-    /// commits the teammates' turns. Output: the rule text, empty when none applies.
+    /// commits the teammates' turns, nor the teammates' folder entry or a symlink at a
+    /// teammate's folder in it, where the engine's setup git adds a teammate worktree
+    /// (OP-9 r2). Output: the rule text, empty when none applies.
     fn teammates_denies(&self) -> String {
         if !self.teammates {
             return String::new();
@@ -1244,8 +1246,10 @@ impl ProjectSandbox {
             (Some(clone), _) => teammates_clone_denies(clone),
             (None, Some(checkout)) => {
                 let worktree = checkout.worktree.display();
+                let root = seatbelt_pattern(&checkout.worktree);
+                let teammates = any_case(crate::agent_git::TEAMMATES_FOLDER);
                 let text = format!(
-                    "(deny file-write*\n  (require-all\n    (subpath \"{worktree}\")\n    (require-not (subpath \"{worktree}/{}\"))))\n(deny file-write*\n  (subpath \"{}\")\n  (subpath \"{}\"))\n",
+                    "(deny file-write*\n  (require-all\n    (subpath \"{worktree}\")\n    (require-not (subpath \"{worktree}/{}\"))))\n(deny file-write*\n  (subpath \"{}\")\n  (subpath \"{}\")\n  (regex #\"^{root}/{teammates}$\"))\n(deny file-write-create\n  (require-all (regex #\"^{root}/{teammates}/[^/]+$\") (vnode-type SYMLINK)))\n",
                     crate::agent_git::TEAMMATES_FOLDER,
                     checkout.admin.display(),
                     checkout.objects.display()
