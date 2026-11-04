@@ -557,10 +557,11 @@ fn run(root: &Path, action: Action) -> Result<(Reply, bool), EngineError> {
 /// it finishes or undoes Accepts and worktree resets an engine stop interrupted, closes
 /// open change sets the owner landed or removed outside the app and deletes discarded refs
 /// past their restore window, each step run on its own so a failing one never skips the
-/// others. Input: the authority, held weakly so a server dropped
-/// without its stop path still releases it. Runs until the server aborts it or the
-/// authority is gone.
-pub(super) async fn upkeep(authority: std::sync::Weak<Authority>) {
+/// others. Inputs: the authority, held weakly so a server dropped without its stop path
+/// still releases it, and the server's stop, a sender dropped or sent. Runs until the stop
+/// or until the authority is gone; a pass already running ends first, since its blocking
+/// work cannot be cancelled and holds its own connection to the engine database.
+pub(super) async fn upkeep(authority: std::sync::Weak<Authority>, mut stop: oneshot::Receiver<()>) {
     loop {
         let Some(root) = authority.upgrade().map(|authority| engine_root(&authority)) else {
             return;
@@ -584,7 +585,10 @@ pub(super) async fn upkeep(authority: std::sync::Weak<Authority>) {
         for error in failures {
             eprintln!("landing_upkeep_failed cause={}", error.0);
         }
-        tokio::time::sleep(UPKEEP_EVERY).await;
+        tokio::select! {
+            _ = &mut stop => return,
+            () = tokio::time::sleep(UPKEEP_EVERY) => {}
+        }
     }
 }
 
@@ -751,6 +755,70 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
+    }
+
+    /// An engine stop waits for the landing upkeep its start began, so no connection of the
+    /// stopped engine is left on its database when the next engine opens it, even when the
+    /// stop comes while the upkeep still prunes thousands of discarded change sets.
+    #[cfg(unix)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_engine_stop_waits_for_its_landing_upkeep_to_leave_the_database() {
+        const DISCARDED: i64 = 5000;
+        let tmp = tempfile::Builder::new()
+            .prefix("ca-chg-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        let root = tmp.path();
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(root.join("global.toml"), "version = 1\ntimeout_ms = 5000\n").unwrap();
+        std::fs::set_permissions(
+            root.join("global.toml"),
+            std::fs::Permissions::from_mode(0o600),
+        )
+        .unwrap();
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        let mut service = started(root, &stopped).await;
+        let gone = root.join("gone");
+        let db = landing::open(root).unwrap();
+        db.execute(
+            "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?1) \
+             INSERT INTO landing_change_sets(id, project, agent_kind, agent_id, label, \
+             repository, worktree, git_dir, base, head, state, last_outcome, turn, prompt_line, \
+             files, added, removed, conflicts, created_ms, updated_ms, restorable_until_ms) \
+             SELECT printf('%032x', i), 'project-1', 'sub', 'agent-' || i, 'Agent', ?2, \
+             ?2 || '/agent-' || i, ?2 || '/.git/worktrees/agent-' || i, ?3, ?3, 'discarded', \
+             'succeeded', 'turn-1', 'Add a file', 1, 1, 0, '[]', 1, 1, 1 FROM n",
+            rusqlite::params![DISCARDED, gone.to_str().unwrap(), "a".repeat(40)],
+        )
+        .unwrap();
+        drop(db);
+        tokio::time::timeout(Duration::from_secs(10), service.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut service = started(root, &stopped).await;
+        tokio::time::timeout(Duration::from_secs(60), service.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+        let probe = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+        probe.busy_timeout(Duration::ZERO).unwrap();
+        let alone = probe.execute_batch("PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE; COMMIT;");
+        assert!(
+            alone.is_ok(),
+            "a connection of the stopped engine was left on its database: {alone:?}"
+        );
+        let pruned: i64 = probe
+            .query_row(
+                "SELECT count(*) FROM landing_change_sets WHERE pruned=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            pruned, DISCARDED,
+            "the pass the stop waited for ran to its end"
+        );
     }
 
     /// The owner socket lists the local branches a change set can be accepted onto with the

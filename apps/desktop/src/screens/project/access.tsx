@@ -31,7 +31,7 @@ export function accessLabel(access: AgentAccess): string {
 export const NETWORK_CHOICES: { network: AgentNetwork; label: string; help: string }[] = [
   { network: "open", label: "Open", help: "Agents with tools on reach the whole network, and so does the plugin check." },
   { network: "https", label: "Port 443 only", help: "Agents and the plugin check reach port 443 only; agents also still reach the model." },
-  { network: "none", label: "None", help: "Agents reach only the model's port, on any host; for subscription accounts that is all of port 443, same as Port 443 only; the plugin check reaches nothing." },
+  { network: "none", label: "None", help: "None limits agents to their model's port: port 443 to any host for a hosted model, or only the local model's port. It does not yet limit them to the model host. The plugin check reaches nothing." },
 ];
 
 /** Why the network choice has no effect under Full access. */

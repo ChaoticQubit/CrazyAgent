@@ -358,6 +358,21 @@ impl NativeBridge {
             .await
     }
 
+    /// Turns a project's "Re-ask a sub-agent's empty reply" setting on or off: on, a
+    /// sub-agent whose task ends with no reply text is asked once more for its reply.
+    /// Takes the project id, the switch and the client generation. Returns the actual
+    /// commit receipt.
+    pub async fn team_reask_empty_reply(
+        &mut self,
+        id: &str,
+        on: bool,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(TeamAction::ReaskEmptyReply { project_id, on }, generation)
+            .await
+    }
+
     /// Sets the most files one new top-level folder, a folder the owner's branch does not
     /// have, may gain in a project's change set before the engine refuses the set (DEC-107).
     /// Takes the project id, the limit and the client generation. Returns the actual commit

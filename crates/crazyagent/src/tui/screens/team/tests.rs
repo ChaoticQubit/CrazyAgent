@@ -870,6 +870,7 @@ fn finished_team() -> crate::team::TeamStatus {
         land_on: None,
         background_at_end: crate::team::BackgroundAtEnd::Wait,
         ask_before_merge: false,
+        reask_empty_reply: true,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
         coordination: None,
         live_switch: None,
@@ -1238,6 +1239,7 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
         land_on: None,
         background_at_end: crate::team::BackgroundAtEnd::Wait,
         ask_before_merge: false,
+        reask_empty_reply: true,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
         coordination: None,
         live_switch: None,
@@ -1654,6 +1656,7 @@ fn switched(
         land_on: None,
         background_at_end: crate::team::BackgroundAtEnd::Wait,
         ask_before_merge: false,
+        reask_empty_reply: true,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
         coordination: None,
         live_switch,
@@ -2729,6 +2732,12 @@ async fn q_lists_the_engines_questions_an_answer_reaches_the_asker_and_enter_ope
     let rows = render(&mut shell).join("\n");
     assert!(rows.contains("May I delete the old fixtures?"), "{rows}");
     assert!(rows.contains("I keep them until you say."), "{rows}");
+    assert_eq!(read.questions[0].for_label, "Me");
+    assert!(
+        rows.lines()
+            .any(|row| row.contains("For: Me") && row.contains("Urgent, the agent is paused")),
+        "the question's head says whom it is for (OP-50): {rows}"
+    );
 
     shell.key(Key::Enter);
     for typed in "Keep them.".chars() {

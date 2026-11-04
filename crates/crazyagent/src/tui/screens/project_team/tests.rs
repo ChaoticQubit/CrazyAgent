@@ -157,6 +157,7 @@ fn team() -> TeamStatus {
         land_on: None,
         background_at_end: crate::team::BackgroundAtEnd::Wait,
         ask_before_merge: false,
+        reask_empty_reply: true,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
         coordination: None,
         live_switch: None,
@@ -242,6 +243,17 @@ fn frame(view: &TeamView, width: u16, height: u16) -> Vec<String> {
     let lines: Vec<String> = text.lines().map(str::to_owned).collect();
     assert_eq!(lines.len(), usize::from(height));
     lines
+}
+
+/// The words a frame shows in reading order, its rows joined with single spaces and its
+/// borders left out, so a text wrapped over several rows reads as one line. Takes the
+/// frame's rows. Returns the words.
+fn words(rows: &[String]) -> String {
+    rows.iter()
+        .flat_map(|row| row.split_whitespace())
+        .filter(|word| word.chars().any(char::is_alphanumeric))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn find<'a>(rows: &'a [String], needle: &str) -> &'a str {
@@ -1951,6 +1963,55 @@ fn g_turns_ask_before_merge_on_and_off() {
     );
 }
 
+/// R flips Re-ask empty reply: On is shown for a team that has made no choice, R sends Off
+/// and then On, each with its plain notice (DEC-111).
+#[test]
+fn capital_r_turns_reask_empty_reply_off_and_on() {
+    let mut view = TeamView::new(project());
+    assert_eq!(view.key(press(KeyCode::Char('R'))), TeamReply::Handled);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("The team is still loading."))
+    );
+    let mut view = loaded();
+    assert!(view.help().contains(&("R", "Re-ask empty reply")));
+    assert!(shows(&view, "Re-ask empty reply  On"));
+    let reply = view.key(press(KeyCode::Char('R')));
+    assert_eq!(
+        reply,
+        TeamReply::Change(TeamAction::ReaskEmptyReply {
+            project_id: project(),
+            on: false,
+        })
+    );
+    applied(&mut view, reply);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "A sub-agent's task with no reply text is now reported without asking again."
+        ))
+    );
+    let mut off = team();
+    off.reask_empty_reply = false;
+    reread(&mut view, off, NOW + 10);
+    assert!(shows(&view, "Re-ask empty reply  Off"));
+    let reply = view.key(press(KeyCode::Char('R')));
+    assert_eq!(
+        reply,
+        TeamReply::Change(TeamAction::ReaskEmptyReply {
+            project_id: project(),
+            on: true,
+        })
+    );
+    applied(&mut view, reply);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "A sub-agent that ends a task with no reply text is now asked once more for its reply."
+        ))
+    );
+}
+
 async fn coord_send(
     view: &mut TeamView,
     controller: &mut OwnerController,
@@ -2603,11 +2664,13 @@ fn f_moves_the_new_folder_limit_through_every_choice() {
 /// B steps Background commands at task end from Wait to a 2 min grace time, to Stop and
 /// back to Wait, and G steps the grace time through every choice, starting a grace time
 /// from another choice (DEC-111 Q13): each key sends its change, the engine's answer says
-/// the new choice and the team rows show what the engine stored. A grace time the engine
-/// refuses has its own plain text.
+/// the new choice and which agents it acts on, read whole in an 80 column terminal, and
+/// the team rows show what the engine stored. A grace time the engine refuses has its own
+/// plain text.
 #[test]
 fn shift_b_steps_background_commands_and_shift_g_steps_the_grace_time() {
     use crate::team::BackgroundAtEnd;
+    const SCOPE: &str = "Wait and a grace time act on Claude Code panes. Other agents run per turn have their background commands stopped when the turn ends, and other kept agents, such as a kept Codex pane, keep theirs whatever the choice.";
     let mut view = TeamView::new(project());
     for key in ['B', 'G'] {
         assert_eq!(view.key(press(KeyCode::Char(key))), TeamReply::Handled);
@@ -2623,20 +2686,24 @@ fn shift_b_steps_background_commands_and_shift_g_steps_the_grace_time() {
     let grace = |secs: u32, span: &str| {
         (
             BackgroundAtEnd::Grace { secs },
-            format!("A task's background commands now get {span} after its turn ends, then stop."),
+            format!(
+                "A task's background commands now get {span} after its turn ends, then stop. {SCOPE}"
+            ),
             format!("Background commands  Stop after {span}"),
         )
     };
     let stop = (
         BackgroundAtEnd::Stop,
-        "A task's background commands now stop when its turn ends, and its agent is told so."
-            .to_owned(),
+        format!(
+            "A task's background commands now stop when its turn ends, and its agent is told so. {SCOPE}"
+        ),
         "Background commands  Stop at turn end".to_owned(),
     );
     let wait = (
         BackgroundAtEnd::Wait,
-        "A task now waits for the commands its agent started in the background, up to its task limit."
-            .to_owned(),
+        format!(
+            "A task now waits for the commands its agent started in the background, up to its task limit. {SCOPE}"
+        ),
         "Background commands  Wait".to_owned(),
     );
     let mut stored = team();
@@ -2660,6 +2727,8 @@ fn shift_b_steps_background_commands_and_shift_g_steps_the_grace_time() {
         );
         applied(&mut view, reply);
         assert_eq!(view.notice, Some(Notice::plain(done)));
+        let narrow = frame(&view, 80, 30);
+        assert!(words(&narrow).contains(SCOPE), "{}", narrow.join("\n"));
         stored.background_at_end = choice;
         at += 60_000;
         reread(&mut view, stored.clone(), at);
@@ -3068,4 +3137,104 @@ fn a_settings_change_waits_for_the_team_read_sent_after_the_last_save() {
         }),
         "the next change keeps the saved one"
     );
+}
+/// Stop teammate (S3, feat/harness-comms b07fcf11): p on a harness with no running teammate
+/// says so; otherwise p asks which one, the panel numbers the running teammates p then 1 up,
+/// oldest first and past finished and stopped ones, a number past them keeps asking, Esc
+/// keeps them, and a number sends one StopTeammate for that teammate's pane.
+#[test]
+fn p_then_a_number_stops_that_running_teammate_of_the_selected_harness() {
+    let mut view = loaded();
+    view.key(press(KeyCode::Down));
+    let lead = view.agents()[1].id;
+    assert_eq!(lead, 2);
+    assert_eq!(view.key(press(KeyCode::Char('p'))), TeamReply::Handled);
+    assert_eq!(view.ask, None);
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain("That harness has no running teammates."))
+    );
+    let teammate = |pane: &str, ended: bool, stopped: bool, minutes: i64| crate::team::Teammate {
+        pane: pane.into(),
+        ended,
+        stopped,
+        seen_ms: NOW - minutes * MINUTE,
+    };
+    let mut status = team();
+    status.agents[1].teammates = vec![
+        teammate("%7", false, false, 5),
+        teammate("%8", true, false, 4),
+        teammate("%9", false, true, 3),
+        teammate("%11", false, false, 2),
+    ];
+    reread(&mut view, status, NOW + MINUTE);
+    let rows = frame(&view, 120, 60);
+    assert!(find(&rows, "%7").contains("running, p then 1"));
+    assert!(find(&rows, "%8").contains("finished"));
+    assert!(find(&rows, "%9").contains("stopped"));
+    assert!(find(&rows, "%11").contains("running, p then 2"));
+    assert_eq!(view.key(press(KeyCode::Char('p'))), TeamReply::Handled);
+    assert_eq!(view.ask, Some(Ask::Teammate(lead)));
+    assert_eq!(view.help(), vec![("1-9", "Stop teammate"), ("Esc", "Keep")]);
+    assert!(find(&frame(&view, 120, 60), "Stop which teammate of").contains("1-2 Teammate"));
+    assert_eq!(view.key(press(KeyCode::Char('3'))), TeamReply::Handled);
+    assert_eq!(
+        view.ask,
+        Some(Ask::Teammate(lead)),
+        "a number past the running teammates keeps asking"
+    );
+    assert_eq!(view.key(press(KeyCode::Esc)), TeamReply::Handled);
+    assert_eq!(view.ask, None);
+    view.key(press(KeyCode::Char('p')));
+    let TeamReply::Change(action) = view.key(press(KeyCode::Char('2'))) else {
+        panic!("p then 2 sends a change");
+    };
+    assert_eq!(
+        action,
+        TeamAction::StopTeammate {
+            project_id: project(),
+            agent: lead,
+            pane: "%11".into(),
+        }
+    );
+    assert_eq!(view.ask, None);
+    view.apply(
+        &SetupQuery::TeamChange {
+            action,
+            generation: 9,
+        },
+        Ok(SetupView::Changed(OwnerResult::Applied)),
+    );
+    assert_eq!(
+        view.notice,
+        Some(Notice::plain(
+            "Stopping that teammate. Its harness is told."
+        ))
+    );
+}
+
+/// The team view's help (S3, feat/harness-comms b07fcf11) names every key once, each with
+/// its own label, Stop teammate on p beside Stop agent on z.
+#[test]
+fn the_team_help_lists_every_key_once_with_stop_teammate_on_p() {
+    let help = loaded().help();
+    for (at, (key, label)) in help.iter().enumerate() {
+        assert!(
+            help[..at].iter().all(|(seen, _)| seen != key),
+            "{key} is listed twice: {help:?}"
+        );
+        assert!(
+            help[..at].iter().all(|(_, seen)| seen != label),
+            "{label} is listed twice: {help:?}"
+        );
+    }
+    for pair in [
+        ("p", "Stop teammate"),
+        ("z", "Stop agent"),
+        ("m", "Master's branch"),
+        ("g", "Ask before merge"),
+        ("T", "Token budget"),
+    ] {
+        assert!(help.contains(&pair), "{pair:?} is missing: {help:?}");
+    }
 }

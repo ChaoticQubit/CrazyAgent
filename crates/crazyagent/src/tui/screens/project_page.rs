@@ -1341,6 +1341,7 @@ impl Screen for ProjectPage {
             || self.screen.edit.is_some()
             || self.screen.adding.is_some()
             || self.screen.folders.is_some()
+            || self.screen.hidden.is_some()
             || self.screen.access.is_some()
             || self.screen.general.is_some()
             || (self.screen.tab == Tab::Conversation && self.screen.typing)
@@ -1634,6 +1635,7 @@ impl Screen for ProjectPage {
         self.screen.edit.is_some()
             || self.screen.general.is_some()
             || self.screen.folders.is_some()
+            || self.screen.hidden.is_some()
             || self.screen.access.is_some()
             || !self.screen.input.value().trim().is_empty()
     }
@@ -1645,6 +1647,8 @@ impl Screen for ProjectPage {
             "Your project changes will be lost."
         } else if self.screen.folders.is_some() {
             "Your read-only folders will not be saved."
+        } else if self.screen.hidden.is_some() {
+            "Your hidden folders will not be saved."
         } else if self.screen.access.is_some() {
             "Your agent access changes will not be saved."
         } else {

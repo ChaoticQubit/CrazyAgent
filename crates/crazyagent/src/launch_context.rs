@@ -75,11 +75,12 @@ const SKILL_TOOL_USE: &str = "Use one with the Skill tool, where it is named cra
 const SKILL_FILE_USE: &str = "To use one, read its SKILL.md at the path shown and follow it.";
 const FOLDER_BYTES_MAX: usize = 1024;
 const HEADER_TITLE: &str = "# Project context from CrazyAgent\n\n";
-const STATE: &str = "crazyagent";
+pub(crate) const STATE: &str = "crazyagent";
 const CONTEXT_MODE_SERVER: &str = "context-mode";
 const CONTEXT_MODE_DECLARED: &str = "plugin_context-mode_context-mode";
 const TEAMMATE_COMMAND: &str = "teammate";
 const TEAMMATE_INSTRUCTIONS: &str = "teammate.md";
+const MATES_HOME: &str = "mates-home";
 /// The most switched-off tools one launch passes to its harness, across every server.
 pub const DENIED_TOOLS_MAX: usize = 256;
 #[cfg(unix)]
@@ -310,6 +311,13 @@ fn teammate_section(worktree: &Path) -> Result<String, LaunchError> {
 /// Input: the agent home. Output: the path.
 pub(crate) fn teammate_command(home: &Path) -> PathBuf {
     home.join(STATE).join(TEAMMATE_COMMAND)
+}
+
+/// The config home a native lead's teammates run with as their `CLAUDE_CONFIG_DIR` and
+/// `HOME`, beside the lead's own, so that no teammate writes a file the lead's Claude Code
+/// or shell reads as code (TPH-2). Input: the lead's agent home. Output: the path.
+pub(crate) fn mates_home(home: &Path) -> PathBuf {
+    home.with_file_name(MATES_HOME)
 }
 
 /// Names what an agent home of the project receives the owner's instructions from: the

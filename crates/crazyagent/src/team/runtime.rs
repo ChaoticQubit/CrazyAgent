@@ -99,6 +99,9 @@ enum TurnBound {
     Session(Duration),
 }
 const EMPTY_REPLY_NOTE: &str = "The master replied with no text, so no work was handed out. Send the message again, or hand a task to a sub-agent yourself.";
+/// The one turn a sub-agent gets when its task turn ended with no reply text and the
+/// project's re-ask setting is on (DEC-111): the master asks it once for its reply.
+const REASK_EMPTY: &str = "Your master got no reply text from your last turn. Reply now with a short summary of what you did for your task.";
 
 /// Bounds every team agent obeys. The task, session and sub-agent idle limits are the
 /// owner's team settings, read per project when a turn or an agent starts or an idle agent
@@ -477,6 +480,8 @@ struct Worker {
     toolchains: Option<Vec<Toolchain>>,
     checked: Option<AgentPolicy>,
     narrowed: Option<Narrowed>,
+    reask: Option<i64>,
+    reasked: Option<i64>,
 }
 
 impl Worker {
@@ -520,6 +525,7 @@ pub struct TeamRuntime {
     instruction_restarts: BTreeMap<i64, ProjectId>,
     master_restarts: BTreeSet<ProjectId>,
     restarted_for: BTreeMap<i64, u64>,
+    waited_for: BTreeMap<i64, u64>,
     #[cfg(unix)]
     callers: BTreeMap<i64, Option<super::caller::Callers>>,
     #[cfg(unix)]
@@ -597,6 +603,56 @@ fn private_directory(path: &Path) -> Result<(), EngineError> {
         return Err(EngineError("team_state_not_private".into()));
     }
     Ok(())
+}
+
+/// Makes the home a native lead's teammates run with (TPH-2 C): a private folder beside the
+/// lead's home, with its own cargo home and Claude Code's first-run questions answered for
+/// the project, whose `teams` and `tasks` are links to the lead's folders of those names,
+/// made here when missing, since Claude Code keeps the team's mailboxes and task lists there
+/// for every member. A changed entry is refused, not replaced. Inputs: the lead's home, the
+/// owner's tool homes and the lead's working folder. Output: the folder.
+#[cfg(unix)]
+fn prepare_mates_home(
+    home: &Path,
+    homes: &ToolHomes,
+    project: &Path,
+) -> Result<PathBuf, EngineError> {
+    let mates = crate::launch_context::mates_home(home);
+    private_directory(&mates)?;
+    for folder in crate::sandbox::CLAUDE_TEAM_SHARED {
+        let shared = home.join(folder);
+        match std::fs::DirBuilder::new().mode(0o700).create(&shared) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(error(e)),
+        }
+        let link = mates.join(folder);
+        match std::os::unix::fs::symlink(&shared, &link) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(error(e)),
+        }
+        if !std::fs::symlink_metadata(&shared).is_ok_and(|metadata| metadata.is_dir())
+            || std::fs::read_link(&link).ok().as_deref() != Some(shared.as_path())
+        {
+            return Err(EngineError("team_shared_folder_changed".into()));
+        }
+    }
+    toolchains::prepare_cargo_home(&mates, homes).map_err(error)?;
+    crate::harnesses::interactive::prepare_claude_home(&mates, project)
+        .map_err(|e| EngineError(e.0))?;
+    Ok(mates)
+}
+
+/// Refuses a native lead's teammates' home where no link can be made. Takes the lead's
+/// home, the tool homes and the working folder, all unused. Returns `team_state_unavailable`.
+#[cfg(not(unix))]
+fn prepare_mates_home(
+    _home: &Path,
+    _homes: &ToolHomes,
+    _project: &Path,
+) -> Result<PathBuf, EngineError> {
+    Err(EngineError("team_state_unavailable".into()))
 }
 
 impl TeamRuntime {
@@ -697,6 +753,7 @@ impl TeamRuntime {
             master_restarts: BTreeSet::new(),
             restarted_for: BTreeMap::new(),
             held_restarts: Vec::new(),
+            waited_for: BTreeMap::new(),
         })
     }
 
@@ -1491,9 +1548,11 @@ impl TeamRuntime {
         Ok(true)
     }
 
-    /// Marks stopped the native teammates of a lead that just ended, since they ran in the
-    /// lead's own terminal server and ended with it. Sub-agents a worker runs go on. Takes
-    /// the lead. Returns any SQLite failure.
+    /// Marks stopped the native teammates of a lead that just ended. They run on their own
+    /// tmux server, which ends itself once the engine clears the lead's short temp folder,
+    /// and may outlive the lead until then; the lead's caller socket node stays there, so a
+    /// teammate's hook meanwhile is refused and never takes the lead's place (rv-secreview
+    /// RH2R2-1). Sub-agents a worker runs go on. Takes the lead. Returns any SQLite failure.
     fn lead_ended(&self, lead: i64) -> Result<(), EngineError> {
         let children: Vec<i64> = {
             let mut statement = self
@@ -2024,6 +2083,7 @@ impl TeamRuntime {
         self.hand_leads(project, access)?;
         self.wake_for_messages(&stored, access, &asleep)?;
         self.instruction_edits(&stored, access, &paused)?;
+        self.send_reasks(&stored, access, &paused)?;
         self.dispatch(&stored, access, &paused)?;
         self.keep_warm(&stored, access, &paused)?;
         self.reap_idle(&stored)
@@ -3308,11 +3368,17 @@ impl TeamRuntime {
                         .zip(digest)
                         .and_then(|(callers, digest)| callers.take(call, digest));
                     #[cfg(not(unix))]
-                    let pane: Option<String> = {
+                    let pane: Option<(String, u32)> = {
                         let _ = (call, digest);
                         None
                     };
-                    team_caller(connection, host, project, (id, &label), pane.as_deref())
+                    team_caller(
+                        connection,
+                        host,
+                        project,
+                        (id, &label),
+                        pane.as_ref().map(|(pane, pid)| (pane.as_str(), *pid)),
+                    )
                 },
                 &mut |connection, caller, call| {
                     super::master::answer_sub(connection, &answering, caller, call)
@@ -3376,9 +3442,10 @@ impl TeamRuntime {
         for id in leads {
             if let Some(callers) = self.callers.get_mut(&id).and_then(Option::as_mut) {
                 let lead = AgentId::team(id).ok();
-                callers.serve(&mut || listed_panes(host, lead.as_ref()), &mut |pane| {
-                    pane_whom(connection, host, project, id, pane)
-                });
+                callers.serve(
+                    &mut || listed_panes(host, lead.as_ref()),
+                    &mut |pane, pid| pane_whom(connection, host, project, id, (pane, pid)),
+                );
             }
         }
     }
@@ -3431,7 +3498,8 @@ impl TeamRuntime {
     /// and the owner is not typing, with the owner's prompts to sub-agents it has not heard,
     /// and under the Next task choice the owner's instruction edit first, once, cut to the
     /// room the input limit leaves beside the message; when not even the cut block fits, a
-    /// team note says the edit waits for a later message (DEC-111 QR1). Takes the project.
+    /// team note says the edit waits for a later message, once per edited text until it is
+    /// delivered (DEC-111 QR1). Takes the project.
     /// Returns any SQLite failure; a message that cannot be typed is failed with a team
     /// note, one that must wait stays pending.
     fn feed_live(&mut self, project: &ProjectId) -> Result<(), EngineError> {
@@ -3466,7 +3534,10 @@ impl TeamRuntime {
         let block = edit.as_ref().and_then(|edit| {
             edit.message_within(super::master::INPUT_TEXT_MAX.saturating_sub(typed.len()))
         });
-        let missed = edit.is_some() && block.is_none();
+        let missed = match (&edit, &block) {
+            (Some(edit), None) => Some(edit.text_hash()),
+            _ => None,
+        };
         let (edit, typed) = match block {
             Some(block) => (edit, format!("{block}{}", typed.trim_start())),
             None => (None, typed),
@@ -3498,8 +3569,14 @@ impl TeamRuntime {
         if let Some(edit) = &edit {
             let _ = crate::instruction_files::delivered(edit, &home);
         }
-        if missed {
-            self.note(project, INSTRUCTIONS_WAIT_FOR_ROOM)?;
+        match missed {
+            Some(hash) if self.waited_for.insert(id, hash) != Some(hash) => {
+                self.note(project, INSTRUCTIONS_WAIT_FOR_ROOM)?;
+            }
+            Some(_) => {}
+            None => {
+                self.waited_for.remove(&id);
+            }
         }
         if let Some(newest) = newest {
             super::direct::delivered(&self.connection, project, newest)?;
@@ -3556,6 +3633,111 @@ impl TeamRuntime {
             )?;
         }
         tx.commit().map_err(error)
+    }
+
+    /// Tells whether a sub-agent's task turn that just ended is asked once more for its
+    /// reply: it ended well with no reply text, the project's re-ask setting is on and the
+    /// task has not had its re-ask yet (DEC-111). Takes the agent, its task, the turn's text
+    /// and how it ended. Returns the answer, or any SQLite failure.
+    fn reasks(&self, id: i64, task: i64, text: &str, end: TurnEnd) -> Result<bool, EngineError> {
+        let worker = &self.workers[&id];
+        if worker.role != AgentRole::Sub
+            || end != TurnEnd::Success
+            || !text.trim().is_empty()
+            || worker.reasked == Some(task)
+        {
+            return Ok(false);
+        }
+        super::reask_empty_reply(&self.connection, &worker.project)
+    }
+
+    /// Sends each of the project's sub-agents whose task turn ended with no reply text its
+    /// one re-ask turn, with the grant and turn rules a task turn gets. A sub-agent that
+    /// cannot take it finishes the task with no reply text, as with the setting off; one on
+    /// a rate-limited connection waits for it, as a task does, and a kept native lead waits
+    /// while its app runs a turn of its own, as instruction edits do (RER-L1). A kept lead
+    /// whose teammates still work is not asked or held: its task finishes as with the
+    /// setting off and it turns again when their results arrive (RER2-L1). A message on its
+    /// way to the lead does not hold the re-ask: typing that message waits for the lead to
+    /// be idle. Takes the project setup, the live model access and the paused connections.
+    /// Returns any SQLite failure.
+    fn send_reasks(
+        &mut self,
+        stored: &StoredSetup,
+        access: &ModelAccess,
+        paused: &BTreeSet<CredentialRef>,
+    ) -> Result<(), EngineError> {
+        let project = &stored.project_id;
+        let due: Vec<(i64, i64)> = self
+            .workers
+            .iter()
+            .filter(|(_, worker)| {
+                &worker.project == project
+                    && !worker.stopping
+                    && worker.own_turn.is_none()
+                    && !paused.contains(&worker.connection)
+            })
+            .filter_map(|(id, worker)| worker.reask.map(|task| (*id, task)))
+            .collect();
+        for (agent, task) in due {
+            assert_eq!(self.workers[&agent].busy, Some(Busy::Task(task)));
+            if self.workers[&agent].kept_session && self.teammates_working(agent)? {
+                self.finish_unasked(project, agent, task)?;
+                continue;
+            }
+            let handed = self.workers[&agent].kept_session && self.workers[&agent].briefed;
+            let grant = if self.workers[&agent].managed && !handed {
+                match self.grant(access, agent, project) {
+                    Ok(Some(grant)) => Some(grant),
+                    Ok(None) => continue,
+                    Err(_) => {
+                        self.finish_unasked(project, agent, task)?;
+                        continue;
+                    }
+                }
+            } else {
+                None
+            };
+            let background = super::background_at_end(&self.connection, project)?;
+            let bound = turn_bound(
+                super::time_limits(&self.connection, project)?,
+                self.workers[&agent].ran(),
+            );
+            let rules = TurnRules {
+                limit: bound.map(|(limit, _)| limit),
+                background,
+            };
+            let worker = self.workers.get_mut(&agent).expect("worker exists");
+            if worker
+                .orders
+                .send(Order::Turn(REASK_EMPTY.to_owned(), grant, rules))
+                .is_err()
+            {
+                self.finish_unasked(project, agent, task)?;
+                continue;
+            }
+            worker.bound = bound.map(|(_, by)| by);
+            worker.reask = None;
+            worker.reasked = Some(task);
+        }
+        Ok(())
+    }
+
+    /// Finishes a task whose re-ask turn could not be sent, as a task turn with no reply
+    /// text finishes with the setting off: Done, its edits landed, the agent idle. Takes the
+    /// project, the agent and the task. Returns any SQLite failure.
+    fn finish_unasked(
+        &mut self,
+        project: &ProjectId,
+        agent: i64,
+        task: i64,
+    ) -> Result<(), EngineError> {
+        let worker = self.workers.get_mut(&agent).expect("worker exists");
+        worker.reask = None;
+        let busy = worker.busy.take();
+        self.finish_task(task, "", TurnEnd::Success, None)?;
+        self.land(agent, project, busy, TurnEnd::Success)?;
+        self.mark_agent(agent, AgentStatus::Idle, None)
     }
 
     fn mark_agent(
@@ -4176,6 +4358,7 @@ impl TeamRuntime {
             }
             worker.bound = bound.map(|(_, by)| by);
             worker.busy = Some(Busy::Task(task));
+            worker.reasked = None;
             worker.briefed |= worker.kept_session;
             if let Some(edit) = &edit {
                 let _ = crate::instruction_files::delivered(edit, &home);
@@ -4346,12 +4529,26 @@ impl TeamRuntime {
     /// wake turn has carried to it yet. Takes the lead. Returns the answer, or any SQLite
     /// failure.
     fn lead_waits(&self, id: i64) -> Result<bool, EngineError> {
+        if self.teammates_working(id)? {
+            return Ok(true);
+        }
+        self.connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM coord_messages WHERE to_kind='agent' AND to_agent=?1
+                           AND receipt='sent')",
+                [id],
+                |row| row.get(0),
+            )
+            .map_err(error)
+    }
+
+    /// Whether a teammate of a kept native lead is still starting or working. Takes the
+    /// lead. Returns the answer, or any SQLite failure.
+    fn teammates_working(&self, id: i64) -> Result<bool, EngineError> {
         self.connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM team_agents WHERE parent=?1 AND role='teammate'
-                                AND status IN ('starting','working'))
-                 OR EXISTS(SELECT 1 FROM coord_messages WHERE to_kind='agent' AND to_agent=?1
-                           AND receipt='sent')",
+                                AND status IN ('starting','working'))",
                 [id],
                 |row| row.get(0),
             )
@@ -4917,6 +5114,8 @@ impl TeamRuntime {
                 toolchains,
                 checked: None,
                 narrowed: None,
+                reask: None,
+                reasked: None,
             },
         );
         assert!(self.panes(&self.workers[&id].project) <= PANES_PER_PROJECT_MAX);
@@ -5546,8 +5745,10 @@ impl TeamRuntime {
                 Some(callers.as_path()),
                 "the lead's servers find the caller socket its sandbox reaches"
             );
+            let mates_home = prepare_mates_home(&home, &homes, &working_dir)
+                .map_err(|e| with_code("the teammates' home could not be made", Some(&e.0)))?;
             let (lead, mates) = sandbox
-                .native_team(&socket, &mates_socket, &callers, &tmux)
+                .native_team(&socket, &mates_socket, &callers, &tmux, &mates_home)
                 .map_err(sandboxed)?;
             sandbox = lead;
             teammates = Some(mates);
@@ -6021,6 +6222,15 @@ impl TeamRuntime {
                 self.connection
                     .execute("UPDATE team_agents SET turns=turns+1 WHERE id=?1", [id])
                     .map_err(error)?;
+                if let Some(Busy::Task(task)) = busy
+                    && self.reasks(id, task, &text, end)?
+                {
+                    let worker = self.workers.get_mut(&id).expect("worker exists");
+                    worker.busy = Some(Busy::Task(task));
+                    worker.reask = Some(task);
+                    self.mark_agent(id, AgentStatus::Working, Some(task))?;
+                    return Ok(false);
+                }
                 match busy {
                     Some(busy) if held && end != TurnEnd::Success => self.release(id, busy)?,
                     Some(Busy::Task(task)) => {
@@ -6159,6 +6369,7 @@ impl TeamRuntime {
             }
             Report::Ended { problem } => {
                 let mut worker = self.workers.remove(&id).expect("worker exists");
+                self.waited_for.remove(&id);
                 crate::coord::requeue_dead(&self.connection, id, now_ms())?;
                 if !worker.leave.load(Ordering::SeqCst) {
                     self.lead_ended(id)?;
@@ -6166,7 +6377,10 @@ impl TeamRuntime {
                 if worker.live {
                     super::master::pane_ended(&self.connection, &worker.project, id)?;
                 }
-                let _ = toolchains::remove_tmp(&self.agent_folder(id).join("home"));
+                let _ = toolchains::remove_tmp_keeping(
+                    &self.agent_folder(id).join("home"),
+                    super::caller::CALLER_SOCKET,
+                );
                 self.connection
                     .execute("DELETE FROM team_panes WHERE agent=?1", [id])
                     .map_err(error)?;
@@ -8433,17 +8647,18 @@ impl Drop for TeamService {
 
 /// Names who made a team call in a sub-agent's mailbox (DEC-104). A lead stored as leading
 /// native teammates shares that mailbox with them, so the pane the engine named the call
-/// by from the caller's process decides (DEC-111 Q18): the lead's own pane is the lead,
-/// the pane of one of its live teammate rows is that teammate, and anything else, no pane
-/// included, is nobody. Every other mailbox names its own agent. Inputs: the database, the
-/// terminal host, the project, the mailbox's agent with its label and the named pane.
-/// Output: the caller's id and label, or none, also when the lead's mode is unread.
+/// by from the caller's process decides (DEC-111 Q18): the lead's own pane, found under the
+/// lead's own pane process, is the lead, the pane of one of its live teammate rows is that
+/// teammate, and anything else, no pane included, is nobody (PLC). Every other mailbox
+/// names its own agent. Inputs: the database, the terminal host, the project, the
+/// mailbox's agent with its label and the named pane with the pane process it was found
+/// under. Output: the caller's id and label, or none, also when the lead's mode is unread.
 pub fn team_caller(
     connection: &Connection,
     host: Option<&dyn Host>,
     project: &ProjectId,
     (lead, label): (i64, &str),
-    pane: Option<&str>,
+    pane: Option<(&str, u32)>,
 ) -> Option<(i64, String)> {
     let mode: Option<String> = connection
         .query_row(
@@ -8473,17 +8688,18 @@ enum PaneMember {
 }
 
 /// Finds who runs in one pane of a native lead's team from the engine's own rows, never
-/// from a file the agents write (DEC-111 Q18): the lead when the pane is the one its pane
-/// record names and the host lists under the recorded process, or the newest live teammate
-/// row of the lead in that pane. Inputs: the database, the terminal host, the project, the
-/// lead and the pane. Output: the member, or none for a pane id that is not plain or a pane
-/// no row names.
+/// from a file the agents write (DEC-111 Q18): the lead when the caller was found under
+/// the process its pane record names and the host lists that pane under it (PLC), or the
+/// newest live teammate row of the lead in that pane. Inputs: the database, the terminal
+/// host, the project, the lead and the pane with the pane process the caller was found
+/// under. Output: the member, or none for a pane id that is not plain or a pane no row
+/// names.
 fn pane_member(
     connection: &Connection,
     host: Option<&dyn Host>,
     project: &ProjectId,
     lead: i64,
-    pane: &str,
+    (pane, pid): (&str, u32),
 ) -> Option<PaneMember> {
     if !crate::terminal::pane_id_valid(pane) {
         return None;
@@ -8511,6 +8727,9 @@ fn pane_member(
         .optional()
         .ok()?;
     let own = record.as_deref().and_then(PaneRecord::decode)?;
+    if pid != own.pid {
+        return None;
+    }
     host?
         .panes(&name)
         .ok()?
@@ -8522,15 +8741,16 @@ fn pane_member(
 /// Who runs in one pane of a native lead's team, for the lead's caller socket to answer
 /// `who` with, from the engine's own rows (DEC-111 Q18, RH-2): the lead, or a live teammate
 /// by the name the engine kept for it when it first saw it. Inputs: the database, the
-/// terminal host, the project, the lead and the pane. Output: the lead, the teammate's
-/// name, or none, also for a teammate with no name kept.
+/// terminal host, the project, the lead and the pane with the pane process the caller was
+/// found under. Output: the lead, the teammate's name, or none, also for a teammate with
+/// no name kept.
 #[cfg(unix)]
 pub(crate) fn pane_whom(
     connection: &Connection,
     host: Option<&dyn Host>,
     project: &ProjectId,
     lead: i64,
-    pane: &str,
+    pane: (&str, u32),
 ) -> Option<super::caller::Whom> {
     match pane_member(connection, host, project, lead, pane)? {
         PaneMember::Lead => Some(super::caller::Whom::Lead),
@@ -8836,6 +9056,9 @@ mod live_claude_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "runtime/live_codex_tests.rs"]
 mod live_codex_tests;
+#[cfg(all(test, target_os = "macos"))]
+#[path = "runtime/live_failover_tests.rs"]
+mod live_failover_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "runtime/live_native_lead_tests.rs"]
 mod live_native_lead_tests;

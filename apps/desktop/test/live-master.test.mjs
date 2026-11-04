@@ -210,6 +210,29 @@ test("a master harness with no terminal app keeps today's conversation, also whe
   assert.match(seen.loading.text, /Loading the master\.\.\./);
 });
 
+test("a plan that stored the alias claude opens the one Claude Code live master, as claude-code does, with no second conversation or message box (OP-28)", async () => {
+  const seen = await inPage(async ({ evaluate }) => {
+    const views = {};
+    for (const master of ["claude", "claude-code"]) {
+      await evaluate(`Fixture.mountArea(${JSON.stringify(master)}, true)`);
+      views[master] = await evaluate("Fixture.shown()");
+    }
+    await evaluate('Fixture.mountArea("claude", true, false)');
+    views.loading = await evaluate("Fixture.shown()");
+    return views;
+  });
+  for (const master of ["claude", "claude-code"]) {
+    const view = seen[master];
+    assert.equal(view.live, true, `${master}: the live master area: ${view.text}`);
+    assert.equal(view.conversation, false, `${master}: no other conversation beside it`);
+    assert.equal(view.console, false, `${master}: no message box beside the terminal`);
+    assert.match(view.text, /Claude Code/, master);
+  }
+  assert.equal(seen.loading.live, false, "nothing is decided before the harness catalog is read");
+  assert.equal(seen.loading.conversation, false, "the console never opens for an alias the catalog has not resolved yet");
+  assert.match(seen.loading.text, /Loading the master\.\.\./);
+});
+
 test("in a real xterm, Shift+Enter types Ctrl+J once and Enter still types Enter", async () => {
   const typed = await inPage(async ({ evaluate, send }) => {
     await evaluate("Fixture.mountKeys()");

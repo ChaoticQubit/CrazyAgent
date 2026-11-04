@@ -28,6 +28,7 @@ const POLL_INTERVAL: Duration = Duration::from_millis(5);
 #[cfg(test)]
 const TERM_GRACE: Duration = Duration::from_millis(100);
 const DROP_TIME: Duration = Duration::from_secs(2);
+const GROUP_SETTLE_TIME: Duration = Duration::from_millis(500);
 #[cfg(test)]
 const READ_BYTES: usize = 4096;
 #[cfg(test)]
@@ -473,6 +474,22 @@ fn sleep_until(deadline: Instant) {
     thread::sleep(POLL_INTERVAL.min(remaining));
 }
 
+/// Waits until the process group of a dedicated child that was already reaped is gone.
+/// macOS can still find such a group for some milliseconds and answer EPERM, no member it
+/// may signal, before it answers ESRCH; a member it may signal answers at once and is a
+/// survivor. Input: the group. Output: whether the group was gone within the settle bound.
+fn reaped_group_gone(group: Pid) -> bool {
+    assert!(group.as_raw_nonzero().get() > 1);
+    let deadline = Instant::now() + GROUP_SETTLE_TIME;
+    loop {
+        match rustix::process::test_kill_process_group(group) {
+            Err(rustix::io::Errno::SRCH) => return true,
+            Err(rustix::io::Errno::PERM) if Instant::now() < deadline => sleep_until(deadline),
+            _ => return false,
+        }
+    }
+}
+
 pub(super) fn retain_direct_child(
     retained: &mut Option<Child>,
     incoming: Child,
@@ -645,7 +662,7 @@ impl CustodySession {
             return Err(EngineError("native_auth_child_cleanup_uncertain".into()));
         }
         let group = group?;
-        if rustix::process::test_kill_process_group(group) != Err(rustix::io::Errno::SRCH) {
+        if !reaped_group_gone(group) {
             return Err(EngineError("native_auth_child_cleanup_uncertain".into()));
         }
         self.guard
@@ -723,7 +740,7 @@ impl CustodySession {
             return Err(EngineError("native_auth_child_cleanup_uncertain".into()));
         }
         let group = group?;
-        if rustix::process::test_kill_process_group(group) != Err(rustix::io::Errno::SRCH) {
+        if !reaped_group_gone(group) {
             return Err(EngineError("native_auth_child_cleanup_uncertain".into()));
         }
         let guard = self.guard.as_ref().expect("session retains physical guard");

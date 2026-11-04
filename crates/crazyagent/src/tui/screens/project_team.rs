@@ -71,6 +71,16 @@ impl Notice {
             if self.error { look.error } else { look.fg },
         )
     }
+
+    /// Draws the notice wrapped to a width, so a long one is read whole instead of cut.
+    /// Takes the look and the width in cells. Returns its rows in the error or plain style.
+    pub fn rows(&self, look: &Look, width: usize) -> Vec<Row> {
+        let style = if self.error { look.error } else { look.fg };
+        wrap_words(&self.text, width)
+            .into_iter()
+            .map(|line| Row::of(line, style))
+            .collect()
+    }
 }
 
 /// Which list of the Team view has focus.
@@ -615,6 +625,7 @@ impl TeamView {
                 TeamReply::Handled
             }
             KeyCode::Char('g') => self.ask_before_merge(),
+            KeyCode::Char('R') => self.reask_empty_reply(),
             KeyCode::Char('F') => self.new_folder_limit(),
             KeyCode::Char('B') => self.background_at_end(),
             KeyCode::Char('G') => self.grace_time(),
@@ -1643,6 +1654,35 @@ impl TeamView {
         })
     }
 
+    /// Flips "Re-ask empty reply" between On and Off: whether a sub-agent that ends a task
+    /// with no reply text is asked once more for its reply (DEC-111). Output: the change to
+    /// send, or Handled with a notice while loading or saving.
+    fn reask_empty_reply(&mut self) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        if self.changing.is_some() {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+            return TeamReply::Handled;
+        }
+        let on = !status.reask_empty_reply;
+        self.changing = Some(
+            if on {
+                "A sub-agent that ends a task with no reply text is now asked once more for its reply."
+            } else {
+                "A sub-agent's task with no reply text is now reported without asking again."
+            }
+            .to_owned(),
+        );
+        TeamReply::Change(TeamAction::ReaskEmptyReply {
+            project_id: self.project.clone(),
+            on,
+        })
+    }
+
     /// Moves "New folder limit", the most files one new top-level folder may gain in a change
     /// set (DEC-107), to its next choice. Output: the change to send, or Handled with a
     /// notice while loading or saving.
@@ -1711,8 +1751,9 @@ impl TeamView {
         self.save_background(BackgroundAtEnd::Grace { secs })
     }
 
-    /// Sends one Background commands choice with the notice that says what it now does.
-    /// Takes the choice. Output: the change to send, or Handled while saving.
+    /// Sends one Background commands choice with the notice that says what it now does and
+    /// which agents it acts on. Takes the choice. Output: the change to send, or Handled
+    /// while saving.
     fn save_background(&mut self, choice: BackgroundAtEnd) -> TeamReply {
         let done = match choice {
             BackgroundAtEnd::Wait => "A task now waits for the commands its agent started in the background, up to its task limit.".to_owned(),
@@ -1722,6 +1763,7 @@ impl TeamView {
             ),
             BackgroundAtEnd::Stop => "A task's background commands now stop when its turn ends, and its agent is told so.".to_owned(),
         };
+        let done = format!("{done} {BACKGROUND_SCOPE}");
         let action = TeamAction::BackgroundAtEnd {
             project_id: self.project.clone(),
             choice,
@@ -2216,7 +2258,11 @@ impl TeamView {
         let summary_rows = lines.len();
         let Some(status) = &self.status else {
             lines.push(Row::of("Loading...", look.muted));
-            lines.extend(self.notice.iter().map(|notice| notice.row(look)));
+            lines.extend(
+                self.notice
+                    .iter()
+                    .flat_map(|notice| notice.rows(look, content)),
+            );
             return (lines, self.help(), None);
         };
         lines.push(Row::of(plan_line(status), look.muted));
@@ -2232,7 +2278,11 @@ impl TeamView {
             lines.push(Row::of(label, look.muted));
         }
         if self.alerts {
-            let notice: Vec<Row> = self.notice.iter().map(|notice| notice.row(look)).collect();
+            let notice: Vec<Row> = self
+                .notice
+                .iter()
+                .flat_map(|notice| notice.rows(look, content))
+                .collect();
             let room = room.saturating_sub(lines.len() + notice.len());
             lines.extend(self.alert_rows(content, room, look));
             lines.extend(notice);
@@ -2240,7 +2290,7 @@ impl TeamView {
         }
         if let Some(list) = &self.messages {
             lines.push(Row::of(list.title(), look.heading));
-            let footer = self.footer(look);
+            let footer = self.footer(content, look);
             let room = room.saturating_sub(lines.len() + footer.len());
             lines.extend(
                 list.lines(content, room)
@@ -2272,7 +2322,7 @@ impl TeamView {
                 None => (self.panel(content, accounts, look), None),
             },
         };
-        let footer = self.footer(look);
+        let footer = self.footer(content, look);
         let hidden = self.finished_hidden();
         let fixed = lines.len() + 5 + usize::from(hidden > 0) + panel.len() + footer.len();
         let over = (fixed + 2).saturating_sub(room);
@@ -2522,6 +2572,15 @@ impl TeamView {
                 if status.ask_before_merge { "On" } else { "Off" }.to_owned(),
             ),
             setting(
+                "Re-ask empty reply",
+                if status.reask_empty_reply {
+                    "On"
+                } else {
+                    "Off"
+                }
+                .to_owned(),
+            ),
+            setting(
                 "New folder limit",
                 format!("{} files", status.new_folder_files_max),
             ),
@@ -2692,7 +2751,7 @@ impl TeamView {
         rows
     }
 
-    fn footer(&self, look: &Look) -> Vec<Row> {
+    fn footer(&self, content: usize, look: &Look) -> Vec<Row> {
         if let Some(ask) = self.ask {
             let label = |id: i64| {
                 self.agent(id)
@@ -2748,7 +2807,7 @@ impl TeamView {
             ];
         }
         if let Some(notice) = &self.notice {
-            return vec![notice.row(look)];
+            return notice.rows(look, content);
         }
         self.status
             .iter()
@@ -2866,6 +2925,7 @@ impl TeamView {
             ("m", "Master's branch"),
             ("L", "Land on"),
             ("g", "Ask before merge"),
+            ("R", "Re-ask empty reply"),
             ("F", "New folder limit"),
             ("B", "Background commands"),
             ("G", "Grace time"),
@@ -3082,6 +3142,11 @@ fn next_limit(choices: &[u32], current: Option<u32>) -> Option<u32> {
             .and_then(|at| choices.get(at + 1).copied()),
     }
 }
+
+/// Which agents Background commands at task end acts on, said with every choice in the
+/// TUI and the desktop alike: Wait and a grace time only where the engine sees background
+/// commands, a Claude Code pane, and turn-end stops only where it ends them (rv-code BHT-M1).
+const BACKGROUND_SCOPE: &str = "Wait and a grace time act on Claude Code panes. Other agents run per turn have their background commands stopped when the turn ends, and other kept agents, such as a kept Codex pane, keep theirs whatever the choice.";
 
 /// The summary words for Background commands at task end (DEC-111 Q13). Input: the
 /// choice. Output: the words.

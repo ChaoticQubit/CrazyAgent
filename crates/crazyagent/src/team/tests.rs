@@ -1779,21 +1779,27 @@ fn a_paused_team_holds_its_work_until_the_owner_resumes_it() {
 
 #[test]
 fn keeping_agents_warm_stops_when_a_warm_agent_dies_before_any_work() {
-    warm_agents_ended(b"#!/bin/sh\nexit 1\n");
+    warm_agents_ended(b"#!/bin/sh\nexit 1\n", false);
 }
 
-/// The second warm sub-agent dies 2 s after the first has turned keeping warm off: it still
-/// ends Failed, and nothing starts again in its place.
+/// The second warm sub-agent is still alive after the first has died and turned keeping
+/// warm off, as the team status shows before the test lets the second go on; it then dies,
+/// still ends Failed, and nothing starts again in its place. A file the test removes holds
+/// that order, not a sleep a loaded machine could outlast (rv-code WAD-L1).
 #[test]
 fn a_warm_agent_that_dies_after_keeping_warm_went_off_still_ends_failed() {
     warm_agents_ended(
-        b"#!/bin/sh\ncase \"$CODEX_HOME\" in */agent-1/*) exit 1 ;; esac\n/bin/sleep 2\nexit 1\n",
+        b"#!/bin/sh\ncase \"$CODEX_HOME\" in */agent-1/*) exit 1 ;; esac\n: > \"$CODEX_HOME/waiting\"\nwhile [ -e \"$CODEX_HOME/waiting\" ]; do /bin/sleep 0.1; done\nexit 1\n",
+        true,
     );
 }
 
 #[test]
 fn a_sub_agent_whose_harness_breaks_its_protocol_names_the_launch_code() {
-    let cold = warm_agents_ended(b"#!/bin/sh\nread line\necho not-json\nexec /bin/sleep 30\n");
+    let cold = warm_agents_ended(
+        b"#!/bin/sh\nread line\necho not-json\nexec /bin/sleep 30\n",
+        false,
+    );
     for agent in &cold.agents {
         assert_eq!(
             agent.problem.as_deref(),
@@ -1811,8 +1817,11 @@ fn a_sub_agent_whose_harness_breaks_its_protocol_names_the_launch_code() {
 
 /// Runs a project that keeps its two codex sub-agents warm on a stand-in harness until a
 /// warm agent that ended before any work turns keeping warm off and both agents have ended.
-/// Input: the stand-in harness script. Output: the team status once both agents ended.
-fn warm_agents_ended(script: &[u8]) -> TeamStatus {
+/// When held, the second agent's script waits while a `waiting` file it wrote in its home
+/// exists; the test checks the first has ended and turned keeping warm off while the second
+/// is alive, then removes the file. Input: the stand-in harness script and whether it holds.
+/// Output: the team status once both agents ended.
+fn warm_agents_ended(script: &[u8], held: bool) -> TeamStatus {
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let database = base.join("engine.db");
@@ -1881,10 +1890,35 @@ fn warm_agents_ended(script: &[u8]) -> TeamStatus {
     )
     .unwrap();
 
+    let waiting = |id: i64| runtime::agent_home(&base.join("team"), id).join("waiting");
+    let mut released = !held;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     loop {
         team.tick().unwrap();
         let now = status(&connection, &setup).unwrap();
+        if !released && waiting(2).exists() && (!now.keep_warm || waiting(1).exists()) {
+            for id in [1, 2] {
+                if waiting(id).exists() {
+                    std::fs::remove_file(waiting(id)).unwrap();
+                }
+            }
+            released = true;
+            let ended = |id: i64| {
+                now.agents
+                    .iter()
+                    .find(|a| a.id == id)
+                    .map(|a| matches!(a.status, AgentStatus::Stopped | AgentStatus::Failed))
+            };
+            assert!(
+                !now.keep_warm && ended(1) == Some(true) && ended(2) == Some(false),
+                "the first warm sub-agent ended and turned keeping warm off while the second was alive: keep_warm={} {:?}",
+                now.keep_warm,
+                now.agents
+                    .iter()
+                    .map(|a| (a.id, a.status.name()))
+                    .collect::<Vec<_>>()
+            );
+        }
         if !now.keep_warm
             && now
                 .agents
@@ -1896,6 +1930,10 @@ fn warm_agents_ended(script: &[u8]) -> TeamStatus {
         assert!(std::time::Instant::now() < deadline, "{now:#?}");
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
+    assert!(
+        released,
+        "the held second warm sub-agent ended only after the test let it go"
+    );
     for _ in 0..10 {
         team.tick().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -5148,6 +5186,57 @@ fn messages_settings_start_at_the_defaults_save_whole_per_project_and_refuse_unl
     assert_eq!(
         status(&connection, &other).unwrap().message_settings,
         MessageSettings::default(),
+        "the choice is per project"
+    );
+}
+
+/// Re-ask empty reply is On for a project with no choice saved, the team status keeps the
+/// owner's Off and then On again, and the choice is per project (DEC-111).
+#[test]
+fn reask_empty_reply_is_on_until_the_owner_turns_it_off_and_on_again() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-reask",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let pool = access("team-reask", &["local-a"]);
+    let project = setup.project_id.clone();
+    assert!(
+        status(&connection, &setup).unwrap().reask_empty_reply,
+        "On is the default"
+    );
+    for on in [false, true, false] {
+        let tx = connection.transaction().unwrap();
+        assert_eq!(
+            execute(
+                &tx,
+                &pool,
+                &TeamAction::ReaskEmptyReply {
+                    project_id: project.clone(),
+                    on,
+                },
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+        tx.commit().unwrap();
+        assert_eq!(status(&connection, &setup).unwrap().reask_empty_reply, on);
+    }
+    assert!(
+        reask_empty_reply(&connection, &ProjectId::new("team-elsewhere").unwrap()).unwrap(),
         "the choice is per project"
     );
 }

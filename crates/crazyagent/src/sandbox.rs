@@ -85,6 +85,19 @@ const SOCKETS_MAX: usize = 2;
 /// The most exact Unix socket grants one agent holds, of every use together: a native lead's
 /// own tmux server, its caller socket and its teammates' tmux server.
 const SOCKET_GRANTS_MAX: usize = 4;
+/// The writes that move, remove, replace or re-permission a folder's own node while its
+/// contents stay writable: the scratch root's and a native lead's home for its teammates.
+const FIXED_WRITES: &str = "file-write-unlink file-write-create file-write-mode file-write-acl";
+/// The folders of a Claude Code config home whose scripts Claude Code 2.1.309 runs ahead of
+/// every Bash command: its shell snapshot and the session hook scripts (TPH-2).
+const CLAUDE_BASH_PRELUDES: [&str; 2] = ["shell-snapshots", "session-env"];
+/// The folders of a Claude Code config home that its agent team shares, the members'
+/// mailboxes and task lists. Claude Code 2.1.309 keeps them under each member's config home,
+/// with no variable of their own, so a native lead's teammates write the lead's (TPH-2).
+pub const CLAUDE_TEAM_SHARED: [&str; 2] = ["teams", "tasks"];
+/// The Seatbelt pattern of a lock folder's path, `<file>.lock`: the only folder a teammate
+/// may still make in a shared team folder, where it may make no other folder or link.
+const LOCK_FOLDER: &str = r#"\.lock$"#;
 /// The longest Unix socket path macOS binds, `sun_path` less its closing NUL.
 const SOCKET_PATH_BYTES_MAX: usize = 103;
 const TOOL_ROOTS_MAX: usize = 24;
@@ -585,7 +598,7 @@ pub fn agent_command<'a>(
 
 /// Network reach of a sandboxed agent: open when the agent's tools are on, except that
 /// it never binds or listens on an [`OWNER_PORTS`] port or one [`ProjectSandbox::keep_ports`]
-/// keeps, otherwise only the listed model endpoints.
+/// keeps, otherwise only the listed remotes, each one port on loopback or on any host.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SandboxNetwork {
     Open,
@@ -706,6 +719,9 @@ pub struct ProjectSandbox {
     served: Vec<PathBuf>,
     reached: Vec<PathBuf>,
     shut: Vec<PathBuf>,
+    read_only: Vec<PathBuf>,
+    fixed: Vec<PathBuf>,
+    shared: Vec<PathBuf>,
 }
 
 /// The one git worktree a confined agent writes in place of the whole project folder,
@@ -762,6 +778,9 @@ impl ProjectSandbox {
             served: Vec::new(),
             reached: Vec::new(),
             shut: Vec::new(),
+            read_only: Vec::new(),
+            fixed: Vec::new(),
+            shared: Vec::new(),
         })
     }
 
@@ -1171,24 +1190,69 @@ impl ProjectSandbox {
     /// teammates serve `mates`, only reach `callers` and are shut out of `own`, so no agent
     /// binds, blocks or replaces the caller socket the engine answers on (DEC-111 Q18,
     /// rv-secreview RH-1) and no teammate holds a listener or places a node where the lead
-    /// connects. Inputs: the three sockets and the canonical tmux program. Output: the lead's
-    /// and the teammates' sandboxes, `Invalid`, or `Unavailable` off macOS.
+    /// connects. They read but never write the launch folders the engine installs in the
+    /// lead's home, its hooks, skills and relay plugin, which the lead's Claude Code runs
+    /// (TPH), nor move, replace or re-permission that home itself (TPH r1 F1), nor the
+    /// shell snapshot and session scripts its Bash commands run first (TPH-2). The teammates
+    /// run in their own home and only read the lead's, except the team folders Claude Code
+    /// shares, where they make no link or folder but a lock, and never write the `git` on the
+    /// lead's path (TPH-2 C). Both are shut out of the name the engine binds the caller
+    /// socket at before it moves it over `callers`, so neither swaps its own listener in
+    /// there (rv-secreview RH2R2-1). Inputs: the three sockets, the canonical tmux program
+    /// and the teammates' home beside the lead's, its team folders already made. Output: the
+    /// lead's and the teammates' sandboxes, `Invalid`, or `Unavailable` off macOS.
     pub fn native_team(
         self,
         own: &Path,
         mates: &Path,
         callers: &Path,
         tmux: &Path,
+        mates_home: &Path,
     ) -> Result<(Self, Self), SandboxError> {
-        let teammates = self
+        let home = self.agent_home.clone();
+        granted_root(mates_home, &self.owner_home, &self.secret_paths())?;
+        if mates_home.starts_with(&home) || home.starts_with(mates_home) {
+            return Err(invalid("the teammates' home must sit beside the lead's"));
+        }
+        let shared: Vec<PathBuf> = CLAUDE_TEAM_SHARED
+            .iter()
+            .map(|folder| home.join(folder))
+            .collect();
+        for folder in &shared {
+            granted_root(folder, &self.owner_home, &self.secret_paths())?;
+        }
+        let binding = crate::team::caller::binding_path(callers);
+        let mut teammates = self
             .clone()
             .serve_tmux_server(mates, tmux)?
             .reach_unix_socket(callers)?
-            .shut_unix_socket(own)?;
+            .shut_unix_socket(own)?
+            .shut_unix_socket(&binding)?
+            .allow_read(&home)?;
+        teammates.agent_home = mates_home.to_path_buf();
+        teammates.read_only = vec![
+            home.join(crate::launch_context::STATE),
+            home.join(crate::coord::relay::PLUGIN_FOLDER),
+        ];
+        teammates
+            .read_only
+            .extend(CLAUDE_BASH_PRELUDES.iter().map(|folder| home.join(folder)));
+        teammates.read_only.extend(
+            self.scratch
+                .iter()
+                .map(|scratch| scratch.join(toolchains::GIT_FOLDER)),
+        );
+        teammates.fixed = vec![home.clone()];
+        teammates.fixed.extend(shared.iter().cloned());
+        teammates.shared = shared;
+        if teammates.writes(&home) {
+            return Err(invalid("a teammates' writable root holds the lead's home"));
+        }
         let lead = self
             .allow_tmux_server(own, tmux)?
             .reach_unix_socket(callers)?
-            .reach_unix_socket(mates)?;
+            .reach_unix_socket(mates)?
+            .shut_unix_socket(&binding)?;
         Ok((lead, teammates))
     }
 
@@ -1335,7 +1399,8 @@ impl ProjectSandbox {
     /// Every folder this sandbox lets the agent write: the project folder, or for a
     /// confined agent its worktree, that worktree's git admin folder and the git object
     /// store, or for a clone-confined agent its clone alone, then its own home and temp
-    /// dirs, its short temp folder, then its extra worktrees.
+    /// dirs, its short temp folder, then its extra worktrees, then for a native lead's
+    /// teammates the team folders they share in the lead's home.
     pub fn writable_roots(&self) -> impl Iterator<Item = &PathBuf> {
         assert!(self.checkout.is_none() || self.clone.is_none());
         let project: Vec<&PathBuf> = match (&self.checkout, &self.clone) {
@@ -1348,6 +1413,7 @@ impl ProjectSandbox {
             .chain([&self.agent_home, &self.agent_tmp])
             .chain(self.scratch.iter())
             .chain(self.worktrees.iter())
+            .chain(self.shared.iter())
     }
 
     /// The read-only toolchain folders, Seatbelt only, with credential names carved out.
@@ -1452,7 +1518,7 @@ impl ProjectSandbox {
         ));
         if let Some(scratch) = &self.scratch {
             text.push_str(&format!(
-                "(deny file-write-unlink file-write-create file-write-mode file-write-acl\n  (literal \"{}\"))\n",
+                "(deny {FIXED_WRITES}\n  (literal \"{}\"))\n",
                 scratch.display()
             ));
         }
@@ -1499,9 +1565,44 @@ impl ProjectSandbox {
                 "(deny file-write*\n  (literal \"{path}\")\n  (literal \"{path}.lock\"))\n"
             ));
         }
+        for folder in &self.read_only {
+            text.push_str(&format!(
+                "(deny file-write* (subpath \"{}\"))\n",
+                folder.display()
+            ));
+        }
+        for folder in &self.fixed {
+            text.push_str(&format!(
+                "(deny {FIXED_WRITES} (literal \"{}\"))\n",
+                folder.display()
+            ));
+        }
+        for folder in &self.shared {
+            text.push_str(&shared_denies(folder));
+        }
         assert_eq!(
             text.matches("unix-socket").count(),
             2 * self.sockets.len() + self.served.len() + self.reached.len()
+        );
+        let last_write_allow = text
+            .rfind("(allow file-write*")
+            .max(text.rfind("(allow file-read* file-write*"));
+        assert!(
+            self.read_only.iter().all(|folder| {
+                text.rfind(&format!(
+                    "(deny file-write* (subpath \"{}\"))",
+                    folder.display()
+                )) > last_write_allow
+            }) && self.fixed.iter().all(|folder| {
+                text.rfind(&format!(
+                    "(deny {FIXED_WRITES} (literal \"{}\"))",
+                    folder.display()
+                )) > last_write_allow
+            }) && self
+                .shared
+                .iter()
+                .all(|folder| text.rfind(&shared_denies(folder)) > last_write_allow),
+            "a read-only, fixed or shared folder's write deny must follow every write allow, since the last match wins"
         );
         let denied_last = |operations: &str, socket: &PathBuf| {
             text.rfind(&format!(
@@ -2303,6 +2404,16 @@ fn clear_of_secrets(root: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError
         return Err(invalid(SECRET_ROOT_REFUSED));
     }
     Ok(())
+}
+
+/// The Seatbelt rules that keep a shared team folder free of links and moved-in folders: no
+/// link may be made there and no folder but a lock, so no teammate places a path the lead's
+/// own Claude Code writes through (TPH-2 C). Input: the folder. Output: the rules.
+fn shared_denies(folder: &Path) -> String {
+    let folder = folder.display();
+    format!(
+        "(deny file-write-create (require-all (subpath \"{folder}\") (vnode-type SYMLINK)))\n(deny file-write-create (require-all (subpath \"{folder}\") (vnode-type DIRECTORY) (require-not (regex #\"{LOCK_FOLDER}\"))))\n"
+    )
 }
 
 fn granted_root(root: &Path, owner: &Path, secrets: &[PathBuf]) -> Result<(), SandboxError> {

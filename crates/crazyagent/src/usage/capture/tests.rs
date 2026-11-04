@@ -213,6 +213,55 @@ fn claude_sub_agent_records_count_and_a_linked_record_is_never_followed() {
     assert_eq!(stored[0].5, "agent-a1");
 }
 
+/// A native lead's teammates keep their session records in their own home beside the
+/// lead's (TPH-2 C), and those count with the lead's own. A teammates' home whose
+/// `projects` is a link is not walked, so no teammate points the scan at another folder.
+#[test]
+fn a_native_lead_s_teammates_records_count_from_their_home_and_a_linked_top_folder_is_not_walked() {
+    let (_root, db) = store();
+    let agent = tempfile::tempdir().unwrap();
+    let home = agent.path().join("home");
+    append(
+        &home.join("projects/-work-alpha/lead.jsonl"),
+        &claude_assistant("lead1", 1, 2, 0, 0, "end_turn"),
+    );
+    append(
+        &agent
+            .path()
+            .join("mates-home/projects/-work-alpha/mate.jsonl"),
+        &claude_assistant("mate1", 10, 20, 0, 0, "end_turn"),
+    );
+    let who = attribution(RunKind::Master, Some("pool-a"));
+    let added = scan_home(&db, &home, Format::Claude, &who, NOW).unwrap();
+    assert_eq!(
+        added,
+        Tokens {
+            input: 11,
+            output: 22,
+            cache_read: 0,
+            cache_write: 0
+        }
+    );
+
+    let other = tempfile::tempdir().unwrap();
+    let elsewhere = tempfile::tempdir().unwrap();
+    append(
+        &elsewhere.path().join("projects/-work-beta/other.jsonl"),
+        &claude_assistant("other1", 1000, 1000, 0, 0, "end_turn"),
+    );
+    std::fs::create_dir_all(other.path().join("home")).unwrap();
+    std::fs::create_dir_all(other.path().join("mates-home")).unwrap();
+    std::os::unix::fs::symlink(
+        elsewhere.path().join("projects"),
+        other.path().join("mates-home").join("projects"),
+    )
+    .unwrap();
+    assert_eq!(
+        records(&other.path().join("home"), Format::Claude).0,
+        Vec::<PathBuf>::new()
+    );
+}
+
 fn codex_count(input: u64, cached: u64, output: u64) -> String {
     format!(
         "{}\n",

@@ -47,12 +47,12 @@ fn a_call_is_named_once_by_the_listed_pane_of_its_process_or_a_parent() {
         lists.set(lists.get() + 1);
         vec![("%7".to_owned(), parent), ("%8".to_owned(), u32::MAX)]
     };
-    assert_eq!(callers.serve(&mut panes, &mut |_| None), 0);
+    assert_eq!(callers.serve(&mut panes, &mut |_, _| None), 0);
     assert_eq!(lists.get(), 0, "no caller, no listing");
 
     let digest = [3_u8; DIGEST_BYTES];
     let mut first = sent(&socket, &line(&id(1), &digest));
-    assert_eq!(callers.serve(&mut panes, &mut |_| None), 1);
+    assert_eq!(callers.serve(&mut panes, &mut |_, _| None), 1);
     assert_eq!(reply(&mut first), NAMED);
     assert_eq!(
         callers.take(&id(1), &[4_u8; DIGEST_BYTES]),
@@ -67,19 +67,22 @@ fn a_call_is_named_once_by_the_listed_pane_of_its_process_or_a_parent() {
 
     let mut again = sent(&socket, &line(&id(2), &digest));
     let mut reused = sent(&socket, &line(&id(2), &[9_u8; DIGEST_BYTES]));
-    assert_eq!(callers.serve(&mut panes, &mut |_| None), 1);
+    assert_eq!(callers.serve(&mut panes, &mut |_, _| None), 1);
     assert_eq!(reply(&mut again), NAMED);
     assert_eq!(
         reply(&mut reused),
         UNNAMED,
         "a named call id is never named again"
     );
-    assert_eq!(callers.take(&id(2), &digest), Some("%7".to_owned()));
+    assert_eq!(
+        callers.take(&id(2), &digest),
+        Some(("%7".to_owned(), parent))
+    );
     assert_eq!(callers.take(&id(2), &digest), None);
 
     let mut stranger = sent(&socket, &line(&id(3), &digest));
     let mut none = || vec![("%9".to_owned(), u32::MAX)];
-    assert_eq!(callers.serve(&mut none, &mut |_| None), 0);
+    assert_eq!(callers.serve(&mut none, &mut |_, _| None), 0);
     assert_eq!(
         reply(&mut stranger),
         UNNAMED,
@@ -115,13 +118,13 @@ fn a_malformed_or_unfinished_line_names_nothing() {
         sent(&socket, &[b'0'; LINE_BYTES]),
     ];
     let unfinished = sent(&socket, &line(&id(5), &digest)[..LINE_BYTES - 1]);
-    assert_eq!(callers.serve(&mut panes, &mut |_| None), 0);
+    assert_eq!(callers.serve(&mut panes, &mut |_, _| None), 0);
     for stream in &mut streams {
         assert_eq!(reply(stream), b"", "dropped without a word");
     }
     assert_eq!(callers.pending.len(), 1, "the unfinished line waits");
     drop(unfinished);
-    assert_eq!(callers.serve(&mut panes, &mut |_| None), 0);
+    assert_eq!(callers.serve(&mut panes, &mut |_, _| None), 0);
     assert!(callers.pending.is_empty(), "a closed connection is dropped");
     assert!(callers.stamps.is_empty());
 }
@@ -181,7 +184,7 @@ fn a_team_server_sends_its_call_only_once_the_engine_named_it() {
             let asked = scope.spawn(|| name_call(&mailbox, &id(call), &digest));
             let deadline = Instant::now() + CALLER_WAIT;
             while !asked.is_finished() && Instant::now() < deadline {
-                callers.serve(&mut || vec![("%7".to_owned(), listed)], &mut |_| None);
+                callers.serve(&mut || vec![("%7".to_owned(), listed)], &mut |_, _| None);
                 std::thread::sleep(Duration::from_millis(10));
             }
             asked.join().unwrap()
@@ -189,7 +192,7 @@ fn a_team_server_sends_its_call_only_once_the_engine_named_it() {
         assert_eq!(served, named, "call {call}");
         assert_eq!(
             callers.take(&id(call), &digest),
-            named.then(|| "%7".to_owned())
+            named.then(|| ("%7".to_owned(), own))
         );
     }
     drop(callers);
@@ -213,7 +216,7 @@ fn one_pane_filling_the_stamps_never_stops_another_pane_s_call() {
             .map(|n| sent(&socket, &line(&id(round * 16 + n + 1), &digest)))
             .collect();
         assert_eq!(
-            callers.serve(&mut || vec![("%1".to_owned(), own)], &mut |_| None),
+            callers.serve(&mut || vec![("%1".to_owned(), own)], &mut |_, _| None),
             16
         );
         for stream in &mut streams {
@@ -222,15 +225,15 @@ fn one_pane_filling_the_stamps_never_stops_another_pane_s_call() {
     }
     let mut other = sent(&socket, &line(&id(65), &digest));
     assert_eq!(
-        callers.serve(&mut || vec![("%2".to_owned(), own)], &mut |_| None),
+        callers.serve(&mut || vec![("%2".to_owned(), own)], &mut |_, _| None),
         1,
         "another pane's call is named"
     );
     assert_eq!(reply(&mut other), NAMED);
-    assert_eq!(callers.take(&id(65), &digest), Some("%2".to_owned()));
+    assert_eq!(callers.take(&id(65), &digest), Some(("%2".to_owned(), own)));
     assert_eq!(
         callers.take(&id(64), &digest),
-        Some("%1".to_owned()),
+        Some(("%1".to_owned(), own)),
         "the full pane keeps its newest"
     );
     assert_eq!(
@@ -253,17 +256,17 @@ fn one_pane_holding_unfinished_lines_never_stops_another_pane_s_call() {
         .map(|n| sent(&socket, &line(&id(n as u8 + 1), &digest)[..10]))
         .collect();
     assert_eq!(
-        callers.serve(&mut || vec![("%1".to_owned(), own)], &mut |_| None),
+        callers.serve(&mut || vec![("%1".to_owned(), own)], &mut |_, _| None),
         0
     );
     let mut other = sent(&socket, &line(&id(99), &digest));
     assert_eq!(
-        callers.serve(&mut || vec![("%2".to_owned(), own)], &mut |_| None),
+        callers.serve(&mut || vec![("%2".to_owned(), own)], &mut |_, _| None),
         1,
         "another pane's call is named"
     );
     assert_eq!(reply(&mut other), NAMED);
-    assert_eq!(callers.take(&id(99), &digest), Some("%2".to_owned()));
+    assert_eq!(callers.take(&id(99), &digest), Some(("%2".to_owned(), own)));
     drop(held);
 }
 
@@ -301,15 +304,15 @@ fn a_pane_respawned_with_another_process_names_nothing_also_after_a_rebind() {
     let digest = [5_u8; DIGEST_BYTES];
     let mut first = sent(&socket, &line(&id(1), &digest));
     assert_eq!(
-        callers.serve(&mut || vec![("%7".to_owned(), own)], &mut |_| None),
+        callers.serve(&mut || vec![("%7".to_owned(), own)], &mut |_, _| None),
         1
     );
     assert_eq!(reply(&mut first), NAMED);
-    assert_eq!(callers.take(&id(1), &digest), Some("%7".to_owned()));
+    assert_eq!(callers.take(&id(1), &digest), Some(("%7".to_owned(), own)));
 
     let mut respawned = sent(&socket, &line(&id(2), &digest));
     assert_eq!(
-        callers.serve(&mut || vec![("%7".to_owned(), parent)], &mut |_| None),
+        callers.serve(&mut || vec![("%7".to_owned(), parent)], &mut |_, _| None),
         0
     );
     assert_eq!(
@@ -325,7 +328,7 @@ fn a_pane_respawned_with_another_process_names_nothing_also_after_a_rebind() {
     let mut rebound = Callers::bind(&socket, Some(pin)).unwrap().with_pins(pins);
     let mut again = sent(&socket, &line(&id(3), &digest));
     assert_eq!(
-        rebound.serve(&mut || vec![("%7".to_owned(), parent)], &mut |_| None),
+        rebound.serve(&mut || vec![("%7".to_owned(), parent)], &mut |_, _| None),
         0
     );
     assert_eq!(
@@ -338,7 +341,7 @@ fn a_pane_respawned_with_another_process_names_nothing_also_after_a_rebind() {
     let mut fresh = Callers::bind(&socket, Some(pin)).unwrap();
     let mut unpinned = sent(&socket, &line(&id(4), &digest));
     assert_eq!(
-        fresh.serve(&mut || vec![("%7".to_owned(), parent)], &mut |_| None),
+        fresh.serve(&mut || vec![("%7".to_owned(), parent)], &mut |_, _| None),
         1
     );
     assert_eq!(
@@ -359,7 +362,7 @@ fn a_respawned_pane_s_who_is_answered_no() {
     let own = std::process::id();
     let parent = std::os::unix::process::parent_id();
     let mut first = sent(&socket, WHO);
-    callers.serve(&mut || vec![("%7".to_owned(), own)], &mut |_| {
+    callers.serve(&mut || vec![("%7".to_owned(), own)], &mut |_, _| {
         Some(Whom::Lead)
     });
     let answered = reply(&mut first);
@@ -370,7 +373,7 @@ fn a_respawned_pane_s_who_is_answered_no() {
     );
 
     let mut respawned = sent(&socket, WHO);
-    callers.serve(&mut || vec![("%7".to_owned(), parent)], &mut |_| {
+    callers.serve(&mut || vec![("%7".to_owned(), parent)], &mut |_, _| {
         Some(Whom::Lead)
     });
     assert_eq!(
@@ -403,8 +406,8 @@ fn who_is_answered_with_the_pane_and_the_member_the_engine_knows_there() {
         let socket = folder.path().join(CALLER_SOCKET);
         let mut callers = Callers::bind(&socket, None).unwrap();
         let mut asked = sent(&socket, WHO);
-        callers.serve(&mut || vec![("%7".to_owned(), own)], &mut |pane| {
-            assert_eq!(pane, "%7");
+        callers.serve(&mut || vec![("%7".to_owned(), own)], &mut |pane, pid| {
+            assert_eq!((pane, pid), ("%7", own));
             whom.clone()
         });
         assert_eq!(
@@ -429,4 +432,54 @@ fn a_dropped_socket_leaves_its_node_for_hooks_to_be_refused_on() {
         "the node stays"
     );
     assert!(crate::spawn_gate::connect_unix_std(&socket).is_err());
+}
+
+/// A caller socket bound again, as on a native lead's relaunch or the rebind after an engine
+/// restart, never leaves its path empty: a hook asking all along finds the old node or the
+/// new socket, and is never told that its agent leads no native team, which would hand a
+/// teammate the lead's place (rv-secreview RH2R2-1).
+#[test]
+fn a_hook_asking_while_the_socket_is_bound_again_never_reads_alone() {
+    struct TmpRemoved(PathBuf);
+    impl Drop for TmpRemoved {
+        fn drop(&mut self) {
+            let _ = crate::sandbox::toolchains::remove_tmp(&self.0);
+        }
+    }
+    const REBINDS: usize = 2000;
+    let root = folder();
+    let agent = root.path().join("agent-1");
+    let mailbox = agent.join("tmp").join(crate::team::tool::MAILBOX_FOLDER);
+    std::fs::create_dir_all(&mailbox).unwrap();
+    let home = agent.join("home");
+    let scratch = crate::sandbox::toolchains::make_tmp(&home).unwrap();
+    let _scratch = TmpRemoved(home);
+    let socket = socket_for_mailbox(&mailbox).unwrap();
+    assert_eq!(socket, scratch.join(CALLER_SOCKET));
+    let callers = Callers::bind(&socket, None).unwrap();
+    let pin = callers.folder();
+    drop(callers);
+    let done = std::sync::atomic::AtomicBool::new(false);
+    let (asked, alone) = std::thread::scope(|scope| {
+        let watcher = scope.spawn(|| {
+            let (mut asked, mut alone) = (0_usize, 0_usize);
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                asked += 1;
+                if own_place(&mailbox, Duration::from_millis(1)) == Place::Alone {
+                    alone += 1;
+                }
+            }
+            (asked, alone)
+        });
+        for _ in 0..REBINDS {
+            drop(Callers::bind(&socket, Some(pin)).unwrap());
+        }
+        done.store(true, std::sync::atomic::Ordering::Relaxed);
+        watcher.join().unwrap()
+    });
+    assert!(asked > 0);
+    assert_eq!(
+        alone, 0,
+        "{alone} of {asked} asks during {REBINDS} rebinds read the lead's place"
+    );
 }

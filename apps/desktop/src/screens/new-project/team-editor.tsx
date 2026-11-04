@@ -65,8 +65,8 @@ export function TeamEditor({ team, harnesses, pool, research, onChange, prefix }
   const errors = teamErrors(team, harnesses);
   const notes = teamNotes(team, harnesses);
   const full = teamFull(team);
-  const master = harnesses?.find((harness) => harness.id === team.master);
-  const fixed = (id: string) => harnesses?.find((harness) => harness.id === id)?.tools.kind === "limited";
+  const master = entry(harnesses, team.master);
+  const fixed = (id: string) => entry(harnesses, id)?.tools.kind === "limited";
   const researchHarnesses = [...new Set((team.sub_harnesses.length ? team.sub_harnesses.map((slot) => slot.harness) : [team.master]).map((id) => harnessName(harnesses, id)))];
   return <div className="pj-stack">
     <section className="pj-stack-s" aria-labelledby={`${prefix}-master`}>

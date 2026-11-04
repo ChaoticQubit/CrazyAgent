@@ -271,7 +271,21 @@ fn git(repository: &Path, home: &Path, arguments: &[&str]) {
     }
 }
 
-fn exclusive_profile_hold(root: &Path, profile_ref: &CredentialRef) -> Option<fs::File> {
+/// An exclusive lock on a native profile's manifest, as an account change holds it. Holds
+/// the open manifest. Dropping it unlocks the open file description, as the engine's own
+/// locks do, so a child another thread is starting, which briefly shares the description,
+/// cannot keep the profile held after the hold ends.
+struct ProfileHold(fs::File);
+
+impl Drop for ProfileHold {
+    /// Unlocks the manifest for every descriptor that shares its open file description.
+    /// Input: the hold being dropped. Output: none.
+    fn drop(&mut self) {
+        let _ = rustix::fs::flock(&self.0, rustix::fs::FlockOperation::Unlock);
+    }
+}
+
+fn exclusive_profile_hold(root: &Path, profile_ref: &CredentialRef) -> Option<ProfileHold> {
     let manifest = root
         .join("native-profiles")
         .join(format!(
@@ -282,7 +296,7 @@ fn exclusive_profile_hold(root: &Path, profile_ref: &CredentialRef) -> Option<fs
     let file = fs::File::open(manifest).unwrap();
     rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive)
         .ok()
-        .map(|()| file)
+        .map(|()| ProfileHold(file))
 }
 
 fn rows(tx: &Transaction<'_>, table: &str) -> Vec<Vec<Value>> {

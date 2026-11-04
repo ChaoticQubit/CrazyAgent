@@ -1975,7 +1975,7 @@ fn hidden_line(screen: &ProjectScreen, look: &Look) -> Row {
         Some([one]) => one.clone(),
         Some(many) => format!("{} hidden folders", many.len()),
     };
-    Row::of(text, look.fg).push("   d Edit hidden folders", look.muted)
+    Row::of(text, look.fg).push("   p Edit hidden folders", look.muted)
 }
 
 fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) -> Drawn {
@@ -2032,8 +2032,10 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
             Row::of("Instructions for this project's agents", look.fg)
                 .push("   i Edit", look.muted),
         ),
-        Row::default(),
     ];
+    if room.saturating_sub(lines.len()) > screen.plugins.floor() {
+        lines.push(Row::default());
+    }
     let (plugins, mut help) = screen
         .plugins
         .rows(content, room.saturating_sub(lines.len()), look);

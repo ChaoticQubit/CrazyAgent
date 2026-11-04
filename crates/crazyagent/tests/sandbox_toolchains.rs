@@ -1190,6 +1190,72 @@ fn neither_a_native_lead_nor_its_teammates_bind_block_or_take_the_caller_socket(
     assert_eq!(engine.join().unwrap(), roles.len());
 }
 
+/// Neither a native lead nor its teammates can place, remove or move a node at the name the
+/// engine binds its caller socket at before one rename moves it over the caller socket's
+/// path (rv-secreview RH2R2-1): with the name free, a listener, a folder or a file either
+/// places there is refused, and once the engine binds there, removing or moving its node
+/// is refused, so no agent swaps its own listener in for the one the engine moves.
+#[test]
+fn neither_a_native_lead_nor_its_teammates_touch_the_caller_socket_s_binding_name() {
+    let team = LiveTeam::start();
+    let binding = crazyagent::team::caller::binding_path(&team.callers);
+    assert!(binding != team.callers && binding.parent() == team.callers.parent());
+    let b = quoted(&binding);
+    let roles: [(&str, Probe); 2] = [
+        ("lead", LiveTeam::as_lead),
+        ("teammate", LiveTeam::teammate),
+    ];
+    for (role, run) in roles {
+        let free = run(
+            &team,
+            &format!(
+                "{}; echo bind=$?\nmkdir {b}; echo mkdir=$?\n/usr/bin/touch {b}; echo file=$?\n",
+                team.session(&binding, "planted")
+            ),
+        );
+        let _ = tmux_at(&team.tmux, &binding, &["kill-server"]);
+        let text = String::from_utf8_lossy(&free.stdout).into_owned();
+        for name in ["bind", "mkdir", "file"] {
+            assert_ne!(
+                status_of(&text, name),
+                "0",
+                "the {role}'s {name} at the free binding name succeeded: {}",
+                String::from_utf8_lossy(&free.stderr)
+            );
+        }
+        assert!(
+            fs::symlink_metadata(&binding).is_err(),
+            "the {role} left a node at the binding name"
+        );
+    }
+
+    let listener = crazyagent::spawn_gate::bind_unix_std(&binding).unwrap();
+    let node = || {
+        fs::symlink_metadata(&binding)
+            .ok()
+            .map(|meta| std::os::unix::fs::MetadataExt::ino(&meta))
+    };
+    let bound = node();
+    assert!(bound.is_some());
+    for (role, run) in roles {
+        let taken = run(
+            &team,
+            &format!("rm -f {b}; echo rm=$?\nmv -f {b} {b}.away; echo mv=$?\n"),
+        );
+        let text = String::from_utf8_lossy(&taken.stdout).into_owned();
+        let errors = String::from_utf8_lossy(&taken.stderr);
+        for name in ["rm", "mv"] {
+            assert_ne!(
+                status_of(&text, name),
+                "0",
+                "the {role}'s {name} at the binding name succeeded: {errors}"
+            );
+        }
+        assert_eq!(node(), bound, "the engine's node survives the {role}");
+    }
+    drop(listener);
+}
+
 /// Reads one `name=status` line a probe script printed. Takes the output text and the name.
 /// Returns the status, panicking when the line is missing.
 fn status_of(text: &str, name: &str) -> String {
@@ -1313,6 +1379,7 @@ impl LiveTeam {
         let own = tmp.join("tmux.sock");
         let mates = tmp.join("teammates-0123456789abcdef.sock");
         let callers = tmp.join(crazyagent::team::caller::CALLER_SOCKET);
+        let mates_home = team_homes(&case.home);
         let (lead, teammates) = ProjectSandbox::new(
             &case.project,
             &case.home,
@@ -1322,7 +1389,7 @@ impl LiveTeam {
         .unwrap()
         .allow_scratch(&tmp)
         .unwrap()
-        .native_team(&own, &mates, &callers, &tmux)
+        .native_team(&own, &mates, &callers, &tmux, &mates_home)
         .unwrap();
         let team = Self {
             case,
@@ -1541,4 +1608,69 @@ fn a_link_at_the_caller_socket_path_never_reaches_the_lead_s_server() {
         );
     }
     assert_eq!(team.sessions(&team.own), "lead\n");
+}
+
+/// Makes the folders a native lead's two sandboxes need beside its home, as the engine makes
+/// them: the team folders Claude Code shares in the lead's home and the teammates' private
+/// home beside it. Takes the lead's home. Returns the teammates' home.
+fn team_homes(home: &Path) -> PathBuf {
+    for folder in crazyagent::sandbox::CLAUDE_TEAM_SHARED {
+        fs::create_dir_all(home.join(folder)).unwrap();
+    }
+    let mates = home.with_file_name("mates-home");
+    fs::create_dir_all(&mates).unwrap();
+    fs::set_permissions(&mates, fs::Permissions::from_mode(0o700)).unwrap();
+    mates
+}
+
+/// A native lead's teammates' home sits beside the lead's, and no root the teammates write
+/// holds the lead's home (TPH-2 C): `native_team` refuses a teammates' home inside the
+/// lead's, and a lead's home inside the project folder its teammates write, and builds the
+/// engine's shape.
+#[test]
+fn native_team_refuses_a_teammates_home_in_the_lead_s_or_a_lead_home_the_project_holds() {
+    let case = case();
+    let tmux = crazyagent::terminal::tmux::installed(&case.project).expect("tmux is installed");
+    let tmp = toolchains::make_tmp(&case.home).unwrap();
+    let team = |home: &Path, mates_home: &Path| {
+        ProjectSandbox::new(
+            &case.project,
+            home,
+            &case.tmp,
+            SandboxNetwork::Only(Vec::new()),
+        )
+        .unwrap()
+        .allow_scratch(&tmp)
+        .unwrap()
+        .native_team(
+            &tmp.join("tmux.sock"),
+            &tmp.join("teammates-0123456789abcdef.sock"),
+            &tmp.join(crazyagent::team::caller::CALLER_SOCKET),
+            &tmux,
+            mates_home,
+        )
+    };
+    let beside = team_homes(&case.home);
+    let inside = case.home.join("mates-home");
+    fs::create_dir_all(&inside).unwrap();
+    fs::set_permissions(&inside, fs::Permissions::from_mode(0o700)).unwrap();
+    let held = case.project.join("agent").join("home");
+    fs::create_dir_all(&held).unwrap();
+    fs::set_permissions(&held, fs::Permissions::from_mode(0o700)).unwrap();
+    let held_mates = team_homes(&held);
+
+    let refused = |made: Result<(ProjectSandbox, ProjectSandbox), SandboxError>| match made {
+        Err(SandboxError::Invalid(reason)) => reason,
+        other => panic!("expected a refusal, got {:?}", other.map(|_| ())),
+    };
+    assert_eq!(
+        refused(team(&case.home, &inside)),
+        "the teammates' home must sit beside the lead's"
+    );
+    assert_eq!(
+        refused(team(&held, &held_mates)),
+        "a teammates' writable root holds the lead's home"
+    );
+    assert!(team(&case.home, &beside).is_ok());
+    toolchains::remove_tmp(&case.home).unwrap();
 }

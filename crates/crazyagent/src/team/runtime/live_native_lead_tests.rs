@@ -1,13 +1,11 @@
-use super::managed_agent::{AGENT, ManagedAgent, NativeTeam, SignedIn, claude};
+use super::managed_agent::{AGENT, ManagedAgent, NativeTeam, SignedIn, claude, shown};
 use super::{Order, Report, TurnEnd, TurnRules};
 use crate::sandbox::policy::AgentAccess;
-use crate::team::AgentRole;
-use crate::terminal::tmux::{Tmux, installed};
-use crate::terminal::{AgentId, FOLDER, Host, harness_socket, teammates_socket};
+use crate::terminal::tmux::installed;
+use crate::terminal::{AgentId, harness_socket, teammates_socket};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -16,35 +14,24 @@ const STOP: Duration = Duration::from_secs(30);
 const ONE: &str = "Reply with exactly the word ONE and nothing else.";
 const TWO: &str = "Reply with exactly the word TWO and nothing else.";
 const COUNT: &str = "Write every whole number from 1 to 600 in order, one per line, then a last line with only the word COUNTED. Use no tools.";
+const BASH_ONE: &str = "Use your Bash tool to run the command `echo snapshot-check`, then reply with exactly the word ONE and nothing else.";
+const BASH_TWO: &str = "Use your Bash tool to run the command `echo snapshot-check`, then reply with exactly the word TWO and nothing else.";
 const TEAM_TURN: Duration = Duration::from_secs(420);
 const POLL: Duration = Duration::from_millis(250);
 const GRACE: Duration = Duration::from_secs(30);
 
-/// A real Claude Code lead prepared by the team runtime on the owner's signed-in account,
-/// in a pane of a tmux host of its own test folder. Output: the lead and the folder.
-fn native_lead() -> (ManagedAgent, tempfile::TempDir) {
-    let root = tempfile::Builder::new()
-        .prefix("ca-live-lead-")
-        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
-        .unwrap();
-    let base = root.path().canonicalize().unwrap();
-    let tmux = installed(&base).expect("BLOCKED: tmux must be installed");
-    let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &base.join(FOLDER)));
-    let lead = ManagedAgent::in_pane("claude-code", &claude(), host, AgentRole::Sub);
-    (lead, root)
-}
-
-/// The same lead started as a real worker of its team runtime at `access`, with its first
-/// turn granted on the owner's account, as the runtime's first dispatch to it does.
-/// Inputs: the held account, the launch's name and the saved level. Output: the team and
-/// the first turn's reports, the finished turn last.
+/// A real Claude Code lead the team runtime plans and starts as a native-mode lead on the
+/// owner's signed-in account, on the engine's own terminal host, started as a real worker of
+/// its team runtime at `access` with its first turn granted, as the runtime's first dispatch
+/// to it does. Inputs: the held account, the launch's name and the saved level. Output: the
+/// team and the first turn's reports, the finished turn last.
 fn native_worker(
     signed_in: &mut SignedIn,
     launch: &str,
     access: AgentAccess,
 ) -> (NativeTeam, Vec<Report>) {
-    let (lead, root) = native_lead();
-    let team = lead.into_native_worker(signed_in.acquire(launch), ONE, TURN, access, Some(root));
+    let lead = ManagedAgent::engine_native_lead(&claude());
+    let team = lead.into_native_worker(signed_in.acquire(launch), ONE, TURN, access);
     let first = team.until_finished(TURN);
     (team, first)
 }
@@ -85,7 +72,7 @@ fn finished(reports: &[Report]) -> Vec<(String, TurnEnd, Option<String>)> {
 #[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
 fn live_native_lead_managed_keeps_one_session() {
     let mut signed_in = SignedIn::claude();
-    let (mut lead, _root) = native_lead();
+    let mut lead = ManagedAgent::engine_native_lead(&claude());
     let profile = signed_in.acquire("claude-live-native-lead");
     let (reports, problem) = lead.run_native_lead(
         profile,
@@ -127,7 +114,7 @@ fn live_native_lead_managed_keeps_one_session() {
 #[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
 fn live_native_lead_managed_adopted_gets_credential() {
     let mut signed_in = SignedIn::claude();
-    let (mut lead, _root) = native_lead();
+    let mut lead = ManagedAgent::engine_native_lead(&claude());
     let (reports, problem) = lead.run_native_lead(
         signed_in.acquire("claude-live-native-left"),
         &["Reply with exactly the word ONE and nothing else."],
@@ -362,17 +349,18 @@ impl LeadServers {
         )
     }
 
-    /// Reads one teammate pane's screen and recent history as the lead's own tmux client
-    /// does: inside the lead's installed profile, on the teammates' server its `TMUX`
-    /// names. Input: the pane. Output: the text, empty when the read was refused.
-    fn read_as_lead(&self, pane: &str) -> String {
+    /// Reads one pane's screen and recent history as the lead's own tmux client does:
+    /// inside the lead's installed profile, on the lead's own server or the teammates' one
+    /// its `TMUX` names. Inputs: the server's socket and the pane. Output: the text, empty
+    /// when the read was refused.
+    fn read_as_lead(&self, socket: &Path, pane: &str) -> String {
         crate::spawn_gate::output(
             Command::new(crate::sandbox::SANDBOX_EXEC)
                 .arg("-f")
                 .arg(&self.profile)
                 .arg(&self.tmux)
                 .arg("-S")
-                .arg(&self.mates)
+                .arg(socket)
                 .args(["capture-pane", "-p", "-J", "-S", "-200", "-t", pane])
                 .env_clear()
                 .stdin(Stdio::null())
@@ -383,6 +371,25 @@ impl LeadServers {
         .filter(|output| output.status.success())
         .map(|output| String::from_utf8_lossy(&output.stdout).into_owned())
         .unwrap_or_default()
+    }
+
+    /// Every pane of both servers with its text as the lead's client reads it, so a failed
+    /// wait shows what the lead and its teammates had on screen. Output: each server's
+    /// socket, pane and text.
+    fn screens(&self) -> Vec<(PathBuf, String, String)> {
+        [&self.own, &self.mates]
+            .into_iter()
+            .flat_map(|socket| {
+                self.panes(socket)
+                    .unwrap_or_default()
+                    .into_keys()
+                    .map(|pane| {
+                        let text = self.read_as_lead(socket, &pane);
+                        (socket.clone(), pane, text)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect()
     }
 
     /// Polls both servers until `wait` passed, or `done` is set and either the lead's client
@@ -402,7 +409,7 @@ impl LeadServers {
                 (Some(own), Some(mates)) => {
                     seen.own.extend(own.into_keys());
                     for (pane, window) in mates {
-                        if pane != anchor && self.read_as_lead(&pane).contains(token) {
+                        if pane != anchor && self.read_as_lead(&self.mates, &pane).contains(token) {
                             seen.read.insert(pane.clone());
                         }
                         seen.mates.insert(pane, window);
@@ -484,7 +491,6 @@ fn live_native_lead_splits_teammates_into_mates_server() {
         &team_prompt(&token),
         TEAM_TURN,
         AgentAccess::Sandboxed,
-        None,
     );
     let started = team.reports_until(TEAM_TURN, |report| matches!(report, Report::Ready { .. }));
     assert_eq!(
@@ -499,9 +505,9 @@ fn live_native_lead_splits_teammates_into_mates_server() {
         .panes(&servers.mates)
         .expect("the teammates' server answers");
     assert_eq!(
-        own.len(),
-        1,
-        "the lead's own server holds only the lead: {own:?}"
+        (own.len(), own.values().collect::<BTreeSet<_>>().len()),
+        (2, 2),
+        "the lead's own server holds only its holder window and the lead's, one pane each: {own:?}"
     );
     assert_eq!(
         mates.len(),
@@ -555,6 +561,334 @@ fn live_native_lead_splits_teammates_into_mates_server() {
         "the lead's tmux client read no teammate pane holding {token}"
     );
     assert_eq!(end, TurnEnd::Success, "{text:?}");
+    team.order(Order::Stop);
+    let (_, problem) = team.until_ended(STOP);
+    assert_eq!(problem, None);
+}
+
+/// A native lead's teammate cannot plant a command in the shell snapshot its lead's Claude
+/// Code runs before every Bash command (rv-audit TPH r1 F2). The real lead runs one Bash
+/// call, so its snapshot exists under its config home. A process in the installed teammates'
+/// profile appends a command to each snapshot there and must be refused, so a snapshot the
+/// lead writes again cannot pass for the refusal, and the lead's next Bash call must not run
+/// it.
+#[test]
+#[ignore = "live qualification: needs a signed-in Claude account, CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
+fn live_a_teammate_cannot_plant_a_command_in_its_lead_s_shell_snapshot() {
+    let mut signed_in = SignedIn::claude();
+    let lead = ManagedAgent::engine_native_lead(&claude());
+    let team = lead.into_native_worker(
+        signed_in.acquire("claude-live-snapshot"),
+        BASH_ONE,
+        TURN,
+        AgentAccess::Sandboxed,
+    );
+    let first = finished(&team.until_finished(TURN));
+    assert!(answered(&first, "ONE"), "{first:?}");
+    let folder = team.home.join("shell-snapshots");
+    let snapshots: Vec<PathBuf> = std::fs::read_dir(&folder)
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|entry| entry.path())
+                .filter(|path| {
+                    path.file_name()
+                        .and_then(|name| name.to_str())
+                        .is_some_and(|name| name.starts_with("snapshot-") && name.ends_with(".sh"))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    assert!(
+        !snapshots.is_empty(),
+        "the lead's Claude Code keeps its shell snapshot in {}",
+        folder.display()
+    );
+    let teammates = super::agent_teammates_profile(&team.runtime.state, AGENT);
+    assert!(
+        teammates.is_file(),
+        "the native lead's launch installed its teammates' profile"
+    );
+    let marker = team.home.join("snapshot-planted.txt");
+    let planted = crate::spawn_gate::output(
+        Command::new(crate::sandbox::SANDBOX_EXEC)
+            .arg("-f")
+            .arg(&teammates)
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg(format!(
+                "for f in '{folder}'/snapshot-*.sh; do printf 'echo planted > {marker}\\n' >> \"$f\" || exit 1; done",
+                folder = folder.display(),
+                marker = marker.display(),
+            ))
+            .current_dir(&team.home)
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("HOME", &team.home)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    team.order(Order::Turn(
+        BASH_TWO.to_owned(),
+        None,
+        TurnRules {
+            limit: Some(TURN),
+            background: crate::team::BackgroundAtEnd::Wait,
+        },
+    ));
+    let second = finished(&team.until_finished(TURN));
+    println!(
+        "real claude lead after a teammate's snapshot write: append={:?} turns={second:?}",
+        planted.status.code()
+    );
+    assert!(answered(&second, "TWO"), "{second:?}");
+    assert!(
+        !planted.status.success(),
+        "a teammate appended to its lead's shell snapshot: {}",
+        String::from_utf8_lossy(&planted.stderr)
+    );
+    assert!(
+        !marker.exists(),
+        "a teammate's line in its lead's shell snapshot ran in the lead's next Bash call: {}",
+        String::from_utf8_lossy(&planted.stderr)
+    );
+}
+
+/// Every file under `root`, at most `depth` folders down and `FILES_MAX` in all, read by
+/// the test from outside every sandbox. Inputs: the folder and the depth. Output: the files.
+fn files_under(root: &Path, depth: usize) -> Vec<PathBuf> {
+    const FILES_MAX: usize = 4096;
+    let mut found = Vec::new();
+    let mut folders = vec![(root.to_path_buf(), 0)];
+    while let Some((folder, level)) = folders.pop() {
+        let Ok(entries) = std::fs::read_dir(&folder) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() && level < depth {
+                folders.push((entry.path(), level + 1));
+            } else if kind.is_file() && found.len() < FILES_MAX {
+                found.push(entry.path());
+            }
+        }
+    }
+    found
+}
+
+/// The files of `files` whose text holds `word`. Inputs: the files and the word. Output:
+/// the matching files.
+fn holding(files: &[PathBuf], word: &str) -> Vec<PathBuf> {
+    files
+        .iter()
+        .filter(|file| std::fs::read_to_string(file).is_ok_and(|text| text.contains(word)))
+        .cloned()
+        .collect()
+}
+
+/// The lead's name in its Claude Code team, which names its inbox `inboxes/team-lead.json`.
+const LEAD_NAME: &str = "team-lead";
+
+/// The names and agent ids of the lead's teammates, read from every `config.json` among
+/// `shared`, the lead itself left out. Input: the files under the lead's `teams/`. Output:
+/// the names and ids.
+fn teammate_names(shared: &[PathBuf]) -> BTreeSet<String> {
+    shared
+        .iter()
+        .filter(|file| file.file_name().is_some_and(|name| name == "config.json"))
+        .filter_map(|file| std::fs::read(file).ok())
+        .filter_map(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .flat_map(|config| {
+            config
+                .get("members")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default()
+        })
+        .filter(|member| member.get("name").and_then(serde_json::Value::as_str) != Some(LEAD_NAME))
+        .flat_map(|member| {
+            ["name", "agentId"]
+                .into_iter()
+                .filter_map(|key| member.get(key)?.as_str().map(str::to_owned))
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// The lead's one turn for the TPH-2 C live check: make a task, create one teammate that
+/// claims and completes it, send that teammate a word and pass its answer on. Input: the
+/// run's token. Output: the prompt.
+fn own_home_prompt(token: &str) -> String {
+    format!(
+        "Use your agent team for this. First create a task in your team's task list with exactly the title {token}TASK. Then spawn exactly one teammate and tell it: claim the task titled {token}TASK and mark it completed, then wait for a message from the team lead and send the team lead back the exact word that message holds followed by OK, and nothing else. Then send the teammate a message with exactly the word {token}MSG. Wait until the teammate's answer reaches you and the task shows completed, then reply with exactly the teammate's answer and nothing else."
+    )
+}
+
+/// TPH-2 C, live: a native lead's teammates run from their own config home and reach the
+/// lead only through the team folders the lead shares. A real Claude Code lead, started by
+/// the runtime on the owner's account, makes a task, creates one teammate, messages it and
+/// waits for its answer. Checked: the teammate starts signed in and answers, past every
+/// first-run, trust and sign-in screen (1); its answer to the lead's message lands in the
+/// lead's own inbox through the linked `teams/`, a file only a teammate writes that answer to
+/// (2); it, not the lead, completes the lead's task in the linked `tasks/`, so the task's
+/// owner is the teammate (3); its transcript sits in the mates home, where the engine's
+/// record walk, which usage and the relay's read receipts use, finds it (4); and Seatbelt
+/// denied nothing at or under the lead's `teams` or `tasks` folders during the run (5).
+#[test]
+#[ignore = "live qualification: needs a signed-in Claude account, CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
+fn live_native_teammates_work_from_their_own_home_through_the_lead_s_team_folders() {
+    let mut signed_in = SignedIn::claude();
+    let started_at = crate::spawn_gate::output(
+        Command::new("/bin/date")
+            .arg("+%Y-%m-%d %H:%M:%S")
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null()),
+    )
+    .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_owned())
+    .unwrap();
+    let lead = ManagedAgent::engine_native_lead(&claude());
+    let name = AgentId::team(AGENT).unwrap();
+    let servers = LeadServers {
+        tmux: installed(&lead.base).expect("BLOCKED: tmux must be installed"),
+        own: harness_socket(&lead.base, &name).unwrap(),
+        mates: teammates_socket(&lead.base, &name).unwrap(),
+        profile: lead.sandbox_profile.clone(),
+    };
+    let token = format!(
+        "OWNHOME{:x}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    );
+    let answer = format!("{token}MSGOK");
+    let team = lead.into_native_worker(
+        signed_in.acquire("claude-live-own-home"),
+        &own_home_prompt(&token),
+        TEAM_TURN,
+        AgentAccess::Sandboxed,
+    );
+    let mates = crate::launch_context::mates_home(&team.home);
+    let reports = team
+        .reports_within(TEAM_TURN, |report| token_turn(report, &answer).is_some())
+        .unwrap_or_else(|(why, seen)| {
+            for (socket, pane, text) in servers.screens() {
+                println!("screen {} {pane}:\n{text}", socket.display());
+            }
+            println!(
+                "mates transcripts={:?} shared={:?} tasks={:?}",
+                files_under(&mates.join("projects"), 3),
+                files_under(&team.home.join("teams"), 3),
+                files_under(&team.home.join("tasks"), 2)
+            );
+            panic!("{why}, after {} others: {:?}", seen.len(), shown(&seen))
+        });
+    let (end, text) = reports
+        .last()
+        .and_then(|report| token_turn(report, &answer))
+        .expect("the wait ends on the lead's turn holding the teammate's answer");
+    let transcripts = files_under(&mates.join("projects"), 3);
+    let shared = files_under(&team.home.join("teams"), 3);
+    let tasks = files_under(&team.home.join("tasks"), 2);
+    let (walked, _, _) =
+        crate::usage::capture::records(&team.home, crate::usage::capture::Format::Claude);
+    let denials = crate::spawn_gate::output(
+        Command::new("/usr/bin/log")
+            .args(["show", "--style", "compact", "--start", &started_at, "--predicate"])
+            .arg("eventMessage CONTAINS \"deny\" AND (eventMessage CONTAINS \"/teams\" OR eventMessage CONTAINS \"/tasks\")")
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped()),
+    )
+    .unwrap();
+    let lead_folders = [
+        format!("/agent-{AGENT}/home/teams"),
+        format!("/agent-{AGENT}/home/tasks"),
+    ];
+    let denied: Vec<String> = String::from_utf8_lossy(&denials.stdout)
+        .lines()
+        .filter(|line| {
+            lead_folders
+                .iter()
+                .any(|folder| line.contains(folder.as_str()))
+        })
+        .map(str::to_owned)
+        .collect();
+    let inbox = format!("{LEAD_NAME}.json");
+    let lead_inboxes: Vec<PathBuf> = shared
+        .iter()
+        .filter(|file| {
+            file.file_name().is_some_and(|name| name == inbox.as_str())
+                && file
+                    .parent()
+                    .and_then(Path::file_name)
+                    .is_some_and(|folder| folder == "inboxes")
+        })
+        .cloned()
+        .collect();
+    let mates_names = teammate_names(&shared);
+    let completed_by_teammate = holding(&tasks, &format!("{token}TASK")).iter().any(|file| {
+        std::fs::read(file)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+            .is_some_and(|task| {
+                task.get("status").and_then(serde_json::Value::as_str) == Some("completed")
+                    && task
+                        .get("owner")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|owner| mates_names.contains(owner))
+            })
+    });
+    println!(
+        "real claude native team in its own home: end={end:?} text={text:?} transcripts={transcripts:?} shared={shared:?} lead_inboxes={lead_inboxes:?} teammates={mates_names:?} tasks={tasks:?} walked={walked:?} denied={denied:?} log_exit={:?} turns={:?}",
+        denials.status.code(),
+        finished(&reports)
+    );
+    assert_eq!(end, TurnEnd::Success, "{text:?}");
+    let teammate = holding(&transcripts, &format!("{token}MSG"));
+    assert!(
+        !teammate.is_empty(),
+        "no teammate transcript in its own home {} holds the lead's message",
+        mates.display()
+    );
+    assert!(
+        !holding(&teammate, &answer).is_empty(),
+        "the teammate's own transcript holds no answer to the lead's message"
+    );
+    assert!(
+        !holding(&lead_inboxes, &answer).is_empty(),
+        "the teammate's answer did not reach the lead's own inbox in the lead's teams folder: {lead_inboxes:?} {shared:?}"
+    );
+    assert!(
+        !mates_names.is_empty(),
+        "the lead's team config names no teammate: {shared:?}"
+    );
+    assert!(
+        completed_by_teammate,
+        "the lead's task was not completed by its teammate in the lead's own tasks folder: teammates={mates_names:?} tasks={tasks:?}"
+    );
+    assert!(
+        walked
+            .iter()
+            .any(|record| record.starts_with(&mates) && teammate.contains(record)),
+        "the engine's record walk misses the teammate's transcript: {walked:?}"
+    );
+    assert!(
+        denials.status.success(),
+        "the Seatbelt log could not be read: {}",
+        String::from_utf8_lossy(&denials.stderr)
+    );
+    assert!(
+        denied.is_empty(),
+        "Seatbelt denied a write in the lead's team folders: {denied:?}"
+    );
     team.order(Order::Stop);
     let (_, problem) = team.until_ended(STOP);
     assert_eq!(problem, None);

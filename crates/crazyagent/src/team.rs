@@ -665,6 +665,10 @@ pub enum TeamAction {
         project_id: ProjectId,
         on: bool,
     },
+    ReaskEmptyReply {
+        project_id: ProjectId,
+        on: bool,
+    },
     NewFolderLimit {
         project_id: ProjectId,
         files: u32,
@@ -916,6 +920,7 @@ impl TeamAction {
             | Self::FinishedAgents { .. }
             | Self::AgentBranches { .. }
             | Self::AskBeforeMerge { .. }
+            | Self::ReaskEmptyReply { .. }
             | Self::LiveMaster { .. }
             | Self::HarnessDelivery { .. }
             | Self::Pause { .. }
@@ -942,6 +947,7 @@ impl TeamAction {
             | Self::LandOn { project_id, .. }
             | Self::BackgroundAtEnd { project_id, .. }
             | Self::AskBeforeMerge { project_id, .. }
+            | Self::ReaskEmptyReply { project_id, .. }
             | Self::NewFolderLimit { project_id, .. }
             | Self::MessageSettings { project_id, .. }
             | Self::LiveMaster { project_id, .. }
@@ -1378,6 +1384,10 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE TABLE IF NOT EXISTS team_merge_ask (
                 project TEXT PRIMARY KEY,
                 ask INTEGER NOT NULL CHECK(ask IN (0,1))
+            );
+            CREATE TABLE IF NOT EXISTS team_reask_empty (
+                project TEXT PRIMARY KEY,
+                reask INTEGER NOT NULL CHECK(reask IN (0,1))
             );
             CREATE TABLE IF NOT EXISTS team_session_switches (
                 session TEXT PRIMARY KEY,
@@ -2276,6 +2286,15 @@ pub fn execute(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::ReaskEmptyReply { on, .. } => {
+            tx.execute(
+                "INSERT INTO team_reask_empty(project,reask) VALUES (?1,?2)
+                 ON CONFLICT(project) DO UPDATE SET reask=excluded.reask",
+                params![project.as_str(), on],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::NewFolderLimit { files, .. } => {
             tx.execute(
                 "INSERT INTO team_new_folder_limit(project,files) VALUES (?1,?2)
@@ -2831,6 +2850,12 @@ fn new_folder_default() -> u32 {
     NEW_FOLDER_FILES_DEFAULT
 }
 
+/// The re-ask choice a team status read without one shows: on, as the owner chose
+/// (DEC-111). Output: the default.
+fn reask_default() -> bool {
+    true
+}
+
 /// Everything the clients show about a project's team.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TeamStatus {
@@ -2866,6 +2891,8 @@ pub struct TeamStatus {
     pub background_at_end: BackgroundAtEnd,
     #[serde(default)]
     pub ask_before_merge: bool,
+    #[serde(default = "reask_default")]
+    pub reask_empty_reply: bool,
     #[serde(default = "new_folder_default")]
     pub new_folder_files_max: u32,
     #[serde(default)]
@@ -3396,6 +3423,24 @@ pub fn ask_before_merge(connection: &Connection, project: &ProjectId) -> Result<
         .optional()
         .map_err(error)?;
     Ok(ask.unwrap_or(false))
+}
+
+/// Tells whether the engine asks a sub-agent once more for its reply when a task turn
+/// ends with no reply text, before it reports the task; on by default (DEC-111). Takes a
+/// connection and the project. Returns the setting.
+pub fn reask_empty_reply(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<bool, EngineError> {
+    let reask: Option<bool> = connection
+        .query_row(
+            "SELECT reask FROM team_reask_empty WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    Ok(reask.unwrap_or_else(reask_default))
 }
 
 /// The most files one new top-level folder, a folder the owner's branch does not have,
@@ -4084,6 +4129,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         land_on: land_on(connection, project)?,
         background_at_end: background_at_end(connection, project)?,
         ask_before_merge: ask_before_merge(connection, project)?,
+        reask_empty_reply: reask_empty_reply(connection, project)?,
         new_folder_files_max: new_folder_files_max(connection, project)?,
         coordination: Some(coordination(connection, project)?),
         message_settings: agent_messages::settings(connection, project)?,
