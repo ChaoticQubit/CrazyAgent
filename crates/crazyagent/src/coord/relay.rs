@@ -495,6 +495,9 @@ pub fn answer(
     Ok(())
 }
 
+/// A relay answer's payload and the messages it hands over.
+type Reply = (Vec<u8>, Vec<MessageId>);
+
 /// Carries out one relay request for the teammate in `pane` and makes its answer. Takes
 /// the database, the project, the lead, the pane, the request and the time in ms. Returns
 /// the payload and the messages it hands over, None for a pane no live teammate of the
@@ -506,7 +509,7 @@ fn reply(
     pane: &str,
     request: &[u8],
     now: i64,
-) -> Result<Option<(Vec<u8>, Vec<MessageId>)>, EngineError> {
+) -> Result<Option<Reply>, EngineError> {
     let team = recipients(db, project, lead)?;
     let Some(mate) = team.get(pane).copied().filter(|_| pane != LEAD_TAG) else {
         return Ok(None);

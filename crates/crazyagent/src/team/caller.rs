@@ -29,6 +29,10 @@ const STAMPS_MAX: usize = 64;
 /// (DEC-111 S1R1-3).
 const STAMPS_PER_PANE_MAX: usize = 8;
 const STAMP_TTL: Duration = Duration::from_secs(60);
+/// The engine's handler of a relay request from a pane (OQ-7 B). Takes the pane, the pane
+/// process the connection was found under, the request line and the connection, on which
+/// it writes the answer.
+pub type RelayHandler<'a> = dyn FnMut(&str, u32, &[u8], &mut dyn Write) + 'a;
 /// The most panes whose first naming process the socket remembers; the oldest makes room.
 const PINS_MAX: usize = 64;
 const ID_BYTES: usize = 32;
@@ -434,7 +438,7 @@ impl Callers {
         &mut self,
         panes: &mut dyn FnMut() -> Vec<(String, u32)>,
         whom: &mut dyn FnMut(&str, u32) -> Option<Whom>,
-        relay: &mut dyn FnMut(&str, u32, &[u8], &mut dyn Write),
+        relay: &mut RelayHandler<'_>,
     ) -> usize {
         let now = Instant::now();
         self.stamps
@@ -561,12 +565,7 @@ impl Callers {
     /// non-blocking with a send buffer that holds a whole answer, so the engine writes it at
     /// once and never waits on a hook that stopped reading. Takes the socket, the connection,
     /// the request and the engine's handler.
-    fn relay(
-        &mut self,
-        mut pending: Pending,
-        request: &[u8],
-        relay: &mut dyn FnMut(&str, u32, &[u8], &mut dyn Write),
-    ) {
+    fn relay(&mut self, mut pending: Pending, request: &[u8], relay: &mut RelayHandler<'_>) {
         let room = 2 * (ANSWERED.len() + REPLY_BYTES_MAX);
         let placed = pending
             .pane

@@ -9525,7 +9525,11 @@ fn a_named_call_whose_file_changed_after_naming_is_refused() {
     }
     let own = std::process::id();
     assert_eq!(
-        callers.serve(&mut || vec![("%900".to_owned(), own)], &mut |_, _| None),
+        callers.serve(
+            &mut || vec![("%900".to_owned(), own)],
+            &mut |_, _| None,
+            &mut |_, _, _, _| {}
+        ),
         2
     );
     for stream in &mut streams {
@@ -9628,7 +9632,8 @@ fn a_caller_found_under_the_lead_s_pane_id_from_another_process_is_not_the_lead(
             &mut || vec![(native.own.clone(), other)],
             &mut |pane, pid| {
                 pane_whom(&f.connection, Some(host_ref), &project, lead, (pane, pid))
-            }
+            },
+            &mut |_, _, _, _| {}
         ),
         1
     );
@@ -9757,7 +9762,11 @@ fn an_unlinked_caller_socket_is_bound_again_on_the_next_tick() {
         let asked = scope.spawn(|| crate::team::caller::name_call(&mailbox, &id, &digest));
         let deadline = Instant::now() + crate::team::caller::CALLER_WAIT;
         while !asked.is_finished() && Instant::now() < deadline {
-            callers.serve(&mut || vec![("%5".to_owned(), own)], &mut |_, _| None);
+            callers.serve(
+                &mut || vec![("%5".to_owned(), own)],
+                &mut |_, _| None,
+                &mut |_, _, _, _| {},
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
         asked.join().unwrap()
@@ -9815,7 +9824,11 @@ fn a_caller_socket_blocked_by_an_obstacle_is_bound_once_the_obstacle_is_gone() {
             let asked = scope.spawn(|| crate::team::caller::name_call(&mailbox, &id, &digest));
             let deadline = Instant::now() + crate::team::caller::CALLER_WAIT;
             while !asked.is_finished() && Instant::now() < deadline {
-                callers.serve(&mut || vec![(pane.to_owned(), pid)], &mut |_, _| None);
+                callers.serve(
+                    &mut || vec![(pane.to_owned(), pid)],
+                    &mut |_, _| None,
+                    &mut |_, _, _, _| {},
+                );
                 std::thread::sleep(Duration::from_millis(10));
             }
             asked.join().unwrap()
