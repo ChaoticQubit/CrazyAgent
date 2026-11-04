@@ -771,7 +771,10 @@ pub(super) fn accept_to(
         Target::Checkout => check_clean(&owner, &repository, &tip, &tree)?,
         Target::Ref => {}
         Target::Agent(agent) => {
-            if agent.head()? != tip || !flow::holds_only(&agent.repo, &tip)? {
+            let teammates = format!("/{}/", crate::agent_git::TEAMMATES_FOLDER);
+            if agent.head()? != tip
+                || !flow::holds_only_except(&agent.repo, &tip, Some(&teammates))?
+            {
                 return Err(failure("changes_agent_busy"));
             }
         }

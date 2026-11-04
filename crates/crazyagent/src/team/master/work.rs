@@ -21,6 +21,8 @@ const BODY_SHOWN_MAX: usize = 600;
 const SENT_BODY_SHOWN_MAX: usize = 80;
 const TITLE_SHOWN_MAX: usize = 120;
 const CLAIMS_SHOWN_MAX: usize = 300;
+const WORKING_TEAMMATES_SHOWN_MAX: usize = 16;
+const WAITING_TEAMMATES_SHOWN_MAX: usize = 16;
 const WIDE_CLAIMS_CHECKED_MAX: usize = 4;
 const WIDE_CLAIMS_TIME: Duration = Duration::from_millis(1500);
 const SECTION_BYTES_MAX: usize = 6 * 1024;
@@ -522,10 +524,12 @@ pub(super) fn transfer_work(
 }
 
 /// Finishes a unit of work with its evidence for `finish_work` (DEC-104). Complete is
-/// refused while a branch of an agent the caller leads is not merged into the caller's
-/// own (`unmerged_for_finish`); review_ready tells the caller's lead, or the master, in a
-/// message. Takes the database, what the answers need, the caller, the work, the version
-/// it read, the outcome and the evidence. Returns the sentence and whether it is a refusal.
+/// refused while a native teammate of the caller still works or its change set still
+/// waits to land on the caller's task branch (OP9B-M1), or while a branch of an agent the
+/// caller leads is not merged into the caller's own (`unmerged_for_finish`); review_ready
+/// tells the caller's lead, or the master, in a message. Takes the database, what the
+/// answers need, the caller, the work, the version it read, the outcome and the evidence.
+/// Returns the sentence and whether it is a refusal.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn finish_work(
     connection: &Connection,
@@ -539,6 +543,42 @@ pub(super) fn finish_work(
 ) -> Result<(String, bool), EngineError> {
     let project = &answering.stored.project_id;
     if outcome == Finish::Complete && !master {
+        let (working, linked) = working_teammates(connection, project, agent)?;
+        if !working.is_empty() {
+            let then = if linked {
+                "CrazyAgent lands each teammate's work on your task branch once it rests and you are idle; finish again once they rest."
+            } else {
+                "Finish again once they rest and you have merged their branches into yours."
+            };
+            return Ok((
+                format!(
+                    "Not finished: these teammates still work: {}. {then}",
+                    bound_text(&working.join(", "), CLAIMS_SHOWN_MAX)
+                ),
+                true,
+            ));
+        }
+        match waiting_teammates(connection, answering, agent) {
+            Ok(waiting) if waiting.is_empty() => {}
+            Ok(waiting) => {
+                return Ok((
+                    format!(
+                        "Not finished: the work of these teammates waits to land on your task branch: {}. CrazyAgent lands it while you are idle and tells you then; finish again after that.",
+                        bound_text(&waiting.join(", "), CLAIMS_SHOWN_MAX)
+                    ),
+                    true,
+                ));
+            }
+            Err(problem) => {
+                return Ok((
+                    format!(
+                        "Not finished: the engine could not tell whether your teammates' work landed ({}). Try again in a moment.",
+                        bound_text(&problem.0, 120)
+                    ),
+                    true,
+                ));
+            }
+        }
         match unmerged_for_finish(connection, answering, agent) {
             Ok(unmerged) if unmerged.is_empty() => {}
             Ok(unmerged) => {
@@ -610,6 +650,90 @@ pub(super) fn finish_work(
         ),
         false,
     ))
+}
+
+/// The names of a lead's native teammates that still start or work (OP-9b, OP9B-C3), which
+/// keep its work from Complete in either layout, since no commit holds their edits yet: in
+/// a linked worktree the engine lands each teammate's work on the lead's task branch only
+/// once it rests, and in its own clone the lead merges their branches. Takes the database,
+/// the project and the lead. Returns the names, none for a lead with no worktree, and
+/// whether the lead's worktree is linked, or a SQLite failure.
+fn working_teammates(
+    connection: &Connection,
+    project: &ProjectId,
+    lead: i64,
+) -> Result<(Vec<String>, bool), EngineError> {
+    let place: Option<(String, String)> = connection
+        .query_row(
+            "SELECT worktree,git_dir FROM team_worktrees WHERE agent=?1 AND project=?2",
+            params![lead, project.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(state)?;
+    let Some((worktree, git_dir)) = place else {
+        return Ok((Vec::new(), false));
+    };
+    let linked = Path::new(&git_dir) != crate::agent_git::git_dir(Path::new(&worktree));
+    let mut statement = connection
+        .prepare(
+            "SELECT COALESCE(n.name,'teammate '||a.id) FROM team_agents a
+             LEFT JOIN team_teammate_names n ON n.agent=a.id
+             WHERE a.project=?1 AND a.parent=?2 AND a.role='teammate'
+             AND a.status IN ('starting','working') ORDER BY a.id LIMIT ?3",
+        )
+        .map_err(state)?;
+    let names: Vec<String> = statement
+        .query_map(
+            params![project.as_str(), lead, WORKING_TEAMMATES_SHOWN_MAX as i64],
+            |row| row.get(0),
+        )
+        .map_err(state)?
+        .collect::<Result<_, _>>()
+        .map_err(state)?;
+    Ok((names, linked))
+}
+
+/// The names of a lead's native teammates whose change set is still open (OP9B-M1): the
+/// engine has committed their work on their own branch in `.worktrees/<name>` but not
+/// landed it on the lead's task branch yet, or it conflicts there. The open sets inside
+/// the lead's teammates' folder are read from the store, so the bound is on open sets, not
+/// on how many teammates the lead ever had (OP9B-R2-L1); a lead that never had a teammate
+/// reads none. Takes the database, what the answers need and the lead. Returns at most
+/// `WAITING_TEAMMATES_SHOWN_MAX` names in path order, none for a lead with no worktree, or
+/// the failure that kept them unread.
+fn waiting_teammates(
+    connection: &Connection,
+    answering: &Answering<'_>,
+    lead: i64,
+) -> Result<Vec<String>, EngineError> {
+    let project = &answering.stored.project_id;
+    let place: Option<(String, bool)> = connection
+        .query_row(
+            "SELECT w.worktree, EXISTS(SELECT 1 FROM team_agents a WHERE a.project=?2
+             AND a.parent=?1 AND a.role='teammate')
+             FROM team_worktrees w WHERE w.agent=?1 AND w.project=?2",
+            params![lead, project.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(state)?;
+    let Some((worktree, true)) = place else {
+        return Ok(Vec::new());
+    };
+    let db = crate::landing::open(answering.landing)?;
+    Ok(
+        crate::landing::open_teammate_sets(&db, Path::new(&worktree), WAITING_TEAMMATES_SHOWN_MAX)?
+            .into_iter()
+            .map(|name| {
+                if crate::agent_git::worktree_name_valid(&name) {
+                    name
+                } else {
+                    "a teammate".to_owned()
+                }
+            })
+            .collect(),
+    )
 }
 
 /// The branches of agents a lead leads that are not merged into its own branch yet, which

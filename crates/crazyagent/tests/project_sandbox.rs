@@ -2370,6 +2370,12 @@ fn a_native_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_clone() {
     if !fs::symlink_metadata(&folder).unwrap().is_dir() || !greet.join(".git").is_file() {
         escaped.push(format!("moved {}", folder.display()));
     }
+    escaped.extend(sibling_folder_escapes(
+        &teammates,
+        &teammates_profile,
+        &folder,
+        &tmp,
+    ));
     assert!(
         escaped.is_empty(),
         "a teammate changes what ties its worktree to the clone: {escaped:?}"
@@ -2378,6 +2384,287 @@ fn a_native_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_clone() {
         fs::read_dir(&lead_only).unwrap().next().is_none(),
         "nothing lands in the lead's folder"
     );
+}
+
+/// OP-9b (plan step 2): a native lead in a linked worktree (the Sandboxed default) has
+/// teammates who write only the teammates' folder of the lead's worktree, where the engine
+/// made each one's linked worktree. The engine commits their turns, so they never write the
+/// lead's files, the lead's or their own worktree records, the object store or the links
+/// that tie a teammate worktree to the repository.
+#[test]
+fn a_linked_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_worktree() {
+    use std::os::unix::fs::PermissionsExt;
+    assert!(Path::new(AGENT_GIT).is_file());
+    let case = case();
+    for arguments in [
+        &["init", "-q"][..],
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+    ] {
+        let made = owner_git(&case.project, &case.home, arguments);
+        assert!(made.status.success(), "{made:?}");
+    }
+    let worktrees = case.project.join(".crazyagent").join("worktrees");
+    fs::create_dir_all(&worktrees).unwrap();
+    let lead_worktree = worktrees.join("agent-1");
+    let greet = lead_worktree
+        .join(crazyagent::agent_git::TEAMMATES_FOLDER)
+        .join("greet");
+    for arguments in [
+        vec![
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            lead_worktree.to_str().unwrap(),
+            "HEAD",
+        ],
+        vec![
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            "crazyagent/write-the-page--greet",
+            greet.to_str().unwrap(),
+            "HEAD",
+        ],
+    ] {
+        let added = owner_git(&case.project, &case.home, &arguments);
+        assert!(added.status.success(), "{added:?}");
+    }
+    let tmux = crazyagent::terminal::tmux::installed(&case.project).expect("tmux is installed");
+    let tmp = crazyagent::sandbox::toolchains::make_tmp(&case.home).unwrap();
+    for folder in crazyagent::sandbox::CLAUDE_TEAM_SHARED {
+        fs::create_dir_all(case.home.join(folder)).unwrap();
+    }
+    let mates_home = case.home.with_file_name("mates-home");
+    fs::create_dir_all(&mates_home).unwrap();
+    fs::set_permissions(&mates_home, fs::Permissions::from_mode(0o700)).unwrap();
+    let (_lead, teammates) = sandbox(&case, SandboxNetwork::Only(Vec::new()))
+        .allow_scratch(&tmp)
+        .unwrap()
+        .confine_to_worktree(&lead_worktree)
+        .unwrap()
+        .native_team(
+            &tmp.join("tmux.sock"),
+            &tmp.join("teammates-0123456789abcdef.sock"),
+            &tmp.join(crazyagent::team::caller::CALLER_SOCKET),
+            &tmux,
+            &mates_home,
+        )
+        .unwrap();
+    let profile = case.profiles.join("teammates.sb");
+    let wrote = run(
+        &teammates,
+        &profile,
+        &format!(
+            "printf 'hello\\n' > {} && mkdir -p {} && printf 'x\\n' > {}",
+            quoted(&greet.join("greet.txt")),
+            quoted(&greet.join("src")),
+            quoted(&greet.join("src").join("a.txt"))
+        ),
+    );
+    assert!(
+        wrote.status.success(),
+        "a teammate writes in its own worktree: {}",
+        String::from_utf8_lossy(&wrote.stderr)
+    );
+    let git = case.project.join(".git");
+    let kept: Vec<(PathBuf, Vec<u8>)> = [
+        greet.join(".git"),
+        git.join("worktrees").join("greet").join("gitdir"),
+        git.join("worktrees").join("greet").join("HEAD"),
+        git.join("worktrees").join("agent-1").join("commondir"),
+        git.join("worktrees").join("agent-1").join("HEAD"),
+    ]
+    .into_iter()
+    .map(|file| {
+        let bytes = fs::read(&file).unwrap();
+        (file, bytes)
+    })
+    .collect();
+    for (file, before) in &kept {
+        let output = run(
+            &teammates,
+            &profile,
+            &format!("printf 'x\\n' >> {}", quoted(file)),
+        );
+        assert!(!output.status.success(), "{}", file.display());
+        assert_eq!(&fs::read(file).unwrap(), before, "{}", file.display());
+    }
+    for target in [
+        lead_worktree.join("lead.txt"),
+        git.join("worktrees").join("agent-1").join("teammate-probe"),
+        git.join("worktrees").join("greet").join("index.lock"),
+        git.join("objects").join("teammate-probe"),
+    ] {
+        write_refused(
+            &teammates,
+            &profile,
+            &format!("printf x > {}", quoted(&target)),
+            &target,
+        );
+    }
+    let lead_only = lead_worktree.join("lead-only");
+    fs::create_dir(&lead_only).unwrap();
+    let folder = lead_worktree.join(crazyagent::agent_git::TEAMMATES_FOLDER);
+    let [bob, carl, dave] = ["bob", "carl", "dave"].map(|name| folder.join(name));
+    let planted = case.home.join("teams").join("planted.lock");
+    let mut escaped: Vec<String> = Vec::new();
+    for (label, script) in [
+        (
+            "symlink at a teammate folder",
+            format!("ln -s {} {}", quoted(&lead_only), quoted(&bob)),
+        ),
+        (
+            "symlink moved in as a teammate folder",
+            format!(
+                "ln -s {} {} && mv {} {}",
+                quoted(&lead_only),
+                quoted(&greet.join("link")),
+                quoted(&greet.join("link")),
+                quoted(&carl)
+            ),
+        ),
+        (
+            "team folder holding a .git moved in as a teammate folder",
+            format!(
+                "mkdir {} && printf 'gitdir: {}\\n' > {} && mv {} {}",
+                quoted(&planted),
+                git.display(),
+                quoted(&planted.join(".git")),
+                quoted(&planted),
+                quoted(&dave)
+            ),
+        ),
+    ] {
+        if run(&teammates, &profile, &script).status.success() {
+            escaped.push(label.to_owned());
+        }
+    }
+    for made in [&bob, &carl, &dave] {
+        if fs::symlink_metadata(made).is_ok() {
+            escaped.push(format!("made {}", made.display()));
+        }
+    }
+    let replaced = run(
+        &teammates,
+        &profile,
+        &format!(
+            "mv {} {} && ln -s {} {}",
+            quoted(&folder),
+            quoted(&tmp.join("teammates-away")),
+            quoted(&lead_only),
+            quoted(&folder)
+        ),
+    );
+    if replaced.status.success() {
+        escaped.push("teammates folder entry replaced".to_owned());
+    }
+    if !fs::symlink_metadata(&folder).unwrap().is_dir() || !greet.join(".git").is_file() {
+        escaped.push(format!("moved {}", folder.display()));
+    }
+    escaped.extend(sibling_folder_escapes(&teammates, &profile, &folder, &tmp));
+    assert!(
+        escaped.is_empty(),
+        "a teammate changes where the engine adds a teammate worktree: {escaped:?}"
+    );
+    assert!(
+        fs::read_dir(&lead_only).unwrap().next().is_none(),
+        "nothing lands in the lead's folder"
+    );
+}
+
+/// Tries from a native lead's teammates' profile to rename, move out or remove a teammate's
+/// worktree folder and to leave a stray entry beside them in the teammates' folder
+/// (OP9B-C1), also spelled in another letter case and as a hard link (OP9B-R3-L1), which
+/// one profile shared by all teammates would let one do to another. Takes
+/// the teammates' sandbox and profile, the teammates' folder and a temp folder outside it.
+/// Returns what got through, each named.
+fn sibling_folder_escapes(
+    teammates: &ProjectSandbox,
+    profile: &Path,
+    folder: &Path,
+    tmp: &Path,
+) -> Vec<String> {
+    let (frank, gina) = (folder.join("frank"), folder.join("gina"));
+    fs::create_dir(&frank).unwrap();
+    fs::write(frank.join("work.txt"), "Frank's work.\n").unwrap();
+    fs::create_dir(&gina).unwrap();
+    let upper = folder.with_file_name(crazyagent::agent_git::TEAMMATES_FOLDER.to_uppercase());
+    assert!(
+        upper.join("frank").is_dir(),
+        "the volume finds the teammates' folder in any letter case"
+    );
+    let mut escaped: Vec<String> = Vec::new();
+    for (label, script) in [
+        (
+            "sibling folder renamed in another letter case",
+            format!(
+                "mv {} {}",
+                quoted(&upper.join("frank")),
+                quoted(&upper.join("frank-case"))
+            ),
+        ),
+        (
+            "stray folder in another letter case",
+            format!("mkdir {}", quoted(&upper.join("case-stray"))),
+        ),
+        (
+            "hard link beside the teammates' worktrees",
+            format!(
+                "ln {} {}",
+                quoted(&frank.join("work.txt")),
+                quoted(&folder.join("linked.txt"))
+            ),
+        ),
+        (
+            "sibling folder renamed",
+            format!(
+                "mv {} {}",
+                quoted(&frank),
+                quoted(&folder.join("frank-renamed"))
+            ),
+        ),
+        (
+            "sibling folder moved out",
+            format!("mv {} {}", quoted(&frank), quoted(&tmp.join("frank-away"))),
+        ),
+        (
+            "empty sibling folder removed",
+            format!("rmdir {}", quoted(&gina)),
+        ),
+        (
+            "stray file",
+            format!("printf x > {}", quoted(&folder.join("stray.txt"))),
+        ),
+        (
+            "stray folder",
+            format!("mkdir {}", quoted(&folder.join("stray"))),
+        ),
+    ] {
+        if run(teammates, profile, &script).status.success() {
+            escaped.push(label.to_owned());
+        }
+    }
+    if fs::read(frank.join("work.txt")).ok().as_deref() != Some(b"Frank's work.\n".as_slice()) {
+        escaped.push("sibling's work moved".to_owned());
+    }
+    if !gina.is_dir() {
+        escaped.push("empty sibling folder gone".to_owned());
+    }
+    for stray in [
+        "frank-renamed",
+        "stray.txt",
+        "stray",
+        "frank-case",
+        "case-stray",
+        "linked.txt",
+    ] {
+        if fs::symlink_metadata(folder.join(stray)).is_ok() {
+            escaped.push(format!("made {stray}"));
+        }
+    }
+    escaped
 }
 
 #[test]
