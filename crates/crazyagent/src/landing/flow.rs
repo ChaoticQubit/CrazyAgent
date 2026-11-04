@@ -909,9 +909,14 @@ pub(super) fn reset_if_quiet(
 /// The pathspec that leaves the teammates' folder at the top of an agent worktree out of
 /// what the engine lists and commits there (OP-9b): each native teammate's own worktree
 /// sits in `.worktrees/<name>` and lands through its own branch, never as an embedded
-/// repository in its lead's turn. Output: the pathspec.
+/// repository in its lead's turn. It is a glob over everything below the folder whose
+/// first character is a one-character class, so it has no literal prefix: git then never
+/// reports the folder as an ignored path named on the command line and fails the add when
+/// an ignore rule hides it, and it still leaves out what the index tracks there. Output:
+/// the pathspec.
 fn teammates_left_out() -> String {
-    format!(":(exclude,top){}", agent_git::TEAMMATES_FOLDER)
+    let (first, rest) = agent_git::TEAMMATES_FOLDER.split_at(1);
+    format!(":(exclude,top,glob)[{first}]{rest}/**")
 }
 
 /// Refuses a change past the bounds before git stores any of it: too many changed
