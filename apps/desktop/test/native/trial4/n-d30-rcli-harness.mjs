@@ -1,7 +1,12 @@
-/** Judges where Settings, Harnesses lists RCLI. Input: the row { group, status }. Output:
- * null when RCLI may be chosen from there, else what is wrong in the owner's words. */
+const MASTER_ONLY = "Limited control: runs only as a CrazyAgent master";
+
+/** Judges where Settings, Harnesses lists RCLI: Ready, or Limited control as a harness that
+ * runs only as the master, the two places it can be picked as the project master from.
+ * Input: the row { group, status }. Output: null when RCLI may be chosen from there, else
+ * what is wrong in the owner's words. */
 export function rcliProblem(row) {
-  return row.group === "Ready" ? null : `RCLI is listed under ${row.group} (${row.status}), not Ready`;
+  if (row.group === "Ready" || (row.group === "Limited control" && row.status === MASTER_ONLY)) return null;
+  return `RCLI is listed under ${row.group} (${row.status}), not Ready or as master only`;
 }
 
 /** Reads the RCLI row of Settings, Harnesses: the group it is listed under and its status.
@@ -53,6 +58,6 @@ export const checks = [{
     if (choice.disabled) throw new Error(`the Master harness list shows RCLI (${choice.label}) but it cannot be picked`);
     await kit.inView("#ps-master-harness");
     await kit.screen();
-    return `RCLI listed under Ready (${row.status}); the Master harness list offers ${choice.label}`;
+    return `RCLI listed under ${row.group} (${row.status}); the Master harness list offers ${choice.label}`;
   },
 }];
