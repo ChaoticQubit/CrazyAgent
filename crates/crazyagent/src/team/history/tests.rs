@@ -1102,3 +1102,39 @@ fn a_private_key_field_and_a_json_escaped_key_block_are_masked() {
         "quokkafern",
     );
 }
+
+/// OP-25 r2 residual: a short value after a credential-named key whose `=` or `:` stands
+/// apart, as Python, TOML, INI and spaced JSON write it, is masked.
+#[test]
+fn a_short_value_after_a_spaced_equals_or_colon_is_masked() {
+    assert_masked(
+        "auth_token = \"tk9Lm2\"\n\
+         token = \"tq8Wz1\"\n\
+         pass = hunter7x\n\
+         {\"token\" : \"tz3Kp9\"}\n\
+         quokkafern done",
+        &["tk9Lm2", "tq8Wz1", "hunter7x", "tz3Kp9"],
+        "quokkafern",
+    );
+}
+
+/// OP-25 r2 residual: an all-lowercase password attached to `-p` is masked, while known
+/// compiler and `find` flags spelled `-p...` stay searchable.
+#[test]
+fn a_lowercase_password_attached_to_p_is_masked_and_known_p_flags_stay() {
+    assert_masked(
+        "$ mysql -u root -pletmein shop\n$ cc -pthread -pedantic main.c",
+        &["letmein"],
+        "-pthread",
+    );
+}
+
+/// OP-25 r2 residual: a token wrapped onto an indented next line is masked whole.
+#[test]
+fn an_indented_wrapped_tail_of_a_masked_token_is_masked() {
+    assert_masked(
+        "config ghp_0123456789abcdefABCD\n    EF0123456789abcd\nquokkafern done",
+        &["EF0123456789abcd"],
+        "quokkafern",
+    );
+}
