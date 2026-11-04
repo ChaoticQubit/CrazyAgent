@@ -2370,6 +2370,12 @@ fn a_native_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_clone() {
     if !fs::symlink_metadata(&folder).unwrap().is_dir() || !greet.join(".git").is_file() {
         escaped.push(format!("moved {}", folder.display()));
     }
+    escaped.extend(sibling_folder_escapes(
+        &teammates,
+        &teammates_profile,
+        &folder,
+        &tmp,
+    ));
     assert!(
         escaped.is_empty(),
         "a teammate changes what ties its worktree to the clone: {escaped:?}"
@@ -2557,6 +2563,7 @@ fn a_linked_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_worktree()
     if !fs::symlink_metadata(&folder).unwrap().is_dir() || !greet.join(".git").is_file() {
         escaped.push(format!("moved {}", folder.display()));
     }
+    escaped.extend(sibling_folder_escapes(&teammates, &profile, &folder, &tmp));
     assert!(
         escaped.is_empty(),
         "a teammate changes where the engine adds a teammate worktree: {escaped:?}"
@@ -2565,6 +2572,66 @@ fn a_linked_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_worktree()
         fs::read_dir(&lead_only).unwrap().next().is_none(),
         "nothing lands in the lead's folder"
     );
+}
+
+/// Tries from a native lead's teammates' profile to rename, move out or remove a teammate's
+/// worktree folder and to leave a stray entry beside them in the teammates' folder
+/// (OP9B-C1), which one profile shared by all teammates would let one do to another. Takes
+/// the teammates' sandbox and profile, the teammates' folder and a temp folder outside it.
+/// Returns what got through, each named.
+fn sibling_folder_escapes(
+    teammates: &ProjectSandbox,
+    profile: &Path,
+    folder: &Path,
+    tmp: &Path,
+) -> Vec<String> {
+    let (frank, gina) = (folder.join("frank"), folder.join("gina"));
+    fs::create_dir(&frank).unwrap();
+    fs::write(frank.join("work.txt"), "Frank's work.\n").unwrap();
+    fs::create_dir(&gina).unwrap();
+    let mut escaped: Vec<String> = Vec::new();
+    for (label, script) in [
+        (
+            "sibling folder renamed",
+            format!(
+                "mv {} {}",
+                quoted(&frank),
+                quoted(&folder.join("frank-renamed"))
+            ),
+        ),
+        (
+            "sibling folder moved out",
+            format!("mv {} {}", quoted(&frank), quoted(&tmp.join("frank-away"))),
+        ),
+        (
+            "empty sibling folder removed",
+            format!("rmdir {}", quoted(&gina)),
+        ),
+        (
+            "stray file",
+            format!("printf x > {}", quoted(&folder.join("stray.txt"))),
+        ),
+        (
+            "stray folder",
+            format!("mkdir {}", quoted(&folder.join("stray"))),
+        ),
+    ] {
+        if run(teammates, profile, &script).status.success() {
+            escaped.push(label.to_owned());
+        }
+    }
+    if fs::read(frank.join("work.txt")).ok().as_deref() != Some(b"Frank's work.\n".as_slice()) {
+        escaped.push("sibling's work moved".to_owned());
+    }
+    if !gina.is_dir() {
+        escaped.push("empty sibling folder gone".to_owned());
+    }
+    for stray in ["frank-renamed", "stray.txt", "stray"] {
+        if fs::symlink_metadata(folder.join(stray)).is_ok() {
+            escaped.push(format!("made {stray}"));
+        }
+    }
+    escaped
 }
 
 #[test]

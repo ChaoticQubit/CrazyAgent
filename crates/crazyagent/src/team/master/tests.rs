@@ -3230,6 +3230,47 @@ fn finish_work_waits_for_an_unmerged_sub_agent() {
     );
 }
 
+/// OP9B-C3: a lead in its own clone cannot report its work Complete while one of its
+/// native teammates still works, since no commit holds that teammate's edits yet:
+/// finish_work names the teammate, then completes once it rests.
+#[test]
+fn a_clone_lead_finishes_only_once_its_native_teammates_rest() {
+    let mut clones = Clones::new();
+    let work = clones.started();
+    let mate = WORKER + 1;
+    clones
+        .fixture
+        .connection
+        .execute_batch(&format!(
+            "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms,parent,pane)
+             VALUES ({mate},'{PROJECT}','teammate','claude-code',1,'working',{NOW},{NOW},{LEAD},'%7');
+             INSERT INTO team_teammate_names(agent,name) VALUES ({mate},'greet');"
+        ))
+        .unwrap();
+
+    let (answer, error) = clones.finish(work, 1);
+    assert_eq!(
+        (answer.as_str(), error),
+        (
+            "Not finished: these teammates still work: greet. Finish again once they rest and you have merged their branches into yours.",
+            true
+        )
+    );
+    clones
+        .fixture
+        .connection
+        .execute("UPDATE team_agents SET status='idle' WHERE id=?1", [mate])
+        .unwrap();
+    let (answer, error) = clones.finish(work, 1);
+    assert_eq!(
+        (answer.as_str(), error),
+        (
+            format!("Work #{work} is complete at version 2.").as_str(),
+            false
+        )
+    );
+}
+
 /// A lead's `merge` of its finished worker in its own clone runs git with the lead's own
 /// Seatbelt profile, makes a merge commit on the lead's task branch and closes the
 /// worker's change set as Accepted at that commit (feat/coord-spawn 372ee630, 4f372a7e).
