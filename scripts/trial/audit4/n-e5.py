@@ -9,7 +9,8 @@ the owner's Rust toolchain, so a passing run reads it in place. The last cargo t
 an agent decides its exit; a denial or download in any run fails. Only Bash calls are
 runs: a team tool's input that names cargo test is not one. The linker's note that xcrun
 could not write its cache in the per-user temp folder, which the sandbox denies on purpose
-(DEC-104), is a toolchain note, not a denial, when the tests passed.
+(DEC-104), is a toolchain note, not a denial, only in a toolchain call that runs no git, by
+the same rule as T3-09 (audit.toolchain_call).
 """
 
 import json
@@ -74,11 +75,12 @@ def first_line(text, pattern):
     return None
 
 
-def denial(text):
-    """The first sandbox denial line of a run's output, the xcrun cache note left out.
-    Input: the output. Output: the masked line cut to LINE_MAX, or None."""
+def denial(text, toolchain):
+    """The first sandbox denial line of a run's output, the xcrun cache note left out of a
+    toolchain call. Inputs: the output and whether its command is a toolchain call that runs
+    no git. Output: the masked line cut to LINE_MAX, or None."""
     for line in text.splitlines():
-        if DENIAL.search(line) and not XCRUN_CACHE.search(line):
+        if DENIAL.search(line) and not (toolchain and XCRUN_CACHE.search(line)):
             return audit.mask(line.strip())[:LINE_MAX]
     return None
 
@@ -102,13 +104,13 @@ def check(t):
             if fetched:
                 failed.append(f"{label} downloaded a toolchain: {fetched}")
                 break
-        tests = [(output, error) for command, output, error in runs if CARGO_TEST.search(command)]
+        tests = [(audit.toolchain_call(command), output, error) for command, output, error in runs if CARGO_TEST.search(command)]
         if not tests:
             continue
-        denied = next((line for line in (denial(output) for output, _ in tests) if line), None)
-        output, error = tests[-1]
+        denied = next((line for line in (denial(output, toolchain) for toolchain, output, _ in tests) if line), None)
+        toolchain, output, error = tests[-1]
         summary = first_line(output, RESULT) or first_line(output, re.compile(r"\S")) or "no output"
-        cache = first_line(output, XCRUN_CACHE)
+        cache = first_line(output, XCRUN_CACHE) if toolchain else None
         note = f"; toolchain note: {cache}" if cache else ""
         if denied:
             failed.append(f"{label}: cargo test was denied by the sandbox ({denied})")

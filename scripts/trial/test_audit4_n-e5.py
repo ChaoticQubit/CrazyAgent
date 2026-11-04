@@ -120,6 +120,25 @@ class CargoTestTests(unittest.TestCase):
         self.assertIn("toolchain note: = note: xcrun: error: couldn't create cache file", detail)
         self.assertIn("no sandbox denial", detail)
 
+    def test_the_xcrun_cache_line_in_a_cargo_test_call_that_also_runs_git_fails_as_t3_09_does(self):
+        agent = self.runs(XCRUN + PASSED, command="git pull && cargo test")
+        outcome, detail = run(CHECK, self.world, PROJECT, MARK)
+        self.assertEqual(outcome, "FAIL", detail)
+        self.assertIn(f"{agent}(sub-agent): cargo test was denied by the sandbox (= note: xcrun: error: couldn't create cache file", detail)
+        self.assertNotIn("toolchain note:", detail)
+        record = self.world.audit("T3-09")
+        self.assertEqual(record["result"], "FAIL", record["detail"])
+
+    def test_the_xcrun_cache_line_in_a_piped_cargo_test_call_is_a_note_in_n_e5_and_t3_09(self):
+        agent = self.runs(XCRUN + PASSED, command='cargo test 2>&1 | grep -E "^test result|error" ; cat calc.py; ls')
+        outcome, detail = run(CHECK, self.world, PROJECT, MARK)
+        self.assertEqual(outcome, "PASS", detail)
+        self.assertIn(f"{agent}(sub-agent): cargo test exit 0 (test result: ok. 1 passed;", detail)
+        self.assertIn("toolchain note: = note: xcrun: error: couldn't create cache file", detail)
+        record = self.world.audit("T3-09")
+        self.assertIn("toolchain xcrun notes=1", record["detail"])
+        self.assertNotEqual(record["result"], "FAIL", record["detail"])
+
     def test_a_real_denial_beside_the_xcrun_cache_note_still_fails(self):
         agent = self.runs(XCRUN + DENIED)
         outcome, detail = run(CHECK, self.world, PROJECT, MARK)
