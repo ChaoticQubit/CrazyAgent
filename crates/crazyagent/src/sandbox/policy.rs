@@ -84,7 +84,8 @@ impl AgentAccess {
 
 /// How far one project's tools-on agents and the plugin "Check again" server may reach on
 /// the network (DEC-111 Q17): Open is the whole network, Https is port 443 only, None is
-/// nothing beyond the model endpoint. The same choice applies to the agents, research jobs
+/// the model alone: a hosted model's own hosts through the engine's model proxy, or only a
+/// local model's port on loopback. The same choice applies to the agents, research jobs
 /// and the check. A master never reaches more than the model's port; under None a master
 /// with tools reaches a model off loopback only through its model proxy in its live
 /// terminal, and a master turn with tools is refused (S4B-M1).

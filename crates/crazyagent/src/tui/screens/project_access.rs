@@ -311,7 +311,7 @@ pub(in crate::tui) fn network_help(network: AgentNetwork) -> &'static str {
             "Agents and the plugin check reach port 443 only; agents also still reach the model."
         }
         AgentNetwork::None => {
-            "None limits agents to their model's port: port 443 to any host for a hosted model, or only the local model's port. It does not yet limit them to the model host. The plugin check reaches nothing."
+            "None limits agents to their model: a hosted model's own hosts, through the engine's proxy, or only the local model's port. The plugin check reaches nothing."
         }
     }
 }
