@@ -141,6 +141,18 @@ export function inTurn(turned, read) {
   return read - turned <= TURN_MS;
 }
 
+/** The wheel turn up in a run of reads taken from just before the turn: the first read that
+ * moved from the read just before it, which anchors the pair, so output the agent printed
+ * before it took the wheel is not counted against the scroll. Input: the reads in order.
+ * Output: { anchor, up }, or null when no read moved. */
+export function turnUp(reads) {
+  assert(Array.isArray(reads), "a turn is read as a list of views");
+  for (let index = 1; index < reads.length; index += 1) {
+    if (moved(reads[index - 1], reads[index])) return { anchor: reads[index - 1], up: reads[index] };
+  }
+  return null;
+}
+
 /** Whether a fullscreen agent scrolled with the wheel: the turn up moved a block of its rows
  * down and the same turn back down put that block back on its first row. A redraw of its own
  * or new output moves rows once, not there and back by the same rows. Inputs: the views before

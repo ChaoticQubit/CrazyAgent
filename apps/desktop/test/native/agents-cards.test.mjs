@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { TURN_MS, UI_MS, cardOf, copyRow, finishedRow, fromRows, inTurn, moved, notShown, overlapping, paired, redrawMove, roleName, showsTask, spilled, statusWord } from "./agents-cards.mjs";
+import { TURN_MS, UI_MS, cardOf, copyRow, finishedRow, fromRows, inTurn, moved, notShown, overlapping, paired, redrawMove, roleName, showsTask, spilled, statusWord, turnUp } from "./agents-cards.mjs";
 
 /** A card as readCards reads it, at a place and size, with one text box inside it unless
  * given others. Inputs: the title, the box and the text boxes. Output: the card. */
@@ -102,6 +102,8 @@ const NEW_OUTPUT = fullscreen([...TRANSCRIPT.slice(8, 14), "● Read(calc.py)", 
 const SPINNING = fullscreen([...TRANSCRIPT.slice(5, 13), "✻ Pondering… (esc to interrupt)", ...FOOTER]);
 const SPINNER_GONE = fullscreen([...TRANSCRIPT.slice(4, 13), ...FOOTER]);
 const APPENDED = fullscreen([...TRANSCRIPT.slice(6, 14), "● Read(calc.py)", ...FOOTER]);
+const ONE_MORE = fullscreen([...TRANSCRIPT.slice(7, 14), "● Read(calc.py)", ...FOOTER]);
+const UP_FROM_ONE_MORE = fullscreen([...TRANSCRIPT.slice(4, 11), "● Listing 2 directories, 1 new message (click) ↓", ...FOOTER]);
 
 test("a redraw move is the first block of rows each screen holds once that changed row", () => {
   assert.deepEqual(redrawMove(BOTTOM.lines, UP_THREE.lines), { block: TRANSCRIPT.slice(6, 9).join("\n"), from: 0, to: 3 });
@@ -132,6 +134,16 @@ test("a fullscreen scroll counts only when the turn back down puts the block the
 test("a redraw with no wheel behind it, a spinner line gone at the end of a turn, never passes as a scroll", () => {
   assert.equal(paired(SPINNING, SPINNER_GONE, SPINNER_GONE), false);
   assert.equal(paired(SPINNING, SPINNER_GONE, APPENDED), false);
+});
+
+test("the turn up pairs with the read just before the rows moved, so output before the agent took the wheel does not fail a real scroll", () => {
+  assert.equal(paired(BOTTOM, UP_FROM_ONE_MORE, ONE_MORE), false);
+  const turn = turnUp([BOTTOM, ONE_MORE, UP_FROM_ONE_MORE]);
+  assert.deepEqual(turn, { anchor: ONE_MORE, up: UP_FROM_ONE_MORE });
+  assert.equal(paired(turn.anchor, turn.up, ONE_MORE), true);
+  assert.deepEqual(turnUp([BOTTOM, UP_THREE]), { anchor: BOTTOM, up: UP_THREE });
+  assert.equal(turnUp([BOTTOM, NEW_OUTPUT, NEW_OUTPUT]), null);
+  assert.equal(turnUp([BOTTOM]), null);
 });
 
 test("a read answers a wheel turn only within TURN_MS, so a redraw and its exact reverse cannot wait the screen out", () => {
