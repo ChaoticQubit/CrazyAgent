@@ -3043,7 +3043,8 @@ impl Clones {
 /// Complete while one of its native teammates still works, nor while a resting teammate's
 /// change set waits to land on the lead's task branch, since the engine lands each
 /// teammate's work there only once it rests and the lead is idle; finish_work names the
-/// teammate each time, then completes once its work has landed.
+/// teammate each time, then completes once its work has landed, however many teammates
+/// the lead had before (OP9B-R2-L1).
 #[test]
 fn a_linked_lead_finishes_only_once_its_native_teammates_work_landed() {
     let mut fixture = Fixture::new();
@@ -3184,6 +3185,17 @@ fn a_linked_lead_finishes_only_once_its_native_teammates_work_landed() {
         matches!(landed, crate::landing::AcceptOutcome::Landed { .. }),
         "greet's work lands on the lead's task branch"
     );
+    let ended: String = (0..65)
+        .map(|index| {
+            let id = WORKER + 100 + index;
+            format!(
+                "INSERT INTO team_agents(id,project,role,harness,tools,status,created_ms,heartbeat_ms,parent,pane)
+                 VALUES ({id},'{PROJECT}','teammate','claude-code',1,'stopped',{NOW},{NOW},{LEAD},'%{id}');
+                 INSERT INTO team_teammate_names(agent,name) VALUES ({id},'ended-{index}');"
+            )
+        })
+        .collect();
+    fixture.connection.execute_batch(&ended).unwrap();
     let (answer, error) = finish(&mut fixture);
     assert_eq!(
         (answer.as_str(), error),
