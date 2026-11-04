@@ -81,7 +81,7 @@ const WORKTREES_MAX: usize = 8;
 /// The most folders one sandbox hides: every hidden folder a project saves
 /// ([`hidden_paths::HIDDEN_PATHS_MAX`]) plus one a step adds itself, such as the graph step's
 /// `.crazyagent/`.
-pub const HIDDEN_MAX: usize = 9;
+pub const HIDDEN_MAX: usize = hidden_paths::HIDDEN_PATHS_MAX + 1;
 /// The most exact Unix sockets one agent may bind and connect: its own Codex app-server's.
 const SOCKETS_MAX: usize = 2;
 /// The most exact Unix socket grants one agent holds, of every use together: a native lead's
