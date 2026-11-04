@@ -722,20 +722,18 @@ fn waiting_teammates(
         return Ok(Vec::new());
     };
     let db = crate::landing::open(answering.landing)?;
-    Ok(crate::landing::open_teammate_sets(
-        &db,
-        Path::new(&worktree),
-        WAITING_TEAMMATES_SHOWN_MAX,
-    )?
-    .into_iter()
-    .map(|name| {
-        if crate::agent_git::worktree_name_valid(&name) {
-            name
-        } else {
-            "a teammate".to_owned()
-        }
-    })
-    .collect())
+    Ok(
+        crate::landing::open_teammate_sets(&db, Path::new(&worktree), WAITING_TEAMMATES_SHOWN_MAX)?
+            .into_iter()
+            .map(|name| {
+                if crate::agent_git::worktree_name_valid(&name) {
+                    name
+                } else {
+                    "a teammate".to_owned()
+                }
+            })
+            .collect(),
+    )
 }
 
 /// The branches of agents a lead leads that are not merged into its own branch yet, which
