@@ -4,8 +4,8 @@ use crate::host::Host;
 use crate::model::{ShortId, codes};
 use crate::reply::Page;
 use crate::runs::{
-    self, ResultView, RunCancel, RunEnd, RunFinish, RunList, RunRecord, RunShow, RunStart, RunView,
-    StopReason, Verdict,
+    self, ResultView, RunCancel, RunEnd, RunFinish, RunList, RunOutcome, RunRecord, RunShow,
+    RunStart, RunView, Sighted, StopReason, Verdict,
 };
 use crate::tests_model::{
     CaseKind, CaseProtectedVisibility, CaseStatus, CaseView, CriterionRef, LIST_ROWS_MAX,
@@ -16,8 +16,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 
-/// Lists a project's cases by number within the page budget. Input: the context. Output:
-/// `cases` and a `case:<n>` cursor while more may follow.
+/// Lists a project's cases by number within the page budget, each latest outcome as the
+/// host's run sight lets the actor read it. Input: the context. Output: `cases` and a
+/// `case:<n>` cursor while more may follow.
 pub(super) fn case_list<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
     let project = cx.project();
     let after = match cursor(cx, "case", 1)? {
@@ -31,7 +32,7 @@ pub(super) fn case_list<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure>
         unlinked: cx.args.get::<bool>("unlinked").unwrap_or(false),
         after,
     };
-    let rows = tests_store::case_list(cx.tx, cx.actor, project, &filter)?;
+    let rows = tests_store::case_list_as(cx.tx, cx.host, cx.actor, project, &filter)?;
     assert!(rows.len() <= LIST_ROWS_MAX);
     let mut page = Page::new(cx.data_bytes_max);
     let taken = fill(&mut page, "cases", &rows);
@@ -66,8 +67,9 @@ pub(super) fn plan_list<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure>
     Ok(done(page.into_value(), next))
 }
 
-/// Lists a project's runs newest first within the page budget. Input: the context.
-/// Output: `runs` and a `run:<n>` cursor naming the last run shown while more follow.
+/// Lists a project's runs newest first within the page budget, with no title for a run the
+/// host's run sight gives the actor as its outcome only. Input: the context. Output: `runs`
+/// and a `run:<n>` cursor naming the last run shown while more follow.
 pub(super) fn run_list<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
     let input = RunList {
         project: cx.project().clone(),
@@ -77,7 +79,7 @@ pub(super) fn run_list<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> 
         commit: cx.args.get::<&str>("commit").map(str::to_owned),
         before: cursor(cx, "run", 1)?,
     };
-    let listed = runs::list(cx.tx, &input)?;
+    let listed = runs::list_as(cx.tx, cx.host, cx.actor, &input)?;
     let mut page = Page::new(cx.data_bytes_max);
     let taken = fill(&mut page, "runs", &listed.rows);
     assert!(
@@ -92,11 +94,12 @@ pub(super) fn run_list<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> 
     Ok(done(page.into_value(), next.map(|n| format!("run:{n}"))))
 }
 
-/// Shows one case as the actor may see it: its fields on the first page, then its steps
-/// from the cursor's `step:<n>` offset. Input: the context. Output: the page and cursor.
+/// Shows one case as the actor may see it, its latest outcome under the host's run sight:
+/// its fields on the first page, then its steps from the cursor's `step:<n>` offset.
+/// Input: the context. Output: the page and cursor.
 pub(super) fn case_show<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
     let id = cx.args.need::<&TestId>("id");
-    let view = tests_store::case_show(cx.tx, cx.actor, id)?;
+    let view = tests_store::case_show_as(cx.tx, cx.host, cx.actor, id)?;
     let (shown, steps) = match &view.steps {
         StepsView::Hidden => ("hidden", &[][..]),
         StepsView::Headings(steps) => ("headings", &steps[..]),
@@ -154,17 +157,24 @@ pub(super) fn plan_show<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure>
 /// Shows one run: on the first page its fields, source, policy and integrity (a member
 /// that cannot fit is named `<member>_cut`) and unlinked names, then its results from
 /// the cursor's `result:<position>`; a protected case's message and artifact are withheld
-/// from an actor its visibility narrows. Input: the context. Output: the page and cursor.
+/// from an actor its visibility narrows. A run the host's run sight gives the actor as its
+/// outcome only shows `run` as that outcome and `sight` `outcome`, nothing else. Input: the
+/// context. Output: the page and cursor.
 pub(super) fn run_show<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
     let id = cx.args.need::<&TestId>("id");
     let after = cursor(cx, "result", 0)?;
-    let shown = runs::show(
-        cx.tx,
-        &RunShow {
-            id: id.clone(),
-            after,
-        },
-    )?;
+    let input = RunShow {
+        id: id.clone(),
+        after,
+    };
+    let shown = match runs::show_as(cx.tx, cx.host, cx.actor, &input)? {
+        Sighted::Full(shown) => shown,
+        Sighted::Outcome(outcome) => {
+            assert_eq!(&outcome.id, id);
+            return Ok(outcome_only(cx, &outcome));
+        }
+    };
+    assert_eq!(&shown.run.id, id);
     let mut page = Page::new(cx.data_bytes_max);
     match after {
         None => {
@@ -200,9 +210,10 @@ pub(super) fn run_show<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> 
     ))
 }
 
-/// Lists each criterion of a ticket or release with its cases and their latest results.
-/// The cursor `crit:<ticket number>:<position>` names the last criterion shown. Input: the
-/// context. Output: the totals, `rows` and the cursor.
+/// Lists each criterion of a ticket or release with its cases and their latest results,
+/// leaving out each result from a run the host's run sight gives the actor as its outcome
+/// only. The cursor `crit:<ticket number>:<position>` names the last criterion shown.
+/// Input: the context. Output: the totals, `rows` and the cursor.
 pub(super) fn coverage<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
     let project = cx.project();
     let ticket = cx.args.get::<&ShortId>("ticket");
@@ -218,7 +229,7 @@ pub(super) fn coverage<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> 
         of,
         after,
     };
-    let found = coverage::coverage(cx.tx, &query)?;
+    let found = coverage::coverage_as(cx.tx, cx.host, cx.actor, &query)?;
     let mut page = Page::new(cx.data_bytes_max);
     assert!(page.put("criteria_total", json!(found.criteria_total)));
     assert!(page.put("uncovered_total", json!(found.uncovered_total)));
@@ -537,6 +548,19 @@ fn run_ack(run: &RunView) -> Value {
         "verdict": run.verdict,
         "totals": run.totals,
     })
+}
+
+/// The page of a run the actor reads as its outcome only: `run` is the outcome and `sight`
+/// is `outcome`, with no source, policy, integrity, unlinked name, result or cursor.
+/// Inputs: the context and the outcome. Output: the page.
+fn outcome_only<H: Host>(cx: &Cx<'_, '_, H>, outcome: &RunOutcome) -> Outcome {
+    let mut page = Page::new(cx.data_bytes_max);
+    assert!(
+        page.put("run", value(outcome)),
+        "a run's outcome fits a page"
+    );
+    assert!(page.put("sight", json!("outcome")));
+    done(page.into_value(), None)
 }
 
 fn header(run: &RunView) -> Value {
