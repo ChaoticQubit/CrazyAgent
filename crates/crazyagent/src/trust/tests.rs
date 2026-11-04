@@ -707,7 +707,8 @@ async fn a_memory_suggestion_from_an_untrusted_project_is_project_scoped() {
     let mut db = Connection::open(engine.root.path().join("engine.db")).unwrap();
     db.busy_timeout(ENGINE_WAIT).unwrap();
     let written =
-        crate::memory::library::agent_remember(&mut db, &project, "team-1", true, text).unwrap();
+        crate::memory::library::agent_remember(&mut db, &project, (None, "team-1"), true, text)
+            .unwrap();
     assert_eq!(
         written,
         Ok(false),

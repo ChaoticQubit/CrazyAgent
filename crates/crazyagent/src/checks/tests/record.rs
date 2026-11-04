@@ -1104,3 +1104,95 @@ fn an_agent_reading_a_holdout_run_through_the_tracker_sees_only_its_verdict() {
     assert_eq!(title(&agent, holdout), "hidden");
     assert_eq!(case_latest(&agent), failed);
 }
+
+#[test]
+fn an_agent_reading_a_holdout_run_through_the_tracker_ops_sees_only_its_verdict() {
+    let case = Case::new();
+    let id = case.change_set(&[("pass.sh", "exit 0\n")]);
+    let (digest, oracle) = protected_oracle(&case);
+    let ticket = case.ticket_proven_by(&oracle);
+    case.approve_with(
+        json!([check("visible", &["sh", "pass.sh"], "exit_code", None)]),
+        hidden(&digest),
+    );
+    assert_eq!(case.run(&id).len(), 2);
+    let latest = record::latest(&case.db, &id).unwrap();
+    let holdout = latest
+        .iter()
+        .find(|run| run.holdout)
+        .unwrap()
+        .id
+        .to_string();
+    let visible = latest
+        .iter()
+        .find(|run| !run.holdout)
+        .unwrap()
+        .id
+        .to_string();
+    crate::team::initialize(&case.db).unwrap();
+    case.db
+        .execute(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms)
+             VALUES (?1,'sub','codex',0,'working',1,1)",
+            [case.project.as_str()],
+        )
+        .unwrap();
+    let agent = core::Actor::new(&format!("agent:{}", case.db.last_insert_rowid())).unwrap();
+    let ask = |actor: &core::Actor, op: &str, args: Value| -> Value {
+        let tx = case.db.unchecked_transaction().unwrap();
+        let request = Request::parse(op, &serde_json::to_vec(&args).unwrap()).unwrap();
+        let reply: Value =
+            serde_json::from_str(ops::dispatch(&tx, &Host, actor, request).json()).unwrap();
+        assert_eq!(reply["ok"], true, "{op} as {actor:?}: {reply}");
+        reply["data"].clone()
+    };
+    let case_latest = |actor: &core::Actor| {
+        let shown = ask(actor, "case_show", json!({"id": oracle}));
+        let listed = ask(actor, "case_list", json!({"project": "CA"}));
+        let rows = listed["cases"].as_array().unwrap();
+        let row = rows
+            .iter()
+            .find(|row| row["id"] == oracle.as_str())
+            .unwrap();
+        (shown["case"]["latest"].clone(), row["latest"].clone())
+    };
+    let title = |actor: &core::Actor, run: &str| {
+        let listed = ask(actor, "run_list", json!({"project": "CA"}));
+        let rows = listed["runs"].as_array().unwrap();
+        rows.iter().find(|row| row["id"] == run).unwrap()["title"].clone()
+    };
+    let covered = |actor: &core::Actor| {
+        let found = ask(
+            actor,
+            "coverage",
+            json!({"project": "CA", "ticket": String::from(ticket.clone())}),
+        );
+        found["rows"][0]["cases"][0]["latest"].clone()
+    };
+
+    assert_eq!(
+        case_latest(&agent),
+        (Value::Null, Value::Null),
+        "an agent reads no hidden case's outcome from a holdout run"
+    );
+    let shown = ask(&agent, "run_show", json!({"id": holdout}));
+    assert_eq!(shown["sight"], "outcome", "{shown}");
+    assert_eq!(shown["run"]["id"], holdout.as_str());
+    assert_eq!(shown["run"]["verdict"], "failed");
+    assert_eq!(shown["run"]["totals"]["failed"], 1);
+    let text = shown.to_string();
+    for withheld in ["hidden", "oracle", "argv", "integrity", "results"] {
+        assert!(!text.contains(withheld), "{withheld} in {text}");
+    }
+    assert_eq!(title(&agent, &holdout), "");
+    assert_eq!(title(&agent, &visible), "visible");
+    assert_eq!(covered(&agent), Value::Null);
+
+    assert_eq!(case_latest(&owner()), (json!("failed"), json!("failed")));
+    let full = ask(&owner(), "run_show", json!({"id": holdout}));
+    assert_eq!(full.get("sight"), None, "{full}");
+    assert_eq!(full["run"]["title"], "hidden");
+    assert_eq!(full["results"][0]["name"], "oracle::answers");
+    assert_eq!(title(&owner(), &holdout), "hidden");
+    assert!(!covered(&owner()).is_null());
+}
