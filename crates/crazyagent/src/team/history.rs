@@ -1,11 +1,11 @@
 use super::tool::{self, Call};
-use crate::harnesses::transcript::{open_plain, record_message};
+use crate::harnesses::transcript::record_message;
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, params};
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::UNIX_EPOCH;
 
 /// The most hits one `sessions` call returns.
 pub const HITS_MAX: usize = 20;
@@ -37,8 +37,15 @@ const SNIPPET_LEAD_BYTES: usize = 100;
 const MESSAGE_CHARS_MAX: usize = 3000;
 const ROWS_MAX: usize = 20_000;
 const AGENTS_MAX: usize = 1024;
+#[cfg(unix)]
 const DEPTH_MAX: usize = 5;
+#[cfg(unix)]
 const VISITS_MAX: usize = 50_000;
+#[cfg(unix)]
+const RECORD_FOLDER: rustix::fs::OFlags = rustix::fs::OFlags::RDONLY
+    .union(rustix::fs::OFlags::DIRECTORY)
+    .union(rustix::fs::OFlags::NOFOLLOW)
+    .union(rustix::fs::OFlags::CLOEXEC);
 const ROW_TEXT_BYTES_MAX: usize = 64 * 1024;
 const FOOTER_BYTES_MAX: usize = 400;
 const HEADER_SLACK_BYTES: usize = 200;
@@ -65,7 +72,8 @@ enum Source {
     Team,
     Record {
         harness: &'static str,
-        path: PathBuf,
+        agents: PathBuf,
+        below: PathBuf,
     },
 }
 
@@ -410,15 +418,15 @@ fn conversations(connection: &Connection, project: &ProjectId, agents: &Path) ->
             "codex" => "sessions",
             _ => continue,
         };
-        let own = agents.join(format!("agent-{agent}"));
+        let own = PathBuf::from(format!("agent-{agent}"));
         let home = own.join("home");
-        if !plain_dir(&own) || !plain_dir(&home) {
+        if !plain_dir(&agents.join(&own)) || !plain_dir(&agents.join(&home)) {
             continue;
         }
         let label = agent_label(connection, project, agent, &role, harness);
         let mut places = vec![(home.join(folder), format!("agent-{agent}"), label.clone())];
         let mates = crate::launch_context::mates_home(&home);
-        if harness == "claude-code" && plain_dir(&mates) {
+        if harness == "claude-code" && plain_dir(&agents.join(&mates)) {
             places.push((
                 mates.join(folder),
                 format!("agent-{agent}/mates"),
@@ -427,9 +435,9 @@ fn conversations(connection: &Connection, project: &ProjectId, agents: &Path) ->
         }
         for (place, prefix, label) in places {
             let mut paths = Vec::new();
-            walk(&place, DEPTH_MAX, &mut paths, &mut visits);
-            for (path, at_ms) in paths {
-                let Some(stem) = path
+            walk(agents, &place, &mut paths, &mut visits);
+            for (below, at_ms) in paths {
+                let Some(stem) = below
                     .file_stem()
                     .and_then(|stem| stem.to_str())
                     .map(|stem| format!("{prefix}/{stem}"))
@@ -437,7 +445,7 @@ fn conversations(connection: &Connection, project: &ProjectId, agents: &Path) ->
                 else {
                     continue;
                 };
-                let label = match kept.get(&path) {
+                let label = match kept.get(&agents.join(&below)) {
                     Some(session) => format!("{label}, master session {session}"),
                     None => label.clone(),
                 };
@@ -445,7 +453,11 @@ fn conversations(connection: &Connection, project: &ProjectId, agents: &Path) ->
                     id: stem,
                     label,
                     at_ms,
-                    source: Source::Record { harness, path },
+                    source: Source::Record {
+                        harness,
+                        agents: agents.to_path_buf(),
+                        below,
+                    },
                 });
             }
         }
@@ -464,39 +476,70 @@ fn conversations(connection: &Connection, project: &ProjectId, agents: &Path) ->
     found
 }
 
-/// Collects the conversation records under one record folder of a home: `.jsonl` files
-/// at most `depth` folders down, never through a link, within `VISITS_MAX` entries in
-/// all. Takes the folder, the depth left, the list to fill with each path and its change
-/// time and the shared visit count.
-fn walk(dir: &Path, depth: usize, out: &mut Vec<(PathBuf, i64)>, visits: &mut usize) {
-    if depth == 0 || !plain_dir(dir) {
-        return;
+/// Collects the conversation records under one record folder of a home: `.jsonl` files at
+/// most `DEPTH_MAX` folders down, within `VISITS_MAX` entries in all. The record folder opens
+/// from the agents folder one part at a time with no link followed
+/// ([`crate::platform::open_beneath`]), so a folder an agent swapped for a link is skipped.
+/// Takes the agents folder, the record folder below it, the list to fill with each record's
+/// path below the agents folder and its change time, and the shared visit count.
+#[cfg(unix)]
+fn walk(agents: &Path, below: &Path, out: &mut Vec<(PathBuf, i64)>, visits: &mut usize) {
+    if let Ok(folder) = crate::platform::open_beneath(agents, below, RECORD_FOLDER) {
+        walk_folder(&folder, below, DEPTH_MAX, out, visits);
     }
-    let Ok(entries) = std::fs::read_dir(dir) else {
+}
+
+/// Finds no records off Unix, where team agents do not run, so no agent home holds one.
+/// Takes the agents folder, the record folder, the list and the visit count, all unused.
+#[cfg(not(unix))]
+fn walk(_agents: &Path, _below: &Path, _out: &mut Vec<(PathBuf, i64)>, _visits: &mut usize) {}
+
+/// Lists one open record folder for [`walk`]: each plain `.jsonl` file in it and, while
+/// `depth` allows, each plain folder in it, opened from this one without following a link.
+/// Takes the folder, its path below the agents folder, the folder levels it may hold, the
+/// list and the visit count.
+#[cfg(unix)]
+fn walk_folder(
+    folder: &std::os::fd::OwnedFd,
+    below: &Path,
+    depth: usize,
+    out: &mut Vec<(PathBuf, i64)>,
+    visits: &mut usize,
+) {
+    use rustix::fs::{AtFlags, FileType, Mode};
+    let Ok(entries) = rustix::fs::Dir::read_from(folder) else {
         return;
     };
     for entry in entries.flatten() {
+        let name = entry.file_name();
+        if matches!(name.to_bytes(), b"." | b"..") {
+            continue;
+        }
         *visits += 1;
         if *visits > VISITS_MAX || out.len() >= RECORDS_MAX * 4 {
             return;
         }
-        let Ok(kind) = entry.file_type() else {
+        let (Ok(text), Ok(stat)) = (
+            name.to_str(),
+            rustix::fs::statat(folder, name, AtFlags::SYMLINK_NOFOLLOW),
+        ) else {
             continue;
         };
-        let path = entry.path();
-        if kind.is_dir() {
-            walk(&path, depth - 1, out, visits);
-        } else if kind.is_file()
-            && path
-                .extension()
-                .is_some_and(|extension| extension == "jsonl")
-        {
-            let at_ms = entry
-                .metadata()
-                .ok()
-                .and_then(|metadata| metadata.modified().ok())
-                .map_or(0, millis);
-            out.push((path, at_ms));
+        let path = below.join(text);
+        match FileType::from_raw_mode(stat.st_mode) {
+            FileType::Directory if depth > 1 => {
+                if let Ok(inner) = rustix::fs::openat(folder, name, RECORD_FOLDER, Mode::empty()) {
+                    walk_folder(&inner, &path, depth - 1, out, visits);
+                }
+            }
+            FileType::RegularFile
+                if path
+                    .extension()
+                    .is_some_and(|extension| extension == "jsonl") =>
+            {
+                out.push((path, millis(tool::modified(&stat))));
+            }
+            _ => {}
         }
     }
 }
@@ -505,7 +548,8 @@ fn plain_dir(path: &Path) -> bool {
     std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir())
 }
 
-fn millis(time: SystemTime) -> i64 {
+#[cfg(unix)]
+fn millis(time: std::time::SystemTime) -> i64 {
     time.duration_since(UNIX_EPOCH)
         .ok()
         .and_then(|elapsed| i64::try_from(elapsed.as_millis()).ok())
@@ -531,8 +575,12 @@ fn each_message(
     let rows = match &conversation.source {
         Source::Turns(session) => turn_messages(connection, project, session),
         Source::Team => team_messages(connection, project),
-        Source::Record { harness, path } => {
-            return record_messages(harness, path, budget, prefilter, &mut masked);
+        Source::Record {
+            harness,
+            agents,
+            below,
+        } => {
+            return record_messages(harness, agents, below, budget, prefilter, &mut masked);
         }
     };
     for (index, (speaker, text)) in rows.unwrap_or_default().iter().enumerate() {
@@ -546,23 +594,26 @@ fn each_message(
     }
 }
 
-/// Streams the messages of one harness record: never through a link, only a file with one
-/// link, line by line within the budget. Takes the catalog harness id, the record, the
-/// budget, optional words every parsed line must hold and the callback.
+/// Streams the messages of one harness record: opened from the agents folder one part at a
+/// time with no link followed ([`crate::platform::open_plain_beneath`]), only a plain file
+/// with one link, line by line, reading no more of it than the budget has left. Takes the
+/// catalog harness id, the agents folder, the record's path below it, the budget, optional
+/// words every parsed line must hold and the callback.
 fn record_messages(
     harness: &str,
-    path: &Path,
+    agents: &Path,
+    below: &Path,
     budget: &mut Budget,
     prefilter: Option<&[String]>,
     each: &mut dyn FnMut(usize, &str, &str) -> bool,
 ) {
-    let Some(file) = open_plain(path) else {
+    let Ok(file) = crate::platform::open_plain_beneath(agents, below) else {
         return;
     };
-    if !single_link(&file) {
+    if !file.metadata().is_ok_and(|metadata| metadata.is_file()) || !single_link(&file) {
         return;
     }
-    let mut reader = BufReader::with_capacity(64 * 1024, file);
+    let mut reader = BufReader::with_capacity(64 * 1024, file.take(budget.left));
     let mut line = Vec::new();
     let mut index = 0;
     while !budget.spent() {

@@ -3243,9 +3243,10 @@ fn push_without_user_part(kept: &mut String, word: &str) {
 /// prefix and at least 16 bytes long, or an opaque such run of at least 32 bytes mixing
 /// letters and digits; a base64 run of at least `BASE64_RUN_MIN` bytes mixing upper case,
 /// lower case and digits with no plain lowercase folder name between its `/`, or one such
-/// part between its `/` alone (a webhook URL's secret path part); a
-/// `.pgpass`-style line of at least `PGPASS_FIELDS_MIN` filled fields; a `-p<password>` flag
-/// other than the known `PLAIN_P_FLAGS`, or a `--user=user:password` flag; or a path to a
+/// part between its `/` alone (a webhook URL's secret path part); a `.pgpass`-style line,
+/// host, port, database and user fields of letters, digits, `.`, `_`, `-` or `*` and then a
+/// filled password field whatever it holds; a `-p<password>` flag other than the known
+/// `PLAIN_P_FLAGS`, or a `--user=user:password` flag; or a path to a
 /// credential the sandbox guards. Takes the word.
 fn secret_like(word: &str) -> bool {
     let token = |c: char| c.is_ascii_alphanumeric() || c == '-' || c == '_';
@@ -3275,16 +3276,25 @@ fn secret_like(word: &str) -> bool {
             .any(|folder| folder.len() >= 3 && folder.bytes().all(|b| b.is_ascii_lowercase()));
         (mixed(run) && !path) || run.split('/').any(mixed)
     });
-    let pgpass = word.split(':').count() >= PGPASS_FIELDS_MIN
-        && word.split(':').all(|field| {
-            !field.is_empty()
-                && field
-                    .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'*'))
-        });
+    let named = |field: &&str| {
+        !field.is_empty()
+            && field
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-' | b'*'))
+    };
+    let mut fields = word
+        .trim_start_matches(['\'', '"', '`'])
+        .splitn(PGPASS_FIELDS_MIN, ':');
+    let pgpass = fields
+        .by_ref()
+        .take(PGPASS_FIELDS_MIN - 1)
+        .filter(named)
+        .count()
+        == PGPASS_FIELDS_MIN - 1
+        && fields.next().is_some_and(|password| !password.is_empty());
     let password_flag = word
         .strip_prefix("-p")
-        .is_some_and(|value| !value.is_empty() && !value.starts_with('-'))
+        .is_some_and(|value| !value.is_empty())
         && !PLAIN_P_FLAGS.contains(&word);
     let user_flag = word
         .strip_prefix("--user=")
