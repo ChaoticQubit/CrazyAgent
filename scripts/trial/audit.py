@@ -335,16 +335,29 @@ def slug_of(path):
     return re.sub(r"[^A-Za-z0-9]", "-", path)
 
 
+def owned_files(folder, pattern, owner):
+    """Lists the regular files a glob finds in a folder whose real path stays in the owner's
+    folder, so a planted symlink, or a symlinked folder on the way, never leads a read out of
+    an agent's own files. Inputs: the folder, the glob pattern and the owner's folder.
+    Output: the files in order."""
+    if not folder.is_dir():
+        return []
+    return [path for path in sorted(folder.glob(pattern)) if not path.is_symlink() and path.is_file() and under(path, owner)]
+
+
 def transcript_files(entries):
     """Lists the transcript files an agent's entries name: a folder gives every .jsonl file
-    under it, a file is itself. Input: folder or file paths. Output: the files in order."""
+    whose real path stays under it, a file is itself; a symlinked file is never read. Input:
+    folder or file paths. Output: the files in order."""
     files = []
     for entry in entries:
         path = Path(entry)
+        if path.is_symlink():
+            continue
         if path.is_file():
             files.append(path)
         elif path.is_dir():
-            files.extend(sorted(path.glob("**/*.jsonl")))
+            files.extend(owned_files(path, "**/*.jsonl", path))
     return files
 
 
@@ -671,7 +684,7 @@ class Trial:
             if not base.is_dir() or self.dirs_of[lead["id"]] in ([], [base]):
                 continue
             for folder in sorted(base.iterdir()):
-                if folder.is_dir() and folder not in claimed and any(folder.glob("*.jsonl")):
+                if folder.is_dir() and folder not in claimed and under(folder, self.agent_dir(lead["id"])) and any(folder.glob("*.jsonl")):
                     self.pane_scans.append((f"lead {lead['id']} pane {folder.name[-32:]}", lead, self.scan([folder])))
         self.procs = processes()
         self.tree = self.masters + self.leads + [a for lead in self.leads for a in self.children[lead["id"]]]
@@ -695,8 +708,13 @@ class Trial:
             return f"{agent['id']}(lead {self.mode_of(agent)})"
         return f"{agent['id']}({'teammate' if agent['role'] == 'teammate' else 'sub-agent'})"
 
+    def agent_dir(self, agent_id):
+        """The engine folder that holds an agent's own files. Input: the agent id. Output:
+        the path."""
+        return self.root / "team" / "agents" / f"agent-{agent_id}"
+
     def home(self, agent_id):
-        return self.root / "team" / "agents" / f"agent-{agent_id}" / "home"
+        return self.agent_dir(agent_id) / "home"
 
     def tmp_path(self, agent_id):
         digest = hashlib.sha256(str(self.home(agent_id)).encode()).digest()[:8]
@@ -720,23 +738,23 @@ class Trial:
         with the agent-team name on its lines, read once. Input: the lead id. Output: (file,
         name or None) pairs in order."""
         if lead_id not in self.mate_names:
-            base = self.root / "team" / "agents" / f"agent-{lead_id}" / MATES_HOME / "projects"
-            files = sorted(base.glob("*/*.jsonl")) if base.is_dir() else []
+            base = self.agent_dir(lead_id) / MATES_HOME / "projects"
+            files = owned_files(base, "*/*.jsonl", self.agent_dir(lead_id))
             self.mate_names[lead_id] = [(path, agent_name(path)) for path in files]
         return self.mate_names[lead_id]
 
     def transcript_dirs(self, agent):
         own = self.home(agent["id"]) / "projects"
-        base = own
+        base, owner = own, self.agent_dir(agent["id"])
         if not own.is_dir() and agent["role"] == "teammate" and agent["parent"] in self.agents:
             named = [path for path, name in self.mates_transcripts(agent["parent"]) if name and name == agent["handle"]]
             if named:
                 return named
-            base = self.home(agent["parent"]) / "projects"
-        if not base.is_dir():
+            base, owner = self.home(agent["parent"]) / "projects", self.agent_dir(agent["parent"])
+        if not base.is_dir() or not under(base, owner):
             return []
         named = base / slug_of(agent["wt"]) if agent["wt"] else None
-        if named is not None and named.is_dir():
+        if named is not None and named.is_dir() and under(named, owner):
             return [named]
         return [base] if base == own else []
 
@@ -1335,8 +1353,7 @@ def listed_skills(t, agent):
     if claude:
         files, mark = transcript_files(t.dirs_of.get(agent["id"], [])), f'"{SKILL_LISTING}"'
     else:
-        base = t.home(agent["id"]) / "sessions"
-        files, mark = (sorted(base.glob("**/rollout-*.jsonl")) if base.is_dir() else []), CODEX_SKILLS_FOLDER
+        files, mark = owned_files(t.home(agent["id"]) / "sessions", "**/rollout-*.jsonl", t.agent_dir(agent["id"])), CODEX_SKILLS_FOLDER
     names, seen = set(), False
     for path in files:
         try:

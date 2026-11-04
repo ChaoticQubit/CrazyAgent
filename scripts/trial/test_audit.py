@@ -772,6 +772,37 @@ class AuditTests(unittest.TestCase):
         self.assertIn("(teammate) launches ok=0/1", record["stdout"])
         self.assertIn("(teammate) launches ok=1/1", record["stdout"])
 
+    def test_planted_symlinks_in_a_teammate_home_or_an_agent_home_are_not_read(self):
+        w = self.world
+        lead = self.native_team()
+        outside = w.base / "outside"
+        (outside / "linked").mkdir(parents=True)
+        for path, name in ((outside / "planted.jsonl", "greeter"), (outside / "linked" / "other-session.jsonl", "docs")):
+            path.write_text(json.dumps(dict(launch(f"Mate.\n{audit.APP_MARK}\n{MARK}"), agentName=name, teamName="session-1")) + "\n")
+        mates = w.root / "team" / "agents" / f"agent-{lead}" / "mates-home" / "projects"
+        (mates / audit.slug_of("/w/agent-lead") / "planted.jsonl").symlink_to(outside / "planted.jsonl")
+        (mates / "linked").symlink_to(outside / "linked")
+        sub = w.agent("sub", mode="app_spawned")
+        (outside / "projects" / "elsewhere").mkdir(parents=True)
+        (outside / "projects" / "elsewhere" / "session.jsonl").write_text(json.dumps(launch(f"Sub.\n{audit.APP_MARK}\n{MARK}")) + "\n")
+        w.home(sub).mkdir(parents=True)
+        (w.home(sub) / "projects").symlink_to(outside / "projects")
+        record = w.audit("T3-15")
+        self.assertEqual(record["detail"].count("(teammate) files=1"), 2, record["detail"])
+        self.assertNotIn("files=2", record["detail"])
+        self.assertIn(f"no transcripts for {sub}", record["detail"])
+
+    def test_t3_23_never_reads_a_codex_rollout_planted_as_a_symlink(self):
+        lead = self.role_skills(lead_harness="codex")
+        folder = self.world.home(lead) / "sessions" / "2026" / "11" / "04"
+        rollout = folder / "rollout-2026-11-04T10-00-00-1.jsonl"
+        outside = self.world.base / "outside"
+        outside.mkdir()
+        rollout.rename(outside / rollout.name)
+        rollout.symlink_to(outside / rollout.name)
+        record = self.world.audit("T3-23")
+        self.assertIn("role lead chose grill-me, tdd; given grill-me, tdd; installed unknown (no skill listing in its transcripts)", record["stdout"])
+
     def test_t3_22_counts_pane_teammates_transcripts_in_their_lead_s_teammate_home(self):
         self.native_team(rows=False)
         record = self.world.audit("T3-22")
@@ -828,7 +859,8 @@ class AuditTests(unittest.TestCase):
     def role_skills(self, worker_given=False, worker_listed=(), lead_harness="claude-code"):
         """A lead whose role chose tdd and grill-me, which Claude Code lists to no model, and a
         worker whose role chose none, each with the engine's skills record and the listing its
-        harness made. Inputs: the worker's given skills, its listing and the lead's harness."""
+        harness made. Inputs: the worker's given skills, its listing and the lead's harness.
+        Output: the lead id."""
         w = self.world
         self.skill("tdd")
         self.skill("grill-me", hidden=True)
@@ -842,6 +874,7 @@ class AuditTests(unittest.TestCase):
             self.listing(lead, ["crazyagent:tdd", "update-config"])
         self.given(worker, "tdd\n" if worker_given else "", kind="agent-skills")
         self.listing(worker, ["update-config", *worker_listed])
+        return lead
 
     def test_t3_23_skills_per_role_pass_when_each_role_gets_its_choice_and_fail_when_a_worker_gets_more(self):
         self.assertEqual(self.verdict("T3-23"), "UNKNOWN")
