@@ -675,7 +675,7 @@ fn codex_request(trust: crate::trust::Trust, working_dir: PathBuf) -> LaunchRequ
 }
 
 fn codex_arguments(request: &LaunchRequest) -> Vec<String> {
-    let (arguments, _) = super::codex_invocation(request, false, None).unwrap();
+    let (arguments, _) = super::codex_invocation(request, None, None).unwrap();
     arguments
         .into_iter()
         .map(|argument| argument.into_string().unwrap())
@@ -723,9 +723,7 @@ fn an_untrusted_headless_codex_names_its_folder_untrusted_and_reads_no_project_d
         PathBuf::from("/private/tmp/bad\nfolder"),
     );
     assert_eq!(
-        super::codex_invocation(&control, false, None)
-            .unwrap_err()
-            .0,
+        super::codex_invocation(&control, None, None).unwrap_err().0,
         "launch_working_dir_unavailable",
         "an untrusted folder Codex cannot be told about is never launched as trusted"
     );
