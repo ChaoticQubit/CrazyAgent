@@ -7124,6 +7124,84 @@ fn an_own_branch_agent_lowered_to_sandboxed_is_stopped_and_never_woken_in_its_cl
     assert!(run.team.shutdown().unwrap().is_empty());
 }
 
+/// A task Stop all held for an Own branch agent goes to the next sub-agent once the project
+/// is Sandboxed, since that agent can never start in its clone again; the agent stays
+/// stopped and its clone and change set stay as they were.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_task_held_for_an_own_branch_agent_goes_to_the_next_agent_once_the_project_is_sandboxed() {
+    let mut run = agent_at_level(crate::sandbox::policy::AgentAccess::OwnBranch);
+    assert_eq!(run.code("commit"), 0, "{:?}", run.codes);
+    let member = run.member;
+    let project = run.fixture.setup.project_id.clone();
+    owner(
+        &run.fixture,
+        &[crate::team::TeamAction::Pause {
+            project_id: project.clone(),
+        }],
+    );
+    run.fixture
+        .until(&mut run.team, "Stop all ends the Own branch agent", |f| {
+            f.agent_status(member).0 == AgentStatus::Stopped
+                && task_of(f, "Write page.md").0 == "queued"
+        });
+    let (task, _) = task_and_agent(&run.fixture, "Write page.md");
+    assert_eq!(pinned_to(&run.fixture, task), Some(member));
+    crate::sandbox::policy::save(
+        &run.fixture.connection,
+        PROJECT,
+        &crate::sandbox::policy::AgentPolicy {
+            access: crate::sandbox::policy::AgentAccess::Sandboxed,
+            network: crate::sandbox::policy::AgentNetwork::default(),
+            toolchains: Vec::new(),
+        },
+    )
+    .unwrap();
+    owner(
+        &run.fixture,
+        &[crate::team::TeamAction::Resume {
+            project_id: project.clone(),
+        }],
+    );
+    run.fixture
+        .until(&mut run.team, "the held task leaves the queue", |f| {
+            task_of(f, "Write page.md").0 != "queued"
+        });
+    assert_eq!(
+        task_of(&run.fixture, "Write page.md"),
+        ("running".to_owned(), None),
+        "the held task is handed on, not failed"
+    );
+    let (next, _, _) = worked_run(&mut run.fixture, &mut run.team, &[member]);
+    assert_eq!(
+        task_and_agent(&run.fixture, "Write page.md"),
+        (task, Some(next))
+    );
+    assert_eq!(pinned_to(&run.fixture, task), None);
+    assert_eq!(
+        run.fixture.agent_status(member).0,
+        AgentStatus::Stopped,
+        "the Own branch agent is never started in its clone at Sandboxed"
+    );
+    assert!(
+        std::fs::symlink_metadata(run.worktree.join(".git")).is_ok_and(|found| found.is_dir()),
+        "the agent's clone stays in place"
+    );
+    let landing = crate::landing::open(&run.fixture.base).unwrap();
+    assert_eq!(
+        crate::landing::list(&landing, &project)
+            .unwrap()
+            .into_iter()
+            .filter(|set| set.state == crate::landing::ChangeState::Pending)
+            .count(),
+        1,
+        "its change set still waits in Changes"
+    );
+    run.member = next;
+    run.stop();
+    assert!(run.team.shutdown().unwrap().is_empty());
+}
+
 #[test]
 fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
     let plan = |layout: Layout| Plan {
