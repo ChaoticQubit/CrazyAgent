@@ -2,8 +2,9 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { chmod, lstat, mkdtemp, open, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir, userInfo } from "node:os";
 import { basename, dirname, extname, isAbsolute, join, relative, resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const TEXT_BYTES = 64 * 1024;
@@ -20,7 +21,9 @@ const IMAGES = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg
 const ACCOUNT_KINDS = { claude: "claude-subscription", chatgpt: "codex-chatgpt" };
 const FLAGGED = "the recorded TUI text held values the report masked; this image may show them";
 const LEFT_OUT = "left out: the masked frames show the same screens, and the GIF would show account labels and home paths unmasked";
-const USAGE = "report.mjs trial <trial folder> | live <live-pass folder> --script <live-pass.sh> [--repo <checkout>] | retro <leader/trial folder>, each with [--out <folder>] [--chrome <executable>]";
+const USAGE = "report.mjs trial <trial folder> | live <live-pass folder> --script <live-pass.sh> [--repo <checkout>] | retro <leader/trial folder>, each with [--engine <engine root>] [--out <folder>] [--chrome <executable>]";
+const ENGINE = process.env.CRAZYAGENT_ENGINE_ROOT || join(homedir(), "Library", "Application Support", "CrazyAgent", "engine");
+const KNOWN_MIN = 3;
 const RETRO = [
   { trial: 1, audit: "audit.txt", plan: "trial-plan.md", timeline: "timeline.txt", tokens: "tokens.txt", limits: "limits-before.txt", frames: "frames", gif: "trial-1028.gif" },
   { trial: 2, audit: "audit-2.txt", plan: "trial-plan-2.md", timeline: "timeline-2.txt", tokens: "tokens-2.txt", limits: "limits-before-2.txt", frames: "frames-2", gif: "trial-2.gif" },
@@ -66,6 +69,52 @@ const RULES = [
   }],
 ];
 const OPAQUE = /(?<![A-Za-z0-9_-])(?=[A-Za-z0-9_-]*\d)(?=[A-Za-z0-9_-]*[A-Za-z])[A-Za-z0-9_][A-Za-z0-9_-]{31,}(?![A-Za-z0-9_-])/g;
+
+let KNOWN = { rules: [], note: "" };
+
+function literal(value) {
+  const units = [...value].filter((unit) => !/\s/.test(unit)).map((unit) => unit.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  return new RegExp(`(?<![A-Za-z0-9\\[])${units.join("\\s*")}(?![A-Za-z0-9\\]])`, "gi");
+}
+
+function accountLabels(engine) {
+  const path = join(engine, "engine.db");
+  let db;
+  try {
+    db = new DatabaseSync(path, { readOnly: true });
+    db.exec("PRAGMA query_only=ON");
+    return db.prepare("SELECT json_extract(CAST(body AS TEXT), '$.details.name') AS name FROM accounts").all().map((row) => row.name).filter((name) => typeof name === "string");
+  } catch (error) {
+    return fail(`report_engine_unreadable: ${error.message.split("\n")[0]}`);
+  } finally {
+    db?.close();
+  }
+}
+
+/**
+ * Builds the mask rules for the values this machine knows: the engine's account labels, the home folder,
+ * its encoded form in transcript paths and the user name, matched whatever their shape and across wraps.
+ * Input: { engine, home, user }; without engine no labels are read. Output: { rules, note } for KNOWN and the cover.
+ */
+export function knownValues({ engine, home = homedir(), user = userInfo().username } = {}) {
+  if (typeof home !== "string" || typeof user !== "string" || (engine !== undefined && typeof engine !== "string")) fail("report_known_invalid");
+  const labels = engine === undefined ? null : accountLabels(engine);
+  const longest = (values) => [...new Map(values.map((value) => [value.trim().toLowerCase(), value.trim()])).values()].sort((left, right) => right.length - left.length);
+  const usable = longest(labels ?? []).filter((label) => label.replace(/\s/g, "").length >= KNOWN_MIN);
+  const short = longest(labels ?? []).length - usable.length;
+  const names = longest([user, basename(home)]).filter((name) => name.length >= KNOWN_MIN);
+  const rules = [];
+  if (home.length >= 2 && home !== dirname(home)) {
+    const encode = (path) => path.replace(/[^A-Za-z0-9]/g, "-");
+    rules.push([literal(home), "~"], [literal(encode(home)), `${encode(dirname(home))}-[user]`]);
+  }
+  for (const label of usable) rules.push([literal(label), "[account]"]);
+  for (const name of names) rules.push([literal(name), "[user]"]);
+  const parts = [labels === null ? "Masked by value: the home folder and the user name. No engine was read, so account labels are masked by shape only." : `Masked by value: ${usable.length} account label${usable.length === 1 ? "" : "s"} from the engine, the home folder and the user name.`];
+  if (short) parts.push(`${short} label${short === 1 ? " is" : "s are"} shorter than ${KNOWN_MIN} characters and masked by shape only.`);
+  if (!names.length) parts.push(`The user name is shorter than ${KNOWN_MIN} characters and masked by value only inside the home folder.`);
+  return { rules, note: parts.join(" ") };
+}
 const BOX = /[─-╿]+/g;
 const WRAPPED = "•";
 const CSS = `
@@ -116,7 +165,7 @@ function fail(message) {
  */
 export function mask(value) {
   let out = String(value ?? "");
-  for (const [pattern, replacement] of RULES) out = out.replace(pattern, replacement);
+  for (const [pattern, replacement] of [...KNOWN.rules, ...RULES]) out = out.replace(pattern, replacement);
   return out;
 }
 
@@ -277,7 +326,7 @@ export function maskFrame(raw) {
   for (const chain of frameChains(lines)) {
     const joined = chain.map((part) => part.body).join("");
     const at = chain.flatMap((part) => Array.from({ length: part.body.length }, (unit, index) => [part.row, part.col + index]));
-    for (const pattern of [...RULES.map(([rule]) => rule), OPAQUE]) {
+    for (const pattern of [...KNOWN.rules, ...RULES].map(([rule]) => rule).concat(OPAQUE)) {
       for (const match of joined.matchAll(pattern)) {
         const end = match.index + match[0].length - 1;
         if (!match[0] || at[match.index][0] === at[end][0] || frameMask(match[0]) === match[0]) continue;
@@ -383,7 +432,8 @@ function usage(tokens) {
  * steps.jsonl and checks/<id>.json with their evidence files.
  * Input: the folder path. Output: the report model; evidence outside the folder is refused, not read.
  */
-export async function readTrial(folder) {
+export async function readTrial(folder, options = {}) {
+  KNOWN = knownValues(options);
   const root = await realpath(folder);
   const manifest = await readJson(root, "manifest.json", "report_manifest_invalid");
   if (!manifest || typeof manifest !== "object" || !Number.isSafeInteger(manifest.trial)) fail("report_manifest_invalid: trial");
@@ -429,6 +479,7 @@ export async function readTrial(folder) {
     kind: "trial",
     title: `Trial ${manifest.trial} report`,
     note: "",
+    known: KNOWN,
     trials: [{
       trial: manifest.trial,
       build: manifest.build ?? "",
@@ -573,7 +624,8 @@ async function retroTrial(root, spec, report) {
  * timelines, token sums, limits (account kinds only), TUI frames and GIFs.
  * Input: the leader/trial folder. Output: one report model holding both trials.
  */
-export async function readRetro(folder) {
+export async function readRetro(folder, options = {}) {
+  KNOWN = knownValues(options);
   const root = await realpath(folder);
   const report = { images: [], embedded: 0 };
   const trials = [];
@@ -581,6 +633,7 @@ export async function readRetro(folder) {
   return {
     kind: "trial",
     title: "Trials 1 and 2, rebuilt from the saved evidence",
+    known: KNOWN,
     note: "Results come from the saved audits, what each check proves and why from the trial plans, and the frames are the recorded TUI text drawn again after masking.",
     trials,
     images: report.images,
@@ -680,7 +733,8 @@ function excerpt(raw) {
  * Input: the folder, the script that lists the tests and the checkout holding their source.
  * Output: one row per listed test with its group, what it proves, result, duration and failure excerpt.
  */
-export async function readLivePass(folder, { script, repo = REPO } = {}) {
+export async function readLivePass(folder, { script, repo = REPO, ...options } = {}) {
+  KNOWN = knownValues(options);
   const root = await realpath(folder);
   const summary = await optionalText(root, "summary.txt");
   if (!summary) fail("report_live_summary_missing");
@@ -706,6 +760,7 @@ export async function readLivePass(folder, { script, repo = REPO } = {}) {
   const written = await stat(join(root, "summary.txt"));
   return {
     kind: "live",
+    known: KNOWN,
     title: `Live pass ${basename(root)}`,
     folder: root,
     date: written.mtime.toISOString().slice(0, 10),
@@ -780,11 +835,11 @@ function imageItem(image) {
   return `<li>Trial ${text(image.trial)} ${text(image.kind)}: <code>${text(image.path)}</code>${image.note ? ` <span class="note">${text(image.note)}</span>` : ""}</li>`;
 }
 
-function sharing(images) {
+function sharing(images, known) {
   const shown = images.filter((image) => !image.leftOut);
   const left = images.filter((image) => image.leftOut);
   const count = `${shown.length} image${shown.length === 1 ? "" : "s"}`;
-  return `<section class="sharing"><h2>Before sharing</h2><p><b>Not masked: ${count}.</b> Screenshots, image frames, GIFs and SVG files are not masked: they are pictures, and the report cannot mask what they show. Look at each one before this report is shared. Logs, rows, plans and the text TUI frames are masked, account labels and home paths included.</p>${shown.length ? `<ul>${shown.map(imageItem).join("")}</ul>` : ""}${left.length ? `<p>Left out of this report:</p><ul>${left.map(imageItem).join("")}</ul>` : ""}</section>`;
+  return `<section class="sharing"><h2>Before sharing</h2><p>${text(known.note)}</p><p><b>Not masked: ${count}.</b> Screenshots, image frames, GIFs and SVG files are not masked: they are pictures, and the report cannot mask what they show. Look at each one before this report is shared. Logs, rows, plans and the text TUI frames are masked, account labels and home paths included.</p>${shown.length ? `<ul>${shown.map(imageItem).join("")}</ul>` : ""}${left.length ? `<p>Left out of this report:</p><ul>${left.map(imageItem).join("")}</ul>` : ""}</section>`;
 }
 
 function imagesSection(all) {
@@ -800,12 +855,12 @@ function page(title, body) {
 
 function renderTrials(model) {
   const many = model.trials.length > 1;
-  const head = `<header class="cover"><h1>${text(model.title)}</h1><p class="generated">Generated ${text(new Date().toISOString())} by scripts/trial/report.mjs.</p>${model.note ? `<p>${text(model.note)}</p>` : ""}${sharing(model.images)}${model.trials.map(cover).join("")}</header>`;
+  const head = `<header class="cover"><h1>${text(model.title)}</h1><p class="generated">Generated ${text(new Date().toISOString())} by scripts/trial/report.mjs.</p>${model.note ? `<p>${text(model.note)}</p>` : ""}${sharing(model.images, model.known)}${model.trials.map(cover).join("")}</header>`;
   return page(model.title, [head, ...model.trials.map((trial) => trialSection(trial, many)), imagesSection(model.images)].join("\n"));
 }
 
 function renderLive(model) {
-  const head = `<header class="cover"><h1>${text(model.title)}</h1><p class="generated">Generated ${text(new Date().toISOString())} by scripts/trial/report.mjs from ${text(model.folder)}.</p>${facts([["Date", model.date], ["Tests", model.rows.length], ["Results", model.totals], ["Test time", model.time]])}<h3>Groups</h3><ul>${model.groups.map(([group, about]) => `<li><b>${text(group)}</b>: ${text(about)}</li>`).join("")}</ul></header>`;
+  const head = `<header class="cover"><h1>${text(model.title)}</h1><p class="generated">Generated ${text(new Date().toISOString())} by scripts/trial/report.mjs from ${text(model.folder)}.</p><p>${text(model.known.note)}</p>${facts([["Date", model.date], ["Tests", model.rows.length], ["Results", model.totals], ["Test time", model.time]])}<h3>Groups</h3><ul>${model.groups.map(([group, about]) => `<li><b>${text(group)}</b>: ${text(about)}</li>`).join("")}</ul></header>`;
   const rows = model.rows.map((row) => {
     const proves = `${text(row.proves)}${row.fromName ? ' <span class="source">from the test name</span>' : ""}`;
     const line = `<tr class="test"><td>${row.n}</td><td>${text(row.group)}</td><td><code>${text(row.name)}</code></td><td>${proves}</td><td>${badge(row.result)}</td><td>${row.seconds === undefined ? "" : `${row.seconds} s`}</td></tr>`;
@@ -821,7 +876,9 @@ function renderLive(model) {
  * Input: the model. Output: the HTML string.
  */
 export function renderReport(model) {
-  if (model?.kind === "trial") return renderTrials(model);
+  if (!Array.isArray(model?.known?.rules) || typeof model.known.note !== "string") fail("report_model_invalid");
+  KNOWN = model.known;
+  if (model.kind === "trial") return renderTrials(model);
   if (model?.kind === "live") return renderLive(model);
   return fail("report_model_invalid");
 }
@@ -875,11 +932,14 @@ export async function main(argv) {
   const [mode, folder, ...rest] = argv;
   const options = {};
   for (let at = 0; at < rest.length; at += 2) {
-    if (!["--script", "--repo", "--out", "--chrome"].includes(rest[at]) || rest[at + 1] === undefined) fail(`report_usage: ${USAGE}`);
+    if (!["--script", "--repo", "--engine", "--out", "--chrome"].includes(rest[at]) || rest[at + 1] === undefined) fail(`report_usage: ${USAGE}`);
     options[rest[at].slice(2)] = rest[at + 1];
   }
   if (!folder || !["trial", "live", "retro"].includes(mode)) fail(`report_usage: ${USAGE}`);
-  const model = mode === "trial" ? await readTrial(folder) : mode === "live" ? await readLivePass(folder, options) : await readRetro(folder);
+  const engine = options.engine ?? ENGINE;
+  const database = await lstat(join(engine, "engine.db")).catch(() => null);
+  if (!database?.isFile()) fail(`BLOCKED: no engine database at ${join(engine, "engine.db")}; pass --engine <engine root> so account labels are masked by value`);
+  const model = mode === "trial" ? await readTrial(folder, { engine }) : mode === "live" ? await readLivePass(folder, { ...options, engine }) : await readRetro(folder, { engine });
   const out = await realpath(options.out ?? folder);
   const html = assertMasked(renderReport(model));
   const htmlPath = join(out, "report.html");

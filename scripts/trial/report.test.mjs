@@ -6,8 +6,9 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { createServer } from "node:http";
+import { DatabaseSync } from "node:sqlite";
 import { crc32, deflateSync } from "node:zlib";
-import { assertMasked, mask, printPdf, readLivePass, readRetro, readTrial, renderReport } from "./report.mjs";
+import { assertMasked, main, mask, printPdf, readLivePass, readRetro, readTrial, renderReport } from "./report.mjs";
 
 const REPORT = join(dirname(fileURLToPath(import.meta.url)), "report.mjs");
 const GIF = Buffer.from("47494638396101000100800000000000ffffff21f90401000000002c00000000010001000002024401003b", "hex");
@@ -114,6 +115,21 @@ function svgText(body) {
 function section(html, id) {
   const from = html.indexOf(`<article class="check" id="${id}">`);
   return from < 0 ? "" : html.slice(from, html.indexOf("</article>", from));
+}
+
+async function engineRoot(names) {
+  const root = await folder("trial-report-engine-");
+  const db = new DatabaseSync(join(root, "engine.db"));
+  try {
+    db.exec("CREATE TABLE accounts (seq INTEGER PRIMARY KEY AUTOINCREMENT, id TEXT NOT NULL UNIQUE, body BLOB NOT NULL)");
+    const insert = db.prepare("INSERT INTO accounts (id, body) VALUES (?, ?)");
+    for (const [index, name] of names.entries()) {
+      insert.run(`claude-account-${String(index).padStart(20, "0")}`, Buffer.from(JSON.stringify({ connection: { harness: "claude", auth: { method: "subscription" } }, details: { name, provider: "anthropic" } })));
+    }
+  } finally {
+    db.close();
+  }
+  return root;
 }
 
 async function addCheck(root, id, evidence) {
@@ -380,9 +396,10 @@ test("the retro mode reads trials 1 and 2 from the saved audit, plan, timeline, 
 
 test("the command writes report.html and a real report.pdf printed by Google Chrome headless", { timeout: 120_000 }, async () => {
   const root = await trialFolder();
+  const engine = await engineRoot([]);
   try {
     const printed = await new Promise((done, failed) => {
-      execFile(process.execPath, [REPORT, "trial", root], { timeout: 110_000 }, (error, stdout, stderr) => (error ? failed(new Error(`${error.message}\n${stderr}`)) : done(stdout.trim())));
+      execFile(process.execPath, [REPORT, "trial", root], { timeout: 110_000, env: { ...process.env, CRAZYAGENT_ENGINE_ROOT: engine } }, (error, stdout, stderr) => (error ? failed(new Error(`${error.message}\n${stderr}`)) : done(stdout.trim())));
     });
     assert.equal(printed, join(root, "report.pdf"));
     const html = await readFile(join(root, "report.html"), "utf8");
@@ -393,6 +410,7 @@ test("the command writes report.html and a real report.pdf printed by Google Chr
     for (const file of ["report.html", "report.pdf"]) assert.equal((await stat(join(root, file))).mode & 0o777, 0o600, `${file} is private`);
   } finally {
     await rm(root, { recursive: true });
+    await rm(engine, { recursive: true });
   }
 });
 
@@ -504,5 +522,47 @@ test("PDF-5: an image over the per-file cap and images past the total cap are re
     assert.deepEqual(["big", "wide-1", "wide-2", "wide-3"].filter((name) => images.includes(`screenshots/${name}.png`)), ["wide-1", "wide-2"]);
   } finally {
     await rm(root, { recursive: true });
+  }
+});
+
+test("PDF2R2-1: the engine's account labels, the home folder and the user name are masked by value in every reader, frames included, whatever their shape", async () => {
+  const known = { home: "/Users/jo-an", user: "jo-an" };
+  const engine = await engineRoot(["acme research lab", "Claude-team blue", "Me"]);
+  const root = await trialFolder();
+  const logs = await folder("known-live-");
+  const retro = await folder("known-retro-");
+  const empty = await folder("known-no-engine-");
+  const lines = [
+    "pool order acme research lab, then Claude-team blue",
+    "cwd /Users/jo-an/Projects/ca-trial-3",
+    "transcript ~/.claude/projects/-Users-jo-an-Projects-ca-trial-3/5f1c.jsonl",
+    "git author jo-an",
+  ].join("\n");
+  const shownOf = (html) => [html, ...svgImages(html)].join("\n").toLowerCase();
+  const leaks = (html) => ["acme", "research", "team blue", "jo-an"].filter((value) => shownOf(html).includes(value));
+  try {
+    await put(root, "logs/known.log", `${lines}\n`);
+    await put(root, "frames/f00004.txt", "  ┌─ Accounts ───────────┐\n  │ first acme research │\n  │ lab second          │\n  └─────────────────────┘\n");
+    await addCheck(root, "T3-08", [{ kind: "log", path: "logs/known.log", caption: "known values" }, { kind: "frame", path: "frames/f00004.txt", caption: "wrapped label" }]);
+    const html = renderReport(await readTrial(root, { engine, ...known }));
+    assert.deepEqual(leaks(html), [], "no label, home name or user name is shown in the trial report");
+    const missing = ["[account]", "~/Projects/ca-trial-3", "-Users-[user]-Projects-ca-trial-3", "git author [user]", "Masked by value: 2 account labels"].filter((part) => !shownOf(html).includes(part.toLowerCase()));
+    assert.deepEqual(missing, [], "the masked forms and the cover note are shown");
+    assert.ok(svgImages(html).some((svg) => svg.includes("second")), "the wrapped frame is still drawn");
+    assert.throws(() => assertMasked("<p>ACME Research Lab</p>"), /report_mask_residue/, "the residue check knows the labels");
+
+    const script = join(logs, "live-pass.sh");
+    await put(logs, "live-pass.sh", "#!/bin/bash\nTESTS=$(\n  cat <<'EOF'\nlocal|lib|engine::accounts::tests::a_label_is_listed|30|host\nEOF\n)\n");
+    await put(logs, "summary.txt", `== local: no tokens\nFAIL engine::accounts::tests::a_label_is_listed 3s exit 101: ${logs}/engine.accounts.tests.a_label_is_listed.log\n`);
+    await put(logs, "engine.accounts.tests.a_label_is_listed.log", "thread 'a' panicked at src/a.rs:1:1:\nassertion failed: listed acme research lab for jo-an\n");
+    assert.deepEqual(leaks(renderReport(await readLivePass(logs, { script, repo: empty, engine, ...known }))), [], "no label or user name is shown in the live report");
+
+    await put(retro, "audit.txt", "FAIL 1 tree: acme research lab ran as jo-an\nSUMMARY project=ca-trial-1028 pass=0 fail=1 unknown=0\n");
+    await put(retro, "audit-2.txt", "PASS 4 owner question: Claude-team blue answered\nSUMMARY project=ca-trial-2 pass=1 fail=0 unknown=0\n");
+    assert.deepEqual(leaks(renderReport(await readRetro(retro, { engine, ...known }))), [], "no label or user name is shown in the retro report");
+
+    await assert.rejects(main(["trial", root, "--engine", empty]), /BLOCKED: no engine database/, "without the engine's labels the command refuses to write a report");
+  } finally {
+    for (const path of [engine, root, logs, retro, empty]) await rm(path, { recursive: true });
   }
 });

@@ -868,6 +868,7 @@ fn finished_team() -> crate::team::TeamStatus {
         land_on: None,
         background_at_end: crate::team::BackgroundAtEnd::Wait,
         ask_before_merge: false,
+        reask_empty_reply: true,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
         coordination: None,
         live_switch: None,
@@ -1137,6 +1138,7 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
         land_on: None,
         background_at_end: crate::team::BackgroundAtEnd::Wait,
         ask_before_merge: false,
+        reask_empty_reply: true,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
         coordination: None,
         live_switch: None,
@@ -1551,6 +1553,7 @@ fn switched(
         land_on: None,
         background_at_end: crate::team::BackgroundAtEnd::Wait,
         ask_before_merge: false,
+        reask_empty_reply: true,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
         coordination: None,
         live_switch,
@@ -2398,6 +2401,7 @@ fn the_instructions_box_lists_each_instruction_file_the_engine_recorded() {
 /// Serves one request the Questions box sends with a real engine through the owner
 /// controller, as the TUI's owner worker does. Inputs: the controller and the request.
 /// Output: the arrival the Team screen receives.
+#[cfg(unix)]
 async fn served(
     controller: &mut crate::client_controller::OwnerController,
     request: Request,
@@ -2429,6 +2433,7 @@ async fn served(
     ))))
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn q_lists_the_engines_questions_an_answer_reaches_the_asker_and_enter_opens_a_waiting_terminal()
  {
@@ -2562,6 +2567,12 @@ async fn q_lists_the_engines_questions_an_answer_reaches_the_asker_and_enter_ope
     let rows = render(&mut shell).join("\n");
     assert!(rows.contains("May I delete the old fixtures?"), "{rows}");
     assert!(rows.contains("I keep them until you say."), "{rows}");
+    assert_eq!(read.questions[0].for_label, "Me");
+    assert!(
+        rows.lines()
+            .any(|row| row.contains("For: Me") && row.contains("Urgent, the agent is paused")),
+        "the question's head says whom it is for (OP-50): {rows}"
+    );
 
     shell.key(Key::Enter);
     for typed in "Keep them.".chars() {
@@ -2865,7 +2876,7 @@ fn a_refused_live_master_start_says_why_in_words_not_its_code() {
 }
 
 #[test]
-fn a_hookless_agent_row_says_receipts_and_adoption_are_unavailable_for_its_account_kind() {
+fn a_hookless_agent_row_says_only_its_receipts_are_unavailable_for_its_account_kind() {
     let mut shell = fresh(120, 30);
     let mut graph = graph();
     graph.nodes[2].hookless = true;
@@ -2889,8 +2900,8 @@ fn a_hookless_agent_row_says_receipts_and_adoption_are_unavailable_for_its_accou
         .join(" ");
     assert_eq!(
         words.trim(),
-        "Receipts and adoption unavailable for this account kind",
-        "{tree:#?}"
+        "Receipts unavailable for this account kind",
+        "adoption counts and flags show for every agent (OQ-8): {tree:#?}"
     );
     let hooked = tree
         .iter()

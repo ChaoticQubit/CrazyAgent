@@ -1,8 +1,10 @@
+#[cfg(unix)]
+use super::launch::CLAUDE_NATIVE_TEAM_TOOLS;
 use super::launch::{
-    AccountBinding, CLAUDE_DENY_FLAG, CLAUDE_MCP_CONNECT_LIMIT, CLAUDE_NATIVE_TEAM_TOOLS,
-    CLAUDE_NO_MCP, CODEX_NO_USER_INPUT, LOCAL_PLACEHOLDER_KEY, LaunchError, LaunchRequest,
-    SANDBOX_EXEC, Secret, TOOLS_OFF_PATH, TOOLS_ON_PATH, claude_bare, claude_denied,
-    codex_configuration, failure, harness_id, key_file_text, validate,
+    AccountBinding, CLAUDE_DENY_FLAG, CLAUDE_MCP_CONNECT_LIMIT, CLAUDE_NO_MCP, CODEX_NO_USER_INPUT,
+    LOCAL_PLACEHOLDER_KEY, LaunchError, LaunchRequest, SANDBOX_EXEC, Secret, TOOLS_OFF_PATH,
+    TOOLS_ON_PATH, claude_bare, claude_denied, codex_configuration, failure, harness_id,
+    key_file_text, validate,
 };
 use crate::launch_context::{Installed, NativeTeam};
 use crate::sandbox::toolchains::{self, ToolHomes};
@@ -51,21 +53,37 @@ const CLAUDE_TOOLS_ON: [&str; 4] = [
 ];
 const CLAUDE_TOOLS_OFF: [&str; 3] = ["--tools", "", "--disable-slash-commands"];
 const CLAUDE_TEAMMATE_MODE: [&str; 2] = ["--teammate-mode", "tmux"];
+/// Makes Claude Code 2.1.309 render its system prompt fresh on every request. Signed in, it
+/// otherwise records the prompt of a conversation's first request and sends that record on
+/// every resume, so a relaunch would run with the instructions of the session's first launch,
+/// not the ones it installed (QR2).
+const CLAUDE_PROMPT_FRESH: [&str; 2] = ["--system-prompt-snapshot", "off"];
 const CLAUDE_AGENT_TEAMS: (&str, &str) = ("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS", "1");
+/// Gives a native-team lead, and through its teammate script every teammate, Claude Code's
+/// task list tools. Claude Code 2.1.309 offers TaskCreate, TaskGet, TaskUpdate and TaskList
+/// to a model newer than its fixed list only with this set or with `--tools` naming one, and
+/// a lead without them cannot share its team's tasks (OP-3).
+const CLAUDE_TODO_TOOLS: (&str, &str) = ("CLAUDE_CODE_ENABLE_TODO_TOOLS", "1");
 const CLAUDE_TEAMMATE_COMMAND: &str = "CLAUDE_CODE_TEAMMATE_COMMAND";
+#[cfg(unix)]
 const CLAUDE_INSTRUCTIONS_FLAG: &str = "--append-system-prompt-file";
 const CLAUDE_BARE: &str = "--bare";
+#[cfg(unix)]
 const TEAMMATE_SCRIPT_BYTES_MAX: usize = 64 * 1024;
 /// The variables of a native lead's command that name a place in its home, which its
 /// teammates get at the same place in their own home (TPH-2 C).
 /// `CLAUDE_SECURESTORAGE_CONFIG_DIR` stays the lead's, where the engine keeps the
 /// account's sign-in copy that teammates read.
+#[cfg(unix)]
 const TEAMMATE_HOME_VARIABLES: [&str; 4] = [
     "CLAUDE_CONFIG_DIR",
     "CLAUDE_CODE_TMPDIR",
     "HOME",
     "CARGO_HOME",
 ];
+/// The variables of a native lead's command that name a place in the lead's own temp folder,
+/// which its teammates get at the same place in the short temp folder they share instead.
+const TEAMMATE_TMP_VARIABLES: [&str; 2] = ["TMPDIR", "TMPPREFIX"];
 
 /// What the terminal host runs for one interactive agent: the full argument list, starting
 /// with the project sandbox wrapper, the working folder and the environment, plus where the
@@ -240,7 +258,9 @@ pub fn support(harness: &str) -> Support {
 
 /// Builds what the terminal host runs for one interactive agent: the harness's own app inside
 /// the project sandbox, with its account home and, for Codex and Claude Code, the installed
-/// project context. A key reaches the harness only through the key file in `run`.
+/// project context. Its `TMPDIR` is its short temp folder, or for a native lead the lead's
+/// own folder in it, which its teammates cannot reach. A key reaches the harness only
+/// through the key file in `run`.
 /// Inputs: the launch request, the installed context and the run. Output: the command, or a
 /// plain refusal code.
 pub fn command(
@@ -287,6 +307,8 @@ pub fn command(
         );
     }
     let executable = text(&request.executable)?;
+    let native_lead =
+        harness_id(request) == "claude-code" && installed.and_then(Installed::native).is_some();
     let transcript = match harness_id(request) {
         "codex" => {
             let resume = if run.resume {
@@ -356,6 +378,11 @@ pub fn command(
         env.push((name.to_owned(), text(Path::new(&value))?));
     }
     if let Some(tmp) = toolchains::existing_tmp(request.account.home()) {
+        let tmp = if native_lead {
+            toolchains::native_lead_tmp(&tmp)
+        } else {
+            tmp
+        };
         env.push(("TMPDIR".to_owned(), text(&tmp)?));
     }
     let env = agent_env(&env)?;
@@ -396,6 +423,18 @@ fn exposes(command: &InteractiveCommand, key: &Secret) -> bool {
             .env
             .iter()
             .any(|(name, value)| name.contains(key) || value.contains(key))
+}
+
+/// The same place under another folder, as text: the folder itself for an empty rest, else
+/// the rest joined to it. Inputs: the folder and the rest of a path. Output: the text, or
+/// `launch_path_invalid`.
+#[cfg(unix)]
+fn moved(to: &Path, rest: &Path) -> Result<String, LaunchError> {
+    if rest.as_os_str().is_empty() {
+        text(to)
+    } else {
+        text(&to.join(rest))
+    }
 }
 
 fn text(path: &Path) -> Result<String, LaunchError> {
@@ -463,6 +502,7 @@ fn claude(
         .to_owned(),
         session_id_checked(run.session_id)?.to_owned(),
     ];
+    arguments.extend(CLAUDE_PROMPT_FRESH.map(str::to_owned));
     match installed {
         Some(installed) => {
             for argument in installed.arguments() {
@@ -503,8 +543,9 @@ fn claude(
 }
 
 /// Builds Claude Code's own variables for one launch. A native-team lead also gets agent
-/// teams turned on and the command its teammates run. Inputs: the request, the agent home
-/// and, for a native-team lead, the teammate command path. Output: the variables.
+/// teams and the task list tools turned on and the command its teammates run. Inputs: the
+/// request, the agent home and, for a native-team lead, the teammate command path. Output:
+/// the variables.
 fn claude_environment(
     request: &LaunchRequest,
     home: &str,
@@ -535,6 +576,10 @@ fn claude_environment(
         environment.push((
             CLAUDE_AGENT_TEAMS.0.to_owned(),
             CLAUDE_AGENT_TEAMS.1.to_owned(),
+        ));
+        environment.push((
+            CLAUDE_TODO_TOOLS.0.to_owned(),
+            CLAUDE_TODO_TOOLS.1.to_owned(),
         ));
         environment.push((CLAUDE_TEAMMATE_COMMAND.to_owned(), command.to_owned()));
     }
@@ -705,7 +750,9 @@ fn tmux_on_path(env: &mut [(String, String)], tmux: &Path) -> Result<(), LaunchE
 /// denied. Claude Code 2.1.309 appends the lead's `--mcp-config`, `--strict-mcp-config`,
 /// `--plugin-dir`, `--settings`, deny rules and tools itself, so the script repeats none of
 /// them and no MCP server loads twice. It runs in the lead's pane, inside the lead's sandbox.
-/// The variables naming the lead's home name the teammates' own home instead (TPH-2 C).
+/// The variables naming the lead's home name the teammates' own home instead (TPH-2 C), and
+/// those naming the lead's own temp folder name the short temp folder the teammates share;
+/// a script that would still name the lead's own temp folder is refused.
 /// Inputs: the agent home, the lead's built command, its request and what its teammates get.
 /// Output: Ok, or a plain code.
 #[cfg(unix)]
@@ -724,17 +771,22 @@ pub fn write_teammate_command(
     let executable = built.argv.get(start).ok_or_else(refused)?;
     let instructions = text(&team.instructions)?;
     let mates = crate::launch_context::mates_home(home);
+    let tmp =
+        toolchains::existing_tmp(home).map(|shared| (toolchains::native_lead_tmp(&shared), shared));
     let mut words = vec!["/usr/bin/env".to_owned()];
     for (name, value) in &built.env {
-        let value = match Path::new(value).strip_prefix(home) {
-            Ok(rest) if TEAMMATE_HOME_VARIABLES.contains(&name.as_str()) => {
-                if rest.as_os_str().is_empty() {
-                    text(&mates)?
-                } else {
-                    text(&mates.join(rest))?
-                }
-            }
-            _ => value.clone(),
+        let path = Path::new(value);
+        let value = if let Ok(rest) = path.strip_prefix(home)
+            && TEAMMATE_HOME_VARIABLES.contains(&name.as_str())
+        {
+            moved(&mates, rest)?
+        } else if let Some((own, shared)) = &tmp
+            && let Ok(rest) = path.strip_prefix(own)
+            && TEAMMATE_TMP_VARIABLES.contains(&name.as_str())
+        {
+            moved(shared, rest)?
+        } else {
+            value.clone()
         };
         words.push(format!("{name}={value}"));
     }
@@ -751,6 +803,12 @@ pub fn write_teammate_command(
     }
     words.push(CLAUDE_DENY_FLAG.to_owned());
     words.extend(CLAUDE_NATIVE_TEAM_TOOLS.map(str::to_owned));
+    if let Some((own, _)) = &tmp {
+        let own = text(own)?;
+        if words.iter().any(|word| word.contains(&own)) {
+            return Err(refused());
+        }
+    }
     let mut script = String::from("#!/bin/sh\nexec");
     for word in &words {
         if word.is_empty() || word.chars().any(char::is_control) {

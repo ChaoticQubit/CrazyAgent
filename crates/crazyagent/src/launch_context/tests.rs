@@ -241,6 +241,7 @@ fn a_team_master_with_tools_on_gets_the_engine_delegate_tool() {
     let directory = tempfile::tempdir().unwrap();
     let root = directory.path().canonicalize().unwrap();
     let record = root.join("tmp").join(crate::team::tool::DROP_FILE);
+    let mailbox = root.join("tmp").join(crate::team::tool::MAILBOX_FOLDER);
     let engine = Path::new("/usr/local/bin/crazyagent");
     let fresh = || AgentContext {
         plugins: LaunchPlugins::default(),
@@ -251,7 +252,9 @@ fn a_team_master_with_tools_on_gets_the_engine_delegate_tool() {
         native_team: None,
         relay: None,
     };
-    let context = fresh().with_team_tool(engine, &record).unwrap();
+    let context = fresh()
+        .with_team_tool(engine, &record, &mailbox, &[])
+        .unwrap();
     assert_eq!(
         context.read_paths(),
         [engine.to_path_buf()],
@@ -277,7 +280,11 @@ fn a_team_master_with_tools_on_gets_the_engine_delegate_tool() {
     );
     assert_eq!(
         server["args"],
-        toml::Value::Array(vec!["team-mcp".into(), record.to_str().unwrap().into()])
+        toml::Value::Array(vec![
+            "team-mcp".into(),
+            record.to_str().unwrap().into(),
+            mailbox.to_str().unwrap().into()
+        ])
     );
     assert!(
         !server.contains_key("env"),
@@ -305,7 +312,7 @@ fn a_team_master_with_tools_on_gets_the_engine_delegate_tool() {
         serde_json::json!({
             "type": "stdio",
             "command": "/usr/local/bin/crazyagent",
-            "args": ["team-mcp", record.to_str().unwrap()],
+            "args": ["team-mcp", record.to_str().unwrap(), mailbox.to_str().unwrap()],
             "env": {},
         })
     );
@@ -313,20 +320,30 @@ fn a_team_master_with_tools_on_gets_the_engine_delegate_tool() {
 
     assert_eq!(
         fresh()
-            .with_team_tool(Path::new("crazyagent"), &record)
+            .with_team_tool(Path::new("crazyagent"), &record, &mailbox, &[])
             .unwrap_err()
             .0,
         "launch_context_team_tool_invalid"
     );
     assert_eq!(
         fresh()
-            .with_team_tool(engine, Path::new("tmp/record.jsonl"))
+            .with_team_tool(engine, Path::new("tmp/record.jsonl"), &mailbox, &[])
             .unwrap_err()
             .0,
         "launch_context_team_tool_invalid"
     );
     assert_eq!(
-        context.with_team_tool(engine, &record).unwrap_err().0,
+        fresh()
+            .with_team_tool(engine, &record, Path::new("tmp/calls"), &[])
+            .unwrap_err()
+            .0,
+        "launch_context_team_tool_invalid"
+    );
+    assert_eq!(
+        context
+            .with_team_tool(engine, &record, &mailbox, &[])
+            .unwrap_err()
+            .0,
         "launch_context_team_tool_taken"
     );
 }

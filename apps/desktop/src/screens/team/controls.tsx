@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, setAskBeforeMerge, setChildLanding, setLandOn, setMasterBranch, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
+import { delegateTeamTask, keepTeamWarm, setAgentBranches, setBackgroundAtEnd, setAskBeforeMerge, setChildLanding, setLandOn, setMasterBranch, setMaxHarnesses, setMaxTeammates, setNewFolderLimit, setOnHarnessSwitch, setReaskEmptyReply, setSpreadAccounts, setSubAgentDepth, setTeamStopped, setTeamTimeLimits, setTokenBudget, showFinishedAgents } from "../../api";
 import type { Result } from "../../api";
 import { failureCopy, receiptState } from "../../api-projects";
 import type { BackgroundAtEnd, BranchMode, ChildLanding, IntentReceipt, SwitchMode, TeamStatus } from "../../engine-client";
@@ -194,6 +194,7 @@ export function TeamControls({ projectId, status, harness, reload }: {
   const [masterBranch, setMasterBranchText] = useState<string | null>(null);
   const [landOn, setLandOnText] = useState<string | null>(null);
   const [askMerge, setAskMerge] = useState<"off" | "on" | null>(null);
+  const [reask, setReask] = useState<"off" | "on" | null>(null);
   const [newFolder, setNewFolder] = useState<number | null>(null);
   const [background, setBackground] = useState<BackgroundAtEnd | null>(null);
   const [graceText, setGraceText] = useState<string | null>(null);
@@ -354,6 +355,16 @@ export function TeamControls({ projectId, status, harness, reload }: {
     reload();
   }
 
+  async function chooseReask(choice: "off" | "on") {
+    setReask(choice);
+    setBusy(true);
+    const message = changeNote(await setReaskEmptyReply(projectId, choice === "on"), "the empty reply setting");
+    setBusy(false);
+    setReask(null);
+    setNote(message);
+    reload();
+  }
+
   async function chooseNewFolder(files: number) {
     setNewFolder(files);
     setBusy(true);
@@ -491,6 +502,12 @@ export function TeamControls({ projectId, status, harness, reload }: {
       <Segmented label="Ask me before merging into the master's branch" value={askMerge ?? (status.ask_before_merge === true ? "on" : "off")} onValue={(choice) => { if (!busy) void chooseAskMerge(choice); }}
         options={[{ value: "off", label: "Off" }, { value: "on", label: "On" }]} />
       <span className="tg-terminal-note">On keeps each finished harness's work in Changes for your Accept instead of the master merging it.</span>
+    </div>
+    <div className="pj-row">
+      <span aria-hidden="true">Re-ask a sub-agent's empty reply</span>
+      <Segmented label="Re-ask a sub-agent's empty reply" value={reask ?? (status.reask_empty_reply === false ? "off" : "on")} onValue={(choice) => { if (!busy) void chooseReask(choice); }}
+        options={[{ value: "on", label: "On" }, { value: "off", label: "Off" }]} />
+      <span className="tg-terminal-note">On asks a sub-agent once more when its task ends with no reply text, and reports the empty reply if the second answer is empty too. Off reports the empty reply at once.</span>
     </div>
     <CoordinationControls projectId={projectId} status={status} reload={reload} />
     {subs ? <form className="tg-hand" onSubmit={(event) => { event.preventDefault(); void hand(); }}>

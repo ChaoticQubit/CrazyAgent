@@ -53,7 +53,8 @@ impl NodeKind {
 /// agent row and `pane` a native teammate's pane in its lead's terminal, for Stop.
 /// `presence`, `waiting` (on the owner in its terminal), `owner_questions` (open For: Me
 /// questions) and `no_worktree` (a teammate working with none, Q17) come from coordination.
-/// `hookless` marks an agent whose launch fires no hooks, so it has no receipts or adoption.
+/// `hookless` marks an agent whose launch fires no hooks, so it has no receipts; its adoption
+/// counts and flags come from its transcript like any other agent's (OQ-8).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphNode {
     pub id: String,
@@ -582,6 +583,6 @@ fn overlap_edges(coord: &Snapshot, end: &impl Fn(Party) -> Option<String>) -> Ve
     merged
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "graph/tests.rs"]
 mod tests;

@@ -424,6 +424,7 @@ fn a_team_claude_agent_counts_and_drops_lines_after_its_result_and_takes_the_nex
     session.stop().unwrap();
 }
 
+#[cfg(unix)]
 const USAGE_RESULT_HARNESS: &str = r#"#!/bin/sh
 IFS= read -r turn
 printf '%s\n' '{"type":"system","subtype":"init","uuid":"init-1","session_id":"native-session","model":"observed-model","capabilities":[]}'

@@ -20,6 +20,8 @@ pub const ALERTS_PER_TICK_MAX: usize = 16;
 pub const ALERT_TEXT_BYTES_MAX: usize = 240;
 /// The label that starts the line where an asker states what it assumes until answered.
 pub const ASSUMPTION_LABEL: &str = "assumption:";
+/// The name a question meant for the owner shows for whom it is meant.
+pub const OWNER_LABEL: &str = "Me";
 
 const QUESTION: &str = "question";
 const WAITING: &str = "waiting";
@@ -36,9 +38,9 @@ const _: () = assert!(QUESTIONS_SHOWN_MAX <= 64 && WAITING_SHOWN_MAX <= 64);
 const _: () = assert!(ALERTS_PER_TICK_MAX <= 64 && ALERT_TEXT_BYTES_MAX <= 1024);
 
 /// One open question an agent put to the owner, as the Questions inbox shows it: who asked,
-/// how urgent it is, whom the asker meant it for, the question, what the asker assumes
-/// until the owner answers when it said so, when it was asked and the asker's terminal
-/// while the asker runs.
+/// how urgent it is, whom the asker meant it for and that party's name, the question, what
+/// the asker assumes until the owner answers when it said so, when it was asked and the
+/// asker's terminal while the asker runs.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OwnerQuestion {
     pub id: i64,
@@ -46,6 +48,7 @@ pub struct OwnerQuestion {
     pub label: String,
     pub severity: Severity,
     pub asked_for: QuestionFor,
+    pub for_label: String,
     pub text: String,
     pub assumption: Option<String>,
     pub created_ms: i64,
@@ -158,6 +161,7 @@ pub fn inbox(connection: &Connection, project: &ProjectId) -> Result<Inbox, Engi
             .as_deref()
             .and_then(Severity::parse)
             .ok_or_else(|| failure("coord_question_invalid"))?;
+        let for_label = meant_for(connection, project, agent, asked_for)?;
         let asker = asker(connection, project, agent)?;
         let (text, assumption) = split_assumption(&body);
         questions.push(OwnerQuestion {
@@ -166,6 +170,7 @@ pub fn inbox(connection: &Connection, project: &ProjectId) -> Result<Inbox, Engi
             label: asker.label,
             severity,
             asked_for,
+            for_label,
             text,
             assumption,
             created_ms: created,
@@ -532,6 +537,35 @@ fn waiting_now(connection: &Connection, agent: i64) -> Result<Option<(Waiting, i
     })
 }
 
+/// The name of whom an asker meant a question for, as the owner reads it: Me for the owner,
+/// the master's label for the master, and for its lead the label of the asker's lead, the
+/// master when the asker has none. Takes the connection, the project, the asker and the
+/// tag. Returns the name.
+fn meant_for(
+    connection: &Connection,
+    project: &ProjectId,
+    agent: i64,
+    asked_for: QuestionFor,
+) -> Result<String, EngineError> {
+    let lead = match asked_for {
+        QuestionFor::Me => return Ok(OWNER_LABEL.into()),
+        QuestionFor::Master => None,
+        QuestionFor::Lead => connection
+            .query_row(
+                "SELECT parent FROM team_agents WHERE id=?1 AND project=?2",
+                params![agent, project.as_str()],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .optional()
+            .map_err(error)?
+            .flatten(),
+    };
+    match lead {
+        Some(lead) => Ok(asker(connection, project, lead)?.label),
+        None => Ok(AgentRole::Master.agent_label(agent)),
+    }
+}
+
 fn asker(connection: &Connection, project: &ProjectId, agent: i64) -> Result<Asker, EngineError> {
     let row: Option<(String, String)> = connection
         .query_row(
@@ -640,6 +674,6 @@ fn waiting_words(waiting: Waiting) -> &'static str {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "questions/tests.rs"]
 mod tests;

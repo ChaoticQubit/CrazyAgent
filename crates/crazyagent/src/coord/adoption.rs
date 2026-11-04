@@ -22,8 +22,8 @@ pub const UNGROUNDED_MS: i64 = 10 * 60_000;
 pub const FIRST_EDIT_REMINDER: &str = "You are editing before any code-graph query. Run graphify query first if this touches code you have not mapped.";
 /// The longest shell command text read for graphify or a skill read, in bytes.
 pub const COMMAND_BYTES_MAX: usize = 16 * 1024;
-/// What the clients show in place of receipts and adoption counts for an agent whose
-/// launch fires no hooks (DEC-104 bare-hooks), instead of zeros or a blank.
+/// What the clients show in place of receipts for an agent whose launch fires no hooks
+/// (DEC-104 bare-hooks), instead of zeros or a blank.
 pub const HOOKLESS_WORDS: &str = "unavailable for this account kind";
 /// The most bytes one adoption view takes once encoded. Newer agents are kept first; the
 /// older ones past it are counted in `Adoption::hidden`.
@@ -119,7 +119,8 @@ impl Flag {
 /// each counted-tools entry in the settings' order, its calls of each enabled skill in the
 /// view's skill order (zero included), the skills it called that the project has not
 /// enabled, its graphify and `ctx_*` calls, the flags it has now, the flags it was already
-/// reminded of and whether its launch fires no hooks, so no counts or flags exist.
+/// reminded of and whether its launch fires no hooks, whose calls the usage scan counts
+/// from its transcript instead (OQ-8).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentAdoption {
@@ -256,9 +257,9 @@ fn runs_graphify(command: &str) -> bool {
 /// The flags one agent's habits raise now (Q18). Edits by an agent that never started or
 /// owned work raise the first. A running agent with tools that worked `UNGROUNDED_MS`
 /// since its start, busy or calling tools, with no graphify and no `ctx_*` call, raises
-/// the second. An agent whose launch fires no hooks raises none, and clients show its counts
-/// and flags as unavailable (DEC-104 bare-hooks). Takes the database, the agent, its row,
-/// its counts by stored tool name and the time in ms. Returns the flags in `Flag::ALL` order.
+/// the second, whether or not its launch fires hooks (OQ-8). Takes the database, the agent,
+/// its row, its counts by stored tool name and the time in ms. Returns the flags in
+/// `Flag::ALL` order.
 pub(super) fn flags(
     db: &Connection,
     id: AgentId,
@@ -266,21 +267,17 @@ pub(super) fn flags(
     used: &[(String, i64)],
     now: i64,
 ) -> Result<Vec<Flag>, EngineError> {
-    let (tools, declared, hookless): (bool, bool, bool) = db
+    let (tools, declared): (bool, bool) = db
         .query_row(
             "SELECT a.tools,
              EXISTS(SELECT 1 FROM coord_audit WHERE by_kind='agent' AND by_agent=a.id
                     AND action='start')
-             OR EXISTS(SELECT 1 FROM coord_work WHERE owner_agent=a.id),
-             a.hookless
+             OR EXISTS(SELECT 1 FROM coord_work WHERE owner_agent=a.id)
              FROM team_agents a WHERE a.id=?1",
             [id],
-            |found| Ok((found.get(0)?, found.get(1)?, found.get(2)?)),
+            |found| Ok((found.get(0)?, found.get(1)?)),
         )
         .map_err(state)?;
-    if hookless {
-        return Ok(Vec::new());
-    }
     let called = |tool: &dyn Fn(&str) -> bool| {
         used.iter()
             .any(|(name, count)| *count > 0 && tool(super::presence::short(name)))

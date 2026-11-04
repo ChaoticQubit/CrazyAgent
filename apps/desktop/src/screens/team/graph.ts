@@ -427,7 +427,7 @@ export function cardText(node: GraphNode, edges: readonly GraphEdge[], harness?:
 }
 
 /** The full text a card shows on hover: title, role line, branch, status and presence, that
- * its receipts and adoption are unavailable when its launch fires no hooks, why it waits on
+ * its receipts are unavailable when its launch fires no hooks, why it waits on
  * the owner, the messages it has not read and who sent them, its claim overlaps, its task and
  * the reply once it came, each kept to `TIP_CHARS`. Inputs: the node, the graph and a harness
  * name lookup. Output: the lines. */
@@ -443,7 +443,7 @@ export function cardTip(node: GraphNode, graph: TeamGraph, harness?: (id: string
     nodeDetail(node, harness),
     node.branch?.trim() ? `Branch ${node.branch.trim()}` : undefined,
     status || undefined,
-    node.hookless ? `Receipts and adoption ${HOOKLESS_WORDS}.` : undefined,
+    node.hookless ? `Receipts ${HOOKLESS_WORDS}.` : undefined,
     waitingOnOwner(node)?.sentence,
     ...unread,
     ...overlaps,

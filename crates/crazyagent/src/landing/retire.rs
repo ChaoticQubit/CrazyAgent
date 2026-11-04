@@ -128,6 +128,37 @@ fn teammates_landed(
     Ok(None)
 }
 
+/// Names the native teammates of a harness's own clone that work in their own worktree on
+/// their own branch (DEC-111 Q17): each `<clone>/.worktrees/<name>` the clone's git records
+/// checked out on `<task branch>--<name>`, read as data with no git run. Inputs: the store,
+/// the worktree and its git folder. Output: the names, none for a linked worktree, or the
+/// code that kept the clone from being read.
+pub(super) fn own_teammates(
+    db: &Connection,
+    worktree: &Path,
+    git_dir: &Path,
+) -> Result<Vec<String>, EngineError> {
+    if git_dir != agent_git::git_dir(worktree) {
+        return Ok(Vec::new());
+    }
+    let branch = clone_branch(db, worktree)?;
+    let named = clone::teammates(worktree, &branch)?
+        .into_iter()
+        .filter_map(|teammate| {
+            let name = teammate.folder.file_name()?.to_str()?.to_owned();
+            match &teammate.head {
+                clone::TeammateHead::Branch(head)
+                    if agent_git::is_teammates_own_branch(&branch, &name, head) =>
+                {
+                    Some(name)
+                }
+                _ => None,
+            }
+        })
+        .collect();
+    Ok(named)
+}
+
 /// Names the teammate branches and teammate worktrees of a harness's clone whose work is
 /// not in its task branch yet (DEC-104), by the fetch and ancestry test of
 /// `teammates_landed`, listing each one instead of stopping at the first. Inputs: the
