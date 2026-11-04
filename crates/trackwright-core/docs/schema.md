@@ -10,9 +10,16 @@ Generated from `trackwright_core::catalog::schema_v1()` by the test `the_schema_
 
 | Operation | Writes | Summary |
 | --- | --- | --- |
+| `case_create` | yes | Creates a test case in a project. |
+| `case_edit` | yes | Changes a case's title, kind, stable name, steps, protection or status. |
+| `case_link` | yes | Links a case to one acceptance criterion it proves. |
+| `case_list` | no | Lists a project's cases by number, optionally by kind, status, set or no link. |
+| `case_show` | no | Shows one case: steps as policy allows, criteria, sets and latest outcome. |
+| `case_unlink` | yes | Removes a case's link to one acceptance criterion. |
 | `check_add` | yes | Adds a check that proves a criterion: a test, a change, a manual check or a CI run. |
 | `claim` | yes | Assigns an unclaimed ticket to you, ready or not; one claimer wins. |
 | `close` | yes | Closes a ticket as done or cancelled, as the project's close policy allows. |
+| `coverage` | no | Shows each criterion of a ticket or release with its cases and latest results. |
 | `create` | yes | Creates a ticket in a project. |
 | `criterion_add` | yes | Adds an open acceptance criterion at the ticket's next position. |
 | `criterion_edit` | yes | Rewrites a criterion's text. |
@@ -29,17 +36,122 @@ Generated from `trackwright_core::catalog::schema_v1()` by the test `the_schema_
 | `link` | yes | Links a ticket to a target of a kind the host declares. |
 | `list` | no | Lists a project's tickets by number, optionally by status, kind or assignee. |
 | `move` | yes | Moves a ticket to another open status; close and reopen change the closed ones. |
+| `plan_add` | yes | Adds one case or one set to the end of a plan. |
+| `plan_list` | no | Lists a project's plans by number, optionally by status. |
+| `plan_remove` | yes | Removes one case or one set from a plan. |
+| `plan_show` | no | Shows one plan: its release, cycle, status and items in order. |
+| `plan_upsert` | yes | Creates a plan, or sets one's fields at the version you read. |
 | `policy_get` | no | Shows a project's policy, every key with its value and options. |
 | `policy_set` | yes | Sets one policy key of a project. |
 | `ready` | no | Lists unblocked work you may take: unclaimed or yours, by priority, active cycle and age. |
 | `release` | yes | Gives up your claim on a ticket. |
 | `reopen` | yes | Reopens a closed ticket. |
 | `roadmap` | no | Shows a project's versions and cycles with closed and total tickets each. |
+| `run_cancel` | yes | Interrupts a running run. |
+| `run_finish` | yes | Finishes a running run; its verdict follows the locked verdict rules. |
+| `run_list` | no | Lists a project's runs newest first, by plan, batch, verdict or commit. |
+| `run_record` | yes | Appends one batch of results to a running run. |
+| `run_show` | no | Shows one run: its source and policy binding, integrity, totals and results. |
+| `run_start` | yes | Starts a run of a project's tests with its source and policy bound. |
 | `schema` | no | Lists the operations, or one operation's fields. |
+| `set_add` | yes | Adds a case to the end of a set. |
+| `set_remove` | yes | Removes a case from a set. |
+| `set_show` | no | Shows one set and its cases in order. |
+| `set_upsert` | yes | Creates a set, or renames one at the version you read. |
 | `show` | no | Shows one ticket: body, criteria with checks and latest evidence, links and recent events. |
 | `undepend` | yes | Removes a dependency. |
 | `unlink` | yes | Removes a ticket's link. |
 | `version_upsert` | yes | Adds a product version to the roadmap, or changes one. |
+
+## `case_create`
+
+Creates a test case in a project.
+
+Writes: yes.
+
+| Field | Required | Schema | Meaning |
+| --- | --- | --- | --- |
+| `kind` | yes | `{"enum":["unit","integration","e2e","smoke","scenario","manual"],"type":"string"}` | What the case checks. |
+| `project` | yes | `{"pattern":"^[A-Z]{2,8}$","type":"string"}` | The project's key, for example CA. |
+| `protected` | no | `{"type":"boolean"}` | Hides the steps from agents as policy says; false when absent. |
+| `request_id` | no | `{"maxLength":64,"minLength":1,"pattern":"^[A-Za-z0-9._:-]+$","type":"string"}` | Your key for this write; repeating it with the same fields returns the first reply. |
+| `stable_name` | no | `{"maxBytes":512,"maxLength":512,"minLength":1,"pattern":"^[^\\r\\n]+$","type":"string"}` | The runner's name for the test; imports match results by it. |
+| `status` | no | `{"enum":["draft","ready","deprecated"],"type":"string"}` | draft when absent. |
+| `steps` | no | `{"items":{"maxLength":1024,"minLength":1,"type":"string"},"maxBytes":16384,"maxItems":64,"type":"array"}` | The steps in order, each in Markdown. |
+| `title` | yes | `{"maxBytes":200,"maxLength":200,"minLength":1,"pattern":"^[^\\r\\n]*$","type":"string"}` | One line naming what the case proves. |
+
+## `case_edit`
+
+Changes a case's title, kind, stable name, steps, protection or status.
+
+Writes: yes.
+
+| Field | Required | Schema | Meaning |
+| --- | --- | --- | --- |
+| `clear_stable_name` | no | `{"type":"boolean"}` | Removes the stable name when true. |
+| `id` | yes | `{"pattern":"^[A-Z]{2,8}-T[1-9][0-9]{0,9}$","type":"string"}` | The case's id, for example CA-T3. |
+| `kind` | no | `{"enum":["unit","integration","e2e","smoke","scenario","manual"],"type":"string"}` | The new kind. |
+| `protected` | no | `{"type":"boolean"}` | The new protection. |
+| `request_id` | no | `{"maxLength":64,"minLength":1,"pattern":"^[A-Za-z0-9._:-]+$","type":"string"}` | Your key for this write; repeating it with the same fields returns the first reply. |
+| `stable_name` | no | `{"maxBytes":512,"maxLength":512,"minLength":1,"pattern":"^[^\\r\\n]+$","type":"string"}` | The new stable name. |
+| `status` | no | `{"enum":["draft","ready","deprecated"],"type":"string"}` | The new status. |
+| `steps` | no | `{"items":{"maxLength":1024,"minLength":1,"type":"string"},"maxBytes":16384,"maxItems":64,"type":"array"}` | The new steps. |
+| `title` | no | `{"maxBytes":200,"maxLength":200,"minLength":1,"pattern":"^[^\\r\\n]*$","type":"string"}` | The new title. |
+| `version` | yes | `{"minimum":1,"type":"integer"}` | The version you last read; a newer stored version refuses the write as stale. |
+
+## `case_link`
+
+Links a case to one acceptance criterion it proves.
+
+Writes: yes.
+
+| Field | Required | Schema | Meaning |
+| --- | --- | --- | --- |
+| `id` | yes | `{"pattern":"^[A-Z]{2,8}-T[1-9][0-9]{0,9}$","type":"string"}` | The case's id, for example CA-T3. |
+| `position` | yes | `{"maximum":32,"minimum":1,"type":"integer"}` | The criterion's position on the ticket, from 1. |
+| `request_id` | no | `{"maxLength":64,"minLength":1,"pattern":"^[A-Za-z0-9._:-]+$","type":"string"}` | Your key for this write; repeating it with the same fields returns the first reply. |
+| `ticket` | yes | `{"pattern":"^[A-Z]{2,8}-[1-9][0-9]{0,9}$","type":"string"}` | The ticket holding the criterion, for example CA-42. |
+| `version` | yes | `{"minimum":1,"type":"integer"}` | The version you last read; a newer stored version refuses the write as stale. |
+
+## `case_list`
+
+Lists a project's cases by number, optionally by kind, status, set or no link.
+
+Writes: no.
+
+| Field | Required | Schema | Meaning |
+| --- | --- | --- | --- |
+| `cursor` | no | `{"maxLength":64,"minLength":1,"pattern":"^[a-z0-9:_-]+$","type":"string"}` | The cursor of the previous page, to read the next one. |
+| `kind` | no | `{"enum":["unit","integration","e2e","smoke","scenario","manual"],"type":"string"}` | Only cases of this kind. |
+| `project` | yes | `{"pattern":"^[A-Z]{2,8}$","type":"string"}` | The project's key, for example CA. |
+| `set` | no | `{"pattern":"^[A-Z]{2,8}-S[1-9][0-9]{0,9}$","type":"string"}` | Only cases in this set. |
+| `status` | no | `{"enum":["draft","ready","deprecated"],"type":"string"}` | Only cases in this status. |
+| `unlinked` | no | `{"type":"boolean"}` | Only cases linked to no criterion when true. |
+
+## `case_show`
+
+Shows one case: steps as policy allows, criteria, sets and latest outcome.
+
+Writes: no.
+
+| Field | Required | Schema | Meaning |
+| --- | --- | --- | --- |
+| `cursor` | no | `{"maxLength":64,"minLength":1,"pattern":"^[a-z0-9:_-]+$","type":"string"}` | The cursor of the previous page, to read the next one. |
+| `id` | yes | `{"pattern":"^[A-Z]{2,8}-T[1-9][0-9]{0,9}$","type":"string"}` | The case's id, for example CA-T3. |
+
+## `case_unlink`
+
+Removes a case's link to one acceptance criterion.
+
+Writes: yes.
+
+| Field | Required | Schema | Meaning |
+| --- | --- | --- | --- |
+| `id` | yes | `{"pattern":"^[A-Z]{2,8}-T[1-9][0-9]{0,9}$","type":"string"}` | The case's id, for example CA-T3. |
+| `position` | yes | `{"maximum":32,"minimum":1,"type":"integer"}` | The criterion's position on the ticket, from 1. |
+| `request_id` | no | `{"maxLength":64,"minLength":1,"pattern":"^[A-Za-z0-9._:-]+$","type":"string"}` | Your key for this write; repeating it with the same fields returns the first reply. |
+| `ticket` | yes | `{"pattern":"^[A-Z]{2,8}-[1-9][0-9]{0,9}$","type":"string"}` | The ticket holding the criterion, for example CA-42. |
+| `version` | yes | `{"minimum":1,"type":"integer"}` | The version you last read; a newer stored version refuses the write as stale. |
 
 ## `check_add`
 
@@ -80,6 +192,19 @@ Writes: yes.
 | `request_id` | no | `{"maxLength":64,"minLength":1,"pattern":"^[A-Za-z0-9._:-]+$","type":"string"}` | Your key for this write; repeating it with the same fields returns the first reply. |
 | `status` | no | `{"enum":["triage","backlog","todo","in_progress","in_review","done","cancelled"],"type":"string"}` | done or cancelled; done when absent. |
 | `version` | yes | `{"minimum":1,"type":"integer"}` | The version you last read; a newer stored version refuses the write as stale. |
+
+## `coverage`
+
+Shows each criterion of a ticket or release with its cases and latest results.
+
+Writes: no.
+
+| Field | Required | Schema | Meaning |
+| --- | --- | --- | --- |
+| `cursor` | no | `{"maxLength":64,"minLength":1,"pattern":"^[a-z0-9:_-]+$","type":"string"}` | The cursor of the previous page, to read the next one. |
+| `project` | yes | `{"pattern":"^[A-Z]{2,8}$","type":"string"}` | The project's key, for example CA. |
+| `release` | no | `{"maxBytes":64,"maxLength":64,"minLength":1,"pattern":"^[^\\r\\n]*$","type":"string"}` | Cover the criteria of this release's tickets; give ticket or release. |
+| `ticket` | no | `{"pattern":"^[A-Z]{2,8}-[1-9][0-9]{0,9}$","type":"string"}` | Cover this ticket's criteria; give ticket or release. |
 
 ## `create`
 
@@ -304,6 +429,74 @@ Writes: yes.
 | `status` | yes | `{"enum":["triage","backlog","todo","in_progress","in_review","done","cancelled"],"type":"string"}` | triage, backlog, todo, in_progress or in_review. |
 | `version` | yes | `{"minimum":1,"type":"integer"}` | The version you last read; a newer stored version refuses the write as stale. |
 
+## `plan_add`
+
+Adds one case or one set to the end of a plan.
+
+Writes: yes.
+
+| Field | Required | Schema | Meaning |
+| --- | --- | --- | --- |
+| `case` | no | `{"pattern":"^[A-Z]{2,8}-T[1-9][0-9]{0,9}$","type":"string"}` | The case to add; give case or set. |
+| `id` | yes | `{"pattern":"^[A-Z]{2,8}-P[1-9][0-9]{0,9}$","type":"string"}` | The plan's id, for example CA-P2. |
+| `request_id` | no | `{"maxLength":64,"minLength":1,"pattern":"^[A-Za-z0-9._:-]+$","type":"string"}` | Your key for this write; repeating it with the same fields returns the first reply. |
+| `set` | no | `{"pattern":"^[A-Z]{2,8}-S[1-9][0-9]{0,9}$","type":"string"}` | The set to add; give case or set. |
+| `version` | yes | `{"minimum":1,"type":"integer"}` | The version you last read; a newer stored version refuses the write as stale. |
+
+## `plan_list`
+
+Lists a project's plans by number, optionally by status.
+
+Writes: no.
+
+| Field | Required | Schema | Meaning |
+| --- | --- | --- | --- |
+| `cursor` | no | `{"maxLength":64,"minLength":1,"pattern":"^[a-z0-9:_-]+$","type":"string"}` | The cursor of the previous page, to read the next one. |
+| `project` | yes | `{"pattern":"^[A-Z]{2,8}$","type":"string"}` | The project's key, for example CA. |
+| `status` | no | `{"enum":["draft","active","closed"],"type":"string"}` | Only plans in this status. |
+
+## `plan_remove`
+
+Removes one case or one set from a plan.
+
+Writes: yes.
+
+| Field | Required | Schema | Meaning |
+| --- | --- | --- | --- |
+| `case` | no | `{"pattern":"^[A-Z]{2,8}-T[1-9][0-9]{0,9}$","type":"string"}` | The case to remove; give case or set. |
+| `id` | yes | `{"pattern":"^[A-Z]{2,8}-P[1-9][0-9]{0,9}$","type":"string"}` | The plan's id, for example CA-P2. |
+| `request_id` | no | `{"maxLength":64,"minLength":1,"pattern":"^[A-Za-z0-9._:-]+$","type":"string"}` | Your key for this write; repeating it with the same fields returns the first reply. |
+| `set` | no | `{"pattern":"^[A-Z]{2,8}-S[1-9][0-9]{0,9}$","type":"string"}` | The set to remove; give case or set. |
+| `version` | yes | `{"minimum":1,"type":"integer"}` | The version you last read; a newer stored version refuses the write as stale. |
+
+## `plan_show`
+
+Shows one plan: its release, cycle, status and items in order.
+
+Writes: no.
+
+| Field | Required | Schema | Meaning |
+| --- | --- | --- | --- |
+| `cursor` | no | `{"maxLength":64,"minLength":1,"pattern":"^[a-z0-9:_-]+$","type":"string"}` | The cursor of the previous page, to read the next one. |
+| `id` | yes | `{"pattern":"^[A-Z]{2,8}-P[1-9][0-9]{0,9}$","type":"string"}` | The plan's id, for example CA-P2. |
+
+## `plan_upsert`
+
+Creates a plan, or sets one's fields at the version you read.
+
+Writes: yes.
+
+| Field | Required | Schema | Meaning |
+| --- | --- | --- | --- |
+| `cycle` | no | `{"maximum":520,"minimum":1,"type":"integer"}` | The project's cycle number the plan is for. |
+| `id` | no | `{"pattern":"^[A-Z]{2,8}-P[1-9][0-9]{0,9}$","type":"string"}` | The plan to change; a new plan when absent. |
+| `name` | yes | `{"maxBytes":200,"maxLength":200,"minLength":1,"pattern":"^[^\\r\\n]*$","type":"string"}` | One line naming the plan. |
+| `project` | yes | `{"pattern":"^[A-Z]{2,8}$","type":"string"}` | The project's key, for example CA. |
+| `release` | no | `{"maxBytes":64,"maxLength":64,"minLength":1,"pattern":"^[^\\r\\n]*$","type":"string"}` | The project's release version the plan is for. |
+| `request_id` | no | `{"maxLength":64,"minLength":1,"pattern":"^[A-Za-z0-9._:-]+$","type":"string"}` | Your key for this write; repeating it with the same fields returns the first reply. |
+| `status` | no | `{"enum":["draft","active","closed"],"type":"string"}` | draft when absent. |
+| `version` | no | `{"minimum":1,"type":"integer"}` | The plan version you last read; required with id. |
+
 ## `policy_get`
 
 Shows a project's policy, every key with its value and options.
@@ -375,6 +568,90 @@ Writes: no.
 | `cursor` | no | `{"maxLength":64,"minLength":1,"pattern":"^[a-z0-9:_-]+$","type":"string"}` | The cursor of the previous page, to read the next one. |
 | `project` | yes | `{"pattern":"^[A-Z]{2,8}$","type":"string"}` | The project's key, for example CA. |
 
+## `run_cancel`
+
+Interrupts a running run.
+
+Writes: yes.
+
+| Field | Required | Schema | Meaning |
+| --- | --- | --- | --- |
+| `id` | yes | `{"pattern":"^[A-Z]{2,8}-R[1-9][0-9]{0,9}$","type":"string"}` | The run's id, for example CA-R7. |
+| `reason` | yes | `{"enum":["cancelled","timed_out"],"type":"string"}` | Why the run stopped. |
+| `request_id` | no | `{"maxLength":64,"minLength":1,"pattern":"^[A-Za-z0-9._:-]+$","type":"string"}` | Your key for this write; repeating it with the same fields returns the first reply. |
+| `version` | yes | `{"minimum":1,"type":"integer"}` | The version you last read; a newer stored version refuses the write as stale. |
+
+## `run_finish`
+
+Finishes a running run; its verdict follows the locked verdict rules.
+
+Writes: yes.
+
+| Field | Required | Schema | Meaning |
+| --- | --- | --- | --- |
+| `end` | yes | `{"enum":["completed","build_failed","report_unreadable","not_started"],"type":"string"}` | How the run ended. |
+| `exit_code` | no | `{"maximum":2147483647,"minimum":-2147483648,"type":"integer"}` | The process exit code, when a process ran. |
+| `id` | yes | `{"pattern":"^[A-Z]{2,8}-R[1-9][0-9]{0,9}$","type":"string"}` | The run's id, for example CA-R7. |
+| `integrity` | no | `{"maxBytes":8192,"type":"object"}` | The host's integrity evidence. |
+| `reason` | no | `{"maxBytes":200,"maxLength":200,"minLength":1,"pattern":"^[^\\r\\n]+$","type":"string"}` | Why the run never started; only with not_started. |
+| `request_id` | no | `{"maxLength":64,"minLength":1,"pattern":"^[A-Za-z0-9._:-]+$","type":"string"}` | Your key for this write; repeating it with the same fields returns the first reply. |
+| `version` | yes | `{"minimum":1,"type":"integer"}` | The version you last read; a newer stored version refuses the write as stale. |
+
+## `run_list`
+
+Lists a project's runs newest first, by plan, batch, verdict or commit.
+
+Writes: no.
+
+| Field | Required | Schema | Meaning |
+| --- | --- | --- | --- |
+| `batch` | no | `{"maxBytes":64,"maxLength":64,"minLength":1,"pattern":"^[^\\r\\n]+$","type":"string"}` | Only runs of this batch. |
+| `commit` | no | `{"maxBytes":64,"maxLength":64,"minLength":1,"pattern":"^[^\\r\\n]+$","type":"string"}` | Only runs of this source commit, 40 hex digits. |
+| `cursor` | no | `{"maxLength":64,"minLength":1,"pattern":"^[a-z0-9:_-]+$","type":"string"}` | The cursor of the previous page, to read the next one. |
+| `plan` | no | `{"pattern":"^[A-Z]{2,8}-P[1-9][0-9]{0,9}$","type":"string"}` | Only runs of this plan. |
+| `project` | yes | `{"pattern":"^[A-Z]{2,8}$","type":"string"}` | The project's key, for example CA. |
+| `verdict` | no | `{"enum":["passed","failed","no_tests","build_failed","unknown","unavailable"],"type":"string"}` | Only runs with this verdict. |
+
+## `run_record`
+
+Appends one batch of results to a running run.
+
+Writes: yes.
+
+| Field | Required | Schema | Meaning |
+| --- | --- | --- | --- |
+| `id` | yes | `{"pattern":"^[A-Z]{2,8}-R[1-9][0-9]{0,9}$","type":"string"}` | The run's id, for example CA-R7. |
+| `request_id` | no | `{"maxLength":64,"minLength":1,"pattern":"^[A-Za-z0-9._:-]+$","type":"string"}` | Your key for this write; repeating it with the same fields returns the first reply. |
+| `results` | yes | `{"items":{"additionalProperties":false,"properties":{"artifact":{"maxLength":512,"type":"string"},"duration_ms":{"maximum":4294967295,"minimum":0,"type":"integer"},"message":{"maxLength":1048576,"type":"string"},"name":{"maxLength":512,"minLength":1,"type":"string"},"outcome":{"enum":["passed","failed","skipped","errored","not_run"],"type":"string"}},"required":["name","outcome"],"type":"object"},"maxBytes":16384,"maxItems":500,"minItems":1,"type":"array"}` | 1 to 500 results: name, outcome, optional duration_ms, message, artifact. |
+| `version` | yes | `{"minimum":1,"type":"integer"}` | The version you last read; a newer stored version refuses the write as stale. |
+
+## `run_show`
+
+Shows one run: its source and policy binding, integrity, totals and results.
+
+Writes: no.
+
+| Field | Required | Schema | Meaning |
+| --- | --- | --- | --- |
+| `cursor` | no | `{"maxLength":64,"minLength":1,"pattern":"^[a-z0-9:_-]+$","type":"string"}` | The cursor of the previous page, to read the next one. |
+| `id` | yes | `{"pattern":"^[A-Z]{2,8}-R[1-9][0-9]{0,9}$","type":"string"}` | The run's id, for example CA-R7. |
+
+## `run_start`
+
+Starts a run of a project's tests with its source and policy bound.
+
+Writes: yes.
+
+| Field | Required | Schema | Meaning |
+| --- | --- | --- | --- |
+| `batch` | no | `{"maxBytes":64,"maxLength":64,"minLength":1,"pattern":"^[^\\r\\n]+$","type":"string"}` | The label grouping one trigger's runs. |
+| `plan` | no | `{"pattern":"^[A-Z]{2,8}-P[1-9][0-9]{0,9}$","type":"string"}` | The plan the run runs. |
+| `policy` | yes | `{"maxBytes":4096,"type":"object"}` | The check policy the run ran under. |
+| `project` | yes | `{"pattern":"^[A-Z]{2,8}$","type":"string"}` | The project's key, for example CA. |
+| `request_id` | no | `{"maxLength":64,"minLength":1,"pattern":"^[A-Za-z0-9._:-]+$","type":"string"}` | Your key for this write; repeating it with the same fields returns the first reply. |
+| `source` | yes | `{"maxBytes":2048,"type":"object"}` | The source the run covers: a commit or a declared source. |
+| `title` | yes | `{"maxBytes":200,"maxLength":200,"minLength":1,"pattern":"^[^\\r\\n]*$","type":"string"}` | One line naming the run. |
+
 ## `schema`
 
 Lists the operations, or one operation's fields.
@@ -384,7 +661,58 @@ Writes: no.
 | Field | Required | Schema | Meaning |
 | --- | --- | --- | --- |
 | `cursor` | no | `{"maxLength":64,"minLength":1,"pattern":"^[a-z0-9:_-]+$","type":"string"}` | The cursor of the previous page, to read the next one. |
-| `op` | no | `{"enum":["ready","list","show","history","roadmap","policy_get","export","schema","create","edit","move","claim","release","depend","undepend","criterion_add","criterion_edit","check_add","evidence_record","criterion_set","link","unlink","close","reopen","version_upsert","cycle_start","cycle_close","import_preview","import_apply","policy_set"],"type":"string"}` | Only this operation's fields. |
+| `op` | no | `{"enum":["ready","list","show","history","roadmap","policy_get","export","schema","create","edit","move","claim","release","depend","undepend","criterion_add","criterion_edit","check_add","evidence_record","criterion_set","link","unlink","close","reopen","version_upsert","cycle_start","cycle_close","import_preview","import_apply","policy_set","case_list","case_show","set_show","plan_list","plan_show","run_list","run_show","coverage","case_create","case_edit","case_link","case_unlink","set_upsert","set_add","set_remove","plan_upsert","plan_add","plan_remove","run_start","run_record","run_finish","run_cancel"],"type":"string"}` | Only this operation's fields. |
+
+## `set_add`
+
+Adds a case to the end of a set.
+
+Writes: yes.
+
+| Field | Required | Schema | Meaning |
+| --- | --- | --- | --- |
+| `case` | yes | `{"pattern":"^[A-Z]{2,8}-T[1-9][0-9]{0,9}$","type":"string"}` | The case to add. |
+| `id` | yes | `{"pattern":"^[A-Z]{2,8}-S[1-9][0-9]{0,9}$","type":"string"}` | The set's id, for example CA-S1. |
+| `request_id` | no | `{"maxLength":64,"minLength":1,"pattern":"^[A-Za-z0-9._:-]+$","type":"string"}` | Your key for this write; repeating it with the same fields returns the first reply. |
+| `version` | yes | `{"minimum":1,"type":"integer"}` | The version you last read; a newer stored version refuses the write as stale. |
+
+## `set_remove`
+
+Removes a case from a set.
+
+Writes: yes.
+
+| Field | Required | Schema | Meaning |
+| --- | --- | --- | --- |
+| `case` | yes | `{"pattern":"^[A-Z]{2,8}-T[1-9][0-9]{0,9}$","type":"string"}` | The case to remove. |
+| `id` | yes | `{"pattern":"^[A-Z]{2,8}-S[1-9][0-9]{0,9}$","type":"string"}` | The set's id, for example CA-S1. |
+| `request_id` | no | `{"maxLength":64,"minLength":1,"pattern":"^[A-Za-z0-9._:-]+$","type":"string"}` | Your key for this write; repeating it with the same fields returns the first reply. |
+| `version` | yes | `{"minimum":1,"type":"integer"}` | The version you last read; a newer stored version refuses the write as stale. |
+
+## `set_show`
+
+Shows one set and its cases in order.
+
+Writes: no.
+
+| Field | Required | Schema | Meaning |
+| --- | --- | --- | --- |
+| `cursor` | no | `{"maxLength":64,"minLength":1,"pattern":"^[a-z0-9:_-]+$","type":"string"}` | The cursor of the previous page, to read the next one. |
+| `id` | yes | `{"pattern":"^[A-Z]{2,8}-S[1-9][0-9]{0,9}$","type":"string"}` | The set's id, for example CA-S1. |
+
+## `set_upsert`
+
+Creates a set, or renames one at the version you read.
+
+Writes: yes.
+
+| Field | Required | Schema | Meaning |
+| --- | --- | --- | --- |
+| `id` | no | `{"pattern":"^[A-Z]{2,8}-S[1-9][0-9]{0,9}$","type":"string"}` | The set to rename; a new set when absent. |
+| `name` | yes | `{"maxBytes":200,"maxLength":200,"minLength":1,"pattern":"^[^\\r\\n]*$","type":"string"}` | One line naming the set. |
+| `project` | yes | `{"pattern":"^[A-Z]{2,8}$","type":"string"}` | The project's key, for example CA. |
+| `request_id` | no | `{"maxLength":64,"minLength":1,"pattern":"^[A-Za-z0-9._:-]+$","type":"string"}` | Your key for this write; repeating it with the same fields returns the first reply. |
+| `version` | no | `{"minimum":1,"type":"integer"}` | The set version you last read; required with id. |
 
 ## `show`
 
@@ -497,7 +825,29 @@ Every operation answers with this envelope: `ok` with `data`, the `next` actions
                   "cycle_close",
                   "import_preview",
                   "import_apply",
-                  "policy_set"
+                  "policy_set",
+                  "case_list",
+                  "case_show",
+                  "set_show",
+                  "plan_list",
+                  "plan_show",
+                  "run_list",
+                  "run_show",
+                  "coverage",
+                  "case_create",
+                  "case_edit",
+                  "case_link",
+                  "case_unlink",
+                  "set_upsert",
+                  "set_add",
+                  "set_remove",
+                  "plan_upsert",
+                  "plan_add",
+                  "plan_remove",
+                  "run_start",
+                  "run_record",
+                  "run_finish",
+                  "run_cancel"
                 ],
                 "type": "string"
               },
@@ -580,7 +930,29 @@ Every operation answers with this envelope: `ok` with `data`, the `next` actions
                   "cycle_close",
                   "import_preview",
                   "import_apply",
-                  "policy_set"
+                  "policy_set",
+                  "case_list",
+                  "case_show",
+                  "set_show",
+                  "plan_list",
+                  "plan_show",
+                  "run_list",
+                  "run_show",
+                  "coverage",
+                  "case_create",
+                  "case_edit",
+                  "case_link",
+                  "case_unlink",
+                  "set_upsert",
+                  "set_add",
+                  "set_remove",
+                  "plan_upsert",
+                  "plan_add",
+                  "plan_remove",
+                  "run_start",
+                  "run_record",
+                  "run_finish",
+                  "run_cancel"
                 ],
                 "type": "string"
               },
