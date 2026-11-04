@@ -1138,3 +1138,114 @@ fn an_indented_wrapped_tail_of_a_masked_token_is_masked() {
         "quokkafern",
     );
 }
+
+/// OP-25 r2 S1 (Codex scan b4ef1526): `-proot` and `-phuntertwo` are masked, while `find`'s
+/// `-print` stays searchable.
+#[test]
+fn the_codex_lowercase_p_passwords_are_masked_and_find_print_stays() {
+    assert_masked(
+        "$ mysql -u root -proot shop\n$ mysql -phuntertwo shop\n$ find . -name x -print",
+        &["-proot", "-phuntertwo"],
+        "-print",
+    );
+}
+
+/// OP-25 r2 S1: a `-p` password that itself starts with `-` is masked; every compact `-p`
+/// value other than a known flag is a password, whatever characters it holds.
+#[test]
+fn a_p_password_starting_with_a_dash_is_masked() {
+    assert_masked(
+        "$ mysql -u admin -p-secret9 shop\nquietheron listed",
+        &["-p-secret9"],
+        "quietheron",
+    );
+}
+
+/// OP-25 r2 S2: a `.pgpass` line is masked by its shape, four host, port, database and user
+/// fields and then a password holding any characters, a quoted line and `\:` included.
+#[test]
+fn a_pgpass_line_with_a_punctuated_password_is_masked() {
+    assert_masked(
+        "db.internal:5432:shop:svc:p@ss!w0rd\n\
+         $ echo 'localhost:5432:*:svc:pa\\:ss9' >> pgfile\n\
+         quietheron listed",
+        &["p@ss!w0rd", "pa\\:ss9"],
+        "quietheron",
+    );
+}
+
+/// OP-25 r2 S3: a record's folder that an agent swaps for a link after the listing, to a
+/// folder outside the agents folder, is never read; the record reads before the swap.
+#[test]
+fn a_record_folder_swapped_for_a_link_after_the_listing_is_never_read() {
+    let fixture = Fixture::new();
+    let (agent, home) = fixture.agent("claude-code");
+    let folder = home.join("projects").join("p");
+    record(
+        &folder.join("swap.jsonl"),
+        &[claude("user", "insideword here")],
+    );
+    let outside = fixture.agents.parent().unwrap().join("outside");
+    record(
+        &outside.join("swap.jsonl"),
+        &[claude("user", "outsideword here")],
+    );
+    let found = conversations(&fixture.db, &project(), &fixture.agents);
+    let swap = found
+        .iter()
+        .find(|one| one.id == format!("agent-{agent}/swap"))
+        .unwrap();
+    let read = |conversation: &Conversation| {
+        let mut texts = Vec::new();
+        let mut budget = Budget {
+            left: SCAN_BYTES_MAX,
+        };
+        each_message(
+            &fixture.db,
+            &project(),
+            conversation,
+            &mut budget,
+            None,
+            &mut |_, _, text| {
+                texts.push(text.to_owned());
+                true
+            },
+        );
+        texts
+    };
+    let before = read(swap);
+    assert!(
+        before.iter().any(|text| text.contains("insideword")),
+        "{before:?}"
+    );
+    std::fs::rename(&folder, home.join("projects").join("moved")).unwrap();
+    symlink(&outside, &folder).unwrap();
+    let after = read(swap);
+    assert!(
+        after.iter().all(|text| !text.contains("outsideword")),
+        "{after:?}"
+    );
+}
+
+/// OP-25 r2 S4: a sparse record with no line break, far larger than the read budget, ends
+/// a search at the budget instead of being read to its end.
+#[test]
+fn a_huge_record_with_no_line_break_is_read_only_up_to_the_budget() {
+    const SPARSE_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+    let fixture = Fixture::new();
+    let (_, home) = fixture.agent("claude-code");
+    let path = home.join("projects").join("p").join("sparse.jsonl");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::File::create(&path)
+        .unwrap()
+        .set_len(SPARSE_BYTES)
+        .unwrap();
+    let started = std::time::Instant::now();
+    let text = fixture.sessions("needle");
+    let took = started.elapsed();
+    assert!(
+        text.contains("The search stopped at its read limit"),
+        "{text}"
+    );
+    assert!(took < std::time::Duration::from_secs(3), "{took:?}");
+}
