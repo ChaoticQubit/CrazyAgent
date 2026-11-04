@@ -231,6 +231,8 @@ fn main() {
         "desktop_usage_set_reset",
         "desktop_scorecard",
         "desktop_scorecard_set",
+        "desktop_tests_read",
+        "desktop_checks",
         "desktop_ide_extension_asks",
         "desktop_ide_extension_approve",
         "desktop_ide_extension_decline",

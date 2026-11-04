@@ -21,6 +21,7 @@ mod account_setup;
 mod accounts;
 mod agents;
 mod changes;
+pub mod checks;
 mod cleanup;
 mod coord;
 mod coord_questions;

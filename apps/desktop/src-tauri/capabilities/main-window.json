@@ -202,6 +202,8 @@
     "allow-desktop-usage-set-reset",
     "allow-desktop-scorecard",
     "allow-desktop-scorecard-set",
+    "allow-desktop-tests-read",
+    "allow-desktop-checks",
     "allow-desktop-ide-extension-asks",
     "allow-desktop-ide-extension-approve",
     "allow-desktop-ide-extension-decline",

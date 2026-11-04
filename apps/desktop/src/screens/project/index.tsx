@@ -26,6 +26,7 @@ import type { ProjectData } from "./shared";
 import { SettingsTab } from "./settings";
 import { TicketsTab } from "./tickets";
 import { TeamActivity } from "./team-activity";
+import { TestsTab } from "./tests";
 import { useTeam } from "./team";
 import "./projects.css";
 
@@ -34,6 +35,7 @@ export const TABS = [
   { id: "conversation", label: "Conversation", icon: "message-square" },
   { id: "agents", label: "Agents", icon: "bot" },
   { id: "changes", label: "Changes", icon: "git-branch" },
+  { id: "tests", label: "Tests", icon: "circle-check" },
   { id: "questions", label: "Questions", icon: "inbox" },
   { id: "tickets", label: "Tickets", icon: "layout-template" },
   { id: "roadmap", label: "Roadmap", icon: "trending-up" },
@@ -262,6 +264,7 @@ export function ProjectPage({ id: projectId, tab = "overview", name, section, na
       {active === "conversation" && <TeamActivity data={data}><MasterArea data={data} /></TeamActivity>}
       {active === "agents" && <AgentsTab data={data} />}
       {active === "changes" && <ChangesTab data={data} />}
+      {active === "tests" && <TestsTab data={data} />}
       {active === "questions" && <QuestionsTab data={data} />}
       {active === "tickets" && <TicketsTab data={data} />}
       {active === "roadmap" && <RoadmapTab data={data} />}

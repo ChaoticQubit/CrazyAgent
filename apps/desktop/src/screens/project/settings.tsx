@@ -20,6 +20,7 @@ import { PlanningLine } from "./planning";
 import { SessionContext, useLoad } from "../../state";
 import { ProjectAccountOrder } from "../settings/account-choice";
 import { HarnessPage } from "../settings/harness-page";
+import { ProjectChecks } from "../settings/checks";
 import { PluginsAndSkills } from "../settings/plugins";
 import { TicketSettingsPanel } from "../settings/tickets";
 import { NotReady, valueOf } from "./shared";
@@ -35,6 +36,7 @@ const SECTIONS = [
   { id: "access", label: "Agent access" },
   { id: "trust", label: "Repository trust" },
   { id: "sandbox", label: "Sandbox" },
+  { id: "checks", label: "Checks" },
   { id: "remove", label: "Remove project" },
 ] as const;
 
@@ -610,6 +612,7 @@ export function SettingsTab({ data, section }: { data: ProjectData; section?: st
       {active === "access" && <AccessSection data={data} />}
       {active === "trust" && <TrustSection data={data} />}
       {active === "sandbox" && <div className="pj-stack"><SandboxSection data={data} /><HiddenSection data={data} /></div>}
+      {active === "checks" && <ProjectChecks projectId={data.id} />}
       {active === "remove" && <RemoveSection data={data} setup={setup} />}
     </div>
   </div>;

@@ -5,6 +5,7 @@ mod updates;
 #[cfg(feature = "native-webdriver")]
 mod native_refresh_observation;
 
+use bridge::checks::TestsReply;
 use bridge::harness_settings::HarnessSettingsPage;
 use bridge::intake::FolderSize;
 use bridge::memory::{MemoryImport, MemoryList, MemoryNote};
@@ -26,8 +27,8 @@ use crazyagent::config::ModelAccessEdit;
 use crazyagent::coord::settings::{CoordSettings, Delivery, HarnessKind, SubagentMode};
 use crazyagent::coord::tool_switches::Switch;
 use crazyagent::engine::owner::{
-    AccountAuthCapabilitiesReply, AccountCheck, AccountPage, AccountSecret, ModelAccessCollection,
-    NativeAuthMethod, TrackedProject,
+    AccountAuthCapabilitiesReply, AccountCheck, AccountPage, AccountSecret, ChecksReply,
+    ModelAccessCollection, NativeAuthMethod, TrackedProject,
 };
 use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crazyagent::harnesses::HarnessEntry;
@@ -2575,6 +2576,32 @@ async fn desktop_restart_agent(
 }
 
 #[tauri::command]
+async fn desktop_tests_read(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+    op: String,
+    args: serde_json::Value,
+) -> Result<TestsReply, BridgeError> {
+    main_window(&window)?;
+    let call = read(&state).await?.tests_read(project_id, op, args)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_checks(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: Option<String>,
+    op: String,
+    args: serde_json::Value,
+) -> Result<ChecksReply, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.checks(project_id, op, args)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_usage_report(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -3791,6 +3818,8 @@ pub fn run() {
             desktop_usage_set_reset,
             desktop_scorecard,
             desktop_scorecard_set,
+            desktop_tests_read,
+            desktop_checks,
             desktop_ide_extension_asks,
             desktop_ide_extension_approve,
             desktop_ide_extension_decline,
