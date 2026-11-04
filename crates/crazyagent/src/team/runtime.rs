@@ -5409,8 +5409,8 @@ impl TeamRuntime {
     /// owner lets a lead's workers land on it, then records the lead's change set again so
     /// the landed work waits for the owner there and tells the lead whose work landed, so a
     /// lead that could not finish while it waited finishes then (OP9B-M1). A conflicting set
-    /// stays on the teammate's branch and the lead is told its files once for each teammate
-    /// head and lead tip.
+    /// stays on the teammate's branch and the lead is told its files, each quoted on its own
+    /// line (OP9B-C2), once for each teammate head and lead tip.
     /// Takes the project and the lead. Returns Ok, or a SQLite or coordination failure.
     fn land_teammates(&mut self, project: &ProjectId, lead: i64) -> Result<(), EngineError> {
         let Some((repository, worktree, git_dir)) = self.linked_lead(project, lead)? else {
@@ -5504,8 +5504,8 @@ impl TeamRuntime {
                         project,
                         lead,
                         format!(
-                            "CrazyAgent could not land teammate {name}'s work on your task branch {branch}: it conflicts in {}. It stays on {name}'s own branch {branch}--{name}. Ask {name} to make those files agree with yours; CrazyAgent lands its work again after its next rest.",
-                            bound_text(&files.join(", "), TEAMMATE_CONFLICT_FILES_SHOWN_MAX)
+                            "CrazyAgent could not land teammate {name}'s work on your task branch {branch}. It stays on {name}'s own branch {branch}--{name}. Ask {name} to make these files agree with yours; CrazyAgent lands its work again after its next rest. The files that conflict, one per line, each quoted:{}",
+                            quoted_lines(&files, TEAMMATE_CONFLICT_FILES_SHOWN_MAX)
                         ),
                     )?;
                 }
@@ -8249,6 +8249,23 @@ const LEAD_ENDED_TEAMMATE: &str = "Its lead stopped, and its terminal ended with
 const OVER_TEAMMATE_CAP: &str = "The engine ended it: its lead ran more sub-agents than the owner's Max teammates per harness allows.";
 const OWNER_WAKES_PER_TICK_MAX: usize = 8;
 const HANDOFF_BYTES_MAX: usize = 1000;
+
+/// Lists file names for an engine note one per line, each quoted with its quotes,
+/// backslashes, newlines and other control characters escaped, so no name an agent chose
+/// reads as a line of the note (OP9B-C2). Takes the names and the byte bound of the list.
+/// Returns the lines, whole names only, then how many names were left out.
+fn quoted_lines(names: &[String], max: usize) -> String {
+    let mut text = String::new();
+    for (shown, name) in names.iter().enumerate() {
+        let line = format!("\n- \"{}\"", name.escape_debug());
+        if text.len() + line.len() > max {
+            text.push_str(&format!("\n- and {} more", names.len() - shown));
+            break;
+        }
+        text.push_str(&line);
+    }
+    text
+}
 
 /// Keeps the harness conversation a sub-agent's pane records, replacing the one kept
 /// before, so waking the agent continues it (DEC-102). A record path that is not plain text

@@ -543,11 +543,16 @@ pub(super) fn finish_work(
 ) -> Result<(String, bool), EngineError> {
     let project = &answering.stored.project_id;
     if outcome == Finish::Complete && !master {
-        let working = working_teammates(connection, project, agent)?;
+        let (working, linked) = working_teammates(connection, project, agent)?;
         if !working.is_empty() {
+            let then = if linked {
+                "CrazyAgent lands each teammate's work on your task branch once it rests and you are idle; finish again once they rest."
+            } else {
+                "Finish again once they rest and you have merged their branches into yours."
+            };
             return Ok((
                 format!(
-                    "Not finished: these teammates still work: {}. CrazyAgent lands each teammate's work on your task branch once it rests and you are idle; finish again once they rest.",
+                    "Not finished: these teammates still work: {}. {then}",
                     bound_text(&working.join(", "), CLAIMS_SHOWN_MAX)
                 ),
                 true,
@@ -647,15 +652,17 @@ pub(super) fn finish_work(
     ))
 }
 
-/// The names of a linked lead's native teammates that still work (OP-9b), which keep its
-/// work from Complete, since the engine lands each teammate's work on the lead's task
-/// branch only once it rests. Takes the database, the project and the lead. Returns the
-/// names, none for a lead in its own clone or with no worktree, or a SQLite failure.
+/// The names of a lead's native teammates that still start or work (OP-9b, OP9B-C3), which
+/// keep its work from Complete in either layout, since no commit holds their edits yet: in
+/// a linked worktree the engine lands each teammate's work on the lead's task branch only
+/// once it rests, and in its own clone the lead merges their branches. Takes the database,
+/// the project and the lead. Returns the names, none for a lead with no worktree, and
+/// whether the lead's worktree is linked, or a SQLite failure.
 fn working_teammates(
     connection: &Connection,
     project: &ProjectId,
     lead: i64,
-) -> Result<Vec<String>, EngineError> {
+) -> Result<(Vec<String>, bool), EngineError> {
     let place: Option<(String, String)> = connection
         .query_row(
             "SELECT worktree,git_dir FROM team_worktrees WHERE agent=?1 AND project=?2",
@@ -665,11 +672,9 @@ fn working_teammates(
         .optional()
         .map_err(state)?;
     let Some((worktree, git_dir)) = place else {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), false));
     };
-    if Path::new(&git_dir) == crate::agent_git::git_dir(Path::new(&worktree)) {
-        return Ok(Vec::new());
-    }
+    let linked = Path::new(&git_dir) != crate::agent_git::git_dir(Path::new(&worktree));
     let mut statement = connection
         .prepare(
             "SELECT COALESCE(n.name,'teammate '||a.id) FROM team_agents a
@@ -686,7 +691,7 @@ fn working_teammates(
         .map_err(state)?
         .collect::<Result<_, _>>()
         .map_err(state)?;
-    Ok(names)
+    Ok((names, linked))
 }
 
 /// The names of a lead's native teammates whose change set is still open (OP9B-M1): the
