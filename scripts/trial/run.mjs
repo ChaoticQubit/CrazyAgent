@@ -7,6 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import { setTimeout as pause } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
+import { stopRelaunched } from "../../apps/desktop/test/native/trial-app.mjs";
 
 const TRIAL = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(TRIAL, "..", "..");
@@ -93,7 +94,7 @@ export function renderPrompt(template, project) {
 }
 
 /** Parses and validates the runner arguments. Input: argv after the script. Output: the options with resolved paths and command arrays; a bad argument throws a Refusal. */
-function options(argv) {
+export function options(argv) {
   const { values } = parseArgs({
     args: argv,
     strict: true,
@@ -120,9 +121,9 @@ function options(argv) {
   const trial = Number(values.trial);
   if (!Number.isInteger(trial) || trial < 1 || trial > 99) throw new Refusal(`--trial must be a whole number from 1 to 99, got ${values.trial}`);
   if (!/^[0-9a-f]{8}$/.test(values.build ?? "")) throw new Refusal("--build must be the stage sha8 the app was built from");
-  const project = absolute("--project", values.project ?? join(homedir(), "Projects", `ca-trial-${trial}`));
-  const evidence = absolute("--evidence", values.evidence ?? process.env.TRIAL_EVIDENCE ?? "");
   const engine = absolute("--engine", values.engine ?? process.env.CRAZYAGENT_ENGINE_ROOT ?? join(homedir(), "Library", "Application Support", "CrazyAgent", "engine"));
+  const project = absolute("--project", values.project ?? join(projectsHome(engine), `ca-trial-${trial}`));
+  const evidence = absolute("--evidence", values.evidence ?? process.env.TRIAL_EVIDENCE ?? "");
   const app = absolute("--app", values.app);
   if (values["frames-cmd"] === undefined && !/^[A-Za-z0-9:._-]{1,64}$/.test(values.pane ?? "")) throw new Refusal("--pane must name the herdr pane that shows the TUI");
   const mark = `TRIAL${trial}-PROJECT-RULE`;
@@ -130,7 +131,7 @@ function options(argv) {
     frames: command("--frames-cmd", values["frames-cmd"], ["herdr", "pane", "read", values.pane ?? ""]),
     desktop: command("--desktop-cmd", values["desktop-cmd"], [process.execPath, join(DESKTOP, "node_modules", "@wdio", "cli", "bin", "wdio.js"), "run", join(DESKTOP, "test", "native", `trial${trial}.wdio.conf.mjs`)]),
     audit: command("--audit-cmd", values["audit-cmd"], ["python3", "-I", join(TRIAL, "audit.py"), project, "--engine", engine, "--evidence", evidence, "--project-mark", mark]),
-    report: command("--report-cmd", values["report-cmd"], [process.execPath, join(TRIAL, "report.mjs"), evidence]),
+    report: command("--report-cmd", values["report-cmd"], [process.execPath, join(TRIAL, "report.mjs"), "trial", evidence]),
   };
   const needed = [PROMPT, join(engine, "engine.db"), join(app, "Contents", "Info.plist")];
   if (values["desktop-cmd"] === undefined) needed.push(commands.desktop[1], commands.desktop[3]);
@@ -153,6 +154,24 @@ function options(argv) {
     psEveryMs: seconds("--ps-every-s", values["ps-every-s"], 3600) * 1000,
     graceMs: seconds("--kill-grace-s", values["kill-grace-s"], 600) * 1000,
   };
+}
+
+/** Reads the owner's projects folder, where the app lists projects, from the engine store, read only. Input: the engine root. Output: the folder; a store without one throws a Refusal. */
+function projectsHome(engine) {
+  if (!existsSync(join(engine, "engine.db"))) throw new Refusal(`missing ${join(engine, "engine.db")}`);
+  let row;
+  try {
+    const db = readOnly(engine);
+    try {
+      row = db.prepare("SELECT path FROM projects_home WHERE singleton=1").get();
+    } finally {
+      db.close();
+    }
+  } catch (error) {
+    throw new Refusal(`the engine has no projects folder (${error.message}); set it in the app or pass --project`);
+  }
+  if (typeof row?.path !== "string" || row.path.length === 0) throw new Refusal("the engine has no projects folder; set it in the app or pass --project");
+  return row.path;
 }
 
 /** Resolves one path argument and requires it to be absolute. Input: the flag name and its text. Output: the normalized path; a relative or empty one throws a Refusal. */
@@ -222,16 +241,21 @@ function git(folder, args) {
   return result.stdout;
 }
 
-/** Seeds the trial project: one commit on main with the trial rule, the land-on branch and an untracked hidden folder. Input: the project path and trial number. Output: the seed sha and a log of what git reports. */
+/** Seeds the trial project: one commit on main with the trial rule and a tiny Rust crate whose cargo test agents run, the land-on branch and an untracked hidden folder. Input: the project path and trial number. Output: the seed sha and a log of what git reports. */
 function seed(project, trial) {
   mkdirSync(project, { recursive: true });
   const files = {
-    ".gitignore": ".crazyagent/\nprivate/\n",
+    ".gitignore": ".crazyagent/\nprivate/\ntarget/\nCargo.lock\n",
     "CLAUDE.md": `# ca-trial-${trial} rules\n\nTRIAL${trial}-PROJECT-RULE: every Python function has a one-line docstring.\n`,
+    "Cargo.toml": `[package]\nname = "ca-trial-${trial}"\nversion = "0.1.0"\nedition = "2021"\n`,
     "README.md": `# ca-trial-${trial}\n\nThrowaway repo for the CrazyAgent DEC-112 trial ${trial}.\n`,
     "calc.py": "def placeholder():\n    \"\"\"Placeholder.\"\"\"\n    return None\n",
+    "src/lib.rs": "/// Doubles a number. Input: the number. Output: twice it.\npub fn double(x: i32) -> i32 {\n    x * 2\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn doubles() {\n        assert_eq!(super::double(2), 4);\n    }\n}\n",
   };
-  for (const [name, text] of Object.entries(files)) writeFileSync(join(project, name), text);
+  for (const [name, text] of Object.entries(files)) {
+    mkdirSync(dirname(join(project, name)), { recursive: true });
+    writeFileSync(join(project, name), text);
+  }
   git(project, ["init", "-q", "-b", "main"]);
   git(project, ["add", "--", ...Object.keys(files)]);
   git(project, ["commit", "-q", "-m", "Initial trial repo"]);
@@ -664,7 +688,7 @@ export async function main(argv) {
     finish();
     return 1;
   }
-  const env = childEnv({ TRIAL_EVIDENCE: opts.evidence, TRIAL_PROJECT: project, TRIAL_PROMPT: PROMPT, TRIAL_ENGINE: opts.engine });
+  const env = childEnv({ TRIAL_EVIDENCE: opts.evidence, TRIAL_PROJECT: project, TRIAL_PROMPT: PROMPT, TRIAL_ENGINE: opts.engine, TRIAL_LAND_ON: `trial${opts.trial}-land`, TRIAL_CLI: join(opts.app, "Contents", "MacOS", "crazyagent") });
   const envNames = Object.keys(env).sort();
   let recorder = null;
   let snapshots = null;
@@ -686,6 +710,11 @@ export async function main(argv) {
     await stopLive(opts.graceMs);
     if (snapshots) shots = await snapshots.stop();
     if (recorder) recorded = await recorder.stop();
+  }
+  const relaunched = await stopRelaunched(opts.evidence).catch((error) => ({ failed: error.message }));
+  if (relaunched) {
+    const failed = typeof relaunched === "object";
+    steps.add("desktop", "Quit the relaunched app", "an app the trial opened as the Dock does has no WebDriver service or process group to stop it", !failed, failed ? `could not stop it: ${relaunched.failed}` : relaunched, ["relaunched.json"]);
   }
   const desktopOk = desktop !== null && desktop.code === 0 && desktop.cause === null && !desktop.error;
   const desktopDetail = desktop === null ? "not started" : `${ending(desktop, opts.deadlineMs)}; ${shots} process snapshots; ${envNames.length} environment names in logs/env.txt`;

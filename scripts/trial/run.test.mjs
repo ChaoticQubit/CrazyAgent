@@ -7,7 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import { setTimeout as pause } from "node:timers/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { mask, renderPrompt } from "./run.mjs";
+import { mask, options, renderPrompt } from "./run.mjs";
 
 const TRIAL = dirname(fileURLToPath(import.meta.url));
 const RUN = join(TRIAL, "run.mjs");
@@ -246,6 +246,11 @@ test("renderPrompt fills every project placeholder and refuses an unknown one", 
   assert.ok(rendered.includes("`ls /Users/owner/Projects/ca-trial-3/private`"));
   assert.ok(rendered.includes("`cat /Users/owner/Projects/ca-trial-3/private/note.txt`"));
   assert.ok(rendered.includes("sleep 45; date +%s > bg-done.txt"));
+  assert.ok(rendered.includes("- Sub-agent 2 adds sub(a, b) to calc.py. Before it starts, it runs `cargo test` in its own worktree and says the line that starts with \"test result\" or why the command failed."));
+  assert.ok(rendered.includes("Then it runs `curl -sS -m 10 -o /dev/null -w 'port443=%{http_code}\\n' https://example.com` and `curl -sS -m 10 -o /dev/null -w 'port80=%{http_code}\\n' http://example.com` and says what each printed."));
+  assert.ok(rendered.includes("Then each lead starts `sleep 40; date +%s > lead-bg-done.txt` in the background in its own worktree"));
+  assert.ok(rendered.startsWith("Before anything else, run `echo trial4-sessions-$(uuidgen | cut -c1-8)` with Bash, then run `true trial4-input-`"));
+  assert.ok(rendered.trimEnd().endsWith("Last, call the sessions tool twice, with the query trial4-sessions and with the query trial4-input, and reply only with how many hits each call found."));
   assert.throws(() => renderPrompt("{{PROJECT}} and {{OTHER}}", "/p"), /OTHER/);
 });
 
@@ -260,8 +265,10 @@ test("a full fixture run seeds, records, launches, writes the manifest, then aud
   assert.equal(git(paths.project, "log", "--format=%s"), "Initial trial repo");
   const seed = git(paths.project, "rev-parse", "main");
   assert.equal(git(paths.project, "rev-parse", "trial3-land"), seed);
-  assert.deepEqual(git(paths.project, "ls-files").split("\n"), [".gitignore", "CLAUDE.md", "README.md", "calc.py"]);
-  assert.equal(readFileSync(join(paths.project, ".gitignore"), "utf8"), ".crazyagent/\nprivate/\n");
+  assert.deepEqual(git(paths.project, "ls-files").split("\n"), [".gitignore", "CLAUDE.md", "Cargo.toml", "README.md", "calc.py", "src/lib.rs"]);
+  assert.equal(readFileSync(join(paths.project, ".gitignore"), "utf8"), ".crazyagent/\nprivate/\ntarget/\nCargo.lock\n");
+  assert.equal(readFileSync(join(paths.project, "Cargo.toml"), "utf8"), "[package]\nname = \"ca-trial-3\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
+  assert.ok(readFileSync(join(paths.project, "src", "lib.rs"), "utf8").includes("#[test]\n    fn doubles() {\n        assert_eq!(super::double(2), 4);\n    }"));
   assert.equal(readFileSync(join(paths.project, "CLAUDE.md"), "utf8"), "# ca-trial-3 rules\n\nTRIAL3-PROJECT-RULE: every Python function has a one-line docstring.\n");
   assert.equal(readFileSync(join(paths.project, "calc.py"), "utf8"), "def placeholder():\n    \"\"\"Placeholder.\"\"\"\n    return None\n");
   assert.equal(readFileSync(join(paths.project, "private", "note.txt"), "utf8"), "TRIAL3-HIDDEN-MARK: agents must not read this file.\n");
@@ -418,4 +425,57 @@ test("a runner failure mid-run stops the desktop group, records the failure in t
   assert.ok(existsSync(join(paths.root, "audit-seen.json")));
   assert.ok(existsSync(join(paths.evidence, "report.html")));
   assertNoSecret(paths.evidence);
+});
+
+/** The fixture runner arguments with some flag pairs left out, so the runner takes their defaults. Input: the fixture, the trial number and the flags to drop. Output: the argv. */
+function defaults(paths, trial, ...flags) {
+  const argv = args(paths);
+  argv[argv.indexOf("--trial") + 1] = trial;
+  for (const flag of flags) argv.splice(argv.indexOf(flag), 2);
+  return argv;
+}
+
+test("--trial 4 runs the trial 4 spec, and the default report command builds the trial report", () => {
+  const paths = fixture("ca-trial-opts-");
+  const opts = options(defaults(paths, "4", "--desktop-cmd", "--report-cmd"));
+  assert.equal(opts.commands.desktop.at(-1), join(TRIAL, "..", "..", "apps", "desktop", "test", "native", "trial4.wdio.conf.mjs"));
+  assert.deepEqual(opts.commands.report, [process.execPath, join(TRIAL, "report.mjs"), "trial", paths.evidence]);
+  assert.equal(opts.mark, "TRIAL4-PROJECT-RULE");
+});
+
+test("with no --project the trial project goes in the owner's projects folder the engine holds, and none set refuses", () => {
+  const paths = fixture("ca-trial-home-");
+  const argv = defaults(paths, "4", "--project");
+  assert.throws(() => options(argv), /the engine has no projects folder .*set it in the app or pass --project/);
+  const home = join(paths.root, "CrazyAgent");
+  const db = new DatabaseSync(join(paths.engine, "engine.db"));
+  db.exec("CREATE TABLE projects_home (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), path TEXT NOT NULL)");
+  assert.throws(() => options(argv), /the engine has no projects folder; set it in the app or pass --project/);
+  db.prepare("INSERT INTO projects_home VALUES (1, ?)").run(home);
+  db.close();
+  assert.equal(options(argv).project, join(home, "ca-trial-4"));
+});
+
+test("the desktop run is told the Land on branch the runner seeded for its trial and the app's crazyagent binary for the TUI", async () => {
+  const paths = fixture("ca-trial-land-");
+  const seen = join(paths.root, "land-seen.json");
+  const desktop = [process.execPath, "--input-type=module", "-e", "import { writeFileSync } from \"node:fs\"; writeFileSync(process.env.TRIAL_EVIDENCE + \"/../land-seen.json\", JSON.stringify({ land: process.env.TRIAL_LAND_ON, cli: process.env.TRIAL_CLI }));"];
+  const result = await runner(args(paths, { commands: { desktop } }), paths.env);
+  assert.ok([0, 1].includes(result.code), result.out);
+  assert.deepEqual(JSON.parse(readFileSync(seen, "utf8")), { land: "trial3-land", cli: join(paths.app, "Contents", "MacOS", "crazyagent") });
+  assert.match(git(paths.project, "branch", "--list", "trial3-land"), /trial3-land/);
+});
+
+test("the runner quits an app the desktop run relaunched outside its process group and records the step", async () => {
+  const paths = fixture("ca-trial-relaunch-");
+  const desktop = [process.execPath, "--input-type=module", "-e", "import { spawn } from \"node:child_process\"; import { writeFileSync } from \"node:fs\"; const child = spawn(\"/bin/sleep\", [\"600\"], { detached: true, stdio: \"ignore\" }); child.unref(); writeFileSync(process.env.TRIAL_EVIDENCE + \"/relaunched.json\", JSON.stringify({ pid: child.pid, binary: \"/bin/sleep\" }));"];
+  const result = await runner(args(paths, { commands: { desktop } }), paths.env);
+  assert.ok([0, 1].includes(result.code), result.out);
+  const { pid } = JSON.parse(readFileSync(join(paths.evidence, "relaunched.json"), "utf8"));
+  const alive = spawnSync("/bin/ps", ["-o", "comm=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim();
+  if (alive) process.kill(pid, "SIGKILL");
+  assert.equal(alive, "", "the relaunched stand-in app was stopped");
+  const quit = steps(paths.evidence).find((step) => step.title === "Quit the relaunched app");
+  assert.equal(quit?.ok, true, JSON.stringify(quit));
+  assert.match(quit.detail, new RegExp(`stopped the relaunched app ${pid}`));
 });

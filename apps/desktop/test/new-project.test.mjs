@@ -389,3 +389,21 @@ test("a plan that names a harness by its alias shows the one catalog entry, not 
   assert.equal(html.match(/<option value="claude">/g), null);
   assert.equal(html.match(/<option value="claude-code" selected="">Claude Code<\/option>/g)?.length, 2);
 });
+
+test("a master stored as the alias claude gets the pool warning and the fixed Tools switch that claude-code gets (OP-28 F1)", async () => {
+  const { createElement } = await import("react");
+  const { renderToStaticMarkup } = await import("react-dom/server");
+  const { TeamEditor } = await import("../src/screens/new-project/team-editor.tsx");
+  const limited = { kind: "limited", reason: "tools can't be turned off" };
+  const named = [harness("codex", "Codex", ready), harness("claude-code", "Claude Code", ready, limited, undefined, undefined, ["claude"])];
+  const member = { id: "cx", provider: "openai", harness: "codex", protocol: "x", account_ref: "cx", endpoint: { kind: "native" }, model: { id: "m", author: "a" }, auth: { method: "native_managed", profile_ref: "r" } };
+  const pool = { pool: { id: "codex-pool", name: "Codex only", members: ["cx"], projects: [], roles: [], fallback_allowed: false }, members: [member] };
+  for (const master of ["claude-code", "claude"]) {
+    const team = { master, master_tools: false, sub_harnesses: [], min_agents: 1, max_agents: 2 };
+    const html = renderToStaticMarkup(createElement(TeamEditor, { team, harnesses: named, pool, research: [], onChange: () => {}, prefix: "np" }));
+    assert.match(html, /Codex only has no account Claude Code can use\./, `${master}: the pool warning names Claude Code`);
+    const tools = html.match(/<[^>]*id="np-master-tools"[^>]*>/)?.[0] ?? "";
+    assert.match(tools, /aria-disabled="true"/, `${master}: the master Tools switch is fixed`);
+    assert.match(tools, /aria-checked="true"/, `${master}: the fixed master Tools switch reads on`);
+  }
+});
