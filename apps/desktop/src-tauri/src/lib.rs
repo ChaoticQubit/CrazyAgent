@@ -13,6 +13,7 @@ use bridge::picker::{FolderPurpose, Pick};
 use bridge::project_setup::{IdeAskItem, MemoryItem, ResearchLog};
 use bridge::questions::{QuestionCount, QuestionPage};
 use bridge::terminal::Terminals;
+use bridge::ticket_settings::TicketSettingsPage;
 use bridge::{
     AccountProfileView, ActionReceipt, BaselineDetail, BaselinePage, BridgeError, BridgeQueue,
     ConfiguredAccountPlan, ConnectionStatus, HistoryPage, IntentReceipt, ManagedAccountPlan,
@@ -26,7 +27,7 @@ use crazyagent::coord::settings::{CoordSettings, Delivery, HarnessKind, Subagent
 use crazyagent::coord::tool_switches::Switch;
 use crazyagent::engine::owner::{
     AccountAuthCapabilitiesReply, AccountCheck, AccountPage, AccountSecret, ModelAccessCollection,
-    NativeAuthMethod,
+    NativeAuthMethod, TrackedProject,
 };
 use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crazyagent::harnesses::HarnessEntry;
@@ -2591,6 +2592,85 @@ async fn desktop_ide_focus(
 }
 
 #[tauri::command]
+async fn desktop_tracker_op(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    op: String,
+    args: serde_json::Value,
+) -> Result<serde_json::Value, BridgeError> {
+    main_window(&window)?;
+    let call = if bridge::tracker::writes(&op) {
+        lock(&state).await?.tracker_op(op, args)?
+    } else {
+        read(&state).await?.tracker_op(op, args)?
+    };
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_tracker_projects(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<Vec<TrackedProject>, BridgeError> {
+    main_window(&window)?;
+    let call = read(&state).await?.tracker_projects()?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_tracker_attach(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+    key: String,
+    name: String,
+) -> Result<TrackedProject, BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state).await?.tracker_attach(project_id, key, name)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_tracker_open_change_set(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: String,
+    change_set: String,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state)
+        .await?
+        .tracker_open_change_set(project_id, change_set)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_ticket_settings(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: Option<String>,
+) -> Result<TicketSettingsPage, BridgeError> {
+    main_window(&window)?;
+    let call = read(&state).await?.ticket_settings(project_id)?;
+    call.await
+}
+
+#[tauri::command]
+async fn desktop_save_ticket_settings(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    project_id: Option<String>,
+    values: serde_json::Value,
+    version: u64,
+) -> Result<(), BridgeError> {
+    main_window(&window)?;
+    let call = lock(&state)
+        .await?
+        .save_ticket_settings(project_id, values, version)?;
+    call.await
+}
+
+#[tauri::command]
 async fn desktop_usage_set_reset(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -3670,12 +3750,18 @@ pub fn run() {
             desktop_engine_versions,
             desktop_restart_engine,
             desktop_ide_focus,
+            desktop_ticket_settings,
+            desktop_save_ticket_settings,
             desktop_update_settings,
             desktop_set_update_channel,
             desktop_check_update,
             desktop_install_update,
             desktop_restart_app,
             desktop_link_cli,
+            desktop_tracker_op,
+            desktop_tracker_projects,
+            desktop_tracker_attach,
+            desktop_tracker_open_change_set,
         ])
         .setup(|app| {
             WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))

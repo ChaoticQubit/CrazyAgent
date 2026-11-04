@@ -20,6 +20,7 @@ import { SessionContext, useLoad } from "../../state";
 import { ProjectAccountOrder } from "../settings/account-choice";
 import { HarnessPage } from "../settings/harness-page";
 import { PluginsAndSkills } from "../settings/plugins";
+import { TicketSettingsPanel } from "../settings/tickets";
 import { NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 
@@ -29,6 +30,7 @@ const SECTIONS = [
   { id: "team", label: "Team" },
   { id: "harnesses", label: "Harnesses" },
   { id: "plugins", label: "Plugins and skills" },
+  { id: "tickets", label: "Tickets" },
   { id: "access", label: "Agent access" },
   { id: "sandbox", label: "Sandbox" },
   { id: "remove", label: "Remove project" },
@@ -507,7 +509,7 @@ export function settingsSection(wanted: string | null | undefined): SectionId {
   return SECTIONS.find((item) => item.id === wanted)?.id ?? "general";
 }
 
-/** Project Settings tab: General, Pool, Team, Harnesses, Plugins and skills, Agent access, Sandbox and Remove project. A setup
+/** Project Settings tab: General, Pool, Team, Harnesses, Plugins and skills, Tickets, Agent access, Sandbox and Remove project. A setup
  * that belongs to another project counts as still loading, so no form seeds from it.
  * Inputs: the project data and an optional section from the route. Output: the tab. */
 export function SettingsTab({ data, section }: { data: ProjectData; section?: string }) {
@@ -531,6 +533,11 @@ export function SettingsTab({ data, section }: { data: ProjectData; section?: st
         <h2>Plugins and skills</h2>
         <p className="pj-secondary">What you add here applies to this project only. Items from Settings, Plugins and skills can be switched off for this project.</p>
         <PluginsAndSkills projectId={data.id} />
+      </div>}
+      {active === "tickets" && <div className="pj-stack">
+        <h2>Tickets</h2>
+        <p className="pj-secondary">Choose a value here to override the app's ticket settings for this project only.</p>
+        <TicketSettingsPanel projectId={data.id} />
       </div>}
       {active === "access" && <AccessSection data={data} />}
       {active === "sandbox" && <div className="pj-stack"><SandboxSection data={data} /><HiddenSection data={data} /></div>}
