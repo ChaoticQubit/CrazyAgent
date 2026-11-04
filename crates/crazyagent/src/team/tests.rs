@@ -3587,13 +3587,18 @@ fn a_native_teammate_row_reads_idle_while_its_session_rests_and_working_once_it_
     let mailbox = directory.path().join("agent").join("tmp").join("mailbox");
     std::fs::create_dir_all(&mailbox).unwrap();
     std::fs::set_permissions(&mailbox, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let rests = mailbox.join("00000000000000000000000000000008.idle");
     let status = |id: i64| -> String {
         connection
             .query_row("SELECT status FROM team_agents WHERE id=?1", [id], |row| {
                 row.get(0)
             })
             .unwrap()
+    };
+    let report = |pane: &str, request: &[u8], now: i64| -> Vec<u8> {
+        let mut answer = Vec::new();
+        crate::coord::relay::answer(&connection, &project, lead, pane, request, &mut answer, now)
+            .unwrap();
+        answer
     };
     let tick = |now: i64| {
         crate::coord::relay::serve(
@@ -3609,8 +3614,7 @@ fn a_native_teammate_row_reads_idle_while_its_session_rests_and_working_once_it_
         .unwrap();
     };
 
-    std::fs::write(&rests, b"").unwrap();
-    tick(10);
+    report("%7", b"stop own", 10);
     assert_eq!(
         status(mate),
         "idle",
@@ -3626,15 +3630,14 @@ fn a_native_teammate_row_reads_idle_while_its_session_rests_and_working_once_it_
     assert_eq!(
         status(mate),
         "idle",
-        "the mark stays until its own hook clears it"
+        "it rests until its own hook reports work"
     );
 
-    std::fs::remove_file(&rests).unwrap();
-    tick(12);
+    report("%7", b"post own Read", 12);
     assert_eq!(
         status(mate),
         "working",
-        "it works again once the mark is gone"
+        "it works again once its own hook reports work"
     );
 
     connection
@@ -3643,8 +3646,7 @@ fn a_native_teammate_row_reads_idle_while_its_session_rests_and_working_once_it_
             [other],
         )
         .unwrap();
-    std::fs::write(mailbox.join("00000000000000000000000000000009.idle"), b"").unwrap();
-    tick(13);
+    report("%8", b"stop own", 13);
     assert_eq!(
         status(other),
         "stopped",

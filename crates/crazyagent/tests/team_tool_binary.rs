@@ -337,7 +337,7 @@ fn served_in_a_teammate_pane(
     let mut names = Vec::new();
     let deadline = Instant::now() + Duration::from_secs(20);
     let answered = loop {
-        callers.serve(&mut listed, &mut |_, _| None);
+        callers.serve(&mut listed, &mut |_, _| None, &mut |_, _, _, _| {});
         for (id, call, digest) in take_calls(&mailbox, CALLS_PER_TICK_MAX) {
             names.push(
                 digest
@@ -522,6 +522,7 @@ fn the_agent_binary_remembers_and_recalls_under_the_sub_agents_name_and_refuses_
                             .unwrap_or_default()
                     },
                     &mut |_, _| None,
+                    &mut |_, _, _, _| {},
                 );
             }
             crazyagent::team::history::serve_agent_calls(
