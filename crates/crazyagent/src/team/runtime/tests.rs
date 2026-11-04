@@ -7032,15 +7032,27 @@ fn an_own_branch_agent_lowered_to_sandboxed_is_stopped_and_never_woken_in_its_cl
         "{}",
         error(&run)
     );
+    let project = run.fixture.setup.project_id.clone();
     let landing = crate::landing::open(&run.fixture.base).unwrap();
     let pending = |landing: &rusqlite::Connection| {
-        crate::landing::list(landing, &run.fixture.setup.project_id)
+        crate::landing::list(landing, &project)
             .unwrap()
             .into_iter()
             .filter(|set| set.state == crate::landing::ChangeState::Pending)
             .count()
     };
     assert_eq!(pending(&landing), 1, "the agent's commit waits in Changes");
+
+    let (next, _, _) = requeued_run(&mut run.fixture, &mut run.team, member);
+    run.fixture.setup.team.sub_harnesses[0].agents = 2;
+    run.fixture.setup.team.max_agents = 3;
+    run.fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?1 WHERE project=?2",
+            params![serde_json::to_string(&run.fixture.setup).unwrap(), PROJECT],
+        )
+        .unwrap();
 
     let mut connection = Connection::open(run.fixture.base.join("engine.db")).unwrap();
     let tx = connection.transaction().unwrap();
@@ -7090,14 +7102,25 @@ fn an_own_branch_agent_lowered_to_sandboxed_is_stopped_and_never_woken_in_its_cl
         1,
         "its change set still waits in Changes"
     );
+    let working: Vec<(i64, Option<String>)> = run
+        .fixture
+        .status()
+        .agents
+        .into_iter()
+        .filter(|agent| agent.status == AgentStatus::Working)
+        .map(|agent| (agent.id, agent.worktree))
+        .collect();
     assert!(
-        run.fixture
-            .status()
-            .agents
-            .iter()
-            .all(|agent| agent.status != AgentStatus::Working),
-        "nothing runs the clone at Sandboxed"
+        working.iter().all(|(id, worktree)| {
+            *id != member
+                && worktree
+                    .as_deref()
+                    .is_none_or(|path| run.fixture.base.join("project").join(path) != run.worktree)
+        }),
+        "nothing runs the clone at Sandboxed: {working:?}"
     );
+    run.member = next;
+    run.stop();
     assert!(run.team.shutdown().unwrap().is_empty());
 }
 
