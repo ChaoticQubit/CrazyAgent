@@ -618,12 +618,36 @@ pub fn fresh_native_lead_tmp(scratch: &Path) -> io::Result<PathBuf> {
     Ok(path)
 }
 
-/// Makes the folder just made at `path` private. Input: the new folder's path. Output:
-/// done, or the error.
+/// Makes the folder just made at `path` private through one descriptor opened without
+/// following a link, then refuses it unless it is still empty and still the private folder
+/// the name holds, so a link or a folder a teammate swaps in meanwhile is refused, never
+/// followed or kept. Input: the new folder's path. Output: done, or the refusal.
 #[cfg(unix)]
 fn seal_new_folder(path: &Path) -> io::Result<()> {
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
-    assert!(private_folder(path));
+    use rustix::fs::{CWD, Dir, Mode, OFlags};
+    use rustix::io::Errno;
+    let changed = || {
+        io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the lead's own temp folder changed while it was made",
+        )
+    };
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let folder = match rustix::fs::openat(CWD, path, flags, Mode::empty()) {
+        Ok(folder) => fs::File::from(folder),
+        Err(Errno::LOOP | Errno::NOTDIR) => return Err(changed()),
+        Err(error) => return Err(error.into()),
+    };
+    folder.set_permissions(fs::Permissions::from_mode(0o700))?;
+    for entry in Dir::read_from(&folder)? {
+        if !matches!(entry?.file_name().to_bytes(), b"." | b"..") {
+            return Err(changed());
+        }
+    }
+    let metadata = folder.metadata()?;
+    if private_folder_pin(path) != Some((metadata.dev(), metadata.ino())) {
+        return Err(changed());
+    }
     Ok(())
 }
 
