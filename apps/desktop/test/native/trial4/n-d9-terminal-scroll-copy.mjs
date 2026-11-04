@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { click } from "../settings-steps.mjs";
-import { RUNNING, UI_MS, cardOf, copyRow, fromRows, moved, openCard, readCards, rowTexts, selectRow, terminalNote, terminalView, wheel } from "../agents-cards.mjs";
+import { RUNNING, UI_MS, cardOf, copyRow, fromRows, moved, openCard, paired, readCards, rowTexts, selectRow, terminalNote, terminalView, wheel } from "../agents-cards.mjs";
 
 const SCROLL_MS = 1500;
 const STEP_PX = 120;
@@ -41,27 +41,30 @@ async function liveTerminal(kit) {
 
 /** Turns the wheel up over a terminal and times how long until it scrolls, then turns it
  * back down and returns to the latest output. An agent that reads the mouse redraws its own
- * screen, so each read is also compared with the one before it, which new output between the
- * first read and the turn cannot hide. Inputs: the kit and the agent's label. Output: { took,
- * mouse }, the milliseconds the scroll took and whether the agent read the mouse. */
+ * screen, which its own redraws can also move, so its scroll counts only when the turn down
+ * puts the rows the turn up moved back on their row. Inputs: the kit and the agent's label.
+ * Output: { took, mouse }, the milliseconds the turn up took and whether the agent read the
+ * mouse. */
 async function scroll(kit, label) {
   const before = await terminalView(label);
   const started = Date.now();
   if (!await wheel(label, -STEP_PX)) throw new Error(`${label}'s terminal screen was not drawn for the wheel`);
   let took = null;
-  let last = before;
+  let up = null;
   await kit.until(async () => {
     const after = await terminalView(label);
-    if (after && (moved(before, after, true) || (before.mouse && moved(last, after, true)))) took = Date.now() - started;
-    if (after) last = after;
+    if (after && moved(before, after)) {
+      took = Date.now() - started;
+      up = after;
+    }
     return took !== null;
   }, SCROLL_MS, `${label}'s terminal did not scroll within ${SCROLL_MS} ms of turning the wheel up${before.mouse ? " (the agent reads the mouse, so its own screen had to move)" : ""}`);
-  await wheel(label, STEP_PX);
+  if (!await wheel(label, STEP_PX)) throw new Error(`${label}'s terminal screen was not drawn for the wheel`);
   if (before.mouse) {
     await kit.until(async () => {
       const view = await terminalView(label);
-      return Boolean(view && moved(last, view, false));
-    }, UI_MS, `${label}'s terminal did not scroll back down after the wheel turned down`);
+      return Boolean(view && paired(before, up, view));
+    }, UI_MS, `${label}'s terminal did not move the rows the wheel moved up back to their row when the wheel turned down, so the move up was its own redraw`);
     return { took, mouse: true };
   }
   if ((await terminalView(label))?.jump) await click(inTerminal(label, '//button[normalize-space(.)="Jump to latest"]'));

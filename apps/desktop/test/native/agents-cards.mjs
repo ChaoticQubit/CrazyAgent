@@ -85,41 +85,58 @@ export function notShown(summary) {
   return found ? Number(found[1]) : 0;
 }
 
-/** How far the screen's rows moved between two reads: the first block of BLOCK_ROWS non-blank
- * rows that each read holds exactly once and that changed place, compared without trailing
- * spaces. Inputs: the row texts before and after, top first. Output: the rows it moved down,
- * negative when up, 0 when no such block moved. */
-export function redrawShift(before, after) {
-  assert(Array.isArray(before) && Array.isArray(after), "a redraw compares two lists of row texts");
-  const [was, now] = [before, after].map((rows) => rows.map((row) => row.replace(/\s+$/, "")));
-  const places = (rows, block) => {
-    const found = [];
-    for (let at = 0; at + BLOCK_ROWS <= rows.length; at += 1) if (rows.slice(at, at + BLOCK_ROWS).join("\n") === block) found.push(at);
-    return found;
-  };
+/** The row texts of a screen without trailing spaces. Input: the rows. Output: the rows. */
+function tidy(rows) {
+  assert(Array.isArray(rows), "a screen is a list of row texts");
+  return rows.map((row) => row.replace(/\s+$/, ""));
+}
+
+/** Where a block of rows sits on a screen when the screen holds it exactly once. Inputs: the
+ * tidied rows and the block's rows joined by newlines. Output: its first row, -1 when it is
+ * missing or held more than once. */
+function rowOf(rows, block) {
+  const found = [];
+  for (let at = 0; at + BLOCK_ROWS <= rows.length; at += 1) if (rows.slice(at, at + BLOCK_ROWS).join("\n") === block) found.push(at);
+  return found.length === 1 ? found[0] : -1;
+}
+
+/** How a screen's own redraw moved its rows between two reads: the first block of BLOCK_ROWS
+ * non-blank rows that each read holds exactly once and that changed row, compared without
+ * trailing spaces. Inputs: the row texts before and after, top first. Output: { block, from,
+ * to }, the block's rows joined by newlines and its first row before and after, or null. */
+export function redrawMove(before, after) {
+  const [was, now] = [tidy(before), tidy(after)];
   for (let at = 0; at + BLOCK_ROWS <= was.length; at += 1) {
     const rows = was.slice(at, at + BLOCK_ROWS);
     if (rows.some((row) => row.trim() === "")) continue;
     const block = rows.join("\n");
-    if (places(was, block).length !== 1) continue;
-    const there = places(now, block);
-    if (there.length === 1 && there[0] !== at) return there[0] - at;
+    if (rowOf(was, block) !== at) continue;
+    const to = rowOf(now, block);
+    if (to !== -1 && to !== at) return { block, from: at, to };
   }
-  return 0;
+  return null;
 }
 
-/** Whether a wheel turn scrolled a terminal view. An agent that reads the mouse, such as a
- * fullscreen TUI, gets the wheel and redraws its own screen, so its rows must move the wheel's
- * way: down for a turn up. Otherwise the offset must change or Jump to latest appear; new rows
- * alone never count, since a live agent prints them on its own. Inputs: the views before and
- * after and whether the turn was up. Output: a boolean. */
-export function moved(before, after, up) {
-  assert.equal(typeof up, "boolean", "a wheel turn is up or down");
+/** Whether a wheel turn up scrolled a terminal view. An agent that reads the mouse, such as a
+ * fullscreen TUI, gets the wheel and redraws its own screen, so a block of its rows must move
+ * down; its own redraws can do that too, so paired decides for it. Otherwise the offset must
+ * change or Jump to latest appear; new rows alone never count. Inputs: the views before and
+ * after the turn. Output: a boolean. */
+export function moved(before, after) {
   if (before.mouse) {
-    const shift = redrawShift(before.lines, after.lines);
-    return up ? shift > 0 : shift < 0;
+    const move = redrawMove(before.lines, after.lines);
+    return move !== null && move.to > move.from;
   }
   return before.top !== after.top || (!before.jump && after.jump);
+}
+
+/** Whether a fullscreen agent scrolled with the wheel: the turn up moved a block of its rows
+ * down and the same turn back down put that block back on its first row. A redraw of its own
+ * or new output moves rows once, not there and back by the same rows. Inputs: the views before
+ * the turn up, after it and after the turn down. Output: a boolean. */
+export function paired(base, up, down) {
+  const move = redrawMove(base.lines, up.lines);
+  return move !== null && move.to > move.from && rowOf(tidy(down.lines), move.block) === move.from;
 }
 
 /** Whether copied text came from a terminal's rows: it is not blank and, with whitespace

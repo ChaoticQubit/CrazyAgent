@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { cardOf, copyRow, finishedRow, fromRows, moved, notShown, overlapping, redrawShift, roleName, showsTask, spilled, statusWord } from "./agents-cards.mjs";
+import { cardOf, copyRow, finishedRow, fromRows, moved, notShown, overlapping, paired, redrawMove, roleName, showsTask, spilled, statusWord } from "./agents-cards.mjs";
 
 /** A card as readCards reads it, at a place and size, with one text box inside it unless
  * given others. Inputs: the title, the box and the text boxes. Output: the card. */
@@ -63,11 +63,11 @@ function plain(rows, top, jump) {
 }
 
 test("a wheel turn scrolled a terminal when its offset changed or Jump to latest appeared, never for new rows alone", () => {
-  assert.equal(moved(plain("a\nb", 0, false), plain("a\nb", 0, false), true), false);
-  assert.equal(moved(plain("a\nb", 0, false), plain("z\na", 0, false), true), false);
-  assert.equal(moved(plain("a\nb", 40, false), plain("a\nb", 0, false), true), true);
-  assert.equal(moved(plain("a\nb", 0, false), plain("z\na", 0, true), true), true);
-  assert.equal(moved(plain("a\nb", 0, true), plain("z\na", 0, true), true), false);
+  assert.equal(moved(plain("a\nb", 0, false), plain("a\nb", 0, false)), false);
+  assert.equal(moved(plain("a\nb", 0, false), plain("z\na", 0, false)), false);
+  assert.equal(moved(plain("a\nb", 40, false), plain("a\nb", 0, false)), true);
+  assert.equal(moved(plain("a\nb", 0, false), plain("z\na", 0, true)), true);
+  assert.equal(moved(plain("a\nb", 0, true), plain("z\na", 0, true)), false);
 });
 
 const RULE = "────────────────────────────────────────────────────────────";
@@ -99,24 +99,39 @@ function fullscreen(lines) {
 const BOTTOM = fullscreen([...TRANSCRIPT.slice(6, 14), ...FOOTER]);
 const UP_THREE = fullscreen([...TRANSCRIPT.slice(3, 10), "● Listing 2 directories, 1 new message (click) ↓", ...FOOTER]);
 const NEW_OUTPUT = fullscreen([...TRANSCRIPT.slice(8, 14), "● Read(calc.py)", "  ⎿  Read 4 lines", ...FOOTER]);
+const SPINNING = fullscreen([...TRANSCRIPT.slice(5, 13), "✻ Pondering… (esc to interrupt)", ...FOOTER]);
+const SPINNER_GONE = fullscreen([...TRANSCRIPT.slice(4, 13), ...FOOTER]);
+const APPENDED = fullscreen([...TRANSCRIPT.slice(6, 14), "● Read(calc.py)", ...FOOTER]);
 
-test("a redraw shift is how far a block of rows the screen holds once moved down, or up when negative", () => {
-  assert.equal(redrawShift(BOTTOM.lines, UP_THREE.lines), 3);
-  assert.equal(redrawShift(UP_THREE.lines, BOTTOM.lines), -3);
-  assert.equal(redrawShift(BOTTOM.lines, NEW_OUTPUT.lines), -2);
-  assert.equal(redrawShift(BOTTOM.lines, BOTTOM.lines), 0);
-  assert.equal(redrawShift(["ab", "cd", "ab", "cd", "ab", "cd"], ["cd", "ab", "cd", "ab", "cd", "ab"]), 0);
-  assert.equal(redrawShift(["x", "y", "z", "x", "y", "z"], ["x", "y", "z", "q", "r", "s"]), 0);
-  assert.equal(redrawShift(["a", "", "b", "c", "d"], ["x", "a", "", "b", "c"]), 0);
-  assert.equal(redrawShift(["a   ", "b", "c", "d"], ["z", "a", "b ", "c"]), 1);
+test("a redraw move is the first block of rows each screen holds once that changed row", () => {
+  assert.deepEqual(redrawMove(BOTTOM.lines, UP_THREE.lines), { block: TRANSCRIPT.slice(6, 9).join("\n"), from: 0, to: 3 });
+  assert.deepEqual(redrawMove(UP_THREE.lines, BOTTOM.lines), { block: TRANSCRIPT.slice(6, 9).join("\n"), from: 3, to: 0 });
+  assert.deepEqual(redrawMove(BOTTOM.lines, NEW_OUTPUT.lines), { block: TRANSCRIPT.slice(8, 11).join("\n"), from: 2, to: 0 });
+  assert.equal(redrawMove(BOTTOM.lines, BOTTOM.lines), null);
+  assert.equal(redrawMove(["ab", "cd", "ab", "cd", "ab", "cd"], ["cd", "ab", "cd", "ab", "cd", "ab"]), null);
+  assert.equal(redrawMove(["x", "y", "z", "x", "y", "z"], ["x", "y", "z", "q", "r", "s"]), null);
+  assert.equal(redrawMove(["a", "", "b", "c", "d"], ["x", "a", "", "b", "c"]), null);
+  assert.deepEqual(redrawMove(["a   ", "b", "c", "d"], ["z", "a", "b ", "c"]), { block: "a\nb\nc", from: 0, to: 1 });
 });
 
-test("a fullscreen agent that reads the mouse scrolled when its own redraw moved its rows the wheel's way", () => {
-  assert.equal(moved(BOTTOM, UP_THREE, true), true);
-  assert.equal(moved(BOTTOM, NEW_OUTPUT, true), false);
-  assert.equal(moved(BOTTOM, BOTTOM, true), false);
-  assert.equal(moved(UP_THREE, BOTTOM, false), true);
-  assert.equal(moved(BOTTOM, UP_THREE, false), false);
+test("a fullscreen agent that reads the mouse moved for a turn up when its own redraw moved its rows down", () => {
+  assert.equal(moved(BOTTOM, UP_THREE), true);
+  assert.equal(moved(BOTTOM, NEW_OUTPUT), false);
+  assert.equal(moved(BOTTOM, BOTTOM), false);
+  assert.equal(moved(SPINNING, SPINNER_GONE), true);
+});
+
+test("a fullscreen scroll counts only when the turn back down puts the block the turn up moved back on its row", () => {
+  assert.equal(paired(BOTTOM, UP_THREE, BOTTOM), true);
+  assert.equal(paired(BOTTOM, UP_THREE, UP_THREE), false);
+  assert.equal(paired(BOTTOM, UP_THREE, NEW_OUTPUT), false);
+  assert.equal(paired(BOTTOM, BOTTOM, BOTTOM), false);
+  assert.equal(paired(BOTTOM, NEW_OUTPUT, BOTTOM), false);
+});
+
+test("a redraw with no wheel behind it, a spinner line gone at the end of a turn, never passes as a scroll", () => {
+  assert.equal(paired(SPINNING, SPINNER_GONE, SPINNER_GONE), false);
+  assert.equal(paired(SPINNING, SPINNER_GONE, APPENDED), false);
 });
 
 test("copied text counts only when it is part of the terminal's rows", () => {
