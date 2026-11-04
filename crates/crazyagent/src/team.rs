@@ -1401,7 +1401,8 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE TABLE IF NOT EXISTS team_task_pins (
                 task INTEGER PRIMARY KEY,
                 project TEXT NOT NULL,
-                agent INTEGER NOT NULL
+                agent INTEGER NOT NULL,
+                held INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS team_worktrees (
                 agent INTEGER PRIMARY KEY,
@@ -3192,8 +3193,9 @@ const _: () = assert!(DEPTH_WALK_MAX > DEPTH_CHOICES[2] as i64);
 /// Gives team tables made before later columns those columns, older rows taking the
 /// default: `team_agents.pane` (a native teammate's tmux pane id), `team_agents.mode` (the
 /// sub-agent mode a lead started in, DEC-104), `team_tasks.mode` (the mode the master asked
-/// for a lead's task) and `team_agents.hookless` (1 when the agent's launch fires no hooks,
-/// DEC-104 bare-hooks). Runs on every open and adds each column once. Takes the engine
+/// for a lead's task), `team_agents.hookless` (1 when the agent's launch fires no hooks,
+/// DEC-104 bare-hooks) and `team_task_pins.held` (1 when a hold pinned the task, not its
+/// own purpose). Runs on every open and adds each column once. Takes the engine
 /// connection. Returns any SQLite failure.
 fn add_late_columns(connection: &Connection) -> Result<(), EngineError> {
     for (table, column, definition) in [
@@ -3201,6 +3203,7 @@ fn add_late_columns(connection: &Connection) -> Result<(), EngineError> {
         ("team_agents", "mode", "TEXT"),
         ("team_tasks", "mode", "TEXT"),
         ("team_agents", "hookless", "INTEGER NOT NULL DEFAULT 0"),
+        ("team_task_pins", "held", "INTEGER NOT NULL DEFAULT 0"),
     ] {
         let present: bool = connection
             .query_row(
