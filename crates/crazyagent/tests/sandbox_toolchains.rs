@@ -913,6 +913,59 @@ fn make_tmp_writes_the_agent_git_once_replaces_a_changed_copy_and_never_follows_
     toolchains::remove_tmp(&case.home).unwrap();
 }
 
+/// A native lead's own temp folder starts empty and private on every start (TPH-2
+/// residual): what an earlier start left is gone, a planted file or link at its name is
+/// replaced by a fresh folder and the link's target keeps its files, and a short temp folder
+/// open to others is refused.
+#[test]
+fn a_native_lead_s_own_temp_folder_starts_empty_and_private_and_never_follows_a_planted_link() {
+    use std::os::unix::fs::MetadataExt;
+    let case = case();
+    let shared = toolchains::make_tmp(&case.home).unwrap();
+    let own = toolchains::fresh_native_lead_tmp(&shared).unwrap();
+    assert_eq!(own, toolchains::native_lead_tmp(&shared));
+    assert_eq!(own.parent(), Some(shared.as_path()));
+    let private = |path: &Path| {
+        let metadata = fs::symlink_metadata(path).unwrap();
+        metadata.is_dir()
+            && !metadata.file_type().is_symlink()
+            && metadata.mode() & 0o777 == 0o700
+            && names(path).is_empty()
+    };
+    assert!(private(&own));
+
+    fs::create_dir(own.join("left")).unwrap();
+    fs::write(own.join("left").join("staged.txt"), "earlier").unwrap();
+    fs::set_permissions(&own, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(toolchains::fresh_native_lead_tmp(&shared).unwrap(), own);
+    assert!(private(&own));
+
+    let elsewhere = case.tmp.join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    fs::write(elsewhere.join("kept.txt"), "kept").unwrap();
+    fs::remove_dir(&own).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &own).unwrap();
+    assert_eq!(toolchains::fresh_native_lead_tmp(&shared).unwrap(), own);
+    assert!(private(&own));
+    assert_eq!(names(&elsewhere), ["kept.txt"]);
+
+    fs::remove_dir(&own).unwrap();
+    fs::write(&own, "planted").unwrap();
+    assert_eq!(toolchains::fresh_native_lead_tmp(&shared).unwrap(), own);
+    assert!(private(&own));
+
+    fs::set_permissions(&shared, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        toolchains::fresh_native_lead_tmp(&shared)
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+    assert!(private(&own));
+    fs::set_permissions(&shared, fs::Permissions::from_mode(0o700)).unwrap();
+    toolchains::remove_tmp(&case.home).unwrap();
+}
+
 #[test]
 fn a_sandboxed_harness_runs_git_through_the_agent_copy_without_the_xcrun_shim() {
     let case = case();

@@ -5413,6 +5413,12 @@ impl TeamRuntime {
         );
         let mates_home = prepare_mates_home(home, homes, working_dir)
             .map_err(|e| with_code("the teammates' home could not be made", Some(&e.0)))?;
+        toolchains::fresh_native_lead_tmp(scratch).map_err(|e| {
+            with_code(
+                "the lead's own temp folder could not be made",
+                Some(io_code(&e)),
+            )
+        })?;
         let (lead, mates) = sandbox
             .native_team(&socket, &mates_socket, &callers, &tmux, &mates_home)
             .map_err(|e| {
