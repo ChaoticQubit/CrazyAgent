@@ -8108,7 +8108,8 @@ fn native_adopted(
 
 /// A kept native lead's turn its app started by itself, as the lead's worker follows it:
 /// whether one runs, its reply text so far, at most `LIVE_REPLY_BYTES_MAX`, how it went,
-/// and an order that came while it ran, taken once it ends.
+/// an order that came while it ran, taken once it ends, when it started and since when
+/// its app holds it open only for commands it started in the background.
 #[derive(Default)]
 struct OwnTurn {
     running: bool,
@@ -8116,6 +8117,8 @@ struct OwnTurn {
     limited: bool,
     interrupted: bool,
     held: Option<Next>,
+    since: Option<Instant>,
+    held_since: Option<Instant>,
 }
 
 /// Reports the turns a kept native lead's app started by itself since the last call: a
@@ -8128,6 +8131,7 @@ fn report_own(session: &mut AgentSession, reports: &Sender<Report>, own: &mut Ow
                 own.running = true;
                 own.text.clear();
                 (own.limited, own.interrupted) = (false, false);
+                (own.since, own.held_since) = (Some(Instant::now()), None);
                 let _ = reports.send(Report::Own {
                     end: None,
                     text: String::new(),
@@ -8159,23 +8163,62 @@ fn report_own(session: &mut AgentSession, reports: &Sender<Report>, own: &mut Ow
     assert!(own.text.len() <= LIVE_REPLY_BYTES_MAX);
 }
 
+/// Ends a kept native lead's own turn that its app holds open only for commands it started
+/// in the background once the owner's rules say so, as `turn` ends an engine-typed one: at
+/// the task limit counted from the turn's start, after the grace time under Grace, at once
+/// under Stop, and never by itself under Wait. Takes the own-turn state and the rules.
+/// Returns the turn's end and the line its result starts with, or none while it waits.
+fn own_release(own: &mut OwnTurn, rules: TurnRules) -> Option<(TurnEnd, &'static str)> {
+    let since = *own.held_since.get_or_insert_with(Instant::now);
+    if rules
+        .limit
+        .is_some_and(|limit| own.since.is_some_and(|start| start.elapsed() >= limit))
+    {
+        return Some((TurnEnd::TimedOut, BACKGROUND_CUT));
+    }
+    match rules.background {
+        super::BackgroundAtEnd::Wait => None,
+        super::BackgroundAtEnd::Grace { secs } => (since.elapsed()
+            >= Duration::from_secs(u64::from(secs)))
+        .then_some((TurnEnd::Success, BACKGROUND_GRACE_ENDED)),
+        super::BackgroundAtEnd::Stop => Some((TurnEnd::Success, BACKGROUND_STOPPED)),
+    }
+}
+
 /// Waits for a kept native lead's next order as `next_turn` does, and meanwhile reports
 /// the turns its app starts by itself. An order that comes while such a turn runs is held
-/// until that turn ends, so no prompt is typed into a running turn; a stop is not held.
-/// Takes the orders, the cancel flag, the session, the reports channel and the own-turn
-/// state. Returns the next order.
+/// until that turn ends, so no prompt is typed into a running turn; a stop is not held. A
+/// turn of its own that its app holds open for commands it started in the background ends
+/// when `own_release` says so, and then the lead stops with those commands, as after an
+/// engine-typed turn. Takes the orders, the cancel flag, the session, the reports channel,
+/// the own-turn state and the rules of the lead's latest engine-typed turn. Returns the
+/// next order.
 fn next_lead_turn(
     orders: &Receiver<Order>,
     cancel: &AtomicBool,
     session: &mut AgentSession,
     reports: &Sender<Report>,
     own: &mut OwnTurn,
+    rules: TurnRules,
 ) -> Next {
     loop {
         if cancel.load(Ordering::SeqCst) {
             return Next::Stop;
         }
         report_own(session, reports, own);
+        if own.running && session.own_held() {
+            if let Some((end, line)) = own_release(own, rules) {
+                own.running = false;
+                let text = format!("{line}\n{}", std::mem::take(&mut own.text));
+                let _ = reports.send(Report::Own {
+                    end: Some(end),
+                    text,
+                });
+                return Next::Stop;
+            }
+        } else {
+            own.held_since = None;
+        }
         if !own.running {
             if let Some(next) = own.held.take() {
                 return next;
@@ -8232,6 +8275,13 @@ fn serve(
 ) -> Option<String> {
     let lead = kept.is_some();
     let (mut first, held) = kept.map_or((None, None), |kept| (kept.first, Some(kept.held)));
+    let mut latest = first.as_ref().map_or(
+        TurnRules {
+            limit: None,
+            background: super::BackgroundAtEnd::default(),
+        },
+        |(_, rules)| *rules,
+    );
     if lead {
         session.follow_own_turns();
     }
@@ -8245,7 +8295,7 @@ fn serve(
     loop {
         let next = match first.take() {
             Some((prompt, rules)) => Next::Turn(prompt, None, rules),
-            None if lead => next_lead_turn(orders, cancel, &mut session, reports, &mut own),
+            None if lead => next_lead_turn(orders, cancel, &mut session, reports, &mut own, latest),
             None => next_turn(orders, cancel, Some(&mut session)),
         };
         let (prompt, grant, rules) = match next {
@@ -8258,6 +8308,7 @@ fn serve(
             }
         };
         assert!(grant.is_none());
+        latest = rules;
         let prompt = told(prompt, rules, session.reports_background());
         let (text, end, cause) = turn(&mut session, &prompt, reports, cancel, interrupt, rules);
         let reusable = matches!(

@@ -5449,7 +5449,14 @@ fn long_background(secs: u32) -> String {
 /// to 3 s for a stopped one to go. Takes the fixture and the agent. Returns the answer.
 #[cfg(target_os = "macos")]
 fn background_alive(fixture: &Fixture, agent: i64) -> bool {
-    let pid: u32 = std::fs::read_to_string(stand_in_file(fixture, agent, "background-pid"))
+    alive_by_pid_file(&stand_in_file(fixture, agent, "background-pid"))
+}
+
+/// Whether the process whose pid a stand-in wrote to `file` still runs, waiting up to 3 s
+/// for a stopped one to go. Takes the file. Returns the answer.
+#[cfg(target_os = "macos")]
+fn alive_by_pid_file(file: &Path) -> bool {
+    let pid: u32 = std::fs::read_to_string(file)
         .unwrap()
         .trim()
         .parse()
@@ -5600,6 +5607,293 @@ fn with_no_wait_a_task_ends_with_its_turn_and_its_agent_was_told() {
     );
     assert!(!alive, "the turn's end left the background command running");
     assert!(!finished);
+}
+
+/// A stand-in Claude Code run as a kept native lead that, once `go` exists in its config
+/// home, takes a turn by itself as after a teammate's message: it starts a background
+/// command of SECS seconds, whose pid it writes to `background-pid` and which writes
+/// `background-done` as it ends, ends its turn waiting for it, writing `held`, and takes
+/// the turn on the command's end notification.
+#[cfg(target_os = "macos")]
+const OWN_BACKGROUND_CLAUDE: &str = r#"#!/bin/sh
+id=""
+prev=""
+for a in "$@"; do
+  case "$prev" in --resume|--session-id) id="$a" ;; esac
+  prev="$a"
+done
+[ -n "$id" ] || { echo "no session id"; exit 4; }
+d="$CLAUDE_CONFIG_DIR/projects/$(/bin/pwd -P | /usr/bin/tr -c 'A-Za-z0-9\n' '-' | /usr/bin/tr -d '\n')"
+/bin/mkdir -p "$d" || exit 1
+f="$d/$id.jsonl"
+printf '\033[?2004hClaude stand-in ready\n'
+while [ ! -e "$CLAUDE_CONFIG_DIR/go" ]; do /bin/sleep 0.1; done
+printf '%s\n' '{"type":"user","message":{"content":"A teammate wrote"}}' >> "$f"
+(
+  /bin/sleep SECS
+  printf done > "$CLAUDE_CONFIG_DIR/background-done"
+  printf '%s\n' '{"type":"user","message":{"content":"<task-notification>\n<task-id>bgcheck1</task-id>\n<status>completed</status>\n</task-notification>"}}' >> "$f"
+  /bin/sleep 0.3
+  printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"Check passed."}],"stop_reason":"end_turn"}}' '{"type":"system","subtype":"turn_duration","durationMs":300}' >> "$f"
+) &
+printf %s "$!" > "$CLAUDE_CONFIG_DIR/background-pid"
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_bg","name":"Bash","input":{"command":"check","run_in_background":true}}],"stop_reason":"tool_use"}}' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bg","content":"Command running in background with ID: bgcheck1."}]},"toolUseResult":{"backgroundTaskId":"bgcheck1"}}' >> "$f"
+/bin/sleep 0.3
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"text","text":"Waiting for the check."}],"stop_reason":"end_turn"}}' '{"type":"system","subtype":"turn_duration","durationMs":300}' >> "$f"
+printf held > "$CLAUDE_CONFIG_DIR/held"
+exec /bin/sleep 300
+"#;
+
+/// How a turn a kept native lead's app took by itself ended while a command it started in
+/// the background outlived its app's turn: the turn's end and result text, the time from
+/// its app's turn end to its end, whether the lead's worker stopped by itself, whether the
+/// command finished, and whether it still ran once the lead stopped.
+#[cfg(target_os = "macos")]
+struct OwnOutlived {
+    end: TurnEnd,
+    text: String,
+    waited: Duration,
+    stopped_itself: bool,
+    finished: bool,
+    alive: bool,
+}
+
+/// Runs one turn a kept native lead's stand-in app takes by itself, with a background
+/// command of `secs` seconds, through `next_lead_turn` under the given rules as the lead's
+/// worker does, then stops the lead as `serve` does on a stop. Takes the fixture, the pane
+/// name, the seconds and the rules. Returns how the turn ended.
+#[cfg(target_os = "macos")]
+fn own_turn_outliving(fixture: &Fixture, name: &str, secs: u32, rules: TurnRules) -> OwnOutlived {
+    let base = fixture.base.join(name);
+    let (home, work, bin) = (base.join("home"), base.join("work"), base.join("bin"));
+    for path in [&home, &work, &bin] {
+        std::fs::create_dir_all(path).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let script =
+        OWN_BACKGROUND_CLAUDE.replace("/bin/sleep SECS\n", &format!("/bin/sleep {secs}\n"));
+    assert_eq!(script.matches(&format!("/bin/sleep {secs}\n")).count(), 1);
+    let executable = bin.join("claude");
+    std::fs::write(&executable, script).unwrap();
+    std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let profile = base.join("agent.sb");
+    std::fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    let request = LaunchRequest {
+        harness: "claude-code".into(),
+        executable,
+        working_dir: work.canonicalize().unwrap(),
+        account: AccountBinding::Url {
+            home: home.clone(),
+            base_url: "http://127.0.0.1:9/v1".into(),
+            key: None,
+        },
+        model: None,
+        tools: true,
+        sandbox_profile: Some(profile),
+        unconfined: false,
+        git_identity: None,
+        limits: LaunchLimits::default(),
+    };
+    let host = fixture.host();
+    let mut session = AgentSession::Terminal(Box::new(
+        TerminalSession::start(host.clone(), AgentId::new(name).unwrap(), request, None).unwrap(),
+    ));
+    assert!(matches!(
+        session.next_event(Duration::from_secs(5)).unwrap(),
+        Some(LaunchEvent::Ready { .. })
+    ));
+    session.follow_own_turns();
+    std::fs::write(home.join("go"), "").unwrap();
+    let (order, orders) = channel();
+    let (reports, reported) = channel();
+    let cancel = AtomicBool::new(false);
+    let mut own = OwnTurn::default();
+    let deadline = Instant::now() + Duration::from_secs(90);
+    let (lead, cancel_flag, own_state) = (&mut session, &cancel, &mut own);
+    let (next, end, text, waited, stopped_itself) = std::thread::scope(|scope| {
+        let worker = scope
+            .spawn(move || next_lead_turn(&orders, cancel_flag, lead, &reports, own_state, rules));
+        let mut held = None;
+        let (end, text, at) = loop {
+            if held.is_none() && home.join("held").exists() {
+                held = Some(Instant::now());
+            }
+            match reported.recv_timeout(Duration::from_millis(50)) {
+                Ok(Report::Own {
+                    end: Some(end),
+                    text,
+                }) => break (end, text, Instant::now()),
+                Ok(_) | Err(RecvTimeoutError::Timeout) => {
+                    assert!(Instant::now() < deadline, "the own turn never ended");
+                }
+                Err(RecvTimeoutError::Disconnected) => {
+                    panic!("the lead's worker ended before its own turn did")
+                }
+            }
+        };
+        let after = Instant::now() + Duration::from_secs(2);
+        while !worker.is_finished() && Instant::now() < after {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let stopped_itself = worker.is_finished();
+        if !stopped_itself {
+            order.send(Order::Stop).unwrap();
+        }
+        let held = held.expect("the stand-in's turn ended before the own turn's end");
+        let next = worker.join().unwrap();
+        (
+            next,
+            end,
+            text,
+            at.saturating_duration_since(held),
+            stopped_itself,
+        )
+    });
+    assert!(matches!(next, Next::Stop));
+    assert!(
+        !session.own_held(),
+        "no turn is held once its end was given"
+    );
+    let finished = home.join("background-done").exists();
+    session.stop().unwrap();
+    let alive = alive_by_pid_file(&home.join("background-pid"));
+    host.close(&[]).unwrap();
+    OwnOutlived {
+        end,
+        text,
+        waited,
+        stopped_itself,
+        finished,
+        alive,
+    }
+}
+
+/// N-E9 (OP-26): under Wait, a turn a kept native lead's app takes by itself that ends while
+/// a command it started in the background still runs stays open until the app's turn on
+/// the command's end notification ends; its result has both replies, the command finished
+/// and the lead keeps running for its next order. In trial 4 run 2 (2026-11-04) a native
+/// lead's own turn ended at "Waiting for the background check." 37 s before its command.
+#[cfg(target_os = "macos")]
+#[test]
+fn under_wait_a_native_lead_s_own_turn_stays_open_until_its_background_command_ends() {
+    let fixture = Fixture::new(1);
+    let rules = TurnRules {
+        limit: None,
+        background: crate::team::BackgroundAtEnd::Wait,
+    };
+    let outlived = own_turn_outliving(&fixture, "own-bg-wait", 3, rules);
+    let text = &outlived.text;
+    assert_eq!(outlived.end, TurnEnd::Success, "{text}");
+    assert!(
+        text.contains("Waiting for the check.") && text.contains("Check passed."),
+        "{text}"
+    );
+    assert!(
+        outlived.finished,
+        "the own turn ended while its command ran: {text}"
+    );
+    assert!(
+        outlived.waited >= Duration::from_secs(2),
+        "{:?}",
+        outlived.waited
+    );
+    assert!(
+        !outlived.stopped_itself,
+        "the lead stopped for a command that ended in time"
+    );
+}
+
+/// N-E9: under Stop, a native lead's own turn whose background command outlives its app's
+/// turn ends at once, says so first in its result, and the lead stops with the command, as
+/// after an engine-typed turn (DEC-111 Q13 option C).
+#[cfg(target_os = "macos")]
+#[test]
+fn under_stop_a_native_lead_s_own_turn_ends_at_once_and_its_background_command_stops() {
+    let fixture = Fixture::new(1);
+    let rules = TurnRules {
+        limit: None,
+        background: crate::team::BackgroundAtEnd::Stop,
+    };
+    let outlived = own_turn_outliving(&fixture, "own-bg-stop", 25, rules);
+    let text = &outlived.text;
+    assert_eq!(outlived.end, TurnEnd::Success, "{text}");
+    assert!(
+        text.starts_with(BACKGROUND_STOPPED) && text.contains("Waiting for the check."),
+        "{text}"
+    );
+    assert!(
+        outlived.waited < Duration::from_secs(5),
+        "{:?}",
+        outlived.waited
+    );
+    assert!(outlived.stopped_itself);
+    assert!(!outlived.finished);
+    assert!(
+        !outlived.alive,
+        "the lead's stop left its background command running"
+    );
+}
+
+/// N-E9: with a grace time saved, a native lead's own turn whose background command outlives
+/// it ends once that time is over, says so first in its result, and the lead stops with
+/// the command (DEC-111 Q13 option B).
+#[cfg(target_os = "macos")]
+#[test]
+fn with_grace_a_native_lead_s_own_turn_ends_after_the_grace_time_and_its_command_stops() {
+    let fixture = Fixture::new(1);
+    let rules = TurnRules {
+        limit: None,
+        background: crate::team::BackgroundAtEnd::Grace { secs: 10 },
+    };
+    let outlived = own_turn_outliving(&fixture, "own-bg-grace", 25, rules);
+    let text = &outlived.text;
+    assert_eq!(outlived.end, TurnEnd::Success, "{text}");
+    assert!(
+        text.starts_with(BACKGROUND_GRACE_ENDED) && text.contains("Waiting for the check."),
+        "{text}"
+    );
+    assert!(
+        outlived.waited >= Duration::from_secs(9) && outlived.waited < Duration::from_secs(20),
+        "{:?}",
+        outlived.waited
+    );
+    assert!(outlived.stopped_itself);
+    assert!(!outlived.finished);
+    assert!(
+        !outlived.alive,
+        "the grace time left the background command running"
+    );
+}
+
+/// N-E9: under Wait with a task limit, a native lead's own turn held for its background
+/// command ends at the limit, counted from the turn's start, says so first in its result,
+/// and the lead stops with the command, as an engine-typed turn is cut.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_task_limit_cuts_a_native_lead_s_own_turn_held_for_its_background_command() {
+    let fixture = Fixture::new(1);
+    let rules = TurnRules {
+        limit: Some(Duration::from_secs(4)),
+        background: crate::team::BackgroundAtEnd::Wait,
+    };
+    let outlived = own_turn_outliving(&fixture, "own-bg-limit", 25, rules);
+    let text = &outlived.text;
+    assert_eq!(outlived.end, TurnEnd::TimedOut, "{text}");
+    assert!(
+        text.starts_with(BACKGROUND_CUT) && text.contains("Waiting for the check."),
+        "{text}"
+    );
+    assert!(
+        outlived.waited >= Duration::from_secs(2) && outlived.waited < Duration::from_secs(10),
+        "{:?}",
+        outlived.waited
+    );
+    assert!(outlived.stopped_itself);
+    assert!(!outlived.finished);
+    assert!(
+        !outlived.alive,
+        "the limit left the background command running"
+    );
 }
 
 /// Under Stop, a Codex sub-agent whose app keeps running between tasks is not told that its
