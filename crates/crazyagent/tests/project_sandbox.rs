@@ -2390,6 +2390,73 @@ fn a_linked_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_worktree()
             &target,
         );
     }
+    let lead_only = lead_worktree.join("lead-only");
+    fs::create_dir(&lead_only).unwrap();
+    let folder = lead_worktree.join(crazyagent::agent_git::TEAMMATES_FOLDER);
+    let [bob, carl, dave] = ["bob", "carl", "dave"].map(|name| folder.join(name));
+    let planted = case.home.join("teams").join("planted.lock");
+    let mut escaped: Vec<String> = Vec::new();
+    for (label, script) in [
+        (
+            "symlink at a teammate folder",
+            format!("ln -s {} {}", quoted(&lead_only), quoted(&bob)),
+        ),
+        (
+            "symlink moved in as a teammate folder",
+            format!(
+                "ln -s {} {} && mv {} {}",
+                quoted(&lead_only),
+                quoted(&greet.join("link")),
+                quoted(&greet.join("link")),
+                quoted(&carl)
+            ),
+        ),
+        (
+            "team folder holding a .git moved in as a teammate folder",
+            format!(
+                "mkdir {} && printf 'gitdir: {}\\n' > {} && mv {} {}",
+                quoted(&planted),
+                git.display(),
+                quoted(&planted.join(".git")),
+                quoted(&planted),
+                quoted(&dave)
+            ),
+        ),
+    ] {
+        if run(&teammates, &profile, &script).status.success() {
+            escaped.push(label.to_owned());
+        }
+    }
+    for made in [&bob, &carl, &dave] {
+        if fs::symlink_metadata(made).is_ok() {
+            escaped.push(format!("made {}", made.display()));
+        }
+    }
+    let replaced = run(
+        &teammates,
+        &profile,
+        &format!(
+            "mv {} {} && ln -s {} {}",
+            quoted(&folder),
+            quoted(&tmp.join("teammates-away")),
+            quoted(&lead_only),
+            quoted(&folder)
+        ),
+    );
+    if replaced.status.success() {
+        escaped.push("teammates folder entry replaced".to_owned());
+    }
+    if !fs::symlink_metadata(&folder).unwrap().is_dir() || !greet.join(".git").is_file() {
+        escaped.push(format!("moved {}", folder.display()));
+    }
+    assert!(
+        escaped.is_empty(),
+        "a teammate changes where the engine adds a teammate worktree: {escaped:?}"
+    );
+    assert!(
+        fs::read_dir(&lead_only).unwrap().next().is_none(),
+        "nothing lands in the lead's folder"
+    );
 }
 
 #[test]

@@ -9055,6 +9055,67 @@ fn the_engine_makes_each_native_teammate_s_own_worktree_on_its_own_branch() {
     team.shutdown().unwrap();
 }
 
+/// OP-9b with OP-9 r2: the engine's teammates' setup git adds a linked teammate's worktree
+/// only at a real teammates' folder, so a symlink at `.worktrees` or at `.worktrees/<name>`
+/// that points at a folder the lead may write never gets a teammate's tree, a worktree
+/// record or a branch.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_engine_never_adds_a_linked_teammate_worktree_through_a_symlink() {
+    let fixture = Fixture::new(1);
+    let mut team = fixture.runtime();
+    let (lead, branch, worktree, git_home) = native_lead_linked_in_the_project(&fixture);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let common = level_git(&worktree, &git_home, &["rev-parse", "--git-common-dir"]);
+    assert!(common.status.success(), "{common:?}");
+    let common = worktree.join(String::from_utf8(common.stdout).unwrap().trim());
+    let lead_only = worktree.join("lead-only");
+    std::fs::create_dir(&lead_only).unwrap();
+    let folder = worktree.join(crate::agent_git::TEAMMATES_FOLDER);
+    std::os::unix::fs::symlink(&lead_only, &folder).unwrap();
+    let home = agent_home(&fixture.base.join("team"), lead);
+    let team_folder = home.join("teams").join("session-1");
+    std::fs::create_dir_all(&team_folder).unwrap();
+    std::fs::write(
+        team_folder.join("config.json"),
+        r#"{"members":[{"name":"greet","tmuxPaneId":"%7"}]}"#,
+    )
+    .unwrap();
+    crate::coord::ensure(&fixture.connection).unwrap();
+    super::teammates::register(&fixture.connection, &project, lead, &home, &["%7"], 1, 5).unwrap();
+    let untouched = |when: &str| {
+        assert!(
+            std::fs::read_dir(&lead_only).unwrap().next().is_none(),
+            "{when}: nothing lands in the lead's folder"
+        );
+        assert!(
+            !common.join("worktrees").join("greet").exists(),
+            "{when}: no worktree record"
+        );
+        let held = level_git(
+            &worktree,
+            &git_home,
+            &[
+                "rev-parse",
+                "--verify",
+                "-q",
+                &format!("refs/heads/{branch}--greet"),
+            ],
+        );
+        assert!(!held.status.success(), "{when}: no teammate branch");
+    };
+
+    team.make_teammate_worktrees(&project, lead).unwrap();
+    untouched("a symlinked teammates' folder");
+
+    std::fs::remove_file(&folder).unwrap();
+    std::fs::create_dir(&folder).unwrap();
+    std::os::unix::fs::symlink(&lead_only, folder.join("greet")).unwrap();
+    team.make_teammate_worktrees(&project, lead).unwrap();
+    untouched("a symlinked teammate folder");
+    team.shutdown().unwrap();
+}
+
 /// A linked native lead in the project whose native teammates greet (`%7`) and check
 /// (`%8`) are registered, both working, each in the linked worktree the engine made for it
 /// on `<task branch>--<name>`, as a live lead's discovery pass leaves them.
