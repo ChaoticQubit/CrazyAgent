@@ -680,6 +680,58 @@ fn files_under(root: &Path, depth: usize) -> Vec<PathBuf> {
     found
 }
 
+/// The team tool uses Claude Code transcripts record and the result each got: every
+/// `TeamCreate`, `Agent` and `SendMessage` call with its input, then its tool result, each
+/// cut to `SHOWN_MAX` characters, so a failed wait shows whether a lead tried to start a
+/// teammate and what Claude Code answered. Input: the files. Output: one line per use or
+/// result, in file order.
+fn team_calls(files: &[PathBuf]) -> Vec<String> {
+    const SHOWN_MAX: usize = 400;
+    const TEAM_TOOLS: [&str; 3] = ["TeamCreate", "Agent", "SendMessage"];
+    let cut = |text: String| text.chars().take(SHOWN_MAX).collect::<String>();
+    let mut uses = BTreeSet::new();
+    let mut lines = Vec::new();
+    for text in files
+        .iter()
+        .filter(|file| {
+            file.extension()
+                .is_some_and(|extension| extension == "jsonl")
+        })
+        .filter_map(|file| std::fs::read_to_string(file).ok())
+    {
+        for line in text.lines() {
+            let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let blocks = entry
+                .pointer("/message/content")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            for block in blocks {
+                let field = |name: &str| block.get(name).cloned().unwrap_or_default();
+                match (field("type").as_str(), field("name").as_str()) {
+                    (Some("tool_use"), Some(name)) if TEAM_TOOLS.contains(&name) => {
+                        uses.insert(field("id").to_string());
+                        lines.push(format!("use {name} {}", cut(field("input").to_string())));
+                    }
+                    (Some("tool_result"), _)
+                        if uses.contains(&field("tool_use_id").to_string()) =>
+                    {
+                        lines.push(format!(
+                            "result error={} {}",
+                            field("is_error"),
+                            cut(field("content").to_string())
+                        ));
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    lines
+}
+
 /// The files of `files` whose text holds `word`. Inputs: the files and the word. Output:
 /// the matching files.
 fn holding(files: &[PathBuf], word: &str) -> Vec<PathBuf> {
@@ -688,6 +740,83 @@ fn holding(files: &[PathBuf], word: &str) -> Vec<PathBuf> {
         .filter(|file| std::fs::read_to_string(file).is_ok_and(|text| text.contains(word)))
         .cloned()
         .collect()
+}
+
+/// Tells whether one line of the files holds every one of `words`, such as a teammate
+/// message Claude Code recorded in a transcript together with its text. Inputs: the files
+/// and the words. Output: the answer.
+fn line_holding(files: &[PathBuf], words: &[&str]) -> bool {
+    files
+        .iter()
+        .filter_map(|file| std::fs::read_to_string(file).ok())
+        .any(|text| {
+            text.lines()
+                .any(|line| words.iter().all(|word| line.contains(word)))
+        })
+}
+
+/// The texts of the tool results that are not errors, for every `tool` call in a Claude Code
+/// transcript among the files whose input holds every one of `words`. Inputs: the files, the
+/// tool name and the words. Output: the result texts, in file order.
+fn succeeded(files: &[PathBuf], tool: &str, words: &[&str]) -> Vec<String> {
+    let mut calls = BTreeSet::new();
+    let mut results = Vec::new();
+    for text in files
+        .iter()
+        .filter(|file| {
+            file.extension()
+                .is_some_and(|extension| extension == "jsonl")
+        })
+        .filter_map(|file| std::fs::read_to_string(file).ok())
+    {
+        for line in text.lines() {
+            let Ok(entry) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let blocks = entry
+                .pointer("/message/content")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            for block in blocks {
+                let field = |name: &str| block.get(name).cloned().unwrap_or_default();
+                match field("type").as_str() {
+                    Some("tool_use") if field("name").as_str() == Some(tool) => {
+                        let input = field("input").to_string();
+                        if words.iter().all(|word| input.contains(word)) {
+                            calls.insert(field("id").to_string());
+                        }
+                    }
+                    Some("tool_result")
+                        if calls.contains(&field("tool_use_id").to_string())
+                            && field("is_error") != serde_json::Value::Bool(true) =>
+                    {
+                        results.push(match field("content") {
+                            serde_json::Value::String(text) => text,
+                            serde_json::Value::Array(parts) => parts
+                                .iter()
+                                .filter_map(|part| part.get("text")?.as_str())
+                                .collect::<Vec<_>>()
+                                .join("\n"),
+                            other => other.to_string(),
+                        });
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    results
+}
+
+/// The id Claude Code 2.1.309 gave the task one of `results` reports, from its TaskCreate
+/// result `Task #<id> created successfully: <subject>`. Input: the TaskCreate result texts.
+/// Output: the first id, or none.
+fn created_task(results: &[String]) -> Option<String> {
+    results.iter().find_map(|text| {
+        let (id, rest) = text.strip_prefix("Task #")?.split_once(' ')?;
+        (!id.is_empty() && rest.starts_with("created successfully")).then(|| id.to_owned())
+    })
 }
 
 /// The lead's name in its Claude Code team, which names its inbox `inboxes/team-lead.json`.
@@ -732,12 +861,17 @@ fn own_home_prompt(token: &str) -> String {
 /// lead only through the team folders the lead shares. A real Claude Code lead, started by
 /// the runtime on the owner's account, makes a task, creates one teammate, messages it and
 /// waits for its answer. Checked: the teammate starts signed in and answers, past every
-/// first-run, trust and sign-in screen (1); its answer to the lead's message lands in the
-/// lead's own inbox through the linked `teams/`, a file only a teammate writes that answer to
-/// (2); it, not the lead, completes the lead's task in the linked `tasks/`, so the task's
-/// owner is the teammate (3); its transcript sits in the mates home, where the engine's
-/// record walk, which usage and the relay's read receipts use, finds it (4); and Seatbelt
-/// denied nothing at or under the lead's `teams` or `tasks` folders during the run (5).
+/// first-run, trust and sign-in screen (1); its answer to the lead's message reaches the lead
+/// through the lead's own inbox in the linked `teams/`: that inbox file exists and the lead's
+/// transcript records the answer as a teammate message, which tmux teammates deliver only
+/// through it (2); it, not the lead, completes the task the lead made in its own `tasks/`, so
+/// the teammate's own update completing the id the lead's TaskCreate reported succeeds
+/// through the linked folder (3). Claude Code
+/// 2.1.309 deletes delivered inbox entries and, once every task is completed, the task files,
+/// so (2) and (3) read the transcripts, not those files. The teammate's transcript sits in
+/// the mates home, where the engine's record walk, which usage and the relay's read receipts
+/// use, finds it (4); and Seatbelt denied nothing at or under the lead's `teams` or `tasks`
+/// folders during the run (5).
 #[test]
 #[ignore = "live qualification: needs a signed-in Claude account, CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
 fn live_native_teammates_work_from_their_own_home_through_the_lead_s_team_folders() {
@@ -787,6 +921,11 @@ fn live_native_teammates_work_from_their_own_home_through_the_lead_s_team_folder
                 files_under(&team.home.join("teams"), 3),
                 files_under(&team.home.join("tasks"), 2)
             );
+            println!(
+                "lead team calls={:?} teammate team calls={:?}",
+                team_calls(&files_under(&team.home.join("projects"), 3)),
+                team_calls(&files_under(&mates.join("projects"), 3))
+            );
             panic!("{why}, after {} others: {:?}", seen.len(), shown(&seen))
         });
     let (end, text) = reports
@@ -833,20 +972,24 @@ fn live_native_teammates_work_from_their_own_home_through_the_lead_s_team_folder
         .cloned()
         .collect();
     let mates_names = teammate_names(&shared);
-    let completed_by_teammate = holding(&tasks, &format!("{token}TASK")).iter().any(|file| {
-        std::fs::read(file)
-            .ok()
-            .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-            .is_some_and(|task| {
-                task.get("status").and_then(serde_json::Value::as_str) == Some("completed")
-                    && task
-                        .get("owner")
-                        .and_then(serde_json::Value::as_str)
-                        .is_some_and(|owner| mates_names.contains(owner))
-            })
-    });
+    let lead_transcripts = files_under(&team.home.join("projects"), 3);
+    let task = format!("{token}TASK");
+    let made = created_task(&succeeded(
+        &lead_transcripts,
+        "TaskCreate",
+        &[task.as_str()],
+    ));
+    let bound = made.as_deref().map(|id| format!(r#""taskId":"{id}""#));
+    let completing = |files: &[PathBuf]| {
+        bound.as_deref().is_some_and(|id| {
+            !succeeded(files, "TaskUpdate", &[id, r#""status":"completed""#]).is_empty()
+        })
+    };
+    let completed_by_teammate = completing(&transcripts);
+    let completed_by_lead = completing(&lead_transcripts);
+    let delivered = line_holding(&lead_transcripts, &["teammate-message", answer.as_str()]);
     println!(
-        "real claude native team in its own home: end={end:?} text={text:?} transcripts={transcripts:?} shared={shared:?} lead_inboxes={lead_inboxes:?} teammates={mates_names:?} tasks={tasks:?} walked={walked:?} denied={denied:?} log_exit={:?} turns={:?}",
+        "real claude native team in its own home: end={end:?} text={text:?} transcripts={transcripts:?} lead_transcripts={lead_transcripts:?} shared={shared:?} lead_inboxes={lead_inboxes:?} delivered={delivered} teammates={mates_names:?} tasks={tasks:?} made={made:?} completed_by_teammate={completed_by_teammate} completed_by_lead={completed_by_lead} walked={walked:?} denied={denied:?} log_exit={:?} turns={:?}",
         denials.status.code(),
         finished(&reports)
     );
@@ -862,16 +1005,16 @@ fn live_native_teammates_work_from_their_own_home_through_the_lead_s_team_folder
         "the teammate's own transcript holds no answer to the lead's message"
     );
     assert!(
-        !holding(&lead_inboxes, &answer).is_empty(),
-        "the teammate's answer did not reach the lead's own inbox in the lead's teams folder: {lead_inboxes:?} {shared:?}"
+        !lead_inboxes.is_empty() && delivered,
+        "the teammate's answer did not reach the lead through the lead's own inbox in the lead's teams folder: inboxes {lead_inboxes:?} delivered {delivered} {shared:?}"
     );
     assert!(
         !mates_names.is_empty(),
         "the lead's team config names no teammate: {shared:?}"
     );
     assert!(
-        completed_by_teammate,
-        "the lead's task was not completed by its teammate in the lead's own tasks folder: teammates={mates_names:?} tasks={tasks:?}"
+        made.is_some() && completed_by_teammate && !completed_by_lead,
+        "the task the lead made was not completed by its teammate through the lead's own tasks folder: made {made:?} by teammate {completed_by_teammate} by lead {completed_by_lead} tasks={tasks:?}"
     );
     assert!(
         walked

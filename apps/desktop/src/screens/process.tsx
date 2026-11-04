@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { listSkills, type Result } from "../api";
-import { HOOKLESS_WORDS, type ImportFile, type Nudges } from "../engine-client";
+import { type ImportFile, type Nudges } from "../engine-client";
 import {
   DEFAULT_INSTRUCTION_SETTINGS, EDIT_DELIVERIES, INSTRUCTION_MODES, PROCESS_TEXT_BYTES_MAX, commitInstructionImport, committedMessage, confirmInstructionImport, defaultProcess, flagWords,
   importInstructionsFile, importRefusal, loadAdoption, loadInstructionImport, loadUncommittedImport, loadInstructionSettings, loadProcess, processMessage, processTextError, saveInstructionSettings,
@@ -209,7 +209,6 @@ export function AgentSkills({ adoption, agent, onRetry }: { adoption: Loaded<Ado
     : adoption.kind === "not_ready" ? <NotReady what="Skill counts" />
     : adoption.kind === "error" ? <LoadError message={processMessage(adoption)} onRetry={onRetry} />
     : !row ? <p className="secondary">This agent is older than the agents the Process page lists, so its counts are not shown.</p>
-    : row.hookless ? <p className="secondary">Skill counts {HOOKLESS_WORDS}.</p>
     : <SkillCounts skills={adoption.value.skills ?? []} agent={row} />;
 }
 
@@ -232,9 +231,8 @@ const NUDGES_NOTES: Record<Nudges, string> = {
 
 /** A project's workflow adoption as a pure view: one row per recent agent with its count for
  * each counted tool, its graphify, ctx_* and per-skill counts, and its flags in red, marked
- * once the agent was reminded, and the nudges option. Stopped agents are dimmed; an
- * agent whose launch fires no hooks says its counts and flags are unavailable. Inputs: the
- * read and the refresh action. */
+ * once the agent was reminded, and the nudges option. Stopped agents are dimmed. Inputs:
+ * the read and the refresh action. */
 export function AdoptionView({ adoption, onRefresh }: { adoption: Loaded<Adoption>; onRefresh: () => void }) {
   if (adoption.kind === "loading") return <Skeleton shape="card" count={1} />;
   if (adoption.kind === "not_ready") return <NotReady what="Workflow adoption" />;
@@ -250,16 +248,12 @@ export function AdoptionView({ adoption, onRefresh }: { adoption: Loaded<Adoptio
         <thead><tr><th scope="col">Agent</th>{counted.map((tool) => <th scope="col" key={tool}>{tool}</th>)}<th scope="col">Skills</th><th scope="col">Flags</th></tr></thead>
         <tbody>{agents.map((agent) => <tr key={agent.agent} className={agent.active ? undefined : "adoption-stopped"}>
           <th scope="row">{adoptionLabel(agent)}</th>
-          {agent.hookless
-            ? <td colSpan={counted.length + 2} className="secondary">Counts and flags {HOOKLESS_WORDS}</td>
-            : <>
-              {counted.map((tool, index) => <td key={tool}>{agent.counts[index] ?? 0}</td>)}
-              <td><SkillCounts skills={skills} agent={agent} /></td>
-              <td><span className="adoption-flags">{agent.flags.length === 0
-                ? <span className="secondary">None</span>
-                : agent.flags.map((flag) => <StatusBadge key={flag} tone="danger"
-                  word={agent.reminded.includes(flag) ? `${flagWords(flag)}, reminded` : flagWords(flag)} />)}</span></td>
-            </>}
+          {counted.map((tool, index) => <td key={tool}>{agent.counts[index] ?? 0}</td>)}
+          <td><SkillCounts skills={skills} agent={agent} /></td>
+          <td><span className="adoption-flags">{agent.flags.length === 0
+            ? <span className="secondary">None</span>
+            : agent.flags.map((flag) => <StatusBadge key={flag} tone="danger"
+              word={agent.reminded.includes(flag) ? `${flagWords(flag)}, reminded` : flagWords(flag)} />)}</span></td>
         </tr>)}</tbody>
       </table>
       {hidden > 0 && <p className="secondary adoption-note">{hidden} older {hidden === 1 ? "agent is" : "agents are"} not listed.</p>}

@@ -84,10 +84,10 @@ impl AgentAccess {
 
 /// How far one project's tools-on agents and the plugin "Check again" server may reach on
 /// the network (DEC-111 Q17): Open is the whole network, Https is port 443 only, None is
-/// the model endpoint's port alone, on loopback for a local model, otherwise on any host,
-/// not yet the model host alone. The same choice applies to the agents and to the check.
-/// It does not widen or narrow the live master, which always reaches the model's port
-/// only, whatever this choice.
+/// nothing beyond the model endpoint. The same choice applies to the agents, research jobs
+/// and the check. A master never reaches more than the model's port; under None a master
+/// with tools reaches a model off loopback only through its model proxy in its live
+/// terminal, and a master turn with tools is refused (S4B-M1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentNetwork {
@@ -119,10 +119,19 @@ impl AgentNetwork {
         }
     }
 
+    /// Tells whether this choice lets agents reach more than `other`: Open more than Port
+    /// 443 only, Port 443 only more than None (CS-2). Input: the choice to compare with.
+    /// Output: true when this one is wider.
+    pub fn wider_than(self, other: Self) -> bool {
+        let rank = |choice: Self| Self::ALL.iter().position(|each| *each == choice);
+        rank(self) < rank(other)
+    }
+
     /// The sandbox reach this choice grants. Input: the model endpoint the agent still
     /// needs, or None for the plugin check, which needs no model. Output: Open for Open,
-    /// port 443 plus the model's port for Https, and for None the model's port alone, on
-    /// loopback for a local model, otherwise on any host.
+    /// port 443 plus the model's port for Https, and for None the model only on loopback:
+    /// a model on any host is reached under None only through a model proxy's loopback
+    /// port, so no None path grants a host port or DNS (S4B-M1).
     pub fn sandbox(self, model: Option<super::SandboxRemote>) -> super::SandboxNetwork {
         match self {
             Self::Open => super::SandboxNetwork::Open,
@@ -131,7 +140,12 @@ impl AgentNetwork {
                 remotes.extend(model);
                 super::SandboxNetwork::Only(remotes)
             }
-            Self::None => super::SandboxNetwork::Only(model.into_iter().collect()),
+            Self::None => super::SandboxNetwork::Only(
+                model
+                    .into_iter()
+                    .filter(|remote| matches!(remote, super::SandboxRemote::Loopback(_)))
+                    .collect(),
+            ),
         }
     }
 }
@@ -338,6 +352,50 @@ pub fn remove(connection: &Connection, project: &str) -> rusqlite::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn no_network_grants_a_model_only_on_loopback_and_never_a_host_port() {
+        use crate::sandbox::{SandboxNetwork, SandboxRemote};
+        assert_eq!(
+            AgentNetwork::None.sandbox(Some(SandboxRemote::AnyHost(443))),
+            SandboxNetwork::Only(vec![])
+        );
+        assert_eq!(
+            AgentNetwork::None.sandbox(Some(SandboxRemote::Loopback(11_434))),
+            SandboxNetwork::Only(vec![SandboxRemote::Loopback(11_434)])
+        );
+        assert_eq!(
+            AgentNetwork::None.sandbox(None),
+            SandboxNetwork::Only(vec![])
+        );
+        assert_eq!(
+            AgentNetwork::Https.sandbox(Some(SandboxRemote::AnyHost(8443))),
+            SandboxNetwork::Only(vec![
+                SandboxRemote::AnyHost(443),
+                SandboxRemote::AnyHost(8443)
+            ])
+        );
+        assert_eq!(AgentNetwork::Open.sandbox(None), SandboxNetwork::Open);
+    }
+
+    #[test]
+    fn a_network_choice_is_wider_only_than_the_narrower_ones() {
+        let (open, https, none) = (AgentNetwork::Open, AgentNetwork::Https, AgentNetwork::None);
+        assert!(open.wider_than(https) && open.wider_than(none) && https.wider_than(none));
+        for (one, other) in [
+            (https, open),
+            (none, open),
+            (none, https),
+            (open, open),
+            (https, https),
+            (none, none),
+        ] {
+            assert!(
+                !one.wider_than(other),
+                "{one:?} is not wider than {other:?}"
+            );
+        }
+    }
 
     #[test]
     fn each_platform_offers_only_the_levels_it_can_enforce() {

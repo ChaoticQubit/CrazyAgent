@@ -1249,6 +1249,46 @@ fn a_native_lead_runs_agent_teams_and_its_teammates_get_a_plain_quoted_script() 
     drop(installed);
 }
 
+/// A native lead and every teammate its script starts get Claude Code's task list tools
+/// (OP-3): Claude Code 2.1.309 offers TaskCreate, TaskGet, TaskUpdate and TaskList to a
+/// current model only when `CLAUDE_CODE_ENABLE_TODO_TOOLS` is set, and without them a lead
+/// cannot share its team's tasks. An agent outside a native team does not get the variable.
+#[test]
+fn a_native_lead_and_its_teammates_get_claude_code_s_task_list_tools() {
+    let case = Case::new();
+    let request = case.request("claude-code", case.subscription(), true);
+    let tmux = case.executable("tmux", "#!/bin/sh\nexit 0\n");
+    let todo = |built: &InteractiveCommand| -> Vec<String> {
+        built
+            .env
+            .iter()
+            .filter(|(name, _)| name == "CLAUDE_CODE_ENABLE_TODO_TOOLS")
+            .map(|(_, value)| value.clone())
+            .collect()
+    };
+    let alone = project_context(&case, "alone")
+        .install("claude-code", &case.home(), true)
+        .unwrap();
+    let agent = command(&request, Some(&alone), &run(None)).unwrap();
+    assert!(todo(&agent).is_empty(), "{:?}", agent.env);
+    drop(alone);
+
+    let installed = project_context(&case, "data")
+        .with_native_team(&tmux, &case.path().join("work"))
+        .install("claude-code", &case.home(), true)
+        .unwrap();
+    let lead = command(&request, Some(&installed), &run(None)).unwrap();
+    assert_eq!(todo(&lead), ["1"], "{:?}", lead.env);
+    write_teammate_command(&case.home(), &lead, &request, installed.native().unwrap()).unwrap();
+    let written =
+        std::fs::read_to_string(crate::launch_context::teammate_command(&case.home())).unwrap();
+    assert!(
+        written.contains(" 'CLAUDE_CODE_ENABLE_TODO_TOOLS=1' "),
+        "{written}"
+    );
+    drop(installed);
+}
+
 /// A native lead's teammates run in their own config home beside the lead's (TPH-2 C): the
 /// script the lead's Claude Code runs for each teammate names that home in place of the
 /// lead's for Claude Code's config and temp folders, `HOME` and the cargo home, and keeps the
@@ -1283,6 +1323,62 @@ fn a_native_lead_s_teammates_get_their_own_config_home_and_the_lead_s_sign_in() 
         "{written}"
     );
     drop(installed);
+}
+
+/// A native lead's temp files are its own (TPH-2 residual): the lead's `TMPDIR` and zsh
+/// prefix name its own folder in the short temp folder, and the script its Claude Code runs
+/// for each teammate names the shared short temp folder in their place, never the lead's
+/// own. A script that would still name the lead's own folder is refused.
+#[test]
+fn a_native_lead_s_temp_folder_is_its_own_and_its_teammates_keep_the_shared_one() {
+    let case = Case::new();
+    let shared = toolchains::make_tmp(&case.home()).unwrap();
+    let own = toolchains::native_lead_tmp(&shared);
+    let request = case.request("claude-code", case.subscription(), true);
+    let tmux = case.executable("tmux", "#!/bin/sh\nexit 0\n");
+    let installed = project_context(&case, "data")
+        .with_native_team(&tmux, &case.path().join("work"))
+        .install("claude-code", &case.home(), true)
+        .unwrap();
+    let built = command(&request, Some(&installed), &run(None)).unwrap();
+    let value = |name: &str| {
+        built
+            .env
+            .iter()
+            .filter(|(known, _)| known == name)
+            .map(|(_, value)| value.as_str())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(value("TMPDIR"), [own.to_str().unwrap()]);
+    assert_eq!(value("TMPPREFIX"), [own.join("zsh").to_str().unwrap()]);
+    assert_ne!(own, shared);
+
+    write_teammate_command(&case.home(), &built, &request, installed.native().unwrap()).unwrap();
+    let script = crate::launch_context::teammate_command(&case.home());
+    let written = std::fs::read_to_string(&script).unwrap();
+    let word = |name: &str, value: &Path| format!(" '{name}={}' ", value.display());
+    assert!(written.contains(&word("TMPDIR", &shared)), "{written}");
+    assert!(
+        written.contains(&word("TMPPREFIX", &shared.join("zsh"))),
+        "{written}"
+    );
+    assert!(!written.contains(own.to_str().unwrap()), "{written}");
+
+    std::fs::remove_file(&script).unwrap();
+    let mut leaky = built.clone();
+    leaky.env.push((
+        "XDG_RUNTIME_DIR".to_owned(),
+        own.join("run").display().to_string(),
+    ));
+    assert_eq!(
+        write_teammate_command(&case.home(), &leaky, &request, installed.native().unwrap())
+            .unwrap_err()
+            .0,
+        "launch_teammate_command_invalid"
+    );
+    assert!(!script.exists());
+    drop(installed);
+    toolchains::remove_tmp(&case.home()).unwrap();
 }
 
 #[test]

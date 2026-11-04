@@ -1,6 +1,7 @@
 use super::error;
 use crate::engine::EngineError;
 use rusqlite::{Connection, params};
+#[cfg(unix)]
 use std::path::Path;
 
 pub(crate) const ACCOUNT_KEY: &str = "account_key";
@@ -8,8 +9,10 @@ pub(crate) const MCP_SECRET: &str = "mcp_secret";
 pub(crate) const MCP_CHECKS: &str = "mcp_checks";
 pub(crate) const SKILL_FOLDER: &str = "skill_folder";
 pub(crate) const HOOK_FOLDER: &str = "hook_folder";
+#[cfg(unix)]
 const SWEEP_MAX: i64 = 10_000;
 
+#[cfg(unix)]
 macro_rules! trash_columns {
     () => {
         "(
@@ -20,6 +23,7 @@ macro_rules! trash_columns {
     };
 }
 
+#[cfg(unix)]
 const SCHEMA: &str = concat!(
     "CREATE TABLE IF NOT EXISTS file_trash ",
     trash_columns!(),
@@ -27,6 +31,7 @@ const SCHEMA: &str = concat!(
 );
 /// Rebuilds a trash table from before hook folders with the current check, keeping every
 /// note, for the upgrade step that lets it hold hook folders.
+#[cfg(unix)]
 pub(super) const WIDEN: &str = concat!(
     "CREATE TABLE file_trash_next ",
     trash_columns!(),
@@ -38,6 +43,7 @@ ALTER TABLE file_trash_next RENAME TO file_trash;"
 
 /// Creates the table of files a committed removal left to delete.
 /// Input: the engine connection. Output: any SQLite failure.
+#[cfg(unix)]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(SCHEMA).map_err(error)
 }
@@ -58,6 +64,7 @@ pub(crate) fn put(tx: &Connection, kind: &str, name: &str) -> Result<(), EngineE
 /// and forgets each one that is gone. A name a live record still refers to is forgotten
 /// without deleting it. A file that cannot be deleted stays noted for the next start.
 /// Inputs: the engine connection and root. Output: how many notes are left.
+#[cfg(unix)]
 pub(crate) fn sweep(connection: &Connection, root: &Path) -> Result<usize, EngineError> {
     let notes = connection
         .prepare("SELECT kind,name FROM file_trash ORDER BY kind,name LIMIT ?1")
@@ -92,6 +99,7 @@ pub(crate) fn sweep(connection: &Connection, root: &Path) -> Result<usize, Engin
     usize::try_from(left).map_err(error)
 }
 
+#[cfg(unix)]
 fn referenced(connection: &Connection, kind: &str, name: &str) -> Result<bool, EngineError> {
     let quoted = format!("\"{name}\"");
     let scoped = format!("project:{name}");
@@ -124,6 +132,7 @@ fn referenced(connection: &Connection, kind: &str, name: &str) -> Result<bool, E
         .map_err(error)
 }
 
+#[cfg(unix)]
 fn delete(root: &Path, kind: &str, name: &str) -> Result<(), EngineError> {
     match kind {
         ACCOUNT_KEY => super::accounts::remove_key_file(root, name),

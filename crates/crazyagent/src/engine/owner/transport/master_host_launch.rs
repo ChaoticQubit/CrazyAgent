@@ -13,6 +13,8 @@ use crate::protocol::RequestId;
 use crate::sandbox::InstalledSandbox;
 #[cfg(unix)]
 use crate::sandbox::policy::AgentAccess;
+#[cfg(unix)]
+use crate::sandbox::policy::AgentNetwork;
 use crate::sandbox::policy::AgentPolicy;
 #[cfg(unix)]
 use crate::sandbox::toolchains::{ToolHomes, Toolchains};
@@ -838,7 +840,9 @@ pub(super) fn master_sandbox(
 /// The master writes only in its leased worktree, its turn home and the turn's temp folder;
 /// it reads the project repository, the harness install folder, the turn directory and the
 /// folder of the engine executable that serves its `delegate` tool, and reaches only its
-/// model endpoint. Output: the installed sandbox, or `master_sandbox_unavailable`.
+/// model endpoint. Under the None network a model off loopback is refused with
+/// `network_none_master_tools`, since a master turn has no model proxy and its tools would
+/// reach every host on that port (S4B-M1). Output: the installed sandbox, or the refusal.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
 pub(super) fn master_tools_sandbox(
@@ -890,6 +894,12 @@ fn turn_sandbox(
         ModelEndpoint::Native {} => SandboxRemote::AnyHost(HTTPS_PORT),
         ModelEndpoint::Http { url } => SandboxRemote::for_endpoint(url).map_err(refused)?,
     };
+    if engine.is_some()
+        && policy.network == AgentNetwork::None
+        && matches!(remote, SandboxRemote::AnyHost(_))
+    {
+        return Err(failure("network_none_master_tools"));
+    }
     let name = format!("master-runtime-{}", runtime_ref.as_str());
     let runtime = Root::open(&root.path.join(&name))?;
     verify_master_runtime(root, &runtime, &name)?;
@@ -899,8 +909,8 @@ fn turn_sandbox(
         .create(&tmp)
         .map_err(io_error)?;
     let home = std::fs::canonicalize(home).map_err(io_error)?;
-    let install = std::fs::canonicalize(executable)
-        .map_err(io_error)?
+    let program = std::fs::canonicalize(executable).map_err(io_error)?;
+    let install = program
         .parent()
         .map(Path::to_path_buf)
         .ok_or_else(|| failure("master_sandbox_unavailable"))?;
@@ -913,17 +923,14 @@ fn turn_sandbox(
         None => ProjectSandbox::new(worktree, &home, &tmp, network)
             .and_then(|sandbox| sandbox.allow_read(repository)),
         Some(engine) => {
-            let folder = std::fs::canonicalize(engine)
-                .map_err(io_error)?
-                .parent()
-                .map(Path::to_path_buf)
-                .ok_or_else(|| failure("master_sandbox_unavailable"))?;
+            let engine = std::fs::canonicalize(engine).map_err(io_error)?;
             ProjectSandbox::new(worktree, &home, &tmp, network)
                 .and_then(|sandbox| sandbox.allow_read(repository))
-                .and_then(|sandbox| sandbox.allow_read(&folder))
+                .and_then(|sandbox| sandbox.allow_engine(&engine))
         }
     }
     .and_then(|sandbox| sandbox.allow_read(&install))
+    .and_then(|sandbox| sandbox.allow_exec(&program))
     .and_then(|sandbox| sandbox.allow_read(&runtime.path))
     .and_then(|sandbox| sandbox.allow_tools(&tools))
     .and_then(|sandbox| sandbox.guard_engine(&root.path))
@@ -1576,6 +1583,10 @@ mod tests {
                 .contains("(allow network-outbound (remote ip \"*:443\"))")
         );
         assert!(!sandbox.sandbox().profile().contains("(allow network*)"));
+        assert!(sandbox.sandbox().profile().contains(&format!(
+            "(allow process-exec\n  (literal \"{}\"))\n",
+            std::fs::canonicalize(&executable).unwrap().display()
+        )));
 
         let master = master_command(&executable, &home, &worktree, "admitted-model", None).unwrap();
         let wrapped = sandbox.wrap(&master).unwrap();
@@ -2067,6 +2078,70 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(worktree.join("work.txt")).unwrap(),
             "agent\n"
+        );
+    }
+
+    /// Under the None network a master turn with tools is refused before its boundary is
+    /// made, since it has no model proxy and its tools would reach every host on 443; a
+    /// tools-off turn still runs, reaching only its model (S4B-M1).
+    #[test]
+    fn a_tools_on_master_turn_under_no_network_is_refused_rather_than_reaching_every_host() {
+        use crate::sandbox::policy::AgentNetwork;
+        let temporary = private_root();
+        let base = temporary.path().canonicalize().unwrap();
+        let root = Root::open(&base).unwrap();
+        let repository = base.join("repository");
+        let worktree = base.join("worktrees").join("lease");
+        let home = base.join("profile-home");
+        let install = base.join("install").join("bin");
+        let engine_bin = base.join("engine").join("bin");
+        for directory in [&repository, &worktree, &home, &install, &engine_bin] {
+            private_directory(directory);
+        }
+        let executable = install.join("claude");
+        let engine = engine_bin.join("crazyagent");
+        for program in [&executable, &engine] {
+            std::fs::write(program, "#!/bin/sh\nexit 0\n").unwrap();
+            std::fs::set_permissions(program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let none = AgentPolicy {
+            network: AgentNetwork::None,
+            ..AgentPolicy::default()
+        };
+        let (runtime_ref, _, _) = allocate_master_capture(&root).unwrap();
+        let refused = master_tools_sandbox(
+            &root,
+            &runtime_ref,
+            &repository,
+            &worktree,
+            &home,
+            &executable,
+            &ModelEndpoint::Native {},
+            &engine,
+            &none,
+            &[],
+        )
+        .err()
+        .map(|error| error.0);
+        assert_eq!(refused.as_deref(), Some("network_none_master_tools"));
+        let (runtime_ref, _, _) = allocate_master_capture(&root).unwrap();
+        let off = master_sandbox(
+            &root,
+            &runtime_ref,
+            &repository,
+            &worktree,
+            &home,
+            &executable,
+            &ModelEndpoint::Native {},
+            &none,
+            &[],
+        )
+        .map(|sandbox| sandbox.sandbox().profile());
+        assert!(
+            off.as_ref()
+                .is_ok_and(|profile| profile.contains("(remote ip \"*:443\")")),
+            "a tools-off master turn under None still reaches its model: {:?}",
+            off.err().map(|error| error.0)
         );
     }
 

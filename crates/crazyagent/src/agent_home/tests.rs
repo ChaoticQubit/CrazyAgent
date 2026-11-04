@@ -19,6 +19,7 @@ fn project(root: &Path) -> AgentProject {
     }
 }
 
+#[cfg(unix)]
 fn given(text: &str) -> Given {
     Given {
         text: text.into(),
@@ -533,6 +534,7 @@ fn the_default_process_leaves_commits_to_the_landing_rules_of_each_access_level(
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn owner_text_up_to_the_cap_is_given_inline_and_more_is_refused_by_its_larger_part() {
     let (_directory, root) = folder();

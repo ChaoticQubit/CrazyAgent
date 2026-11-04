@@ -191,6 +191,55 @@ pub(super) fn register(
                 .map_err(error)?;
         }
     }
+    keep_worktrees(connection, project, lead)
+}
+
+/// Keeps the worktree each running teammate row of a lead works in (DEC-111 Q17, OP-9):
+/// `<lead clone>/.worktrees/<name>`, relative to the owner's checkout root as every other
+/// team worktree is stored, while the lead's clone records it on the teammate's own branch
+/// `<task branch>--<name>`, else none, which the graph shows in amber. The clone is read
+/// as data with no git run; one that cannot be read holds none. Inputs: the connection,
+/// the project and the lead. Output: any SQLite failure.
+pub(super) fn keep_worktrees(
+    connection: &Connection,
+    project: &ProjectId,
+    lead: i64,
+) -> Result<(), EngineError> {
+    let place: Option<(String, String, String)> = connection
+        .query_row(
+            "SELECT repository,worktree,git_dir FROM team_worktrees WHERE agent=?1 AND project=?2",
+            params![lead, project.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let own = place
+        .as_ref()
+        .and_then(|(_, worktree, git_dir)| {
+            crate::landing::teammate_worktrees(connection, Path::new(worktree), Path::new(git_dir))
+                .ok()
+        })
+        .unwrap_or_default();
+    for (teammate, _) in working(connection, project, lead)? {
+        let folder = name(connection, teammate)
+            .filter(|kept| own.contains(kept))
+            .zip(place.as_ref())
+            .and_then(|(kept, (repository, worktree, _))| {
+                Path::new(worktree)
+                    .join(crate::agent_git::TEAMMATES_FOLDER)
+                    .join(kept)
+                    .strip_prefix(repository)
+                    .ok()?
+                    .to_str()
+                    .map(str::to_owned)
+            });
+        connection
+            .execute(
+                "UPDATE team_agents SET worktree=?2 WHERE id=?1 AND worktree IS NOT ?2",
+                params![teammate, folder],
+            )
+            .map_err(error)?;
+    }
     Ok(())
 }
 
@@ -223,6 +272,7 @@ fn keep_name(
 
 /// The name the engine keeps for a native teammate's row (DEC-111 Q18, RH-2). Inputs: the
 /// connection and the row. Output: the name, or none, also when unread.
+#[cfg(unix)]
 pub(super) fn name(connection: &Connection, teammate: i64) -> Option<String> {
     connection
         .query_row(
@@ -233,6 +283,31 @@ pub(super) fn name(connection: &Connection, teammate: i64) -> Option<String> {
         .optional()
         .ok()
         .flatten()
+}
+
+/// Lists a lead's running teammate rows with whether each rests, so the engine commits a
+/// resting teammate's turn and lands its work on the lead (OP-9b). Inputs: the connection,
+/// the project and the lead. Output: the rows, true for a resting one, or a SQLite failure.
+pub(super) fn resting(
+    connection: &Connection,
+    project: &ProjectId,
+    lead: i64,
+) -> Result<Vec<(i64, bool)>, EngineError> {
+    let mut statement = connection
+        .prepare(
+            "SELECT id,status='idle' FROM team_agents WHERE project=?1 AND parent=?2
+             AND role='teammate' AND status IN ('starting','idle','working')
+             ORDER BY id LIMIT ?3",
+        )
+        .map_err(error)?;
+    let rows: Vec<(i64, bool)> = statement
+        .query_map(params![project.as_str(), lead, MEMBERS_MAX as i64], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .map_err(error)?
+        .collect::<Result<_, _>>()
+        .map_err(error)?;
+    Ok(rows)
 }
 
 /// Lists a lead's running teammate rows with their pane ids, so the terminal host learns

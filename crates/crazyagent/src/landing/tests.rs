@@ -1428,6 +1428,50 @@ fn an_embedded_repository_left_in_the_worktree_is_refused_when_the_turn_is_commi
     );
 }
 
+/// OP-9b: a linked lead's native teammates work in linked worktrees of the owner
+/// repository inside the lead's worktree, each in `.worktrees/<name>`. The lead's turn
+/// commits its own edits and leaves that folder out, so no teammate worktree is taken in
+/// as an embedded repository and the lead's turn is still kept.
+#[test]
+fn a_linked_lead_s_turn_leaves_its_teammates_worktrees_out() {
+    let case = Case::new();
+    case.start();
+    let teammate = case
+        .workspace
+        .worktree
+        .join(crate::agent_git::TEAMMATES_FOLDER)
+        .join("greet");
+    case.owner(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "agent-1--greet",
+        teammate.to_str().unwrap(),
+        "HEAD",
+    ]);
+    write(&teammate.join("greet.txt"), "hello\n");
+    case.edit("README", "one\ntwo\nthree\nfour\n");
+
+    let turn = TurnEnd {
+        outcome: TurnOutcome::Succeeded,
+        turn: "turn-1".into(),
+        prompt_line: "Add the fourth line".into(),
+    };
+    let recorded = record_turn_end(&case.db, &case.workspace, &turn);
+    let Ok(Some(id)) = recorded else {
+        panic!("the lead's turn is kept with its teammate's worktree inside: {recorded:?}");
+    };
+    let head = case.view(&id).head;
+    assert_eq!(
+        case.owner(&["show", "--name-only", "--format=", &head])
+            .trim(),
+        "README",
+        "only the lead's own edit is in its change set"
+    );
+    assert!(teammate.join("greet.txt").is_file());
+}
+
 #[test]
 fn an_accept_stopped_at_any_step_is_finished_or_undone_when_the_engine_starts() {
     for step in [
