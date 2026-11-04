@@ -88,10 +88,15 @@ export async function startTui({ argv, env, evidence, project = "", cols = COLS,
   const go = async (place) => {
     assert(PLACES.includes(place), `go takes one of ${PLACES.join(", ")}, got ${place}`);
     assert(project.length > 0, "go needs the project name the TUI lists");
-    await key("Ctrl-K");
-    await waitFor("Go to");
-    await type(`${project} / Conversation`);
+    await waitFor(project);
+    await type("/");
+    await waitFor("Clear filter");
+    await type(project);
     await key("Enter");
+    await until((text) => !/Clear filter/.test(text), waitMs, `${project} filter never applied`);
+    await key("Enter");
+    await until(crumb("Overview"), waitMs, `${project} never opened from Home`);
+    await key("]");
     await until((text) => crumb("Conversation")(text) || crumb("Master")(text), waitMs, `${project} / Conversation never opened`);
     if (place === "project-team") {
       if (crumb("Master")(pane())) {
@@ -123,9 +128,12 @@ export async function startTui({ argv, env, evidence, project = "", cols = COLS,
     /** Waits until the pane's text passes a test. Inputs: the test, the time limit in ms and
      * the failure label. Output: the text; throws with the last pane, masked. */
     until,
-    /** Opens a place in the project: project-master is the live master terminal (Go to
-     * Conversation, then /master) and project-team the Team screen. Input: the place.
-     * Output: the pane text once the header shows the place; throws with the last pane. */
+    /** Opens a place in the project. It finds the project from Home by filtering the list to
+     * its name (so no letter of the name can trigger a Home shortcut such as n for New
+     * project), opens it to Overview, then steps right to the Conversation tab. project-master
+     * then runs /master for the live master terminal; project-team opens the Team screen.
+     * Input: the place. Output: the pane text once the header shows the place; throws with
+     * the last pane. */
     go,
     /** Saves the pane, masked, as tui4/<name>.txt in the run folder. Input: the file stem.
      * Output: { path relative to the run folder, the masked text }. */
