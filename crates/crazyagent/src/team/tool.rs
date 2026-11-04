@@ -72,6 +72,7 @@ pub const CALLS_PENDING_MAX: usize = 16;
 pub const REPLY_TEXT_MAX: usize = 32 * 1024;
 const CALL_BYTES_MAX: u64 = 16 * 1024;
 const REPLY_BYTES_MAX: u64 = 2 * REPLY_TEXT_MAX as u64 + 64;
+#[cfg(unix)]
 const MAILBOX_SCAN_MAX: usize = 256;
 const AGENT_NAME_BYTES_MAX: usize = 64;
 const CALL_SUFFIX: &str = ".call";

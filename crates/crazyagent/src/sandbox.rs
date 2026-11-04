@@ -89,6 +89,7 @@ const SOCKET_GRANTS_MAX: usize = 4;
 const FIXED_WRITES: &str = "file-write-unlink file-write-create file-write-mode file-write-acl";
 /// The folders of a Claude Code config home whose scripts Claude Code 2.1.309 runs ahead of
 /// every Bash command: its shell snapshot and the session hook scripts (TPH-2).
+#[cfg(unix)]
 const CLAUDE_BASH_PRELUDES: [&str; 2] = ["shell-snapshots", "session-env"];
 /// The folders of a Claude Code config home that its agent team shares, the members'
 /// mailboxes and task lists. Claude Code 2.1.309 keeps them under each member's config home,
@@ -1148,6 +1149,7 @@ impl ProjectSandbox {
     /// there (rv-secreview RH2R2-1). Inputs: the three sockets, the canonical tmux program
     /// and the teammates' home beside the lead's, its team folders already made. Output: the
     /// lead's and the teammates' sandboxes, `Invalid`, or `Unavailable` off macOS.
+    #[cfg(unix)]
     pub fn native_team(
         self,
         own: &Path,

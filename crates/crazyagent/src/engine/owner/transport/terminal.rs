@@ -228,19 +228,26 @@ impl Engine {
     /// Gives the terminal host on the tmux program found now. The host is kept while that
     /// program stays the one found and opened anew when it changes, such as when setup
     /// installs its own copy over an unsupported one or an upgrade removes the old one.
+    /// Windows has no tmux: its ConPTY host is opened on first use and kept.
     /// Takes the engine root. Returns the host, or `terminal_unavailable`.
     pub(crate) fn terminal(&self, root: &Path) -> Result<Arc<dyn Host>, EngineError> {
         let mut slot = self
             .terminal
             .lock()
             .map_err(|_| failure("terminal_unavailable"))?;
+        #[cfg(unix)]
         let found = crate::terminal::tmux::installed(root);
+        #[cfg(not(unix))]
+        let found = None;
         if let Some((program, host)) = slot.as_ref()
             && *program == found
         {
             return Ok(host.clone());
         }
+        #[cfg(unix)]
         let host = crate::terminal::tmux_host(root, found.clone());
+        #[cfg(not(unix))]
+        let (_, host) = crate::terminal::platform(root);
         *slot = Some((found, host.clone()));
         Ok(host)
     }

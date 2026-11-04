@@ -228,6 +228,7 @@ pub(crate) fn update(
     _repo: &Path,
     _state: &Path,
     _name: &str,
+    _hidden: &[std::path::PathBuf],
     _limit: Duration,
     _stop: &dyn Fn() -> bool,
 ) -> Result<GraphEnding, RunError> {

@@ -1209,7 +1209,9 @@ impl ResearchRunner {
 /// as, `prompt` goes to it on stdin, `wall_time` bounds it.
 pub(crate) struct ReadOnlyRun<'a> {
     pub name: &'a str,
+    #[cfg(unix)]
     pub agent: &'a str,
+    #[cfg(unix)]
     pub project: Option<&'a ProjectId>,
     #[cfg(unix)]
     pub folder: &'a Path,
@@ -4026,8 +4028,6 @@ mod windows_tests {
         };
         let run = ReadOnlyRun {
             name: "onboard-m-windows",
-            agent: "onboarding",
-            project: None,
             account: &account,
             wall_time: Duration::from_secs(5),
         };

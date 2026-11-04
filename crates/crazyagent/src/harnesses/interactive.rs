@@ -1,8 +1,10 @@
+#[cfg(unix)]
+use super::launch::CLAUDE_NATIVE_TEAM_TOOLS;
 use super::launch::{
-    AccountBinding, CLAUDE_DENY_FLAG, CLAUDE_MCP_CONNECT_LIMIT, CLAUDE_NATIVE_TEAM_TOOLS,
-    CLAUDE_NO_MCP, CODEX_NO_USER_INPUT, LOCAL_PLACEHOLDER_KEY, LaunchError, LaunchRequest,
-    SANDBOX_EXEC, Secret, TOOLS_OFF_PATH, TOOLS_ON_PATH, claude_bare, claude_denied,
-    codex_configuration, failure, harness_id, key_file_text, validate,
+    AccountBinding, CLAUDE_DENY_FLAG, CLAUDE_MCP_CONNECT_LIMIT, CLAUDE_NO_MCP, CODEX_NO_USER_INPUT,
+    LOCAL_PLACEHOLDER_KEY, LaunchError, LaunchRequest, SANDBOX_EXEC, Secret, TOOLS_OFF_PATH,
+    TOOLS_ON_PATH, claude_bare, claude_denied, codex_configuration, failure, harness_id,
+    key_file_text, validate,
 };
 use crate::launch_context::{Installed, NativeTeam};
 use crate::sandbox::toolchains::{self, ToolHomes};
@@ -63,13 +65,16 @@ const CLAUDE_AGENT_TEAMS: (&str, &str) = ("CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS"
 /// a lead without them cannot share its team's tasks (OP-3).
 const CLAUDE_TODO_TOOLS: (&str, &str) = ("CLAUDE_CODE_ENABLE_TODO_TOOLS", "1");
 const CLAUDE_TEAMMATE_COMMAND: &str = "CLAUDE_CODE_TEAMMATE_COMMAND";
+#[cfg(unix)]
 const CLAUDE_INSTRUCTIONS_FLAG: &str = "--append-system-prompt-file";
 const CLAUDE_BARE: &str = "--bare";
+#[cfg(unix)]
 const TEAMMATE_SCRIPT_BYTES_MAX: usize = 64 * 1024;
 /// The variables of a native lead's command that name a place in its home, which its
 /// teammates get at the same place in their own home (TPH-2 C).
 /// `CLAUDE_SECURESTORAGE_CONFIG_DIR` stays the lead's, where the engine keeps the
 /// account's sign-in copy that teammates read.
+#[cfg(unix)]
 const TEAMMATE_HOME_VARIABLES: [&str; 4] = [
     "CLAUDE_CONFIG_DIR",
     "CLAUDE_CODE_TMPDIR",
