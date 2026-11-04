@@ -161,9 +161,10 @@ const WRITE_TIME: Duration = Duration::from_secs(10);
 /// the extension gave up on never holds one of the `CONNECTIONS_MAX` connections into its
 /// next poll, and the extension reads the refusal instead of closing first.
 const READ_TIME: Duration = Duration::from_secs(28);
-/// How long a diff comment, an owner edit, a message to an agent or a memory or extension
-/// decision may take before the IDE is told its outcome is unknown: past the handshake
-/// deadline, so a slow write reports what it did, and before the extension stops waiting.
+/// How long a diff comment, an owner edit, a message to an agent, a memory or extension
+/// decision, an extension request or the show-all switch may take before the IDE is told
+/// its outcome is unknown: past the handshake deadline, so a slow write reports what it
+/// did, and before the extension stops waiting.
 const IDE_WRITE_TIME: Duration = Duration::from_secs(28);
 const PATH_BYTES_MAX: usize = 4096;
 const TEXT_BYTES_MAX: usize = 16384;
@@ -843,10 +844,23 @@ fn register_extension(extensions: &Path, folder: &Path) -> Result<(), EngineErro
 /// its `outcome_unknown` code.
 /// Inputs: the stream, handshake packet, owner runtime and deadline.
 pub(crate) async fn serve(
+    stream: UnixStream,
+    packet: [u8; 37],
+    runtime: OwnerRuntimeHandle,
+    deadline: Instant,
+) {
+    serve_within(stream, packet, runtime, deadline, IDE_WRITE_TIME).await;
+}
+
+/// [`serve`] with the time a write other than Accept, Discard, Restore and a git command
+/// may take before its outcome is unknown, which [`serve`] sets to `IDE_WRITE_TIME`.
+/// Inputs: the stream, handshake packet, owner runtime, deadline and that time.
+async fn serve_within(
     mut stream: UnixStream,
     packet: [u8; 37],
     runtime: OwnerRuntimeHandle,
     deadline: Instant,
+    write_time: Duration,
 ) {
     let opened = tokio::time::timeout_at(deadline, open(&mut stream, &packet, &runtime)).await;
     let (reply, wrote) = match opened {
@@ -878,7 +892,7 @@ pub(crate) async fn serve(
         }
         Ok(Ok((project, call))) => {
             let unknown = outcome_unknown(&call);
-            let bound = bound(&call, deadline);
+            let bound = bound(&call, deadline, write_time);
             let answered = tokio::time::timeout_at(bound, answer(&runtime, &project, call)).await;
             let reply = match (answered, unknown) {
                 (Ok(Ok(reply)), _) => reply,
@@ -905,8 +919,8 @@ pub(crate) async fn serve(
 /// The code a write answers when its bound passes before it reports: it may already have
 /// taken effect, so the owner checks before trying again rather than reading a plain
 /// timeout. Accept, Discard and Restore keep the Changes code; a diff comment, an owner
-/// edit, a message to an agent, a memory or extension decision and a git command each have
-/// their own.
+/// edit, a message to an agent, a memory or extension decision, an extension request, the
+/// show-all switch and a git command each have their own.
 /// Input: the call. Output: the code, or None for a call that writes nothing.
 fn outcome_unknown(call: &IdeCall) -> Option<&'static str> {
     Some(match call {
@@ -918,6 +932,8 @@ fn outcome_unknown(call: &IdeCall) -> Option<&'static str> {
         IdeCall::AgentMessage { .. } => "ide_agent_message_outcome_unknown",
         IdeCall::MemoryDecide { .. } => "ide_memory_decide_outcome_unknown",
         IdeCall::ExtensionDecide { .. } => "ide_extension_decide_outcome_unknown",
+        IdeCall::ExtensionRequest { .. } => "ide_extension_request_outcome_unknown",
+        IdeCall::ShowAllAgents { .. } => "ide_show_all_agents_outcome_unknown",
         IdeCall::Git { .. } => "ide_git_outcome_unknown",
         _ => return None,
     })
@@ -925,12 +941,12 @@ fn outcome_unknown(call: &IdeCall) -> Option<&'static str> {
 
 /// When one IDE call must be answered by. Accept, Discard and Restore run under the
 /// desktop's Changes bound, so a slow commit still lands and reports what it did; the
-/// other writes run under IDE_WRITE_TIME for the same reason; the four Changes reads run
+/// other writes run under the write time for the same reason; the four Changes reads run
 /// under READ_TIME, since the extension polls them again; a git command runs under
 /// `GIT_TIME` and `GIT_ANSWER_MARGIN`; every other call keeps the
-/// handshake deadline. Inputs: the call and the handshake deadline. Output: the instant,
-/// never before the deadline.
-fn bound(call: &IdeCall, deadline: Instant) -> Instant {
+/// handshake deadline. Inputs: the call, the handshake deadline and the write time.
+/// Output: the instant, never before the deadline.
+fn bound(call: &IdeCall, deadline: Instant, write_time: Duration) -> Instant {
     let time = match call {
         IdeCall::Accept { .. } | IdeCall::Discard { .. } | IdeCall::Restore { .. } => {
             CHANGES_TIMEOUT
@@ -939,7 +955,9 @@ fn bound(call: &IdeCall, deadline: Instant) -> Instant {
         | IdeCall::OwnerEdit { .. }
         | IdeCall::AgentMessage { .. }
         | IdeCall::MemoryDecide { .. }
-        | IdeCall::ExtensionDecide { .. } => IDE_WRITE_TIME,
+        | IdeCall::ExtensionDecide { .. }
+        | IdeCall::ExtensionRequest { .. }
+        | IdeCall::ShowAllAgents { .. } => write_time,
         IdeCall::ChangeSets {}
         | IdeCall::ChangeDiff { .. }
         | IdeCall::BaseBlob { .. }

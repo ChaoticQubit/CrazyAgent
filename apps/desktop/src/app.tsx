@@ -4,7 +4,7 @@ import { engineVersions, plainError, unconfirmedLine, PROFILE_UNCONFIRMED_LINE, 
 import { ideFocus, type IdeFocus } from "./engine-client";
 import { loadTeamEvents, teamAttention } from "./api-projects";
 import { loadQuestionCounts, pendingByProject, unseenQuestionAlerts, withPendingQuestions } from "./api-questions";
-import { useQuestionNotifications } from "./notify";
+import { questionWatch } from "./notify";
 import { displayText } from "./screens/conversation";
 import { Home } from "./screens/dashboard";
 import { Welcome } from "./screens/first-run";
@@ -205,8 +205,9 @@ export const ALERT_READ_MS = 10_000;
  * 10 s it reads them, shows a new notification as a toast, with Open to the Questions inbox
  * for an urgent question or an agent waiting in its terminal, keeps the app icon badge at the
  * unseen notifications plus the pending questions, and asks for attention when a notification
- * is new; a Normal question only counts toward the badge. Inputs: whether the engine runs and
- * the toast action. Output: what each project's sidebar flag counts. */
+ * is new; a Normal question only counts toward the badge. The same counts read drives the
+ * question notification watch, so the counts are read once per look. Inputs: whether the
+ * engine runs and the toast action. Output: what each project's sidebar flag counts. */
 function useTeamAlerts(running: boolean, showToast: (message: string, open?: Route) => void): Map<string, number> {
   const [counts, setCounts] = useState<Map<string, number>>(() => new Map());
   const toast = useRef(showToast);
@@ -217,9 +218,10 @@ function useTeamAlerts(running: boolean, showToast: (message: string, open?: Rou
     let last: number | null = null;
     let shown = 0;
     let timer = 0;
+    const watch = questionWatch((line) => toast.current(line));
     const read = async () => {
       const [result, questions] = await Promise.all([loadTeamEvents(), loadQuestionCounts()]);
-      if (!live || result.kind === "not_ready") return;
+      if (!live) return;
       const pending = questions.kind === "ok" ? pendingByProject(questions.value) : new Map<string, number>();
       if (result.kind === "ok") {
         const next = freshAlerts(last, result.value);
@@ -231,12 +233,14 @@ function useTeamAlerts(running: boolean, showToast: (message: string, open?: Rou
         if (next.fresh.length > 0 || total !== shown) void teamAttention(total, next.fresh.length > 0);
         shown = total;
       }
-      if (live) timer = window.setTimeout(read, ALERT_READ_MS);
+      if (questions.kind === "ok") await watch.look(questions.value);
+      if (live && (result.kind !== "not_ready" || questions.kind !== "not_ready")) timer = window.setTimeout(read, ALERT_READ_MS);
     };
     void read();
     return () => {
       live = false;
       window.clearTimeout(timer);
+      watch.stop();
     };
   }, [running]);
   return counts;
@@ -282,6 +286,5 @@ export function App() {
   useUpdateWatch(session.showToast);
   const alerts = useTeamAlerts(session.engine === "running", session.showToast);
   useIdeFocus(session.engine === "running");
-  useQuestionNotifications(session.engine === "running", session.showToast);
   return <AppView session={session} route={route} alerts={alerts} />;
 }

@@ -896,6 +896,7 @@ impl Authority {
     }
 }
 
+#[derive(Clone)]
 pub struct OwnerRuntimeHandle {
     engine: Arc<Engine>,
     authority: Arc<Authority>,

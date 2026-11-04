@@ -127,23 +127,6 @@ pub(crate) fn config_text(
     text_at(&record.repository, &record.head, path)
 }
 
-/// Refuses while a change set's agent worktree holds anything but the head the set
-/// recorded, as Update does, so an IDE Accept never follows a diff the agent is still
-/// changing. Inputs: the store, the project and the change set. Output: Ok when the agent
-/// holds exactly that head, `changes_agent_busy` while it works on, or `changes_not_found`.
-pub(crate) fn agent_idle(
-    db: &Connection,
-    project: &ProjectId,
-    id: &ChangeSetId,
-) -> Result<(), EngineError> {
-    let record = of_project(db, project, id)?;
-    let agent = super::flow::agent(db, &record)?;
-    if agent.head()? != record.head || !super::flow::holds_only(&agent.repo, &record.head)? {
-        return Err(failure("changes_agent_busy"));
-    }
-    Ok(())
-}
-
 /// The file a change set changes at a path as text. Inputs: the change set and the path.
 /// Output: the file, or `changes_not_found`.
 fn text_file(record: &Record, path: &str) -> Result<ChangedFile, EngineError> {

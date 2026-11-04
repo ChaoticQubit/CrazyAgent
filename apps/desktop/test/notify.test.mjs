@@ -81,8 +81,20 @@ test("the window names only the project and the question; the app writes the not
   assert.match(source, /const notifying = shouldNotify\(inBackground\(\), await system\);/);
   assert.match(source, /failureLine\(await notifyQuestion\(question\.project_id, question\.id\)\)/);
   assert.match(source, /navigate\(\{ name: "project", id: result\.value, tab: "questions" \}\)/);
-  const app = readFileSync(new URL("../src/app.tsx", import.meta.url), "utf8");
-  assert.equal(app.match(/useQuestionNotifications\(session\.engine === "running", session\.showToast\);/g)?.length, 1);
   const settings = readFileSync(new URL("../src/screens/settings/team-alerts.tsx", import.meta.url), "utf8");
   assert.match(settings, /systemNotificationsLine\(/);
+});
+
+test("one question-counts read every 10 s feeds the sidebar flags, the badge and the notification watch", () => {
+  const source = readFileSync(new URL("../src/notify.ts", import.meta.url), "utf8");
+  const app = readFileSync(new URL("../src/app.tsx", import.meta.url), "utf8");
+  const reads = (text) => text.match(/loadQuestionCounts\(\)/g)?.length ?? 0;
+  assert.equal(reads(source) + reads(app), 1, "the counts are read once per look, not once per watcher");
+  assert.match(app, /Promise\.all\(\[loadTeamEvents\(\), loadQuestionCounts\(\)\]\)/);
+  assert.equal(app.match(/questionWatch\(\(line\) => toast\.current\(line\)\)/g)?.length, 1, "one watch, made by the alerts read");
+  assert.match(app, /if \(questions\.kind === "ok"\) await watch\.look\(questions\.value\);/);
+  assert.match(app, /watch\.stop\(\);/);
+  assert.match(app, /if \(live && \(result\.kind !== "not_ready" \|\| questions\.kind !== "not_ready"\)\) timer = window\.setTimeout\(read, ALERT_READ_MS\);/, "a build without team events still watches questions");
+  assert.doesNotMatch(source, /setTimeout|setInterval|QUESTION_READ_MS/, "the watch has no timer of its own");
+  assert.doesNotMatch(app, /useQuestionNotifications/);
 });
