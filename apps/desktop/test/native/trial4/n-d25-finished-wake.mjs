@@ -14,8 +14,7 @@ async function leftAlone(kit) {
   let found = null;
   const moves = [];
   await kit.waitFor(async () => {
-    const away = await backTo(kit, "agents");
-    if (away !== null) moves.push(away);
+    await backToAgents(kit, moves);
     const { nodes } = await kit.graph();
     const { rows } = await finishedList();
     const ended = nodes.filter((node) => (node.kind === "sub" || node.kind === "teammate") && node.agent != null && (node.status === "stopped" || node.status === "failed"));
@@ -29,35 +28,48 @@ async function leftAlone(kit) {
   return found;
 }
 
+/** Takes the window back to the Agents tab when it shows another page and notes that page,
+ * as each Finished fold-out read does first. Inputs: the kit and the pages noted so far.
+ * Output: none; a page the window was taken back from is added to the pages. */
+async function backToAgents(kit, moves) {
+  const away = await backTo(kit, "agents");
+  if (away !== null) moves.push(away);
+}
+
 /** Names the pages the window was taken back to Agents from, for a check's detail. Input: the
  * hashes. Output: the clause, empty when the window never left. */
 function awayNote(moves) {
   return moves.length === 0 ? "" : `; the window left Agents ${moves.length} times (${[...new Set(moves)].join(", ")}) and was taken back`;
 }
 
-/** Hides finished agents and checks the agent left the graph for the Finished fold-out.
- * Inputs: the kit and the agent. Output: the fold-out's toggle text. */
-async function hidden(kit, { label, agent }) {
+/** Hides finished agents and checks the agent left the graph for the Finished fold-out,
+ * noting each page the window was taken back from. Inputs: the kit and the agent, whose
+ * moves gain those pages. Output: the fold-out's toggle text. */
+async function hidden(kit, { label, agent, moves }) {
   await kit.choose("agents", "Finished agents", "Hide");
   let toggle = "";
   await kit.until(async () => {
-    await backTo(kit, "agents");
+    await backToAgents(kit, moves);
     const { nodes } = await kit.graph();
     const cards = await readCards();
     const list = await finishedList();
     toggle = list.label;
     const count = FINISHED_COUNT.exec(toggle);
     return !nodes.some((node) => node.agent === agent) && !cardOf(cards, { label }) && Boolean(count) && Number(count[1]) >= 1 && Boolean(finishedRow(list.rows, label));
-  }, UI_MS, `under Hide, ${label} did not leave the graph for the Finished list`);
+  }, UI_MS, `under Hide, ${label} did not leave the graph for the Finished list`).catch((error) => {
+    throw new Error(`${error.message}${awayNote(moves)}`);
+  });
   return toggle;
 }
 
 /** Wakes the agent from the Finished fold-out and waits until the same agent row runs again,
- * with no second agent under its name. Inputs: the kit and the agent. Output: its status. */
-async function woken(kit, { label, agent }) {
-  await backTo(kit, "agents");
+ * with no second agent under its name, noting the page the window was taken back from.
+ * Inputs: the kit and the agent, whose moves gain that page. Output: its status. */
+async function woken(kit, { label, agent, moves }) {
+  await backToAgents(kit, moves);
   const row = finishedRow((await finishedList()).rows, label);
-  if (!row.wakeable) throw new Error(`${label}'s Wake is disabled${row.note ? `: ${row.note}` : ""}`);
+  if (!row) throw new Error(`${label} is not in the Finished list to wake${awayNote(moves)}`);
+  if (!row.wakeable) throw new Error(`${label}'s Wake is disabled${row.note ? `: ${row.note}` : ""}${awayNote(moves)}`);
   await openFinished(kit);
   await click(`//details[@aria-label="Finished agents"]//ul[@aria-label="Finished agents"]/li[.//span[contains(concat(" ", normalize-space(@class), " "), " pj-kind ")][normalize-space(text())="${label}"]]//button[normalize-space(.)="Wake"]`);
   let status = "";
@@ -66,7 +78,7 @@ async function woken(kit, { label, agent }) {
     const same = nodes.filter((node) => node.label === label);
     status = same.find((node) => node.agent === agent)?.status ?? "";
     const others = same.filter((node) => node.agent !== agent);
-    return { done: RUNNING.includes(status) && others.length === 0, seen: `agent ${agent} ${status || "not in the graph"}; other agents named ${label}: ${others.length}` };
+    return { done: RUNNING.includes(status) && others.length === 0, seen: `agent ${agent} ${status || "not in the graph"}; other agents named ${label}: ${others.length}${awayNote(moves)}` };
   }, Math.min(kit.team(), WAKE_MS), `${label} did not run again as the same agent after Wake`);
   return status;
 }
