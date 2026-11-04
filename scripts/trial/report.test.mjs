@@ -346,6 +346,103 @@ test("a live pass folder becomes one row per listed test with its group, what it
   }
 });
 
+function liveScript(rows) {
+  return ["#!/bin/bash", "TESTS=$(", "  cat <<'EOF'", ...rows, "EOF", ")", ""].join("\n");
+}
+
+function liveRows(html) {
+  return [...html.matchAll(/<tr class="test"><td>\d+<\/td><td>(\w+)<\/td><td><code>([^<]+)<\/code><\/td><td>.*?<\/td><td><span class="result [\w-]+">([A-Z ]+)<\/span>(.*?)<\/td><td>([^<]*)<\/td><\/tr>/g)]
+    .map(([, group, name, result, run, seconds]) => [group, name.split("::").pop(), result, run.replace(/<[^>]+>/g, "").trim(), seconds]);
+}
+
+test("LP14-1: a test that reports BLOCKED after it ran keeps its reason and its duration", async () => {
+  const logs = await folder("live-blocked-");
+  const repo = await folder("live-blocked-repo-");
+  try {
+    const script = join(repo, "live-pass.sh");
+    await put(repo, "live-pass.sh", liveScript([
+      "local|codex_bridge_live|a_real_codex_app_takes_coord_messages|120|codex-app",
+      "profile|lib|team::runtime::live_failover_tests::a_rate_limited_master_fails_over|60|profile",
+      "profile|lib|team::runtime::live_network_none_tests::an_api_key_turn_stays_offline|60|codex-key",
+    ]));
+    await put(logs, "summary.txt", [
+      "== local: no account, no tokens",
+      "BLOCKED a_real_codex_app_takes_coord_messages 60s: prerequisite: /Applications/Codex.app is not installed",
+      "== profile: holds a shared lock on the owner's profile",
+      "BLOCKED team::runtime::live_failover_tests::a_rate_limited_master_fails_over 2s: BLOCKED: no account at its limit",
+      "BLOCKED team::runtime::live_network_none_tests::an_api_key_turn_stays_offline: BLOCKED: no Codex key profile",
+      "passed 0, failed or blocked 3",
+      "",
+    ].join("\n"));
+    const html = renderReport(await readLivePass(logs, { script, repo }));
+    assert.deepEqual(liveRows(html), [
+      ["local", "a_real_codex_app_takes_coord_messages", "BLOCKED", "", "60 s"],
+      ["profile", "a_rate_limited_master_fails_over", "BLOCKED", "", "2 s"],
+      ["profile", "an_api_key_turn_stays_offline", "BLOCKED", "", ""],
+    ]);
+    assert.ok(html.includes("prerequisite: /Applications/Codex.app is not installed"), "a blocked test after its run shows why");
+    assert.ok(html.includes("no account at its limit") && !html.includes("BLOCKED: no account"), "the test's own BLOCKED mark is not repeated");
+    assert.ok(html.includes("0 passed, 0 failed, 3 blocked, 0 not run"));
+  } finally {
+    await rm(logs, { recursive: true });
+    await rm(repo, { recursive: true });
+  }
+});
+
+test("LP14-2: runs.json merges the listed summaries in order, names the commit of each row's run and lists the runs on the cover", async () => {
+  const logs = await folder("live-runs-");
+  const repo = await folder("live-runs-repo-");
+  try {
+    const script = join(repo, "live-pass.sh");
+    await put(repo, "live-pass.sh", liveScript([
+      "local|lib|launch_context::tests::a_local_turn_answers|30|none",
+      "profile|lib|team::runtime::live_claude_tests::under_stop_ends_its_command|60|profile",
+      "profile|lib|team::runtime::live_native_lead_tests::a_teammate_cannot_plant|60|profile",
+    ]));
+    await put(logs, "summary-local.txt", "== local: no account, no tokens\nPASS launch_context::tests::a_local_turn_answers 3s\npassed 1, failed or blocked 0\n");
+    await put(logs, "summary-profile.txt", [
+      "== profile: holds a shared lock on the owner's profile",
+      `FAIL team::runtime::live_claude_tests::under_stop_ends_its_command 8s exit 101: ${logs}/team.runtime.live_claude_tests.under_stop_ends_its_command.log`,
+      "BLOCKED team::runtime::live_native_lead_tests::a_teammate_cannot_plant: BLOCKED: not on this checkout",
+      "passed 0, failed or blocked 2",
+      "",
+    ].join("\n"));
+    await put(logs, "summary-rerun.txt", "== profile: holds a shared lock on the owner's profile\nPASS team::runtime::live_claude_tests::under_stop_ends_its_command 6s\npassed 1, failed or blocked 0\n");
+    await put(logs, "summary.txt", "== profile: a later run of another kind\nPASS team::runtime::live_native_lead_tests::a_teammate_cannot_plant 1s\n");
+    await put(logs, "team.runtime.live_claude_tests.under_stop_ends_its_command.log", "thread 'x' panicked at src/x.rs:1:1:\nRED-RUN-PROCESS-LIST\n");
+    const runs = [
+      { file: "summary-local.txt", commit: "afd69922", source: "local group on the stage" },
+      { file: "summary-profile.txt", mtime: "20261104-155848", commit: "afd69922", source: "profile group on the stage" },
+      { file: "summary-rerun.txt", commit: "b2d2b49e", source: "under_stop rerun on test/live-ps-piped" },
+    ];
+    await put(logs, "runs.json", JSON.stringify(runs));
+    const html = renderReport(await readLivePass(logs, { script, repo }));
+    assert.deepEqual(liveRows(html), [
+      ["local", "a_local_turn_answers", "PASS", "afd69922", "3 s"],
+      ["profile", "under_stop_ends_its_command", "PASS", "b2d2b49e", "6 s"],
+      ["profile", "a_teammate_cannot_plant", "BLOCKED", "afd69922", ""],
+    ]);
+    assert.ok(!html.includes("RED-RUN-PROCESS-LIST"), "a result a later run replaced shows no log");
+    assert.ok(html.includes("2 passed, 0 failed, 1 blocked, 0 not run"), "summary.txt is not read when runs.json lists the runs");
+    const cover = html.slice(0, html.indexOf('<section class="live">'));
+    for (const run of runs) assert.ok(cover.includes(run.file) && cover.includes(run.commit) && cover.includes(run.source), run.file);
+    for (const [bad, why] of [
+      [[{ ...runs[0], file: "../summary-local.txt" }], "a file outside the folder"],
+      [[{ ...runs[0], file: "notes.txt" }], "a file that is not a summary"],
+      [[{ ...runs[0], commit: "afd6992g" }], "a commit that is not a hash"],
+      [[{ ...runs[0], file: "summary-missing.txt" }], "a missing summary"],
+      [[], "no runs"],
+      [{ file: "summary-local.txt" }, "not a list"],
+    ]) {
+      await put(logs, "runs.json", JSON.stringify(bad));
+      await assert.rejects(readLivePass(logs, { script, repo }), /report_live_runs_invalid/, why);
+    }
+  } finally {
+    await rm(logs, { recursive: true });
+    await rm(repo, { recursive: true });
+  }
+});
+
 test("the retro mode reads trials 1 and 2 from the saved audit, plan, timeline, tokens and frames into one report", async () => {
   const root = await folder("retro-report-");
   try {
