@@ -2576,7 +2576,8 @@ fn a_linked_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_worktree()
 
 /// Tries from a native lead's teammates' profile to rename, move out or remove a teammate's
 /// worktree folder and to leave a stray entry beside them in the teammates' folder
-/// (OP9B-C1), which one profile shared by all teammates would let one do to another. Takes
+/// (OP9B-C1), also spelled in another letter case and as a hard link (OP9B-R3-L1), which
+/// one profile shared by all teammates would let one do to another. Takes
 /// the teammates' sandbox and profile, the teammates' folder and a temp folder outside it.
 /// Returns what got through, each named.
 fn sibling_folder_escapes(
@@ -2589,8 +2590,33 @@ fn sibling_folder_escapes(
     fs::create_dir(&frank).unwrap();
     fs::write(frank.join("work.txt"), "Frank's work.\n").unwrap();
     fs::create_dir(&gina).unwrap();
+    let upper = folder.with_file_name(crazyagent::agent_git::TEAMMATES_FOLDER.to_uppercase());
+    assert!(
+        upper.join("frank").is_dir(),
+        "the volume finds the teammates' folder in any letter case"
+    );
     let mut escaped: Vec<String> = Vec::new();
     for (label, script) in [
+        (
+            "sibling folder renamed in another letter case",
+            format!(
+                "mv {} {}",
+                quoted(&upper.join("frank")),
+                quoted(&upper.join("frank-case"))
+            ),
+        ),
+        (
+            "stray folder in another letter case",
+            format!("mkdir {}", quoted(&upper.join("case-stray"))),
+        ),
+        (
+            "hard link beside the teammates' worktrees",
+            format!(
+                "ln {} {}",
+                quoted(&frank.join("work.txt")),
+                quoted(&folder.join("linked.txt"))
+            ),
+        ),
         (
             "sibling folder renamed",
             format!(
@@ -2626,7 +2652,14 @@ fn sibling_folder_escapes(
     if !gina.is_dir() {
         escaped.push("empty sibling folder gone".to_owned());
     }
-    for stray in ["frank-renamed", "stray.txt", "stray"] {
+    for stray in [
+        "frank-renamed",
+        "stray.txt",
+        "stray",
+        "frank-case",
+        "case-stray",
+        "linked.txt",
+    ] {
         if fs::symlink_metadata(folder.join(stray)).is_ok() {
             escaped.push(format!("made {stray}"));
         }
