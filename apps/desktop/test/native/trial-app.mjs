@@ -5,6 +5,10 @@ import { isAbsolute, join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 
 export const RELAUNCHED = "relaunched.json";
+/** The variable naming the folder a native-webdriver build of the app takes its next folder
+ * pick from (apps/desktop/src-tauri/src/bridge/trial_pick.rs). The trial conf sets it on the
+ * runner and on the app it launches; the kit's chooseFolder writes the answers there. */
+export const PICKS_VARIABLE = "CRAZYAGENT_TRIAL_PICKS";
 export const WINDOW = { width: 1440, height: 960 };
 const TOOL_MS = 10000;
 const QUIT_MS = 15000;

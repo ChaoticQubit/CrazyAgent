@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { basename, isAbsolute, join } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 import { SECRET_SOURCES, mask } from "./trial3-mask.mjs";
 import { teamWait } from "./trial3-team.mjs";
 import { click, shot, shown } from "./settings-steps.mjs";
-import { RELAUNCHED, appBundle, attach, command, ended, listener } from "./trial-app.mjs";
+import { PICKS_VARIABLE, RELAUNCHED, appBundle, attach, command, ended, listener } from "./trial-app.mjs";
+
+export { PICKS_VARIABLE };
 
 export const MODE = process.env.TRIAL3_MODE;
 export const EVIDENCE = process.env.TRIAL_EVIDENCE;
@@ -241,45 +243,25 @@ export async function choose(where, group, option) {
   return `${group} reads ${option} after reopening the tab${was ? " (it already was)" : ""}`;
 }
 
-/** Runs in the page: makes the next desktop_pick_folder call of one purpose answer a path, as
- * the owner's pick in the native chooser would, by wrapping the page's Tauri invoke once; every
- * other call goes to the app's own invoke. Uses only its arguments, since WebDriver sends its
- * source to the page. Inputs: the path, the purpose and the page scope (window). Output:
- * whether the pick is armed. */
-export function armPick(path, purpose, scope = window) {
-  const internals = scope.__TAURI_INTERNALS__;
-  if (!internals.__trialPicks) {
-    const invoke = internals.invoke;
-    const picks = {};
-    const trialInvoke = (cmd, args, options) => {
-      if (cmd === "desktop_pick_folder" && Object.hasOwn(picks, args?.purpose)) {
-        const picked = picks[args.purpose];
-        delete picks[args.purpose];
-        return Promise.resolve(picked);
-      }
-      return invoke.call(internals, cmd, args, options);
-    };
-    try {
-      internals.invoke = trialInvoke;
-      internals.__trialPicks = picks;
-    } catch {
-      return false;
-    }
-    if (internals.invoke !== trialInvoke || internals.__trialPicks !== picks) return false;
-  }
-  internals.__trialPicks[purpose] = path;
-  return internals.__trialPicks[purpose] === path;
-}
-
 /** Makes the app's next native folder chooser for a purpose answer a path, because WebDriver
- * cannot drive the macOS chooser. The app's own code gets the path and the engine does the
- * rest; the chooser window itself is not exercised. Inputs: the absolute path and the purpose
- * (project, the default, skill, projects_home, memory or plugin). Throws when the page's
- * invoke cannot be wrapped. */
+ * cannot drive the macOS chooser and Tauri 2 locks the page's invoke against wrapping: writes
+ * the path as a private one-shot answer file named after the purpose in the folder
+ * PICKS_VARIABLE names, which only a native-webdriver build reads and removes when the page
+ * asks for that chooser. The app's own code gets the path and the engine does the rest; the
+ * chooser window itself is not exercised. Inputs: the absolute path and the purpose (project,
+ * the default, skill, projects_home, memory or plugin). Throws when no picks folder is named or
+ * an earlier answer of the purpose still waits. */
 export async function chooseFolder(path, purpose = "project") {
   assert(typeof path === "string" && isAbsolute(path), `chooseFolder takes an absolute path, got ${path}`);
+  assert(!/[\u0000-\u001f\u007f]/.test(path), "chooseFolder takes a path without control characters");
   assert(PURPOSES.includes(purpose), `the purpose is one of ${PURPOSES.join(", ")}, got ${purpose}`);
-  assert(await browser.execute(armPick, path, purpose), "the page's Tauri invoke could not be wrapped, so the folder pick is not armed");
+  const picks = process.env[PICKS_VARIABLE];
+  assert(picks && isAbsolute(picks), `chooseFolder needs ${PICKS_VARIABLE}, the absolute folder the native-webdriver app takes its next pick from`);
+  mkdirSync(picks, { recursive: true, mode: 0o700 });
+  chmodSync(picks, 0o700);
+  const answer = join(picks, purpose);
+  assert(!existsSync(answer), `an earlier ${purpose} pick still waits in ${picks}: the app never asked for that chooser`);
+  writeFileSync(answer, `${path}\n`, { mode: 0o600, flag: "wx" });
 }
 
 /** Reads the project's team graph from the engine through the app's own command and the
@@ -296,7 +278,8 @@ export async function graph() {
 }
 
 /** Quits the app and opens it again as the Dock does: open -a on its bundle, so it starts with
- * no CRAZYAGENT_DESKTOP_SOCKET and only the two variables its WebDriver server needs, then
+ * no CRAZYAGENT_DESKTOP_SOCKET and only the variables its WebDriver server and its trial folder
+ * pick (PICKS_VARIABLE, when set) need, then
  * attaches a new WebDriver session. Live runs only: an app opened that way looks for this
  * machine's default engine and may install its login service. The relaunched app is recorded
  * in relaunched.json; the conf and the runner quit it. Output: what it did. */
@@ -311,7 +294,8 @@ export async function relaunch() {
   assert(await ended(old, binary, UI_MS), `the app (pid ${old}) did not quit within ${UI_MS / 1000} s`);
   const others = spawnSync("/usr/bin/pgrep", ["-f", binary], { encoding: "utf8", timeout: 10000 }).stdout.trim();
   assert.equal(others, "", `another ${binary} runs (pid ${others}), so open -a would bring it forward instead of opening the app`);
-  const opened = spawnSync("/usr/bin/open", ["-a", bundle, "--env", `TAURI_WEBDRIVER_PORT=${port}`, "--env", "WDIO_EMBEDDED_SERVER=true"], { encoding: "utf8", timeout: 30000 });
+  const picks = process.env[PICKS_VARIABLE] ? ["--env", `${PICKS_VARIABLE}=${process.env[PICKS_VARIABLE]}`] : [];
+  const opened = spawnSync("/usr/bin/open", ["-a", bundle, "--env", `TAURI_WEBDRIVER_PORT=${port}`, "--env", "WDIO_EMBEDDED_SERVER=true", ...picks], { encoding: "utf8", timeout: 30000 });
   assert.equal(opened.status, 0, `open -a ${bundle} failed: ${opened.stderr}`);
   let pid = null;
   for (const deadline = Date.now() + OPEN_MS; Date.now() < deadline; await pause(250)) {

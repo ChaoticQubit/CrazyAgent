@@ -2796,6 +2796,10 @@ async fn desktop_pick_folder(
     purpose: FolderPurpose,
 ) -> Result<Option<String>, BridgeError> {
     main_window(&window)?;
+    #[cfg(all(unix, feature = "native-webdriver"))]
+    if let Some(picked) = bridge::trial_pick::take(purpose)? {
+        return Ok(Some(picked));
+    }
     Ok(match bridge::picker::choose(purpose.script()).await? {
         Pick::Canceled => None,
         Pick::Paths(mut paths) => {
