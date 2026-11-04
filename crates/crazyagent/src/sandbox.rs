@@ -1659,8 +1659,9 @@ impl ProjectSandbox {
     /// top-level `.git` is a legitimate repository link the engine adds, and every other
     /// writable root, where no `.git` may ever appear. A `.git` anywhere below a working
     /// tree, and a `.git` at any depth (top level included) in an admin folder, object
-    /// store, home, temp or scratch root, is denied so no agent can create a repository to
-    /// rename whole into a worktree.
+    /// store, home, temp or scratch root, or a team folder a native lead shares with its
+    /// teammates, is denied so no agent can create a repository to rename whole into a
+    /// worktree (OP-9 r2).
     fn git_deny_roots(&self) -> (Vec<&Path>, Vec<&Path>) {
         let mut working: Vec<&Path> = Vec::new();
         let mut other: Vec<&Path> = Vec::new();
@@ -1679,6 +1680,7 @@ impl ProjectSandbox {
         if let Some(scratch) = &self.scratch {
             other.push(scratch.as_path());
         }
+        other.extend(self.shared.iter().map(PathBuf::as_path));
         for worktree in &self.worktrees {
             working.push(worktree.as_path());
         }
