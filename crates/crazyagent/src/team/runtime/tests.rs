@@ -10986,9 +10986,18 @@ fn a_tools_on_agent_profile_follows_the_project_network_choice() {
     assert!(https.contains("(remote ip \"*:443\")"), "{https}");
     assert!(!https.contains("(remote ip \"*:*\")"), "{https}");
     let none = profile(AgentNetwork::None);
-    assert!(none.contains("(remote ip \"*:8443\")"), "{none}");
-    assert!(!none.contains("(remote ip \"*:443\")"), "{none}");
-    assert!(!none.contains("(remote ip \"*:*\")"), "{none}");
+    assert!(!none.contains("(remote ip \"*:"), "{none}");
+    assert!(!none.contains("mDNSResponder"), "{none}");
+    let local = ProjectSandbox::new(
+        &root,
+        &home,
+        &tmp,
+        AgentNetwork::None.sandbox(Some(SandboxRemote::Loopback(11_434))),
+    )
+    .unwrap()
+    .profile();
+    assert!(local.contains("(remote ip \"localhost:11434\")"), "{local}");
+    assert!(!local.contains("(remote ip \"*:"), "{local}");
 }
 
 /// Opens a runtime for a project whose agents with tools run under the None network, with a
