@@ -327,11 +327,13 @@ export const TRIAL3_STEPS = [
       if (started) await click("button=Start all");
       const box = "textarea.tg-composer-input";
       const send = "//form[contains(@class, \"tg-composer\")]//button[normalize-space(.)=\"Send\"]";
-      await waitFor(async () => {
-        const live = await shown(box) && await $(send).isEnabled();
-        return { done: live, seen: live ? "the master terminal is live" : mask((await screen()).slice(0, 400)) };
-      }, MASTER_MS, "the master's message box never became ready to send");
+      await until(() => shown(box), UI_MS, "the master's message box was never shown");
       await paste(box, message);
+      await waitFor(async () => {
+        if ((await $(box).getValue()) !== message) await paste(box, message);
+        const live = await $(send).isEnabled();
+        return { done: live, seen: live ? "the master terminal is live" : mask((await screen()).slice(0, 400)) };
+      }, MASTER_MS, "Send never became enabled with the prompt in the box: the master terminal never went live");
       await click(send);
       await until(async () => (await $(box).getValue()) === "", UI_MS, "the message box kept the prompt: it was not sent");
       return `${started ? "Start all, then " : ""}sent ${Buffer.byteLength(message)} bytes (sha256 ${createHash("sha256").update(message).digest("hex").slice(0, 12)})`;
