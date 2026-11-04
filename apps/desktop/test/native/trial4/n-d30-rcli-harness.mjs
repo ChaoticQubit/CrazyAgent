@@ -1,3 +1,9 @@
+/** Judges where Settings, Harnesses lists RCLI. Input: the row { group, status }. Output:
+ * null when RCLI may be chosen from there, else what is wrong in the owner's words. */
+export function rcliProblem(row) {
+  return row.group === "Ready" ? null : `RCLI is listed under ${row.group} (${row.status}), not Ready`;
+}
+
 /** Reads the RCLI row of Settings, Harnesses: the group it is listed under and its status.
  * Output: { group, status } or null while the catalog has no RCLI row. */
 function rcliRow() {
@@ -35,7 +41,8 @@ export const checks = [{
       const seen = await rcliRow();
       return { done: seen !== null, seen: JSON.stringify(seen) };
     }, kit.UI_MS, "Settings, Harnesses listed no RCLI row"));
-    if (row.group !== "Ready") throw new Error(`RCLI is listed under ${row.group} (${row.status}), not Ready`);
+    const problem = rcliProblem(row);
+    if (problem) throw new Error(problem);
     await kit.screen();
     await kit.go(`#/projects/${encodeURIComponent(kit.project())}/settings`);
     const choice = JSON.parse(await kit.waitFor(async () => {
