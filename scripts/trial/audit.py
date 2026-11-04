@@ -12,6 +12,7 @@ import argparse
 from collections import Counter
 from datetime import datetime
 import hashlib
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -27,7 +28,9 @@ SHELL_TOOLS = ("Bash", "shell", "shell_command", "exec_command", "local_shell_ca
 SEVERITIES = ("high", "normal", "low")
 RESULTS = ("PASS", "FAIL", "UNKNOWN")
 SLUG = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
-CHECK_ID = re.compile(r"^T3-[0-9]{2}$")
+CHECK_ID = re.compile(r"^[A-Z][A-Z0-9]*(-[A-Z0-9]+)+$")
+OP_ROW = re.compile(r"^OP-[1-9][0-9]*$")
+AUDIT4 = Path(__file__).resolve().parent / "audit4"
 OFFLOAD = "so CrazyAgent wrote it to `"
 COMMAND_BYTES_MAX = 16 * 1024
 LISTED_MAX = 8
@@ -40,6 +43,7 @@ TEXT_BYTES_MAX = 64 * 1024
 SKILL_PREFIX = "skill:"
 CALLER_UNKNOWN = "team_caller_unknown"
 REPLY_INVALID = "coord_reply_invalid"
+ACCOUNT_WAIT = ("native_profile_in_use", "free account")
 XCRUN = re.compile(r"xcrun_db|xcrun: error")
 GIT_WORD = re.compile(r"(^|[\s;&|(])git(\s|$)")
 FINISH_EVENTS = ("finished", "change_set_ready")
@@ -71,6 +75,10 @@ GIT_SAFE = ("-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false")
 ROWS_PER_READ_MAX = 200
 READS_PER_CHECK_MAX = 400
 STEPS_MAX = 10_000
+FINISHED_HIDE_STEP = "Set Finished agents to Hide"
+STOP_ALL_STEP = "Stop all"
+FINISHED_COUNT = re.compile(r"Finished \((\d+)\)")
+DRAWN = re.compile(r"drawn: ([^;]*)")
 CITES_PER_CHECK_MAX = 16
 EXCERPT_BYTES_MAX = 2000
 VALUE_BYTES_MAX = 4096
@@ -1205,7 +1213,7 @@ def check_adoption(t):
     )
 
 
-def tui_steps(out):
+def read_steps(out):
     try:
         handle = (out / "steps.jsonl").open("r", encoding="utf-8", errors="replace")
     except OSError:
@@ -1223,7 +1231,7 @@ def tui_steps(out):
             except ValueError:
                 skipped += 1
                 continue
-            if isinstance(step, dict) and step.get("surface") == "tui":
+            if isinstance(step, dict):
                 steps.append(step)
     return steps, skipped
 
@@ -1231,7 +1239,8 @@ def tui_steps(out):
 def check_tui(t):
     frames = len(list((t.out / "frames").glob("*"))) if (t.out / "frames").is_dir() else 0
     gif = (t.out / "trial.gif").is_file()
-    steps, skipped = tui_steps(t.out)
+    every, skipped = read_steps(t.out)
+    steps = None if every is None else [step for step in every if step.get("surface") == "tui"]
     extra = tui_frames(t.out) + ([{"kind": "log", "path": "steps.jsonl", "caption": "the run's recorded steps"}] if steps is not None else [])
     failed = [f"step {step.get('n')} {step.get('title')}" for step in steps or () if step.get("ok") is False]
     detail = (
@@ -1671,6 +1680,95 @@ def check_reask(t):
     return verdict("UNKNOWN", detail + idle)
 
 
+def check_finished(t):
+    if not t.columns("team_finished_view"):
+        return verdict("UNKNOWN", "not in this build: no team_finished_view table")
+    stored = t.q("SELECT show FROM team_finished_view WHERE project=?", t.pid)
+    show = bool(stored and stored[0][0])
+    finished = [a for a in t.agents.values() if a["role"] in ("sub", "teammate") and a["status"] in ("stopped", "failed")]
+    every = read_steps(t.out)[0] or []
+    stop_at = next((stamp_ms(step.get("at")) for step in every if step.get("title") == STOP_ALL_STEP), None)
+    early = [a for a in finished if stop_at is not None and a["stopped"] is not None and a["stopped"] < stop_at]
+    reused = t.q("SELECT agent, COUNT(*) FROM team_tasks WHERE project=? AND agent IS NOT NULL GROUP BY agent HAVING COUNT(*) > 1", t.pid)
+    step = next((step for step in reversed(every) if str(step.get("title", "")).startswith(FINISHED_HIDE_STEP)), None)
+    shots = [path for path in (step or {}).get("evidence") or () if isinstance(path, str) and not os.path.isabs(path)]
+    extra = [
+        {"kind": "screenshot", "path": path, "caption": f"step {step.get('n')} {FINISHED_HIDE_STEP}"}
+        for path in shots if under(t.out / path, t.out) and (t.out / path).is_file()
+    ]
+    detail = (
+        f"setting={'show' if show else 'hide'}{'' if stored else ' (no row: hide by default)'}; "
+        f"finished in the store={len(finished)} ({listed(t.label(a) for a in finished) or 'none'}); "
+        f"left on their own before Stop all={len(early) if stop_at is not None else 'unknown'}; "
+        f"agents given more than one task={len(reused)}"
+    )
+    if show:
+        return verdict("FAIL", detail + "; Finished agents is Show at the end of the run, so finished agents stay in the list and graph", extra=extra)
+    if step is None:
+        return verdict("UNKNOWN", detail + f"; not exercised: no '{FINISHED_HIDE_STEP}' step in steps.jsonl", extra=extra)
+    said = str(step.get("detail") or "")
+    detail += f"; step {step.get('n')} ok={step.get('ok')} said: {said[:300]}"
+    if step.get("ok") is not True:
+        return verdict("FAIL", detail + "; the step failed", extra=extra)
+    count = FINISHED_COUNT.search(said)
+    if count is None:
+        return verdict("FAIL", detail + "; the step recorded no Finished (N) count", extra=extra)
+    if int(count.group(1)) != len(finished):
+        return verdict("FAIL", detail + f"; Finished ({count.group(1)}) shown, {len(finished)} finished in the store", extra=extra)
+    cards = DRAWN.search(said)
+    if cards is None:
+        return verdict("FAIL", detail + "; the step recorded no drawn cards", extra=extra)
+    drawn = {card.strip() for card in cards.group(1).split(",") if card.strip()}
+    still = [a["handle"] or a["persona"] or str(a["id"]) for a in finished if {a["handle"], a["persona"]} & drawn]
+    if still:
+        return verdict("FAIL", detail + f"; drawn while finished: {listed(still)}", extra=extra)
+    if not finished:
+        return verdict("UNKNOWN", detail + "; not exercised: no finished agent", extra=extra)
+    return verdict("PASS", detail, extra=extra)
+
+
+def check_shared_account(t):
+    accounts = dict(t.q(
+        "SELECT id, DENSE_RANK() OVER (ORDER BY connection) FROM team_agents "
+        "WHERE project=? AND role<>'teammate' AND connection IS NOT NULL ORDER BY id",
+        t.pid,
+    ))
+    spans = {}
+    for task, agent, started, finished in t.q(
+        "SELECT id, agent, started_ms, finished_ms FROM team_tasks WHERE project=? AND agent IS NOT NULL AND started_ms IS NOT NULL ORDER BY id",
+        t.pid,
+    ):
+        if agent in accounts:
+            end = finished if finished is not None else max(started, t.agents[agent]["heartbeat"])
+            spans.setdefault(accounts[agent], []).append((started, end, task, agent))
+    shared = []
+    for account, runs in sorted(spans.items()):
+        for at, (start, end, task, agent) in enumerate(runs):
+            for other_start, other_end, other_task, other in runs[at + 1:]:
+                if other != agent and start < other_end and other_start < end:
+                    together = (min(end, other_end) - max(start, other_start)) // 1000
+                    shared.append(f"agents {agent} and {other} ran tasks {task} and {other_task} on account {account} together for {together} s")
+    likes = [f"%{word}%" for word in ACCOUNT_WAIT]
+    waits = []
+    for table, text in (
+        ("team_agents", "coalesce(error,'')"),
+        ("team_tasks", "coalesce(error,'') || ' ' || coalesce(result,'')"),
+        ("team_events", "text"),
+    ):
+        for (row_id,) in t.q(f"SELECT id FROM {table} WHERE project=? AND ({text} LIKE ? OR {text} LIKE ?) ORDER BY id", t.pid, *likes):
+            waits.append(f"{table} {row_id}")
+    detail = (
+        f"agents with an account={len(accounts)} on accounts={len(set(accounts.values()))}; "
+        f"tasks run={sum(len(runs) for runs in spans.values())}; agents on one account at once={len(shared)}"
+        + (f" ({listed(shared)})" if shared else "")
+    )
+    if waits:
+        return verdict("FAIL", detail + f"; an agent waited for its account: {listed(waits)}")
+    if shared:
+        return verdict("PASS", detail)
+    return verdict("UNKNOWN", detail + "; not exercised: no two agents ran a task on one account at the same time")
+
+
 CHECKS = (
     {
         "id": "T3-01", "name": "tree", "run": check_tree,
@@ -1847,7 +1945,76 @@ CHECKS = (
         "why": "Owner DEC-111: re-ask a sub-agent that ends a task with no reply text, a setting, default On. New in 18.13, no trial-2 result. UNKNOWN while the build has no team_reask_empty table.",
         "how": "team_reask_empty for the project (no row is on); done team_tasks with a blank result per agent; the engine's re-ask turn text in each agent's transcript; engine notes of an empty master reply, which the setting does not cover.",
     },
+    {
+        "id": "T3-26", "name": "finished", "run": check_finished,
+        "title": "Finished agents leave the Agents list and graph for the Finished fold-out",
+        "proves": "With Finished agents on Hide, the default, stopped and failed sub-agents and teammates leave the Team panel and graph, and the Finished (N) fold-out lists each of them.",
+        "why": "OP-27, owner 10-27: sub-agents that finished their work and sat idle never left. DEC-102 decision 2 as the owner changed it after the DEC-104 trial: an idle agent stays until Idle stop or Stop all ends it (125e3173). Fix B-51, fix/agent-view-finished 84e5ec76. Trial 2: not checked; trial 3 sets Show for its tree checks.",
+        "how": "team_finished_view for the project (no row is Hide); stopped or failed sub-agent and teammate rows; the desktop step 'Set Finished agents to Hide' in steps.jsonl with its Finished (N) count, drawn cards and screenshots; team_tasks per agent for reuse.",
+    },
+    {
+        "id": "T3-27", "name": "shared account", "run": check_shared_account,
+        "title": "Agents beyond the pool's account count run at once, none waiting for a free account",
+        "proves": "Two agents of the project ran tasks on the same pool account at the same time, and no agent, task or team event says it waited for its account.",
+        "why": "OP-40, DEC-086: any number of agents share one signed-in account (fix 08ac582c, B-55). Owner 10-25: Claude has 4 accounts, agents beyond 4 wait for a free account. New in trial 3; UNKNOWN when no two agents shared an account at once.",
+        "how": "team_agents connection per agent, teammates left out, ranked so no account id is written; overlapping team_tasks started_ms to finished_ms (or the agent's heartbeat while running) per account; native_profile_in_use or free account in team_agents.error, team_tasks error and result, and team_events text.",
+    },
 )
+
+
+def audit4_run(module):
+    """Wraps one audit4 module's check(t) as a trial check run. Takes the module. Returns a
+    function of t giving the verdict; it raises ValueError when check(t) does not return a
+    known result and a non-empty detail, which run_checks records as UNKNOWN."""
+
+    def run(t):
+        outcome = module.check(t)
+        if not (isinstance(outcome, tuple) and len(outcome) == 2 and outcome[0] in RESULTS and isinstance(outcome[1], str) and outcome[1]):
+            raise ValueError(f"{module.ID} check must return (result, detail) with result in {', '.join(RESULTS)}")
+        return verdict(*outcome)
+
+    return run
+
+
+def load_audit4(folder, taken):
+    """Loads the trial 4 audit checks, one per scripts/trial/audit4/*.py module (files starting
+    with _ are helpers), in file name order. Takes the folder, which may be missing, and the
+    ids already in use. Writes no bytecode next to them. Returns check entries shaped like
+    CHECKS; raises ValueError naming the file and the rule of leader/trial/TRIAL4-CONVENTION.md
+    it breaks."""
+    sys.modules.setdefault("audit", sys.modules[__name__])
+    sys.dont_write_bytecode = True
+    checks = []
+    for path in sorted(folder.glob("*.py")) if folder.is_dir() else []:
+        if path.name.startswith("_"):
+            continue
+        spec = importlib.util.spec_from_file_location(f"audit4_{len(checks)}_{re.sub(r'[^A-Za-z0-9_]', '_', path.stem)}", path)
+        module = importlib.util.module_from_spec(spec)
+        try:
+            spec.loader.exec_module(module)
+        except Exception as failure:
+            raise ValueError(f"{path.name}: does not load: {type(failure).__name__}: {failure}") from None
+        cid = getattr(module, "ID", None)
+        if not (isinstance(cid, str) and CHECK_ID.match(cid) and not cid.startswith("T3-")):
+            raise ValueError(f"{path.name}: ID must look like N-E1, got {cid!r}")
+        if cid in taken:
+            raise ValueError(f"{path.name}: {cid} is already a check")
+        rows = getattr(module, "OP", None)
+        if not (isinstance(rows, list) and rows and all(isinstance(row, str) and OP_ROW.match(row) for row in rows)):
+            raise ValueError(f"{path.name}: {cid} OP must list OP-<n> rows of owner-problems-v1.md")
+        title = getattr(module, "TITLE", None)
+        if not (isinstance(title, str) and title.strip()):
+            raise ValueError(f"{path.name}: {cid} TITLE must be a non-empty string")
+        if not callable(getattr(module, "check", None)):
+            raise ValueError(f"{path.name}: {cid} check must be a function")
+        taken.add(cid)
+        checks.append({
+            "id": cid, "name": path.stem, "run": audit4_run(module), "title": title,
+            "proves": getattr(module, "PROVES", title),
+            "why": f"Owner problems {', '.join(rows)} (owner-problems-v1.md, DEC-114). {getattr(module, 'WHY', '')}".strip(),
+            "how": getattr(module, "HOW", f"scripts/trial/audit4/{path.name}"),
+        })
+    return tuple(checks)
 
 
 def excerpt(path, number):
@@ -1951,13 +2118,19 @@ def main(argv):
     parser.add_argument("--project-mark", default="TRIAL3-PROJECT-RULE", help="a line of the seeded repo CLAUDE.md")
     parser.add_argument("--answer", default="Hello", help="the owner's answer to the For: Me question")
     parser.add_argument("--only", action="append", help="run only this check id; repeatable")
+    parser.add_argument("--checks", default=str(AUDIT4), help="folder of trial 4 audit check modules (ID, OP, TITLE, check(t))")
     args = parser.parse_args(argv)
     root = Path(os.path.abspath(args.engine))
     store = Path(os.path.abspath(args.db)) if args.db else root / "engine.db"
     if not store.is_file():
         print(f"UNKNOWN T3-00 engine: no engine.db at {store}")
         return 2
-    chosen = [check for check in CHECKS if not args.only or check["id"] in args.only]
+    try:
+        extra = load_audit4(Path(os.path.abspath(args.checks)), {check["id"] for check in CHECKS})
+    except ValueError as failure:
+        print(f"audit4 check refused: {failure}", file=sys.stderr)
+        return 2
+    chosen = [check for check in CHECKS + extra if not args.only or check["id"] in args.only]
     if args.only and len(chosen) != len(set(args.only)):
         print(f"unknown check id in {args.only}", file=sys.stderr)
         return 2
