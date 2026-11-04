@@ -24,6 +24,10 @@ const LEFT_OUT = "left out: the masked frames show the same screens, and the GIF
 const USAGE = "report.mjs trial <trial folder> | live <live-pass folder> --script <live-pass.sh> [--repo <checkout>] | retro <leader/trial folder>, each with [--engine <engine root>] [--out <folder>] [--chrome <executable>]";
 const ENGINE = process.env.CRAZYAGENT_ENGINE_ROOT || join(homedir(), "Library", "Application Support", "CrazyAgent", "engine");
 const KNOWN_MIN = 3;
+const RUNS_MAX = 20;
+const RUN_FILE = /^summary[A-Za-z0-9_.-]*\.txt$/;
+const RUN_COMMIT = /^[0-9a-f]{7,40}$/;
+const RUN_SOURCE_MAX = 300;
 const RETRO = [
   { trial: 1, audit: "audit.txt", plan: "trial-plan.md", timeline: "timeline.txt", tokens: "tokens.txt", limits: "limits-before.txt", frames: "frames", gif: "trial-1028.gif" },
   { trial: 2, audit: "audit-2.txt", plan: "trial-plan-2.md", timeline: "timeline-2.txt", tokens: "tokens-2.txt", limits: "limits-before-2.txt", frames: "frames-2", gif: "trial-2.gif" },
@@ -662,9 +666,37 @@ function parseSummary(raw) {
     if ((match = line.match(/^== (\w+): (.*)$/))) groups.set(match[1], match[2]);
     else if ((match = line.match(/^PASS (\S+) (\d+)s$/))) results.set(match[1], { result: "PASS", seconds: Number(match[2]) });
     else if ((match = line.match(/^FAIL (\S+) (\d+)s exit (-?\d+): /))) results.set(match[1], { result: "FAIL", seconds: Number(match[2]), exit: Number(match[3]) });
-    else if ((match = line.match(/^BLOCKED (\S+): (.*)$/))) results.set(match[1], { result: "BLOCKED", reason: match[2].replace(/^BLOCKED: /, "") });
+    else if ((match = line.match(/^BLOCKED (\S+)(?: (\d+)s)?: (.*)$/))) {
+      results.set(match[1], { result: "BLOCKED", seconds: match[2] === undefined ? undefined : Number(match[2]), reason: match[3].replace(/^BLOCKED: /, "") });
+    }
   }
   return { results, groups };
+}
+
+/**
+ * Lists the summaries of a live-pass folder in merge order: the runs runs.json names, or summary.txt alone.
+ * Input: the real folder path. Output: each run's file, commit (empty for summary.txt), source, text and time.
+ * Throws report_live_runs_invalid for a malformed runs.json or a listed summary that is not a plain file here.
+ */
+async function liveRuns(root) {
+  if ((await place(root, "runs.json")).problem?.startsWith("missing:")) {
+    const summary = await optionalText(root, "summary.txt");
+    if (!summary) fail("report_live_summary_missing");
+    return [{ file: "summary.txt", commit: "", source: "", text: summary, written: (await stat(join(root, "summary.txt"))).mtime }];
+  }
+  const listed = await readJson(root, "runs.json", "report_live_runs_invalid");
+  if (!Array.isArray(listed) || listed.length === 0 || listed.length > RUNS_MAX) fail(`report_live_runs_invalid: a list of 1 to ${RUNS_MAX} runs`);
+  const runs = [];
+  for (const run of listed) {
+    const { file, commit, source } = run ?? {};
+    if (typeof file !== "string" || !RUN_FILE.test(file) || typeof commit !== "string" || !RUN_COMMIT.test(commit) || typeof source !== "string" || source.length > RUN_SOURCE_MAX) {
+      fail("report_live_runs_invalid: each run names a summary*.txt file here, its commit hash and a short source");
+    }
+    const where = await place(root, file);
+    if (where.problem) fail(`report_live_runs_invalid: ${file} ${where.problem}`);
+    runs.push({ file, commit, source, text: (await readBounded(where.full, TEXT_BYTES * 4)).bytes.toString("utf8"), written: (await stat(where.full)).mtime });
+  }
+  return runs;
 }
 
 async function testSources(repo) {
@@ -729,18 +761,24 @@ function excerpt(raw) {
 }
 
 /**
- * Reads a live-pass folder written by leader/live-pass-18.13.sh: summary.txt and one log per test.
+ * Reads a live-pass folder written by leader/live-pass-18.1x.sh: summary.txt, or the summaries runs.json
+ * lists with their commits, later runs replacing earlier results, and one log per test.
  * Input: the folder, the script that lists the tests and the checkout holding their source.
- * Output: one row per listed test with its group, what it proves, result, duration and failure excerpt.
+ * Output: one row per listed test with its group, what it proves, result, run, duration and failure excerpt.
  */
 export async function readLivePass(folder, { script, repo = REPO, ...options } = {}) {
   KNOWN = knownValues(options);
   const root = await realpath(folder);
-  const summary = await optionalText(root, "summary.txt");
-  if (!summary) fail("report_live_summary_missing");
+  const runs = await liveRuns(root);
   if (typeof script !== "string" || !script) fail("report_live_script_required");
   const listed = parseTests(await readFile(script, "utf8"));
-  const { results, groups } = parseSummary(summary);
+  const results = new Map();
+  const groups = new Map();
+  for (const run of runs) {
+    const parsed = parseSummary(run.text);
+    for (const [group, about] of parsed.groups) groups.set(group, about);
+    for (const [name, outcome] of parsed.results) results.set(name, { ...outcome, run: run.commit });
+  }
   const sources = await testSources(repo);
   const known = new Set(listed.map((entry) => entry.name));
   const all = [...listed, ...[...results.keys()].filter((name) => !known.has(name)).map((name) => ({ group: "unlisted", target: "lib", name }))];
@@ -754,17 +792,18 @@ export async function readLivePass(folder, { script, repo = REPO, ...options } =
       const where = await place(root, `${entry.name.replaceAll("::", ".")}.log`);
       detail = where.problem ? where.problem : excerpt((await readBounded(where.full, LOG_BYTES)).bytes.toString("utf8"));
     }
-    rows.push({ n: index + 1, group: entry.group, name: entry.name, proves: doc || sentence(entry.name), fromName: !doc, result: outcome.result, seconds: outcome.seconds, detail });
+    rows.push({ n: index + 1, group: entry.group, name: entry.name, proves: doc || sentence(entry.name), fromName: !doc, result: outcome.result, run: outcome.run ?? "", seconds: outcome.seconds, detail });
   }
   const count = (result) => rows.filter((row) => row.result === result).length;
-  const written = await stat(join(root, "summary.txt"));
+  const written = new Date(Math.max(...runs.map((run) => run.written.getTime())));
   return {
     kind: "live",
     known: KNOWN,
     title: `Live pass ${basename(root)}`,
     folder: root,
-    date: written.mtime.toISOString().slice(0, 10),
+    date: written.toISOString().slice(0, 10),
     groups: [...groups],
+    runs: runs.filter((run) => run.commit).map(({ file, commit, source }) => ({ file, commit, source })),
     rows,
     totals: `${count("PASS")} passed, ${count("FAIL")} failed, ${count("BLOCKED")} blocked, ${count("NOT RUN")} not run`,
     time: span(rows.reduce((total, row) => total + (row.seconds ?? 0), 0)),
@@ -859,11 +898,17 @@ function renderTrials(model) {
   return page(model.title, [head, ...model.trials.map((trial) => trialSection(trial, many)), imagesSection(model.images)].join("\n"));
 }
 
+function runsList(runs) {
+  if (!runs?.length) return "";
+  return `<h3>Runs</h3><p>The summaries merged into this report, in order. A later run replaces an earlier result for the same test; each row names the commit of the run its result came from.</p><ul>${runs.map((run) => `<li><code>${text(run.file)}</code> at <code>${text(run.commit)}</code>: ${text(run.source)}</li>`).join("")}</ul>`;
+}
+
 function renderLive(model) {
-  const head = `<header class="cover"><h1>${text(model.title)}</h1><p class="generated">Generated ${text(new Date().toISOString())} by scripts/trial/report.mjs from ${text(model.folder)}.</p><p>${text(model.known.note)}</p>${facts([["Date", model.date], ["Tests", model.rows.length], ["Results", model.totals], ["Test time", model.time]])}<h3>Groups</h3><ul>${model.groups.map(([group, about]) => `<li><b>${text(group)}</b>: ${text(about)}</li>`).join("")}</ul></header>`;
+  const head = `<header class="cover"><h1>${text(model.title)}</h1><p class="generated">Generated ${text(new Date().toISOString())} by scripts/trial/report.mjs from ${text(model.folder)}.</p><p>${text(model.known.note)}</p>${facts([["Date", model.date], ["Tests", model.rows.length], ["Results", model.totals], ["Test time", model.time]])}<h3>Groups</h3><ul>${model.groups.map(([group, about]) => `<li><b>${text(group)}</b>: ${text(about)}</li>`).join("")}</ul>${runsList(model.runs)}</header>`;
   const rows = model.rows.map((row) => {
     const proves = `${text(row.proves)}${row.fromName ? ' <span class="source">from the test name</span>' : ""}`;
-    const line = `<tr class="test"><td>${row.n}</td><td>${text(row.group)}</td><td><code>${text(row.name)}</code></td><td>${proves}</td><td>${badge(row.result)}</td><td>${row.seconds === undefined ? "" : `${row.seconds} s`}</td></tr>`;
+    const run = row.run ? ` <span class="source">${text(row.run)}</span>` : "";
+    const line = `<tr class="test"><td>${row.n}</td><td>${text(row.group)}</td><td><code>${text(row.name)}</code></td><td>${proves}</td><td>${badge(row.result)}${run}</td><td>${row.seconds === undefined ? "" : `${row.seconds} s`}</td></tr>`;
     return row.detail ? `${line}\n<tr class="excerpt"><td colspan="6"><pre>${text(row.detail)}</pre></td></tr>` : line;
   });
   const table = `<section class="live"><h2>Tests</h2><table><thead><tr><th>#</th><th>Group</th><th>Test</th><th>What it proves</th><th>Result</th><th>Duration</th></tr></thead><tbody>\n${rows.join("\n")}\n</tbody></table></section>`;
