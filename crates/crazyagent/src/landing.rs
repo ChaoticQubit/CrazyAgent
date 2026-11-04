@@ -822,6 +822,36 @@ pub fn open_change_set(
     }
 }
 
+/// Names the teammate worktrees `<worktree>/.worktrees/<name>` of a lead that hold an open
+/// change set (OP9B-M1), read from the store by their folder, so the bound is on open sets,
+/// never on how many teammates the lead ever had (OP9B-R2-L1). Inputs: the store, the
+/// lead's worktree and the most names to read. Output: the folder names in path order.
+pub fn open_teammate_sets(
+    db: &Connection,
+    worktree: &Path,
+    max: usize,
+) -> Result<Vec<String>, EngineError> {
+    #[cfg(unix)]
+    {
+        let Some(folder) = worktree
+            .join(crate::agent_git::TEAMMATES_FOLDER)
+            .to_str()
+            .map(|folder| format!("{folder}/"))
+        else {
+            return Ok(Vec::new());
+        };
+        Ok(store::open_inside(db, &folder, max)?
+            .into_iter()
+            .filter_map(|path| path.strip_prefix(&folder).map(str::to_owned))
+            .collect())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (db, worktree, max);
+        Err(unavailable())
+    }
+}
+
 /// Reads one page of a change set's diff, produced by the engine with no external diff or
 /// text conversion: for an open set, first noticed against the owner's branch, only what
 /// would change on that branch (DEC-107), from the merge base of its tip and the set's
