@@ -9,7 +9,7 @@ import { appBundle } from "./trial-app.mjs";
 const BRAND = fileURLToPath(new URL("../../src/assets/brand/", import.meta.url));
 const APP_ICON = fileURLToPath(new URL("../../src-tauri/icons/icon.icns", import.meta.url));
 const MARKS = [["full", "mark.svg"], ["reduced", "mark-reduced.svg"]];
-const FAVICONS = [["SVG", "favicon.svg"], ["PNG", "favicon-32.png"]];
+const FAVICONS = [["SVG", "favicon.svg", "image/svg+xml", /^favicon(-[\w-]{8})?\.svg$/u], ["PNG", "favicon-32.png", "image/png", /^favicon-32(-[\w-]{8})?\.png$/u]];
 const SQUARE = ["x", "y", "width", "height", "transform"];
 const PLIST_MS = 10000;
 
@@ -30,26 +30,56 @@ function geometry(svg) {
 }
 
 /** The approved brand redesign, read from its own files in the repository: the full and
- * reduced Ember 4 mark drawings, the SVG and PNG favicons and the app icon the bundle ships.
- * Output: { marks: [{ name, coil, squares }], favicons: [{ label, sha }], app }. */
+ * reduced Ember 4 mark drawings, the SVG and PNG favicons as data URLs the window can draw
+ * under its CSP, and the app icon the bundle ships.
+ * Output: { marks: [{ name, coil, squares }], favicons: [{ label, file, url }], app }. */
 export function approvedBrand() {
   return {
     marks: MARKS.map(([name, file]) => ({ name, ...geometry(readFileSync(join(BRAND, file), "utf8")) })),
-    favicons: FAVICONS.map(([label, file]) => ({ label, sha: digest(readFileSync(join(BRAND, file))) })),
+    favicons: FAVICONS.map(([label, file, type]) => ({ label, file, url: `data:${type};base64,${readFileSync(join(BRAND, file)).toString("base64")}` })),
     app: digest(readFileSync(APP_ICON)),
   };
 }
 
-/** Hashes each favicon the window fetched from its own link rel=icon. Input: the page's
- * readings [{ href, status, size, bytes }], bytes being empty when the file was too big to
- * return. Output: [{ href, sha }], sha null for a failed or oversized fetch. */
-export function served(readings) {
-  assert(Array.isArray(readings), "the favicon readings are a list");
-  return readings.map(({ href, status, size, bytes }) => {
-    assert(typeof href === "string" && Number.isInteger(status) && Number.isInteger(size) && Array.isArray(bytes), "a favicon reading has its href, status, size and bytes");
-    assert(bytes.every((byte) => Number.isInteger(byte) && byte >= 0 && byte <= 255), "favicon bytes are 0 to 255");
-    const whole = status === 200 && bytes.length === size && size > 0;
-    return { href, sha: whole ? digest(Buffer.from(bytes)) : null };
+/** Checks one image the page drew: a positive size and its RGBA pixels, or why it failed.
+ * Input: the image. Output: none; an assertion fails on another shape. */
+function checkDrawn(image) {
+  if (typeof image?.failed === "string") return;
+  const { width, height, pixels } = image ?? {};
+  assert(Number.isInteger(width) && Number.isInteger(height) && width > 0 && height > 0 && Array.isArray(pixels)
+    && pixels.length === width * height * 4 && pixels.every((value) => Number.isInteger(value) && value >= 0 && value <= 255),
+  "a drawn image is its width, height and RGBA pixels");
+}
+
+/** Tells whether two drawn images are the same picture. Inputs: two drawn images. Output:
+ * true when their sizes and every pixel match. */
+function samePicture(one, other) {
+  return one.width === other.width && one.height === other.height && one.pixels.every((value, index) => value === other.pixels[index]);
+}
+
+/** Judges each approved favicon against what the window drew: the link whose file name is
+ * the approved file's, hashed by the build or not, must draw the same pixels as the approved
+ * file drawn in the same window. Inputs: the page's readings { links: [{ href, image }],
+ * approved: [{ label, image }] } and the approved brand. Output: [{ label, href, problem }],
+ * problem null when the window draws the approved favicon. */
+export function served(readings, approved) {
+  assert(Array.isArray(readings?.links) && Array.isArray(readings?.approved), "the favicon readings list the links and the approved favicons");
+  for (const { href, image } of readings.links) {
+    assert(typeof href === "string", "a favicon link has its href");
+    checkDrawn(image);
+  }
+  readings.approved.forEach(({ image }) => checkDrawn(image));
+  return approved.favicons.map(({ label, file }) => {
+    const reference = readings.approved.find((one) => one.label === label)?.image;
+    assert(reference !== undefined, "the readings hold each approved favicon");
+    const name = FAVICONS.find(([one]) => one === label)[3];
+    const link = readings.links.find(({ href }) => name.test(href.split(/[?#]/u)[0].split("/").pop()));
+    if (link === undefined) return { label, href: null, problem: `the window links no ${label} favicon (${file})` };
+    const { href, image } = link;
+    if (image.failed !== undefined) return { label, href, problem: `the window could not draw its ${label} favicon ${href}: ${image.failed}` };
+    if (reference.failed !== undefined) return { label, href, problem: `the window could not draw the approved ${label} favicon: ${reference.failed}` };
+    if (!samePicture(image, reference)) return { label, href, problem: `the window's ${label} favicon ${href} is not the approved ${file}` };
+    return { label, href, problem: null };
   });
 }
 
@@ -80,6 +110,7 @@ export function dockIcon(app) {
 export function iconsVerdict({ home, project, sidebar, glyphs, favicons, dock, approved }) {
   assert([home, project, sidebar].every((count) => Number.isInteger(count) && count >= 0), "the icon counts are whole numbers");
   assert(Array.isArray(glyphs) && Array.isArray(favicons) && typeof dock?.sha === "string", "the readings are lists and a Dock icon");
+  assert(favicons.length === approved.favicons.length && favicons.every((icon) => icon.problem === null || typeof icon.problem === "string"), "one judgement per approved favicon");
   if (home === 0) throw new Error("OP-59: Home draws no icons");
   if (project === 0) throw new Error("OP-59: the project's Context page draws no icons");
   if (sidebar === 0) throw new Error("OP-59: the sidebar draws no icons");
@@ -88,9 +119,8 @@ export function iconsVerdict({ home, project, sidebar, glyphs, favicons, dock, a
   const [glyph] = glyphs;
   const mark = approved.marks.find((one) => one.coil === glyph.coil && JSON.stringify(one.squares) === JSON.stringify(glyph.squares));
   if (!mark) throw new Error(`OP-59: the sidebar's CrazyAgent mark is not the approved Ember 4 mark: ${glyph.coil} with ${glyph.squares.length} squares`);
-  const shas = new Set(favicons.map((icon) => icon.sha).filter(Boolean));
-  const missing = approved.favicons.find((icon) => !shas.has(icon.sha));
-  if (missing) throw new Error(`OP-59: the window does not serve the approved ${missing.label} favicon`);
+  const wrong = favicons.find((icon) => icon.problem !== null);
+  if (wrong) throw new Error(`OP-59: ${wrong.problem}`);
   if (dock.sha !== approved.app) throw new Error(`OP-59: the Dock icon ${dock.bundle} ${dock.file} is not the approved app icon`);
   return `Home draws ${home} icons, the project's Context page ${project} and the sidebar ${sidebar}; the sidebar shows the approved Ember 4 mark (${mark.name} drawing); the window serves the approved ${approved.favicons.map((icon) => icon.label).join(" and ")} favicons; the Dock icon is ${dock.bundle} ${dock.file}, the approved app icon`;
 }
