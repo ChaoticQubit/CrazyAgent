@@ -594,10 +594,11 @@ fn log_tools(folder: &Mailbox, tag: &str, input: &Value) {
     }
 }
 
-/// The names one tool call counts under: the tool name, for a graphify command or skill
-/// `graphify` too (Q18), and for a skill `skill:` and its name, so each skill counts by name
-/// (F7), and whether the call queried the code graph. Takes the hook input. Returns the
-/// names, none for a tool name that is not plain, and the answer.
+/// The names one tool call counts under: the tool name, for a command line that runs
+/// graphify anywhere in it (relay B F1) or the skill `graphify` too (Q18), and for a skill
+/// `skill:` and its name, so each skill counts by name (F7), and whether the call queried
+/// the code graph. Takes the hook input. Returns the names, none for a tool name that is
+/// not plain, and the answer.
 fn tool_lines(input: &Value) -> (Vec<String>, bool) {
     let Some(tool) = input["tool_name"].as_str().filter(|tool| {
         !tool.is_empty()
@@ -608,12 +609,9 @@ fn tool_lines(input: &Value) -> (Vec<String>, bool) {
     };
     let mut names = vec![tool.to_owned()];
     let graphify = match tool {
-        "Bash" => input["tool_input"]["command"]
-            .as_str()
-            .and_then(|command| command.split_whitespace().next())
-            .is_some_and(|program| {
-                Path::new(program).file_name() == Some(std::ffi::OsStr::new(GRAPHIFY))
-            }),
+        "Bash" => {
+            super::adoption::tool_key(tool, &input["tool_input"]).as_deref() == Some(GRAPHIFY)
+        }
         "Skill" => input["tool_input"]["skill"]
             .as_str()
             .is_some_and(|skill| skill == GRAPHIFY || skill.ends_with(":graphify")),
