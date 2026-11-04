@@ -36,6 +36,10 @@ COMMAND_BYTES_MAX = 16 * 1024
 LISTED_MAX = 8
 REFS_MAX = 64
 APP_MARK = "# Mandatory workflow"
+GIVEN_TITLE = "# Instructions from CrazyAgent"
+APP_HEADING = "## App instructions"
+PROJECT_HEADING = "## Project instructions"
+GIVEN_OPENING = [GIVEN_TITLE, APP_HEADING, APP_MARK]
 INSTRUCTION_NAMES = ("CLAUDE.md", "AGENTS.md", "CLAUDE.local.md")
 IMPORTED_HEADING = "## Imported from "
 STATE = ".crazyagent"
@@ -1496,22 +1500,53 @@ def given_record(t, kind, agent_id):
     return read_text(t.root / kind / name)
 
 
-def first_line(text):
-    return next((line.strip() for line in (text or "").splitlines() if line.strip()), None)
+def opening(text):
+    """The first non-blank lines of a given instruction text, as many as GIVEN_OPENING has.
+    Input: the text or None. Output: the stripped lines."""
+    return [line.strip() for line in (text or "").splitlines() if line.strip()][: len(GIVEN_OPENING)]
+
+
+def app_part(text):
+    """The app part of a given instruction text in the engine's rendered shape: what follows
+    the app heading, up to the project heading or the end. Input: the text or None. Output:
+    the part, stripped, or None when the text has no app heading."""
+    head = f"{APP_HEADING}\n\n"
+    at = (text or "").find(head)
+    if at < 0:
+        return None
+    part = text[at + len(head):]
+    end = part.find(f"\n\n{PROJECT_HEADING}\n\n")
+    return (part if end < 0 else part[:end]).strip()
+
+
+def content_hash(text):
+    """The SHA-256 of a text, or "none" for None. Input: the text. Output: the hex digest."""
+    return "none" if text is None else hashlib.sha256(text.encode()).hexdigest()
+
+
+def same_app(text, copy):
+    """Compares the app part of a given text with the app copy the engine renders from, by
+    content hash. Inputs: the given text and the stripped app copy. Output: whether they
+    match, and the evidence line with both short hashes."""
+    part = content_hash(app_part(text))
+    want = content_hash(copy)
+    return part == want, f"app part sha256={part[:12]} app copy sha256={want[:12]}"
 
 
 def check_part_one(t):
     if not t.tree:
         return verdict("FAIL", "no agents")
     lines, bad = [], []
+    copy = (read_text(t.root / "instructions.md") or "").strip()
     for a in t.tree:
         if a["role"] == "teammate":
             continue
         if not a["harness"].startswith("claude"):
             text = read_text(t.home(a["id"]) / "AGENTS.md")
-            line = f"{t.label(a)} home AGENTS.md first line={first_line(text)!r}"
+            matched, hashes = same_app(text, copy)
+            line = f"{t.label(a)} home AGENTS.md opening={opening(text)!r}; {hashes}"
             lines.append(line)
-            if first_line(text) != APP_MARK:
+            if opening(text) != GIVEN_OPENING or not matched:
                 bad.append(line)
             continue
         recorded = given_record(t, "agent-instructions-given", a["id"])
@@ -1519,9 +1554,10 @@ def check_part_one(t):
         launches = t.transcripts[a["id"]]["launches"]
         reached = [l for l in launches if l["app"] is not None and l["app"] >= 0]
         source = "given record" if recorded is not None else "home crazyagent/instructions.md" if given is not None else "nothing given"
-        line = f"{t.label(a)} {source} first line={first_line(given)!r}; launches with the set={len(reached)}/{len(launches)}"
+        matched, hashes = same_app(given, copy)
+        line = f"{t.label(a)} {source} opening={opening(given)!r}; {hashes}; launches with the set={len(reached)}/{len(launches)}"
         lines.append(line)
-        if first_line(given) != APP_MARK or not launches or len(reached) < len(launches):
+        if opening(given) != GIVEN_OPENING or not matched or not launches or len(reached) < len(launches):
             bad.append(line)
         if launches:
             t.cite(t.transcripts[a["id"]], launches[0]["spot"], f"{t.label(a)} first launch context")
@@ -1541,7 +1577,7 @@ def check_part_one(t):
             bad.append(line)
     return verdict(
         "FAIL" if bad else "PASS",
-        f"the given instruction set opens with '{APP_MARK}' for every agent and reaches every launch, teammates included; agents bad={len(bad)}",
+        f"the given text opens with '{GIVEN_TITLE}' and its '{APP_HEADING}' with '{APP_MARK}', its app part matches the engine's app copy by hash for every agent, and the set reaches every launch, teammates included; agents bad={len(bad)}",
         lines,
     )
 
@@ -1920,9 +1956,9 @@ CHECKS = (
     {
         "id": "T3-22", "name": "part 1 instructions", "run": check_part_one,
         "title": "The Part 1 instruction set reaches every agent, teammates included",
-        "proves": "The text each agent was given opens with '# Mandatory workflow' and every launch context, native teammates' too, holds it.",
+        "proves": "The text each agent was given opens with CrazyAgent's title, its app instructions open with '# Mandatory workflow' and are the engine's app copy, and every launch context, native teammates' too, holds the set.",
         "why": "DEC-111 QR1 and DEC-106, 18.13 fix (feat/instruction-edit-delivery). Re-proves trial 2 T3-11, which failed for teammates 50 and 51 with no transcript.",
-        "how": "The engine's agent-instructions-given record per agent home (SHA-256 of its real path); the first launch context of every transcript, teammate panes through the lead's home; home AGENTS.md for Codex agents.",
+        "how": "The engine's agent-instructions-given record per agent home (SHA-256 of its real path), its app part compared with the engine's app instructions.md by SHA-256; the first launch context of every transcript, teammate panes through the lead's home; home AGENTS.md for Codex agents.",
     },
     {
         "id": "T3-23", "name": "skills per role", "run": check_role_skills,
