@@ -2174,8 +2174,10 @@ impl TeamRuntime {
     }
 
     /// Returns a held agent's work to its queue without spending an attempt: a task waits
-    /// again (or is cancelled when the owner asked for that) and a message waits again.
-    fn release(&mut self, agent: i64, busy: Busy) -> Result<(), EngineError> {
+    /// again, pinned to `pin` when given (or is cancelled when the owner asked for that), and
+    /// a message waits again. An agent stopped for a narrowed policy passes no pin, so the
+    /// next sub-agent takes its task under the saved policy and the stopped agent stays down.
+    fn release(&mut self, pin: Option<i64>, busy: Busy) -> Result<(), EngineError> {
         match busy {
             Busy::Task(task) => {
                 self.connection
@@ -2185,13 +2187,15 @@ impl TeamRuntime {
                         [task],
                     )
                     .map_err(error)?;
-                self.connection
-                    .execute(
-                        "INSERT OR REPLACE INTO team_task_pins(task,project,agent)
-                         SELECT id,project,?2 FROM team_tasks WHERE id=?1 AND status='queued'",
-                        params![task, agent],
-                    )
-                    .map_err(error)?;
+                if let Some(agent) = pin {
+                    self.connection
+                        .execute(
+                            "INSERT OR REPLACE INTO team_task_pins(task,project,agent)
+                             SELECT id,project,?2 FROM team_tasks WHERE id=?1 AND status='queued'",
+                            params![task, agent],
+                        )
+                        .map_err(error)?;
+                }
                 self.connection
                     .execute(
                         "UPDATE team_tasks SET status='cancelled', error='Cancelled by you', finished_ms=?2
@@ -6014,6 +6018,7 @@ impl TeamRuntime {
                 let connection = worker.connection.clone();
                 let project = worker.project.clone();
                 let held = worker.held;
+                let pin = worker.narrowed.is_none().then_some(id);
                 let team_tool = worker.team_tool;
                 if end == TurnEnd::RateLimited {
                     self.pause(&connection)?;
@@ -6022,7 +6027,7 @@ impl TeamRuntime {
                     .execute("UPDATE team_agents SET turns=turns+1 WHERE id=?1", [id])
                     .map_err(error)?;
                 match busy {
-                    Some(busy) if held && end != TurnEnd::Success => self.release(id, busy)?,
+                    Some(busy) if held && end != TurnEnd::Success => self.release(pin, busy)?,
                     Some(Busy::Task(task)) => {
                         self.finish_task(task, &text, end, cause.as_deref())?
                     }
@@ -6180,7 +6185,9 @@ impl TeamRuntime {
                     }
                 }
                 match worker.busy {
-                    Some(busy) if worker.held => self.release(id, busy)?,
+                    Some(busy) if worker.held => {
+                        self.release(worker.narrowed.is_none().then_some(id), busy)?
+                    }
                     Some(Busy::Task(task)) => self.finish_task(task, "", TurnEnd::Closed, None)?,
                     Some(Busy::Message(message)) => self.finish_message(
                         &worker.project,
