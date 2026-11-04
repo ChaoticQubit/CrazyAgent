@@ -1096,6 +1096,27 @@ impl Mailbox {
         )?))
     }
 
+    /// Opens a folder inside the mailbox, refusing a link or anything but a folder at its
+    /// name. Takes its name. Returns the handle or the I/O error.
+    pub(crate) fn folder(&self, name: &str) -> std::io::Result<Self> {
+        Ok(Self(rustix::fs::openat(
+            &self.0,
+            name,
+            Self::folder_flags(),
+            Mode::empty(),
+        )?))
+    }
+
+    /// Makes a folder inside the mailbox that only this user can enter, keeping whatever
+    /// already sits at its name, which [`Self::folder`] then refuses unless it is a folder.
+    /// Takes its name. Returns the I/O error.
+    pub(crate) fn make_folder(&self, name: &str) -> std::io::Result<()> {
+        match rustix::fs::mkdirat(&self.0, name, Mode::RWXU) {
+            Ok(()) | Err(rustix::io::Errno::EXIST) => Ok(()),
+            Err(error) => Err(error.into()),
+        }
+    }
+
     /// Lists the entries with one suffix whose names carry a valid call id and that are
     /// plain files, oldest first, never more than `MAILBOX_SCAN_MAX` entries looked at.
     pub(crate) fn entries(&self, suffix: &str) -> Vec<(std::time::SystemTime, String)> {
@@ -1188,6 +1209,14 @@ impl Mailbox {
 
     pub(crate) fn open_for_engine(path: &Path) -> std::io::Result<Self> {
         Self::open(path)
+    }
+
+    pub(crate) fn folder(&self, _name: &str) -> std::io::Result<Self> {
+        match *self {}
+    }
+
+    pub(crate) fn make_folder(&self, _name: &str) -> std::io::Result<()> {
+        match *self {}
     }
 
     pub(crate) fn entries(&self, _suffix: &str) -> Vec<(std::time::SystemTime, String)> {

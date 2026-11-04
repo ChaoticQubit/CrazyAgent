@@ -80,9 +80,10 @@ const PATH_BYTES_MAX: usize = 1024;
 const READ_ROOTS_MAX: usize = 16;
 const WORKTREES_MAX: usize = 8;
 /// The most folders one sandbox hides: every hidden folder a project saves
-/// ([`hidden_paths::HIDDEN_PATHS_MAX`]) plus one a step adds itself, such as the graph step's
-/// `.crazyagent/`.
-pub const HIDDEN_MAX: usize = hidden_paths::HIDDEN_PATHS_MAX + 1;
+/// ([`hidden_paths::HIDDEN_PATHS_MAX`]) plus the two a step adds itself at most, such as the
+/// graph step's `.crazyagent/`, or a native lead's part of the relay mailbox and its own temp
+/// folder, which its teammates' sandbox hides.
+pub const HIDDEN_MAX: usize = hidden_paths::HIDDEN_PATHS_MAX + 2;
 /// The most exact Unix sockets one agent may bind and connect: its own Codex app-server's.
 const SOCKETS_MAX: usize = 2;
 /// The most exact Unix socket grants one agent holds, of every use together: a native lead's
@@ -625,6 +626,7 @@ pub struct ProjectSandbox {
     execs: Vec<PathBuf>,
     scratch: Option<PathBuf>,
     hidden: Vec<PathBuf>,
+    revealed: Vec<PathBuf>,
     network: SandboxNetwork,
     kept_ports: Vec<u16>,
     owner_home: PathBuf,
@@ -695,6 +697,7 @@ impl ProjectSandbox {
             execs: Vec::new(),
             scratch: None,
             hidden: Vec::new(),
+            revealed: Vec::new(),
             network,
             kept_ports: Vec::new(),
             owner_home: owner,
@@ -1216,10 +1219,13 @@ impl ProjectSandbox {
     /// short temp folder they share ([`toolchains::native_lead_tmp`], TPH-2 residual), so no
     /// teammate reads, races or plants a file the lead stages there. Both are shut out of the
     /// name the engine binds the caller socket at before it moves it over `callers`, so
-    /// neither swaps its own listener in there (rv-secreview RH2R2-1). Inputs: the three
-    /// sockets, the canonical tmux program and the teammates' home beside the lead's, its team
-    /// folders already made. Output: the lead's and the teammates' sandboxes, `Invalid`, or
-    /// `Unavailable` off macOS.
+    /// neither swaps its own listener in there (rv-secreview RH2R2-1). The lead's part of the
+    /// relay mailbox is hidden from the teammates but for its `relay.json`, which they only
+    /// read, and they never move or re-permission the mailbox or the temp folder holding it
+    /// (relay mailbox forgery C1). Inputs: the three sockets, the canonical tmux program and
+    /// the teammates' home beside the lead's, its team folders already made, with the
+    /// mailbox in the agent temp folder. Output: the lead's and the teammates' sandboxes,
+    /// `Invalid`, or `Unavailable` off macOS.
     #[cfg(unix)]
     pub fn native_team(
         self,
@@ -1242,13 +1248,16 @@ impl ProjectSandbox {
             granted_root(folder, &self.owner_home, &self.secret_paths())?;
         }
         let binding = crate::team::caller::binding_path(callers);
+        let mailbox = self.agent_tmp.join(crate::team::tool::MAILBOX_FOLDER);
+        let lead_part = mailbox.join(crate::coord::relay::LEAD_PART);
         let mut teammates = self
             .clone()
             .serve_tmux_server(mates, tmux)?
             .reach_unix_socket(callers)?
             .shut_unix_socket(own)?
             .shut_unix_socket(&binding)?
-            .allow_read(&home)?;
+            .allow_read(&home)?
+            .hide(&lead_part)?;
         let lead_tmp = teammates
             .scratch
             .as_deref()
@@ -1256,6 +1265,7 @@ impl ProjectSandbox {
             .ok_or_else(|| invalid("a native team needs the agent temp folder"))?;
         teammates = teammates.hide(&lead_tmp)?;
         teammates.agent_home = mates_home.to_path_buf();
+        teammates.revealed = vec![lead_part.join(crate::coord::relay::ROSTER_FILE)];
         teammates.read_only = vec![
             home.join(crate::launch_context::STATE),
             home.join(crate::coord::relay::PLUGIN_FOLDER),
@@ -1268,7 +1278,7 @@ impl ProjectSandbox {
                 .iter()
                 .map(|scratch| scratch.join(toolchains::GIT_FOLDER)),
         );
-        teammates.fixed = vec![home.clone()];
+        teammates.fixed = vec![home.clone(), self.agent_tmp.clone(), mailbox];
         teammates.fixed.extend(shared.iter().cloned());
         teammates.shared = shared;
         teammates.teammates = true;
@@ -1547,6 +1557,12 @@ impl ProjectSandbox {
                 }
             }
             text.push_str(")\n");
+        }
+        for file in self.revealed.iter().filter(|file| clean_absolute(file)) {
+            text.push_str(&format!(
+                "(allow file-read* (literal \"{}\"))\n",
+                file.display()
+            ));
         }
         let project = self.project_root.display();
         text.push_str(&format!(

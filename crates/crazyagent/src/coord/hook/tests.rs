@@ -39,6 +39,14 @@ fn log_tools_counts_each_skill_by_name_and_graphify_once() {
         "Bash\ngraphify\n"
     );
     assert_eq!(
+        logged(json!({
+            "tool_name": "Bash",
+            "tool_input": {"command": "cd /repo && graphify query \"pools\""}
+        })),
+        "Bash\ngraphify\n",
+        "a command line that runs graphify after another program counts it too"
+    );
+    assert_eq!(
         logged(json!({"tool_name": "Skill", "tool_input": {"skill": "bad name"}})),
         "Skill\n",
         "a skill name that is not plain is not counted by name"
@@ -72,12 +80,13 @@ fn the_first_edit_without_a_graph_query_gets_one_reminder_and_is_allowed() {
         teammate: None,
         cwd: None,
         unnamed: false,
+        part: relay::Part::Single,
     };
     let input = json!({
         "tool_name": "Edit",
         "tool_input": {"file_path": root.path().join("a.rs"), "old_string": "a", "new_string": "b"},
     });
-    let edit = |tag: &str| edit_answer(&folder, &session(tag), &input);
+    let edit = |tag: &str| edit_answer(&folder, None, &session(tag), &input);
 
     for quiet in [Nudges::Off, Nudges::TenMinutes] {
         roster(quiet);

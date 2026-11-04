@@ -75,6 +75,7 @@ impl Team {
             lead,
             &self.home,
             &self.mailbox,
+            Layout::Single,
             receipts,
             now(),
         )
@@ -408,6 +409,7 @@ fn a_master_gets_no_letters_while_a_lead_in_the_same_project_still_does() {
         lead,
         &team.home,
         &lead_mailbox,
+        Layout::Single,
         false,
         now(),
     )

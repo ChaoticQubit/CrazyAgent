@@ -8657,6 +8657,54 @@ fn between_turns(
     }
 }
 
+/// A native lead's relay is served in the split layout its sandbox was built for, the roster
+/// in the lead's part, and a lead whose stored mode cannot be read is not served at all, so
+/// nothing lands in the mailbox folder its teammates write (relay mailbox forgery C1,
+/// rv-audit r1 F1).
+#[test]
+fn a_native_lead_s_relay_is_served_split_and_one_whose_mode_cannot_be_read_is_not_served() {
+    let fixture = Fixture::new(2);
+    crate::coord::ensure(&fixture.connection).unwrap();
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let native = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    let unread = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Working);
+    fixture
+        .connection
+        .execute("UPDATE team_agents SET mode='native' WHERE id=?1", [native])
+        .unwrap();
+    fixture
+        .connection
+        .execute("UPDATE team_agents SET mode=X'00' WHERE id=?1", [unread])
+        .unwrap();
+    for id in [native, unread] {
+        let home = agent_home(&team.state, id);
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(team.mailbox(id).parent().unwrap()).unwrap();
+        crate::coord::relay::install(&home, &team.mailbox(id), &fixture.base.join("engine"))
+            .unwrap();
+        let mut worker = between_turns(&project, AgentRole::Sub, false, false);
+        worker.harness = "claude-code".into();
+        team.workers.insert(id, worker);
+    }
+
+    team.serve_relays(&project);
+    let roster = |id: i64| team.mailbox(id).join("relay.json");
+    let lead_roster = |id: i64| {
+        team.mailbox(id)
+            .join(crate::coord::relay::LEAD_PART)
+            .join("relay.json")
+    };
+    assert!(
+        lead_roster(native).is_file() && !roster(native).exists(),
+        "a native lead's roster sits in its part, never where its teammates write"
+    );
+    assert!(
+        !roster(unread).exists() && !lead_roster(unread).exists(),
+        "a lead whose mode cannot be read is skipped, never served in the single layout"
+    );
+}
+
 /// F2 and FAIL C: the agents the engine wakes for their messages are the project's idle
 /// sub-agents on a signed-in account between turns, kept native-lead sessions included;
 /// busy, live, stopping, endpoint (kept) agents, the master and other projects are not.
@@ -8956,8 +9004,11 @@ fn a_lead_runs_native_only_as_its_own_row_says_whatever_the_setting_says_later()
         team.native_lead(&project, spawned, AgentRole::Sub, "claude-code"),
         Ok(false)
     );
-    assert_eq!(team.stored_mode(native).as_deref(), Some("native"));
-    assert_eq!(team.stored_mode(spawned).as_deref(), Some("app_spawned"));
+    assert_eq!(team.stored_mode(native).unwrap().as_deref(), Some("native"));
+    assert_eq!(
+        team.stored_mode(spawned).unwrap().as_deref(),
+        Some("app_spawned")
+    );
     let planted = |harness: &str, parent: Option<i64>| -> i64 {
         fixture
             .connection
@@ -11030,7 +11081,11 @@ fn a_named_call_whose_file_changed_after_naming_is_refused() {
     }
     let own = std::process::id();
     assert_eq!(
-        callers.serve(&mut || vec![("%900".to_owned(), own)], &mut |_, _| None),
+        callers.serve(
+            &mut || vec![("%900".to_owned(), own)],
+            &mut |_, _| None,
+            &mut |_, _, _, _| {}
+        ),
         2
     );
     for stream in &mut streams {
@@ -11133,7 +11188,8 @@ fn a_caller_found_under_the_lead_s_pane_id_from_another_process_is_not_the_lead(
             &mut || vec![(native.own.clone(), other)],
             &mut |pane, pid| {
                 pane_whom(&f.connection, Some(host_ref), &project, lead, (pane, pid))
-            }
+            },
+            &mut |_, _, _, _| {}
         ),
         1
     );
@@ -11262,7 +11318,11 @@ fn an_unlinked_caller_socket_is_bound_again_on_the_next_tick() {
         let asked = scope.spawn(|| crate::team::caller::name_call(&mailbox, &id, &digest));
         let deadline = Instant::now() + crate::team::caller::CALLER_WAIT;
         while !asked.is_finished() && Instant::now() < deadline {
-            callers.serve(&mut || vec![("%5".to_owned(), own)], &mut |_, _| None);
+            callers.serve(
+                &mut || vec![("%5".to_owned(), own)],
+                &mut |_, _| None,
+                &mut |_, _, _, _| {},
+            );
             std::thread::sleep(Duration::from_millis(10));
         }
         asked.join().unwrap()
@@ -11320,7 +11380,11 @@ fn a_caller_socket_blocked_by_an_obstacle_is_bound_once_the_obstacle_is_gone() {
             let asked = scope.spawn(|| crate::team::caller::name_call(&mailbox, &id, &digest));
             let deadline = Instant::now() + crate::team::caller::CALLER_WAIT;
             while !asked.is_finished() && Instant::now() < deadline {
-                callers.serve(&mut || vec![(pane.to_owned(), pid)], &mut |_, _| None);
+                callers.serve(
+                    &mut || vec![(pane.to_owned(), pid)],
+                    &mut |_, _| None,
+                    &mut |_, _, _, _| {},
+                );
                 std::thread::sleep(Duration::from_millis(10));
             }
             asked.join().unwrap()

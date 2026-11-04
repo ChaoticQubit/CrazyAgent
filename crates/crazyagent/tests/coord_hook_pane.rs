@@ -1,7 +1,9 @@
 #![cfg(unix)]
 
+use crazyagent::protocol::ProjectId;
 use crazyagent::team::caller::{Callers, Whom, socket_for_mailbox};
 use crazyagent::team::tool::MAILBOX_FOLDER;
+use rusqlite::{Connection, params};
 use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -77,9 +79,11 @@ impl Drop for Placed {
 
 /// A native lead's team as its hooks see it: a real tmux server with the lead's pane and
 /// two teammate panes, Claude Code's team config naming the teammates by those panes, the
-/// lead's mailbox in the engine's layout, and the lead's caller socket, which the test
-/// serves as the engine does, answering `who` for the lead's pane and each teammate's pane
-/// from the names it registered, as the engine answers from its rows.
+/// lead's mailbox in the engine's layout, the engine's database with the lead and both
+/// teammates' rows by those panes, and the lead's caller socket, which the test serves as
+/// the engine does, answering `who` for the lead's pane and each teammate's pane from the
+/// names it registered, as the engine answers from its rows, and each teammate's relay
+/// request with the engine's real handler.
 struct Team {
     _folder: tempfile::TempDir,
     root: PathBuf,
@@ -88,6 +92,9 @@ struct Team {
     mailbox: PathBuf,
     server: Server,
     callers: Option<Callers>,
+    db: Connection,
+    project_id: ProjectId,
+    lead_id: i64,
     _placed: Placed,
     lead: String,
     alpha: String,
@@ -155,6 +162,9 @@ impl Team {
         let mailbox = root.join("agent-1").join("tmp").join(MAILBOX_FOLDER);
         std::fs::create_dir_all(&mailbox).unwrap();
         std::fs::set_permissions(&mailbox, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let part = mailbox.join(crazyagent::coord::relay::LEAD_PART);
+        std::fs::create_dir(&part).unwrap();
+        std::fs::set_permissions(&part, std::fs::Permissions::from_mode(0o700)).unwrap();
         let socket = socket_for_mailbox(&mailbox).unwrap();
         let short = socket.parent().unwrap();
         assert!(!short.exists(), "{}", short.display());
@@ -162,6 +172,27 @@ impl Team {
         std::fs::set_permissions(short, std::fs::Permissions::from_mode(0o700)).unwrap();
         let placed = Placed(socket.clone());
         let callers = Callers::bind(&socket, None).unwrap();
+        let db = Connection::open(root.join("engine.db")).unwrap();
+        db.execute_batch("CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, body TEXT NOT NULL); INSERT INTO projects VALUES ('alpha','{}');")
+            .unwrap();
+        crazyagent::team::initialize(&db).unwrap();
+        crazyagent::project_setup::initialize(&db).unwrap();
+        crazyagent::coord::ensure(&db).unwrap();
+        db.execute(
+            "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms)
+             VALUES ('alpha','sub_agent','claude-code',1,'working',0,0)",
+            [],
+        )
+        .unwrap();
+        let lead_id = db.last_insert_rowid();
+        for pane in [&alpha, &beta] {
+            db.execute(
+                "INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms,parent,pane)
+                 VALUES ('alpha','teammate','claude-code',1,'working',0,0,?1,?2)",
+                params![lead_id, pane],
+            )
+            .unwrap();
+        }
         Self {
             _folder: folder,
             root,
@@ -170,6 +201,9 @@ impl Team {
             mailbox,
             server,
             callers: Some(callers),
+            db,
+            project_id: ProjectId::new("alpha").unwrap(),
+            lead_id,
             _placed: placed,
             lead,
             alpha,
@@ -181,7 +215,8 @@ impl Team {
     /// Runs one relay hook the way a teammate's harness does, as a child of the one shell
     /// that is `pane`'s process for the whole test, as Claude Code's hooks run under its
     /// pane's one process, with `TMUX_PANE` set to `claimed`; detached, it runs a second
-    /// after the subshell that started it left, under pid 1. The test serves the caller socket meanwhile. Takes the pane, the
+    /// after the subshell that started it left, under pid 1. The test serves the caller
+    /// socket meanwhile, each relay request with the engine's real handler. Takes the pane, the
     /// claimed pane, the event, the hook input and whether it is detached. Returns what the
     /// hook printed.
     fn hook(
@@ -221,14 +256,30 @@ impl Team {
             (self.alpha.as_str(), Whom::Teammate("alpha".to_owned())),
             (self.beta.as_str(), Whom::Teammate("beta".to_owned())),
         ];
+        let (db, project, lead) = (&self.db, &self.project_id, self.lead_id);
         let deadline = Instant::now() + Duration::from_secs(30);
         while !done.exists() && Instant::now() < deadline {
             if let Some(callers) = self.callers.as_mut() {
-                callers.serve(&mut || server.panes(), &mut |pane, _| {
-                    rows.iter()
-                        .find(|(row, _)| *row == pane)
-                        .map(|(_, whom)| whom.clone())
-                });
+                callers.serve(
+                    &mut || server.panes(),
+                    &mut |pane, _| {
+                        rows.iter()
+                            .find(|(row, _)| *row == pane)
+                            .map(|(_, whom)| whom.clone())
+                    },
+                    &mut |pane, _, request, out| {
+                        crazyagent::coord::relay::answer(
+                            db,
+                            project,
+                            lead,
+                            pane,
+                            request,
+                            out,
+                            now_ms(),
+                        )
+                        .unwrap();
+                    },
+                );
             }
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -236,13 +287,26 @@ impl Team {
         std::fs::read_to_string(&output).unwrap()
     }
 
-    fn tools(&self, pane: &str) -> Option<String> {
-        let number: u128 = pane[1..].parse().unwrap();
-        std::fs::read_to_string(self.mailbox.join(format!("{:032x}.tools", number + 1))).ok()
+    /// The tools the engine counted for the teammate in a pane, by name.
+    fn tools(&self, pane: &str) -> Vec<String> {
+        self.db
+            .prepare(
+                "SELECT tool FROM coord_tool_use WHERE agent=(SELECT id FROM team_agents
+                 WHERE role='teammate' AND pane=?1) ORDER BY tool",
+            )
+            .unwrap()
+            .query_map([pane], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
     }
 
     fn lead_tools(&self) -> Option<String> {
-        std::fs::read_to_string(self.mailbox.join(format!("{:032x}.tools", 0))).ok()
+        std::fs::read_to_string(self.lead_part().join(format!("{:032x}.tools", 0))).ok()
+    }
+
+    fn lead_part(&self) -> PathBuf {
+        self.mailbox.join(crazyagent::coord::relay::LEAD_PART)
     }
 
     /// Overwrites the team config the way any agent of the team can. Takes the new config.
@@ -257,14 +321,14 @@ impl Team {
         .unwrap();
     }
 
-    /// Leaves one message in the mailbox for a delivery tag, as the engine does. Takes the
-    /// message id, the tag and the body.
-    fn letter(&self, id: i64, to: &str, body: &str) {
+    /// Leaves one message in the lead's part of the mailbox, as the engine does for a native
+    /// lead's own sessions. Takes the message id and the body.
+    fn lead_letter(&self, id: i64, body: &str) {
         std::fs::write(
-            self.mailbox.join(format!("{id:032x}.inbox")),
+            self.lead_part().join(format!("{id:032x}.inbox")),
             json!({
                 "id": id,
-                "to": to,
+                "to": "leader",
                 "from": "Ada (@lead-a)",
                 "kind": "note",
                 "question": null,
@@ -276,6 +340,45 @@ impl Team {
         )
         .unwrap();
     }
+
+    /// Sends one note from the lead to the teammate in a pane, which the engine hands that
+    /// teammate's session on its own request. Takes the pane and the body.
+    fn note(&self, pane: &str, body: &str) {
+        let to: i64 = self
+            .db
+            .query_row(
+                "SELECT id FROM team_agents WHERE role='teammate' AND pane=?1",
+                [pane],
+                |row| row.get(0),
+            )
+            .unwrap();
+        crazyagent::coord::send(
+            &self.db,
+            crazyagent::coord::NewMessage {
+                project: self.project_id.clone(),
+                from: crazyagent::coord::Party::Agent(self.lead_id),
+                to: crazyagent::coord::Party::Agent(to),
+                kind: crazyagent::coord::MessageKind::Note,
+                question: None,
+                work: None,
+                reply_to: None,
+                body: body.to_owned(),
+                idempotency_key: None,
+            },
+            now_ms(),
+        )
+        .unwrap();
+    }
+}
+
+fn now_ms() -> i64 {
+    i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
 }
 
 fn read_tool(session: &str) -> Value {
@@ -312,10 +415,10 @@ fn a_teammate_hook_claiming_another_pane_acts_as_its_own_pane() {
 
     let printed = team.hook(&alpha, &beta, "post-tool", &read_tool(MATE_SESSION), false);
     assert_eq!(printed, "");
-    assert_eq!(team.tools(&beta), None, "the claimed pane got nothing");
+    assert!(team.tools(&beta).is_empty(), "the claimed pane got nothing");
     assert_eq!(
-        team.tools(&alpha).as_deref(),
-        Some("Read\n"),
+        team.tools(&alpha),
+        ["Read"],
         "the tool counts for the pane the hook runs in"
     );
 
@@ -344,7 +447,7 @@ fn a_hook_outside_every_pane_counts_for_nobody_and_its_edits_are_held() {
 
     let printed = team.hook(&alpha, &alpha, "post-tool", &read_tool(MATE_SESSION), true);
     assert_eq!(printed, "");
-    assert_eq!(team.tools(&alpha), None, "nobody's tool is counted");
+    assert!(team.tools(&alpha).is_empty(), "nobody's tool is counted");
 
     let own = team
         .project
@@ -400,8 +503,8 @@ fn a_teammate_rewriting_its_team_config_still_acts_as_itself() {
     for (round, forged) in forgeries.iter().enumerate() {
         team.forge(forged);
         let id = 10 + 2 * i64::try_from(round).unwrap();
-        team.letter(id, "leader", &format!("For the lead {round}."));
-        team.letter(id + 1, &alpha, &format!("For alpha {round}."));
+        team.lead_letter(id, &format!("For the lead {round}."));
+        team.note(&alpha, &format!("For alpha {round}."));
         let printed = team.hook(&alpha, &alpha, "post-tool", &read_tool(MATE_SESSION), false);
         assert!(
             printed.contains(&format!("For alpha {round}.")),
@@ -416,9 +519,9 @@ fn a_teammate_rewriting_its_team_config_still_acts_as_itself() {
             None,
             "round {round}: nothing counts for the lead"
         );
-        assert!(
-            team.tools(&alpha)
-                .is_some_and(|tools| tools.contains("Read")),
+        assert_eq!(
+            team.tools(&alpha),
+            ["Read"],
             "round {round}: the tool counts for alpha's pane"
         );
         let printed = team.hook(&alpha, &alpha, "edit", &edit(MATE_SESSION, &theirs), false);
@@ -440,7 +543,10 @@ fn a_teammate_hook_while_the_engine_is_away_is_held_not_taken_for_the_lead() {
 
     let printed = team.hook(&alpha, &alpha, "post-tool", &read_tool(MATE_SESSION), false);
     assert_eq!(printed, "");
-    assert_eq!(team.tools(&alpha), None, "nothing counts for the teammate");
+    assert!(
+        team.tools(&alpha).is_empty(),
+        "nothing counts for the teammate"
+    );
     assert_eq!(team.lead_tools(), None, "nothing counts for the lead");
 
     let own = team

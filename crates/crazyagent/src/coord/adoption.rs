@@ -1,6 +1,6 @@
 use super::settings::{COUNTED_TOOL_BYTES_MAX, COUNTED_TOOLS_MAX, Nudges};
 use super::store::{AgentRow, agent, state};
-use super::{AgentId, MessageKind, NewMessage, Party, TOOL_BYTES_MAX};
+use super::{AgentId, MessageId, MessageKind, NewMessage, Party, TOOL_BYTES_MAX};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, params};
@@ -579,40 +579,87 @@ fn first_edits(db: &Connection, project: &ProjectId, now: i64) -> Result<(), Eng
         if !called(&|name| EDIT_TOOLS.contains(&name)) || called(&|name| name == GRAPH_TOOL) {
             continue;
         }
-        let key = format!("{NUDGE_KEY}first_edit-{id}");
-        let earlier: bool = db
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM coord_messages WHERE project=?1
-                 AND from_kind='engine' AND to_kind='agent' AND to_agent=?2 AND idem_key=?3)",
-                params![project.as_str(), id, key],
-                |found| found.get(0),
-            )
-            .map_err(state)?;
-        if earlier {
+        if first_edit_reminded(db, project, id)? {
             continue;
         }
         if sent == NUDGES_PER_TICK_MAX {
             break;
         }
-        super::send(
-            db,
-            NewMessage {
-                project: project.clone(),
-                from: Party::Engine,
-                to: Party::Agent(id),
-                kind: MessageKind::Note,
-                question: None,
-                work: None,
-                reply_to: None,
-                body: FIRST_EDIT_REMINDER.to_owned(),
-                idempotency_key: Some(key),
-            },
-            now,
-        )?;
+        send_first_edit(db, project, id, now)?;
         sent += 1;
     }
     assert!(sent <= NUDGES_PER_TICK_MAX);
     Ok(())
+}
+
+/// Decides the FirstEdit reminder a native teammate's edit hands its session through the
+/// relay (relay over the caller socket, OQ-7 B): under the FirstEdit nudges, for an agent
+/// whose counted calls hold no code-graph query, once, recorded as the same Engine note
+/// `first_edits` keys by the agent. Takes the database, the project, the agent and the time
+/// in ms. Returns the note's id, to mark Delivered once its session got it, or None.
+pub(super) fn first_edit_note(
+    db: &Connection,
+    project: &ProjectId,
+    id: AgentId,
+    now: i64,
+) -> Result<Option<MessageId>, EngineError> {
+    if super::settings::read(db, project)?.nudges != Nudges::FirstEdit {
+        return Ok(None);
+    }
+    let graphed = used(db, id)?.iter().any(|(name, count)| {
+        *count > 0 && tool_key(name, &Value::Null).as_deref() == Some(GRAPH_TOOL)
+    });
+    if graphed || first_edit_reminded(db, project, id)? {
+        return Ok(None);
+    }
+    send_first_edit(db, project, id, now).map(Some)
+}
+
+/// Whether an agent got its FirstEdit reminder, by the Engine note keyed by the agent.
+/// Takes the database, the project and the agent. Returns the answer.
+fn first_edit_reminded(
+    db: &Connection,
+    project: &ProjectId,
+    id: AgentId,
+) -> Result<bool, EngineError> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM coord_messages WHERE project=?1
+         AND from_kind='engine' AND to_kind='agent' AND to_agent=?2 AND idem_key=?3)",
+        params![project.as_str(), id, first_edit_key(id)],
+        |found| found.get(0),
+    )
+    .map_err(state)
+}
+
+/// Sends an agent the Engine note with `FIRST_EDIT_REMINDER`, keyed by the agent so it is
+/// sent once. Takes the database, the project, the agent and the time in ms. Returns the
+/// note's id or the refusal.
+fn send_first_edit(
+    db: &Connection,
+    project: &ProjectId,
+    id: AgentId,
+    now: i64,
+) -> Result<MessageId, EngineError> {
+    super::send(
+        db,
+        NewMessage {
+            project: project.clone(),
+            from: Party::Engine,
+            to: Party::Agent(id),
+            kind: MessageKind::Note,
+            question: None,
+            work: None,
+            reply_to: None,
+            body: FIRST_EDIT_REMINDER.to_owned(),
+            idempotency_key: Some(first_edit_key(id)),
+        },
+        now,
+    )
+}
+
+/// The idempotency key of an agent's FirstEdit reminder. Takes the agent. Returns the key.
+fn first_edit_key(id: AgentId) -> String {
+    format!("{NUDGE_KEY}first_edit-{id}")
 }
 
 #[cfg(all(test, unix))]

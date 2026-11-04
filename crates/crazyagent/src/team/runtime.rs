@@ -3375,8 +3375,9 @@ impl TeamRuntime {
     /// refused on an earlier tick, under the pane pins of the socket it replaces, also kept
     /// across a refused bind, logging only a change; then serves each bound socket once,
     /// whether or not the lead has the team tool, so its hooks and monitors learn their pane
-    /// and who the engine's rows put there, and its team servers get their calls named.
-    /// Takes the project.
+    /// and who the engine's rows put there, its teammates' hooks and monitors get their relay
+    /// requests answered for their own pane (relay over the caller socket, OQ-7 B), and its
+    /// team servers get their calls named. Takes the project.
     #[cfg(unix)]
     fn tend_callers(&mut self, project: &ProjectId) {
         let workers = &self.workers;
@@ -3394,7 +3395,7 @@ impl TeamRuntime {
                 Some(Some(callers)) if callers.intact() => continue,
                 Some(Some(callers)) => (Some(true), callers.pins()),
                 Some(None) => (Some(false), self.caller_pins.remove(id).unwrap_or_default()),
-                None if self.stored_mode(*id).as_deref()
+                None if self.stored_mode(*id).ok().flatten().as_deref()
                     == Some(crate::coord::settings::SubagentMode::Native.as_str()) =>
                 {
                     (None, Vec::new())
@@ -3427,6 +3428,17 @@ impl TeamRuntime {
                 callers.serve(
                     &mut || listed_panes(host, lead.as_ref()),
                     &mut |pane, pid| pane_whom(connection, host, project, id, (pane, pid)),
+                    &mut |pane, _, request, out| {
+                        let _ = crate::coord::relay::answer(
+                            connection,
+                            project,
+                            id,
+                            pane,
+                            request,
+                            out,
+                            now_ms(),
+                        );
+                    },
                 );
             }
         }
@@ -3434,10 +3446,12 @@ impl TeamRuntime {
 
     /// Runs the Claude Code relay (K2a) of each running Claude agent of a project whose home
     /// holds the relay plugin: delivers its and its native teammates' messages through the
-    /// mailbox, applies their reported activity and waits, answers their overlap questions
-    /// and, at most once each `events::SCAN_EVERY` per project, marks read receipts from
-    /// their transcripts. A relay that fails is skipped until the next tick, like the
-    /// agents' team calls. Takes the project.
+    /// mailbox, split into the lead's part and its teammates' for a native lead, applies
+    /// their reported activity and waits, answers their overlap questions and, at most once
+    /// each `events::SCAN_EVERY` per project, marks read receipts from their transcripts. A
+    /// relay that fails is skipped until the next tick, like the agents' team calls, and so
+    /// is one whose agent's stored mode cannot be read, never served in the single layout a
+    /// native lead's teammates could write into. Takes the project.
     fn serve_relays(&mut self, project: &ProjectId) {
         let now = Instant::now();
         let receipts = self
@@ -3464,12 +3478,23 @@ impl TeamRuntime {
             if !crate::coord::relay::installed(&home) {
                 continue;
             }
+            let layout = match self.stored_mode(id) {
+                Ok(mode)
+                    if mode.as_deref()
+                        == Some(crate::coord::settings::SubagentMode::Native.as_str()) =>
+                {
+                    crate::coord::relay::Layout::Split
+                }
+                Ok(_) => crate::coord::relay::Layout::Single,
+                Err(_) => continue,
+            };
             let _ = crate::coord::relay::serve(
                 &self.connection,
                 project,
                 id,
                 &home,
                 &self.mailbox(id),
+                layout,
                 receipts,
                 now_ms(),
             );
@@ -4149,9 +4174,9 @@ impl TeamRuntime {
                         && !w.stopping
                         && !paused.contains(&w.connection)
                         && pin.map_or(w.parent == parent, |pin| pin == **id)
-                        && mode
-                            .as_deref()
-                            .is_none_or(|mode| self.stored_mode(**id).as_deref() == Some(mode))
+                        && mode.as_deref().is_none_or(|mode| {
+                            self.stored_mode(**id).ok().flatten().as_deref() == Some(mode)
+                        })
                 })
                 .map(|(id, _)| *id);
             let mut woken_fresh = false;
@@ -5183,17 +5208,16 @@ impl TeamRuntime {
         super::caller::Callers::bind(&socket, pinned)
     }
 
-    /// The sub-agent mode name stored on an agent's row, if any. Takes the agent. Returns
-    /// the name, or None for a row without one or a failed read.
-    fn stored_mode(&self, id: i64) -> Option<String> {
+    /// The sub-agent mode name stored on an agent's row. Takes the agent. Returns the name,
+    /// None for a row without one, or the SQLite failure.
+    fn stored_mode(&self, id: i64) -> Result<Option<String>, EngineError> {
         self.connection
             .query_row("SELECT mode FROM team_agents WHERE id=?1", [id], |row| {
                 row.get::<_, Option<String>>(0)
             })
             .optional()
-            .ok()
-            .flatten()
-            .flatten()
+            .map(Option::flatten)
+            .map_err(error)
     }
 
     /// Tells whether a team agent was started by a lead agent rather than by the master,
@@ -5953,7 +5977,7 @@ impl TeamRuntime {
         }
         let live = self.live_master(&stored.project_id, role, launch);
         let agent_tools = role == AgentRole::Sub && tools && self.delegation_tool.is_some();
-        if (role == AgentRole::Master && tools) || agent_tools {
+        if (role == AgentRole::Master && tools) || agent_tools || native {
             private_directory(&tmp.join(tool::MAILBOX_FOLDER)).map_err(|e| {
                 with_code("the master's tool mailbox could not be made", Some(&e.0))
             })?;
