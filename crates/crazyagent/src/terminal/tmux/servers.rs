@@ -1,9 +1,9 @@
 use super::super::teammates_socket;
 use super::super::{
     AgentId, Host, HostError, OWN_SERVER_UNAVAILABLE, PANES_LISTED_MAX, PaneInfo, PaneRef,
-    TerminalStream, failure,
+    TEAMMATES_SERVER_ENDED, TerminalStream, failure,
 };
-use super::{Tmux, harness_socket, user};
+use super::{ServerPin, Tmux, harness_socket, user};
 use crate::harnesses::interactive::InteractiveCommand;
 use std::collections::BTreeMap;
 use std::os::unix::fs::{FileTypeExt, MetadataExt};
@@ -34,6 +34,7 @@ pub struct Servers {
     leads: Mutex<BTreeMap<AgentId, Arc<Tmux>>>,
     mates: Mutex<BTreeMap<AgentId, Arc<Tmux>>>,
     members: Mutex<BTreeMap<AgentId, AgentId>>,
+    pins: Mutex<BTreeMap<AgentId, Arc<ServerPin>>>,
 }
 
 /// Whether a lead's own socket is a live socket of this user, read without following a link.
@@ -115,6 +116,7 @@ impl Servers {
             leads: Mutex::new(BTreeMap::new()),
             mates: Mutex::new(BTreeMap::new()),
             members: Mutex::new(BTreeMap::new()),
+            pins: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -185,10 +187,48 @@ impl Servers {
             socket,
             &profile_of(&self.root, lead)?,
             &teammates_profile_of(&self.root, lead)?,
+            self.pin(lead, socket)?,
         )?);
         mates.insert(lead.clone(), server.clone());
         assert!(mates.len() <= LEADS_KEPT_MAX);
         Ok(server)
+    }
+
+    /// The pin a native lead's teammates' server pid is kept in for the socket its latest
+    /// start named (PLC c): one per socket while the engine runs, kept across the clients it
+    /// opens and drops there, so a server under another pid is refused even after a client
+    /// was dropped while none listened; a new socket gets a new pin. Each pin reads and keeps
+    /// its pid in a record on disk, so a pin made again after a restart or a kill holds the
+    /// same pid (PC-L1). Takes the lead and the socket. Returns the pin, or
+    /// `terminal_unavailable` when too many are kept.
+    fn pin(&self, lead: &AgentId, socket: &Path) -> Result<Arc<ServerPin>, HostError> {
+        let mut pins = self
+            .pins
+            .lock()
+            .map_err(|_| failure("terminal_unavailable"))?;
+        if let Some(pin) = pins.get(lead)
+            && pin.socket == socket
+        {
+            return Ok(pin.clone());
+        }
+        pins.remove(lead);
+        if pins.len() >= LEADS_KEPT_MAX {
+            pins.retain(|known, _| {
+                harness_socket(&self.root, known).is_ok_and(|socket| listening(&socket))
+            });
+            if pins.len() >= LEADS_KEPT_MAX {
+                return Err(failure("terminal_unavailable"));
+            }
+        }
+        let pin = Arc::new(ServerPin {
+            root: self.root.clone(),
+            lead: lead.clone(),
+            socket: socket.to_path_buf(),
+            pid: Mutex::new(None),
+        });
+        pins.insert(lead.clone(), pin.clone());
+        assert!(pins.len() <= LEADS_KEPT_MAX);
+        Ok(pin)
     }
 
     /// A native lead's teammates' server when one accepts connections at the socket its
@@ -208,6 +248,20 @@ impl Servers {
         self.mates_host(lead, &socket).map(Some)
     }
 
+    /// The teammates' server a native lead's team panes are on (PLC d): the one its latest
+    /// start named, which must still accept connections, so a pane id read there is never
+    /// resolved on the lead's own server, which numbers its panes from the same `%0`. Takes
+    /// the lead. Returns the server, none for a lead started without one, whose team panes
+    /// are on its own server, or `terminal_teammates_server_ended`.
+    fn team_mates(&self, lead: &AgentId) -> Result<Option<Arc<Tmux>>, HostError> {
+        if teammates_socket(&self.root, lead).is_err() {
+            return Ok(None);
+        }
+        self.mates(lead)?
+            .map(Some)
+            .ok_or_else(|| failure(TEAMMATES_SERVER_ENDED))
+    }
+
     /// Forgets the client hosts of a lead's servers and the teammates adopted under it.
     /// Takes the lead.
     fn forget(&self, lead: &AgentId) {
@@ -219,6 +273,9 @@ impl Servers {
         }
         if let Ok(mut members) = self.members.lock() {
             members.retain(|_, known| known != lead);
+        }
+        if let Ok(mut pins) = self.pins.lock() {
+            pins.remove(lead);
         }
     }
 
@@ -306,18 +363,16 @@ impl Servers {
         }
     }
 
-    /// Runs one call on the server that holds the panes of an agent's window: a native
-    /// lead's teammates' server while it and the lead's own listen, else as [`Self::on`].
+    /// Runs one call on the server that holds the panes of an agent's window: for a lead
+    /// whose own server listens, its [`Self::team_mates`] or its own, else as [`Self::on`].
     /// Takes the agent and the call. Returns the call's result.
     fn on_panes<T>(
         &self,
         agent: &AgentId,
         call: impl FnOnce(&Tmux) -> Result<T, HostError>,
     ) -> Result<T, HostError> {
-        if self.own(agent)?.is_some()
-            && let Some(mates) = self.mates(agent)?
-        {
-            return call(&mates);
+        if let Some(own) = self.own(agent)? {
+            return call(&self.team_mates(agent)?.unwrap_or(own));
         }
         self.on(agent, call)
     }
@@ -430,7 +485,7 @@ impl Host for Servers {
         let own = self
             .own(lead)?
             .ok_or_else(|| failure(OWN_SERVER_UNAVAILABLE))?;
-        let server = self.mates(lead)?.unwrap_or(own);
+        let server = self.team_mates(lead)?.unwrap_or(own);
         if self.own(agent)?.is_some() || self.engine.alive()?.contains(agent) {
             return Err(failure("terminal_agent_running"));
         }
@@ -439,10 +494,11 @@ impl Host for Servers {
     }
 
     fn panes(&self, agent: &AgentId) -> Result<Vec<PaneInfo>, HostError> {
-        if let Some(own) = self.own(agent)?
-            && let Some(mates) = self.mates(agent)?
-        {
-            return lead_panes(&own, &mates, agent);
+        if let Some(own) = self.own(agent)? {
+            return match self.team_mates(agent)? {
+                Some(mates) => lead_panes(&own, &mates, agent),
+                None => own.panes(agent),
+            };
         }
         self.on(agent, |server| server.panes(agent))
     }

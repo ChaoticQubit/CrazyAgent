@@ -24,6 +24,10 @@ const TEAMMATES_NONCE_BYTES: usize = 8;
 #[cfg(unix)]
 const TEAMMATES_NAME_BYTES: usize =
     TEAMMATES_SOCKET_PREFIX.len() + 2 * TEAMMATES_NONCE_BYTES + TEAMMATES_SOCKET_SUFFIX.len();
+/// The most bytes a teammates' server pid record holds: the socket's name, a space and the
+/// ten digits of the largest pid.
+#[cfg(unix)]
+const TEAMMATES_PIN_BYTES_MAX: usize = TEAMMATES_NAME_BYTES + 1 + 10;
 const HARNESS_SOCKET_BYTES_MAX: usize = 104;
 pub const AGENT_ID_BYTES_MAX: usize = 64;
 pub const INPUT_BYTES_MAX: usize = 4096;
@@ -346,6 +350,14 @@ pub trait Host: Send + Sync {
 /// lead's sandbox: Linux, Windows, or a missing tmux.
 pub const OWN_SERVER_UNAVAILABLE: &str = "terminal_own_server_unavailable";
 
+/// The refusal for a team pane call on a native lead whose latest start named a teammates'
+/// server that no longer accepts connections; its pane ids are never read on another server.
+pub const TEAMMATES_SERVER_ENDED: &str = "terminal_teammates_server_ended";
+
+/// The refusal for a native lead's teammates' socket answered by a server under another pid
+/// than the one the engine first reached there (PLC c).
+pub const TEAMMATES_SERVER_REPLACED: &str = "terminal_teammates_server_replaced";
+
 /// A host that starts each agent through `Host::spawn_own_server`, in a tmux server of its
 /// own inside the agent's sandbox; every other call goes to the host unchanged.
 struct OwnServer(Arc<dyn Host>);
@@ -656,8 +668,6 @@ pub fn teammates_socket(engine_root: &Path, lead: &AgentId) -> Result<PathBuf, H
 /// profiles folder must exist. Returns the new path, or a plain code.
 #[cfg(unix)]
 pub fn renew_teammates_socket(engine_root: &Path, lead: &AgentId) -> Result<PathBuf, HostError> {
-    use std::io::Write;
-    use std::os::unix::fs::OpenOptionsExt;
     let id = lead
         .team_agent()
         .ok_or_else(|| failure("terminal_agent_invalid"))?;
@@ -666,7 +676,21 @@ pub fn renew_teammates_socket(engine_root: &Path, lead: &AgentId) -> Result<Path
     let digits: String = nonce.iter().map(|byte| format!("{byte:02x}")).collect();
     let name = format!("{TEAMMATES_SOCKET_PREFIX}{digits}{TEAMMATES_SOCKET_SUFFIX}");
     assert!(teammates_name_valid(&name));
-    let kept = crate::team::runtime::agent_teammates_socket_name(&engine_root.join("team"), id);
+    keep_record(
+        &crate::team::runtime::agent_teammates_socket_name(&engine_root.join("team"), id),
+        &name,
+    )?;
+    lead_temp_socket(engine_root, lead, &name)
+}
+
+/// Writes one engine record in the profiles folder no agent writes, in place of any earlier
+/// one: a staged file only this user reads, renamed over the record so no reader sees part
+/// of it. Takes the record path and its text. Returns Ok, or
+/// `terminal_own_server_unavailable`.
+#[cfg(unix)]
+fn keep_record(kept: &Path, text: &str) -> Result<(), HostError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
     let staging = kept.with_extension(format!("{}.tmp", std::process::id()));
     let written = std::fs::OpenOptions::new()
         .write(true)
@@ -675,15 +699,92 @@ pub fn renew_teammates_socket(engine_root: &Path, lead: &AgentId) -> Result<Path
         .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
         .open(&staging)
         .and_then(|mut file| {
-            file.write_all(name.as_bytes())
+            file.write_all(text.as_bytes())
                 .and_then(|()| file.sync_all())
         })
-        .and_then(|()| std::fs::rename(&staging, &kept));
+        .and_then(|()| std::fs::rename(&staging, kept));
     if written.is_err() {
         let _ = std::fs::remove_file(&staging);
         return Err(failure(OWN_SERVER_UNAVAILABLE));
     }
-    lead_temp_socket(engine_root, lead, &name)
+    Ok(())
+}
+
+/// The pid a native lead's teammates' server at one socket was pinned to (PLC c, PC-L1),
+/// read without following a link from the record beside the socket's name, which outlives
+/// the engine and a kill of the lead. Takes the engine root, the lead and the socket.
+/// Returns the pid, none when no record names this socket, or
+/// `terminal_own_server_unavailable` for a record that is not this user's plain file as
+/// [`keep_teammates_server_pid`] writes one, so a damaged record refuses every server.
+#[cfg(unix)]
+fn teammates_server_pid(
+    engine_root: &Path,
+    lead: &AgentId,
+    socket: &Path,
+) -> Result<Option<u32>, HostError> {
+    use std::os::unix::fs::MetadataExt;
+    let id = lead
+        .team_agent()
+        .ok_or_else(|| failure("terminal_agent_invalid"))?;
+    let kept = crate::team::runtime::agent_teammates_server_pid(&engine_root.join("team"), id);
+    let unavailable = || failure(OWN_SERVER_UNAVAILABLE);
+    let metadata = match std::fs::symlink_metadata(&kept) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(_) => return Err(unavailable()),
+    };
+    let plain = metadata.is_file()
+        && metadata.uid() == rustix::process::getuid().as_raw()
+        && u64::try_from(TEAMMATES_PIN_BYTES_MAX).is_ok_and(|bytes| metadata.len() <= bytes);
+    if !plain {
+        return Err(unavailable());
+    }
+    let text = std::fs::read_to_string(&kept).map_err(|_| unavailable())?;
+    let (name, pid) = text
+        .split_once(' ')
+        .filter(|(name, pid)| {
+            teammates_name_valid(name)
+                && !pid.is_empty()
+                && pid.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        .ok_or_else(unavailable)?;
+    let pid = pid
+        .parse::<u32>()
+        .ok()
+        .filter(|pid| *pid > 0)
+        .ok_or_else(unavailable)?;
+    if socket.file_name().and_then(|kept| kept.to_str()) != Some(name) {
+        return Ok(None);
+    }
+    Ok(Some(pid))
+}
+
+/// Records the pid a native lead's teammates' server at one socket first answered with
+/// (PLC c, PC-L1), beside the socket's name in the engine's profiles folder, in place of
+/// the record of an earlier start's socket. Takes the engine root, the lead, the socket and
+/// the pid. Returns Ok, or `terminal_own_server_unavailable`.
+#[cfg(unix)]
+fn keep_teammates_server_pid(
+    engine_root: &Path,
+    lead: &AgentId,
+    socket: &Path,
+    pid: u32,
+) -> Result<(), HostError> {
+    assert!(pid > 0);
+    let id = lead
+        .team_agent()
+        .ok_or_else(|| failure("terminal_agent_invalid"))?;
+    let name = socket
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| teammates_name_valid(name))
+        .ok_or_else(|| failure(OWN_SERVER_UNAVAILABLE))?;
+    let text = format!("{name} {pid}");
+    assert!(text.len() <= TEAMMATES_PIN_BYTES_MAX);
+    keep_record(
+        &crate::team::runtime::agent_teammates_server_pid(&engine_root.join("team"), id),
+        &text,
+    )
 }
 
 /// Whether a text is a teammates' socket name as [`renew_teammates_socket`] makes one.

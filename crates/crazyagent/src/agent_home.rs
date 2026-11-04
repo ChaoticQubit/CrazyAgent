@@ -356,10 +356,12 @@ fn record_place(data: &Path, kind: &str, home: &Path) -> Result<(PathBuf, String
 /// record text. Output: unit, or a plain code.
 fn write_record(data: &Path, kind: &str, home: &Path, record: &str) -> Result<(), AgentHomeError> {
     let (folder, name) = record_place(data, kind, home)?;
-    let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
-    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
-    match builder.create(&folder) {
+    let created =
+        std::os::unix::fs::DirBuilderExt::mode(&mut fs::DirBuilder::new(), 0o700).create(&folder);
+    #[cfg(not(unix))]
+    let created = fs::DirBuilder::new().create(&folder);
+    match created {
         Err(problem) if problem.kind() != std::io::ErrorKind::AlreadyExists => {
             return Err(failure("process_text_unwritable"));
         }

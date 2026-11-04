@@ -951,8 +951,9 @@ fn a_clone_with_a_huge_file_at_a_tracked_path_is_kept_as_dirty_without_hashing_i
     assert!(case.kept(1) && case.base_known(1));
 }
 
-/// A removed native lead's teammates' profile and the record of its teammates' socket name
-/// go with its own profile (rv-audit TTDL F2), and an agent left in place keeps its own.
+/// A removed native lead's teammates' profile and the records of its teammates' socket name
+/// and server pid go with its own profile (rv-audit TTDL F2, PLC c PC-L1), and an agent left
+/// in place keeps its own.
 #[test]
 fn a_removed_native_lead_takes_its_teammates_profile_and_socket_record_with_it() {
     let case = Case::new();
@@ -962,6 +963,7 @@ fn a_removed_native_lead_takes_its_teammates_profile_and_socket_record_with_it()
         [
             crate::team::runtime::agent_teammates_profile(&case.team, id),
             crate::team::runtime::agent_teammates_socket_name(&case.team, id),
+            crate::team::runtime::agent_teammates_server_pid(&case.team, id),
         ]
     };
     for id in [1, 2] {

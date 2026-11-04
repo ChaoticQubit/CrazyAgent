@@ -647,17 +647,214 @@ pub fn conversation_messages(harness: &str, record: &Path) -> Vec<(Speaker, Stri
     messages.into()
 }
 
-/// Reads one line of a harness conversation record as `conversation_messages` reads it:
-/// a Codex rollout `message` item or Claude Code `user` and `assistant` text. Takes the
-/// catalog harness id and the line. Returns the speaker and text, or none for any other
-/// line, a harness without a reader or a line that is not JSON.
-pub fn record_message(harness: &str, line: &[u8]) -> Option<(Speaker, String)> {
+/// Most bytes of one tool call's input or of one tool's output the session search keeps.
+pub const TOOL_TEXT_BYTES_MAX: usize = 32 * 1024;
+/// Most bytes of a tool value's plain lines made before the cut: the kept bytes and enough
+/// past them that a cut shows, a character's bytes at most.
+const FIELDS_BYTES_MAX: usize = TOOL_TEXT_BYTES_MAX + 4;
+
+/// Reads one line of a harness conversation record for the session search: the messages
+/// `conversation_messages` reads, plus each tool call with its input (Claude Code
+/// `tool_use`, Codex `function_call` and `custom_tool_call`) and each tool's output
+/// (`tool_result`, `function_call_output` and `custom_tool_call_output`), each cut to
+/// `TOOL_TEXT_BYTES_MAX` bytes. Takes the catalog harness id and the line. Returns who said
+/// it ("typed", "agent" or "tool") and the text, or none for any other line, a harness
+/// without a reader or a line that is not JSON.
+pub fn record_message(harness: &str, line: &[u8]) -> Option<(&'static str, String)> {
     let value = serde_json::from_slice::<Value>(line).ok()?;
     match harness {
-        "codex" => codex_message(&value),
-        "claude-code" => claude_message(&value),
+        "codex" => codex_entry(&value),
+        "claude-code" => claude_entry(&value),
         _ => None,
     }
+}
+
+fn speaker_name(speaker: Speaker) -> &'static str {
+    match speaker {
+        Speaker::Input => "typed",
+        Speaker::Agent => "agent",
+    }
+}
+
+fn codex_entry(value: &Value) -> Option<(&'static str, String)> {
+    let payload = &value["payload"];
+    if value["type"] != "response_item" {
+        return None;
+    }
+    match payload["type"].as_str()? {
+        "function_call" | "custom_tool_call" => {
+            let input = match &payload["arguments"] {
+                Value::String(text) => {
+                    serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.clone()))
+                }
+                Value::Null => payload["input"].clone(),
+                other => other.clone(),
+            };
+            let name = payload["name"].as_str().unwrap_or("tool");
+            Some(("agent", tool_call(name, &input)))
+        }
+        "function_call_output" | "custom_tool_call_output" => {
+            let output = match &payload["output"] {
+                Value::String(text) => match serde_json::from_str::<Value>(text) {
+                    Ok(Value::Object(map)) => map
+                        .get("output")
+                        .and_then(Value::as_str)
+                        .unwrap_or(text.as_str())
+                        .to_owned(),
+                    _ => text.clone(),
+                },
+                other => fields(other),
+            };
+            Some(("tool", tool_output(&output)))
+        }
+        _ => codex_message(value).map(|(speaker, text)| (speaker_name(speaker), text)),
+    }
+}
+
+fn claude_entry(value: &Value) -> Option<(&'static str, String)> {
+    let speaker = match value["type"].as_str()? {
+        "user" if value["isMeta"] != true => "typed",
+        "assistant" if value["isApiErrorMessage"] != true => "agent",
+        _ => return None,
+    };
+    let mut texts: Vec<String> = claude_message(value)
+        .map(|(_, text)| text)
+        .into_iter()
+        .collect();
+    let mut output = false;
+    for part in value["message"]["content"].as_array().into_iter().flatten() {
+        match part["type"].as_str() {
+            Some("tool_use") => {
+                texts.push(tool_call(
+                    part["name"].as_str().unwrap_or("tool"),
+                    &part["input"],
+                ));
+            }
+            Some("tool_result") => {
+                output = true;
+                let text = match &part["content"] {
+                    Value::Array(items) => items
+                        .iter()
+                        .filter(|item| item["type"] == "text")
+                        .filter_map(|item| item["text"].as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                    other => fields(other),
+                };
+                texts.push(tool_output(&text));
+            }
+            _ => {}
+        }
+    }
+    (!texts.is_empty()).then(|| (if output { "tool" } else { speaker }, texts.join("\n")))
+}
+
+fn tool_call(name: &str, input: &Value) -> String {
+    format!("Tool call {name}:\n{}", capped(&fields(input)))
+}
+
+fn tool_output(text: &str) -> String {
+    format!("Tool output:\n{}", capped(text))
+}
+
+/// A tool's input or output as plain lines: each field of an object as "name: value", a
+/// list of strings joined by spaces, a string as it is and any other value as compact JSON,
+/// so secret masking reads it line by line and word by word. Only the first
+/// `FIELDS_BYTES_MAX` bytes are made, so a deep or huge value costs about its kept bytes.
+/// Takes the JSON value. Returns the text, longer than `TOOL_TEXT_BYTES_MAX` only when the
+/// whole text is.
+fn fields(value: &Value) -> String {
+    let mut text = String::new();
+    push_fields(value, &mut text);
+    text
+}
+
+/// Appends a tool value's plain lines to `out`, as [`fields`] makes them, stopping once
+/// `out` holds `FIELDS_BYTES_MAX` bytes. Takes the value and the text to extend.
+fn push_fields(value: &Value, out: &mut String) {
+    match value {
+        Value::Null => {}
+        Value::String(text) => push_bounded(out, text),
+        Value::Object(map) => {
+            for (at, (key, value)) in map.iter().enumerate() {
+                if out.len() >= FIELDS_BYTES_MAX {
+                    return;
+                }
+                if at > 0 {
+                    push_bounded(out, "\n");
+                }
+                push_bounded(out, key);
+                push_bounded(out, ": ");
+                push_fields(value, out);
+            }
+        }
+        Value::Array(items) if items.iter().all(Value::is_string) => {
+            for (at, item) in items.iter().filter_map(Value::as_str).enumerate() {
+                if out.len() >= FIELDS_BYTES_MAX {
+                    return;
+                }
+                if at > 0 {
+                    push_bounded(out, " ");
+                }
+                push_bounded(out, item);
+            }
+        }
+        other => {
+            let mut json = Bounded {
+                bytes: Vec::new(),
+                room: FIELDS_BYTES_MAX.saturating_sub(out.len()),
+            };
+            let _ = serde_json::to_writer(&mut json, other);
+            push_bounded(out, &String::from_utf8_lossy(&json.bytes));
+        }
+    }
+}
+
+/// Appends as much of `text` to `out` as fits under `FIELDS_BYTES_MAX` bytes, cut at a
+/// character boundary. Takes the text to extend and the text to add.
+fn push_bounded(out: &mut String, text: &str) {
+    let mut end = text.len().min(FIELDS_BYTES_MAX.saturating_sub(out.len()));
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    out.push_str(&text[..end]);
+}
+
+/// Bytes a JSON value is written into, at most `room` of them; a write past that fails, so
+/// serializing a huge value stops at the bound.
+struct Bounded {
+    bytes: Vec<u8>,
+    room: usize,
+}
+
+impl std::io::Write for Bounded {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        let taken = bytes.len().min(self.room - self.bytes.len());
+        if taken == 0 && !bytes.is_empty() {
+            return Err(std::io::ErrorKind::WriteZero.into());
+        }
+        self.bytes.extend_from_slice(&bytes[..taken]);
+        Ok(taken)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Cuts a tool's text to `TOOL_TEXT_BYTES_MAX` bytes at the last white space before the
+/// bound, so no word and so no secret is split, and marks the cut with "...". Takes the
+/// text. Returns it whole when it fits.
+fn capped(text: &str) -> String {
+    if text.len() <= TOOL_TEXT_BYTES_MAX {
+        return text.to_owned();
+    }
+    let mut end = TOOL_TEXT_BYTES_MAX;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let end = text[..end].rfind(char::is_whitespace).unwrap_or(end);
+    format!("{}...", &text[..end])
 }
 
 fn codex_message(value: &Value) -> Option<(Speaker, String)> {

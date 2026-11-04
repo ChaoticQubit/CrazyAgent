@@ -2226,7 +2226,7 @@ impl TeamView {
     /// Draws the Team view like `draw` without the typing cursor.
     /// Takes the content width, the rows available, the accounts used to name
     /// agents' accounts and the look. Returns the body rows and the help keys.
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub fn rows(
         &self,
         content: usize,

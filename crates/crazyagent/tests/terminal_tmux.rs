@@ -1551,6 +1551,20 @@ impl Drop for Lead {
     }
 }
 
+/// Waits until nothing accepts connections at `socket`, as after kill-server, whose server
+/// ends a moment after the command returns. Takes the socket.
+fn until_refused(socket: &Path) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while crazyagent::spawn_gate::connect_unix_std(socket).is_ok() {
+        assert!(
+            Instant::now() < deadline,
+            "{} still accepts connections",
+            socket.display()
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 fn wait_text(path: &Path) -> String {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -1784,6 +1798,211 @@ fn a_native_lead_and_each_adopted_teammate_name_their_own_first_process() {
     assert_eq!(left, [own_pane, ann_pane.clone()]);
     assert!(process_running(pids[&ann_pane]));
     host.close(&[]).unwrap();
+}
+/// PLC (d): a native lead's team panes live only on the teammates' server its start named.
+/// Its own server numbers its panes on its own, so a teammate pane's id can name a pane the
+/// lead split there; once the teammates' server ends no team pane call goes to the lead's
+/// own server, so that pane is neither listed, typed into nor adopted as a teammate under
+/// the teammate pane's id.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_lead_s_team_pane_calls_never_reach_its_own_server_once_its_teammates_server_ended() {
+    let lead = Lead::new();
+    let root = lead.path();
+    let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
+    let leader = AgentId::team(1).unwrap();
+    let [ann, bob] = [2, 3].map(|id| AgentId::team(id).unwrap());
+    host.spawn_own_server(&leader, &lead.confined("lead$ ", &["/bin/sh"]))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !contains(&host.snapshot(&leader).unwrap().screen, b"lead$") {
+        assert!(Instant::now() < deadline, "the lead's shell never prompted");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let own_out = root.join("own.txt");
+    let own_id = root.join("own-id.txt");
+    let line = format!(
+        "{} -S {} split-window -d -P -F '#{{pane_id}}' 'cat > {}' > {}\n",
+        lead.tmux.display(),
+        lead.socket.display(),
+        own_out.display(),
+        own_id.display()
+    );
+    host.input(&leader, line.as_bytes()).unwrap();
+    let own_split = wait_text(&own_id).trim().to_owned();
+    let mut ann_pane = lead.new_pane(host.as_ref(), &leader, "split-window -d", "sleep 600");
+    for _ in 0..4 {
+        if ann_pane == own_split {
+            break;
+        }
+        ann_pane = lead.new_pane(host.as_ref(), &leader, "split-window -d", "sleep 600");
+    }
+    assert_eq!(
+        ann_pane, own_split,
+        "a teammate pane on the teammates' server has the id of the lead's split on its own"
+    );
+    host.adopt_pane(&ann, &leader, &ann_pane).unwrap();
+
+    let killed = crazyagent::spawn_gate::status(
+        Command::new(&lead.tmux)
+            .arg("-S")
+            .arg(&lead.mates)
+            .arg("kill-server")
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    assert!(killed.success());
+    until_refused(&lead.mates);
+
+    let ended = "terminal_teammates_server_ended";
+    assert_eq!(host.panes(&leader).unwrap_err().0, ended);
+    assert_eq!(
+        host.input_pane(&leader, &ann_pane, b"to-own\n")
+            .unwrap_err()
+            .0,
+        ended
+    );
+    assert_eq!(
+        host.adopt_pane(&bob, &leader, &own_split).unwrap_err().0,
+        ended
+    );
+    let routed = root.join("routed.txt");
+    host.input(
+        &leader,
+        format!("echo lead-$((40 + 2)) > {}\n", routed.display()).as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(wait_text(&routed), "lead-42\n");
+    assert!(
+        !std::fs::read_to_string(&own_out)
+            .unwrap_or_default()
+            .contains("to-own")
+    );
+    host.close(&[]).unwrap();
+}
+
+/// Starts a stand-in tmux server at one of a native lead's sockets, as another process could
+/// once the engine's server there ended, shaped like the engine's: its session and holder
+/// window, whose one pane is tagged as the lead's. Takes the tmux program, the socket and
+/// the lead.
+fn stand_in(tmux: &Path, socket: &Path, lead: &AgentId) {
+    match std::fs::remove_file(socket) {
+        Ok(()) => {}
+        Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound),
+    }
+    let started = crazyagent::spawn_gate::status(
+        Command::new(tmux)
+            .args(["-u", "-f", "/dev/null", "-S"])
+            .arg(socket)
+            .args([
+                "new-session",
+                "-d",
+                "-s",
+                "crazyagent",
+                "-n",
+                "_crazyagent",
+                "cat",
+            ])
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    assert!(started.success());
+    tmux_reply(
+        tmux,
+        socket,
+        &[
+            "set-option",
+            "-p",
+            "-t",
+            "crazyagent:=_crazyagent",
+            "@crazyagent",
+            lead.as_str(),
+        ],
+    );
+}
+
+/// PLC (c): the engine pins a native lead's teammates' server to the pid it first answered
+/// with. Once that server and the lead's own ended, stand-in servers another process started
+/// at both sockets are refused for the lead's team panes: by the same host, though it dropped
+/// its teammates' client while nothing listened there, and by a host opened again on the
+/// same engine root, as after an engine restart, since the pin is kept on disk (PC-L1).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_server_started_at_a_native_lead_s_teammates_socket_after_its_own_ended_is_refused() {
+    let lead = Lead::new();
+    let root = lead.path();
+    let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
+    let leader = AgentId::team(1).unwrap();
+    let command = lead.confined("lead$ ", &["/bin/sh"]);
+    host.spawn_own_server(&leader, &command).unwrap();
+    assert_eq!(host.panes(&leader).unwrap().len(), 1);
+    for socket in [&lead.socket, &lead.mates] {
+        let killed = crazyagent::spawn_gate::status(
+            Command::new(&lead.tmux)
+                .arg("-S")
+                .arg(socket)
+                .arg("kill-server")
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .unwrap();
+        assert!(killed.success());
+        until_refused(socket);
+    }
+    assert_eq!(
+        host.panes(&leader).unwrap_err().0,
+        "terminal_teammates_server_ended",
+        "no server lists the lead's panes while none runs, and the host drops its teammates' client"
+    );
+    for socket in [&lead.socket, &lead.mates] {
+        stand_in(&lead.tmux, socket, &leader);
+    }
+
+    let replaced = "terminal_teammates_server_replaced";
+    assert_eq!(host.panes(&leader).unwrap_err().0, replaced);
+    assert_eq!(
+        host.input_pane(&leader, "%0", b"x\n").unwrap_err().0,
+        replaced
+    );
+    let restarted = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
+    assert_eq!(restarted.panes(&leader).unwrap_err().0, replaced);
+    assert_eq!(
+        restarted.input_pane(&leader, "%0", b"x\n").unwrap_err().0,
+        replaced
+    );
+}
+
+/// PLC (c) PC-L1: a native lead's teammates' server pin outlives the engine's kill of that
+/// lead, which forgets its clients: stand-in servers another process started at both sockets
+/// after the kill are refused for the lead's team panes.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_server_started_at_a_native_lead_s_teammates_socket_after_the_lead_was_killed_is_refused() {
+    let lead = Lead::new();
+    let root = lead.path();
+    let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
+    let leader = AgentId::team(1).unwrap();
+    host.spawn_own_server(&leader, &lead.confined("lead$ ", &["/bin/sh"]))
+        .unwrap();
+    assert_eq!(host.panes(&leader).unwrap().len(), 1);
+    host.kill(&leader).unwrap();
+    for socket in [&lead.socket, &lead.mates] {
+        until_refused(socket);
+        stand_in(&lead.tmux, socket, &leader);
+    }
+    assert_eq!(
+        host.panes(&leader).unwrap_err().0,
+        "terminal_teammates_server_replaced"
+    );
 }
 
 #[test]

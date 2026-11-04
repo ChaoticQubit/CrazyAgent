@@ -11,7 +11,7 @@ use crate::engine::owner::{HostStamp, NativeProfileBinding};
 use crate::harnesses::terminal_session::{PaneRecord, Resume, paste};
 use crate::project_setup::{HarnessSlot, StoredSetup, TeamPlan};
 use crate::protocol::{ConfigId, CredentialRef, Cursor, ProjectId, RequestId};
-use crate::sandbox::policy::{AgentAccess, AgentPolicy};
+use crate::sandbox::policy::{AgentAccess, AgentNetwork, AgentPolicy};
 use crate::team::{AgentRole, TaskSource, TeamAccount, TeamReach};
 use crate::terminal::{AgentId, Host};
 use rusqlite::{Connection, params};
@@ -30,6 +30,7 @@ const PROJECT: &str = "dec-090";
 pub(super) const AGENT: i64 = 1;
 const SIGNED_IN_CLAUDE: &str = "CRAZYAGENT_MANAGED_CLAUDE_PROFILE";
 const SIGNED_IN_CODEX: &str = "CRAZYAGENT_MANAGED_CODEX_PROFILE";
+const SIGNED_IN_CODEX_KEY: &str = "CRAZYAGENT_MANAGED_CODEX_KEY_PROFILE";
 
 /// The owner's signed-in managed profile of a real engine, named by its slot folder in
 /// `CRAZYAGENT_MANAGED_CLAUDE_PROFILE` or `CRAZYAGENT_MANAGED_CODEX_PROFILE`, held through
@@ -52,6 +53,12 @@ impl SignedIn {
     /// The owner's signed-in ChatGPT account for Codex. Output: the held profile.
     pub(crate) fn codex() -> Self {
         Self::open(SIGNED_IN_CODEX, "codex", "a ChatGPT account for Codex")
+    }
+
+    /// The owner's Codex profile signed in with an OpenAI API key, named by
+    /// `CRAZYAGENT_MANAGED_CODEX_KEY_PROFILE`. Output: the held profile.
+    pub(crate) fn codex_api_key() -> Self {
+        Self::open(SIGNED_IN_CODEX_KEY, "codex", "Codex with an OpenAI API key")
     }
 
     /// Opens the slot one variable names and checks it belongs to the expected harness.
@@ -231,7 +238,26 @@ enum Placement {
 
 impl ManagedAgent {
     pub(crate) fn new(harness: &'static str, executable: &Path) -> Self {
-        Self::open(harness, executable, Placement::Child, AgentRole::Sub)
+        Self::open(harness, executable, Placement::Child, AgentRole::Sub, None)
+    }
+
+    /// The same agent in a project whose agents run under the None network (S4b), so the
+    /// runtime gives it a model proxy and a profile that reaches only the proxy. Inputs: the
+    /// launch harness and its executable. Output: the prepared agent.
+    pub(crate) fn with_no_network(harness: &'static str, executable: &Path) -> Self {
+        Self::open(
+            harness,
+            executable,
+            Placement::Child,
+            AgentRole::Sub,
+            Some(AgentNetwork::None),
+        )
+    }
+
+    /// The loopback port of the model proxy the runtime gave this agent, none when it
+    /// reaches its model directly.
+    pub(crate) fn model_proxy(&self) -> Option<u16> {
+        self.plan.proxy.as_ref().map(|proxy| proxy.port())
     }
 
     /// The same agent, or the project's master when `role` says so, with its harness app in
@@ -243,7 +269,7 @@ impl ManagedAgent {
         host: Arc<dyn Host>,
         role: AgentRole,
     ) -> Self {
-        Self::open(harness, executable, Placement::Pane(host), role)
+        Self::open(harness, executable, Placement::Pane(host), role, None)
     }
 
     /// A Claude Code lead the runtime itself plans as a native-mode lead (DEC-104, TTDL): the
@@ -257,6 +283,7 @@ impl ManagedAgent {
             executable,
             Placement::NativeLead,
             AgentRole::Sub,
+            None,
         )
     }
 
@@ -265,6 +292,7 @@ impl ManagedAgent {
         executable: &Path,
         placement: Placement,
         role: AgentRole,
+        network: Option<AgentNetwork>,
     ) -> Self {
         let native = matches!(placement, Placement::NativeLead);
         let root = tempfile::Builder::new()
@@ -331,6 +359,18 @@ impl ManagedAgent {
                 &setup.project_id,
                 HarnessKind::ClaudeCode,
                 SubagentMode::Native,
+            )
+            .unwrap();
+        }
+        if let Some(network) = network {
+            crate::sandbox::policy::save(
+                &connection,
+                PROJECT,
+                &AgentPolicy {
+                    access: AgentAccess::Sandboxed,
+                    network,
+                    ..AgentPolicy::default()
+                },
             )
             .unwrap();
         }
@@ -588,6 +628,23 @@ impl ManagedAgent {
         finished.unwrap_or_else(|| panic!("the turn never finished: {problem:?}"))
     }
 
+    /// The instructions the runtime's launch context gives this agent with tools on, which a
+    /// Codex launch writes as `developer_instructions` in its home's `config.toml`. Input:
+    /// none. Output: the text.
+    pub(super) fn instructions(&self) -> String {
+        self.runtime
+            .context(
+                &ProjectId::new(PROJECT).unwrap(),
+                AGENT,
+                self.role,
+                true,
+                crate::agent_git::Layout::Linked,
+            )
+            .unwrap()
+            .instructions()
+            .to_owned()
+    }
+
     /// Checks that the runtime planned this agent as a native-mode lead (DEC-104), as only
     /// [`Self::engine_native_lead`] prepares one: its teammates' profile installed, their
     /// server named and its pane on its own server of the engine's terminal host. Input:
@@ -708,6 +765,8 @@ impl ManagedAgent {
             }),
             access: crate::sandbox::policy::AgentAccess::Sandboxed,
             toolchains: Some(Vec::new()),
+            network: crate::sandbox::policy::AgentNetwork::Open,
+            proxy: None,
         };
         let (orders, ordered) = channel();
         let (reports, reported) = channel();

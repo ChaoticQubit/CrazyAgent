@@ -295,6 +295,7 @@ impl TerminalSession {
             .map(|record| PaneRecord {
                 resumed,
                 context: installed.as_ref().and_then(Installed::files).cloned(),
+                proxy: installed.as_ref().and_then(Installed::model_proxy),
                 ..record
             }),
             _key: key,

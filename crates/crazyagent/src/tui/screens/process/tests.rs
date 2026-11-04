@@ -931,8 +931,8 @@ fn each_import_from_file_refusal_reads_as_a_plain_sentence_and_keeps_the_editor(
 /// nothing, a Codex sub-agent that edited with no declared work, queried the graph twice,
 /// ran one context-mode call and read the tdd skill and a skill the project does not
 /// enable, and was reminded of its flag with the project's nudges turned on, and a newer
-/// agent whose launch fires no hooks. Input: the project. Output: the view and the master,
-/// sub-agent and hookless ids.
+/// agent whose launch fires no hooks that edited and read the tdd skill, reminded the same
+/// way. Input: the project. Output: the view and the master, sub-agent and hookless ids.
 fn adoption_read(project: &ProjectId) -> (Adoption, i64, i64, i64) {
     const NOW: i64 = 1_800_000_000_000;
     let root = tempfile::tempdir().unwrap();
@@ -973,6 +973,9 @@ fn adoption_read(project: &ProjectId) -> (Adoption, i64, i64, i64) {
         "skill:other-one",
     ] {
         crate::coord::record_tool(&db, sub, tool, NOW).unwrap();
+    }
+    for tool in ["Edit", "Skill", "skill:tdd"] {
+        crate::coord::record_tool(&db, hookless, tool, NOW).unwrap();
     }
     let nudges = crate::coord::settings::CoordSettings {
         nudges: crate::coord::settings::Nudges::TenMinutes,
@@ -1047,9 +1050,20 @@ fn a_project_page_shows_workflow_adoption_after_its_settings() {
     let master_row = at(&format!("#{master} master claude-code"));
     assert!(heading < hookless_row && hookless_row < sub_row && sub_row < master_row);
     assert!(
-        rows[hookless_row + 1].contains("Counts and flags unavailable for this account kind"),
+        rows[hookless_row + 1].contains(
+            "start_work 0  inspect_work 0  update_work 0  transfer_work 0  finish_work 0  ctx_* 0  graphify 0  Skill 1"
+        ),
+        "an agent without hooks shows its counts (OQ-8):\n{shown}"
+    );
+    assert!(
+        rows[hookless_row + 2].contains("graphify 0  ctx_* 0  Skills:  tdd 1  zeta 0"),
         "{shown}"
     );
+    assert!(
+        rows[hookless_row + 3].contains("Edits without start_work, reminded"),
+        "an agent without hooks shows its flag, reminded under the 10-minute nudges:\n{shown}"
+    );
+    assert!(!shown.contains("unavailable"), "{shown}");
     assert!(
         rows[sub_row + 1].contains(
             "start_work 0  inspect_work 0  update_work 0  transfer_work 0  finish_work 0  ctx_* 1  graphify 2  Skill 1"

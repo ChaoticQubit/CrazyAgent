@@ -1,21 +1,25 @@
 use super::AgentKind;
 use super::clone;
 use super::flow::{
-    check_places, clone_branch, drop_branch, hold, holds_only, holds_only_except, open_agent,
-    set_engine_ref, shared,
+    agent_branch, check_places, clone_branch, drop_branch, hold, holds_only, holds_only_except,
+    linked_git_dir, open_agent, set_engine_ref, shared,
 };
 use super::git::{Repo, failure};
 use super::store;
 use crate::agent_git::{self, Layout};
 use crate::engine::EngineError;
 use rusqlite::{Connection, params};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 const REMOVE_OUTPUT_BYTES_MAX: usize = 4096;
 const TIP_LISTING_BYTES_MAX: usize = 64 * 1024 * 1024;
 
 fn unavailable(_: impl std::fmt::Display) -> EngineError {
     failure("changes_unavailable")
+}
+
+fn invalid() -> EngineError {
+    failure("changes_workspace_invalid")
 }
 
 /// What the engine's own fetch read from an agent's clone: its branch tip with each
@@ -126,6 +130,97 @@ fn teammates_landed(
         }
     }
     Ok(None)
+}
+
+/// Names the native teammates of a harness that work in their own worktree on their own
+/// branch (DEC-111 Q17, OP-9b): each `<worktree>/.worktrees/<name>` its clone's git, or for
+/// a linked worktree the project repository's git, records checked out on
+/// `<task branch>--<name>`, read as data with no git run. Inputs: the store, the worktree
+/// and its git folder. Output: the names, or the code that kept them from being read.
+pub(super) fn own_teammates(
+    db: &Connection,
+    worktree: &Path,
+    git_dir: &Path,
+) -> Result<Vec<String>, EngineError> {
+    let (branch, teammates) = if git_dir == agent_git::git_dir(worktree) {
+        let branch = clone_branch(db, worktree)?;
+        let teammates = clone::teammates(worktree, &branch)?;
+        (branch, teammates)
+    } else {
+        let repository = linked_repository(git_dir)?;
+        if check_places(repository, worktree, git_dir)? != Layout::Linked {
+            return Ok(Vec::new());
+        }
+        let branch = agent_branch(db, worktree, Layout::Linked)?.ok_or_else(invalid)?;
+        let teammates = clone::linked_teammates(repository, worktree, &branch)?;
+        (branch, teammates)
+    };
+    let named = teammates
+        .into_iter()
+        .filter_map(|teammate| {
+            let name = teammate.folder.file_name()?.to_str()?.to_owned();
+            match &teammate.head {
+                clone::TeammateHead::Branch(head)
+                    if agent_git::is_teammates_own_branch(&branch, &name, head) =>
+                {
+                    Some(name)
+                }
+                _ => None,
+            }
+        })
+        .collect();
+    Ok(named)
+}
+
+/// The linked worktree and git folder of one native teammate of a linked lead that works in
+/// its own worktree on its own branch (OP-9b), read as data with no git run. Inputs: the
+/// store, the lead's worktree and git folder and the teammate's name. Output: the
+/// teammate's worktree and git folder, None for a lead in its own clone or a teammate with
+/// no worktree on its own branch, or the code that kept them from being read.
+pub(super) fn linked_teammate_place(
+    db: &Connection,
+    worktree: &Path,
+    git_dir: &Path,
+    name: &str,
+) -> Result<Option<(PathBuf, PathBuf)>, EngineError> {
+    if git_dir == agent_git::git_dir(worktree) {
+        return Ok(None);
+    }
+    let repository = linked_repository(git_dir)?;
+    if check_places(repository, worktree, git_dir)? != Layout::Linked {
+        return Ok(None);
+    }
+    let branch = agent_branch(db, worktree, Layout::Linked)?.ok_or_else(invalid)?;
+    let folder = worktree.join(agent_git::TEAMMATES_FOLDER).join(name);
+    let own = clone::linked_teammates(repository, worktree, &branch)?
+        .into_iter()
+        .any(|teammate| {
+            teammate.folder == folder
+                && matches!(&teammate.head, clone::TeammateHead::Branch(head)
+                    if agent_git::is_teammates_own_branch(&branch, name, head))
+        });
+    if !own {
+        return Ok(None);
+    }
+    let own_git = linked_git_dir(&folder)?;
+    if check_places(repository, &folder, &own_git)? != Layout::Linked {
+        return Err(invalid());
+    }
+    Ok(Some((folder, own_git)))
+}
+
+/// The owner checkout root a linked worktree's git folder sits in,
+/// `<repository>/.git/worktrees/<record>`, read from the path alone. Input: the git
+/// folder. Output: the root, or `changes_workspace_invalid` for any other path.
+pub(super) fn linked_repository(git_dir: &Path) -> Result<&Path, EngineError> {
+    let records = git_dir.parent().ok_or_else(invalid)?;
+    let metadata = records.parent().ok_or_else(invalid)?;
+    if records.file_name() != Some(std::ffi::OsStr::new("worktrees"))
+        || metadata.file_name() != Some(std::ffi::OsStr::new(".git"))
+    {
+        return Err(invalid());
+    }
+    metadata.parent().ok_or_else(invalid)
 }
 
 /// Names the teammate branches and teammate worktrees of a harness's clone whose work is
@@ -312,15 +407,7 @@ fn check(
     if store::open_for(db, text)?.is_some() {
         return Ok(Some("cleanup_changes_open"));
     }
-    let held: i64 = db
-        .query_row(
-            "SELECT COUNT(*) FROM landing_change_sets WHERE worktree=?1 AND (intent IS NOT NULL
-             OR (state='discarded' AND pruned=0 AND restorable_until_ms>?2))",
-            params![text, i64::try_from(now).map_err(unavailable)?],
-            |row| row.get(0),
-        )
-        .map_err(unavailable)?;
-    if held > 0 {
+    if held_sets(db, text, now)? {
         return Ok(Some("cleanup_changes_restorable"));
     }
     let layout = match check_places(repository, worktree, git_dir) {
@@ -373,6 +460,11 @@ fn check(
         }
         Err(_) => None,
     };
+    if let Some(head) = &head
+        && let Some(code) = linked_teammates_landed(db, repository, worktree, head, now)?
+    {
+        return Ok(Some(code));
+    }
     match (head, store::base_of(db, text)?) {
         (Some(head), Some(base)) if head == base => match holds_only(&agent.repo, &head) {
             Err(refused) if refused.0 == "changes_git_failed" => {
@@ -382,6 +474,77 @@ fn check(
         },
         _ => Ok(Some("cleanup_commits_unlanded")),
     }
+}
+
+/// Tells whether a worktree's change sets still hold work the owner can get back: one with
+/// an owner action in flight, or one discarded and still restorable. Inputs: the store,
+/// the worktree path and the time now. Output: the answer.
+fn held_sets(db: &Connection, worktree: &str, now: u64) -> Result<bool, EngineError> {
+    let held: i64 = db
+        .query_row(
+            "SELECT COUNT(*) FROM landing_change_sets WHERE worktree=?1 AND (intent IS NOT NULL
+             OR (state='discarded' AND pruned=0 AND restorable_until_ms>?2))",
+            params![worktree, i64::try_from(now).map_err(unavailable)?],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    Ok(held > 0)
+}
+
+/// Says whether a linked lead's worktree can go without losing its native teammates' work
+/// (OP9B-S1), whatever ignore rule hides its teammates' folder from the lead's own git:
+/// each teammate worktree has no open or restorable change set, stands at the base its
+/// last landed set left or, never recorded, at a commit in the lead's head, and holds
+/// nothing uncommitted. The folder is read as data and each teammate worktree with the
+/// engine's own git. Inputs: the store, the owner checkout root, the lead's worktree, its
+/// head and the time now. Output: None when nothing would be lost, else the cleanup code.
+fn linked_teammates_landed(
+    db: &Connection,
+    repository: &Path,
+    worktree: &Path,
+    lead_head: &str,
+    now: u64,
+) -> Result<Option<&'static str>, EngineError> {
+    let Some(branch) = agent_branch(db, worktree, Layout::Linked)? else {
+        return Ok(Some("cleanup_worktree_invalid"));
+    };
+    let Ok(teammates) = clone::linked_teammates(repository, worktree, &branch) else {
+        return Ok(Some("cleanup_worktree_unreadable"));
+    };
+    for teammate in &teammates {
+        let Some(text) = teammate.folder.to_str() else {
+            return Ok(Some("cleanup_worktree_invalid"));
+        };
+        if store::open_for(db, text)?.is_some() {
+            return Ok(Some("cleanup_changes_open"));
+        }
+        if held_sets(db, text, now)? {
+            return Ok(Some("cleanup_changes_restorable"));
+        }
+        let Ok(own_git) = linked_git_dir(&teammate.folder) else {
+            return Ok(Some("cleanup_worktree_unreadable"));
+        };
+        let (agent, head) =
+            match open_agent(db, AgentKind::Sub, repository, &teammate.folder, &own_git)
+                .and_then(|agent| agent.head().map(|head| (agent, head)))
+            {
+                Ok(opened) => opened,
+                Err(_) => return Ok(Some("cleanup_worktree_unreadable")),
+            };
+        let landed = match store::base_of(db, text)? {
+            Some(base) => base == head,
+            None => shared(repository)?.test(&["merge-base", "--is-ancestor", &head, lead_head])?,
+        };
+        if !landed {
+            return Ok(Some("cleanup_commits_unlanded"));
+        }
+        match holds_only(&agent.repo, &head) {
+            Ok(true) => {}
+            Ok(false) => return Ok(Some("cleanup_worktree_dirty")),
+            Err(_) => return Ok(Some("cleanup_worktree_unreadable")),
+        }
+    }
+    Ok(None)
 }
 
 /// Removes an agent worktree with git, never forcing it, while holding the repository so

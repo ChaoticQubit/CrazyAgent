@@ -714,8 +714,8 @@ export function setProjectAgentPolicy(id: string, policy: AgentPolicy, generatio
 
 export type TeamRole = "master" | "sub" | "teammate";
 
-/** What the screens show in place of receipts and adoption counts for an agent whose launch
- * fires no hooks (DEC-104 bare-hooks), instead of zeros or a blank. */
+/** What the screens show in place of receipts for an agent whose launch fires no hooks
+ * (DEC-104 bare-hooks), instead of zeros or a blank. */
 export const HOOKLESS_WORDS = "unavailable for this account kind";
 export type TeamAgentStatus = "starting" | "idle" | "working" | "stopped" | "failed";
 export type TeamTaskStatus = "queued" | "needs_pool" | "running" | "done" | "failed" | "cancelled";

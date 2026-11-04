@@ -1288,7 +1288,8 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 parent INTEGER,
                 pane TEXT,
                 mode TEXT,
-                hookless INTEGER NOT NULL DEFAULT 0
+                hookless INTEGER NOT NULL DEFAULT 0,
+                pane_pid INTEGER
             );
             CREATE INDEX IF NOT EXISTS team_agents_project ON team_agents(project, status);
             CREATE TABLE IF NOT EXISTS team_tasks (
@@ -3221,8 +3222,9 @@ const _: () = assert!(DEPTH_WALK_MAX > DEPTH_CHOICES[2] as i64);
 /// default: `team_agents.pane` (a native teammate's tmux pane id), `team_agents.mode` (the
 /// sub-agent mode a lead started in, DEC-104), `team_tasks.mode` (the mode the master asked
 /// for a lead's task), `team_agents.hookless` (1 when the agent's launch fires no hooks,
-/// DEC-104 bare-hooks) and `team_task_pins.held` (1 when a hold pinned the task, not its
-/// own purpose). Runs on every open and adds each column once. Takes the engine
+/// DEC-104 bare-hooks), `team_agents.pane_pid` (the pane process a native teammate was
+/// first named by, PLC (b)) and `team_task_pins.held` (1 when a hold pinned the task, not
+/// its own purpose). Runs on every open and adds each column once. Takes the engine
 /// connection. Returns any SQLite failure.
 fn add_late_columns(connection: &Connection) -> Result<(), EngineError> {
     for (table, column, definition) in [
@@ -3230,6 +3232,7 @@ fn add_late_columns(connection: &Connection) -> Result<(), EngineError> {
         ("team_agents", "mode", "TEXT"),
         ("team_tasks", "mode", "TEXT"),
         ("team_agents", "hookless", "INTEGER NOT NULL DEFAULT 0"),
+        ("team_agents", "pane_pid", "INTEGER"),
         ("team_task_pins", "held", "INTEGER NOT NULL DEFAULT 0"),
     ] {
         let present: bool = connection
@@ -3298,6 +3301,7 @@ pub(crate) fn lead_mode(
 /// each task and agent records the lead that started it, NULL for the master's own. A
 /// table the engine has not opened yet gets the column from `initialize`. Takes the
 /// upgrade transaction. Returns any SQLite failure.
+#[cfg(unix)]
 pub(crate) fn add_parent_columns(tx: &Transaction<'_>) -> Result<(), EngineError> {
     for table in ["team_tasks", "team_agents"] {
         let exists: bool = tx

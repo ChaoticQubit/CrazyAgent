@@ -13,9 +13,8 @@ use rustix::fs::{FlockOperation, Mode, OFlags};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::fs::{self, File};
-use std::io::Read;
 #[cfg(unix)]
-use std::io::Write;
+use std::io::{Read, Write};
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
@@ -76,6 +75,9 @@ const SKILL_FILE_USE: &str = "To use one, read its SKILL.md at the path shown an
 const FOLDER_BYTES_MAX: usize = 1024;
 const HEADER_TITLE: &str = "# Project context from CrazyAgent\n\n";
 pub(crate) const STATE: &str = "crazyagent";
+/// The folder under a Codex home's `skills` where Codex 0.164.0 installs its own system
+/// skills at each start.
+pub(crate) const CODEX_SYSTEM_SKILLS: &str = ".system";
 const CONTEXT_MODE_SERVER: &str = "context-mode";
 const CONTEXT_MODE_DECLARED: &str = "plugin_context-mode_context-mode";
 const TEAMMATE_COMMAND: &str = "teammate";
@@ -132,8 +134,9 @@ fn skill_unavailable<E>(_: E) -> LaunchError {
 /// MCP servers with their secret values, the tools the owner switched off on each server,
 /// one bounded startup instruction holding the project brief, an index of its context files
 /// and the owner-approved memories, whether a headless Claude run keeps its transcript,
-/// whether a Claude Code lead runs its own agent team, and the engine executable and mailbox
-/// of a team agent's message relay.
+/// whether a Claude Code lead runs its own agent team, the engine executable and mailbox
+/// of a team agent's message relay, and the loopback port of the model proxy a team agent
+/// under the None network reaches its model through (S4b).
 #[derive(Debug)]
 pub struct AgentContext {
     plugins: LaunchPlugins,
@@ -143,6 +146,7 @@ pub struct AgentContext {
     off_tools: Vec<(String, Vec<String>)>,
     native_team: Option<(PathBuf, PathBuf)>,
     relay: Option<(PathBuf, PathBuf)>,
+    model_proxy: Option<u16>,
 }
 
 /// The project whose app and project instructions and instruction files each launch reads
@@ -155,8 +159,8 @@ struct Process {
 
 /// The files one launch wrote into its agent home, whether a headless Claude run keeps its
 /// transcript, whether its generated plugin holds hooks, the Claude Code tool names the
-/// owner switched off, whether the lead runs its own agent team, and the lock that keeps a
-/// second launch out of that home. Dropping it deletes every file holding a secret and the
+/// owner switched off, whether the lead runs its own agent team, the model proxy port its
+/// variables name, and the lock that keeps a second launch out of that home. Dropping it deletes every file holding a secret and the
 /// copied skills and hooks, unless `keep` left them to a pane that still runs.
 #[derive(Debug)]
 pub struct Installed {
@@ -167,6 +171,7 @@ pub struct Installed {
     relay: bool,
     denied: Vec<String>,
     native: Option<NativeTeam>,
+    model_proxy: Option<u16>,
     _lock: File,
 }
 
@@ -228,6 +233,7 @@ pub fn for_project(
         off_tools,
         native_team: None,
         relay: None,
+        model_proxy: None,
     })
 }
 
@@ -449,6 +455,29 @@ pub fn team_tools_section(off: &[String]) -> String {
     section
 }
 
+/// Renders the section that names the memory tools of a team master running without its
+/// live terminal, less the ones switched off, and says that only they keep what later
+/// sessions and the owner see. Takes the tools left out. Returns the markdown, empty when
+/// both are off.
+fn memory_tools_section(off: &[String]) -> String {
+    let lines: String = crate::coord::tool_switches::BUILTIN_TOOLS
+        .iter()
+        .filter(|(name, _)| {
+            crate::team::tool::MEMORY_TOOLS.contains(name) && !off.iter().any(|tool| tool == name)
+        })
+        .map(|(name, line)| format!("- {name}: {line}\n"))
+        .collect();
+    if lines.is_empty() {
+        return String::new();
+    }
+    let section = format!(
+        "\n## Memory tools\n\nYour memory tools are in the `{}` MCP server. Keep what later sessions should know with remember: the owner sees it in Project memory, and memory you keep anywhere else is never seen there:\n{lines}",
+        crate::team::tool::SERVER_NAME
+    );
+    assert!(section.len() <= TOOLS_SECTION_BYTES_MAX);
+    section
+}
+
 fn engine_root(connection: &Connection) -> Result<PathBuf, LaunchError> {
     Ok(connection
         .path()
@@ -543,6 +572,16 @@ impl AgentContext {
         self
     }
 
+    /// Sends a team agent's model traffic through its model proxy (S4b): its launch gets
+    /// `HTTPS_PROXY` and `HTTP_PROXY` naming the proxy on 127.0.0.1 and an empty `NO_PROXY`,
+    /// and its pane record keeps the port for a later engine. Input: the proxy's port.
+    /// Output: the context.
+    pub fn with_model_proxy(mut self, port: u16) -> Self {
+        assert_ne!(port, 0);
+        self.model_proxy = Some(port);
+        self
+    }
+
     /// Gives a team agent's Claude Code launch the message relay plugin (DEC-104 K2a), which
     /// delivers its team messages and reports its activity through its mailbox, and which its
     /// native teammates get from it. Other harnesses ignore it. Input: the absolute engine
@@ -552,12 +591,27 @@ impl AgentContext {
         self
     }
 
-    /// Adds the engine's own MCP server that gives a team master with tools on its `delegate` tool.
-    /// Input: the absolute canonical engine executable that serves it and the absolute drop file
-    /// in the master's private temporary folder. Output: the context, or a plain code when a path
-    /// is not plain or an approved server already uses the name.
-    pub fn with_team_tool(self, executable: &Path, drop: &Path) -> Result<Self, LaunchError> {
-        self.with_team_server(executable, crate::team::tool::SERVER_COMMAND, drop, &[])
+    /// Adds the engine's own MCP server that gives a team master with tools on, running
+    /// without its live terminal, its `delegate` tool and its `remember` and `recall` tools,
+    /// answered by the engine through the mailbox folder, and the section that names those
+    /// two. Input: the absolute canonical engine executable that serves it, the absolute drop
+    /// file and mailbox in the master's private temporary folder and the team tools left out.
+    /// Output: the context, or a plain code when a path is not plain or an approved server
+    /// already uses the name.
+    pub fn with_team_tool(
+        self,
+        executable: &Path,
+        drop: &Path,
+        mailbox: &Path,
+        off: &[String],
+    ) -> Result<Self, LaunchError> {
+        self.with_team_server(
+            executable,
+            crate::team::tool::SERVER_COMMAND,
+            &[drop, mailbox],
+            off,
+        )
+        .map(|context| context.with_memory_section(off))
     }
 
     /// Adds the engine's own MCP server that gives a live team master with tools on its team
@@ -574,7 +628,7 @@ impl AgentContext {
         self.with_team_server(
             executable,
             crate::team::tool::LIVE_SERVER_COMMAND,
-            mailbox,
+            &[mailbox],
             off,
         )
         .map(|context| context.with_tools_section(off))
@@ -594,7 +648,7 @@ impl AgentContext {
         self.with_team_server(
             executable,
             crate::team::tool::AGENT_SERVER_COMMAND,
-            mailbox,
+            &[mailbox],
             off,
         )
         .map(|context| context.with_tools_section(off))
@@ -606,11 +660,17 @@ impl AgentContext {
         self
     }
 
+    fn with_memory_section(mut self, off: &[String]) -> Self {
+        self.instructions.push_str(&memory_tools_section(off));
+        assert!(self.instructions.len() <= MASTER_INSTRUCTIONS_BYTES_MAX);
+        self
+    }
+
     fn with_team_server(
         mut self,
         executable: &Path,
         subcommand: &str,
-        drop: &Path,
+        folders: &[&Path],
         off: &[String],
     ) -> Result<Self, LaunchError> {
         if !crate::team::tool::known_tools(off) {
@@ -623,7 +683,14 @@ impl AgentContext {
                 .filter(|text| !text.chars().any(char::is_control))
                 .map(str::to_owned)
         };
-        let (Some(command), Some(drop)) = (plain(executable), plain(drop)) else {
+        let (Some(command), Some(folders)) = (
+            plain(executable),
+            folders
+                .iter()
+                .copied()
+                .map(&plain)
+                .collect::<Option<Vec<String>>>(),
+        ) else {
             return Err(failure("launch_context_team_tool_invalid"));
         };
         let name = crate::team::tool::SERVER_NAME;
@@ -639,8 +706,8 @@ impl AgentContext {
             name: name.into(),
             spec: ServerSpec::Stdio {
                 command,
-                args: [subcommand.to_owned(), drop]
-                    .into_iter()
+                args: std::iter::once(subcommand.to_owned())
+                    .chain(folders)
                     .chain(off.iter().cloned())
                     .collect(),
             },
@@ -745,6 +812,7 @@ impl AgentContext {
             relay: false,
             denied: Vec::new(),
             native: None,
+            model_proxy: self.model_proxy,
             _lock: lock,
         };
         remove(&state);
@@ -876,6 +944,7 @@ impl AgentContext {
         assert!(installed.denied.len() <= DENIED_TOOLS_MAX);
         assert!(installed.denied.is_empty() || (id == "claude-code" && tools));
         assert!(installed.native.is_none() || (id == "claude-code" && tools));
+        assert!(installed.model_proxy.is_none() || tools);
         Ok(installed)
     }
 
@@ -937,6 +1006,12 @@ impl Installed {
         self.native.as_ref()
     }
 
+    /// Names the loopback port of the model proxy this launch's variables point at, none
+    /// for a launch that reaches its model directly.
+    pub fn model_proxy(&self) -> Option<u16> {
+        self.model_proxy
+    }
+
     /// Names where this launch wrote its files, for the record of a pane that may outlive
     /// the engine. Output: the files, none once `keep` left them to the pane.
     pub fn files(&self) -> Option<&InstalledFiles> {
@@ -958,6 +1033,7 @@ impl Installed {
             relay: false,
             denied: Vec::new(),
             native: None,
+            model_proxy: None,
             _lock: lock,
         })
     }
@@ -1381,14 +1457,18 @@ pub fn lock_only(home: &Path) -> Result<Installed, LaunchError> {
         relay: false,
         denied: Vec::new(),
         native: None,
+        model_proxy: None,
         _lock: lock,
     })
 }
 
-/// Removes the Codex skill copies at `<home>/skills/crazyagent` without resolving `skills`
-/// by path, because the agent may have replaced that folder with a link: the copies are
-/// moved up into the verified home through descriptors and removed there. A `skills` that
-/// is not a real folder of this user is left alone. Input: the validated agent home.
+/// Removes the Codex skill copies at `<home>/skills/crazyagent` and Codex's own system
+/// skills at `<home>/skills/.system`, which the agent can write during a run and Codex would
+/// keep while their marker matches, so Codex installs them fresh at its next start (LL2S-1).
+/// It never resolves `skills` by path, because the agent may have replaced that folder with
+/// a link: each entry is moved up into the verified home through descriptors and removed
+/// there. A `skills` that is not a real folder of this user is left alone. Input: the
+/// validated agent home.
 #[cfg(unix)]
 fn remove_copies(home: &Path) {
     let folder = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
@@ -1403,10 +1483,12 @@ fn remove_copies(home: &Path) {
     {
         return;
     }
-    let parked = format!(".{STATE}-skills-{}", std::process::id());
-    remove(&home.join(&parked));
-    if rustix::fs::renameat(&skills, STATE, &parent, parked.as_str()).is_ok() {
+    for (entry, kind) in [(STATE, "skills"), (CODEX_SYSTEM_SKILLS, "system")] {
+        let parked = format!(".{STATE}-{kind}-{}", std::process::id());
         remove(&home.join(&parked));
+        if rustix::fs::renameat(&skills, entry, &parent, parked.as_str()).is_ok() {
+            remove(&home.join(&parked));
+        }
     }
 }
 

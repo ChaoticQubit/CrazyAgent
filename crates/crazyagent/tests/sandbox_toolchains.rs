@@ -913,6 +913,59 @@ fn make_tmp_writes_the_agent_git_once_replaces_a_changed_copy_and_never_follows_
     toolchains::remove_tmp(&case.home).unwrap();
 }
 
+/// A native lead's own temp folder starts empty and private on every start (TPH-2
+/// residual): what an earlier start left is gone, a planted file or link at its name is
+/// replaced by a fresh folder and the link's target keeps its files, and a short temp folder
+/// open to others is refused.
+#[test]
+fn a_native_lead_s_own_temp_folder_starts_empty_and_private_and_never_follows_a_planted_link() {
+    use std::os::unix::fs::MetadataExt;
+    let case = case();
+    let shared = toolchains::make_tmp(&case.home).unwrap();
+    let own = toolchains::fresh_native_lead_tmp(&shared).unwrap();
+    assert_eq!(own, toolchains::native_lead_tmp(&shared));
+    assert_eq!(own.parent(), Some(shared.as_path()));
+    let private = |path: &Path| {
+        let metadata = fs::symlink_metadata(path).unwrap();
+        metadata.is_dir()
+            && !metadata.file_type().is_symlink()
+            && metadata.mode() & 0o777 == 0o700
+            && names(path).is_empty()
+    };
+    assert!(private(&own));
+
+    fs::create_dir(own.join("left")).unwrap();
+    fs::write(own.join("left").join("staged.txt"), "earlier").unwrap();
+    fs::set_permissions(&own, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(toolchains::fresh_native_lead_tmp(&shared).unwrap(), own);
+    assert!(private(&own));
+
+    let elsewhere = case.tmp.join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    fs::write(elsewhere.join("kept.txt"), "kept").unwrap();
+    fs::remove_dir(&own).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &own).unwrap();
+    assert_eq!(toolchains::fresh_native_lead_tmp(&shared).unwrap(), own);
+    assert!(private(&own));
+    assert_eq!(names(&elsewhere), ["kept.txt"]);
+
+    fs::remove_dir(&own).unwrap();
+    fs::write(&own, "planted").unwrap();
+    assert_eq!(toolchains::fresh_native_lead_tmp(&shared).unwrap(), own);
+    assert!(private(&own));
+
+    fs::set_permissions(&shared, fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        toolchains::fresh_native_lead_tmp(&shared)
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::PermissionDenied
+    );
+    assert!(private(&own));
+    fs::set_permissions(&shared, fs::Permissions::from_mode(0o700)).unwrap();
+    toolchains::remove_tmp(&case.home).unwrap();
+}
+
 #[test]
 fn a_sandboxed_harness_runs_git_through_the_agent_copy_without_the_xcrun_shim() {
     let case = case();
@@ -1190,6 +1243,166 @@ fn neither_a_native_lead_nor_its_teammates_bind_block_or_take_the_caller_socket(
     assert_eq!(engine.join().unwrap(), roles.len());
 }
 
+/// A native lead's teammates neither read nor change the lead's part of the relay mailbox,
+/// where the engine keeps the lead's letters, reports, asks and answers: reading a letter,
+/// listing the part, taking a letter by rename, planting an entry, and removing or moving
+/// the part are all refused, and only the roster the engine keeps there is readable. The
+/// same reads, plants and moves spelled in another letter case, and a hard link of a
+/// letter out of the part, are refused too (relay RC-1). The lead reads and takes its own
+/// letters (DEC-111 relay mailbox forgery, C1).
+#[test]
+fn native_teammates_neither_read_nor_change_the_leads_part_of_the_relay_mailbox() {
+    let team = LiveTeam::start();
+    let mailbox = team.case.tmp.join(crazyagent::team::tool::MAILBOX_FOLDER);
+    let part = mailbox.join(crazyagent::coord::relay::LEAD_PART);
+    fs::create_dir(&part).unwrap();
+    fs::set_permissions(&part, fs::Permissions::from_mode(0o700)).unwrap();
+    let letter = part.join(format!("{:032x}.inbox", 5));
+    fs::write(&letter, b"letter for the lead").unwrap();
+    fs::write(part.join("relay.json"), b"{}").unwrap();
+    let (l, r, p) = (
+        quoted(&letter),
+        quoted(&part.join("relay.json")),
+        quoted(&part),
+    );
+    let shown = quoted(&part.join(format!("{:032x}.shown", 5)));
+    let away = quoted(&mailbox.join("away"));
+    let upper = mailbox
+        .join(crazyagent::coord::relay::LEAD_PART.to_uppercase())
+        .join(letter.file_name().unwrap());
+    let mixed = mailbox.join("Lead");
+    let linked = mailbox.join("linked");
+    let calls = team
+        .case
+        .tmp
+        .join(crazyagent::team::tool::MAILBOX_FOLDER.to_uppercase());
+    assert!(
+        upper.is_file() && mixed.is_dir() && calls.is_dir(),
+        "the volume finds the part and the mailbox in any letter case"
+    );
+    let (u, x, k, c) = (
+        quoted(&upper),
+        quoted(&mixed),
+        quoted(&linked),
+        quoted(&calls),
+    );
+    let gone = quoted(&team.case.tmp.join("calls-away"));
+    let probed = team.teammate(&format!(
+        "/bin/cat {l}; echo read=$?\n/bin/cat {r} >/dev/null; echo roster=$?\n/bin/ls {p}; echo list=$?\n/bin/mv {l} {shown}; echo take=$?\n/usr/bin/touch {p}/planted; echo plant=$?\n/bin/rm -r {p}; echo rm=$?\n/bin/mv {p} {away}; echo move=$?\n/bin/cat {u}; echo read_case=$?\n/usr/bin/touch {x}/planted; echo plant_case=$?\n/bin/ln {l} {k}; echo link=$?\n/bin/mv {c} {gone}; echo move_case=$?\n"
+    ));
+    let text = String::from_utf8_lossy(&probed.stdout).into_owned();
+    let errors = String::from_utf8_lossy(&probed.stderr);
+    assert!(
+        !text.contains("letter for the lead"),
+        "a teammate read the lead's letter: {text}"
+    );
+    for name in [
+        "read",
+        "list",
+        "take",
+        "plant",
+        "rm",
+        "move",
+        "read_case",
+        "plant_case",
+        "link",
+        "move_case",
+    ] {
+        assert_ne!(
+            status_of(&text, name),
+            "0",
+            "the teammate's {name} in the lead's part succeeded: {errors}"
+        );
+    }
+    assert_eq!(status_of(&text, "roster"), "0", "{errors}");
+    assert!(
+        letter.is_file()
+            && !part.join("planted").exists()
+            && fs::symlink_metadata(&linked).is_err()
+            && mailbox.is_dir(),
+        "the lead's part is as the engine left it"
+    );
+
+    let lead = team.as_lead(&format!(
+        "/bin/cat {l} >/dev/null; echo read=$?\n/bin/mv {l} {shown}; echo take=$?\n"
+    ));
+    let text = String::from_utf8_lossy(&lead.stdout).into_owned();
+    for name in ["read", "take"] {
+        assert_eq!(
+            status_of(&text, name),
+            "0",
+            "{}",
+            String::from_utf8_lossy(&lead.stderr)
+        );
+    }
+}
+
+#[test]
+fn native_teammates_never_move_the_folders_holding_the_leads_part_of_the_relay_mailbox() {
+    let team = LiveTeam::start();
+    let mailbox = team.case.tmp.join(crazyagent::team::tool::MAILBOX_FOLDER);
+    let part = mailbox.join(crazyagent::coord::relay::LEAD_PART);
+    fs::create_dir(&part).unwrap();
+    fs::set_permissions(&part, fs::Permissions::from_mode(0o700)).unwrap();
+    let letter = part.join(format!("{:032x}.inbox", 5));
+    fs::write(&letter, b"letter for the lead").unwrap();
+    let (m, t) = (quoted(&mailbox), quoted(&team.case.tmp));
+    let shifted = quoted(&team.case.tmp.join("shifted"));
+    let uprooted = quoted(&team.case.project.join("uprooted"));
+    let probed = team.teammate(&format!(
+        "/bin/mv {m} {shifted}; echo shift=$?\n/bin/mv {t} {uprooted}; echo uproot=$?\n"
+    ));
+    let text = String::from_utf8_lossy(&probed.stdout).into_owned();
+    let errors = String::from_utf8_lossy(&probed.stderr);
+    for name in ["shift", "uproot"] {
+        assert_ne!(
+            status_of(&text, name),
+            "0",
+            "the teammate's {name} of a folder holding the lead's part succeeded: {errors}"
+        );
+    }
+    assert!(
+        letter.is_file(),
+        "the lead's letter stays where the engine left it"
+    );
+}
+
+/// A native lead in a project that hides as many folders as a project may save still gets
+/// its teammates' sandbox, which hides the lead's part of the relay mailbox and the lead's
+/// own temp folder besides (relay C1 merged with lead-own-tmp).
+#[test]
+fn a_native_team_starts_in_a_project_hiding_as_many_folders_as_it_may() {
+    let case = case();
+    let tmux = crazyagent::terminal::tmux::installed(&case.project).expect("tmux is installed");
+    let tmp = toolchains::make_tmp(&case.home).unwrap();
+    let mates_home = team_homes(&case.home);
+    let mailbox = case.tmp.join(crazyagent::team::tool::MAILBOX_FOLDER);
+    fs::create_dir(&mailbox).unwrap();
+    fs::set_permissions(&mailbox, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut sandbox = ProjectSandbox::new(
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_scratch(&tmp)
+    .unwrap();
+    for index in 0..crazyagent::sandbox::hidden_paths::HIDDEN_PATHS_MAX {
+        sandbox = sandbox
+            .hide(&case.project.join(format!("hidden-{index}")))
+            .unwrap();
+    }
+    let team = sandbox.native_team(
+        &tmp.join("tmux.sock"),
+        &tmp.join("teammates-0123456789abcdef.sock"),
+        &tmp.join(crazyagent::team::caller::CALLER_SOCKET),
+        &tmux,
+        &mates_home,
+    );
+    assert!(team.is_ok(), "{:?}", team.as_ref().err());
+}
+
 /// Neither a native lead nor its teammates can place, remove or move a node at the name the
 /// engine binds its caller socket at before one rename moves it over the caller socket's
 /// path (rv-secreview RH2R2-1): with the name free, a listener, a folder or a file either
@@ -1380,6 +1593,9 @@ impl LiveTeam {
         let mates = tmp.join("teammates-0123456789abcdef.sock");
         let callers = tmp.join(crazyagent::team::caller::CALLER_SOCKET);
         let mates_home = team_homes(&case.home);
+        let mailbox = case.tmp.join(crazyagent::team::tool::MAILBOX_FOLDER);
+        fs::create_dir(&mailbox).unwrap();
+        fs::set_permissions(&mailbox, fs::Permissions::from_mode(0o700)).unwrap();
         let (lead, teammates) = ProjectSandbox::new(
             &case.project,
             &case.home,
@@ -1632,6 +1848,9 @@ fn native_team_refuses_a_teammates_home_in_the_lead_s_or_a_lead_home_the_project
     let case = case();
     let tmux = crazyagent::terminal::tmux::installed(&case.project).expect("tmux is installed");
     let tmp = toolchains::make_tmp(&case.home).unwrap();
+    let mailbox = case.tmp.join(crazyagent::team::tool::MAILBOX_FOLDER);
+    fs::create_dir(&mailbox).unwrap();
+    fs::set_permissions(&mailbox, fs::Permissions::from_mode(0o700)).unwrap();
     let team = |home: &Path, mates_home: &Path| {
         ProjectSandbox::new(
             &case.project,

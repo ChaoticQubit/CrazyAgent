@@ -411,7 +411,7 @@ test("the hover card sits under a card near the top and over a card near the bot
   assert.deepEqual(scaled, { left: graph.TIP_HALF, top: 10 + 60 + graph.TIP_GAP, above: false });
 });
 
-test("a hookless card has no receipt ticks and says its receipts and adoption are unavailable", () => {
+test("a hookless card has no receipt ticks and says only its receipts are unavailable", () => {
   const client = engineClient;
   const bare = { ...talk, nodes: talk.nodes.map((item) => item.id === "team-3" ? { ...item, hookless: true } : item) };
   const layout = graph.layoutGraph(bare);
@@ -422,7 +422,8 @@ test("a hookless card has no receipt ticks and says its receipts and adoption ar
   assert.deepEqual(graph.receiptShown("delivered", true), { ticks: "", word: "receipts unavailable for this account kind" });
   assert.equal(graph.receiptShown("delivered", false).ticks, "✓✓");
   const tip = graph.cardTip(card(layout, "team-3").node, bare);
-  assert.ok(tip.includes("Receipts and adoption unavailable for this account kind."), tip.join("\n"));
+  assert.ok(tip.includes("Receipts unavailable for this account kind."), tip.join("\n"));
+  assert.ok(!tip.some((line) => line.includes("adoption")), tip.join("\n"));
   assert.ok(tip.some((line) => /^2 unread messages from .+, receipts unavailable for this account kind\.$/.test(line)), tip.join("\n"));
   assert.ok(!graph.cardTip(card(graph.layoutGraph(talk), "team-3").node, talk).some((line) => line.includes("unavailable")));
   const html = renderToStaticMarkup(createElement(view.GraphCard, {

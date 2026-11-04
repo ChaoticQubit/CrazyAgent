@@ -706,3 +706,45 @@ fn a_parked_partial_line_is_not_rescanned_by_polls_without_new_bytes() {
     append(&file, &format!("\n{prompt}\n"));
     assert_eq!(reader.read().unwrap(), vec![TranscriptEvent::TurnStarted]);
 }
+/// OP-25 OP25-2: a tool input nested as deep as a record line allows is formatted only up
+/// to the bound the session search keeps, so it costs about what a flat input of the same
+/// size costs, and its text is cut at that bound.
+#[test]
+fn a_deeply_nested_tool_input_is_formatted_only_up_to_its_bound() {
+    let filler = "word ".repeat(200 * 1024);
+    let line = |depth: usize| {
+        let mut input = Value::String(filler.clone());
+        for _ in 0..depth {
+            input = serde_json::json!({ "a": input });
+        }
+        serde_json::json!({"type": "assistant", "message": {"role": "assistant", "content": [
+            {"type": "tool_use", "id": "toolu_0D", "name": "Deep", "input": input}]}})
+        .to_string()
+    };
+    let fastest = |line: &str| {
+        (0..7)
+            .map(|_| {
+                let started = std::time::Instant::now();
+                let (speaker, text) = record_message("claude-code", line.as_bytes()).unwrap();
+                let took = started.elapsed();
+                assert_eq!(speaker, "agent");
+                assert!(text.len() <= TOOL_TEXT_BYTES_MAX + 64, "{}", text.len());
+                assert!(text.ends_with("..."), "{}", &text[text.len() - 20..]);
+                took
+            })
+            .min()
+            .unwrap()
+    };
+    let flat = line(1);
+    let deep = line(120);
+    assert!(
+        deep.len() <= crate::team::history::LINE_BYTES_MAX,
+        "{}",
+        deep.len()
+    );
+    let (flat_took, deep_took) = (fastest(&flat), fastest(&deep));
+    assert!(
+        deep_took <= flat_took * 3 + Duration::from_millis(1),
+        "deep {deep_took:?}, flat {flat_took:?}"
+    );
+}

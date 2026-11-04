@@ -84,10 +84,11 @@ impl AgentAccess {
 
 /// How far one project's tools-on agents and the plugin "Check again" server may reach on
 /// the network (DEC-111 Q17): Open is the whole network, Https is port 443 only, None is
-/// the model endpoint's port alone, on loopback for a local model, otherwise on any host,
-/// not yet the model host alone. The same choice applies to the agents and to the check.
-/// It does not widen or narrow the live master, which always reaches the model's port
-/// only, whatever this choice.
+/// the model alone: a hosted model's own hosts through the engine's model proxy, or only a
+/// local model's port on loopback. The same choice applies to the agents, research jobs
+/// and the check. A master never reaches more than the model's port; under None a master
+/// with tools reaches a model off loopback only through its model proxy in its live
+/// terminal, and a master turn with tools is refused (S4B-M1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentNetwork {
@@ -119,10 +120,19 @@ impl AgentNetwork {
         }
     }
 
+    /// Tells whether this choice lets agents reach more than `other`: Open more than Port
+    /// 443 only, Port 443 only more than None (CS-2). Input: the choice to compare with.
+    /// Output: true when this one is wider.
+    pub fn wider_than(self, other: Self) -> bool {
+        let rank = |choice: Self| Self::ALL.iter().position(|each| *each == choice);
+        rank(self) < rank(other)
+    }
+
     /// The sandbox reach this choice grants. Input: the model endpoint the agent still
     /// needs, or None for the plugin check, which needs no model. Output: Open for Open,
-    /// port 443 plus the model's port for Https, and for None the model's port alone, on
-    /// loopback for a local model, otherwise on any host.
+    /// port 443 plus the model's port for Https, and for None the model only on loopback:
+    /// a model on any host is reached under None only through a model proxy's loopback
+    /// port, so no None path grants a host port or DNS (S4B-M1).
     pub fn sandbox(self, model: Option<super::SandboxRemote>) -> super::SandboxNetwork {
         match self {
             Self::Open => super::SandboxNetwork::Open,
@@ -131,7 +141,12 @@ impl AgentNetwork {
                 remotes.extend(model);
                 super::SandboxNetwork::Only(remotes)
             }
-            Self::None => super::SandboxNetwork::Only(model.into_iter().collect()),
+            Self::None => super::SandboxNetwork::Only(
+                model
+                    .into_iter()
+                    .filter(|remote| matches!(remote, super::SandboxRemote::Loopback(_)))
+                    .collect(),
+            ),
         }
     }
 }
@@ -255,13 +270,15 @@ impl AgentPolicy {
 }
 
 /// Why a process that started under a project's agent policy holds more than the policy
-/// the owner saved now allows: a wider access level; a toolchain the owner turned off; a
-/// toolchain with no owner choice that the project no longer uses, which is also how
+/// the owner saved now allows: a wider access level; a profile with tools made for a wider
+/// network (CS-2); a toolchain the owner turned off; a toolchain with no owner choice that
+/// the project no longer uses, which is also how
 /// turning off a family the project does not use is saved; or a policy, or a project folder
 /// that toolchain detection needs, that cannot be read, so nothing held can be confirmed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Narrowing {
     Access,
+    Network,
     TurnedOff,
     NotAllowed,
     PolicyUnreadable,
@@ -274,6 +291,7 @@ impl Narrowing {
     pub fn code(self) -> &'static str {
         match self {
             Self::Access => "agent_access_lowered",
+            Self::Network => "agent_network_narrowed",
             Self::TurnedOff | Self::NotAllowed => "agent_toolchain_lowered",
             Self::PolicyUnreadable => "agent_policy_unreadable",
             Self::FolderUnreadable => "agent_project_unreadable",
@@ -281,25 +299,32 @@ impl Narrowing {
     }
 }
 
-/// Tells whether a process that started at an access level with some toolchains granted
-/// holds more than the saved policy allows now. Inputs: the saved policy, none when it
-/// cannot be read; the project folder, none when it cannot be resolved; the level the
-/// process runs at, none when it reads the level again before it next runs anything; and
-/// the toolchains its sandbox profile grants. Output: why it must stop, or none.
+/// Tells whether a process that started at an access level and network with some
+/// toolchains granted holds more than the saved policy allows now. Inputs: the saved
+/// policy, none when it cannot be read; the project folder, none when it cannot be
+/// resolved; the level the process runs at, none when it reads the level again before it
+/// next runs anything; the network its profile was made for, none for a process without
+/// tools, whose profile has no network rule of the policy's; and the toolchains its sandbox
+/// profile grants. Output: why it must stop, or none.
 pub fn narrowing(
     saved: Option<&AgentPolicy>,
     project: Option<&Path>,
     access: Option<AgentAccess>,
+    network: Option<AgentNetwork>,
     granted: &[Toolchain],
 ) -> Option<Narrowing> {
     assert!(granted.len() <= Toolchain::ALL.len());
     let Some(saved) = saved else {
         let holds = !granted.is_empty()
-            || access.is_some_and(|access| access.wider_than(AgentAccess::Sandboxed));
+            || access.is_some_and(|access| access.wider_than(AgentAccess::Sandboxed))
+            || network.is_some_and(|network| network.wider_than(AgentNetwork::None));
         return holds.then_some(Narrowing::PolicyUnreadable);
     };
     if access.is_some_and(|access| access.wider_than(saved.access)) {
         return Some(Narrowing::Access);
+    }
+    if network.is_some_and(|network| network.wider_than(saved.network)) {
+        return Some(Narrowing::Network);
     }
     if granted
         .iter()
@@ -430,6 +455,50 @@ mod tests {
     use super::*;
 
     #[test]
+    fn no_network_grants_a_model_only_on_loopback_and_never_a_host_port() {
+        use crate::sandbox::{SandboxNetwork, SandboxRemote};
+        assert_eq!(
+            AgentNetwork::None.sandbox(Some(SandboxRemote::AnyHost(443))),
+            SandboxNetwork::Only(vec![])
+        );
+        assert_eq!(
+            AgentNetwork::None.sandbox(Some(SandboxRemote::Loopback(11_434))),
+            SandboxNetwork::Only(vec![SandboxRemote::Loopback(11_434)])
+        );
+        assert_eq!(
+            AgentNetwork::None.sandbox(None),
+            SandboxNetwork::Only(vec![])
+        );
+        assert_eq!(
+            AgentNetwork::Https.sandbox(Some(SandboxRemote::AnyHost(8443))),
+            SandboxNetwork::Only(vec![
+                SandboxRemote::AnyHost(443),
+                SandboxRemote::AnyHost(8443)
+            ])
+        );
+        assert_eq!(AgentNetwork::Open.sandbox(None), SandboxNetwork::Open);
+    }
+
+    #[test]
+    fn a_network_choice_is_wider_only_than_the_narrower_ones() {
+        let (open, https, none) = (AgentNetwork::Open, AgentNetwork::Https, AgentNetwork::None);
+        assert!(open.wider_than(https) && open.wider_than(none) && https.wider_than(none));
+        for (one, other) in [
+            (https, open),
+            (none, open),
+            (none, https),
+            (open, open),
+            (https, https),
+            (none, none),
+        ] {
+            assert!(
+                !one.wider_than(other),
+                "{one:?} is not wider than {other:?}"
+            );
+        }
+    }
+
+    #[test]
     fn each_platform_offers_only_the_levels_it_can_enforce() {
         let offered: Vec<AgentAccess> = AgentAccess::ALL
             .into_iter()
@@ -475,43 +544,48 @@ mod tests {
         };
         let sandboxed = chose(AgentAccess::Sandboxed, &[]);
         let full = Some(AgentAccess::Full);
-        assert_eq!(narrowing(Some(&sandboxed), root, None, &rust), None);
+        assert_eq!(narrowing(Some(&sandboxed), root, None, None, &rust), None);
         assert_eq!(
-            narrowing(Some(&sandboxed), root, full, &rust),
+            narrowing(Some(&sandboxed), root, full, None, &rust),
             Some(Narrowing::Access)
         );
         assert_eq!(
-            narrowing(Some(&chose(AgentAccess::Full, &[])), root, full, &rust),
+            narrowing(
+                Some(&chose(AgentAccess::Full, None, &[])),
+                root,
+                full,
+                &rust
+            ),
             None
         );
         let off = chose(AgentAccess::Sandboxed, &[(Toolchain::Rust, false)]);
         assert_eq!(
-            narrowing(Some(&off), None, None, &rust),
+            narrowing(Some(&off), None, None, None, &rust),
             Some(Narrowing::TurnedOff)
         );
         let node = [Toolchain::Node];
         assert_eq!(
-            narrowing(Some(&sandboxed), root, None, &node),
+            narrowing(Some(&sandboxed), root, None, None, &node),
             Some(Narrowing::NotAllowed),
             "an unused family turned off leaves no choice behind"
         );
         let on = chose(AgentAccess::Sandboxed, &[(Toolchain::Node, true)]);
-        assert_eq!(narrowing(Some(&on), None, None, &node), None);
+        assert_eq!(narrowing(Some(&on), None, None, None, &node), None);
         assert_eq!(
-            narrowing(Some(&sandboxed), None, None, &rust),
+            narrowing(Some(&sandboxed), None, None, None, &rust),
             Some(Narrowing::FolderUnreadable)
         );
-        assert_eq!(narrowing(Some(&sandboxed), None, None, &[]), None);
+        assert_eq!(narrowing(Some(&sandboxed), None, None, None, &[]), None);
         assert_eq!(
-            narrowing(None, root, None, &rust),
+            narrowing(None, root, None, None, &rust),
             Some(Narrowing::PolicyUnreadable)
         );
         assert_eq!(
-            narrowing(None, root, Some(AgentAccess::OwnBranch), &[]),
+            narrowing(None, root, Some(AgentAccess::OwnBranch), None, &[]),
             Some(Narrowing::PolicyUnreadable)
         );
         assert_eq!(
-            narrowing(None, root, Some(AgentAccess::Sandboxed), &[]),
+            narrowing(None, root, Some(AgentAccess::Sandboxed), None, &[]),
             None
         );
         assert_eq!(Narrowing::NotAllowed.code(), "agent_toolchain_lowered");
@@ -521,7 +595,7 @@ mod tests {
         std::fs::remove_file(project.path().join("Cargo.toml")).unwrap();
         assert_eq!(pinned.allowed(project.path()), rust);
         assert!(sandboxed.allowed(project.path()).is_empty());
-        assert_eq!(narrowing(Some(&pinned), None, None, &rust), None);
+        assert_eq!(narrowing(Some(&pinned), None, None, None, &rust), None);
     }
 
     #[test]

@@ -1509,7 +1509,7 @@ fn lead_rows(
 }
 
 /// Adds the rows under an agent: its account and branch on one row, then, for an agent
-/// whose launch fires no hooks, that its receipts and adoption are unavailable, wrapped to
+/// whose launch fires no hooks, that its receipts are unavailable, wrapped to
 /// the width left after the prefix so the words are never cut. Inputs: the rows, the node,
 /// the prefix and the row width. Output: none; rows are appended.
 fn detail_row(out: &mut Vec<TreeRow>, node: &GraphNode, prefix: String, width: usize) {
@@ -1524,10 +1524,7 @@ fn detail_row(out: &mut Vec<TreeRow>, node: &GraphNode, prefix: String, width: u
         });
     }
     if node.hookless {
-        let words = format!(
-            "Receipts and adoption {}",
-            crate::coord::adoption::HOOKLESS_WORDS
-        );
+        let words = format!("Receipts {}", crate::coord::adoption::HOOKLESS_WORDS);
         let room = width
             .saturating_sub(crate::tui::text::width(&prefix))
             .max(1);

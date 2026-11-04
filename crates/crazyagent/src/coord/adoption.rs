@@ -1,6 +1,6 @@
 use super::settings::{COUNTED_TOOL_BYTES_MAX, COUNTED_TOOLS_MAX, Nudges};
 use super::store::{AgentRow, agent, state};
-use super::{AgentId, MessageKind, NewMessage, Party, TOOL_BYTES_MAX};
+use super::{AgentId, MessageId, MessageKind, NewMessage, Party, TOOL_BYTES_MAX};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use rusqlite::{Connection, params};
@@ -22,8 +22,8 @@ pub const UNGROUNDED_MS: i64 = 10 * 60_000;
 pub const FIRST_EDIT_REMINDER: &str = "You are editing before any code-graph query. Run graphify query first if this touches code you have not mapped.";
 /// The longest shell command text read for graphify or a skill read, in bytes.
 pub const COMMAND_BYTES_MAX: usize = 16 * 1024;
-/// What the clients show in place of receipts and adoption counts for an agent whose
-/// launch fires no hooks (DEC-104 bare-hooks), instead of zeros or a blank.
+/// What the clients show in place of receipts for an agent whose launch fires no hooks
+/// (DEC-104 bare-hooks), instead of zeros or a blank.
 pub const HOOKLESS_WORDS: &str = "unavailable for this account kind";
 /// The most bytes one adoption view takes once encoded. Newer agents are kept first; the
 /// older ones past it are counted in `Adoption::hidden`.
@@ -119,7 +119,8 @@ impl Flag {
 /// each counted-tools entry in the settings' order, its calls of each enabled skill in the
 /// view's skill order (zero included), the skills it called that the project has not
 /// enabled, its graphify and `ctx_*` calls, the flags it has now, the flags it was already
-/// reminded of and whether its launch fires no hooks, so no counts or flags exist.
+/// reminded of and whether its launch fires no hooks, whose calls the usage scan counts
+/// from its transcript instead (OQ-8).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentAdoption {
@@ -256,9 +257,9 @@ fn runs_graphify(command: &str) -> bool {
 /// The flags one agent's habits raise now (Q18). Edits by an agent that never started or
 /// owned work raise the first. A running agent with tools that worked `UNGROUNDED_MS`
 /// since its start, busy or calling tools, with no graphify and no `ctx_*` call, raises
-/// the second. An agent whose launch fires no hooks raises none, and clients show its counts
-/// and flags as unavailable (DEC-104 bare-hooks). Takes the database, the agent, its row,
-/// its counts by stored tool name and the time in ms. Returns the flags in `Flag::ALL` order.
+/// the second, whether or not its launch fires hooks (OQ-8). Takes the database, the agent,
+/// its row, its counts by stored tool name and the time in ms. Returns the flags in
+/// `Flag::ALL` order.
 pub(super) fn flags(
     db: &Connection,
     id: AgentId,
@@ -266,21 +267,17 @@ pub(super) fn flags(
     used: &[(String, i64)],
     now: i64,
 ) -> Result<Vec<Flag>, EngineError> {
-    let (tools, declared, hookless): (bool, bool, bool) = db
+    let (tools, declared): (bool, bool) = db
         .query_row(
             "SELECT a.tools,
              EXISTS(SELECT 1 FROM coord_audit WHERE by_kind='agent' AND by_agent=a.id
                     AND action='start')
-             OR EXISTS(SELECT 1 FROM coord_work WHERE owner_agent=a.id),
-             a.hookless
+             OR EXISTS(SELECT 1 FROM coord_work WHERE owner_agent=a.id)
              FROM team_agents a WHERE a.id=?1",
             [id],
-            |found| Ok((found.get(0)?, found.get(1)?, found.get(2)?)),
+            |found| Ok((found.get(0)?, found.get(1)?)),
         )
         .map_err(state)?;
-    if hookless {
-        return Ok(Vec::new());
-    }
     let called = |tool: &dyn Fn(&str) -> bool| {
         used.iter()
             .any(|(name, count)| *count > 0 && tool(super::presence::short(name)))
@@ -582,40 +579,87 @@ fn first_edits(db: &Connection, project: &ProjectId, now: i64) -> Result<(), Eng
         if !called(&|name| EDIT_TOOLS.contains(&name)) || called(&|name| name == GRAPH_TOOL) {
             continue;
         }
-        let key = format!("{NUDGE_KEY}first_edit-{id}");
-        let earlier: bool = db
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM coord_messages WHERE project=?1
-                 AND from_kind='engine' AND to_kind='agent' AND to_agent=?2 AND idem_key=?3)",
-                params![project.as_str(), id, key],
-                |found| found.get(0),
-            )
-            .map_err(state)?;
-        if earlier {
+        if first_edit_reminded(db, project, id)? {
             continue;
         }
         if sent == NUDGES_PER_TICK_MAX {
             break;
         }
-        super::send(
-            db,
-            NewMessage {
-                project: project.clone(),
-                from: Party::Engine,
-                to: Party::Agent(id),
-                kind: MessageKind::Note,
-                question: None,
-                work: None,
-                reply_to: None,
-                body: FIRST_EDIT_REMINDER.to_owned(),
-                idempotency_key: Some(key),
-            },
-            now,
-        )?;
+        send_first_edit(db, project, id, now)?;
         sent += 1;
     }
     assert!(sent <= NUDGES_PER_TICK_MAX);
     Ok(())
+}
+
+/// Decides the FirstEdit reminder a native teammate's edit hands its session through the
+/// relay (relay over the caller socket, OQ-7 B): under the FirstEdit nudges, for an agent
+/// whose counted calls hold no code-graph query, once, recorded as the same Engine note
+/// `first_edits` keys by the agent. Takes the database, the project, the agent and the time
+/// in ms. Returns the note's id, to mark Delivered once its session got it, or None.
+pub(super) fn first_edit_note(
+    db: &Connection,
+    project: &ProjectId,
+    id: AgentId,
+    now: i64,
+) -> Result<Option<MessageId>, EngineError> {
+    if super::settings::read(db, project)?.nudges != Nudges::FirstEdit {
+        return Ok(None);
+    }
+    let graphed = used(db, id)?.iter().any(|(name, count)| {
+        *count > 0 && tool_key(name, &Value::Null).as_deref() == Some(GRAPH_TOOL)
+    });
+    if graphed || first_edit_reminded(db, project, id)? {
+        return Ok(None);
+    }
+    send_first_edit(db, project, id, now).map(Some)
+}
+
+/// Whether an agent got its FirstEdit reminder, by the Engine note keyed by the agent.
+/// Takes the database, the project and the agent. Returns the answer.
+fn first_edit_reminded(
+    db: &Connection,
+    project: &ProjectId,
+    id: AgentId,
+) -> Result<bool, EngineError> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM coord_messages WHERE project=?1
+         AND from_kind='engine' AND to_kind='agent' AND to_agent=?2 AND idem_key=?3)",
+        params![project.as_str(), id, first_edit_key(id)],
+        |found| found.get(0),
+    )
+    .map_err(state)
+}
+
+/// Sends an agent the Engine note with `FIRST_EDIT_REMINDER`, keyed by the agent so it is
+/// sent once. Takes the database, the project, the agent and the time in ms. Returns the
+/// note's id or the refusal.
+fn send_first_edit(
+    db: &Connection,
+    project: &ProjectId,
+    id: AgentId,
+    now: i64,
+) -> Result<MessageId, EngineError> {
+    super::send(
+        db,
+        NewMessage {
+            project: project.clone(),
+            from: Party::Engine,
+            to: Party::Agent(id),
+            kind: MessageKind::Note,
+            question: None,
+            work: None,
+            reply_to: None,
+            body: FIRST_EDIT_REMINDER.to_owned(),
+            idempotency_key: Some(first_edit_key(id)),
+        },
+        now,
+    )
+}
+
+/// The idempotency key of an agent's FirstEdit reminder. Takes the agent. Returns the key.
+fn first_edit_key(id: AgentId) -> String {
+    format!("{NUDGE_KEY}first_edit-{id}")
 }
 
 #[cfg(all(test, unix))]

@@ -1426,6 +1426,7 @@ async fn a_running_turn_reads_the_saved_agent_policy_and_an_unreadable_one_as_no
         read_off.as_ref(),
         None,
         Some(AgentAccess::Sandboxed),
+        None,
         &[Toolchain::Rust],
     )
     .map(Narrowing::code)

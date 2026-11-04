@@ -618,7 +618,7 @@ pub(crate) fn open_record(path: &Path) -> Option<(File, (u64, u64), u64)> {
     }
     let file = File::open(path).ok()?;
     let metadata = file.metadata().ok()?;
-    metadata.is_file().then(|| (file, (0, 0), metadata.len()))
+    metadata.is_file().then_some((file, (0, 0), metadata.len()))
 }
 
 fn session_name(path: &Path) -> String {

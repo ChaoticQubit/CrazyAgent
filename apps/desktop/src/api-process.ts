@@ -355,7 +355,7 @@ export interface SkillCount {
  * tool in the settings' order, its calls of each enabled skill in the view's skill order
  * (zero included), the skills it called that the project has not enabled, its graphify and
  * ctx_* calls, its flags now and the flags it was already reminded of, and whether its
- * launch fires no hooks, so no counts or flags exist. */
+ * launch fires no hooks, whose calls the engine counts from its transcript instead. */
 export interface AgentAdoption {
   agent: number;
   role: string;

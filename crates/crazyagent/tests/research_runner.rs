@@ -1130,3 +1130,91 @@ fn research_whose_engine_dies_leaves_nothing_its_harness_detached() {
         Vec::<u32>::new()
     );
 }
+
+/// Writes a harness standing in for Codex that records, in the agent's home, which outlives
+/// the job's temp folder, the proxy its launch names and the status that proxy gives it for
+/// a CONNECT to a host off the agent's list, then exits. Takes the folder. Returns the
+/// harness.
+fn proxy_reporting_harness(folder: &Path) -> PathBuf {
+    let harness = folder.canonicalize().unwrap().join("codex");
+    fs::write(
+        &harness,
+        r#"#!/bin/sh
+{
+echo "proxy=$HTTPS_PROXY"
+/usr/bin/curl -sS -o /dev/null -w 'connect=%{http_connect}\n' --max-time 10 --proxy "$HTTPS_PROXY" https://example.com/
+} > "$HOME/reach" 2>&1
+exit 0
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&harness, fs::Permissions::from_mode(0o700)).unwrap();
+    harness
+}
+
+/// A research job with tools under the None network runs with its model proxy bound: its
+/// harness's launch names the proxy, the proxy answers the harness inside its sandbox and
+/// refuses a host off its list, and the job's profile reaches only the proxy's port
+/// (S4B-R2-L1).
+#[test]
+fn a_tools_on_research_job_under_no_network_runs_with_its_model_proxy_bound() {
+    use crazyagent::sandbox::policy::{AgentNetwork, AgentPolicy};
+    let case = case("A plain project.");
+    let none = AgentPolicy {
+        network: AgentNetwork::None,
+        ..AgentPolicy::default()
+    };
+    crazyagent::sandbox::policy::save(
+        &rusqlite::Connection::open(&case.database).unwrap(),
+        "project-a",
+        &none,
+    )
+    .unwrap();
+    let folder = harness_folder();
+    let harness = proxy_reporting_harness(folder.path());
+    let jobs = ResearchJobs::open(&case.database).unwrap();
+    let id = jobs
+        .enqueue("project-a", "market_research", "codex", true)
+        .unwrap();
+    let account = ResearchAccount::Endpoint {
+        base_url: "https://models.crazyagent.test/v1".into(),
+        model: "proxied-model".into(),
+    };
+    ResearchRunner::new(
+        &case.database,
+        &case.state,
+        &harness,
+        limits(Duration::from_secs(60)),
+    )
+    .unwrap()
+    .run_once(&project(&case, Some(account)))
+    .unwrap()
+    .unwrap();
+    let name = format!("job-{id}-1");
+    let reach = fs::read_to_string(
+        case.state
+            .join("agents")
+            .join(&name)
+            .join("home")
+            .join("reach"),
+    )
+    .unwrap();
+    let port: u16 = reach
+        .lines()
+        .find_map(|line| line.strip_prefix("proxy=http://127.0.0.1:"))
+        .and_then(|port| port.parse().ok())
+        .unwrap_or_else(|| panic!("the harness's launch names no model proxy: {reach}"));
+    assert!(
+        reach.lines().any(|line| line == "connect=403"),
+        "the model proxy did not answer the harness: {reach}"
+    );
+    let profile =
+        fs::read_to_string(case.state.join("profiles").join(format!("{name}.sb"))).unwrap();
+    assert!(
+        profile.contains(&format!(
+            "(allow network-outbound (remote ip \"localhost:{port}\"))"
+        )),
+        "{profile}"
+    );
+    assert!(!profile.contains("(remote ip \"*:"), "{profile}");
+}

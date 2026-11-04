@@ -674,6 +674,6 @@ fn waiting_words(waiting: Waiting) -> &'static str {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 #[path = "questions/tests.rs"]
 mod tests;

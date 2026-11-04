@@ -1342,6 +1342,7 @@ pub(crate) fn lease_git_dir(
 /// Names the branch of the lease whose worktree is at `path`, the only ref a master
 /// worktree's HEAD may name when the engine reads or moves it. Inputs: the connection and
 /// the worktree path. Output: the branch, or `lease_missing`.
+#[cfg(unix)]
 pub(crate) fn lease_branch(connection: &Connection, path: &Path) -> Result<String, EngineError> {
     let path = path.to_str().ok_or_else(|| error("lease_missing"))?;
     let body: Option<String> = connection

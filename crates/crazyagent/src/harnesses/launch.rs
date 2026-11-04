@@ -527,6 +527,15 @@ fn build(request: &LaunchRequest, installed: Option<&Installed>) -> Result<Comma
         ("LC_ALL", OsStr::new("C")),
     ];
     base.extend(tools.iter().map(|(name, value)| (*name, value.as_os_str())));
+    let proxy = installed
+        .and_then(Installed::model_proxy)
+        .map(crate::sandbox::model_proxy::variables);
+    base.extend(
+        proxy
+            .iter()
+            .flatten()
+            .map(|(name, value)| (*name, OsStr::new(value))),
+    );
     if let Some(identity) = &request.git_identity {
         base.extend(
             identity

@@ -2568,6 +2568,7 @@ fn the_instructions_box_lists_each_instruction_file_the_engine_recorded() {
 /// Serves one request the Questions box sends with a real engine through the owner
 /// controller, as the TUI's owner worker does. Inputs: the controller and the request.
 /// Output: the arrival the Team screen receives.
+#[cfg(unix)]
 async fn served(
     controller: &mut crate::client_controller::OwnerController,
     request: Request,
@@ -2599,6 +2600,7 @@ async fn served(
     ))))
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn q_lists_the_engines_questions_an_answer_reaches_the_asker_and_enter_opens_a_waiting_terminal()
  {
@@ -3041,7 +3043,7 @@ fn a_refused_live_master_start_says_why_in_words_not_its_code() {
 }
 
 #[test]
-fn a_hookless_agent_row_says_receipts_and_adoption_are_unavailable_for_its_account_kind() {
+fn a_hookless_agent_row_says_only_its_receipts_are_unavailable_for_its_account_kind() {
     let mut shell = fresh(120, 30);
     let mut graph = graph();
     graph.nodes[2].hookless = true;
@@ -3065,8 +3067,8 @@ fn a_hookless_agent_row_says_receipts_and_adoption_are_unavailable_for_its_accou
         .join(" ");
     assert_eq!(
         words.trim(),
-        "Receipts and adoption unavailable for this account kind",
-        "{tree:#?}"
+        "Receipts unavailable for this account kind",
+        "adoption counts and flags show for every agent (OQ-8): {tree:#?}"
     );
     let hooked = tree
         .iter()

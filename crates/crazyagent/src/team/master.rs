@@ -30,6 +30,7 @@ const SWITCHED_OFF: &str = "Not done: the owner switched this tool off.";
 const LEAD_MODE_REFUSED: &str = "Not started: only the master picks a lead's mode; your sub-agents run in yours. Call spawn again without mode (spawn_mode_master_only).";
 const NATIVE_LEAD_REFUSED: &str = "Not started: you were started to run sub-agents as native teammates. Start them in your own agent team instead.";
 const MASTER_LABEL: &str = "Master";
+const NOT_LIVE_TOOL: &str = "Not done: without its live terminal the master's team tools are delegate, remember and recall.";
 const WORKERS_LISTED_MAX: i64 = 64;
 const AGENT_SHOWN_MAX: usize = 64;
 
@@ -841,6 +842,36 @@ pub fn serve_calls(
                 let _ = crate::coord::touch(connection, master, now_ms());
                 answer(connection, answering, master, call)?
             }
+        };
+        let _ = tool::answer_call(mailbox, id, &text, error);
+    }
+    Ok(taken.len())
+}
+
+/// Answers the memory calls a project's master left in its mailbox while it runs without its
+/// live terminal, at most `CALLS_PER_TICK_MAX`, each checked again and against the owner's
+/// tool switches: `remember` and `recall` under the master's name. Any other call is refused,
+/// since that master's server lists only `delegate`, `remember` and `recall`. Takes the engine
+/// database, the project and the mailbox. Returns how many calls were answered, or a SQLite
+/// failure.
+pub fn serve_memory_calls(
+    connection: &mut Connection,
+    project: &ProjectId,
+    mailbox: &Path,
+) -> Result<usize, EngineError> {
+    let taken = tool::take_calls(mailbox, tool::CALLS_PER_TICK_MAX);
+    for (id, call, _) in &taken {
+        let (text, error) = match call.clone().map(tool::checked) {
+            None => (UNREAD.to_owned(), true),
+            Some(Err(refused)) => (refused.to_owned(), true),
+            Some(Ok(call)) if !tool::MEMORY_TOOLS.contains(&call.name()) => {
+                (NOT_LIVE_TOOL.to_owned(), true)
+            }
+            Some(Ok(call)) if switched_off(connection, project, &call).unwrap_or(true) => {
+                (SWITCHED_OFF.to_owned(), true)
+            }
+            Some(Ok(call)) => memory_answer(connection, project, MASTER_LABEL, call)
+                .expect("a memory call has an answer")?,
         };
         let _ = tool::answer_call(mailbox, id, &text, error);
     }

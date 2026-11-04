@@ -523,6 +523,28 @@ pub(super) fn open_for(db: &Connection, worktree: &str) -> Result<Option<Record>
     .map_err(storage)
 }
 
+/// Reads the worktrees of the change sets open directly inside one folder, such as a
+/// lead's teammates' folder, in path order. Inputs: the store, the folder path ending in
+/// `/` and the most worktrees to read. Output: the worktree paths.
+pub(super) fn open_inside(
+    db: &Connection,
+    folder: &str,
+    max: usize,
+) -> Result<Vec<String>, EngineError> {
+    let mut statement = db
+        .prepare(
+            "SELECT worktree FROM landing_change_sets \
+             WHERE substr(worktree,1,length(?1))=?1 AND length(worktree)>length(?1) \
+             AND instr(substr(worktree,length(?1)+1),'/')=0 \
+             AND state IN ('pending','conflict','updating') ORDER BY worktree LIMIT ?2",
+        )
+        .map_err(storage)?;
+    let rows = statement
+        .query_map(params![folder, max as i64], |row| row.get(0))
+        .map_err(storage)?;
+    rows.collect::<Result<_, _>>().map_err(storage)
+}
+
 /// Reads the change set of one team sub-agent of a project changed last. Inputs: the
 /// store, the project and the agent id. Output: the record, None when it has none.
 pub(super) fn newest_of(
