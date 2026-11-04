@@ -2360,6 +2360,7 @@ fn a_linked_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_worktree()
         git.join("worktrees").join("greet").join("gitdir"),
         git.join("worktrees").join("greet").join("HEAD"),
         git.join("worktrees").join("agent-1").join("commondir"),
+        git.join("worktrees").join("agent-1").join("HEAD"),
     ]
     .into_iter()
     .map(|file| {
@@ -2378,7 +2379,7 @@ fn a_linked_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_worktree()
     }
     for target in [
         lead_worktree.join("lead.txt"),
-        git.join("worktrees").join("agent-1").join("ORIG_HEAD"),
+        git.join("worktrees").join("agent-1").join("teammate-probe"),
         git.join("worktrees").join("greet").join("index.lock"),
         git.join("objects").join("teammate-probe"),
     ] {

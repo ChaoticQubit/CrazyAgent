@@ -14143,7 +14143,9 @@ fn a_native_teammate_cannot_type_into_its_lead_s_pane() {
     assert!(crate::terminal::pane_id_valid(&placed.pane));
 
     let marker = work.join("reached.txt");
-    let tried = work.join("tried.txt");
+    let probe = work.join(crate::agent_git::TEAMMATES_FOLDER).join("probe");
+    std::fs::create_dir_all(&probe).unwrap();
+    let tried = probe.join("tried.txt");
     let mate = work.join("mate.sh");
     std::fs::write(
         &mate,
@@ -14271,7 +14273,9 @@ fn a_native_teammate_cannot_plant_a_command_in_its_lead_s_shell_snapshot_or_sess
     let hook = session.join("sessionstart-hook-0.sh");
 
     let marker = work.join("planted.txt");
-    let tried = work.join("tried.txt");
+    let probe = work.join(crate::agent_git::TEAMMATES_FOLDER).join("probe");
+    std::fs::create_dir_all(&probe).unwrap();
+    let tried = probe.join("tried.txt");
     let mate = work.join("mate.sh");
     let plant = format!("echo planted > {}", marker.display());
     std::fs::write(
@@ -14354,7 +14358,8 @@ fn a_native_teammate_cannot_plant_a_command_in_its_lead_s_shell_snapshot_or_sess
 /// teammate in its installed profile cannot write the files the lead's shell, git, cargo
 /// and Claude Code read from the lead's home, nor the `git` first on the lead's path, nor
 /// leave a link in the team folders Claude Code shares, where the lead writes too. It still
-/// writes a mailbox, a lock, a task, its own home and its worktree. The lead's shell then
+/// writes a mailbox, a lock, a task, its own home and its worktree, but not its lead's
+/// worktree outside the teammates' folder (OP-9b). The lead's shell then
 /// starts in the lead's profile as Claude Code starts it, and runs nothing planted.
 #[cfg(target_os = "macos")]
 #[test]
@@ -14415,7 +14420,9 @@ fn a_native_teammate_writes_only_its_own_home_and_the_team_folders_its_lead_shar
     std::fs::create_dir_all(&tasks).unwrap();
 
     let marker = work.join("planted.txt");
-    let tried = work.join("tried.txt");
+    let probe = work.join(crate::agent_git::TEAMMATES_FOLDER).join("probe");
+    std::fs::create_dir_all(&probe).unwrap();
+    let tried = probe.join("tried.txt");
     let mate = work.join("mate.sh");
     let plant = format!("echo planted > {}", marker.display());
     std::fs::write(
@@ -14429,20 +14436,22 @@ fn a_native_teammate_writes_only_its_own_home_and_the_team_folders_its_lead_shar
              try transcript sh -c \"mkdir -p '{home}/projects/planted' && printf '{{}}\\n' > '{home}/projects/planted/s.jsonl'\"\n\
              try path_git sh -c \"printf '#!/bin/sh\\n{plant}\\n' > '{scratch}/bin/git'\"\n\
              try link ln -s '{home}/.zshenv' '{inboxes}/planted.json'\n\
-             mkdir -p '{work}/moved/inboxes' && ln -s '{home}/.zshenv' '{work}/moved/inboxes/team-lead.json'\n\
-             try moved_folder mv '{work}/moved' '{home}/teams/moved-team'\n\
-             try shared_folder mv '{home}/teams' '{work}/teams-away'\n\
+             mkdir -p '{probe}/moved/inboxes' && ln -s '{home}/.zshenv' '{probe}/moved/inboxes/team-lead.json'\n\
+             try moved_folder mv '{probe}/moved' '{home}/teams/moved-team'\n\
+             try shared_folder mv '{home}/teams' '{probe}/teams-away'\n\
              try inbox sh -c \"printf '[]' > '{inboxes}/mate.json'\"\n\
              try lock mkdir '{inboxes}/team-lead.json.lock'\n\
              try task sh -c \"printf '{{}}' > '{tasks}/1.json'\"\n\
              try own_home sh -c \"printf x > '{mates}/own.txt'\"\n\
-             try worktree sh -c \"printf x > '{work}/mate-wrote.txt'\"\n",
+             try lead_worktree sh -c \"printf x > '{work}/mate-wrote.txt'\"\n\
+             try worktree sh -c \"printf x > '{probe}/mate-wrote.txt'\"\n",
             home = home.display(),
             mates = mates.display(),
             scratch = scratch.display(),
             inboxes = inboxes.display(),
             tasks = tasks.display(),
             work = work.display(),
+            probe = probe.display(),
             tried = tried.display(),
         ),
     )
@@ -14505,6 +14514,7 @@ fn a_native_teammate_writes_only_its_own_home_and_the_team_folders_its_lead_shar
         "link",
         "moved_folder",
         "shared_folder",
+        "lead_worktree",
     ] {
         assert!(
             exit(attempt).is_some_and(|code| code != "0"),
@@ -14663,7 +14673,9 @@ fn a_native_teammate_cannot_change_a_hook_its_lead_runs() {
 
     let work = plan.working_dir.clone();
     let marker = work.join("planted.txt");
-    let tried = work.join("tried.txt");
+    let probe = work.join(crate::agent_git::TEAMMATES_FOLDER).join("probe");
+    std::fs::create_dir_all(&probe).unwrap();
+    let tried = probe.join("tried.txt");
     let mate = work.join("mate.sh");
     std::fs::write(
         &mate,
@@ -14735,7 +14747,7 @@ fn a_native_teammate_cannot_change_a_hook_its_lead_runs() {
 
 /// A native lead's teammate cannot move its lead's home folder away and put a link in its
 /// place (rv-audit TPH r1 F1). The lead's launch installs one owner hook into its agent home.
-/// The teammate, in its installed profile, renames the home into the shared worktree, links
+/// The teammate, in its installed profile, renames the home into its own folder, links
 /// the home path to the moved folder and rewrites the hook's script through the link. The
 /// move is refused, the home stays the engine's own folder and the lead, running the hook
 /// command the engine wrote, runs only the owner's script.
@@ -14844,9 +14856,11 @@ fn a_native_teammate_cannot_move_or_replace_its_lead_s_home() {
         .to_owned();
 
     let work = plan.working_dir.clone();
-    let moved = work.join("h");
+    let probe = work.join(crate::agent_git::TEAMMATES_FOLDER).join("probe");
+    std::fs::create_dir_all(&probe).unwrap();
+    let moved = probe.join("h");
     let marker = work.join("planted.txt");
-    let tried = work.join("tried.txt");
+    let tried = probe.join("tried.txt");
     let mate = work.join("mate.sh");
     std::fs::write(
         &mate,
@@ -15024,7 +15038,9 @@ fn a_native_teammate_cannot_change_its_lead_s_skills_or_relay_plugin() {
         .collect();
 
     let work = plan.working_dir.clone();
-    let tried = work.join("tried.txt");
+    let probe = work.join(crate::agent_git::TEAMMATES_FOLDER).join("probe");
+    std::fs::create_dir_all(&probe).unwrap();
+    let tried = probe.join("tried.txt");
     let mate = work.join("mate.sh");
     std::fs::write(
         &mate,
