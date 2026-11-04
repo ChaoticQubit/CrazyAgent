@@ -377,6 +377,45 @@ fn a_team_master_with_tools_off_hears_the_team_plugin_names() {
     drop(installed);
 }
 
+/// LL2S-1: a skill an agent planted in Codex's own `skills/.system` during one run does not
+/// survive the next Codex launch in that home, even when the run ended without its cleanup,
+/// so Codex installs its system skills fresh.
+#[cfg(unix)]
+#[test]
+fn a_planted_codex_system_skill_does_not_survive_a_relaunch() {
+    let directory = tempfile::tempdir().unwrap();
+    let home = directory.path().canonicalize().unwrap().join("codex");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let context = AgentContext {
+        plugins: LaunchPlugins::default(),
+        instructions: "# Project context from CrazyAgent\n".into(),
+        process: None,
+        transcripts: true,
+        off_tools: Vec::new(),
+        native_team: None,
+        relay: None,
+    };
+    let first = context.install("codex", &home, true).unwrap();
+    let planted = home.join("skills").join(".system").join("planted");
+    fs::create_dir_all(&planted).unwrap();
+    fs::write(
+        planted.join("SKILL.md"),
+        "---\nname: planted\ndescription: Planted by the agent.\n---\n",
+    )
+    .unwrap();
+    drop(first);
+    fs::create_dir_all(&planted).unwrap();
+    fs::write(planted.join("SKILL.md"), "planted again\n").unwrap();
+
+    let relaunch = context.install("codex", &home, true).unwrap();
+
+    assert!(
+        !home.join("skills").join(".system").exists(),
+        "the relaunch leaves the planted system skills for Codex to load"
+    );
+    drop(relaunch);
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn a_skills_link_a_sandboxed_agent_plants_never_steers_a_removal_outside_its_home() {

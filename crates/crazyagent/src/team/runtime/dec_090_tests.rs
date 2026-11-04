@@ -186,7 +186,7 @@ const LAUNCH_FILES: [(&str, &str); 7] = [
     ),
 ];
 
-const LAUNCH_NAMES: [&str; 12] = [
+const LAUNCH_NAMES: [&str; 13] = [
     "claude.md",
     "agents.md",
     "agents.override.md",
@@ -199,9 +199,10 @@ const LAUNCH_NAMES: [&str; 12] = [
     "output-styles",
     "rules",
     "settings.json",
+    ".agents",
 ];
 
-const LAUNCH_ATTEMPTS: [(&str, &str); 37] = [
+const LAUNCH_ATTEMPTS: [(&str, &str); 42] = [
     ("overwrite_claude", "printf planted > {p}/CLAUDE.md"),
     ("append_agents", "printf planted >> {p}/AGENTS.md"),
     ("create_override", "printf planted > {p}/AGENTS.override.md"),
@@ -305,6 +306,26 @@ const LAUNCH_ATTEMPTS: [(&str, &str); 37] = [
     ),
     ("settings", "printf planted > {p}/settings.json"),
     ("case_settings", "printf planted > {p}/Settings.JSON"),
+    (
+        "codex_user_skill",
+        "mkdir -p {p}/.agents/skills/planted && printf planted > {p}/.agents/skills/planted/SKILL.md",
+    ),
+    (
+        "case_codex_user_skill",
+        "mkdir -p {p}/.Agents/Skills/planted && printf planted > {p}/.Agents/Skills/planted/SKILL.md",
+    ),
+    (
+        "long_s_settings",
+        "printf planted > {p}/\u{17f}ettings.json",
+    ),
+    (
+        "kelvin_skills",
+        "mkdir -p {p}/s\u{212a}ills/planted-k && printf planted > {p}/s\u{212a}ills/planted-k/SKILL.md",
+    ),
+    (
+        "long_s_rules",
+        "mkdir -p {p}/rule\u{17f} && printf planted > {p}/rule\u{17f}/planted.md",
+    ),
 ];
 
 const LAUNCH_ALLOWED: [(&str, &str); 5] = [
