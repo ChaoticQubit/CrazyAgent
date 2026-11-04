@@ -9277,6 +9277,7 @@ fn a_linked_teammate_s_update_merges_its_lead_s_branch() {
 #[test]
 fn a_linked_lead_with_unlanded_teammate_work_is_never_retired_whatever_hides_its_teammates() {
     let mut retired = Vec::new();
+    let mut unrecorded = Vec::new();
     for source in ["project", "exclude", "lead", "teammate"] {
         let fixture = Fixture::new(1);
         let repository = fixture.base.join("project");
@@ -9298,27 +9299,14 @@ fn a_linked_lead_with_unlanded_teammate_work_is_never_retired_whatever_hides_its
             }
             "lead" => {
                 std::fs::write(linked.worktree.join(".gitignore"), ".worktrees/\n").unwrap();
-                let set = crate::landing::record_turn_end(
-                    &db,
-                    &crate::landing::Workspace {
-                        project: linked.project.clone(),
-                        agent: crate::landing::ChangeAgent {
-                            kind: crate::landing::AgentKind::Sub,
-                            id: linked.lead.to_string(),
-                            label: format!("Sub-agent {}", linked.lead),
-                        },
-                        repository: repository.clone(),
-                        worktree: linked.worktree.clone(),
-                        git_dir: git_dir.clone(),
-                    },
-                    &crate::landing::TurnEnd {
-                        outcome: crate::landing::TurnOutcome::Succeeded,
-                        turn: "task-1".into(),
-                        prompt_line: "Ignore the teammates' folder".into(),
-                    },
-                )
-                .unwrap()
-                .expect("the lead's .gitignore waits in its change set");
+                let set =
+                    match linked.record_lead_turn(&fixture, &db, "Ignore the teammates' folder") {
+                        Ok(Some(set)) => set,
+                        other => {
+                            unrecorded.push(format!("{source}: {other:?}"));
+                            continue;
+                        }
+                    };
                 let set = crate::landing::change_set(&db, &set)
                     .unwrap()
                     .expect("the lead's change set reads")
@@ -9365,8 +9353,61 @@ fn a_linked_lead_with_unlanded_teammate_work_is_never_retired_whatever_hides_its
         }
     }
     assert!(
-        retired.is_empty(),
-        "unlanded teammate work let its lead's worktree go under: {retired:?}"
+        retired.is_empty() && unrecorded.is_empty(),
+        "unlanded teammate work let its lead's worktree go under: {retired:?}; the lead's turn was not recorded: {unrecorded:?}"
+    );
+}
+
+/// OP-9b: a linked lead's turn is committed whichever rule hides its teammates' folder from
+/// its git, the project's `.gitignore`, the owner's exclude file or a `.gitignore` the lead
+/// writes, and its teammates' worktrees stay out of the commit: git never reports the
+/// folder as an ignored path the engine named.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_linked_lead_s_turn_is_committed_whatever_hides_its_teammates_folder() {
+    let mut wrong = Vec::new();
+    for source in ["project", "exclude", "lead"] {
+        let fixture = Fixture::new(1);
+        let repository = fixture.base.join("project");
+        if source == "project" {
+            std::fs::write(repository.join(".gitignore"), ".worktrees/\n").unwrap();
+        }
+        let mut team = fixture.runtime();
+        let linked = LinkedTeam::new(&fixture, &mut team);
+        let start = linked.tip(&linked.branch);
+        match source {
+            "exclude" => {
+                let info = repository.join(".git").join("info");
+                std::fs::create_dir_all(&info).unwrap();
+                std::fs::write(info.join("exclude"), ".worktrees/\n").unwrap();
+            }
+            "lead" => {
+                std::fs::write(linked.worktree.join(".gitignore"), ".worktrees/\n").unwrap();
+            }
+            _ => {}
+        }
+        std::fs::write(linked.worktree.join("lead.txt"), "Lead.\n").unwrap();
+        std::fs::write(linked.teammate("greet").join("hello.txt"), "Hello.\n").unwrap();
+        let db = crate::landing::open(&fixture.base).unwrap();
+
+        let recorded = linked.record_lead_turn(&fixture, &db, "Write the lead's file");
+
+        let committed = match recorded {
+            Ok(Some(_)) => linked.files(&start, &linked.tip(&linked.branch)),
+            other => format!("not recorded: {other:?}"),
+        };
+        let expected = if source == "lead" {
+            ".gitignore\nlead.txt"
+        } else {
+            "lead.txt"
+        };
+        if committed != expected {
+            wrong.push(format!("{source}: {committed}"));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "the lead's turn holds exactly its own files whatever hides its teammates' folder: {wrong:?}"
     );
 }
 
@@ -9482,6 +9523,38 @@ impl LinkedTeam {
             );
         }
         linked
+    }
+
+    fn record_lead_turn(
+        &self,
+        fixture: &Fixture,
+        db: &rusqlite::Connection,
+        prompt: &str,
+    ) -> Result<Option<crate::landing::ChangeSetId>, crate::engine::EngineError> {
+        let repository = fixture.base.join("project");
+        let git_dir = repository
+            .join(".git")
+            .join("worktrees")
+            .join(format!("agent-{}", self.lead));
+        crate::landing::record_turn_end(
+            db,
+            &crate::landing::Workspace {
+                project: self.project.clone(),
+                agent: crate::landing::ChangeAgent {
+                    kind: crate::landing::AgentKind::Sub,
+                    id: self.lead.to_string(),
+                    label: format!("Sub-agent {}", self.lead),
+                },
+                repository,
+                worktree: self.worktree.clone(),
+                git_dir,
+            },
+            &crate::landing::TurnEnd {
+                outcome: crate::landing::TurnOutcome::Succeeded,
+                turn: format!("task-{}", now_ms()),
+                prompt_line: prompt.to_owned(),
+            },
+        )
     }
 
     fn teammate(&self, name: &str) -> PathBuf {
