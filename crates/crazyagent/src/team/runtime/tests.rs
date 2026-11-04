@@ -2174,6 +2174,98 @@ fn a_team_master_never_gets_a_delegate_engine_inside_a_folder_it_can_write() {
     );
 }
 
+/// A team agent whose delegation engine sits in an app bundle, as the macOS service runs it
+/// from `CrazyAgent.app/Contents/MacOS`, can start that engine under its installed profile
+/// for its team tools, relay hooks and monitor, with tools on or off, while another bundle's
+/// main executable stays denied (OP24R2-1).
+#[cfg(target_os = "macos")]
+#[test]
+fn a_team_agent_starts_the_delegation_engine_from_its_app_bundle_but_no_other_bundle() {
+    let fixture = Fixture::new(1);
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let account = TeamAccount {
+        connection: reference(ENDPOINT),
+        reach: TeamReach::Endpoint {
+            base_url: "http://127.0.0.1:11434/v1".into(),
+            model: "qwen2.5:0.5b".into(),
+        },
+    };
+    let bundle = |name: &str| {
+        let folder = fixture
+            .base
+            .join(format!("{name}.app"))
+            .join("Contents")
+            .join("MacOS");
+        std::fs::create_dir_all(&folder).unwrap();
+        let program = folder.join(name.to_lowercase());
+        std::fs::write(&program, "#!/bin/sh\necho ran\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        program
+    };
+    let engine = bundle("CrazyAgent");
+    let other = bundle("Other");
+    let access = fixture.access.clone();
+    let runtime = TeamRuntime::open(
+        &fixture.base.join("engine.db"),
+        &fixture.base.join("team"),
+        BTreeMap::from([("codex", codex.clone())]),
+        Box::new(move || Some(access.clone())),
+        TeamLimits::default(),
+    )
+    .unwrap()
+    .with_delegation_tool(&engine)
+    .unwrap();
+    for (role, tools) in [
+        (AgentRole::Master, true),
+        (AgentRole::Sub, true),
+        (AgentRole::Sub, false),
+    ] {
+        let id = fixture.agent(role, "codex", AgentStatus::Starting);
+        let (_, plan, _) = runtime
+            .prepare(
+                &fixture.setup,
+                id,
+                role,
+                "codex",
+                tools,
+                &account,
+                false,
+                crate::agent_git::Layout::Linked,
+            )
+            .unwrap();
+        for (program, starts) in [(&engine, true), (&other, false)] {
+            let output = crate::spawn_gate::output(
+                Command::new(crate::sandbox::SANDBOX_EXEC)
+                    .arg("-f")
+                    .arg(&plan.sandbox_profile)
+                    .arg(program)
+                    .current_dir(&plan.working_dir)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped()),
+            )
+            .unwrap();
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            if starts {
+                assert!(
+                    output.status.success(),
+                    "agent {id} ({role:?}, tools {tools}) cannot start {}: {stderr}",
+                    program.display()
+                );
+                assert_eq!(String::from_utf8_lossy(&output.stdout), "ran\n");
+            } else {
+                assert!(!output.status.success(), "{} ran", program.display());
+                assert!(stderr.contains("Operation not permitted"), "{stderr}");
+                assert!(output.stdout.is_empty());
+            }
+        }
+    }
+}
+
 /// A launch that made an agent's own clone and then failed at a later step removes that
 /// clone again, so a failed launch leaves no checkout behind that no agent row would clean
 /// up, and another agent's worktree stays (GA-R2).

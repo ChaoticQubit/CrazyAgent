@@ -2157,6 +2157,62 @@ fn an_agent_cannot_exec_an_app_bundle_binary_in_any_case_but_bundle_tools_still_
 }
 
 #[test]
+fn an_agent_cannot_exec_an_app_bundle_it_put_in_its_own_folders_but_bundle_tools_still_run() {
+    use std::os::unix::fs::PermissionsExt;
+    let case = case();
+    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let profile = case.profiles.join("own-apps.sb");
+    let script = |root: &Path, path: &str| {
+        let file = root.join(path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "#!/bin/sh\necho ran\n").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+        file
+    };
+    let chrome = script(
+        &case.home,
+        ".cache/puppeteer/chrome/mac_arm-131.0.6778.85/chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+    );
+    let apps = [
+        chrome.clone(),
+        script(
+            &case.home,
+            "Library/Caches/ms-playwright/chromium-1148/chrome-mac/Chromium.app/Contents/MacOS/Chromium",
+        ),
+        script(
+            &case.project,
+            "node_modules/electron/dist/Electron.app/Contents/MacOS/Electron",
+        ),
+        script(&case.tmp, "unpacked/Some Tool.APP/contents/macos/Some Tool"),
+        Path::new("/System/Volumes/Data").join(chrome.strip_prefix("/").unwrap()),
+        PathBuf::from(chrome.to_str().unwrap().to_uppercase()),
+    ];
+    for app in &apps {
+        assert!(app.is_file(), "{}", app.display());
+        let output = run(&sandbox, &profile, &quoted(app));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{} ran", app.display());
+        assert!(
+            stderr.contains("Operation not permitted"),
+            "{}: {stderr}",
+            app.display()
+        );
+        assert!(output.stdout.is_empty(), "{}", app.display());
+    }
+    let tool = script(
+        &case.project,
+        "node_modules/electron/dist/Electron.app/Contents/Resources/bin/tool",
+    );
+    let output = run(&sandbox, &profile, &quoted(&tool));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "ran\n");
+}
+
+#[test]
 fn a_teammate_worktree_is_added_in_the_clone_but_no_other_git_lands_below_it() {
     assert!(Path::new(AGENT_GIT).is_file());
     let (case, clone, _head) = clone_case();
@@ -2193,4 +2249,196 @@ fn a_teammate_worktree_is_added_in_the_clone_but_no_other_git_lands_below_it() {
             &target,
         );
     }
+}
+
+#[test]
+fn a_confined_agent_cannot_exec_an_app_bundle_from_a_folder_it_only_reads() {
+    use std::os::unix::fs::PermissionsExt;
+    let case = case();
+    for arguments in [
+        &["init", "-q"][..],
+        &["commit", "-q", "--allow-empty", "-m", "start"],
+    ] {
+        let made = owner_git(&case.project, &case.home, arguments);
+        assert!(made.status.success(), "{made:?}");
+    }
+    let worktree = case.project.join("worktrees").join("one");
+    let added = owner_git(
+        &case.project,
+        &case.home,
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "--detach",
+            worktree.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+    assert!(added.status.success(), "{added:?}");
+    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let profile = case.profiles.join("read-only-apps.sb");
+    let script = |root: &Path, path: &str| {
+        let file = root.join(path);
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, "#!/bin/sh\necho ran\n").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+        file
+    };
+    let electron = script(
+        &case.project,
+        "node_modules/electron/dist/Electron.app/Contents/MacOS/Electron",
+    );
+    let apps = [
+        electron.clone(),
+        script(
+            &case.outside,
+            "tools/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+        ),
+        script(
+            &case.outside,
+            "unpacked/Some Tool.APP/contents/macos/Some Tool",
+        ),
+        Path::new("/System/Volumes/Data").join(electron.strip_prefix("/").unwrap()),
+        PathBuf::from(electron.to_str().unwrap().to_uppercase()),
+    ];
+    let tool = script(
+        &case.project,
+        "node_modules/electron/dist/Electron.app/Contents/Resources/bin/tool",
+    );
+    let confined = sandbox
+        .allow_read(&case.outside)
+        .unwrap()
+        .confine_to_worktree(&worktree)
+        .unwrap();
+    assert!(confined.read_roots().contains(&case.project));
+    assert!(!confined.writes(&electron));
+    for app in &apps {
+        assert!(app.is_file(), "{}", app.display());
+        let output = run(&confined, &profile, &quoted(app));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{} ran", app.display());
+        assert!(
+            stderr.contains("Operation not permitted"),
+            "{}: {stderr}",
+            app.display()
+        );
+        assert!(output.stdout.is_empty(), "{}", app.display());
+    }
+    let output = run(&confined, &profile, &quoted(&tool));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "ran\n");
+}
+
+#[test]
+fn the_harness_the_engine_launches_from_an_app_bundle_still_starts_but_its_bundle_does_not() {
+    use std::os::unix::fs::PermissionsExt;
+    let case = case();
+    let bundle = case
+        .outside
+        .join("Harness.app")
+        .join("Contents")
+        .join("MacOS");
+    fs::create_dir_all(&bundle).unwrap();
+    let program = |name: &str| {
+        let file = bundle.join(name);
+        fs::write(&file, "#!/bin/sh\necho ran\n").unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+        file
+    };
+    let harness = program("harness");
+    let sibling = program("Helper");
+    let fresh = || sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let allowed = fresh()
+        .allow_read(&case.outside)
+        .unwrap()
+        .allow_exec(&harness)
+        .unwrap()
+        .allow_exec(&harness)
+        .unwrap();
+    let profile = case.profiles.join("harness.sb");
+    allowed.install(&profile).unwrap();
+    let mut launched = allowed.command(&profile, &harness);
+    launched
+        .current_dir(allowed.project_root())
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = crazyagent::spawn_gate::output(&mut launched).unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "ran\n");
+    let own = case
+        .home
+        .join("Own.app")
+        .join("Contents")
+        .join("MacOS")
+        .join("own");
+    fs::create_dir_all(own.parent().unwrap()).unwrap();
+    fs::write(&own, "#!/bin/sh\necho ran\n").unwrap();
+    fs::set_permissions(&own, fs::Permissions::from_mode(0o755)).unwrap();
+    let writable = fresh().allow_exec(&own).unwrap();
+    assert!(writable.writes(&own));
+    for (sandbox, app) in [(&allowed, &sibling), (&writable, &own)] {
+        let output = run(sandbox, &profile, &quoted(app));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{} ran", app.display());
+        assert!(stderr.contains("Operation not permitted"), "{stderr}");
+        assert!(output.stdout.is_empty());
+    }
+    let refused = |result: Result<ProjectSandbox, SandboxError>| {
+        assert!(
+            matches!(result, Err(SandboxError::Invalid(_))),
+            "{:?}",
+            result.map(|sandbox| sandbox.profile())
+        );
+    };
+    refused(fresh().allow_exec(Path::new("Harness.app/Contents/MacOS/harness")));
+    refused(fresh().allow_exec(&bundle));
+    refused(fresh().allow_exec(&bundle.join("missing")));
+    refused(
+        fresh().allow_exec(
+            &case
+                .outside
+                .join("Harness.app/Contents/MacOS/../MacOS/harness"),
+        ),
+    );
+    let mut many = fresh();
+    for index in 0..4 {
+        many = many.allow_exec(&program(&format!("tool-{index}"))).unwrap();
+    }
+    many = many.allow_exec(&bundle.join("tool-0")).unwrap();
+    refused(many.allow_exec(&program("tool-4")));
+}
+
+#[test]
+fn an_agent_still_runs_framework_python_whose_launcher_starts_its_python_app() {
+    let case = case();
+    let sandbox = sandbox(&case, SandboxNetwork::Only(Vec::new()));
+    let profile = case.profiles.join("python.sb");
+    let python = Path::new("/opt/homebrew/bin/python3");
+    let real = fs::canonicalize(python).unwrap();
+    assert!(
+        real.to_str().unwrap().contains(".framework/Versions/"),
+        "the probe needs a framework build at {}",
+        python.display()
+    );
+    let output = run(
+        &sandbox,
+        &profile,
+        &format!("{} -c 'print(\"ok\")'", quoted(python)),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "ok\n");
 }
