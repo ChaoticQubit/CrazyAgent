@@ -14341,7 +14341,9 @@ fn a_native_teammate_writes_only_its_own_home_and_the_team_folders_its_lead_shar
 /// starts with its own temp folder empty, though an earlier start left a file there, and in
 /// its installed profile stages a file in it. A teammate in its installed profile can
 /// neither read, list, change, remove nor move that folder or anything in it, nor make a
-/// file, a link or a folder there, and still writes the short temp folder it shares.
+/// file, a link or a folder there, nor read or plant through the folder's name in upper
+/// case, which the case-insensitive file system resolves to the same folder (LT-1), and
+/// still writes the short temp folder it shares.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_native_teammate_cannot_read_or_plant_in_its_lead_s_own_temp_folder() {
@@ -14427,6 +14429,15 @@ fn a_native_teammate_cannot_read_or_plant_in_its_lead_s_own_temp_folder() {
     assert!(staging.status.success(), "{staging:?}");
     assert_eq!(std::fs::read_to_string(&staged).unwrap(), "staged");
 
+    let upper = shared.join("LEAD");
+    assert_eq!(
+        std::fs::symlink_metadata(&upper)
+            .map(|found| std::os::unix::fs::MetadataExt::ino(&found))
+            .ok(),
+        Some(std::os::unix::fs::MetadataExt::ino(&metadata)),
+        "the temp folder's file system tells case apart, so the upper-case probe proves nothing"
+    );
+
     let tried = work.join("tried.txt");
     let mate = work.join("mate.sh");
     std::fs::write(
@@ -14440,9 +14451,12 @@ fn a_native_teammate_cannot_read_or_plant_in_its_lead_s_own_temp_folder() {
              try link ln -s '{home}/.zshenv' '{own}/link'\n\
              try folder mkdir '{own}/sub'\n\
              try remove rm -f '{own}/staged.txt'\n\
+             try upper_read cat '{upper}/staged.txt'\n\
+             try upper_create sh -c \"printf planted > '{upper}/planted.txt'\"\n\
              try move mv '{own}' '{shared}/away'\n\
              try shared sh -c \"printf x > '{shared}/mate-tmp.txt'\"\n",
             own = own.display(),
+            upper = upper.display(),
             home = home.display(),
             shared = shared.display(),
             tried = tried.display(),
@@ -14474,7 +14488,16 @@ fn a_native_teammate_cannot_read_or_plant_in_its_lead_s_own_temp_folder() {
 
     assert!(mated.status.success(), "{mated:?}");
     for attempt in [
-        "read", "list", "change", "create", "link", "folder", "remove", "move",
+        "read",
+        "list",
+        "change",
+        "create",
+        "link",
+        "folder",
+        "remove",
+        "upper_read",
+        "upper_create",
+        "move",
     ] {
         assert!(
             exit(attempt).is_some_and(|code| code != "0"),
