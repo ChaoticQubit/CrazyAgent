@@ -2874,7 +2874,7 @@ fn a_refused_live_master_start_says_why_in_words_not_its_code() {
 }
 
 #[test]
-fn a_hookless_agent_row_says_receipts_and_adoption_are_unavailable_for_its_account_kind() {
+fn a_hookless_agent_row_says_only_its_receipts_are_unavailable_for_its_account_kind() {
     let mut shell = fresh(120, 30);
     let mut graph = graph();
     graph.nodes[2].hookless = true;
@@ -2898,8 +2898,8 @@ fn a_hookless_agent_row_says_receipts_and_adoption_are_unavailable_for_its_accou
         .join(" ");
     assert_eq!(
         words.trim(),
-        "Receipts and adoption unavailable for this account kind",
-        "{tree:#?}"
+        "Receipts unavailable for this account kind",
+        "adoption counts and flags show for every agent (OQ-8): {tree:#?}"
     );
     let hooked = tree
         .iter()

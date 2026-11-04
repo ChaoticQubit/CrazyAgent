@@ -351,7 +351,8 @@ const ADOPTION = {
   skills: ["tdd", "zeta"],
   hidden: 2,
   agents: [
-    { agent: 3, role: "sub", harness: "claude-code", active: true, counts: [0, 0], skills: [0, 0], other_skills: [], graphify: 0, context_mode: 0, flags: [], reminded: [], hookless: true },
+    { agent: 3, role: "sub", harness: "claude-code", active: true, counts: [0, 1], skills: [1, 0], other_skills: [], graphify: 1, context_mode: 0,
+      flags: ["edits_without_start_work"], reminded: [], hookless: true },
     { agent: 2, role: "sub", harness: "codex", active: false, counts: [0, 2], skills: [1, 0], other_skills: [{ name: "other-one", count: 1 }], graphify: 2, context_mode: 1,
       flags: ["edits_without_start_work"], reminded: ["edits_without_start_work"], hookless: false },
     { agent: 1, role: "master", harness: "claude-code", active: true, counts: [1, 0], skills: [0, 0], other_skills: [], graphify: 0, context_mode: 0,
@@ -393,11 +394,14 @@ test("workflow adoption shows each counted tool's column, skill counts, red flag
   assert.match(failed, /Workflow adoption couldn&#x27;t be read\. Try again\./);
 });
 
-test("a hookless agent's adoption row is one cell spanning the counts, skills and flags", () => {
+test("a hookless agent's adoption row shows its counts, skills and flags like any other agent's", () => {
   const markup = renderToStaticMarkup(createElement(view.AdoptionView, { adoption: { kind: "ok", value: ADOPTION }, onRefresh: never("onRefresh") }));
   const bare = rowOf(markup, "#3 sub claude-code");
-  assert.match(bare, new RegExp(`<td colSpan="${ADOPTION.counted.length + 2}" class="secondary">Counts and flags unavailable for this account kind</td>`, "i"));
-  assert.doesNotMatch(bare, /<strong>|None/);
+  assert.match(bare, /<td>0<\/td><td>1<\/td>/);
+  assert.match(bare, /graphify <strong>1<\/strong>/);
+  assert.match(bare, /<span>tdd <strong>1<\/strong><\/span>/);
+  assert.match(bare, /Edits without start_work/);
+  assert.doesNotMatch(bare, /colSpan|unavailable/i);
 });
 
 test("an agent's skill counts list graphify, ctx_* and every enabled skill, zeros muted", () => {
@@ -409,12 +413,12 @@ test("an agent's skill counts list graphify, ctx_* and every enabled skill, zero
   assert.match(none, /<span class="secondary">No skills enabled<\/span>/);
 });
 
-test("the skills dialog shows an agent's counts, or says why a hookless or unlisted agent has none", () => {
+test("the skills dialog shows an agent's counts, a hookless agent's too, or says why an unlisted agent has none", () => {
   const body = (agent, adoption = { kind: "ok", value: ADOPTION }) =>
     renderToStaticMarkup(createElement(view.AgentSkills, { adoption, agent, onRetry() {} }));
   assert.match(body(2), /tdd <strong>1<\/strong>/);
-  assert.match(body(3), /Skill counts unavailable for this account kind\./);
-  assert.doesNotMatch(body(3), /<strong>/);
+  assert.match(body(3), /<span>tdd <strong>1<\/strong><\/span>/);
+  assert.doesNotMatch(body(3), /unavailable/);
   assert.match(body(9), /This agent is older than the agents the Process page lists, so its counts are not shown\./);
   assert.match(body(2, { kind: "error", code: "process_adoption_unavailable", message: "" }), /Workflow adoption couldn&#x27;t be read\. Try again\./);
 });
