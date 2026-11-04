@@ -385,6 +385,12 @@ pub fn command(
         };
         env.push(("TMPDIR".to_owned(), text(&tmp)?));
     }
+    if let Some(port) = installed.and_then(Installed::model_proxy) {
+        env.extend(
+            crate::sandbox::model_proxy::variables(port)
+                .map(|(name, value)| (name.to_owned(), value)),
+        );
+    }
     let env = agent_env(&env)?;
     let built = InteractiveCommand {
         argv,

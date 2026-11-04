@@ -24,10 +24,11 @@ use crate::master_sessions::ResumePlan;
 use crate::project_setup::{StoredSetup, load_setup};
 use crate::protocol::{CredentialRef, ProjectId, RequestId, SessionId};
 use crate::research::runner::{
-    ResearchAccount, RunError, add_worktree_at, confined_unavailable, ensure_repository,
-    model_remote,
+    CLAUDE_MODEL_HOSTS, CODEX_MODEL_HOSTS, ResearchAccount, RunError, add_worktree_at,
+    confined_unavailable, endpoint_model_host, ensure_repository, model_remote,
 };
-use crate::sandbox::policy::AgentAccess;
+use crate::sandbox::model_proxy::{ModelHost, ModelProxy};
+use crate::sandbox::policy::{AgentAccess, AgentNetwork};
 use crate::sandbox::toolchains::{self, ToolHomes, Toolchains};
 use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
 use crate::terminal::{AgentId, Host, PANES_PER_PROJECT_MAX};
@@ -171,7 +172,10 @@ struct Grant {
 /// native-mode lead (DEC-104), which runs in a tmux server of its own inside its profile,
 /// and `tmux` is that server's program, which its teammates are split off with; `hookless`
 /// marks a launch Claude Code starts `--bare`, which fires no hooks (DEC-104 bare-hooks);
-/// `scratch_pin` is the agent's short temp folder as the engine made it (DEC-111 S1R1-1).
+/// `scratch_pin` is the agent's short temp folder as the engine made it (DEC-111 S1R1-1);
+/// `proxy` is the model proxy an agent with tools under the None network reaches its model
+/// through, the only network its profile allows (S4b); `network` is the project network its
+/// profile was made for, which a narrower saved choice stops it for (CS-2).
 struct Plan {
     harness: String,
     executable: PathBuf,
@@ -180,6 +184,7 @@ struct Plan {
     tools: bool,
     sandbox_profile: PathBuf,
     access: AgentAccess,
+    network: AgentNetwork,
     layout: Layout,
     git_identity: Option<GitIdentity>,
     limits: LaunchLimits,
@@ -192,6 +197,7 @@ struct Plan {
     hookless: bool,
     #[cfg(unix)]
     scratch_pin: Option<(u64, u64)>,
+    proxy: Option<Arc<ModelProxy>>,
 }
 
 /// Why a native-mode lead does not start at Full access: its own tmux server, its teammate
@@ -208,14 +214,19 @@ const OVERLAP_BLOCK_NEEDS_HOOKS: &str = "Overlaps set to Block needs hooks, and 
 
 impl Plan {
     /// Gives a native-mode lead's launch context its agent team (DEC-104 K5a): agent teams on,
-    /// `--teammate-mode tmux`, tmux on its PATH and the teammates' instructions. Other plans
-    /// keep the context as it is. Takes the context. Returns it.
+    /// `--teammate-mode tmux`, tmux on its PATH and the teammates' instructions. A plan with a
+    /// model proxy also points the launch's variables at it (S4b). Other plans keep the
+    /// context as it is. Takes the context. Returns it.
     fn team_context(&self, context: AgentContext) -> AgentContext {
         assert_eq!(
             self.native,
             self.tmux.is_some(),
             "a native plan carries its tmux"
         );
+        let context = match &self.proxy {
+            Some(proxy) => context.with_model_proxy(proxy.port()),
+            None => context,
+        };
         match &self.tmux {
             Some(tmux) => context.with_native_team(tmux, &self.working_dir),
             None => context,
@@ -296,6 +307,21 @@ enum Launch {
     Adopt(Box<Adoption>),
 }
 
+impl Launch {
+    /// Names the model proxy the launch's agent reaches its model through, which its worker
+    /// thread holds until the thread ends (S4b). Takes the launch. Returns the proxy, if any.
+    fn proxy(&self) -> Option<Arc<ModelProxy>> {
+        match self {
+            Launch::Fresh(plan, _) => plan.proxy.clone(),
+            Launch::Adopt(adoption) => adoption.proxy.clone(),
+        }
+    }
+}
+
+/// A pane an earlier engine left running, taken over from its record: the host and pane
+/// name, the record, the bounds, whether it is a live master, what a signed-in account needs
+/// again, the access level it started at, the project network its profile was made for, and
+/// its model proxy, bound again on the port its profile names (S4b).
 struct Adoption {
     host: Arc<dyn Host>,
     agent: AgentId,
@@ -304,6 +330,8 @@ struct Adoption {
     live: bool,
     managed: Option<Managed>,
     access: AgentAccess,
+    network: AgentNetwork,
+    proxy: Option<Arc<ModelProxy>>,
 }
 
 /// What a live master on a signed-in account needs when a later engine takes its pane over:
@@ -425,6 +453,8 @@ struct Worker {
     handoff: Option<String>,
     access: AgentAccess,
     lowered: bool,
+    network: AgentNetwork,
+    narrowed: bool,
     ran_before: Duration,
     told_finished: BTreeSet<i64>,
     parent: Option<i64>,
@@ -774,7 +804,9 @@ impl TeamRuntime {
     /// signed-in account for a live master or a native-mode lead, whose worker hands the
     /// credential to its home again before it serves. The pane keeps the
     /// access level its record says it started at, Full access for a record without one, so
-    /// a level lowered while no engine ran stops it on the next tick. Takes the host, the
+    /// a level lowered while no engine ran stops it on the next tick. A pane with tools whose
+    /// record names a wider network than the saved one, Open for a record without one, is not
+    /// taken over (CS-2). Takes the host, the
     /// agent id, its pane record and the live access. Returns Ok, or why the pane must end.
     fn adopt(
         &mut self,
@@ -837,6 +869,14 @@ impl TeamRuntime {
         if !in_plan {
             return Ok(Err("the team plan no longer has room for it".into()));
         }
+        let saved = crate::sandbox::policy::load(&self.connection, project.as_str())
+            .map_or(AgentNetwork::None, |policy| policy.network);
+        let started = record.network.unwrap_or(AgentNetwork::Open);
+        if tools && started.wider_than(saved) {
+            return Ok(Err(
+                "it started under a wider network than the project allows now".into(),
+            ));
+        }
         if self.panes(&project) >= PANES_PER_PROJECT_MAX {
             return Ok(Err(format!(
                 "the project already runs {PANES_PER_PROJECT_MAX} agents"
@@ -844,13 +884,16 @@ impl TeamRuntime {
         }
         let live = self.live_master(&project, role, launch);
         let native = !live && matches!(self.native_lead(&project, id, role, launch), Ok(true));
-        let reach = match eligible_accounts(access, &project, launch) {
+        let account_reach = match eligible_accounts(access, &project, launch) {
             Accounts::Usable(accounts) => accounts
                 .iter()
                 .find(|account| account.connection == connection)
-                .map(|account| matches!(account.reach, TeamReach::Endpoint { .. })),
+                .map(|account| account.reach.clone()),
             _ => None,
         };
+        let reach = account_reach
+            .as_ref()
+            .map(|reach| matches!(reach, TeamReach::Endpoint { .. }));
         let managed = match reach {
             Some(true) => None,
             Some(false) if live || native => match self.executables.get(launch) {
@@ -866,6 +909,22 @@ impl TeamRuntime {
                 ));
             }
             None => return Ok(Err("its account is no longer in the project's pool".into())),
+        };
+        let proxy = match (record.proxy, &account_reach) {
+            (None, _) => None,
+            (Some(port), Some(reach)) => {
+                let hosts = match model_hosts(launch, reach) {
+                    Ok(hosts) => hosts,
+                    Err(problem) => return Ok(Err(problem)),
+                };
+                match ModelProxy::bind(id, hosts, Some(port)) {
+                    Ok(proxy) => Some(Arc::new(proxy)),
+                    Err(_) => return Ok(Err(format!("its model proxy port {port} is taken"))),
+                }
+            }
+            (Some(_), None) => {
+                return Ok(Err("its account is no longer in the project's pool".into()));
+            }
         };
         let Ok(agent) = AgentId::team(id) else {
             return Ok(Err("its record is not valid".into()));
@@ -888,6 +947,8 @@ impl TeamRuntime {
             live,
             managed,
             access: record.access.unwrap_or(AgentAccess::Full),
+            network: record.network.unwrap_or(AgentNetwork::Open),
+            proxy,
         };
         let session = if live {
             crate::master_sessions::live_session(&self.connection, &project)?
@@ -1966,6 +2027,7 @@ impl TeamRuntime {
         let paused = self.paused()?;
         self.retire_rejected(project, access);
         self.retire_lowered(project);
+        self.retire_narrowed(project);
         self.sync_pool(&stored, access)?;
         self.request_cancels(project)?;
         self.keep_live(&stored, access, &paused)?;
@@ -2424,6 +2486,39 @@ impl TeamRuntime {
             let worker = self.workers.get_mut(&id).expect("worker exists");
             worker.stopping = true;
             worker.lowered = true;
+            worker.cancel.store(true, Ordering::SeqCst);
+            let _ = worker.orders.send(Order::Stop);
+        }
+    }
+
+    /// Stops the project's agents with tools whose profile was made for a wider network than
+    /// the one the owner saved now (CS-2): a running, kept or live agent at once, and an idle
+    /// per-turn agent too, since its next turn would run in the same profile. Every next start
+    /// makes its profile for the saved network. An unreadable choice counts as None. Takes
+    /// the project.
+    fn retire_narrowed(&mut self, project: &ProjectId) {
+        if !self.workers.values().any(|worker| {
+            &worker.project == project
+                && worker.tools
+                && !worker.stopping
+                && worker.network != AgentNetwork::None
+        }) {
+            return;
+        }
+        let saved = crate::sandbox::policy::load(&self.connection, project.as_str())
+            .map_or(AgentNetwork::None, |policy| policy.network);
+        let narrowed: Vec<i64> = self
+            .workers
+            .iter()
+            .filter(|(_, w)| {
+                &w.project == project && w.tools && !w.stopping && w.network.wider_than(saved)
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in narrowed {
+            let worker = self.workers.get_mut(&id).expect("worker exists");
+            worker.stopping = true;
+            worker.narrowed = true;
             worker.cancel.store(true, Ordering::SeqCst);
             let _ = worker.orders.send(Order::Stop);
         }
@@ -4895,9 +4990,9 @@ impl TeamRuntime {
             Launch::Adopt(adoption) => adoption.managed.is_some() && !adoption.live,
         };
         assert!(!(kept_session && live));
-        let access = match &launch {
-            Launch::Fresh(plan, _) => plan.access,
-            Launch::Adopt(adoption) => adoption.access,
+        let (access, network) = match &launch {
+            Launch::Fresh(plan, _) => (plan.access, plan.network),
+            Launch::Adopt(adoption) => (adoption.access, adoption.network),
         };
         let thread = std::thread::Builder::new()
             .name(format!("team-agent-{id}"))
@@ -4948,7 +5043,9 @@ impl TeamRuntime {
                 spawned: Instant::now(),
                 handoff: None,
                 access,
+                network,
                 lowered: false,
+                narrowed: false,
                 ran_before: Duration::ZERO,
                 told_finished: BTreeSet::new(),
                 parent,
@@ -5551,10 +5648,22 @@ impl TeamRuntime {
         if let Some(reason) = policy.access.unavailable() {
             return Err(with_code(reason, Some("agent_access_unavailable")));
         }
-        let network = if tools {
-            policy.network.sandbox(Some(remote))
+        let proxy = if tools
+            && policy.network == AgentNetwork::None
+            && !matches!(remote, SandboxRemote::Loopback(_))
+        {
+            let hosts = model_hosts(launch, &account.reach)?;
+            let proxy = ModelProxy::bind(id, hosts, None).map_err(|e| {
+                with_code("the agent's model proxy could not start", Some(io_code(&e)))
+            })?;
+            Some(Arc::new(proxy))
         } else {
-            SandboxNetwork::Only(vec![remote])
+            None
+        };
+        let network = match &proxy {
+            Some(proxy) => SandboxNetwork::Only(vec![SandboxRemote::Loopback(proxy.port())]),
+            None if tools => policy.network.sandbox(Some(remote)),
+            None => SandboxNetwork::Only(vec![remote]),
         };
         let homes = ToolHomes::owner().map_err(sandboxed)?;
         let scratch = toolchains::make_tmp(&home)
@@ -5766,6 +5875,7 @@ impl TeamRuntime {
             tools,
             sandbox_profile: profile,
             access: policy.access,
+            network: policy.network,
             layout,
             git_identity: owner_git_identity(&root),
             limits: self.launch_limits(),
@@ -5788,6 +5898,7 @@ impl TeamRuntime {
             hookless,
             #[cfg(unix)]
             scratch_pin,
+            proxy,
         };
         let mode = match &account.reach {
             TeamReach::Endpoint { base_url, .. } => Mode::Kept {
@@ -6085,7 +6196,12 @@ impl TeamRuntime {
                     worker.spawned = Instant::now();
                 }
                 let access = Some(self.workers[&id].access);
-                let pane = pane.map(|record| PaneRecord { access, ..record });
+                let network = Some(self.workers[&id].network);
+                let pane = pane.map(|record| PaneRecord {
+                    access,
+                    network,
+                    ..record
+                });
                 if let Some(record) = pane.as_ref().and_then(PaneRecord::encode) {
                     self.connection
                         .execute(
@@ -6417,14 +6533,23 @@ impl TeamRuntime {
                 } else {
                     AgentStatus::Stopped
                 };
-                let problem = problem.or_else(|| {
-                    worker.lowered.then(|| {
-                        with_code(
-                            "the project's agent access was lowered, so the agent was stopped; its next start uses the new level",
-                            Some("agent_access_lowered"),
-                        )
+                let problem = problem
+                    .or_else(|| {
+                        worker.lowered.then(|| {
+                            with_code(
+                                "the project's agent access was lowered, so the agent was stopped; its next start uses the new level",
+                                Some("agent_access_lowered"),
+                            )
+                        })
                     })
-                });
+                    .or_else(|| {
+                        worker.narrowed.then(|| {
+                            with_code(
+                                "the project's agent network was narrowed, so the agent was stopped; its next start uses the new network",
+                                Some("agent_network_narrowed"),
+                            )
+                        })
+                    });
                 if let Some(hosted) = worker.hosted.take() {
                     let state = if status == AgentStatus::Failed {
                         RunState::Failed
@@ -7086,6 +7211,7 @@ fn work(
     interrupt: Arc<AtomicBool>,
     leave: Arc<AtomicBool>,
 ) {
+    let _proxy = launch.proxy();
     let launch = match launch {
         Launch::Fresh(plan, mode) if plan.live => {
             let problem = live(&plan, *mode, &orders, &reports, &cancel, &leave);
@@ -8387,6 +8513,40 @@ fn io_code(error: &std::io::Error) -> &'static str {
     }
 }
 
+/// Lists the hosts a team agent under the None network reaches through its model proxy
+/// (S4b): its harness's model hosts on a signed-in account, its base URL's host on an
+/// endpoint. Inputs: the launch harness and the account's reach. Output: the hosts, or the
+/// plain refusal for an endpoint no proxy can reach by name or a harness with no list.
+fn model_hosts(launch: &str, reach: &TeamReach) -> Result<Vec<ModelHost>, String> {
+    let fixed = |hosts: &[(&str, u16)]| -> Vec<ModelHost> {
+        hosts
+            .iter()
+            .filter_map(|(name, port)| ModelHost::new(name, *port))
+            .collect()
+    };
+    let hosts = match (reach, launch) {
+        (TeamReach::Endpoint { base_url, .. }, _) => match endpoint_model_host(base_url) {
+            Some(host) => vec![host],
+            None => {
+                return Err(with_code(
+                    "With no network, an agent with tools reaches only an https endpoint named by a host name. Use such an endpoint or choose another network setting.",
+                    Some("network_none_endpoint_unnamed"),
+                ));
+            }
+        },
+        (TeamReach::Managed { .. }, "codex") => fixed(CODEX_MODEL_HOSTS),
+        (TeamReach::Managed { .. }, "claude-code") => fixed(CLAUDE_MODEL_HOSTS),
+        (TeamReach::Managed { .. }, _) => {
+            return Err(with_code(
+                "this harness has no model hosts for the no network setting",
+                Some("network_none_harness_unlisted"),
+            ));
+        }
+    };
+    assert!(!hosts.is_empty() && hosts.len() <= crate::sandbox::model_proxy::HOSTS_MAX);
+    Ok(hosts)
+}
+
 /// The plain code for a failed agent sandbox step. Input: the error. Output: the code.
 fn sandbox_code(error: &SandboxError) -> &'static str {
     match error {
@@ -9062,3 +9222,6 @@ mod live_failover_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "runtime/live_native_lead_tests.rs"]
 mod live_native_lead_tests;
+#[cfg(all(test, target_os = "macos"))]
+#[path = "runtime/live_network_none_tests.rs"]
+mod live_network_none_tests;
