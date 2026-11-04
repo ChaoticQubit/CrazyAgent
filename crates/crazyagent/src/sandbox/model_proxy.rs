@@ -1,6 +1,6 @@
 use crate::spawn_gate;
 use std::io::{self, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::thread::JoinHandle;
@@ -19,11 +19,16 @@ pub const HOSTS_MAX: usize = 8;
 
 const RECORD_BYTES_MAX: usize = 5 + 16 * 1024;
 const POLL: Duration = Duration::from_millis(250);
+const ACCEPT_POLL: Duration = Duration::from_millis(5);
 const WRITE_TIME: Duration = Duration::from_secs(60);
 const HOST_BYTES_MAX: usize = 253;
 const COPY_BYTES: usize = 16 * 1024;
 const SHOWN_BYTES_MAX: usize = 96;
 const ESTABLISHED: &[u8] = b"HTTP/1.1 200 Connection Established\r\n\r\n";
+const SERVER_NAME: u16 = 0x0000;
+const ENCRYPTED_CLIENT_HELLO: u16 = 0xfe0d;
+const ENCRYPTED_SERVER_NAME: u16 = 0xffce;
+const BIND_TRIES: usize = 16;
 
 /// One host a model proxy lets an agent reach: a DNS name, never an IP literal, and its
 /// port. Names are kept in lower case, as hosts compare.
@@ -91,11 +96,13 @@ pub fn variables(port: u16) -> [(&'static str, String); 6] {
     ]
 }
 
-/// One agent's model proxy (S4b): a listener on 127.0.0.1 that opens a CONNECT tunnel
-/// only to a host on the agent's list, resolves the host itself and passes the TLS bytes
-/// through untouched, after checking that the ClientHello names the same host. The agent's
-/// Seatbelt profile reaches only this port, so the proxy is its one way to the network.
-/// Dropping it closes the listener and, within a poll, every open tunnel.
+/// One agent's model proxy (S4b): a listener on 127.0.0.1 and one on ::1, on the same port,
+/// that opens a CONNECT tunnel only to a host on the agent's list, resolves the host itself
+/// and passes the TLS bytes through untouched, after checking that the ClientHello names the
+/// same host. The agent's Seatbelt profile reaches only this port on loopback, which Seatbelt
+/// names `localhost` and which covers both addresses, so holding both leaves no other
+/// process a side of the port while the proxy runs (S4B-2). Dropping it closes the
+/// listeners and, within a poll, every open tunnel.
 pub struct ModelProxy {
     port: u16,
     stop: Arc<AtomicBool>,
@@ -113,21 +120,26 @@ impl std::fmt::Debug for ModelProxy {
 }
 
 impl ModelProxy {
-    /// Starts one agent's proxy on 127.0.0.1, on `port` when a kept pane needs the port its
-    /// profile names again, otherwise on a free port. Inputs: the agent id its refusal lines
-    /// name, its hosts (1 to `HOSTS_MAX`) and the port. Output: the running proxy, or the
-    /// bind error, such as a saved port another process took.
+    /// Starts one agent's proxy on 127.0.0.1 and ::1, on `port` when a kept pane needs the
+    /// port its profile names again, otherwise on a port free on both. Inputs: the agent id
+    /// its refusal lines name, its hosts (1 to `HOSTS_MAX`) and the port. Output: the running
+    /// proxy, or the bind error, such as a saved port another process took on either address.
     pub fn bind(agent: i64, hosts: Vec<ModelHost>, port: Option<u16>) -> io::Result<Self> {
         assert!(!hosts.is_empty() && hosts.len() <= HOSTS_MAX);
-        let listener = spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, port.unwrap_or(0)))?;
-        let bound = listener.local_addr()?.port();
+        let listeners = loopback_pair(port)?;
+        let bound = listeners[0].local_addr()?.port();
         assert!(bound != 0 && port.is_none_or(|port| port == bound));
+        for listener in &listeners {
+            let address = listener.local_addr()?;
+            assert!(address.ip().is_loopback() && address.port() == bound);
+            listener.set_nonblocking(true)?;
+        }
         let stop = Arc::new(AtomicBool::new(false));
         let open = Arc::new(AtomicUsize::new(0));
         let (flag, count, hosts) = (stop.clone(), open.clone(), Arc::new(hosts));
         let thread = std::thread::Builder::new()
             .name(format!("model-proxy-{agent}"))
-            .spawn(move || serve(agent, &listener, &hosts, &flag, &count))?;
+            .spawn(move || serve(agent, &listeners, &hosts, &flag, &count))?;
         Ok(Self {
             port: bound,
             stop,
@@ -142,15 +154,33 @@ impl ModelProxy {
     }
 }
 
+/// Binds 127.0.0.1 and ::1 on one port: `port` when given, otherwise a free port of
+/// 127.0.0.1 that ::1 also has free, trying again up to `BIND_TRIES` times. Input: the port.
+/// Output: the two listeners, 127.0.0.1 first, or the first bind error.
+fn loopback_pair(port: Option<u16>) -> io::Result<[TcpListener; 2]> {
+    let mut tries = 1;
+    loop {
+        let v4 = spawn_gate::bind_tcp_std((Ipv4Addr::LOCALHOST, port.unwrap_or(0)))?;
+        let bound = v4.local_addr()?.port();
+        match spawn_gate::bind_tcp_std((Ipv6Addr::LOCALHOST, bound)) {
+            Ok(v6) => return Ok([v4, v6]),
+            Err(error)
+                if port.is_none()
+                    && error.kind() == io::ErrorKind::AddrInUse
+                    && tries < BIND_TRIES =>
+            {
+                tries += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
 impl Drop for ModelProxy {
-    /// Stops the listener, wakes its accept with one connection of its own, and waits a
-    /// short bound for the open tunnels to notice the stop. Takes the proxy.
+    /// Stops the listeners, which the serving thread sees within one accept poll, and
+    /// waits a short bound for the open tunnels to notice the stop. Takes the proxy.
     fn drop(&mut self) {
         self.stop.store(true, Ordering::SeqCst);
-        let _ = spawn_gate::connect_tcp_std_timeout(
-            &SocketAddr::from((Ipv4Addr::LOCALHOST, self.port)),
-            Duration::from_secs(1),
-        );
         if let Some(thread) = self.listener.take() {
             let _ = thread.join();
         }
@@ -171,51 +201,107 @@ impl Drop for Held {
     }
 }
 
-/// Accepts the agent's connections until the proxy stops: each one becomes a tunnel thread,
-/// and one past `TUNNELS_MAX` gets a 503. Inputs: the agent, the listener, its hosts, the
-/// stop flag and the open-tunnel count. Output: none.
+/// Accepts the agent's connections on both non-blocking listeners until the proxy stops,
+/// polling every `ACCEPT_POLL` while neither has one waiting. Inputs: the agent, the
+/// listeners, its hosts, the stop flag and the open-tunnel count. Output: none.
 fn serve(
     agent: i64,
-    listener: &TcpListener,
+    listeners: &[TcpListener; 2],
     hosts: &Arc<Vec<ModelHost>>,
     stop: &Arc<AtomicBool>,
     open: &Arc<AtomicUsize>,
 ) {
-    for incoming in spawn_gate::incoming_tcp_std(listener) {
-        if stop.load(Ordering::SeqCst) {
-            return;
+    while !stop.load(Ordering::SeqCst) {
+        let mut waiting = false;
+        for listener in listeners {
+            if let Ok((client, _)) = spawn_gate::accept_tcp_std(listener) {
+                waiting = true;
+                admit(agent, client, hosts, stop, open);
+            }
         }
-        let Ok(client) = incoming else {
-            std::thread::sleep(POLL / 10);
-            continue;
-        };
-        let admitted = open.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
-            (count < TUNNELS_MAX).then_some(count + 1)
-        });
-        if admitted.is_err() {
-            refuse(
-                agent,
-                &client,
-                "503 Service Unavailable",
-                "too many tunnels",
-            );
-            continue;
+        if !waiting {
+            std::thread::sleep(ACCEPT_POLL);
         }
-        let held = Held(open.clone());
-        let (hosts, stop) = (hosts.clone(), stop.clone());
-        let _ = std::thread::Builder::new()
-            .name(format!("model-tunnel-{agent}"))
-            .spawn(move || {
-                let _held = held;
-                tunnel(agent, client, &hosts, &stop);
-            });
     }
 }
 
-/// Answers a connection the proxy will not tunnel and logs the agent and what it asked
-/// for. Inputs: the agent, the client, the status line and what was asked. Output: none.
-fn refuse(agent: i64, mut client: &TcpStream, status: &str, asked: &str) {
-    eprintln!("model_proxy_refused agent={agent} host={}", shown(asked));
+/// Starts a tunnel thread for one accepted connection, or answers a 503 to one past
+/// `TUNNELS_MAX`. Inputs: the agent, the connection, its hosts, the stop flag and the
+/// open-tunnel count. Output: none.
+fn admit(
+    agent: i64,
+    client: TcpStream,
+    hosts: &Arc<Vec<ModelHost>>,
+    stop: &Arc<AtomicBool>,
+    open: &Arc<AtomicUsize>,
+) {
+    let admitted = open.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+        (count < TUNNELS_MAX).then_some(count + 1)
+    });
+    if admitted.is_err() {
+        refuse(
+            &client,
+            "503 Service Unavailable",
+            &format!("model_proxy_refused agent={agent} reason=too_many_tunnels"),
+        );
+        return;
+    }
+    let held = Held(open.clone());
+    let (hosts, stop) = (hosts.clone(), stop.clone());
+    let _ = std::thread::Builder::new()
+        .name(format!("model-tunnel-{agent}"))
+        .spawn(move || {
+            let _held = held;
+            tunnel(agent, client, &hosts, &stop);
+        });
+}
+
+/// The log line for a refused request: the agent, the request's method and the host and
+/// port it named, never its path, query or user info, which may hold a credential (S4B-3).
+/// A method that is not a plain upper-case word, or a target with no plain host, shows as
+/// `-`. Inputs: the agent and the request line. Output: the line.
+fn refusal(agent: i64, line: &str) -> String {
+    let mut words = line.split(' ');
+    let (method, target) = (
+        words.next().unwrap_or_default(),
+        words.next().unwrap_or_default(),
+    );
+    let host = if method == "CONNECT" {
+        target
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b".-:[]".contains(&b))
+            .then(|| target.to_owned())
+    } else {
+        url::Url::parse(target).ok().and_then(|url| {
+            let name = url.host_str()?;
+            Some(match url.port_or_known_default() {
+                Some(port) => format!("{name}:{port}"),
+                None => name.to_owned(),
+            })
+        })
+    };
+    let method = if !method.is_empty()
+        && method.len() <= 16
+        && method.bytes().all(|b| b.is_ascii_uppercase())
+    {
+        method
+    } else {
+        "-"
+    };
+    format!(
+        "model_proxy_refused agent={agent} method={method} host={}",
+        shown(
+            host.as_deref()
+                .filter(|host| !host.is_empty())
+                .unwrap_or("-")
+        )
+    )
+}
+
+/// Answers a connection the proxy will not tunnel and logs why. Inputs: the client, the
+/// status line and the log line, which names no client secret. Output: none.
+fn refuse(mut client: &TcpStream, status: &str, line: &str) {
+    eprintln!("{line}");
     let _ = client.write_all(
         format!("HTTP/1.1 {status}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes(),
     );
@@ -250,17 +336,16 @@ fn shown(asked: &str) -> String {
 fn tunnel(agent: i64, client: TcpStream, hosts: &[ModelHost], stop: &AtomicBool) {
     let deadline = Instant::now() + HANDSHAKE_TIME;
     let Ok((head, rest)) = read_head(&client, deadline) else {
-        refuse(agent, &client, "403 Forbidden", "unreadable request");
+        refuse(
+            &client,
+            "403 Forbidden",
+            &format!("model_proxy_refused agent={agent} reason=unreadable_request"),
+        );
         return;
     };
     let first = head.lines().next().unwrap_or_default();
     let Some(host) = connect_target(first).filter(|target| hosts.contains(target)) else {
-        refuse(
-            agent,
-            &client,
-            "403 Forbidden",
-            first.split(' ').nth(1).unwrap_or(first),
-        );
+        refuse(&client, "403 Forbidden", &refusal(agent, first));
         return;
     };
     if (&client).write_all(ESTABLISHED).is_err() {
@@ -380,25 +465,43 @@ fn connect_target(line: &str) -> Option<ModelHost> {
     ModelHost::new(name, port.parse().ok()?)
 }
 
-/// Reads the server name a TLS ClientHello carries in its server_name extension. The
-/// ClientHello must fit in the record. Input: one whole TLS record. Output: the name, or
-/// none for another message, a malformed one, no name, or more than one host name.
+/// Reads the server name a TLS ClientHello carries in its server_name extension. The record
+/// must hold exactly one ClientHello, parsed to its last byte. A hello that carries an
+/// Encrypted Client Hello or the older encrypted server name is refused, since its outer
+/// name need not be the host the client reaches (S4B-1). Input: one whole TLS record.
+/// Output: the name, or none for another message, a malformed or trailing byte, no name,
+/// more than one host name or server_name extension, or an encrypted name.
 pub fn server_name(record: &[u8]) -> Option<&str> {
     let length = usize::from(u16::from_be_bytes([*record.get(3)?, *record.get(4)?]));
-    let body = record.get(5..5 + length)?;
-    if *record.first()? != 0x16 || *body.first()? != 0x01 {
+    if *record.first()? != 0x16 || record.len() != 5 + length {
+        return None;
+    }
+    let body = &record[5..];
+    if *body.first()? != 0x01 {
         return None;
     }
     let size = (usize::from(*body.get(1)?) << 16)
         | (usize::from(*body.get(2)?) << 8)
         | usize::from(*body.get(3)?);
-    let hello = body.get(4..4 + size)?;
+    if body.len() != 4 + size {
+        return None;
+    }
+    let hello = &body[4..];
     let mut at = 2 + 32;
-    at += 1 + usize::from(*hello.get(at)?);
+    let session = usize::from(*hello.get(at)?);
+    if session > 32 {
+        return None;
+    }
+    at += 1 + session;
     at += 2 + usize::from(u16::from_be_bytes([*hello.get(at)?, *hello.get(at + 1)?]));
     at += 1 + usize::from(*hello.get(at)?);
     let total = usize::from(u16::from_be_bytes([*hello.get(at)?, *hello.get(at + 1)?]));
-    let mut extensions = hello.get(at + 2..at + 2 + total)?;
+    if hello.len() != at + 2 + total {
+        return None;
+    }
+    let mut extensions = &hello[at + 2..];
+    let mut found = None;
+    let mut named = false;
     while !extensions.is_empty() {
         let kind = u16::from_be_bytes([*extensions.first()?, *extensions.get(1)?]);
         let size = usize::from(u16::from_be_bytes([
@@ -407,29 +510,44 @@ pub fn server_name(record: &[u8]) -> Option<&str> {
         ]));
         let data = extensions.get(4..4 + size)?;
         extensions = &extensions[4 + size..];
-        if kind != 0 {
-            continue;
-        }
-        let listed = usize::from(u16::from_be_bytes([*data.first()?, *data.get(1)?]));
-        let mut names = data.get(2..2 + listed)?;
-        let mut found = None;
-        while !names.is_empty() {
-            let (kind, size) = (
-                *names.first()?,
-                usize::from(u16::from_be_bytes([*names.get(1)?, *names.get(2)?])),
-            );
-            let name = names.get(3..3 + size)?;
-            names = &names[3 + size..];
-            if kind == 0 {
-                if found.is_some() {
-                    return None;
-                }
-                found = Some(std::str::from_utf8(name).ok()?);
+        match kind {
+            ENCRYPTED_CLIENT_HELLO | ENCRYPTED_SERVER_NAME => return None,
+            SERVER_NAME if named => return None,
+            SERVER_NAME => {
+                named = true;
+                found = Some(host_name(data)?);
             }
+            _ => {}
         }
-        return found;
     }
-    None
+    found
+}
+
+/// Reads the one host name of a server_name extension's list, which must end at its last
+/// byte. Input: the extension's data. Output: the name, or none for a malformed list, no
+/// host name or more than one.
+fn host_name(data: &[u8]) -> Option<&str> {
+    let listed = usize::from(u16::from_be_bytes([*data.first()?, *data.get(1)?]));
+    if data.len() != 2 + listed {
+        return None;
+    }
+    let mut names = &data[2..];
+    let mut found = None;
+    while !names.is_empty() {
+        let (kind, size) = (
+            *names.first()?,
+            usize::from(u16::from_be_bytes([*names.get(1)?, *names.get(2)?])),
+        );
+        let name = names.get(3..3 + size)?;
+        names = &names[3 + size..];
+        if kind == 0 {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(std::str::from_utf8(name).ok()?);
+        }
+    }
+    found
 }
 
 /// Resolves one host on the engine's side and connects to the first address that answers
