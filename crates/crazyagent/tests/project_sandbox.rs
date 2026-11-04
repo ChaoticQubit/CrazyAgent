@@ -2285,7 +2285,8 @@ fn a_native_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_clone() {
     let lead_only = clone.join("lead-only");
     fs::create_dir(&lead_only).unwrap();
     let folder = clone.join(crazyagent::agent_git::TEAMMATES_FOLDER);
-    let bob = folder.join("bob");
+    let [bob, carl, dave, erin] = ["bob", "carl", "dave", "erin"].map(|name| folder.join(name));
+    let planted = case.home.join("teams").join("planted.lock");
     let mut escaped: Vec<String> = Vec::new();
     for (label, script) in [
         (
@@ -2301,6 +2302,15 @@ fn a_native_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_clone() {
             format!("printf 'x\\n' >> {}", quoted(&greet.join(".GIT"))),
         ),
         (
+            ".GIT made in a new teammate folder",
+            format!(
+                "mkdir {} && printf 'gitdir: {}\\n' > {}",
+                quoted(&erin),
+                git.display(),
+                quoted(&erin.join(".GIT"))
+            ),
+        ),
+        (
             "symlink at a teammate folder",
             format!("ln -s {} {}", quoted(&lead_only), quoted(&bob)),
         ),
@@ -2311,7 +2321,18 @@ fn a_native_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_clone() {
                 quoted(&lead_only),
                 quoted(&greet.join("link")),
                 quoted(&greet.join("link")),
-                quoted(&bob)
+                quoted(&carl)
+            ),
+        ),
+        (
+            "team folder holding a .git moved in as a teammate folder",
+            format!(
+                "mkdir {} && printf 'gitdir: {}\\n' > {} && mv {} {}",
+                quoted(&planted),
+                git.display(),
+                quoted(&planted.join(".git")),
+                quoted(&planted),
+                quoted(&dave)
             ),
         ),
     ] {
@@ -2327,8 +2348,10 @@ fn a_native_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_clone() {
             escaped.push(format!("changed {}", file.display()));
         }
     }
-    if fs::symlink_metadata(&bob).is_ok() {
-        escaped.push(format!("made {}", bob.display()));
+    for made in [&bob, &carl, &dave, &erin.join(".git")] {
+        if fs::symlink_metadata(made).is_ok() {
+            escaped.push(format!("made {}", made.display()));
+        }
     }
     let replaced = run(
         &teammates,
@@ -2348,12 +2371,12 @@ fn a_native_lead_s_teammates_write_only_their_worktrees_in_the_lead_s_clone() {
         escaped.push(format!("moved {}", folder.display()));
     }
     assert!(
-        fs::read_dir(&lead_only).unwrap().next().is_none(),
-        "nothing lands in the lead's folder"
-    );
-    assert!(
         escaped.is_empty(),
         "a teammate changes what ties its worktree to the clone: {escaped:?}"
+    );
+    assert!(
+        fs::read_dir(&lead_only).unwrap().next().is_none(),
+        "nothing lands in the lead's folder"
     );
 }
 
