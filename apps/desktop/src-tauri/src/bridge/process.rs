@@ -2,7 +2,7 @@ use super::*;
 use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{
     Adoption, AgentInstructions, ImportCommit, ImportFile, InstructionSettings, OwnerClient,
-    PROCESS_CODES, ProcessSaved,
+    PROCESS_CODES, ProcessSaved, UncommittedImport,
 };
 use crazyagent::protocol::ProjectId;
 use std::path::PathBuf;
@@ -121,12 +121,12 @@ impl NativeBridge {
     }
 
     /// Lists the moved instruction files whose move the project folder has not committed,
-    /// run without the bridge lock. Input: the project id. Output: the paths, empty when
-    /// no move waits for a commit.
+    /// with its checked-out branch, run without the bridge lock. Input: the project id.
+    /// Output: the paths, empty when no move waits for a commit, and the branch.
     pub fn uncommitted_instruction_import(
         &self,
         project_id: String,
-    ) -> Result<Unlocked<Vec<String>>, BridgeError> {
+    ) -> Result<Unlocked<UncommittedImport>, BridgeError> {
         let project =
             project(Some(project_id))?.ok_or_else(|| failure("process_project_unknown"))?;
         let client = self.process_client()?;

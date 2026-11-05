@@ -196,3 +196,57 @@ test("Copy output in the terminal menu puts the whole output on the clipboard an
   assert.equal(seen.clipboard, "first line of output\nsecond line");
   assert.deepEqual([seen.closed.open, seen.closed.focus, seen.closed.notes], [false, "terminal", ["Copied the output."]]);
 });
+
+async function drag(send, from, to) {
+  await send("Input.dispatchMouseEvent", { type: "mousePressed", x: from.x, y: from.y, button: "left", buttons: 1, clickCount: 1 });
+  for (const part of [0.25, 0.5, 0.75, 1]) {
+    await send("Input.dispatchMouseEvent", { type: "mouseMoved", x: Math.round(from.x + (to.x - from.x) * part), y: from.y, button: "left", buttons: 1 });
+  }
+  await send("Input.dispatchMouseEvent", { type: "mouseReleased", x: to.x, y: to.y, button: "left", buttons: 0, clickCount: 1 });
+}
+
+test("the panel's xterm never lets a right-click replace the selection with the word under the pointer (N-D9)", async () => {
+  const seen = await withPage(async ({ evaluate }) => {
+    await evaluate(fixture);
+    return evaluate("Fixture.rightClickSelectsWord()");
+  });
+  assert.equal(seen, false, "terminalOptions sets rightClickSelectsWord to false, as xterm turns it on by default on a Mac");
+});
+
+test("a drag then a right-click where the button was let go keeps the dragged text, so the menu's Copy puts exactly it on the clipboard (N-D9)", async () => {
+  let server = null;
+  const seen = await withPage(async ({ evaluate, send, context }) => {
+    server = await securePage(evaluate, send, context);
+    await send("Emulation.setDeviceMetricsOverride", { width: 1000, height: 700, deviceScaleFactor: 1, mobile: false });
+    await evaluate(fixture);
+    await evaluate("Fixture.mountMenu(true)");
+    await evaluate(`Fixture.write(${JSON.stringify("first line of output\r\nsecond line")})`);
+    const start = await settledMenu(evaluate);
+    const cell = { width: (start.screen.right - start.screen.left) / 80, height: (start.screen.bottom - start.screen.top) / 10 };
+    const y = Math.round(start.screen.top + cell.height / 2);
+    const from = { x: start.screen.left + 2, y };
+    const runs = [];
+    for (const [where, x] of [["mid-text", Math.round(start.screen.left + cell.width * 9.4)], ["right edge", start.screen.right - 2]]) {
+      await evaluate("Fixture.clearSelection()");
+      await evaluate("navigator.clipboard.writeText('before')");
+      await drag(send, from, { x, y });
+      const dragged = await evaluate("Fixture.selection()");
+      await mouse(send, x, y, "right");
+      const open = await settledMenu(evaluate);
+      const copy = open.items.find((entry) => entry.text === "Copy");
+      if (copy && !copy.disabled) await mouse(send, Math.round((copy.left + copy.right) / 2), Math.round((copy.top + copy.bottom) / 2), "left");
+      else await press(send, "Escape", 27);
+      for (let waited = 0; (await evaluate("Fixture.menuView()")).open && waited < 2000; waited += 20) await new Promise((done) => setTimeout(done, 20));
+      const closed = await settledMenu(evaluate);
+      runs.push({ where, dragged, open: open.open, copy: copy ? { disabled: copy.disabled } : null, clipboard: await evaluate("navigator.clipboard.readText()"), note: closed.notes.at(-1) });
+    }
+    return runs;
+  }).finally(() => server?.close());
+  for (const run of seen) {
+    assert.match(run.dragged, /^first lin/, `${run.where}: the drag selected the start of the first row`);
+    assert.equal(run.open, true, `${run.where}: the right-click opened the terminal menu`);
+    assert.deepEqual(run.copy, { disabled: false }, `${run.where}: Copy is enabled for the dragged text`);
+    assert.equal(run.clipboard, run.dragged, `${run.where}: the clipboard holds exactly the dragged text, not the word under the pointer`);
+    assert.equal(run.note, "Copied the selection.", `${run.where}: the terminal says the copy worked`);
+  }
+});

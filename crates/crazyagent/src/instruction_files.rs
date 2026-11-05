@@ -236,6 +236,17 @@ pub struct ImportCommit {
     pub files: Vec<String>,
 }
 
+/// The moved instruction files whose move the owner's checkout has not committed, and the
+/// branch that checkout has checked out, so a notice can name where merges are refused:
+/// none for a detached HEAD, a name over `BRANCH_BYTES_MAX`, a branch git cannot read for
+/// the engine (a name that is not UTF-8) or when no move waits.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UncommittedImport {
+    pub files: Vec<String>,
+    pub branch: Option<String>,
+}
+
 /// Tells whether a name is one an instruction files record may hold, so a record read back
 /// from an agent home names only these files. Input: the name. Output: true for a known name.
 pub fn known_name(name: &str) -> bool {
@@ -846,6 +857,23 @@ pub fn uncommitted(folder: &Path) -> Result<Vec<String>, EngineError> {
         .filter(|(_, held)| *held)
         .map(|(path, _)| path.to_owned())
         .collect())
+}
+
+/// Lists the moved instruction files whose move the owner's checkout has not committed, as
+/// `uncommitted` does, with the branch the checkout has checked out while any wait; a
+/// branch that cannot be read is left unnamed, so the move still shows. Input: the project
+/// folder. Output: the files and branch, or a plain code as `uncommitted`.
+pub fn uncommitted_import(folder: &Path) -> Result<UncommittedImport, EngineError> {
+    let root = fs::canonicalize(folder).map_err(|_| failure("process_project_folder_missing"))?;
+    let files = uncommitted(&root)?;
+    if files.is_empty() {
+        return Ok(UncommittedImport {
+            files,
+            branch: None,
+        });
+    }
+    let branch = crate::landing::checked_out_branch(&root).unwrap_or(None);
+    Ok(UncommittedImport { files, branch })
 }
 
 /// Commits the instruction import's move in the owner's checkout, as the owner chose: one

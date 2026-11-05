@@ -9,6 +9,7 @@ import {
 import { useAppSession, useLoad, type Loaded } from "../state";
 import { Button, ConfirmDialog, Dialog, EmptyState, LoadError, NotReady, Notice, Panel, Segmented, Skeleton, StatusBadge, Switch, TextArea } from "../ui";
 import { navigate } from "../ui/router";
+import { displayText } from "./conversation";
 import { SkillTag, skillEntries } from "./skill-tag";
 import "./process.css";
 
@@ -366,11 +367,12 @@ export function InstructionImportView({ name, files, busy, failure, onConfirm, o
 }
 
 /** The choice offered while moved git-tracked instruction files still show as deleted, as a
- * pure view: names the files, says what the commit holds and offers Commit the move and, when
- * given, Leave it. Inputs: the paths, whether the commit runs, the last failure and the
- * actions. */
-export function ImportMoveView({ files, busy, failure, onCommit, onLeave }: {
+ * pure view: names the files and, when known, the checked-out branch merges into are refused,
+ * says what the commit holds and offers Commit the move and, when given, Leave it. Inputs: the
+ * paths, the branch, whether the commit runs, the last failure and the actions. */
+export function ImportMoveView({ files, branch, busy, failure, onCommit, onLeave }: {
   files: readonly string[];
+  branch?: string | null;
   busy: boolean;
   failure: string;
   onCommit: () => void;
@@ -379,7 +381,7 @@ export function ImportMoveView({ files, busy, failure, onCommit, onLeave }: {
   const one = files.length === 1;
   return <Notice tone="warn">
     <span className="import-move">
-      <span>Git still shows {files.join(", ")} as deleted, and merges into this branch are refused until the move is committed. Commit the move makes one local commit on your current branch holding only {one ? "this deletion" : "these deletions"}; it is never pushed.</span>
+      <span>Git still shows {files.join(", ")} as deleted, and merges into {branch == null ? "this branch" : displayText(branch)} are refused until the move is committed. Commit the move makes one local commit on your current branch holding only {one ? "this deletion" : "these deletions"}; it is never pushed.</span>
       {failure && <span className="import-move-failure" role="alert">{failure}</span>}
       <span className="import-move-actions">
         {onLeave && <Button disabled={busy} onClick={onLeave}>Leave it</Button>}
@@ -391,10 +393,12 @@ export function ImportMoveView({ files, busy, failure, onCommit, onLeave }: {
 
 /** Commits an instruction import's move on the owner's click and shows the result: a toast
  * naming the branch and files, or the refusal in place. Inputs: the project id, the paths,
- * what to do after a commit and, when the owner may decline, Leave it. */
-export function ImportMoveCommit({ projectId, files, onCommitted, onLeave }: {
+ * the checked-out branch when known, what to do after a commit and, when the owner may
+ * decline, Leave it. */
+export function ImportMoveCommit({ projectId, files, branch, onCommitted, onLeave }: {
   projectId: string;
   files: readonly string[];
+  branch?: string | null;
   onCommitted: () => void;
   onLeave?: () => void;
 }) {
@@ -414,16 +418,16 @@ export function ImportMoveCommit({ projectId, files, onCommitted, onLeave }: {
     session.showToast(committedMessage(result.value));
     onCommitted();
   };
-  return <ImportMoveView files={files} busy={busy} failure={failure} onCommit={() => void commit()} onLeave={onLeave} />;
+  return <ImportMoveView files={files} branch={branch} busy={busy} failure={failure} onCommit={() => void commit()} onLeave={onLeave} />;
 }
 
 /** The project page banner shown while an instruction import's move stays uncommitted: it
- * names the files and offers Commit the move. Inputs: the project id and a version that a
+ * names the files and the checked-out branch and offers Commit the move. Inputs: the project id and a version that a
  * finished import bumps so the list is read again. */
 export function ImportMoveBanner({ projectId, version }: { projectId: string; version: number }) {
-  const [paths, reload] = useLoad(() => loadUncommittedImport(projectId), [projectId, version]);
-  if (paths.kind !== "ok" || paths.value.length === 0) return null;
-  return <ImportMoveCommit projectId={projectId} files={paths.value} onCommitted={reload} />;
+  const [waiting, reload] = useLoad(() => loadUncommittedImport(projectId), [projectId, version]);
+  if (waiting.kind !== "ok" || waiting.value.files.length === 0) return null;
+  return <ImportMoveCommit projectId={projectId} files={waiting.value.files} branch={waiting.value.branch} onCommitted={reload} />;
 }
 
 /** Asks once per opening of a project to import its found instruction files: reads the

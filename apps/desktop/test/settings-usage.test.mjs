@@ -18,7 +18,8 @@ const tokens = (patch = {}) => ({ input: 0, output: 0, cache_read: 0, cache_writ
 const row = (key, patch = {}) => ({ key, tokens: tokens({ input: 1200, output: 300, cache_read: 4000 }), runs: 2, last_ms: NOW - 5 * MINUTE, ...patch });
 const limits = (patch = {}) => ({
   account: "acct-claude", plan: "max", five_hour: { used_percent: 34.4, resets_at_ms: NOW + 2 * HOUR }, weekly: { used_percent: 81, resets_at_ms: NOW + 3 * DAY + 4 * HOUR },
-  five_hour_reset_override_ms: null, weekly_reset_override_ms: null, source: "poll", observed_ms: NOW - 3 * MINUTE, checked_ms: NOW - 3 * MINUTE, failure: null, ...patch,
+  five_hour_reset_override_ms: null, weekly_reset_override_ms: null, source: "poll", observed_ms: NOW - 3 * MINUTE, checked_ms: NOW - 3 * MINUTE, failure: null,
+  five_hour_left_out: null, weekly_left_out: null, five_hour_left_out_label: null, weekly_left_out_label: null, ...patch,
 });
 const report = (patch = {}) => ({
   since_ms: null, total: tokens({ input: 1200, output: 300, cache_read: 4000, cache_write: 800 }), runs: 3,
@@ -248,6 +249,25 @@ test("an API-key account's windows keep the provider-omitted wording, since it h
     assert.ok(words.includes(`${label} Not reported The provider hasn't reported this window.`), `${label}: ${words}`);
   }
   assert.doesNotMatch(words, /Not read The last read failed/);
+});
+
+test("a window a good read left out shows the engine's sentence for it, with no use, meter or reset time, and a failed read keeps Not read (N-D16, r1 F1)", () => {
+  const card = (patch) => render({ report: { kind: "ok", value: report({ limits: [limits(patch)] }) } });
+  const count = (markup, pattern) => (markup.match(pattern) ?? []).length;
+  for (const sentence of ["Codex reports no 5-hour limit for this plan.", "Claude reports no 5-hour window right now.", "A sentence only the engine wrote."]) {
+    const markup = card({ plan: "prolite", five_hour: null, five_hour_left_out: "codex", five_hour_left_out_label: sentence });
+    const words = text(markup);
+    assert.ok(words.includes(` 5-hour ${sentence} Weekly 81% used `), words);
+    assert.equal(count(markup, /<meter /gu), 1, markup);
+    assert.equal(count(markup, /Set reset time/gu), 1, markup);
+    assert.doesNotMatch(words, /Not reported|hasn't reported|Not read/);
+  }
+  const weekly = text(card({ weekly: null, weekly_left_out: "claude", weekly_left_out_label: "A weekly sentence only the engine wrote." }));
+  assert.ok(weekly.includes(" Weekly A weekly sentence only the engine wrote. "), weekly);
+  const failed = text(card({ five_hour: null, five_hour_left_out: "claude", five_hour_left_out_label: "Claude reports no 5-hour window right now.", failure: "usage_unreachable" }));
+  assert.ok(failed.includes("5-hour Not read The last read failed, for the reason above."), failed);
+  assert.doesNotMatch(failed, /reports no/);
+  assert.equal(usage.leftOutText, undefined, "the card keeps no copy of the engine's sentence");
 });
 
 test("the usage page has empty, loading, error and not-ready states", () => {

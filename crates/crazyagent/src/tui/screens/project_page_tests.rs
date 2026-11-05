@@ -3,7 +3,7 @@ use super::new_project_frames::check_frames;
 use super::new_project_input::cells;
 use super::new_project_page::{harness_choices_from, kept_draft, key_event, pool_choices_from};
 use super::project::OpenRequest;
-use super::project_page::{Opening, opening};
+use super::project_page::{BANNER_ROWS_MAX, Opening, move_banner, opening};
 use super::{Flow, Place, ProjectTab, SettingsSection, open};
 use crate::client_controller::OwnerController;
 use crate::engine::Client;
@@ -20,7 +20,7 @@ use crate::tui::client::process::ProcessQuery;
 use crate::tui::client::settings::SettingsJob;
 use crate::tui::client::{Connection, OwnerEvent};
 use crate::tui::ctx::{Ctx, Load};
-use crate::tui::frame::Tone;
+use crate::tui::frame::{Message, Tone};
 use crate::tui::glyphs::UNICODE;
 use crate::tui::keys::Key;
 use crate::tui::master_session::{Event as MasterEvent, Job as MasterJob};
@@ -304,6 +304,53 @@ impl Engine {
         )
         .unwrap()
     }
+}
+
+#[test]
+fn the_move_banner_names_the_checked_out_branch_merges_into_are_refused() {
+    let files = ["CLAUDE.md".to_owned(), "AGENTS.md".to_owned()];
+    let named = move_banner(&files, Some("trial4-land"), "…");
+    assert!(
+        named.starts_with("Git still shows CLAUDE.md, AGENTS.md as deleted after the instruction import, so merges into trial4-land are refused."),
+        "{named}"
+    );
+    assert!(!named.contains("this branch"), "{named}");
+    let detached = move_banner(&files[..1], None, "…");
+    assert!(
+        detached.contains("so merges into this branch are refused."),
+        "a detached HEAD has no branch to name: {detached}"
+    );
+}
+
+#[test]
+fn the_move_banner_keeps_are_refused_within_its_rows_for_the_longest_branch_names() {
+    let files: Vec<String> = [
+        "CLAUDE.md",
+        ".claude/CLAUDE.md",
+        "AGENTS.md",
+        "CLAUDE.local.md",
+    ]
+    .map(str::to_owned)
+    .to_vec();
+    let ascii = "a".repeat(crate::landing::BRANCH_BYTES_MAX);
+    let wide = "\u{8a9e}".repeat(crate::landing::BRANCH_BYTES_MAX / 3);
+    for branch in [&ascii, &wide] {
+        assert!(branch.len() <= crate::landing::BRANCH_BYTES_MAX);
+        let text = move_banner(&files, Some(branch), "…");
+        for width in [78, 118] {
+            let shown = crate::tui::text::wrap(&text, width)
+                .into_iter()
+                .take(BANNER_ROWS_MAX)
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(shown.contains(" are refused."), "{width}: {shown}");
+        }
+    }
+    let cut = move_banner(&files[..1], Some(&ascii), ".");
+    assert!(
+        cut.contains(". are refused.") && !cut.contains(&ascii),
+        "a long name is cut with the ellipsis glyph: {cut}"
+    );
 }
 
 #[test]
@@ -1417,6 +1464,167 @@ async fn n_whose_settings_read_fails_says_the_new_session_was_not_started() {
     );
 }
 
+/// A second n while the first New session still starts says so in plain words on the
+/// page, not the client's internal intent line, and only one new session is made (P2,
+/// trial 4 run 6 N-T2): the first n is still reading the current settings when the
+/// second arrives. Once the new session lands, the wait is over and the error is gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_n_while_the_first_new_session_starts_says_it_is_already_starting() {
+    let mut engine = Engine::start().await;
+    let (notes, mut shell, mut connection, first) =
+        conversation_with_a_settled_turn(&mut engine).await;
+    shell.key(Key::Esc);
+    until(&mut shell, &mut connection, |shown| {
+        shown.contains("Session  started")
+    })
+    .await;
+    shell.key(Key::Char('n'));
+    shell.key(Key::Char('n'));
+    let message = shell
+        .ctx
+        .message()
+        .cloned()
+        .expect("the second n is answered on the page");
+    assert_eq!(message.tone, Tone::Error);
+    assert_eq!(message.lead, "The session did not switch.");
+    assert_eq!(message.rest, "A new session is already starting.");
+    let shown = render(&mut shell, 100, 40);
+    assert!(
+        shown.contains("A new session is already starting."),
+        "{shown}"
+    );
+    for internal in ["intent", "exact identity", "Ctrl-R recovers"] {
+        assert!(!shown.contains(internal), "{internal}:\n{shown}");
+    }
+    until(&mut shell, &mut connection, |shown| {
+        shown.contains("No messages yet.") && !shown.contains("Plan the first slice")
+    })
+    .await;
+    let (fresh, _) = latest_master(&mut engine, &notes).await;
+    assert_ne!(fresh.unwrap().session_id, first.session_id);
+    assert_eq!(
+        master_sessions(&engine, &notes),
+        2,
+        "one new session, not two"
+    );
+    assert_eq!(
+        shell.ctx.message(),
+        None,
+        "the wait ended, so its error is gone"
+    );
+    let shown = render(&mut shell, 100, 40);
+    assert!(
+        !shown.contains("A new session is already starting."),
+        "{shown}"
+    );
+}
+
+/// A second n once the first New session has its settings and waits on the engine says
+/// the same plain words (P2): the settings read is answered by hand, so the New session
+/// is queued for the engine and not yet made when the second n arrives. An error said
+/// after it stays when the new session lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_n_while_the_engine_makes_the_first_new_session_says_it_is_already_starting() {
+    let mut engine = Engine::start().await;
+    let (notes, mut shell, mut connection, first) =
+        conversation_with_a_settled_turn(&mut engine).await;
+    shell.key(Key::Esc);
+    until(&mut shell, &mut connection, |shown| {
+        shown.contains("Session  started")
+    })
+    .await;
+    shell.key(Key::Char('n'));
+    let mut read = None;
+    for _ in 0..shell.ctx.queued() {
+        match shell.ctx.next_request().unwrap() {
+            Request::Master(job) if matches!(*job, MasterJob::Catalog { .. }) => read = Some(job),
+            other => shell.ctx.request(other),
+        }
+    }
+    connection
+        .master(*read.expect("n reads the current settings first"))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "the settings read was never answered"
+        );
+        match connection.poll_owner().unwrap() {
+            Some(OwnerEvent::Master(event))
+                if matches!(event.as_ref(), MasterEvent::Catalog { .. }) =>
+            {
+                shell.arrive(owner_arrival(OwnerEvent::Master(event)));
+                break;
+            }
+            Some(event) => shell.arrive(owner_arrival(event)),
+            None => tokio::time::sleep(Duration::from_millis(20)).await,
+        }
+    }
+    shell.key(Key::Char('n'));
+    let message = shell
+        .ctx
+        .message()
+        .cloned()
+        .expect("the second n is answered on the page");
+    assert_eq!(message.lead, "The session did not switch.");
+    assert_eq!(message.rest, "A new session is already starting.");
+    let other = Message::error("The master's turn did not stop.", "It had already ended.");
+    shell.ctx.say(other.clone());
+    until(&mut shell, &mut connection, |shown| {
+        shown.contains("No messages yet.") && !shown.contains("Plan the first slice")
+    })
+    .await;
+    let (fresh, _) = latest_master(&mut engine, &notes).await;
+    assert_ne!(fresh.unwrap().session_id, first.session_id);
+    assert_eq!(
+        master_sessions(&engine, &notes),
+        2,
+        "one new session, not two"
+    );
+    assert_eq!(
+        shell.ctx.message(),
+        Some(&other),
+        "an error said after the wait stays"
+    );
+}
+
+/// n while another master step is still under way, here a message just sent and not yet
+/// taken by the engine, says so in plain words, not the client's internal intent line
+/// (P2 r1, TUIP2-L1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn n_while_a_sent_message_is_under_way_says_so_in_plain_words() {
+    let mut engine = Engine::start().await;
+    let (_, mut shell, mut connection, _) = conversation_with_a_settled_turn(&mut engine).await;
+    shell.key(Key::Esc);
+    until(&mut shell, &mut connection, |shown| {
+        shown.contains("Session  started")
+    })
+    .await;
+    shell.key(Key::Enter);
+    for character in "Plan the second slice".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::Enter);
+    shell.key(Key::Esc);
+    shell.key(Key::Char('n'));
+    let message = shell
+        .ctx
+        .message()
+        .cloned()
+        .expect("n is answered on the page");
+    assert_eq!(message.tone, Tone::Error);
+    assert_eq!(message.lead, "The session did not switch.");
+    assert_eq!(
+        message.rest,
+        "Your last request is still being handled. Press n again when it is done."
+    );
+    let shown = render(&mut shell, 100, 40);
+    for internal in ["intent", "exact identity", "Ctrl-R recovers"] {
+        assert!(!shown.contains(internal), "{internal}:\n{shown}");
+    }
+}
+
 /// A new session on a project whose master runs live turns the live switch on once the
 /// engine has made the new session, so the live master starts on the fresh conversation
 /// even when it was stopped or never started.
@@ -2195,6 +2403,18 @@ async fn team_settings(shell: &mut Shell, connection: &mut Connection) {
     assert!(shown.contains("Team settings"), "{shown}");
 }
 
+fn master_sessions(engine: &Engine, project: &ProjectId) -> i64 {
+    let connection = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    connection.busy_timeout(Duration::from_secs(5)).unwrap();
+    connection
+        .query_row(
+            "SELECT COUNT(*) FROM master_sessions WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
 fn seed_question(engine: &Engine, project: &ProjectId, text: &str) {
     let connection = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
     connection.busy_timeout(Duration::from_secs(5)).unwrap();
@@ -2937,6 +3157,15 @@ async fn confirm_with_tracked_file_offers_commit_then_banner_after_leave() {
     assert!(
         shown.contains("Git still shows CLAUDE.md as deleted after the instruction import"),
         "{shown}"
+    );
+    let checked_out = crate::tui::test_home::git(&folder, &["branch", "--show-current"]);
+    let words = shown.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        words.contains(&format!(
+            "so merges into {} are refused.",
+            checked_out.trim()
+        )),
+        "the banner names the checked-out branch\n{shown}"
     );
     let hints = shown.lines().last().unwrap().to_owned();
     assert!(

@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 const PROJECT: &str = "live-failover";
 const SIGNED_IN: &str = "CRAZYAGENT_MANAGED_CLAUDE_PROFILE";
+const SIGNED_IN_CODEX: &str = "CRAZYAGENT_MANAGED_CODEX_PROFILE";
 pub(crate) const START: Duration = Duration::from_secs(120);
 pub(crate) const TURN: Duration = Duration::from_secs(300);
 pub(crate) const ASK: &str = "Reply with only the word READY.";
@@ -26,8 +27,8 @@ pub(crate) const ASK: &str = "Reply with only the word READY.";
 /// profile key, generation, phase, request and fact.
 type Operation = (String, String, i64, String, Vec<u8>, Vec<u8>);
 
-/// One of the owner's signed-in Claude accounts as the owner's engine records it: the
-/// connection its proven sign-in names, that sign-in's row and fact, and whether the
+/// One of the owner's signed-in Claude or Codex accounts as the owner's engine records it:
+/// the connection its proven sign-in names, that sign-in's row and fact, and whether the
 /// engine's usage reading has the account at its 5-hour or weekly limit now.
 struct Account {
     connection: ModelConnection,
@@ -39,23 +40,23 @@ struct Account {
 /// The most profile keys the live tests read from the owner's engine.
 const PROFILES_MAX: usize = 256;
 
-/// Stops a live run whose `CRAZYAGENT_MANAGED_CLAUDE_PROFILE` is not a profile slot path.
-/// Input: none. Output: never returns; panics with the plain BLOCKED message.
-fn not_a_slot() -> ! {
+/// Stops a live run whose profile variable is not a profile slot path.
+/// Input: the variable. Output: never returns; panics with the plain BLOCKED message.
+fn not_a_slot(variable: &str) -> ! {
     panic!(
-        "BLOCKED: {SIGNED_IN} does not name a profile slot <engine folder>/native-profiles/<profile key>"
+        "BLOCKED: {variable} does not name a profile slot <engine folder>/native-profiles/<profile key>"
     )
 }
 
-/// The running engine of the app that holds the managed profile `CRAZYAGENT_MANAGED_CLAUDE_PROFILE`
-/// names, found from that path alone: the slot's profile key (its folder name), the database
-/// beside its profiles folder, a read-only connection to that database and the run it is in.
-/// The slot, its profiles folder and their files are never opened, read or listed. Output:
-/// the four, or a panic with the plain BLOCKED message.
-fn owner_engine() -> (String, PathBuf, Connection, HostStamp) {
-    let slot = PathBuf::from(std::env::var_os(SIGNED_IN).unwrap_or_else(|| {
+/// The running engine of the app that holds the managed profile `variable` names, found
+/// from that path alone: the slot's profile key (its folder name), the database beside its
+/// profiles folder, a read-only connection to that database and the run it is in. The
+/// slot, its profiles folder and their files are never opened, read or listed. Input: the
+/// variable. Output: the four, or a panic with the plain BLOCKED message.
+fn owner_engine(variable: &str) -> (String, PathBuf, Connection, HostStamp) {
+    let slot = PathBuf::from(std::env::var_os(variable).unwrap_or_else(|| {
         panic!(
-            "BLOCKED: no signed-in managed Claude profile. Run with {SIGNED_IN}=<engine folder>/native-profiles/<profile key>"
+            "BLOCKED: no signed-in managed profile. Run with {variable}=<engine folder>/native-profiles/<profile key>"
         )
     }));
     let key = slot
@@ -67,7 +68,7 @@ fn owner_engine() -> (String, PathBuf, Connection, HostStamp) {
                     .bytes()
                     .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
         })
-        .unwrap_or_else(|| not_a_slot())
+        .unwrap_or_else(|| not_a_slot(variable))
         .to_owned();
     let profiles = slot
         .parent()
@@ -75,10 +76,10 @@ fn owner_engine() -> (String, PathBuf, Connection, HostStamp) {
             profiles.is_absolute()
                 && profiles.file_name() == Some(std::ffi::OsStr::new("native-profiles"))
         })
-        .unwrap_or_else(|| not_a_slot());
+        .unwrap_or_else(|| not_a_slot(variable));
     let database = profiles
         .parent()
-        .unwrap_or_else(|| not_a_slot())
+        .unwrap_or_else(|| not_a_slot(variable))
         .join("engine.db");
     let path = database.to_str().unwrap();
     let uri = format!(
@@ -115,13 +116,18 @@ fn owner_engine() -> (String, PathBuf, Connection, HostStamp) {
     (key, database, owner, host)
 }
 
-/// The owner's Claude account behind one profile key, from the read-only engine database
-/// alone: the key's latest sign-in row, when its fact names a Claude managed connection and
+/// The owner's account behind one profile key, from the read-only engine database alone:
+/// the key's latest sign-in row, when its fact names a managed connection of `harness` and
 /// passes this run's launch check, as every master turn checks it, with whether the engine
 /// reads the account at a limit: a 5-hour or weekly window, observed or polled, at 100
-/// percent used now. Inputs: the read-only engine, its run and the key. Output: the
-/// account, or None.
-fn signed_in_account(owner: &Connection, host: &HostStamp, key: &str) -> Option<Account> {
+/// percent used now. Inputs: the read-only engine, its run, the key and the connection
+/// harness, `claude` or `codex`. Output: the account, or None.
+fn signed_in_account(
+    owner: &Connection,
+    host: &HostStamp,
+    key: &str,
+    harness: &str,
+) -> Option<Account> {
     let operation: Operation = owner
         .query_row(
             "SELECT id,profile_key,generation,phase,request,fact FROM native_auth_operations WHERE profile_key=?1 ORDER BY generation DESC LIMIT 1",
@@ -140,7 +146,7 @@ fn signed_in_account(owner: &Connection, host: &HostStamp, key: &str) -> Option<
         key,
         "a profile's sign-in names that profile"
     );
-    if connection.harness.as_str() != "claude" {
+    if connection.harness.as_str() != harness {
         return None;
     }
     let tx = owner.unchecked_transaction().unwrap();
@@ -187,36 +193,94 @@ fn signed_in_accounts(owner: &Connection, host: &HostStamp) -> Vec<Account> {
         .unwrap();
     assert!(keys.len() <= PROFILES_MAX);
     keys.iter()
-        .filter_map(|key| signed_in_account(owner, host, key))
+        .filter_map(|key| signed_in_account(owner, host, key, "claude"))
         .collect()
 }
 
-/// The owner's signed-in Claude account of the profile `CRAZYAGENT_MANAGED_CLAUDE_PROFILE`
-/// names, which the running app's engine does not read at a limit, with that engine's
-/// database and the run the account's sign-in is proven in.
-pub(crate) struct OwnerClaude {
+/// The team launch harness and its real executable for an account's connection harness.
+/// Input: `claude` or `codex`. Output: `claude-code` or `codex` with its executable.
+fn launch(harness: &str) -> (&'static str, PathBuf) {
+    match harness {
+        "claude" => ("claude-code", super::managed_agent::claude()),
+        "codex" => ("codex", super::managed_agent::codex()),
+        other => unreachable!("the live tests pick only Claude and Codex accounts, not {other}"),
+    }
+}
+
+/// Records the owner's engine run and the accounts' proven sign-in rows in a database a
+/// test engine left, and raises its revision to theirs, so its runtimes launch on those
+/// accounts as the owner's engine run would. Inputs: the database, the owner's run and the
+/// accounts. Output: none; it panics unless every row is written.
+fn record_run(db: &Connection, host: &HostStamp, accounts: &[&Account]) {
+    db.execute(
+        "INSERT OR REPLACE INTO owner_meta(singleton,schema_version,db_instance,engine_epoch,runtime_state) VALUES (1,1,?1,?2,'active')",
+        params![host.db_instance, host.engine_epoch],
+    )
+    .unwrap();
+    for account in accounts {
+        let (id, key, generation, phase, request, fact) = &account.operation;
+        db.execute(
+            "INSERT INTO native_auth_operations(id,profile_key,generation,phase,request,fact) VALUES (?1,?2,?3,?4,?5,?6)",
+            params![id, key, generation, phase, request, fact],
+        )
+        .unwrap();
+    }
+    let revision = accounts
+        .iter()
+        .map(|account| account.fact.binding.at_revision.value())
+        .max()
+        .expect("at least one signed-in account");
+    assert_eq!(
+        db.execute(
+            "UPDATE state SET revision=MAX(revision,?1) WHERE id=1",
+            [i64::try_from(revision).unwrap()],
+        )
+        .unwrap(),
+        1,
+        "the engine keeps one revision row"
+    );
+}
+
+/// The owner's signed-in Claude or Codex account of the profile its variable names, which
+/// the running app's engine does not read at a limit, with that engine's database and the
+/// run the account's sign-in is proven in.
+pub(crate) struct OwnerAccount {
     database: PathBuf,
     host: HostStamp,
     account: Account,
 }
 
-impl OwnerClaude {
-    /// Takes the account of the named profile from the running app's engine database alone.
-    /// Input: none. Output: the account, or a panic with the plain BLOCKED message when its
-    /// sign-in is not proven for this run or the engine reads it at a limit.
-    pub(crate) fn pick() -> Self {
-        let (key, database, owner, host) = owner_engine();
-        let account = signed_in_account(&owner, &host, &key).unwrap_or_else(|| {
+impl OwnerAccount {
+    /// The Claude account of the profile `CRAZYAGENT_MANAGED_CLAUDE_PROFILE` names.
+    /// Input: none. Output: the account, or a panic with the plain BLOCKED message.
+    pub(crate) fn claude() -> Self {
+        Self::pick(SIGNED_IN, "claude", "Claude")
+    }
+
+    /// The ChatGPT account for Codex of the profile `CRAZYAGENT_MANAGED_CODEX_PROFILE` names.
+    /// Input: none. Output: the account, or a panic with the plain BLOCKED message.
+    pub(crate) fn codex() -> Self {
+        Self::pick(SIGNED_IN_CODEX, "codex", "Codex")
+    }
+
+    /// Takes the account of the profile `variable` names from the running app's engine
+    /// database alone. Inputs: the variable, the connection harness and its plain name.
+    /// Output: the account, or a panic with the plain BLOCKED message when its sign-in is
+    /// not proven for this run or the engine reads it at a limit.
+    fn pick(variable: &str, harness: &str, name: &str) -> Self {
+        let (key, database, owner, host) = owner_engine(variable);
+        let account = signed_in_account(&owner, &host, &key, harness).unwrap_or_else(|| {
             panic!(
-                "BLOCKED: the profile {SIGNED_IN} names has no Claude sign-in the app's engine proves for this run"
+                "BLOCKED: the profile {variable} names has no {name} sign-in the app's engine proves for this run"
             )
         });
         drop(owner);
         if account.limited {
             panic!(
-                "BLOCKED: the Claude account {SIGNED_IN} names is at its 5-hour or weekly limit in the engine's usage reading"
+                "BLOCKED: the {name} account {variable} names is at its 5-hour or weekly limit in the engine's usage reading"
             );
         }
+        assert_eq!(account.connection.harness.as_str(), harness);
         Self {
             database,
             host,
@@ -227,6 +291,24 @@ impl OwnerClaude {
     /// The account's connection as the owner's settings name it. Output: the connection.
     pub(crate) fn connection(&self) -> &ModelConnection {
         &self.account.connection
+    }
+
+    /// The team launch harness of the account and its real executable. Output: both.
+    pub(crate) fn launch(&self) -> (&'static str, PathBuf) {
+        launch(self.account.connection.harness.as_str())
+    }
+
+    /// Records the owner's engine run and this account's proven sign-in in a database a test
+    /// engine left, as [`Team::on_engine`] does. Input: the database. Output: none.
+    pub(crate) fn record_run(&self, db: &Connection) {
+        record_run(db, &self.host, &[&self.account]);
+    }
+
+    /// The owner's engine's custody, which only reads its database and takes a shared lock
+    /// on a profile for each launch. Output: the custody.
+    pub(crate) fn custody(&self) -> NativeProfileCustody {
+        NativeProfileCustody::capture(&self.database, &std::fs::metadata(&self.database).unwrap())
+            .unwrap()
     }
 }
 
@@ -357,7 +439,7 @@ impl Team {
         global: &Path,
         settings: &Path,
         project: &ProjectId,
-        owner: &OwnerClaude,
+        owner: &OwnerAccount,
     ) -> Self {
         let base = base.canonicalize().unwrap();
         let db = Connection::open(base.join("engine.db")).unwrap();
@@ -381,9 +463,9 @@ impl Team {
 
     /// Records the owner's engine run and the accounts' proven sign-in rows in the prepared
     /// database, raises its revision to theirs and opens the runtime on the owner's engine's
-    /// custody with tmux. Inputs: the folder, its database, the project, the owner's run and
-    /// database, the accounts, the last of which is the working one, and the pool source.
-    /// Output: the team.
+    /// custody with tmux and each account's launch harness. Inputs: the folder, its database,
+    /// the project, the owner's run and database, the accounts, the last of which is the
+    /// working one, and the pool source. Output: the team.
     fn open(
         base: PathBuf,
         db: Connection,
@@ -394,39 +476,18 @@ impl Team {
         access: super::AccessSource,
     ) -> Self {
         let tmux = installed(&base).expect("BLOCKED: tmux must be installed");
-        db.execute(
-            "INSERT OR REPLACE INTO owner_meta(singleton,schema_version,db_instance,engine_epoch,runtime_state) VALUES (1,1,?1,?2,'active')",
-            params![host.db_instance, host.engine_epoch],
-        )
-        .unwrap();
-        for account in accounts {
-            let (id, key, generation, phase, request, fact) = &account.operation;
-            db.execute(
-                "INSERT INTO native_auth_operations(id,profile_key,generation,phase,request,fact) VALUES (?1,?2,?3,?4,?5,?6)",
-                params![id, key, generation, phase, request, fact],
-            )
-            .unwrap();
-        }
-        let revision = accounts
+        record_run(&db, host, accounts);
+        let executables: BTreeMap<&'static str, PathBuf> = accounts
             .iter()
-            .map(|account| account.fact.binding.at_revision.value())
-            .max()
-            .expect("at least one signed-in account");
-        assert_eq!(
-            db.execute(
-                "UPDATE state SET revision=MAX(revision,?1) WHERE id=1",
-                [i64::try_from(revision).unwrap()],
-            )
-            .unwrap(),
-            1,
-            "the engine keeps one revision row"
-        );
+            .map(|account| launch(account.connection.harness.as_str()))
+            .collect();
+        assert!(!executables.is_empty());
         let host_terminal: Arc<dyn Host> =
             Arc::new(Tmux::open(Some(tmux.clone()), &base.join(FOLDER)));
         let mut runtime = TeamRuntime::open(
             &base.join("engine.db"),
             &base.join("team"),
-            BTreeMap::from([("claude-code", super::managed_agent::claude())]),
+            executables,
             access,
             TeamLimits::default(),
         )
@@ -581,9 +642,29 @@ impl Team {
                 limit.as_secs(),
                 self.seen()
             );
-            self.runtime.tick().unwrap();
-            std::thread::sleep(Duration::from_millis(200));
+            self.tick();
         }
+    }
+
+    /// Runs one runtime tick, then waits a moment, as the engine's team service does.
+    pub(crate) fn tick(&mut self) {
+        self.runtime.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    /// The project's task with exactly this prompt, as the engine's team status lists it.
+    /// Input: the prompt. Output: the task, or None while no task has it.
+    pub(crate) fn task(&self, prompt: &str) -> Option<crate::team::TeamTask> {
+        let tx = self.db.unchecked_transaction().unwrap();
+        let stored = crate::project_setup::load_setup(&tx, &self.project)
+            .unwrap()
+            .expect("the team's project is set up");
+        drop(tx);
+        crate::team::status(&self.db, &stored)
+            .unwrap()
+            .tasks
+            .into_iter()
+            .find(|task| task.prompt == prompt)
     }
 
     /// Whether the project's live switch is on in the database. Output: the switch.
@@ -645,7 +726,7 @@ impl Drop for Team {
 #[test]
 #[ignore = "live qualification: needs the running app's engine with two signed-in Claude accounts, one it reads at its limit, CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
 fn live_a_rate_limited_live_master_stops_and_its_next_turn_runs_on_the_working_pool_account() {
-    let (_, owner_database, owner, host) = owner_engine();
+    let (_, owner_database, owner, host) = owner_engine(SIGNED_IN);
     let found = signed_in_accounts(&owner, &host);
     drop(owner);
     let limited = found.iter().find(|account| account.limited).unwrap_or_else(|| {
