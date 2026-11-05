@@ -9479,11 +9479,13 @@ fn ignores_graph(root: &Path, worktree: &Path) -> bool {
         Ok(metadata) if metadata.is_file() => Some(root.join(".git").join("info").join("exclude")),
         _ => None,
     };
-    match plain_text(&worktree.join(".gitignore")).and_then(|text| graph_rule(&text)) {
+    match plain_text(&worktree.join(".gitignore"))
+        .and_then(|text| crate::agent_git::graph_rule(&text))
+    {
         Some(ignored) => ignored,
         None => exclude
             .and_then(|path| plain_text(&path))
-            .and_then(|text| graph_rule(&text))
+            .and_then(|text| crate::agent_git::graph_rule(&text))
             .unwrap_or(false),
     }
 }
@@ -9509,27 +9511,6 @@ fn plain_text(path: &Path) -> Option<String> {
     }
     assert!(text.len() as u64 <= GITIGNORE_BYTES_MAX);
     Some(text)
-}
-
-/// What the last line of one ignore file naming the graph folder by a usual spelling says:
-/// ignored, or taken back into git by a `!` line. Takes the text. Returns the answer, none
-/// when no line names the folder.
-#[cfg(unix)]
-fn graph_rule(text: &str) -> Option<bool> {
-    text.lines()
-        .map(str::trim)
-        .filter_map(|line| {
-            let (ignored, pattern) = match line.strip_prefix('!') {
-                Some(rest) => (false, rest),
-                None => (true, line),
-            };
-            matches!(
-                pattern,
-                "graphify-out" | "graphify-out/" | "/graphify-out" | "/graphify-out/"
-            )
-            .then_some(ignored)
-        })
-        .next_back()
 }
 
 /// The Seatbelt profile the engine installs for one team agent, which its harness, and for a
