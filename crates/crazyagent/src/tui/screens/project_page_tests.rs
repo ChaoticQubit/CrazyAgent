@@ -3,7 +3,7 @@ use super::new_project_frames::check_frames;
 use super::new_project_input::cells;
 use super::new_project_page::{harness_choices_from, kept_draft, key_event, pool_choices_from};
 use super::project::OpenRequest;
-use super::project_page::{Opening, move_banner, opening};
+use super::project_page::{BANNER_ROWS_MAX, Opening, move_banner, opening};
 use super::{Flow, Place, ProjectTab, SettingsSection, open};
 use crate::client_controller::OwnerController;
 use crate::engine::Client;
@@ -309,16 +309,42 @@ impl Engine {
 #[test]
 fn the_move_banner_names_the_checked_out_branch_merges_into_are_refused() {
     let files = ["CLAUDE.md".to_owned(), "AGENTS.md".to_owned()];
-    let named = move_banner(&files, Some("trial4-land"));
+    let named = move_banner(&files, Some("trial4-land"), "…");
     assert!(
         named.starts_with("Git still shows CLAUDE.md, AGENTS.md as deleted after the instruction import, so merges into trial4-land are refused."),
         "{named}"
     );
     assert!(!named.contains("this branch"), "{named}");
-    let detached = move_banner(&files[..1], None);
+    let detached = move_banner(&files[..1], None, "…");
     assert!(
         detached.contains("so merges into this branch are refused."),
         "a detached HEAD has no branch to name: {detached}"
+    );
+}
+
+#[test]
+fn the_move_banner_keeps_are_refused_within_its_rows_for_the_longest_branch_names() {
+    let files: Vec<String> = ["CLAUDE.md", ".claude/CLAUDE.md", "AGENTS.md", "CLAUDE.local.md"]
+        .map(str::to_owned)
+        .to_vec();
+    let ascii = "a".repeat(crate::landing::BRANCH_BYTES_MAX);
+    let wide = "\u{8a9e}".repeat(crate::landing::BRANCH_BYTES_MAX / 3);
+    for branch in [&ascii, &wide] {
+        assert!(branch.len() <= crate::landing::BRANCH_BYTES_MAX);
+        let text = move_banner(&files, Some(branch), "…");
+        for width in [78, 118] {
+            let shown = crate::tui::text::wrap(&text, width)
+                .into_iter()
+                .take(BANNER_ROWS_MAX)
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(shown.contains(" are refused."), "{width}: {shown}");
+        }
+    }
+    let cut = move_banner(&files[..1], Some(&ascii), ".");
+    assert!(
+        cut.contains(". are refused.") && !cut.contains(&ascii),
+        "a long name is cut with the ellipsis glyph: {cut}"
     );
 }
 

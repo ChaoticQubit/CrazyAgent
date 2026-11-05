@@ -45,7 +45,7 @@ const TEAM_READ_MS: i64 = 3_000;
 const TEAM_WAIT_MS: i64 = 15_000;
 const IMPORT_MODAL_WIDTH: u16 = 72;
 const IMPORT_ROWS_MAX: usize = 12;
-const BANNER_ROWS_MAX: usize = 3;
+pub(in crate::tui) const BANNER_ROWS_MAX: usize = 3;
 
 #[derive(PartialEq)]
 enum MasterSent {
@@ -238,10 +238,12 @@ fn import_problem(code: &str) -> String {
 
 /// The banner text shown while an instruction import's move stays uncommitted (DEC-106
 /// addendum): the files and the checked-out branch merges into are refused, or "this
-/// branch" without one. Inputs: the paths and the branch. Output: the text, sanitized.
-pub(in crate::tui) fn move_banner(files: &[String], branch: Option<&str>) -> String {
+/// branch" without one. Inputs: the paths, the branch and the ellipsis glyph. Output: the
+/// text, sanitized.
+pub(in crate::tui) fn move_banner(files: &[String], branch: Option<&str>, ellipsis: &str) -> String {
     assert!(!files.is_empty());
     let files: Vec<String> = files.iter().map(|path| sanitize(path)).collect();
+    let _ = ellipsis;
     let target = branch.map_or_else(|| "this branch".to_owned(), sanitize);
     format!(
         "Git still shows {} as deleted after the instruction import, so merges into {target} are refused. Ctrl-G Commit the move makes one local commit holding only that move; it is never pushed.",
@@ -452,7 +454,11 @@ impl ProjectPage {
         if self.uncommitted.is_empty() || width < 8 {
             return Vec::new();
         }
-        let text = move_banner(&self.uncommitted, self.uncommitted_branch.as_deref());
+        let text = move_banner(
+            &self.uncommitted,
+            self.uncommitted_branch.as_deref(),
+            ctx.glyphs.ellipsis,
+        );
         wrap(&text, width - 2)
             .into_iter()
             .take(BANNER_ROWS_MAX)

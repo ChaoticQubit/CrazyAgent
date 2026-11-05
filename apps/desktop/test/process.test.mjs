@@ -323,6 +323,11 @@ test("the import prompt lists each found file with its size, a tracked note or w
   assert.match(prompt([importFile("AGENTS.md")], { failure: "The instruction files couldn't be moved aside." }), /class="notice danger" role="alert">.*The instruction files couldn&#x27;t be moved aside\./s);
 });
 
+test("the commit toast names the branch and files and shows a direction or zero-width mark in the branch as an escape", () => {
+  assert.equal(client.committedMessage({ branch: "main", files: ["CLAUDE.md", "AGENTS.md"] }), "Committed the move on main: CLAUDE.md, AGENTS.md. Nothing was pushed.");
+  assert.equal(client.committedMessage({ branch: "rel\u202e\u200bx", files: ["CLAUDE.md"] }), "Committed the move on rel\\u202e\\u200bx: CLAUDE.md. Nothing was pushed.");
+});
+
 test("the move notice names the files, says this or these deletions, offers Leave it only when given and shows a refusal as an alert", () => {
   const notice = (files, extra = {}) => renderToStaticMarkup(createElement(view.ImportMoveView, {
     files, busy: false, failure: "", onCommit: never("onCommit"), ...extra,
@@ -342,6 +347,9 @@ test("the move notice names the files, says this or these deletions, offers Leav
   assert.doesNotMatch(named, /this branch/);
   assert.match(notice(["CLAUDE.md"], { branch: null }), /merges into this branch are refused/, "a detached HEAD has no branch to name");
   assert.match(notice(["CLAUDE.md"], { branch: "<b>x" }), /merges into &lt;b&gt;x are refused/, "the branch is text, never markup");
+  const hidden = notice(["CLAUDE.md"], { branch: "main\u202e\u200bx" });
+  assert.match(hidden, /merges into main\\u202e\\u200bx are refused/, "a direction or zero-width mark in the branch shows as an escape");
+  assert.ok(!hidden.includes("\u202e") && !hidden.includes("\u200b"), hidden);
   const refused = notice(["CLAUDE.md"], { failure: client.processMessage({ kind: "error", code: "process_commit_staged", message: "" }) });
   assert.match(refused, /class="import-move-failure" role="alert">Other files are staged/);
   for (const code of ["process_commit_staged", "process_commit_none", "process_commit_busy", "process_commit_detached", "process_commit_moved", "process_commit_identity", "process_commit_failed"]) {

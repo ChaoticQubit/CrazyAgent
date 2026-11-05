@@ -968,6 +968,25 @@ mod import {
     }
 
     #[test]
+    fn a_branch_name_the_engine_cannot_read_keeps_the_waiting_move_with_no_branch() {
+        let checkout = Checkout::new();
+        import(&checkout.folder).unwrap();
+        let git = checkout.folder.join(".git");
+        let mut packed = format!("{} refs/heads/", checkout.tip()).into_bytes();
+        packed.extend_from_slice(b"\xffname\n");
+        fs::write(git.join("packed-refs"), packed).unwrap();
+        fs::write(git.join("HEAD"), b"ref: refs/heads/\xffname\n").unwrap();
+        assert_eq!(
+            uncommitted_import(&checkout.folder).unwrap(),
+            UncommittedImport {
+                files: vec!["CLAUDE.md".to_owned(), ".claude/CLAUDE.md".to_owned()],
+                branch: None
+            },
+            "a branch that is not UTF-8 is not named, and the move still waits"
+        );
+    }
+
+    #[test]
     fn a_folder_without_git_moves_its_files_with_nothing_to_commit() {
         let checkout = Checkout::new();
         let plain = checkout.root.join("plain");
