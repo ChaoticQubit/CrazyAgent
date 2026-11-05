@@ -48,6 +48,9 @@ const GRAPH_NOT_STARTED: &str = "Graph build could not start";
 #[cfg(unix)]
 const MAPPING_TIMED_OUT: &str = "Mapping agent ran out of time";
 const MAPPING_NOT_STARTED: &str = "Mapping agent could not start";
+/// The most output tokens of one Claude Code mapping answer. Mapping answers run about
+/// 1600 tokens; a run cut here ends after its one turn and the try fails.
+const MAPPING_OUTPUT_TOKENS: u32 = 16_000;
 const DRAFT_UNSAVED: &str = "Could not save the project draft";
 #[cfg(unix)]
 pub(crate) const MAPPING_NO_OVERVIEW: &str = "Mapping agent returned no overview";
@@ -593,6 +596,7 @@ fn mapping_step(
         prompt: &prompt,
         account: &account,
         wall_time: work.limits.mapping_time,
+        output_tokens: Some(MAPPING_OUTPUT_TOKENS),
     };
     match work.runner.run_read_only(&run, beat) {
         #[cfg(unix)]

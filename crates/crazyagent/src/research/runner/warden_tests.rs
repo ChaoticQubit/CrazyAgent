@@ -92,6 +92,7 @@ fn read_only_run(base: &Path, stop: &dyn Fn() -> bool) -> Result<ReadOnlyEnding,
             prompt: "Describe this repository.",
             account: &account,
             wall_time: Duration::from_secs(60),
+            output_tokens: None,
         },
         stop,
     )
