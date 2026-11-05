@@ -114,6 +114,20 @@ const CLAUDE_COMMON: [&str; 12] = [
     CLAUDE_NO_TRANSCRIPT,
 ];
 const CLAUDE_NO_TRANSCRIPT: &str = "--no-session-persistence";
+/// The system prompt of every tools-off Claude Code launch, in place of Claude Code's own
+/// agent prompt. That prompt describes Bash and other tools such a launch does not offer;
+/// under it a Claude Code 2.1.309 mapping run wrote tool calls as plain text until its
+/// output limit and kept going, so onboarding hung for its whole step time.
+pub(crate) const CLAUDE_NO_TOOLS_PROMPT: &str = "You are Claude, answering inside CrazyAgent with no tools. You cannot run commands, read or write files, browse or call any tool, and no tool results will ever come back. Never write tool calls, function call markup or commands for yourself to run. Answer directly in plain text from the conversation and the text you are given.";
+/// Claude Code's arguments for a launch with tools off: no tools, no slash commands and
+/// [`CLAUDE_NO_TOOLS_PROMPT`] as the whole system prompt.
+pub(crate) const CLAUDE_TOOLS_OFF: [&str; 5] = [
+    "--tools",
+    "",
+    "--disable-slash-commands",
+    "--system-prompt",
+    CLAUDE_NO_TOOLS_PROMPT,
+];
 
 /// Holds an API key or token in memory for one launch; it never appears in Debug,
 /// serialization, arguments or reports and is handed to the child only as an environment value.
@@ -750,7 +764,7 @@ fn claude_invocation(
             .map(OsString::from),
         );
     } else {
-        arguments.extend(["--tools", "", "--disable-slash-commands"].map(OsString::from));
+        arguments.extend(CLAUDE_TOOLS_OFF.map(OsString::from));
     }
     let denied = claude_denied(request.tools, false, installed);
     if !denied.is_empty() {

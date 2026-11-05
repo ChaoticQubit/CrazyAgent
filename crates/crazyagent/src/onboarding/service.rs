@@ -2,7 +2,7 @@
 use super::MappingFacts;
 use super::draft::{self, Answer, Drafted};
 use super::graph::{self, GRAPHIFY_MISSING, GraphEnding};
-use super::{Step, now_ms};
+use super::{Step, bounded_reason, now_ms};
 use crate::projects_home::CRAZYAGENT_DIRECTORY;
 use crate::protocol::CredentialRef;
 use crate::research::accounts::AccountPick;
@@ -13,6 +13,7 @@ use crate::research::jobs::JobError;
 use crate::research::runner::ResearchLimits;
 use crate::research::runner::{
     RUN_NAME_USED, ReadOnlyEnding, ReadOnlyRun, ResearchHarness, ResearchRunner, RunError,
+    confined_unavailable,
 };
 use crate::sandbox::SandboxError;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, TransactionBehavior, params};
@@ -23,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const STALE_MS: i64 = 30_000;
 const HEARTBEAT_MS: i64 = 5_000;
@@ -48,6 +49,16 @@ const GRAPH_NOT_STARTED: &str = "Graph build could not start";
 #[cfg(unix)]
 const MAPPING_TIMED_OUT: &str = "Mapping agent ran out of time";
 const MAPPING_NOT_STARTED: &str = "Mapping agent could not start";
+/// The most output tokens of each Claude Code mapping request: about 2.5 times a
+/// 3000-token answer. Claude Code 2.1.309 continues an answer cut here at most three
+/// times, so a runaway try writes at most 32000 tokens and ends by itself in about 200 s,
+/// inside [`MAPPING_TRY_TIME`].
+const MAPPING_OUTPUT_TOKENS: u32 = 8_000;
+/// How long one mapping try may run by default before a fresh try starts.
+const MAPPING_TRY_TIME: Duration = Duration::from_secs(240);
+/// How many fresh tries one mapping step gives its agent inside
+/// [`OnboardingLimits::mapping_time`], each with its own agent state.
+pub(crate) const MAPPING_TRIES: u32 = 3;
 const DRAFT_UNSAVED: &str = "Could not save the project draft";
 #[cfg(unix)]
 pub(crate) const MAPPING_NO_OVERVIEW: &str = "Mapping agent returned no overview";
@@ -62,19 +73,23 @@ const ROW_UNREADABLE: &str =
 #[cfg(unix)]
 const GRAPHIFY_CANDIDATES: [&str; 2] = ["/opt/homebrew/bin/graphify", "/usr/local/bin/graphify"];
 
-/// How long each onboarding step may run before it fails as out of time.
+/// How long each onboarding step may run before it fails as out of time, and how long
+/// one try of the mapping agent may run inside its step before a fresh try starts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OnboardingLimits {
     pub graph_time: Duration,
     pub mapping_time: Duration,
+    pub mapping_try_time: Duration,
 }
 
 impl Default for OnboardingLimits {
-    /// Ten minutes for the graph build and fifteen for the mapping agent.
+    /// Ten minutes for the graph build and fifteen for the mapping step, of which each
+    /// mapping try may take four.
     fn default() -> Self {
         Self {
             graph_time: Duration::from_secs(600),
             mapping_time: Duration::from_secs(900),
+            mapping_try_time: MAPPING_TRY_TIME,
         }
     }
 }
@@ -158,6 +173,9 @@ impl OnboardingService {
     {
         assert!(!tick.is_zero());
         assert!(!limits.graph_time.is_zero() && !limits.mapping_time.is_zero());
+        assert!(
+            !limits.mapping_try_time.is_zero() && limits.mapping_try_time <= limits.mapping_time
+        );
         let stop = Arc::new(AtomicBool::new(false));
         let nanos = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -308,11 +326,15 @@ fn claim(database: &Connection, claimer: &str) -> Result<Option<Claimed>, String
         tx.commit().map_err(|error| error.to_string())?;
         return Ok(None);
     };
+    let tries = match kind {
+        Kind::Graph => "",
+        Kind::Mapping => ",mapping_try=NULL,mapping_try_ms=NULL,mapping_try_earlier=NULL",
+    };
     let changed = tx
         .execute(
             &format!(
                 "UPDATE onboarding SET {0}_state='running',{0}_reason=NULL,runs=runs+1,
-                    claimer=?2,heartbeat_ms=?3,updated_ms=?3
+                    claimer=?2,heartbeat_ms=?3,updated_ms=?3{tries}
                  WHERE project=?1 AND claimer IS NULL",
                 kind.prefix()
             ),
@@ -343,6 +365,7 @@ fn finish(
 ) -> Result<(), String> {
     let (state, reason) = step.columns();
     assert_ne!(state, "running");
+    let found = drafted.and_then(draft::found_column);
     let drafted = drafted
         .map(serde_json::to_string)
         .transpose()
@@ -351,11 +374,43 @@ fn finish(
         .execute(
             &format!(
                 "UPDATE onboarding SET {0}_state=?3,{0}_reason=?4,
-                    drafted=COALESCE(?5,drafted),claimer=NULL,heartbeat_ms=NULL,updated_ms=?6
+                    drafted=COALESCE(?5,drafted),mapping_found=COALESCE(?7,mapping_found),
+                    claimer=NULL,heartbeat_ms=NULL,updated_ms=?6
                  WHERE project=?1 AND claimer=?2",
                 claimed.kind.prefix()
             ),
-            params![claimed.project, claimer, state, reason, drafted, now_ms()],
+            params![
+                claimed.project,
+                claimer,
+                state,
+                reason,
+                drafted,
+                now_ms(),
+                found
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Records on the claimed row which mapping try starts now and why the try before it
+/// failed, which the onboarding view shows while the step runs. Changes nothing once
+/// another worker holds the row. Takes the worker's database and claimer, the claim, the
+/// try number and the earlier try's reason. Returns an error when the row is unwritable.
+fn record_try(
+    database: &Connection,
+    claimer: &str,
+    claimed: &Claimed,
+    number: u32,
+    earlier: Option<&str>,
+) -> Result<(), String> {
+    assert!((1..=MAPPING_TRIES).contains(&number));
+    assert_eq!(number == 1, earlier.is_none());
+    database
+        .execute(
+            "UPDATE onboarding SET mapping_try=?3,mapping_try_ms=?4,mapping_try_earlier=?5
+             WHERE project=?1 AND claimer=?2",
+            params![claimed.project, claimer, number, now_ms(), earlier],
         )
         .map_err(|error| error.to_string())?;
     Ok(())
@@ -371,21 +426,32 @@ fn store_draft(
     let body = serde_json::to_string(drafted).map_err(|error| error.to_string())?;
     database
         .execute(
-            "UPDATE onboarding SET drafted=?3,updated_ms=?4 WHERE project=?1 AND claimer=?2",
-            params![claimed.project, claimer, body, now_ms()],
+            "UPDATE onboarding SET drafted=?3,mapping_found=COALESCE(?5,mapping_found),updated_ms=?4
+             WHERE project=?1 AND claimer=?2",
+            params![
+                claimed.project,
+                claimer,
+                body,
+                now_ms(),
+                draft::found_column(drafted)
+            ],
         )
         .map_err(|error| error.to_string())?;
     Ok(())
 }
 
 /// The agent state name of one step attempt: the step, the project, when its
-/// onboarding row was made and the attempt, so no attempt reuses a folder an
-/// earlier onboarding of the same project id left. The project part is cut
-/// short only when the whole name would pass the bound. Returns the name.
-fn run_name(claimed: &Claimed) -> String {
+/// onboarding row was made, the attempt and, for a mapping try, `t` and the try
+/// number, so no try reuses a folder an earlier try or an earlier onboarding of
+/// the same project id left. The project part is cut short only when the whole
+/// name would pass the bound. Takes the claim and the try. Returns the name.
+fn run_name(claimed: &Claimed, try_number: Option<u32>) -> String {
     assert!(claimed.project.is_ascii() && !claimed.project.is_empty());
     let head = format!("onboard-{}-", claimed.kind.short());
-    let tail = format!("-{}-{}", claimed.created_ms, claimed.runs);
+    let mut tail = format!("-{}-{}", claimed.created_ms, claimed.runs);
+    if let Some(number) = try_number {
+        tail.push_str(&format!("-t{number}"));
+    }
     let room = RUN_NAME_BYTES_MAX - head.len() - tail.len();
     let project = &claimed.project[..claimed.project.len().min(room)];
     let name = format!("{head}{project}{tail}");
@@ -447,7 +513,7 @@ fn graph_step(
         &graphify,
         &claimed.repo,
         work.runner.state(),
-        &run_name(claimed),
+        &run_name(claimed, None),
         &hidden,
         work.limits.graph_time,
         beat,
@@ -532,8 +598,11 @@ fn io_cause(prefix: &str, error: &std::io::Error) -> String {
 /// Maps the project: collects the bounded evidence, saves the draft the
 /// manifests alone give, then asks a tools-off agent on the pool for an
 /// overview and the remaining fields and merges its answer into the gaps.
-/// Fails with [`CODEX_MISSING`] when the runner has no harness to map with,
-/// and waits while every pool member that fits is paused after a limit.
+/// A try that runs out of [`OnboardingLimits::mapping_try_time`], fails or
+/// answers with no overview starts a fresh try on a new pick of the pool, up
+/// to [`MAPPING_TRIES`] inside the step's time; each try is recorded for the
+/// view. Fails with [`CODEX_MISSING`] when the runner has no harness to map
+/// with, and waits while every pool member that fits is paused after a limit.
 /// Returns the step's ending and the draft to keep.
 fn mapping_step(
     work: &Work,
@@ -564,58 +633,115 @@ fn mapping_step(
     if harnesses.is_empty() {
         return (Step::failed(CODEX_MISSING), base);
     }
-    let account = match (work.accounts)(&claimed.pool, &harnesses) {
-        AccountPick::Account { account, .. } if harnesses.contains(&account.harness()) => *account,
-        AccountPick::Paused { until_ms } => {
-            return (
-                Step::Waiting {
-                    until_ms: Some(until_ms),
-                },
-                base,
-            );
-        }
-        _ => return (Step::failed(NO_ACCOUNT), base),
-    };
-    let name = run_name(claimed);
     #[cfg(unix)]
     let prompt = draft::prompt(&evidence, &found);
     #[cfg(unix)]
     let project = crate::protocol::ProjectId::new(claimed.project.clone()).ok();
-    let run = ReadOnlyRun {
-        name: &name,
-        #[cfg(unix)]
-        agent: "onboarding",
-        #[cfg(unix)]
-        project: project.as_ref(),
-        #[cfg(unix)]
-        folder: &claimed.repo,
-        #[cfg(unix)]
-        prompt: &prompt,
-        account: &account,
-        wall_time: work.limits.mapping_time,
-    };
-    match work.runner.run_read_only(&run, beat) {
-        #[cfg(unix)]
-        Ok(ReadOnlyEnding::Answered(text)) => {
-            let (step, kept, wrote) = answered(&layout, &base, &text, &found, &stack);
-            let _ = super::seal_draft(database, &claimed.repo, &kept);
-            if let Some(overview) = wrote {
-                let _ = super::seal_overview(database, &claimed.repo, &overview);
-            }
-            (step, kept)
+    let started = Instant::now();
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut kept = base.clone();
+    let mut causes: Vec<String> = Vec::with_capacity(MAPPING_TRIES as usize);
+    for number in 1..=MAPPING_TRIES {
+        let left = work.limits.mapping_time.saturating_sub(started.elapsed());
+        if left.is_zero() {
+            break;
         }
-        Ok(ReadOnlyEnding::Failed(reason)) => (Step::failed(&reason), base),
-        #[cfg(unix)]
-        Ok(ReadOnlyEnding::TimedOut) => (Step::failed(MAPPING_TIMED_OUT), base),
-        #[cfg(unix)]
-        Ok(ReadOnlyEnding::Stopped) => (Step::WAITING, base),
-        Err(RunError::Busy) => (Step::WAITING, base),
-        Err(RunError::Account(_)) => (Step::failed(NO_ACCOUNT), base),
-        Err(RunError::Uncertain(_)) => (
-            Step::failed(crate::sandbox::warden::CLEANUP_UNCERTAIN),
-            base,
-        ),
-        Err(error) => (not_started(Kind::Mapping, &error), base),
+        let account = match (work.accounts)(&claimed.pool, &harnesses) {
+            AccountPick::Account { account, .. } if harnesses.contains(&account.harness()) => {
+                *account
+            }
+            AccountPick::Paused { until_ms } => {
+                return (
+                    Step::Waiting {
+                        until_ms: Some(until_ms),
+                    },
+                    kept,
+                );
+            }
+            _ => return (Step::failed(NO_ACCOUNT), kept),
+        };
+        let _ = record_try(
+            database,
+            &work.claimer,
+            claimed,
+            number,
+            causes.last().map(String::as_str),
+        );
+        let name = run_name(claimed, Some(number));
+        let run = ReadOnlyRun {
+            name: &name,
+            #[cfg(unix)]
+            agent: "onboarding",
+            #[cfg(unix)]
+            project: project.as_ref(),
+            #[cfg(unix)]
+            folder: &claimed.repo,
+            #[cfg(unix)]
+            prompt: &prompt,
+            account: &account,
+            wall_time: work.limits.mapping_try_time.min(left),
+            output_tokens: Some(MAPPING_OUTPUT_TOKENS),
+        };
+        let cause = match work.runner.run_read_only(&run, beat) {
+            #[cfg(unix)]
+            Ok(ReadOnlyEnding::Answered(text)) => {
+                let (step, merged, wrote) = answered(&layout, &base, &text, &found, &stack);
+                let _ = super::seal_draft(database, &claimed.repo, &merged);
+                if let Some(overview) = wrote {
+                    let _ = super::seal_overview(database, &claimed.repo, &overview);
+                }
+                match step {
+                    Step::Failed { reason } if reason == MAPPING_NO_OVERVIEW => {
+                        kept = merged;
+                        reason
+                    }
+                    step => return (step, merged),
+                }
+            }
+            Ok(ReadOnlyEnding::Failed(reason))
+                if confined_unavailable(std::env::consts::OS) == Some(reason.as_str()) =>
+            {
+                return (Step::failed(&reason), kept);
+            }
+            Ok(ReadOnlyEnding::Failed(reason)) => reason,
+            #[cfg(unix)]
+            Ok(ReadOnlyEnding::TimedOut) => MAPPING_TIMED_OUT.to_owned(),
+            #[cfg(unix)]
+            Ok(ReadOnlyEnding::Stopped) => return (Step::WAITING, kept),
+            Err(RunError::Busy) => return (Step::WAITING, kept),
+            Err(RunError::Account(_)) => return (Step::failed(NO_ACCOUNT), kept),
+            Err(RunError::Uncertain(_)) => {
+                return (
+                    Step::failed(crate::sandbox::warden::CLEANUP_UNCERTAIN),
+                    kept,
+                );
+            }
+            Err(error) => return (not_started(Kind::Mapping, &error), kept),
+        };
+        causes.push(bounded_reason(&cause));
+    }
+    (Step::failed(&tries_failed(&causes)), kept)
+}
+
+/// The plain reason of a mapping step whose every try failed: the one try's own
+/// reason, how many tries failed and their shared reason, or each try's reason in
+/// order. Input: the reasons in try order, at least one. Output: the reason.
+fn tries_failed(causes: &[String]) -> String {
+    assert!(!causes.is_empty() && causes.len() <= MAPPING_TRIES as usize);
+    let tries = causes.len();
+    match causes {
+        [only] => only.clone(),
+        [first, rest @ ..] if rest.iter().all(|cause| cause == first) => {
+            format!("Mapping agent failed {tries} tries: {first}")
+        }
+        _ => {
+            let each: Vec<String> = causes
+                .iter()
+                .enumerate()
+                .map(|(index, cause)| format!("try {}: {cause}", index + 1))
+                .collect();
+            format!("Mapping agent failed {tries} tries: {}", each.join("; "))
+        }
     }
 }
 

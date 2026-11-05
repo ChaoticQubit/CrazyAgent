@@ -926,6 +926,8 @@ fn a_claude_master_with_tools_on_gets_the_team_tool_flags_and_only_the_engine_de
             "stream-json",
             "--tools",
             "",
+            "--system-prompt",
+            crate::harnesses::launch::CLAUDE_NO_TOOLS_PROMPT,
             "--strict-mcp-config",
             "--mcp-config",
             "{\"mcpServers\":{}}",

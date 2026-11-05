@@ -1036,3 +1036,6 @@ fn live_native_teammates_work_from_their_own_home_through_the_lead_s_team_folder
     let (_, problem) = team.until_ended(STOP);
     assert_eq!(problem, None);
 }
+
+#[path = "live_native_lead_own_turn_tests.rs"]
+mod own_turn;

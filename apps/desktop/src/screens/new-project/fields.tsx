@@ -89,18 +89,23 @@ export function BasicsFields({ prefix, draft, onChange, catalog, errors, showErr
   </>;
 }
 
-/** The research switches shared by New Project, Work and Project Settings, General: one switch
- * per research kind with its icon and plain description. Inputs: an id prefix, the engine catalog,
- * the chosen kinds and their change handler. Output: the switch list. */
-export function ResearchSwitches({ prefix, catalog, value, onChange }: {
+/** The research switches shared by New Project, Work, Project Settings, General and the setup
+ * review: one switch per research kind with its icon and plain description, and the repository
+ * files that already hold that research when the mapping found any. Inputs: an id prefix, the
+ * engine catalog, the chosen kinds, their change handler and the files per kind. Output: the
+ * switch list. */
+export function ResearchSwitches({ prefix, catalog, value, onChange, found = {} }: {
   prefix: string; catalog: Result<ProjectCatalog> | undefined; value: ResearchKind[]; onChange: (research: ResearchKind[]) => void;
+  found?: Partial<Record<ResearchKind, string[]>>;
 }) {
   const research = catalog?.kind === "ok" ? catalog.value.research : (Object.keys(RESEARCH_LABELS) as ResearchKind[]).map((kind) => ({ kind, label: RESEARCH_LABELS[kind] }));
   return <div className="pj-switch-list">{research.map((item) => {
     const on = value.includes(item.kind);
+    const files = found[item.kind] ?? [];
     return <div className="pj-switch-item" key={item.kind}>
       <Icon name={RESEARCH_ICONS[item.kind]} size={18} />
-      <span><strong>{item.label}</strong><span className="pj-secondary">{RESEARCH_COPY[item.kind]}</span></span>
+      <span><strong>{item.label}</strong><span className="pj-secondary">{RESEARCH_COPY[item.kind]}</span>
+        {files.length > 0 && <span className="pj-secondary">Already in the repo: {files.join(", ")}</span>}</span>
       <Switch id={`${prefix}-research-${item.kind}`} label={item.label} hideLabel checked={on} onChecked={() => onChange(toggle(value, item.kind))} />
     </div>;
   })}</div>;

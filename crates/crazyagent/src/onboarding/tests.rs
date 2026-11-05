@@ -1,6 +1,6 @@
 use super::draft::{self, Drafted};
 use super::*;
-use crate::project_setup::Platform;
+use crate::project_setup::{Platform, ResearchKind};
 use std::os::unix::fs::symlink;
 
 const OTHER_GRAPH_MARKER: &str = "# Other project graph 6620";
@@ -115,6 +115,369 @@ fn evidence_never_reads_env_files_or_follows_links() {
     );
     assert!(!prompt.contains("SECRET_VALUE_7731"));
     assert!(!found.languages.contains(&"JavaScript".to_owned()));
+}
+
+fn write_file(root: &Path, path: &str, text: &str) {
+    let path = root.join(path);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+}
+
+#[test]
+fn documents_with_unrelated_names_are_read_from_their_text_and_mapped_to_research() {
+    let dir = rust_repo();
+    let root = dir.path();
+    git_init(root);
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("token"), "SECRET_VALUE_7731").unwrap();
+    write_file(
+        root,
+        "research/landscape-2026.md",
+        "# Landscape\n\nRival note apps: Notion and Obsidian lead. COMPETITOR_TEXT_5521\n",
+    );
+    write_file(
+        root,
+        "notes/q3-sizing.txt",
+        "Serviceable market 2.1B dollars, growing 9% a year. MARKET_TEXT_8830\n",
+    );
+    write_file(
+        root,
+        "docs/plan.md",
+        "Release plan for sync. PLAN_TEXT_4410\n",
+    );
+    write_file(root, "docs/spec.pdf", "%PDF-1.7 PDF_BYTES_3390");
+    write_file(root, "private/salaries.md", "PRIVATE_TEXT_6602");
+    write_file(root, "docs/Private/board.md", "PRIVATE_TEXT_6602");
+    write_file(root, ".notes/hidden.md", "HIDDEN_TEXT_1207");
+    write_file(root, "docs/.draft.md", "HIDDEN_TEXT_1207");
+    write_file(root, "node_modules/pkg/README.md", "VENDOR_TEXT_7781");
+    write_file(root, "docs/a/b/c/deep.md", "DEPTH_FOUR_TEXT_2290");
+    write_file(root, "docs/a/b/c/d/deeper.md", "DEPTH_FIVE_TEXT_8121");
+    std::fs::write(root.join("docs/huge.md"), "x".repeat(1024 * 1024 + 1)).unwrap();
+    symlink(outside.path().join("token"), root.join("notes/linked.md")).unwrap();
+    symlink(outside.path(), root.join("docs/linked-folder")).unwrap();
+
+    let evidence = draft::gather(root);
+    let (found, stack) = draft::found_facts(&evidence, root);
+    let prompt = draft::prompt(&evidence, &found);
+    for text in [
+        "COMPETITOR_TEXT_5521",
+        "MARKET_TEXT_8830",
+        "PLAN_TEXT_4410",
+        "DEPTH_FOUR_TEXT_2290",
+        "### research/landscape-2026.md (",
+        "docs/spec.pdf (",
+        "\"research\"",
+    ] {
+        assert!(prompt.contains(text), "{text} is missing from the prompt");
+    }
+    for text in [
+        "SECRET_VALUE_7731",
+        "PRIVATE_TEXT_6602",
+        "HIDDEN_TEXT_1207",
+        "VENDOR_TEXT_7781",
+        "DEPTH_FIVE_TEXT_8121",
+        "PDF_BYTES_3390",
+        "docs/huge.md",
+        "salaries",
+        "linked.md",
+        "linked-folder",
+    ] {
+        assert!(!prompt.contains(text), "{text} reached the prompt");
+    }
+    assert_eq!(prompt.matches("A small greeting tool").count(), 1);
+
+    let answer = draft::parse_answer(concat!(
+        "## Structure\n\nA note app.\n\n## Project documents\n\n",
+        "research/landscape-2026.md holds the competitor analysis.\n\n",
+        "```json\n{\"about\": \"A note app.\", \"research\": [",
+        "{\"kind\": \"competitor_research\", \"files\": [\"research/landscape-2026.md\"]}, ",
+        "{\"kind\": \"market_research\", \"files\": [\"./notes/q3-sizing.txt\", \"research/made-up.md\"]}, ",
+        "{\"kind\": \"sales_research\", \"files\": [\"docs/plan.md\"]}], ",
+        "\"documents\": [\"docs/plan.md\", \"docs/spec.pdf\", \"private/salaries.md\"]}\n```\n",
+    ));
+    let base = Drafted::new("notes".into(), &pool());
+    let merged = draft::merge(&base, &answer, &found, &stack);
+    assert_eq!(
+        merged.facts.research,
+        [
+            FoundResearch {
+                kind: ResearchKind::MarketResearch,
+                files: vec!["notes/q3-sizing.txt".into()],
+            },
+            FoundResearch {
+                kind: ResearchKind::CompetitorResearch,
+                files: vec!["research/landscape-2026.md".into()],
+            },
+        ]
+    );
+    assert_eq!(merged.facts.documents, ["docs/plan.md"]);
+    assert_eq!(merged.draft.about, "A note app.");
+    assert!(
+        merged.draft.research.is_empty(),
+        "mapping never turns research on"
+    );
+    assert!(merged.facts.shown.is_empty());
+    let again = draft::merge(&merged, &draft::Answer::default(), &found, &stack);
+    assert_eq!(again.facts, merged.facts);
+}
+
+#[test]
+fn document_reading_stops_at_its_bounds_and_lists_the_rest() {
+    let dir = rust_repo();
+    git_init(dir.path());
+    for index in 0..60 {
+        write_file(
+            dir.path(),
+            &format!("docs/note-{index:02}.md"),
+            &format!("NOTE_{index:02} {}\n", "y".repeat(7 * 1024)),
+        );
+    }
+    let evidence = draft::gather(dir.path());
+    let read: Vec<&str> = evidence
+        .documents
+        .iter()
+        .map(|document| document.path.as_str())
+        .collect();
+    assert_eq!(read.len(), 8, "{read:?}");
+    assert_eq!(read[0], "docs/note-00.md");
+    assert!(
+        evidence
+            .documents
+            .iter()
+            .all(|document| document.text.len() == 6 * 1024 && document.size == 7177)
+    );
+    assert_eq!(evidence.unread.len(), 52);
+    assert_eq!(evidence.unread[0], ("docs/note-08.md".to_owned(), 7177));
+    let (found, _) = draft::found_facts(&evidence, dir.path());
+    assert_eq!(found.shown.len(), 8);
+    let prompt = draft::prompt(&evidence, &found);
+    assert!(prompt.contains("### docs/note-00.md (7177 bytes, the first 6144 shown)"));
+    assert!(prompt.contains("docs/note-59.md (7177 bytes)"));
+
+    let many = rust_repo();
+    git_init(many.path());
+    for index in 0..45 {
+        write_file(
+            many.path(),
+            &format!("notes/n-{index:02}.txt"),
+            &format!("Short note {index}.\n"),
+        );
+    }
+    let evidence = draft::gather(many.path());
+    assert_eq!(evidence.documents.len(), 40);
+    assert_eq!(evidence.unread.len(), 5);
+    assert_eq!(evidence.unread[0].0, "notes/n-40.txt");
+}
+
+#[test]
+fn facts_without_documents_serialize_as_before() {
+    assert_eq!(
+        serde_json::to_value(MappingFacts::default()).unwrap(),
+        serde_json::json!({"languages": [], "build_commands": [], "test_commands": [], "entry_points": []})
+    );
+    let old: MappingFacts = serde_json::from_str(
+        r#"{"languages":["Rust"],"build_commands":[],"test_commands":[],"entry_points":[]}"#,
+    )
+    .unwrap();
+    assert!(old.research.is_empty() && old.documents.is_empty() && old.shown.is_empty());
+}
+
+fn git_init(root: &Path) {
+    let mut command = std::process::Command::new(crate::research::runner::setup_git());
+    command
+        .args(["init", "-q", "--template="])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .current_dir(root);
+    let status = crate::spawn_gate::status(&mut command);
+    assert!(
+        status.as_ref().is_ok_and(std::process::ExitStatus::success),
+        "git init: {status:?}"
+    );
+}
+
+fn mapping_prompt(root: &Path) -> String {
+    let evidence = draft::gather(root);
+    let (found, _) = draft::found_facts(&evidence, root);
+    draft::prompt(&evidence, &found)
+}
+
+#[test]
+fn git_ignored_documents_are_neither_read_nor_listed() {
+    let dir = rust_repo();
+    let root = dir.path();
+    git_init(root);
+    write_file(
+        root,
+        ".gitignore",
+        "notes/private-*.md\n!notes/private-ok.md\ndocs/scratch/\n*.log.md\n",
+    );
+    write_file(root, ".git/info/exclude", "docs/excluded.md\n");
+    write_file(
+        root,
+        "docs/plan.md",
+        "Release plan for sync. PLAN_TEXT_4410\n",
+    );
+    write_file(
+        root,
+        "docs/meeting notes.md",
+        "Weekly sync. SPACED_TEXT_6161\n",
+    );
+    write_file(
+        root,
+        "notes/private-ok.md",
+        "Kept by a rule. NEGATED_TEXT_1414\n",
+    );
+    write_file(root, "docs/spec.pdf", "%PDF-1.7");
+    let ignored = [
+        "notes/private-plan.md",
+        "docs/scratch/idea.md",
+        "docs/scratch/spec.pdf",
+        "docs/run.log.md",
+        "docs/excluded.md",
+    ];
+    for path in ignored {
+        write_file(root, path, "IGNORED_TEXT_3141 api_key=sk-test-0000\n");
+    }
+
+    let prompt = mapping_prompt(root);
+    for text in [
+        "PLAN_TEXT_4410",
+        "SPACED_TEXT_6161",
+        "NEGATED_TEXT_1414",
+        "docs/spec.pdf (",
+    ] {
+        assert!(prompt.contains(text), "{text} is missing from the prompt");
+    }
+    assert!(
+        !prompt.contains("IGNORED_TEXT_3141"),
+        "git-ignored text reached the prompt"
+    );
+    for path in ignored {
+        assert!(!prompt.contains(path), "the git-ignored {path} is listed");
+    }
+}
+
+#[test]
+fn secret_named_documents_are_neither_read_nor_listed() {
+    let dir = rust_repo();
+    let root = dir.path();
+    git_init(root);
+    write_file(
+        root,
+        "docs/plan.md",
+        "Release plan for sync. PLAN_TEXT_4410\n",
+    );
+    let kept = [
+        "docs/monkey-business.md",
+        "docs/tokenizer.md",
+        "docs/keynote.md",
+        "docs/environment.md",
+    ];
+    for path in kept {
+        write_file(root, path, &format!("KEPT_TEXT_5150 {path}\n"));
+    }
+    let secret = [
+        "docs/credentials.txt",
+        "docs/api-keys.md",
+        "notes/Passwords.md",
+        "docs/server.pem.txt",
+        "docs/prod.env.md",
+        "research/aws_secret_notes.md",
+        "docs/privateKey.txt",
+        "docs/tokens.md",
+        "docs/Api_Key.txt",
+        "docs/client.p12.txt",
+        "docs/cert.PFX.md",
+        "notes/passwd.txt",
+        "docs/deploy.key.md",
+        "secrets/notes.md",
+        "docs/Credential.pdf",
+    ];
+    for path in secret {
+        write_file(root, path, "SECRET_TEXT_9001 password=hunter2\n");
+    }
+
+    let prompt = mapping_prompt(root);
+    assert!(prompt.contains("PLAN_TEXT_4410"));
+    for path in kept {
+        assert!(
+            prompt.contains(&format!("KEPT_TEXT_5150 {path}")),
+            "{path} is missing from the prompt"
+        );
+    }
+    assert!(
+        !prompt.contains("SECRET_TEXT_9001"),
+        "a secret file's text reached the prompt"
+    );
+    for path in secret {
+        assert!(!prompt.contains(path), "the secret-named {path} is listed");
+    }
+}
+
+#[test]
+fn hard_linked_documents_are_neither_read_nor_listed() {
+    let dir = rust_repo();
+    let root = dir.path();
+    git_init(root);
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("notes.md"), "HARDLINK_TEXT_4242\n").unwrap();
+    write_file(
+        root,
+        "docs/plan.md",
+        "Release plan for sync. PLAN_TEXT_4410\n",
+    );
+    std::fs::hard_link(
+        outside.path().join("notes.md"),
+        root.join("docs/linked-copy.md"),
+    )
+    .unwrap();
+    write_file(root, "docs/twin-a.md", "TWIN_TEXT_4243\n");
+    std::fs::hard_link(root.join("docs/twin-a.md"), root.join("docs/twin-b.md")).unwrap();
+
+    let prompt = mapping_prompt(root);
+    assert!(prompt.contains("PLAN_TEXT_4410"));
+    for text in [
+        "HARDLINK_TEXT_4242",
+        "docs/linked-copy.md",
+        "TWIN_TEXT_4243",
+        "docs/twin-a.md",
+        "docs/twin-b.md",
+    ] {
+        assert!(
+            !prompt.contains(text),
+            "the hard-linked {text} reached the prompt"
+        );
+    }
+}
+
+#[test]
+fn without_an_answer_from_git_no_document_is_read_and_the_prompt_says_so() {
+    let dir = rust_repo();
+    let root = dir.path();
+    write_file(
+        root,
+        "docs/plan.md",
+        "Release plan for sync. PLAN_TEXT_4410\n",
+    );
+    write_file(root, "docs/spec.pdf", "%PDF-1.7");
+
+    let evidence = draft::gather(root);
+    assert!(
+        evidence.documents.is_empty() && evidence.unread.is_empty(),
+        "documents were read without git saying which it ignores"
+    );
+    let prompt = mapping_prompt(root);
+    assert!(!prompt.contains("PLAN_TEXT_4410") && !prompt.contains("docs/spec.pdf"));
+    assert!(
+        prompt.contains(
+            "No project document was read: the project's git could not tell which files it ignores."
+        ),
+        "the prompt does not say why no document was read"
+    );
 }
 
 #[test]

@@ -6,8 +6,8 @@ use crate::engine::Client;
 use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
 use crate::github::{GitHubMethod, GitHubRepo, GitHubRepoPage, GitHubStatus};
-use crate::onboarding::{MappingFacts, OnboardingView, Step};
-use crate::project_setup::{ProjectSetup, SetupAction, SetupQuery};
+use crate::onboarding::{FoundResearch, MappingFacts, MappingTry, OnboardingView, Step};
+use crate::project_setup::{ProjectSetup, ResearchKind, SetupAction, SetupQuery};
 use crate::protocol::ProjectId;
 use crate::tui::client::Connection;
 use crate::tui::client::intake::{IntakeEvent, IntakeJob, IntakeQuery, IntakeView};
@@ -915,6 +915,7 @@ fn review_with(change: impl FnOnce(&mut OnboardingView)) -> (Shell, ProjectId) {
         mapping: Step::Failed {
             reason: "No model answered.".into(),
         },
+        mapping_try: None,
         name: "notes".into(),
         draft: ProjectSetup {
             about: String::new(),
@@ -930,6 +931,7 @@ fn review_with(change: impl FnOnce(&mut OnboardingView)) -> (Shell, ProjectId) {
             build_commands: vec!["cargo build".into()],
             test_commands: vec!["cargo test".into()],
             entry_points: vec!["src/main.rs".into()],
+            ..MappingFacts::default()
         },
         missing: vec!["about".into(), "platforms".into()],
         overview: None,
@@ -966,6 +968,125 @@ fn a_graph_step_turned_off_in_setup_says_so_while_mapping_runs() {
         "{rows:#?}"
     );
     assert!(shows(&rows, "Running"), "{rows:#?}");
+}
+
+#[test]
+fn a_running_mapping_shows_its_try_its_minutes_and_why_the_earlier_try_failed() {
+    let now = crate::tui::clock::now_ms();
+    let (mut shell, _) = review_with(|view| {
+        view.mapping = Step::Running;
+        view.mapping_try = Some(MappingTry {
+            number: 2,
+            tries: 3,
+            started_ms: now - 150_000,
+            earlier: Some("Mapping agent ran out of time".into()),
+        });
+    });
+    let rows = render(&mut shell, 100, 40);
+    assert!(
+        shows(
+            &rows,
+            "Mapping, try 2 of 3, 2 min. Try 1 failed: Mapping agent ran out of time"
+        ),
+        "{rows:#?}"
+    );
+
+    let (mut shell, _) = review_with(|view| {
+        view.mapping = Step::Running;
+        view.mapping_try = Some(MappingTry {
+            number: 1,
+            tries: 3,
+            started_ms: now + 5_000,
+            earlier: None,
+        });
+    });
+    let rows = render(&mut shell, 100, 40);
+    assert!(
+        shows(&rows, "Mapping, try 1 of 3, under 1 min."),
+        "{rows:#?}"
+    );
+    assert!(!shows(&rows, "failed:"), "{rows:#?}");
+
+    let (mut shell, _) = review_with(|view| {
+        view.mapping = Step::WAITING;
+        view.mapping_try = Some(MappingTry {
+            number: 2,
+            tries: 3,
+            started_ms: now,
+            earlier: Some("Mapping agent ran out of time".into()),
+        });
+    });
+    let rows = render(&mut shell, 100, 40);
+    assert!(!shows(&rows, "Mapping, try"), "{rows:#?}");
+}
+
+#[test]
+fn an_engine_reason_with_hidden_or_direction_changing_characters_shows_them_as_escapes() {
+    const HIDDEN: &str = "\u{202e}exe\u{200b}";
+    const ESCAPED: &str = "\\u202eexe\\u200b";
+    let mut raw = Vec::new();
+
+    let (mut shell, _) = review_with(|view| {
+        view.mapping = Step::Running;
+        view.mapping_try = Some(MappingTry {
+            number: 2,
+            tries: 3,
+            started_ms: crate::tui::clock::now_ms(),
+            earlier: Some(HIDDEN.into()),
+        });
+    });
+    let rows = render(&mut shell, 100, 40);
+    if !shows(&rows, &format!("Try 1 failed: {ESCAPED}")) {
+        raw.push(("the running try's earlier reason", rows));
+    }
+
+    let (mut shell, _) = review_with(|view| {
+        view.mapping = Step::Failed {
+            reason: format!("No model: {HIDDEN}"),
+        };
+    });
+    let rows = render(&mut shell, 80, 40);
+    if !shows(&rows, &format!("Mapping failed: No model: {ESCAPED}")) {
+        raw.push(("the review's mapping failure", rows));
+    }
+
+    let (mut shell, _) = review_with(|view| {
+        view.graph = Step::Failed {
+            reason: format!("graphify stopped: {HIDDEN}"),
+        };
+    });
+    while shell.ctx.next_request().is_some() {}
+    let rows = render(&mut shell, 80, 40);
+    if !shows(&rows, &format!("graphify stopped: {ESCAPED}")) {
+        raw.push(("a failed step's reason", rows));
+    }
+
+    assert!(raw.is_empty(), "shown without escapes: {raw:#?}");
+}
+
+#[test]
+fn the_review_shows_the_research_and_documents_already_in_the_repo() {
+    let (mut shell, _) = review_with(|view| {
+        view.facts.research = vec![FoundResearch {
+            kind: ResearchKind::CompetitorResearch,
+            files: vec!["research/landscape-2026.md".into()],
+        }];
+        view.facts.documents = vec!["docs/q3-plan.md".into()];
+    });
+    let rows = render(&mut shell, 100, 80);
+    assert!(
+        shows(
+            &rows,
+            "Competitor research - Already in the repo: research/landscape-2026.md"
+        ),
+        "{rows:#?}"
+    );
+    assert!(shows(&rows, "Project documents found:"), "{rows:#?}");
+    assert!(shows(&rows, "- docs/q3-plan.md"), "{rows:#?}");
+    let (mut plain, _) = review_with(|_| {});
+    let rows = render(&mut plain, 100, 80);
+    assert!(!shows(&rows, "Already in the repo"), "{rows:#?}");
+    assert!(!shows(&rows, "Project documents found"), "{rows:#?}");
 }
 
 #[test]

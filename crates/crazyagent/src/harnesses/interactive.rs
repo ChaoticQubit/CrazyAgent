@@ -1,10 +1,10 @@
 #[cfg(unix)]
 use super::launch::CLAUDE_NATIVE_TEAM_TOOLS;
 use super::launch::{
-    AccountBinding, CLAUDE_DENY_FLAG, CLAUDE_MCP_CONNECT_LIMIT, CLAUDE_NO_MCP, CODEX_NO_USER_INPUT,
-    LOCAL_PLACEHOLDER_KEY, LaunchError, LaunchRequest, SANDBOX_EXEC, Secret, TOOLS_OFF_PATH,
-    TOOLS_ON_PATH, claude_bare, claude_denied, codex_configuration, failure, harness_id,
-    key_file_text, validate,
+    AccountBinding, CLAUDE_DENY_FLAG, CLAUDE_MCP_CONNECT_LIMIT, CLAUDE_NO_MCP, CLAUDE_TOOLS_OFF,
+    CODEX_NO_USER_INPUT, LOCAL_PLACEHOLDER_KEY, LaunchError, LaunchRequest, SANDBOX_EXEC, Secret,
+    TOOLS_OFF_PATH, TOOLS_ON_PATH, claude_bare, claude_denied, codex_configuration, failure,
+    harness_id, key_file_text, validate,
 };
 use crate::launch_context::{Installed, NativeTeam};
 use crate::sandbox::toolchains::{self, ToolHomes};
@@ -51,7 +51,6 @@ const CLAUDE_TOOLS_ON: [&str; 4] = [
     "--permission-mode",
     "bypassPermissions",
 ];
-const CLAUDE_TOOLS_OFF: [&str; 3] = ["--tools", "", "--disable-slash-commands"];
 const CLAUDE_TEAMMATE_MODE: [&str; 2] = ["--teammate-mode", "tmux"];
 /// Makes Claude Code 2.1.309 render its system prompt fresh on every request. Signed in, it
 /// otherwise records the prompt of a conversation's first request and sends that record on

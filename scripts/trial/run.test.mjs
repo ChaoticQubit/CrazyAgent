@@ -7,7 +7,8 @@ import { DatabaseSync } from "node:sqlite";
 import { setTimeout as pause } from "node:timers/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { mask, options, renderPrompt } from "./run.mjs";
+import { CANARY, DECOY, MAPPING_FILES } from "./mapping-docs.mjs";
+import { mask, options, renderPrompt, seed } from "./run.mjs";
 
 const TRIAL = dirname(fileURLToPath(import.meta.url));
 const RUN = join(TRIAL, "run.mjs");
@@ -265,7 +266,7 @@ test("a full fixture run seeds, records, launches, writes the manifest, then aud
   assert.equal(git(paths.project, "log", "--format=%s"), "Initial trial repo");
   const seed = git(paths.project, "rev-parse", "main");
   assert.equal(git(paths.project, "rev-parse", "trial3-land"), seed);
-  assert.deepEqual(git(paths.project, "ls-files").split("\n"), [".gitignore", "CLAUDE.md", "Cargo.toml", "README.md", "calc.py", "data/orders.csv", "report.sh", "shop/money.py", "shop/pricing.py", "shop/report.py", "shop/tax.py", "src/lib.rs"]);
+  assert.deepEqual(git(paths.project, "ls-files").split("\n"), [".gitignore", "CLAUDE.md", "Cargo.toml", "README.md", "calc.py", "data/orders.csv", "report.sh", "shop/money.py", "shop/pricing.py", "shop/report.py", "shop/tax.py", "src/lib.rs", ...Object.keys(MAPPING_FILES)].sort());
   const printed = spawnSync("sh", [join(paths.project, "report.sh")], { cwd: paths.root, encoding: "utf8" });
   assert.equal(printed.status, 0, printed.stderr);
   const lines = printed.stdout.trimEnd().split("\n");
@@ -486,4 +487,18 @@ test("the runner quits an app the desktop run relaunched outside its process gro
   const quit = steps(paths.evidence).find((step) => step.title === "Quit the relaunched app");
   assert.equal(quit?.ok, true, JSON.stringify(quit));
   assert.match(quit.detail, new RegExp(`stopped the relaunched app ${pid}`));
+});
+
+test("the seed commits the research documents and the secret-named decoy on main, the decoy holding the canary", () => {
+  const project = join(mkdtempSync(join(tmpdir(), "ca-seed-")), "ca-trial-4d");
+  const { sha } = seed(project, 4);
+  const tracked = git(project, "ls-files").split("\n");
+  for (const [path, text] of Object.entries(MAPPING_FILES)) {
+    assert.ok(tracked.includes(path), `${path} is committed`);
+    assert.equal(readFileSync(join(project, path), "utf8"), text);
+  }
+  assert.equal(git(project, "rev-parse", "main"), sha);
+  assert.equal(git(project, "status", "--porcelain", "--", ...Object.keys(MAPPING_FILES)), "");
+  assert.equal(spawnSync("git", ["-C", project, "check-ignore", "-q", DECOY]).status, 1, "the decoy is not git-ignored, so only its name keeps the mapping out");
+  assert.ok(readFileSync(join(project, DECOY), "utf8").includes(CANARY));
 });

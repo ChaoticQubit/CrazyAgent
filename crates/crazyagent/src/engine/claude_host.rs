@@ -6,7 +6,7 @@ use crate::adapters::NativeHarness;
 #[cfg(unix)]
 use crate::adapters::claude::{ClaudeProtocol, ProtocolError};
 use crate::adapters::events::ObservedEvent;
-use crate::harnesses::launch::{CLAUDE_BUILT_IN_AGENTS, CLAUDE_DENY_FLAG};
+use crate::harnesses::launch::{CLAUDE_BUILT_IN_AGENTS, CLAUDE_DENY_FLAG, CLAUDE_NO_TOOLS_PROMPT};
 #[cfg(unix)]
 use crate::protocol::FRAME_BYTES_MAX;
 use crate::protocol::{CredentialRef, RequestId};
@@ -260,7 +260,7 @@ fn command_for(
                 CLAUDE_DENY_FLAG,
             ])
             .args(CLAUDE_BUILT_IN_AGENTS),
-        None => command.args(["--tools", ""]),
+        None => command.args(["--tools", "", "--system-prompt", CLAUDE_NO_TOOLS_PROMPT]),
     };
     command.args([
         "--strict-mcp-config",

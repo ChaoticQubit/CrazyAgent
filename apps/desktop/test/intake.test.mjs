@@ -201,6 +201,13 @@ test("repositories filter by name and read their size and branch", () => {
 test("onboarding steps use the fixed words and keep the failure reason", () => {
   assert.deepEqual(intake.stepView({ kind: "waiting" }), { word: "Waiting", tone: "neutral", line: null });
   assert.deepEqual(intake.stepView({ kind: "running" }), { word: "Working", tone: "info", line: null });
+  const started = Date.UTC(2026, 10, 4, 22, 0, 0);
+  const first = { number: 1, tries: 3, started_ms: started, earlier: null };
+  assert.deepEqual(intake.stepView({ kind: "running" }, false, first, started + 20000), { word: "Working", tone: "info", line: "Mapping, try 1 of 3, under 1 min." });
+  const second = { number: 2, tries: 3, started_ms: started, earlier: "Mapping agent ran out of time" };
+  assert.deepEqual(intake.stepView({ kind: "running" }, false, second, started + 150000), { word: "Working", tone: "info", line: "Mapping, try 2 of 3, 2 min. Try 1 failed: Mapping agent ran out of time" });
+  assert.equal(intake.stepView({ kind: "running" }, false, first, started - 5000).line, "Mapping, try 1 of 3, under 1 min.");
+  assert.deepEqual(intake.stepView({ kind: "done" }, false, second, started), { word: "Done", tone: "ok", line: null });
   assert.deepEqual(intake.stepView({ kind: "done" }), { word: "Done", tone: "ok", line: null });
   assert.deepEqual(intake.stepView({ kind: "failed", reason: "graphify isn't installed." }), { word: "Failed", tone: "danger", line: "graphify isn't installed." });
   assert.deepEqual(intake.stepView({ kind: "off" }), { word: "Off", tone: "neutral", line: "Graphify is off in Settings, Pack, so no code graph is built." });
@@ -502,6 +509,21 @@ test("an overview the engine did not write is shown apart and labelled, never as
   assert.match(found, /The mapping agent did not write this: it came with the folder or was changed since\./);
   assert.match(found, /From the repository\./);
   assert.doesNotMatch(found, />Overview</);
+});
+
+test("the setup review shows each research toggle the repo already covers and the documents found", () => {
+  const catalog = ok({ tech_stack: [], platforms: [], research: [{ kind: "market_research", label: "Market research" }, { kind: "competitor_research", label: "Competitor research" }], document_extensions: [], documents_max: 16, document_bytes_max: 1, project_document_bytes_max: 1, default_team: stored().team });
+  const base = { name: "Plant shop", catalog, errors: {}, showErrors: false, busy: false, problem: "", onDraft: noop, onConfirm: noop, onOpenLink: noop };
+  const facts = { ...view().facts, research: [{ kind: "competitor_research", files: ["research/landscape-2026.md", "notes/rivals.txt"] }], documents: ["docs/q3-plan.md"] };
+  const mapped = view({ facts });
+  const markup = html(OnboardingReviewView, { ...base, view: ok(mapped), draft: intake.onboardingDraft(mapped, stored()) });
+  const items = markup.split('class="pj-switch-item"').slice(1);
+  assert.equal(items.length, 2);
+  assert.doesNotMatch(items[0], /Already in the repo/);
+  assert.match(items[1], /Already in the repo: research\/landscape-2026\.md, notes\/rivals\.txt/);
+  assert.match(markup, /Project documents found[\s\S]*<li>docs\/q3-plan\.md<\/li>/);
+  const plain = html(OnboardingReviewView, { ...base, view: ok(view()), draft: intake.onboardingDraft(view(), stored()) });
+  assert.doesNotMatch(plain, /Already in the repo|Project documents found/);
 });
 
 test("a repository CrazyAgent can't clone is listed with why and without a working Clone", () => {

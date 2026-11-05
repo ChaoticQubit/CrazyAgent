@@ -51,6 +51,8 @@ const MASTER_WAITING: &str =
 const MASTER_ON: &str = "Live master on. It starts when you open this view.";
 const MASTER_ON_SWITCHED: &str = "Live master on.";
 const MASTER_OFF: &str = "Live master stopped.";
+pub(in crate::tui) const MASTER_NO_SESSION: &str =
+    "No master session opened, so this conversation won't be in Sessions.";
 const MASTER_STOPPED: &str = "The live master is stopped.";
 const MASTER_RESTART: &str =
     "It starts again when you open this view again or press n for a new session.";
@@ -136,6 +138,7 @@ pub struct Team {
     name: String,
     master: bool,
     asked: bool,
+    checked: bool,
     switch: Option<LiveSwitch>,
     want: Option<bool>,
     refused: Option<String>,
@@ -163,6 +166,7 @@ impl Team {
             name,
             master: false,
             asked: false,
+            checked: false,
             switch: None,
             want: None,
             refused: None,
@@ -266,16 +270,31 @@ impl Team {
         }));
     }
 
+    /// Sends the owner's default Open check for a switch already on, once per open of a
+    /// running team's master view and after each accepted Start all, so an existing
+    /// project's live master with no session gets one and restarts on it (LMS-1).
+    /// Input: the context. Output: none; the check is queued.
+    fn check_session(&mut self, ctx: &mut Ctx) {
+        self.checked = true;
+        let generation = ctx.next_generation();
+        ctx.request(Request::Setup(SetupQuery::OpenLiveSession {
+            project: self.project.clone(),
+            generation,
+        }));
+    }
+
     fn read_switch(&self, ctx: &mut Ctx) {
         ctx.request(Request::Setup(SetupQuery::Team {
             project: self.project.clone(),
         }));
     }
 
-    /// Takes a team status read or a live switch change of this master view: a good read
-    /// replaces the switch, and the first one of this open turns a switch that is not on
-    /// on; a failed read changes nothing;
-    /// an accepted change is the switch until the next read, which is read at once.
+    /// Takes a team status read, a live switch change or a session check of this master
+    /// view: a good read replaces the switch, and the first one of this open turns a switch
+    /// that is not on on, or checks the session of a running team's switch already on; a
+    /// failed read changes nothing; an accepted change is the switch until the next read,
+    /// which is read at once, and an accepted Start all checks the session too; an Open that
+    /// opened no session is named.
     /// Inputs: the setup query, its result and the context. Output: none.
     fn took_setup(
         &mut self,
@@ -304,13 +323,15 @@ impl Team {
                 self.switch = Some(switch);
                 if off && !self.asked {
                     self.start_live(ctx);
+                } else if !off && !self.paused && !self.asked && !self.checked {
+                    self.check_session(ctx);
                 }
             }
             SetupQuery::TeamChange {
                 action: TeamAction::LiveMaster { project_id, on },
                 ..
             } if *project_id == self.project => match result {
-                Ok(_) => {
+                Ok(view) => {
                     self.want = None;
                     let switched = self.switch.take().and_then(|switch| switch.switched);
                     self.switch = Some(LiveSwitch {
@@ -318,6 +339,9 @@ impl Team {
                         problem: None,
                         switched,
                     });
+                    if let SetupView::LiveWithoutSession(why) = view {
+                        ctx.say(Message::error(MASTER_NO_SESSION, &unopened(why)));
+                    }
                     self.read_switch(ctx);
                 }
                 Err(code) => {
@@ -329,9 +353,17 @@ impl Team {
                 action: TeamAction::Resume { project_id },
                 ..
             } if *project_id == self.project => match result {
-                Ok(_) => self.read_switch(ctx),
+                Ok(_) => {
+                    self.read_switch(ctx);
+                    self.check_session(ctx);
+                }
                 Err(code) => ctx.say(Message::error(&refusal(code), "")),
             },
+            SetupQuery::OpenLiveSession { project, .. } if *project == self.project => {
+                if let Ok(SetupView::LiveWithoutSession(why)) | Err(why) = result {
+                    ctx.say(Message::error(MASTER_NO_SESSION, &unopened(why)));
+                }
+            }
             _ => {}
         }
     }
@@ -1642,6 +1674,17 @@ fn lost(code: &str) -> bool {
 /// else the team panel's sentence, which names an unknown code after a retry sentence.
 fn refusal(code: &str) -> String {
     plain_problem(code).map_or_else(|| team_plain(code), str::to_owned)
+}
+
+/// The plain words for why the owner's Open opened no master session (LMS-M1): the sentence
+/// a code has, or the reason itself when it is a sentence already. Input: the code or
+/// reason. Output: the words.
+pub(in crate::tui) fn unopened(why: &str) -> String {
+    if crate::tui::text::plain_code(why) {
+        refusal(why)
+    } else {
+        why.to_owned()
+    }
 }
 
 /// The words shown for a closed or refused terminal.

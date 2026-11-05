@@ -140,6 +140,7 @@ async fn serve(controller: &mut OwnerController, query: SetupQuery) -> Result<Se
         SetupQuery::Team { .. }
         | SetupQuery::TeamChange { .. }
         | SetupQuery::TeamMessages { .. }
+        | SetupQuery::OpenLiveSession { .. }
         | SetupQuery::Library(_)
         | SetupQuery::CoordQuestions { .. } => {
             panic!("the project screen never reads the team or the library")
@@ -2801,4 +2802,41 @@ fn editing_the_stack_keeps_saved_entries_holding_commas_whole() {
         }
         other => panic!("the form sends an update: {other:?}"),
     }
+}
+
+#[test]
+fn a_live_switch_that_opened_no_session_shows_on_and_names_why() {
+    let project = ProjectId::new("unopened").unwrap();
+    let mut screen = ProjectScreen::new(project.clone(), "Unopened".into(), None);
+    let query = SetupQuery::TeamChange {
+        action: crate::team::TeamAction::LiveMaster {
+            project_id: project.clone(),
+            on: true,
+        },
+        generation: 1,
+    };
+    screen.apply(
+        &query,
+        Ok(SetupView::LiveWithoutSession(
+            "No account pool is assigned to this project as its master".into(),
+        )),
+    );
+    assert_eq!(
+        screen.problem.as_deref(),
+        Some(
+            "No master session opened, so this conversation won't be in Sessions. No account pool is assigned to this project as its master"
+        )
+    );
+    screen.apply(
+        &query,
+        Ok(SetupView::LiveWithoutSession(
+            "master_open_provenance".into(),
+        )),
+    );
+    let named = screen.problem.clone().unwrap();
+    assert!(
+        named.starts_with("No master session opened, so this conversation won't be in Sessions. ")
+            && named.contains("master_open_provenance"),
+        "{named}"
+    );
 }

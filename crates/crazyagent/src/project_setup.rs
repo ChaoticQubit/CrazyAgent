@@ -702,6 +702,13 @@ pub enum SetupQuery {
         agent: i64,
         before: Option<crate::team::agent_messages::Cursor>,
     },
+    /// Sends the owner's default master Open for a project whose live master switch is
+    /// already on when no live session holds the master, so an existing project's master
+    /// gets its session and restarts on it (LMS-1).
+    OpenLiveSession {
+        project: ProjectId,
+        generation: u64,
+    },
     Library(crate::memory::library::LibraryQuery),
 }
 
@@ -722,6 +729,9 @@ pub enum SetupView {
     CoordQuestions(Box<crate::team::questions::Inbox>),
     TeamMessages(Box<crate::team::agent_messages::AgentMessages>),
     Library(crate::memory::library::LibraryView),
+    /// A live master switch that is on although the owner's default Open opened no session
+    /// for it, with the engine's code or the plain reason, so the owner sees why (LMS-M1).
+    LiveWithoutSession(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

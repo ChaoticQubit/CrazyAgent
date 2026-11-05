@@ -1219,11 +1219,20 @@ export type AddFolderMode = "move" | "copy";
 
 export type OnboardingStep = { kind: "waiting"; until_ms?: number } | { kind: "running" } | { kind: "done" } | { kind: "off" } | { kind: "not_installed" } | { kind: "failed"; reason: string };
 
+/** One kind of research the project's own documents already hold, read from their text:
+ * the kind and the files below the project folder that hold it. */
+export interface FoundResearch {
+  kind: ResearchKind;
+  files: string[];
+}
+
 export interface MappingFacts {
   languages: string[];
   build_commands: string[];
   test_commands: string[];
   entry_points: string[];
+  research?: FoundResearch[];
+  documents?: string[];
 }
 
 /** One instruction file of a project (CLAUDE.md, .claude/CLAUDE.md, AGENTS.md or
@@ -1246,10 +1255,20 @@ export interface ImportCommit {
   files: string[];
 }
 
+/** The try a running mapping step is on: its number of `tries`, when it started in ms since the
+ * epoch and the plain reason the try before it failed. */
+export interface MappingTry {
+  number: number;
+  tries: number;
+  started_ms: number;
+  earlier: string | null;
+}
+
 export interface OnboardingView {
   project_id: string;
   graph: OnboardingStep;
   mapping: OnboardingStep;
+  mapping_try?: MappingTry;
   name: string;
   draft: ProjectSetup;
   facts: MappingFacts;

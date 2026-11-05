@@ -11,7 +11,7 @@ import { BasicsFields, ResearchSwitches } from "../new-project/fields";
 import { basicsErrors, editRequest, type ProjectDraft } from "../new-project/wizard";
 import { MarkdownView } from "../project/markdown";
 import { ImportMoveCommit } from "../process";
-import { ONBOARDING_POLL_MS, confirmReady, mappingRetry, missingLabels, onboardingDraft, projectFolder, settled, startedProject, stepView } from "./intake";
+import { ONBOARDING_POLL_MS, confirmReady, inRepo, mappingRetry, missingLabels, onboardingDraft, projectFolder, settled, startedProject, stepView } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
 
@@ -52,10 +52,11 @@ export function OnboardingReviewView({ name, view, draft, catalog, errors, showE
   const gate = confirmReady(value);
   const missing = missingLabels(value.missing);
   const offerRetry = mappingRetry(value) && !skipped;
+  const repo = inRepo(value.facts);
   return <div className="pj in-page">
     {header}
     <ol className="in-list" aria-label="Setup steps">{STEPS.map((step) => {
-      const shown = stepView(value[step.key], value.finished);
+      const shown = stepView(value[step.key], value.finished, step.key === "mapping" ? value.mapping_try ?? null : null);
       return <li className="in-row" key={step.key}>
         <span className="in-row-main"><strong>{step.title}</strong>{shown.line && <span className={`pj-small ${shown.tone === "danger" ? "pj-error" : "pj-secondary"}`}>{shown.line}</span>}</span>
         <StatusBadge word={shown.word} tone={shown.tone} />
@@ -80,8 +81,13 @@ export function OnboardingReviewView({ name, view, draft, catalog, errors, showE
       <fieldset className="pj-field">
         <legend>Research</legend>
         <p className="pj-help">Research is off for existing code. Turn on what you want; it runs on the project's pool.</p>
-        <ResearchSwitches prefix="ob" catalog={catalog} value={draft.research} onChange={(research) => onDraft({ ...draft, research })} />
+        <ResearchSwitches prefix="ob" catalog={catalog} value={draft.research} onChange={(research) => onDraft({ ...draft, research })} found={repo.research} />
       </fieldset>
+      {repo.documents.length > 0 && <fieldset className="pj-field">
+        <legend>Project documents found</legend>
+        <p className="pj-help">The mapping read these files in the repository as project documents.</p>
+        <ul>{repo.documents.map((path) => <li key={path}>{path}</li>)}</ul>
+      </fieldset>}
     </form>}
     <p className="pj-secondary" role="status">{gate.line}</p>
     {problem && <p className="pj-error" role="alert">{problem}</p>}

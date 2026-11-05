@@ -4,7 +4,7 @@ use super::project_markdown::sanitize;
 use super::project_time::{clock, local_offset};
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection, open};
 use crate::engine::owner::OwnerResult;
-use crate::onboarding::{OnboardingView, Step};
+use crate::onboarding::{MappingTry, OnboardingView, Step};
 use crate::pools::PoolSummary;
 use crate::project_setup::{Platform, SetupAction, SetupQuery, SetupView};
 use crate::protocol::{CredentialRef, ProjectId};
@@ -551,7 +551,7 @@ impl OnboardingPage {
         }
         if let Step::Failed { reason } = step {
             lines.extend(
-                wrap(reason, limit.saturating_sub(2))
+                wrap(&sanitize(reason), limit.saturating_sub(2))
                     .into_iter()
                     .map(|text| styled(format!("  {text}"), Role::Muted, theme)),
             );
@@ -649,7 +649,7 @@ impl OnboardingPage {
             && !review.onboarding.finished
         {
             lines.extend(
-                wrap(&format!("Mapping failed: {reason}"), limit)
+                wrap(&format!("Mapping failed: {}", sanitize(reason)), limit)
                     .into_iter()
                     .map(|text| styled(text, Role::Error, theme)),
             );
@@ -762,6 +762,28 @@ impl OnboardingPage {
                     .into_iter()
                     .map(|line| styled(line, Role::Muted, theme)),
             );
+        }
+        for found in &facts.research {
+            let files = sanitize(&found.files.join(", "));
+            lines.extend(
+                wrap(
+                    &format!("{} - Already in the repo: {files}", found.kind.label()),
+                    limit,
+                )
+                .into_iter()
+                .map(|line| styled(line, Role::Muted, theme)),
+            );
+        }
+        if !facts.documents.is_empty() {
+            lines.push(Line::default());
+            lines.push(styled("Project documents found:", Role::Heading, theme));
+            for path in &facts.documents {
+                lines.extend(
+                    wrap(&format!("- {}", sanitize(path)), limit)
+                        .into_iter()
+                        .map(Line::raw),
+                );
+            }
         }
         lines.push(Line::default());
         if confirming {
@@ -993,6 +1015,18 @@ impl Screen for OnboardingPage {
                         limit,
                         ctx,
                     ));
+                    if let (Step::Running, Some(progress)) =
+                        (&onboarding.mapping, &onboarding.mapping_try)
+                    {
+                        lines.extend(
+                            wrap(
+                                &try_line(progress, crate::tui::clock::now_ms()),
+                                limit.saturating_sub(2),
+                            )
+                            .into_iter()
+                            .map(|text| styled(format!("  {text}"), Role::Muted, theme)),
+                        );
+                    }
                     lines.push(Line::default());
                     lines.push(styled(
                         "The setup draft shows here when both steps finish.",
@@ -1053,5 +1087,31 @@ impl Screen for OnboardingPage {
             name: self.name.clone(),
             project: self.project.clone(),
         })
+    }
+}
+
+/// The running mapping try as the setup screen says it, in the desktop review's words: its
+/// number of tries, how many whole minutes it has run and why the try before it failed.
+/// The earlier try's reason is engine text and goes through `sanitize`. Inputs: the try
+/// and the time now in ms. Output: one line, such as
+/// `Mapping, try 2 of 3, 2 min. Try 1 failed: Mapping agent ran out of time`.
+fn try_line(progress: &MappingTry, now_ms: i64) -> String {
+    let minutes = now_ms.saturating_sub(progress.started_ms).max(0) / 60_000;
+    let elapsed = if minutes < 1 {
+        "under 1 min".to_owned()
+    } else {
+        format!("{minutes} min")
+    };
+    let head = format!(
+        "Mapping, try {} of {}, {elapsed}.",
+        progress.number, progress.tries
+    );
+    match &progress.earlier {
+        Some(earlier) => format!(
+            "{head} Try {} failed: {}",
+            progress.number.saturating_sub(1),
+            sanitize(earlier)
+        ),
+        None => head,
     }
 }

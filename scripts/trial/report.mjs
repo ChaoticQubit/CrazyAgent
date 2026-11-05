@@ -899,7 +899,7 @@ function trialSection(trial, many) {
     const judged = trial.steps.some((step) => step.why || typeof step.ok === "boolean");
     parts.push(`<h4>Steps</h4><table class="steps"><thead><tr><th>#</th><th>At</th><th>Surface</th><th>Step</th>${judged ? "<th>Why</th><th>OK</th>" : ""}</tr></thead><tbody>`);
     for (const step of trial.steps) {
-      const ok = step.ok === true ? badge("PASS") : step.ok === false ? badge("FAIL") : "";
+      const ok = step.ok === true ? badge("PASS") : step.ok === false ? badge(/^BLOCKED: /.test(step.detail ?? "") ? "BLOCKED" : "FAIL") : "";
       const more = judged ? `<td>${text(step.why ?? "")}</td><td>${ok}</td>` : "";
       parts.push(`<tr><td>${text(step.n)}</td><td>${text(step.at ?? "")}</td><td>${text(step.surface ?? "")}</td><td>${text(step.title ?? "")}${step.detail ? `<div class="note">${text(step.detail)}</div>` : ""}</td>${more}</tr>`);
     }
