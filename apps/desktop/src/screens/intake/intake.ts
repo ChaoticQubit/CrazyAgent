@@ -126,11 +126,26 @@ export function worktreesLine(count: number): string {
 /** Why Add folder offers no Move for a folder whose git worktree links a move would break. */
 export const MOVE_WITHHELD = "Move isn't offered: this folder is linked to git worktrees, and moving it would break them.";
 
-/** Whether Add folder offers Move: not once the folder read says moving it would break its
- * git worktree links, which the engine refuses. Input: the folder read, if any. Output: true
- * until a read says the folder cannot move. */
+/** Why Add folder offers no Move yet while the folder read is still checking its git links. */
+export const MOVE_CHECKING = "Move is offered once CrazyAgent has checked this folder's git links.";
+
+/** Why Add folder offers no Move when the folder read failed or could not say. */
+export const MOVE_UNCHECKED = "Move isn't offered: CrazyAgent couldn't check this folder's git links.";
+
+/** Whether Add folder offers Move: only once the folder read says moving it keeps its git
+ * worktree links, since the engine refuses a Move that would break them. Input: the folder
+ * read, if any. Output: true only for a read with movable true. */
 export function moveOffered(size: Loaded<FolderSize> | null): boolean {
-  return size?.kind !== "ok" || size.value.movable !== false;
+  return size?.kind === "ok" && size.value.movable === true;
+}
+
+/** Why Add folder offers no Move for a picked folder. Input: the folder read, if any. Output:
+ * the reason line, or null when Move is offered or no folder is picked. */
+export function moveWithheld(size: Loaded<FolderSize> | null): string | null {
+  if (size === null || moveOffered(size)) return null;
+  if (size.kind === "loading") return MOVE_CHECKING;
+  if (size.kind === "ok" && size.value.movable === false) return MOVE_WITHHELD;
+  return MOVE_UNCHECKED;
 }
 
 /** The way Add folder uses: the chosen one, or Use where it is for a Move it no longer offers.
