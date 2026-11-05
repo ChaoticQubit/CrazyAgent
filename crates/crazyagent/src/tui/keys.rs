@@ -71,7 +71,8 @@ impl Key {
     /// Normalizes one crossterm key event.
     /// Input: the event. Output: the key, or None for releases and keys the TUI
     /// does not use (function keys, Alt and Super chords). Terminals send Ctrl-]
-    /// as byte 0x1d, which crossterm reports as Ctrl-5.
+    /// as byte 0x1d, which crossterm reports as Ctrl-5. Shift+Enter, where the
+    /// terminal reports it, is Ctrl-J: the new-line key, a line feed to an agent.
     pub fn from_event(event: KeyEvent) -> Option<Self> {
         if event.kind == KeyEventKind::Release {
             return None;
@@ -92,6 +93,7 @@ impl Key {
         let shift = modifiers.contains(KeyModifiers::SHIFT);
         Some(match event.code {
             KeyCode::Char(character) if !character.is_control() => Self::Char(character),
+            KeyCode::Enter if shift => Self::Ctrl('j'),
             KeyCode::Enter => Self::Enter,
             KeyCode::Esc => Self::Esc,
             KeyCode::Tab if shift => Self::BackTab,

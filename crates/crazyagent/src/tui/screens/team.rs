@@ -60,6 +60,11 @@ const MASTER_PAUSED: &str = "The team is stopped (Stop all). Start the team to r
 const MASTER_PAUSED_START: &str =
     "S starts every agent of this project again; the master starts with them.";
 const MASTER_TEAM_STOPPED: &str = "Team stopped.";
+const MASTER_PASTE_WAIT: &str = "Paste once the master's terminal is open.";
+const MASTER_HELD_FULL: &str = "The master's terminal is still starting.";
+const MASTER_HELD_REST: &str =
+    "What you typed so far goes in once it opens; the rest was not kept.";
+const HELD_KEYS_MAX: usize = 4096;
 /// The master view header's session keys, widest first; the state picks the widest that
 /// fits beside it whole.
 const MASTER_CONTROLS: [&str; 2] = ["n New session  l Sessions", "n New session"];
@@ -153,6 +158,7 @@ pub struct Team {
     questions: questions::Questions,
     instructions: Option<Instructions>,
     settings: Option<TeamView>,
+    held: Vec<Key>,
 }
 
 impl Team {
@@ -180,6 +186,7 @@ impl Team {
             questions: questions::Questions::new(),
             instructions: None,
             settings: None,
+            held: Vec::new(),
         }
     }
 
@@ -235,12 +242,52 @@ impl Team {
     /// The master view of one project: a header with the live master's state, then the
     /// live master's own terminal filling the body, opened as soon as the team shows it.
     /// Every open turns the master on; it stops only on the master idle stop or app quit.
+    /// The terminal has the keys from the start; what is typed before it opens waits.
     /// Inputs: the project id and name. Output: the screen, waiting for the master.
     pub fn master(project: ProjectId, name: String) -> Self {
         Self {
             master: true,
+            focus: Focus::Terminal,
             ..Self::new(project, name)
         }
+    }
+
+    /// Whether the master view is still waiting for a terminal that is coming: none yet or
+    /// one the engine has not attached, the team not stopped, no refused start and the
+    /// switch not off. Input: none. Output: true while typed keys wait for the terminal.
+    fn starting(&self) -> bool {
+        self.master
+            && self
+                .attached
+                .as_ref()
+                .is_none_or(|attached| !attached.started && attached.closed.is_none())
+            && !self.paused
+            && self.refused.is_none()
+            && self.live_on() != Some(false)
+    }
+
+    /// Whether keys go to a terminal: the terminal has focus and, in the master view, one is
+    /// attached or coming; a stopped, refused or switched-off master keeps the view keys.
+    /// Input: none. Output: true while every key but Ctrl-] goes to the terminal.
+    fn terminal_keys(&self) -> bool {
+        self.focus == Focus::Terminal
+            && (!self.master || self.attached.is_some() || self.starting())
+    }
+
+    /// Keeps one key typed while the master's terminal starts, up to `HELD_KEYS_MAX` keys
+    /// in all; a paste is not kept, since its bracketing needs the open terminal's mode.
+    /// Inputs: the key and the context. Output: none; a dropped key says why.
+    fn hold(&mut self, key: &Key, ctx: &mut Ctx) {
+        assert!(self.starting());
+        if matches!(key, Key::Paste(_)) {
+            ctx.say(Message::warning(MASTER_PASTE_WAIT, MASTER_HELD_FULL));
+            return;
+        }
+        if self.held.len() >= HELD_KEYS_MAX {
+            ctx.say(Message::warning(MASTER_HELD_FULL, MASTER_HELD_REST));
+            return;
+        }
+        self.held.push(key.clone());
     }
 
     /// Whether the live master is on as the owner sees it: the owner's last change until the
@@ -459,7 +506,10 @@ impl Team {
         }
     }
 
-    fn stream(&mut self, agent: &AgentId, frame: &TerminalFrame) {
+    /// Takes one frame of the attached terminal; at its `Attached` frame the keys held while
+    /// the master's terminal started are typed in, in the order typed.
+    /// Inputs: the agent, the frame and the context. Output: none.
+    fn stream(&mut self, agent: &AgentId, frame: &TerminalFrame, ctx: &mut Ctx) {
         let Some(attached) = self
             .attached
             .as_mut()
@@ -475,6 +525,16 @@ impl Team {
                 );
                 attached.pane.show(&[], None);
                 attached.started = true;
+                let bytes: Vec<u8> = std::mem::take(&mut self.held)
+                    .iter()
+                    .flat_map(|key| attached.pane.encode(key))
+                    .collect();
+                for chunk in bytes.chunks(INPUT_BYTES_MAX) {
+                    ctx.request(Request::TerminalInput {
+                        agent: attached.agent.clone(),
+                        bytes: chunk.to_vec(),
+                    });
+                }
             }
             TerminalFrame::Output { bytes } => attached.pane.feed(bytes),
             TerminalFrame::Closed { reason } => attached.closed = Some(reason.clone()),
@@ -724,16 +784,30 @@ impl Team {
     }
 
     /// Takes a key while the terminal has the keys: Ctrl-] gives them back to the team or
-    /// master view, any other key goes to the open terminal. A terminal that closed keeps
-    /// the keys and drops them until Ctrl-], so keys typed as it closed never act on the
-    /// view. Inputs: the key and the context. Output: handled.
+    /// master view, any other key goes to the open terminal. While the master's terminal
+    /// starts, keys wait for it and Esc goes back; a master view with no terminal coming
+    /// gives the keys to the view. A terminal that closed keeps the keys and drops them
+    /// until Ctrl-], so keys typed as it closed never act on the view.
+    /// Inputs: the key and the context. Output: the flow.
     fn terminal_key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
         if *key == LEADER {
             self.focus = Focus::Tree;
             return Flow::Handled;
         }
+        if self.starting() {
+            if *key == Key::Esc {
+                self.held.clear();
+                self.detach(ctx);
+                return Flow::Back;
+            }
+            self.hold(key, ctx);
+            return Flow::Handled;
+        }
         let Some(attached) = self.attached.as_mut() else {
             self.focus = Focus::Tree;
+            if self.master {
+                return self.master_key(key, ctx);
+            }
             return Flow::Handled;
         };
         if attached.closed.is_some() {
@@ -1040,10 +1114,14 @@ impl Screen for Team {
     }
 
     fn hints(&self, ctx: &Ctx) -> Vec<Hint> {
-        if self.focus == Focus::Terminal && self.master {
-            return vec![hint("Ctrl-]", "Leave terminal"), hint("Ctrl-J", "New line")];
+        if self.terminal_keys() && self.master {
+            let mut hints = vec![hint("Ctrl-]", "Leave terminal"), hint("Ctrl-J", "New line")];
+            if self.starting() {
+                hints.push(hint("Esc", "Back"));
+            }
+            return hints;
         }
-        if self.focus == Focus::Terminal {
+        if self.terminal_keys() {
             return vec![hint("Ctrl-]", "Back to the team")];
         }
         if self.master {
@@ -1117,7 +1195,7 @@ impl Screen for Team {
     }
 
     fn raw(&self) -> bool {
-        self.focus == Focus::Terminal
+        self.terminal_keys()
     }
 
     fn typing(&self) -> bool {
@@ -1215,7 +1293,7 @@ impl Screen for Team {
                     questions::Questions::read(&self.project, ctx);
                 }
             }
-            Arrival::Terminal { agent, frame } => self.stream(agent, frame),
+            Arrival::Terminal { agent, frame } => self.stream(agent, frame, ctx),
             Arrival::Owner(event) => match event.as_ref() {
                 OwnerEvent::Process(event) => self.take_instructions(event),
                 OwnerEvent::Setup(event) => {
