@@ -19,8 +19,8 @@ static REQUESTS: AtomicUsize = AtomicUsize::new(0);
 /// CLI that prints the official sign-in line and then waits like a real login, and one
 /// registered stand-in for the Codex CLI: by default one whose interpreter is missing, so
 /// it never starts, or one that answers the app-server sign-in requests on stdio and then
-/// ends as `codex-mode` in the root says. Dropping it kills the engine and every login it
-/// started.
+/// ends as `codex-mode` in the root says, noting each login start and logout it gets in
+/// `codex-requests`. Dropping it kills the engine and every login it started.
 struct Case {
     engine: Option<Child>,
     root: tempfile::TempDir,
@@ -66,9 +66,11 @@ while IFS= read -r line; do
   id=$(printf '%s\n' "$line" | /usr/bin/sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
   case "$line" in
     *'"method":"initialize"'*)
+      [ "$mode" = slow ] && /bin/sleep 3
       printf '{{"id":%s,"result":{{"userAgent":"stand-in","codexHome":"%s","platformFamily":"unix","platformOs":"macos"}}}}\n' "$id" "$CODEX_HOME"
       ;;
     *'"method":"account/login/start"'*)
+      echo login >> '{root}/codex-requests'
       printf '{{"id":%s,"result":{{"type":"chatgpt","loginId":"stand-in-login","authUrl":"https://auth.openai.com/authorize?state=fixture"}}}}\n' "$id"
       case "$mode" in
         exit) exit 0 ;;
@@ -77,6 +79,9 @@ while IFS= read -r line; do
       ;;
     *'"method":"account/login/cancel"'*)
       exit 0
+      ;;
+    *'"method":"account/logout"'*)
+      echo logout >> '{root}/codex-requests'
       ;;
   esac
 done
@@ -684,5 +689,59 @@ async fn a_codex_sign_in_whose_harness_fails_after_starting_settles_failed_with_
     let again = waiting_with(&client, &scope, NativeAuthMethod::CodexBrowser).await;
     cancel(&client, &scope, &again).await;
     settle(&client, &scope, &again, ended).await;
+    case.no_fence().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_codex_logout_whose_harness_never_answers_settles_failed_at_its_deadline() {
+    let case = Case::with_codex("codex-app-server");
+    let (client, database) = owner(case.root()).await;
+    let account = subscription(&client, Provider::Chatgpt, "Work ChatGPT").await;
+    let (scope, _) = scope(&client, &database, &account).await;
+    let begun = client
+        .logout_native_auth(NativeAuthLogout {
+            request_id: next("logout"),
+            scope: scope.clone(),
+        })
+        .await
+        .unwrap()
+        .fact;
+    let settled = settle(&client, &scope, &begun, ended).await;
+    assert_eq!(
+        (settled.phase, settled.code.as_deref()),
+        (NativeAuthPhase::Failed, Some("native_auth_codex_deadline")),
+        "{}",
+        case.log()
+    );
+    assert_eq!(
+        std::fs::read_to_string(case.root().join("codex-requests")).unwrap(),
+        "logout\n"
+    );
+    case.no_fence().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelling_a_codex_sign_in_before_its_harness_starts_the_login_settles_cancelled() {
+    let case = Case::with_codex("codex-app-server");
+    std::fs::write(case.root().join("codex-mode"), "slow\n").unwrap();
+    let (client, database) = owner(case.root()).await;
+    let account = subscription(&client, Provider::Chatgpt, "Work ChatGPT").await;
+    let (scope, _) = scope(&client, &database, &account).await;
+    let begun = start(&client, &scope, NativeAuthMethod::CodexBrowser)
+        .await
+        .unwrap();
+    assert_eq!(begun.phase, NativeAuthPhase::Starting);
+    cancel(&client, &scope, &begun).await;
+    let finished = settle(&client, &scope, &begun, ended).await;
+    assert_eq!(
+        (finished.phase, finished.code.as_deref()),
+        (NativeAuthPhase::Cancelled, None),
+        "{}",
+        case.log()
+    );
+    assert!(
+        !case.root().join("codex-requests").exists(),
+        "the login started before the cancel"
+    );
     case.no_fence().await;
 }
