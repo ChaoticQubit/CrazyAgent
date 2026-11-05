@@ -405,7 +405,7 @@ impl Hostile {
             .apply(WireRequest {
                 protocol_version: PROTOCOL_VERSION,
                 client_id: ClientId::new("untrusted-repository").unwrap(),
-                request_id: RequestId::new(&format!("request-{}", self.requests)).unwrap(),
+                request_id: RequestId::new(format!("request-{}", self.requests)).unwrap(),
                 expected_revision: self.revision.clone(),
                 command,
             })

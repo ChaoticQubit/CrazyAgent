@@ -65,9 +65,12 @@ fn the_fixture_catalog_parses_in_its_own_order() {
     assert!(!qualified(&catalog, None));
 }
 
+/// One way to break the fixture Codex catalog: an edit made in place to its JSON document.
+type CatalogEdit = Box<dyn Fn(&mut Value)>;
+
 #[test]
 fn a_catalog_that_breaks_the_contract_is_refused() {
-    let edits: Vec<(&str, Box<dyn Fn(&mut Value)>)> = vec![
+    let edits: Vec<(&str, CatalogEdit)> = vec![
         (
             "no versions",
             Box::new(|c| c["qualified_versions"] = json!([])),

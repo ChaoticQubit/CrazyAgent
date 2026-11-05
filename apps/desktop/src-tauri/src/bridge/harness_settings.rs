@@ -534,6 +534,6 @@ mod tests {
             following(Some(9), Some(4)).unwrap_err().code,
             "owner_read_failed"
         );
-        assert!(PAGES_MAX > ROWS_MAX);
+        const { assert!(PAGES_MAX > ROWS_MAX) };
     }
 }
