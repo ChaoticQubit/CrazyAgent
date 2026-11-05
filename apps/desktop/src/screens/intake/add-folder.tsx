@@ -8,7 +8,7 @@ import { Button, ConfirmDialog, LoadError, Notice, NotReady, PageHeader, Segment
 import { displayText } from "../conversation";
 import { folderLabel } from "../project/overview";
 import { SetUpDialog } from "./found";
-import { COPY_WITHHELD, MOVE_WITHHELD, addWay, copyOffered, folderName, joinPath, moveOffered, pickedFolderProblem, sizeLine, worktreesLine, type AddWay } from "./intake";
+import { addWay, copyOffered, folderName, joinPath, moveOffered, pickedFolderProblem, sizeLine, waysWithheld, worktreesLine, type AddWay } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
 
@@ -22,9 +22,9 @@ const ADD_LABELS: Record<AddWay, string> = { here: "Set up here", move: "Move in
 
 /** Add an existing folder as a view of its state: the chosen folder, used where it is (default)
  * or explicitly moved or copied with the target shown first, Copy with the size first and a
- * warning above 1 GB and the linked worktrees it leaves behind, no Move or no Copy with the reason
- * once the read says it would break the folder's git links, and a clone suggestion when the code is
- * on GitHub. Inputs: the projects home
+ * warning above 1 GB and the linked worktrees it leaves behind, Move and Copy only once the read
+ * says they keep the folder's git links (otherwise the reason), and a clone suggestion when the code
+ * is on GitHub. Inputs: the projects home
  * read, the source folder, its size read, the way, a busy flag, the last problem and the handlers.
  * Output: the page. */
 export function AddFolderView({ home, source, size, mode, busy, problem, onChoose, onMode, onAdd, onClone, onRetry }: {
@@ -52,6 +52,7 @@ export function AddFolderView({ home, source, size, mode, busy, problem, onChoos
   const worktrees = size?.kind === "ok" ? size.value.worktrees ?? 0 : 0;
   const moves = moveOffered(size);
   const copies = copyOffered(size);
+  const withheld = waysWithheld(size);
   const way = addWay(mode, size);
   const line = sizeLine(way, bytes, root);
   const name = source ? folderName(source) : "";
@@ -72,11 +73,9 @@ export function AddFolderView({ home, source, size, mode, busy, problem, onChoos
         <span className="pj-label">How to add it</span>
         <Segmented label="How to add it" value={way} onValue={onMode} options={WAYS.filter((option) => (moves || option.value !== "move") && (copies || option.value !== "copy"))} />
       </div>
-      {!moves && <Notice tone="info">{MOVE_WITHHELD}</Notice>}
-      {!copies && <Notice tone="info">{COPY_WITHHELD}</Notice>}
+      {withheld.map((line) => <Notice key={line} tone="info">{line}</Notice>)}
       {line.warn ? <Notice tone="warn">{line.text}</Notice> : <p className="pj-secondary" role="status">{line.text}</p>}
       {way === "copy" && worktrees > 0 && <Notice tone="info">{worktreesLine(worktrees)}</Notice>}
-      {size?.kind === "not_ready" && way === "copy" && <p className="pj-help">The folder size isn't in this build, so Copy can't show it first.</p>}
       {size?.kind === "error" && <p className="pj-error" role="alert">{size.message}</p>}
       {problem && <p className="pj-error" role="alert">{problem}</p>}
       <span className="pj-row">
@@ -90,9 +89,30 @@ export function AddFolderView({ home, source, size, mode, busy, problem, onChoos
   </div>;
 }
 
+/** The confirm before a Move: the folder, where it goes and that it leaves its old place. It
+ * shows only while asked for and while Move is still the way, so a read that withdraws Move
+ * closes it. Inputs: whether it is asked for, the way, the folder name, source and projects
+ * folder, a busy flag and the handlers. Output: the dialog, or nothing. */
+export function MoveConfirmDialog({ open, way, name, source, root, busy, onCancel, onConfirm }: {
+  open: boolean;
+  way: AddWay;
+  name: string;
+  source: string | null;
+  root: string | null;
+  busy: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return <ConfirmDialog open={open && way === "move" && source !== null && root !== null} title={`Move ${name} into your projects folder?`} confirmLabel="Move folder" cancelLabel="Keep it here" pending={busy}
+    onCancel={onCancel} onConfirm={onConfirm}>
+    {displayText(folderLabel(source ?? ""))} moves to {displayText(folderLabel(root ? joinPath(root, name) : ""))} and won't stay at its old place.
+    Anything that points at the old place, like a terminal or an editor, has to open the new one.
+  </ConfirmDialog>;
+}
+
 /** Add an existing folder: picks it in the macOS chooser and reads its size. By default it is set up
- * where it is on a chosen pool; Move asks to confirm with the target shown, Move and Copy are not
- * offered for a folder whose git links they would break, and a moved or copied folder shows on Home
+ * where it is on a chosen pool; Move and Copy are offered once the read says they keep the folder's
+ * git links, Move asks to confirm with the target shown, and a moved or copied folder shows on Home
  * as found. */
 export function AddFolder() {
   const session = useAppSession();
@@ -110,6 +130,7 @@ export function AddFolder() {
 
   const choose = async () => {
     setProblem("");
+    setConfirming(false);
     const result = await pickFolder("project");
     if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? "The folder chooser isn't in this build." : result.message); return; }
     if (result.value === null) return;
@@ -151,10 +172,7 @@ export function AddFolder() {
       onChoose={() => void choose()} onMode={setMode} onAdd={start} onClone={() => navigate({ name: "add-project", way: "clone" })} onRetry={reload} />
     {settingUp && source && <SetUpDialog folder={{ name, path: source }} onClose={() => setSettingUp(false)}
       onStarted={() => { setSettingUp(false); session.showToast(`Setting up ${name}. Continue setup from Home.`); navigate({ name: "home" }); }} />}
-    <ConfirmDialog open={confirming && source !== null && root !== null} title={`Move ${name} into your projects folder?`} confirmLabel="Move folder" cancelLabel="Keep it here" pending={busy}
-      onCancel={() => setConfirming(false)} onConfirm={() => void add()}>
-      {displayText(folderLabel(source ?? ""))} moves to {displayText(folderLabel(root ? joinPath(root, name) : ""))} and won't stay at its old place.
-      Anything that points at the old place, like a terminal or an editor, has to open the new one.
-    </ConfirmDialog>
+    <MoveConfirmDialog open={confirming} way={way} name={name} source={source} root={root} busy={busy}
+      onCancel={() => setConfirming(false)} onConfirm={() => void add()} />
   </>;
 }
