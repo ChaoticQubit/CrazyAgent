@@ -3120,8 +3120,40 @@ fn a_started_live_master_waiting_for_its_profile_shows_the_wait_line_until_its_t
     assert!(!shown.contains("Waiting for the account"), "{rows:#?}");
 }
 
+/// LMS-1 r1 L1: Stop all leaves the engine's wait line in the switch status, but the
+/// paused team's master pane shows the paused team, not that the master waits for its
+/// account's profile.
+#[test]
+fn a_paused_team_hides_the_masters_profile_wait_line() {
+    let waiting = crate::team::master::PROFILE_IN_USE;
+    let shows = |rows: &[String]| {
+        rows.iter()
+            .any(|row| row.contains("Waiting for the account"))
+    };
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    shell.arrive(switch(Some(true), Some(waiting)));
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    requests(&mut shell);
+    let rows = render(&mut shell);
+    assert!(
+        shows(&rows),
+        "the running team shows the wait line: {rows:#?}"
+    );
+    shell.arrive(paused_with(Some(true), Some(waiting)));
+    let rows = render(&mut shell);
+    assert!(!shows(&rows), "Stop all hides it: {rows:#?}");
+}
+
 fn paused_read(on: Option<bool>) -> Arrival {
-    let mut arrival = switch(on, None);
+    paused_with(on, None)
+}
+
+fn paused_with(on: Option<bool>, problem: Option<&str>) -> Arrival {
+    let mut arrival = switch(on, problem);
     let Arrival::Owner(event) = &mut arrival else {
         unreachable!()
     };
