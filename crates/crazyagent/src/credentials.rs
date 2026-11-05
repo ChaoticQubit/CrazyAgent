@@ -24,6 +24,7 @@ pub use os_keyring::{GIT_HELPER_COMMAND, OsKeyring, answer_git_credential};
 
 pub const SECRET_BYTES_MAX: usize = 1024;
 pub const NAME_BYTES_MAX: usize = 63;
+const TOKEN_BYTES_MAX: usize = 16_384;
 
 /// Opens this computer's credential store for one engine namespace under
 /// `dev.crazyagent.`: the macOS Keychain here. Input: the namespace.
@@ -54,15 +55,29 @@ pub fn platform_store(_namespace: &str) -> Result<Arc<dyn Store>, StoreError> {
     Err(StoreError::code("credential_store_unavailable"))
 }
 
-/// A secret held only in memory: one to 1024 visible ASCII bytes, zeroed on drop and
-/// redacted from Debug. Input: the raw bytes. Output: the secret, or `credential_secret_invalid`
-/// when empty, too long, or holding spaces, control bytes or non-ASCII bytes.
+/// A secret held only in memory: one to 1024 visible ASCII bytes, or up to 16 KiB for a
+/// provider's bearer token, zeroed on drop and redacted from Debug. Input: the raw bytes.
+/// Output: the secret, or `credential_secret_invalid` when empty, too long, or holding
+/// spaces, control bytes or non-ASCII bytes.
 pub struct SecretString(Vec<u8>);
 
 impl SecretString {
-    pub fn new(mut bytes: Vec<u8>) -> Result<Self, StoreError> {
+    pub fn new(bytes: Vec<u8>) -> Result<Self, StoreError> {
+        Self::within(bytes, SECRET_BYTES_MAX)
+    }
+
+    /// Holds a provider's bearer token that is sent and never stored, such as a ChatGPT
+    /// access token of about 2 KB. Input: the raw bytes. Output: the secret of up to
+    /// 16 KiB, or `credential_secret_invalid`.
+    pub fn bearer(bytes: Vec<u8>) -> Result<Self, StoreError> {
+        Self::within(bytes, TOKEN_BYTES_MAX)
+    }
+
+    /// Checks the bytes against the rules above with `bytes_max` as the length bound.
+    /// Inputs: the raw bytes and the bound. Output: the secret, or the refusal.
+    fn within(mut bytes: Vec<u8>, bytes_max: usize) -> Result<Self, StoreError> {
         if bytes.is_empty()
-            || bytes.len() > SECRET_BYTES_MAX
+            || bytes.len() > bytes_max
             || bytes.iter().any(|byte| !(0x21..=0x7e).contains(byte))
         {
             bytes.fill(0);

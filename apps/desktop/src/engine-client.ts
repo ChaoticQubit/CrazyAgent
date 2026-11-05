@@ -1151,6 +1151,7 @@ export interface FolderSize {
   bytes: number;
   github?: string | null;
   worktrees?: number;
+  movable?: boolean;
 }
 
 export type AddFolderMode = "move" | "copy";

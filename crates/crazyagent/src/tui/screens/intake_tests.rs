@@ -465,7 +465,6 @@ async fn a_copy_of_a_repo_with_linked_worktrees_says_they_stay_with_the_original
     keys(&mut shell, &format!("{}/", source.display()));
     shell.key(Key::Tab);
     shell.key(Key::Right);
-    shell.key(Key::Right);
     shell.key(Key::Enter);
     assert_eq!(pump(&mut shell, &mut connection).await, ["folder size"]);
     let rows = render(&mut shell, 80, 24);
@@ -491,6 +490,99 @@ async fn a_copy_of_a_repo_with_linked_worktrees_says_they_stay_with_the_original
             .join("shop-side")
             .is_dir()
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_repo_with_a_linked_worktree_and_that_worktree_are_never_offered_move() {
+    let mut engine = Engine::start().await;
+    engine.set_home().await;
+    let outside = engine.user().join("outside");
+    let plain = outside.join("notes");
+    let source = outside.join("shop");
+    let linked = outside.join("shop-side");
+    for folder in [&plain, &source] {
+        std::fs::create_dir_all(folder).unwrap();
+        std::fs::write(folder.join("README.md"), "shop\n").unwrap();
+    }
+    let git = |args: &[&str]| {
+        let done = crate::spawn_gate::output(
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(&source)
+                .args(args),
+        )
+        .unwrap();
+        assert!(done.status.success(), "{done:?}");
+    };
+    git(&["init", "-q", "-b", "main"]);
+    git(&["add", "README.md"]);
+    git(&[
+        "-c",
+        "user.name=Owner",
+        "-c",
+        "user.email=owner@example.invalid",
+        "commit",
+        "-q",
+        "-m",
+        "init",
+    ]);
+    git(&[
+        "worktree",
+        "add",
+        "-q",
+        "-b",
+        "side",
+        linked.to_str().unwrap(),
+    ]);
+    let mut ctx = screen_ctx(&engine.user());
+    let screen = open(&Place::AddFolder, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    let mut connection = engine.connect();
+    assert_eq!(pump(&mut shell, &mut connection).await, ["home"]);
+    let typed = format!("{}/", plain.display());
+    keys(&mut shell, &typed);
+    shell.key(Key::Tab);
+    shell.key(Key::Right);
+    let rows = render(&mut shell, 80, 24);
+    assert!(shows(&rows, "(*) Move"), "{rows:#?}");
+    assert!(!shows(&rows, "Move isn't offered"), "{rows:#?}");
+    shell.key(Key::BackTab);
+    clear(&mut shell, typed.len());
+
+    for folder in [&source, &linked] {
+        let typed = format!("{}/", folder.display());
+        keys(&mut shell, &typed);
+        shell.key(Key::Tab);
+        let rows = render(&mut shell, 80, 24);
+        assert!(!shows(&rows, ") Move"), "{rows:#?}");
+        assert!(shows(&rows, "(*) Use where it is"), "{rows:#?}");
+        assert!(
+            shows(&rows, "Move isn't offered: this folder is linked to git"),
+            "{rows:#?}"
+        );
+        for (key, way) in [
+            (Key::Right, "(*) Copy"),
+            (Key::Right, "(*) Use where it is"),
+            (Key::Left, "(*) Copy"),
+            (Key::Left, "(*) Use where it is"),
+        ] {
+            shell.key(key);
+            let rows = render(&mut shell, 80, 24);
+            assert!(shows(&rows, way), "{rows:#?}");
+            assert!(!shows(&rows, ") Move"), "{rows:#?}");
+        }
+        shell.key(Key::BackTab);
+        clear(&mut shell, typed.len());
+    }
+    assert!(pump(&mut shell, &mut connection).await.is_empty());
+    assert!(
+        source
+            .join(".git")
+            .join("worktrees")
+            .join("shop-side")
+            .is_dir()
+    );
+    assert!(linked.join("README.md").is_file());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
