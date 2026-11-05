@@ -61,6 +61,7 @@ fn main_window(window: &WebviewWindow) -> Result<(), BridgeError> {
         return Err(BridgeError {
             code: "window_denied",
             cause: None,
+            account: None,
         });
     }
     Ok(())

@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { knownError, nextGeneration, plainError, removeAccount, signInRecord, type AccountView, type Result } from "../../api";
+import { knownError, listAccounts, nextGeneration, plainError, removeAccount, signInRecord, type AccountView, type Result } from "../../api";
 import { cancelNativeAuth, logoutNativeAuth, readNativeAuth, startNativeAuth, submitClaudeAuthCode, withCode } from "../../engine-client";
 import {
-  nativeAuthAllowed, nativeAuthFailureCode, nativeAuthText, nativeClaudeInputAllowed, reduceNativeAuth, validateClaudeAuthCode,
+  nativeAuthAllowed, nativeAuthFailureCode, nativeAuthRunningAccount, nativeAuthText, nativeClaudeInputAllowed, reduceNativeAuth, validateClaudeAuthCode,
   type NativeAuthCommand, type NativeAuthMethod, type NativeAuthState, type NativeAuthView,
 } from "../../native-auth";
 import { useAppSession } from "../../state";
@@ -47,9 +47,14 @@ const SIGN_IN_TEXT: Record<string, string> = {
 export const POLL_MS = 2000;
 
 /** Turns a sign-in failure code into one plain sentence and the action that fits it.
- * Inputs: the code and the provider. Output: the copy and its hint. */
-export function signInFailure(code: string, provider: SubscriptionProvider): { text: string; hint: FailureHint } {
+ * Inputs: the code, the provider and, for a sign-in refused because another still runs, that
+ * account's name when known. Output: the copy and its hint. */
+export function signInFailure(code: string, provider: SubscriptionProvider, running?: string): { text: string; hint: FailureHint } {
   const [harness, name] = provider === "chatgpt" ? ["Codex", "ChatGPT"] : ["Claude Code", "Claude"];
+  if (code === "native_auth_sign_in_running") {
+    return { text: running ? `${running}'s sign-in is still running. Wait for it to finish, or open ${running} and cancel its sign-in, then try again.`
+      : plainError(code), hint: "retry" };
+  }
   if (code === "native_auth_host_unavailable") {
     return { text: `${harness} isn't installed on this Mac, so ${name} sign-in isn't available. Install ${harness}, then check again in Settings, Harnesses.`, hint: "missing" };
   }
@@ -169,7 +174,7 @@ export function signInStage(state: NativeAuthState | undefined, provider: Subscr
     return { kind: "working", text };
   }
   if (state.error) {
-    const failure = signInFailure(state.error, provider);
+    const failure = signInFailure(state.error, provider, state.running_account_name);
     return { kind: "failed", text: failure.text, hint: state.recover ? "check" : failure.hint };
   }
   const operation = state.operation;
@@ -192,6 +197,16 @@ export function signInStage(state: NativeAuthState | undefined, provider: Subscr
  * Input: the state. Output: true while the engine holds an unfinished operation. */
 export function signInRunning(state: NativeAuthState | undefined): boolean {
   return Boolean(state?.in_flight || state?.operation && ACTIVE_PHASES.includes(state.operation.phase));
+}
+
+/** Names the account a refusal says still runs a sign-in, from the account list.
+ * Input: the rejection value. Output: the account's name, or undefined when the refusal names
+ * none or the list does not have it. */
+async function runningAccountName(failure: unknown): Promise<string | undefined> {
+  const id = nativeAuthRunningAccount(failure);
+  if (id === undefined) return undefined;
+  const accounts = await listAccounts();
+  return accounts.kind === "ok" ? accounts.value.find((account) => account.id === id)?.name : undefined;
 }
 
 /** Runs managed sign-in for one subscription account: reads its sign-in record, starts,
@@ -225,7 +240,7 @@ export function useSignIn(accountId: string | undefined) {
     } catch (failure) {
       const code = nativeAuthFailureCode(failure);
       note.current({ kind: "error", code, message: plainError(code) });
-      update({ kind: "failure", navigation: turn, request, code });
+      update({ kind: "failure", navigation: turn, request, code, account: await runningAccountName(failure) });
     }
   }, [update]);
 

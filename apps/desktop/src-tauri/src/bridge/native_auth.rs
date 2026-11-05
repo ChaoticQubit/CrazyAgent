@@ -221,6 +221,22 @@ impl NativeBridge {
         Ok(())
     }
 
+    /// The refusal while a sign-in is held: one the engine still runs names its account, so
+    /// the window says to wait for it or cancel it; one whose end the bridge could not confirm
+    /// is stuck and needs Clear stuck sign-in. Output: the error.
+    fn held_refusal(&self) -> BridgeError {
+        let operation = self.native_auth.as_ref().filter(|value| value.unresolved);
+        assert!(operation.is_some(), "a refusal follows only a held sign-in");
+        match operation {
+            Some(operation) if operation.running => BridgeError {
+                code: "native_auth_sign_in_running",
+                cause: None,
+                account: Some(operation.connection.id.as_str().to_owned()),
+            },
+            _ => failure("native_auth_recovery_required"),
+        }
+    }
+
     /// Refuses any owner change while an account profile change awaits its outcome.
     pub(super) fn allow_change(&self) -> Result<(), BridgeError> {
         if self.profile_pending() {
@@ -241,7 +257,7 @@ impl NativeBridge {
             self.confirm_running_auth().await?;
         }
         if self.held_auth().is_some_and(&touches) {
-            return Err(failure("native_auth_recovery_required"));
+            return Err(self.held_refusal());
         }
         Ok(())
     }
@@ -255,7 +271,7 @@ impl NativeBridge {
             self.confirm_running_auth().await?;
         }
         if self.held_auth().is_some() {
-            return Err(failure("native_auth_recovery_required"));
+            return Err(self.held_refusal());
         }
         Ok(())
     }

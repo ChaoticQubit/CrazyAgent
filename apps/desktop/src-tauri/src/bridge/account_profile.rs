@@ -373,6 +373,7 @@ fn profile_error(error: EngineError) -> BridgeError {
                     BridgeError {
                         code: "account_profile_rejected_read_same_request",
                         cause: native.cause,
+                        account: None,
                     }
                 } else {
                     native
