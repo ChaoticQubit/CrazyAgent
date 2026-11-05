@@ -16,7 +16,8 @@ use std::time::{Duration, Instant};
 static REQUESTS: AtomicUsize = AtomicUsize::new(0);
 
 /// One real engine process on a private root, with a registered stand-in for the Claude
-/// CLI that prints the official sign-in line and then waits like a real login.
+/// CLI that prints the official sign-in line and then waits like a real login, and a
+/// registered stand-in for the Codex CLI whose interpreter is missing, so it never starts.
 /// Dropping it kills the engine and every login it started.
 struct Case {
     engine: Option<Child>,
@@ -42,6 +43,12 @@ impl Case {
         );
         std::fs::write(root.path().join("claude-login"), login).unwrap();
         private(&root.path().join("claude-login"), 0o700);
+        std::fs::write(
+            root.path().join("codex-unstartable"),
+            "#!/nonexistent/crazyagent-test-interpreter\n",
+        )
+        .unwrap();
+        private(&root.path().join("codex-unstartable"), 0o700);
         let mut case = Self { engine: None, root };
         case.launch("first.sock");
         case
@@ -68,6 +75,8 @@ impl Case {
                 .arg("--writable-settings")
                 .arg("--claude-executable")
                 .arg(self.root().join("claude-login"))
+                .arg("--codex-executable")
+                .arg(self.root().join("codex-unstartable"))
                 .env("CRAZYAGENT_DEBUG_CUSTODIAN", "1")
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -223,11 +232,11 @@ async fn owner(root: &Path) -> (OwnerClient, String) {
     (client, identity.database_instance().to_owned())
 }
 
-async fn subscription(client: &OwnerClient, name: &str) -> CredentialRef {
+async fn subscription(client: &OwnerClient, provider: Provider, name: &str) -> CredentialRef {
     client
         .add_account(
             AccountDraft {
-                provider: Provider::Claude,
+                provider,
                 method: SignInMethod::Subscription,
                 name: name.into(),
                 url: None,
@@ -287,12 +296,16 @@ async fn scope(
     )
 }
 
-async fn start(client: &OwnerClient, scope: &NativeAuthScope) -> Result<NativeAuthFact, String> {
+async fn start(
+    client: &OwnerClient,
+    scope: &NativeAuthScope,
+    method: NativeAuthMethod,
+) -> Result<NativeAuthFact, String> {
     client
         .start_native_auth(NativeAuthStart {
             request_id: next("start"),
             scope: scope.clone(),
-            method: NativeAuthMethod::ClaudeOfficial,
+            method,
         })
         .await
         .map(|reply| reply.fact)
@@ -362,7 +375,9 @@ fn ended(phase: NativeAuthPhase) -> bool {
 }
 
 async fn waiting(client: &OwnerClient, scope: &NativeAuthScope) -> NativeAuthFact {
-    let begun = start(client, scope).await.unwrap();
+    let begun = start(client, scope, NativeAuthMethod::ClaudeOfficial)
+        .await
+        .unwrap();
     let shown = settle(client, scope, &begun, shown).await;
     assert_eq!(shown.phase, NativeAuthPhase::AwaitingOwner);
     shown
@@ -372,7 +387,7 @@ async fn waiting(client: &OwnerClient, scope: &NativeAuthScope) -> NativeAuthFac
 async fn cancelling_a_waiting_claude_sign_in_settles_cancelled_and_frees_the_account() {
     let case = Case::new();
     let (client, database) = owner(case.root()).await;
-    let account = subscription(&client, "Work Claude").await;
+    let account = subscription(&client, Provider::Claude, "Work Claude").await;
     let (scope, _) = scope(&client, &database, &account).await;
     let begun = waiting(&client, &scope).await;
     let login = case.logins();
@@ -400,7 +415,7 @@ async fn cancelling_a_waiting_claude_sign_in_settles_cancelled_and_frees_the_acc
 async fn a_killed_custodian_frees_its_account_in_the_same_engine_run() {
     let case = Case::new();
     let (client, database) = owner(case.root()).await;
-    let account = subscription(&client, "Work Claude").await;
+    let account = subscription(&client, Provider::Claude, "Work Claude").await;
     let (scope, _) = scope(&client, &database, &account).await;
     let begun = waiting(&client, &scope).await;
     let custodian = case.custodian();
@@ -427,8 +442,8 @@ async fn interrupted_by_a_killed_engine(
     case: &mut Case,
 ) -> (CredentialRef, CredentialRef, String, NativeAuthFact) {
     let (client, database) = owner(case.root()).await;
-    let first = subscription(&client, "Work Claude").await;
-    let other = subscription(&client, "Home Claude").await;
+    let first = subscription(&client, Provider::Claude, "Work Claude").await;
+    let other = subscription(&client, Provider::Claude, "Home Claude").await;
     let (scope, profile) = scope(&client, &database, &first).await;
     let interrupted = waiting(&client, &scope).await;
     let custodian = case.custodian();
@@ -473,7 +488,9 @@ async fn an_old_sign_in_stays_fenced_while_its_profile_is_held_and_clears_once_f
     let (scope, _) = self::scope(&client, &database, &first).await;
     let (elsewhere, _) = self::scope(&client, &database, &other).await;
     assert_eq!(
-        start(&client, &elsewhere).await.unwrap_err(),
+        start(&client, &elsewhere, NativeAuthMethod::ClaudeOfficial)
+            .await
+            .unwrap_err(),
         "native_auth_recovery_required"
     );
     assert_eq!(case.fences(), 1);
@@ -491,4 +508,72 @@ async fn an_old_sign_in_stays_fenced_while_its_profile_is_held_and_clears_once_f
     cancel(&client, &elsewhere, &proceeds).await;
     settle(&client, &elsewhere, &proceeds, ended).await;
     case.no_fence().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_claude_sign_in_that_fails_before_its_login_starts_settles_failed_and_frees_the_account()
+{
+    let case = Case::new();
+    let (client, database) = owner(case.root()).await;
+    let account = subscription(&client, Provider::Claude, "Work Claude").await;
+    let (scope, profile) = scope(&client, &database, &account).await;
+    let first = waiting(&client, &scope).await;
+    cancel(&client, &scope, &first).await;
+    settle(&client, &scope, &first, ended).await;
+    case.no_fence().await;
+    let library = case
+        .root()
+        .join("native-profiles")
+        .join(&profile)
+        .join("home")
+        .join("Library");
+    let kept = case.root().join("kept-library");
+    std::fs::rename(&library, &kept).unwrap();
+    std::os::unix::fs::symlink(&kept, &library).unwrap();
+    let begun = start(&client, &scope, NativeAuthMethod::ClaudeOfficial)
+        .await
+        .unwrap();
+    let failed = settle(&client, &scope, &begun, ended).await;
+    assert_eq!(
+        (failed.phase, failed.code.as_deref()),
+        (
+            NativeAuthPhase::Failed,
+            Some("native_auth_claude_keychain_unavailable")
+        ),
+        "{}",
+        case.log()
+    );
+    assert_eq!(case.logins().len(), 1);
+    case.no_fence().await;
+    std::fs::remove_file(&library).unwrap();
+    std::fs::rename(&kept, &library).unwrap();
+    let again = waiting(&client, &scope).await;
+    cancel(&client, &scope, &again).await;
+    let cancelled = settle(&client, &scope, &again, ended).await;
+    assert_eq!(cancelled.phase, NativeAuthPhase::Cancelled);
+    case.no_fence().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_codex_sign_in_whose_harness_cannot_start_settles_unavailable_and_frees_the_account() {
+    let case = Case::new();
+    let (client, database) = owner(case.root()).await;
+    let account = subscription(&client, Provider::Chatgpt, "Work ChatGPT").await;
+    let (scope, _) = scope(&client, &database, &account).await;
+    for _ in 0..2 {
+        let begun = start(&client, &scope, NativeAuthMethod::CodexBrowser)
+            .await
+            .unwrap();
+        let settled = settle(&client, &scope, &begun, ended).await;
+        assert_eq!(
+            (settled.phase, settled.code.as_deref()),
+            (
+                NativeAuthPhase::Unavailable,
+                Some("native_auth_host_unavailable")
+            ),
+            "{}",
+            case.log()
+        );
+        case.no_fence().await;
+    }
 }

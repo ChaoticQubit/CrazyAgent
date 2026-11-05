@@ -379,10 +379,12 @@ pub(in crate::engine) async fn run(
         session.check(channel).await?,
         NativeAuthCustodyControl::Cancel
     ) {
-        return Err(failure("native_auth_cancelled"));
+        return session.seal_without_effect();
     }
     let home = session.profile_path()?;
-    let child = crate::spawn_gate::spawn(&mut command(executable, &home)?).map_err(io_error)?;
+    let Ok(child) = crate::spawn_gate::spawn(&mut command(executable, &home)?) else {
+        return session.seal_without_effect();
+    };
     let group = Pid::from_raw(i32::try_from(child.id()).map_err(io_error)?)
         .ok_or_else(|| failure("native_auth_child_cleanup_uncertain"))?;
     if let Err((error, mut child)) = session.retain_child(child) {

@@ -9426,9 +9426,10 @@ const GITIGNORE_BYTES_MAX: u64 = 256 * 1024;
 /// Shows the project's graphify graph read-only in an agent's worktree (I3): a real
 /// `graphify-out` folder there holds links to the project's graph, report and wiki, which the
 /// agent's sandbox reads but never writes, so `graphify query` and the graphify reminder hook
-/// find the graph from the worktree. Only when the worktree's `.gitignore` ignores the
-/// folder, so it never shows as a change; anything the agent made there itself is left alone,
-/// and every step works through the folder's own descriptor without following a link. A
+/// find the graph from the worktree. Only when git ignores the folder there (see
+/// [`ignores_graph`]), so it never shows as a change; anything the agent made there itself
+/// is left alone, and every step works through the folder's own descriptor without following
+/// a link. A
 /// failure leaves the agent without the graph, never without its start. Takes the project
 /// folder and the worktree.
 #[cfg(unix)]
@@ -9439,7 +9440,7 @@ fn expose_graph(root: &Path, worktree: &Path) {
     };
     let source = root.join(GRAPH_FOLDER);
     let shared = std::fs::symlink_metadata(&source).is_ok_and(|metadata| metadata.is_dir());
-    if !shared || !ignores_graph(worktree) {
+    if !shared || !ignores_graph(root, worktree) {
         return;
     }
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
@@ -9477,17 +9478,38 @@ fn expose_graph(root: &Path, worktree: &Path) {
     }
 }
 
-/// Whether a worktree's `.gitignore` ignores the graph folder by one of its usual spellings,
-/// read as a plain file, never through a link or from a pipe, at most `GITIGNORE_BYTES_MAX`
-/// bytes. Takes the worktree. Returns the answer; anything unreadable reads as no.
+/// Whether git keeps the graph folder out of a worktree's changes, by one of its usual
+/// spellings: the last line about it in the worktree's `.gitignore` decides, and with none
+/// there the repository's `info/exclude` does, a clone's own where `.git` is a folder and
+/// the project repository's, which the engine writes, for a linked worktree. Takes the
+/// project folder and the worktree. Returns the answer; an unreadable file names nothing.
 #[cfg(unix)]
-fn ignores_graph(worktree: &Path) -> bool {
+fn ignores_graph(root: &Path, worktree: &Path) -> bool {
+    let git = worktree.join(".git");
+    let exclude = match std::fs::symlink_metadata(&git) {
+        Ok(metadata) if metadata.is_dir() => Some(git.join("info").join("exclude")),
+        Ok(metadata) if metadata.is_file() => Some(root.join(".git").join("info").join("exclude")),
+        _ => None,
+    };
+    match plain_text(&worktree.join(".gitignore"))
+        .and_then(|text| crate::agent_git::graph_rule(&text))
+    {
+        Some(ignored) => ignored,
+        None => exclude
+            .and_then(|path| plain_text(&path))
+            .and_then(|text| crate::agent_git::graph_rule(&text))
+            .unwrap_or(false),
+    }
+}
+
+/// Reads one ignore file as a plain file, never through a link or from a pipe, at most
+/// `GITIGNORE_BYTES_MAX` bytes. Takes its path. Returns the text, none when unreadable.
+#[cfg(unix)]
+fn plain_text(path: &Path) -> Option<String> {
     use rustix::fs::{CWD, FileType, Mode, OFlags, fstat, openat};
     use std::io::Read;
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
-    let Ok(fd) = openat(CWD, worktree.join(".gitignore"), flags, Mode::empty()) else {
-        return false;
-    };
+    let fd = openat(CWD, path, flags, Mode::empty()).ok()?;
     let plain =
         fstat(&fd).is_ok_and(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile);
     let mut text = String::new();
@@ -9497,14 +9519,10 @@ fn ignores_graph(worktree: &Path) -> bool {
             .read_to_string(&mut text)
             .is_err()
     {
-        return false;
+        return None;
     }
-    text.lines().map(str::trim).any(|line| {
-        matches!(
-            line,
-            "graphify-out" | "graphify-out/" | "/graphify-out" | "/graphify-out/"
-        )
-    })
+    assert!(text.len() as u64 <= GITIGNORE_BYTES_MAX);
+    Some(text)
 }
 
 /// The Seatbelt profile the engine installs for one team agent, which its harness, and for a

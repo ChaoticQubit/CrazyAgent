@@ -3631,6 +3631,63 @@ fn a_reused_clone_gets_its_store_folders_back_and_a_linked_object_folder_is_refu
     assert_eq!(std::fs::read_dir(&elsewhere).unwrap().count(), 0);
 }
 
+/// A clone made before its exclude named the project graph gets that line once when it is
+/// launched again (18.15.1), so the graph the engine then shows there never reaches the
+/// agent's commits, and an exclude the agent replaced with a link is never written through.
+#[test]
+fn a_reused_clone_made_before_the_graph_exclude_gets_the_line_once() {
+    let case = Case::own_branch();
+    let exclude = case.workspace.git_dir.join("info").join("exclude");
+    let read = || std::fs::read_to_string(&exclude).unwrap();
+    std::fs::write(&exclude, "/.worktrees/").unwrap();
+    ready_agent_clone(&case.workspace.worktree).unwrap();
+    assert_eq!(read(), "/.worktrees/\n/graphify-out/\n");
+    ready_agent_clone(&case.workspace.worktree).unwrap();
+    assert_eq!(
+        read(),
+        "/.worktrees/\n/graphify-out/\n",
+        "a second launch adds nothing"
+    );
+
+    std::fs::write(&exclude, "/.worktrees/\n!/graphify-out/\n").unwrap();
+    ready_agent_clone(&case.workspace.worktree).unwrap();
+    assert_eq!(
+        read(),
+        "/.worktrees/\n!/graphify-out/\n/graphify-out/\n",
+        "a line taking the graph back into git is outweighed by the engine's own last line"
+    );
+
+    std::fs::write(&exclude, "/.worktrees/\ngraphify-out\n").unwrap();
+    ready_agent_clone(&case.workspace.worktree).unwrap();
+    assert_eq!(
+        read(),
+        "/.worktrees/\ngraphify-out\n",
+        "any usual spelling already keeps the graph out"
+    );
+
+    let owner = case.repo.parent().unwrap().join("owner-file");
+    std::fs::write(&owner, "kept\n").unwrap();
+    std::fs::remove_file(&exclude).unwrap();
+    std::os::unix::fs::symlink(&owner, &exclude).unwrap();
+    ready_agent_clone(&case.workspace.worktree).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&owner).unwrap(),
+        "kept\n",
+        "a linked exclude is never written through"
+    );
+
+    let shared = case.repo.parent().unwrap().join("shared-file");
+    std::fs::write(&shared, "/.worktrees/\n").unwrap();
+    std::fs::remove_file(&exclude).unwrap();
+    std::fs::hard_link(&shared, &exclude).unwrap();
+    ready_agent_clone(&case.workspace.worktree).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&shared).unwrap(),
+        "/.worktrees/\n",
+        "a hard-linked exclude is never written through (F1)"
+    );
+}
+
 /// A clone holding more object bytes than the change bounds allow is refused before the
 /// engine fetches, so none of its objects reach the project's store (DEC102-F2).
 #[test]
@@ -4011,6 +4068,10 @@ fn a_harness_clone_works_on_its_task_branch() {
     assert!(
         exclude.lines().any(|line| line == "/.worktrees/"),
         "{exclude}"
+    );
+    assert!(
+        exclude.lines().any(|line| line == "/graphify-out/"),
+        "the project graph shown in the clone never reaches the agent's commits: {exclude}"
     );
     assert_eq!(
         agent_branch(&case.db, &case.workspace.worktree, &case.workspace.git_dir).unwrap(),

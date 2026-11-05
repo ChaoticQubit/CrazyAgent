@@ -80,6 +80,17 @@ pub(crate) const STATE: &str = "crazyagent";
 pub(crate) const CODEX_SYSTEM_SKILLS: &str = ".system";
 const CONTEXT_MODE_SERVER: &str = "context-mode";
 const CONTEXT_MODE_DECLARED: &str = "plugin_context-mode_context-mode";
+/// The context-mode tools the "Tools to use" section names, in the order it names them.
+const CONTEXT_MODE_TOOLS: [&str; 5] = [
+    "ctx_batch_execute",
+    "ctx_execute",
+    "ctx_execute_file",
+    "ctx_fetch_and_index",
+    "ctx_search",
+];
+/// The most bytes of the section that tells a tools-on launch when to use context-mode,
+/// graphify and its skills.
+pub const TOOL_USE_BYTES_MAX: usize = 2 * 1024;
 const TEAMMATE_COMMAND: &str = "teammate";
 const TEAMMATE_INSTRUCTIONS: &str = "teammate.md";
 const MATES_HOME: &str = "mates-home";
@@ -833,11 +844,21 @@ impl AgentContext {
             crate::agent_home::record_skills(&process.project.data, home, &names)
                 .map_err(|problem| LaunchError(problem.0))?;
         }
+        let first_skill = names.first().copied();
+        assert_eq!(first_skill.is_some(), skills);
         if id == "codex" {
             let config = home.join("config.toml");
             let copies = home.join("skills").join(STATE);
             remove_copies(home);
             let mut developer = self.instructions.clone();
+            if tools {
+                developer.push_str(&tool_use_section(
+                    false,
+                    servers,
+                    &self.off_tools,
+                    first_skill,
+                ));
+            }
             if skills {
                 directory(&home.join("skills"), false)?;
                 self.copy_skills(&copies)?;
@@ -848,6 +869,7 @@ impl AgentContext {
                     <= MASTER_INSTRUCTIONS_BYTES_MAX
                         + 1
                         + LIVE_INSTRUCTIONS_BYTES_MAX
+                        + TOOL_USE_BYTES_MAX
                         + SKILLS_INDEX_BYTES_MAX
                         + SECTION_SLACK
             );
@@ -864,6 +886,14 @@ impl AgentContext {
             if !given.text.is_empty() {
                 text.push('\n');
                 text.push_str(&given.text);
+            }
+            if tools {
+                text.push_str(&tool_use_section(
+                    true,
+                    servers,
+                    &self.off_tools,
+                    first_skill,
+                ));
             }
             if skills || !hooks.is_empty() {
                 let plugin = state.join("plugin");
@@ -899,6 +929,7 @@ impl AgentContext {
                     <= MASTER_INSTRUCTIONS_BYTES_MAX
                         + 1
                         + LIVE_INSTRUCTIONS_BYTES_MAX
+                        + TOOL_USE_BYTES_MAX
                         + SKILLS_INDEX_BYTES_MAX
                         + SECTION_SLACK
                         + crate::agent_home::PROCESS_BYTES_MAX
@@ -1189,6 +1220,66 @@ fn short_description(text: &str, bytes: usize) -> String {
     let short = format!("{}...", cut.trim_end());
     assert!(short.len() <= bytes);
     short
+}
+
+/// Tells a tools-on launch when to use the tools it has (18.15.1): the context-mode tools
+/// left on, by the names its harness gives them, graphify on the project graph and the
+/// approved skills by the names the skills index uses. Inputs: whether the harness is Claude
+/// Code, the launch's servers, the tools switched off and the first approved skill's name,
+/// none without skills. Output: at most `TOOL_USE_BYTES_MAX` bytes of markdown.
+fn tool_use_section(
+    claude: bool,
+    servers: &[LaunchServer],
+    off_tools: &[(String, Vec<String>)],
+    skill: Option<&str>,
+) -> String {
+    let mut section = String::from(
+        "\n## Tools to use\n\nThe owner's instructions and the sections above come first. This section only names the tools this launch has as you call them; where other instructions name one another way, use the name here.\n\n",
+    );
+    let off = off_tools
+        .iter()
+        .find(|(name, _)| name == CONTEXT_MODE_SERVER)
+        .map_or(&[][..], |(_, off)| off.as_slice());
+    let names: Vec<String> = CONTEXT_MODE_TOOLS
+        .into_iter()
+        .filter(|tool| !off.iter().any(|name| name == tool))
+        .map(|tool| match claude {
+            true => format!("mcp__{CONTEXT_MODE_DECLARED}__{tool}"),
+            false => tool.to_owned(),
+        })
+        .collect();
+    let context_mode = servers
+        .iter()
+        .any(|server| server.name == CONTEXT_MODE_SERVER);
+    if context_mode && !names.is_empty() {
+        let listed: Vec<String> = names.iter().map(|name| format!("`{name}`")).collect();
+        section.push_str(&format!(
+            "- context-mode: run every command, test, search, file read or web fetch whose output may pass 20 lines through {}",
+            listed.join(", ")
+        ));
+        section.push_str(&match claude {
+            true => format!(
+                ", and keep Bash for short fixed output, edits and git. They load on demand: first run ToolSearch with `select:{}`.\n",
+                names.join(",")
+            ),
+            false => format!(
+                " of the `{CONTEXT_MODE_DECLARED}` MCP server, and keep the shell for short fixed output, edits and git.\n"
+            ),
+        });
+    }
+    section.push_str("- graphify: when `graphify-out/graph.json` is in your worktree, run `graphify query \"<question>\"` in the shell before you read or edit code, `graphify path \"<A>\" \"<B>\"` for how two parts connect and `graphify explain \"<name>\"` for one part.\n");
+    if let Some(name) = skill {
+        section.push_str(&match claude {
+            true => format!(
+                "- Skills: before each task, call the Skill tool for every skill in the Skills section below that fits, by its name there, such as `crazyagent:{}`. A skill other instructions name as `superpowers:NAME`, `software-practices:NAME` or plain `NAME` is `crazyagent:NAME` here.\n",
+                clip(name, NAME_BYTES_MAX)
+            ),
+            false => "- Skills: before each task, read the SKILL.md of every skill in the Skills section below that fits and follow it. A skill other instructions name as `superpowers:NAME`, `software-practices:NAME` or `crazyagent:NAME` is the one listed as NAME there.\n".to_owned(),
+        });
+    }
+    assert!(section.len() <= TOOL_USE_BYTES_MAX);
+    assert!(!names.is_empty() || off.len() >= CONTEXT_MODE_TOOLS.len());
+    section
 }
 
 /// Lists the skills the owner approved for one launch, each with its one-line description
