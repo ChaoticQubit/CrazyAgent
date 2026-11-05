@@ -186,6 +186,25 @@ mod tests {
     }
 
     #[test]
+    fn shift_enter_is_the_new_line_key_a_terminal_sends_as_a_line_feed() {
+        assert_eq!(
+            press(KeyCode::Enter, KeyModifiers::SHIFT),
+            Some(Key::Ctrl('j')),
+            "a terminal reporting Shift+Enter (CSI 13;2u) gets a new line, never a send"
+        );
+        assert_eq!(press(KeyCode::Enter, KeyModifiers::NONE), Some(Key::Enter));
+        let line_feed = crate::tui::terminal_pane::encode(&Key::Ctrl('j'), false, false);
+        assert_eq!(
+            line_feed, b"\n",
+            "the byte Claude Code and Codex read as a new line in the message"
+        );
+        assert_eq!(
+            crate::tui::terminal_pane::encode(&Key::Enter, false, false),
+            b"\r"
+        );
+    }
+
+    #[test]
     fn globals_leave_letters_to_focused_fields() {
         assert_eq!(global(&Key::Ctrl('q'), true), Some(Global::Quit));
         assert_eq!(global(&Key::Ctrl('c'), false), Some(Global::Quit));
