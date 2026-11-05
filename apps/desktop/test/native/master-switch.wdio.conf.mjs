@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
-import { createWriteStream, mkdirSync, writeFileSync } from "node:fs";
+import { spawn, spawnSync } from "node:child_process";
+import { createWriteStream, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -168,6 +168,13 @@ async function stopEngine() {
   clearTimeout(timer);
 }
 
+/** Ends the tmux server the engine ran the masters' terminals in, which outlives the
+ * engine. Output: none; a server already gone is fine. */
+function stopTerminals() {
+  const server = join(runtime, "terminal", "tmux.sock");
+  if (existsSync(server)) spawnSync("tmux", ["-S", server, "kill-server"], { env: { PATH: process.env.PATH }, stdio: "ignore" });
+}
+
 export const config = {
   runner: "local",
   specs: [fileURLToPath(new URL("master-switch.e2e.mjs", import.meta.url))],
@@ -212,5 +219,6 @@ export const config = {
   },
   onComplete: async function () {
     await stopEngine();
+    stopTerminals();
   },
 };
