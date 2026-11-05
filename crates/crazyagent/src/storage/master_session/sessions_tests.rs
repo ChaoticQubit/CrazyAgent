@@ -1347,6 +1347,16 @@ async fn upgrading_keeps_sessions_used_only_in_the_live_terminal_listed() {
         "terminal-conversation",
         &record,
     );
+    keep_conversation(
+        &case,
+        &typed.session_id,
+        2,
+        "typed-conversation",
+        &case
+            .root
+            .path()
+            .join("team/agents/agent-2/home/typed.jsonl"),
+    );
     let project = case.project.clone();
     let root = case.close().await;
     let db = Connection::open(root.path().join("engine.db")).unwrap();
@@ -1372,7 +1382,7 @@ async fn upgrading_keeps_sessions_used_only_in_the_live_terminal_listed() {
             .map(|summary| summary.turns)
             .collect::<Vec<_>>(),
         vec![1, 1],
-        "the kept conversation counts as the one terminal turn it proves"
+        "a kept conversation counts as one terminal turn only for a session with no engine turn"
     );
     assert_eq!(
         case.renew("renew-after-upgrade", true).await,
@@ -1390,26 +1400,34 @@ async fn upgrading_keeps_sessions_used_only_in_the_live_terminal_listed() {
 
 /// N-D14: the Sessions list counts every turn run in a session's live terminal as a message,
 /// added to its engine-run turns, also when an 18.14 engine recorded it in the two-column
-/// table: that row counts as the one turn it proves and later turns count on.
+/// table: a row of a session with no engine turn counts as the one turn it proves, a row of
+/// a session with engine turns may be a kept conversation's backfill and adds none (ND14-L1),
+/// and later turns count on.
 #[tokio::test]
 async fn terminal_turns_count_as_the_session_s_messages_also_when_recorded_on_18_14() {
     let case = Case::new().await;
     assert_eq!(case.open("open-terminal").await, OwnerResult::Applied);
-    let live = case.shown().await;
-    case.used_in_terminal(&live.session_id);
-    case.used_in_terminal(&live.session_id);
+    let terminal = case.shown().await;
+    case.used_in_terminal(&terminal.session_id);
+    case.used_in_terminal(&terminal.session_id);
     let listed = case.sessions().await;
-    assert_eq!(listed_ids(&listed), vec![live.session_id.clone()]);
+    assert_eq!(listed_ids(&listed), vec![terminal.session_id.clone()]);
     assert_eq!(listed[0].phase, MasterSessionPhase::Configured);
     assert_eq!(listed[0].turns, 2, "each terminal turn counts once");
+    assert_eq!(
+        case.renew("renew-terminal", true).await,
+        OwnerResult::Applied
+    );
+    let live = case.shown().await;
     assert_eq!(
         case.submit("typed-line", &live.session_id, "Outline the export page")
             .await,
         OwnerResult::Applied
     );
+    case.used_in_terminal(&live.session_id);
     assert_eq!(
-        case.sessions().await[0].turns,
-        3,
+        turns_of(&case.sessions().await, &live.session_id),
+        2,
         "an engine-run turn adds to the terminal turns"
     );
 
@@ -1424,11 +1442,13 @@ async fn terminal_turns_count_as_the_session_s_messages_also_when_recorded_on_18
          );",
     )
     .unwrap();
-    db.execute(
-        "INSERT INTO session_owner_turns(session,project) VALUES (?1,?2)",
-        [live.session_id.as_str(), project.as_str()],
-    )
-    .unwrap();
+    for session in [&terminal.session_id, &live.session_id] {
+        db.execute(
+            "INSERT INTO session_owner_turns(session,project) VALUES (?1,?2)",
+            [session.as_str(), project.as_str()],
+        )
+        .unwrap();
+    }
     drop(db);
     let (storage, started) = start(root.path()).await;
     let case = Case {
@@ -1437,16 +1457,34 @@ async fn terminal_turns_count_as_the_session_s_messages_also_when_recorded_on_18
         project,
         root,
     };
+    let listed = case.sessions().await;
     assert_eq!(
-        case.sessions().await[0].turns,
-        2,
-        "the 18.14 row counts as one terminal turn beside the engine-run one"
+        turns_of(&listed, &terminal.session_id),
+        1,
+        "the 18.14 row of a session with no engine turn counts as one terminal turn"
+    );
+    assert_eq!(
+        turns_of(&listed, &live.session_id),
+        1,
+        "the 18.14 row of a session with engine turns adds no turn to them"
     );
     case.used_in_terminal(&live.session_id);
     let listed = case.sessions().await;
-    assert_eq!(listed_ids(&listed), vec![live.session_id.clone()]);
-    assert_eq!(listed[0].turns, 3, "a later terminal turn counts on");
+    assert_eq!(listed.len(), 2);
+    assert_eq!(
+        turns_of(&listed, &live.session_id),
+        2,
+        "a later terminal turn counts on"
+    );
     case.close().await;
+}
+
+fn turns_of(listed: &[MasterSessionSummary], session: &SessionId) -> u64 {
+    listed
+        .iter()
+        .find(|summary| &summary.session_id == session)
+        .unwrap_or_else(|| panic!("{} is listed", session.as_str()))
+        .turns
 }
 
 #[tokio::test]

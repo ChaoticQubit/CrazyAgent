@@ -50,12 +50,17 @@ const MARKS: &str = "CREATE TABLE IF NOT EXISTS session_marks (
 const OWNER_TURNS: &str = "CREATE TABLE session_owner_turns (
     session TEXT PRIMARY KEY CHECK(length(session) BETWEEN 1 AND 128),
     project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),
-    turns INTEGER NOT NULL DEFAULT 1 CHECK(turns >= 1)
+    turns INTEGER NOT NULL DEFAULT 1 CHECK(turns >= 0)
 )";
 
+/// Gives a table an older engine made its turn count: a row of a session with no engine
+/// turn counts the one terminal turn it proves, while a row of a session with engine turns
+/// may be the first creation's backfill of a kept conversation, so it counts none.
 #[cfg(unix)]
 const OWNER_TURNS_COUNTED: &str =
-    "ALTER TABLE session_owner_turns ADD COLUMN turns INTEGER NOT NULL DEFAULT 1 CHECK(turns >= 1)";
+    "ALTER TABLE session_owner_turns ADD COLUMN turns INTEGER NOT NULL DEFAULT 1 CHECK(turns >= 0);
+     UPDATE session_owner_turns SET turns=0
+     WHERE EXISTS(SELECT 1 FROM master_turns t WHERE t.session=session_owner_turns.session);";
 
 /// The SQL condition that the master session `s` holds an owner turn: a turn the engine ran
 /// for an owner message, or a turn its live master started in the terminal.
@@ -110,9 +115,10 @@ pub const LOST_NOTE: &str = "This session continues in a new harness conversatio
 
 /// Creates the tables of session wall-clock marks and of sessions with an owner turn when
 /// the engine database opens. The first creation counts every session that kept a harness
-/// conversation as having one, so sessions used only in the live terminal stay listed; a
-/// table an older engine made without the turn count gains it, each row counting one turn.
-/// Takes the engine connection. Returns any SQLite failure.
+/// conversation and ran no engine turn as having one terminal turn, so sessions used only
+/// in the live terminal stay listed; a table an older engine made without the turn count
+/// gains it as `OWNER_TURNS_COUNTED` says. Takes the engine connection. Returns any SQLite
+/// failure, with the table left as it was.
 #[cfg(unix)]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(MARKS).map_err(error)?;
@@ -124,24 +130,31 @@ pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 |row| row.get(0),
             )
             .map_err(error)?;
-        if !counted {
-            connection
-                .execute_batch(OWNER_TURNS_COUNTED)
-                .map_err(error)?;
-        }
-        return Ok(());
+        return if counted {
+            Ok(())
+        } else {
+            owner_turns_change(connection, OWNER_TURNS_COUNTED)
+        };
     }
     let backfill = if table_exists(connection, "team_master_conversations")? {
         "INSERT OR IGNORE INTO session_owner_turns(session,project)
-         SELECT session,project FROM team_master_conversations
-         WHERE length(session) BETWEEN 1 AND 128 AND length(project) BETWEEN 1 AND 128;"
+         SELECT c.session,c.project FROM team_master_conversations c
+         WHERE length(c.session) BETWEEN 1 AND 128 AND length(c.project) BETWEEN 1 AND 128
+         AND NOT EXISTS(SELECT 1 FROM master_turns t WHERE t.session=c.session);"
     } else {
         ""
     };
-    let created = connection.execute_batch(&format!(
-        "SAVEPOINT session_owner_turns; {OWNER_TURNS}; {backfill} RELEASE session_owner_turns;"
+    owner_turns_change(connection, &format!("{OWNER_TURNS}; {backfill}"))
+}
+
+/// Applies a change to the table of sessions with an owner turn all or nothing. Takes the
+/// engine connection and the statements. Returns any SQLite failure, rolled back.
+#[cfg(unix)]
+fn owner_turns_change(connection: &Connection, statements: &str) -> Result<(), EngineError> {
+    let applied = connection.execute_batch(&format!(
+        "SAVEPOINT session_owner_turns; {statements} RELEASE session_owner_turns;"
     ));
-    if let Err(failure) = created {
+    if let Err(failure) = applied {
         let _ = connection
             .execute_batch("ROLLBACK TO session_owner_turns; RELEASE session_owner_turns;");
         return Err(error(failure));
