@@ -1113,7 +1113,7 @@ impl Team {
             .switch
             .as_ref()
             .and_then(|switch| switch.problem.as_deref())
-            .filter(|_| self.master && !attached.started)
+            .filter(|_| self.master && !self.paused && !attached.started)
         {
             let lines = wrap(waiting, limit)
                 .into_iter()

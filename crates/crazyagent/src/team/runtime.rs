@@ -3189,7 +3189,8 @@ impl TeamRuntime {
     /// conversation for a session with earlier turns, and the signed-in account's profile on
     /// a managed account. The master then waits for the owner's first line. Takes the setup,
     /// live access and the agent. Returns once sent; a profile still in use or checked
-    /// waits for the next tick with its wait line.
+    /// waits for the next tick with its wait line, and a refused account stops the master
+    /// with a note and clears that line.
     fn brief(
         &mut self,
         stored: &StoredSetup,
@@ -3218,6 +3219,7 @@ impl TeamRuntime {
                     let worker = self.workers.get_mut(&id).expect("master worker exists");
                     worker.stopping = true;
                     let _ = worker.orders.send(Order::Stop);
+                    super::master::problem(&self.connection, project, None)?;
                     return self.note(
                         project,
                         &full_stop(format!(
