@@ -898,10 +898,10 @@ pub(crate) fn cycle_close<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failur
     } else {
         None
     };
-    if counted(cx.tx, CYCLE_ACTIVE, project.id)? == 0
-        && let Some(upcoming) = one_cycle(cx.tx, CYCLE_FIRST_UPCOMING, [project.id])?
-    {
-        set_cycle_status(cx, &project, &upcoming, CycleStatus::Active)?;
+    if counted(cx.tx, CYCLE_ACTIVE, project.id)? == 0 {
+        if let Some(upcoming) = one_cycle(cx.tx, CYCLE_FIRST_UPCOMING, [project.id])? {
+            set_cycle_status(cx, &project, &upcoming, CycleStatus::Active)?;
+        }
     }
     assert!(counted(cx.tx, CYCLE_ACTIVE, project.id)? <= 1);
     closed_outcome(cx, &project, &closed, rollover, &unfinished, moved_to)
