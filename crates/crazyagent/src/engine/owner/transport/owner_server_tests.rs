@@ -392,12 +392,15 @@ async fn the_import_move_is_listed_committed_and_refused_again_through_the_owner
         )
         .unwrap();
     let client = fixture.client().await;
-    assert!(
+    assert_eq!(
         client
             .uncommitted_instruction_import(project.clone())
             .await
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        crate::engine::owner::UncommittedImport {
+            files: Vec::new(),
+            branch: None
+        }
     );
     let moved = client
         .confirm_instruction_import(project.clone())
@@ -415,7 +418,11 @@ async fn the_import_move_is_listed_committed_and_refused_again_through_the_owner
             .uncommitted_instruction_import(project.clone())
             .await
             .unwrap(),
-        ["CLAUDE.md"]
+        crate::engine::owner::UncommittedImport {
+            files: vec!["CLAUDE.md".to_owned()],
+            branch: Some("main".to_owned())
+        },
+        "the reply names the checked-out branch merges into are refused"
     );
     let made = client
         .commit_instruction_import(project.clone())
@@ -430,12 +437,15 @@ async fn the_import_move_is_listed_committed_and_refused_again_through_the_owner
         made.commit
     );
     assert_eq!(checkout_git(&home, &folder, &["status", "--porcelain"]), "");
-    assert!(
+    assert_eq!(
         client
             .uncommitted_instruction_import(project.clone())
             .await
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        crate::engine::owner::UncommittedImport {
+            files: Vec::new(),
+            branch: None
+        }
     );
     assert_eq!(
         client

@@ -82,6 +82,7 @@ fn agent(
         pane: None,
         hookless: false,
         instructions_changed: false,
+        message_note: None,
     }
 }
 

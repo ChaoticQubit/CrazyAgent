@@ -484,7 +484,7 @@ pub(crate) fn quiet(
 /// Checks that engine input may reach a project's live master now, as `quiet` describes.
 /// Takes the engine database, the owner typing signal, the project and the time. Returns
 /// the master's agent id, or why the input waits or cannot go.
-fn input_open(
+pub(crate) fn input_open(
     connection: &Connection,
     typing: Option<&OwnerTyping>,
     project: &ProjectId,

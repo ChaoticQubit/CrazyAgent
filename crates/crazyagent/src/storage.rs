@@ -2455,6 +2455,7 @@ fn owner_read(
             status: Box::new(crate::team::owner_status(
                 &tx,
                 &stored_setup(&tx, project_id)?,
+                config.settings.model_access.as_ref(),
             )?),
         },
         OwnerRead::TeamEvents => OwnerData::TeamEvents {
@@ -2464,6 +2465,7 @@ fn owner_read(
             graph: Box::new(crate::team::owner_graph(
                 &tx,
                 &stored_setup(&tx, project_id)?,
+                config.settings.model_access.as_ref(),
             )?),
         },
         OwnerRead::CoordQuestions { project_id } => {
