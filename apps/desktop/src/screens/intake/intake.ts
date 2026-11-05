@@ -126,6 +126,9 @@ export function worktreesLine(count: number): string {
 /** Why Add folder offers no Move for a folder whose git worktree links a move would break. */
 export const MOVE_WITHHELD = "Move isn't offered: this folder is linked to git worktrees, and moving it would break them.";
 
+/** Why Add folder offers no Copy for a folder that is itself a linked git worktree or submodule. */
+export const COPY_WITHHELD = "Copy isn't offered: this folder is a git worktree or submodule of another repository, so a copy would still share it.";
+
 /** Whether Add folder offers Move: not once the folder read says moving it would break its
  * git worktree links, which the engine refuses. Input: the folder read, if any. Output: true
  * until a read says the folder cannot move. */
@@ -133,10 +136,19 @@ export function moveOffered(size: Loaded<FolderSize> | null): boolean {
   return size?.kind !== "ok" || size.value.movable !== false;
 }
 
-/** The way Add folder uses: the chosen one, or Use where it is for a Move it no longer offers.
- * Inputs: the chosen way and the folder read. Output: the way to show and add with. */
+/** Whether Add folder offers Copy: not once the folder read says it is itself a linked git
+ * worktree or submodule checkout, whose copy the engine refuses. Input: the folder read, if
+ * any. Output: true until a read says the folder cannot be copied. */
+export function copyOffered(size: Loaded<FolderSize> | null): boolean {
+  return size?.kind !== "ok" || size.value.copyable !== false;
+}
+
+/** The way Add folder uses: the chosen one, or Use where it is for a Move or Copy it no longer
+ * offers. Inputs: the chosen way and the folder read. Output: the way to show and add with. */
 export function addWay(mode: AddWay, size: Loaded<FolderSize> | null): AddWay {
-  return mode === "move" && !moveOffered(size) ? "here" : mode;
+  if (mode === "move" && !moveOffered(size)) return "here";
+  if (mode === "copy" && !copyOffered(size)) return "here";
+  return mode;
 }
 
 /** Says how long the GitHub device code still works. Inputs: its lifetime in seconds, when it
