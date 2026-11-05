@@ -53,13 +53,16 @@ export function SavedMemoryRow({ item, busy, onPromote, onDelete }: { item: Memo
 }
 
 /** One note in Your notes with its exact stored text, hidden characters as escapes, next to
- * Delete. A note an agent asked for reads Needs approval until the owner approves it in
- * Settings, Memory, since no agent reads it before (OP-22). Inputs: the memory, whether it is
- * busy and the delete action. Output: the row. */
+ * Delete. A note an agent wrote names that agent, so the owner never takes it for their own,
+ * and one it asked for reads Needs approval until the owner approves it in Settings, Memory,
+ * since no agent reads it before (OP-22). Inputs: the memory, whether it is busy and the
+ * delete action. Output: the row. */
 export function OwnNoteRow({ memory, busy, onDelete }: { memory: SavedMemory; busy: boolean; onDelete: () => void }) {
+  const byAgent = memory.origin === "agent" || memory.origin === "requested";
   return <li className="pj-memory">
     <p className="pj-note-text">{displayText(memory.text)}</p>
-    <span className="pj-row">{memory.origin === "requested"
+    <span className="pj-row">{byAgent && <span className="pj-small pj-muted">From {displayText(memory.agent ?? "an agent")}</span>}
+      {memory.origin === "requested"
       ? <><StatusBadge word="Needs approval" /><span className="pj-small pj-muted">Approve it in Settings, Memory.</span></>
       : <StatusBadge word="Saved" tone="ok" />}
       <Button size="small" variant="danger-text" disabled={busy} onClick={onDelete}>Delete</Button></span>
