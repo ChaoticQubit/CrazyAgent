@@ -6780,6 +6780,7 @@ impl TeamRuntime {
                     worker.connection.clone(),
                     worker.team_tool,
                 );
+                let live_session = worker.session.clone().filter(|_| worker.live);
                 if end == TurnEnd::RateLimited {
                     self.pause(&connection)?;
                     self.workers.get_mut(&id).expect("worker exists").stopping = true;
@@ -6792,6 +6793,14 @@ impl TeamRuntime {
                     now_ms(),
                     end.name(),
                 )?;
+                if let Some(session) = &live_session {
+                    crate::master_sessions::mark_owner_reply(
+                        &self.connection,
+                        &project,
+                        session,
+                        &text,
+                    )?;
+                }
                 self.connection
                     .execute("UPDATE team_agents SET turns=turns+1 WHERE id=?1", [id])
                     .map_err(error)?;

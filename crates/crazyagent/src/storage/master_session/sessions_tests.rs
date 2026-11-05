@@ -1347,6 +1347,7 @@ async fn upgrading_keeps_sessions_used_only_in_the_live_terminal_listed() {
         "terminal-conversation",
         &record,
     );
+    write_record(&record, "Plan the import page", IMPORT_REPLY);
     keep_conversation(
         &case,
         &typed.session_id,
@@ -1395,7 +1396,39 @@ async fn upgrading_keeps_sessions_used_only_in_the_live_terminal_listed() {
         "a session with neither a turn nor a kept conversation is not listed"
     );
     assert_eq!(listed_ids(&case.sessions().await).len(), 2);
+    let listed = case.sessions().await;
+    let parked = summary_of(&listed, &terminal.session_id);
+    assert_eq!(parked.phase, MasterSessionPhase::Parked);
+    assert_eq!(
+        parked.last_line.as_deref(),
+        Some(IMPORT_REPLY),
+        "a parked session used only in the terminal shows the newest reply of its kept conversation"
+    );
     case.close().await;
+}
+
+const IMPORT_REPLY: &str = "The import plan is in docs/import.md.";
+
+/// Writes a Claude Code conversation record of one typed line and one reply, as the harness
+/// keeps it. Takes the record path, the typed line and the reply.
+fn write_record(record: &Path, typed: &str, reply: &str) {
+    std::fs::create_dir_all(record.parent().unwrap()).unwrap();
+    let lines = [
+        serde_json::json!({"type": "user", "message": {"role": "user", "content": typed}}),
+        serde_json::json!({"type": "assistant", "message": {"role": "assistant", "content": [{"type": "text", "text": reply}]}}),
+    ];
+    let text: String = lines.iter().map(|line| format!("{line}\n")).collect();
+    std::fs::write(record, text).unwrap();
+}
+
+fn summary_of<'a>(
+    listed: &'a [MasterSessionSummary],
+    session: &SessionId,
+) -> &'a MasterSessionSummary {
+    listed
+        .iter()
+        .find(|summary| &summary.session_id == session)
+        .unwrap_or_else(|| panic!("{} is listed", session.as_str()))
 }
 
 /// N-D14: the Sessions list counts every turn run in a session's live terminal as a message,
@@ -1430,6 +1463,18 @@ async fn terminal_turns_count_as_the_session_s_messages_also_when_recorded_on_18
         2,
         "an engine-run turn adds to the terminal turns"
     );
+    let record = case
+        .root
+        .path()
+        .join("team/agents/agent-4/home/terminal.jsonl");
+    keep_conversation(
+        &case,
+        &terminal.session_id,
+        4,
+        "terminal-conversation",
+        &record,
+    );
+    write_record(&record, "Plan the import page", IMPORT_REPLY);
 
     let project = case.project.clone();
     let root = case.close().await;
@@ -1467,6 +1512,13 @@ async fn terminal_turns_count_as_the_session_s_messages_also_when_recorded_on_18
         turns_of(&listed, &live.session_id),
         1,
         "the 18.14 row of a session with engine turns adds no turn to them"
+    );
+    let parked = summary_of(&listed, &terminal.session_id);
+    assert_eq!(parked.phase, MasterSessionPhase::Parked);
+    assert_eq!(
+        parked.last_line.as_deref(),
+        Some(IMPORT_REPLY),
+        "a parked session an 18.14 engine recorded from the terminal shows its newest reply"
     );
     case.used_in_terminal(&live.session_id);
     let listed = case.sessions().await;
