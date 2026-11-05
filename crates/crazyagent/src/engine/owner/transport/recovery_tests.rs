@@ -1,21 +1,30 @@
 use super::*;
+#[cfg(unix)]
 use crate::engine::bootstrap::EngineService;
 use crate::recovery::RunState;
 use rusqlite::params;
 use std::collections::BTreeMap;
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 const PROJECT: &str = "banner-project";
 const STOPPED_MS: i64 = 1_800_000_000_000;
 
+#[cfg(unix)]
 const OWNER_WAIT_MS: u64 = 5000;
+#[cfg(unix)]
 const EXCHANGE_MS: u64 = 1000;
+#[cfg(unix)]
 const IN_FLIGHT: Duration = Duration::from_millis(300);
+#[cfg(unix)]
 const PAST_EXCHANGE: Duration = Duration::from_millis(1500);
+#[cfg(unix)]
 const BARRIER_FREED: Duration = Duration::from_secs(10);
+#[cfg(unix)]
 const FILL_WRITES_MAX: usize = 4096;
 
 /// A real engine with an owner client and the engine root its action ledger lives in.
+#[cfg(unix)]
 struct Running {
     root: tempfile::TempDir,
     service: EngineService,
@@ -24,6 +33,7 @@ struct Running {
     engine_root: PathBuf,
 }
 
+#[cfg(unix)]
 impl Running {
     async fn start() -> Self {
         Self::start_with(OWNER_WAIT_MS).await
@@ -90,6 +100,7 @@ impl Running {
 
 /// Records one agent start whose outcome is unknown, as a notice the owner may dismiss.
 /// Inputs: the ledger and the team agent. Output: the notice's id.
+#[cfg(unix)]
 fn notice(ledger: &rusqlite::Connection, team_agent: u32) -> ledger::ActionId {
     ledger::begin(
         ledger,
@@ -649,6 +660,7 @@ fn recovery_codes_cover_every_refusal_of_the_protocol_and_stay_sorted() {
     assert_eq!(sorted, RECOVERY_CODES);
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dismissal_holds_the_owner_barrier_until_it_commits_and_a_revoked_client_dismisses_none()
 {
@@ -707,6 +719,7 @@ async fn a_dismissal_holds_the_owner_barrier_until_it_commits_and_a_revoked_clie
 
 /// The owner's half of a connected socket pair, with the client's half kept open.
 /// Output: the server stream and the client stream.
+#[cfg(unix)]
 fn connection() -> (UnixStream, UnixStream) {
     let (server, client) = crate::spawn_gate::unix_pair_std().unwrap();
     for end in [&server, &client] {
@@ -718,6 +731,7 @@ fn connection() -> (UnixStream, UnixStream) {
     )
 }
 
+#[cfg(unix)]
 fn dismissal_body(id: ledger::ActionId) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
         "recovery": {"kind": "dismiss", "action_kind": "agent_spawn", "id": id.get()}
@@ -725,6 +739,7 @@ fn dismissal_body(id: ledger::ActionId) -> Vec<u8> {
     .unwrap()
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dismissal_slower_than_the_owner_exchange_deadline_still_answers_with_its_outcome() {
     let running = Running::start_with(EXCHANGE_MS).await;
@@ -756,6 +771,7 @@ async fn a_dismissal_slower_than_the_owner_exchange_deadline_still_answers_with_
     running.stop().await;
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_dismissal_cut_short_keeps_the_owner_barrier_until_it_commits_so_a_revocation_returns_after_it()
  {
@@ -812,6 +828,7 @@ async fn a_dismissal_cut_short_keeps_the_owner_barrier_until_it_commits_so_a_rev
     running.stop().await;
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_request_that_cannot_take_the_owner_barrier_within_the_engine_timeout_is_refused_busy() {
     let running = Running::start_with(EXCHANGE_MS).await;
@@ -857,6 +874,7 @@ async fn a_request_that_cannot_take_the_owner_barrier_within_the_engine_timeout_
     running.stop().await;
 }
 
+#[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_client_that_stops_reading_holds_the_owner_barrier_no_longer_than_the_reply_bound() {
     let running = Running::start().await;
