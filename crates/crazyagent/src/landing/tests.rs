@@ -3675,6 +3675,17 @@ fn a_reused_clone_made_before_the_graph_exclude_gets_the_line_once() {
         "kept\n",
         "a linked exclude is never written through"
     );
+
+    let shared = case.repo.parent().unwrap().join("shared-file");
+    std::fs::write(&shared, "/.worktrees/\n").unwrap();
+    std::fs::remove_file(&exclude).unwrap();
+    std::fs::hard_link(&shared, &exclude).unwrap();
+    ready_agent_clone(&case.workspace.worktree).unwrap();
+    assert_eq!(
+        std::fs::read_to_string(&shared).unwrap(),
+        "/.worktrees/\n",
+        "a hard-linked exclude is never written through (F1)"
+    );
 }
 
 /// A clone holding more object bytes than the change bounds allow is refused before the
