@@ -2968,7 +2968,7 @@ impl TeamRuntime {
                 if planned {
                     self.master_restarts.insert(project.clone());
                 }
-                return self.checking_sign_ins(project);
+                return self.wait_line(project, super::master::SIGN_INS_CHECKING);
             }
             Err(reason) => {
                 return self.live_off(
@@ -3188,8 +3188,8 @@ impl TeamRuntime {
     /// reads at launch as system context, never as a typed message, with the seed of a fresh
     /// conversation for a session with earlier turns, and the signed-in account's profile on
     /// a managed account. The master then waits for the owner's first line. Takes the setup,
-    /// live access and the agent. Returns once sent; a profile still in use waits for the
-    /// next tick.
+    /// live access and the agent. Returns once sent; a profile still in use or checked
+    /// waits for the next tick with its wait line.
     fn brief(
         &mut self,
         stored: &StoredSetup,
@@ -3202,13 +3202,17 @@ impl TeamRuntime {
                 Ok(Some(grant)) => Some(grant),
                 Ok(None) => {
                     let connection = self.workers[&id].connection.clone();
-                    if self
+                    let checking = self
                         .sign_in(access, &connection)
-                        .is_err_and(|code| code == SIGN_IN_CHECKING)
-                    {
-                        return self.checking_sign_ins(project);
-                    }
-                    return Ok(());
+                        .is_err_and(|code| code == SIGN_IN_CHECKING);
+                    return self.wait_line(
+                        project,
+                        if checking {
+                            super::master::SIGN_INS_CHECKING
+                        } else {
+                            super::master::PROFILE_IN_USE
+                        },
+                    );
                 }
                 Err(reason) => {
                     let worker = self.workers.get_mut(&id).expect("master worker exists");
@@ -3245,17 +3249,13 @@ impl TeamRuntime {
         Ok(())
     }
 
-    /// Says once, in the live master's problem line and one team note, that it waits for
-    /// this engine run's sign-in re-checks of the pool (DEC-108). It stays on, counts no
-    /// start and starts on a later tick once an account passes. Takes the project.
-    /// Returns any SQLite failure.
-    fn checking_sign_ins(&mut self, project: &ProjectId) -> Result<(), EngineError> {
-        if super::master::problem(
-            &self.connection,
-            project,
-            Some(super::master::SIGN_INS_CHECKING),
-        )? {
-            self.note(project, super::master::SIGN_INS_CHECKING)?;
+    /// Says once, in the live master's problem line and one team note, why it waits: for
+    /// this engine run's sign-in re-checks of the pool (DEC-108), or for its account's
+    /// profile another process holds (LMS-1). It stays on, counts no start and starts on a
+    /// later tick. Takes the project and the wait line. Returns any SQLite failure.
+    fn wait_line(&mut self, project: &ProjectId, line: &str) -> Result<(), EngineError> {
+        if super::master::problem(&self.connection, project, Some(line))? {
+            self.note(project, line)?;
         }
         Ok(())
     }

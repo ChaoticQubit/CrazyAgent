@@ -281,8 +281,9 @@ export function liveWord(live: Live): { word: string; tone: "ok" | "muted" | "wa
 /** The live master area in one state: one console whose head names the master, its state
  * and account, then New session and Sessions, which restart the live terminal on a fresh or
  * resumed conversation and start the live master when it is stopped, above the master's
- * terminal filling the rest, typed into as the owner's Master input setting says, or a line
- * while it starts, can't or is stopped; a stopped team (Stop all) says so and offers
+ * terminal filling the rest, typed into as the owner's Master input setting says, under the
+ * engine's line while that terminal waits to start, or a line while it starts, can't or is
+ * stopped; a stopped team (Stop all) says so and offers
  * Start all. An engine that says the master has no terminal app
  * gets today's conversation instead. Inputs: the project data, the master harness id, the
  * state, the start action, the session check Start all sends once the team runs again, the
@@ -296,6 +297,7 @@ export function LiveMasterView({ data, harness, live, onStart, onSession, sessio
   const sessions = held ?? own;
   const harnesses = valueOf(data.harnesses);
   const name = (id: string) => harnessName(harnesses, id);
+  const waits = liveSwitch(data.team.result, data.id)?.problem ?? null;
   if (live.kind === "refused" && live.code === NO_TERMINAL) return <ConversationTab data={data} />;
   const off = live.kind === "stopped" || live.kind === "refused";
   const startTeam = async () => {
@@ -338,7 +340,7 @@ export function LiveMasterView({ data, harness, live, onStart, onSession, sessio
       <Button size="small" icon="refresh-cw" onClick={() => void onStart()}>Try again</Button>
     </div>}
     {live.kind === "starting" && <p className="tg-terminal-state" role="status"><Icon name="loader-circle" size={14} spin />Starting the master ({displayText(name(harness))})...</p>}
-    {live.kind === "running" && !live.node && <p className="tg-terminal-state" role="status"><Icon name="loader-circle" size={14} spin />{displayText(liveSwitch(data.team.result, data.id)?.problem ?? WAITING)}</p>}
+    {live.kind === "running" && (!live.node || waits !== null) && <p className="tg-terminal-state" role="status"><Icon name="loader-circle" size={14} spin />{displayText(waits ?? WAITING)}</p>}
     {live.kind === "running" && live.node && <TerminalPanel key={`${live.node.terminal ?? live.node.id}:${sessions.liveId ?? ""}`} node={live.node} harness={name} embedded input={input} follow />}
   </div>;
 }
