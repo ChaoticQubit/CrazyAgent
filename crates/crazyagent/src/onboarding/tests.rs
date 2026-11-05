@@ -300,6 +300,35 @@ fn git_init(root: &Path) {
     );
 }
 
+fn git_in(root: &Path, args: &[&str]) {
+    let mut command = std::process::Command::new(crate::research::runner::setup_git());
+    command
+        .args(args)
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "Mapping Test")
+        .env("GIT_AUTHOR_EMAIL", "mapping@example.invalid")
+        .env("GIT_COMMITTER_NAME", "Mapping Test")
+        .env("GIT_COMMITTER_EMAIL", "mapping@example.invalid")
+        .current_dir(root);
+    let status = crate::spawn_gate::status(&mut command);
+    assert!(
+        status.as_ref().is_ok_and(std::process::ExitStatus::success),
+        "git {args:?}: {status:?}"
+    );
+}
+
+fn broken_git(root: &Path) {
+    let missing = root.join("missing.git");
+    std::fs::write(
+        root.join(".git"),
+        format!("gitdir: {}\n", missing.display()),
+    )
+    .unwrap();
+}
+
 fn mapping_prompt(root: &Path) -> String {
     let evidence = draft::gather(root);
     let (found, _) = draft::found_facts(&evidence, root);
@@ -550,6 +579,7 @@ fn hard_linked_documents_are_neither_read_nor_listed() {
 fn without_an_answer_from_git_no_document_is_read_and_the_prompt_says_so() {
     let dir = rust_repo();
     let root = dir.path();
+    broken_git(root);
     write_file(
         root,
         "docs/plan.md",
@@ -598,6 +628,7 @@ fn a_secret_like_package_main_is_never_an_entry_point() {
 fn without_an_answer_from_git_no_entry_or_path_name_reaches_the_prompt() {
     let dir = rust_repo();
     let root = dir.path();
+    broken_git(root);
     write_file(root, ".gitignore", "private/\n");
     write_file(root, "private/plan.md", "PRIVATE_TEXT_1618\n");
     write_file(
@@ -1241,6 +1272,7 @@ fn without_an_answer_from_git_no_graph_is_built() {
         .tempdir_in("/tmp")
         .unwrap();
     let repo = dir.path().canonicalize().unwrap();
+    broken_git(&repo);
     write_file(
         &repo,
         "src/shop.py",
@@ -1258,7 +1290,343 @@ fn without_an_answer_from_git_no_graph_is_built() {
             "Graph not built: the project's git could not tell which files it ignores."
         )
     );
-    assert!(!repo.join("graphify-out/graph.json").exists());
+    assert!(
+        !repo.join("graphify-out").exists(),
+        "a graph step that failed its checks made graphify-out"
+    );
+}
+
+#[test]
+fn key_files_and_credential_stores_are_secret_like() {
+    let missed: Vec<&str> = [
+        "ssh/id_rsa",
+        "ssh/id_dsa",
+        "ssh/id_ecdsa.pub",
+        "ssh/id_ed25519",
+        ".htpasswd",
+        "android/release.jks",
+        "android/app.keystore",
+        "kube/kubeconfig",
+        "kube-config.yaml",
+        "infra/terraform.tfstate",
+        "infra/prod.tfvars",
+        ".pgpass",
+        ".npmrc",
+        ".pypirc",
+        "putty/server.ppk",
+        "vault.kdbx",
+    ]
+    .into_iter()
+    .filter(|name| !draft::names::names_secret(name))
+    .collect();
+    assert!(missed.is_empty(), "not secret-like: {missed:?}");
+    for plain in [
+        "src/keyboard.rs",
+        "docs/monkey.md",
+        "src/config.rs",
+        "README.md",
+    ] {
+        assert!(
+            !draft::names::names_secret(plain),
+            "{plain} is not a secret"
+        );
+    }
+}
+
+#[test]
+fn the_graph_never_reads_inside_a_nested_repository_or_submodule() {
+    let dir = tempfile::Builder::new()
+        .prefix("ca-graph-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let repo = dir.path().canonicalize().unwrap();
+    git_init(&repo);
+    write_file(
+        &repo,
+        "src/shop.py",
+        "def shop_total(items):\n    return sum(items)\n",
+    );
+    let sdk = repo.join("vendor/sdk");
+    std::fs::create_dir_all(&sdk).unwrap();
+    git_init(&sdk);
+    write_file(
+        &repo,
+        "vendor/sdk/notes/api-keys.md",
+        "# SDK keys heading\n\nSDK_CANARY_5150\n",
+    );
+    write_file(
+        &repo,
+        "vendor/sdk/client.py",
+        "def sdk_client_reader():\n    return 1\n",
+    );
+    git_in(&sdk, &["add", "-A"]);
+    git_in(&sdk, &["commit", "-q", "-m", "sdk"]);
+    git_in(&repo, &["add", "vendor/sdk"]);
+    let helper = repo.join("tools/helper");
+    std::fs::create_dir_all(&helper).unwrap();
+    git_init(&helper);
+    write_file(&repo, "tools/helper/.gitignore", "local_only.py\n");
+    write_file(
+        &repo,
+        "tools/helper/local_only.py",
+        "def nested_ignored_reader():\n    return 1\n",
+    );
+    write_file(&repo, "tools/helper/.git/info/exclude", "draft.md\n");
+    write_file(
+        &repo,
+        "tools/helper/draft.md",
+        "# Nested excluded heading\n",
+    );
+    write_file(
+        &repo,
+        "tools/helper/notes/tokens.md",
+        "# Nested token notes\n",
+    );
+
+    assert_eq!(build_graph(&repo), graph::GraphEnding::Built);
+    let graph = std::fs::read_to_string(repo.join("graphify-out/graph.json")).unwrap();
+    assert!(graph.contains("shop_total"), "{graph}");
+    for name in ["graph.json", "manifest.json", "GRAPH_REPORT.md"] {
+        let text = std::fs::read_to_string(repo.join("graphify-out").join(name)).unwrap();
+        for leaked in [
+            "SDK keys heading",
+            "SDK_CANARY_5150",
+            "api-keys",
+            "nested_ignored_reader",
+            "Nested excluded heading",
+            "Nested token notes",
+        ] {
+            assert!(!text.contains(leaked), "{leaked} reached {name}: {text}");
+        }
+    }
+}
+
+#[test]
+fn documents_inside_a_nested_repository_are_never_read() {
+    let dir = rust_repo();
+    let root = dir.path();
+    git_init(root);
+    write_file(
+        root,
+        "docs/plan.md",
+        "Release plan for sync. PLAN_TEXT_4410\n",
+    );
+    let helper = root.join("tools/helper");
+    std::fs::create_dir_all(&helper).unwrap();
+    git_init(&helper);
+    write_file(root, "tools/helper/.git/info/exclude", "notes.md\n");
+    write_file(
+        root,
+        "tools/helper/notes.md",
+        "Nested private notes. NESTED_PRIVATE_1234\n",
+    );
+
+    let prompt = mapping_prompt(root);
+    assert!(prompt.contains("PLAN_TEXT_4410"), "{prompt}");
+    assert!(
+        !prompt.contains("NESTED_PRIVATE_1234") && !prompt.contains("tools/helper/notes.md"),
+        "a nested repository's excluded file reached the prompt"
+    );
+}
+
+#[test]
+fn a_folder_outside_git_maps_like_a_repository_without_ignores() {
+    let dir = rust_repo();
+    let root = dir.path();
+    write_file(
+        root,
+        "docs/plan.md",
+        "Release plan for sync. PLAN_TEXT_4410\n",
+    );
+    write_file(root, "notes/api-keys.md", "# API keys\n\nKEY_TEXT_9090\n");
+    write_file(root, "secrets.txt", "SECRET_TEXT_7070\n");
+    write_file(
+        root,
+        "README.md",
+        concat!(
+            "# Demo\n\nA small greeting tool. README_KEPT_1111\n",
+            "Keys live in notes/api-keys.md.\n",
+            "Plans live in docs/plan.md.\n",
+        ),
+    );
+
+    let evidence = draft::gather(root);
+    assert!(!evidence.ignores_unknown);
+    for entry in ["docs/", "src/", "Cargo.toml"] {
+        assert!(
+            evidence.entries.iter().any(|listed| listed == entry),
+            "{entry} not listed: {:?}",
+            evidence.entries
+        );
+    }
+    assert!(
+        evidence
+            .documents
+            .iter()
+            .any(|document| document.path == "docs/plan.md"),
+        "the document was not read"
+    );
+    let prompt = mapping_prompt(root);
+    for kept in [
+        "PLAN_TEXT_4410",
+        "README_KEPT_1111",
+        "Plans live in docs/plan.md.",
+    ] {
+        assert!(prompt.contains(kept), "{kept} missing: {prompt}");
+    }
+    for leaked in [
+        "api-keys",
+        "KEY_TEXT_9090",
+        "SECRET_TEXT_7070",
+        "secrets.txt",
+        "could not tell which files it ignores",
+    ] {
+        assert!(!prompt.contains(leaked), "{leaked} reached the prompt");
+    }
+}
+
+#[test]
+fn a_folder_outside_git_gets_a_graph_without_its_secret_like_files() {
+    let dir = tempfile::Builder::new()
+        .prefix("ca-graph-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let repo = dir.path().canonicalize().unwrap();
+    write_file(
+        &repo,
+        "src/shop.py",
+        "def shop_total(items):\n    return sum(items)\n",
+    );
+    write_file(
+        &repo,
+        "notes/ui-direction.md",
+        "# UI direction\n\nDark first.\n",
+    );
+    write_file(
+        &repo,
+        "notes/api-keys.md",
+        "# API keys\n\nDECOY_CANARY_8080\n",
+    );
+    write_file(
+        &repo,
+        "config/Credentials.py",
+        "def credential_loader():\n    return 1\n",
+    );
+    write_file(
+        &repo,
+        "tokens/store.py",
+        "def token_store_reader():\n    return 1\n",
+    );
+
+    assert_eq!(build_graph(&repo), graph::GraphEnding::Built);
+    let graph = std::fs::read_to_string(repo.join("graphify-out/graph.json")).unwrap();
+    assert!(
+        graph.contains("shop_total") && graph.contains("UI direction"),
+        "{graph}"
+    );
+    for name in ["graph.json", "manifest.json", "GRAPH_REPORT.md"] {
+        let text = std::fs::read_to_string(repo.join("graphify-out").join(name)).unwrap();
+        for leaked in [
+            "api-keys",
+            "API keys",
+            "DECOY_CANARY_8080",
+            "credential_loader",
+            "token_store_reader",
+        ] {
+            assert!(!text.contains(leaked), "{leaked} reached {name}: {text}");
+        }
+    }
+}
+
+#[test]
+fn a_graph_made_before_the_keep_out_never_reaches_the_prompt() {
+    let dir = rust_repo();
+    let root = dir.path();
+    git_init(root);
+    write_file(
+        root,
+        "graphify-out/GRAPH_REPORT.md",
+        "# Graph Report\n\n- Rotation schedule OLD_GRAPH_3030\n",
+    );
+
+    let evidence = draft::gather(root);
+    assert!(
+        evidence.graph.is_none(),
+        "a graph not made under the keep-out was read: {:?}",
+        evidence.graph
+    );
+    assert!(!mapping_prompt(root).contains("OLD_GRAPH_3030"));
+}
+
+#[test]
+fn a_graph_made_before_the_keep_out_is_rebuilt_from_nothing() {
+    let dir = tempfile::Builder::new()
+        .prefix("ca-graph-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let repo = dir.path().canonicalize().unwrap();
+    git_init(&repo);
+    write_file(
+        &repo,
+        "src/shop.py",
+        "def shop_total(items):\n    return sum(items)\n",
+    );
+    write_file(&repo, "graphify-out/old-notes.txt", "OLD_GRAPH_3030\n");
+    write_file(
+        &repo,
+        "graphify-out/GRAPH_REPORT.md",
+        "# Graph Report\n\n- OLD_GRAPH_3030\n",
+    );
+
+    assert_eq!(build_graph(&repo), graph::GraphEnding::Built);
+    assert!(
+        !repo.join("graphify-out/old-notes.txt").exists(),
+        "the old graph folder was kept"
+    );
+    let report = std::fs::read_to_string(repo.join("graphify-out/GRAPH_REPORT.md")).unwrap();
+    assert!(!report.contains("OLD_GRAPH_3030"), "{report}");
+    let evidence = draft::gather(&repo);
+    assert!(
+        evidence
+            .graph
+            .as_deref()
+            .is_some_and(|graph| !graph.contains("OLD_GRAPH_3030")),
+        "the new graph is not read: {:?}",
+        evidence.graph
+    );
+}
+
+#[test]
+fn a_graph_update_drops_a_file_kept_out_since_the_last_build() {
+    let dir = tempfile::Builder::new()
+        .prefix("ca-graph-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let repo = dir.path().canonicalize().unwrap();
+    git_init(&repo);
+    write_file(
+        &repo,
+        "src/shop.py",
+        "def shop_total(items):\n    return sum(items)\n",
+    );
+    write_file(
+        &repo,
+        "notes/rotation.md",
+        "# Rotation schedule\n\nROTATION_CANARY_2020\n",
+    );
+    assert_eq!(build_graph(&repo), graph::GraphEnding::Built);
+    let first = std::fs::read_to_string(repo.join("graphify-out/graph.json")).unwrap();
+    assert!(first.contains("Rotation schedule"), "{first}");
+
+    write_file(&repo, ".gitignore", "notes/rotation.md\n");
+    assert_eq!(build_graph(&repo), graph::GraphEnding::Built);
+    for name in ["graph.json", "manifest.json", "GRAPH_REPORT.md"] {
+        let text = std::fs::read_to_string(repo.join("graphify-out").join(name)).unwrap();
+        for leaked in ["Rotation schedule", "ROTATION_CANARY_2020", "rotation.md"] {
+            assert!(!text.contains(leaked), "{leaked} stayed in {name}: {text}");
+        }
+    }
+    assert!(repo.join("notes/rotation.md").is_file());
 }
 
 #[test]
