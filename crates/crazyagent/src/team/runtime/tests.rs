@@ -14083,6 +14083,57 @@ fn the_shared_graph_shows_in_an_agent_worktree_only_when_it_ignores_graphify_out
     assert!(!fresh.join(GRAPH_FOLDER).exists());
 }
 
+/// The graph shows in a worktree only where git itself ignores the graph folder (T3-L1): a
+/// line with leading spaces names another path and any `!` line naming the folder takes it
+/// back, as each case's real git says, while trailing spaces are git's own trim.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_shared_graph_shows_only_where_real_git_ignores_graphify_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let project = base.join("project");
+    let graph = project.join(GRAPH_FOLDER);
+    std::fs::create_dir_all(&graph).unwrap();
+    std::fs::write(graph.join("graph.json"), "{}").unwrap();
+    let home = base.join("home");
+    std::fs::create_dir(&home).unwrap();
+    for (name, ignore, exclude, ignored) in [
+        ("spaced", "  graphify-out\n", "", false),
+        ("starred", "!**/graphify-out\n", "/graphify-out/\n", false),
+        ("later", "graphify-out/\n!**/graphify-out\n", "", false),
+        ("trailing", "graphify-out/  \n", "", true),
+    ] {
+        let clone = base.join(name);
+        std::fs::create_dir(&clone).unwrap();
+        let made = level_git(&clone, &home, &["init", "-q", "--template="]);
+        assert!(made.status.success(), "{name}: {made:?}");
+        std::fs::write(clone.join(".gitignore"), ignore).unwrap();
+        std::fs::create_dir_all(clone.join(".git").join("info")).unwrap();
+        std::fs::write(clone.join(".git").join("info").join("exclude"), exclude).unwrap();
+        let checked = level_git(
+            &clone,
+            &home,
+            &[
+                "check-ignore",
+                "-q",
+                "--no-index",
+                "graphify-out/graph.json",
+            ],
+        );
+        assert!(
+            matches!(checked.status.code(), Some(0 | 1)),
+            "{name}: {checked:?}"
+        );
+        assert_eq!(checked.status.success(), ignored, "{name}: real git");
+        expose_graph(&project, &clone);
+        assert_eq!(
+            std::fs::symlink_metadata(clone.join(GRAPH_FOLDER).join("graph.json")).is_ok(),
+            ignored,
+            "{name}: the graph shows only where git ignores it"
+        );
+    }
+}
+
 #[test]
 fn the_shared_graph_shows_in_a_worktree_whose_repository_excludes_graphify_out() {
     let dir = tempfile::tempdir().unwrap();

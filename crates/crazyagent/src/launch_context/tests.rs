@@ -1367,6 +1367,14 @@ fn a_tools_on_launch_is_told_when_to_use_context_mode_graphify_and_its_skills() 
     drop(installed);
     let section = tools_section(&prompt);
     assert!(!section.is_empty(), "{prompt}");
+    assert!(
+        section.contains("The owner's instructions and the sections above come first."),
+        "{section}"
+    );
+    assert!(
+        !section.contains("as said here"),
+        "the section names tools and never outranks other instructions: {section}"
+    );
     for tool in on {
         assert!(
             section.contains(&format!("`{}`", declared(tool))),
@@ -1424,6 +1432,14 @@ fn a_tools_on_launch_is_told_when_to_use_context_mode_graphify_and_its_skills() 
     drop(installed);
     let section = tools_section(&developer);
     assert!(!section.is_empty(), "{developer}");
+    assert!(
+        section.contains("The owner's instructions and the sections above come first."),
+        "{section}"
+    );
+    assert!(
+        !section.contains("as said here"),
+        "the section names tools and never outranks other instructions: {section}"
+    );
     for tool in on {
         assert!(section.contains(&format!("`{tool}`")), "{tool}: {section}");
     }
