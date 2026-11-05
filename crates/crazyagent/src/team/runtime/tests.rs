@@ -9217,6 +9217,7 @@ fn between_turns(
         ready: true,
         reask: None,
         reasked: None,
+        starts: crate::coord::relay::TaskStarts::default(),
     }
 }
 
@@ -13131,6 +13132,7 @@ fn reap_keeps_a_kept_lead_past_its_idle_limit_while_its_teammate_works() {
             access: AgentAccess::Sandboxed,
             network: crate::sandbox::policy::AgentNetwork::Open,
             proxy: None,
+            task_start: None,
         })),
         Seat {
             project: ProjectId::new(PROJECT).unwrap(),
@@ -13210,6 +13212,7 @@ fn kept_lead_with_a_task(fixture: &Fixture) -> (TeamRuntime, i64, i64) {
             access: AgentAccess::Sandboxed,
             network: crate::sandbox::policy::AgentNetwork::Open,
             proxy: None,
+            task_start: None,
         })),
         Seat {
             project: ProjectId::new(PROJECT).unwrap(),
@@ -13346,6 +13349,7 @@ fn wiring_a_native_lead_adopted_without_its_account_is_killed() {
             access: AgentAccess::Sandboxed,
             network: crate::sandbox::policy::AgentNetwork::Open,
             proxy: None,
+            task_start: None,
         };
         let (orders, ordered) = channel();
         let (reports, reported) = channel();
