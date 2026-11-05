@@ -579,8 +579,9 @@ export function settingsSection(wanted: string | null | undefined): SectionId {
   return SECTIONS.find((item) => item.id === wanted)?.id ?? "general";
 }
 
-/** Project Settings tab: General, Pool, Team, Harnesses, Plugins and skills, Tickets, Agent access, Repository trust, Sandbox and Remove project. A setup
- * that belongs to another project counts as still loading, so no form seeds from it.
+/** Project Settings tab: General, Pool, Team, Harnesses, Plugins and skills, Tickets, Agent
+ * access, Repository trust, Sandbox, Checks and Remove project. A setup that belongs to another
+ * project counts as still loading, so no form seeds from it.
  * Inputs: the project data and an optional section from the route. Output: the tab. */
 export function SettingsTab({ data, section }: { data: ProjectData; section?: string }) {
   const [active, setActive] = useState<SectionId>(settingsSection(section ?? hashSection()));
