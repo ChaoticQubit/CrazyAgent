@@ -122,6 +122,72 @@ impl Drop for Fixture {
     }
 }
 
+/// R10-L1: an input whose typing fails after its checks passed frees the master for the
+/// next one, since its input time is cleared. With the master's pane gone, tmux answers the
+/// bracketed paste question for another pane of its server (IMP-RVDS-PR3), so the check
+/// passes and only the typing fails; the other pane gets nothing.
+#[test]
+fn a_failed_typing_frees_the_live_master_for_the_next_input() {
+    let mut fixture = Fixture::new();
+    let host = fixture.host();
+    let project = fixture.setup.project_id.clone();
+    let app = |file: &Path| InteractiveCommand {
+        argv: vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            format!(
+                "/bin/stty raw -echo; printf '\\033[?2004hready\\n'; exec /bin/cat > '{}'",
+                file.display()
+            ),
+        ],
+        cwd: fixture.base.clone(),
+        env: Vec::new(),
+        transcript: Transcript::Unavailable,
+    };
+    let master = AgentId::team(MASTER).unwrap();
+    let other = AgentId::team(MASTER + 1).unwrap();
+    let other_typed = fixture.base.join("other-typed");
+    host.spawn(&master, &app(&fixture.base.join("typed")))
+        .unwrap();
+    host.spawn(&other, &app(&other_typed)).unwrap();
+    reads_keys(host.as_ref(), &master);
+    reads_keys(host.as_ref(), &other);
+    fixture.live(Some(MASTER));
+    host.kill(&master).unwrap();
+    assert!(
+        host.input_live(&master).unwrap(),
+        "tmux answers for another pane of its server"
+    );
+
+    let gone = master_input_at(
+        &fixture.connection,
+        host.as_ref(),
+        None,
+        &project,
+        "hello",
+        NOW,
+    );
+    assert!(matches!(gone, Err(InputRefused::Failed(_))), "{gone:?}");
+    let input_ms: Option<i64> = fixture
+        .connection
+        .query_row(
+            "SELECT input_ms FROM team_live_masters WHERE project=?1",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        input_ms, None,
+        "a failed input frees the master for the next one"
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        std::fs::read(&other_typed).unwrap_or_default(),
+        b"",
+        "the other pane gets nothing"
+    );
+}
+
 /// Waits until a pane's app has turned bracketed paste on, which engine input to a live
 /// master waits for. Takes the host and the pane.
 fn reads_keys(host: &dyn Host, pane: &AgentId) {
