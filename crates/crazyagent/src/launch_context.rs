@@ -1568,6 +1568,7 @@ pub fn lock_only(home: &Path) -> Result<Installed, LaunchError> {
         denied: Vec::new(),
         native: None,
         model_proxy: None,
+        claude_display: ClaudeDisplay::Classic,
         _lock: lock,
     })
 }
