@@ -1,7 +1,11 @@
-use super::{Document, ENTRY_NAME_BYTES_MAX, Folder, clip, file_text, open_folder, open_in};
+use super::names::{paths_in, secret_like};
+use super::{
+    Document, ENTRY_NAME_BYTES_MAX, Evidence, Folder, clip, file_text, open_folder, open_in,
+};
 use crate::onboarding::FoundResearch;
 use crate::project_setup::{DOCUMENT_PATH_BYTES_MAX, ResearchKind};
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, Stat};
+use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
@@ -37,34 +41,6 @@ const IGNORE_POLL: Duration = Duration::from_millis(5);
 const IGNORE_OUTPUT_BYTES_MAX: usize = 8 * 1024 * 1024;
 const IGNORES_UNKNOWN: &str =
     "No project document was read: the project's git could not tell which files it ignores.";
-
-/// Words that mark a file or folder name as one that may hold a secret: credentials, keys
-/// and tokens, and key-file extensions such as `.pem` or `.env` kept even when renamed
-/// `.txt`. The mapping prompt goes to the project's model provider, and a document is
-/// chosen by its name alone before any text is read, so a name with one of these words, or
-/// two adjacent words joining into one, is neither read nor listed. A few documents with
-/// such names, such as `key-metrics.md`, are left out with them.
-const SECRET_WORDS: [&str; 19] = [
-    "secret",
-    "secrets",
-    "credential",
-    "credentials",
-    "password",
-    "passwords",
-    "passwd",
-    "token",
-    "tokens",
-    "apikey",
-    "apikeys",
-    "privatekey",
-    "pem",
-    "key",
-    "keys",
-    "p12",
-    "pfx",
-    "env",
-    "netrc",
-];
 
 /// What one document walk gives the prompt: the documents read and the paths and sizes of
 /// those only listed.
@@ -131,6 +107,82 @@ pub(super) fn read(repo: &Path, readme: Option<&str>) -> Option<Reading> {
     assert!(total <= TOTAL_TEXT_BYTES_MAX);
     assert!(documents.len() <= READ_MAX && unread.len() <= UNREAD_MAX);
     Some((documents, unread))
+}
+
+/// Drops each file name that looks like it holds a secret or that git ignores from the
+/// mapping evidence (MAP-2): such top-level entries and each README, manifest, overview and
+/// document line naming one, a code graph line also on any secret word, as its nodes may be
+/// bare names. One `check-ignore` call answers for all; a name git does not clear, or every
+/// name when git could not answer, counts as ignored. Takes the folder and the evidence.
+pub(super) fn screen(repo: &Path, evidence: &mut Evidence) {
+    let mut names: BTreeSet<String> = evidence.entries.iter().cloned().collect();
+    let texts = evidence
+        .readme
+        .iter()
+        .map(|(_, text)| text)
+        .chain(evidence.manifests.iter().map(|(_, text)| text))
+        .chain(&evidence.graph)
+        .chain(&evidence.overview)
+        .chain(evidence.documents.iter().map(|document| &document.text));
+    for text in texts {
+        names.extend(paths_in(text).filter(|path| below(path)).map(str::to_owned));
+    }
+    let asked: Vec<&str> = names.iter().map(String::as_str).collect();
+    let checked = (!evidence.ignores_unknown)
+        .then(|| ignored(repo, &asked))
+        .flatten();
+    let cleared: BTreeSet<&str> = checked.map_or_else(BTreeSet::new, |flags| {
+        asked
+            .iter()
+            .zip(flags)
+            .filter_map(|(path, ignored)| (!ignored).then_some(*path))
+            .collect()
+    });
+    let shown = |line: &str| {
+        paths_in(line).all(|path| {
+            !secret_like(path)
+                && (path.starts_with('/') || path.starts_with('~') || cleared.contains(path))
+        })
+    };
+    let keep = |text: &mut String, strict: bool| {
+        *text = text
+            .split_inclusive('\n')
+            .filter(|line| !(strict && secret_like(line)) && shown(line))
+            .collect();
+    };
+    evidence
+        .entries
+        .retain(|entry| !secret_like(entry) && cleared.contains(entry.as_str()));
+    if let Some((_, text)) = &mut evidence.readme {
+        keep(text, false);
+    }
+    for (_, text) in &mut evidence.manifests {
+        keep(text, false);
+    }
+    if let Some(text) = &mut evidence.overview {
+        keep(text, false);
+    }
+    for document in &mut evidence.documents {
+        keep(&mut document.text, false);
+    }
+    if let Some(text) = &mut evidence.graph {
+        keep(text, true);
+    }
+}
+
+/// Whether `path` may name a file below the project folder for git to check: not from the
+/// root or a home folder, within the path bound, without control characters, and with no
+/// empty, `.` or `..` name before an optional closing `/`. Takes the path. Returns the answer.
+fn below(path: &str) -> bool {
+    !path.starts_with('/')
+        && !path.starts_with('~')
+        && path.len() <= DOCUMENT_PATH_BYTES_MAX
+        && !path.chars().any(char::is_control)
+        && path
+            .strip_suffix('/')
+            .unwrap_or(path)
+            .split('/')
+            .all(|name| !matches!(name, "" | "." | ".."))
 }
 
 /// Walks `folder`, found at `at` below the project folder and `depth` folders deep, adding
@@ -222,20 +274,6 @@ fn walk(
 /// Whether `name` is one of `list`, ignoring ASCII case.
 fn named(list: &[&str], name: &str) -> bool {
     list.iter().any(|known| known.eq_ignore_ascii_case(name))
-}
-
-/// Whether the file or folder `name` looks like it holds a secret: one of its words, split
-/// at every character that is not an ASCII letter or digit, or two adjacent words joined,
-/// is in [`SECRET_WORDS`], ignoring case. Takes the full name, extensions included.
-fn secret_like(name: &str) -> bool {
-    let words: Vec<&str> = name
-        .split(|character: char| !character.is_ascii_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .collect();
-    words.iter().any(|word| named(&SECRET_WORDS, word))
-        || words
-            .windows(2)
-            .any(|pair| named(&SECRET_WORDS, &format!("{}{}", pair[0], pair[1])))
 }
 
 /// Asks the project's own git, in one `check-ignore` call, which of `paths` it ignores by
@@ -457,8 +495,9 @@ pub(super) fn research(value: &serde_json::Value) -> Vec<FoundResearch> {
 }
 
 /// The file paths an answer's JSON list names: trimmed, a leading `./` dropped, each once,
-/// at most `max`, none empty, past the path bound or holding control characters. Takes the
-/// JSON value and the bound. Returns the paths.
+/// at most `max`, none empty, past the path bound, holding control characters or looking
+/// like it holds a secret, so a guessed secret name is never kept. Takes the JSON value and
+/// the bound. Returns the paths.
 pub(super) fn paths(value: &serde_json::Value, max: usize) -> Vec<String> {
     let mut paths: Vec<String> = Vec::new();
     let listed = value.as_array().into_iter().flatten();
@@ -471,6 +510,7 @@ pub(super) fn paths(value: &serde_json::Value, max: usize) -> Vec<String> {
         if !path.is_empty()
             && path.len() <= DOCUMENT_PATH_BYTES_MAX
             && !path.chars().any(char::is_control)
+            && !secret_like(path)
             && !paths.iter().any(|known| known == path)
         {
             paths.push(path.to_owned());

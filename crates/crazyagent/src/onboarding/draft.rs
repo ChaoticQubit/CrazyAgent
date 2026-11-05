@@ -16,6 +16,7 @@ use std::path::Path;
 
 #[cfg(unix)]
 mod documents;
+pub(super) mod names;
 
 const README_NAMES: [&str; 4] = ["README.md", "README", "README.txt", "readme.md"];
 const MANIFESTS: [&str; 12] = [
@@ -376,7 +377,8 @@ fn clip(text: &str, bytes: usize) -> &str {
     &text[..end]
 }
 
-/// Gathers the bounded evidence of the project folder `repo`.
+/// Gathers the bounded evidence of the project folder `repo`, with no file name in it that
+/// looks like it holds a secret or that the project's git ignores (MAP-2).
 pub(crate) fn gather(repo: &Path) -> Evidence {
     let mut evidence = Evidence {
         folder: folder_name(repo),
@@ -434,6 +436,7 @@ pub(crate) fn gather(repo: &Path) -> Evidence {
             }
             None => evidence.ignores_unknown = true,
         }
+        documents::screen(repo, &mut evidence);
     }
     assert!(evidence.entries.len() <= ENTRIES_MAX);
     assert!(evidence.manifests.len() <= MANIFESTS.len());
@@ -520,6 +523,7 @@ pub(crate) fn found_facts(evidence: &Evidence, repo: &Path) -> (MappingFacts, Ve
             }
             if let Some(main) = package.get("main").and_then(|m| m.as_str())
                 && let Some(main) = clean_entry(main, FACT_BYTES_MAX)
+                && !names::names_secret(&main)
             {
                 push_unique(&mut facts.entry_points, &main);
             }
@@ -721,7 +725,8 @@ fn first_paragraph(overview: &str) -> String {
 
 /// Splits the agent's answer into its overview and the draft fields of its
 /// last fenced json block. A missing or unreadable block leaves the fields
-/// empty; `about` then falls back to the overview's first paragraph.
+/// empty; `about` then falls back to the overview's first paragraph. Overview lines,
+/// entries and an `about` naming a path that looks like it holds a secret are dropped.
 #[cfg(unix)]
 pub(crate) fn parse_answer(text: &str) -> Answer {
     let text = clip(text, OVERVIEW_BYTES_MAX * 2);
@@ -738,18 +743,22 @@ pub(crate) fn parse_answer(text: &str) -> Answer {
         ),
         None => (text.trim(), Reply::default()),
     };
-    let overview = clip(overview, OVERVIEW_BYTES_MAX).trim().to_owned();
+    let overview = names::without_secret_paths(clip(overview, OVERVIEW_BYTES_MAX))
+        .trim()
+        .to_owned();
     let clean = |list: &[String]| -> Vec<String> {
         let mut cleaned = Vec::new();
         for value in list.iter().take(FACTS_MAX) {
-            if let Some(value) = clean_entry(value, FACT_BYTES_MAX) {
+            if let Some(value) = clean_entry(value, FACT_BYTES_MAX)
+                && !names::names_secret(&value)
+            {
                 push_unique(&mut cleaned, &value);
             }
         }
         cleaned
     };
     let mut about = clean_about(reply.about.as_deref().unwrap_or_default());
-    if about.is_empty() {
+    if about.is_empty() || names::names_secret(&about) {
         about = first_paragraph(&overview);
     }
     let mut platforms = Vec::new();
