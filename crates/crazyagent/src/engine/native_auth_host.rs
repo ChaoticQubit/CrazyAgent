@@ -328,6 +328,8 @@ pub(in crate::engine) mod claude_auth;
 
 #[cfg(test)]
 mod bootstrap_pipe_tests;
+#[cfg(test)]
+mod cause_tests;
 pub(in crate::engine) mod codex_auth;
 pub(super) mod custody;
 #[cfg(test)]
