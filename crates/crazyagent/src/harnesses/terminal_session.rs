@@ -136,10 +136,10 @@ fn host_failure(error: HostError) -> LaunchError {
     LaunchError(error.0, None)
 }
 
-/// The refusal code for a confined pane on a system whose terminal host cannot confine it.
-/// Inputs: the operating system name as `std::env::consts::OS` gives it and whether the
-/// pane runs unconfined. Output: the code, or None where the pane may open.
-fn unconfinable(_os: &str, _unconfined: bool) -> Option<&'static str> {
+/// The refusal code for an agent pane on a system that cannot hold it under the macOS
+/// confinement. Input: the operating system name as `std::env::consts::OS` gives it.
+/// Output: the code, or None where an agent pane may open or be taken over.
+fn agent_pane_unavailable(_os: &str) -> Option<&'static str> {
     None
 }
 
@@ -203,7 +203,7 @@ impl TerminalSession {
         if interactive::support(&request.harness) != Support::Terminal {
             return Err(failure("launch_terminal_unsupported"));
         }
-        if let Some(code) = unconfinable(std::env::consts::OS, request.unconfined) {
+        if let Some(code) = agent_pane_unavailable(std::env::consts::OS) {
             return Err(failure(code));
         }
         let (request, relay) = route(request)?;

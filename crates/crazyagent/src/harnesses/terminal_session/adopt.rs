@@ -230,6 +230,9 @@ impl TerminalSession {
         limits: LaunchLimits,
     ) -> Result<Self, LaunchError> {
         let context = record.context.as_ref().map(Installed::adopt).transpose()?;
+        if let Some(code) = super::agent_pane_unavailable(std::env::consts::OS) {
+            return Err(failure(code));
+        }
         if !host.alive().map_err(host_failure)?.contains(&agent) {
             return Err(failure("launch_closed"));
         }
