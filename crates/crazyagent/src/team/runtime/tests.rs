@@ -3072,11 +3072,10 @@ fn noted(fixture: &Fixture, text: &str) -> usize {
 }
 
 /// Each master session keeps its own harness conversation: switching sessions restarts the
-/// project's one live master in its worktree, a session it ran before continues by the
-/// stored conversation id and reads only the turns added after the resume, also when it was
-/// kept on another pool account, and a session whose conversation cannot continue, kept with
-/// an id the harness cannot resume by or with its record gone, starts a fresh harness
-/// conversation seeded with what could be read, with a note saying so.
+/// project's one live master in its worktree, a session it ran before continues by its
+/// stored id and reads only turns added after the resume, and a session whose conversation
+/// cannot continue, kept on another account than this endpoint or with its record gone,
+/// starts a fresh conversation seeded with what could be read, with a note saying so.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_resumed_session_continues_its_own_harness_conversation_or_says_why_not() {
@@ -3116,7 +3115,7 @@ fn a_resumed_session_continues_its_own_harness_conversation_or_says_why_not() {
         },
     );
     assert_eq!(live_turns(&fixture.connection), (1, false));
-    let (second, second_record) = kept_conversation(&fixture.connection, "s-two").unwrap();
+    let (second, _) = kept_conversation(&fixture.connection, "s-two").unwrap();
     assert_ne!(second, first);
     assert_eq!(launches(&fixture, master).len(), 2);
     assert!(
@@ -3178,42 +3177,24 @@ fn a_resumed_session_continues_its_own_harness_conversation_or_says_why_not() {
     switch_session(&fixture.connection, "s-two");
     fixture.until(
         &mut team,
-        "a session kept on another pool account starts its master again",
+        "a session kept on another account starts its master again",
         |f| launches(f, master).len() == 4 && host.alive().unwrap() == names(&[master]),
     );
     assert!(
-        launches(&fixture, master)[3].ends_with(&format!(" resume {second}")),
-        "a session kept on another pool account resumes its own conversation: {:?}",
+        !launches(&fixture, master)[3].contains("resume"),
+        "an endpoint master never resumes a conversation kept on another account: {:?}",
         launches(&fixture, master)
     );
-    idle_ticks(&mut team);
-    assert_eq!(noted(&fixture, crate::master_sessions::FRESH_NOTE), 0);
-    assert_eq!(
-        kept_conversation(&fixture.connection, "s-two").map(|(id, _)| id),
-        Some(second.clone())
-    );
-    assert_eq!(live_turns(&fixture.connection), (3, false));
-
-    fixture
-        .connection
-        .execute(
-            "UPDATE team_master_conversations SET conversation='not-a-uuid' WHERE session='s-one'",
-            [],
-        )
-        .unwrap();
-    switch_session(&fixture.connection, "s-one");
     fixture.until(
         &mut team,
-        "a session kept with an id the harness cannot resume by starts fresh",
+        "a session kept on another account starts fresh",
         |f| {
             noted(f, crate::master_sessions::FRESH_NOTE) == 1
-                && kept_conversation(&f.connection, "s-one")
-                    .is_some_and(|(id, _)| id != "not-a-uuid" && id != first)
+                && kept_conversation(&f.connection, "s-two").is_some_and(|(id, _)| id != second)
                 && live_agent(&f.connection).is_some()
         },
     );
     assert_eq!(live_turns(&fixture.connection), (3, false));
-    assert!(!launches(&fixture, master)[4].contains("resume"));
     let seeded = codex_instructions(&fixture, master);
     assert!(
         seeded.contains("Your earlier harness conversation in this session"),
@@ -3222,19 +3203,19 @@ fn a_resumed_session_continues_its_own_harness_conversation_or_says_why_not() {
     assert!(seeded.contains("You: Done."), "{seeded}");
     assert_eq!(typed(&fixture, master), "", "the seed is never typed");
 
-    std::fs::remove_file(&second_record).unwrap();
-    switch_session(&fixture.connection, "s-two");
+    std::fs::remove_file(&first_record).unwrap();
+    switch_session(&fixture.connection, "s-one");
     fixture.until(
         &mut team,
         "a session whose record is gone starts fresh",
         |f| {
             noted(f, crate::master_sessions::LOST_NOTE) == 1
-                && launches(f, master).len() == 6
+                && launches(f, master).len() == 5
                 && live_agent(&f.connection).is_some()
         },
     );
     assert_eq!(live_turns(&fixture.connection), (3, false));
-    assert!(!launches(&fixture, master)[5].contains("resume"));
+    assert!(!launches(&fixture, master)[4].contains("resume"));
     assert_eq!(masters(&fixture.connection), [master]);
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
