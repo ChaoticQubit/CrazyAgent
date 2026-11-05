@@ -492,3 +492,45 @@ async fn an_old_sign_in_stays_fenced_while_its_profile_is_held_and_clears_once_f
     settle(&client, &elsewhere, &proceeds, ended).await;
     case.no_fence().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_claude_sign_in_that_fails_before_its_login_starts_settles_failed_and_frees_the_account()
+{
+    let case = Case::new();
+    let (client, database) = owner(case.root()).await;
+    let account = subscription(&client, "Work Claude").await;
+    let (scope, profile) = scope(&client, &database, &account).await;
+    let first = waiting(&client, &scope).await;
+    cancel(&client, &scope, &first).await;
+    settle(&client, &scope, &first, ended).await;
+    case.no_fence().await;
+    let library = case
+        .root()
+        .join("native-profiles")
+        .join(&profile)
+        .join("home")
+        .join("Library");
+    let kept = case.root().join("kept-library");
+    std::fs::rename(&library, &kept).unwrap();
+    std::os::unix::fs::symlink(&kept, &library).unwrap();
+    let begun = start(&client, &scope).await.unwrap();
+    let failed = settle(&client, &scope, &begun, ended).await;
+    assert_eq!(
+        (failed.phase, failed.code.as_deref()),
+        (
+            NativeAuthPhase::Failed,
+            Some("native_auth_claude_keychain_unavailable")
+        ),
+        "{}",
+        case.log()
+    );
+    assert_eq!(case.logins().len(), 1);
+    case.no_fence().await;
+    std::fs::remove_file(&library).unwrap();
+    std::fs::rename(&kept, &library).unwrap();
+    let again = waiting(&client, &scope).await;
+    cancel(&client, &scope, &again).await;
+    let cancelled = settle(&client, &scope, &again, ended).await;
+    assert_eq!(cancelled.phase, NativeAuthPhase::Cancelled);
+    case.no_fence().await;
+}

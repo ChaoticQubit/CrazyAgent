@@ -687,6 +687,13 @@ impl CustodySession {
             .claude_expiry()
     }
 
+    /// Whether this session was ever handed a child, even one reaped since, so a session
+    /// that never started one can retire without one. Input: none. Output: true once a
+    /// child was handed over.
+    pub(in crate::engine) fn child_attempted(&self) -> bool {
+        self.child_attempted
+    }
+
     pub(in crate::engine) fn child_mut(&mut self) -> Result<&mut Child, EngineError> {
         let child = self
             .child
@@ -838,6 +845,13 @@ pub(super) fn cleanup_owned_group(
 }
 
 impl Retirement {
+    /// Whether this retirement was sealed after a reaped child rather than with no child
+    /// ever started, which picks the engine request that retires it. Input: none.
+    /// Output: true after a reaped child.
+    pub(in crate::engine) fn child_reaped(&self) -> bool {
+        matches!(self.kind, RetirementKind::ChildReaped)
+    }
+
     pub(in crate::engine) fn revalidate(
         &self,
         host: &HostStamp,

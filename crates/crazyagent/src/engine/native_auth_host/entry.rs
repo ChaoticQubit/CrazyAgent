@@ -146,7 +146,11 @@ async fn run_inner(
             return Err(EngineError("native_auth_host_executable_changed".into()));
         }
         let retirement = super::claude_auth::run(session, &mut channel, &executable).await?;
-        channel.retire_after_child_reaped(retirement).await?
+        if retirement.child_reaped() {
+            channel.retire_after_child_reaped(retirement).await?
+        } else {
+            channel.retire(retirement).await?
+        }
     } else if let Some((executable, expected_sha256)) = codex {
         if fact.binding.connection.harness.as_str() != "codex" {
             return Err(EngineError("native_auth_method_mismatch".into()));
