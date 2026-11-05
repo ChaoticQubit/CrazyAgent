@@ -325,8 +325,15 @@ pub fn no_channel(
     tools: bool,
     kept: bool,
 ) -> Result<Option<&'static str>, EngineError> {
-    let _ = (db, project, role, harness, tools, kept);
-    Ok(None)
+    if role != crate::team::AgentRole::Sub
+        || tools
+        || !kept
+        || HarnessKind::from_harness(harness) != Some(HarnessKind::Codex)
+    {
+        return Ok(None);
+    }
+    let delivery = settings::delivery(db, project, HarnessKind::Codex)?;
+    Ok((delivery == Delivery::NativeOnly).then_some(NO_CHANNEL))
 }
 
 /// Hands a project master its waiting messages through the engine's own master input

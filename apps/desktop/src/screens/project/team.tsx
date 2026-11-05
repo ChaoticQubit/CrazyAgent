@@ -130,6 +130,7 @@ export function TeamPanel({ data, team, filter, harnesses, accounts, reload }: {
           {row.role !== row.name && <span className="pj-small pj-muted pj-block">{row.role}</span>}
           {row.lead && <span className="pj-small pj-muted pj-block">Worker of {displayText(row.lead)}</span>}
           {row.folder && <span className="pj-small pj-muted pj-block">{displayText(row.folder)}</span>}
+          {row.messageNote && <span className="pj-small pj-block">{displayText(row.messageNote)}</span>}
           {row.teammates.length > 0 && <ul className="pj-rows" aria-label={`Teammates of ${displayText(row.name)}`}>{row.teammates.map((mate) => <li key={mate.key} className="pj-row">
             <span className="pj-small pj-secondary">Teammate in pane {displayText(mate.pane)}</span>
             <StatusBadge word={mate.word} />

@@ -3767,7 +3767,29 @@ fn message_notes(
     access: Option<&ModelAccess>,
     status: &mut TeamStatus,
 ) -> Result<(), EngineError> {
-    let _ = (connection, access, status);
+    let project = status.project_id.clone();
+    for agent in &mut status.agents {
+        let kept = access
+            .zip(agent.account.as_deref())
+            .and_then(|(access, account)| {
+                access
+                    .connections
+                    .iter()
+                    .find(|found| found.id.as_str() == account)
+            })
+            .zip(launch_harness(&agent.harness))
+            .and_then(|(found, harness)| reach(found, harness))
+            .is_some_and(|reach| matches!(reach, TeamReach::Endpoint { .. }));
+        agent.message_note = crate::coord::delivery::no_channel(
+            connection,
+            &project,
+            agent.role,
+            &agent.harness,
+            agent.tools,
+            kept,
+        )?
+        .map(str::to_owned);
+    }
     Ok(())
 }
 
