@@ -312,6 +312,7 @@ pub(in crate::tui) fn wrap_words(text: &str, width: usize) -> Vec<String> {
 
 /// Draws the 80-column tab strip and its underline.
 /// Takes the width, the labels with optional counts, the active label and whether section glyphs fit.
+/// Drops the counts, then narrows the gap from 3 to 2 to 1 cell, until the labels fit.
 /// Returns two rows: labels, then the rule with a heavy mark under the active label.
 pub(in crate::tui) fn tab_strip(
     width: usize,
@@ -337,8 +338,10 @@ pub(in crate::tui) fn tab_strip(
         (true, 3)
     } else if bare + 3 * items.len().saturating_sub(1) <= width {
         (false, 3)
-    } else {
+    } else if bare + 2 * items.len().saturating_sub(1) <= width {
         (false, 2)
+    } else {
+        (false, 1)
     };
     let mut top = Row::of("  ", Style::new());
     let mut under = Row::of("\u{2500}\u{2500}", look.muted);
@@ -368,6 +371,10 @@ pub(in crate::tui) fn tab_strip(
             under = under.push(look.glyph("\u{2500}").repeat(gap), look.muted);
         }
     }
+    assert!(
+        gap == 1 || top.width() <= width,
+        "a gap above one is chosen only when the strip fits"
+    );
     let rest = width.saturating_sub(under.width());
     under = under.push(look.glyph("\u{2500}").repeat(rest), look.muted);
     [top.pad(width), under.pad(width)]
