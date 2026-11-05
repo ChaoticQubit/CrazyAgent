@@ -3120,6 +3120,73 @@ fn an_owner_line_reaches_a_live_master_once_its_first_screen_can_be_watched() {
     host.close(&[]).unwrap();
 }
 
+/// `LIVE_CODEX` that turns bracketed paste on only once `go` exists in its Codex home, as
+/// an app that reads no keys for a long while. Returns the script.
+#[cfg(target_os = "macos")]
+fn paste_later_codex() -> String {
+    let ready = "printf '\\033[?2004hCodex stand-in ready\\n'\n";
+    let script = LIVE_CODEX.replacen(
+        ready,
+        "( while [ ! -e \"$CODEX_HOME/go\" ]; do /bin/sleep 0.1; done; printf '\\033[?2004h' ) &\nprintf 'Codex stand-in ready\\n'\n",
+        1,
+    );
+    assert_ne!(script, LIVE_CODEX);
+    script
+}
+
+/// F2: an owner line that has waited longer than a first screen may take for the live
+/// master's app to read keys says why, once, in a team note and the live problem line, and
+/// the line goes once the owner's line is typed.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_owner_line_waiting_long_for_the_masters_app_says_so_once() {
+    let mut fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, &paste_later_codex());
+    let project = fixture.setup.project_id.clone();
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the live master's pane runs", |f| {
+        live_agent(&f.connection).is_some()
+    });
+    let master = masters(&fixture.connection)[0];
+    let tx = fixture.connection.transaction().unwrap();
+    append_message(
+        &tx,
+        &project,
+        MessageAuthor::Owner,
+        "Reply with only the word READY.",
+        MessageState::Pending,
+        now_ms(),
+    )
+    .unwrap()
+    .unwrap();
+    tx.commit().unwrap();
+    let line = super::super::master::MASTER_NOT_READING;
+    let deadline = Instant::now() + crate::harnesses::terminal_session::READY_WAIT + WAIT;
+    while fixture.status().live_problem.as_deref() != Some(line) {
+        assert!(
+            Instant::now() < deadline,
+            "the waiting line says why: {:#?}",
+            fixture.status()
+        );
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(noted(&fixture, line), 1, "one note");
+    idle_ticks(&mut team);
+    assert_eq!(noted(&fixture, line), 1, "still one note");
+
+    std::fs::write(stand_in_file(&fixture, master, "go"), "").unwrap();
+    fixture.until(
+        &mut team,
+        "the owner's line is typed and the wait line goes",
+        |f| live_turns(&f.connection).0 >= 1 && f.status().live_problem.is_none(),
+    );
+    assert_eq!(noted(&fixture, line), 1);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
 #[cfg(target_os = "macos")]
 #[test]
 fn an_owner_line_waits_until_the_live_masters_screen_is_quiet() {

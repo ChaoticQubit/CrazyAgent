@@ -188,6 +188,76 @@ fn a_failed_typing_frees_the_live_master_for_the_next_input() {
     );
 }
 
+/// F3: engine input asks the host whether the app reads keys outside its write
+/// transaction, so a tmux server slow to answer never holds the engine database's write
+/// lock: while the fixture's tmux server is stopped and the input waits on it, another
+/// connection takes the write lock at once.
+#[test]
+fn engine_input_asks_the_host_outside_its_write_transaction() {
+    let mut fixture = Fixture::new();
+    let host = fixture.host();
+    let project = fixture.setup.project_id.clone();
+    let typed = fixture.base.join("typed");
+    let command = InteractiveCommand {
+        argv: vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            format!(
+                "/bin/stty raw -echo; printf '\\033[?2004hready\\n'; exec /bin/cat > '{}'",
+                typed.display()
+            ),
+        ],
+        cwd: fixture.base.clone(),
+        env: Vec::new(),
+        transcript: Transcript::Unavailable,
+    };
+    let pane = AgentId::team(MASTER).unwrap();
+    host.spawn(&pane, &command).unwrap();
+    reads_keys(host.as_ref(), &pane);
+    fixture.live(Some(MASTER));
+    let tmux = fixture.tmux.clone().unwrap();
+    let shown = crate::spawn_gate::output(
+        Command::new(&tmux)
+            .arg("-S")
+            .arg(fixture.base.join(FOLDER).join(SOCKET))
+            .args(["display-message", "-p", "#{pid}"])
+            .env_clear()
+            .stdin(Stdio::null()),
+    )
+    .unwrap();
+    let pid = String::from_utf8(shown.stdout).unwrap().trim().to_owned();
+    assert!(pid.parse::<u32>().is_ok(), "{pid:?}");
+    let signal = |name: &str| {
+        crate::spawn_gate::status(Command::new("/bin/kill").args([name, pid.as_str()]))
+            .is_ok_and(|status| status.success())
+    };
+    let db = fixture.base.join("engine.db");
+    let other = Connection::open(&db).unwrap();
+    other.busy_timeout(Duration::ZERO).unwrap();
+
+    assert!(signal("-STOP"), "the tmux server stops");
+    let input = std::thread::spawn({
+        let host = host.clone();
+        let project = project.clone();
+        move || {
+            let connection = Connection::open(&db).unwrap();
+            master_input_at(&connection, host.as_ref(), None, &project, "hello", NOW)
+        }
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    let locked = other.execute_batch("BEGIN IMMEDIATE; ROLLBACK;");
+    let resumed = signal("-CONT");
+    let typed_input = input.join().unwrap();
+    assert!(resumed, "the tmux server goes on");
+    assert!(
+        locked.is_ok(),
+        "the write lock is free while tmux has not answered: {locked:?}"
+    );
+    assert_eq!(typed_input, Ok(()));
+    let pasted = b"\x1b[200~hello\x1b[201~\r";
+    assert_eq!(typed_until(&typed, pasted), pasted);
+}
+
 /// Waits until a pane's app has turned bracketed paste on, which engine input to a live
 /// master waits for. Takes the host and the pane.
 fn reads_keys(host: &dyn Host, pane: &AgentId) {

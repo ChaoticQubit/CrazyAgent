@@ -226,6 +226,12 @@ pub(crate) const SIGN_INS_CHECKING: &str = "Checking account sign-ins after the 
 /// yet (LMS-1); the views show it as is.
 pub(crate) const PROFILE_IN_USE: &str = "Waiting for the account: another process is using its profile, such as a sign-in or a sign-out. The live master starts once the profile is free.";
 
+/// The live master's problem line and one team note while an owner line has waited longer
+/// than a first screen may take for the master's app to read keys (F2); the line is typed
+/// once the app turns bracketed paste on.
+pub(crate) const MASTER_NOT_READING: &str =
+    "The master app is not reading keys yet; your message waits.";
+
 /// Turns a project's live master on or off: on, the runtime keeps the master's own app
 /// running in a terminal; off, the master ends with its next stop. Turning it on clears why
 /// it last could not start, and either way a sign-in or profile wait line no longer applies.

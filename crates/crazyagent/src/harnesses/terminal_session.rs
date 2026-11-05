@@ -18,7 +18,7 @@ mod adopt;
 pub use adopt::{PaneRecord, RecordSource};
 
 pub const PROMPT_BYTES_MAX: usize = 1024 * 1024;
-const READY_WAIT: Duration = Duration::from_secs(30);
+pub(crate) const READY_WAIT: Duration = Duration::from_secs(30);
 const READY_QUIET: Duration = Duration::from_millis(700);
 const PASTE_SETTLE: Duration = Duration::from_millis(200);
 const POLL: Duration = Duration::from_millis(100);
