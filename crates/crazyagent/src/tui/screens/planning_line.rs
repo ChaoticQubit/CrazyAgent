@@ -9,7 +9,7 @@ use crossterm::event::KeyCode;
 pub(in crate::tui) enum Planning {
     Idle,
     Waiting,
-    Planning {
+    Active {
         job: i64,
         status: ResearchStatus,
     },
@@ -52,7 +52,7 @@ pub(in crate::tui) fn planning(jobs: &[ResearchJob]) -> Planning {
         {
             Planning::Waiting
         }
-        Some(job) if ACTIVE.contains(&job.status) => Planning::Planning {
+        Some(job) if ACTIVE.contains(&job.status) => Planning::Active {
             job: job.id,
             status: job.status,
         },
@@ -77,7 +77,7 @@ pub(in crate::tui) fn planning_value(state: &Planning, look: &Look) -> Row {
     match state {
         Planning::Idle => Row::of("Not planned", look.fg).push(plan, look.muted),
         Planning::Waiting => Row::of("Waiting for research", look.muted),
-        Planning::Planning { status, .. } => Row::of(
+        Planning::Active { status, .. } => Row::of(
             match status {
                 ResearchStatus::Queued => "Planning, waiting to start",
                 ResearchStatus::NeedsPool => "Planning, waiting for a pool",
@@ -120,7 +120,7 @@ pub(in crate::tui) fn planning_key(
         (KeyCode::Char('p'), Planning::Waiting) => {
             Some(Err("The roadmap is planned once research finishes."))
         }
-        (KeyCode::Char('p'), Planning::Planning { .. }) => Some(Err(
+        (KeyCode::Char('p'), Planning::Active { .. }) => Some(Err(
             "A roadmap is already being planned for this project. Wait for it to finish.",
         )),
         (KeyCode::Char('r'), Planning::Failed { job, .. }) => {

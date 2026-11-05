@@ -3996,7 +3996,7 @@ fn message_whose_arrival_cannot_be_told_is_failed_with_a_note_and_stays_pending_
     );
     assert_eq!(
         pending_keys(&fixture, ledger::ActionKind::Message),
-        [key.clone()],
+        std::slice::from_ref(&key),
         "the recovery banner reads it from pending()"
     );
 
@@ -4009,7 +4009,7 @@ fn message_whose_arrival_cannot_be_told_is_failed_with_a_note_and_stays_pending_
     );
     assert_eq!(
         pending_keys(&fixture, ledger::ActionKind::Message),
-        [key.clone()]
+        std::slice::from_ref(&key)
     );
 
     let open = ledger::pending_key(&fixture.connection, ledger::ActionKind::Message, &key)
@@ -4066,7 +4066,7 @@ fn dispatch_whose_arrival_cannot_be_told_fails_once_and_stays_pending_for_the_ow
     assert_eq!(outcomes(&fixture, "dispatch", &key), [None]);
     assert_eq!(
         pending_keys(&fixture, ledger::ActionKind::Dispatch),
-        [key.clone()]
+        std::slice::from_ref(&key)
     );
 
     drop(fixture.runtime());
@@ -4077,7 +4077,7 @@ fn dispatch_whose_arrival_cannot_be_told_fails_once_and_stays_pending_for_the_ow
     );
     assert_eq!(
         pending_keys(&fixture, ledger::ActionKind::Dispatch),
-        [key.clone()]
+        std::slice::from_ref(&key)
     );
 }
 
@@ -4096,7 +4096,7 @@ fn an_unknown_delivery_is_not_settled_later_by_a_newer_session() {
     assert_eq!(message_state(&fixture, message), "failed");
     assert_eq!(
         pending_keys(&fixture, ledger::ActionKind::Message),
-        [key.clone()]
+        std::slice::from_ref(&key)
     );
     let marked = ledger::pending_key(&fixture.connection, ledger::ActionKind::Message, &key)
         .unwrap()
@@ -4129,7 +4129,7 @@ fn an_unknown_delivery_is_not_settled_later_by_a_newer_session() {
         );
         assert_eq!(
             pending_keys(&fixture, ledger::ActionKind::Message),
-            [key.clone()]
+            std::slice::from_ref(&key)
         );
         assert_eq!(message_state(&fixture, message), "failed");
         assert_eq!(noted(&fixture, delivery::UNKNOWN_NOTE), 1);
@@ -4828,7 +4828,7 @@ fn a_held_message_waits_for_its_resume_and_a_retried_resume_that_fails_again_let
     assert_eq!(noted(&fixture, delivery::UNKNOWN_NOTE), 1);
     assert_eq!(
         pending_keys(&fixture, ledger::ActionKind::Message),
-        [key.clone()]
+        std::slice::from_ref(&key)
     );
     idle_ticks(&mut team);
     assert_eq!(message_state(&fixture, message), "failed");

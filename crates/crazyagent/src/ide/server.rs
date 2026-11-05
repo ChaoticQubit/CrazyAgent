@@ -276,12 +276,14 @@ impl Servers {
             .map_err(|_| failure("ide_state_unavailable"))
             .and_then(|output| {
                 command(
-                    project,
-                    &build,
-                    &folder,
-                    root,
+                    Launch {
+                        project,
+                        build: &build,
+                        folder: &folder,
+                        root,
+                        socket: &self.socket,
+                    },
                     &info,
-                    &self.socket,
                     output,
                     project_hooks,
                 )
@@ -692,6 +694,16 @@ fn checked_build(build: &Path) -> Result<PathBuf, EngineError> {
     Ok(real)
 }
 
+/// Where one IDE server launch runs: its project, the verified build, its state folder,
+/// the project root and the owner socket its built-in extension connects to.
+struct Launch<'a> {
+    project: &'a ProjectId,
+    build: &'a Path,
+    folder: &'a Path,
+    root: &'a Path,
+    socket: &'a Path,
+}
+
 /// The server's command line, IDE-1 verdict 3, under the Seatbelt profile installed for
 /// this launch, after the AI lock is written ([`settings::write`]); a lock that cannot be
 /// written stops the start. The build's launcher on 127.0.0.1 at the server port, the token
@@ -705,17 +717,20 @@ fn checked_build(build: &Path) -> Result<PathBuf, EngineError> {
 /// the project's hooks run in `root` only when `project_hooks` is on, and git's search stops
 /// at `root`'s agents root, and at its older one while an engine-made worktree of
 /// `project` stays there ([`super::workspace::older_agents`]); a `root` holding a `:` is
-/// refused.
+/// refused. Inputs: the launch, the server's info, the output pipe and the hooks switch.
 fn command(
-    project: &ProjectId,
-    build: &Path,
-    folder: &Path,
-    root: &Path,
+    launch: Launch<'_>,
     info: &ServerInfo,
-    socket: &Path,
     output: PipeWriter,
     project_hooks: bool,
 ) -> Result<Command, EngineError> {
+    let Launch {
+        project,
+        build,
+        folder,
+        root,
+        socket,
+    } = launch;
     let errors = output
         .try_clone()
         .map_err(|_| failure("ide_state_unavailable"))?;

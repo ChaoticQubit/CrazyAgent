@@ -585,7 +585,7 @@ fn entries(bytes: &[u8]) -> Option<Vec<Entry>> {
         return Some(Vec::new());
     }
     let parts: Vec<&str> = text.strip_suffix('\0')?.split('\0').collect();
-    if parts.len() % 2 != 0 {
+    if !parts.len().is_multiple_of(2) {
         return None;
     }
     Some(

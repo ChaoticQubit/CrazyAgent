@@ -89,7 +89,7 @@ impl Terminal {
         let project = ProjectId::new(PROJECT).unwrap();
         let folder = ide::workspace::folder(engine.path(), &project).unwrap();
         fs::write(folder.join("README.md"), "buoys\n").unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let listener = crazyagent::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
         ready_build(&engine, &owner).await;
         Self {
             engine,
@@ -318,7 +318,7 @@ async fn ide_terminal_sandboxed_is_the_default_and_runs_the_owner_shell_in_the_a
         .unwrap();
     assert_eq!(result(saved), OwnerResult::Applied);
     let place = ide_shell::project_place(case.engine.path(), &case.project).unwrap();
-    assert_eq!(place.extra_reads, [granted.clone()]);
+    assert_eq!(place.extra_reads, std::slice::from_ref(&granted));
 
     let client = case.owner.controller.owner_client().unwrap();
     let opened = client.ide_tab_open(case.project.clone()).await.unwrap();

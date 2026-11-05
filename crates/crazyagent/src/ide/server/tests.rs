@@ -1031,12 +1031,14 @@ fn command_ceiling(servers: &Servers, project: &ProjectId, root: &Path) -> OsStr
     };
     let (_reader, writer) = crate::spawn_gate::guarded(std::io::pipe).unwrap();
     let command = command(
-        project,
-        &cached_build(),
-        &folder,
-        root,
+        Launch {
+            project,
+            build: &cached_build(),
+            folder: &folder,
+            root,
+            socket: &servers.socket,
+        },
         &info,
-        &servers.socket,
         writer,
         false,
     )
@@ -1213,12 +1215,14 @@ fn the_server_command_line_is_verdict_3_under_the_ide_sandbox() {
     let (_reader, writer) = crate::spawn_gate::guarded(std::io::pipe).unwrap();
     let socket = data.path().join("engine").join("owner.sock");
     let command = command(
-        &project,
-        &build,
-        &folder,
-        checkout.path(),
+        Launch {
+            project: &project,
+            build: &build,
+            folder: &folder,
+            root: checkout.path(),
+            socket: &socket,
+        },
         &info,
-        &socket,
         writer,
         false,
     )

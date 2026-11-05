@@ -2053,7 +2053,7 @@ fn worktree_config_on(listing: &[u8]) -> bool {
             key.eq_ignore_ascii_case("extensions.worktreeconfig")
                 .then_some(value)
         })
-        .last()
+        .next_back()
         .is_some_and(|value| GIT_TRUE.iter().any(|on| on.eq_ignore_ascii_case(value)))
 }
 
