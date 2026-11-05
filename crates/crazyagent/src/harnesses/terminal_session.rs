@@ -747,10 +747,11 @@ pub fn end_left_pane(host: &dyn Host, agent: &AgentId, owner: &str) -> Result<bo
 }
 
 /// Asks a pane's first process to stop with terminate and waits up to `KEEPER_WAIT` for the
-/// pane to end. A [`crate::sandbox::KEEPER`] then has the run's warden kill every process in
-/// the sandbox and ends only once the warden confirmed that or found signals not confined,
-/// so the pane ending in time confirms it. Inputs: the host, the pane and its first process,
-/// proven the pane's within `GROUP_FRESH`. Output: whether the pane is gone.
+/// pane to end, after the host kept its last screen, since the pane ends before any kill.
+/// A [`crate::sandbox::KEEPER`] then has the run's warden kill every process in the sandbox
+/// and ends only once the warden confirmed that or found signals not confined, so the pane
+/// ending in time confirms it. Inputs: the host, the pane and its first process, proven the
+/// pane's within `GROUP_FRESH`. Output: whether the pane is gone.
 #[cfg(target_os = "macos")]
 pub(crate) fn stop_keeper(host: &dyn Host, agent: &AgentId, pid: u32) -> bool {
     let gone = || host.alive().is_ok_and(|alive| !alive.contains(agent));
@@ -763,6 +764,7 @@ pub(crate) fn stop_keeper(host: &dyn Host, agent: &AgentId, pid: u32) -> bool {
     else {
         return false;
     };
+    host.keep_last(agent);
     let _ = rustix::process::kill_process(process, rustix::process::Signal::TERM);
     let deadline = Instant::now() + KEEPER_WAIT;
     while !gone() {

@@ -79,6 +79,12 @@ impl LastScreens {
     }
 }
 
+/// The label over a kept screen: the local time its terminal ended. Output: the label.
+fn finished_label() -> String {
+    use crate::tui::clock::{clock, local_offset, now_ms};
+    format!(" Finished at {} ", clock(now_ms(), local_offset()))
+}
+
 /// A terminal host that keeps the last screen of each terminal it ends, so a viewer opening
 /// an agent between runs sees how its last run finished, labeled with the local time it
 /// ended, instead of a refusal; a new run of the agent forgets it. A kill and a spawn each
@@ -133,6 +139,13 @@ impl<H: Host> Host for LastScreenHost<H> {
         self.inner.snapshot(agent)
     }
 
+    fn keep_last(&self, agent: &AgentId) {
+        let mut screens = self.screens();
+        if let Ok(last) = self.inner.snapshot(agent) {
+            screens.keep(agent, &last.screen, last.cols, last.rows, &finished_label());
+        }
+    }
+
     fn input(&self, agent: &AgentId, bytes: &[u8]) -> Result<(), HostError> {
         self.inner.input(agent, bytes)
     }
@@ -154,9 +167,7 @@ impl<H: Host> Host for LastScreenHost<H> {
         let last = self.inner.snapshot(agent).ok();
         self.inner.kill(agent)?;
         if let Some(last) = last {
-            use crate::tui::clock::{clock, local_offset, now_ms};
-            let label = format!(" Finished at {} ", clock(now_ms(), local_offset()));
-            screens.keep(agent, &last.screen, last.cols, last.rows, &label);
+            screens.keep(agent, &last.screen, last.cols, last.rows, &finished_label());
         }
         Ok(())
     }
