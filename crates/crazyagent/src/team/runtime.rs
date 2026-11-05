@@ -177,7 +177,8 @@ struct Grant {
 /// `scratch_pin` is the agent's short temp folder as the engine made it (DEC-111 S1R1-1);
 /// `proxy` is the model proxy an agent with tools under the None network reaches its model
 /// through, the only network its profile allows (S4b); `network` is the project network its
-/// profile was made for, which a narrower saved choice stops it for (CS-2).
+/// profile was made for, which a narrower saved choice stops it for (CS-2); `claude_display`
+/// is the project's Claude Code terminal display, read when the agent is prepared (N-D9).
 struct Plan {
     harness: String,
     executable: PathBuf,
@@ -200,6 +201,7 @@ struct Plan {
     #[cfg(unix)]
     scratch_pin: Option<(u64, u64)>,
     proxy: Option<Arc<ModelProxy>>,
+    claude_display: crate::coord::settings::ClaudeDisplay,
 }
 
 /// Why a native-mode lead does not start at Full access: its own tmux server, its teammate
@@ -217,14 +219,15 @@ const OVERLAP_BLOCK_NEEDS_HOOKS: &str = "Overlaps set to Block needs hooks, and 
 impl Plan {
     /// Gives a native-mode lead's launch context its agent team (DEC-104 K5a): agent teams on,
     /// `--teammate-mode tmux`, tmux on its PATH and the teammates' instructions. A plan with a
-    /// model proxy also points the launch's variables at it (S4b). Other plans keep the
-    /// context as it is. Takes the context. Returns it.
+    /// model proxy also points the launch's variables at it (S4b). Every plan gives its
+    /// Claude Code terminal the project's display (N-D9). Takes the context. Returns it.
     fn team_context(&self, context: AgentContext) -> AgentContext {
         assert_eq!(
             self.native,
             self.tmux.is_some(),
             "a native plan carries its tmux"
         );
+        let context = context.with_claude_display(self.claude_display);
         let context = match &self.proxy {
             Some(proxy) => context.with_model_proxy(proxy.port()),
             None => context,
@@ -6240,6 +6243,14 @@ impl TeamRuntime {
                 .map_err(sandboxed)?;
         }
         sandbox.install(&profile).map_err(sandboxed)?;
+        let claude_display = crate::coord::settings::read(&self.connection, &stored.project_id)
+            .map_err(|e| {
+                with_code(
+                    "the project's coordination settings could not be read",
+                    Some(&e.0),
+                )
+            })?
+            .claude_display;
         let plan = Plan {
             harness: launch.into(),
             executable: executable.to_path_buf(),
@@ -6272,6 +6283,7 @@ impl TeamRuntime {
             #[cfg(unix)]
             scratch_pin,
             proxy,
+            claude_display,
         };
         let mode = match &account.reach {
             TeamReach::Endpoint { base_url, .. } => Mode::Kept {

@@ -7400,6 +7400,7 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         hookless: false,
         scratch_pin: None,
         proxy: None,
+        claude_display: crate::coord::settings::ClaudeDisplay::Classic,
     };
     let account = || AccountBinding::Subscription {
         home: PathBuf::from("/tmp/home"),
@@ -12197,6 +12198,7 @@ fn hooks_plan(harness: &str, hookless: bool) -> Plan {
         hookless,
         scratch_pin: None,
         proxy: None,
+        claude_display: crate::coord::settings::ClaudeDisplay::Classic,
     }
 }
 
@@ -12482,6 +12484,104 @@ fn endpoint_claude_agent_is_hookless_and_refused_under_block() {
     let warned = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
     let (_, plan, _) = prepare(&runtime, warned, true).unwrap();
     assert!(plan.hookless, "under Warn it starts, still without hooks");
+    runtime.shutdown().unwrap();
+}
+
+/// Prepares one new Claude Code sub-agent with tools on an endpoint account, as the team
+/// starts it, and builds its pane command from the plan and the kept context the runtime
+/// made. Inputs: the fixture and the runtime. Output: the display variables of that command.
+#[cfg(target_os = "macos")]
+fn team_claude_display(fixture: &Fixture, runtime: &TeamRuntime) -> Vec<(String, String)> {
+    let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    let (_, plan, mode) = runtime
+        .prepare(
+            &fixture.setup,
+            id,
+            AgentRole::Sub,
+            "claude-code",
+            true,
+            &endpoint_account(),
+            false,
+            Layout::Linked,
+        )
+        .unwrap();
+    let Mode::Kept { account, context } = mode else {
+        panic!("an endpoint agent keeps its process");
+    };
+    let request = plan.request(account, AgentAccess::Sandboxed).unwrap();
+    let installed = plan
+        .team_context(*context)
+        .install("claude-code", request.account.home(), true)
+        .unwrap();
+    let pane = crate::harnesses::interactive::command(
+        &request,
+        Some(&installed),
+        &crate::harnesses::interactive::Run {
+            session_id: "0f8fad5b-d9cb-469f-a165-70867728950e",
+            key_file: None,
+            resume: false,
+        },
+    )
+    .unwrap();
+    pane.env
+        .into_iter()
+        .filter(|(name, _)| {
+            name == "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN" || name == "CLAUDE_CODE_SCROLL_SPEED"
+        })
+        .collect()
+}
+
+/// A team Claude Code terminal of a project that never chose a display starts Classic
+/// (N-D9): Claude Code's alternate screen is off, so the app's view scrolls with the wheel.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_team_claude_code_terminal_starts_classic_by_default() {
+    let fixture = Fixture::new(1);
+    let mut runtime = exiting_claude_runtime(&fixture);
+    assert_eq!(
+        team_claude_display(&fixture, &runtime),
+        [(
+            "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".to_owned(),
+            "1".to_owned()
+        )]
+    );
+    runtime.shutdown().unwrap();
+}
+
+/// The display is read when each agent is prepared (N-D9): after the owner picks Fullscreen
+/// the next team Claude Code terminal keeps Claude Code's view at 3 rows a notch, and after
+/// Classic again the next one turns the alternate screen off.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_team_claude_code_terminal_gets_the_display_the_owner_chose_last() {
+    use crate::coord::settings::{ClaudeDisplay, CoordSettings, write};
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let mut runtime = exiting_claude_runtime(&fixture);
+    let choose = |claude_display: ClaudeDisplay| {
+        write(
+            &fixture.connection,
+            &project,
+            &CoordSettings {
+                claude_display,
+                ..CoordSettings::default()
+            },
+        )
+        .unwrap();
+    };
+    choose(ClaudeDisplay::Fullscreen);
+    assert_eq!(
+        team_claude_display(&fixture, &runtime),
+        [("CLAUDE_CODE_SCROLL_SPEED".to_owned(), "3".to_owned())]
+    );
+    choose(ClaudeDisplay::Classic);
+    assert_eq!(
+        team_claude_display(&fixture, &runtime),
+        [(
+            "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".to_owned(),
+            "1".to_owned()
+        )]
+    );
     runtime.shutdown().unwrap();
 }
 
@@ -13256,6 +13356,7 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
         hookless: false,
         scratch_pin: None,
         proxy: None,
+        claude_display: crate::coord::settings::ClaudeDisplay::Classic,
     };
     let account = || AccountBinding::Subscription {
         home: PathBuf::from("/private/tmp/agent-1-home"),

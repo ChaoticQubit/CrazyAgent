@@ -210,6 +210,7 @@ fn a_home_is_free_once_its_launch_ends_even_while_a_child_shares_its_lock() {
         native_team: None,
         relay: None,
         model_proxy: None,
+        claude_display: ClaudeDisplay::Classic,
     };
     let installed = context.install("codex", &home, false).unwrap();
     let mut child = crate::spawn_gate::spawn(
@@ -253,6 +254,7 @@ fn a_team_master_with_tools_on_gets_the_engine_delegate_tool() {
         native_team: None,
         relay: None,
         model_proxy: None,
+        claude_display: ClaudeDisplay::Classic,
     };
     let context = fresh()
         .with_team_tool(engine, &record, &mailbox, &[])
@@ -377,6 +379,7 @@ fn a_team_master_with_tools_off_hears_the_team_plugin_names() {
         native_team: None,
         relay: None,
         model_proxy: None,
+        claude_display: ClaudeDisplay::Classic,
     }
     .with_index(&plugins, &RoleSkills::default());
     let home = root.join("codex");
@@ -415,6 +418,7 @@ fn a_planted_codex_system_skill_does_not_survive_a_relaunch() {
         native_team: None,
         relay: None,
         model_proxy: None,
+        claude_display: ClaudeDisplay::Classic,
     };
     let first = context.install("codex", &home, true).unwrap();
     let planted = home.join("skills").join(".system").join("planted");
@@ -460,6 +464,7 @@ fn a_skills_link_a_sandboxed_agent_plants_never_steers_a_removal_outside_its_hom
         native_team: None,
         relay: None,
         model_proxy: None,
+        claude_display: ClaudeDisplay::Classic,
     };
 
     agents.shell(&plant);
@@ -609,6 +614,7 @@ fn each_launch_writes_the_owner_instructions_into_its_harness_file_in_order() {
         native_team: None,
         relay: None,
         model_proxy: None,
+        claude_display: ClaudeDisplay::Classic,
     };
     let home = |name: &str| {
         let home = root.join(name);
@@ -703,6 +709,7 @@ fn every_claude_and_codex_launch_is_told_how_its_work_lands_in_its_layout() {
             native_team: None,
             relay: None,
             model_proxy: None,
+            claude_display: ClaudeDisplay::Classic,
         };
         let claude = home(&format!("claude-{layout:?}"));
         let installed = context.install("claude-code", &claude, false).unwrap();
@@ -784,6 +791,7 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
         native_team: None,
         relay: None,
         model_proxy: None,
+        claude_display: ClaudeDisplay::Classic,
     };
     let request = || crate::harnesses::launch::LaunchRequest {
         harness: "codex".into(),
@@ -879,6 +887,7 @@ impl LeftPane {
             native_team: None,
             relay: None,
             model_proxy: None,
+            claude_display: ClaudeDisplay::Classic,
         };
         let request = crate::harnesses::launch::LaunchRequest {
             harness: "codex".into(),
@@ -1024,6 +1033,7 @@ fn a_live_team_server_takes_its_mailbox_and_the_tools_left_out_and_says_so() {
         native_team: None,
         relay: None,
         model_proxy: None,
+        claude_display: ClaudeDisplay::Classic,
     };
     let off = vec![crate::team::tool::STOP_TOOL.to_owned()];
     for (context, subcommand) in [
@@ -1109,6 +1119,7 @@ fn context_with(
         native_team: None,
         relay: None,
         model_proxy: None,
+        claude_display: ClaudeDisplay::Classic,
     }
 }
 
@@ -1595,6 +1606,7 @@ fn a_claude_launch_with_tools_on_writes_only_the_hooks_given_each_rerooted_in_it
         native_team: None,
         relay: None,
         model_proxy: None,
+        claude_display: ClaudeDisplay::Classic,
     };
     let home = |name: &str| {
         let home = root.join(name);
@@ -1753,6 +1765,7 @@ fn context_mode_context(plugins: LaunchPlugins) -> AgentContext {
         native_team: None,
         relay: None,
         model_proxy: None,
+        claude_display: ClaudeDisplay::Classic,
     }
 }
 
