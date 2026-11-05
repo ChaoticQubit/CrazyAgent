@@ -608,6 +608,13 @@ impl AppSetup {
                 );
             }
         }
+        for note in &setup.notes {
+            lines.extend(
+                wrap(&setup_reason(note), limit.saturating_sub(2).max(1))
+                    .into_iter()
+                    .map(|part| join([Line::raw("  "), styled(part, Role::Warning, theme)])),
+            );
+        }
         lines
     }
 
