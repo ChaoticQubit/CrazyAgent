@@ -1510,6 +1510,85 @@ async fn sign_in_rechecking_due_after_restart() {
     .expect("the earlier-run re-check case exceeded 900 seconds");
 }
 
+/// N-E1: a real Claude sign-in whose custodian stops on an error while the owner is at the
+/// browser settles Failed with the custodian's own cause, not still waiting and not the
+/// general interruption. Once the installed Claude Code shows its sign-in link, the temp
+/// profile's home folder is replaced, so the custodian's next profile check refuses it and the
+/// custodian exits non-zero naming `native_profile_binding_conflict`. Needs the installed
+/// Claude Code; the link is never opened and no account is signed in. Runs only by name with
+/// `--ignored` in an owner-approved live window.
+#[ignore = "live: needs the installed Claude Code; a real sign-in runs until it shows its sign-in link"]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_real_claude_sign_in_whose_custodian_fails_settles_with_its_cause() {
+    let restart = Restart::live();
+    tokio::time::timeout(Duration::from_secs(300), async {
+        let run = restart.start().await;
+        let scope = run.scope(restart.config().id).await;
+        let client = run.client();
+        let started = client
+            .start_native_auth(NativeAuthStart {
+                request_id: request("custodian-cause-sign-in"),
+                scope: scope.clone(),
+                method: NativeAuthMethod::ClaudeOfficial,
+            })
+            .await
+            .unwrap();
+        let query = NativeAuthQuery {
+            request_id: request("custodian-cause-read"),
+            scope: scope.clone(),
+            operation_id: started.fact.operation_id.clone(),
+        };
+        let mut phase = started.fact.phase;
+        for _ in 0..1200 {
+            phase = client
+                .read_native_auth(query.clone())
+                .await
+                .unwrap()
+                .fact
+                .phase;
+            if phase == NativeAuthPhase::AwaitingOwner || !phase.unfinished() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(
+            phase,
+            NativeAuthPhase::AwaitingOwner,
+            "the real sign-in never showed its sign-in link"
+        );
+        let homes: Vec<PathBuf> = std::fs::read_dir(restart.root.path().join("native-profiles"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path().join("home"))
+            .filter(|home| home.is_dir())
+            .collect();
+        assert_eq!(homes.len(), 1, "{homes:?}");
+        std::fs::rename(&homes[0], restart.root.path().join("replaced-home")).unwrap();
+        std::fs::create_dir(&homes[0]).unwrap();
+        std::fs::set_permissions(&homes[0], std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut settled = None;
+        for _ in 0..1200 {
+            let fact = client.read_native_auth(query.clone()).await.unwrap().fact;
+            if !fact.phase.unfinished() {
+                settled = Some(fact);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let fact = settled.expect("the sign-in kept waiting after its custodian failed");
+        assert_eq!(
+            (fact.phase, fact.code.as_deref()),
+            (
+                NativeAuthPhase::Failed,
+                Some("native_profile_binding_conflict")
+            )
+        );
+        assert_eq!(restart.fences(), 0, "the failed custodian left a fence");
+        run.stop().await;
+    })
+    .await
+    .expect("the custodian-cause case exceeded 300 seconds");
+}
+
 /// DEC-108: the engine-start re-proof flag is true before the engine runs, and clears once
 /// that re-proof ends: when it finished with nothing to re-check, when it gave up because no
 /// owner registration admits a check, and when the engine stopped it while it still waited.
