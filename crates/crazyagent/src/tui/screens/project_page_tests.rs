@@ -325,9 +325,14 @@ fn the_move_banner_names_the_checked_out_branch_merges_into_are_refused() {
 
 #[test]
 fn the_move_banner_keeps_are_refused_within_its_rows_for_the_longest_branch_names() {
-    let files: Vec<String> = ["CLAUDE.md", ".claude/CLAUDE.md", "AGENTS.md", "CLAUDE.local.md"]
-        .map(str::to_owned)
-        .to_vec();
+    let files: Vec<String> = [
+        "CLAUDE.md",
+        ".claude/CLAUDE.md",
+        "AGENTS.md",
+        "CLAUDE.local.md",
+    ]
+    .map(str::to_owned)
+    .to_vec();
     let ascii = "a".repeat(crate::landing::BRANCH_BYTES_MAX);
     let wide = "\u{8a9e}".repeat(crate::landing::BRANCH_BYTES_MAX / 3);
     for branch in [&ascii, &wide] {

@@ -242,7 +242,11 @@ fn import_problem(code: &str) -> String {
 /// branch" without one; a name wider than `BANNER_BRANCH_CELLS` is cut with the ellipsis,
 /// so "are refused" stays within the banner's rows. Inputs: the paths, the branch and the
 /// ellipsis glyph. Output: the text, sanitized.
-pub(in crate::tui) fn move_banner(files: &[String], branch: Option<&str>, ellipsis: &str) -> String {
+pub(in crate::tui) fn move_banner(
+    files: &[String],
+    branch: Option<&str>,
+    ellipsis: &str,
+) -> String {
     assert!(!files.is_empty());
     let files: Vec<String> = files.iter().map(|path| sanitize(path)).collect();
     let target = branch.map_or_else(
