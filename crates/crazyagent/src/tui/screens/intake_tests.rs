@@ -493,7 +493,7 @@ async fn a_copy_of_a_repo_with_linked_worktrees_says_they_stay_with_the_original
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_repo_with_a_linked_worktree_and_that_worktree_are_never_offered_move() {
+async fn a_repo_with_a_linked_worktree_is_offered_no_move_and_that_worktree_no_move_or_copy() {
     let mut engine = Engine::start().await;
     engine.set_home().await;
     let outside = engine.user().join("outside");
@@ -549,30 +549,51 @@ async fn a_repo_with_a_linked_worktree_and_that_worktree_are_never_offered_move(
     shell.key(Key::BackTab);
     clear(&mut shell, typed.len());
 
-    for folder in [&source, &linked] {
-        let typed = format!("{}/", folder.display());
-        keys(&mut shell, &typed);
-        shell.key(Key::Tab);
+    let typed = format!("{}/", source.display());
+    keys(&mut shell, &typed);
+    shell.key(Key::Tab);
+    let rows = render(&mut shell, 80, 24);
+    assert!(!shows(&rows, ") Move"), "{rows:#?}");
+    assert!(shows(&rows, "(*) Use where it is"), "{rows:#?}");
+    assert!(
+        shows(&rows, "Move isn't offered: this folder is linked to git"),
+        "{rows:#?}"
+    );
+    assert!(!shows(&rows, "Copy isn't offered"), "{rows:#?}");
+    for (key, way) in [
+        (Key::Right, "(*) Copy"),
+        (Key::Right, "(*) Use where it is"),
+        (Key::Left, "(*) Copy"),
+        (Key::Left, "(*) Use where it is"),
+        (Key::Right, "(*) Copy"),
+    ] {
+        shell.key(key);
         let rows = render(&mut shell, 80, 24);
+        assert!(shows(&rows, way), "{rows:#?}");
         assert!(!shows(&rows, ") Move"), "{rows:#?}");
+    }
+    shell.key(Key::BackTab);
+    clear(&mut shell, typed.len());
+
+    let typed = format!("{}/", linked.display());
+    keys(&mut shell, &typed);
+    shell.key(Key::Tab);
+    for key in [None, Some(Key::Right), Some(Key::Left)] {
+        if let Some(key) = key {
+            shell.key(key);
+        }
+        let rows = render(&mut shell, 80, 24);
         assert!(shows(&rows, "(*) Use where it is"), "{rows:#?}");
+        assert!(!shows(&rows, ") Move"), "{rows:#?}");
+        assert!(!shows(&rows, ") Copy"), "{rows:#?}");
         assert!(
             shows(&rows, "Move isn't offered: this folder is linked to git"),
             "{rows:#?}"
         );
-        for (key, way) in [
-            (Key::Right, "(*) Copy"),
-            (Key::Right, "(*) Use where it is"),
-            (Key::Left, "(*) Copy"),
-            (Key::Left, "(*) Use where it is"),
-        ] {
-            shell.key(key);
-            let rows = render(&mut shell, 80, 24);
-            assert!(shows(&rows, way), "{rows:#?}");
-            assert!(!shows(&rows, ") Move"), "{rows:#?}");
-        }
-        shell.key(Key::BackTab);
-        clear(&mut shell, typed.len());
+        assert!(
+            shows(&rows, "Copy isn't offered: this folder is a git worktree"),
+            "{rows:#?}"
+        );
     }
     assert!(pump(&mut shell, &mut connection).await.is_empty());
     assert!(

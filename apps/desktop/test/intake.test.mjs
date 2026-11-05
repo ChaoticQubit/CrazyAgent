@@ -486,6 +486,30 @@ test("adding a folder whose git worktree links a move would break offers no Move
   assert.doesNotMatch(measuring, why);
 });
 
+test("adding a folder that is itself a linked git worktree offers neither Move nor Copy and says why", () => {
+  const base = { home: ok({ path: "/Users/mira/Projects", watching: true }), busy: false, problem: "", onChoose: noop, onMode: noop, onAdd: noop, onClone: noop };
+  const radio = (label) => new RegExp(`role="radio"[^>]*>(<svg[\\s\\S]*?<\\/svg>)?${label}<`);
+  const copyWhy = /Copy isn(&#x27;|')t offered: this folder is a git worktree or submodule of another repository, so a copy would still share it\./;
+  const moveWhy = /Move isn(&#x27;|')t offered: this folder is linked to git worktrees/;
+  const linked = (mode) => html(AddFolderView, { ...base, source: "/Users/mira/Code/shop-side", size: ok({ bytes: 10, worktrees: 0, movable: false, copyable: false }), mode });
+  for (const mode of ["here", "move", "copy"]) {
+    const markup = linked(mode);
+    assert.doesNotMatch(markup, radio("Move"), mode);
+    assert.doesNotMatch(markup, radio("Copy"), mode);
+    assert.match(markup, /role="radio" aria-checked="true"[^>]*>(<svg[\s\S]*?<\/svg>)?Use where it is</, mode);
+    assert.match(markup, copyWhy, mode);
+    assert.match(markup, moveWhy, mode);
+    assert.match(markup, />Set up here<\/button>/, mode);
+    assert.doesNotMatch(markup, /into projects folder<\/button>/, mode);
+  }
+  const repo = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10, worktrees: 1, movable: false, copyable: true }), mode: "copy" });
+  assert.match(repo, /role="radio" aria-checked="true"[^>]*>(<svg[\s\S]*?<\/svg>)?Copy</);
+  assert.doesNotMatch(repo, copyWhy);
+  const measuring = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop-side", size: { kind: "loading" }, mode: "copy" });
+  assert.match(measuring, radio("Copy"));
+  assert.doesNotMatch(measuring, copyWhy);
+});
+
 test("GitHub sign-in shows the three ways, then the device code, and the token field never holds a value", () => {
   const base = { device: null, now: 0, busy: false, problem: "", tokenOpen: false, tokenRef: { current: null }, onDevice: noop, onCli: noop, onTokenOpen: noop, onToken: noop, onOpenPage: noop };
   const start = html(GitHubSignInView, base);
