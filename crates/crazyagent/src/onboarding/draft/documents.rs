@@ -66,6 +66,10 @@ const SECRET_WORDS: [&str; 19] = [
     "netrc",
 ];
 
+/// What one document walk gives the prompt: the documents read and the paths and sizes of
+/// those only listed.
+type Reading = (Vec<Document>, Vec<(String, u64)>);
+
 /// One file the walk found below the project folder: its path with `/` between names, its
 /// size and whether its text is read or only its path and size are listed.
 struct Found {
@@ -83,10 +87,7 @@ struct Found {
 /// and CSV files are only listed. Takes the folder and the README name already read. Returns
 /// the documents read and the paths and sizes listed, or `None` when the project's git could
 /// not say which files it ignores, so none is read.
-pub(super) fn read(
-    repo: &Path,
-    readme: Option<&str>,
-) -> Option<(Vec<Document>, Vec<(String, u64)>)> {
+pub(super) fn read(repo: &Path, readme: Option<&str>) -> Option<Reading> {
     let Some((root, device)) = open_folder(repo)
         .and_then(|root| rustix::fs::fstat(&root).ok().map(|device| (root, device)))
     else {
