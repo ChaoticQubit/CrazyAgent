@@ -1157,7 +1157,146 @@ auth = { method = "native_managed", profile_ref = "profile-claude" }
             .unwrap()
             .unwrap();
     }
+
+    /// Rewrites the account's latest stored sign-in to `phase` and `code`, as the engine
+    /// stores one another client still has open or one an earlier run left unconfirmed.
+    /// Inputs: the engine root, the phase and the code. Output: none.
+    fn store_sign_in(root: &std::path::Path, phase: NativeAuthPhase, code: Option<&str>) {
+        let db = rusqlite::Connection::open(root.join("engine.db")).unwrap();
+        db.busy_timeout(ENGINE_WAIT).unwrap();
+        let (id, generation, bytes): (String, i64, Vec<u8>) = db
+            .query_row(
+                "SELECT id,generation,fact FROM native_auth_operations
+                 ORDER BY generation DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        let mut fact = crate::engine::owner::native_auth::decode_fact(&bytes).unwrap();
+        fact.phase = phase;
+        fact.code = code.map(str::to_owned);
+        let stored = match phase {
+            NativeAuthPhase::Starting => "starting",
+            NativeAuthPhase::Uncertain => "uncertain",
+            NativeAuthPhase::Unavailable => "unavailable",
+            other => panic!("no stored phase for {other:?}"),
+        };
+        let updated = db
+            .execute(
+                "UPDATE native_auth_operations SET fact=?1,phase=?2 WHERE id=?3 AND generation=?4",
+                rusqlite::params![
+                    crate::engine::owner::native_auth::encode_fact(&fact).unwrap(),
+                    stored,
+                    id,
+                    generation
+                ],
+            )
+            .unwrap();
+        assert_eq!(updated, 1);
+    }
+
+    /// Counts the sign-ins the engine has stored. Input: the engine root. Output: the count.
+    fn stored_sign_ins(root: &std::path::Path) -> i64 {
+        rusqlite::Connection::open(root.join("engine.db"))
+            .unwrap()
+            .query_row("SELECT COUNT(*) FROM native_auth_operations", [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    }
+
+    /// On Settings, Add account, a sign-in the engine refuses because another sign-in of the
+    /// account is still open, or an earlier one never confirmed how it ended, says so with a
+    /// way out, and the n it names sends a new start each time; once the other sign-in has
+    /// ended, n starts a fresh one. A harness that is not installed names itself and how to
+    /// install it, as the engine records it (phase Unavailable).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_sign_in_held_open_or_unconfirmed_elsewhere_says_how_it_clears_and_n_tries_again() {
+        let root = tempfile::Builder::new()
+            .prefix("ca-tacc-open-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        let global = root.path().join("global.toml");
+        std::fs::write(
+            &global,
+            format!("timeout_ms = {}\n{CLAUDE}", ENGINE_WAIT.as_millis()),
+        )
+        .unwrap();
+        std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        let mut service = EngineService::start_with_settings_sources(
+            root.path(),
+            "e.sock",
+            &global,
+            &root.path().join("project.toml"),
+            &stopped,
+        )
+        .await
+        .unwrap();
+        let mut connection = Connection::connect_paired(
+            Client::new(root.path().join("e.sock"), ENGINE_WAIT).unwrap(),
+        )
+        .unwrap();
+        let claude = account(
+            0,
+            "Work Claude",
+            Provider::Claude,
+            SignInMethod::Subscription,
+            AccountStatus::NotSignedIn,
+        );
+        let mut shell = Shell::with(ctx(320, 40), Box::new(AddAccount::again(claude)));
+        until(&mut shell, &mut connection, ready).await;
+        send(&mut shell, &mut connection, |job| {
+            matches!(job, SettingsJob::Accounts(AccountsRequest::Catalog))
+        })
+        .await;
+        shell.refresh();
+        let start = |job: &SettingsJob| matches!(job, SettingsJob::SignIn(_));
+        send(&mut shell, &mut connection, start).await;
+        let installed = "Claude Code isn't installed on this Mac, so Claude sign-in isn't available. Install Claude Code, then check again in Settings, Harnesses.";
+        let page = render(&mut shell, 320, 40).join("\n");
+        assert!(page.contains("Press n to try again."), "{page}");
+        assert_eq!(stored_sign_ins(root.path()), 1);
+
+        for (phase, code) in [
+            (NativeAuthPhase::Starting, None),
+            (
+                NativeAuthPhase::Uncertain,
+                Some("native_auth_recovery_required"),
+            ),
+        ] {
+            store_sign_in(root.path(), phase, code);
+            shell.key(Key::Char('n'));
+            send(&mut shell, &mut connection, start).await;
+            let page = render(&mut shell, 320, 40).join("\n");
+            assert!(page.contains(STILL_OPEN), "{phase:?}: {page}");
+            assert!(page.contains("Press n to try again."), "{phase:?}: {page}");
+            assert!(!page.contains("recovery_required"), "{phase:?}: {page}");
+            assert_eq!(stored_sign_ins(root.path()), 1, "{phase:?}");
+        }
+
+        store_sign_in(
+            root.path(),
+            NativeAuthPhase::Unavailable,
+            Some("native_auth_host_unavailable"),
+        );
+        shell.key(Key::Char('n'));
+        send(&mut shell, &mut connection, start).await;
+        let page = render(&mut shell, 320, 40).join("\n");
+        assert!(page.contains(installed), "{page}");
+        assert!(!page.contains(STILL_OPEN), "{page}");
+        assert_eq!(stored_sign_ins(root.path()), 2);
+        drop(connection);
+        tokio::time::timeout(Duration::from_secs(5), service.shutdown())
+            .await
+            .unwrap()
+            .unwrap();
+    }
 }
+
+const UNCONFIRMED: &str = "This sign-in didn't confirm how it ended, so changes to its account and new sign-ins wait. Wait a few minutes, then try again. If this keeps happening, restart CrazyAgent.";
+const STILL_OPEN: &str = "A sign-in for this account is still open or didn't confirm how it ended. Wait a few minutes, then try again. If this keeps happening, restart CrazyAgent.";
 
 /// A failed sign-in view for one recorded code, with or without a device code on screen.
 /// Inputs: the code and the device code. Output: the view the engine reply gives the TUI.
@@ -1201,12 +1340,6 @@ fn a_recorded_sign_in_failure_reads_the_app_s_sentence_for_the_harness_it_used()
             "Codex didn't answer in time. Try again.",
         ),
         (
-            codex,
-            "native_auth_host_unavailable",
-            None,
-            "Codex isn't installed on this Mac, so ChatGPT sign-in isn't available. Install Codex, then check again in Settings, Harnesses.",
-        ),
-        (
             claude,
             "native_auth_host_executable_unsafe",
             None,
@@ -1217,12 +1350,6 @@ fn a_recorded_sign_in_failure_reads_the_app_s_sentence_for_the_harness_it_used()
             "native_auth_sign_in_expired",
             None,
             "This code expired.",
-        ),
-        (
-            claude,
-            "native_auth_recovery_required",
-            None,
-            "A sign-in didn't confirm how it ended, so changes to its account and new sign-ins wait. Press c in Model access to clear the stuck sign-in, then try again.",
         ),
     ] {
         assert_eq!(
@@ -1235,4 +1362,62 @@ fn a_recorded_sign_in_failure_reads_the_app_s_sentence_for_the_harness_it_used()
         sign_in_problem(claude, &failed("native_auth_made_up", None)),
         "The sign-in did not work. (code: native_auth_made_up)"
     );
+}
+
+/// A finished view for one phase and, when the engine recorded one, its code. Inputs: the
+/// phase and the code. Output: the view the engine reply gives the TUI.
+fn finished(phase: NativeAuthPhase, code: Option<&str>) -> SignInView {
+    SignInView {
+        phase,
+        problem: code.map(str::to_owned),
+        ..failed("unused", None)
+    }
+}
+
+/// A code the engine recorded wins over the phase's own line, as the app reads it: a harness
+/// that is not installed (phase Unavailable) names the harness and how to install it, and a
+/// cancel reads the app's row. Without a code the phase lines remain. A sign-in the engine
+/// could not confirm says how it clears.
+#[test]
+fn a_recorded_code_wins_over_the_phase_line_and_an_unconfirmed_sign_in_says_how_it_clears() {
+    let codex = Some(NativeAuthMethod::CodexBrowser);
+    let claude = Some(NativeAuthMethod::ClaudeOfficial);
+    for (native, phase, code, sentence) in [
+        (
+            codex,
+            NativeAuthPhase::Unavailable,
+            Some("native_auth_host_unavailable"),
+            "Codex isn't installed on this Mac, so ChatGPT sign-in isn't available. Install Codex, then check again in Settings, Harnesses.",
+        ),
+        (
+            claude,
+            NativeAuthPhase::Cancelled,
+            Some("native_auth_cancelled"),
+            "Sign-in cancelled.",
+        ),
+        (
+            claude,
+            NativeAuthPhase::Uncertain,
+            Some("native_auth_recovery_required"),
+            UNCONFIRMED,
+        ),
+        (
+            claude,
+            NativeAuthPhase::Cancelled,
+            None,
+            "The sign-in was cancelled.",
+        ),
+        (
+            claude,
+            NativeAuthPhase::Unavailable,
+            None,
+            "This sign-in is not available on this Mac.",
+        ),
+    ] {
+        assert_eq!(
+            sign_in_problem(native, &finished(phase, code)),
+            sentence,
+            "{phase:?} {code:?}"
+        );
+    }
 }
