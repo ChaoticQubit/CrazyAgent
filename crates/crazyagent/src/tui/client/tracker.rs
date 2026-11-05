@@ -1,4 +1,4 @@
-use super::settings::problem;
+use super::settings::{connection_lost, problem};
 use super::*;
 use crate::engine::EngineError;
 use crate::engine::owner::{OwnerClient, SettingsSaved, TicketSettingsView, TrackedProject};
@@ -136,7 +136,8 @@ pub(in crate::tui) fn refused(code: &str) -> Value {
 
 /// The views' client on the owner worker: each call runs `tracker_op` on the shared owner
 /// client and waits for it on this blocking thread. The first transport failure is kept so
-/// the worker can tell the shell the connection dropped.
+/// the worker can tell the shell the connection dropped; once it is a lost connection, the
+/// job's later calls are refused with its code instead of each waiting out the timeout.
 struct OwnerTracker {
     client: Arc<OwnerClient>,
     handle: tokio::runtime::Handle,
@@ -145,6 +146,13 @@ struct OwnerTracker {
 
 impl Client for OwnerTracker {
     fn call(&mut self, op: OpKind, input: Value) -> Value {
+        if let Some(lost) = self
+            .failure
+            .as_ref()
+            .filter(|error| connection_lost(&error.0))
+        {
+            return refused(&bounded_problem(&lost.0));
+        }
         match self.handle.block_on(self.client.tracker_op(op, input)) {
             Ok(envelope) => envelope,
             Err(error) => {
