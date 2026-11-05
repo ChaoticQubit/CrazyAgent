@@ -6,7 +6,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 export const CHECKS = fileURLToPath(new URL("trial4/", import.meta.url));
 export const TUI_CHECKS = fileURLToPath(new URL("../../../../scripts/trial/tui4/", import.meta.url));
 const ID = /^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+$/;
-const OP = /^OP-[1-9][0-9]*$/;
+const OP = /^(?:OP|MAP)-[1-9][0-9]*$/;
 
 /** Whether a value is a non-empty string. Input: the value. Output: a boolean. */
 function filled(value) {
@@ -19,7 +19,7 @@ function filled(value) {
 function validate(check, file, slugs) {
   assert(filled(check?.id) && ID.test(check.id) && check.id.length <= 24, `${file}: id must look like N-D1, got ${JSON.stringify(check?.id)}`);
   const where = `${file} ${check.id}`;
-  assert(Array.isArray(check.op) && check.op.length > 0 && check.op.every((row) => OP.test(row)), `${where}: op must list OP-<n> rows of owner-problems-v1.md`);
+  assert(Array.isArray(check.op) && check.op.length > 0 && check.op.every((row) => OP.test(row)), `${where}: op must list OP-<n> rows of owner-problems-v1.md or MAP-<n> rows of the 18.15 coverage list`);
   assert(filled(check.title), `${where}: title must be a non-empty string`);
   assert(filled(check.why), `${where}: why must be a non-empty string`);
   assert(check.after === "end" || slugs.includes(check.after), `${where}: after must name a trial 3 step or "end", not ${check.after}`);

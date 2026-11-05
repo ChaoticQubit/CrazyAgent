@@ -105,6 +105,8 @@ test("a check module that breaks the convention is refused with its file and the
     [{ "a.mjs": check({ after: "no-such-step" }) }, /a\.mjs N-D1: after must name a trial 3 step or "end", not no-such-step/],
     [{ "a.mjs": check({ op: ["7"] }) }, /a\.mjs N-D1: op must list OP-<n> rows/],
     [{ "a.mjs": check({ op: [] }) }, /a\.mjs N-D1: op must list OP-<n> rows/],
+    [{ "a.mjs": check({ op: ["MAP-0"] }) }, /a\.mjs N-D1: op must list OP-<n> rows/],
+    [{ "a.mjs": check({ op: ["MAPS-1"] }) }, /a\.mjs N-D1: op must list OP-<n> rows/],
     [{ "a.mjs": check({ id: "nd1" }) }, /a\.mjs: id must look like N-D1/],
     [{ "a.mjs": check({ title: "" }) }, /a\.mjs N-D1: title must be a non-empty string/],
     [{ "a.mjs": check({ why: 3 }) }, /a\.mjs N-D1: why must be a non-empty string/],
@@ -119,6 +121,15 @@ test("a check module that breaks the convention is refused with its file and the
     } finally {
       rmSync(folder, { recursive: true, force: true });
     }
+  }
+});
+
+test("a check may name a MAP-<n> row of the 18.15 coverage list, which has no OP number yet", async () => {
+  const folder = modules({ "a.mjs": check({ op: ["MAP-1"] }) });
+  try {
+    assert.deepEqual((await loadChecks(folder, SLUGS)).map((loaded) => loaded.op), [["MAP-1"]]);
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
   }
 });
 
