@@ -71,7 +71,8 @@ impl Key {
     /// Normalizes one crossterm key event.
     /// Input: the event. Output: the key, or None for releases and keys the TUI
     /// does not use (function keys, Alt and Super chords). Terminals send Ctrl-]
-    /// as byte 0x1d, which crossterm reports as Ctrl-5.
+    /// as byte 0x1d, which crossterm reports as Ctrl-5. Shift+Enter, where the
+    /// terminal reports it, is Ctrl-J: the new-line key, a line feed to an agent.
     pub fn from_event(event: KeyEvent) -> Option<Self> {
         if event.kind == KeyEventKind::Release {
             return None;
@@ -92,6 +93,7 @@ impl Key {
         let shift = modifiers.contains(KeyModifiers::SHIFT);
         Some(match event.code {
             KeyCode::Char(character) if !character.is_control() => Self::Char(character),
+            KeyCode::Enter if shift => Self::Ctrl('j'),
             KeyCode::Enter => Self::Enter,
             KeyCode::Esc => Self::Esc,
             KeyCode::Tab if shift => Self::BackTab,
@@ -183,6 +185,25 @@ mod tests {
         let mut release = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
         release.kind = KeyEventKind::Release;
         assert_eq!(Key::from_event(release), None);
+    }
+
+    #[test]
+    fn shift_enter_is_the_new_line_key_a_terminal_sends_as_a_line_feed() {
+        assert_eq!(
+            press(KeyCode::Enter, KeyModifiers::SHIFT),
+            Some(Key::Ctrl('j')),
+            "a terminal reporting Shift+Enter (CSI 13;2u) gets a new line, never a send"
+        );
+        assert_eq!(press(KeyCode::Enter, KeyModifiers::NONE), Some(Key::Enter));
+        let line_feed = crate::tui::terminal_pane::encode(&Key::Ctrl('j'), false, false);
+        assert_eq!(
+            line_feed, b"\n",
+            "the byte Claude Code and Codex read as a new line in the message"
+        );
+        assert_eq!(
+            crate::tui::terminal_pane::encode(&Key::Enter, false, false),
+            b"\r"
+        );
     }
 
     #[test]
