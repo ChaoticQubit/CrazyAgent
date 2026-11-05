@@ -5499,7 +5499,9 @@ struct Outlived {
 }
 
 /// Runs one task whose agent's background command outlives its turn under the saved
-/// choice, timing it from the end of the agent's turn. Takes the fixture and the choice.
+/// choice, timing it from the end of the agent's turn: the stand-in's held mark, or the
+/// task's end when that comes first, as under Stop, whose stop can end the stand-in
+/// between its end_turn line and the mark. Takes the fixture and the choice.
 /// Returns how the task ended.
 #[cfg(target_os = "macos")]
 fn outliving_background(fixture: &Fixture, choice: crate::team::BackgroundAtEnd) -> Outlived {
@@ -5510,6 +5512,7 @@ fn outliving_background(fixture: &Fixture, choice: crate::team::BackgroundAtEnd)
         subs(f)
             .first()
             .is_some_and(|agent| stand_in_file(f, *agent, "held").exists())
+            || check_end(f).is_some()
     });
     let turn_ended = Instant::now();
     let agent = subs(fixture)[0];
