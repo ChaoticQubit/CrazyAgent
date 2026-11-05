@@ -1460,6 +1460,61 @@ async fn a_second_n_while_the_first_new_session_starts_says_it_is_already_starti
     assert!(shown.contains("Sessions  2"), "one new session, not two:\n{shown}");
 }
 
+/// A second n once the first New session has its settings and waits on the engine says
+/// the same plain words (P2): the settings read is answered by hand, so the New session
+/// is queued for the engine and not yet made when the second n arrives.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_n_while_the_engine_makes_the_first_new_session_says_it_is_already_starting() {
+    let mut engine = Engine::start().await;
+    let (notes, mut shell, mut connection, first) =
+        conversation_with_a_settled_turn(&mut engine).await;
+    shell.key(Key::Esc);
+    until(&mut shell, &mut connection, |shown| {
+        shown.contains("Session  started")
+    })
+    .await;
+    shell.key(Key::Char('n'));
+    let mut read = None;
+    for _ in 0..shell.ctx.queued() {
+        match shell.ctx.next_request().unwrap() {
+            Request::Master(job) if matches!(*job, MasterJob::Catalog { .. }) => read = Some(job),
+            other => shell.ctx.request(other),
+        }
+    }
+    connection
+        .master(*read.expect("n reads the current settings first"))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(Instant::now() < deadline, "the settings read was never answered");
+        match connection.poll_owner().unwrap() {
+            Some(OwnerEvent::Master(event)) if matches!(event.as_ref(), MasterEvent::Catalog { .. }) => {
+                shell.arrive(owner_arrival(OwnerEvent::Master(event)));
+                break;
+            }
+            Some(event) => shell.arrive(owner_arrival(event)),
+            None => tokio::time::sleep(Duration::from_millis(20)).await,
+        }
+    }
+    shell.key(Key::Char('n'));
+    let message = shell
+        .ctx
+        .message()
+        .cloned()
+        .expect("the second n is answered on the page");
+    assert_eq!(message.lead, "The session did not switch.");
+    assert_eq!(message.rest, "A new session is already starting.");
+    until(&mut shell, &mut connection, |shown| {
+        shown.contains("No messages yet.") && !shown.contains("Plan the first slice")
+    })
+    .await;
+    let (fresh, _) = latest_master(&mut engine, &notes).await;
+    assert_ne!(fresh.unwrap().session_id, first.session_id);
+    shell.key(Key::Char('l'));
+    let shown = render(&mut shell, 100, 40);
+    assert!(shown.contains("Sessions  2"), "one new session, not two:\n{shown}");
+}
+
 /// A new session on a project whose master runs live turns the live switch on once the
 /// engine has made the new session, so the live master starts on the fresh conversation
 /// even when it was stopped or never started.
