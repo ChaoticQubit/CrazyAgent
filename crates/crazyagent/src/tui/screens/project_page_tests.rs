@@ -1542,6 +1542,42 @@ async fn a_second_n_while_the_engine_makes_the_first_new_session_says_it_is_alre
     );
 }
 
+/// n while another master step is still under way, here a message just sent and not yet
+/// taken by the engine, says so in plain words, not the client's internal intent line
+/// (P2 r1, TUIP2-L1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn n_while_a_sent_message_is_under_way_says_so_in_plain_words() {
+    let mut engine = Engine::start().await;
+    let (_, mut shell, mut connection, _) = conversation_with_a_settled_turn(&mut engine).await;
+    shell.key(Key::Esc);
+    until(&mut shell, &mut connection, |shown| {
+        shown.contains("Session  started")
+    })
+    .await;
+    shell.key(Key::Enter);
+    for character in "Plan the second slice".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::Enter);
+    shell.key(Key::Esc);
+    shell.key(Key::Char('n'));
+    let message = shell
+        .ctx
+        .message()
+        .cloned()
+        .expect("n is answered on the page");
+    assert_eq!(message.tone, Tone::Error);
+    assert_eq!(message.lead, "The session did not switch.");
+    assert_eq!(
+        message.rest,
+        "Your last request is still being handled. Press n again when it is done."
+    );
+    let shown = render(&mut shell, 100, 40);
+    for internal in ["intent", "exact identity", "Ctrl-R recovers"] {
+        assert!(!shown.contains(internal), "{internal}:\n{shown}");
+    }
+}
+
 /// A new session on a project whose master runs live turns the live switch on once the
 /// engine has made the new session, so the live master starts on the fresh conversation
 /// even when it was stopped or never started.
