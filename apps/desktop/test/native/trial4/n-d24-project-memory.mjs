@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { click, shown, text, texts } from "../settings-steps.mjs";
+import { click, shown, texts } from "../settings-steps.mjs";
 import { UI_MS, lit } from "../trial-kit.mjs";
 import { memoryVerdict, rememberPrompt } from "../trial4-context.mjs";
 
@@ -18,6 +18,13 @@ async function projectMemory(kit) {
   return (await texts("main")).join("\n");
 }
 
+/** Reads the source line Settings, Memory shows under one memory row, through WebDriver since
+ * the row is found by XPath. Input: the row's XPath. Output: its text, "" when none is shown. */
+async function sourceOf(row) {
+  const line = `${row}//span[contains(@class, "muted")]`;
+  return (await shown(line)) ? $(line).getText() : "";
+}
+
 export const checks = [{
   id: "N-D24",
   op: ["OP-22"],
@@ -30,11 +37,14 @@ export const checks = [{
     await kit.until(() => shown(WRITES), UI_MS, "Settings, Memory never showed Agent memory writes");
     const writes = await $(WRITES).getValue();
     await kit.tab("conversation");
+    const request = rememberPrompt(token);
+    await kit.until(() => shown(BOX), UI_MS, "the master's message box was never shown");
+    await kit.paste(BOX, request);
     await kit.waitFor(async () => {
-      const ready = await shown(BOX) && await $(SEND).isEnabled();
-      return { done: ready, seen: ready ? "the master's message box is ready" : "the master's message box is not ready" };
-    }, MASTER_MS, "the master's message box never became ready to send");
-    await kit.paste(BOX, rememberPrompt(token));
+      if ((await $(BOX).getValue()) !== request) await kit.paste(BOX, request);
+      const ready = await $(SEND).isEnabled();
+      return { done: ready, seen: ready ? "Send is enabled with the request in the box" : "Send is off with the request in the box" };
+    }, MASTER_MS, "Send never became enabled with the request in the box: the master terminal never went live");
     await click(SEND);
     await kit.until(async () => (await $(BOX).getValue()) === "", UI_MS, "the message box kept the request: it was not sent");
     await kit.waitFor(async () => {
@@ -47,11 +57,11 @@ export const checks = [{
     await kit.go("#/settings/memory");
     await kit.pick("#memory-scope", kit.project());
     await kit.until(() => shown(row), UI_MS, `Settings, Memory never listed ${token} for the project`);
-    const source = await text(`${row}//span[contains(@class, "muted")]`);
+    const source = await sourceOf(row);
     const approved = await shown(approve);
     if (approved) {
       await click(approve);
-      await kit.until(async () => !(await shown(approve)) && !(await text(`${row}//span[contains(@class, "muted")]`)).startsWith("Waiting"), UI_MS, `${token} still waits after Approve`);
+      await kit.until(async () => !(await shown(approve)) && !(await sourceOf(row)).startsWith("Waiting"), UI_MS, `${token} still waits after Approve`);
     }
     const listed = await projectMemory(kit);
     await kit.screen();
