@@ -3023,3 +3023,31 @@ async fn the_conversation_tab_of_a_live_master_is_its_terminal() {
     )
     .await;
 }
+
+/// N-T1 B, Switch tabs: Shift-←→ in the master view move the project page one tab, so a
+/// walk across the tabs passes the Conversation tab of a live master.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shift_arrows_walk_the_project_tabs_across_the_master_view() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let tab = |tab: ProjectTab| Place::Project {
+        id: notes.clone(),
+        name: "Notes CLI".into(),
+        tab,
+    };
+    let master = Place::Master {
+        id: notes.clone(),
+        name: "Notes CLI".into(),
+    };
+    let mut connection = engine.connect();
+    let mut shell = shell_on(&tab(ProjectTab::Overview));
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::ShiftRight);
+    until_place(&mut shell, &mut connection, &master).await;
+    shell.key(Key::ShiftRight);
+    assert_eq!(shell.place(), Some(tab(ProjectTab::Agents)));
+    shell.key(Key::ShiftLeft);
+    until_place(&mut shell, &mut connection, &master).await;
+    shell.key(Key::ShiftLeft);
+    assert_eq!(shell.place(), Some(tab(ProjectTab::Overview)));
+}

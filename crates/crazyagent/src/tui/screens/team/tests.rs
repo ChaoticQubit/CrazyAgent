@@ -6,7 +6,7 @@ use crate::tui::client::OwnerEvent;
 use crate::tui::client::process::{ProcessEvent, ProcessQuery, ProcessReply};
 use crate::tui::ctx::{Ctx, Link, Load};
 use crate::tui::glyphs::UNICODE;
-use crate::tui::keys::Key;
+use crate::tui::keys::{Key, ShiftArrows};
 use crate::tui::screens::{Place, open};
 use crate::tui::seam::{AccountRow, Arrival, NOT_READY, Request};
 use crate::tui::shell::Shell;
@@ -2003,6 +2003,96 @@ fn esc_while_the_master_terminal_starts_is_never_typed_into_it_later() {
         sent.iter().all(|request| input(request).is_none()),
         "{sent:?}"
     );
+}
+
+fn attached_master_view(shift_arrows: ShiftArrows) -> Shell {
+    let mut shell = master_view(80, 24);
+    shell.ctx.shift_arrows = shift_arrows;
+    shell.arrive(switch(Some(true), None));
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    shell.arrive(Arrival::Terminal {
+        agent: terminal("team-1"),
+        frame: TerminalFrame::Attached {
+            agent_id: terminal("team-1"),
+            cols: 74,
+            rows: 17,
+        },
+    });
+    requests(&mut shell);
+    shell
+}
+
+/// N-T1 B, Switch tabs (the default): Shift-←→ while the master's terminal has the keys
+/// leave the master view for the project's previous or next tab, attached or still
+/// starting, and are never typed in; keys kept while it started go with the view.
+#[test]
+fn shift_arrows_in_the_master_terminal_switch_project_tabs_by_default() {
+    let mut shell = attached_master_view(ShiftArrows::default());
+    assert_eq!(ShiftArrows::default(), ShiftArrows::SwitchTabs);
+    let rows = render(&mut shell);
+    assert!(rows[23].contains("Shift-←→ Tabs"), "{}", rows[23]);
+    shell.key(Key::ShiftRight);
+    let sent = requests(&mut shell);
+    assert!(
+        sent.iter().all(|sent| input(sent).is_none()),
+        "Shift-→ is never typed in: {sent:?}"
+    );
+    assert!(
+        sent.iter().any(
+            |sent| matches!(sent, Request::TerminalDetach { agent } if agent.as_str() == "team-1")
+        ),
+        "{sent:?}"
+    );
+    assert_eq!(shell.ctx.project_step, Some((project(), true)));
+
+    let mut starting = master_view(80, 24);
+    starting.arrive(switch(Some(true), None));
+    requests(&mut starting);
+    starting.key(Key::Char('h'));
+    starting.key(Key::ShiftLeft);
+    assert_eq!(starting.ctx.project_step, Some((project(), false)));
+    starting.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    starting.arrive(Arrival::Terminal {
+        agent: terminal("team-1"),
+        frame: TerminalFrame::Attached {
+            agent_id: terminal("team-1"),
+            cols: 74,
+            rows: 17,
+        },
+    });
+    let sent = requests(&mut starting);
+    assert!(
+        sent.iter().all(|sent| input(sent).is_none()),
+        "the key kept before Shift-← went with the view: {sent:?}"
+    );
+}
+
+/// N-T1 B, Send to the agent: Shift-←→ while the master's terminal has the keys are typed
+/// into it and the view stays; after Ctrl-] they move the project tab in either choice.
+#[test]
+fn shift_arrows_in_the_master_terminal_go_to_the_agent_when_set_so() {
+    let mut shell = attached_master_view(ShiftArrows::SendToAgent);
+    let rows = render(&mut shell);
+    assert!(!rows[23].contains("Tabs"), "{}", rows[23]);
+    shell.key(Key::ShiftRight);
+    let sent = requests(&mut shell);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(input(&sent[0]), Some(("team-1", &b"\x1b[1;2C"[..])));
+    assert_eq!(shell.ctx.project_step, None);
+
+    shell.key(LEADER);
+    shell.key(Key::ShiftLeft);
+    assert_eq!(shell.ctx.project_step, Some((project(), false)));
+    let mut switching = attached_master_view(ShiftArrows::SwitchTabs);
+    switching.key(LEADER);
+    switching.key(Key::ShiftRight);
+    assert_eq!(switching.ctx.project_step, Some((project(), true)));
 }
 
 #[test]

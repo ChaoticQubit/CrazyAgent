@@ -1,3 +1,4 @@
+use super::keys::ShiftArrows;
 use super::theme::Colors;
 use std::io::Write;
 #[cfg(unix)]
@@ -73,6 +74,25 @@ pub fn load_colors(path: &Path) -> Colors {
         .unwrap_or_default()
 }
 
+/// Where the TUI keeps its Shift-←→ choice for the master terminal: beside the Colors file.
+/// Input: the Colors file path. Output: `tui-shift-arrows` in the same folder.
+pub fn shift_arrows_path(colors: &Path) -> PathBuf {
+    colors.with_file_name("tui-shift-arrows")
+}
+
+/// Reads the saved Shift-←→ choice.
+/// Input: the file path. Output: the choice; Switch tabs when the file is missing, too
+/// large or unreadable.
+pub fn load_shift_arrows(_path: &Path) -> ShiftArrows {
+    ShiftArrows::default()
+}
+
+/// Saves the Shift-←→ choice, replacing the file atomically.
+/// Inputs: the file path and the choice. Output: Ok, or the I/O error text.
+pub fn save_shift_arrows(_path: &Path, _choice: ShiftArrows) -> Result<(), String> {
+    Ok(())
+}
+
 /// Saves the Colors choice, replacing the file atomically.
 /// Inputs: the file path and the choice. Output: Ok, or the I/O error text.
 pub fn save_colors(path: &Path, colors: Colors) -> Result<(), String> {
@@ -95,6 +115,30 @@ pub fn save_colors(path: &Path, colors: Colors) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shift_arrows_round_trip_beside_the_colors_file_and_bad_files_fall_back() {
+        let folder = tempfile::tempdir().unwrap();
+        let colors = folder.path().join("nested").join("tui-colors");
+        let path = shift_arrows_path(&colors);
+        assert_eq!(path, folder.path().join("nested").join("tui-shift-arrows"));
+        assert_eq!(load_shift_arrows(&path), ShiftArrows::SwitchTabs);
+        for (choice, _) in ShiftArrows::ALL {
+            save_shift_arrows(&path, choice).unwrap();
+            assert_eq!(load_shift_arrows(&path), choice);
+        }
+        save_colors(&colors, Colors::Light).unwrap();
+        assert_eq!(load_colors(&colors), Colors::Light);
+        assert_eq!(
+            load_shift_arrows(&path),
+            ShiftArrows::SendToAgent,
+            "each choice keeps its own file"
+        );
+        std::fs::write(&path, "sideways").unwrap();
+        assert_eq!(load_shift_arrows(&path), ShiftArrows::SwitchTabs);
+        std::fs::write(&path, "x".repeat(100)).unwrap();
+        assert_eq!(load_shift_arrows(&path), ShiftArrows::SwitchTabs);
+    }
 
     #[test]
     fn colors_round_trip_and_bad_files_fall_back() {

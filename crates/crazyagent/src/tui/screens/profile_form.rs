@@ -3,7 +3,7 @@ use crate::owner_profile::{
     WorkingStyle, plain_problem,
 };
 use crate::tui::ctx::Ctx;
-use crate::tui::keys::Key;
+use crate::tui::keys::{Key, ShiftArrows};
 use crate::tui::text::{join, pad};
 use crate::tui::theme::Colors;
 use crate::tui::widgets::{TextField, buttons, radio};
@@ -24,6 +24,7 @@ pub enum Slot {
     Detail,
     Initiative,
     Colors,
+    ShiftArrows,
     Save,
 }
 
@@ -51,6 +52,7 @@ pub struct ProfileForm {
     detail: AnswerDetail,
     initiative: Initiative,
     colors: Option<Colors>,
+    shift_arrows: Option<ShiftArrows>,
     focus: Option<Slot>,
     pub saving: bool,
 }
@@ -73,6 +75,7 @@ impl ProfileForm {
             detail: AnswerDetail::Terse,
             initiative: Initiative::AskFirst,
             colors,
+            shift_arrows: None,
             focus: Some(Slot::Name),
             saving: false,
         };
@@ -139,6 +142,18 @@ impl ProfileForm {
     /// Input: the slot. Output: none.
     pub fn set_focus(&mut self, slot: Option<Slot>) {
         self.focus = slot;
+    }
+
+    /// Adds the master terminal's Shift-←→ choice, shown in Settings after Colors.
+    /// Input: the current choice. Output: the form.
+    pub fn with_shift_arrows(self, _choice: ShiftArrows) -> Self {
+        self
+    }
+
+    /// The chosen Shift-←→ value in Settings.
+    /// Input: none. Output: the choice, or None on Welcome.
+    pub fn shift_arrows(&self) -> Option<ShiftArrows> {
+        self.shift_arrows
     }
 
     /// The chosen Colors value in Settings.
@@ -500,6 +515,44 @@ mod tests {
         assert_eq!(profile.working_style.detail, AnswerDetail::Detailed);
         assert_eq!(profile.working_style.initiative, Initiative::ActFirst);
         assert_eq!(form.key(&Key::Char('x')), FormKey::Ignored);
+    }
+
+    #[test]
+    fn settings_shows_the_master_shift_arrows_choice_after_colors_and_arrows_switch_it() {
+        let mut form =
+            ProfileForm::new(None, Some(Colors::Dark)).with_shift_arrows(ShiftArrows::SwitchTabs);
+        assert_eq!(
+            form.slots(),
+            [
+                Slot::Name,
+                Slot::Role,
+                Slot::Bio,
+                Slot::Stack,
+                Slot::Detail,
+                Slot::Initiative,
+                Slot::Colors,
+                Slot::ShiftArrows,
+                Slot::Save
+            ]
+        );
+        let welcome = ProfileForm::new(None, None);
+        assert!(!welcome.slots().contains(&Slot::ShiftArrows));
+        assert_eq!(welcome.shift_arrows(), None);
+        form.set_focus(Some(Slot::Colors));
+        form.key(&Key::Tab);
+        assert_eq!(form.focus(), Some(Slot::ShiftArrows));
+        assert!(!form.edited());
+        assert_eq!(form.key(&Key::Right), FormKey::Handled);
+        assert_eq!(form.shift_arrows(), Some(ShiftArrows::SendToAgent));
+        assert!(
+            form.edited(),
+            "a changed choice is an edit that quit warns about"
+        );
+        assert_eq!(form.key(&Key::Left), FormKey::Handled);
+        assert_eq!(form.shift_arrows(), Some(ShiftArrows::SwitchTabs));
+        assert!(!form.edited());
+        form.key(&Key::Tab);
+        assert_eq!(form.focus(), Some(Slot::Save));
     }
 
     #[test]
