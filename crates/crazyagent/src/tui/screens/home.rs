@@ -1157,6 +1157,7 @@ pub(in crate::tui) mod tests {
                 .collect(),
             pack: Vec::new(),
             running: false,
+            notes: Vec::new(),
         }
     }
 

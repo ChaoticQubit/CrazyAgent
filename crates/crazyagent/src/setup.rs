@@ -278,6 +278,8 @@ pub struct SetupStatus {
     pub dependencies: Vec<DependencyStatus>,
     pub pack: Vec<PackEntry>,
     pub running: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 /// One Python tool setup installs only from its bundled lock: the package, its version,

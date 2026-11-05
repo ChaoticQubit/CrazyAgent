@@ -94,6 +94,10 @@ pub(super) async fn after_owner(
             if let OwnerData::SetupStatus { status } = &mut state.data {
                 let root = engine_root(authority)?;
                 status.dependencies = dependency_rows(&root, deadline).await;
+                status.notes = crate::research::runner::agent_git_problem()
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect();
             }
         }
         (

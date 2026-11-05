@@ -2169,7 +2169,7 @@ pub(crate) fn add_teammate_worktree_at(
 fn setup_step(command: &mut Command, failed: &'static str) -> Result<(), RunError> {
     match wait_bounded(crate::spawn_gate::spawn(command)?, SETUP_TIMEOUT)? {
         Ended::Succeeded => Ok(()),
-        Ended::Failed => Err(RunError::Setup(failed)),
+        Ended::Failed => Err(RunError::Setup(step_failure(failed, Path::new(TOOLS_ROOT)))),
         Ended::TimedOut => Err(RunError::Setup(SETUP_TIMED_OUT)),
     }
 }
@@ -2199,6 +2199,46 @@ pub(crate) fn setup_git() -> &'static Path {
 /// `libexec/git-core` instead of falling through the search path to the `/usr/bin` shims.
 #[cfg(unix)]
 const TOOLS_GIT: &str = "/Library/Developer/CommandLineTools/usr/bin/git";
+
+/// The Command Line Tools root, which every agent profile reads.
+#[cfg(unix)]
+const TOOLS_ROOT: &str = "/Library/Developer/CommandLineTools";
+
+/// The code for a Mac with no Command Line Tools git, the only git whose helpers an agent
+/// profile can read.
+pub(crate) const AGENT_GIT_NEEDS_TOOLS: &str = "agent_git_needs_tools";
+
+/// The git for commands that run inside an agent's sandbox: the agent's own git script and
+/// the engine's setup steps under the agent profile. Returns the path.
+#[cfg(unix)]
+pub(crate) fn sandboxed_git() -> &'static Path {
+    setup_git()
+}
+
+/// Whether agent git lacks the Command Line Tools on this Mac. Output: the code, or none.
+pub(crate) fn agent_git_problem() -> Option<&'static str> {
+    None
+}
+
+/// Whether a toolchain root lacks the Command Line Tools git. Input: the root. Output: the
+/// code, or none.
+#[cfg(unix)]
+fn agent_git_problem_at(tools: &Path) -> Option<&'static str> {
+    assert!(tools.is_absolute());
+    None
+}
+
+/// The code a failed setup git step reports: the missing Command Line Tools when that is
+/// the cause on a Mac, else the step's own code. Inputs: the step's code and the toolchain
+/// root. Output: the code.
+#[cfg(unix)]
+fn step_failure(failed: &'static str, tools: &Path) -> &'static str {
+    if cfg!(target_os = "macos") {
+        agent_git_problem_at(tools).unwrap_or(failed)
+    } else {
+        failed
+    }
+}
 
 /// Picks the real git once, outside any sandbox: the Command Line Tools git when it is
 /// installed, else the active toolchain's git from xcrun. An Xcode toolchain's git runs
@@ -2234,7 +2274,7 @@ fn real_git() -> Option<PathBuf> {
 /// Takes the sandbox and its installed profile. Returns the command, ready for arguments.
 #[cfg(unix)]
 fn worktree_git(sandbox: &ProjectSandbox, profile: &Path) -> Command {
-    let mut git = sandbox.command(profile, setup_git());
+    let mut git = sandbox.command(profile, sandboxed_git());
     git.env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_NO_LAZY_FETCH", "1")
         .args(GIT_SAFE)
@@ -2347,7 +2387,12 @@ fn bounded_stdout(command: &mut Command) -> Result<Vec<u8>, RunError> {
     let stdout = child.stdout.take().ok_or_else(refused)?;
     match wait_bounded(child, SETUP_TIMEOUT)? {
         Ended::Succeeded => {}
-        Ended::Failed => return Err(RunError::Setup("worktree_config_failed")),
+        Ended::Failed => {
+            return Err(RunError::Setup(step_failure(
+                "worktree_config_failed",
+                Path::new(TOOLS_ROOT),
+            )));
+        }
         Ended::TimedOut => return Err(RunError::Setup(SETUP_TIMED_OUT)),
     }
     let mut bytes = Vec::new();
@@ -3842,6 +3887,56 @@ mod tests {
     /// call and its developer-dir lookup forks xcrun, the fragile path behind the load flake.
     /// The resolved git runs `git version` under the profile with no xcrun work and so prints
     /// nothing to stderr. Skipped only where no toolchain git resolves and the fix falls back.
+    /// Engine git outside any sandbox keeps the toolchain xcode-select chose; only git that
+    /// runs inside an agent sandbox is the Command Line Tools git, whose helpers the agent
+    /// profile reads (T3-09 r1).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn engine_git_keeps_the_selected_toolchain_and_sandboxed_git_is_the_command_line_tools_git() {
+        let found = crate::spawn_gate::output(
+            Command::new("/usr/bin/xcrun")
+                .args(["--find", "git"])
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null()),
+        )
+        .unwrap();
+        assert!(found.status.success());
+        let selected = PathBuf::from(String::from_utf8(found.stdout).unwrap().trim());
+        assert_eq!(setup_git(), selected);
+        if Path::new(TOOLS_GIT).is_file() {
+            assert_eq!(sandboxed_git(), Path::new(TOOLS_GIT));
+            assert_eq!(agent_git_problem(), None);
+        } else {
+            assert_eq!(sandboxed_git(), selected);
+            assert_eq!(agent_git_problem(), Some(AGENT_GIT_NEEDS_TOOLS));
+        }
+    }
+
+    /// A toolchain root with no Command Line Tools git names the plain reason, and a failed
+    /// setup git step reports it in place of its own code; a root that has one does not.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_toolchain_root_without_the_command_line_tools_git_names_the_reason() {
+        let root = tempfile::tempdir().unwrap();
+        let tools = root.path().canonicalize().unwrap();
+        assert_eq!(agent_git_problem_at(&tools), Some(AGENT_GIT_NEEDS_TOOLS));
+        assert_eq!(
+            step_failure("worktree_add_failed", &tools),
+            AGENT_GIT_NEEDS_TOOLS
+        );
+        let bin = tools.join("usr").join("bin");
+        fs::create_dir_all(&bin).unwrap();
+        fs::write(bin.join("git"), "").unwrap();
+        assert_eq!(agent_git_problem_at(&tools), None);
+        assert_eq!(
+            step_failure("worktree_add_failed", &tools),
+            "worktree_add_failed"
+        );
+    }
+
     #[cfg(target_os = "macos")]
     #[test]
     fn engine_setup_git_does_not_run_the_xcrun_shim_under_the_sandbox() {
@@ -3864,7 +3959,7 @@ mod tests {
         sandbox.install(&profile).unwrap();
         let printed = crate::spawn_gate::output(
             sandbox
-                .command(&profile, setup_git())
+                .command(&profile, sandboxed_git())
                 .args(["version"])
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
