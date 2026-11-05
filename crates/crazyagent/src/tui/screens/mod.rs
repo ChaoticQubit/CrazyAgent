@@ -145,7 +145,7 @@ pub enum ProjectTab {
 
 impl ProjectTab {
     /// Every tab in order.
-    pub const ALL: [ProjectTab; 8] = [
+    pub const ALL: [ProjectTab; 9] = [
         Self::Overview,
         Self::Conversation,
         Self::Agents,
