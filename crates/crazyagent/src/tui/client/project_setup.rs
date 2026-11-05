@@ -1093,4 +1093,118 @@ pools = []
         drop(native);
         service.shutdown().await.unwrap();
     }
+
+    /// A New session the owner asks for in the TUI after another client changed the settings
+    /// starts on the current settings instead of being refused as opened before the change
+    /// (N-T2): the TUI's catalog and the live session's binding are both older than it.
+    #[tokio::test]
+    async fn a_new_session_after_a_settings_change_starts_on_the_current_settings() {
+        let root = tempfile::Builder::new()
+            .prefix("ca-tui-renew-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        let (mut service, mut native, _app, project, _stop, _home) =
+            live_project(root.path()).await;
+        let controller = native.controller.as_mut().unwrap();
+        assign_live_pool(controller, &project).await;
+        assert_eq!(open_live_session(controller, &project, 2).await, None);
+        let Some((first, _)) = master_session(controller, &project).await else {
+            panic!("the owner's default Open opened no master session");
+        };
+        let identity = controller.identity().clone();
+        let mut master = crate::tui::master_session::State::default();
+        master
+            .select(Some(identity), Some(project.clone()), true)
+            .unwrap();
+        master.open().unwrap();
+        for _ in 0..4 {
+            let Some(job) = master.request(true) else {
+                break;
+            };
+            let event = native.master(job).await;
+            master.apply(event).unwrap();
+        }
+        assert!(
+            master
+                .transcript()
+                .is_some_and(|(session, ..)| session.is_some()),
+            "the TUI reads the live session"
+        );
+
+        let controller = native.controller.as_mut().unwrap();
+        let pools = controller
+            .read(OwnerRead::ModelAccessPage {
+                collection: crate::engine::owner::ModelAccessCollection::Pools,
+                cursor: None,
+                limit: 1,
+            })
+            .await
+            .unwrap();
+        let OwnerData::ModelAccessPage { source_hash, .. } = &pools.data else {
+            panic!("pool page required");
+        };
+        let reference = |value: &str| crate::protocol::CredentialRef::new(value).unwrap();
+        controller
+            .begin_mutation(
+                OwnerMutation::ModelAccess {
+                    expected_config_id: pools.config_id.clone(),
+                    expected_source_hash: source_hash.clone(),
+                    edit: crate::config::ModelAccessEdit::ReplacePool {
+                        pool: crate::config::AccountPool {
+                            id: reference("pool-live"),
+                            name: Some("Live notes pool".into()),
+                            members: vec![reference("api-a")],
+                            projects: vec![reference(project.as_str())],
+                            roles: vec![reference("project_leader")],
+                            fallback_allowed: false,
+                            provider_quota_policy: crate::config::ProviderQuotaPolicy::default(),
+                        },
+                    },
+                },
+                3,
+            )
+            .unwrap();
+        let renamed = controller.send_pending().await.unwrap();
+        assert!(
+            matches!(
+                &renamed,
+                OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation }
+                    if operation.result == crate::engine::owner::OwnerResult::Applied
+            ),
+            "another client changes the settings: {renamed:?}"
+        );
+
+        master.new_session(false).unwrap();
+        let mut answer = None;
+        for _ in 0..4 {
+            let Some(job) = master.request(true) else {
+                break;
+            };
+            let event = native.master(job).await;
+            if let crate::tui::master_session::Event::Mutation { result, .. } = &event {
+                answer = Some(result.clone());
+                break;
+            }
+            master.apply(event).unwrap();
+        }
+        assert!(
+            matches!(
+                &answer,
+                Some(Ok(response)) if matches!(
+                    response.as_ref(),
+                    OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation }
+                        if operation.result == crate::engine::owner::OwnerResult::Applied
+                )
+            ),
+            "the New session starts on the current settings: {answer:?}"
+        );
+        let controller = native.controller.as_mut().unwrap();
+        let Some((second, phase)) = master_session(controller, &project).await else {
+            panic!("the New session left no master session");
+        };
+        assert_ne!(second, first, "a fresh session is live");
+        assert_eq!(phase, crate::master_session::MasterSessionPhase::Configured);
+        drop(native);
+        service.shutdown().await.unwrap();
+    }
 }
