@@ -59,7 +59,7 @@ pub(in crate::tui) enum Tab {
 }
 
 impl Tab {
-    pub const ALL: [Tab; 8] = [
+    pub const ALL: [Tab; 9] = [
         Self::Overview,
         Self::Conversation,
         Self::Agents,
