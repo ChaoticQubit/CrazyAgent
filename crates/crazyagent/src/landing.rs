@@ -503,11 +503,12 @@ pub fn merge_sub_agent(
 
 /// Readies an agent's own clone for another launch: makes any of its pack and
 /// loose-object folders that are missing, as `add_agent_clone` does for a new one, since
-/// the Own branch sandbox keeps the agent from making them itself (RL-3). Input: the
-/// clone's worktree. Output: Ok, else `changes_workspace_invalid`.
+/// the Own branch sandbox keeps the agent from making them itself (RL-3), and gives a clone
+/// made before its exclude named the project graph that line (18.15.1). Input: the clone's
+/// worktree. Output: Ok, else `changes_workspace_invalid`.
 pub fn ready_agent_clone(worktree: &Path) -> Result<(), EngineError> {
     #[cfg(unix)]
-    return clone::store_folders(worktree);
+    return clone::store_folders(worktree).map(|()| clone::exclude_graph(worktree));
     #[cfg(not(unix))]
     {
         let _ = worktree;

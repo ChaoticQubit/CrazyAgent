@@ -836,14 +836,21 @@ export interface RoleSkills {
   worker: string[] | null;
 }
 
+/** How every Claude Code terminal of a project draws: Classic on the normal screen, so the
+ * app's view scrolls with the wheel and a plain drag selects, or Fullscreen, Claude Code's own
+ * view, which takes the mouse. */
+export type ClaudeDisplay = "classic" | "fullscreen";
+
 /** A project's coordination settings: question routing, claim overlaps, workflow nudges, the
- * tool names the adoption counts include and the skills each team role gets. */
+ * tool names the adoption counts include, the skills each team role gets and the Claude Code
+ * terminal display. */
 export interface CoordSettings {
   questions_to: QuestionsTo;
   overlaps: Overlaps;
   nudges: Nudges;
   counted_tools: string[];
   role_skills: RoleSkills;
+  claude_display: ClaudeDisplay;
 }
 
 /** One harness kind's sub-agent mode and delivery, and whether it has native teammates at all. */
@@ -1151,6 +1158,8 @@ export interface FolderSize {
   bytes: number;
   github?: string | null;
   worktrees?: number;
+  movable?: boolean;
+  copyable?: boolean;
 }
 
 export type AddFolderMode = "move" | "copy";

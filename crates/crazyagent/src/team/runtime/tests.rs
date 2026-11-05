@@ -7400,6 +7400,7 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         hookless: false,
         scratch_pin: None,
         proxy: None,
+        claude_display: crate::coord::settings::ClaudeDisplay::Classic,
     };
     let account = || AccountBinding::Subscription {
         home: PathBuf::from("/tmp/home"),
@@ -12197,6 +12198,7 @@ fn hooks_plan(harness: &str, hookless: bool) -> Plan {
         hookless,
         scratch_pin: None,
         proxy: None,
+        claude_display: crate::coord::settings::ClaudeDisplay::Classic,
     }
 }
 
@@ -12482,6 +12484,104 @@ fn endpoint_claude_agent_is_hookless_and_refused_under_block() {
     let warned = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
     let (_, plan, _) = prepare(&runtime, warned, true).unwrap();
     assert!(plan.hookless, "under Warn it starts, still without hooks");
+    runtime.shutdown().unwrap();
+}
+
+/// Prepares one new Claude Code sub-agent with tools on an endpoint account, as the team
+/// starts it, and builds its pane command from the plan and the kept context the runtime
+/// made. Inputs: the fixture and the runtime. Output: the display variables of that command.
+#[cfg(target_os = "macos")]
+fn team_claude_display(fixture: &Fixture, runtime: &TeamRuntime) -> Vec<(String, String)> {
+    let id = fixture.agent(AgentRole::Sub, "claude-code", AgentStatus::Starting);
+    let (_, plan, mode) = runtime
+        .prepare(
+            &fixture.setup,
+            id,
+            AgentRole::Sub,
+            "claude-code",
+            true,
+            &endpoint_account(),
+            false,
+            Layout::Linked,
+        )
+        .unwrap();
+    let Mode::Kept { account, context } = mode else {
+        panic!("an endpoint agent keeps its process");
+    };
+    let request = plan.request(account, AgentAccess::Sandboxed).unwrap();
+    let installed = plan
+        .team_context(*context)
+        .install("claude-code", request.account.home(), true)
+        .unwrap();
+    let pane = crate::harnesses::interactive::command(
+        &request,
+        Some(&installed),
+        &crate::harnesses::interactive::Run {
+            session_id: "0f8fad5b-d9cb-469f-a165-70867728950e",
+            key_file: None,
+            resume: false,
+        },
+    )
+    .unwrap();
+    pane.env
+        .into_iter()
+        .filter(|(name, _)| {
+            name == "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN" || name == "CLAUDE_CODE_SCROLL_SPEED"
+        })
+        .collect()
+}
+
+/// A team Claude Code terminal of a project that never chose a display starts Classic
+/// (N-D9): Claude Code's alternate screen is off, so the app's view scrolls with the wheel.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_team_claude_code_terminal_starts_classic_by_default() {
+    let fixture = Fixture::new(1);
+    let mut runtime = exiting_claude_runtime(&fixture);
+    assert_eq!(
+        team_claude_display(&fixture, &runtime),
+        [(
+            "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".to_owned(),
+            "1".to_owned()
+        )]
+    );
+    runtime.shutdown().unwrap();
+}
+
+/// The display is read when each agent is prepared (N-D9): after the owner picks Fullscreen
+/// the next team Claude Code terminal keeps Claude Code's view at 3 rows a notch, and after
+/// Classic again the next one turns the alternate screen off.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_team_claude_code_terminal_gets_the_display_the_owner_chose_last() {
+    use crate::coord::settings::{ClaudeDisplay, CoordSettings, write};
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let mut runtime = exiting_claude_runtime(&fixture);
+    let choose = |claude_display: ClaudeDisplay| {
+        write(
+            &fixture.connection,
+            &project,
+            &CoordSettings {
+                claude_display,
+                ..CoordSettings::default()
+            },
+        )
+        .unwrap();
+    };
+    choose(ClaudeDisplay::Fullscreen);
+    assert_eq!(
+        team_claude_display(&fixture, &runtime),
+        [("CLAUDE_CODE_SCROLL_SPEED".to_owned(), "3".to_owned())]
+    );
+    choose(ClaudeDisplay::Classic);
+    assert_eq!(
+        team_claude_display(&fixture, &runtime),
+        [(
+            "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".to_owned(),
+            "1".to_owned()
+        )]
+    );
     runtime.shutdown().unwrap();
 }
 
@@ -13256,6 +13356,7 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
         hookless: false,
         scratch_pin: None,
         proxy: None,
+        claude_display: crate::coord::settings::ClaudeDisplay::Classic,
     };
     let account = || AccountBinding::Subscription {
         home: PathBuf::from("/private/tmp/agent-1-home"),
@@ -14081,6 +14182,137 @@ fn the_shared_graph_shows_in_an_agent_worktree_only_when_it_ignores_graphify_out
     let fresh = worktree("fresh", "graphify-out/\n");
     expose_graph(&bare_project, &fresh);
     assert!(!fresh.join(GRAPH_FOLDER).exists());
+}
+
+/// The graph shows in a worktree only where git itself ignores the graph folder (T3-L1): a
+/// line with leading spaces names another path and any `!` line naming the folder takes it
+/// back, as each case's real git says, while trailing spaces are git's own trim.
+#[cfg(target_os = "macos")]
+#[test]
+fn the_shared_graph_shows_only_where_real_git_ignores_graphify_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let project = base.join("project");
+    let graph = project.join(GRAPH_FOLDER);
+    std::fs::create_dir_all(&graph).unwrap();
+    std::fs::write(graph.join("graph.json"), "{}").unwrap();
+    let home = base.join("home");
+    std::fs::create_dir(&home).unwrap();
+    for (name, ignore, exclude, ignored) in [
+        ("spaced", "  graphify-out\n", "", false),
+        ("starred", "!**/graphify-out\n", "/graphify-out/\n", false),
+        ("later", "graphify-out/\n!**/graphify-out\n", "", false),
+        ("trailing", "graphify-out/  \n", "", true),
+    ] {
+        let clone = base.join(name);
+        std::fs::create_dir(&clone).unwrap();
+        let made = level_git(&clone, &home, &["init", "-q", "--template="]);
+        assert!(made.status.success(), "{name}: {made:?}");
+        std::fs::write(clone.join(".gitignore"), ignore).unwrap();
+        std::fs::create_dir_all(clone.join(".git").join("info")).unwrap();
+        std::fs::write(clone.join(".git").join("info").join("exclude"), exclude).unwrap();
+        let checked = level_git(
+            &clone,
+            &home,
+            &[
+                "check-ignore",
+                "-q",
+                "--no-index",
+                "graphify-out/graph.json",
+            ],
+        );
+        assert!(
+            matches!(checked.status.code(), Some(0 | 1)),
+            "{name}: {checked:?}"
+        );
+        assert_eq!(checked.status.success(), ignored, "{name}: real git");
+        expose_graph(&project, &clone);
+        assert_eq!(
+            std::fs::symlink_metadata(clone.join(GRAPH_FOLDER).join("graph.json")).is_ok(),
+            ignored,
+            "{name}: the graph shows only where git ignores it"
+        );
+    }
+}
+
+#[test]
+fn the_shared_graph_shows_in_a_worktree_whose_repository_excludes_graphify_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let project = base.join("project");
+    let graph = project.join(GRAPH_FOLDER);
+    std::fs::create_dir_all(&graph).unwrap();
+    std::fs::write(graph.join("graph.json"), "{}").unwrap();
+    std::fs::create_dir_all(project.join(".git").join("info")).unwrap();
+    std::fs::write(
+        project.join(".git").join("info").join("exclude"),
+        "# git ls-files --others --exclude-from=.git/info/exclude\n.crazyagent/\ngraphify-out/\n",
+    )
+    .unwrap();
+    let clone = |name: &str, ignore: &str, exclude: &str| -> PathBuf {
+        let folder = base.join(name);
+        std::fs::create_dir_all(folder.join(".git").join("info")).unwrap();
+        std::fs::write(folder.join(".gitignore"), ignore).unwrap();
+        std::fs::write(folder.join(".git").join("info").join("exclude"), exclude).unwrap();
+        folder
+    };
+    let linked = |name: &str, ignore: &str| -> PathBuf {
+        let folder = base.join(name);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join(".gitignore"), ignore).unwrap();
+        std::fs::write(
+            folder.join(".git"),
+            format!("gitdir: {}/.git/worktrees/{name}\n", project.display()),
+        )
+        .unwrap();
+        folder
+    };
+    let shown = |folder: &Path| std::fs::read_link(folder.join(GRAPH_FOLDER).join("graph.json"));
+
+    let own = clone(
+        "own",
+        ".crazyagent/\ntarget/\n",
+        "/.worktrees/\n/graphify-out/\n",
+    );
+    expose_graph(&project, &own);
+    assert_eq!(
+        shown(&own).ok(),
+        Some(graph.join("graph.json")),
+        "an Own branch clone whose own exclude keeps the graph out of git shows it"
+    );
+
+    let sandboxed = linked("sandboxed", ".crazyagent/\ntarget/\n");
+    expose_graph(&project, &sandboxed);
+    assert_eq!(
+        shown(&sandboxed).ok(),
+        Some(graph.join("graph.json")),
+        "a linked worktree shares the project repository's exclude, which the engine writes"
+    );
+
+    let older = clone("older", "target/\n", "/.worktrees/\n");
+    expose_graph(&project, &older);
+    assert!(
+        !older.join(GRAPH_FOLDER).exists(),
+        "a clone made before its exclude named the graph never shows it as a change"
+    );
+
+    let negated = linked("negated", "target/\n!graphify-out/\n");
+    expose_graph(&project, &negated);
+    assert!(
+        !negated.join(GRAPH_FOLDER).exists(),
+        "a .gitignore line taking the graph back into git wins over the exclude"
+    );
+
+    let unignored = clone(
+        "unignored",
+        "graphify-out/\n!/graphify-out/\n",
+        "/.worktrees/\n",
+    );
+    expose_graph(&project, &unignored);
+    assert!(
+        !unignored.join(GRAPH_FOLDER).exists(),
+        "the last .gitignore line about the graph decides"
+    );
 }
 
 fn reminders(connection: &Connection) -> Vec<String> {
@@ -15962,7 +16194,8 @@ fn a_lead_worker_change_set_stays_the_owners_while_lands_is_owner() {
 
 /// A live master's session counts as used once a turn runs in its terminal: started and
 /// kept, the fresh session holds no owner turn and is not listed; once the owner's line runs
-/// as a turn in the master's pane, the session holds one and is listed.
+/// as a turn in the master's pane, the session holds one and is listed, and the list counts
+/// each turn run there as one of its messages.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_turn_in_the_live_master_s_terminal_marks_its_session_used_and_listed() {
@@ -15978,7 +16211,7 @@ fn a_turn_in_the_live_master_s_terminal_marks_its_session_used_and_listed() {
         crate::master_sessions::list(&f.connection, &project)
             .unwrap()
             .into_iter()
-            .map(|summary| summary.session_id)
+            .map(|summary| (summary.session_id, summary.turns))
             .collect::<Vec<_>>()
     };
     super::super::master::set_live(&fixture.connection, &project, true).unwrap();
@@ -16027,7 +16260,19 @@ fn a_turn_in_the_live_master_s_terminal_marks_its_session_used_and_listed() {
         live_turns(&f.connection) == (1, false)
     });
     assert!(used(&fixture), "a turn in the terminal marks the session");
-    assert_eq!(listed(&fixture), vec![session.clone()]);
+    assert_eq!(listed(&fixture), vec![(session.clone(), 1)]);
+
+    host.input(&pane, b"again\r").unwrap();
+    fixture.until(
+        &mut team,
+        "the owner's second turn in the session ends",
+        |f| live_turns(&f.connection) == (2, false),
+    );
+    assert_eq!(
+        listed(&fixture),
+        vec![(session.clone(), 2)],
+        "every turn run in the terminal counts as one of the session's messages"
+    );
     let marked: i64 = fixture
         .connection
         .query_row(

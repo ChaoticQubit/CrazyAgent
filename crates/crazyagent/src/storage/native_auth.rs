@@ -449,13 +449,21 @@ fn commit_native_auth_custody(
     } else {
         matches!(
             fact.phase,
-            NativeAuthPhase::Starting | NativeAuthPhase::Cancelling
+            NativeAuthPhase::Starting
+                | NativeAuthPhase::Cancelling
+                | NativeAuthPhase::Failed
+                | NativeAuthPhase::Cancelled
         )
     };
     if !valid {
         return Err(error("native_auth_recovery_required"));
     }
-    if !retirement.after_child_reaped() {
+    if !retirement.after_child_reaped()
+        && matches!(
+            fact.phase,
+            NativeAuthPhase::Starting | NativeAuthPhase::Cancelling
+        )
+    {
         apply_update(&mut fact, NativeAuthHostUpdate::Unavailable)?;
     }
     store_fact(&tx, &fact)?;

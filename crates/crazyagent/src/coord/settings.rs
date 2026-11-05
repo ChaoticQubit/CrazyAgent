@@ -100,6 +100,31 @@ pub enum Overlaps {
     Off,
 }
 
+/// How every Claude Code terminal of the project draws (N-D9): Classic on the normal
+/// screen, so the app's terminal view scrolls with the wheel at once and a plain drag
+/// selects text, or Fullscreen, Claude Code's own view, which takes the mouse. Classic is
+/// the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaudeDisplay {
+    #[default]
+    Classic,
+    Fullscreen,
+}
+
+impl ClaudeDisplay {
+    /// The variable a Claude Code terminal starts with for this display: Classic turns its
+    /// alternate screen off, which makes Claude Code 2.1.309 use its classic renderer; Fullscreen
+    /// sets 3 rows a wheel notch, the step Claude Code picks itself for xterm.js. Takes the
+    /// display. Returns the name and value.
+    pub fn variable(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Classic => ("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN", "1"),
+            Self::Fullscreen => ("CLAUDE_CODE_SCROLL_SPEED", "3"),
+        }
+    }
+}
+
 /// A team role whose skills the owner chooses (DEC-111 R3): the master, a lead (a
 /// sub-agent that may start sub-agents of its own) or a worker (any other sub-agent or
 /// teammate).
@@ -198,7 +223,7 @@ impl<'de> Deserialize<'de> for Nudges {
 }
 
 /// A project's coordination settings. Every option is the owner's choice; the defaults
-/// are Lead, Warn, nudges Off and `COUNTED_TOOLS_DEFAULT`.
+/// are Lead, Warn, nudges Off, `COUNTED_TOOLS_DEFAULT` and the Classic Claude Code display.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CoordSettings {
@@ -208,6 +233,8 @@ pub struct CoordSettings {
     pub counted_tools: Vec<String>,
     #[serde(default)]
     pub role_skills: RoleSkills,
+    #[serde(default)]
+    pub claude_display: ClaudeDisplay,
 }
 
 impl Default for CoordSettings {
@@ -218,6 +245,7 @@ impl Default for CoordSettings {
             nudges: Nudges::Off,
             counted_tools: COUNTED_TOOLS_DEFAULT.map(str::to_owned).to_vec(),
             role_skills: RoleSkills::default(),
+            claude_display: ClaudeDisplay::Classic,
         }
     }
 }

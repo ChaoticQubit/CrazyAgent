@@ -9,7 +9,7 @@ const intake = await import("../src/screens/intake/intake.ts");
 const router = await import("../src/ui/router.ts");
 const { HomeFolderView } = await import("../src/screens/intake/home-folder.tsx");
 const { FoundProjectsView, SetUpDialogBody } = await import("../src/screens/intake/found.tsx");
-const { AddFolderView } = await import("../src/screens/intake/add-folder.tsx");
+const { AddFolderView, MoveConfirmDialog } = await import("../src/screens/intake/add-folder.tsx");
 const { GitHubSignInView, RepoListView } = await import("../src/screens/intake/clone.tsx");
 const { OnboardingReviewView } = await import("../src/screens/intake/onboarding.tsx");
 const { ToolsSetupView } = await import("../src/screens/intake/setup-step.tsx");
@@ -434,24 +434,24 @@ test("adding an existing folder uses it where it is by default, shows the target
   assert.match(none, /<h1>Add an existing folder<\/h1>/);
   assert.match(none, />Choose folder<\/button>/);
   assert.doesNotMatch(none, /Set up here|Move into projects folder/);
-  const here = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: { kind: "loading" }, mode: "here" });
+  const here = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10, movable: true }), mode: "here" });
   assert.match(here, /role="radio" aria-checked="true"[^>]*>(<svg[\s\S]*?<\/svg>)?Use where it is</);
   assert.match(here, /role="radio" aria-checked="false"[^>]*>(<svg[\s\S]*?<\/svg>)?Move</);
   assert.match(here, /~\/Code\/shop<\/span> stays where it is\./);
   assert.match(here, /Nothing is moved or copied\./);
   assert.match(here, />Set up here<\/button>/);
   assert.doesNotMatch(here, /goes to|into projects folder/);
-  const move = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: { kind: "loading" }, mode: "move" });
+  const move = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10, movable: true }), mode: "move" });
   assert.match(move, /role="radio" aria-checked="true"[^>]*>(<svg[\s\S]*?<\/svg>)?Move</);
   assert.match(move, /goes to <span class="pj-mono">~\/Projects\/shop<\/span>/);
   assert.match(move, /Moves the folder into ~\/Projects\./);
   assert.match(move, />Move into projects folder<\/button>/);
-  const big = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 3 * GB }), mode: "copy" });
+  const big = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 3 * GB, copyable: true }), mode: "copy" });
   assert.match(big, /This copies 3 GB/);
   assert.match(big, /class="notice"/);
   assert.match(big, />Copy into projects folder<\/button>/);
   assert.doesNotMatch(big, /linked git worktree/);
-  const linked = (worktrees, mode) => html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10, worktrees }), mode });
+  const linked = (worktrees, mode) => html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10, worktrees, copyable: true }), mode });
   assert.match(linked(3, "copy"), /This folder has 3 linked git worktrees\. They stay with the original folder; the copy gets the main checkout and every branch\./);
   assert.match(linked(1, "copy"), /This folder has 1 linked git worktree\. It stays with the original folder; the copy gets the main checkout and every branch\./);
   assert.doesNotMatch(linked(0, "copy"), /linked git worktree/);
@@ -461,6 +461,78 @@ test("adding an existing folder uses it where it is by default, shows the target
   assert.match(hosted, />Clone instead<\/button>/);
   assert.match(html(AddFolderView, { ...base, home: ok({ path: null, watching: false }), source: null, size: null, mode: "move" }), /Choose your projects folder first/);
   assert.match(html(AddFolderView, { ...base, home: notReady, source: null, size: null, mode: "move" }), /Not ready yet/);
+});
+
+test("adding a folder whose git worktree links a move would break offers no Move and says why", () => {
+  const base = { home: ok({ path: "/Users/mira/Projects", watching: true }), busy: false, problem: "", onChoose: noop, onMode: noop, onAdd: noop, onClone: noop };
+  const moveRadio = /role="radio"[^>]*>(<svg[\s\S]*?<\/svg>)?Move</;
+  const why = /Move isn(&#x27;|')t offered: this folder is linked to git worktrees, and moving it would break them\./;
+  const linked = (mode) => html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10, worktrees: 1, movable: false, copyable: true }), mode });
+  for (const mode of ["here", "move", "copy"]) {
+    const markup = linked(mode);
+    assert.doesNotMatch(markup, moveRadio, mode);
+    assert.match(markup, why, mode);
+    assert.doesNotMatch(markup, /Move into projects folder/, mode);
+  }
+  assert.match(linked("move"), /role="radio" aria-checked="true"[^>]*>(<svg[\s\S]*?<\/svg>)?Use where it is</);
+  assert.match(linked("move"), /~\/Code\/shop<\/span> stays where it is\./);
+  assert.match(linked("move"), />Set up here<\/button>/);
+  assert.match(linked("copy"), /This folder has 1 linked git worktree\./);
+  const movable = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10, worktrees: 0, movable: true }), mode: "move" });
+  assert.match(movable, /role="radio" aria-checked="true"[^>]*>(<svg[\s\S]*?<\/svg>)?Move</);
+  assert.doesNotMatch(movable, why);
+  for (const [size, line] of [
+    [{ kind: "loading" }, /Move and Copy are offered once CrazyAgent has checked this folder(&#x27;|')s git links\./],
+    [failed("folder_size_failed"), /Move and Copy aren(&#x27;|')t offered: CrazyAgent couldn(&#x27;|')t check this folder(&#x27;|')s git links\./],
+    [notReady, /Move and Copy aren(&#x27;|')t offered: CrazyAgent couldn(&#x27;|')t check this folder(&#x27;|')s git links\./],
+    [ok({ bytes: 10 }), /Move and Copy aren(&#x27;|')t offered: CrazyAgent couldn(&#x27;|')t check this folder(&#x27;|')s git links\./],
+  ]) {
+    for (const mode of ["here", "move", "copy"]) {
+      const unchecked = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size, mode });
+      assert.doesNotMatch(unchecked, moveRadio, `${size.kind} ${mode}`);
+      assert.doesNotMatch(unchecked, /role="radio"[^>]*>(<svg[\s\S]*?<\/svg>)?Copy</, `${size.kind} ${mode}`);
+      assert.match(unchecked, />Set up here<\/button>/, `${size.kind} ${mode}`);
+      assert.match(unchecked, line, `${size.kind} ${mode}`);
+      assert.doesNotMatch(unchecked, why, `${size.kind} ${mode}`);
+      assert.doesNotMatch(unchecked, /Move into projects folder/, `${size.kind} ${mode}`);
+    }
+  }
+});
+
+test("the Move confirm only opens while Move is the way, so a read that withdraws Move closes it", () => {
+  assert.equal(typeof MoveConfirmDialog, "function", "add-folder.tsx exports MoveConfirmDialog");
+  const props = (way) => ({ open: true, way, name: "shop", source: "/Users/mira/Code/shop", root: "/Users/mira/Projects", busy: false, onCancel: noop, onConfirm: noop });
+  const title = /Move shop into your projects folder\?/;
+  assert.match(html(MoveConfirmDialog, props("move")), title);
+  assert.match(html(MoveConfirmDialog, props("move")), />Move folder<\/button>/);
+  for (const way of ["here", "copy"]) assert.doesNotMatch(html(MoveConfirmDialog, props(way)), title, way);
+  assert.doesNotMatch(html(MoveConfirmDialog, { ...props("move"), open: false }), title);
+  assert.doesNotMatch(html(MoveConfirmDialog, { ...props("move"), root: null }), title);
+});
+
+test("adding a folder that is itself a linked git worktree offers neither Move nor Copy and says why", () => {
+  const base = { home: ok({ path: "/Users/mira/Projects", watching: true }), busy: false, problem: "", onChoose: noop, onMode: noop, onAdd: noop, onClone: noop };
+  const radio = (label) => new RegExp(`role="radio"[^>]*>(<svg[\\s\\S]*?<\\/svg>)?${label}<`);
+  const copyWhy = /Copy isn(&#x27;|')t offered: this folder is a git worktree or submodule of another repository, so a copy would still share it\./;
+  const moveWhy = /Move isn(&#x27;|')t offered: this folder is linked to git worktrees/;
+  const linked = (mode) => html(AddFolderView, { ...base, source: "/Users/mira/Code/shop-side", size: ok({ bytes: 10, worktrees: 0, movable: false, copyable: false }), mode });
+  for (const mode of ["here", "move", "copy"]) {
+    const markup = linked(mode);
+    assert.doesNotMatch(markup, radio("Move"), mode);
+    assert.doesNotMatch(markup, radio("Copy"), mode);
+    assert.match(markup, /role="radio" aria-checked="true"[^>]*>(<svg[\s\S]*?<\/svg>)?Use where it is</, mode);
+    assert.match(markup, copyWhy, mode);
+    assert.match(markup, moveWhy, mode);
+    assert.match(markup, />Set up here<\/button>/, mode);
+    assert.doesNotMatch(markup, /into projects folder<\/button>/, mode);
+  }
+  const repo = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10, worktrees: 1, movable: false, copyable: true }), mode: "copy" });
+  assert.match(repo, /role="radio" aria-checked="true"[^>]*>(<svg[\s\S]*?<\/svg>)?Copy</);
+  assert.doesNotMatch(repo, copyWhy);
+  const measuring = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop-side", size: { kind: "loading" }, mode: "copy" });
+  assert.doesNotMatch(measuring, radio("Copy"));
+  assert.match(measuring, /Move and Copy are offered once CrazyAgent has checked/);
+  assert.doesNotMatch(measuring, copyWhy);
 });
 
 test("GitHub sign-in shows the three ways, then the device code, and the token field never holds a value", () => {
@@ -683,10 +755,10 @@ test("the projects folder, Add, clone and setup screens draw their Lucide icons"
   const base = { home: ok({ path: "/Users/mira/Projects", watching: true }), busy: false, problem: "", onChoose: noop, onMode: noop, onAdd: noop, onClone: noop };
   const here = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10 }), mode: "here" });
   assert.ok(here.includes(`${svg("list-checks", 15)}Set up here</button>`), here);
-  const move = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10, github: "mira/plant-shop" }), mode: "move" });
+  const move = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10, github: "mira/plant-shop", movable: true }), mode: "move" });
   assert.ok(move.includes(`${svg("folder-input", 15)}Move into projects folder</button>`), move);
   assert.ok(move.includes(`${svg("git-branch", 15)}Clone instead</button>`), move);
-  const copy = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10 }), mode: "copy" });
+  const copy = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10, copyable: true }), mode: "copy" });
   assert.ok(copy.includes(`${svg("copy", 15)}Copy into projects folder</button>`), copy);
 
   const repos = [{ full_name: "mira/plant-shop", private: true, default_branch: "main", size_kb: 2048 }, { full_name: "mira/notes", private: false, default_branch: "main", size_kb: 12 }];

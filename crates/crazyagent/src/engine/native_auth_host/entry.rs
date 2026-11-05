@@ -137,7 +137,7 @@ async fn run_inner(
     )?;
     let session = CustodySession::new(guard);
     session.check(&mut channel).await?;
-    let retired = if let Some((executable, expected_sha256)) = claude {
+    let retirement = if let Some((executable, expected_sha256)) = claude {
         if codex.is_some() || fact.binding.connection.harness.as_str() != "claude" {
             return Err(EngineError("native_auth_method_mismatch".into()));
         }
@@ -145,8 +145,7 @@ async fn run_inner(
         if executable.verified_sha256()? != expected_sha256 {
             return Err(EngineError("native_auth_host_executable_changed".into()));
         }
-        let retirement = super::claude_auth::run(session, &mut channel, &executable).await?;
-        channel.retire_after_child_reaped(retirement).await?
+        super::claude_auth::run(session, &mut channel, &executable).await?
     } else if let Some((executable, expected_sha256)) = codex {
         if fact.binding.connection.harness.as_str() != "codex" {
             return Err(EngineError("native_auth_method_mismatch".into()));
@@ -155,11 +154,14 @@ async fn run_inner(
         if executable.verified_sha256()? != expected_sha256 {
             return Err(EngineError("native_auth_host_executable_changed".into()));
         }
-        let retirement =
-            super::codex_auth::run(session, &mut channel, executable.verified_path()?).await?;
+        super::codex_auth::run(session, &mut channel, executable.verified_path()?).await?
+    } else {
+        session.seal_without_effect()?
+    };
+    let retired = if retirement.child_reaped() {
         channel.retire_after_child_reaped(retirement).await?
     } else {
-        channel.retire(session.seal_without_effect()?).await?
+        channel.retire(retirement).await?
     };
     assert_eq!(retired.operation_id, fact.operation_id);
     assert_eq!(retired.generation, fact.generation);

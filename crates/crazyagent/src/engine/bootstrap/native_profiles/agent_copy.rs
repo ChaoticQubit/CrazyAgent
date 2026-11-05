@@ -412,7 +412,7 @@ fn poll_credential(
             Harness::Claude => unavailable(),
         })?;
     Ok(crate::usage::poll::PollCredential {
-        token: crate::credentials::SecretString::new(token.as_bytes().to_vec())
+        token: crate::credentials::SecretString::bearer(token.as_bytes().to_vec())
             .map_err(|_| unavailable())?,
         account_id: account_id.map(str::to_owned),
         plan: plan.map(str::to_owned),

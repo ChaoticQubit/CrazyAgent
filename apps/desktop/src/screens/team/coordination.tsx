@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { listSkills, setCoordSettings, setHarnessDelivery, setHarnessMode, type SkillView } from "../../api";
-import type { CoordHarness, CoordinationView, CoordSettings, Delivery, Nudges, Overlaps, QuestionsTo, SkillRole, SubagentMode, TeamStatus } from "../../engine-client";
+import type { ClaudeDisplay, CoordHarness, CoordinationView, CoordSettings, Delivery, Nudges, Overlaps, QuestionsTo, SkillRole, SubagentMode, TeamStatus } from "../../engine-client";
 import { useLoad, type Loaded } from "../../state";
 import { Button, Checkbox, Segmented, Select } from "../../ui";
 import type { SelectOption } from "../../ui";
@@ -20,6 +20,7 @@ export const COORD_DEFAULTS: CoordSettings = {
   nudges: "off",
   counted_tools: ["start_work", "inspect_work", "update_work", "transfer_work", "finish_work", "ctx_*", "graphify", "Skill"],
   role_skills: { master: null, lead: null, worker: null },
+  claude_display: "classic",
 };
 
 const ROLES: { role: SkillRole; label: string; about: string }[] = [
@@ -82,6 +83,17 @@ export function modeOptions(native: boolean): SelectOption[] {
   const spawned = { value: "app_spawned", label: "App-spawned sub-agents" };
   return native ? [spawned, { value: "native", label: "Native teammates" }] : [spawned];
 }
+
+/** The Claude Code terminal display choices, Classic first as the default. */
+export const DISPLAY_OPTIONS: SelectOption[] = [
+  { value: "classic", label: "Classic" },
+  { value: "fullscreen", label: "Fullscreen" },
+];
+
+const DISPLAY_HELPER: Record<ClaudeDisplay, string> = {
+  classic: "Classic: the mouse wheel scrolls the terminal at once and a plain drag selects text. A change applies when a Claude Code terminal next starts.",
+  fullscreen: "Fullscreen: Claude Code draws its own view and takes the mouse; the wheel scrolls 3 rows a notch and Option-drag selects text. A change applies when a Claude Code terminal next starts.",
+};
 
 /** The Delivery choices, Auto first as the default. */
 export const DELIVERY_OPTIONS: SelectOption[] = [
@@ -151,6 +163,9 @@ export function CoordinationControls({ projectId, status, reload }: { projectId:
           : `${HARNESS_NAMES[row.harness]} has no native teammates, so its sub-agents are app-spawned.`} />
       <Select id={`tg-delivery-${row.harness}-${projectId}`} label={`Messages to ${HARNESS_NAMES[row.harness]} agents`} value={row.delivery} options={DELIVERY_OPTIONS}
         onValue={(value) => { if (value === "auto" || value === "native_only" || value === "typing_only") void run(() => setHarnessDelivery(projectId, row.harness, value as Delivery), "message delivery"); }} />
+      {row.harness === "claude-code" && <Select id={`tg-display-claude-code-${projectId}`} label="Claude Code terminal display" value={view.settings.claude_display} options={DISPLAY_OPTIONS}
+        onValue={(value) => { if (value === "classic" || value === "fullscreen") void save({ claude_display: value }, "the Claude Code terminal display"); }}
+        helper={DISPLAY_HELPER[view.settings.claude_display]} />}
     </div>)}
     <div className="pj-row">
       <span aria-hidden="true">Sub-agent questions go to</span>

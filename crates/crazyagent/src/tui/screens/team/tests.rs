@@ -2005,6 +2005,180 @@ fn esc_while_the_master_terminal_starts_is_never_typed_into_it_later() {
     );
 }
 
+fn attached_frame(shell: &mut Shell, name: &str) {
+    shell.arrive(Arrival::Terminal {
+        agent: terminal(name),
+        frame: TerminalFrame::Attached {
+            agent_id: terminal(name),
+            cols: 74,
+            rows: 17,
+        },
+    });
+}
+
+fn type_hi_and_enter(shell: &mut Shell) {
+    for character in "hi".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::Enter);
+    let sent = requests(shell);
+    assert!(sent.iter().all(|sent| input(sent).is_none()), "{sent:?}");
+}
+
+fn typed_while_starting(team_read: bool) -> Shell {
+    let mut shell = master_view(80, 24);
+    shell.arrive(switch(Some(true), None));
+    if team_read {
+        shell.arrive(Arrival::TeamGraph {
+            project: project(),
+            result: Ok(graph()),
+        });
+    }
+    requests(&mut shell);
+    type_hi_and_enter(&mut shell);
+    shell
+}
+
+fn said_not_sent(shell: &mut Shell) -> bool {
+    render(shell)
+        .iter()
+        .any(|row| row.contains("What you typed for the master was not sent."))
+}
+
+fn typed_in(shell: &mut Shell) -> Vec<Request> {
+    requests(shell)
+        .into_iter()
+        .filter(|sent| input(sent).is_some())
+        .collect()
+}
+
+fn attach_asked(sent: &[Request], name: &str) -> bool {
+    sent.iter()
+        .any(|sent| matches!(sent, Request::TerminalAttach { agent } if agent.as_str() == name))
+}
+
+/// NT1-M1: a master terminal that closes before it opens drops the keys kept for it and
+/// says so; the master's terminal opened again gets none of them.
+#[test]
+fn a_master_terminal_closed_before_it_opens_drops_the_keys_kept_for_it() {
+    let mut shell = typed_while_starting(true);
+    shell.arrive(Arrival::Terminal {
+        agent: terminal("team-1"),
+        frame: TerminalFrame::Closed {
+            reason: "exited".into(),
+        },
+    });
+    assert!(said_not_sent(&mut shell), "{:?}", render(&mut shell));
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    let sent = requests(&mut shell);
+    assert!(attach_asked(&sent, "team-1"), "{sent:?}");
+    attached_frame(&mut shell, "team-1");
+    let typed = typed_in(&mut shell);
+    assert!(typed.is_empty(), "{typed:?}");
+}
+
+/// F1: a rejected master terminal drops the keys kept for it and says so; the master's
+/// next terminal gets none of them when it opens.
+#[test]
+fn a_rejected_master_terminal_drops_the_keys_kept_for_it_and_the_next_one_gets_none() {
+    let mut shell = typed_while_starting(true);
+    shell.arrive(Arrival::Terminal {
+        agent: terminal("team-1"),
+        frame: TerminalFrame::Rejected {
+            code: "terminal_unknown".into(),
+        },
+    });
+    assert!(said_not_sent(&mut shell), "{:?}", render(&mut shell));
+    let mut moved = graph();
+    moved.nodes[0].terminal = Some(terminal("team-9"));
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(moved),
+    });
+    let sent = requests(&mut shell);
+    assert!(attach_asked(&sent, "team-9"), "{sent:?}");
+    attached_frame(&mut shell, "team-9");
+    let typed = typed_in(&mut shell);
+    assert!(typed.is_empty(), "{typed:?}");
+}
+
+/// NT1-M1: a master that moves to another terminal before its first one opens (failover)
+/// drops the keys kept for the first and says so; the new terminal gets none of them.
+#[test]
+fn a_master_moved_to_a_new_terminal_before_it_opens_drops_the_keys_kept_for_the_old_one() {
+    let mut shell = typed_while_starting(true);
+    let mut moved = graph();
+    moved.nodes[0].terminal = Some(terminal("team-9"));
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(moved),
+    });
+    let sent = requests(&mut shell);
+    assert!(attach_asked(&sent, "team-9"), "{sent:?}");
+    assert!(said_not_sent(&mut shell), "{:?}", render(&mut shell));
+    attached_frame(&mut shell, "team-9");
+    let typed = typed_in(&mut shell);
+    assert!(typed.is_empty(), "{typed:?}");
+}
+
+/// NT1-M1: a refused live master start drops the keys kept for the master's terminal and
+/// says so; a terminal that opens later gets none of them.
+#[test]
+fn a_refused_live_master_start_drops_the_keys_kept_for_its_terminal() {
+    let mut shell = master_view(80, 24);
+    shell.arrive(switch(None, None));
+    requests(&mut shell);
+    type_hi_and_enter(&mut shell);
+    shell.arrive(turned(true, Err("team_master_no_terminal")));
+    assert!(said_not_sent(&mut shell), "{:?}", render(&mut shell));
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    requests(&mut shell);
+    attached_frame(&mut shell, "team-1");
+    let typed = typed_in(&mut shell);
+    assert!(typed.is_empty(), "{typed:?}");
+}
+
+/// NT1-M1: Stop all while the master's terminal starts drops the keys kept for it and says
+/// so; once the team runs again, the terminal that opens gets none of them.
+#[test]
+fn stop_all_while_the_master_terminal_starts_drops_the_keys_kept_for_it() {
+    let mut shell = typed_while_starting(false);
+    shell.arrive(paused_read(Some(true)));
+    assert!(said_not_sent(&mut shell), "{:?}", render(&mut shell));
+    shell.arrive(switch(Some(true), None));
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    let sent = requests(&mut shell);
+    assert!(attach_asked(&sent, "team-1"), "{sent:?}");
+    attached_frame(&mut shell, "team-1");
+    let typed = typed_in(&mut shell);
+    assert!(typed.is_empty(), "{typed:?}");
+}
+
+/// NT1-M1: the live master turned off while its terminal starts drops the keys kept for it
+/// and says so.
+#[test]
+fn the_live_master_turned_off_while_its_terminal_starts_drops_the_keys_kept_for_it() {
+    let mut shell = master_view(80, 24);
+    shell.arrive(switch(None, None));
+    shell.arrive(turned(true, Ok(())));
+    requests(&mut shell);
+    type_hi_and_enter(&mut shell);
+    shell.arrive(switch(
+        Some(false),
+        Some("The live master was turned off: it could not start."),
+    ));
+    assert!(said_not_sent(&mut shell), "{:?}", render(&mut shell));
+}
+
 fn attached_master_view(shift_arrows: ShiftArrows) -> Shell {
     let mut shell = master_view(80, 24);
     shell.ctx.shift_arrows = shift_arrows;

@@ -15,6 +15,7 @@ const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 const TICK_MS = 30_000;
 const NOT_READY = "This isn't ready in this build yet.";
+const API_KEY_ACCOUNT = "native_profile_codex_api_key";
 const COMPACT = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });
 
 export type UsageRange = "today" | "7d" | "30d" | "all";
@@ -114,6 +115,16 @@ export function readLine(limits: AccountLimits, nowMs: number): string {
   if (limits.observed_ms === null || limits.source === null) return "Not read yet";
   const from = limits.source === "poll" ? "Read from the provider" : "Read from a run's own record";
   return `${from} ${agoText(limits.observed_ms, nowMs)}`;
+}
+
+/** What a window with no current reading says: not read when the last read failed, whose
+ * cause the card's notice above gives, or not reported by the provider, as for an API-key
+ * account, which has no such window. Input: the account's last failure. Output: the
+ * window's state and its line. */
+export function missingWindow(failure: string | null): [string, string] {
+  return failure && failure !== API_KEY_ACCOUNT
+    ? ["Not read", "The last read failed, for the reason above."]
+    : ["Not reported", "The provider hasn't reported this window."];
 }
 
 /** An agent's name in the tables. Inputs: the engine's agent key and the project namer.
@@ -250,13 +261,14 @@ function WindowLine({ limits, kind, nowMs, pending, onSetReset }: {
   const override = kind === "five_hour" ? limits.five_hour_reset_override_ms : limits.weekly_reset_override_ms;
   const current = windowNow(kind === "five_hour" ? limits.five_hour : limits.weekly, override, nowMs);
   const label = kind === "five_hour" ? "5-hour" : "Weekly";
+  const [missing, why] = missingWindow(limits.failure);
   return <div className="usage-window">
     <div className="row usage-window-head">
       <strong>{label}</strong>
-      <span>{current ? `${Math.round(current.used_percent)}% used` : "Not reported"}</span>
+      <span>{current ? `${Math.round(current.used_percent)}% used` : missing}</span>
     </div>
     {current && <meter className="usage-meter" min={0} max={100} low={70} high={90} optimum={0} value={current.used_percent} aria-label={`${label} limit used`} />}
-    <span className="muted small">{current ? resetText(current.resets_at_ms, nowMs) : "The provider hasn't reported this window."}{override !== null ? " (your time)" : ""}</span>
+    <span className="muted small">{current ? resetText(current.resets_at_ms, nowMs) : why}{override !== null ? " (your time)" : ""}</span>
     <ResetEditor id={`usage-reset-${limits.account}-${kind}`} override={override} nowMs={nowMs} pending={pending}
       onSave={(at) => onSetReset(limits.account, kind, at)} />
   </div>;
@@ -275,7 +287,7 @@ function LimitsCard({ limits, name, nowMs, busy, onSetReset }: {
       {limits.plan && <span className="badge">{limits.plan}</span>}
     </div>
     <span className="muted small">{readLine(limits, nowMs)}</span>
-    {limits.failure && <Notice tone={limits.failure === "native_profile_codex_api_key" ? "info" : "warn"}>{pollFailure(limits.failure)}</Notice>}
+    {limits.failure && <Notice tone={limits.failure === API_KEY_ACCOUNT ? "info" : "warn"}>{pollFailure(limits.failure)}</Notice>}
     <WindowLine limits={limits} kind="five_hour" nowMs={nowMs} pending={busy === `${limits.account}/five_hour`} onSetReset={onSetReset} />
     <WindowLine limits={limits} kind="weekly" nowMs={nowMs} pending={busy === `${limits.account}/weekly`} onSetReset={onSetReset} />
   </section>;
