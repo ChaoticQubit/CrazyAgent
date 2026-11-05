@@ -1087,6 +1087,37 @@ pub enum TeamReach {
     },
 }
 
+/// Tells how an agent of the launch harness reaches its model through one connection: a
+/// keyless endpoint whose protocol fits, or a native managed profile of that harness.
+/// Takes the connection and the launch harness identifier. Returns the reach, or none
+/// when the harness cannot run on that connection.
+fn reach(connection: &crate::config::ModelConnection, harness: &str) -> Option<TeamReach> {
+    match (&connection.endpoint, &connection.auth) {
+        (ModelEndpoint::Http { url }, ModelAuthentication::None {}) => {
+            let protocol = connection.protocol.as_str();
+            let fits = match harness {
+                "codex" => protocol.starts_with("openai"),
+                "claude-code" => protocol == "anthropic-messages",
+                _ => false,
+            };
+            fits.then(|| TeamReach::Endpoint {
+                base_url: url.clone(),
+                model: connection.model.id.clone(),
+            })
+        }
+        (ModelEndpoint::Native {}, ModelAuthentication::NativeManaged { profile_ref }) => {
+            let fits = crate::harnesses::spec(connection.harness.as_str())
+                .is_some_and(|spec| spec.id == harness);
+            fits.then(|| TeamReach::Managed {
+                profile_ref: profile_ref.clone(),
+                model: (connection.model.id != NATIVE_DEFAULT_MODEL)
+                    .then(|| connection.model.id.clone()),
+            })
+        }
+        _ => None,
+    }
+}
+
 /// The accounts a harness may use for one project, or why there are none.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Accounts {
@@ -1121,31 +1152,7 @@ pub fn eligible_accounts(access: &ModelAccess, project: &ProjectId, harness: &st
             let Some(connection) = access.connections.iter().find(|c| &c.id == member) else {
                 continue;
             };
-            let reach = match (&connection.endpoint, &connection.auth) {
-                (ModelEndpoint::Http { url }, ModelAuthentication::None {}) => {
-                    let protocol = connection.protocol.as_str();
-                    let fits = match harness {
-                        "codex" => protocol.starts_with("openai"),
-                        "claude-code" => protocol == "anthropic-messages",
-                        _ => false,
-                    };
-                    fits.then(|| TeamReach::Endpoint {
-                        base_url: url.clone(),
-                        model: connection.model.id.clone(),
-                    })
-                }
-                (ModelEndpoint::Native {}, ModelAuthentication::NativeManaged { profile_ref }) => {
-                    let fits = crate::harnesses::spec(connection.harness.as_str())
-                        .is_some_and(|spec| spec.id == harness);
-                    fits.then(|| TeamReach::Managed {
-                        profile_ref: profile_ref.clone(),
-                        model: (connection.model.id != NATIVE_DEFAULT_MODEL)
-                            .then(|| connection.model.id.clone()),
-                    })
-                }
-                _ => None,
-            };
-            if let Some(reach) = reach {
+            if let Some(reach) = reach(connection, harness) {
                 usable.push(TeamAccount {
                     connection: connection.id.clone(),
                     reach,
@@ -1185,6 +1192,20 @@ pub fn pick_account<'a>(
         .ready
         .first()
         .map(|index| open[*index])
+}
+
+/// Tells whether a master conversation kept while the master ran on `kept` may resume on the
+/// `picked` account: always on the same account, and across accounts only from one native
+/// subscription in the pool to another, never to or from an endpoint whose model may not take
+/// that history. Takes the pool's usable accounts for the harness, the picked account and the
+/// kept connection. Returns the answer.
+pub fn resumes_on(pool: &[TeamAccount], picked: &TeamAccount, kept: &str) -> bool {
+    let subscription = |account: &TeamAccount| matches!(account.reach, TeamReach::Managed { .. });
+    picked.connection.as_str() == kept
+        || (subscription(picked)
+            && pool
+                .iter()
+                .any(|account| account.connection.as_str() == kept && subscription(account)))
 }
 
 /// One task the master asked for in its reply, with the role handle it gave the job, if any.
@@ -2718,6 +2739,8 @@ pub struct TeamAgent {
     pub hookless: bool,
     #[serde(default)]
     pub instructions_changed: bool,
+    #[serde(default)]
+    pub message_note: Option<String>,
 }
 
 /// One teammate a harness split off in its own pane of the harness's terminal, such as a
@@ -2973,6 +2996,7 @@ pub(crate) fn agent_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TeamAgent> 
         pane: row.get(17)?,
         hookless: row.get(18)?,
         instructions_changed: false,
+        message_note: None,
     })
 }
 
@@ -3803,25 +3827,68 @@ pub(crate) fn paused_until(
         .optional()
 }
 
-/// The project's team status as the owner reads it: `status`, fitted to one owner reply by
-/// `fit_status`. Takes a connection and the stored setup. Returns the status, partial when
-/// older history had to go, or `team_status_bounds` when even an empty view does not fit.
+/// The project's team status as the owner reads it: `status` with each agent's
+/// [`message_notes`], fitted to one owner reply by `fit_status`. Takes a connection, the
+/// stored setup and the model access, if any. Returns the status, partial when older
+/// history had to go, or `team_status_bounds` when even an empty view does not fit.
 pub fn owner_status(
     connection: &Connection,
     stored: &StoredSetup,
+    access: Option<&ModelAccess>,
 ) -> Result<TeamStatus, EngineError> {
-    fit_status(status(connection, stored)?, encoded_len::<TeamStatus>)
+    let mut status = status(connection, stored)?;
+    message_notes(connection, access, &mut status)?;
+    fit_status(status, encoded_len::<TeamStatus>)
 }
 
-/// The project's team graph as the owner reads it, built from a status `fit_status` fitted
-/// until the graph fits one owner reply, with the branches and coordination state
-/// `graph::facts` reads now. Takes a connection and the stored setup. Returns the graph, or
-/// `team_status_bounds` when even an empty view does not fit.
+/// Says on each agent whether the project's Delivery setting leaves it no way to get its
+/// team messages ([`crate::coord::delivery::no_channel`]); an agent runs a kept session when
+/// its connection is a keyless endpoint, and one whose connection is gone from the model
+/// access gets no note. Takes the connection, the model access and the status. Returns any
+/// SQLite failure.
+fn message_notes(
+    connection: &Connection,
+    access: Option<&ModelAccess>,
+    status: &mut TeamStatus,
+) -> Result<(), EngineError> {
+    let project = status.project_id.clone();
+    for agent in &mut status.agents {
+        let kept = access
+            .zip(agent.account.as_deref())
+            .and_then(|(access, account)| {
+                access
+                    .connections
+                    .iter()
+                    .find(|found| found.id.as_str() == account)
+            })
+            .zip(launch_harness(&agent.harness))
+            .and_then(|(found, harness)| reach(found, harness))
+            .is_some_and(|reach| matches!(reach, TeamReach::Endpoint { .. }));
+        agent.message_note = crate::coord::delivery::no_channel(
+            connection,
+            &project,
+            agent.role,
+            &agent.harness,
+            agent.tools,
+            kept,
+        )?
+        .map(str::to_owned);
+    }
+    Ok(())
+}
+
+/// The project's team graph as the owner reads it, built from a status with each agent's
+/// [`message_notes`] that `fit_status` fitted until the graph fits one owner reply, with
+/// the branches and coordination state `graph::facts` reads now. Takes a connection, the
+/// stored setup and the model access, if any. Returns the graph, or `team_status_bounds`
+/// when even an empty view does not fit.
 pub fn owner_graph(
     connection: &Connection,
     stored: &StoredSetup,
+    access: Option<&ModelAccess>,
 ) -> Result<TeamGraph, EngineError> {
-    let status = status(connection, stored)?;
+    let mut status = status(connection, stored)?;
+    message_notes(connection, access, &mut status)?;
     let facts = graph::facts(connection, &status, now_ms())?;
     let status = fit_status(status, |status| encoded_len(&graph(status, &facts)))?;
     Ok(graph(&status, &facts))

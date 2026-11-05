@@ -14,7 +14,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-const COMMANDS: [&str; 13] = [
+const COMMANDS: [&str; 14] = [
     "desktop_team_status",
     "desktop_team_message",
     "desktop_team_delegate",
@@ -22,6 +22,7 @@ const COMMANDS: [&str; 13] = [
     "desktop_team_keep_warm",
     "desktop_team_time_limits",
     "desktop_team_on_harness_switch",
+    "desktop_team_apply_harness_switch",
     "desktop_team_finished_agents",
     "desktop_team_live_master",
     "desktop_team_pause",

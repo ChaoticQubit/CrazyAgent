@@ -210,14 +210,16 @@ fn window_line(
     window: Option<LimitWindow>,
     own: bool,
     failed: bool,
+    left_out: Option<&str>,
     now_ms: i64,
 ) -> String {
-    match window {
-        None if failed => {
+    match (window, left_out) {
+        (None, _) if failed => {
             format!("{label:<8}Not read. The last read failed, for the reason above.")
         }
-        None => format!("{label:<8}Not reported"),
-        Some(window) => format!(
+        (None, Some(sentence)) => format!("{label:<8}{sentence}"),
+        (None, None) => format!("{label:<8}Not reported"),
+        (Some(window), _) => format!(
             "{label:<8}{:>3}% used  {}{}",
             window.used_percent.round() as u32,
             reset_text(window.resets_at_ms, now_ms),
@@ -268,6 +270,7 @@ fn limits_lines(
             limits.five_hour_at(now_ms),
             limits.five_hour_reset_override_ms.is_some(),
             failed,
+            limits.five_hour_left_out_label.as_deref(),
             now_ms
         )
     )));
@@ -278,6 +281,7 @@ fn limits_lines(
             limits.weekly_at(now_ms),
             limits.weekly_reset_override_ms.is_some(),
             failed,
+            limits.weekly_left_out_label.as_deref(),
             now_ms
         )
     )));

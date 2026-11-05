@@ -830,7 +830,7 @@ impl Team {
                 | ProcessReply::Settings(_)
                 | ProcessReply::Adoption(_)
                 | ProcessReply::Files(_)
-                | ProcessReply::Paths(_)
+                | ProcessReply::Uncommitted(_)
                 | ProcessReply::Committed(_),
             ) => {
                 return;
@@ -1659,9 +1659,10 @@ fn lead_rows(
 }
 
 /// Adds the rows under an agent: its account and branch on one row, then, for an agent
-/// whose launch fires no hooks, that its receipts are unavailable, wrapped to
-/// the width left after the prefix so the words are never cut. Inputs: the rows, the node,
-/// the prefix and the row width. Output: none; rows are appended.
+/// whose launch fires no hooks, that its receipts are unavailable, then the engine's note
+/// when the Delivery setting leaves it no way to get messages, each wrapped to the width
+/// left after the prefix so the words are never cut. Inputs: the rows, the node, the
+/// prefix and the row width. Output: none; rows are appended.
 fn detail_row(out: &mut Vec<TreeRow>, node: &GraphNode, prefix: String, width: usize) {
     if node.account.is_some() || node.branch.is_some() {
         out.push(TreeRow {
@@ -1673,11 +1674,16 @@ fn detail_row(out: &mut Vec<TreeRow>, node: &GraphNode, prefix: String, width: u
             },
         });
     }
-    if node.hookless {
-        let words = format!("Receipts {}", crate::coord::adoption::HOOKLESS_WORDS);
-        let room = width
-            .saturating_sub(crate::tui::text::width(&prefix))
-            .max(1);
+    let room = width
+        .saturating_sub(crate::tui::text::width(&prefix))
+        .max(1);
+    let hookless = node
+        .hookless
+        .then(|| format!("Receipts {}", crate::coord::adoption::HOOKLESS_WORDS));
+    for words in hookless
+        .into_iter()
+        .chain(node.message_note.as_deref().map(plain))
+    {
         out.extend(wrap(&words, room).into_iter().map(|line| TreeRow {
             item: None,
             prefix: prefix.clone(),

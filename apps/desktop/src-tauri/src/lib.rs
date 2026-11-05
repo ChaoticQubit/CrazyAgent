@@ -61,6 +61,7 @@ fn main_window(window: &WebviewWindow) -> Result<(), BridgeError> {
         return Err(BridgeError {
             code: "window_denied",
             cause: None,
+            account: None,
         });
     }
     Ok(())
@@ -77,7 +78,11 @@ async fn read(state: &NativeState) -> Result<RwLockReadGuard<'_, NativeBridge>, 
 const SOCKET_OVERRIDE: &str = "CRAZYAGENT_DESKTOP_SOCKET";
 
 fn engine_failure(code: &'static str) -> BridgeError {
-    BridgeError { code, cause: None }
+    BridgeError {
+        code,
+        cause: None,
+        account: None,
+    }
 }
 
 /// The `crazyagent` executable bundled beside this app's own executable as a sidecar.
@@ -854,6 +859,21 @@ async fn desktop_team_on_harness_switch(
     lock(&state)
         .await?
         .team_on_harness_switch(&id, &mode, generation)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_apply_harness_switch(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    mode: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_apply_harness_switch(&id, &mode, generation)
         .await
 }
 
@@ -1989,6 +2009,7 @@ async fn desktop_configure_account_profile(
         .map_err(|_| BridgeError {
             code: "account_secret_invalid",
             cause: None,
+            account: None,
         })?;
     let mut bridge = state.0.enter_owned().await?;
     tauri::async_runtime::spawn(async move {
@@ -2000,6 +2021,7 @@ async fn desktop_configure_account_profile(
     .map_err(|_| BridgeError {
         code: "account_profile_outcome_unknown_read_same_request",
         cause: None,
+        account: None,
     })?
 }
 
@@ -2713,7 +2735,7 @@ async fn desktop_uncommitted_instruction_import(
     window: WebviewWindow,
     state: State<'_, NativeState>,
     project_id: String,
-) -> Result<Vec<String>, BridgeError> {
+) -> Result<crazyagent::engine::owner::UncommittedImport, BridgeError> {
     main_window(&window)?;
     let call = lock(&state)
         .await?
@@ -2947,6 +2969,7 @@ async fn desktop_submit_claude_auth_code(
     .map_err(|_| BridgeError {
         code: "native_auth_claude_input_outcome_unknown",
         cause: None,
+        account: None,
     })?
 }
 
@@ -3075,6 +3098,7 @@ pub fn run() {
             desktop_team_keep_warm,
             desktop_team_time_limits,
             desktop_team_on_harness_switch,
+            desktop_team_apply_harness_switch,
             desktop_team_sub_agent_depth,
             desktop_team_child_landing,
             desktop_team_finished_agents,

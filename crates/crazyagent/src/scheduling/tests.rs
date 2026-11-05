@@ -103,6 +103,7 @@ fn readings(
                     used_percent: *weekly,
                     resets_at_ms: *weekly_resets,
                 }),
+                provider: Some(crate::usage::poll::Provider::Claude),
             },
             source,
             at_ms,

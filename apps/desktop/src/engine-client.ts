@@ -755,6 +755,7 @@ export interface TeamAgent {
   teammates?: Teammate[];
   pane?: string | null;
   hookless?: boolean;
+  message_note?: string | null;
 }
 
 /** One teammate a harness split off in its own pane of the harness's terminal: its pane id,
@@ -798,6 +799,10 @@ export interface TeamMessage {
 /** What the live master does with the conversation when the master harness changes: carry it
  * over to the new harness, or start the new harness fresh. */
 export type SwitchMode = "carry" | "fresh";
+
+/** When a saved master harness change reaches the running live master: once it is idle, or at
+ * its next start. */
+export type SwitchApply = "when_idle" | "next_start";
 
 /** What a task does at its turn end while commands its agent started in the background
  * still run: wait for them, give them a grace time in seconds and stop them, or stop them
@@ -880,6 +885,7 @@ export interface TeamStatus {
   session_limit_secs?: number | null;
   idle_stop_secs?: number | null;
   on_harness_switch?: SwitchMode;
+  apply_harness_switch?: SwitchApply;
   sub_agent_depth?: number;
   child_landing?: ChildLanding;
   show_finished?: boolean;
@@ -1056,6 +1062,12 @@ export function teamOnHarnessSwitch(id: string, mode: SwitchMode, generation: nu
   return invoke<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, generation });
 }
 
+/** Sets when a saved master harness change reaches the running live master. Inputs: the project
+ * id, the choice and a generation. Output: the engine receipt. */
+export function teamApplyHarnessSwitch(id: string, mode: SwitchApply, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_apply_harness_switch", { id, mode, generation });
+}
+
 /** Sets how deep sub-agents may start workers of their own. Inputs: the project id, the depth
  * 1, 2 or 3 and a generation. Output: the engine receipt. */
 export function teamSubAgentDepth(id: string, depth: number, generation: number): Promise<IntentReceipt> {
@@ -1200,6 +1212,13 @@ export interface ImportCommit {
   commit: string;
   branch: string;
   files: string[];
+}
+
+/** The moved instruction files whose move the checkout has not committed, and the branch it
+ * has checked out, null for a detached HEAD or when no move waits (DEC-106 addendum). */
+export interface UncommittedImport {
+  files: string[];
+  branch: string | null;
 }
 
 /** The try a running mapping step is on: its number of `tries`, when it started in ms since the
@@ -1417,7 +1436,8 @@ export type Receipt = "sent" | "delivered" | "typed" | "read" | "replied" | "fai
  * its own team agent row and `pane` a native teammate's pane, for Stop. `presence`, `waiting`
  * on the owner in its terminal, `owner_questions` (open For: Me questions) and `no_worktree`
  * come from the coordination layer; `hookless` marks an agent whose launch fires no hooks, so
- * it has no receipts. Older engines leave the optional fields out. */
+ * it has no receipts; `message_note` is the engine's sentence when the Delivery setting leaves
+ * the agent no way to get messages. Older engines leave the optional fields out. */
 export interface GraphNode {
   id: string;
   kind: GraphNodeKind;
@@ -1437,6 +1457,7 @@ export interface GraphNode {
   owner_questions?: number;
   no_worktree?: boolean;
   hookless?: boolean;
+  message_note?: string | null;
 }
 
 /** Unread messages from one party to another: how many and the newest one's receipt. Each end

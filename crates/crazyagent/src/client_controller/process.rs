@@ -58,12 +58,13 @@ impl OwnerController {
             .await
     }
 
-    /// Lists the moved instruction files whose move the project folder has not committed.
-    /// Input: the project. Output: the paths, empty when no move waits for a commit.
+    /// Lists the moved instruction files whose move the project folder has not committed,
+    /// with its checked-out branch. Input: the project. Output: the paths, empty when no
+    /// move waits for a commit, and the branch, none for a detached HEAD.
     pub async fn uncommitted_instruction_import(
         &self,
         project: ProjectId,
-    ) -> Result<Vec<String>, EngineError> {
+    ) -> Result<crate::engine::owner::UncommittedImport, EngineError> {
         self.process_client()?
             .uncommitted_instruction_import(project)
             .await

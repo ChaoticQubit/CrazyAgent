@@ -517,6 +517,8 @@ pub struct TeamRuntime {
     master_restarts: BTreeSet<ProjectId>,
     restarted_for: BTreeMap<i64, u64>,
     waited_for: BTreeMap<i64, u64>,
+    #[cfg(test)]
+    grant_waited: BTreeMap<i64, String>,
     #[cfg(unix)]
     callers: BTreeMap<i64, Option<super::caller::Callers>>,
     #[cfg(unix)]
@@ -727,6 +729,8 @@ impl TeamRuntime {
             master_restarts: BTreeSet::new(),
             restarted_for: BTreeMap::new(),
             waited_for: BTreeMap::new(),
+            #[cfg(test)]
+            grant_waited: BTreeMap::new(),
         })
     }
 
@@ -2646,10 +2650,14 @@ impl TeamRuntime {
         id: i64,
         project: &ProjectId,
     ) -> Result<Option<Box<Grant>>, String> {
+        #[cfg(test)]
+        self.grant_waited.remove(&id);
         let connection = self.workers[&id].connection.clone();
         let (host, fact) = match self.sign_in(access, &connection) {
             Ok(signed) => signed,
             Err(code) if code == "native_profile_in_use" || code == SIGN_IN_CHECKING => {
+                #[cfg(test)]
+                self.grant_waited.insert(id, code);
                 return Ok(None);
             }
             Err(code) => return Err(sign_in_problem(&code)),
@@ -2669,7 +2677,11 @@ impl TeamRuntime {
             NativeProfileUsePurpose::Execution,
         ) {
             Ok(profile) => profile,
-            Err(problem) if problem.0 == "native_profile_in_use" => return Ok(None),
+            Err(problem) if problem.0 == "native_profile_in_use" => {
+                #[cfg(test)]
+                self.grant_waited.insert(id, problem.0);
+                return Ok(None);
+            }
             Err(problem) => {
                 return Err(with_code(
                     "the account could not be handed to the agent",
@@ -2983,7 +2995,7 @@ impl TeamRuntime {
                 .or_default()
                 .push(Instant::now());
         }
-        match self.start_master(stored, &harness, &account, session.as_deref())? {
+        match self.start_master(stored, access, &harness, &account, session.as_deref())? {
             Ok((id, note)) => {
                 super::master::problem(&self.connection, project, None)?;
                 if let Some(note) = note {
@@ -3025,18 +3037,14 @@ impl TeamRuntime {
         {
             return Ok(());
         }
-        let waits = worker.kept_session && self.lead_waits(id)?;
         let quiet = super::master::quiet(
             &self.connection,
             self.agents.as_deref().map(Agents::typing),
             project,
             now_ms(),
         );
-        let worker = &self.workers[&id];
-        let idle = worker.busy.is_none()
-            && worker.own_turn.is_none()
-            && worker.turn_started.is_none()
-            && !waits;
+        let idle =
+            worker.busy.is_none() && worker.own_turn.is_none() && worker.turn_started.is_none();
         if !idle
             || !quiet
             || !matches!(
@@ -3061,12 +3069,13 @@ impl TeamRuntime {
     /// conversation seeded with them, and its note says so. A session whose conversation ran
     /// on another harness follows the owner's On harness switch setting: Carry over seeds
     /// the new conversation with a bounded handoff, Start fresh seeds nothing, and either
-    /// note marks the switch. Takes the setup, the master harness, the account and the live
-    /// session. Returns the agent id with the note to show, or the plain reason it could not
-    /// start.
+    /// note marks the switch. Takes the setup, the model access, the master harness, the account
+    /// and the live session. Returns the agent id with the note to show, or the plain reason it
+    /// could not start.
     fn start_master(
         &mut self,
         stored: &StoredSetup,
+        access: &ModelAccess,
         harness: &str,
         account: &TeamAccount,
         session: Option<&str>,
@@ -3112,13 +3121,19 @@ impl TeamRuntime {
                     }
                 }
             }
-            (Some(session), None) => crate::master_sessions::resume_harness(
-                &self.connection,
-                project,
-                session,
-                launch,
-                account.connection.as_str(),
-            )?,
+            (Some(session), None) => {
+                let pool = match eligible_accounts(access, project, launch) {
+                    Accounts::Usable(pool) => pool,
+                    Accounts::NoPool => Vec::new(),
+                };
+                crate::master_sessions::resume_harness(
+                    &self.connection,
+                    project,
+                    session,
+                    launch,
+                    &|kept| super::resumes_on(&pool, account, kept),
+                )?
+            }
             (None, _) => ResumePlan::New,
         };
         if let ResumePlan::Resume {
@@ -4869,9 +4884,10 @@ impl TeamRuntime {
     }
 
     /// Starts a stopped agent again under its own id in the worktree and home it left: a
-    /// sub-agent through [`TeamRuntime::wake`], or a project's live master. The agent shows no
-    /// process group until its new process is ready, never the one that ended. It clears only
-    /// the agent's own owner stop; the owner's Wake or restart clears its lead tree in
+    /// sub-agent through [`TeamRuntime::wake`], or a project's live master. Its row takes the
+    /// tools switch it starts with now. The agent shows no process group until its new
+    /// process is ready, never the one that ended. It clears only the agent's own owner
+    /// stop; the owner's Wake or restart clears its lead tree in
     /// [`TeamRuntime::start_again`]. Takes the setup, the agent, its role, harness and
     /// tools switch, the account to run on and the register restart if any. Returns its id,
     /// or the plain reason it could not start; the worktree must still be the one recorded
@@ -4907,9 +4923,9 @@ impl TeamRuntime {
         let changed = self
             .connection
             .execute(
-                "UPDATE team_agents SET status='starting', connection=?3, task=NULL, error=NULL, stopped_ms=NULL, turns=0, heartbeat_ms=?4, process_group=NULL
+                "UPDATE team_agents SET status='starting', connection=?3, tools=?6, task=NULL, error=NULL, stopped_ms=NULL, turns=0, heartbeat_ms=?4, process_group=NULL
                  WHERE id=?1 AND project=?2 AND role=?5 AND status IN ('stopped','failed')",
-                params![id, stored.project_id.as_str(), account.connection.as_str(), now_ms(), role.name()],
+                params![id, stored.project_id.as_str(), account.connection.as_str(), now_ms(), role.name(), tools],
             )
             .map_err(error)?;
         if changed != 1 {

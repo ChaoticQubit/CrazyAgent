@@ -16,7 +16,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 pub const INPUT_TEXT_MAX: usize = 16 * 1024;
-const OWNER_QUIET_MS: i64 = 10_000;
+pub(crate) const OWNER_QUIET_MS: i64 = 10_000;
 const DRAFT_ABANDONED_MS: i64 = 120_000;
 const INPUT_SETTLE_MS: i64 = 30_000;
 const PASTE_SETTLE: Duration = Duration::from_millis(200);
@@ -484,7 +484,7 @@ pub(crate) fn quiet(
 /// Checks that engine input may reach a project's live master now, as `quiet` describes.
 /// Takes the engine database, the owner typing signal, the project and the time. Returns
 /// the master's agent id, or why the input waits or cannot go.
-fn input_open(
+pub(crate) fn input_open(
     connection: &Connection,
     typing: Option<&OwnerTyping>,
     project: &ProjectId,
