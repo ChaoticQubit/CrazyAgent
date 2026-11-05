@@ -517,6 +517,8 @@ pub struct TeamRuntime {
     master_restarts: BTreeSet<ProjectId>,
     restarted_for: BTreeMap<i64, u64>,
     waited_for: BTreeMap<i64, u64>,
+    #[cfg(test)]
+    grant_waited: BTreeMap<i64, String>,
     #[cfg(unix)]
     callers: BTreeMap<i64, Option<super::caller::Callers>>,
     #[cfg(unix)]
@@ -727,6 +729,8 @@ impl TeamRuntime {
             master_restarts: BTreeSet::new(),
             restarted_for: BTreeMap::new(),
             waited_for: BTreeMap::new(),
+            #[cfg(test)]
+            grant_waited: BTreeMap::new(),
         })
     }
 
@@ -2646,10 +2650,14 @@ impl TeamRuntime {
         id: i64,
         project: &ProjectId,
     ) -> Result<Option<Box<Grant>>, String> {
+        #[cfg(test)]
+        self.grant_waited.remove(&id);
         let connection = self.workers[&id].connection.clone();
         let (host, fact) = match self.sign_in(access, &connection) {
             Ok(signed) => signed,
             Err(code) if code == "native_profile_in_use" || code == SIGN_IN_CHECKING => {
+                #[cfg(test)]
+                self.grant_waited.insert(id, code);
                 return Ok(None);
             }
             Err(code) => return Err(sign_in_problem(&code)),
@@ -2669,7 +2677,11 @@ impl TeamRuntime {
             NativeProfileUsePurpose::Execution,
         ) {
             Ok(profile) => profile,
-            Err(problem) if problem.0 == "native_profile_in_use" => return Ok(None),
+            Err(problem) if problem.0 == "native_profile_in_use" => {
+                #[cfg(test)]
+                self.grant_waited.insert(id, problem.0);
+                return Ok(None);
+            }
             Err(problem) => {
                 return Err(with_code(
                     "the account could not be handed to the agent",
