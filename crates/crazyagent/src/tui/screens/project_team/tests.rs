@@ -2179,9 +2179,10 @@ async fn a_real_engine_keeps_the_coordination_the_owner_sets_in_the_editor() {
         assert_eq!(coordination_of(&view).settings.overlaps, overlaps);
     }
 
-    view.key(press(KeyCode::Down));
-    view.key(press(KeyCode::Down));
-    assert_eq!(view.coord.as_ref().unwrap().row, 10);
+    for _ in 0..3 {
+        view.key(press(KeyCode::Down));
+    }
+    assert_eq!(view.coord.as_ref().unwrap().row, 11);
     assert_eq!(view.key(press(KeyCode::Enter)), TeamReply::Handled);
     assert!(view.typing());
     clear_counted(&mut view);
@@ -2262,10 +2263,10 @@ async fn skills_per_role_are_set_in_the_coordination_editor_through_a_real_engin
     for role in ["Master skills", "Lead skills", "Worker skills"] {
         assert!(find(&shown, role).contains("All approved skills"), "{role}");
     }
-    for _ in 0..13 {
+    for _ in 0..14 {
         assert_eq!(view.key(press(KeyCode::Down)), TeamReply::Handled);
     }
-    assert_eq!(view.coord.as_ref().unwrap().row, 13);
+    assert_eq!(view.coord.as_ref().unwrap().row, 14);
     let (_, help) = view.rows(116, 40, &accounts(), &Look::plain());
     assert!(
         help.contains(&("Space", "All or chosen")) && help.contains(&("Enter", "Edit skills")),

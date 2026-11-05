@@ -179,7 +179,8 @@ struct Grant {
 /// `proxy` is the model proxy an agent with tools under the None network reaches its model
 /// through, the only network its profile allows (S4b); `network` is the project network its
 /// profile was made for, which a narrower saved choice stops it for (CS-2); `claude_display`
-/// is the project's Claude Code terminal display, read when the agent is prepared (N-D9).
+/// is the project's Claude Code terminal display, read when the agent is prepared (N-D9);
+/// `task_start` is a sub-agent's Task-start reminder from its launch context (T3-15).
 struct Plan {
     harness: String,
     executable: PathBuf,
@@ -203,6 +204,7 @@ struct Plan {
     scratch_pin: Option<(u64, u64)>,
     proxy: Option<Arc<ModelProxy>>,
     claude_display: crate::coord::settings::ClaudeDisplay,
+    task_start: Option<String>,
 }
 
 /// Why a native-mode lead does not start at Full access: its own tmux server, its teammate
@@ -322,12 +324,22 @@ impl Launch {
             Launch::Adopt(adoption) => adoption.proxy.clone(),
         }
     }
+
+    /// Gives the Task-start reminder the launch's sub-agent gets with each task, which its
+    /// teammates get too (T3-15). Takes the launch. Returns the text, if any.
+    fn task_start(&self) -> Option<String> {
+        match self {
+            Launch::Fresh(plan, _) => plan.task_start.clone(),
+            Launch::Adopt(adoption) => adoption.task_start.clone(),
+        }
+    }
 }
 
 /// A pane an earlier engine left running, taken over from its record: the host and pane
 /// name, the record, the bounds, whether it is a live master, what a signed-in account needs
-/// again, the access level it started at, the project network its profile was made for, and
-/// its model proxy, bound again on the port its profile names (S4b).
+/// again, the access level it started at, the project network its profile was made for, its
+/// model proxy, bound again on the port its profile names (S4b), and a sub-agent's Task-start
+/// reminder from its launch context as it reads now (T3-15).
 struct Adoption {
     host: Arc<dyn Host>,
     agent: AgentId,
@@ -338,6 +350,7 @@ struct Adoption {
     access: AgentAccess,
     network: AgentNetwork,
     proxy: Option<Arc<ModelProxy>>,
+    task_start: Option<String>,
 }
 
 /// What a live master on a signed-in account needs when a later engine takes its pane over:
@@ -468,6 +481,7 @@ struct Worker {
     ready: bool,
     reask: Option<i64>,
     reasked: Option<i64>,
+    starts: crate::coord::relay::TaskStarts,
 }
 
 impl Worker {
@@ -954,6 +968,14 @@ impl TeamRuntime {
                 params![id, now_ms()],
             )
             .map_err(error)?;
+        let task_start = match role {
+            AgentRole::Sub => self
+                .agent_layout(&project, id)
+                .ok()
+                .and_then(|layout| self.context(&project, id, role, tools, layout).ok())
+                .and_then(|context| context.task_start(launch, tools)),
+            AgentRole::Master | AgentRole::Teammate => None,
+        };
         let adoption = Adoption {
             host: host.clone(),
             agent,
@@ -964,6 +986,7 @@ impl TeamRuntime {
             access: record.access.unwrap_or(AgentAccess::Full),
             network: record.network.unwrap_or(AgentNetwork::Open),
             proxy,
+            task_start,
         };
         let session = if live {
             crate::master_sessions::live_session(&self.connection, &project)?
@@ -3458,9 +3481,14 @@ impl TeamRuntime {
         }
         let host = self.terminal.as_deref();
         let connection = &self.connection;
+        let workers = &mut self.workers;
         for id in leads {
             if let Some(callers) = self.callers.get_mut(&id).and_then(Option::as_mut) {
                 let lead = AgentId::team(id).ok();
+                let mut none = crate::coord::relay::TaskStarts::default();
+                let starts = workers
+                    .get_mut(&id)
+                    .map_or(&mut none, |worker| &mut worker.starts);
                 callers.serve(
                     &mut || listed_panes(host, lead.as_ref()),
                     &mut |pane, pid| pane_whom(connection, host, project, id, (pane, pid)),
@@ -3473,7 +3501,7 @@ impl TeamRuntime {
                             request,
                             out,
                             now_ms(),
-                            &mut crate::coord::relay::TaskStarts::default(),
+                            starts,
                         );
                     },
                 );
@@ -4362,6 +4390,13 @@ impl TeamRuntime {
             );
             prompt.push_str(&self.lead_lines(project, agent)?);
             prompt.push_str(&self.branch_line(project, agent));
+            if let Some(text) = &self.workers[&agent].starts.text
+                && crate::coord::settings::read(&self.connection, project)?.task_start
+                    == crate::coord::settings::TaskStart::On
+            {
+                prompt.push_str("\n\n");
+                prompt.push_str(text);
+            }
             let background = super::background_at_end(&self.connection, &stored.project_id)?;
             let (waiting, carried) = crate::coord::delivery::next_turn(&self.connection, agent)?;
             prompt.push_str(&waiting);
@@ -5074,6 +5109,10 @@ impl TeamRuntime {
             Launch::Fresh(plan, _) => (plan.access, plan.network),
             Launch::Adopt(adoption) => (adoption.access, adoption.network),
         };
+        let starts = crate::coord::relay::TaskStarts {
+            text: launch.task_start(),
+            reminded: BTreeSet::new(),
+        };
         let thread = std::thread::Builder::new()
             .name(format!("team-agent-{id}"))
             .spawn(move || work(launch, inbox, outbox, flag, interrupt, kept))
@@ -5133,6 +5172,7 @@ impl TeamRuntime {
                 ready: false,
                 reask: None,
                 reasked: None,
+                starts,
             },
         );
         assert!(self.panes(&self.workers[&id].project) <= PANES_PER_PROJECT_MAX);
@@ -6021,6 +6061,10 @@ impl TeamRuntime {
             })?;
         }
         let context = self.context(&stored.project_id, id, role, tools, layout)?;
+        let task_start = match role {
+            AgentRole::Sub => context.task_start(launch, tools),
+            AgentRole::Master | AgentRole::Teammate => None,
+        };
         let policy = crate::sandbox::policy::load(&self.connection, stored.project_id.as_str())
             .map_err(|_| with_code("the project's agent access could not be read", None))?;
         if let Some(reason) = policy.access.unavailable() {
@@ -6286,6 +6330,7 @@ impl TeamRuntime {
             scratch_pin,
             proxy,
             claude_display,
+            task_start,
         };
         let mode = match &account.reach {
             TeamReach::Endpoint { base_url, .. } => Mode::Kept {

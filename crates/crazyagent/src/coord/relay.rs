@@ -1,5 +1,5 @@
 use super::hook::Event;
-use super::settings::{self, Delivery, HarnessKind, Nudges, Overlaps};
+use super::settings::{self, Delivery, HarnessKind, Nudges, Overlaps, TaskStart};
 use super::store::{failure, message, state};
 use super::{
     AgentId, BODY_BYTES_MAX, Message, MessageId, MessageKind, PENDING_MAX, Party, QuestionFor,
@@ -481,15 +481,14 @@ pub fn answer(
     now: i64,
     starts: &mut TaskStarts,
 ) -> Result<(), EngineError> {
-    let _ = starts;
-    let reply = match reply(db, project, lead, pane, request, now) {
+    let reply = match reply(db, project, lead, pane, request, now, starts) {
         Ok(reply) => reply,
         Err(problem) => {
             let _ = out.write_all(REFUSED);
             return Err(problem);
         }
     };
-    let Some((payload, delivered)) = reply else {
+    let Some(((payload, delivered), started)) = reply else {
         let _ = out.write_all(REFUSED);
         return Ok(());
     };
@@ -500,6 +499,9 @@ pub fn answer(
     if out.write_all(&whole).and_then(|()| out.flush()).is_err() {
         return Ok(());
     }
+    if let Some(mate) = started {
+        starts.reminded.insert(mate);
+    }
     for id in delivered {
         advance(db, id, Receipt::Delivered, now)?;
     }
@@ -509,10 +511,13 @@ pub fn answer(
 /// A relay answer's payload and the messages it hands over.
 type Reply = (Vec<u8>, Vec<MessageId>);
 
-/// Carries out one relay request for the teammate in `pane` and makes its answer. Takes
-/// the database, the project, the lead, the pane, the request and the time in ms. Returns
-/// the payload and the messages it hands over, None for a pane no live teammate of the
-/// lead holds or a malformed request, or a SQLite failure.
+/// Carries out one relay request for the teammate in `pane` and makes its answer: a prompt
+/// that starts a task, the teammate's first or its first since it rested, gets the lead's
+/// Task-start reminder while the setting is On, and a rest makes its next prompt start one.
+/// Takes the database, the project, the lead, the pane, the request, the time in ms and the
+/// lead's reminder. Returns the payload, the messages it hands over and the teammate to mark
+/// reminded once it is written, None for a pane no live teammate of the lead holds or a
+/// malformed request, or a SQLite failure.
 fn reply(
     db: &Connection,
     project: &ProjectId,
@@ -520,7 +525,8 @@ fn reply(
     pane: &str,
     request: &[u8],
     now: i64,
-) -> Result<Option<Reply>, EngineError> {
+    starts: &mut TaskStarts,
+) -> Result<Option<(Reply, Option<AgentId>)>, EngineError> {
     let team = recipients(db, project, lead)?;
     let Some(mate) = team.get(pane).copied().filter(|_| pane != LEAD_TAG) else {
         return Ok(None);
@@ -555,6 +561,7 @@ fn reply(
         };
         (text.into_bytes(), ids)
     };
+    let mut started = None;
     let answered = match request {
         Request::Post { own, tools } => {
             settle(db, mate, now)?;
@@ -570,6 +577,7 @@ fn reply(
             let taken = letters(own)?;
             if taken.is_empty() {
                 rests(db, mate, true)?;
+                starts.reminded.remove(&mate);
             }
             handed(taken)
         }
@@ -583,7 +591,17 @@ fn reply(
                 settle(db, mate, now)?;
                 super::touch(db, mate, now)?;
             }
-            (Vec::new(), Vec::new())
+            match starts.text.as_deref() {
+                Some(text)
+                    if !starts.reminded.contains(&mate)
+                        && settings::read(db, project)?.task_start == TaskStart::On =>
+                {
+                    assert!(text.len() <= crate::launch_context::TASK_START_BYTES_MAX);
+                    started = Some(mate);
+                    (text.as_bytes().to_vec(), Vec::new())
+                }
+                _ => (Vec::new(), Vec::new()),
+            }
         }
         Request::Ask(path) => {
             let bytes = serde_json::to_vec(&Answer {
@@ -610,7 +628,7 @@ fn reply(
             (lines.into_bytes(), Vec::new())
         }
     };
-    Ok(Some(answered))
+    Ok(Some((answered, started)))
 }
 
 /// Clears a teammate's wait once its session moves on, only while one is stored, so a

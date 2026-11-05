@@ -228,8 +228,8 @@ impl<'de> Deserialize<'de> for Nudges {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStart {
-    On,
     #[default]
+    On,
     Off,
 }
 
@@ -275,7 +275,7 @@ impl Default for CoordSettings {
             counted_tools: COUNTED_TOOLS_DEFAULT.map(str::to_owned).to_vec(),
             role_skills: RoleSkills::default(),
             claude_display: ClaudeDisplay::Classic,
-            task_start: TaskStart::Off,
+            task_start: TaskStart::On,
         }
     }
 }

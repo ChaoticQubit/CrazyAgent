@@ -841,9 +841,13 @@ export interface RoleSkills {
  * view, which takes the mouse. */
 export type ClaudeDisplay = "classic" | "fullscreen";
 
+/** Whether the first turn of each task of a team agent carries the Task-start reminder: the
+ * context-mode tools to load and the approved skills to check for the task. */
+export type TaskStart = "on" | "off";
+
 /** A project's coordination settings: question routing, claim overlaps, workflow nudges, the
- * tool names the adoption counts include, the skills each team role gets and the Claude Code
- * terminal display. */
+ * tool names the adoption counts include, the skills each team role gets, the Claude Code
+ * terminal display and the Task-start reminder. */
 export interface CoordSettings {
   questions_to: QuestionsTo;
   overlaps: Overlaps;
@@ -851,6 +855,7 @@ export interface CoordSettings {
   counted_tools: string[];
   role_skills: RoleSkills;
   claude_display: ClaudeDisplay;
+  task_start: TaskStart;
 }
 
 /** One harness kind's sub-agent mode and delivery, and whether it has native teammates at all. */

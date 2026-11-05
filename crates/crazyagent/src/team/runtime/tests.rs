@@ -7476,6 +7476,7 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         scratch_pin: None,
         proxy: None,
         claude_display: crate::coord::settings::ClaudeDisplay::Classic,
+        task_start: None,
     };
     let account = || AccountBinding::Subscription {
         home: PathBuf::from("/tmp/home"),
@@ -12486,6 +12487,7 @@ fn hooks_plan(harness: &str, hookless: bool) -> Plan {
         scratch_pin: None,
         proxy: None,
         claude_display: crate::coord::settings::ClaudeDisplay::Classic,
+        task_start: None,
     }
 }
 
@@ -13644,6 +13646,7 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
         scratch_pin: None,
         proxy: None,
         claude_display: crate::coord::settings::ClaudeDisplay::Classic,
+        task_start: None,
     };
     let account = || AccountBinding::Subscription {
         home: PathBuf::from("/private/tmp/agent-1-home"),
