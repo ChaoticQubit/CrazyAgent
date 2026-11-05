@@ -154,7 +154,7 @@ fn start_app(base: &Path, home: &Path, agent: &AgentId) -> (Server, Tmux) {
             key: None,
         },
         model: Some(LOCAL_MODEL.into()),
-        tools: false,
+        tools: true,
         sandbox_profile: Some(profile),
         unconfined: false,
         git_identity: None,
@@ -218,10 +218,11 @@ fn now_ms() -> i64 {
     .unwrap()
 }
 
-/// K2b live: a real Codex app launched by the engine's own command, inside the real project
-/// sandbox with only its control socket granted, starts its app server through the bridge
-/// and attaches to it. `codex::deliver` then starts a turn while the app is idle and
-/// steers the running turn while it works. Needs Codex 0.164 and a local Ollama model.
+/// K2b live: a real tools-on Codex app launched by the engine's own command, inside the real
+/// project sandbox with only its control socket granted, starts its app server through the
+/// bridge and attaches to it (a tools-off app runs without the shared app server and is
+/// reached by typing). `codex::deliver` then starts a turn while the app is idle and steers
+/// the running turn while it works. Needs Codex 0.164 and a local Ollama model.
 #[test]
 fn a_real_codex_app_takes_coord_messages_through_its_app_server_idle_and_busy() {
     let root = tempfile::Builder::new()
