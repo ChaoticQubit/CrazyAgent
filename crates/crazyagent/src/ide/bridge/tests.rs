@@ -682,15 +682,16 @@ fn ide_terminal_frames_match_the_extension_fixture() {
 #[test]
 fn ide_request_bounds_are_refused() {
     let id = "0123456789abcdef0123456789abcdef";
+    let head = "a".repeat(40);
     let refused = [
-        json!({ "name": "ide.base_blob", "args": { "id": id, "path": "", "page": 0 } }),
-        json!({ "name": "ide.base_blob", "args": { "id": id, "path": "a".repeat(PATH_BYTES_MAX + 1), "page": 0 } }),
-        json!({ "name": "ide.base_blob", "args": { "id": id, "path": "src/a\u{0}b.rs", "page": 0 } }),
-        json!({ "name": "ide.config_blob", "args": { "id": id, "path": "", "page": 0 } }),
-        json!({ "name": "ide.config_blob", "args": { "id": id, "path": "../agent-7/.vscode/settings.json", "page": 0 } }),
-        json!({ "name": "ide.head_blob", "args": { "id": id, "path": "", "page": 0 } }),
-        json!({ "name": "ide.head_blob", "args": { "id": id, "path": "/etc/passwd", "page": 0 } }),
-        json!({ "name": "ide.head_blob", "args": { "id": id, "path": "../repo/a.rs", "page": 0 } }),
+        json!({ "name": "ide.base_blob", "args": { "id": id, "head": head, "path": "", "page": 0 } }),
+        json!({ "name": "ide.base_blob", "args": { "id": id, "head": head, "path": "a".repeat(PATH_BYTES_MAX + 1), "page": 0 } }),
+        json!({ "name": "ide.base_blob", "args": { "id": id, "head": head, "path": "src/a\u{0}b.rs", "page": 0 } }),
+        json!({ "name": "ide.config_blob", "args": { "id": id, "head": head, "path": "", "page": 0 } }),
+        json!({ "name": "ide.config_blob", "args": { "id": id, "head": head, "path": "../agent-7/.vscode/settings.json", "page": 0 } }),
+        json!({ "name": "ide.head_blob", "args": { "id": id, "head": head, "path": "", "page": 0 } }),
+        json!({ "name": "ide.head_blob", "args": { "id": id, "head": head, "path": "/etc/passwd", "page": 0 } }),
+        json!({ "name": "ide.head_blob", "args": { "id": id, "head": head, "path": "../repo/a.rs", "page": 0 } }),
         json!({ "name": "ide.comment", "args": { "id": id, "path": "a.rs", "line": 0, "text": "x" } }),
         json!({ "name": "ide.comment", "args": { "id": id, "path": "a.rs", "line": 1, "text": " " } }),
         json!({ "name": "ide.comment", "args": { "id": id, "path": "a.rs", "line": 1, "text": "x".repeat(COMMENT_BYTES_MAX + 1) } }),
@@ -1014,6 +1015,51 @@ async fn an_ide_discard_answers_with_its_outcome_after_its_capability_is_revoked
     case.stop().await;
 }
 
+/// Every page of a change set's diff and texts is read at the head the IDE listed, which
+/// Accept and Discard name too: a head the set does not hold now, such as the commit it
+/// started from, is refused as stale on every read, so the owner never reviews one head
+/// while Accept lands another (V2PRE-L1). The listed head reads.
+#[tokio::test]
+async fn ide_pages_asked_at_a_head_the_set_does_not_hold_are_refused_as_stale() {
+    let mut case = Case::start().await;
+    let (changes, socket, ide) = change_set(&case).await;
+    let set = changes.only(NOW);
+    let older = changes.owner_head();
+    assert_ne!(older, set.head);
+    let reads = |head: &str| {
+        let file = |name: &str| {
+            json!({
+                "name": name,
+                "args": { "id": set.id, "head": head, "path": "README", "page": 0 }
+            })
+        };
+        [
+            json!({ "name": "ide.change_diff", "args": { "id": set.id, "head": head, "page": 0 } }),
+            file("ide.base_blob"),
+            file("ide.head_blob"),
+        ]
+    };
+    for head in [older.as_str(), "HEAD", ""] {
+        for call in reads(head) {
+            let body = request(changes.project.as_str(), call.clone());
+            assert_eq!(
+                exchange(&socket, ide, &body).await,
+                rejected("changes_stale"),
+                "{call}"
+            );
+        }
+    }
+    for call in reads(&set.head) {
+        let body = request(changes.project.as_str(), call.clone());
+        let reply = exchange(&socket, ide, &body).await;
+        assert!(
+            matches!(reply, Some(IdeReply::Ok { .. })),
+            "{call} {reply:?}"
+        );
+    }
+    case.stop().await;
+}
+
 #[test]
 fn ide_changes_reads_end_before_the_extension_stops_waiting_and_writes_keep_the_changes_bound() {
     let extension = include_str!("../../../../../apps/ide-extension/src/engine.ts");
@@ -1034,15 +1080,18 @@ fn ide_changes_reads_end_before_the_extension_stops_waiting_and_writes_keep_the_
         IdeCall::ChangeSets {},
         IdeCall::ChangeDiff {
             id: id.clone(),
+            head: "0".repeat(40),
             page: 0,
         },
         IdeCall::BaseBlob {
             id: id.clone(),
+            head: "0".repeat(40),
             path: "src/lib.rs".into(),
             page: 0,
         },
         IdeCall::HeadBlob {
             id: id.clone(),
+            head: "0".repeat(40),
             path: "src/lib.rs".into(),
             page: 0,
         },
@@ -1177,6 +1226,7 @@ fn ide_writes_run_under_their_own_bound_and_answer_an_unknown_outcome_past_it() 
         IdeCall::ChangeSets {},
         IdeCall::HeadBlob {
             id,
+            head: "0".repeat(40),
             path: "README".into(),
             page: 0,
         },

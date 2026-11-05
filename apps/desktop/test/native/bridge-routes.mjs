@@ -7,6 +7,7 @@ export const ROUTES = fileURLToPath(new URL("../../src-tauri/e2e_bridge/routes.r
 
 const NATIVE_ONLY = /\bbridge::|\bupdates::|\bterminals\b|\bapp\b|NativeBridge::|Arc::|default_engine\(|SOCKET_OVERRIDE|state\.0/;
 const NATIVE_PARAM = /State<|AppHandle|Channel<|WebviewWindow/;
+const QUEUE_CALLS = /\bstate\.0\.(project_files)\(/g;
 
 /** Splits text at the commas that sit outside every bracket.
  * Input: a parameter list or brace list. Output: the trimmed, non-empty parts. */
@@ -63,7 +64,8 @@ export function commands(source) {
 
 /** Decides how the end-to-end bridge serves one command: routed with its arguments and body,
  * or left out with the reason (it needs the native window, terminals, updates or a picker).
- * Input: one command record. Output: `{ route }` or `{ skip }`. */
+ * A bridge queue call the app makes on `state.0` runs on the bridge's own queue, which is
+ * the same `BridgeQueue`. Input: one command record. Output: `{ route }` or `{ skip }`. */
 export function plan(command) {
   const prefix = "main_window(&window)?;";
   if (!command.body.startsWith(prefix)) return { skip: "no main-window check" };
@@ -71,9 +73,11 @@ export function plan(command) {
   if (!command.params.some((param) => param.name === "window")) return { skip: "no window parameter" };
   if (args.some((param) => NATIVE_PARAM.test(param.type))) return { skip: "native parameter" };
   let body = command.body.slice(prefix.length).replace("ensure_default_engine().await?;", "").replace(/\s+/g, " ").trim();
+  body = body.replace(QUEUE_CALLS, "state.$1(");
   if (NATIVE_ONLY.test(body)) return { skip: "native-only body" };
   body = body.replaceAll("lock(&state)", "lock(state)").replaceAll("read(&state)", "read(state)");
-  if (/\bstate\b/.test(body.replaceAll("lock(state)", "").replaceAll("read(state)", ""))) return { skip: "uses the state directly" };
+  const plain = body.replaceAll("lock(state)", "").replaceAll("read(state)", "").replace(/\bstate\.(project_files)\(/g, "");
+  if (/\bstate\b/.test(plain)) return { skip: "uses the state directly" };
   return { route: { name: command.name, args: args.map((arg) => ({ name: arg.name, type: arg.type.replaceAll(/\bbridge::/g, "crazyagent_desktop::bridge::") })), body } };
 }
 

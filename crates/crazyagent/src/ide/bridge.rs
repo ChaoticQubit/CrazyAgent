@@ -212,22 +212,29 @@ pub enum IdeCall {
     #[serde(rename = "ide.change_sets")]
     ChangeSets {},
     #[serde(rename = "ide.change_diff")]
-    ChangeDiff { id: ChangeSetId, page: u16 },
+    ChangeDiff {
+        id: ChangeSetId,
+        head: String,
+        page: u16,
+    },
     #[serde(rename = "ide.base_blob")]
     BaseBlob {
         id: ChangeSetId,
+        head: String,
         path: String,
         page: u16,
     },
     #[serde(rename = "ide.config_blob")]
     ConfigBlob {
         id: ChangeSetId,
+        head: String,
         path: String,
         page: u16,
     },
     #[serde(rename = "ide.head_blob")]
     HeadBlob {
         id: ChangeSetId,
+        head: String,
         path: String,
         page: u16,
     },

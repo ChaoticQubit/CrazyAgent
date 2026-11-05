@@ -3566,9 +3566,10 @@ impl TeamRuntime {
     }
 
     /// Types into each running sub-agent of a project how the owner settled its questions,
-    /// the owner's own words from the questions log, once each. A note the terminal does not
-    /// take stays for the next tick; a note longer than one prompt points to the master, which
-    /// has it in full. Takes the project.
+    /// the owner's own words from the questions log, once each, each kept in the agent's
+    /// Messages timeline as the engine's notice. A note the terminal does not take stays for
+    /// the next tick; a note longer than one prompt points to the master, which has it in
+    /// full. Takes the project.
     fn tell_agent_answers(&self, project: &ProjectId) {
         let Some(host) = self.terminal.as_deref() else {
             return;
@@ -3593,7 +3594,7 @@ impl TeamRuntime {
                         note.question
                     )
                 };
-                match super::events::send_to_id(&self.connection, host, project, id, &text) {
+                match super::events::send_notice_to_id(&self.connection, host, project, id, &text) {
                     Ok(Ok(())) => typed.push(note.question),
                     Ok(Err(_)) | Err(_) => break,
                 }

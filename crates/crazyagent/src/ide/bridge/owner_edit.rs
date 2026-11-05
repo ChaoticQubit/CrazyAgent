@@ -34,11 +34,12 @@ pub(super) async fn answer(
 
 /// Lets the owner edit one file in a running team agent's worktree: records the edit for
 /// the change set that will hold it, unlocks the file until the agent's turn ends, rewrites
-/// the workspace and types one message naming the file into a sub-agent's terminal. A
-/// master hears nothing; the owner talks to it directly. Inputs: the engine root, the
-/// terminal host when there is one, the project, the agent, the path inside its worktree
-/// and the time in ms. Output: whether the agent was told, or `ide_agent_unknown`,
-/// `ide_agent_not_running` or the store's refusal.
+/// the workspace and types one message naming the file on one line into a sub-agent's
+/// terminal, kept in its Messages timeline as an engine notice, so a path with a line break
+/// cannot add a line to that notice. A master hears nothing; the owner talks to it
+/// directly. Inputs: the engine root, the terminal host when there is one, the project, the
+/// agent, the path inside its worktree and the time in ms. Output: whether the agent was
+/// told, or `ide_agent_unknown`, `ide_agent_not_running` or the store's refusal.
 pub(crate) fn edit(
     root: &Path,
     host: Option<&dyn Host>,
@@ -78,8 +79,10 @@ pub(crate) fn edit(
     let Some(host) = host.filter(|_| role == "sub") else {
         return Ok(false);
     };
+    let named = super::comments::shown(path, super::comments::PATH_BYTES_MAX);
+    assert!(!named.contains('\n'), "the note names the file on one line");
     let message = format!(
-        "The owner edited {path} in your worktree while you work. Keep their edit; it is part of your change set."
+        "The owner edited {named} in your worktree while you work. Keep their edit; it is part of your change set."
     );
     let sent = crate::team::events::send_to_agent(
         &db,

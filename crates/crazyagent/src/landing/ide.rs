@@ -32,6 +32,24 @@ fn of_project(
     Ok(record)
 }
 
+/// Reads a change set of the IDE's project only at the head the IDE listed, which Accept
+/// and Discard name too, so a page never shows a head the owner did not list. Inputs: the
+/// store, the project, the change set and the listed head. Output: the record, or
+/// `changes_not_found`, or `changes_stale` once the set holds another head.
+fn at_head(
+    db: &Connection,
+    project: &ProjectId,
+    id: &ChangeSetId,
+    head: &str,
+) -> Result<Record, EngineError> {
+    let record = of_project(db, project, id)?;
+    assert!(!record.head.is_empty(), "a change set always has a head");
+    if record.head != head {
+        return Err(failure("changes_stale"));
+    }
+    Ok(record)
+}
+
 /// Finds a change set only when it belongs to the IDE's project; a set of another project
 /// answers exactly as a missing one. Inputs: the store, the project and the change set.
 /// Output: the agent worktree its files live in, or `changes_not_found`.
@@ -69,15 +87,17 @@ pub(crate) fn files(
 /// Reads the text a changed file had at the change set's base, its old path for a rename,
 /// the left side of its IDE diff. Only text files of this change set are readable, so the
 /// IDE never reads other paths of the owner's history. Inputs: the store, the project, the
-/// change set and the path. Output: the text, empty for an added file, or
-/// `changes_not_found` for any other path, `changes_too_large` past `BASE_BYTES_MAX`.
+/// change set, the head the IDE listed and the path. Output: the text, empty for an added
+/// file, or `changes_not_found` for any other path, `changes_stale` once the set holds
+/// another head, `changes_too_large` past `BASE_BYTES_MAX`.
 pub(crate) fn base_text(
     db: &Connection,
     project: &ProjectId,
     id: &ChangeSetId,
+    head: &str,
     path: &str,
 ) -> Result<Arc<str>, EngineError> {
-    let record = of_project(db, project, id)?;
+    let record = at_head(db, project, id, head)?;
     let file = text_file(&record, path)?;
     if file.status == FileStatus::Added {
         return Ok(Arc::from(""));
@@ -91,16 +111,18 @@ pub(crate) fn base_text(
 
 /// Reads the text a changed file has at the head the change set recorded, the right side
 /// of its IDE diff, which is what Accept lands, never the agent worktree it may still be
-/// changing. Inputs: the store, the project, the change set and the path. Output: the
-/// text, or `changes_not_found` for a deleted file or any path the set does not change as
-/// text, `changes_too_large` past `BASE_BYTES_MAX`.
+/// changing. Inputs: the store, the project, the change set, the head the IDE listed and
+/// the path. Output: the text, or `changes_not_found` for a deleted file or any path the
+/// set does not change as text, `changes_stale` once the set holds another head,
+/// `changes_too_large` past `BASE_BYTES_MAX`.
 pub(crate) fn head_text(
     db: &Connection,
     project: &ProjectId,
     id: &ChangeSetId,
+    head: &str,
     path: &str,
 ) -> Result<Arc<str>, EngineError> {
-    let record = of_project(db, project, id)?;
+    let record = at_head(db, project, id, head)?;
     let file = text_file(&record, path)?;
     if file.status == FileStatus::Deleted {
         return Err(failure("changes_not_found"));
@@ -111,15 +133,17 @@ pub(crate) fn head_text(
 /// Reads the text an IDE settings file has at the change set's head, the agent's side of
 /// its diff, which the IDE server is not allowed to read from the agent's worktree. Only a
 /// text file of this change set marked `IdeConfig` that the set did not delete is readable.
-/// Inputs: the store, the project, the change set and the path. Output: the text, or
-/// `changes_not_found` for any other path, `changes_too_large` past `BASE_BYTES_MAX`.
+/// Inputs: the store, the project, the change set, the head the IDE listed and the path.
+/// Output: the text, or `changes_not_found` for any other path, `changes_stale` once the
+/// set holds another head, `changes_too_large` past `BASE_BYTES_MAX`.
 pub(crate) fn config_text(
     db: &Connection,
     project: &ProjectId,
     id: &ChangeSetId,
+    head: &str,
     path: &str,
 ) -> Result<Arc<str>, EngineError> {
-    let record = of_project(db, project, id)?;
+    let record = at_head(db, project, id, head)?;
     let file = text_file(&record, path)?;
     if file.status == FileStatus::Deleted || !file.marks.contains(&FileMark::IdeConfig) {
         return Err(failure("changes_not_found"));

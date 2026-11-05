@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 const AGENT_BYTES_MAX: usize = 128;
 const TITLE_BYTES_MAX: usize = 256;
-const PATH_BYTES_MAX: usize = 1024;
+pub(super) const PATH_BYTES_MAX: usize = 1024;
 const HEADER_BYTES_MAX: usize = AGENT_BYTES_MAX + TITLE_BYTES_MAX + PATH_BYTES_MAX + 64;
 const _: () = assert!(HEADER_BYTES_MAX + COMMENT_BYTES_MAX <= SEND_BYTES_MAX);
 const _: () = assert!(SEND_BYTES_MAX <= MESSAGE_BYTES_MAX);
@@ -49,7 +49,7 @@ pub(crate) async fn answer(
 /// Engine or agent text as one plain line inside the message: control characters become
 /// U+FFFD, square brackets and their look-alikes become parentheses so no `[owner]` tag can
 /// show, and it is cut to `max` bytes. Inputs: the text and the bound. Output: the line.
-fn shown(text: &str, max: usize) -> String {
+pub(super) fn shown(text: &str, max: usize) -> String {
     let plain: String = text
         .chars()
         .map(|character| {

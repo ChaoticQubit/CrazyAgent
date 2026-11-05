@@ -400,26 +400,26 @@ fn the_base_side_of_a_diff_is_the_file_before_the_agent_touched_it() {
         next: None,
     };
     assert_eq!(
-        base_blob(&case.db, &case.project, &set.id, "README", 0).unwrap(),
+        base_blob(&case.db, &case.project, &set.id, &set.head, "README", 0).unwrap(),
         whole("one\ntwo\nthree\n")
     );
     assert_eq!(
-        base_blob(&case.db, &case.project, &set.id, "OLD", 0).unwrap(),
+        base_blob(&case.db, &case.project, &set.id, &set.head, "OLD", 0).unwrap(),
         whole("gone soon\n")
     );
     assert_eq!(
-        base_blob(&case.db, &case.project, &set.id, "NOTES", 0).unwrap(),
+        base_blob(&case.db, &case.project, &set.id, &set.head, "NOTES", 0).unwrap(),
         whole("")
     );
     assert_eq!(
-        base_blob(&case.db, &case.project, &set.id, "README", 1)
+        base_blob(&case.db, &case.project, &set.id, &set.head, "README", 1)
             .unwrap_err()
             .0,
         "changes_not_found"
     );
     for outside in ["Cargo.toml", "../repo/README", ".git/config", ""] {
         assert_eq!(
-            base_blob(&case.db, &case.project, &set.id, outside, 0)
+            base_blob(&case.db, &case.project, &set.id, &set.head, outside, 0)
                 .unwrap_err()
                 .0,
             "changes_not_found",
@@ -471,12 +471,22 @@ fn agent_ide_settings_are_read_from_the_change_set_head_by_the_engine_only() {
             "shop.code-workspace"
         ]
     );
-    let config = |path: &str, page: u16| config_blob(&case.db, &case.project, &set.id, path, page);
+    let config = |path: &str, page: u16| {
+        config_blob(&case.db, &case.project, &set.id, &set.head, path, page)
+    };
     assert_eq!(config(".vscode/settings.json", 0).unwrap(), whole(settings));
     assert_eq!(config(".vscode/tasks.json", 0).unwrap(), whole(tasks));
     assert_eq!(config("shop.code-workspace", 0).unwrap(), whole(workspace));
     assert_eq!(
-        base_blob(&case.db, &case.project, &set.id, ".vscode/tasks.json", 0).unwrap(),
+        base_blob(
+            &case.db,
+            &case.project,
+            &set.id,
+            &set.head,
+            ".vscode/tasks.json",
+            0
+        )
+        .unwrap(),
         whole(old_tasks)
     );
     std::fs::write(
@@ -506,9 +516,16 @@ fn agent_ide_settings_are_read_from_the_change_set_head_by_the_engine_only() {
     }
     let other = ProjectId::new("project-2").unwrap();
     assert_eq!(
-        config_blob(&case.db, &other, &set.id, ".vscode/settings.json", 0)
-            .unwrap_err()
-            .0,
+        config_blob(
+            &case.db,
+            &other,
+            &set.id,
+            &set.head,
+            ".vscode/settings.json",
+            0
+        )
+        .unwrap_err()
+        .0,
         "changes_not_found"
     );
 }
@@ -525,22 +542,22 @@ fn the_head_side_of_a_diff_is_the_recorded_head_while_the_agent_works_on() {
         next: None,
     };
     assert_eq!(
-        head_blob(&case.db, &case.project, &set.id, "README", 0).unwrap(),
+        head_blob(&case.db, &case.project, &set.id, &set.head, "README", 0).unwrap(),
         whole("uno\ntwo\nthree\n")
     );
     assert_eq!(
-        head_blob(&case.db, &case.project, &set.id, "NOTES", 0).unwrap(),
+        head_blob(&case.db, &case.project, &set.id, &set.head, "NOTES", 0).unwrap(),
         whole("added by the agent\n")
     );
     assert_eq!(
-        head_blob(&case.db, &case.project, &set.id, "README", 1)
+        head_blob(&case.db, &case.project, &set.id, &set.head, "README", 1)
             .unwrap_err()
             .0,
         "changes_not_found"
     );
     for outside in ["OLD", "Cargo.toml", "../repo/README", ".git/config", ""] {
         assert_eq!(
-            head_blob(&case.db, &case.project, &set.id, outside, 0)
+            head_blob(&case.db, &case.project, &set.id, &set.head, outside, 0)
                 .unwrap_err()
                 .0,
             "changes_not_found",
@@ -549,7 +566,7 @@ fn the_head_side_of_a_diff_is_the_recorded_head_while_the_agent_works_on() {
     }
     let other = ProjectId::new("project-2").unwrap();
     assert_eq!(
-        head_blob(&case.db, &other, &set.id, "README", 0)
+        head_blob(&case.db, &other, &set.id, &set.head, "README", 0)
             .unwrap_err()
             .0,
         "changes_not_found"
@@ -601,13 +618,13 @@ fn a_legacy_encoded_text_file_opens_on_both_sides_of_its_diff() {
         (FileStatus::Modified, FileKind::Text)
     );
     assert_eq!(
-        base_blob(&case.db, &case.project, &set.id, "LATIN", 0)
+        base_blob(&case.db, &case.project, &set.id, &set.head, "LATIN", 0)
             .unwrap()
             .text,
         "caf\u{fffd}\n"
     );
     assert_eq!(
-        head_blob(&case.db, &case.project, &set.id, "LATIN", 0)
+        head_blob(&case.db, &case.project, &set.id, &set.head, "LATIN", 0)
             .unwrap()
             .text,
         "caf\u{fffd}s cr\u{fffd}me\n"
@@ -618,13 +635,13 @@ fn a_legacy_encoded_text_file_opens_on_both_sides_of_its_diff() {
 fn a_file_text_and_the_file_list_are_read_from_git_once_for_every_page() {
     let case = Case::new();
     let set = case.only(NOW);
-    let base = base_blob(&case.db, &case.project, &set.id, "README", 0).unwrap();
-    let head = head_blob(&case.db, &case.project, &set.id, "README", 0).unwrap();
+    let base = base_blob(&case.db, &case.project, &set.id, &set.head, "README", 0).unwrap();
+    let head = head_blob(&case.db, &case.project, &set.id, &set.head, "README", 0).unwrap();
     let (git, moved) = (case.repo.join(".git"), case.repo.join("git-moved"));
     std::fs::rename(&git, &moved).unwrap();
-    let base_again = base_blob(&case.db, &case.project, &set.id, "README", 0);
-    let head_again = head_blob(&case.db, &case.project, &set.id, "README", 0);
-    let past = head_blob(&case.db, &case.project, &set.id, "README", 1);
+    let base_again = base_blob(&case.db, &case.project, &set.id, &set.head, "README", 0);
+    let head_again = head_blob(&case.db, &case.project, &set.id, &set.head, "README", 0);
+    let past = head_blob(&case.db, &case.project, &set.id, &set.head, "README", 1);
     std::fs::rename(&moved, &git).unwrap();
     assert_eq!(base_again.unwrap(), base);
     assert_eq!(head_again.unwrap(), head);
@@ -639,9 +656,9 @@ fn another_projects_ide_never_reads_or_changes_this_projects_change_sets() {
     let other = ProjectId::new("project-2").unwrap();
     assert!(change_sets(&case.db, &other, NOW).unwrap().is_empty());
     let refusals = [
-        change_diff(&case.db, &other, &set.id, 0).map(|_| ()),
-        base_blob(&case.db, &other, &set.id, "README", 0).map(|_| ()),
-        head_blob(&case.db, &other, &set.id, "README", 0).map(|_| ()),
+        change_diff(&case.db, &other, &set.id, &set.head, 0).map(|_| ()),
+        base_blob(&case.db, &other, &set.id, &set.head, "README", 0).map(|_| ()),
+        head_blob(&case.db, &other, &set.id, &set.head, "README", 0).map(|_| ()),
         accept(&case.db, &case.home, &other, &set.id, &set.head, "Land it").map(|_| ()),
         discard(&case.db, &other, &set.id, &set.head, NOW).map(|_| ()),
         restore(&case.db, &other, &set.id, NOW),
@@ -651,7 +668,7 @@ fn another_projects_ide_never_reads_or_changes_this_projects_change_sets() {
     }
     assert_eq!(case.owner_head(), start);
     assert_eq!(case.only(NOW), set);
-    let page = change_diff(&case.db, &case.project, &set.id, 0).unwrap();
+    let page = change_diff(&case.db, &case.project, &set.id, &set.head, 0).unwrap();
     assert!(page.text.contains("+uno"), "{}", page.text);
 }
 

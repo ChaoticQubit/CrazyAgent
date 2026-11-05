@@ -4325,8 +4325,9 @@ fn typed_once(fixture: &Fixture, team: &mut TeamRuntime, id: i64, answer: &str) 
 
 /// The owner's answer to agent 7's question is typed into agent 7's own terminal exactly
 /// once, with no panic, even while agent 8 carries the handle `team-7`, and agent 8 is never
-/// given it. Each pane writes what it is given to a file, so the count does not depend on
-/// how the screen echoes or wraps.
+/// given it. Agent 7's Messages timeline keeps it once as the engine's notice and agent 8's
+/// keeps nothing of it (V2PB-L2). Each pane writes what it is given to a file, so the count
+/// does not depend on how the screen echoes or wraps.
 #[test]
 fn an_owner_answer_reaches_only_the_sub_agent_that_asked_even_when_another_holds_its_id_as_a_handle()
  {
@@ -4377,6 +4378,23 @@ fn an_owner_answer_reaches_only_the_sub_agent_that_asked_even_when_another_holds
         !typed(&fixture, holder).contains(answer),
         "the agent holding the handle team-{asker} never gets agent {asker}'s answer"
     );
+    use crate::team::agent_messages::{Speaker, read};
+    let kept = |id: i64| -> Vec<Speaker> {
+        read(&fixture.connection, &project, id, None, None)
+            .unwrap()
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry
+                    .text
+                    .as_deref()
+                    .is_some_and(|text| text.contains(answer))
+            })
+            .map(|entry| entry.from)
+            .collect()
+    };
+    assert_eq!(kept(asker), [Speaker::Engine]);
+    assert!(kept(holder).is_empty(), "{:?}", kept(holder));
     team.shutdown().unwrap();
 }
 

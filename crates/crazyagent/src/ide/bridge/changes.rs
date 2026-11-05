@@ -57,16 +57,27 @@ pub(crate) async fn answer(
         let db = landing::open(&root)?;
         match call {
             IdeCall::ChangeSets {} => json(change_sets(&db, &project, now_ms()?)?),
-            IdeCall::ChangeDiff { id, page } => json(change_diff(&db, &project, &id, page)?),
-            IdeCall::BaseBlob { id, path, page } => {
-                json(base_blob(&db, &project, &id, &path, page)?)
+            IdeCall::ChangeDiff { id, head, page } => {
+                json(change_diff(&db, &project, &id, &head, page)?)
             }
-            IdeCall::ConfigBlob { id, path, page } => {
-                json(config_blob(&db, &project, &id, &path, page)?)
-            }
-            IdeCall::HeadBlob { id, path, page } => {
-                json(head_blob(&db, &project, &id, &path, page)?)
-            }
+            IdeCall::BaseBlob {
+                id,
+                head,
+                path,
+                page,
+            } => json(base_blob(&db, &project, &id, &head, &path, page)?),
+            IdeCall::ConfigBlob {
+                id,
+                head,
+                path,
+                page,
+            } => json(config_blob(&db, &project, &id, &head, &path, page)?),
+            IdeCall::HeadBlob {
+                id,
+                head,
+                path,
+                page,
+            } => json(head_blob(&db, &project, &id, &head, &path, page)?),
             IdeCall::Accept { id, head, message } => {
                 let home = std::env::var_os("HOME")
                     .map(PathBuf::from)
@@ -207,62 +218,82 @@ fn fit(sets: Vec<IdeChangeSet>) -> Result<Vec<IdeChangeSet>, EngineError> {
     Ok(kept)
 }
 
-/// Answers `ide.change_diff`: one page of a change set of the IDE's project, at the head the
-/// set holds now. Inputs: the store, the project, the change set and the page. Output: the
-/// page, or `changes_stale` when the set moves between the read of its head and the page.
+/// Answers `ide.change_diff`: one page of a change set of the IDE's project at the head the
+/// IDE listed, which Accept and Discard name too, so the owner never reviews a head other
+/// than the one Accept lands. Inputs: the store, the project, the change set, the listed
+/// head and the page. Output: the page, or `changes_stale` once the set holds another head
+/// or for a head that is no commit id.
 pub(crate) fn change_diff(
     db: &Connection,
     project: &ProjectId,
     id: &ChangeSetId,
+    head: &str,
     page: u16,
 ) -> Result<ChangeDiff, EngineError> {
-    let head = landing::ide::view(db, project, id)?.head;
-    assert!(!head.is_empty(), "a change set always has a head");
-    landing::diff(db, id, &head, page)
+    if !commit_id(head) {
+        return Err(failure("changes_stale"));
+    }
+    landing::ide::locate(db, project, id)?;
+    landing::diff(db, id, head, page)
 }
 
 /// Answers `ide.base_blob`: one page of the base text of one text file of a change set of
 /// the IDE's project, the left side of its diff. Inputs: the store, the project, the
-/// change set, the path and the page. Output: the page, or `changes_not_found` past the end.
+/// change set, the head the IDE listed, the path and the page. Output: the page, or
+/// `changes_not_found` past the end, `changes_stale` once the set holds another head.
 pub(crate) fn base_blob(
     db: &Connection,
     project: &ProjectId,
     id: &ChangeSetId,
+    head: &str,
     path: &str,
     page: u16,
 ) -> Result<BasePage, EngineError> {
-    let text = landing::ide::base_text(db, project, id, path)?;
+    if !commit_id(head) {
+        return Err(failure("changes_stale"));
+    }
+    let text = landing::ide::base_text(db, project, id, head, path)?;
     page_of(&text, page).ok_or_else(|| failure("changes_not_found"))
 }
 
 /// One page of an IDE settings file as the agent's change set has it, the right side of
 /// its diff, served by the engine because the IDE server cannot read agent `.vscode` or
-/// `*.code-workspace` files. Inputs: the store, the project, the set, the path and the page.
-/// Output: the page, or `changes_not_found` for any other path or a page past the end.
+/// `*.code-workspace` files. Inputs: the store, the project, the set, the head the IDE
+/// listed, the path and the page. Output: the page, or `changes_not_found` for any other
+/// path or a page past the end, `changes_stale` once the set holds another head.
 pub(crate) fn config_blob(
     db: &Connection,
     project: &ProjectId,
     id: &ChangeSetId,
+    head: &str,
     path: &str,
     page: u16,
 ) -> Result<BasePage, EngineError> {
-    let text = landing::ide::config_text(db, project, id, path)?;
+    if !commit_id(head) {
+        return Err(failure("changes_stale"));
+    }
+    let text = landing::ide::config_text(db, project, id, head, path)?;
     page_of(&text, page).ok_or_else(|| failure("changes_not_found"))
 }
 
 /// Answers `ide.head_blob`: one page of the text one text file of a change set of the
 /// IDE's project has at the set's recorded head, the right side of its diff, so the owner
 /// reviews what Accept lands rather than the agent worktree. Inputs: the store, the
-/// project, the change set, the path and the page. Output: the page, or `changes_not_found`
-/// for a deleted file or past the end.
+/// project, the change set, the head the IDE listed, the path and the page. Output: the
+/// page, or `changes_not_found` for a deleted file or past the end, `changes_stale` once
+/// the set holds another head.
 pub(crate) fn head_blob(
     db: &Connection,
     project: &ProjectId,
     id: &ChangeSetId,
+    head: &str,
     path: &str,
     page: u16,
 ) -> Result<BasePage, EngineError> {
-    let text = landing::ide::head_text(db, project, id, path)?;
+    if !commit_id(head) {
+        return Err(failure("changes_stale"));
+    }
+    let text = landing::ide::head_text(db, project, id, head, path)?;
     page_of(&text, page).ok_or_else(|| failure("changes_not_found"))
 }
 

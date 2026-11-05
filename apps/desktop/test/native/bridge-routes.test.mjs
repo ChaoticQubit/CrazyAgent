@@ -19,7 +19,8 @@ test("every plain bridge command is routed with its own arguments and native one
   assert.deepEqual(catalog.args.map((arg) => arg.name), ["check"]);
   assert.match(catalog.body, /^read\(state\)\s*\.await\?\s*\.harness_catalog\(check\.unwrap_or\(false\)\)\s*\.await$/, "plain reads share the bridge as the app's do");
   assert.match(planned.get("desktop_project_read_paths").route.body, /^read\(state\)\s*\.await\?\s*\.project_read_paths\(&id\)\s*\.await$/, "the read-folders read never takes the bridge alone");
-  for (const native of ["desktop_pick_folder", "desktop_terminal_attach", "desktop_install_update", "desktop_engine_versions"]) {
+  assert.equal(planned.get("desktop_project_files").route.body, "state.project_files(&id, &query).await", "the @ file listing runs on the bridge queue as the app's does");
+  for (const native of ["desktop_pick_folder", "desktop_terminal_attach", "desktop_install_update", "desktop_engine_versions", "desktop_submit_claude_auth_code"]) {
     assert.ok(planned.get(native).skip, `${native} needs the native app`);
   }
   assert.ok([...planned.values()].filter((entry) => entry.route).length > 100, "the bridge serves the plain commands");

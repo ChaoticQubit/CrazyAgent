@@ -1095,10 +1095,52 @@ pub fn send_to(
 }
 
 /// Types text into the terminal of exactly one sub-agent of a project, chosen by its team
-/// agent id, as `send_to_agent` types it. Takes the connection, the terminal host, the
+/// agent id, as `send_to_agent` types it, and keeps nothing for its Messages timeline: the
+/// caller keeps the owner's words there itself. Takes the connection, the terminal host, the
 /// project, the team agent id and the text. Returns a plain refusal code for blank or long
 /// text, an id that is no sub-agent of the project, a stopped agent or an unreachable terminal.
 pub fn send_to_id(
+    connection: &Connection,
+    host: &dyn Host,
+    project: &ProjectId,
+    id: i64,
+    text: &str,
+) -> Result<Result<(), &'static str>, EngineError> {
+    if let Err(code) = type_to_id(connection, host, project, id, text)? {
+        return Ok(Err(code));
+    }
+    clear_waiting(connection, id)?;
+    Ok(Ok(()))
+}
+
+/// Types an engine notice into exactly one sub-agent of a project, chosen by its team agent
+/// id, as `send_to_id` types it, and keeps it in the agent's Messages timeline as the
+/// engine's, with the waiting mark cleared in the same transaction, as `send_to` keeps what
+/// the master says. Takes the connection, the terminal host, the project, the team agent id
+/// and the text. Returns the same plain refusal codes as `send_to_id`.
+pub fn send_notice_to_id(
+    connection: &Connection,
+    host: &dyn Host,
+    project: &ProjectId,
+    id: i64,
+    text: &str,
+) -> Result<Result<(), &'static str>, EngineError> {
+    if let Err(code) = type_to_id(connection, host, project, id, text)? {
+        return Ok(Err(code));
+    }
+    assert!(id > 0, "only a sub-agent row takes a notice");
+    let tx = immediate(connection)?;
+    super::agent_messages::record(&tx, project, id, Said::Notice, text, super::now_ms())?;
+    clear_waiting(&tx, id)?;
+    tx.commit().map_err(error)?;
+    Ok(Ok(()))
+}
+
+/// Admits and types text into one sub-agent of a project by its team agent id, writing
+/// nothing to the store. Takes the connection, the terminal host, the project, the team
+/// agent id and the text. Returns Ok once its terminal took the text, or the plain refusal
+/// code of `send_to_id`.
+fn type_to_id(
     connection: &Connection,
     host: &dyn Host,
     project: &ProjectId,
@@ -1131,7 +1173,6 @@ pub fn send_to_id(
         }
         Err(_) => return Ok(Err("team_agent_unreachable")),
     }
-    clear_waiting(connection, id)?;
     Ok(Ok(()))
 }
 
