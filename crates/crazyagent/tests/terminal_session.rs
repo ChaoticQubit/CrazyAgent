@@ -249,6 +249,14 @@ struct StandIn {
 /// Starts `script` as a stand-in Claude Code in a pane named `name` of a fresh tmux server,
 /// under the sandbox profile text `profile_text`. Output: the running stand-in.
 fn stand_in(script: &str, name: &str, profile_text: &str) -> StandIn {
+    stand_in_on(script, name, Some(profile_text), false)
+}
+
+/// Starts `script` as a stand-in Claude Code in a pane named `name` of a fresh tmux server:
+/// under the sandbox profile text `profile_text`, or with Full access when there is none,
+/// and on the host the engine runs agents on, which keeps each ended terminal's last
+/// screen, when `keeps` is set. Output: the running stand-in.
+fn stand_in_on(script: &str, name: &str, profile_text: Option<&str>, keeps: bool) -> StandIn {
     let root = tempfile::Builder::new()
         .prefix("ca-pane-")
         .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -261,7 +269,11 @@ fn stand_in(script: &str, name: &str, profile_text: &str) -> StandIn {
         tmux: tmux.clone(),
         socket: folder.join(SOCKET),
     };
-    let host: Arc<dyn Host> = Arc::new(Tmux::open(Some(tmux), &folder));
+    let host: Arc<dyn Host> = if keeps {
+        crazyagent::terminal::tmux_host(&root_path, Some(tmux))
+    } else {
+        Arc::new(Tmux::open(Some(tmux), &folder))
+    };
     let home = root_path.join("home");
     let work = root_path.join("work");
     let bin = root_path.join("bin");
@@ -271,8 +283,11 @@ fn stand_in(script: &str, name: &str, profile_text: &str) -> StandIn {
     let executable = bin.join("claude");
     std::fs::write(&executable, script).unwrap();
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let profile = root_path.join("agent.sb");
-    std::fs::write(&profile, profile_text).unwrap();
+    let profile = profile_text.map(|text| {
+        let profile = root_path.join("agent.sb");
+        std::fs::write(&profile, text).unwrap();
+        profile
+    });
     let request = LaunchRequest {
         harness: "claude-code".into(),
         executable,
@@ -284,8 +299,8 @@ fn stand_in(script: &str, name: &str, profile_text: &str) -> StandIn {
         },
         model: None,
         tools: true,
-        sandbox_profile: Some(profile),
-        unconfined: false,
+        unconfined: profile.is_none(),
+        sandbox_profile: profile,
         git_identity: None,
         limits: LaunchLimits::default(),
     };
@@ -300,6 +315,51 @@ fn stand_in(script: &str, name: &str, profile_text: &str) -> StandIn {
         _server: server,
         _root: root,
     }
+}
+
+/// Whether `seen` holds `wanted`. Inputs: the bytes and the text. Output: whether.
+fn contains(seen: &[u8], wanted: &[u8]) -> bool {
+    seen.windows(wanted.len()).any(|window| window == wanted)
+}
+
+/// Stops a stand-in on the engine's host once its app drew its ready line, then checks the
+/// host kept the pane's last screen: the pane is gone, `kept` names it, and attaching opens
+/// that screen, the ready line under the finished label. Input: the stand-in.
+fn stops_keeping_its_last_screen(pane: StandIn) {
+    assert!(
+        within(Duration::from_secs(15), || pane
+            .host
+            .screen(&pane.agent)
+            .is_ok_and(|screen| contains(&screen, b"stand-in ready"))),
+        "the stand-in never drew its ready line"
+    );
+    assert_eq!(pane.session.stop().unwrap(), None);
+    assert!(!pane.host.alive().unwrap().contains(&pane.agent));
+    assert!(
+        pane.host.kept(&pane.agent),
+        "the host keeps the stopped pane's last screen"
+    );
+    let kept = pane.host.attach(&pane.agent).unwrap();
+    assert!(
+        contains(&kept.screen, b"stand-in ready") && contains(&kept.screen, b" Finished at "),
+        "the kept screen is the pane's last one under its finished label: {}",
+        String::from_utf8_lossy(&kept.screen)
+    );
+}
+
+/// B19-KEPT: a Sandboxed pane's stop ends it through its keeper, which empties the sandbox
+/// and ends the pane before the host's kill, and the engine's host still keeps the pane's
+/// last screen for its finished card (N-D21, OP-39).
+#[test]
+fn a_sandboxed_pane_stopped_through_its_keeper_keeps_its_last_screen() {
+    stops_keeping_its_last_screen(stand_in_on(STAND_IN, "stand-in-11", Some(ALLOW_ALL), true));
+}
+
+/// B19-KEPT: a Full access pane, which stops without a keeper, keeps its last screen on the
+/// engine's host as well, so every confinement shows how its run finished.
+#[test]
+fn a_full_access_pane_stopped_without_a_keeper_keeps_its_last_screen() {
+    stops_keeping_its_last_screen(stand_in_on(STAND_IN, "stand-in-12", None, true));
 }
 
 /// Waits for the pid a stand-in wrote for the background process it started and checks
