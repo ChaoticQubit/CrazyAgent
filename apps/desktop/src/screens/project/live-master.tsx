@@ -315,7 +315,7 @@ export function LiveMasterView({ data, harness, live, onStart, onSession, sessio
       <span className={`pj-console-state ${state.tone}`}>{state.word}</span>
       {account && <span className="pj-console-detail">{displayText(account)}</span>}
     </div>
-    {live.kind !== "not_ready" && <SessionsBar ticket={sessions.ticket} liveId={sessions.liveId} onSwitched={async () => {
+    {live.kind !== "not_ready" && <SessionsBar ticket={sessions.ticket} liveId={sessions.liveId} mark={live.kind === "running" ? live.node?.status ?? null : null} onSwitched={async () => {
       await sessions.reread();
       if (off) await onStart();
       data.reloadTeam();
