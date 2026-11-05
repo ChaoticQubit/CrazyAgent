@@ -571,6 +571,7 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
                         SetupQuery::Jobs { .. }
                             | SetupQuery::Context { .. }
                             | SetupQuery::Memories { .. }
+                            | SetupQuery::Team { .. }
                     )
             ),
             "{request:?}"
