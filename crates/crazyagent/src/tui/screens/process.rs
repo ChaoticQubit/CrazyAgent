@@ -695,7 +695,7 @@ impl ProcessPage {
                 | ProcessReply::Settings(_)
                 | ProcessReply::Adoption(_)
                 | ProcessReply::Files(_)
-                | ProcessReply::Paths(_)
+                | ProcessReply::Uncommitted(_)
                 | ProcessReply::Committed(_),
             ) => {
                 return;

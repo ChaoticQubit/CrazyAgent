@@ -22,6 +22,7 @@ const STEPS_MAX: usize = 12;
 const SHIFT_RIGHT: [&str; 6] = ["1b", "5b", "31", "3b", "32", "43"];
 const SHIFT_LEFT: [&str; 6] = ["1b", "5b", "31", "3b", "32", "44"];
 const SETTLE_TIME: Duration = Duration::from_secs(180);
+const PICK_TIME: Duration = Duration::from_secs(5);
 const TURN_TIME: Duration = Duration::from_secs(60);
 const REPO: &str = "plant-shop";
 const ABOUT: &str = "A small shop that sells house plants online.";
@@ -147,11 +148,65 @@ fn at_home(screen: &str, project: &str) -> bool {
 }
 
 fn on_agents(screen: &str, project: &str) -> bool {
-    screen.contains(&format!("{project}  /  Agents"))
+    screen.contains(&format!("/  {project}  /  Agents"))
 }
 
 fn on_team(screen: &str, project: &str) -> bool {
-    screen.contains(&format!("{project}  /  Team")) && screen.contains("Master")
+    screen.contains(&format!("/  {project}  /  Team")) && screen.contains("Master")
+}
+
+/// Whether the crumbs end on the project named exactly `project`, or go on to one of its
+/// tabs. Inputs: the screen and the project name. Output: true when the crumbs name it.
+fn in_project(screen: &str, project: &str) -> bool {
+    let crumbs = screen.lines().next().unwrap_or_default().trim_end();
+    let place = format!("/  {project}");
+    crumbs.ends_with(&place) || crumbs.contains(&format!("{place}  /  "))
+}
+
+/// Whether Home's selection bar marks the card named exactly `project`: the bar, then the
+/// name, then nothing or the gap before the card's state.
+/// Inputs: the screen and the project name. Output: true when the picked card is it.
+fn picked_card(screen: &str, project: &str) -> bool {
+    let gap = format!("{project}  ");
+    screen.lines().any(|line| {
+        ["\u{258c} ", "| "].iter().any(|bar| {
+            line.trim_start()
+                .strip_prefix(bar)
+                .is_some_and(|rest| rest.trim_end() == project || rest.starts_with(&gap))
+        })
+    })
+}
+
+/// Moves Home's selection to the card named exactly `project`: filters Home by the name,
+/// then steps down until the bar marks that card, so a newer card whose name starts with it
+/// is passed over. Inputs: the TUI on Home with its project list focused and the name.
+/// Output: none; panics when no card has exactly that name.
+fn pick_card(pty: &Pty, project: &str) {
+    pty.keys(&["/"]);
+    pty.text(project);
+    let filter = format!("/ {project}");
+    pty.until("Home's filter holds the project name", |screen| {
+        screen.contains(&filter)
+    });
+    pty.keys(&["Enter"]);
+    for step in 0..=STEPS_MAX {
+        let screen = pty.until("Home keeps the filter", |screen| {
+            !screen.contains("Keep filter")
+        });
+        if picked_card(&screen, project) {
+            return;
+        }
+        assert!(
+            step < STEPS_MAX && !screen.contains("No project matches"),
+            "no Home card is named exactly {project}:\n{screen}"
+        );
+        pty.keys(&["Down"]);
+        pty.until_within(
+            &format!("no Home card below the picked one is named exactly {project}"),
+            PICK_TIME,
+            |now| now != screen,
+        );
+    }
 }
 
 fn reach_home(pty: &Pty, home: impl Fn(&str) -> bool) {
@@ -190,10 +245,15 @@ fn open_team(pty: &Pty, project: &str) {
     pty.until("Home offers to open the project", |screen| {
         screen.contains("Open")
     });
+    pick_card(pty, project);
     pty.keys(&["Enter"]);
-    pty.until("the project screen opens with its tabs", |screen| {
-        screen.contains(project) && screen.contains("Tabs")
+    let screen = pty.until("the project screen opens with its tabs", |screen| {
+        screen.contains("Tabs")
     });
+    assert!(
+        in_project(&screen, project),
+        "Home opened another project than {project}:\n{screen}"
+    );
     for step in 0..=STEPS_MAX {
         let screen = pty.screen();
         if on_agents(&screen, project) {
@@ -236,6 +296,48 @@ fn the_tui_walks_from_home_into_the_project_team_tree() {
     let screen = pty.screen();
     assert!(screen.contains("Master"), "{screen}");
     assert!(!screen.contains("Not ready yet"), "{screen}");
+    drop(pty);
+    engine.stop();
+}
+
+const NEWER_PROJECT: &str = "Tidepool e2e readd";
+
+/// Home highlights its most recent card; a project whose name that newer card's name starts
+/// with is still the one opened, by its exact name (live row 7 on 18.15 opened
+/// ca-trial-4-readd-202611051754 for ca-trial-4).
+#[test]
+fn the_tui_opens_the_project_named_exactly_when_a_newer_card_starts_with_its_name() {
+    let mut engine = Engine::start("ca-e2e-tui-");
+    let tmux = installed(engine.path()).expect(TMUX);
+    let disk = scratch("ca-e2e-home-");
+    let home = disk.path().join("Projects");
+    std::fs::create_dir(&home).unwrap();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut owner = Owner::attach(&engine).await;
+            assert_eq!(owner.save_profile(profile()).await, OwnerResult::Applied);
+            assert_eq!(owner.set_home(&home).await, OwnerResult::Applied);
+            assert_eq!(
+                owner.create_project("e2e-tui", PROJECT).await,
+                OwnerResult::Applied
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            assert_eq!(
+                owner.create_project("e2e-tui-readd", NEWER_PROJECT).await,
+                OwnerResult::Applied
+            );
+            owner.controller.detach();
+        });
+
+    let pty = Pty::launch(tmux, &engine.socket());
+    reach_home(&pty, |screen| at_home(screen, NEWER_PROJECT));
+    open_team(&pty, PROJECT);
+    let screen = pty.screen();
+    assert!(on_team(&screen, PROJECT), "{screen}");
+    assert!(!screen.contains(NEWER_PROJECT), "{screen}");
     drop(pty);
     engine.stop();
 }

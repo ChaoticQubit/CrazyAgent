@@ -59,7 +59,8 @@ impl NodeKind {
 /// `presence`, `waiting` (on the owner in its terminal), `owner_questions` (open For: Me
 /// questions) and `no_worktree` (a teammate working with none, Q17) come from coordination.
 /// `hookless` marks an agent whose launch fires no hooks, so it has no receipts; its adoption
-/// counts and flags come from its transcript like any other agent's (OQ-8).
+/// counts and flags come from its transcript like any other agent's (OQ-8). `message_note`
+/// is its agent row's sentence when the Delivery setting leaves it no way to get messages.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GraphNode {
     pub id: String,
@@ -89,6 +90,8 @@ pub struct GraphNode {
     pub no_worktree: bool,
     #[serde(default)]
     pub hookless: bool,
+    #[serde(default)]
+    pub message_note: Option<String>,
 }
 
 /// Where one handed-out task stands, as the graph draws it.
@@ -364,6 +367,7 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
         owner_questions: master.map_or(0, |agent| asked.get(&agent.id).copied().unwrap_or(0)),
         no_worktree: false,
         hookless: master.is_some_and(|agent| agent.hookless),
+        message_note: master.and_then(|agent| agent.message_note.clone()),
     }];
     let listed: Vec<&TeamAgent> = status.agents.iter().filter(|agent| shown(agent)).collect();
     let adopted: BTreeSet<(i64, &str)> = status
@@ -424,6 +428,7 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
             no_worktree: agent.role == AgentRole::Teammate
                 && state.is_some_and(|state| !state.has_worktree),
             hookless: agent.hookless,
+            message_note: agent.message_note.clone(),
         });
         for mate in agent.teammates.iter().filter(|mate| {
             (status.show_finished || !mate.ended)
@@ -457,6 +462,7 @@ pub fn graph(status: &TeamStatus, facts: &GraphFacts) -> TeamGraph {
                 owner_questions: 0,
                 no_worktree: false,
                 hookless: agent.hookless,
+                message_note: None,
             });
         }
     }

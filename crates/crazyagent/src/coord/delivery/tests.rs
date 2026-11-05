@@ -1204,3 +1204,110 @@ fn a_note_line_says_it_takes_no_reply_within_the_head_bound() {
     let asked = line(&connection, &prompt, NEXT_TURN_BYTES_MAX).unwrap();
     assert!(asked.contains(": work for you, answer with update_work: "));
 }
+
+/// Owner 2026-11-05: only a tools-off Codex sub-agent in a kept session has no channel
+/// under Native only; tools on, a signed-in agent the engine wakes per turn, the master,
+/// another harness, and the Auto or Typing only setting each still reach the agent.
+#[test]
+fn no_channel_names_only_a_tools_off_codex_sub_agent_in_a_kept_session_under_native_only() {
+    use crate::team::AgentRole;
+    let fixture = Fixture::new();
+    let mut named = Vec::new();
+    for delivery in [Delivery::Auto, Delivery::NativeOnly, Delivery::TypingOnly] {
+        for kind in [
+            HarnessKind::Codex,
+            HarnessKind::ClaudeCode,
+            HarnessKind::Rcli,
+        ] {
+            settings::set_delivery(&fixture.db, &project(), kind, delivery).unwrap();
+        }
+        for role in [AgentRole::Master, AgentRole::Sub, AgentRole::Teammate] {
+            for harness in ["codex", "claude-code", "rcli"] {
+                for tools in [false, true] {
+                    for kept in [false, true] {
+                        let note = no_channel(&fixture.db, &project(), role, harness, tools, kept)
+                            .unwrap();
+                        if let Some(note) = note {
+                            assert_eq!(note, NO_CHANNEL);
+                            named.push((delivery, role, harness, tools, kept));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(
+        named,
+        [(Delivery::NativeOnly, AgentRole::Sub, "codex", false, true)]
+    );
+    assert_eq!(
+        NO_CHANNEL,
+        "Can't receive messages: Native only needs tools on for Codex."
+    );
+}
+
+/// Owner 2026-11-05: Native only never drops nor types a tools-off Codex agent's message:
+/// it stays Sent over ticks, retried, with nothing in its pane; once the setting is Auto
+/// the next tick types it in.
+#[test]
+fn native_only_keeps_a_tools_off_codex_agents_messages_sent_until_auto_types_them() {
+    let mut fixture = Fixture::new();
+    let host = fixture.host();
+    let owner = OwnerTyping::new(fixture.base.join("typing-never-written.db"));
+    let agent = fixture.agent("sub", "codex", "idle", None);
+    fixture
+        .db
+        .execute("UPDATE team_agents SET tools=0 WHERE id=?1", [agent])
+        .unwrap();
+    settings::set_delivery(
+        &fixture.db,
+        &project(),
+        HarnessKind::Codex,
+        Delivery::NativeOnly,
+    )
+    .unwrap();
+    let out = fixture.base.join("typed.txt");
+    fixture.pane(&host, agent, READ_ONE_LINE, &out);
+    let now = now_ms();
+    let message = fixture.send(
+        Party::Owner,
+        agent,
+        MessageKind::Prompt,
+        "Check the gate",
+        now,
+    );
+    let pane = crate::terminal::AgentId::team(agent).unwrap();
+    until("a quiet pane", || {
+        host.quiet(&pane).unwrap().unwrap() >= typing::APP_QUIET
+    });
+    let asleep = BTreeSet::new();
+    let reach = reach(
+        Some(&host as &dyn Host),
+        Some(&owner),
+        &fixture.base,
+        &asleep,
+    );
+    let mut deliveries = Deliveries::default();
+    for tick in 0..3 {
+        let at = now + tick * RETRY_MS;
+        deliveries
+            .tick(&fixture.db, &project(), at, &reach)
+            .unwrap();
+        assert_eq!(fixture.receipt(message), "sent");
+        assert_eq!(deliveries.retry.get(&agent), Some(&(at + RETRY_MS)));
+    }
+    assert!(
+        !out.exists(),
+        "Native only typed into a tools-off Codex agent"
+    );
+    settings::set_delivery(&fixture.db, &project(), HarnessKind::Codex, Delivery::Auto).unwrap();
+    deliveries
+        .tick(&fixture.db, &project(), now + 3 * RETRY_MS, &reach)
+        .unwrap();
+    assert_eq!(fixture.receipt(message), "typed");
+    until("the typed line", || {
+        std::fs::read_to_string(&out).is_ok_and(|line| {
+            line == format!("[crazyagent msg {message}] from the owner: work for you, answer with update_work: Check the gate\n")
+        })
+    });
+}

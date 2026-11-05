@@ -50,7 +50,11 @@ pub struct InstallOutcome {
 }
 
 fn refused(code: &'static str) -> BridgeError {
-    BridgeError { code, cause: None }
+    BridgeError {
+        code,
+        cause: None,
+        account: None,
+    }
 }
 
 fn bridged(error: UpdateError) -> BridgeError {
