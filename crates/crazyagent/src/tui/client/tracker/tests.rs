@@ -363,3 +363,70 @@ fn a_call_the_engine_did_not_answer_reads_as_a_refusal_with_its_code() {
     assert_eq!(envelope["code"], json!("tracker_unavailable"));
     assert_eq!(envelope["api"], json!(1));
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn after_a_lost_connection_a_views_job_calls_the_engine_no_more() {
+    use crate::engine::bootstrap::EngineService;
+    use crate::engine::owner::OwnerClientKind;
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::Builder::new()
+        .prefix("ca-tui-tk-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let global = root.path().join("global.toml");
+    std::fs::write(&global, "version = 1\ntimeout_ms = 5000\n").unwrap();
+    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start_with_settings_sources(
+        root.path(),
+        "e.sock",
+        &global,
+        &root.path().join("project.toml"),
+        &stopped,
+    )
+    .await
+    .unwrap();
+    let (client, _) = OwnerClient::discover(
+        root.path(),
+        OwnerClientKind::Tui,
+        std::time::Duration::from_secs(20),
+    )
+    .await
+    .unwrap();
+    let client = Arc::new(client);
+    let handle = tokio::runtime::Handle::current();
+    let (answered, after_refused, after_lost, kept) = tokio::task::spawn_blocking(move || {
+        let mut tracker = OwnerTracker {
+            client,
+            handle,
+            failure: None,
+        };
+        let answered = tracker.call(OpKind::Schema, json!({}));
+        tracker.failure = Some(EngineError("tracker_unavailable".into()));
+        let after_refused = tracker.call(OpKind::Schema, json!({}));
+        tracker.failure = Some(EngineError("tracker_outcome_unknown".into()));
+        let after_lost = tracker.call(OpKind::Schema, json!({}));
+        (
+            answered,
+            after_refused,
+            after_lost,
+            tracker.failure.map(|error| error.0),
+        )
+    })
+    .await
+    .unwrap();
+    assert_eq!(answered["ok"], json!(true), "{answered}");
+    assert_eq!(
+        after_refused["ok"],
+        json!(true),
+        "a connect the engine refused is no lost connection: {after_refused}"
+    );
+    assert_eq!(after_lost, refused("tracker_outcome_unknown"));
+    assert_eq!(kept.as_deref(), Some("tracker_outcome_unknown"));
+    tokio::time::timeout(std::time::Duration::from_secs(10), service.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+}
