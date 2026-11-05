@@ -4601,6 +4601,7 @@ fn coordination_settings_are_checked_saved_and_read_back_per_harness_kind() {
             worker: Some(vec!["release-notes".into()]),
             ..Default::default()
         },
+        claude_display: crate::coord::settings::ClaudeDisplay::Fullscreen,
     };
     for action in [
         TeamAction::CoordSettings {

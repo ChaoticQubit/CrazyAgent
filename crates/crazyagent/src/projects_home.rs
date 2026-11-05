@@ -214,7 +214,8 @@ pub fn check_home(path: &Path, engine_root: &Path) -> Result<PathBuf, EngineErro
 /// True when moving `folder` would break git links kept outside it: the
 /// folder is a linked worktree or submodule (its `.git` is a file or a link),
 /// or its repository has linked worktrees. An unreadable `.git` counts.
-fn git_links(folder: &Path) -> bool {
+/// [`plan_add`] refuses such a Move, and the windows offer no Move for it.
+pub fn git_links(folder: &Path) -> bool {
     let git = folder.join(".git");
     match std::fs::symlink_metadata(&git) {
         Err(error) => error.kind() != std::io::ErrorKind::NotFound,
@@ -229,7 +230,8 @@ fn git_links(folder: &Path) -> bool {
 /// True when `folder` is itself a checkout whose git data lives in another repository:
 /// its `.git` is a file (a linked worktree or submodule checkout) or a link. A copy of it
 /// would still use that repository's data. An unreadable `.git` counts.
-fn linked_checkout(folder: &Path) -> bool {
+/// [`plan_add`] refuses such a Copy, and the windows offer no Copy for it.
+pub fn linked_checkout(folder: &Path) -> bool {
     match std::fs::symlink_metadata(folder.join(".git")) {
         Err(error) => error.kind() != std::io::ErrorKind::NotFound,
         Ok(metadata) => !metadata.is_dir() || metadata.file_type().is_symlink(),

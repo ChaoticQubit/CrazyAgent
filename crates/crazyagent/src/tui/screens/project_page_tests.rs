@@ -25,6 +25,7 @@ use crate::tui::keys::Key;
 use crate::tui::run::owner_arrival;
 use crate::tui::seam::{ProjectCard, Request, ShellRequest};
 use crate::tui::shell::Shell;
+use crate::tui::terminal_pane::LEADER;
 use crate::tui::theme::{Appearance, Colors, Depth};
 use crossterm::event::{KeyCode, KeyModifiers};
 use ratatui::Terminal;
@@ -3529,9 +3530,9 @@ async fn until_place(shell: &mut Shell, connection: &mut Connection, place: &Pla
 }
 
 /// A session switch the owner starts from the live master view (S2, fix/session-resume-open
-/// e4cb1277) opens that view again once the engine applied it: l there resumes the parked
-/// session from the sessions list, n there starts a new one, and each lands back on the
-/// master view on the session the engine now holds.
+/// e4cb1277) opens that view again once the engine applied it: Ctrl-] then l there resumes
+/// the parked session from the sessions list, Ctrl-] then n there starts a new one, and each
+/// lands back on the master view on the session the engine now holds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_session_switch_from_the_master_view_opens_the_master_view_again() {
     let mut engine = Engine::start().await;
@@ -3557,6 +3558,7 @@ async fn a_session_switch_from_the_master_view_opens_the_master_view_again() {
 
     say(&mut shell, &mut connection, "/master").await;
     until_place(&mut shell, &mut connection, &master).await;
+    shell.key(LEADER);
     shell.key(Key::Char('l'));
     let shown = until(&mut shell, &mut connection, |shown| {
         shown.contains("Sessions  2")
@@ -3576,6 +3578,7 @@ async fn a_session_switch_from_the_master_view_opens_the_master_view_again() {
     let (resumed, _) = latest_master(&mut engine, &notes).await;
     assert_eq!(resumed.unwrap().session_id, first.session_id);
 
+    shell.key(LEADER);
     shell.key(Key::Char('n'));
     until_place(&mut shell, &mut connection, &master).await;
     let (fresh, _) = latest_master(&mut engine, &notes).await;

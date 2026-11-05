@@ -5,8 +5,8 @@ use super::project::{REFRESH_MS, plain_problem};
 use super::project_time::{clock, duration};
 use super::team_messages::{ListKey, MASTER_ELSEWHERE, Messages, Shown};
 use crate::coord::settings::{
-    COUNTED_TOOL_BYTES_MAX, COUNTED_TOOLS_DEFAULT, COUNTED_TOOLS_MAX, Delivery, HarnessKind,
-    Nudges, Overlaps, QuestionsTo, ROLE_SKILLS_MAX, SkillRole, SubagentMode,
+    COUNTED_TOOL_BYTES_MAX, COUNTED_TOOLS_DEFAULT, COUNTED_TOOLS_MAX, ClaudeDisplay, Delivery,
+    HarnessKind, Nudges, Overlaps, QuestionsTo, ROLE_SKILLS_MAX, SkillRole, SubagentMode,
 };
 use crate::engine::owner::OwnerResult;
 use crate::project_setup::{SetupQuery, SetupView};
@@ -150,12 +150,13 @@ pub(in crate::tui) struct CoordEdit {
 }
 
 /// One row of the coordination editor: a harness kind's sub-agent mode or message delivery,
-/// where sub-agent questions go, overlapping edits, workflow nudges, the counted tools or
-/// the skills one team role gets (DEC-111 R3).
+/// the Claude Code terminal display (N-D9), where sub-agent questions go, overlapping edits,
+/// workflow nudges, the counted tools or the skills one team role gets (DEC-111 R3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum CoordRow {
     Mode(HarnessKind),
     Delivery(HarnessKind),
+    ClaudeDisplay,
     Questions,
     Overlaps,
     Nudges,
@@ -163,9 +164,10 @@ pub(in crate::tui) enum CoordRow {
     Skills(SkillRole),
 }
 
-const COORD_ROWS: [CoordRow; 13] = [
+const COORD_ROWS: [CoordRow; 14] = [
     CoordRow::Mode(HarnessKind::ClaudeCode),
     CoordRow::Delivery(HarnessKind::ClaudeCode),
+    CoordRow::ClaudeDisplay,
     CoordRow::Mode(HarnessKind::Codex),
     CoordRow::Delivery(HarnessKind::Codex),
     CoordRow::Mode(HarnessKind::Rcli),
@@ -1931,6 +1933,23 @@ impl TeamView {
                     ),
                 )
             }
+            CoordRow::ClaudeDisplay => {
+                settings.claude_display = match settings.claude_display {
+                    ClaudeDisplay::Classic => ClaudeDisplay::Fullscreen,
+                    ClaudeDisplay::Fullscreen => ClaudeDisplay::Classic,
+                };
+                let done = format!(
+                    "Claude Code terminals now open {}.",
+                    display_words(settings.claude_display)
+                );
+                (
+                    TeamAction::CoordSettings {
+                        project_id,
+                        settings,
+                    },
+                    done,
+                )
+            }
             CoordRow::Questions => {
                 settings.questions_to = match settings.questions_to {
                     QuestionsTo::Lead => QuestionsTo::Me,
@@ -2148,6 +2167,11 @@ impl TeamView {
                     found(kind)
                         .map_or("", |row| delivery_words(row.delivery))
                         .to_owned(),
+                    "",
+                ),
+                CoordRow::ClaudeDisplay => (
+                    "Claude Code terminal display".to_owned(),
+                    display_words(view.settings.claude_display).to_owned(),
                     "",
                 ),
                 CoordRow::Questions => (
@@ -3013,6 +3037,13 @@ fn delivery_words(delivery: Delivery) -> &'static str {
         Delivery::Auto => "Auto: native, typing as fallback",
         Delivery::NativeOnly => "Native only",
         Delivery::TypingOnly => "Typing only",
+    }
+}
+
+fn display_words(display: ClaudeDisplay) -> &'static str {
+    match display {
+        ClaudeDisplay::Classic => "Classic",
+        ClaudeDisplay::Fullscreen => "Fullscreen",
     }
 }
 

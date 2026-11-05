@@ -9,6 +9,8 @@ const NAME_BYTES_MAX: usize = 48;
 /// `<clone>/.worktrees/<teammate>` each, which landing leaves out of the harness's change
 /// set and cleanup removes with the clone.
 pub const TEAMMATES_FOLDER: &str = ".worktrees";
+/// The line an agent clone's `info/exclude` keeps the project graph out of git with.
+pub const GRAPH_EXCLUDE: &str = "/graphify-out/";
 /// The most bytes of a native teammate's name, which names its worktree folder.
 pub const WORKTREE_NAME_BYTES_MAX: usize = 64;
 const CLAUDE_LEAD_NAME: &str = "team-lead";
@@ -158,3 +160,21 @@ fn plain_name(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests;
+
+/// What the last line of one ignore file about the graph folder says, read as git reads it
+/// with only trailing spaces trimmed (T3-L1): ignored, for a line that is one of the usual
+/// spellings, or taken back into git, for any `!` line naming the folder in any pattern.
+/// Input: the text. Output: the answer, none when no line is about the folder.
+pub fn graph_rule(text: &str) -> Option<bool> {
+    text.lines()
+        .map(|line| line.trim_end_matches(' '))
+        .filter_map(|line| match line.strip_prefix('!') {
+            Some(pattern) => pattern.contains("graphify-out").then_some(false),
+            None => matches!(
+                line,
+                "graphify-out" | "graphify-out/" | "/graphify-out" | "/graphify-out/"
+            )
+            .then_some(true),
+        })
+        .next_back()
+}

@@ -6,6 +6,7 @@ use super::launch::{
     TOOLS_OFF_PATH, TOOLS_ON_PATH, claude_bare, claude_denied, codex_configuration, failure,
     harness_id, key_file_text, validate,
 };
+use crate::coord::settings::ClaudeDisplay;
 use crate::launch_context::{Installed, NativeTeam};
 use crate::sandbox::toolchains::{self, ToolHomes};
 use std::ffi::OsStr;
@@ -355,7 +356,13 @@ pub fn command(
                     ))
                 })
                 .transpose()?;
-            env.extend(claude_environment(request, &home, teammates.as_deref()));
+            let display = installed.map(Installed::claude_display).unwrap_or_default();
+            env.extend(claude_environment(
+                request,
+                &home,
+                teammates.as_deref(),
+                display,
+            ));
             let folder = claude_project_folder(&cwd)
                 .ok_or_else(|| failure("launch_working_dir_too_long"))?;
             Transcript::ClaudeSession {
@@ -555,7 +562,9 @@ fn claude_environment(
     request: &LaunchRequest,
     home: &str,
     teammates: Option<&str>,
+    display: ClaudeDisplay,
 ) -> Vec<(String, String)> {
+    let (display_name, display_value) = display.variable();
     let mut environment = vec![
         ("CLAUDE_CONFIG_DIR".to_owned(), home.to_owned()),
         (
@@ -568,6 +577,7 @@ fn claude_environment(
             "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_owned(),
             "1".to_owned(),
         ),
+        (display_name.to_owned(), display_value.to_owned()),
     ];
     if request.tools {
         environment.push(("SHELL".to_owned(), "/bin/zsh".to_owned()));

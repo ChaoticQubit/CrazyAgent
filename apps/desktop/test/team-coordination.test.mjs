@@ -88,3 +88,18 @@ test("approved skills are the ones on here and readable, and a tick keeps the na
   assert.deepEqual(coord.tickedSkills(["style-guide"], approved, "release-notes", true), approved);
   assert.deepEqual(coord.tickedSkills(["style-guide", "gone"], approved, "style-guide", false), ["gone"]);
 });
+
+test("Claude Code's row offers both terminal displays with Classic as the default (N-D9)", () => {
+  assert.equal(coord.COORD_DEFAULTS.claude_display, "classic");
+  assert.deepEqual(coord.DISPLAY_OPTIONS, [{ value: "classic", label: "Classic" }, { value: "fullscreen", label: "Fullscreen" }]);
+  const status = (claude_display) => ({ project_id: "p", coordination: { settings: { ...coord.COORD_DEFAULTS, claude_display }, harnesses: [] } });
+  for (const [display, helper] of [["classic", /the mouse wheel scrolls the terminal at once and a plain drag selects text/], ["fullscreen", /takes the mouse; the wheel scrolls 3 rows a notch and Option-drag selects text/]]) {
+    const markup = renderToStaticMarkup(createElement(coord.CoordinationControls, { projectId: "p", status: status(display), reload: forbidden }));
+    const claude = markup.slice(markup.indexOf('aria-label="Claude Code"'), markup.indexOf('aria-label="Codex"'));
+    assert.match(claude, /<label for="tg-display-claude-code-p">Claude Code terminal display<\/label>/, display);
+    assert.match(claude, new RegExp(`<option value="${display}" selected="">`), display);
+    assert.match(claude, helper, display);
+    assert.match(claude, /applies when a Claude Code terminal next starts/, display);
+    assert.doesNotMatch(markup.slice(markup.indexOf('aria-label="Codex"')), /terminal display/, "only Claude Code has the display");
+  }
+});

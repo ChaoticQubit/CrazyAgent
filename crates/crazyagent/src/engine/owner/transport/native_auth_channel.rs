@@ -1972,7 +1972,12 @@ impl NativeAuthCustodyChannel {
         self.retirement_or_close(&retirement)?;
         let reply = self.exchange(RequestKind::RetireNoEffect, None).await?;
         self.retirement_or_close(&retirement)?;
-        if reply.kind != ReplyKind::Retired || reply.fact.phase != NativeAuthPhase::Unavailable {
+        if reply.kind != ReplyKind::Retired
+            || !matches!(
+                reply.fact.phase,
+                NativeAuthPhase::Unavailable | NativeAuthPhase::Failed | NativeAuthPhase::Cancelled
+            )
+        {
             self.close();
             return Err(failure("native_auth_reply_invalid"));
         }
@@ -2112,7 +2117,12 @@ impl NativeAuthCustodyChannel {
             }
             ReplyKind::Retired => {
                 (request.kind == RequestKind::RetireNoEffect
-                    && reply.fact.phase == NativeAuthPhase::Unavailable)
+                    && matches!(
+                        reply.fact.phase,
+                        NativeAuthPhase::Unavailable
+                            | NativeAuthPhase::Failed
+                            | NativeAuthPhase::Cancelled
+                    ))
                     || (request.kind == RequestKind::RetireAfterChildReaped
                         && matches!(
                             reply.fact.phase,

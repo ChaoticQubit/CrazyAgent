@@ -238,6 +238,27 @@ test("a manual reset, a failed check and a passed reset show on the account's ca
   assert.match(unreported, /Weekly Not reported/);
 });
 
+test("a failed read with no window shows each window as not read and points at the notice's cause, never the provider", () => {
+  const sentence = "CrazyAgent can't read this account's sign-in. Sign in again in Accounts.";
+  const unread = { plan: null, five_hour: null, weekly: null, source: null, observed_ms: null, failure: "native_profile_credential_unavailable" };
+  const words = text(render({ report: { kind: "ok", value: report({ limits: [limits(unread)] }) } }));
+  for (const label of ["5-hour", "Weekly"]) {
+    assert.ok(words.includes(`${label} Not read The last read failed, for the reason above.`), `${label}: ${words}`);
+  }
+  assert.ok(words.indexOf(sentence) >= 0 && words.indexOf(sentence) < words.indexOf("5-hour"), words);
+  assert.doesNotMatch(words, /Not reported|hasn't reported/);
+});
+
+test("an API-key account's windows keep the provider-omitted wording, since it has none by design", () => {
+  const keyed = { plan: null, five_hour: null, weekly: null, source: null, observed_ms: null, failure: "native_profile_codex_api_key" };
+  const words = text(render({ report: { kind: "ok", value: report({ limits: [limits(keyed)] }) } }));
+  assert.ok(words.includes("An API-key account has no 5-hour or weekly window."), words);
+  for (const label of ["5-hour", "Weekly"]) {
+    assert.ok(words.includes(`${label} Not reported The provider hasn't reported this window.`), `${label}: ${words}`);
+  }
+  assert.doesNotMatch(words, /Not read The last read failed/);
+});
+
 test("the usage page has empty, loading, error and not-ready states", () => {
   const empty = text(render({ report: { kind: "ok", value: report({ total: tokens(), runs: 0, projects: [], pools: [], accounts: [], agents: [], days: [], lines: [], limits: [] }) } }));
   assert.match(empty, /No usage in this range/);

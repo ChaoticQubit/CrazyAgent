@@ -39,11 +39,26 @@ const WAYS: [(Way, &str); 3] = [
     (Way::Into(AddMode::Copy), "Copy"),
 ];
 
+const MOVE_WITHHELD: &str =
+    "Move isn't offered: this folder is linked to git worktrees, and moving it would break them.";
+
+const COPY_WITHHELD: &str = "Copy isn't offered: this folder is a git worktree or submodule of another repository, so a copy would still share it.";
+
+/// The ways a typed folder's git links rule out, as the engine's plan does: Move when moving
+/// it would break them, Copy when it is itself a linked worktree or submodule checkout.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Withheld {
+    folder: String,
+    no_move: bool,
+    no_copy: bool,
+}
+
 /// The Existing folder page: sets up a folder on this computer where it is
 /// by default, or moves or copies it into the projects folder with the target
 /// shown first, a Move confirmed with a second Enter, and a Copy with its size
 /// shown first, a warning above 1 GB and the linked git worktrees it leaves with
-/// the original. The folder then opens its setup.
+/// the original. A Move or Copy that would break the folder's git links is not
+/// offered, with the reason. The folder then opens its setup.
 pub struct AddFolder {
     field: TextField,
     way: Way,
@@ -52,6 +67,7 @@ pub struct AddFolder {
     home: Option<String>,
     size: Option<(String, Load<u64>)>,
     worktrees: usize,
+    withheld: Option<Withheld>,
     sent: Option<String>,
     problem: Option<String>,
 }
@@ -69,6 +85,7 @@ impl AddFolder {
             home: None,
             size: None,
             worktrees: 0,
+            withheld: None,
             sent: None,
             problem: None,
         }
@@ -110,17 +127,61 @@ impl AddFolder {
             .map(|home| format!("{home}/{name}"))
     }
 
-    fn step(&mut self, forward: bool) {
-        let at = WAYS
+    /// Checks the typed folder as the engine does before a Move or Copy: a way that would
+    /// break its git links is withheld and, when chosen, goes back to Use where it is.
+    /// Takes the context. Returns true when it took a chosen way back.
+    fn withhold_ways(&mut self, ctx: &Ctx) -> bool {
+        self.withheld = self.source(ctx).ok().and_then(|folder| {
+            let no_move = crate::projects_home::git_links(Path::new(&folder));
+            let no_copy = crate::projects_home::linked_checkout(Path::new(&folder));
+            (no_move || no_copy).then_some(Withheld {
+                folder,
+                no_move,
+                no_copy,
+            })
+        });
+        if self.offered(self.way, ctx) {
+            return false;
+        }
+        self.way = Way::Here;
+        self.confirming = false;
+        true
+    }
+
+    /// True unless `way` is withheld for the folder typed now.
+    fn offered(&self, way: Way, ctx: &Ctx) -> bool {
+        let Some(withheld) = &self.withheld else {
+            return true;
+        };
+        if self.source(ctx).ok().as_ref() != Some(&withheld.folder) {
+            return true;
+        }
+        match way {
+            Way::Here => true,
+            Way::Into(AddMode::Move) => !withheld.no_move,
+            Way::Into(AddMode::Copy) => !withheld.no_copy,
+        }
+    }
+
+    /// The ways offered for the folder typed now. Takes the context. Returns them in order.
+    fn ways(&self, ctx: &Ctx) -> Vec<(Way, &'static str)> {
+        WAYS.into_iter()
+            .filter(|(way, _)| self.offered(*way, ctx))
+            .collect()
+    }
+
+    fn step(&mut self, forward: bool, ctx: &Ctx) {
+        let ways = self.ways(ctx);
+        let at = ways
             .iter()
             .position(|(way, _)| *way == self.way)
             .unwrap_or(0);
         let next = if forward {
-            (at + 1) % WAYS.len()
+            (at + 1) % ways.len()
         } else {
-            (at + WAYS.len() - 1) % WAYS.len()
+            (at + ways.len() - 1) % ways.len()
         };
-        self.way = WAYS[next].0;
+        self.way = ways[next].0;
         self.confirming = false;
     }
 
@@ -162,6 +223,9 @@ impl AddFolder {
             }
         };
         self.problem = None;
+        if self.withhold_ways(ctx) {
+            return Flow::Handled;
+        }
         let mode = match self.way {
             Way::Here => return self.here(&source, ctx),
             Way::Into(mode) => mode,
@@ -283,7 +347,10 @@ impl Screen for AddFolder {
             (Focus::Folder, Key::Tab) => {
                 match complete(self.field.value(), Self::user_home(ctx), true) {
                     Some(completed) => self.field.set(&completed),
-                    None => self.focus = Focus::Mode,
+                    None => {
+                        self.focus = Focus::Mode;
+                        self.withhold_ways(ctx);
+                    }
                 }
                 Flow::Handled
             }
@@ -300,11 +367,11 @@ impl Screen for AddFolder {
                 Flow::Handled
             }
             (Focus::Mode, Key::Right | Key::Char(' ')) => {
-                self.step(true);
+                self.step(true, ctx);
                 Flow::Handled
             }
             (Focus::Mode, Key::Left) => {
-                self.step(false);
+                self.step(false, ctx);
                 Flow::Handled
             }
             (_, Key::Esc) => Flow::Ignored,
@@ -393,13 +460,21 @@ impl Screen for AddFolder {
             theme.text
         };
         let mut ways = Vec::with_capacity(WAYS.len() * 2);
-        for (way, label) in WAYS {
+        for (way, label) in self.ways(ctx) {
             if !ways.is_empty() {
                 ways.push(Span::raw("   "));
             }
             ways.push(Span::styled(radio(self.way == way, label), mode_style));
         }
         lines.push(Line::from(ways));
+        for (way, why) in [
+            (Way::Into(AddMode::Move), MOVE_WITHHELD),
+            (Way::Into(AddMode::Copy), COPY_WITHHELD),
+        ] {
+            if !self.offered(way, ctx) {
+                lines.extend(wrap(why, limit).into_iter().map(Line::raw));
+            }
+        }
         let source = self.source(ctx).ok();
         match (
             self.way,

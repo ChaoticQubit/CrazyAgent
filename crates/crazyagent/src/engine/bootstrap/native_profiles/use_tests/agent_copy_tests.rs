@@ -440,6 +440,75 @@ fn a_codex_usage_read_whose_lapsed_token_the_renewal_cannot_refresh_says_the_sig
     assert_eq!(std::fs::read(&source).unwrap(), lapsing);
 }
 
+/// An access token shaped like the ones ChatGPT issues Codex: an RS256 JWT whose claims
+/// name its audience, client, account, plan, profile, scopes and session and whose
+/// signature is 256 bytes, so it runs past 1 KiB. Input: its expiry. Output: the token.
+fn chatgpt_token(expires: u64) -> String {
+    let part = |bytes: &[u8]| base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes);
+    let issued = expires - 864_000;
+    let header = json!({
+        "alg": "RS256",
+        "kid": "b1dd3f8f-9926-4f9b-b5a3-2f3c3f0e7a11",
+        "typ": "JWT"
+    });
+    let claims = json!({
+        "aud": ["https://api.openai.com/v1"],
+        "client_id": "app_unit00000000000000000000",
+        "exp": expires,
+        "https://api.openai.com/auth": {
+            "chatgpt_account_id": "acct-unit",
+            "chatgpt_plan_type": "pro",
+            "chatgpt_user_id": "user-unit00000000000000000000",
+            "user_id": "user-unit00000000000000000000"
+        },
+        "https://api.openai.com/profile": {"email": "unit@example.com", "email_verified": true},
+        "iat": issued,
+        "iss": "https://auth.openai.com",
+        "jti": "4f0e8c2a-7d6b-4c1e-9a3f-5b2d8e1c0a97",
+        "nbf": issued,
+        "pwd_auth_time": issued * 1000,
+        "scp": ["openid", "profile", "email", "offline_access"],
+        "session_id": "authsess_unit000000000000000000000",
+        "sub": "auth0|unit000000000000000000000000"
+    });
+    let signature: Vec<u8> = (0..=255).collect();
+    format!(
+        "{}.{}.{}",
+        part(header.to_string().as_bytes()),
+        part(claims.to_string().as_bytes()),
+        part(&signature)
+    )
+}
+
+/// R4 N-D16: a usage read of a Codex account gets its access token, although a ChatGPT
+/// access token is longer than the 1 KiB a stored secret may hold.
+#[test]
+fn a_codex_usage_read_gets_a_full_size_chatgpt_access_token() {
+    let mut case = UseCase::new();
+    let access = chatgpt_token(now() + 3600);
+    assert!(
+        access.len() > crate::credentials::SECRET_BYTES_MAX,
+        "a ChatGPT access token outgrows a stored secret: {} bytes",
+        access.len()
+    );
+    let mut record: Value = serde_json::from_slice(&codex_auth(now() + 3600)).unwrap();
+    record["tokens"]["access_token"] = json!(access);
+    private_file(
+        &case.home().join("auth.json"),
+        record.to_string().as_bytes(),
+    );
+    let guard = execution(&mut case);
+    let read = guard.usage_credential(&no_harness(&case));
+    assert_eq!(
+        read.as_ref().err().map(|problem| problem.0.as_str()),
+        None,
+        "the usage read refused the account's access token"
+    );
+    let read = read.unwrap();
+    assert_eq!(read.token.expose(), access);
+    assert_eq!(read.account_id.as_deref(), Some("acct-unit"));
+}
+
 #[test]
 fn links_at_either_end_are_refused_or_replaced_and_never_followed() {
     let mut case = UseCase::new();
