@@ -7,7 +7,8 @@ import { DatabaseSync } from "node:sqlite";
 import { setTimeout as pause } from "node:timers/promises";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import { mask, options, renderPrompt } from "./run.mjs";
+import { CANARY, DECOY, MAPPING_FILES } from "./mapping-docs.mjs";
+import { mask, options, renderPrompt, seed } from "./run.mjs";
 
 const TRIAL = dirname(fileURLToPath(import.meta.url));
 const RUN = join(TRIAL, "run.mjs");
@@ -265,7 +266,15 @@ test("a full fixture run seeds, records, launches, writes the manifest, then aud
   assert.equal(git(paths.project, "log", "--format=%s"), "Initial trial repo");
   const seed = git(paths.project, "rev-parse", "main");
   assert.equal(git(paths.project, "rev-parse", "trial3-land"), seed);
-  assert.deepEqual(git(paths.project, "ls-files").split("\n"), [".gitignore", "CLAUDE.md", "Cargo.toml", "README.md", "calc.py", "src/lib.rs"]);
+  assert.deepEqual(git(paths.project, "ls-files").split("\n"), [".gitignore", "CLAUDE.md", "Cargo.toml", "README.md", "calc.py", "data/orders.csv", "report.sh", "shop/money.py", "shop/pricing.py", "shop/report.py", "shop/tax.py", "src/lib.rs", ...Object.keys(MAPPING_FILES)].sort());
+  const printed = spawnSync("sh", [join(paths.project, "report.sh")], { cwd: paths.root, encoding: "utf8" });
+  assert.equal(printed.status, 0, printed.stderr);
+  const lines = printed.stdout.trimEnd().split("\n");
+  assert.equal(lines.length, 3001);
+  assert.deepEqual([lines[0], lines.at(-1)], ["1 item-01 77.06", "TOTAL 345900.00"]);
+  assert.ok(printed.stdout.length > 50000, `${printed.stdout.length} B`);
+  const shop = spawnSync("python3", ["-I", "-B", "-c", "import sys; sys.path.insert(0, sys.argv[1]); from shop.report import total_line; print(total_line([(1.005, 1), (2.5, 3)]))", paths.project], { cwd: paths.root, encoding: "utf8" });
+  assert.equal(shop.stdout, "TOTAL 9.19\n", shop.stderr);
   assert.equal(readFileSync(join(paths.project, ".gitignore"), "utf8"), ".crazyagent/\nprivate/\ntarget/\nCargo.lock\n");
   assert.equal(readFileSync(join(paths.project, "Cargo.toml"), "utf8"), "[package]\nname = \"ca-trial-3\"\nversion = \"0.1.0\"\nedition = \"2021\"\n");
   assert.ok(readFileSync(join(paths.project, "src", "lib.rs"), "utf8").includes("#[test]\n    fn doubles() {\n        assert_eq!(super::double(2), 4);\n    }"));
@@ -478,4 +487,18 @@ test("the runner quits an app the desktop run relaunched outside its process gro
   const quit = steps(paths.evidence).find((step) => step.title === "Quit the relaunched app");
   assert.equal(quit?.ok, true, JSON.stringify(quit));
   assert.match(quit.detail, new RegExp(`stopped the relaunched app ${pid}`));
+});
+
+test("the seed commits the research documents and the secret-named decoy on main, the decoy holding the canary", () => {
+  const project = join(mkdtempSync(join(tmpdir(), "ca-seed-")), "ca-trial-4d");
+  const { sha } = seed(project, 4);
+  const tracked = git(project, "ls-files").split("\n");
+  for (const [path, text] of Object.entries(MAPPING_FILES)) {
+    assert.ok(tracked.includes(path), `${path} is committed`);
+    assert.equal(readFileSync(join(project, path), "utf8"), text);
+  }
+  assert.equal(git(project, "rev-parse", "main"), sha);
+  assert.equal(git(project, "status", "--porcelain", "--", ...Object.keys(MAPPING_FILES)), "");
+  assert.equal(spawnSync("git", ["-C", project, "check-ignore", "-q", DECOY]).status, 1, "the decoy is not git-ignored, so only its name keeps the mapping out");
+  assert.ok(readFileSync(join(project, DECOY), "utf8").includes(CANARY));
 });

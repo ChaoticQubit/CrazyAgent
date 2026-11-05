@@ -17,6 +17,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import sqlite3
 import subprocess
 import sys
@@ -36,6 +37,10 @@ COMMAND_BYTES_MAX = 16 * 1024
 LISTED_MAX = 8
 REFS_MAX = 64
 APP_MARK = "# Mandatory workflow"
+GIVEN_TITLE = "# Instructions from CrazyAgent"
+APP_HEADING = "## App instructions"
+PROJECT_HEADING = "## Project instructions"
+GIVEN_OPENING = [GIVEN_TITLE, APP_HEADING, APP_MARK]
 INSTRUCTION_NAMES = ("CLAUDE.md", "AGENTS.md", "CLAUDE.local.md")
 IMPORTED_HEADING = "## Imported from "
 STATE = ".crazyagent"
@@ -45,7 +50,25 @@ CALLER_UNKNOWN = "team_caller_unknown"
 REPLY_INVALID = "coord_reply_invalid"
 ACCOUNT_WAIT = ("native_profile_in_use", "free account")
 XCRUN = re.compile(r"xcrun_db|xcrun: error")
-GIT_WORD = re.compile(r"(^|[\s;&|(])git(\s|$)")
+GIT_NAMED = re.compile(r"(^|[^A-Za-z0-9_.-])git($|[^A-Za-z0-9_.-])")
+SHELL_PUNCTUATION = frozenset("();<>|&")
+SHELL_GROUPS = frozenset({"{", "}"})
+SHELL_KEYWORDS = frozenset({"if", "then", "else", "elif", "while", "until", "do", "!", "time"})
+SHELL_WRAPPERS = frozenset({
+    "env", "command", "builtin", "exec", "nohup", "nice", "sudo", "xargs", "xcrun", "timeout", "find",
+    "sh", "bash", "zsh", "dash", "ksh", "eval",
+})
+SHELL_ASSIGNMENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=")
+SHELL_DEPTH_MAX = 4
+TOOLCHAIN_WORDS = frozenset({
+    "cargo", "rustc", "rustdoc", "cc", "c++", "clang", "clang++", "gcc", "g++", "ld", "swift", "swiftc",
+    "make", "cmake", "ninja", "xcodebuild", "go",
+})
+PLAIN_WORDS = frozenset({
+    "cd", "ls", "cat", "echo", "printf", "grep", "egrep", "fgrep", "head", "tail", "wc", "sort", "uniq", "tee",
+    "cut", "tr", "true", "false", "test", "[", "pwd", "date", "sleep", "mkdir", "touch", "cp", "mv", "rm",
+    "stat", "basename", "dirname",
+})
 FINISH_EVENTS = ("finished", "change_set_ready")
 BACKGROUND_STEM = "while a command it started in the background still ran; that command was stopped"
 BACKGROUND_ENDS = (
@@ -76,6 +99,21 @@ ROWS_PER_READ_MAX = 200
 READS_PER_CHECK_MAX = 400
 STEPS_MAX = 10_000
 FINISHED_HIDE_STEP = "Set Finished agents to Hide"
+HIDE_CHECK_STEP = "N-D25 "
+HIDE_LEFT = re.compile(r"under Hide it left the graph for Finished \((\d+)\)")
+HIDE_STAYED = "did not leave the graph for the Finished list"
+HIDE_NOT_REACHED = "no sub-agent left on its own"
+HIDE_PASSED_FIRST = ("Wake is disabled", "did not run again as the same agent after Wake", "could not be set back to Show")
+MATES_HOME = "mates-home"
+SKILL_LISTING = "skill_listing"
+OUR_SKILL = "crazyagent:"
+CLAUDE_SKILL = re.compile(r"^- crazyagent:([^:\s]+):", re.M)
+CODEX_SKILLS_FOLDER = "/skills/crazyagent/"
+CODEX_SKILL = re.compile(r"/skills/crazyagent/([^/\s()\\\"]+)/SKILL\.md\)")
+HIDDEN_FROM_MODEL = re.compile(r"^disable-model-invocation:\s*true\s*$", re.M)
+SKILL_HEAD_BYTES_MAX = 8192
+LISTING_LINES_MAX = 200_000
+AGENT_NAME_LINES_MAX = 64
 STOP_ALL_STEP = "Stop all"
 FINISHED_COUNT = re.compile(r"Finished \((\d+)\)")
 DRAWN = re.compile(r"drawn: ([^;]*)")
@@ -181,6 +219,73 @@ def shell_command(given):
     return command[:COMMAND_BYTES_MAX] if isinstance(command, str) else None
 
 
+def shell_words(command):
+    """The shlex words of a shell command line, with each newline read as a command separator.
+    Takes the command text. Returns the words, or None when shlex cannot read the line, such as
+    an open quote."""
+    try:
+        return list(shlex.shlex(command.replace("\n", " ; "), posix=True, punctuation_chars=True))
+    except ValueError:
+        return None
+
+
+def separates(word):
+    """Whether a shell word ends a simple command: ; & && | || ( ) or a brace, not a
+    redirection such as >& or <<. Takes the word. Returns the answer."""
+    if word in SHELL_GROUPS:
+        return True
+    return bool(word) and set(word) <= SHELL_PUNCTUATION and (any(c in ";|()" for c in word) or not word.strip("&"))
+
+
+def command_words(words):
+    """The basenames of the words that start each simple command among shell words: the
+    first past assignments and keywords, at the start and after each separator, and every word
+    after a wrapper such as env, xcrun or sh up to the next separator. Takes the words.
+    Returns the basenames in order."""
+    found, start, wrapped = [], True, False
+    for word in words:
+        if separates(word):
+            start, wrapped = True, False
+            continue
+        if start and (word in SHELL_KEYWORDS or SHELL_ASSIGNMENT.match(word)):
+            continue
+        if start or wrapped:
+            name = word.rsplit("/", 1)[-1]
+            found.append(name)
+            wrapped = wrapped or (start and name in SHELL_WRAPPERS)
+        start = False
+    return found
+
+
+def names_git(command, depth=0):
+    """Whether a shell command runs git: a command word with the basename git, as
+    /usr/bin/git, after ; && | or a newline, after a wrapper or inside a quoted argument such
+    as sh -c "git log". A line shlex cannot read, one with $( ) or backticks, or one nested
+    deeper than SHELL_DEPTH_MAX runs git when it names the word at all. Takes the command text.
+    Returns the answer."""
+    words = shell_words(command)
+    if words is None or depth >= SHELL_DEPTH_MAX or "$(" in command or "`" in command:
+        return bool(GIT_NAMED.search(command))
+    if "git" in command_words(words):
+        return True
+    return any((" " in word or "\t" in word) and names_git(word, depth + 1) for word in words)
+
+
+def toolchain_call(command):
+    """Whether a shell command is a known toolchain call that names no git, the one kind whose
+    xcrun lines are a toolchain's cache write the sandbox refuses (DEC-104) and only a note:
+    every command word a toolchain such as cargo or a plain command such as grep, at least
+    one toolchain, no word naming git (GIT=/usr/bin/git, cargo run -- git), no $( ) or
+    backticks. Takes the command text. Returns the answer."""
+    if "$(" in command or "`" in command or names_git(command) or GIT_NAMED.search(command):
+        return False
+    words = shell_words(command)
+    if words is None:
+        return False
+    names = command_words(words)
+    return bool(names) and set(names) <= TOOLCHAIN_WORDS | PLAIN_WORDS and not TOOLCHAIN_WORDS.isdisjoint(names)
+
+
 def tool_key(name, given):
     if not isinstance(name, str):
         return None
@@ -234,10 +339,59 @@ def slug_of(path):
     return re.sub(r"[^A-Za-z0-9]", "-", path)
 
 
+def owned_files(folder, pattern, owner):
+    """Lists the regular files a glob finds in a folder whose real path stays in the owner's
+    folder, so a planted symlink, or a symlinked folder on the way, never leads a read out of
+    an agent's own files. Inputs: the folder, the glob pattern and the owner's folder.
+    Output: the files in order."""
+    if not folder.is_dir():
+        return []
+    return [path for path in sorted(folder.glob(pattern)) if not path.is_symlink() and path.is_file() and under(path, owner)]
+
+
+def transcript_files(entries):
+    """Lists the transcript files an agent's entries name: a folder gives every .jsonl file
+    whose real path stays under it, a file is itself; a symlinked file is never read. Input:
+    folder or file paths. Output: the files in order."""
+    files = []
+    for entry in entries:
+        path = Path(entry)
+        if path.is_symlink():
+            continue
+        if path.is_file():
+            files.append(path)
+        elif path.is_dir():
+            files.extend(owned_files(path, "**/*.jsonl", path))
+    return files
+
+
+def agent_name(path):
+    """The agent-team name a native teammate's Claude Code writes on its transcript lines.
+    Input: the transcript file. Output: the name from its first AGENT_NAME_LINES_MAX lines,
+    or None."""
+    try:
+        handle = path.open("r", encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    with handle:
+        for number, line in enumerate(handle, 1):
+            if number > AGENT_NAME_LINES_MAX:
+                break
+            if '"agentName"' not in line:
+                continue
+            try:
+                name = json.loads(line).get("agentName")
+            except (ValueError, AttributeError):
+                continue
+            if isinstance(name, str) and name:
+                return name
+    return None
+
+
 def blank_scan():
     return {
         "files": 0, "calls": 0, "ctx": 0, "graphify": 0, "Skill": 0, "overlap": 0, "first": {}, "at": {},
-        "skills": Counter(), "tools": Counter(), "codes": Counter(), "xcrun": 0, "git": 0, "git_ok": 0,
+        "skills": Counter(), "tools": Counter(), "codes": Counter(), "xcrun": 0, "toolchain_xcrun": 0, "git": 0, "git_ok": 0,
         "work_ok": Counter(), "work_failed": Counter(), "prompts": [], "launches": [], "repo_reads": [],
         "phrases": Counter(),
     }
@@ -339,7 +493,7 @@ def scan_file(path, found, root, project_mark):
                     if skill:
                         found["skills"][skill] += 1
                     command = shell_command(given) if name in SHELL_TOOLS else None
-                    uses[part.get("id")] = (key, bool(command and GIT_WORD.search(command)))
+                    uses[part.get("id")] = (key, bool(command and names_git(command)), bool(command and toolchain_call(command)))
                 elif part.get("type") == "tool_result":
                     text = result_text(part.get("content"))
                     failed = part.get("is_error") is True
@@ -348,10 +502,7 @@ def scan_file(path, found, root, project_mark):
                             found["codes"][code] += 1
                             first(code)
                     xcrun = bool(XCRUN.search(text))
-                    if xcrun:
-                        found["xcrun"] += 1
-                        first("xcrun")
-                    key, git_call = uses.get(part.get("tool_use_id"), (None, False))
+                    key, git_call, toolchain = uses.get(part.get("tool_use_id"), (None, False, False))
                     if key in WORK_TOOLS:
                         (found["work_failed"] if failed else found["work_ok"])[key] += 1
                         if "overlap" in text.lower():
@@ -361,6 +512,12 @@ def scan_file(path, found, root, project_mark):
                         found["git"] += 1
                         if not failed and not xcrun:
                             found["git_ok"] += 1
+                    if xcrun and toolchain:
+                        found["toolchain_xcrun"] += 1
+                        first("toolchain_xcrun")
+                    elif xcrun:
+                        found["xcrun"] += 1
+                        first("xcrun")
     if top:
         chosen = launch or snapshot
         found["launches"].append(launch_record(chosen[0], chosen[1], early, project_mark) if chosen else {"spot": where, "app": None})
@@ -516,16 +673,22 @@ class Trial:
         except Missing:
             self.panes = {lead["id"]: [] for lead in self.leads}
         self.load_reads, self.reads = self.reads, None
+        self.mate_names = {}
         self.dirs_of = {agent_id: self.transcript_dirs(agent) for agent_id, agent in self.agents.items()}
         self.transcripts = {agent_id: self.scan(self.dirs_of[agent_id]) for agent_id in self.agents}
-        claimed = {folder for folders in self.dirs_of.values() for folder in folders}
+        claimed = {Path(entry) for entries in self.dirs_of.values() for entry in entries}
         self.pane_scans = []
         for lead in self.leads:
+            if self.mode_of(lead) != "native":
+                continue
+            for path, name in self.mates_transcripts(lead["id"]):
+                if path not in claimed:
+                    self.pane_scans.append((f"lead {lead['id']} mate {name or path.stem[:8]}", lead, self.scan([path])))
             base = self.home(lead["id"]) / "projects"
-            if self.mode_of(lead) != "native" or not base.is_dir() or self.dirs_of[lead["id"]] in ([], [base]):
+            if not base.is_dir() or self.dirs_of[lead["id"]] in ([], [base]):
                 continue
             for folder in sorted(base.iterdir()):
-                if folder.is_dir() and folder not in claimed and any(folder.glob("*.jsonl")):
+                if folder.is_dir() and folder not in claimed and under(folder, self.agent_dir(lead["id"])) and any(folder.glob("*.jsonl")):
                     self.pane_scans.append((f"lead {lead['id']} pane {folder.name[-32:]}", lead, self.scan([folder])))
         self.procs = processes()
         self.tree = self.masters + self.leads + [a for lead in self.leads for a in self.children[lead["id"]]]
@@ -549,8 +712,13 @@ class Trial:
             return f"{agent['id']}(lead {self.mode_of(agent)})"
         return f"{agent['id']}({'teammate' if agent['role'] == 'teammate' else 'sub-agent'})"
 
+    def agent_dir(self, agent_id):
+        """The engine folder that holds an agent's own files. Input: the agent id. Output:
+        the path."""
+        return self.root / "team" / "agents" / f"agent-{agent_id}"
+
     def home(self, agent_id):
-        return self.root / "team" / "agents" / f"agent-{agent_id}" / "home"
+        return self.agent_dir(agent_id) / "home"
 
     def tmp_path(self, agent_id):
         digest = hashlib.sha256(str(self.home(agent_id)).encode()).digest()[:8]
@@ -569,23 +737,35 @@ class Trial:
             branch = git(wt, "symbolic-ref", "--short", "-q", "HEAD")
         return branch[len("refs/heads/"):] if branch and branch.startswith("refs/heads/") else branch
 
+    def mates_transcripts(self, lead_id):
+        """The transcripts a native lead's teammates write in its teammates' config home, each
+        with the agent-team name on its lines, read once. Input: the lead id. Output: (file,
+        name or None) pairs in order."""
+        if lead_id not in self.mate_names:
+            base = self.agent_dir(lead_id) / MATES_HOME / "projects"
+            files = owned_files(base, "*/*.jsonl", self.agent_dir(lead_id))
+            self.mate_names[lead_id] = [(path, agent_name(path)) for path in files]
+        return self.mate_names[lead_id]
+
     def transcript_dirs(self, agent):
         own = self.home(agent["id"]) / "projects"
-        base = own
+        base, owner = own, self.agent_dir(agent["id"])
         if not own.is_dir() and agent["role"] == "teammate" and agent["parent"] in self.agents:
-            base = self.home(agent["parent"]) / "projects"
-        if not base.is_dir():
+            named = [path for path, name in self.mates_transcripts(agent["parent"]) if name and name == agent["handle"]]
+            if named:
+                return named
+            base, owner = self.home(agent["parent"]) / "projects", self.agent_dir(agent["parent"])
+        if not base.is_dir() or not under(base, owner):
             return []
         named = base / slug_of(agent["wt"]) if agent["wt"] else None
-        if named is not None and named.is_dir():
+        if named is not None and named.is_dir() and under(named, owner):
             return [named]
         return [base] if base == own else []
 
     def scan(self, dirs):
         found = blank_scan()
-        for folder in dirs:
-            for path in sorted(folder.glob("**/*.jsonl")):
-                scan_file(path, found, self.root, self.project_mark)
+        for path in transcript_files(dirs):
+            scan_file(path, found, self.root, self.project_mark)
         return found
 
     def owned_by(self, agent, process):
@@ -1025,9 +1205,12 @@ def check_git(t):
     notes, bad = [], []
     for a in t.tree:
         s = t.transcripts[a["id"]]
-        if not s["git"] and not s["xcrun"]:
+        if not s["git"] and not s["xcrun"] and not s["toolchain_xcrun"]:
             continue
         note = f"{t.label(a)} git calls={s['git']} ok={s['git_ok']} xcrun errors={s['xcrun']}" + (f" first {s['first']['xcrun']}" if s["xcrun"] else "")
+        if s["toolchain_xcrun"]:
+            note += f", toolchain xcrun notes={s['toolchain_xcrun']} first {s['first']['toolchain_xcrun']}"
+            t.cite(s, s["first"]["toolchain_xcrun"], f"agent {a['id']} first toolchain xcrun note, a cache write the sandbox refuses (DEC-104)")
         if s["xcrun"]:
             t.cite(s, s["first"]["xcrun"], f"agent {a['id']} first xcrun error")
         (bad if s["xcrun"] else notes).append(note)
@@ -1126,6 +1309,13 @@ def check_delivery(t):
 
 
 def enabled_skills(t):
+    return sorted(approved_skill_folders(t))
+
+
+def approved_skill_folders(t):
+    """The skills the project approves, each with the folder of the engine's copy, a
+    project skill shadowing a global one of its name. Input: the trial. Output: {name:
+    folder} for each skill whose copy has a SKILL.md."""
     off = {row[0] for row in t.q("SELECT item FROM plugin_switches WHERE project=?", t.pid)}
     records = []
     for (body,) in t.q("SELECT body FROM plugin_items WHERE kind='skill' ORDER BY scope, name"):
@@ -1140,13 +1330,64 @@ def enabled_skills(t):
         if (local and place.get("project_id") != t.pid) or (not local and record.get("id") in off):
             continue
         records.append((record["name"], local, record.get("folder")))
-    names = []
+    folders = {}
     for name, local, folder in records:
         shadowed = not local and any(other_local and other == name for other, other_local, _ in records)
         described = isinstance(folder, str) and (t.root / folder / "SKILL.md").is_file()
-        if not shadowed and described and name not in names:
-            names.append(name)
-    return sorted(names)
+        if not shadowed and described and name not in folders:
+            folders[name] = t.root / folder
+    return folders
+
+
+def hidden_from_model(folder):
+    """Whether Claude Code leaves a skill out of the model's skill listing: its SKILL.md
+    front matter sets disable-model-invocation: true. Input: the skill's folder. Output:
+    the answer."""
+    text = (read_text(folder / "SKILL.md") or "")[:SKILL_HEAD_BYTES_MAX]
+    end = text.find("\n---", 3) if text.startswith("---") else -1
+    return end != -1 and HIDDEN_FROM_MODEL.search(text[3:end]) is not None
+
+
+def listed_skills(t, agent):
+    """The approved skills an agent's harness listed as installed: Claude Code's crazyagent:*
+    names in the skill_listing attachments of its transcripts, Codex's names in the skills
+    index of its rollouts. Inputs: the trial and the agent. Output: the sorted names, or
+    None when no listing was read."""
+    claude = agent["harness"].startswith("claude")
+    if claude:
+        files, mark = transcript_files(t.dirs_of.get(agent["id"], [])), f'"{SKILL_LISTING}"'
+    else:
+        files, mark = owned_files(t.home(agent["id"]) / "sessions", "**/rollout-*.jsonl", t.agent_dir(agent["id"])), CODEX_SKILLS_FOLDER
+    names, seen = set(), False
+    for path in files:
+        try:
+            handle = path.open("r", encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with handle:
+            for number, line in enumerate(handle, 1):
+                if number > LISTING_LINES_MAX:
+                    break
+                if mark not in line:
+                    continue
+                if not claude:
+                    seen = True
+                    names.update(CODEX_SKILL.findall(line))
+                    continue
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                attachment = entry.get("attachment") if isinstance(entry, dict) else None
+                if not isinstance(attachment, dict) or attachment.get("type") != SKILL_LISTING:
+                    continue
+                seen = True
+                given = attachment.get("names")
+                if isinstance(given, list):
+                    names.update(name[len(OUR_SKILL):] for name in given if isinstance(name, str) and name.startswith(OUR_SKILL))
+                else:
+                    names.update(CLAUDE_SKILL.findall(str(attachment.get("content") or "")))
+    return sorted(names) if seen else None
 
 
 def short(tool):
@@ -1496,22 +1737,53 @@ def given_record(t, kind, agent_id):
     return read_text(t.root / kind / name)
 
 
-def first_line(text):
-    return next((line.strip() for line in (text or "").splitlines() if line.strip()), None)
+def opening(text):
+    """The first non-blank lines of a given instruction text, as many as GIVEN_OPENING has.
+    Input: the text or None. Output: the stripped lines."""
+    return [line.strip() for line in (text or "").splitlines() if line.strip()][: len(GIVEN_OPENING)]
+
+
+def app_part(text):
+    """The app part of a given instruction text in the engine's rendered shape: what follows
+    the app heading, up to the project heading or the end. Input: the text or None. Output:
+    the part, stripped, or None when the text has no app heading."""
+    head = f"{APP_HEADING}\n\n"
+    at = (text or "").find(head)
+    if at < 0:
+        return None
+    part = text[at + len(head):]
+    end = part.find(f"\n\n{PROJECT_HEADING}\n\n")
+    return (part if end < 0 else part[:end]).strip()
+
+
+def content_hash(text):
+    """The SHA-256 of a text, or "none" for None. Input: the text. Output: the hex digest."""
+    return "none" if text is None else hashlib.sha256(text.encode()).hexdigest()
+
+
+def same_app(text, copy):
+    """Compares the app part of a given text with the app copy the engine renders from, by
+    content hash. Inputs: the given text and the stripped app copy. Output: whether they
+    match, and the evidence line with both short hashes."""
+    part = content_hash(app_part(text))
+    want = content_hash(copy)
+    return part == want, f"app part sha256={part[:12]} app copy sha256={want[:12]}"
 
 
 def check_part_one(t):
     if not t.tree:
         return verdict("FAIL", "no agents")
     lines, bad = [], []
+    copy = (read_text(t.root / "instructions.md") or "").strip()
     for a in t.tree:
         if a["role"] == "teammate":
             continue
         if not a["harness"].startswith("claude"):
             text = read_text(t.home(a["id"]) / "AGENTS.md")
-            line = f"{t.label(a)} home AGENTS.md first line={first_line(text)!r}"
+            matched, hashes = same_app(text, copy)
+            line = f"{t.label(a)} home AGENTS.md opening={opening(text)!r}; {hashes}"
             lines.append(line)
-            if first_line(text) != APP_MARK:
+            if opening(text) != GIVEN_OPENING or not matched:
                 bad.append(line)
             continue
         recorded = given_record(t, "agent-instructions-given", a["id"])
@@ -1519,9 +1791,10 @@ def check_part_one(t):
         launches = t.transcripts[a["id"]]["launches"]
         reached = [l for l in launches if l["app"] is not None and l["app"] >= 0]
         source = "given record" if recorded is not None else "home crazyagent/instructions.md" if given is not None else "nothing given"
-        line = f"{t.label(a)} {source} first line={first_line(given)!r}; launches with the set={len(reached)}/{len(launches)}"
+        matched, hashes = same_app(given, copy)
+        line = f"{t.label(a)} {source} opening={opening(given)!r}; {hashes}; launches with the set={len(reached)}/{len(launches)}"
         lines.append(line)
-        if first_line(given) != APP_MARK or not launches or len(reached) < len(launches):
+        if opening(given) != GIVEN_OPENING or not matched or not launches or len(reached) < len(launches):
             bad.append(line)
         if launches:
             t.cite(t.transcripts[a["id"]], launches[0]["spot"], f"{t.label(a)} first launch context")
@@ -1541,7 +1814,7 @@ def check_part_one(t):
             bad.append(line)
     return verdict(
         "FAIL" if bad else "PASS",
-        f"the given instruction set opens with '{APP_MARK}' for every agent and reaches every launch, teammates included; agents bad={len(bad)}",
+        f"the given text opens with '{GIVEN_TITLE}' and its '{APP_HEADING}' with '{APP_MARK}', its app part matches the engine's app copy by hash for every agent, and the set reaches every launch, teammates included; agents bad={len(bad)}",
         lines,
     )
 
@@ -1571,30 +1844,47 @@ def check_role_skills(t):
         return verdict("UNKNOWN", "not exercised: no role has a skill choice, so every role gets all approved skills")
     nesting = t.q("SELECT depth FROM team_nesting WHERE project=?", t.pid) if t.columns("team_nesting") else []
     limit = nesting[0][0] if nesting else DEPTH_DEFAULT
-    approved = enabled_skills(t)
-    lines, bad, checked = [], [], 0
+    folders = approved_skill_folders(t)
+    approved = sorted(folders)
+    hidden = {name for name, folder in folders.items() if hidden_from_model(folder)}
+    lines, bad, checked, unread = [], [], 0, []
     for a in t.tree:
         if a["role"] == "teammate":
             continue
         role = "master" if a["role"] == "master" else "lead" if a["role"] == "sub" and depth_of(t, a) < limit else "worker"
         record = given_record(t, "agent-skills", a["id"])
         got = sorted(line.strip() for line in (record or "").splitlines() if line.strip())
-        folder = t.home(a["id"]) / ("crazyagent/plugin/skills" if a["harness"].startswith("claude") else "skills/crazyagent")
-        installed = sorted(p.name for p in folder.iterdir() if p.is_dir()) if folder.is_dir() else []
+        installed = listed_skills(t, a)
+        shown = "unknown (no skill listing in its transcripts)" if installed is None else listed(installed) or "none"
+        claude = a["harness"].startswith("claude")
         choice = choices.get(role)
         if isinstance(choice, list):
-            checked += 1
-            expected = sorted(name for name in choice if isinstance(name, str))
-            line = f"{t.label(a)} role {role} chose {listed(expected) or 'none'}; given {listed(got) or 'none'}; installed {listed(installed) or 'none'}"
-            if record is None or got != expected or installed != expected:
-                bad.append(line + (" (no skills record)" if record is None else ""))
+            chosen = sorted(name for name in choice if isinstance(name, str))
+            expected = [name for name in chosen if not (claude and name in hidden)]
+            line = f"{t.label(a)} role {role} chose {listed(chosen) or 'none'}; given {listed(got) or 'none'}; installed {shown}"
+            if claude and set(chosen) & hidden:
+                line += f"; Claude Code lists none of {listed(sorted(set(chosen) & hidden))} to the model (disable-model-invocation)"
+            if installed is None:
+                unread.append(t.label(a))
+                if record is None or got != chosen:
+                    bad.append(line + (" (no skills record)" if record is None else ""))
+            else:
+                checked += 1
+                if record is None or got != chosen or installed != expected:
+                    bad.append(line + (" (no skills record)" if record is None else ""))
         else:
-            line = f"{t.label(a)} role {role} all approved ({len(approved)}); given {len(got)}; installed {len(installed)}"
+            count = "unknown" if installed is None else len(installed)
+            line = f"{t.label(a)} role {role} all approved ({len(approved)}); given {len(got)}; installed {count}"
         lines.append(line)
-    detail = f"role choices: {'; '.join(f'{r}=' + ('all' if not isinstance(choices.get(r), list) else listed(choices[r]) or 'none') for r in SKILL_ROLES)}; Sub-agent depth={limit}; agents checked={checked} bad={len(bad)}; teammates use their lead's set"
+    detail = (
+        f"role choices: {'; '.join(f'{r}=' + ('all' if not isinstance(choices.get(r), list) else listed(choices[r]) or 'none') for r in SKILL_ROLES)}; "
+        f"Sub-agent depth={limit}; agents checked={checked} bad={len(bad)}; teammates use their lead's set"
+        + (f"; skills Claude Code lists to no model: {listed(sorted(hidden))}" if hidden else "")
+        + (f"; no skill listing read for {listed(unread)}" if unread else "")
+    )
     if bad:
         return verdict("FAIL", detail, lines)
-    return verdict("PASS" if checked else "UNKNOWN", detail if checked else detail + "; no agent of a role with a choice", lines)
+    return verdict("PASS" if checked else "UNKNOWN", detail if checked else detail + "; no agent of a role with a choice and a skill listing", lines)
 
 
 def nudge_mode(value):
@@ -1691,21 +1981,24 @@ def check_finished(t):
     early = [a for a in finished if stop_at is not None and a["stopped"] is not None and a["stopped"] < stop_at]
     reused = t.q("SELECT agent, COUNT(*) FROM team_tasks WHERE project=? AND agent IS NOT NULL GROUP BY agent HAVING COUNT(*) > 1", t.pid)
     step = next((step for step in reversed(every) if str(step.get("title", "")).startswith(FINISHED_HIDE_STEP)), None)
-    shots = [path for path in (step or {}).get("evidence") or () if isinstance(path, str) and not os.path.isabs(path)]
+    check = next((step for step in reversed(every) if str(step.get("title", "")).startswith(HIDE_CHECK_STEP)), None)
+    chosen = step or check
+    shots = [path for path in (chosen or {}).get("evidence") or () if isinstance(path, str) and not os.path.isabs(path)]
     extra = [
-        {"kind": "screenshot", "path": path, "caption": f"step {step.get('n')} {FINISHED_HIDE_STEP}"}
+        {"kind": "screenshot", "path": path, "caption": f"step {chosen.get('n')} {str(chosen.get('title', ''))[:80]}"}
         for path in shots if under(t.out / path, t.out) and (t.out / path).is_file()
     ]
     detail = (
-        f"setting={'show' if show else 'hide'}{'' if stored else ' (no row: hide by default)'}; "
+        f"setting at the end={'show' if show else 'hide'}{'' if stored else ' (no row: hide by default)'}"
+        f"{', a note: the trial sets Show for its final tree' if show else ''}; "
         f"finished in the store={len(finished)} ({listed(t.label(a) for a in finished) or 'none'}); "
         f"left on their own before Stop all={len(early) if stop_at is not None else 'unknown'}; "
         f"agents given more than one task={len(reused)}"
     )
-    if show:
-        return verdict("FAIL", detail + "; Finished agents is Show at the end of the run, so finished agents stay in the list and graph", extra=extra)
+    if step is None and check is not None:
+        return hide_at_check(check, detail, extra)
     if step is None:
-        return verdict("UNKNOWN", detail + f"; not exercised: no '{FINISHED_HIDE_STEP}' step in steps.jsonl", extra=extra)
+        return verdict("UNKNOWN", detail + f"; not exercised: no '{FINISHED_HIDE_STEP}' or N-D25 step in steps.jsonl", extra=extra)
     said = str(step.get("detail") or "")
     detail += f"; step {step.get('n')} ok={step.get('ok')} said: {said[:300]}"
     if step.get("ok") is not True:
@@ -1725,6 +2018,29 @@ def check_finished(t):
     if not finished:
         return verdict("UNKNOWN", detail + "; not exercised: no finished agent", extra=extra)
     return verdict("PASS", detail, extra=extra)
+
+
+def hide_at_check(step, detail, extra):
+    """Judges Finished agents set to Hide at the N-D25 step, which hides finished agents
+    once one left on its own: under Hide that agent left the graph for Finished (N). A
+    failure before Hide is not exercised; one after it, in Wake or in setting Show back,
+    is N-D25's. Inputs: the step, the detail so far and the evidence. Output: the verdict."""
+    said = str(step.get("detail") or "")
+    detail += f"; N-D25 step {step.get('n')} ok={step.get('ok')} said: {said[:300]}"
+    if step.get("ok") is True:
+        left = HIDE_LEFT.search(said)
+        if left is None:
+            return verdict("FAIL", detail + "; the step recorded no Finished (N) count under Hide", extra=extra)
+        if int(left.group(1)) < 1:
+            return verdict("FAIL", detail + "; under Hide the Finished list was empty", extra=extra)
+        return verdict("PASS", detail, extra=extra)
+    if HIDE_STAYED in said:
+        return verdict("FAIL", detail + "; under Hide the finished agent stayed in the graph", extra=extra)
+    if HIDE_NOT_REACHED in said:
+        return verdict("UNKNOWN", detail + "; not exercised: N-D25 did not reach Hide", extra=extra)
+    if any(part in said for part in HIDE_PASSED_FIRST):
+        return verdict("PASS", detail + "; Hide held before the step failed, which is N-D25's", extra=extra)
+    return verdict("UNKNOWN", detail + "; not exercised: N-D25 failed before Hide could be told", extra=extra)
 
 
 def check_shared_account(t):
@@ -1831,7 +2147,7 @@ CHECKS = (
         "title": "Git works inside every agent's sandbox",
         "proves": "Agent git calls succeed with no xcrun shim errors under the sandbox.",
         "why": "Sandbox git through the real binary (Q73, IMP-AWF). Trial 2: PASS (every agent's git calls ok, 0 xcrun errors).",
-        "how": "Shell tool calls naming git in each transcript and their results; xcrun_db or xcrun: error in any result.",
+        "how": "Shell tool calls in each transcript whose parsed command words run git (/usr/bin/git, after ; && |, inside sh -c or $( )), and their results; xcrun_db or xcrun: error in any call's result fails, except in a known toolchain call (cargo, rustc, cc, swift, make ...) that names no git, not even as an argument such as make GIT=/usr/bin/git, where it is a toolchain's cache write the sandbox refuses (DEC-104) and a note.",
     },
     {
         "id": "T3-10", "name": "stop all", "run": check_stopped,
@@ -1920,16 +2236,16 @@ CHECKS = (
     {
         "id": "T3-22", "name": "part 1 instructions", "run": check_part_one,
         "title": "The Part 1 instruction set reaches every agent, teammates included",
-        "proves": "The text each agent was given opens with '# Mandatory workflow' and every launch context, native teammates' too, holds it.",
+        "proves": "The text each agent was given opens with CrazyAgent's title, its app instructions open with '# Mandatory workflow' and are the engine's app copy, and every launch context, native teammates' too, holds the set.",
         "why": "DEC-111 QR1 and DEC-106, 18.13 fix (feat/instruction-edit-delivery). Re-proves trial 2 T3-11, which failed for teammates 50 and 51 with no transcript.",
-        "how": "The engine's agent-instructions-given record per agent home (SHA-256 of its real path); the first launch context of every transcript, teammate panes through the lead's home; home AGENTS.md for Codex agents.",
+        "how": "The engine's agent-instructions-given record per agent home (SHA-256 of its real path), its app part compared with the engine's app instructions.md by SHA-256; the first launch context of every transcript, teammate panes through the lead's home; home AGENTS.md for Codex agents.",
     },
     {
         "id": "T3-23", "name": "skills per role", "run": check_role_skills,
         "title": "Each role gets the skills chosen for it",
         "proves": "Masters, leads and workers launch with exactly the skills the project chose for their role.",
         "why": "DEC-111 R3, 18.13 fix (feat/role-skills). New in trial 3.",
-        "how": "coord_settings role_skills and team_nesting depth; the engine's agent-skills record per agent home and the skill folders installed in it.",
+        "how": "coord_settings role_skills and team_nesting depth; the engine's agent-skills record per agent home and the skills its harness listed: Claude Code's crazyagent:* skill_listing in its transcripts, which leaves out skills whose SKILL.md sets disable-model-invocation, and Codex's skills index in its rollouts. The installed folders are gone once a launch ends.",
     },
     {
         "id": "T3-24", "name": "nudges", "run": check_nudges,
@@ -1950,7 +2266,7 @@ CHECKS = (
         "title": "Finished agents leave the Agents list and graph for the Finished fold-out",
         "proves": "With Finished agents on Hide, the default, stopped and failed sub-agents and teammates leave the Team panel and graph, and the Finished (N) fold-out lists each of them.",
         "why": "OP-27, owner 10-27: sub-agents that finished their work and sat idle never left. DEC-102 decision 2 as the owner changed it after the DEC-104 trial: an idle agent stays until Idle stop or Stop all ends it (125e3173). Fix B-51, fix/agent-view-finished 84e5ec76. Trial 2: not checked; trial 3 sets Show for its tree checks.",
-        "how": "team_finished_view for the project (no row is Hide); stopped or failed sub-agent and teammate rows; the desktop step 'Set Finished agents to Hide' in steps.jsonl with its Finished (N) count, drawn cards and screenshots; team_tasks per agent for reuse.",
+        "how": "team_finished_view for the project (no row is Hide); stopped or failed sub-agent and teammate rows; the desktop step 'Set Finished agents to Hide' in steps.jsonl with its Finished (N) count, drawn cards and screenshots, or else the N-D25 step, where under Hide an agent that left on its own leaves the graph for Finished (N); the setting at the end of the run is a note, since trial scripts set Show for their final tree; team_tasks per agent for reuse.",
     },
     {
         "id": "T3-27", "name": "shared account", "run": check_shared_account,

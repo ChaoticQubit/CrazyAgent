@@ -182,11 +182,64 @@ fn custodian_command(
             if std::env::var_os("CRAZYAGENT_DEBUG_CUSTODIAN").is_some() {
                 Stdio::inherit()
             } else {
-                Stdio::null()
+                Stdio::piped()
             },
         )
         .process_group(0);
     Ok(command)
+}
+
+/// The longest failure code a custodian may name: the bound of a stored sign-in fact's code.
+const CAUSE_BYTES_MAX: usize = 128;
+
+/// What a custodian wrote on its error stream, kept up to one code and its line end and read
+/// without ever waiting, so a custodian that writes more never blocks on a full pipe.
+struct CustodianCause {
+    stream: OwnedFd,
+    text: Vec<u8>,
+}
+
+impl CustodianCause {
+    /// Takes the custodian's error stream and makes reads on it return at once.
+    /// Input: the stream. Output: the cause, empty so far.
+    fn new(stream: std::process::ChildStderr) -> Result<Self, EngineError> {
+        let stream = OwnedFd::from(stream);
+        let flags = rustix::fs::fcntl_getfl(&stream).map_err(io_error)?;
+        rustix::fs::fcntl_setfl(&stream, flags | OFlags::NONBLOCK).map_err(io_error)?;
+        Ok(Self {
+            stream,
+            text: Vec::new(),
+        })
+    }
+
+    /// Reads what the stream holds now, keeping at most one code, its line end and one more
+    /// byte, so a longer line still reads as too long. Output: done once nothing waits in it.
+    fn read(&mut self) -> Result<(), EngineError> {
+        let mut buffer = [0; 256];
+        loop {
+            match rustix::io::read(&self.stream, &mut buffer) {
+                Ok(0) | Err(rustix::io::Errno::AGAIN) => return Ok(()),
+                Ok(size) => {
+                    let room = (CAUSE_BYTES_MAX + 2).saturating_sub(self.text.len());
+                    self.text.extend_from_slice(&buffer[..size.min(room)]);
+                }
+                Err(rustix::io::Errno::INTR) => {}
+                Err(error) => return Err(io_error(error)),
+            }
+        }
+    }
+
+    /// The code the custodian named: its one line when that line is a code a sign-in fact can
+    /// carry, 1 to 128 lowercase letters and `_`. Output: the code, or None for any other text.
+    fn code(&self) -> Option<&str> {
+        let line = self.text.strip_suffix(b"\n").unwrap_or(&self.text);
+        let plain = !line.is_empty()
+            && line.len() <= CAUSE_BYTES_MAX
+            && line
+                .iter()
+                .all(|byte| byte.is_ascii_lowercase() || *byte == b'_');
+        plain.then(|| std::str::from_utf8(line).ok()).flatten()
+    }
 }
 
 pub(in crate::engine) async fn dispatch(
@@ -217,13 +270,22 @@ pub(in crate::engine) async fn dispatch(
             .arg(claude.verified_sha256()?);
     }
     let mut child = crate::spawn_gate::spawn(&mut command).map_err(io_error)?;
-    let Some(input) = child.stdin.take() else {
-        custody::cleanup_direct_child(
-            &mut child,
-            std::time::Instant::now() + std::time::Duration::from_secs(2),
-        )
-        .map_err(io_error)?;
-        return Err(EngineError("native_auth_host_input_unavailable".into()));
+    let cause = child.stderr.take().map(CustodianCause::new).transpose();
+    let streams = match (child.stdin.take(), cause) {
+        (Some(input), Ok(cause)) => Ok((input, cause)),
+        (None, _) => Err(EngineError("native_auth_host_input_unavailable".into())),
+        (_, Err(error)) => Err(error),
+    };
+    let (input, mut cause) = match streams {
+        Ok(streams) => streams,
+        Err(error) => {
+            custody::cleanup_direct_child(
+                &mut child,
+                std::time::Instant::now() + std::time::Duration::from_secs(2),
+            )
+            .map_err(io_error)?;
+            return Err(error);
+        }
     };
     if let Err((error, mut child)) = host.retain_child(child) {
         custody::cleanup_direct_child(
@@ -235,12 +297,28 @@ pub(in crate::engine) async fn dispatch(
     }
     launch.write_bootstrap(input)?;
     loop {
+        if let Some(cause) = cause.as_mut() {
+            cause.read()?;
+        }
         if let Some(status) = host.try_wait_child()? {
-            return if status.success() {
-                Ok(())
-            } else {
-                Err(EngineError("native_auth_host_child_failed".into()))
+            if status.success() {
+                return Ok(());
+            }
+            let code = match cause.as_mut() {
+                Some(cause) => {
+                    cause.read()?;
+                    cause.code()
+                }
+                None => None,
             };
+            eprintln!(
+                "native_auth_custodian_failed cause={}",
+                code.unwrap_or("native_auth_custodian_cause_unnamed")
+            );
+            if let Some(code) = code {
+                host.record_custodian_failure(code)?;
+            }
+            return Err(EngineError("native_auth_host_child_failed".into()));
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
@@ -250,6 +328,8 @@ pub(in crate::engine) mod claude_auth;
 
 #[cfg(test)]
 mod bootstrap_pipe_tests;
+#[cfg(test)]
+mod cause_tests;
 pub(in crate::engine) mod codex_auth;
 pub(super) mod custody;
 #[cfg(test)]

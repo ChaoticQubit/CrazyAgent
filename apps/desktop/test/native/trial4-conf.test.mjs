@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -33,6 +33,22 @@ test("every committed trial4 check module has a unique id, OP rows, a title, a w
   const checks = await loadChecks(CHECKS, SLUGS);
   t.diagnostic(`${checks.length} checks in ${CHECKS}`);
   for (const loaded of checks) assert.equal(typeof loaded.run, "function", loaded.id);
+});
+
+test("no committed trial4 check hands an XPath to the CSS-only text and texts helpers", () => {
+  const xpathCalls = [];
+  let calls = 0;
+  for (const name of readdirSync(CHECKS).filter((file) => file.endsWith(".mjs")).sort()) {
+    const source = readFileSync(join(CHECKS, name), "utf8");
+    const xpaths = new Set([...source.matchAll(/^const ([A-Z_]+) = [`"]\(?\/\//gmu)].map((match) => match[1]));
+    for (const call of source.matchAll(/\btexts?\(\s*([^,)]+)/gu)) {
+      calls += 1;
+      const argument = call[1].trim();
+      if (/^[`"]\(?(?:\$\{[^}]+\})?\/\//u.test(argument) || xpaths.has(argument)) xpathCalls.push(`${name}: ${argument}`);
+    }
+  }
+  assert(calls > 0, "the scan read the checks' text and texts calls");
+  assert.deepEqual(xpathCalls, []);
 });
 
 test("every committed tui4 check module in scripts/trial/tui4 passes the same convention, and no id is both a desktop and a TUI check", async (t) => {
@@ -89,6 +105,8 @@ test("a check module that breaks the convention is refused with its file and the
     [{ "a.mjs": check({ after: "no-such-step" }) }, /a\.mjs N-D1: after must name a trial 3 step or "end", not no-such-step/],
     [{ "a.mjs": check({ op: ["7"] }) }, /a\.mjs N-D1: op must list OP-<n> rows/],
     [{ "a.mjs": check({ op: [] }) }, /a\.mjs N-D1: op must list OP-<n> rows/],
+    [{ "a.mjs": check({ op: ["MAP-0"] }) }, /a\.mjs N-D1: op must list OP-<n> rows/],
+    [{ "a.mjs": check({ op: ["MAPS-1"] }) }, /a\.mjs N-D1: op must list OP-<n> rows/],
     [{ "a.mjs": check({ id: "nd1" }) }, /a\.mjs: id must look like N-D1/],
     [{ "a.mjs": check({ title: "" }) }, /a\.mjs N-D1: title must be a non-empty string/],
     [{ "a.mjs": check({ why: 3 }) }, /a\.mjs N-D1: why must be a non-empty string/],
@@ -103,6 +121,15 @@ test("a check module that breaks the convention is refused with its file and the
     } finally {
       rmSync(folder, { recursive: true, force: true });
     }
+  }
+});
+
+test("a check may name a MAP-<n> row of the 18.15 coverage list, which has no OP number yet", async () => {
+  const folder = modules({ "a.mjs": check({ op: ["MAP-1"] }) });
+  try {
+    assert.deepEqual((await loadChecks(folder, SLUGS)).map((loaded) => loaded.op), [["MAP-1"]]);
+  } finally {
+    rmSync(folder, { recursive: true, force: true });
   }
 });
 

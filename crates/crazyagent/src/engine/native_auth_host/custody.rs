@@ -3,7 +3,7 @@ use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::process::{Pid, Signal};
 #[cfg(test)]
 use std::ffi::OsString;
-use std::io;
+use std::io::{self, Write};
 #[cfg(test)]
 use std::os::fd::OwnedFd;
 #[cfg(test)]
@@ -792,10 +792,10 @@ impl Drop for CustodySession {
                 None => cleanup_direct_child(child, deadline).map(|status| status.is_some()),
             };
             if !matches!(cleaned, Ok(true)) {
-                eprintln!("native_auth_child_cleanup_uncertain");
                 if let Some(guard) = self.guard.take() {
                     std::mem::forget(guard);
                 }
+                let _ = writeln!(io::stderr(), "native_auth_child_cleanup_uncertain");
             }
         }
     }

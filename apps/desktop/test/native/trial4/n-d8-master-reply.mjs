@@ -61,9 +61,31 @@ export async function liveLine() {
   return browser.execute(() => document.querySelector("[data-testid=master-live-session]")?.textContent ?? "");
 }
 
-/** Presses Start all in the master area when the team is paused. Output: whether it pressed it. */
-export async function startIfPaused() {
-  if (!(await shown(START))) return false;
+/** Reads whether a project's team is stopped (Stop all) from the app's desktop_team_status
+ * answer. Inputs: the answer and the project id. Output: the paused flag; throws when the read
+ * failed, is another project's or has no flag, so a check never decides without the read. */
+export function pausedOf(answer, id) {
+  if (answer?.failed !== undefined) throw new Error(`desktop_team_status failed: ${answer.failed}`);
+  if (answer?.project_id !== id) throw new Error(`desktop_team_status answered for ${JSON.stringify(answer?.project_id)}, not ${id}`);
+  if (typeof answer.paused !== "boolean") throw new Error(`desktop_team_status answered no paused flag for ${id}`);
+  return answer.paused;
+}
+
+/** Reads through the app's own command whether a project's team is stopped (Stop all). Input:
+ * the project id. Output: the paused flag; throws when the engine answered no team state. */
+export async function teamPaused(id) {
+  const answer = await browser.executeAsync((id, done) => {
+    window.__TAURI_INTERNALS__.invoke("desktop_team_status", { id }).then(done, (failure) => done({ failed: String(failure) }));
+  }, id);
+  return pausedOf(answer, id);
+}
+
+/** Presses Start all in the master area when the engine's team read says the team is stopped,
+ * after the master area offers it; a page drawn before its own team read never decides. Inputs:
+ * the kit and the id of the project whose master area is open. Output: whether it pressed it. */
+export async function startIfPaused(kit, id) {
+  if (!(await teamPaused(id))) return false;
+  await kit.until(() => shown(START), UI_MS, "the team is stopped, but the master area never offered Start all");
   await click(START);
   return true;
 }
@@ -96,8 +118,11 @@ export async function terminalLive(kit, timeout) {
  * kit and the text. Output: which input it used. */
 export async function sendToMaster(kit, text) {
   if (await shown(BOX)) {
-    await kit.until(async () => await $(SEND).isEnabled(), UI_MS, "the master's Send button stayed off");
     await kit.paste(BOX, text);
+    await kit.until(async () => {
+      if ((await $(BOX).getValue()) !== text) await kit.paste(BOX, text);
+      return $(SEND).isEnabled();
+    }, UI_MS, "the master's Send button stayed off with the text in the box");
     await click(SEND);
     await kit.until(async () => (await $(BOX).getValue()) === "", UI_MS, "the message box kept the text: it was not sent");
     return "message box";

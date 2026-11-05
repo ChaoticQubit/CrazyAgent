@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import * as kit from "./trial-kit.mjs";
+import { terminalKeys } from "./trial-kit.mjs";
 
 const PICKS = "CRAZYAGENT_TRIAL_PICKS";
 const PURPOSES = ["skill", "project", "projects_home", "memory", "plugin"];
@@ -79,4 +80,33 @@ test("the kit and the app name the picks folder and the answer files alike", () 
   const seam = readFileSync(SEAM, "utf8");
   assert.ok(seam.includes(`pub const PICKS_VARIABLE: &str = "${PICKS}";`), "trial_pick.rs reads the same variable");
   for (const purpose of PURPOSES) assert.match(seam, new RegExp(`=> "${purpose}",`), purpose);
+});
+
+const SHIFT = "\uE008";
+const ENTER = "\uE007";
+
+test("terminal keys type N-D10's lines once each, Shift+Enter as a Shift key press and Enter as a carriage return", () => {
+  const lines = ["Trial 4 check N-D10, first line.", "Second line: reply with the single word ok."];
+  assert.deepEqual(terminalKeys(lines[0]), [{ text: lines[0] }]);
+  assert.deepEqual(terminalKeys([SHIFT, ENTER]), [{ key: "Enter", shiftKey: true }]);
+  assert.deepEqual(terminalKeys(ENTER), [{ text: "\r", alone: true }]);
+  assert.deepEqual(terminalKeys([lines[0], SHIFT, ENTER, SHIFT, lines[1], ENTER, "x"]), [{ text: lines[0] }, { key: "Enter", shiftKey: true }, { text: lines[1] }, { text: "\r", alone: true }, { text: "x" }]);
+});
+
+test("terminal keys hold WebDriver modifiers until pressed again or released, within one call", () => {
+  assert.deepEqual(terminalKeys(["\uE009", "c", "\uE000", "c"]), [{ text: "\u0003c" }]);
+  assert.deepEqual(terminalKeys([SHIFT, "ab", SHIFT, "c"]), [{ text: "ABc" }]);
+  assert.deepEqual(terminalKeys([SHIFT]), []);
+  assert.deepEqual(terminalKeys("a"), [{ text: "a" }]);
+  assert.deepEqual(terminalKeys(["\uE004", "\uE003", "\uE00C", "\uE006"]), [{ text: "\t\u007f\u001b" }, { text: "\r", alone: true }]);
+});
+
+test("terminal keys refuse what the terminal path cannot send instead of typing something else", () => {
+  assert.throws(() => terminalKeys(["\uE00A", "x"]), /no Alt or Meta chord/);
+  assert.throws(() => terminalKeys(["\uE03D", "c"]), /no Alt or Meta chord/);
+  assert.throws(() => terminalKeys("\uE015"), /does not send the WebDriver key U\+E015/);
+  assert.throws(() => terminalKeys([SHIFT, "1"]), /Shift only with a letter or Enter/);
+  assert.throws(() => terminalKeys(["\uE009", ENTER]), /Enter with Control/);
+  assert.throws(() => terminalKeys(["\uE009", "1"]), /Control only with a letter/);
+  assert.throws(() => terminalKeys([7]), /strings/);
 });

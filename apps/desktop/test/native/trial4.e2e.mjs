@@ -72,6 +72,7 @@ async function verifyTui(slug, title, check) {
 }
 
 describe(`CrazyAgent trial 4: trial 3 plus ${desktopChecks.length} desktop and ${tuiChecks.length} TUI owner problem checks (${kit.MODE})`, () => {
+  before(() => kit.terminalTyping(browser));
   for (const { slug, step, check } of plan(TRIAL3_STEPS, checks)) {
     if (step) {
       it(step.it, () => kit.step(slug, step.title, step.why, step.action));

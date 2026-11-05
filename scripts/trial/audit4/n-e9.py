@@ -9,8 +9,9 @@ ended its turn waiting on a background cargo check, and the engine ended the tas
 from collections import Counter
 from datetime import datetime
 import json
-from pathlib import Path
 import re
+
+import audit
 
 ID = "N-E9"
 OP = ["OP-26"]
@@ -80,28 +81,27 @@ def scan(t, agent_id):
     """Reads one agent's Claude Code transcripts. Inputs: the trial and the agent id.
     Output: its background starts and ends, lost-command notices and last reply time."""
     found = {"started": [], "ended": {}, "lost": 0, "last": None}
-    for folder in t.dirs_of.get(agent_id, []):
-        for path in sorted(Path(folder).glob("**/*.jsonl")):
-            try:
-                handle = path.open("r", encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            with handle:
-                for number, line in enumerate(handle, 1):
-                    if number > LINES_PER_FILE_MAX:
-                        break
-                    if LOST in line:
-                        found["lost"] += 1
-                    try:
-                        entry = json.loads(line)
-                    except ValueError:
-                        continue
-                    if not isinstance(entry, dict):
-                        continue
-                    at = stamp_ms(entry.get("timestamp"))
-                    if at is not None and entry.get("type") == "assistant":
-                        found["last"] = max(found["last"] or at, at)
-                    marks(entry, at, found)
+    for path in audit.transcript_files(t.dirs_of.get(agent_id, [])):
+        try:
+            handle = path.open("r", encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with handle:
+            for number, line in enumerate(handle, 1):
+                if number > LINES_PER_FILE_MAX:
+                    break
+                if LOST in line:
+                    found["lost"] += 1
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(entry, dict):
+                    continue
+                at = stamp_ms(entry.get("timestamp"))
+                if at is not None and entry.get("type") == "assistant":
+                    found["last"] = max(found["last"] or at, at)
+                marks(entry, at, found)
     return found
 
 

@@ -309,3 +309,100 @@ export async function relaunch() {
   await attach(browser);
   return `quit pid ${old}, opened ${bundle} with open -a (no CRAZYAGENT_DESKTOP_SOCKET), WebDriver attached to pid ${pid}`;
 }
+
+const WEBDRIVER_KEYS = { "\uE000": "Release", "\uE003": "Backspace", "\uE004": "Tab", "\uE006": "Enter", "\uE007": "Enter", "\uE008": "Shift", "\uE009": "Control", "\uE00A": "Alt", "\uE00C": "Escape", "\uE03D": "Meta" };
+const MODIFIERS = { Shift: "shiftKey", Control: "ctrlKey", Alt: "altKey", Meta: "metaKey" };
+const TERMINAL_BYTES = { Backspace: "\u007f", Tab: "\t", Escape: "\u001b", Enter: "\r" };
+const KEY_GAP_MS = 60;
+const typingInstalled = new WeakSet();
+
+/** Turns what browser.keys was given into what the kit sends to a terminal: runs of typed
+ * text with Control+letter as its control byte, Enter as a carriage return of its own, so a
+ * harness never reads it inside pasted-looking text, and Shift+Enter as a key press. WebDriver's modifier keys stay held until pressed
+ * again or released by U+E000, within the one call, as browser.keys holds them. Input: a
+ * string or a list of strings. Output: [{ text } or { key: "Enter", shiftKey: true }];
+ * throws for a key or chord the terminal path does not send. */
+export function terminalKeys(value) {
+  const parts = Array.isArray(value) ? value : [value];
+  assert(parts.every((part) => typeof part === "string"), "browser.keys takes strings");
+  const held = { shiftKey: false, ctrlKey: false, altKey: false, metaKey: false };
+  const out = [];
+  const text = (data) => {
+    const last = out.at(-1);
+    if (last && "text" in last && !last.alone) last.text += data;
+    else out.push({ text: data });
+  };
+  for (const char of parts.flatMap((part) => Array.from(part))) {
+    const named = WEBDRIVER_KEYS[char];
+    if (named === "Release") {
+      for (const flag of Object.keys(held)) held[flag] = false;
+      continue;
+    }
+    if (MODIFIERS[named]) {
+      held[MODIFIERS[named]] = !held[MODIFIERS[named]];
+      continue;
+    }
+    assert(!held.altKey && !held.metaKey, `the terminal path types no Alt or Meta chord, got ${JSON.stringify(char)}`);
+    if (named === "Enter") {
+      assert(!held.ctrlKey, "the terminal path sends no Enter with Control");
+      out.push(held.shiftKey ? { key: "Enter", shiftKey: true } : { text: TERMINAL_BYTES.Enter, alone: true });
+      continue;
+    }
+    if (named) {
+      assert(!held.shiftKey && !held.ctrlKey, `the terminal path sends ${named} with no modifier`);
+      text(TERMINAL_BYTES[named]);
+      continue;
+    }
+    const code = char.codePointAt(0);
+    assert(code < 0xe000 || code > 0xe05d, `the terminal path does not send the WebDriver key U+${code.toString(16).toUpperCase()}`);
+    if (held.ctrlKey) {
+      assert(/^[a-z]$/i.test(char) && !held.shiftKey, "the terminal path types Control only with a letter");
+      text(String.fromCharCode(char.toLowerCase().charCodeAt(0) - 96));
+      continue;
+    }
+    if (held.shiftKey) {
+      assert(/^[a-z]$/i.test(char), "the terminal path types Shift only with a letter or Enter");
+      text(char.toUpperCase());
+      continue;
+    }
+    text(char);
+  }
+  return out;
+}
+
+/** Sends one terminal key event to the focused xterm in the page: text as one insertText
+ * input event, which xterm reads once, and Shift+Enter as a keydown and keyup with shiftKey
+ * set, which the app's key override (terminal-io.ts keyOverride) turns into a new line.
+ * Runs in the page. Inputs: the event from terminalKeys and the page's global scope.
+ * Output: false when the focus is not a terminal, so nothing was sent. */
+export function sendTerminal(event, scope = globalThis) {
+  const target = scope.document.activeElement;
+  if (!target || !target.classList || !target.classList.contains("xterm-helper-textarea")) return false;
+  if ("text" in event) {
+    target.dispatchEvent(new scope.InputEvent("input", { data: event.text, inputType: "insertText", bubbles: true, cancelable: true }));
+    return true;
+  }
+  for (const type of ["keydown", "keyup"]) {
+    target.dispatchEvent(new scope.KeyboardEvent(type, { key: "Enter", code: "Enter", shiftKey: true, bubbles: true, cancelable: true }));
+  }
+  return true;
+}
+
+/** Routes browser.keys into a focused terminal through terminalKeys and sendTerminal, since
+ * the WebDriver plugin's key actions type some characters twice and drop Shift from Enter
+ * there (tauri-plugin-wdio-webdriver 1.5.0 executor.rs:1505, 1572-1592, 1310-1311 and 1477).
+ * Keys sent anywhere else still go through WebDriver. Installs once per browser. Input: the
+ * browser. */
+export function terminalTyping(browser) {
+  if (typingInstalled.has(browser)) return;
+  typingInstalled.add(browser);
+  browser.overwriteCommand("keys", async function keys(webdriverKeys, value) {
+    const focused = await browser.execute(() => document.activeElement?.classList?.contains("xterm-helper-textarea") === true);
+    if (!focused) return webdriverKeys(value);
+    for (const [at, event] of terminalKeys(value).entries()) {
+      if (at > 0) await pause(KEY_GAP_MS);
+      assert(await browser.execute(sendTerminal, event), "the terminal lost the focus while the keys were sent");
+    }
+    return undefined;
+  });
+}

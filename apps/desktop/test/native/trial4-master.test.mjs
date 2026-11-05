@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { TRIAL3_STEPS } from "./trial3-steps.mjs";
 import * as reply from "./trial4/n-d8-master-reply.mjs";
@@ -40,6 +41,15 @@ test("the master has ended when it has no agent row or a stopped status; running
   assert.equal(reply.masterState([{ kind: "master", status: null }]).ended, true);
   assert.equal(reply.masterState([{ kind: "master", status: "failed" }]).ended, true);
   assert.equal(reply.masterState([{ kind: "lead", status: "working" }]).ended, true);
+});
+
+test("Start all is decided from the engine's team read of this project, never from no read", () => {
+  assert.equal(reply.pausedOf({ project_id: "ca-trial-4", paused: true, keep_warm: true }, "ca-trial-4"), true);
+  assert.equal(reply.pausedOf({ project_id: "ca-trial-4", paused: false, keep_warm: true }, "ca-trial-4"), false);
+  assert.throws(() => reply.pausedOf({ failed: "engine_unavailable" }, "ca-trial-4"), /desktop_team_status failed: engine_unavailable/);
+  assert.throws(() => reply.pausedOf({ project_id: "ca-trial-4b", paused: true }, "ca-trial-4"), /answered for "ca-trial-4b", not ca-trial-4/);
+  assert.throws(() => reply.pausedOf({ project_id: "ca-trial-4" }, "ca-trial-4"), /no paused flag/);
+  assert.throws(() => reply.pausedOf(null, "ca-trial-4"), /answered for undefined/);
 });
 
 test("the Sessions bar line gives the live session's messages, 0 for a new one and null for none", () => {
@@ -114,4 +124,36 @@ test("a question row's tags are the badge it opens with and its For: tag", () =>
   assert.deepEqual(questions.questionTags("UrgentFor: MeAda (@lead-a)The agent is paused until you answer."), { severity: "Urgent", forWhom: "Me" });
   assert.deepEqual(questions.questionTags("Carrying on For: @lead-a Is the default fine?"), { severity: "Carrying on", forWhom: "@lead-a" });
   assert.equal(questions.questionTags("Ada asks: Urgent? For:").severity, null);
+});
+
+test("N-D14 resumes the master session the 18.14 record step wrote in ca-trial-4c, and its title names that hop", () => {
+  assert.equal(instructions.OLD_PROJECT, "ca-trial-4c");
+  const [check] = instructions.checks;
+  assert.equal(check.id, "N-D14");
+  assert.match(check.title, /^A master session recorded on 18\.14 resumes on 18\.15 /u);
+});
+
+test("N-D14 passes only on the live session the 18.14 record step wrote, never on another or on no read", () => {
+  const RECORDED = "master-215080c51594223929c2c5f79d08b6ef09e86c82b1c8bba4a1d895cc1f91da33";
+  assert.equal(instructions.RECORDED_SESSION, RECORDED);
+  const state = (session) => ({ project_id: "ca-trial-4c", ticket: "ticket-1", session });
+  assert.equal(instructions.liveSessionOf(state({ session_id: RECORDED, phase: "configured", current_turn: null }), "ca-trial-4c"), RECORDED);
+  assert.equal(instructions.liveSessionOf(state({ session_id: "master-new", phase: "configured", current_turn: null }), "ca-trial-4c"), "master-new");
+  assert.throws(() => instructions.liveSessionOf(state({ session_id: RECORDED, phase: "parked", current_turn: null }), "ca-trial-4c"), /ca-trial-4c has no live master session/);
+  assert.throws(() => instructions.liveSessionOf(state(null), "ca-trial-4c"), /ca-trial-4c has no live master session/);
+  assert.throws(() => instructions.liveSessionOf({ failed: "engine_unavailable" }, "ca-trial-4c"), /desktop_master_state failed: engine_unavailable/);
+  assert.throws(() => instructions.liveSessionOf({ ...state(null), project_id: "ca-trial-4b" }, "ca-trial-4c"), /answered for "ca-trial-4b", not ca-trial-4c/);
+});
+
+test("N-D14 fails on either note the engine posts when a session goes on in a new harness conversation", () => {
+  const source = readFileSync(new URL("../../../../crates/crazyagent/src/master_sessions.rs", import.meta.url), "utf8");
+  assert.ok(source.includes(`pub const FRESH_NOTE: &str = ${JSON.stringify(instructions.FRESH_NOTE)};`), "FRESH_NOTE is the engine's text");
+  assert.ok(source.includes(`pub const LOST_NOTE: &str = ${JSON.stringify(instructions.LOST_NOTE)};`), "LOST_NOTE is the engine's text");
+  const status = (messages) => ({ project_id: "ca-trial-4c", paused: false, messages });
+  const said = { id: 1, author: "master", text: instructions.FRESH_NOTE, state: "reply", created_ms: 1 };
+  assert.deepEqual(instructions.resumeNotes(status([said, { id: 2, author: "engine", text: "Team started.", state: "note", created_ms: 2 }]), "ca-trial-4c"), []);
+  assert.deepEqual(instructions.resumeNotes(status([{ ...said, state: "note" }, { ...said, id: 3, text: instructions.LOST_NOTE, state: "note" }]), "ca-trial-4c"), [instructions.FRESH_NOTE, instructions.LOST_NOTE]);
+  assert.throws(() => instructions.resumeNotes({ project_id: "ca-trial-4c", paused: false }, "ca-trial-4c"), /desktop_team_status answered no messages for ca-trial-4c/);
+  assert.throws(() => instructions.resumeNotes({ failed: "engine_unavailable" }, "ca-trial-4c"), /desktop_team_status failed: engine_unavailable/);
+  assert.throws(() => instructions.resumeNotes(status([]), "ca-trial-4b"), /answered for "ca-trial-4c", not ca-trial-4b/);
 });

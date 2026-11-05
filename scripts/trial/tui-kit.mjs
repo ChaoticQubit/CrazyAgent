@@ -80,18 +80,32 @@ export async function startTui({ argv, env, evidence, project = "", cols = COLS,
     const passes = typeof want === "string" ? (text) => text.includes(want) : (text) => want.test(text);
     return until(passes, timeout, `the TUI never showed ${want}`);
   };
-  const crumb = (page) => (text) => {
-    const left = text.split("\n", 1)[0].trim().split(/\s{4,}/)[0];
-    return left.includes(project) && left.endsWith(`/  ${page}`);
+  const head = (text) => text.split("\n", 1)[0].trim().split(/\s{4,}/)[0];
+  const crumb = (page) => (text) => head(text).endsWith(`/  ${project}  /  ${page}`);
+  const atProject = (text) => head(text).endsWith(`/  ${project}`);
+  const picked = (text = pane()) => {
+    const line = text.split("\n").find((row) => /[▌|]/.test(row)) ?? "";
+    const after = line.slice(line.search(/[▌|]/) + 1).replace(/^\s+/, "").trimEnd();
+    return after === project || after.startsWith(`${project}  `);
   };
   const typing = (text = pane()) => /Enter\s+Send/.test(text.trimEnd().split("\n").at(-1));
   const go = async (place) => {
     assert(PLACES.includes(place), `go takes one of ${PLACES.join(", ")}, got ${place}`);
     assert(project.length > 0, "go needs the project name the TUI lists");
-    await key("Ctrl-K");
-    await waitFor("Go to");
-    await type(`${project} / Conversation`);
+    await waitFor(project);
+    await type("/");
+    await waitFor("Clear filter");
+    await type(project);
     await key("Enter");
+    await until((text) => !/Clear filter/.test(text), waitMs, `${project} filter never applied`);
+    for (let hops = 0; !picked(); hops += 1) {
+      assert(hops < 64, `${project} is not selectable in the filtered Home list; a sibling such as ${project}-readd or ${project}0 must not be opened instead`);
+      await key("Down");
+      await pause(POLL_MS);
+    }
+    await key("Enter");
+    await until(atProject, waitMs, `${project} never opened from Home`);
+    await key("]");
     await until((text) => crumb("Conversation")(text) || crumb("Master")(text), waitMs, `${project} / Conversation never opened`);
     if (place === "project-team") {
       if (crumb("Master")(pane())) {
@@ -123,9 +137,15 @@ export async function startTui({ argv, env, evidence, project = "", cols = COLS,
     /** Waits until the pane's text passes a test. Inputs: the test, the time limit in ms and
      * the failure label. Output: the text; throws with the last pane, masked. */
     until,
-    /** Opens a place in the project: project-master is the live master terminal (Go to
-     * Conversation, then /master) and project-team the Team screen. Input: the place.
-     * Output: the pane text once the header shows the place; throws with the last pane. */
+    /** Opens a place in the project. It finds the project from Home by filtering the list to
+     * its name (filter mode captures letters, so no letter of the name can trigger a Home
+     * shortcut such as n for New project), then steps Down to the card the selection bar marks
+     * as exactly this project, so a substring sibling such as the N-D15 re-add or a trailing
+     * digit is never opened by mistake. It opens that card to Overview (whose crumbs are
+     * Home / project, with no tab word), then steps right to the Conversation tab. project-
+     * master then runs /master for the live master terminal; project-team opens the Team
+     * screen. Input: the place. Output: the pane text once the header ends with the project
+     * and the place; throws with the last pane. */
     go,
     /** Saves the pane, masked, as tui4/<name>.txt in the run folder. Input: the file stem.
      * Output: { path relative to the run folder, the masked text }. */
