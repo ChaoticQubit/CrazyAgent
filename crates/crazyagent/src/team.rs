@@ -1153,6 +1153,20 @@ pub fn pick_account<'a>(
         .map(|index| open[*index])
 }
 
+/// Tells whether a master conversation kept while the master ran on `kept` may resume on the
+/// `picked` account: always on the same account, and across accounts only from one native
+/// subscription in the pool to another, never to or from an endpoint whose model may not take
+/// that history. Takes the pool's usable accounts for the harness, the picked account and the
+/// kept connection. Returns the answer.
+pub fn resumes_on(pool: &[TeamAccount], picked: &TeamAccount, kept: &str) -> bool {
+    let subscription = |account: &TeamAccount| matches!(account.reach, TeamReach::Managed { .. });
+    picked.connection.as_str() == kept
+        || (subscription(picked)
+            && pool
+                .iter()
+                .any(|account| account.connection.as_str() == kept && subscription(account)))
+}
+
 /// One task the master asked for in its reply, with the role handle it gave the job, if any.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Delegation {
