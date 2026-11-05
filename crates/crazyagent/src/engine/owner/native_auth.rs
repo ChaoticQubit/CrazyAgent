@@ -1206,8 +1206,14 @@ auth = { method = "native_managed", profile_ref = "codex-profile" }"#,
             canceled: true,
         };
         for (method, code) in [
-            (NativeAuthMethod::CodexDeviceCode, "native_auth_sign_in_timed_out"),
-            (NativeAuthMethod::CodexBrowser, "native_auth_sign_in_page_timed_out"),
+            (
+                NativeAuthMethod::CodexDeviceCode,
+                "native_auth_sign_in_timed_out",
+            ),
+            (
+                NativeAuthMethod::CodexBrowser,
+                "native_auth_sign_in_page_timed_out",
+            ),
         ] {
             let mut fact = codex_fact(NativeAuthPhase::AwaitingOwner);
             fact.action = NativeAuthAction::SignIn { method };
@@ -1228,9 +1234,21 @@ auth = { method = "native_managed", profile_ref = "codex-profile" }"#,
             code_ran_out,
         };
         for (method, ran_out, code) in [
-            (NativeAuthMethod::CodexDeviceCode, true, "native_auth_sign_in_timed_out"),
-            (NativeAuthMethod::CodexDeviceCode, false, "native_auth_login_failed"),
-            (NativeAuthMethod::CodexBrowser, true, "native_auth_login_failed"),
+            (
+                NativeAuthMethod::CodexDeviceCode,
+                true,
+                "native_auth_sign_in_timed_out",
+            ),
+            (
+                NativeAuthMethod::CodexDeviceCode,
+                false,
+                "native_auth_login_failed",
+            ),
+            (
+                NativeAuthMethod::CodexBrowser,
+                true,
+                "native_auth_login_failed",
+            ),
         ] {
             let mut fact = codex_fact(NativeAuthPhase::AwaitingOwner);
             fact.action = NativeAuthAction::SignIn { method };

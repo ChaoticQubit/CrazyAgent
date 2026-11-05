@@ -339,7 +339,9 @@ ERROR codex_login: device auth timed out after 15 minutes"#;
         br#"{"user_code":"ABCD-EFGH"} code:KLMN-PQRS userCode=TUVW-XYZA user code: BCDF-GHJK ok"#,
         None,
     );
-    for secret in ["ABCD", "EFGH", "KLMN", "PQRS", "TUVW", "XYZA", "BCDF", "GHJK"] {
+    for secret in [
+        "ABCD", "EFGH", "KLMN", "PQRS", "TUVW", "XYZA", "BCDF", "GHJK",
+    ] {
         assert!(!unknown.contains(secret), "{secret} in {unknown}");
     }
     assert!(unknown.ends_with(" ok"), "{unknown}");
