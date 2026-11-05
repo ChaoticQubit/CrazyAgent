@@ -574,7 +574,9 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
                     | Request::Changes(_)
                     | Request::TeamGraph { .. }
                     | Request::Setup(
-                        SetupQuery::Jobs { .. }
+                        SetupQuery::Setup { .. }
+                            | SetupQuery::Jobs { .. }
+                            | SetupQuery::Log { .. }
                             | SetupQuery::Context { .. }
                             | SetupQuery::Memories { .. }
                             | SetupQuery::Team { .. }
@@ -934,7 +936,7 @@ async fn a_master_saved_from_the_team_screen_is_read_again_by_the_project_page()
     );
     let shown = render(&mut shell, 100, 40);
     assert!(
-        shown.contains("Master  RCLI"),
+        shown.contains("Master  rcli"),
         "the console names the saved master:\n{shown}"
     );
 

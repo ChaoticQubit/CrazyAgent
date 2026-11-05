@@ -571,7 +571,7 @@ pub(in crate::tui) struct ProjectScreen {
     agent_policy_read_ms: Option<i64>,
     memories_read_ms: Option<i64>,
     setup_failed_ms: Option<i64>,
-    setup_due: bool,
+    pub setup_due: bool,
     waiting: Option<SetupQuery>,
 }
 

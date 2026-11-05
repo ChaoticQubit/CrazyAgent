@@ -236,6 +236,7 @@ pub(in crate::tui) struct TeamView {
     changing: Option<String>,
     stored: Option<Box<StoredSetup>>,
     setup_waiting: bool,
+    setup_failed_ms: Option<i64>,
     saving: Option<SetupAction>,
     catalog: Option<Vec<HarnessChoice>>,
     catalog_due: bool,
@@ -268,19 +269,27 @@ impl TeamView {
             changing: None,
             stored: None,
             setup_waiting: false,
+            setup_failed_ms: None,
             saving: None,
             catalog: None,
             catalog_due: false,
         }
     }
 
-    /// Gives the next read: the stored setup once while the master harness picker needs it,
-    /// else the team, at most one at a time and one per refresh period.
+    /// Gives the next read: the stored setup while the master harness picker needs it, a
+    /// failed one again after a refresh period, else the team, at most one at a time and one
+    /// per refresh period.
     /// Takes the current time in milliseconds. Returns `SetupQuery::Setup` or
     /// `SetupQuery::Team`, or none while a read is out or nothing is due.
     pub fn next_query(&mut self, now_ms: i64) -> Option<SetupQuery> {
         self.now_ms = now_ms;
-        if self.master_pick.is_some() && self.stored.is_none() && !self.setup_waiting {
+        if self.master_pick.is_some()
+            && self.stored.is_none()
+            && !self.setup_waiting
+            && self
+                .setup_failed_ms
+                .is_none_or(|failed| now_ms - failed >= REFRESH_MS)
+        {
             self.setup_waiting = true;
             return Some(SetupQuery::Setup {
                 project: self.project.clone(),
@@ -345,15 +354,20 @@ impl TeamView {
                 match result {
                     Ok(SetupView::Setup(Some(stored))) => {
                         assert_eq!(stored.project_id, self.project);
+                        self.setup_failed_ms = None;
                         self.stored = Some(stored);
                     }
                     Ok(SetupView::Setup(None)) => {
+                        self.master_pick = None;
                         self.notice = Some(Notice::problem(
                             "This project has no saved setup, so its master harness cannot change.",
                         ));
                     }
                     Ok(_) => {}
-                    Err(code) => self.notice = Some(Notice::problem(team_plain(&code))),
+                    Err(code) => {
+                        self.setup_failed_ms = Some(self.now_ms);
+                        self.notice = Some(Notice::problem(team_plain(&code)));
+                    }
                 }
             }
             SetupQuery::Change { action, .. } if self.saving.as_ref() == Some(action) => {

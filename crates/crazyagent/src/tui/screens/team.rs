@@ -474,9 +474,6 @@ impl Team {
         }));
     }
 
-    /// Opens the master's terminal once the team lists it, and the new one
-    /// after the master moved to another account.
-    /// Input: the context. Output: none; attach and size requests are queued.
     /// Reads the team again when the graph shows another master agent than it showed last,
     /// so the master view's harness follows a live master that started again (OP-28).
     /// Input: the context. Output: none; a team read may be queued.
@@ -502,6 +499,9 @@ impl Team {
         }
     }
 
+    /// Opens the master's terminal once the team lists it, and the new one
+    /// after the master moved to another account.
+    /// Input: the context. Output: none; attach and size requests are queued.
     fn follow_master(&mut self, ctx: &mut Ctx) {
         if !self.master || self.live_on() == Some(false) {
             return;
