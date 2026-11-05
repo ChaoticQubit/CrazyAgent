@@ -127,6 +127,7 @@ fn write_file(root: &Path, path: &str, text: &str) {
 fn documents_with_unrelated_names_are_read_from_their_text_and_mapped_to_research() {
     let dir = rust_repo();
     let root = dir.path();
+    git_init(root);
     let outside = tempfile::tempdir().unwrap();
     std::fs::write(outside.path().join("token"), "SECRET_VALUE_7731").unwrap();
     write_file(
@@ -224,6 +225,7 @@ fn documents_with_unrelated_names_are_read_from_their_text_and_mapped_to_researc
 #[test]
 fn document_reading_stops_at_its_bounds_and_lists_the_rest() {
     let dir = rust_repo();
+    git_init(dir.path());
     for index in 0..60 {
         write_file(
             dir.path(),
@@ -254,6 +256,7 @@ fn document_reading_stops_at_its_bounds_and_lists_the_rest() {
     assert!(prompt.contains("docs/note-59.md (7177 bytes)"));
 
     let many = rust_repo();
+    git_init(many.path());
     for index in 0..45 {
         write_file(
             many.path(),

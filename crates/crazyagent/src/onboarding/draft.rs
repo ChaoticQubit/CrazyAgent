@@ -102,9 +102,11 @@ impl Drafted {
 
 /// The bounded project files a mapping agent is given: top-level entry
 /// names, the README, the build manifests, the code graph report, an
-/// existing overview, the text of the project's own documents and the paths
-/// and sizes of documents whose text is not read. No file is read through a
-/// link, and no `.env`, hidden, private or other unlisted file is read at all.
+/// existing overview, the text of the project's own documents, the paths
+/// and sizes of documents whose text is not read and whether the project's git
+/// could not say which files it ignores, so no document was read. No file is
+/// read through a link, and no `.env`, hidden, private, secret-named,
+/// git-ignored or other unlisted file is read at all.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Evidence {
     pub folder: String,
@@ -115,6 +117,7 @@ pub(crate) struct Evidence {
     pub overview: Option<String>,
     pub documents: Vec<Document>,
     pub unread: Vec<(String, u64)>,
+    pub ignores_unknown: bool,
 }
 
 /// One of the project's own documents as the mapping reads it: its path below the
@@ -364,7 +367,12 @@ pub(crate) fn gather(repo: &Path) -> Evidence {
     #[cfg(unix)]
     {
         let readme = evidence.readme.as_ref().map(|(name, _)| name.as_str());
-        (evidence.documents, evidence.unread) = documents::read(repo, readme);
+        match documents::read(repo, readme) {
+            Some((documents, unread)) => {
+                (evidence.documents, evidence.unread) = (documents, unread)
+            }
+            None => evidence.ignores_unknown = true,
+        }
     }
     assert!(evidence.entries.len() <= ENTRIES_MAX);
     assert!(evidence.manifests.len() <= MANIFESTS.len());
@@ -587,7 +595,11 @@ pub(crate) fn prompt(evidence: &Evidence, found: &MappingFacts) -> String {
             "\n## Existing overview (keep what is still true)\n\n{overview}\n"
         ));
     }
-    text.push_str(&documents::section(&evidence.documents, &evidence.unread));
+    text.push_str(&documents::section(
+        &evidence.documents,
+        &evidence.unread,
+        evidence.ignores_unknown,
+    ));
     text
 }
 
