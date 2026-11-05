@@ -73,7 +73,7 @@ fn failed_steps_keep_a_bounded_plain_reason() {
 fn manifests_alone_give_the_rust_facts() {
     let dir = rust_repo();
     git_init(dir.path());
-    let evidence = draft::gather(dir.path());
+    let evidence = draft::gather(dir.path(), &[]);
     let (facts, stack) = draft::found_facts(&evidence, dir.path());
     assert_eq!(facts.languages, ["Rust"]);
     assert_eq!(facts.build_commands, ["cargo build", "make build"]);
@@ -98,7 +98,7 @@ fn evidence_never_reads_env_files_or_follows_links() {
         dir.path().join("package.json"),
     )
     .unwrap();
-    let evidence = draft::gather(dir.path());
+    let evidence = draft::gather(dir.path(), &[]);
     let (found, _) = draft::found_facts(&evidence, dir.path());
     let prompt = draft::prompt(&evidence, &found);
     assert!(evidence.readme.is_none());
@@ -158,7 +158,7 @@ fn documents_with_unrelated_names_are_read_from_their_text_and_mapped_to_researc
     symlink(outside.path().join("token"), root.join("notes/linked.md")).unwrap();
     symlink(outside.path(), root.join("docs/linked-folder")).unwrap();
 
-    let evidence = draft::gather(root);
+    let evidence = draft::gather(root, &[]);
     let (found, stack) = draft::found_facts(&evidence, root);
     let prompt = draft::prompt(&evidence, &found);
     for text in [
@@ -234,7 +234,7 @@ fn document_reading_stops_at_its_bounds_and_lists_the_rest() {
             &format!("NOTE_{index:02} {}\n", "y".repeat(7 * 1024)),
         );
     }
-    let evidence = draft::gather(dir.path());
+    let evidence = draft::gather(dir.path(), &[]);
     let read: Vec<&str> = evidence
         .documents
         .iter()
@@ -265,7 +265,7 @@ fn document_reading_stops_at_its_bounds_and_lists_the_rest() {
             &format!("Short note {index}.\n"),
         );
     }
-    let evidence = draft::gather(many.path());
+    let evidence = draft::gather(many.path(), &[]);
     assert_eq!(evidence.documents.len(), 40);
     assert_eq!(evidence.unread.len(), 5);
     assert_eq!(evidence.unread[0].0, "notes/n-40.txt");
@@ -330,7 +330,7 @@ fn broken_git(root: &Path) {
 }
 
 fn mapping_prompt(root: &Path) -> String {
-    let evidence = draft::gather(root);
+    let evidence = draft::gather(root, &[]);
     let (found, _) = draft::found_facts(&evidence, root);
     draft::prompt(&evidence, &found)
 }
@@ -505,7 +505,7 @@ fn no_secret_like_or_git_ignored_name_reaches_the_mapping_prompt() {
         ),
     );
 
-    let evidence = draft::gather(root);
+    let evidence = draft::gather(root, &[]);
     for entry in ["Cargo.toml", "Makefile", "README.md", "notes/", "src/"] {
         assert!(
             evidence.entries.contains(&entry.to_owned()),
@@ -592,7 +592,7 @@ fn without_an_answer_from_git_no_document_is_read_and_the_prompt_says_so() {
     );
     write_file(root, "docs/spec.pdf", "%PDF-1.7");
 
-    let evidence = draft::gather(root);
+    let evidence = draft::gather(root, &[]);
     assert!(
         evidence.documents.is_empty() && evidence.unread.is_empty(),
         "documents were read without git saying which it ignores"
@@ -623,7 +623,7 @@ fn a_secret_like_package_main_is_never_an_entry_point() {
         "{\"main\": \"lib/apikeys.js\", \"scripts\": {\"build\": \"tsc\"}}\n",
     );
 
-    let evidence = draft::gather(root);
+    let evidence = draft::gather(root, &[]);
     let (found, _) = draft::found_facts(&evidence, root);
     assert_eq!(found.entry_points, ["src/main.rs"]);
     assert!(!mapping_prompt(root).to_lowercase().contains("apikeys"));
@@ -642,7 +642,7 @@ fn without_an_answer_from_git_no_entry_or_path_name_reaches_the_prompt() {
         "# Demo\n\nA small greeting tool. README_KEPT_1111\nDrafts go to private/plan.md.\n",
     );
 
-    let evidence = draft::gather(root);
+    let evidence = draft::gather(root, &[]);
     assert!(
         evidence.entries.is_empty(),
         "entries were listed without git saying which it ignores: {:?}",
@@ -1004,7 +1004,7 @@ fn a_graph_folder_swapped_for_a_link_mid_gather_is_never_followed() {
     let deadline = std::time::Instant::now() + GATHER_RACE_TIME;
     let (mut gathers, mut own, mut leaks) = (0_u64, 0_u64, 0_u64);
     while gathers < GATHER_RACE_MAX && std::time::Instant::now() < deadline && leaks == 0 {
-        match draft::gather(&repo).graph {
+        match draft::gather(&repo, &[]).graph {
             Some(text) if text.contains(OTHER_GRAPH_MARKER) => leaks += 1,
             Some(text) if text.contains("Own graph") => own += 1,
             _ => {}
@@ -1182,6 +1182,10 @@ fn the_graph_leaves_out_the_engine_files_in_the_project() {
 fn build_graph(repo: &Path) -> graph::GraphEnding {
     let graphify = service::installed_graphify()
         .expect("BLOCKED: graphify not installed (~/.local/bin or Homebrew)");
+    run_graph(repo, &graphify, &[])
+}
+
+fn run_graph(repo: &Path, graphify: &Path, hidden: &[std::path::PathBuf]) -> graph::GraphEnding {
     let scratch = tempfile::Builder::new()
         .prefix("ca-state-")
         .tempdir_in("/tmp")
@@ -1191,11 +1195,11 @@ fn build_graph(repo: &Path) -> graph::GraphEnding {
         std::fs::create_dir(state.join(folder)).unwrap();
     }
     graph::update(
-        &graphify,
+        graphify,
         repo,
         &state,
         "onboard-g-keep-out",
-        &[],
+        hidden,
         std::time::Duration::from_secs(300),
         &|| false,
     )
@@ -1341,6 +1345,139 @@ fn key_files_and_credential_stores_are_secret_like() {
 }
 
 #[test]
+fn shell_cloud_and_gpg_credential_files_are_secret_like() {
+    let missed: Vec<&str> = [
+        ".envrc",
+        "deploy/service-account.json",
+        "gcp/my-service-account-prod.json",
+        ".gnupg/trustdb.gpg",
+        "backup/secring.gpg",
+        "backup/pubring.kbx",
+        ".dockercfg",
+        "ops/.s3cfg",
+    ]
+    .into_iter()
+    .filter(|name| !draft::names::names_secret(name))
+    .collect();
+    assert!(missed.is_empty(), "not secret-like: {missed:?}");
+}
+
+#[test]
+fn a_graph_marked_under_another_keep_out_never_reaches_the_prompt() {
+    let dir = tempfile::Builder::new()
+        .prefix("ca-graph-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let repo = dir.path().canonicalize().unwrap();
+    git_init(&repo);
+    write_file(
+        &repo,
+        "src/shop.py",
+        "def shop_total(items):\n    return sum(items)\n",
+    );
+    write_file(
+        &repo,
+        "notes/rotation.md",
+        "# Rotation schedule\n\nROTATION_CANARY_2020\n",
+    );
+    assert_eq!(build_graph(&repo), graph::GraphEnding::Built);
+    assert!(
+        draft::gather(&repo, &[]).graph.is_some(),
+        "the graph marked under the current keep-out is read"
+    );
+
+    write_file(&repo, ".gitignore", "notes/\n");
+    let evidence = draft::gather(&repo, &[]);
+    assert!(
+        evidence.graph.is_none(),
+        "a graph marked under another keep-out was read: {:?}",
+        evidence.graph
+    );
+}
+
+fn graphed_then_hidden() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    Vec<std::path::PathBuf>,
+) {
+    let dir = tempfile::Builder::new()
+        .prefix("ca-graph-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let repo = dir.path().canonicalize().unwrap();
+    git_init(&repo);
+    write_file(
+        &repo,
+        "src/shop.py",
+        "def shop_total(items):\n    return sum(items)\n",
+    );
+    write_file(
+        &repo,
+        "clientroadmap/plan.md",
+        "# Clientroadmap acquisition heading\n\nACQUIRE_CANARY_6060\n",
+    );
+    write_file(
+        &repo,
+        "clientroadmap/deal.py",
+        "def acquisition_target_reader():\n    return 1\n",
+    );
+    assert_eq!(build_graph(&repo), graph::GraphEnding::Built);
+    let graph = std::fs::read_to_string(repo.join("graphify-out/graph.json")).unwrap();
+    assert!(graph.contains("acquisition_target_reader"), "{graph}");
+    let hidden = vec![repo.join("clientroadmap")];
+    (dir, repo, hidden)
+}
+
+fn assert_hidden_out_of_the_prompt(repo: &Path, hidden: &[std::path::PathBuf]) {
+    let evidence = draft::gather(repo, hidden);
+    assert!(
+        evidence.graph.is_none(),
+        "a graph built before the folder was hidden was read: {:?}",
+        evidence.graph
+    );
+    let (found, _) = draft::found_facts(&evidence, repo);
+    let prompt = draft::prompt(&evidence, &found);
+    for leaked in [
+        "clientroadmap",
+        "Clientroadmap",
+        "acquisition",
+        "ACQUIRE_CANARY_6060",
+    ] {
+        assert!(!prompt.contains(leaked), "{leaked} reached the prompt");
+    }
+}
+
+#[test]
+fn a_folder_hidden_after_the_graph_never_reaches_the_prompt_with_the_graph_off() {
+    let (_dir, repo, hidden) = graphed_then_hidden();
+    assert_hidden_out_of_the_prompt(&repo, &hidden);
+}
+
+#[test]
+fn a_folder_hidden_after_the_graph_never_reaches_the_prompt_when_graphify_is_missing() {
+    let (_dir, repo, hidden) = graphed_then_hidden();
+    assert_eq!(
+        run_graph(&repo, Path::new("/nonexistent/graphify"), &hidden),
+        graph::GraphEnding::Failed(graph::GRAPHIFY_MISSING)
+    );
+    assert_hidden_out_of_the_prompt(&repo, &hidden);
+}
+
+#[test]
+fn a_folder_hidden_after_the_graph_never_reaches_the_prompt_when_the_keep_out_is_refused() {
+    let (_dir, repo, hidden) = graphed_then_hidden();
+    write_file(&repo, ".gitignore", "it's/\n");
+    write_file(&repo, "it's/cache.py", "def cached():\n    return 1\n");
+    let graphify = service::installed_graphify()
+        .expect("BLOCKED: graphify not installed (~/.local/bin or Homebrew)");
+    assert_eq!(
+        run_graph(&repo, &graphify, &hidden),
+        graph::GraphEnding::Failed(graph::GRAPH_KEEP_OUT_REFUSED)
+    );
+    assert_hidden_out_of_the_prompt(&repo, &hidden);
+}
+
+#[test]
 fn the_graph_never_reads_inside_a_nested_repository_or_submodule() {
     let dir = tempfile::Builder::new()
         .prefix("ca-graph-")
@@ -1457,7 +1594,7 @@ fn a_folder_outside_git_maps_like_a_repository_without_ignores() {
         ),
     );
 
-    let evidence = draft::gather(root);
+    let evidence = draft::gather(root, &[]);
     assert!(!evidence.ignores_unknown);
     for entry in ["docs/", "src/", "Cargo.toml"] {
         assert!(
@@ -1556,7 +1693,7 @@ fn a_graph_made_before_the_keep_out_never_reaches_the_prompt() {
         "# Graph Report\n\n- Rotation schedule OLD_GRAPH_3030\n",
     );
 
-    let evidence = draft::gather(root);
+    let evidence = draft::gather(root, &[]);
     assert!(
         evidence.graph.is_none(),
         "a graph not made under the keep-out was read: {:?}",
@@ -1592,7 +1729,7 @@ fn a_graph_made_before_the_keep_out_is_rebuilt_from_nothing() {
     );
     let report = std::fs::read_to_string(repo.join("graphify-out/GRAPH_REPORT.md")).unwrap();
     assert!(!report.contains("OLD_GRAPH_3030"), "{report}");
-    let evidence = draft::gather(&repo);
+    let evidence = draft::gather(&repo, &[]);
     assert!(
         evidence
             .graph

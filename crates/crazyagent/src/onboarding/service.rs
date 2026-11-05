@@ -611,7 +611,7 @@ fn mapping_step(
     beat: &dyn Fn() -> bool,
 ) -> (Step, Drafted) {
     let layout = claimed.repo.join(CRAZYAGENT_DIRECTORY);
-    let evidence = draft::gather(&claimed.repo);
+    let evidence = draft::gather(&claimed.repo, &[]);
     let (found, stack) = draft::found_facts(&evidence, &claimed.repo);
     let mut base = claimed.drafted.clone();
     base.draft.pool = Some(claimed.pool.clone());

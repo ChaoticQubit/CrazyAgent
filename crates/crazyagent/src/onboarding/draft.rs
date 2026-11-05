@@ -382,7 +382,7 @@ fn clip(text: &str, bytes: usize) -> &str {
 /// Gathers the bounded evidence of the project folder `repo`, with no file name in it that
 /// looks like it holds a secret or that the project's git ignores, and the code graph only
 /// when the engine built it under the keep-out (MAP-2).
-pub(crate) fn gather(repo: &Path) -> Evidence {
+pub(crate) fn gather(repo: &Path, _hidden: &[std::path::PathBuf]) -> Evidence {
     let mut evidence = Evidence {
         folder: folder_name(repo),
         ..Evidence::default()
