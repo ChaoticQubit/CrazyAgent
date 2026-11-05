@@ -1184,10 +1184,20 @@ export interface ImportCommit {
   files: string[];
 }
 
+/** The try a running mapping step is on: its number of `tries`, when it started in ms since the
+ * epoch and the plain reason the try before it failed. */
+export interface MappingTry {
+  number: number;
+  tries: number;
+  started_ms: number;
+  earlier: string | null;
+}
+
 export interface OnboardingView {
   project_id: string;
   graph: OnboardingStep;
   mapping: OnboardingStep;
+  mapping_try?: MappingTry;
   name: string;
   draft: ProjectSetup;
   facts: MappingFacts;

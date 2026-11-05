@@ -667,6 +667,8 @@ fn claude_runs_its_own_app_under_a_known_session_and_keeps_its_transcript() {
         "--tools",
         "",
         "--disable-slash-commands",
+        "--system-prompt",
+        crate::harnesses::launch::CLAUDE_NO_TOOLS_PROMPT,
     ]));
     assert_eq!(built.argv, argv);
     for headless in [

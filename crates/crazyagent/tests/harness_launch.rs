@@ -388,6 +388,11 @@ fn claude_subscription_sets_both_config_directories_and_switches_tools() {
         args.windows(2).any(|pair| pair == ["--tools", ""]),
         "{args:?}"
     );
+    assert!(
+        args.windows(2)
+            .any(|pair| pair[0] == "--system-prompt" && pair[1].contains("with no tools")),
+        "{args:?}"
+    );
     assert!(!args.contains(&"--bare".to_owned()));
     let mut on = request("claude-code", home.path(), work.path(), subscription());
     on.tools = true;

@@ -1025,6 +1025,7 @@ async fn a_mapping_agent_that_runs_out_of_time_leaves_no_process() {
         OnboardingLimits {
             graph_time: Duration::from_secs(60),
             mapping_time: Duration::from_secs(8),
+            mapping_try_time: Duration::from_secs(8),
         },
         Duration::from_millis(50),
     );
@@ -1033,6 +1034,89 @@ async fn a_mapping_agent_that_runs_out_of_time_leaves_no_process() {
     assert_eq!(agent_runs(&agents, "onboard-m-"), 1);
     assert!(processes_with(&agents).is_empty());
     stop_service(service).await;
+    assert!(processes_with(&agents).is_empty());
+    bench.stop().await;
+}
+
+/// A mapping try that runs out of its own time or fails starts a fresh try on a new pick
+/// of the pool, with no process left behind: while a later try runs, the view names it and
+/// the earlier try's reason, and once all three failed the step names each try's reason,
+/// well inside the step's time.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_mapping_try_that_runs_out_of_time_starts_a_fresh_try_and_the_step_names_every_try() {
+    let mut bench = Bench::start(|_| {}).await;
+    let project = bench.start_onboarding().await;
+    let (hanging, _server) = hanging_endpoint();
+    let rejecting = rejecting_endpoint();
+    let endpoint = |port: u16, model: &str| ResearchAccount::Endpoint {
+        base_url: format!("http://127.0.0.1:{port}/v1"),
+        model: model.into(),
+    };
+    let accounts = [
+        endpoint(hanging, "hanging-model"),
+        endpoint(rejecting, "closed-model"),
+        endpoint(hanging, "hanging-model"),
+    ];
+    let picks = std::sync::atomic::AtomicUsize::new(0);
+    let (runner, agents) = bench.runner();
+    let started = Instant::now();
+    let service = OnboardingService::start(
+        runner,
+        move |_: &CredentialRef, _: &[ResearchHarness]| {
+            let pick = picks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            picked(&accounts[pick.min(accounts.len() - 1)])
+        },
+        || None,
+        OnboardingLimits {
+            graph_time: Duration::from_secs(60),
+            mapping_time: Duration::from_secs(120),
+            mapping_try_time: Duration::from_secs(8),
+        },
+        Duration::from_millis(50),
+    );
+    let mut third = None;
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let view = loop {
+        let view = bench.view(&project).await;
+        if let Some(progress) = view
+            .mapping_try
+            .clone()
+            .filter(|progress| progress.number == 3)
+        {
+            third = Some(progress);
+        }
+        if settled(&view.mapping) {
+            break view;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "mapping did not settle: {view:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    };
+    let took = started.elapsed();
+    stop_service(service).await;
+    assert_eq!(
+        view.mapping,
+        failed(
+            "Mapping agent failed 3 tries: try 1: Mapping agent ran out of time; try 2: Agent stopped: The model closed-model does not exist; try 3: Mapping agent ran out of time"
+        ),
+        "{view:?}"
+    );
+    assert_eq!(view.mapping_try, None);
+    assert!(
+        third.is_some(),
+        "the view never showed the third try while it ran"
+    );
+    let third = third.unwrap();
+    assert_eq!((third.number, third.tries), (3, 3));
+    assert_eq!(
+        third.earlier.as_deref(),
+        Some("Agent stopped: The model closed-model does not exist")
+    );
+    assert!(took < Duration::from_secs(60), "{took:?}");
+    assert_eq!(agent_runs(&agents, "onboard-m-"), 3);
     assert!(processes_with(&agents).is_empty());
     bench.stop().await;
 }
@@ -1700,6 +1784,7 @@ async fn a_failing_mapping_agent_reports_its_own_reason() {
         OnboardingLimits {
             graph_time: Duration::from_secs(60),
             mapping_time: Duration::from_secs(240),
+            mapping_try_time: Duration::from_secs(240),
         },
         Duration::from_millis(50),
     );
@@ -1710,9 +1795,9 @@ async fn a_failing_mapping_agent_reports_its_own_reason() {
     };
     assert_eq!(
         reason,
-        "Agent stopped: The model closed-model does not exist"
+        "Mapping agent failed 3 tries: Agent stopped: The model closed-model does not exist"
     );
-    assert_eq!(agent_runs(&agents, "onboard-m-"), 1);
+    assert_eq!(agent_runs(&agents, "onboard-m-"), 3);
     assert!(processes_with(&agents).is_empty());
     bench.stop().await;
 }
@@ -1751,6 +1836,7 @@ async fn agent_folders_left_by_an_earlier_project_with_the_same_id_never_block_a
         OnboardingLimits {
             graph_time: Duration::from_secs(240),
             mapping_time: Duration::from_secs(240),
+            mapping_try_time: Duration::from_secs(240),
         },
         Duration::from_millis(50),
     );
@@ -1759,7 +1845,9 @@ async fn agent_folders_left_by_an_earlier_project_with_the_same_id_never_block_a
     assert_eq!(view.graph, Step::Done, "{view:?}");
     assert_eq!(
         view.mapping,
-        failed("Agent stopped: The model closed-model does not exist"),
+        failed(
+            "Mapping agent failed 3 tries: Agent stopped: The model closed-model does not exist"
+        ),
         "{view:?}"
     );
     for name in &earlier {
@@ -1769,7 +1857,7 @@ async fn agent_folders_left_by_an_earlier_project_with_the_same_id_never_block_a
         );
     }
     assert_eq!(agent_runs(&agents, "onboard-g-"), 2);
-    assert_eq!(agent_runs(&agents, "onboard-m-"), 2);
+    assert_eq!(agent_runs(&agents, "onboard-m-"), 4);
     assert!(processes_with(&agents).is_empty());
     bench.stop().await;
 }
@@ -1799,7 +1887,7 @@ async fn a_step_that_cannot_start_records_its_cause_code() {
     let created = onboarding_created_ms(&bench.root);
     let taken = [
         format!("onboard-g-{PROJECT}-{created}-1"),
-        format!("onboard-m-{PROJECT}-{created}-2"),
+        format!("onboard-m-{PROJECT}-{created}-2-t1"),
     ];
     for name in &taken {
         leftover_agent(&agents, name);
