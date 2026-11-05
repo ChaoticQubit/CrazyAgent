@@ -13,6 +13,7 @@ use rustix::fs::{FlockOperation, Mode, OFlags};
 use serde::{Deserialize, Serialize};
 use std::ffi::OsString;
 use std::fs::{self, File};
+#[cfg(unix)]
 use std::io::Read;
 #[cfg(unix)]
 use std::io::Write;

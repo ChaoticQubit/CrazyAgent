@@ -1,8 +1,8 @@
 use super::launch::{
-    AccountBinding, CLAUDE_DENY_FLAG, CLAUDE_MCP_CONNECT_LIMIT, CLAUDE_NATIVE_TEAM_TOOLS,
-    CLAUDE_NO_MCP, CODEX_NO_USER_INPUT, LOCAL_PLACEHOLDER_KEY, LaunchError, LaunchRequest,
-    SANDBOX_EXEC, Secret, TOOLS_OFF_PATH, TOOLS_ON_PATH, claude_bare, claude_denied,
-    codex_configuration, failure, harness_id, key_file_text, validate,
+    AccountBinding, CLAUDE_DENY_FLAG, CLAUDE_MCP_CONNECT_LIMIT, CLAUDE_NO_MCP, CODEX_NO_USER_INPUT,
+    LOCAL_PLACEHOLDER_KEY, LaunchError, LaunchRequest, SANDBOX_EXEC, Secret, TOOLS_OFF_PATH,
+    TOOLS_ON_PATH, claude_bare, claude_denied, codex_configuration, failure, harness_id,
+    key_file_text, validate,
 };
 use crate::launch_context::{Installed, NativeTeam};
 use crate::sandbox::toolchains::{self, ToolHomes};
@@ -731,7 +731,7 @@ pub fn write_teammate_command(
         words.push(CLAUDE_BARE.to_owned());
     }
     words.push(CLAUDE_DENY_FLAG.to_owned());
-    words.extend(CLAUDE_NATIVE_TEAM_TOOLS.map(str::to_owned));
+    words.extend(super::launch::CLAUDE_NATIVE_TEAM_TOOLS.map(str::to_owned));
     let mut script = String::from("#!/bin/sh\nexec");
     for word in &words {
         if word.is_empty() || word.chars().any(char::is_control) {

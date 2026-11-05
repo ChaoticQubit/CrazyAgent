@@ -1,3 +1,5 @@
+#![cfg(unix)]
+
 use super::settings::{
     self, CoordSettings, Delivery, HarnessKind, Nudges, Overlaps, QuestionsTo, RoleSkills,
     SkillRole, SubagentMode,
