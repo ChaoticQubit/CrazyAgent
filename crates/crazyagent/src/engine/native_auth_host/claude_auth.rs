@@ -125,6 +125,11 @@ fn verified_status(
     Ok(account)
 }
 
+/// Reports how a Claude Code sign-in failed and retires its session: Cancelled when the owner
+/// cancelled, else Failed with the reason the error maps to. A channel the error already
+/// closed, such as a refused profile guard, takes no report, so the error itself is returned
+/// as the custodian's cause. Inputs: the session, the channel and the error. Output: the
+/// retirement, or the error.
 pub(in crate::engine) async fn finish_failure(
     session: CustodySession,
     channel: &mut NativeAuthCustodyChannel,
@@ -132,6 +137,9 @@ pub(in crate::engine) async fn finish_failure(
 ) -> Result<Retirement, EngineError> {
     if error.0 == "native_auth_child_cleanup_uncertain" {
         std::mem::forget(session);
+        return Err(error);
+    }
+    if channel.sealed() {
         return Err(error);
     }
     let observation = if error.0 == "native_auth_cancelled" {
