@@ -10,8 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const PROJECT: &str = "coord-delivery";
 const WAIT: Duration = Duration::from_secs(20);
 const READ_ONE_LINE: &str = "IFS= read -r line\nprintf '%s\\n' \"$line\" > \"$1\"\nexec sleep 60\n";
-const READ_LINES: &str =
-    "while IFS= read -r line; do printf '%s\\n' \"$line\" >> \"$1\"; done\nexec sleep 60\n";
+const READ_RAW: &str = "stty -icanon\nexec cat >> \"$1\"\n";
 const ASK: &str = "printf ' Do you want to proceed?\\n \\342\\235\\257 1. Yes\\n   2. No\\n\\n Esc to cancel\\n'\nexec sleep 60\n";
 
 struct Fixture {
@@ -956,7 +955,7 @@ fn a_full_window_of_owner_notices_never_holds_a_later_prompt() {
     )
     .unwrap();
     let out = fixture.base.join("typed.txt");
-    fixture.pane(&host, lead, READ_LINES, &out);
+    fixture.pane(&host, lead, READ_RAW, &out);
     for notice in 0..PENDING_MAX {
         fixture.send_keyed(
             Party::Engine,
@@ -1009,6 +1008,57 @@ fn a_full_window_of_owner_notices_never_holds_a_later_prompt() {
     until("the typed prompt", || {
         std::fs::read_to_string(&out).is_ok_and(|lines| lines.contains("Merge the branch"))
     });
+}
+
+/// owner-wake r2 OWAKE2-M1: a working Codex agent's notes go to its app-server bridge, an
+/// owner notice alone included, and are tried again while the bridge cannot take them; an
+/// idle agent's owner notice alone is neither bridged nor typed and waits with no retry.
+/// The steer itself needs a real Codex app (`tests/codex_bridge_live.rs`).
+#[test]
+fn a_working_codex_agents_notes_are_tried_on_its_bridge_and_an_idle_ones_notice_waits() {
+    let fixture = Fixture::new();
+    let nudged = fixture.agent("sub", "codex", "working", None);
+    let noticed = fixture.agent("sub", "codex", "working", None);
+    let idle = fixture.agent("sub", "codex", "idle", None);
+    let nudge = fixture.send_keyed(
+        Party::Engine,
+        nudged,
+        MessageKind::Note,
+        "CrazyAgent reminder: declare your work",
+        Some(&format!("adoption-edits_without_start_work-{nudged}")),
+        1,
+    );
+    let notices: Vec<MessageId> = [noticed, idle]
+        .iter()
+        .map(|agent| {
+            fixture.send_keyed(
+                Party::Engine,
+                *agent,
+                MessageKind::Note,
+                "Owner notice",
+                Some(&format!("{NOTICES_KEY}{agent}")),
+                1,
+            )
+        })
+        .collect();
+    let awake = BTreeSet::new();
+    let mut deliveries = Deliveries::default();
+    deliveries
+        .tick(
+            &fixture.db,
+            &project(),
+            2,
+            &reach(None, None, &fixture.base, &awake),
+        )
+        .unwrap();
+    assert_eq!(
+        deliveries.retry.keys().copied().collect::<Vec<_>>(),
+        [nudged, noticed],
+        "the working agents' notes were tried and wait for a retry, the idle one's notice waits"
+    );
+    for message in [nudge, notices[0], notices[1]] {
+        assert_eq!(fixture.receipt(message), "sent");
+    }
 }
 
 /// owner-wake r2 L1: agents with a waking message come first among a tick's recipients, so
