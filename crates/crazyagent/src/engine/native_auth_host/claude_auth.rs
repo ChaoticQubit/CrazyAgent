@@ -145,9 +145,9 @@ async fn finish_failure(
             }
             "native_auth_claude_profile_mismatch" => ClaudeAuthFailure::ProfileMismatch,
             "native_auth_claude_launch_failed"
-            | "native_auth_claude_keychain_unavailable"
             | "native_auth_host_executable_changed"
             | "native_auth_host_executable_unsafe" => ClaudeAuthFailure::LaunchFailed,
+            "native_auth_claude_keychain_unavailable" => ClaudeAuthFailure::KeychainUnavailable,
             "native_auth_claude_input_invalid" => ClaudeAuthFailure::InputInvalid,
             "native_auth_claude_destination_unsupported" => {
                 ClaudeAuthFailure::DestinationUnsupported
@@ -170,7 +170,11 @@ async fn finish_failure(
             .observe_claude(channel, ClaudeAuthObservation::Cancelled)
             .await?;
     }
-    session.seal_after_child_reaped()
+    if session.child_attempted() {
+        session.seal_after_child_reaped()
+    } else {
+        session.seal_without_effect()
+    }
 }
 
 /// Whether a Claude Code access token is inside Claude Code's refresh window, where an
@@ -241,7 +245,12 @@ pub(in crate::engine) async fn run(
         session.check(channel).await?,
         NativeAuthCustodyControl::Cancel
     ) {
-        return Err(EngineError("native_auth_cancelled".into()));
+        return finish_failure(
+            session,
+            channel,
+            EngineError("native_auth_cancelled".into()),
+        )
+        .await;
     }
     let home = session.profile_path()?;
     #[cfg(target_os = "macos")]
