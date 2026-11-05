@@ -3,7 +3,11 @@ use crate::config::{ModelAccess, ModelAuthentication, ModelEndpoint, ProviderQuo
 use std::collections::BTreeSet;
 
 async fn empty_accounts(case: &Case) -> Ui {
-    std::fs::write(&case.global, "timeout_ms = 1000\n").unwrap();
+    std::fs::write(
+        &case.global,
+        format!("timeout_ms = {}\n", ENGINE_WAIT.as_millis()),
+    )
+    .unwrap();
     case.restart().await;
     let ui = Ui::new(case).await;
     assert_eq!(catalog(case), ModelAccess::default());
