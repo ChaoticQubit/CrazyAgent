@@ -1215,7 +1215,7 @@ fn tool_use_section(
     skill: Option<&str>,
 ) -> String {
     let mut section = String::from(
-        "\n## Tools to use\n\nUse these tools of this launch as said here, also where other instructions name them another way.\n\n",
+        "\n## Tools to use\n\nThe owner's instructions and the sections above come first. This section only names the tools this launch has as you call them; where other instructions name one another way, use the name here.\n\n",
     );
     let off = off_tools
         .iter()

@@ -9511,23 +9511,21 @@ fn plain_text(path: &Path) -> Option<String> {
     Some(text)
 }
 
-/// What the last line of one ignore file naming the graph folder by a usual spelling says:
-/// ignored, or taken back into git by a `!` line. Takes the text. Returns the answer, none
-/// when no line names the folder.
+/// What the last line of one ignore file about the graph folder says, read as git reads it
+/// with only trailing spaces trimmed (T3-L1): ignored, for a line that is one of the usual
+/// spellings, or taken back into git, for any `!` line naming the folder in any pattern.
+/// Takes the text. Returns the answer, none when no line is about the folder.
 #[cfg(unix)]
 fn graph_rule(text: &str) -> Option<bool> {
     text.lines()
-        .map(str::trim)
-        .filter_map(|line| {
-            let (ignored, pattern) = match line.strip_prefix('!') {
-                Some(rest) => (false, rest),
-                None => (true, line),
-            };
-            matches!(
-                pattern,
+        .map(|line| line.trim_end_matches(' '))
+        .filter_map(|line| match line.strip_prefix('!') {
+            Some(pattern) => pattern.contains(GRAPH_FOLDER).then_some(false),
+            None => matches!(
+                line,
                 "graphify-out" | "graphify-out/" | "/graphify-out" | "/graphify-out/"
             )
-            .then_some(ignored)
+            .then_some(true),
         })
         .next_back()
 }
