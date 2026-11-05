@@ -240,6 +240,12 @@ pub trait Host: Send + Sync {
         false
     }
 
+    /// Keeps the last screen of an agent terminal that is about to end some other way than
+    /// `kill`, as when its keeper empties its sandbox first, so `attach` still opens how it
+    /// finished. Takes the name. Returns nothing; a host that keeps no screens, or a
+    /// terminal already gone, keeps none.
+    fn keep_last(&self, _agent: &AgentId) {}
+
     /// Types bytes into an agent terminal exactly as given, control keys included.
     /// Takes the name and at most `INPUT_BYTES_MAX` bytes.
     /// Returns once the host accepted them.
@@ -392,6 +398,10 @@ impl Host for OwnServer {
 
     fn snapshot(&self, agent: &AgentId) -> Result<TerminalStream, HostError> {
         self.0.snapshot(agent)
+    }
+
+    fn keep_last(&self, agent: &AgentId) {
+        self.0.keep_last(agent)
     }
 
     fn input(&self, agent: &AgentId, bytes: &[u8]) -> Result<(), HostError> {
