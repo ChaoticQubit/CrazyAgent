@@ -1115,7 +1115,12 @@ fn a_sandboxed_harness_git_runs_its_helpers_from_its_own_toolchain_not_the_xcrun
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stderr}");
     assert_eq!(String::from_utf8_lossy(&output.stdout), "upstream\n");
-    let helpers = real.parent().unwrap().parent().unwrap().join("libexec/git-core");
+    let helpers = real
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("libexec/git-core");
     assert!(
         stderr.contains(&format!(
             "resolved executable path from Darwin stack: {}\n",
