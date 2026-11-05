@@ -3072,10 +3072,10 @@ fn noted(fixture: &Fixture, text: &str) -> usize {
 }
 
 /// Each master session keeps its own harness conversation: switching sessions restarts the
-/// project's one live master in its worktree, a session it ran before continues by the
-/// stored conversation id and reads only the turns added after the resume, and a session
-/// whose conversation cannot continue, kept on another account or with its record gone,
-/// starts a fresh harness conversation seeded with what could be read, with a note saying so.
+/// project's one live master in its worktree, a session it ran before continues by its
+/// stored id and reads only turns added after the resume, and a session whose conversation
+/// cannot continue, kept on another account than this endpoint or with its record gone,
+/// starts a fresh conversation seeded with what could be read, with a note saying so.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_resumed_session_continues_its_own_harness_conversation_or_says_why_not() {
@@ -3177,6 +3177,16 @@ fn a_resumed_session_continues_its_own_harness_conversation_or_says_why_not() {
     switch_session(&fixture.connection, "s-two");
     fixture.until(
         &mut team,
+        "a session kept on another account starts its master again",
+        |f| launches(f, master).len() == 4 && host.alive().unwrap() == names(&[master]),
+    );
+    assert!(
+        !launches(&fixture, master)[3].contains("resume"),
+        "an endpoint master never resumes a conversation kept on another account: {:?}",
+        launches(&fixture, master)
+    );
+    fixture.until(
+        &mut team,
         "a session kept on another account starts fresh",
         |f| {
             noted(f, crate::master_sessions::FRESH_NOTE) == 1
@@ -3185,7 +3195,6 @@ fn a_resumed_session_continues_its_own_harness_conversation_or_says_why_not() {
         },
     );
     assert_eq!(live_turns(&fixture.connection), (3, false));
-    assert!(!launches(&fixture, master)[3].contains("resume"));
     let seeded = codex_instructions(&fixture, master);
     assert!(
         seeded.contains("Your earlier harness conversation in this session"),

@@ -2983,7 +2983,7 @@ impl TeamRuntime {
                 .or_default()
                 .push(Instant::now());
         }
-        match self.start_master(stored, &harness, &account, session.as_deref())? {
+        match self.start_master(stored, access, &harness, &account, session.as_deref())? {
             Ok((id, note)) => {
                 super::master::problem(&self.connection, project, None)?;
                 if let Some(note) = note {
@@ -3006,12 +3006,13 @@ impl TeamRuntime {
     /// conversation seeded with them, and its note says so. A session whose conversation ran
     /// on another harness follows the owner's On harness switch setting: Carry over seeds
     /// the new conversation with a bounded handoff, Start fresh seeds nothing, and either
-    /// note marks the switch. Takes the setup, the master harness, the account and the live
-    /// session. Returns the agent id with the note to show, or the plain reason it could not
-    /// start.
+    /// note marks the switch. Takes the setup, the model access, the master harness, the account
+    /// and the live session. Returns the agent id with the note to show, or the plain reason it
+    /// could not start.
     fn start_master(
         &mut self,
         stored: &StoredSetup,
+        access: &ModelAccess,
         harness: &str,
         account: &TeamAccount,
         session: Option<&str>,
@@ -3057,13 +3058,19 @@ impl TeamRuntime {
                     }
                 }
             }
-            (Some(session), None) => crate::master_sessions::resume_harness(
-                &self.connection,
-                project,
-                session,
-                launch,
-                account.connection.as_str(),
-            )?,
+            (Some(session), None) => {
+                let pool = match eligible_accounts(access, project, launch) {
+                    Accounts::Usable(pool) => pool,
+                    Accounts::NoPool => Vec::new(),
+                };
+                crate::master_sessions::resume_harness(
+                    &self.connection,
+                    project,
+                    session,
+                    launch,
+                    &|kept| super::resumes_on(&pool, account, kept),
+                )?
+            }
             (None, _) => ResumePlan::New,
         };
         if let ResumePlan::Resume {
