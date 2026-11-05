@@ -763,6 +763,28 @@ impl OnboardingPage {
                     .map(|line| styled(line, Role::Muted, theme)),
             );
         }
+        for found in &facts.research {
+            let files = sanitize(&found.files.join(", "));
+            lines.extend(
+                wrap(
+                    &format!("{} - Already in the repo: {files}", found.kind.label()),
+                    limit,
+                )
+                .into_iter()
+                .map(|line| styled(line, Role::Muted, theme)),
+            );
+        }
+        if !facts.documents.is_empty() {
+            lines.push(Line::default());
+            lines.push(styled("Project documents found:", Role::Heading, theme));
+            for path in &facts.documents {
+                lines.extend(
+                    wrap(&format!("- {}", sanitize(path)), limit)
+                        .into_iter()
+                        .map(Line::raw),
+                );
+            }
+        }
         lines.push(Line::default());
         if confirming {
             lines.push(ctx.loading("Saving the setup"));

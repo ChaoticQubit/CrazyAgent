@@ -139,7 +139,11 @@ fn documents_with_unrelated_names_are_read_from_their_text_and_mapped_to_researc
         "notes/q3-sizing.txt",
         "Serviceable market 2.1B dollars, growing 9% a year. MARKET_TEXT_8830\n",
     );
-    write_file(root, "docs/plan.md", "Release plan for sync. PLAN_TEXT_4410\n");
+    write_file(
+        root,
+        "docs/plan.md",
+        "Release plan for sync. PLAN_TEXT_4410\n",
+    );
     write_file(root, "docs/spec.pdf", "%PDF-1.7 PDF_BYTES_3390");
     write_file(root, "private/salaries.md", "PRIVATE_TEXT_6602");
     write_file(root, "docs/Private/board.md", "PRIVATE_TEXT_6602");

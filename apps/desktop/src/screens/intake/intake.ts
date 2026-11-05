@@ -1,7 +1,7 @@
 import { receiptState, type StoredSetup } from "../../api-projects";
 import type {
-  AddFolderMode, Dependency, DependencyName, DependencyState, FoundProject, FoundProjectState, GitHubRepo, GitHubStatus, IntentReceipt, OnboardingStep,
-  OnboardingView, PackEntry, PackGroup, PackState, ProjectsHome, SetupStatus,
+  AddFolderMode, Dependency, DependencyName, DependencyState, FoundProject, FoundProjectState, GitHubRepo, GitHubStatus, IntentReceipt, MappingFacts, OnboardingStep,
+  OnboardingView, PackEntry, PackGroup, PackState, ProjectsHome, ResearchKind, SetupStatus,
 } from "../../engine-client";
 import type { Loaded } from "../../state";
 import type { IconName, Tone } from "../../ui";
@@ -242,6 +242,15 @@ export function onboardingDraft(view: OnboardingView, stored: StoredSetup): Proj
     platforms: [...view.draft.platforms],
     research: [...view.draft.research],
   };
+}
+
+/** What the mapping read in the project's own documents: per research kind the files that already
+ * hold it, and the other project documents, each path made safe to show. Input: the mapping facts.
+ * Output: { research, documents }. */
+export function inRepo(facts: MappingFacts): { research: Partial<Record<ResearchKind, string[]>>; documents: string[] } {
+  const research: Partial<Record<ResearchKind, string[]>> = {};
+  for (const found of facts.research ?? []) research[found.kind] = found.files.map(displayText);
+  return { research, documents: (facts.documents ?? []).map(displayText) };
 }
 
 /** Tells whether the graph and mapping steps have stopped changing or the setup is already saved.
