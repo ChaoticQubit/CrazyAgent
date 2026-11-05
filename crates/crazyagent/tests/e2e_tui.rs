@@ -815,6 +815,7 @@ const KEYBOARD_QUERY: &[u8] = b"\x1b[?u";
 const KEYBOARD_PUSH: &[u8] = b"\x1b[>1u";
 const KEYBOARD_POP: &[u8] = b"\x1b[<1u";
 const KEYBOARD_REPLY: &[u8] = b"\x1b[?0u\x1b[?62;22c";
+const DEVICE_ONLY_REPLY: &[u8] = b"\x1b[?62;22c";
 const LEAVE_SCREEN: &[u8] = b"\x1b[?1049l";
 const SHIFT_ENTER: &[u8] = b"\x1b[13;2u";
 
@@ -1000,6 +1001,40 @@ fn shift_enter_auto_turns_the_keyboard_protocol_on_and_the_exit_turns_it_off() {
     assert!(
         pushes[0] < pops[0] && leaves.last().is_some_and(|leave| pops[0] < *leave),
         "popped after the push and before the alternate screen is left: {pushes:?} {pops:?} {leaves:?}"
+    );
+    engine.stop();
+}
+
+/// N-T1 C, Auto on a terminal without the protocol: it answers the query with its device
+/// attributes only, so the TUI never turns the protocol on and the exit has nothing to turn
+/// off; Ctrl-J still makes a new line in the bio.
+#[test]
+fn shift_enter_auto_leaves_a_terminal_without_the_protocol_as_it_is() {
+    let mut engine = Engine::start("ca-e2e-keys-");
+    let home = scratch("ca-e2e-keys-home-");
+    let mut pty = ScriptPty::launch(&engine.socket(), home.path());
+    pty.until_written(
+        "Auto asks the terminal for the keyboard protocol",
+        |written| !found(written, KEYBOARD_QUERY).is_empty(),
+    );
+    pty.type_bytes(DEVICE_ONLY_REPLY);
+    welcome_bio(&pty);
+    pty.type_bytes(b"\t\tfirst\nsecond");
+    pty.until("Ctrl-J makes a new line in the bio", |screen| {
+        bio_lines(screen, "first", "second")
+    });
+    pty.type_bytes(b"\x15");
+    pty.until("Ctrl-U clears the bio", |screen| !screen.contains("second"));
+    pty.type_bytes(b"\x11");
+    let written = pty.exited();
+    assert_eq!(found(&written, KEYBOARD_QUERY).len(), 1, "Auto asks once");
+    assert!(
+        !pushes_a_keyboard_protocol(&written),
+        "a terminal without the protocol never gets it turned on"
+    );
+    assert!(
+        found(&written, KEYBOARD_POP).is_empty(),
+        "nothing pushed, nothing popped"
     );
     engine.stop();
 }
