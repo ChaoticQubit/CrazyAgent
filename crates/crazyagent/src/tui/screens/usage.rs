@@ -205,8 +205,17 @@ fn shown<'a>(names: &'a HashMap<String, String>, key: &'a str) -> &'a str {
     names.get(key).map_or(key, String::as_str)
 }
 
-fn window_line(label: &str, window: Option<LimitWindow>, own: bool, now_ms: i64) -> String {
+fn window_line(
+    label: &str,
+    window: Option<LimitWindow>,
+    own: bool,
+    failed: bool,
+    now_ms: i64,
+) -> String {
     match window {
+        None if failed => {
+            format!("{label:<8}Not read. The last read failed, for the reason above.")
+        }
         None => format!("{label:<8}Not reported"),
         Some(window) => format!(
             "{label:<8}{:>3}% used  {}{}",
@@ -243,12 +252,19 @@ fn limits_lines(
     };
     head.push(Span::styled(read, theme.style(Role::Muted)));
     let mut lines = vec![Line::from(head)];
+    if let Some(code) = &limits.failure {
+        for part in wrap(&poll_failure(code), limit.saturating_sub(2).max(8)) {
+            lines.push(styled(format!("  {part}"), Role::Warning, theme));
+        }
+    }
+    let failed = limits.failure.is_some();
     lines.push(Line::raw(format!(
         "  {}",
         window_line(
             "5-hour",
             limits.five_hour_at(now_ms),
             limits.five_hour_reset_override_ms.is_some(),
+            failed,
             now_ms
         )
     )));
@@ -258,14 +274,10 @@ fn limits_lines(
             "Weekly",
             limits.weekly_at(now_ms),
             limits.weekly_reset_override_ms.is_some(),
+            failed,
             now_ms
         )
     )));
-    if let Some(code) = &limits.failure {
-        for part in wrap(&poll_failure(code), limit.saturating_sub(2).max(8)) {
-            lines.push(styled(format!("  {part}"), Role::Warning, theme));
-        }
-    }
     lines
 }
 

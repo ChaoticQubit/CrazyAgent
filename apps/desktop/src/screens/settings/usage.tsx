@@ -116,6 +116,15 @@ export function readLine(limits: AccountLimits, nowMs: number): string {
   return `${from} ${agoText(limits.observed_ms, nowMs)}`;
 }
 
+/** What a window with no current reading says: not read when the last read failed, whose
+ * cause the card's notice above gives, or not reported by the provider. Input: the account's
+ * last failure. Output: the window's state and its line. */
+export function missingWindow(failure: string | null): [string, string] {
+  return failure
+    ? ["Not read", "The last read failed, for the reason above."]
+    : ["Not reported", "The provider hasn't reported this window."];
+}
+
 /** An agent's name in the tables. Inputs: the engine's agent key and the project namer.
  * Output: "Agent 3", "Research harbor", "Master, Harbor Notes", "Onboarding" or the key. */
 export function agentLabel(key: string, project: (key: string) => string = (key) => key): string {
@@ -250,13 +259,14 @@ function WindowLine({ limits, kind, nowMs, pending, onSetReset }: {
   const override = kind === "five_hour" ? limits.five_hour_reset_override_ms : limits.weekly_reset_override_ms;
   const current = windowNow(kind === "five_hour" ? limits.five_hour : limits.weekly, override, nowMs);
   const label = kind === "five_hour" ? "5-hour" : "Weekly";
+  const [missing, why] = missingWindow(limits.failure);
   return <div className="usage-window">
     <div className="row usage-window-head">
       <strong>{label}</strong>
-      <span>{current ? `${Math.round(current.used_percent)}% used` : "Not reported"}</span>
+      <span>{current ? `${Math.round(current.used_percent)}% used` : missing}</span>
     </div>
     {current && <meter className="usage-meter" min={0} max={100} low={70} high={90} optimum={0} value={current.used_percent} aria-label={`${label} limit used`} />}
-    <span className="muted small">{current ? resetText(current.resets_at_ms, nowMs) : "The provider hasn't reported this window."}{override !== null ? " (your time)" : ""}</span>
+    <span className="muted small">{current ? resetText(current.resets_at_ms, nowMs) : why}{override !== null ? " (your time)" : ""}</span>
     <ResetEditor id={`usage-reset-${limits.account}-${kind}`} override={override} nowMs={nowMs} pending={pending}
       onSave={(at) => onSetReset(limits.account, kind, at)} />
   </div>;
