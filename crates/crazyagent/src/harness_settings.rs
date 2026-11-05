@@ -294,9 +294,10 @@ pub(crate) fn refusal(
 }
 
 /// Picks one unlocked key's value: the project override, then the app value, then the
-/// catalog default. A stored value the catalog in force refuses, such as one saved under
-/// an older catalog, is passed over. Inputs: the key, the app values and the project's,
-/// none at app scope. Output: the value and where it comes from.
+/// catalog default, null when the harness decides. A stored value the catalog in force
+/// refuses, such as one saved under an older catalog, is passed over. Inputs: the key, the
+/// app values and the project's, none at app scope. Output: the value and where it comes
+/// from.
 fn layered(key: &Key, app: &Stored, project: Option<&Stored>) -> (Value, Source) {
     let allowed = |value: &&Value| check_value(key, value).is_ok();
     let overridable = key.scope == KeyScope::AppAndProject;
@@ -310,7 +311,11 @@ fn layered(key: &Key, app: &Stored, project: Option<&Stored>) -> (Value, Source)
     if let Some(value) = app.get(&key.key).filter(allowed) {
         return (value.clone(), Source::App);
     }
-    assert!(check_value(key, &key.default).is_ok());
+    assert!(key.locked.is_none());
+    assert!(
+        check_value(key, &key.default).is_ok()
+            || (key.default.is_null() && key.harness_default.is_none())
+    );
     (key.default.clone(), Source::Default)
 }
 
@@ -390,7 +395,8 @@ pub(crate) fn setting(
 /// Resolves what one harness start applies: for a qualified version, every unlocked key a
 /// launch writes that the owner set, or whose default the engine picks over the harness's
 /// own (catalog default, then app, then project), then every locked key with the engine's
-/// value, last; an unqualified version gets only the locked keys. Inputs: the catalog, the
+/// value, last; an unqualified version gets only the locked keys. A key left to the
+/// harness default applies nothing until the owner sets a value. Inputs: the catalog, the
 /// installed version, the app values and the project's, none for an app-level start.
 /// Output: the values in apply order.
 pub fn resolve(
@@ -418,6 +424,7 @@ pub fn resolve(
         }
         let (value, source) = layered(key, app, project);
         if source != Source::Default || key.harness_default.is_some() {
+            assert!(!value.is_null(), "{}", key.key);
             owner.push(resolved(value, source));
         }
     }

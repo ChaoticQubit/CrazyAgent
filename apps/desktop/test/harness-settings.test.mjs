@@ -75,7 +75,7 @@ test("an ordinary key is a switch, select or field with help, Save once changed 
   assert.match(choice, /<select[^>]*>/);
   assert.match(choice, /<option value="light">light<\/option>/);
   const field = row(setting({ key: "cleanupPeriodDays", label: "Keep transcripts", type: "integer", min: 1, max: 365, default: 30, value: 30 }));
-  assert.match(field, /<input[^>]*inputmode="numeric"[^>]*value="30"/);
+  assert.match(field, /<input[^>]*inputMode="numeric"[^>]*value="30"/);
   assert.match(row(setting(), { busy: true, draft: false }), /<button[^>]*disabled=""[^>]*>.*Saving\.\.\.<\/button>/);
   assert.match(row(setting(), { note: "This value doesn't fit the setting." }), /role="status">This value doesn&#x27;t fit the setting.</);
 });
@@ -195,7 +195,7 @@ test("agent and catalog text shows through displayText, so hidden characters can
   assert.equal(client.valueText(false), "Off");
   assert.equal(client.valueText(12), "12");
   assert.equal(client.valueText(null), "Not set");
-  assert.throws(() => client.draftOf(setting({ value: null })), /an editable key has a value/);
+  assert.throws(() => client.draftOf(setting({ value: null, source: "app" })), /only the harness default leaves a key without a value/);
 });
 
 test("a stale change reads the page again, and every harness settings code reads as a sentence", () => {
@@ -263,4 +263,41 @@ test("the harness page has a route, and its commands go through the bridge with 
   const project = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
   assert.match(project, /\{ id: "harnesses", label: "Harnesses" \}/);
   assert.match(project, /<HarnessPage key=\{current.id\} harness=\{current.id\} projectId=\{data.id\} \/>/);
+});
+
+test("a key left to the harness default reads Harness default and saves only a value the owner picks", () => {
+  assert.equal(client.HARNESS_DEFAULT, "Harness default");
+  const effort = setting({ key: "model_reasoning_effort", label: "Reasoning effort", type: "enum", options: ["low", "high"], default: null, value: null });
+  assert.equal(client.shownValue(effort), "Harness default");
+  assert.equal(client.shownValue({ ...effort, source: "not_applied" }), "Not set", "only the default source reads as the harness default");
+  assert.equal(client.shownValue(setting()), "On");
+  assert.equal(client.draftOf(effort), "");
+  assert.equal(client.draftChanged(effort, ""), false);
+  assert.equal(client.draftChanged(effort, "high"), true);
+  assert.deepEqual(client.draftValue(effort, ""), { error: "Pick one of the options." });
+  assert.throws(() => client.draftOf({ ...effort, source: "app" }), /only the harness default leaves a key without a value/);
+  const choice = row(effort);
+  assert.match(choice, /<option value="" selected="">Harness default<\/option>/);
+  assert.match(choice, /<option value="high">high<\/option>/);
+  assert.doesNotMatch(choice, />Save</, "nothing to save while the harness decides");
+  assert.match(row(effort, { draft: "high" }), /<button[^>]*>Save<\/button>/);
+
+  const toggle = setting({ key: "analytics.enabled", label: "Analytics", default: null, value: null });
+  assert.equal(client.draftOf(toggle), "");
+  assert.equal(client.draftChanged(toggle, ""), false);
+  assert.equal(client.draftChanged(toggle, false), true);
+  assert.deepEqual(client.draftValue(toggle, false), { value: false });
+  assert.deepEqual(client.draftValue(toggle, ""), { error: "Turn this setting on or off." });
+  const unset = row(toggle);
+  assert.doesNotMatch(unset, /role="switch"/, "a switch cannot show that the harness decides");
+  assert.match(unset, /<option value="" selected="">Harness default<\/option><option value="on">On<\/option><option value="off">Off<\/option>/);
+  assert.match(row(toggle, { draft: false }), /<option value="off" selected="">Off<\/option>/);
+  assert.match(row(toggle, { draft: false }), /<button[^>]*>Save<\/button>/);
+  assert.match(row(setting({ value: false, source: "app", here: false })), /role="switch"[^>]*aria-checked="false"/, "a set value is a switch again");
+
+  const number = row(setting({ key: "history.max_bytes", label: "History size", type: "integer", min: 0, max: 100, default: null, value: null }));
+  assert.match(number, /placeholder="Harness default"/);
+  assert.match(number, /value=""/);
+  const shown = row(readOnly("Not qualified for Codex 0.49.0", { type: "enum", options: ["low"], default: null, value: null, source: "default" }));
+  assert.match(shown, /<span class="mono">Harness default<\/span>/);
 });

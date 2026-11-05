@@ -7,7 +7,7 @@
     Setting                           Value                             From                                            
   > Hide agent reasoning              On                                Project                                         
     Reasoning effort                  low                               Project                                         
-    Project doc limit                 32768                             Default                                         
+    Project doc limit                 0                                 ⊘ Locked                                        
     Status label                      Empty                             ⊘ Read-only                                     
     Sandbox                           Not set                           ⊘ Locked                                        
     Approvals                         never                             ⊘ Locked                                        

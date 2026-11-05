@@ -15,10 +15,10 @@ fn alpha() -> ProjectId {
     ProjectId::new("alpha").unwrap()
 }
 
-/// The fixture Codex catalog with the sandbox key locked and kept unset by the engine, as
-/// the catalog HS-3 reserves engine keys with. Output: the catalog; a fixture without the
-/// sandbox key fails the calling test.
-fn codex() -> Catalog {
+/// The fixture Codex catalog document with the sandbox key locked and kept unset by the
+/// engine, as the catalog HS-3 reserves engine keys with. Output: the document; a fixture
+/// without the sandbox key fails the calling test.
+fn codex_json() -> Value {
     let mut document = crate::harness_settings::tests::fixture_json();
     let sandbox = document["keys"]
         .as_array_mut()
@@ -27,6 +27,35 @@ fn codex() -> Catalog {
         .find(|key| key["key"] == "sandbox_mode")
         .unwrap();
     sandbox["locked"]["engine_value"] = Value::Null;
+    document
+}
+
+/// The fixture Codex catalog the pages read. Output: the parsed catalog.
+fn codex() -> Catalog {
+    catalog::parse(&serde_json::to_vec(&codex_json()).unwrap()).unwrap()
+}
+
+/// The fixture Codex catalog with its one integer key, the project doc limit the engine
+/// locks, turned into an ordinary key the owner edits, so a test can type numbers into a
+/// field. Output: the catalog; a fixture whose doc limit is not a locked integer fails the
+/// calling test.
+fn open_number() -> Catalog {
+    let mut document = codex_json();
+    let limit = document["keys"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|key| key["key"] == "project_doc_max_bytes")
+        .unwrap();
+    assert_eq!(limit["type"], "integer");
+    assert!(
+        limit["locked"].is_object(),
+        "the engine locks the doc limit"
+    );
+    limit["key"] = json!("model_context_window");
+    limit["label"] = json!("Context window");
+    limit["help"] = json!("Fixture: the most tokens the model reads at once.");
+    limit["locked"] = Value::Null;
     catalog::parse(&serde_json::to_vec(&document).unwrap()).unwrap()
 }
 
@@ -46,7 +75,19 @@ fn read(
     app: &[(&str, Value)],
     project: &[(&str, Value)],
 ) -> HarnessRead {
-    let catalog = codex();
+    read_with(codex(), installed, layer, app, project)
+}
+
+/// Builds what the engine reads for one catalog, as `read` does for the fixture. Inputs: the
+/// catalog, the installed version, the scope, the app values and the project values.
+/// Output: the joined read.
+fn read_with(
+    catalog: Catalog,
+    installed: Option<&str>,
+    layer: &Layer,
+    app: &[(&str, Value)],
+    project: &[(&str, Value)],
+) -> HarnessRead {
     let (app, project) = (stored(app), stored(project));
     let here = match layer {
         Layer::App => &app,
@@ -403,7 +444,7 @@ fn an_unqualified_version_shows_every_setting_read_only() {
     );
     let read_only = shown.matches("⊘ Read-only").count();
     let locked = shown.matches("⊘ Locked").count();
-    assert_eq!((read_only, locked), (4, 2), "{shown}");
+    assert_eq!((read_only, locked), (3, 3), "{shown}");
     shell.key(Key::Char(' '));
     assert_eq!(requests(&mut shell), vec![]);
     assert_eq!(
@@ -424,7 +465,14 @@ fn an_unqualified_version_shows_every_setting_read_only() {
 
 #[test]
 fn numbers_and_text_are_checked_before_they_are_sent() {
-    let mut shell = app_page(QUALIFIED);
+    let answer = read_with(
+        open_number(),
+        QUALIFIED,
+        &Layer::App,
+        &[("model_reasoning_effort", json!("high"))],
+        &[],
+    );
+    let mut shell = opened(Scope::App, 80, 24, answer);
     press(&mut shell, &[Key::Down, Key::Down, Key::Enter]);
     let shown = screen(&mut shell);
     assert!(shown.contains("New value"), "{shown}");
@@ -453,7 +501,7 @@ fn numbers_and_text_are_checked_before_they_are_sent() {
         vec![HarnessSettingsQuery::Set {
             harness: "codex".into(),
             project: None,
-            key: "project_doc_max_bytes".into(),
+            key: "model_context_window".into(),
             value: json!(4096),
             version: 0,
         }]
@@ -659,4 +707,54 @@ fn the_page_stands_for_its_place() {
         &mut context,
     );
     assert_eq!(list.crumbs(), ["Fieldnotes Mobile", "Harnesses"]);
+}
+
+#[test]
+fn a_key_left_to_the_harness_default_reads_harness_default() {
+    let mut document = crate::harness_settings::tests::fixture_json();
+    document["keys"][1]["default"] = Value::Null;
+    let parsed = catalog::parse(&serde_json::to_vec(&document).unwrap());
+    assert!(
+        parsed.is_ok(),
+        "an unlocked key may leave its default to the harness"
+    );
+    let catalog = parsed.unwrap();
+    let key = catalog.key("model_reasoning_effort").unwrap();
+    assert_eq!(
+        kind_sentence(key),
+        "One of minimal, low, medium, high. Default: Harness default."
+    );
+    let empty = Stored::new();
+    let settings = catalog
+        .keys
+        .iter()
+        .map(|key| {
+            setting(
+                &catalog,
+                QUALIFIED,
+                &Layer::App,
+                &key.key,
+                &empty,
+                &empty,
+                0,
+            )
+        })
+        .collect();
+    let page = catalog_page(&catalog, QUALIFIED, None).unwrap();
+    let answer = HarnessRead {
+        name: page.name,
+        installed: page.installed,
+        qualified: page.qualified,
+        keys: page.keys,
+        settings,
+    };
+    let mut shell = opened(Scope::App, 80, 24, answer);
+    let shown = screen(&mut shell);
+    let effort = shown
+        .lines()
+        .find(|line| line.contains("Reasoning effort"))
+        .unwrap_or_default();
+    assert!(effort.contains("Harness default"), "{shown}");
+    assert!(!effort.contains("Not set"), "{shown}");
+    assert!(shown.contains("Sandbox"), "{shown}");
 }

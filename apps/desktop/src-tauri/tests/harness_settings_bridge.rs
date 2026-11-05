@@ -107,6 +107,8 @@ fn the_window_passes_only_the_harness_project_key_value_and_version() {
 }
 
 /// Runs one flow against a real engine in a private temporary root, then stops the engine.
+/// The flow gets the root without symbolic links, as the engine keeps it, because
+/// `versioned::open` refuses a path through one and `/tmp` is one on macOS.
 /// Inputs: the root prefix and the flow. Output: none; a failed flow fails the test.
 async fn with_engine<F, T>(prefix: &str, flow: F)
 where
@@ -118,13 +120,15 @@ where
         .tempdir_in("/tmp")
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let config = engine_support::engine_config(root.path());
+    let base = std::fs::canonicalize(root.path()).unwrap();
+    assert!(base.is_absolute());
+    assert_eq!(base.file_name(), root.path().file_name());
+    let config = engine_support::engine_config(&base);
     let (_cancel, stopped) = tokio::sync::watch::channel(false);
-    let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+    let mut service = EngineService::start(&base, "e.sock", &config, &stopped)
         .await
         .unwrap();
-    let result =
-        tokio::time::timeout(Duration::from_secs(20), flow(root.path().to_path_buf())).await;
+    let result = tokio::time::timeout(Duration::from_secs(20), flow(base)).await;
     let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
     assert!(matches!(cleanup, Ok(Ok(()))));
     result.unwrap().unwrap();
@@ -490,8 +494,12 @@ async fn disagreeing(root: std::path::PathBuf) -> Result<(), Box<dyn Error>> {
     let at = wrong
         .settings
         .iter()
-        .position(|row| row.key == "project_doc_max_bytes")
+        .position(|row| row.key == "hide_agent_reasoning")
         .unwrap();
+    assert!(
+        matches!(wrong.settings[at].access, Access::Editable),
+        "the wrong-type case needs a key the catalog leaves editable"
+    );
     wrong.settings[at].effective = json!("many");
     let mut stray = values()?;
     let mut extra = stray.settings[0].clone();
@@ -644,4 +652,66 @@ async fn outdated(root: std::path::PathBuf) -> Result<(), Box<dyn Error>> {
 #[tokio::test]
 async fn a_stored_value_the_catalog_in_force_refuses_loads_as_a_row_the_owner_can_reset() {
     with_engine("ca-desk-hso-", outdated).await;
+}
+
+async fn unset(root: std::path::PathBuf) -> Result<(), Box<dyn Error>> {
+    let mut json: Value = serde_json::from_slice(FIXTURE)?;
+    json["keys"][1]["default"] = Value::Null;
+    let parsed = catalog::parse(&serde_json::to_vec(&json)?);
+    assert!(
+        parsed.is_ok(),
+        "an unlocked key may leave its default to the harness"
+    );
+    let unset = parsed?;
+    let read = page_under(&root, &unset);
+    assert!(
+        read.is_ok(),
+        "a row left to the harness default reaches the window"
+    );
+    let page = read?;
+    let effort = row(&page, "model_reasoning_effort").clone();
+    assert_eq!(effort.access, Access::Editable);
+    assert_eq!(
+        (&effort.value, effort.source, &effort.default),
+        (&Value::Null, "default", &Value::Null)
+    );
+    assert_eq!((&effort.here, effort.here_valid), (&Value::Null, true));
+    assert_eq!(serde_json::to_value(&effort)?["default"], Value::Null);
+
+    let db = versioned::open(&root)?;
+    let key = "model_reasoning_effort";
+    let high = json!("high");
+    written(store::set(
+        &db,
+        &unset,
+        QUALIFIED,
+        &Scope::App,
+        key,
+        &high,
+        effort.version,
+    )?)?;
+    let set = page_under(&root, &unset)?;
+    let saved = row(&set, key).clone();
+    assert_eq!((&saved.value, saved.source), (&high, "app"));
+    written(store::reset(
+        &db,
+        &unset,
+        QUALIFIED,
+        &Scope::App,
+        key,
+        saved.version,
+    )?)?;
+    let after = page_under(&root, &unset)?;
+    let cleared = row(&after, key);
+    assert_eq!((&cleared.value, cleared.source), (&Value::Null, "default"));
+    assert!(after.keys.iter().all(|row| row.here_valid));
+    Ok(())
+}
+
+/// Q24: a key whose catalog default is null, left to the harness, loads as an editable row
+/// with no value and the default source; a value the owner saves applies, and a reset
+/// returns the row to the harness default.
+#[tokio::test]
+async fn a_key_left_to_the_harness_default_reaches_the_window_as_unset() {
+    with_engine("ca-desk-hsu-", unset).await;
 }

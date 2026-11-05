@@ -66,6 +66,30 @@
       }
     },
     {
+      "key": "model_context_window",
+      "label": "Model context window",
+      "help": "Context window tokens available to the active model.",
+      "type": "integer",
+      "default": null,
+      "min": 0,
+      "max": 2147483647,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "model_auto_compact_token_limit",
+      "label": "Model auto compact token limit",
+      "help": "Token threshold that triggers automatic history compaction (unset uses model defaults).",
+      "type": "integer",
+      "default": null,
+      "min": 0,
+      "max": 2147483647,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
       "key": "model_auto_compact_token_limit_scope",
       "label": "Model auto compact token limit scope",
       "help": "Controls whether the auto-compaction threshold counts the full active context (`total`, the default) or only growth after the carried compaction-window prefix (`body_after_prefix`).",
@@ -75,6 +99,18 @@
         "body_after_prefix"
       ],
       "default": "total",
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "model_post_turn_compact_threshold_percent",
+      "label": "Model post turn compact threshold percent",
+      "help": "Compact history after a final response when active context reaches this percentage of the usable context window. Omit or set to `0` to disable turn-end compaction. The usual auto-compaction limits still apply.",
+      "type": "integer",
+      "default": null,
+      "min": 0,
+      "max": 100,
       "apply": "codex_config",
       "scope": "app_and_project",
       "locked": null
@@ -328,6 +364,16 @@
       "locked": null
     },
     {
+      "key": "analytics.enabled",
+      "label": "Analytics enabled",
+      "help": "Enable or disable analytics for this machine or profile. Setting this to `false` disables the built-in Statsig metrics exporter. Explicit OTLP metrics exporters remain active. When unset, the client default applies.",
+      "type": "bool",
+      "default": null,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
       "key": "instructions",
       "label": "Instructions",
       "help": "Reserved for future use; prefer `model_instructions_file` or `AGENTS.md`.",
@@ -398,6 +444,37 @@
       }
     },
     {
+      "key": "personality",
+      "label": "Personality",
+      "help": "Deprecated compatibility setting. `friendly` and `pragmatic` no longer select a style. `none` omits the built-in Personality section from model instructions; explicit instruction overrides are unchanged.",
+      "type": "enum",
+      "options": [
+        "none",
+        "friendly",
+        "pragmatic"
+      ],
+      "default": null,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "service_tier",
+      "label": "Service tier",
+      "help": "Preferred service tier for new turns. Use `fast` or another tier advertised by the active model; `fast` maps to the request value `priority`.",
+      "type": "enum",
+      "options": [
+        "default",
+        "priority",
+        "flex",
+        "fast"
+      ],
+      "default": null,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
       "key": "experimental_compact_prompt_file",
       "label": "Experimental compact prompt file",
       "help": "Load the compaction prompt override from a file (experimental).",
@@ -432,6 +509,18 @@
       "locked": null
     },
     {
+      "key": "skills.max_context_tokens",
+      "label": "Skills max context tokens",
+      "help": "Token budget for the available-skills catalog. Defaults to 2% of the model's context window. Explicit values are capped at `10000` tokens.",
+      "type": "integer",
+      "default": null,
+      "min": 1,
+      "max": 10000,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
       "key": "features.apps",
       "label": "Feature apps",
       "help": "Enable app (connector) integrations (stable; on by default). App and connector traffic is not controlled by the sandboxed-command network proxy or its domain allowlist.",
@@ -458,11 +547,33 @@
       }
     },
     {
+      "key": "features.context_management.experimental_mode",
+      "label": "Feature context management experimental mode",
+      "help": "Experimental context-management setting. The feature is not currently available.",
+      "type": "bool",
+      "default": null,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
       "key": "features.rollout_budget.enabled",
       "label": "Feature rollout budget enabled",
       "help": "Enable rollout budget tracking. This feature is under development and off by default. When enabled, set both `limit_tokens` and `reminder_at_remaining_tokens`.",
       "type": "bool",
       "default": false,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "features.rollout_budget.limit_tokens",
+      "label": "Feature rollout budget limit tokens",
+      "help": "Positive token limit for rollout budget tracking. Required when rollout budget is enabled.",
+      "type": "integer",
+      "default": null,
+      "min": 1,
+      "max": 2147483647,
       "apply": "codex_config",
       "scope": "app_and_project",
       "locked": null
@@ -572,6 +683,30 @@
         "reason": "Sub-agents start only through the engine.",
         "engine_value": null
       }
+    },
+    {
+      "key": "memories.version",
+      "label": "Memories version",
+      "help": "Select the local memory store. With memories enabled, Codex defaults to `v2` for a fresh home and `v1` if `$CODEX_HOME/memories/` exists. Explicitly setting `dual_write = false` keeps the default at `v1`.",
+      "type": "enum",
+      "options": [
+        "v1",
+        "v2"
+      ],
+      "default": null,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "memories.dual_write",
+      "label": "Memories dual write",
+      "help": "With `v1` selected, set to `true` to generate both stores while continuing to read `v1`. With `v2` selected, Codex writes only `v2`.",
+      "type": "bool",
+      "default": null,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
     },
     {
       "key": "memories.generate_memories",
@@ -777,6 +912,18 @@
         "reason": "The engine decides which tools an agent has.",
         "engine_value": false
       }
+    },
+    {
+      "key": "goals.max_goal_token_budget",
+      "label": "Goals max goal token budget",
+      "help": "Set the default token budget for new goals and the largest budget a goal can request. Omit to leave goals without a configured limit.",
+      "type": "integer",
+      "default": null,
+      "min": 1,
+      "max": 2147483647,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
     },
     {
       "key": "features.remote_plugin",
@@ -990,6 +1137,73 @@
       }
     },
     {
+      "key": "model_reasoning_effort",
+      "label": "Model reasoning effort",
+      "help": "Reasoning effort advertised by the selected model, such as `low`, `medium`, `high`, `xhigh`, `max`, or `ultra`. Available levels depend on the model and client.",
+      "type": "enum",
+      "options": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "default": null,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "plan_mode_reasoning_effort",
+      "label": "Plan mode reasoning effort",
+      "help": "Plan-mode-specific reasoning override using a level supported by the selected model. When unset, Plan mode uses its built-in preset default.",
+      "type": "enum",
+      "options": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max",
+        "ultra"
+      ],
+      "default": null,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "model_reasoning_summary",
+      "label": "Model reasoning summary",
+      "help": "Select reasoning summary detail or disable summaries entirely.",
+      "type": "enum",
+      "options": [
+        "auto",
+        "concise",
+        "detailed",
+        "none"
+      ],
+      "default": null,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "model_verbosity",
+      "label": "Model verbosity",
+      "help": "Optional GPT-5 Responses API verbosity override; when unset, the selected model/preset default is used.",
+      "type": "enum",
+      "options": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "default": null,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
       "key": "shell_environment_policy.inherit",
       "label": "Shell environment policy inherit",
       "help": "Baseline environment inheritance when spawning subprocesses.",
@@ -1063,6 +1277,18 @@
       "locked": null
     },
     {
+      "key": "tool_output_token_limit",
+      "label": "Tool output token limit",
+      "help": "Token budget for storing individual tool/function outputs in history.",
+      "type": "integer",
+      "default": null,
+      "min": 0,
+      "max": 2147483647,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
       "key": "thread_unload_delay_secs",
       "label": "Thread unload delay secs",
       "help": "Seconds the app server waits before unloading an inactive thread with no subscribers. Set to `0` to unload it as soon as it meets both conditions. Defaults to `60` seconds.",
@@ -1080,6 +1306,18 @@
       "help": "Maximum poll window in milliseconds for empty `write_stdin` polls (background terminal polling). Default: `300000` (5 minutes). Replaces the older `background_terminal_timeout` key.",
       "type": "integer",
       "default": 300000,
+      "min": 0,
+      "max": 2147483647,
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "history.max_bytes",
+      "label": "History max bytes",
+      "help": "If set, caps the history file size in bytes by dropping oldest entries.",
+      "type": "integer",
+      "default": null,
       "min": 0,
       "max": 2147483647,
       "apply": "codex_config",
@@ -1286,6 +1524,20 @@
         "never"
       ],
       "default": "auto",
+      "apply": "codex_config",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "tui.resume_cwd",
+      "label": "TUI resume folder",
+      "help": "Working directory to use when resuming or forking a session. When unset, Codex asks you to choose if your current directory differs from the session's saved directory.",
+      "type": "enum",
+      "options": [
+        "current",
+        "session"
+      ],
+      "default": null,
       "apply": "codex_config",
       "scope": "app_and_project",
       "locked": null

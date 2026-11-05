@@ -10,8 +10,8 @@ use serde_json::Value;
 use std::collections::BTreeSet;
 
 /// The catalogs the engine ships, by harness id, each a version-qualified JSON document
-/// built from the harness's published settings reference. rcli has none until its settings
-/// source is named.
+/// built from the harness's published settings reference; rcli's from the config sources
+/// of the upstream revision its bundled host is built from.
 pub const BUILTIN: &[(&str, &str)] = &[
     (
         "claude-code",
@@ -20,6 +20,10 @@ pub const BUILTIN: &[(&str, &str)] = &[
     (
         "codex",
         include_str!("../../assets/harness-settings/codex.json"),
+    ),
+    (
+        "rcli",
+        include_str!("../../assets/harness-settings/rcli.json"),
     ),
 ];
 
@@ -43,8 +47,10 @@ impl Catalog {
 
 /// One setting of a harness: its name, label and help, its type with options or bounds,
 /// the default a start uses, which is the harness's own unless `harness_default` names the
-/// harness's own beside the engine's choice, how a start applies it, whether a project may
-/// override it, and, for a key the engine enforces, the reason and the value the engine sets.
+/// harness's own beside the engine's choice, or null on an unlocked key whose harness
+/// default is only "unset", so a start passes nothing until the owner sets a value, how a
+/// start applies it, whether a project may override it, and, for a key the engine
+/// enforces, the reason and the value the engine sets.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Key {
@@ -216,6 +222,7 @@ fn key_ok(harness: &str, key: &Key) -> bool {
             && (locked.engine_value.is_null()
                 || (applied_at_launch(key.apply) && check_value(key, &locked.engine_value).is_ok()))
     });
+    let unset = key.default.is_null() && key.locked.is_none() && key.harness_default.is_none();
     let chosen = key.harness_default.as_ref().is_none_or(|own| {
         key.locked.is_none()
             && applied_at_launch(key.apply)
@@ -228,7 +235,7 @@ fn key_ok(harness: &str, key: &Key) -> bool {
         && shape
         && bytes
         && applies
-        && check_value(key, &key.default).is_ok()
+        && (unset || check_value(key, &key.default).is_ok())
         && locked
         && chosen
 }

@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import type { Result } from "../../api";
 import {
-  EFFECT_LINE, NO_CATALOG_LINE, STALE_LINE, canReset, draftChanged, draftOf, draftValue, harnessSettingsRefusal, isStale,
-  loadHarnessSettings, notReady, resetHarnessSetting, resetLabel, setHarnessSetting, settingGroups, sourceLine,
-  storedLine, valueText, versionLine,
+  EFFECT_LINE, HARNESS_DEFAULT, NO_CATALOG_LINE, STALE_LINE, canReset, draftChanged, draftOf, draftValue, harnessSettingsRefusal,
+  isStale, loadHarnessSettings, notReady, resetHarnessSetting, resetLabel, setHarnessSetting, settingGroups, shownValue,
+  sourceLine, storedLine, versionLine,
 } from "../../api-harness-settings";
 import type { HarnessSetting, HarnessSettingsPage, SettingDraft, SettingScope } from "../../api-harness-settings";
 import { useLoad, type Loaded } from "../../state";
@@ -36,17 +36,27 @@ export function rowId(key: string): string {
 
 function Control({ setting, id, draft, onDraft }: { setting: HarnessSetting; id: string; draft: SettingDraft; onDraft: (draft: SettingDraft) => void }) {
   const label = displayText(setting.label);
+  const unset = setting.value === null;
+  const harness = { value: "", label: HARNESS_DEFAULT };
+  if (setting.type === "bool" && unset) {
+    assert(draft === "" || typeof draft === "boolean", "a switch draft is a boolean or the harness default");
+    const options = [harness, { value: "on", label: "On" }, { value: "off", label: "Off" }];
+    const chosen = draft === "" ? "" : draft ? "on" : "off";
+    return <Select id={`${id}-control`} label={label} hideLabel value={chosen} options={options} onValue={(value) => onDraft(value === "" ? "" : value === "on")} />;
+  }
   if (setting.type === "bool") {
     assert(typeof draft === "boolean", "a switch draft is a boolean");
     return <Switch id={`${id}-control`} label={label} hideLabel checked={draft} onChecked={onDraft} />;
   }
   assert(typeof draft === "string", "a field draft is text");
   if (setting.type === "enum") {
-    const options = setting.options.map((option) => ({ value: option, label: displayText(option) }));
+    const listed = setting.options.map((option) => ({ value: option, label: displayText(option) }));
+    const options = unset ? [harness, ...listed] : listed;
     return <Select id={`${id}-control`} label={label} hideLabel value={draft} options={options} onValue={onDraft} />;
   }
   return <input id={`${id}-control`} className="input hs-input" aria-labelledby={`${id}-label`} aria-describedby={setting.help ? `${id}-help` : undefined}
-    inputMode={setting.type === "integer" ? "numeric" : undefined} value={draft} onChange={(event) => onDraft(event.target.value)} />;
+    inputMode={setting.type === "integer" ? "numeric" : undefined} placeholder={unset ? HARNESS_DEFAULT : undefined} value={draft}
+    onChange={(event) => onDraft(event.target.value)} />;
 }
 
 function ReadOnly({ setting, id, reason, scope, busy, note, onReset }: { setting: HarnessSetting; id: string; reason: string; scope: SettingScope; busy: boolean; note: string; onReset: () => void }) {
@@ -54,7 +64,7 @@ function ReadOnly({ setting, id, reason, scope, busy, note, onReset }: { setting
   assert(!locked || setting.source === "engine", "a locked key shows the engine's value");
   const stored = storedLine(setting);
   return <div className="hs-control">
-    <span className="hs-value">{locked && <Icon name="lock" size={14} label="Locked" />}<span className="mono">{valueText(setting.value)}</span></span>
+    <span className="hs-value">{locked && <Icon name="lock" size={14} label="Locked" />}<span className="mono">{shownValue(setting)}</span></span>
     <p id={`${id}-reason`} className="helper">{displayText(reason)}</p>
     {stored && <p className="helper hs-stored">{stored}</p>}
     {canReset(setting) && <span className="row"><Button variant="quiet" size="small" pending={busy} pendingLabel="Clearing..." onClick={onReset}>{resetLabel(setting, scope)}</Button></span>}

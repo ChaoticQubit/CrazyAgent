@@ -193,6 +193,17 @@ fn a_catalog_that_breaks_the_contract_is_refused() {
             }),
         ),
         (
+            "a null default on a locked key",
+            Box::new(|c| c["keys"][4]["default"] = Value::Null),
+        ),
+        (
+            "a null default beside a harness default",
+            Box::new(|c| {
+                c["keys"][1]["default"] = Value::Null;
+                c["keys"][1]["harness_default"] = json!("high");
+            }),
+        ),
+        (
             "too many keys",
             Box::new(|c| {
                 let key = c["keys"][0].clone();
@@ -499,7 +510,7 @@ fn every_catalog_parses_and_names_its_sources_and_versions() {
         .iter()
         .map(|(harness, _)| *harness)
         .collect();
-    assert_eq!(shipped, ["claude-code", "codex"]);
+    assert_eq!(shipped, ["claude-code", "codex", "rcli"]);
     let hosts = [
         "https://code.claude.com/docs/en/",
         "https://developers.openai.com/codex/",
@@ -552,8 +563,10 @@ fn every_catalog_parses_and_names_its_sources_and_versions() {
         );
         for key in &parsed.keys {
             assert!(applied_at_launch(key.apply), "{harness} {}", key.key);
+            let unset =
+                key.default.is_null() && key.locked.is_none() && key.harness_default.is_none();
             assert!(
-                check_value(key, &key.default).is_ok(),
+                unset || check_value(key, &key.default).is_ok(),
                 "{harness} {}",
                 key.key
             );
@@ -566,9 +579,250 @@ fn every_catalog_parses_and_names_its_sources_and_versions() {
             );
         }
     }
+    let rcli = catalog::builtin("rcli").unwrap().unwrap();
+    assert_eq!(rcli.qualified_versions, ["3.0.4"]);
+    assert!(installed::version_valid("3.0.4"));
     assert!(
-        catalog::builtin("rcli").unwrap().is_none(),
-        "the rcli catalog waits on its settings source (owner input P2)"
+        rcli.sources
+            .iter()
+            .all(|source| source.starts_with(RCLI_SOURCE))
+    );
+    let defaults: Vec<(&str, Value)> = rcli
+        .keys
+        .iter()
+        .map(|key| (key.key.as_str(), key.default.clone()))
+        .collect();
+    assert_eq!(
+        defaults,
+        [
+            ("model.provider", json!("")),
+            ("model.model", json!("")),
+            ("thinking.effort", Value::Null),
+            ("memory", json!("auto")),
+            ("memoryProfile", json!("code")),
+            ("notify", json!(false)),
+            ("verbose", json!(true)),
+            ("timerSeconds", Value::Null),
+        ]
+    );
+    let empty = Stored::new();
+    for key in &rcli.keys {
+        assert_eq!(key.apply, Apply::RcliConfig, "{}", key.key);
+        assert!(!applied_at_launch(key.apply));
+        let locked = key.key.starts_with("model.");
+        assert_eq!(
+            key.locked.as_ref().map(|lock| &lock.engine_value),
+            locked.then_some(&Value::Null),
+            "{}",
+            key.key
+        );
+        let row = setting(&rcli, None, &Scope::App, &key.key, &empty, &empty, 0);
+        let access = if locked {
+            assert_eq!(row.source, Source::Engine);
+            Access::Locked {
+                reason: key.locked.as_ref().unwrap().reason.clone(),
+            }
+        } else {
+            assert_eq!(row.source, Source::NotApplied);
+            Access::ReadOnly {
+                reason: NOT_APPLIED.into(),
+            }
+        };
+        assert_eq!(row.access, access, "{}", key.key);
+    }
+    for absent in ["apiKey", "apiUrl", "providers", "expert.enabled"] {
+        assert!(rcli.key(absent).is_none(), "rcli lists {absent}");
+    }
+    let applied = resolve(&rcli, Some("3.0.4"), &empty, Some(&empty));
+    assert_eq!(applied.len(), 2);
+    assert!(
+        applied
+            .iter()
+            .all(|value| value.source == Source::Engine && value.value.is_null())
+    );
+}
+
+/// Where the rcli catalog's keys were read: the config sources of the upstream revision
+/// `scripts/rcli/source-lock.json` pins, which the installed host is built from.
+const RCLI_SOURCE: &str = "https://github.com/Backboard-io/Backboard-R-CLI/blob/51bee17e02344de5fffd89523ce2b73d5042f216/src/config/";
+
+/// The keys of the shipped catalogs whose harness default is only "unset": each is listed
+/// unlocked with a null default, so the harness decides until the owner sets a value.
+const UNSET: [(&str, &[&str]); 2] = [
+    (
+        "codex",
+        &[
+            "model_context_window",
+            "model_auto_compact_token_limit",
+            "model_post_turn_compact_threshold_percent",
+            "analytics.enabled",
+            "personality",
+            "service_tier",
+            "skills.max_context_tokens",
+            "features.context_management.experimental_mode",
+            "features.rollout_budget.limit_tokens",
+            "memories.version",
+            "memories.dual_write",
+            "goals.max_goal_token_budget",
+            "model_reasoning_effort",
+            "plan_mode_reasoning_effort",
+            "model_reasoning_summary",
+            "model_verbosity",
+            "tool_output_token_limit",
+            "history.max_bytes",
+            "tui.resume_cwd",
+        ],
+    ),
+    (
+        "claude-code",
+        &[
+            "effortLevel",
+            "maxEffortLevel",
+            "promptCacheTtl",
+            "subagentPromptCacheTtl",
+            "bashEditDiffEnabled",
+            "keybindingFlavor",
+            "tui",
+            "viewMode",
+            "voiceEnabled",
+            "disableArtifact",
+            "disableDeepLinkRegistration",
+            "enableArtifact",
+        ],
+    ),
+];
+
+#[test]
+fn keys_whose_harness_default_is_unset_are_listed_with_a_null_default() {
+    for (harness, names) in UNSET {
+        let shipped = catalog::builtin(harness).unwrap().unwrap();
+        for name in names {
+            assert!(
+                shipped.key(name).is_some_and(|key| key.default.is_null()
+                    && key.locked.is_none()
+                    && key.harness_default.is_none()),
+                "{harness} {name}"
+            );
+        }
+        let unset = shipped
+            .keys
+            .iter()
+            .filter(|key| key.default.is_null())
+            .count();
+        assert_eq!(unset, names.len(), "{harness}");
+        let version = shipped.qualified_versions.first().map(String::as_str);
+        let empty = Stored::new();
+        let applied = resolve(&shipped, version, &empty, Some(&empty));
+        assert!(
+            applied
+                .iter()
+                .all(|value| !names.contains(&value.key.as_str()))
+        );
+        for name in names {
+            let row = setting(&shipped, version, &Scope::App, name, &empty, &empty, 0);
+            assert_eq!(
+                (&row.effective, row.source, &row.access),
+                (&Value::Null, Source::Default, &Access::Editable),
+                "{harness} {name}"
+            );
+        }
+    }
+    for (harness, name) in [
+        ("codex", "compact_prompt"),
+        ("codex", "tui.theme"),
+        ("codex", "features.rollout_budget.sampling_token_weight"),
+        ("codex", "features.rollout_budget.prefill_token_weight"),
+        ("claude-code", "language"),
+        ("claude-code", "outputStyle"),
+        ("claude-code", "timeZone"),
+        ("claude-code", "prUrlTemplate"),
+    ] {
+        let shipped = catalog::builtin(harness).unwrap().unwrap();
+        assert!(
+            shipped.key(name).is_none(),
+            "{harness} {name} takes free text or a fraction"
+        );
+    }
+}
+
+#[test]
+fn an_unset_default_applies_nothing_until_the_owner_sets_a_value() {
+    let mut document = fixture_json();
+    document["keys"][1]["default"] = Value::Null;
+    let parsed = catalog::parse(&serde_json::to_vec(&document).unwrap());
+    assert!(
+        parsed.is_ok(),
+        "an unlocked key may leave its default to the harness"
+    );
+    let catalog = parsed.unwrap();
+    let key = catalog.key("model_reasoning_effort").unwrap();
+    assert_eq!(key.default, Value::Null);
+    assert_eq!(
+        check_value(key, &Value::Null).unwrap_err().0,
+        "harness_settings_value_invalid",
+        "null is no value the owner sets; a reset returns to the harness default"
+    );
+    let version = Some("0.50.0");
+    let project = Scope::Project(crate::protocol::ProjectId::new("alpha").unwrap());
+    let empty = Stored::new();
+    let row = setting(&catalog, version, &Scope::App, &key.key, &empty, &empty, 0);
+    assert_eq!(
+        (&row.effective, row.source, &row.access),
+        (&Value::Null, Source::Default, &Access::Editable)
+    );
+    let unqualified = setting(&catalog, None, &Scope::App, &key.key, &empty, &empty, 0);
+    assert_eq!(
+        (&unqualified.effective, unqualified.source),
+        (&Value::Null, Source::Default)
+    );
+    let found = |values: &[Resolved]| {
+        values
+            .iter()
+            .find(|value| value.key == key.key)
+            .map(|value| (value.value.clone(), value.source))
+    };
+    assert_eq!(
+        found(&resolve(&catalog, version, &empty, Some(&empty))),
+        None
+    );
+    assert!(
+        resolve(&catalog, version, &empty, Some(&empty))
+            .iter()
+            .all(|value| !value.value.is_null() || value.source == Source::Engine)
+    );
+    let app = Stored::from([(key.key.clone(), json!("high"))]);
+    let here = Stored::from([(key.key.clone(), json!("low"))]);
+    assert_eq!(
+        found(&resolve(&catalog, version, &app, None)),
+        Some((json!("high"), Source::App))
+    );
+    assert_eq!(
+        found(&resolve(&catalog, version, &app, Some(&here))),
+        Some((json!("low"), Source::Project))
+    );
+    assert_eq!(
+        found(&resolve(&catalog, version, &empty, Some(&here))),
+        Some((json!("low"), Source::Project))
+    );
+    let overridden = setting(&catalog, version, &project, &key.key, &app, &here, 1);
+    assert_eq!(
+        (&overridden.effective, overridden.source),
+        (&json!("low"), Source::Project)
+    );
+    let refused = Stored::from([(key.key.clone(), json!("extreme"))]);
+    assert_eq!(found(&resolve(&catalog, version, &refused, None)), None);
+    let stale = setting(
+        &catalog,
+        version,
+        &Scope::App,
+        &key.key,
+        &refused,
+        &empty,
+        1,
+    );
+    assert_eq!(
+        (&stale.here, &stale.effective, stale.source),
+        (&Some(json!("extreme")), &Value::Null, Source::Default)
     );
 }
 

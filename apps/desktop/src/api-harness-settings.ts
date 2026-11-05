@@ -64,6 +64,10 @@ export interface HarnessSettingsPage {
 /** What the owner is editing in one row: the switch state, or the field or option text. */
 export type SettingDraft = boolean | string;
 
+/** What a key left to the harness shows as its value: the harness decides until the owner
+ * sets one. */
+export const HARNESS_DEFAULT = "Harness default";
+
 /** The longest text value the engine keeps, whatever bound a key names. */
 export const VALUE_BYTES_MAX = 1024;
 
@@ -181,6 +185,12 @@ export function valueText(value: SettingValue): string {
   return value === "" ? "Empty" : displayText(value);
 }
 
+/** A row's value as the owner reads it: Harness default when the catalog default leaves it to
+ * the harness, otherwise as `valueText` reads it. Input: the key. Output: the text. */
+export function shownValue(key: Pick<HarnessSetting, "value" | "source">): string {
+  return key.value === null && key.source === "default" ? HARNESS_DEFAULT : valueText(key.value);
+}
+
 /** Where the shown value comes from, in plain words for the page's scope. Inputs: the key and
  * the page's scope. Output: the line. */
 export function sourceLine(key: Pick<HarnessSetting, "source">, scope: SettingScope): string {
@@ -193,10 +203,13 @@ export function sourceLine(key: Pick<HarnessSetting, "source">, scope: SettingSc
   }
 }
 
-/** The draft an editable row starts from: the shown value, as the row's control holds it.
- * Input: the key. Output: the draft. */
-export function draftOf(key: Pick<HarnessSetting, "type" | "value">): SettingDraft {
-  assert(key.value !== null, "an editable key has a value");
+/** The draft an editable row starts from: the shown value, as the row's control holds it, or
+ * "" while the harness default decides. Input: the key. Output: the draft. */
+export function draftOf(key: Pick<HarnessSetting, "type" | "value" | "source">): SettingDraft {
+  if (key.value === null) {
+    assert(key.source === "default", "only the harness default leaves a key without a value");
+    return "";
+  }
   if (key.type === "bool") {
     assert(typeof key.value === "boolean", "a switch key holds a boolean");
     return key.value;
@@ -231,10 +244,12 @@ function wholeNumber(key: Pick<HarnessSetting, "min" | "max">, draft: string): {
   return { value };
 }
 
-/** Whether a row's draft differs from the shown value, so Save has something to send.
+/** Whether a row's draft differs from the shown value, so Save has something to send. A
+ * switch key left to the harness drafts "" until the owner picks On or Off.
  * Inputs: the key and the draft. Output: true when the owner changed the control. */
-export function draftChanged(key: Pick<HarnessSetting, "type" | "value">, draft: SettingDraft): boolean {
-  assert(typeof draft === (key.type === "bool" ? "boolean" : "string"), "a draft matches its control");
+export function draftChanged(key: Pick<HarnessSetting, "type" | "value" | "source">, draft: SettingDraft): boolean {
+  const unset = key.type === "bool" && key.value === null && draft === "";
+  assert(unset || typeof draft === (key.type === "bool" ? "boolean" : "string"), "a draft matches its control");
   return draft !== draftOf(key);
 }
 

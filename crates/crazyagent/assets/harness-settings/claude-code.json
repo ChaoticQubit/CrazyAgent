@@ -33,6 +33,22 @@
       "locked": null
     },
     {
+      "key": "effortLevel",
+      "label": "Effort level",
+      "help": "Set a default effort level for models you haven't saved a level for. Lower levels are faster and cheaper on straightforward tasks, and higher levels reason more deeply on complex problems.",
+      "type": "enum",
+      "options": [
+        "low",
+        "medium",
+        "high",
+        "xhigh"
+      ],
+      "default": null,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
       "key": "enforceAvailableModels",
       "label": "Enforce available models",
       "help": "The `/model` picker has a Default option, and `default` model setting describes the model it resolves to. An `availableModels` allowlist limits the models you can name, but with the default prefix matching it doesn't remap your account type's default, so Default can still resolve to a model outside the list. This key closes that gap. Requires Claude Code v2.1.175 or later.",
@@ -66,6 +82,23 @@
       "locked": null
     },
     {
+      "key": "maxEffortLevel",
+      "label": "Max effort level",
+      "help": "Cap the effort level a session can use, leaving lower levels available. Any higher level runs at the cap instead, including one from `/effort`, the `/model` picker, `--effort`, `CLAUDE_CODE_EFFORT_LEVEL`, a skill's or subagent's `effort` frontmatter, or the model's own default. Claude Code applies the cap itself before each request, so it holds on every provider, including Amazon Bedrock, Google Cloud's Agent Platform, and Microsoft Foundry. Requires Claude Code v2.1.267 or later.",
+      "type": "enum",
+      "options": [
+        "low",
+        "medium",
+        "high",
+        "xhigh",
+        "max"
+      ],
+      "default": null,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
       "key": "model",
       "label": "Model",
       "help": "Set the model every new session uses, so you don't have to pick one with `/model` each time. Setting it here doesn't stop you from switching mid-session. If your admin set an organization default model to override user selection, you get that model even when you set this key in user, project, or local settings.",
@@ -80,11 +113,39 @@
       }
     },
     {
+      "key": "promptCacheTtl",
+      "label": "Prompt cache TTL",
+      "help": "Choose how long the prompt cache holds the main conversation. This key applies to your interactive, `-p`, and Agent SDK turns, together with the helpers Claude Code runs inline with them. The one-hour lifetime keeps the cache warm across longer breaks, and the API bills each cache write at a higher rate than at the five-minute lifetime. Requires Claude Code v2.1.242 or later.",
+      "type": "enum",
+      "options": [
+        "5m",
+        "1h"
+      ],
+      "default": null,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
       "key": "showThinkingSummaries",
       "label": "Show thinking summaries",
       "help": "See summaries of Claude's extended thinking in interactive sessions. Set it if you want the full summaries when you expand thinking with `Ctrl+O`. When unset or `false`, the Anthropic API redacts thinking blocks and Claude Code shows a collapsed stub.",
       "type": "bool",
       "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "subagentPromptCacheTtl",
+      "label": "Subagent prompt cache TTL",
+      "help": "Choose how long the prompt cache holds the requests Claude Code makes outside the main conversation. This key applies to subagents, workflows, and Claude Code's own background and helper requests, such as compaction and session titles. The one-hour lifetime keeps the cache warm across longer breaks, and the API bills each cache write at a higher rate than at the five-minute lifetime. Requires Claude Code v2.1.242 or later.",
+      "type": "enum",
+      "options": [
+        "5m",
+        "1h"
+      ],
+      "default": null,
       "apply": "claude_settings",
       "scope": "app_and_project",
       "locked": null
@@ -569,6 +630,16 @@
       "locked": null
     },
     {
+      "key": "bashEditDiffEnabled",
+      "label": "Bash edit diff enabled",
+      "help": "Choose whether Claude Code records which files changed in a Git repository while a Bash command runs. When it records them, you see their diff in the terminal after the command, and your PostToolUse Bash hooks receive the changed-file list.",
+      "type": "bool",
+      "default": null,
+      "apply": "claude_settings",
+      "scope": "app",
+      "locked": null
+    },
+    {
       "key": "defaultShell",
       "label": "Default shell",
       "help": "Choose whether Bash or PowerShell runs the shell commands you type with the `!` prefix in the input box, the ones Claude Code runs directly and adds to the session.",
@@ -618,6 +689,20 @@
       "help": "Show emoji suggestions when you type `:` plus a shortcode in the prompt input, and replace a completed shortcode such as `:heart:` with its emoji. Set it to `false` to turn off both.",
       "type": "bool",
       "default": true,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "keybindingFlavor",
+      "label": "Keybinding flavor",
+      "help": "Deprecated since v2.1.261 and has no effect. The prompt's word-editing keys always follow readline conventions, as in Bash. Claude Code still accepts `keybindingFlavor`, so a settings file that sets it stays valid.",
+      "type": "enum",
+      "options": [
+        "classic",
+        "readline"
+      ],
+      "default": null,
       "apply": "claude_settings",
       "scope": "app_and_project",
       "locked": null
@@ -758,11 +843,50 @@
       "locked": null
     },
     {
+      "key": "tui",
+      "label": "TUI",
+      "help": "Choose the terminal UI renderer. Use `\"fullscreen\"` for the flicker-free alt-screen renderer with virtualized scrollback, or `\"default\"` for the classic main-screen renderer. Running `/tui fullscreen` or `/tui default` writes this key for you.",
+      "type": "enum",
+      "options": [
+        "default",
+        "fullscreen"
+      ],
+      "default": null,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
       "key": "verbose",
       "label": "Verbose",
       "help": "By default, the transcript collapses each tool call to a short summary, such as the command Claude ran and a line count of its output, and you press `Ctrl+O` to switch the whole transcript to the expanded view when you want the details. Set this key to `true` to show every tool call's full input and output inline as it happens, which is useful when you're debugging a hook, an MCP server, or a long shell command. Appears in `/config` as Verbose output.",
       "type": "bool",
       "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "viewMode",
+      "label": "View mode",
+      "help": "Set the transcript view Claude Code starts in: `\"default\"`, `\"verbose\"`, or `\"focus\"`. When set, it overrides both the sticky `/focus` selection and the `verbose` setting.",
+      "type": "enum",
+      "options": [
+        "default",
+        "verbose",
+        "focus"
+      ],
+      "default": null,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "voiceEnabled",
+      "label": "Voice enabled",
+      "help": "Deprecated since v2.1.92, when the `voice` object replaced it. Claude Code still reads it so older settings files keep working, but new configurations should set `voice.enabled`.",
+      "type": "bool",
+      "default": null,
       "apply": "claude_settings",
       "scope": "app_and_project",
       "locked": null
@@ -1138,11 +1262,44 @@
       "locked": null
     },
     {
+      "key": "disableArtifact",
+      "label": "Disable artifact",
+      "help": "Deprecated, and replaced by `enableArtifact`. Claude Code still honors `disableArtifact: true` as equivalent to `enableArtifact: false`, and ignores `disableArtifact: false`.",
+      "type": "bool",
+      "default": null,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "disableDeepLinkRegistration",
+      "label": "Disable deep link registration",
+      "help": "Stop Claude Code from registering the `claude-cli://` protocol handler with the operating system. Deep links let external tools open a Claude Code session with a pre-filled prompt. Set this in environments where protocol handler registration is restricted or managed separately.",
+      "type": "enum",
+      "options": [
+        "disable"
+      ],
+      "default": null,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
       "key": "disableRemoteControl",
       "label": "Disable remote control",
       "help": "Turn off Remote Control: Claude Code then refuses `claude remote-control`, the `--remote-control` flag, auto-start, and the in-session toggle, and reports that your organization's policy disabled it. Place it in managed settings for per-device MDM enforcement.",
       "type": "bool",
       "default": false,
+      "apply": "claude_settings",
+      "scope": "app_and_project",
+      "locked": null
+    },
+    {
+      "key": "enableArtifact",
+      "label": "Enable artifact",
+      "help": "Turn off the Artifact tool, which publishes session output as a private web page on claude.ai. When you turn the Artifacts row off in `/config`, Claude Code writes this key to your user settings, so you don't usually edit it by hand.",
+      "type": "bool",
+      "default": null,
       "apply": "claude_settings",
       "scope": "app_and_project",
       "locked": null

@@ -9,7 +9,7 @@
     Setting                   Value                   From                      
     Hide agent reasoning      Off                     Default                   
     Reasoning effort          high                    App                       
-    Project doc limit         32768                   Default                   
+    Project doc limit         0                       ⊘ Locked                  
     Status label              Empty                   Default                   
   > Sandbox                   Not set                 ⊘ Locked                  
     Approvals                 never                   ⊘ Locked                  

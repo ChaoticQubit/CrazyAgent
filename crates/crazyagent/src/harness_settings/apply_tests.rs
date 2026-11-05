@@ -478,8 +478,11 @@ fn an_owner_codex_setting_becomes_one_c_line() {
         let request = case.request("codex", tools);
         let pane = case.pane(&request, &settings);
         let plain = case.pane(&request, &Applied::default());
-        assert_eq!(pane[..owner.len()], owner);
-        assert_eq!(pane[owner.len()..], plain[..]);
+        let lead = if tools { "" } else { "--no-daemon" };
+        assert_eq!(pane[0], lead);
+        assert_eq!(plain[0], lead);
+        assert_eq!(pane[1..=owner.len()], owner);
+        assert_eq!(pane[owner.len() + 1..], plain[1..]);
         let headless = case.headless(&request, &settings);
         let plain = case.headless(&request, &Applied::default());
         assert_eq!(headless[..owner.len()], owner);
@@ -550,6 +553,82 @@ fn an_rcli_or_arg_setting_shows_not_applied_and_is_never_resolved() {
             .0,
         "harness_settings_catalog_invalid"
     );
+}
+
+#[test]
+fn a_key_left_to_the_harness_default_reaches_no_launch_until_the_owner_sets_it() {
+    let case = Case::new();
+    for (harness, name, apply) in [
+        ("codex", "fixture_unset", "codex_config"),
+        ("claude-code", "fixtureUnset", "claude_settings"),
+    ] {
+        let installed = installed(harness);
+        let mut document: Value = serde_json::from_str(fixture_text(harness)).unwrap();
+        document["keys"]
+            .as_array_mut()
+            .unwrap()
+            .push(json!({"key": name, "label": "Fixture",
+            "help": "Fixture key the harness decides.", "type": "enum",
+            "options": ["low", "high"], "default": null, "apply": apply,
+            "scope": "app_and_project", "locked": null}));
+        let parsed = catalog::parse(&serde_json::to_vec(&document).unwrap());
+        assert!(parsed.is_ok(), "{harness}: an unset default parses");
+        let catalog = parsed.unwrap();
+        let launches = |settings: &Applied| {
+            let mut seen = Vec::new();
+            for tools in [false, true] {
+                let request = case.request(harness, tools);
+                for arguments in [
+                    case.pane(&request, settings),
+                    case.headless(&request, settings),
+                ] {
+                    seen.push(launched(harness, &arguments, name));
+                }
+            }
+            assert_eq!(seen.len(), 4);
+            seen
+        };
+        let current = || resolved(&case.db, &catalog, installed, Some(&case.project)).unwrap();
+        let unset = current();
+        assert!(unset.values().iter().all(|value| value.key != name));
+        assert_eq!(launches(&unset), [None, None, None, None], "{harness}");
+        let null = store::set(
+            &case.db,
+            &catalog,
+            installed,
+            &Scope::App,
+            name,
+            &Value::Null,
+            0,
+        );
+        assert_eq!(null.unwrap_err().0, "harness_settings_value_invalid");
+        let mut versions = Vec::new();
+        for (scope, value) in [(Scope::App, json!("high")), (case.here(), json!("low"))] {
+            let written =
+                store::set(&case.db, &catalog, installed, &scope, name, &value, 0).unwrap();
+            let setting = match written {
+                Written::Saved { setting } => setting,
+                other => panic!("{harness} {name}: {other:?}"),
+            };
+            assert_eq!(
+                (&setting.effective, &setting.here),
+                (&value, &Some(value.clone()))
+            );
+            assert_eq!(
+                launches(&current()),
+                vec![Some(value.clone()); 4],
+                "{harness}"
+            );
+            versions.push((scope, setting.version));
+        }
+        for (scope, version) in versions.into_iter().rev() {
+            let written = store::reset(&case.db, &catalog, installed, &scope, name, version);
+            assert!(matches!(written, Ok(Written::Saved { .. })), "{harness}");
+        }
+        let reset = current();
+        assert!(reset.values().iter().all(|value| value.key != name));
+        assert_eq!(launches(&reset), [None, None, None, None], "{harness}");
+    }
 }
 
 #[test]

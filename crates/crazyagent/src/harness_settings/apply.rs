@@ -9,8 +9,9 @@ use std::path::Path;
 /// as the app value or the project override, and those whose default the engine picks over
 /// the harness's own, in catalog order, and the locked keys whose engine value the catalog
 /// names, which every launch must already use. A locked key is never among the owner's
-/// values, and each launch builder writes its own values over these, last. The default
-/// applies nothing, so the harness starts with the engine's values only.
+/// values, nor is a key left to the harness default, and each launch builder writes its
+/// own values over these, last. The default applies nothing, so the harness starts with
+/// the engine's values only.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Applied {
     harness: Option<String>,
@@ -26,6 +27,7 @@ impl Applied {
         let (locked, values): (Vec<Resolved>, Vec<Resolved>) = resolved
             .into_iter()
             .partition(|value| value.source == Source::Engine);
+        assert!(values.iter().all(|value| !value.value.is_null()));
         assert!(values.iter().all(|value| {
             catalog.key(&value.key).is_some_and(|key| {
                 (matches!(value.source, Source::App | Source::Project)
