@@ -72,6 +72,7 @@ fn failed_steps_keep_a_bounded_plain_reason() {
 #[test]
 fn manifests_alone_give_the_rust_facts() {
     let dir = rust_repo();
+    git_init(dir.path());
     let evidence = draft::gather(dir.path());
     let (facts, stack) = draft::found_facts(&evidence, dir.path());
     assert_eq!(facts.languages, ["Rust"]);
@@ -419,6 +420,97 @@ fn secret_named_documents_are_neither_read_nor_listed() {
 }
 
 #[test]
+fn no_secret_like_or_git_ignored_name_reaches_the_mapping_prompt() {
+    let dir = rust_repo();
+    let root = dir.path();
+    git_init(root);
+    write_file(root, ".gitignore", "private/\nlocal-notes.md\n");
+    write_file(
+        root,
+        "notes/api-keys.md",
+        "SECRET_TEXT_9001 key=sk-test-0000\n",
+    );
+    write_file(
+        root,
+        "notes/ui-direction.md",
+        "Dark theme first. UI_TEXT_2718\nThe keys for it sit in notes/api-keys.md.\n",
+    );
+    write_file(root, "private/plan.md", "PRIVATE_TEXT_1618\n");
+    write_file(root, "secrets.txt", "SECRET_TEXT_9001\n");
+    write_file(root, "local-notes.md", "PRIVATE_TEXT_1618\n");
+    write_file(
+        root,
+        "README.md",
+        concat!(
+            "# Demo\n\nA small greeting tool. README_KEPT_1111\n",
+            "See notes/ui-direction.md for the look.\n",
+            "The keys sit in `notes/api-keys.md`.\n",
+            "Drafts go to [the plan](private/plan.md).\n",
+        ),
+    );
+    write_file(
+        root,
+        "Makefile",
+        "build:\n\tcargo build\ntest:\n\tcargo test\nrelease:\n\tcp config/secrets.toml dist/\n",
+    );
+    write_file(
+        root,
+        "graphify-out/GRAPH_REPORT.md",
+        concat!(
+            "# Graph Report\n\n## God Nodes\n",
+            "- api-keys.md\n- notes/api-keys.md\n- private/plan.md\n- ApiKeys\n",
+            "- ui-direction.md GRAPH_KEPT_4242\n",
+        ),
+    );
+    write_file(
+        root,
+        ".crazyagent/overview.md",
+        concat!(
+            "# Project overview\n\nGreets people. OVERVIEW_KEPT_3030\n",
+            "The code graph mentions an `api-keys.md` node, probably here. It was not read.\n",
+        ),
+    );
+
+    let evidence = draft::gather(root);
+    for entry in ["Cargo.toml", "Makefile", "README.md", "notes/", "src/"] {
+        assert!(
+            evidence.entries.contains(&entry.to_owned()),
+            "the entry {entry} is missing"
+        );
+    }
+    for entry in ["secrets.txt", "local-notes.md", "private/"] {
+        assert!(
+            !evidence.entries.contains(&entry.to_owned()),
+            "the entry {entry} is listed"
+        );
+    }
+    let prompt = mapping_prompt(root);
+    for text in [
+        "README_KEPT_1111",
+        "See notes/ui-direction.md for the look.",
+        "UI_TEXT_2718",
+        "GRAPH_KEPT_4242",
+        "OVERVIEW_KEPT_3030",
+        "make build",
+    ] {
+        assert!(prompt.contains(text), "{text} is missing from the prompt");
+    }
+    let lower = prompt.to_lowercase();
+    for name in [
+        "api-keys",
+        "apikeys",
+        "secret_text_9001",
+        "private/plan.md",
+        "private_text_1618",
+        "secrets.txt",
+        "secrets.toml",
+        "local-notes.md",
+    ] {
+        assert!(!lower.contains(name), "{name} reached the mapping prompt");
+    }
+}
+
+#[test]
 fn hard_linked_documents_are_neither_read_nor_listed() {
     let dir = rust_repo();
     let root = dir.path();
@@ -470,6 +562,11 @@ fn without_an_answer_from_git_no_document_is_read_and_the_prompt_says_so() {
         evidence.documents.is_empty() && evidence.unread.is_empty(),
         "documents were read without git saying which it ignores"
     );
+    assert!(
+        evidence.entries.is_empty(),
+        "entries were listed without git saying which it ignores: {:?}",
+        evidence.entries
+    );
     let prompt = mapping_prompt(root);
     assert!(!prompt.contains("PLAN_TEXT_4410") && !prompt.contains("docs/spec.pdf"));
     assert!(
@@ -478,6 +575,46 @@ fn without_an_answer_from_git_no_document_is_read_and_the_prompt_says_so() {
         ),
         "the prompt does not say why no document was read"
     );
+}
+
+#[test]
+fn a_secret_like_package_main_is_never_an_entry_point() {
+    let dir = rust_repo();
+    let root = dir.path();
+    git_init(root);
+    write_file(
+        root,
+        "package.json",
+        "{\"main\": \"lib/apikeys.js\", \"scripts\": {\"build\": \"tsc\"}}\n",
+    );
+
+    let evidence = draft::gather(root);
+    let (found, _) = draft::found_facts(&evidence, root);
+    assert_eq!(found.entry_points, ["src/main.rs"]);
+    assert!(!mapping_prompt(root).to_lowercase().contains("apikeys"));
+}
+
+#[test]
+fn without_an_answer_from_git_no_entry_or_path_name_reaches_the_prompt() {
+    let dir = rust_repo();
+    let root = dir.path();
+    write_file(root, ".gitignore", "private/\n");
+    write_file(root, "private/plan.md", "PRIVATE_TEXT_1618\n");
+    write_file(
+        root,
+        "README.md",
+        "# Demo\n\nA small greeting tool. README_KEPT_1111\nDrafts go to private/plan.md.\n",
+    );
+
+    let evidence = draft::gather(root);
+    assert!(
+        evidence.entries.is_empty(),
+        "entries were listed without git saying which it ignores: {:?}",
+        evidence.entries
+    );
+    let prompt = mapping_prompt(root);
+    assert!(prompt.contains("README_KEPT_1111"));
+    assert!(!prompt.contains("private/plan.md"));
 }
 
 #[test]
@@ -592,6 +729,50 @@ fn only_an_overview_this_engine_wrote_is_shown_as_the_mapping_agents() {
 }
 
 #[test]
+fn a_shown_overview_holds_no_secret_like_path() {
+    let dir = rust_repo();
+    let layout = dir.path().join(CRAZYAGENT_DIRECTORY);
+    std::fs::create_dir(&layout).unwrap();
+    let mut database = Connection::open_in_memory().unwrap();
+    crate::storage::plugins::initialize(&database).unwrap();
+    crate::storage::setup::initialize(&database).unwrap();
+    crate::project_setup::initialize(&database).unwrap();
+    initialize(&database).unwrap();
+    database
+        .execute(
+            "INSERT INTO onboarding(project,repo,pool,graph_state,mapping_state,drafted,created_ms,updated_ms)
+             VALUES ('demo',?1,'main','done','done',?2,1,1)",
+            params![
+                dir.path().to_str().unwrap(),
+                serde_json::to_string(&Drafted::new("demo".into(), &pool())).unwrap()
+            ],
+        )
+        .unwrap();
+    let shown = |database: &mut Connection| {
+        let tx = database.transaction().unwrap();
+        let view = status(&tx, &ProjectId::new("demo").unwrap())
+            .unwrap()
+            .unwrap();
+        (view.overview, view.folder_overview)
+    };
+    let leaked = concat!(
+        "# Project overview\n\nGreets people.\n",
+        "The code graph mentions an `api-keys.md` node, probably here. It was not read.\n\n",
+        "## Open questions\n\n- Do docs/Api_Key.txt and config/secrets.toml hold keys?\n",
+        "- Is notes/ui-direction.md current?",
+    );
+    let screened = concat!(
+        "# Project overview\n\nGreets people.\n\n",
+        "## Open questions\n\n",
+        "- Is notes/ui-direction.md current?",
+    );
+    std::fs::write(layout.join("overview.md"), leaked).unwrap();
+    assert_eq!(shown(&mut database), (None, Some(screened.to_owned())));
+    seal_overview(&database, dir.path(), leaked).unwrap();
+    assert_eq!(shown(&mut database), (Some(screened.to_owned()), None));
+}
+
+#[test]
 fn saving_an_unchanged_draft_leaves_the_file_and_a_changed_one_replaces_it() {
     use std::os::unix::fs::MetadataExt;
     let dir = rust_repo();
@@ -682,6 +863,69 @@ fn a_mapping_answer_without_an_overview_fails_and_keeps_its_fields() {
         Step::Done,
         "an overview kept from before still counts"
     );
+}
+
+#[test]
+fn a_secret_like_path_the_agent_writes_is_neither_stored_nor_written() {
+    let dir = rust_repo();
+    let layout = dir.path().join(CRAZYAGENT_DIRECTORY);
+    std::fs::create_dir(&layout).unwrap();
+    let text = concat!(
+        "## Structure\n\nA CLI that prints greetings.\n",
+        "The code graph mentions an `api-keys.md` node, probably here.\n\n",
+        "## Project documents\n\n- notes/ui-direction.md covers the look.\n",
+        "- **config/secrets.toml** and ./notes/api-keys.md were not read.\n\n",
+        "```json\n{\"about\": \"Greets people; keys in notes/api-keys.md.\", ",
+        "\"tech_stack\": [\"Rust\", \"config/secrets.toml\"], \"languages\": [\"Rust\"], ",
+        "\"build_commands\": [\"cargo build\", \"cat notes/api-keys.md\"], ",
+        "\"test_commands\": [\"cargo test\", \"source .env && cargo test\"], ",
+        "\"entry_points\": [\"src/main.rs\", \"config/secrets.toml\"], ",
+        "\"research\": [{\"kind\": \"competitor_research\", ",
+        "\"files\": [\"docs/rivals.md\", \"notes/api-keys.md\"]}], ",
+        "\"documents\": [\"notes/ui-direction.md\", \"./notes/api-keys.md\", \"docs/Api_Key.txt\"]}\n",
+        "```\n",
+    );
+
+    let answer = draft::parse_answer(text);
+    assert!(answer.overview.contains("A CLI that prints greetings."));
+    assert!(
+        answer
+            .overview
+            .contains("- notes/ui-direction.md covers the look.")
+    );
+    assert_eq!(answer.about, "A CLI that prints greetings.");
+    assert_eq!(answer.tech_stack, ["Rust"]);
+    assert_eq!(answer.facts.build_commands, ["cargo build"]);
+    assert_eq!(answer.facts.test_commands, ["cargo test"]);
+    assert_eq!(answer.facts.entry_points, ["src/main.rs"]);
+    assert_eq!(answer.facts.research.len(), 1);
+    assert_eq!(answer.facts.research[0].files, ["docs/rivals.md"]);
+    assert_eq!(answer.facts.documents, ["notes/ui-direction.md"]);
+
+    let found = MappingFacts {
+        shown: vec![
+            "docs/rivals.md".into(),
+            "notes/ui-direction.md".into(),
+            "notes/api-keys.md".into(),
+            "docs/Api_Key.txt".into(),
+        ],
+        ..MappingFacts::default()
+    };
+    let base = Drafted::new("demo".into(), &pool());
+    let (step, kept, wrote) = service::answered(&layout, &base, text, &found, &[]);
+    assert_eq!(step, Step::Done);
+    let stored = [
+        format!("{answer:?}"),
+        serde_json::to_string(&kept).unwrap(),
+        wrote.unwrap_or_default(),
+        draft::overview(&layout).unwrap_or_default(),
+    ];
+    for text in stored {
+        let lower = text.to_lowercase();
+        for name in ["api-keys", "api_key", "secrets.toml", ".env"] {
+            assert!(!lower.contains(name), "{name} was kept in {text}");
+        }
+    }
 }
 
 #[test]
