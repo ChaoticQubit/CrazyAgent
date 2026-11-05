@@ -406,6 +406,34 @@ fn relative(path: &str) -> bool {
         && path.split('/').all(|part| part != "..")
 }
 
+/// The most bytes of a path an engine-written line names, as the IDE comment frame and the
+/// owner-edit note show it.
+pub(super) const NOTE_PATH_BYTES_MAX: usize = 1024;
+
+/// Engine or agent text as one plain line inside an engine-written message: control
+/// characters become U+FFFD, square brackets and their look-alikes become parentheses so no
+/// `[owner]` tag can show, and it is cut to `max` bytes. Pure, so every platform's owner-edit
+/// note uses it. Inputs: the text and the bound. Output: the line.
+pub(super) fn shown(text: &str, max: usize) -> String {
+    let plain: String = text
+        .chars()
+        .map(|character| {
+            if character.is_control() {
+                '\u{fffd}'
+            } else {
+                character
+            }
+        })
+        .collect();
+    let line = crate::team::bound_text(&crate::team::events::plain_agent_text(&plain), max);
+    assert!(
+        !line.chars().any(char::is_control),
+        "a shown line has no control character"
+    );
+    assert!(line.len() <= max, "a shown line keeps its bound");
+    line
+}
+
 /// Whether an extension id is `publisher.name`, each part 1 to `NAME_BYTES_MAX` ASCII
 /// letters, digits, hyphens or underscores.
 pub(super) fn extension_id(id: &str) -> bool {

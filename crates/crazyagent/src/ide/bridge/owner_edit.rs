@@ -79,7 +79,7 @@ pub(crate) fn edit(
     let Some(host) = host.filter(|_| role == "sub") else {
         return Ok(false);
     };
-    let named = super::comments::shown(path, super::comments::PATH_BYTES_MAX);
+    let named = super::shown(path, super::NOTE_PATH_BYTES_MAX);
     assert!(!named.contains('\n'), "the note names the file on one line");
     let message = format!(
         "The owner edited {named} in your worktree while you work. Keep their edit; it is part of your change set."
