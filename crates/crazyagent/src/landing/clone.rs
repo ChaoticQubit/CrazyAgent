@@ -146,9 +146,9 @@ const EXCLUDE_BYTES_MAX: u64 = 256 * 1024;
 /// Adds the graph line to a clone's `info/exclude` when no line there keeps the project graph
 /// out of git yet, as `fill` writes it for every new clone, so a clone made before that
 /// shows the graph too (18.15.1). Every step goes through its folder's own descriptor
-/// without following a link, and only a plain file of at most `EXCLUDE_BYTES_MAX` bytes is
-/// read and appended to. Anything else, or a failed write, leaves the clone without the
-/// graph, never without its launch. Takes the clone's worktree.
+/// without following a link, and only a plain file with no other hard link (F1) of at most
+/// `EXCLUDE_BYTES_MAX` bytes is read and appended to. Anything else, or a failed write,
+/// leaves the clone without the graph, never without its launch. Takes the clone's worktree.
 pub(super) fn exclude_graph(worktree: &Path) {
     use rustix::fs::{CWD, FileType, Mode, OFlags, fstat, openat};
     use std::io::{Read, Write};
@@ -163,6 +163,7 @@ pub(super) fn exclude_graph(worktree: &Path) {
     };
     let plain = fstat(&fd).is_ok_and(|stat| {
         FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile
+            && stat.st_nlink == 1
             && u64::try_from(stat.st_size).is_ok_and(|size| size <= EXCLUDE_BYTES_MAX)
     });
     let mut file = std::fs::File::from(fd);
