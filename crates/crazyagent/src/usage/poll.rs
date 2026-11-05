@@ -192,7 +192,8 @@ fn codex_window(
 /// Reads the reply of Codex's usage call: `plan_type` and `rate_limit` with a primary and
 /// a secondary window, each with `used_percent`, `limit_window_seconds` and `reset_at` in
 /// seconds since the epoch. A window is placed by its length; without one, primary is the
-/// 5-hour window and secondary the weekly one. Inputs: the body and the time.
+/// 5-hour window and secondary the weekly one. A window of any other length refuses the
+/// reply, so it is never read as one the plan leaves out. Inputs: the body and the time.
 /// Output: the plan and windows, or `usage_reply_invalid`.
 pub fn parse_codex(body: &[u8], now_ms: i64) -> Result<Observation, EngineError> {
     let value: Value = serde_json::from_slice(body).map_err(|_| invalid())?;
@@ -217,7 +218,8 @@ pub fn parse_codex(body: &[u8], now_ms: i64) -> Result<Observation, EngineError>
                 observation.five_hour = Some(window);
             }
             Some((None, window)) => observation.weekly = Some(window),
-            Some((Some(_), _)) | None => {}
+            Some((Some(_), _)) => return Err(invalid()),
+            None => {}
         }
     }
     if observation.five_hour.is_none() && observation.weekly.is_none() {

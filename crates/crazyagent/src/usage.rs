@@ -106,7 +106,8 @@ pub struct Observation {
 /// An account's stored limits: the last observed windows and plan, the same windows as
 /// the last successful poll read them, the owner's manual reset times, where and when they
 /// were last read, the plain code of the last failed poll, and the provider whose good poll
-/// left each window out until a read reports it again.
+/// left each window out until a read reports it again, with the sentence the cards show
+/// for that window.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccountLimits {
@@ -201,8 +202,20 @@ pub fn open(runtime: &Path) -> Result<Connection, EngineError> {
 /// the account's plan, and Claude has no such window running now. Inputs: the provider and
 /// the window. Output: the sentence.
 pub fn left_out_label(provider: poll::Provider, kind: WindowKind) -> &'static str {
-    let _ = (provider, kind);
-    ""
+    match (provider, kind) {
+        (poll::Provider::Codex, WindowKind::FiveHour) => {
+            "Codex reports no 5-hour limit for this plan."
+        }
+        (poll::Provider::Codex, WindowKind::Weekly) => {
+            "Codex reports no weekly limit for this plan."
+        }
+        (poll::Provider::Claude, WindowKind::FiveHour) => {
+            "Claude reports no 5-hour window right now."
+        }
+        (poll::Provider::Claude, WindowKind::Weekly) => {
+            "Claude reports no weekly window right now."
+        }
+    }
 }
 
 /// Adds the usage tables to a database when missing, and to a store made before them the
@@ -451,6 +464,8 @@ fn limits_row(row: &Row<'_>) -> rusqlite::Result<AccountLimits> {
         Some("transcript") => Some(LimitSource::Transcript),
         Some(_) => return Err(conversion(8)),
     };
+    let five_hour_left_out = left_out(row, 16)?;
+    let weekly_left_out = left_out(row, 17)?;
     Ok(AccountLimits {
         account: CredentialRef::new(row.get::<_, String>(0)?).map_err(|_| conversion(0))?,
         plan: row.get(1)?,
@@ -464,10 +479,12 @@ fn limits_row(row: &Row<'_>) -> rusqlite::Result<AccountLimits> {
         observed_ms: row.get(9)?,
         checked_ms: row.get(10)?,
         failure: row.get(11)?,
-        five_hour_left_out: left_out(row, 16)?,
-        weekly_left_out: left_out(row, 17)?,
-        five_hour_left_out_label: None,
-        weekly_left_out_label: None,
+        five_hour_left_out,
+        weekly_left_out,
+        five_hour_left_out_label: five_hour_left_out
+            .map(|provider| left_out_label(provider, WindowKind::FiveHour).to_owned()),
+        weekly_left_out_label: weekly_left_out
+            .map(|provider| left_out_label(provider, WindowKind::Weekly).to_owned()),
     })
 }
 

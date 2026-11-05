@@ -8,7 +8,6 @@ use crate::tui::keys::Key;
 use crate::tui::seam::Arrival;
 use crate::tui::text::{indent, row, styled, wrap};
 use crate::tui::theme::{Role, Theme};
-use crate::usage::poll::Provider;
 use crate::usage::report::{UsageReport, UsageRow};
 use crate::usage::{AccountLimits, LimitSource, LimitWindow};
 use ratatui::Frame;
@@ -211,21 +210,14 @@ fn window_line(
     window: Option<LimitWindow>,
     own: bool,
     failed: bool,
-    left_out: Option<Provider>,
+    left_out: Option<&str>,
     now_ms: i64,
 ) -> String {
     match (window, left_out) {
         (None, _) if failed => {
             format!("{label:<8}Not read. The last read failed, for the reason above.")
         }
-        (None, Some(Provider::Codex)) => format!(
-            "{label:<8}Codex reports no {} limit for this plan.",
-            label.to_ascii_lowercase()
-        ),
-        (None, Some(Provider::Claude)) => format!(
-            "{label:<8}Claude reports no {} window right now.",
-            label.to_ascii_lowercase()
-        ),
+        (None, Some(sentence)) => format!("{label:<8}{sentence}"),
         (None, None) => format!("{label:<8}Not reported"),
         (Some(window), _) => format!(
             "{label:<8}{:>3}% used  {}{}",
@@ -278,7 +270,7 @@ fn limits_lines(
             limits.five_hour_at(now_ms),
             limits.five_hour_reset_override_ms.is_some(),
             failed,
-            limits.five_hour_left_out,
+            limits.five_hour_left_out_label.as_deref(),
             now_ms
         )
     )));
@@ -289,7 +281,7 @@ fn limits_lines(
             limits.weekly_at(now_ms),
             limits.weekly_reset_override_ms.is_some(),
             failed,
-            limits.weekly_left_out,
+            limits.weekly_left_out_label.as_deref(),
             now_ms
         )
     )));

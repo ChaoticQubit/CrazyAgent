@@ -127,14 +127,6 @@ export function missingWindow(failure: string | null): [string, string] {
     : ["Not reported", "The provider hasn't reported this window."];
 }
 
-/** What a window a good read left out says: its provider's own reason, Codex having no such
- * limit on the account's plan and Claude no such window running now. Inputs: the provider
- * and the window's label. Output: the sentence. */
-export function leftOutText(provider: "claude" | "codex", label: string): string {
-  const window = label.toLowerCase();
-  return provider === "codex" ? `Codex reports no ${window} limit for this plan.` : `Claude reports no ${window} window right now.`;
-}
-
 /** An agent's name in the tables. Inputs: the engine's agent key and the project namer.
  * Output: "Agent 3", "Research harbor", "Master, Harbor Notes", "Onboarding" or the key. */
 export function agentLabel(key: string, project: (key: string) => string = (key) => key): string {
@@ -270,11 +262,11 @@ function WindowLine({ limits, kind, nowMs, pending, onSetReset }: {
   const current = windowNow(kind === "five_hour" ? limits.five_hour : limits.weekly, override, nowMs);
   const label = kind === "five_hour" ? "5-hour" : "Weekly";
   const [missing, why] = missingWindow(limits.failure);
-  const leftOut = kind === "five_hour" ? limits.five_hour_left_out : limits.weekly_left_out;
+  const leftOut = kind === "five_hour" ? limits.five_hour_left_out_label : limits.weekly_left_out_label;
   const failed = limits.failure !== null && limits.failure !== API_KEY_ACCOUNT;
   if (!current && leftOut !== null && !failed) return <div className="usage-window">
     <div className="row usage-window-head"><strong>{label}</strong></div>
-    <span className="muted small">{leftOutText(leftOut, label)}</span>
+    <span className="muted small">{leftOut}</span>
   </div>;
   return <div className="usage-window">
     <div className="row usage-window-head">
