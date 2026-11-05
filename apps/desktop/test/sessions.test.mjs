@@ -172,3 +172,30 @@ test("the conversation's Sessions bar re-reads its count when a second turn show
   assert.equal(seen.second.line, "Live session · Started earlier · 2 messages", "the second turn shows in the count");
   assert.equal(seen.quiet.reads, seen.second.reads, "the conversation's two-second turn reads leave the list alone");
 });
+
+test("a Sessions list read that works again clears the problem an earlier refused read showed", async () => {
+  const seen = await inCountPage(async (evaluate) => {
+    await evaluate('Fixture.mountLive("working", 1)');
+    await evaluate('Fixture.liveLine("never", 500)');
+    const refused = await evaluate("Fixture.problem()");
+    await evaluate('Fixture.turnLive("idle")');
+    const line = await evaluate('Fixture.liveLine("2 messages", 3000)');
+    return { refused, line, after: await evaluate("Fixture.problem()") };
+  });
+  assert.equal(seen.refused, "CrazyAgent's engine isn't running.", "the refused read shows its problem");
+  assert.equal(seen.line.line, "Live session · Started earlier · 2 messages");
+  assert.equal(seen.after, null, "the read that worked clears the earlier problem");
+});
+
+test("a refused New session keeps its problem through the list read after it", async () => {
+  const seen = await inCountPage(async (evaluate) => {
+    await evaluate('Fixture.mountLive("idle")');
+    const before = await evaluate('Fixture.liveLine("1 message", 3000)');
+    const clicked = await evaluate('Fixture.click("New session")');
+    const after = await evaluate('Fixture.liveLine("never", 500)');
+    return { before, clicked, after, problem: await evaluate("Fixture.problem()") };
+  });
+  assert.equal(seen.clicked, true);
+  assert.equal(seen.after.reads, seen.before.reads + 1, "the refused switch reads the list once");
+  assert.equal(seen.problem, api.failureCopy({ code: "master_source_conflict" }), "the list read that worked keeps the switch's problem");
+});
