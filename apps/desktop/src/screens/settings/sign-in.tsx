@@ -22,24 +22,42 @@ export type SignInStage =
   | { kind: "failed"; text: string; hint: FailureHint };
 
 const ACTIVE_PHASES = ["starting", "awaiting_owner", "checking_account", "cancelling"];
-const EXPIRED = ["native_auth_sign_in_expired", "native_auth_claude_deadline", "native_auth_bootstrap_timeout"];
+const EXPIRED = ["native_auth_sign_in_expired", "native_auth_claude_deadline", "native_auth_bootstrap_timeout", "native_auth_codex_deadline"];
 const UNFINISHED = ["native_auth_interrupted", "native_auth_login_failed", "native_auth_native_request_failed", "native_auth_not_active"];
 const CHECK = ["native_auth_outcome_unknown_read_same_operation", "native_auth_claude_input_outcome_unknown"];
+const SIGN_IN_TEXT: Record<string, string> = {
+  native_auth_claude_native_exit: "Claude Code stopped before sign-in finished. Try again.",
+  native_auth_claude_status_invalid: "Claude Code's account check gave an answer CrazyAgent couldn't read. Update Claude Code, then try again.",
+  native_auth_claude_output_invalid: "Claude Code's sign-in gave an answer CrazyAgent couldn't read. Update Claude Code, then try again.",
+  native_auth_claude_subscription_unsupported: "This account isn't signed in with a Claude subscription. Sign in with a Claude Pro or Max account, or use an API key instead.",
+  native_auth_claude_profile_mismatch: "Claude Code checked a different settings folder than the one CrazyAgent set up for this account. Update Claude Code, then try again.",
+  native_auth_claude_launch_failed: "Claude Code couldn't start for sign-in. Check that Claude Code is installed and opens on this Mac, then try again.",
+  native_auth_claude_keychain_unavailable: "Claude sign-in couldn't use this Mac's login keychain. Unlock your Mac and allow keychain access if asked, then try again.",
+  native_auth_claude_destination_unsupported: "Claude Code opened a sign-in page CrazyAgent doesn't recognize. Update CrazyAgent and Claude Code, then try again.",
+  native_auth_claude_credential_expiring: "Claude Code is about to renew this account's sign-in. Wait a few minutes, then try again.",
+  native_auth_codex_exited_before_observation: "Codex stopped before sign-in started. Check that Codex opens on this Mac, then try again.",
+  native_profile_custody_unsafe: "CrazyAgent couldn't safely use this account's sign-in folder on this Mac, so it stopped. Delete the account, then add it again.",
+  native_profile_identity_changed: "This account's sign-in folder changed outside CrazyAgent, so CrazyAgent stopped. Delete the account, then add it again.",
+};
 export const POLL_MS = 2000;
 
 /** Turns a sign-in failure code into one plain sentence and the action that fits it.
  * Inputs: the code and the provider. Output: the copy and its hint. */
 export function signInFailure(code: string, provider: SubscriptionProvider): { text: string; hint: FailureHint } {
+  const [harness, name] = provider === "chatgpt" ? ["Codex", "ChatGPT"] : ["Claude Code", "Claude"];
   if (code === "native_auth_host_unavailable") {
-    const [harness, name] = provider === "chatgpt" ? ["Codex", "ChatGPT"] : ["Claude Code", "Claude"];
     return { text: `${harness} isn't installed on this Mac, so ${name} sign-in isn't available. Install ${harness}, then check again in Settings, Harnesses.`, hint: "missing" };
   }
+  if (code === "native_auth_host_executable_unsafe") {
+    return { text: `${harness} on this Mac isn't safe to start: its program file must belong to you and only you may change it. Reinstall ${harness}, then try again.`, hint: "retry" };
+  }
+  if (code === "native_auth_host_executable_changed") return { text: `${harness} changed on this Mac during sign-in, perhaps from an update. Try again.`, hint: "retry" };
   if (EXPIRED.includes(code)) return { text: "This code expired.", hint: "expired" };
   if (CHECK.includes(code)) return { text: plainError(code), hint: "check" };
   if (code === "native_auth_cancelled") return { text: "Sign-in cancelled.", hint: "retry" };
   if (code === "native_auth_authentication_failed") return { text: "Sign-in didn't finish.", hint: "retry" };
   if (UNFINISHED.includes(code)) return { text: "Sign-in didn't finish. Try again.", hint: "retry" };
-  return { text: knownError(code) ?? withCode("Sign-in didn't finish. Try again.", code), hint: "retry" };
+  return { text: SIGN_IN_TEXT[code] ?? knownError(code) ?? withCode("Sign-in didn't finish. Try again.", code), hint: "retry" };
 }
 
 const GONE = new Set(["native_auth_operation_missing", "native_profile_source_conflict"]);

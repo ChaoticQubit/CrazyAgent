@@ -38,18 +38,19 @@ function literals(text, pattern) {
 }
 
 /**
- * Finds the parenthesis that closes a call. Takes the source text and the index just after
- * the call's opening parenthesis. Returns the index just after its matching close.
+ * Finds the bracket that closes a call or a body. Takes the source text, the index just after
+ * the opening bracket and the bracket pair, parentheses unless given. Returns the index just
+ * after its matching close.
  */
-function closing(text, start) {
+function closing(text, start, open = "(", close = ")") {
   let depth = 1;
   let index = start;
   while (depth > 0 && index < text.length) {
-    if (text[index] === "(") depth += 1;
-    if (text[index] === ")") depth -= 1;
+    if (text[index] === open) depth += 1;
+    if (text[index] === close) depth -= 1;
     index += 1;
   }
-  assert.equal(depth, 0, `unclosed call at ${start}`);
+  assert.equal(depth, 0, `unclosed ${open} at ${start}`);
   return index;
 }
 
@@ -80,6 +81,19 @@ function withoutPrints(text) {
     from = closing(text, match.index + match[0].length);
   }
   return kept + text.slice(from);
+}
+
+const CODE_FN = /\bfn code\(&?self\)\s*->\s*&'static str\s*\{/g;
+
+/**
+ * Reads the sign-in codes every `fn code` of an engine failure type returns, one per match
+ * arm. Takes the source text. Returns the `native_auth_` literals inside each such body.
+ */
+function codeArms(text) {
+  return [...text.matchAll(CODE_FN)].flatMap((match) => {
+    const start = match.index + match[0].length;
+    return literals(text.slice(start, closing(text, start, "{", "}") - 1), /"(native_auth_[a-z_]+)"/g);
+  });
 }
 
 const REJECT = /\breject(?:ed)?\(/g;
@@ -137,7 +151,16 @@ test("a bridge failure keeps its own sentence and names the engine code behind i
 });
 
 test("every sign-in failure the engine records reads as a sentence, and an unknown one names its code", () => {
-  const facts = new Set(engineFiles.flatMap(({ text }) => literals(withoutPrints(text), /(?:Some|\.unwrap_or)\(\s*"(native_auth_[a-z_]+)"/g)));
+  const listed = production(join(ENGINE, "storage/native_auth.rs")).match(/\bCUSTODIAN_CODES: \[&str; \d+\] = \[([^\]]*)\]/);
+  assert.ok(listed, "storage/native_auth.rs lists the codes a custodian may name");
+  const custodian = literals(listed[1], /"([a-z][a-z0-9_]*)"/g);
+  const arms = engineFiles.flatMap(({ text }) => codeArms(text));
+  assert.ok(custodian.length > 0 && arms.length > 0, `${custodian.length} custodian codes, ${arms.length} failure arms`);
+  const facts = new Set([
+    ...custodian,
+    ...arms,
+    ...engineFiles.flatMap(({ text }) => literals(withoutPrints(text), /(?:Some|\.unwrap_or)\(\s*"(native_auth_[a-z_]+)"/g)),
+  ]);
   assert.ok(facts.size >= 6 && facts.has("native_auth_interrupted"), [...facts].join(","));
   for (const code of facts) {
     const { text } = signInFailure(code, "chatgpt");
