@@ -9391,64 +9391,156 @@ fn an_asleep_agent_with_a_waking_message_gets_one_pinned_wake_task() {
     team.workers.clear();
 }
 
-/// 18.15.2 (run 5 task 73): the owner's Wake, restart or stop of a worker reaches its
-/// lead's mailbox as a note that wakes no one, under the shipped rule with progress off as
-/// under an app rule with progress on, so the lead spends no turn on it; the lead reads all
-/// of them under "Messages for you" at its next real turn, here the wake its worker's
-/// result brings.
-#[test]
-fn an_owner_action_on_a_worker_waits_for_its_leads_next_real_turn() {
-    let fixture = Fixture::new(2);
-    let mut team = fixture.runtime();
-    let project = ProjectId::new(PROJECT).unwrap();
-    crate::coord::ensure(&fixture.connection).unwrap();
-    let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
-    let worker = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
-    fixture
-        .connection
-        .execute(
-            "UPDATE team_agents SET parent=?1 WHERE id=?2",
-            [lead, worker],
-        )
-        .unwrap();
-    team.workers
-        .insert(lead, between_turns(&project, AgentRole::Sub, true, true));
-    let tick = |team: &mut TeamRuntime| {
-        crate::team::events::forward_to_parents(&fixture.connection, &project, now_ms()).unwrap();
-        let asleep = team.asleep(&project);
-        assert_eq!(asleep, BTreeSet::from([lead]));
-        team.wake_for_messages(&fixture.setup, &fixture.access, &asleep)
-            .unwrap();
-    };
-    let pinned = || -> i64 {
+/// A lead with one worker for the 18.15.2 owner-action tests (run 5 task 73): the lead is
+/// idle between turns in a kept session with no task, so only a waking message gives it a
+/// turn. The runtime comes first so it drops before the fixture's folder goes.
+struct OwnerActionCase {
+    team: TeamRuntime,
+    fixture: Fixture,
+    project: ProjectId,
+    lead: i64,
+    worker: i64,
+}
+
+impl OwnerActionCase {
+    /// Makes the project's lead and its worker, the lead asleep between turns. Returns the case.
+    fn new() -> Self {
+        let fixture = Fixture::new(2);
+        let mut team = fixture.runtime();
+        let project = ProjectId::new(PROJECT).unwrap();
+        crate::coord::ensure(&fixture.connection).unwrap();
+        let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+        let worker = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
         fixture
+            .connection
+            .execute(
+                "UPDATE team_agents SET parent=?1 WHERE id=?2",
+                [lead, worker],
+            )
+            .unwrap();
+        team.workers
+            .insert(lead, between_turns(&project, AgentRole::Sub, true, true));
+        assert_ne!(lead, worker);
+        Self {
+            team,
+            fixture,
+            project,
+            lead,
+            worker,
+        }
+    }
+
+    /// Forwards the worker's queued events to the lead and wakes the asleep lead for its
+    /// messages, as a team step does.
+    fn tick(&mut self) {
+        crate::team::events::forward_to_parents(&self.fixture.connection, &self.project, now_ms())
+            .unwrap();
+        let asleep = self.team.asleep(&self.project);
+        assert_eq!(asleep, BTreeSet::from([self.lead]));
+        self.team
+            .wake_for_messages(&self.fixture.setup, &self.fixture.access, &asleep)
+            .unwrap();
+    }
+
+    /// Counts the tasks pinned to the lead that still wait or run.
+    fn pinned(&self) -> i64 {
+        self.fixture
             .connection
             .query_row(
                 "SELECT COUNT(*) FROM team_task_pins p JOIN team_tasks t ON t.id=p.task
                  WHERE p.project=?1 AND p.agent=?2 AND t.status IN ('queued','needs_pool','running')",
-                params![PROJECT, lead],
+                params![PROJECT, self.lead],
                 |row| row.get(0),
             )
             .unwrap()
-    };
-    let waiting = || -> Vec<String> {
-        crate::coord::pending(&fixture.connection, lead, crate::coord::PENDING_MAX)
-            .unwrap()
-            .into_iter()
-            .map(|note| note.body)
-            .collect()
-    };
+    }
 
-    team.owner_woke(&project, worker, true, false).unwrap();
-    tick(&mut team);
-    assert_eq!(pinned(), 0, "the owner's Wake gives the lead no turn");
-    assert!(!crate::coord::delivery::waking(&fixture.connection, lead).unwrap());
-    let notes = waiting();
-    assert_eq!(notes.len(), 1, "{notes:?}");
+    /// Lists the bodies of the lead's messages that wait for its next turn.
+    fn waiting(&self) -> Vec<String> {
+        crate::coord::pending(
+            &self.fixture.connection,
+            self.lead,
+            crate::coord::PENDING_MAX,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|note| note.body)
+        .collect()
+    }
+
+    /// Records an event of the worker. Takes the kind and the text.
+    fn record(&self, kind: crate::team::events::EventKind, text: &str) {
+        crate::team::events::record(
+            &self.fixture.connection,
+            &self.project,
+            self.worker,
+            None,
+            kind,
+            text,
+            now_ms(),
+        )
+        .unwrap()
+        .unwrap();
+    }
+
+    /// Gives the lead its next real turn: the worker's result wakes it and dispatch sends
+    /// that turn. Returns the messages the turn carries, after which none waits.
+    fn real_turn(&mut self) -> String {
+        self.record(crate::team::events::EventKind::Finished, "Wrote page.md");
+        self.tick();
+        assert_eq!(self.pinned(), 1, "the worker's result wakes the lead");
+        let (orders, turns) = channel();
+        self.team.workers.get_mut(&self.lead).unwrap().orders = orders;
+        self.team
+            .dispatch(&self.fixture.setup, &self.fixture.access, &BTreeSet::new())
+            .unwrap();
+        let Ok(Order::Turn(typed, None, _)) = turns.try_recv() else {
+            panic!("the woken lead's kept session got no turn");
+        };
+        let (_, messages) = typed
+            .split_once("\n\nMessages for you:\n")
+            .expect("the lead's turn carries its messages");
+        assert!(messages.contains("Wrote page.md"), "{messages}");
+        assert!(
+            self.waiting().is_empty(),
+            "the real turn carried every note"
+        );
+        messages.to_owned()
+    }
+}
+
+/// 18.15.2, shipped rule: with progress off the owner's Wake of a worker still reaches its
+/// lead, as a note that waits and gives the lead no turn, and the lead reads it at its next
+/// real turn.
+#[test]
+fn an_owner_wake_reaches_the_lead_under_the_shipped_rule_at_its_next_real_turn() {
+    let mut case = OwnerActionCase::new();
+    case.team
+        .owner_woke(&case.project, case.worker, true, false)
+        .unwrap();
+    case.tick();
+    let notes = case.waiting();
+    assert_eq!(
+        notes.len(),
+        1,
+        "the notice reaches the lead's mailbox: {notes:?}"
+    );
     assert!(notes[0].contains(OWNER_WOKE), "{notes:?}");
+    assert_eq!(case.pinned(), 0, "the owner's Wake gives the lead no turn");
+    assert!(!crate::coord::delivery::waking(&case.fixture.connection, case.lead).unwrap());
+    let messages = case.real_turn();
+    assert!(messages.contains(OWNER_WOKE), "{messages}");
+    case.team.workers.clear();
+}
 
+/// 18.15.2, progress on as the owner's app rule had it in run 5: the owner's Wake, restart
+/// or stop of a worker pins no wake task for its lead; each notice waits in the lead's
+/// mailbox and the lead's next real turn carries them all.
+#[test]
+fn an_owner_action_never_pins_a_wake_task_for_the_lead_with_progress_on() {
+    let mut case = OwnerActionCase::new();
     crate::team::events::set_rule(
-        &fixture.connection,
+        &case.fixture.connection,
         &crate::team::events::RuleTarget::App,
         Some(&crate::team::events::WakeRule {
             progress: true,
@@ -9457,64 +9549,42 @@ fn an_owner_action_on_a_worker_waits_for_its_leads_next_real_turn() {
     )
     .unwrap()
     .unwrap();
-    team.owner_woke(&project, worker, true, true).unwrap();
-    tick(&mut team);
-    crate::team::events::record(
-        &fixture.connection,
-        &project,
-        worker,
-        None,
+    case.team
+        .owner_woke(&case.project, case.worker, true, false)
+        .unwrap();
+    case.tick();
+    assert_eq!(
+        case.pinned(),
+        0,
+        "the owner's Wake pins no wake task for the lead"
+    );
+    case.team
+        .owner_woke(&case.project, case.worker, true, true)
+        .unwrap();
+    case.tick();
+    assert_eq!(
+        case.pinned(),
+        0,
+        "the owner's restart pins no wake task for the lead"
+    );
+    case.record(
         crate::team::events::EventKind::Progress,
         OWNER_STOPPED_AGENT,
-        now_ms(),
-    )
-    .unwrap()
-    .unwrap();
-    tick(&mut team);
-    assert_eq!(
-        pinned(),
-        0,
-        "with progress on the owner's restart and stop still give the lead no turn"
     );
-    assert!(!crate::coord::delivery::waking(&fixture.connection, lead).unwrap());
-    let notes = waiting();
+    case.tick();
+    assert_eq!(
+        case.pinned(),
+        0,
+        "the owner's stop pins no wake task for the lead"
+    );
+    assert!(!crate::coord::delivery::waking(&case.fixture.connection, case.lead).unwrap());
+    let notes = case.waiting();
     assert_eq!(notes.len(), 3, "{notes:?}");
-    assert!(notes[1].contains(OWNER_RESTARTED), "{notes:?}");
-    assert!(notes[2].contains(OWNER_STOPPED_AGENT), "{notes:?}");
-
-    crate::team::events::record(
-        &fixture.connection,
-        &project,
-        worker,
-        None,
-        crate::team::events::EventKind::Finished,
-        "Wrote page.md",
-        now_ms(),
-    )
-    .unwrap()
-    .unwrap();
-    tick(&mut team);
-    assert_eq!(pinned(), 1, "the worker's result wakes the lead");
-    let (orders, turns) = channel();
-    team.workers.get_mut(&lead).unwrap().orders = orders;
-    team.dispatch(&fixture.setup, &fixture.access, &BTreeSet::new())
-        .unwrap();
-    let Ok(Order::Turn(typed, None, _)) = turns.try_recv() else {
-        panic!("the woken lead's kept session got no turn");
-    };
-    let (_, messages) = typed
-        .split_once("\n\nMessages for you:\n")
-        .expect("the lead's turn carries its messages");
-    for text in [
-        OWNER_WOKE,
-        OWNER_RESTARTED,
-        OWNER_STOPPED_AGENT,
-        "Wrote page.md",
-    ] {
+    let messages = case.real_turn();
+    for text in [OWNER_WOKE, OWNER_RESTARTED, OWNER_STOPPED_AGENT] {
         assert!(messages.contains(text), "{text} missing: {messages}");
     }
-    assert!(waiting().is_empty(), "the real turn carried every note");
-    team.workers.clear();
+    case.team.workers.clear();
 }
 
 /// Audit A: a delivery database failure no longer ends the team step: when putting back a
