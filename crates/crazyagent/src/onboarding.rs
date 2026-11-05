@@ -222,9 +222,15 @@ const TRY_COLUMNS: [(&str, &str); 3] = [
     ("mapping_try_earlier", "TEXT"),
 ];
 
+/// The column that keeps the research and documents the mapping found beside the draft,
+/// outside it, so engines up to 18.14, whose draft refuses unknown keys, still read the
+/// row; onboarding tables made before 18.15 lack it.
+const FOUND_COLUMN: (&str, &str) = ("mapping_found", "TEXT");
+
 /// Creates the onboarding table: one row per imported project with its
-/// folder, pool, both steps, the mapping try, the current draft and the
-/// worker's claim, and adds the try columns to an older table.
+/// folder, pool, both steps, the mapping try, the current draft, what the
+/// mapping found and the worker's claim, and adds the try and found columns
+/// to an older table.
 pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection
         .execute_batch(
@@ -240,6 +246,7 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 mapping_try_ms INTEGER,
                 mapping_try_earlier TEXT,
                 drafted TEXT NOT NULL,
+                mapping_found TEXT,
                 runs INTEGER NOT NULL DEFAULT 0,
                 claimer TEXT,
                 heartbeat_ms INTEGER,
@@ -256,7 +263,7 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             );",
         )
         .map_err(error)?;
-    for (column, kind) in TRY_COLUMNS {
+    for (column, kind) in TRY_COLUMNS.into_iter().chain([FOUND_COLUMN]) {
         let present: bool = connection
             .query_row(
                 "SELECT EXISTS(SELECT 1 FROM pragma_table_info('onboarding') WHERE name=?1)",
@@ -645,7 +652,7 @@ pub(crate) fn status(
     let row = tx
         .query_row(
             "SELECT graph_state,graph_reason,mapping_state,mapping_reason,drafted,repo,
-                mapping_try,mapping_try_ms,mapping_try_earlier
+                mapping_try,mapping_try_ms,mapping_try_earlier,mapping_found
              FROM onboarding WHERE project=?1",
             [project_id.as_str()],
             |row| {
@@ -657,6 +664,7 @@ pub(crate) fn status(
                         row.get::<_, Option<String>>(3)?,
                         row.get::<_, String>(4)?,
                         row.get::<_, String>(5)?,
+                        row.get::<_, Option<String>>(9)?,
                     ),
                     (
                         row.get::<_, Option<u32>>(6)?,
@@ -668,7 +676,8 @@ pub(crate) fn status(
         )
         .optional()
         .map_err(error)?;
-    let Some(((graph, graph_reason, mapping, mapping_reason, drafted, repo), tried)) = row else {
+    let Some(((graph, graph_reason, mapping, mapping_reason, drafted, repo, found), tried)) = row
+    else {
         return Ok(None);
     };
     let mapping = Step::from_columns(&mapping, mapping_reason)?;
@@ -682,6 +691,7 @@ pub(crate) fn status(
         _ => None,
     };
     let mut drafted: draft::Drafted = serde_json::from_str(&drafted).map_err(error)?;
+    draft::restore_found(&mut drafted.facts, found.as_deref()).map_err(error)?;
     let saved = crate::project_setup::load_setup(tx, project_id)?.filter(|stored| stored.saved());
     let finished = saved.is_some();
     if let Some(stored) = saved {

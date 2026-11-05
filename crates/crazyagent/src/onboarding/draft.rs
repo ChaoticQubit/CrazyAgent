@@ -59,7 +59,68 @@ const OVERVIEW_FILE: &str = "overview.md";
 pub(crate) struct Drafted {
     pub name: String,
     pub draft: ProjectSetup,
+    #[serde(serialize_with = "facts_on_1814")]
     pub facts: MappingFacts,
+}
+
+/// The research and documents the mapping found, as the onboarding row's `mapping_found`
+/// column keeps them beside the draft.
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MappingFound {
+    #[serde(default)]
+    research: Vec<FoundResearch>,
+    #[serde(default)]
+    documents: Vec<String>,
+}
+
+/// Writes a draft's facts as engines up to 18.14 read them, the four lists only: their
+/// draft refuses unknown keys, so the research and documents found are kept in the
+/// onboarding row's own `mapping_found` column instead. Takes the facts and the
+/// serializer. Returns the serializer's result.
+fn facts_on_1814<S: serde::Serializer>(
+    facts: &MappingFacts,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    MappingFacts {
+        languages: facts.languages.clone(),
+        build_commands: facts.build_commands.clone(),
+        test_commands: facts.test_commands.clone(),
+        entry_points: facts.entry_points.clone(),
+        ..MappingFacts::default()
+    }
+    .serialize(serializer)
+}
+
+/// The onboarding row's `mapping_found` column for a draft: the research and documents its
+/// facts name, as JSON, or `None` when they name neither, so the row keeps what an earlier
+/// mapping found, as [`merge`] keeps an earlier map. Takes the draft. Returns the column.
+pub(crate) fn found_column(drafted: &Drafted) -> Option<String> {
+    let facts = &drafted.facts;
+    if facts.research.is_empty() && facts.documents.is_empty() {
+        return None;
+    }
+    serde_json::to_string(&MappingFound {
+        research: facts.research.clone(),
+        documents: facts.documents.clone(),
+    })
+    .ok()
+}
+
+/// Puts the research and documents from an onboarding row's `mapping_found` column back
+/// into a draft's facts read from the row. Takes the facts and the column, none when the
+/// mapping found nothing yet. Returns the decoding error for a column the engine did not
+/// write.
+pub(crate) fn restore_found(
+    facts: &mut MappingFacts,
+    column: Option<&str>,
+) -> Result<(), serde_json::Error> {
+    if let Some(column) = column {
+        let found: MappingFound = serde_json::from_str(column)?;
+        facts.research = found.research;
+        facts.documents = found.documents;
+    }
+    Ok(())
 }
 
 impl Drafted {
