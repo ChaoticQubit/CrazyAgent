@@ -418,3 +418,19 @@ fn a_key_another_project_holds_keeps_the_field_open_with_the_key_typed() {
     assert!(!tickets.editing());
     ends_with(&mut tickets, "Tickets are on. Ticket ids start with FN.");
 }
+
+#[test]
+fn a_recheck_outside_a_turn_on_in_flight_is_refused() {
+    let mut reading = ProjectTickets::new(fieldnotes(), "Fieldnotes Mobile".into());
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        reading.recheck("project_exists");
+    }));
+    assert!(refused.is_err(), "a tab still reading has no turn-on");
+    let mut engine = Engine::bare();
+    let mut tickets = tab(&mut engine);
+    tickets.attach = Some(ProjectKey::new("FM").unwrap());
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tickets.recheck("project_exists");
+    }));
+    assert!(refused.is_err(), "a turn-on not sent yet has no outcome");
+}
