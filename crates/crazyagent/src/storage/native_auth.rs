@@ -12,6 +12,21 @@ use crate::engine::owner::transport::native_auth_channel::{
 /// the sign-in an earlier run proved.
 const UNRUN_CHECKS_MAX: i64 = 16;
 
+/// The failure codes a sign-in custodian may name that its settled attempt records (OP-7):
+/// each tells the owner something a plain retry does not, and the app has a sentence for
+/// each. Any other cause a custodian names settles the attempt as `native_auth_interrupted`.
+pub(crate) const CUSTODIAN_CODES: [&str; 9] = [
+    "native_auth_bootstrap_timeout",
+    "native_auth_cancelled",
+    "native_auth_codex_deadline",
+    "native_auth_codex_exited_before_observation",
+    "native_auth_host_executable_changed",
+    "native_auth_host_executable_unsafe",
+    "native_profile_custody_unsafe",
+    "native_profile_identity_changed",
+    "native_profile_in_use",
+];
+
 impl Clone for Command {
     fn clone(&self) -> Self {
         match self {
@@ -292,7 +307,8 @@ fn validate_dispatch(
 /// a crash, a killed custodian or an old engine run never blocks every later sign-in. A
 /// fence of this engine run is settled only for a dispatch known to have ended, which the
 /// caller names again on later calls while a renewal still held the profile. An attempt of
-/// that ended dispatch settles Failed with the code its custodian named, if it named one.
+/// that ended dispatch settles Failed with the code its custodian named, when that code is
+/// one of `CUSTODIAN_CODES`, and as `native_auth_interrupted` otherwise.
 /// Inputs: the database, the profile custody, this engine's host, the fact of the last
 /// dispatch that ended and its custodian's code. Output: the settled fact, or `None` when
 /// nothing was released.
@@ -347,7 +363,9 @@ pub(crate) fn recover_native_auth(
         fact.code = None;
     } else if fact.phase.unfinished() || fact.phase == NativeAuthPhase::Uncertain {
         fact.phase = NativeAuthPhase::Failed;
-        let code = named.filter(|_| own).unwrap_or("native_auth_interrupted");
+        let code = named
+            .filter(|code| own && CUSTODIAN_CODES.contains(code))
+            .unwrap_or("native_auth_interrupted");
         fact.code = Some(code.into());
     }
     store_fact(&tx, &fact)?;

@@ -911,7 +911,7 @@ fn settled(case: &LifetimeCase, fact: &NativeAuthFact) -> (NativeAuthPhase, Opti
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_auth_dispatch_lifetime_a_custodian_that_names_its_failure_settles_failed_with_it() {
     lifetime_case(|case| async move {
-        register_failing_custodian(&case, "native_profile_binding_conflict");
+        register_failing_custodian(&case, "native_auth_host_executable_changed");
         let (fact, work) = case.work("custodian-names-its-failure").await;
         case.retain(work);
         case.drain().await;
@@ -919,7 +919,26 @@ async fn native_auth_dispatch_lifetime_a_custodian_that_names_its_failure_settle
             settled(&case, &fact),
             (
                 NativeAuthPhase::Failed,
-                Some("native_profile_binding_conflict".to_owned())
+                Some("native_auth_host_executable_changed".to_owned())
+            )
+        );
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_auth_dispatch_lifetime_a_custodian_cause_outside_the_custodian_codes_settles_interrupted()
+ {
+    lifetime_case(|case| async move {
+        register_failing_custodian(&case, "native_auth_child_not_retained");
+        let (fact, work) = case.work("custodian-names-an-unlisted-cause").await;
+        case.retain(work);
+        case.drain().await;
+        assert_eq!(
+            settled(&case, &fact),
+            (
+                NativeAuthPhase::Failed,
+                Some("native_auth_interrupted".to_owned())
             )
         );
     })
