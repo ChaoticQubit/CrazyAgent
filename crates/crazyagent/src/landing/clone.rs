@@ -87,7 +87,8 @@ pub(super) fn add(
 /// Fills the folder `add` just made with the clone, so `add` can remove the folder again
 /// when any step fails (GA-R2): private, its git folder made with no template, the
 /// alternates line naming the owner's objects, an `info/exclude` that keeps the
-/// teammates' worktree folder out of what the agent's own `git add` takes, its branch at
+/// teammates' worktree folder and the project graph the engine shows there out of what the
+/// agent's own `git add` takes, its branch at
 /// the owner's commit and checked out with nothing left modified. Inputs: the new worktree, the branch, the
 /// alternates line, the object format and the commit. Output: Ok once checked out, else
 /// `changes_git_failed` or a git failure.
@@ -119,7 +120,7 @@ fn fill(
         .and_then(|()| {
             std::fs::write(
                 git_dir.join("info").join("exclude"),
-                format!("/{}/\n", agent_git::TEAMMATES_FOLDER),
+                format!("/{}/\n/graphify-out/\n", agent_git::TEAMMATES_FOLDER),
             )
         })
         .map_err(|_| failure("changes_git_failed"))?;
