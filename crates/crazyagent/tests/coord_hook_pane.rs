@@ -273,13 +273,15 @@ impl Team {
                     &mut |pane, _, request, out| {
                         crazyagent::coord::relay::answer(
                             db,
-                            project,
-                            lead,
+                            crazyagent::coord::relay::ForLead {
+                                project,
+                                id: lead,
+                                starts: &mut *starts,
+                            },
                             pane,
                             request,
                             out,
                             now_ms(),
-                            starts,
                         )
                         .unwrap();
                     },

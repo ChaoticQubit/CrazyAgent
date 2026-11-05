@@ -3656,13 +3656,15 @@ fn a_native_teammate_gets_the_task_start_reminder_on_the_first_prompt_of_each_ta
         let mut answer = Vec::new();
         crate::coord::relay::answer(
             &connection,
-            &project,
-            lead,
+            crate::coord::relay::ForLead {
+                project: &project,
+                id: lead,
+                starts,
+            },
             pane,
             request,
             &mut answer,
             10,
-            starts,
         )
         .unwrap();
         String::from_utf8(answer).unwrap()
@@ -3753,13 +3755,15 @@ fn a_native_teammate_row_reads_idle_while_its_session_rests_and_working_once_it_
         let mut answer = Vec::new();
         crate::coord::relay::answer(
             &connection,
-            &project,
-            lead,
+            crate::coord::relay::ForLead {
+                project: &project,
+                id: lead,
+                starts: &mut crate::coord::relay::TaskStarts::default(),
+            },
             pane,
             request,
             &mut answer,
             now,
-            &mut crate::coord::relay::TaskStarts::default(),
         )
         .unwrap();
         answer

@@ -275,13 +275,15 @@ fn relay(engine: &Path, pane: &str, request: &[u8], out: &mut dyn Write) {
     .unwrap();
     crazyagent::coord::relay::answer(
         &db,
-        &ProjectId::new(&project).unwrap(),
-        lead,
+        crazyagent::coord::relay::ForLead {
+            project: &ProjectId::new(&project).unwrap(),
+            id: lead,
+            starts: &mut crazyagent::coord::relay::TaskStarts::default(),
+        },
         pane,
         request,
         out,
         now,
-        &mut crazyagent::coord::relay::TaskStarts::default(),
     )
     .unwrap();
 }

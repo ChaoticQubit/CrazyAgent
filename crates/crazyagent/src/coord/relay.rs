@@ -461,26 +461,36 @@ pub struct TaskStarts {
     pub reminded: BTreeSet<AgentId>,
 }
 
+/// The native lead a relay request came in for on its caller socket (OQ-7 B): its project,
+/// its id and its teammates' Task-start reminder (T3-15).
+pub struct ForLead<'a> {
+    pub project: &'a ProjectId,
+    pub id: AgentId,
+    pub starts: &'a mut TaskStarts,
+}
+
 /// Answers one relay request a native teammate's hook or monitor sent on its lead's caller
 /// socket (relay over the caller socket, OQ-7 B). It acts for the live teammate the
 /// engine's rows put in `pane`, the pane the socket found the connecting process in, never
 /// for one the request names, so no teammate reports, takes letters or asks as another.
 /// The answer is `ok` and its payload, written at once; letters and the first-edit reminder
 /// are marked Delivered only once written whole. A pane no live teammate of the lead holds,
-/// a malformed request and a failure get `no`. Inputs: the database, the project, the lead,
-/// the pane, the request, the connection, the time in ms and the lead's Task-start
-/// reminder. Output: Ok, or the SQLite failure after answering no.
-#[allow(clippy::too_many_arguments)]
+/// a malformed request and a failure get `no`. Inputs: the database, the lead with its
+/// project and Task-start reminder, the pane, the request, the connection and the time in
+/// ms. Output: Ok, or the SQLite failure after answering no.
 pub fn answer(
     db: &Connection,
-    project: &ProjectId,
-    lead: AgentId,
+    lead: ForLead<'_>,
     pane: &str,
     request: &[u8],
     out: &mut dyn Write,
     now: i64,
-    starts: &mut TaskStarts,
 ) -> Result<(), EngineError> {
+    let ForLead {
+        project,
+        id: lead,
+        starts,
+    } = lead;
     let reply = match reply(db, project, lead, pane, request, now, starts) {
         Ok(reply) => reply,
         Err(problem) => {
