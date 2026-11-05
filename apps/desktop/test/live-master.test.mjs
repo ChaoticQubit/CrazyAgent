@@ -409,3 +409,37 @@ test("Start all sends the owner's session check once the team runs again (LMS-1)
   assert.ok(resumed > 0 && check > resumed, `Start all sends the session check after the team runs again: resumed ${resumed}, check ${check}`);
   assert.match(source, /onSession=\{\(\) => start\(false\)\}/, "the area's session check is the Open only");
 });
+
+test("the master area is headed by the harness the running master uses and names a saved switch that waits (N-D26)", () => {
+  assert.equal(typeof live.masterHead, "function", "the area decides its head from the saved and the running harness");
+  const name = (id) => ({ codex: "Codex", claude: "Claude Code", "claude-code": "Claude Code" })[id] ?? id;
+  assert.deepEqual(live.masterHead("codex", "claude", name), { title: "Claude Code", waits: "Codex from the next start" });
+  assert.deepEqual(live.masterHead("claude-code", "claude", name), { title: "Claude Code", waits: null }, "an alias of the running harness is no switch");
+  assert.deepEqual(live.masterHead("codex", null, name), { title: "Codex", waits: null }, "no running master: the saved harness");
+});
+
+test("the running harness comes from the team status agent behind the master card, not the card, which names the saved plan (N-D26)", () => {
+  assert.equal(typeof live.runningHarness, "function", "the area reads the running master's harness from the team status");
+  const agent = (id, harness, status) => ({ id, role: "master", label: "Master", harness, tools: true, account: null, worktree: null, status, status_label: status, task: null, turns: 1, problem: null, process_group: null, created_ms: id });
+  const team = { kind: "ok", value: { project_id: "p-1", live_switch: null, agents: [agent(71, "codex", "stopped"), agent(72, "claude", "idle")] } };
+  assert.equal(live.runningHarness(team, "p-1", 72), "claude", "the agent behind the card");
+  assert.equal(live.runningHarness(team, "p-1", 71), "codex", "the card's own agent even when an older one");
+  assert.equal(live.runningHarness(team, "p-1", null), "claude", "no agent on the card: the newest live master");
+  assert.equal(live.runningHarness(team, "p-2", 72), null, "another project's status says nothing");
+  assert.equal(live.runningHarness(undefined, "p-1", 72), null, "no status read yet");
+  assert.equal(live.runningHarness({ kind: "ok", value: { ...team.value, agents: [agent(71, "codex", "stopped")] } }, "p-1", null), null, "no live master");
+  const data = {
+    id: "p-1", name: "Harbor Notes", setup: undefined, research: undefined, context: undefined,
+    pools: undefined, harnesses: undefined, assigned: null, now: 61_000, navigate: () => {}, notify: () => {}, reload: () => {}, reloadPools: () => {},
+    team: { result: team, at: 1 }, reloadTeam: () => {},
+  };
+  const node = { id: "agent-72", kind: "master", label: "Master", harness: "codex", agent: 72, account: "claude-account-f2fa", terminal: null, status: "idle" };
+  const shown = renderToStaticMarkup(createElement(live.LiveMasterView, { data, harness: "codex", live: { kind: "running", node }, onStart: async () => undefined }));
+  const title = shown.match(/<span class="pj-console-title">([\s\S]*?)<\/span>/);
+  assert.ok(title, shown);
+  assert.match(title[1], /Claude Code/, "the head names the harness that runs, though the card names the saved Codex");
+  assert.doesNotMatch(title[1], /Codex/, "never the saved harness that does not run yet");
+  assert.match(shown, /data-testid="master-switch-waits"[^>]*>Codex from the next start</, shown);
+  const same = renderToStaticMarkup(createElement(live.LiveMasterView, { data, harness: "claude", live: { kind: "running", node }, onStart: async () => undefined }));
+  assert.doesNotMatch(same, /master-switch-waits/);
+});
