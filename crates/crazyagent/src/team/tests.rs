@@ -5131,7 +5131,8 @@ fn only_a_tools_off_codex_agent_on_a_keyless_endpoint_says_it_cannot_receive_mes
         Delivery::NativeOnly,
     )
     .unwrap();
-    let noted = |access: Option<&ModelAccess>| -> (Vec<(i64, String)>, Vec<(Option<i64>, String)>) {
+    type Noted = (Vec<(i64, String)>, Vec<(Option<i64>, String)>);
+    let noted = |access: Option<&ModelAccess>| -> Noted {
         let status = owner_status(&connection, &setup, access).unwrap();
         let graph = owner_graph(&connection, &setup, access).unwrap();
         (
