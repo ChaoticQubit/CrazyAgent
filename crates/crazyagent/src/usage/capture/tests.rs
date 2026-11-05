@@ -866,6 +866,7 @@ fn transcript_limits_stay_within_their_window_below_the_owner_and_a_fresh_poll()
             resets_at_ms: Some(NOW + 4 * HOUR),
         }),
         weekly: None,
+        provider: Some(crate::usage::poll::Provider::Codex),
     };
     record_observation(&db, &account, &polled, LimitSource::Poll, NOW + 3).unwrap();
     append(&record, &codex_limits(100.0, 300, NOW + HOUR));

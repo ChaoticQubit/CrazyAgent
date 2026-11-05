@@ -61,6 +61,8 @@ fn limits(failure: Option<&str>) -> AccountLimits {
         observed_ms: Some(NOW - 3 * MINUTE),
         checked_ms: Some(NOW - 3 * MINUTE),
         failure: failure.map(Into::into),
+        five_hour_left_out: None,
+        weekly_left_out: None,
     }
 }
 
@@ -404,6 +406,58 @@ fn an_api_key_account_s_windows_keep_the_provider_omitted_wording() {
         !lines.iter().any(|line| line.contains("Not read.")),
         "{lines:#?}"
     );
+}
+
+/// N-D16 run 6: a window a good poll left out names the provider that left it out and what
+/// that means, Codex for the plan and Claude for now, while a failed read keeps its own wording.
+#[test]
+fn a_window_a_good_poll_left_out_names_its_provider_and_a_failed_read_keeps_its_wording() {
+    use crate::usage::poll::Provider;
+    let ctx = ctx(100, 40);
+    let shown = |limits: AccountLimits| {
+        text(&summary(
+            &UsageReport {
+                limits: vec![limits],
+                ..report()
+            },
+            UsageRange::Week,
+            &names(),
+            NOW,
+            0,
+            96,
+            &ctx,
+        ))
+    };
+    let five_hour_out = |provider: Provider, failure: Option<&str>| AccountLimits {
+        five_hour: None,
+        polled_five_hour: None,
+        five_hour_left_out: Some(provider),
+        ..limits(failure)
+    };
+    let codex = shown(five_hour_out(Provider::Codex, None));
+    let claude = shown(five_hour_out(Provider::Claude, None));
+    let weekly = shown(AccountLimits {
+        weekly: None,
+        polled_weekly: None,
+        weekly_left_out: Some(Provider::Codex),
+        ..limits(None)
+    });
+    let failed = shown(five_hour_out(Provider::Codex, Some("usage_unreachable")));
+    for (lines, wanted) in [
+        (&codex, "    5-hour  Codex reports no 5-hour limit for this plan."),
+        (&claude, "    5-hour  Claude reports no 5-hour window right now."),
+        (&weekly, "    Weekly  Codex reports no weekly limit for this plan."),
+        (&failed, "    5-hour  Not read. The last read failed, for the reason above."),
+    ] {
+        assert!(
+            lines.iter().any(|line| line == wanted),
+            "{wanted:?} in {lines:#?}"
+        );
+        assert!(
+            !lines.iter().any(|line| line.contains("Not reported")),
+            "{lines:#?}"
+        );
+    }
 }
 
 fn asked_since(ctx: &mut Ctx) -> Option<i64> {

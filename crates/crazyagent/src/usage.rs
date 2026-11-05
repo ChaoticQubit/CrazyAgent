@@ -89,6 +89,7 @@ pub struct Observation {
     pub plan: Option<String>,
     pub five_hour: Option<LimitWindow>,
     pub weekly: Option<LimitWindow>,
+    pub provider: Option<poll::Provider>,
 }
 
 /// An account's stored limits: the last observed windows and plan, the same windows as
@@ -109,6 +110,8 @@ pub struct AccountLimits {
     pub observed_ms: Option<i64>,
     pub checked_ms: Option<i64>,
     pub failure: Option<String>,
+    pub five_hour_left_out: Option<poll::Provider>,
+    pub weekly_left_out: Option<poll::Provider>,
 }
 
 impl AccountLimits {
@@ -401,6 +404,8 @@ fn limits_row(row: &Row<'_>) -> rusqlite::Result<AccountLimits> {
         observed_ms: row.get(9)?,
         checked_ms: row.get(10)?,
         failure: row.get(11)?,
+        five_hour_left_out: None,
+        weekly_left_out: None,
     })
 }
 

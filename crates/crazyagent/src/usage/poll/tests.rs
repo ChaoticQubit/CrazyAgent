@@ -86,6 +86,7 @@ fn claude_poll_sends_the_token_and_beta_header_and_reads_both_windows() {
                 used_percent: 81.5,
                 resets_at_ms: Some(1_793_318_400_000)
             }),
+            provider: Some(super::Provider::Claude),
         }
     );
     let seen = server.seen();
@@ -155,6 +156,44 @@ fn codex_poll_sends_the_account_id_and_places_windows_by_length() {
     assert_eq!(bare.five_hour.unwrap().used_percent, 5.0);
     assert_eq!(bare.weekly.unwrap().used_percent, 6.0);
     assert_eq!(bare.plan, None);
+    assert_eq!(bare.provider, Some(Provider::Codex));
+}
+
+#[test]
+fn a_reply_that_leaves_a_window_out_reads_the_other_and_names_its_provider() {
+    let prolite = parse_codex(
+        br#"{"plan_type":"prolite","rate_limit":{"primary_window":{"used_percent":25,"limit_window_seconds":604800,"reset_at":1793400000},"secondary_window":null}}"#,
+        NOW,
+    )
+    .unwrap();
+    assert_eq!(
+        prolite,
+        Observation {
+            plan: Some("prolite".into()),
+            five_hour: None,
+            weekly: Some(LimitWindow {
+                used_percent: 25.0,
+                resets_at_ms: Some(1_793_400_000_000)
+            }),
+            provider: Some(Provider::Codex),
+        }
+    );
+    let idle = parse_claude(
+        br#"{"five_hour":null,"seven_day":{"utilization":40,"resets_at":"2026-10-30T00:00:00+00:00"}}"#,
+    )
+    .unwrap();
+    assert_eq!(
+        idle,
+        Observation {
+            plan: None,
+            five_hour: None,
+            weekly: Some(LimitWindow {
+                used_percent: 40.0,
+                resets_at_ms: Some(1_793_318_400_000)
+            }),
+            provider: Some(Provider::Claude),
+        }
+    );
 }
 
 #[test]

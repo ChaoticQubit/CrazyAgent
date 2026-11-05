@@ -471,6 +471,7 @@ fn research_follows_the_schedule_and_waits_for_a_held_account_to_reset() {
                     used_percent: weekly,
                     resets_at_ms: Some(resets),
                 }),
+                provider: Some(usage::poll::Provider::Codex),
             },
             usage::LimitSource::Poll,
             1_000,
