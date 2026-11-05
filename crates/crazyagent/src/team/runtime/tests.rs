@@ -14083,6 +14083,86 @@ fn the_shared_graph_shows_in_an_agent_worktree_only_when_it_ignores_graphify_out
     assert!(!fresh.join(GRAPH_FOLDER).exists());
 }
 
+#[test]
+fn the_shared_graph_shows_in_a_worktree_whose_repository_excludes_graphify_out() {
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().canonicalize().unwrap();
+    let project = base.join("project");
+    let graph = project.join(GRAPH_FOLDER);
+    std::fs::create_dir_all(&graph).unwrap();
+    std::fs::write(graph.join("graph.json"), "{}").unwrap();
+    std::fs::create_dir_all(project.join(".git").join("info")).unwrap();
+    std::fs::write(
+        project.join(".git").join("info").join("exclude"),
+        "# git ls-files --others --exclude-from=.git/info/exclude\n.crazyagent/\ngraphify-out/\n",
+    )
+    .unwrap();
+    let clone = |name: &str, ignore: &str, exclude: &str| -> PathBuf {
+        let folder = base.join(name);
+        std::fs::create_dir_all(folder.join(".git").join("info")).unwrap();
+        std::fs::write(folder.join(".gitignore"), ignore).unwrap();
+        std::fs::write(folder.join(".git").join("info").join("exclude"), exclude).unwrap();
+        folder
+    };
+    let linked = |name: &str, ignore: &str| -> PathBuf {
+        let folder = base.join(name);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join(".gitignore"), ignore).unwrap();
+        std::fs::write(
+            folder.join(".git"),
+            format!("gitdir: {}/.git/worktrees/{name}\n", project.display()),
+        )
+        .unwrap();
+        folder
+    };
+    let shown = |folder: &Path| std::fs::read_link(folder.join(GRAPH_FOLDER).join("graph.json"));
+
+    let own = clone(
+        "own",
+        ".crazyagent/\ntarget/\n",
+        "/.worktrees/\n/graphify-out/\n",
+    );
+    expose_graph(&project, &own);
+    assert_eq!(
+        shown(&own).ok(),
+        Some(graph.join("graph.json")),
+        "an Own branch clone whose own exclude keeps the graph out of git shows it"
+    );
+
+    let sandboxed = linked("sandboxed", ".crazyagent/\ntarget/\n");
+    expose_graph(&project, &sandboxed);
+    assert_eq!(
+        shown(&sandboxed).ok(),
+        Some(graph.join("graph.json")),
+        "a linked worktree shares the project repository's exclude, which the engine writes"
+    );
+
+    let older = clone("older", "target/\n", "/.worktrees/\n");
+    expose_graph(&project, &older);
+    assert!(
+        !older.join(GRAPH_FOLDER).exists(),
+        "a clone made before its exclude named the graph never shows it as a change"
+    );
+
+    let negated = linked("negated", "target/\n!graphify-out/\n");
+    expose_graph(&project, &negated);
+    assert!(
+        !negated.join(GRAPH_FOLDER).exists(),
+        "a .gitignore line taking the graph back into git wins over the exclude"
+    );
+
+    let unignored = clone(
+        "unignored",
+        "graphify-out/\n!/graphify-out/\n",
+        "/.worktrees/\n",
+    );
+    expose_graph(&project, &unignored);
+    assert!(
+        !unignored.join(GRAPH_FOLDER).exists(),
+        "the last .gitignore line about the graph decides"
+    );
+}
+
 fn reminders(connection: &Connection) -> Vec<String> {
     let mut statement = connection
         .prepare(

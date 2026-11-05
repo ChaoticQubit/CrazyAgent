@@ -4012,6 +4012,10 @@ fn a_harness_clone_works_on_its_task_branch() {
         exclude.lines().any(|line| line == "/.worktrees/"),
         "{exclude}"
     );
+    assert!(
+        exclude.lines().any(|line| line == "/graphify-out/"),
+        "the project graph shown in the clone never reaches the agent's commits: {exclude}"
+    );
     assert_eq!(
         agent_branch(&case.db, &case.workspace.worktree, &case.workspace.git_dir).unwrap(),
         Some(branch.clone())
