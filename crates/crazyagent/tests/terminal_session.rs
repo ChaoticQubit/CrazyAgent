@@ -644,12 +644,13 @@ fn a_full_access_pane_runs_its_harness_as_its_first_process_and_stops_without_a_
     );
 
     let stopping = Instant::now();
-    assert_eq!(pane.session.stop().unwrap(), None);
+    let stopped = pane.session.stop();
+    let took = stopping.elapsed();
     assert!(
-        stopping.elapsed() < KEEPER_WAIT,
-        "the stop took {:?}",
-        stopping.elapsed()
+        matches!(stopped, Ok(None)),
+        "the stop of a Full access pane was {stopped:?}"
     );
+    assert!(took < KEEPER_WAIT, "the stop took {took:?}");
     assert!(!pane.host.alive().unwrap().contains(&pane.agent));
     assert!(test_kill_process_group(group).is_err());
 }
