@@ -107,6 +107,8 @@ fn the_window_passes_only_the_harness_project_key_value_and_version() {
 }
 
 /// Runs one flow against a real engine in a private temporary root, then stops the engine.
+/// The flow gets the root without symbolic links, as the engine keeps it, because
+/// `versioned::open` refuses a path through one and `/tmp` is one on macOS.
 /// Inputs: the root prefix and the flow. Output: none; a failed flow fails the test.
 async fn with_engine<F, T>(prefix: &str, flow: F)
 where
@@ -118,13 +120,15 @@ where
         .tempdir_in("/tmp")
         .unwrap();
     std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let config = engine_support::engine_config(root.path());
+    let base = std::fs::canonicalize(root.path()).unwrap();
+    assert!(base.is_absolute());
+    assert_eq!(base.file_name(), root.path().file_name());
+    let config = engine_support::engine_config(&base);
     let (_cancel, stopped) = tokio::sync::watch::channel(false);
-    let mut service = EngineService::start(root.path(), "e.sock", &config, &stopped)
+    let mut service = EngineService::start(&base, "e.sock", &config, &stopped)
         .await
         .unwrap();
-    let result =
-        tokio::time::timeout(Duration::from_secs(20), flow(root.path().to_path_buf())).await;
+    let result = tokio::time::timeout(Duration::from_secs(20), flow(base)).await;
     let cleanup = tokio::time::timeout(Duration::from_secs(5), service.shutdown()).await;
     assert!(matches!(cleanup, Ok(Ok(()))));
     result.unwrap().unwrap();

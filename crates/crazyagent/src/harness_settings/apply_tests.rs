@@ -477,8 +477,11 @@ fn an_owner_codex_setting_becomes_one_c_line() {
         let request = case.request("codex", tools);
         let pane = case.pane(&request, &settings);
         let plain = case.pane(&request, &Applied::default());
-        assert_eq!(pane[..owner.len()], owner);
-        assert_eq!(pane[owner.len()..], plain[..]);
+        let lead = if tools { "" } else { "--no-daemon" };
+        assert_eq!(pane[0], lead);
+        assert_eq!(plain[0], lead);
+        assert_eq!(pane[1..=owner.len()], owner);
+        assert_eq!(pane[owner.len() + 1..], plain[1..]);
         let headless = case.headless(&request, &settings);
         let plain = case.headless(&request, &Applied::default());
         assert_eq!(headless[..owner.len()], owner);

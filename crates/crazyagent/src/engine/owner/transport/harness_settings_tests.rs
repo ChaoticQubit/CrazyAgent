@@ -743,11 +743,24 @@ fn harness_settings_codes_cover_every_refusal() {
         include_str!("../../../harness_settings/store.rs"),
         include_str!("../../../harness_settings/installed.rs"),
     ];
-    let found: Vec<&str> = sources
+    let scanned: Vec<&str> = sources
         .iter()
         .flat_map(|source| source.split("\"harness_settings_").skip(1))
         .filter_map(|rest| rest.split('"').next())
         .collect();
+    let found: Vec<&str> = scanned
+        .iter()
+        .copied()
+        .filter(|rest| {
+            rest.bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte == b'_')
+        })
+        .collect();
+    assert_eq!(
+        scanned.len() - found.len(),
+        1,
+        "only the tests module path is not a code: {scanned:?}"
+    );
     assert!(found.len() >= 15, "{found:?}");
     for code in &found {
         let code = format!("harness_settings_{code}");
