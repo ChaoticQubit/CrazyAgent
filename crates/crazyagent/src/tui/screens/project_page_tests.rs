@@ -1455,10 +1455,21 @@ async fn a_second_n_while_the_first_new_session_starts_says_it_is_already_starti
     .await;
     let (fresh, _) = latest_master(&mut engine, &notes).await;
     assert_ne!(fresh.unwrap().session_id, first.session_id);
-    assert_eq!(master_sessions(&engine, &notes), 2, "one new session, not two");
-    assert_eq!(shell.ctx.message(), None, "the wait ended, so its error is gone");
+    assert_eq!(
+        master_sessions(&engine, &notes),
+        2,
+        "one new session, not two"
+    );
+    assert_eq!(
+        shell.ctx.message(),
+        None,
+        "the wait ended, so its error is gone"
+    );
     let shown = render(&mut shell, 100, 40);
-    assert!(!shown.contains("A new session is already starting."), "{shown}");
+    assert!(
+        !shown.contains("A new session is already starting."),
+        "{shown}"
+    );
 }
 
 /// A second n once the first New session has its settings and waits on the engine says
@@ -1488,9 +1499,14 @@ async fn a_second_n_while_the_engine_makes_the_first_new_session_says_it_is_alre
         .unwrap();
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        assert!(Instant::now() < deadline, "the settings read was never answered");
+        assert!(
+            Instant::now() < deadline,
+            "the settings read was never answered"
+        );
         match connection.poll_owner().unwrap() {
-            Some(OwnerEvent::Master(event)) if matches!(event.as_ref(), MasterEvent::Catalog { .. }) => {
+            Some(OwnerEvent::Master(event))
+                if matches!(event.as_ref(), MasterEvent::Catalog { .. }) =>
+            {
                 shell.arrive(owner_arrival(OwnerEvent::Master(event)));
                 break;
             }
@@ -1514,8 +1530,16 @@ async fn a_second_n_while_the_engine_makes_the_first_new_session_says_it_is_alre
     .await;
     let (fresh, _) = latest_master(&mut engine, &notes).await;
     assert_ne!(fresh.unwrap().session_id, first.session_id);
-    assert_eq!(master_sessions(&engine, &notes), 2, "one new session, not two");
-    assert_eq!(shell.ctx.message(), Some(&other), "an error said after the wait stays");
+    assert_eq!(
+        master_sessions(&engine, &notes),
+        2,
+        "one new session, not two"
+    );
+    assert_eq!(
+        shell.ctx.message(),
+        Some(&other),
+        "an error said after the wait stays"
+    );
 }
 
 /// A new session on a project whose master runs live turns the live switch on once the
