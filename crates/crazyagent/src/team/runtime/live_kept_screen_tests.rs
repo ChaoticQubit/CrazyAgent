@@ -20,15 +20,16 @@ const SUM: &str = "3825";
 const SHOWN: Duration = Duration::from_secs(10);
 
 /// A real engine on a fresh root, with its owner socket, its own terminal host and one
-/// set-up project, which the test reads and attaches to as the app does.
+/// set-up project, which the test reads and attaches to as the app does. The runtime is
+/// the last field, so a failed test drops the engine before the runtime it runs on.
 struct OwnerEngine {
-    runtime: tokio::runtime::Runtime,
     service: EngineService,
     controller: OwnerController,
     host: Arc<dyn Host>,
     root: tempfile::TempDir,
     _home: tempfile::TempDir,
     _stop: tokio::sync::watch::Sender<bool>,
+    runtime: tokio::runtime::Runtime,
 }
 
 /// A new owner-only folder under `/tmp`. Input: its name's prefix. Output: the folder.
