@@ -284,3 +284,6 @@ pub fn poll(
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests;
+
+#[cfg(all(test, target_os = "macos"))]
+mod live_codex_tests;

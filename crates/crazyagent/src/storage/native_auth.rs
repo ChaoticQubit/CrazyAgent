@@ -476,13 +476,17 @@ fn commit_native_auth_custody(
     if !valid {
         return Err(error("native_auth_recovery_required"));
     }
-    if !retirement.after_child_reaped()
-        && matches!(
-            fact.phase,
-            NativeAuthPhase::Starting | NativeAuthPhase::Cancelling
-        )
-    {
-        apply_update(&mut fact, NativeAuthHostUpdate::Unavailable)?;
+    if !retirement.after_child_reaped() {
+        match fact.phase {
+            NativeAuthPhase::Starting => {
+                apply_update(&mut fact, NativeAuthHostUpdate::Unavailable)?;
+            }
+            NativeAuthPhase::Cancelling => {
+                fact.phase = NativeAuthPhase::Cancelled;
+                fact.code = None;
+            }
+            _ => {}
+        }
     }
     store_fact(&tx, &fact)?;
     validate_dispatch(&tx, config, sources, dispatch)?;
