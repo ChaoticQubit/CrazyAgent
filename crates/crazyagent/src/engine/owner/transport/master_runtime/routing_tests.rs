@@ -2401,27 +2401,21 @@ async fn call_waits(mailbox: &Path) {
     }
 }
 
-/// A console master's remember is answered by its own turn's tick (OP22-L1, F2): a real
-/// Claude host on a stand-in harness holds the turn open, the team server writes the call
-/// into the turn's mailbox, and collect_master_turn's inspect tick finds it waiting and sends
-/// ServeMemory, so the answer reaches the server while the turn runs. Once the turn has
-/// settled, ServeMemory refuses with master_memory_turn_not_running and a new call stays
-/// untaken until the server gives up on it.
-#[tokio::test]
-async fn a_console_master_turn_s_own_tick_answers_its_remember_and_stops_with_the_turn() {
-    use crate::engine::master_host_fixture::MasterFixture;
-    use crate::memory::library::{MemoryOrigin, MemoryScope, PAGE_ITEMS_MAX};
-    let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
-    store_master_tools(&case, true);
-    case.sign_in("codex-c", true).await;
-    let prepared = case.prepared(&case.turn.id).await;
-    assert!(prepared.tools, "the project's master tools switch is on");
-    let (profile, hold) = case
-        .runtime()
-        .acquire_master_profile(&prepared, &case.turn.id)
-        .await
-        .unwrap();
-    let mut fixture = MasterFixture::new("claude");
+/// A real Claude host on the memory-turn stand-in for a case's prepared console turn, with
+/// the team server's drop record and mailbox in the stand-in's private tmp (OP-22).
+/// Inputs: the case, its prepared turn and the host's wall time in milliseconds. Outputs:
+/// the stand-in fixture, which owns the folders, the active master, the record and mailbox.
+async fn console_claude_master(
+    case: &Fixture,
+    prepared: &PreparedMasterTurn,
+    wall_time_ms: u64,
+) -> (
+    crate::engine::master_host_fixture::MasterFixture,
+    ActiveMaster,
+    PathBuf,
+    PathBuf,
+) {
+    let mut fixture = crate::engine::master_host_fixture::MasterFixture::new("claude");
     let lease = fixture.lease("console-memory-turn", 1).unwrap();
     let home = lease.profile_path().unwrap();
     let harness = fixture.stand_in("claude", MEMORY_TURN_HARNESS);
@@ -2459,12 +2453,15 @@ async fn a_console_master_turn_s_own_tick_answers_its_remember_and_stops_with_th
             worktree_lease: prepared.worktree_lease.clone(),
         },
         account_ref.clone(),
-        ResourceBudget::unit(),
+        ResourceBudget {
+            wall_time_ms,
+            ..ResourceBudget::unit()
+        },
     )
     .await
     .unwrap();
     let (runtime_ref, capture_ref, capture) = case.runtime().allocate_master_capture().unwrap();
-    let mut active = ActiveMaster {
+    let active = ActiveMaster {
         host: MasterHost::Claude(Box::new(claude)),
         capture: Capture::new(
             capture,
@@ -2486,6 +2483,97 @@ async fn a_console_master_turn_s_own_tick_answers_its_remember_and_stops_with_th
         },
         reported: Tokens::default(),
     };
+    (fixture, active, record, mailbox)
+}
+
+/// How a collected console turn ended, as one line a test compares: its reply text, its
+/// failure cause, its engine error, or no end within the test's bound. Input: the bounded
+/// collect outcome. Output: the line.
+fn turn_end(
+    observed: &Result<Result<MasterRuntimeObservation, EngineError>, tokio::time::error::Elapsed>,
+) -> String {
+    match observed {
+        Ok(Ok(MasterRuntimeObservation::Response { reply, .. })) => format!("reply {}", reply.text),
+        Ok(Ok(MasterRuntimeObservation::Failed { cause, .. })) => format!("failed {cause}"),
+        Ok(Ok(_)) => "another observation".to_owned(),
+        Ok(Err(error)) => format!("error {}", error.0),
+        Err(_) => "no end in time".to_owned(),
+    }
+}
+
+/// A console master turn reads its harness and replies while every inspection of the turn
+/// outlasts the inspect interval, here behind an owner request holding the engine's owner
+/// barrier 250 ms at a time: the next inspection waits one interval after the last one
+/// ends, so the host's events and deadline are read between inspections (OP-22 r1).
+#[tokio::test]
+async fn a_console_master_turn_reads_its_harness_while_each_inspection_outlasts_the_interval() {
+    let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
+    case.sign_in("codex-c", true).await;
+    let prepared = case.prepared(&case.turn.id).await;
+    let (profile, hold) = case
+        .runtime()
+        .acquire_master_profile(&prepared, &case.turn.id)
+        .await
+        .unwrap();
+    let (fixture, mut active, _, mailbox) = console_claude_master(&case, &prepared, 150_000).await;
+    fs::write(fixture.project.join("memory-answered"), b"").unwrap();
+    let engine = Arc::clone(&case.runtime().engine);
+    let barrier = tokio::spawn(async move {
+        loop {
+            let held = engine.owner_egress.read().await;
+            tokio::time::sleep(Duration::from_millis(250)).await;
+            drop(held);
+        }
+    });
+    let observed = tokio::time::timeout(
+        Duration::from_secs(30),
+        case.runtime()
+            .collect_master_turn(&prepared, &case.turn.id, &mut active, Some(&mailbox)),
+    )
+    .await;
+    barrier.abort();
+    let _ = active.host.close().await;
+    assert_eq!(
+        turn_end(&observed),
+        "reply DONE",
+        "the turn read its harness while each inspection outlasted the interval"
+    );
+    let Ok(Ok(observed)) = observed else {
+        unreachable!("the turn's reply was asserted");
+    };
+    let settled = case
+        .runtime()
+        .observe_master_turn(&prepared, &case.turn.id, observed)
+        .await
+        .unwrap();
+    assert!(!settled.phase.outstanding(), "{:?}", settled.phase);
+    drop(hold);
+    drop(profile);
+    drop(prepared);
+    case.finish().await;
+}
+
+/// A console master's remember is answered by its own turn's tick (OP22-L1, F2): a real
+/// Claude host on a stand-in harness holds the turn open, the team server writes the call
+/// into the turn's mailbox, and collect_master_turn's inspect tick finds it waiting and sends
+/// ServeMemory, so the answer reaches the server while the turn runs. Once the turn has
+/// settled, ServeMemory refuses with master_memory_turn_not_running and a new call stays
+/// untaken until the server gives up on it.
+#[tokio::test]
+async fn a_console_master_turn_s_own_tick_answers_its_remember_and_stops_with_the_turn() {
+    use crate::memory::library::{MemoryOrigin, MemoryScope, PAGE_ITEMS_MAX};
+    let case = Fixture::open(POOL_CATALOG, codex_pool_selection(), true).await;
+    store_master_tools(&case, true);
+    case.sign_in("codex-c", true).await;
+    let prepared = case.prepared(&case.turn.id).await;
+    assert!(prepared.tools, "the project's master tools switch is on");
+    let (profile, hold) = case
+        .runtime()
+        .acquire_master_profile(&prepared, &case.turn.id)
+        .await
+        .unwrap();
+    let (fixture, mut active, record, mailbox) =
+        console_claude_master(&case, &prepared, 150_000).await;
     let server = remember_server(
         &record,
         &mailbox,
@@ -2497,15 +2585,17 @@ async fn a_console_master_turn_s_own_tick_answers_its_remember_and_stops_with_th
         case.runtime()
             .collect_master_turn(&prepared, &case.turn.id, &mut active, Some(&mailbox)),
     )
-    .await
-    .expect("the console turn never ended")
-    .unwrap();
+    .await;
     let _ = active.host.close().await;
     let answered = server.join().unwrap();
-    assert!(
-        matches!(&observed, MasterRuntimeObservation::Response { reply, .. } if reply.text == "DONE"),
+    assert_eq!(
+        turn_end(&observed),
+        "reply DONE",
         "the turn replied after its memory call was answered"
     );
+    let Ok(Ok(observed)) = observed else {
+        unreachable!("the turn's reply was asserted");
+    };
     let settled = case
         .runtime()
         .observe_master_turn(&prepared, &case.turn.id, observed)
