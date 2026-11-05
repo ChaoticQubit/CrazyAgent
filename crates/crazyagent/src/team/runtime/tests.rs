@@ -17967,3 +17967,27 @@ fn a_native_teammate_cannot_change_its_lead_s_skills_or_relay_plugin() {
     }
     drop(installed);
 }
+
+/// LMS-1 r1 L1: the runtime's grant wait record for an agent holds only its newest grant's
+/// answer: a grant that fails another way after a profile wait drops the earlier
+/// `native_profile_in_use`, so a live test never reads BLOCKED over that failure.
+#[test]
+fn a_grant_that_fails_after_a_profile_wait_drops_the_wait_record() {
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let mut team = fixture.runtime();
+    let mut master = between_turns(&project, AgentRole::Master, true, false);
+    master.connection = reference("left-the-pool");
+    team.workers.insert(7, master);
+    team.grant_waited
+        .insert(7, "native_profile_in_use".to_owned());
+    assert!(
+        team.grant(&fixture.access, 7, &project).is_err(),
+        "an account that left the pool is refused"
+    );
+    assert_eq!(
+        team.grant_waited.get(&7),
+        None,
+        "the earlier profile wait is not the newest grant answer"
+    );
+}

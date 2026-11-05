@@ -664,14 +664,7 @@ impl Team {
         let screen = master
             .and_then(|(id, _)| crate::terminal::AgentId::team(*id).ok())
             .and_then(|agent| self.host.screen(&agent).ok())
-            .map(|bytes| {
-                let rows: Vec<String> = crate::team::events::screen_rows(&bytes)
-                    .into_iter()
-                    .map(|row| row.trim().to_owned())
-                    .filter(|row| !row.is_empty())
-                    .collect();
-                rows[rows.len().saturating_sub(SCREEN_ROWS)..].to_vec()
-            })
+            .map(|bytes| pane_rows(&bytes))
             .unwrap_or_default();
         InputFacts {
             messages,
@@ -809,6 +802,18 @@ pub(crate) struct InputFacts {
     screen: Vec<String>,
 }
 
+/// The master pane's last `SCREEN_ROWS` non-empty rows for a failure message, each through
+/// the engine's credential redaction, since a pane can show a sign-in code or a token.
+/// Input: the pane's screen bytes. Output: the rows, oldest first.
+pub(crate) fn pane_rows(screen: &[u8]) -> Vec<String> {
+    let rows: Vec<String> = crate::team::events::screen_rows(screen)
+        .into_iter()
+        .map(|row| row.trim().to_owned())
+        .filter(|row| !row.is_empty())
+        .collect();
+    rows[rows.len().saturating_sub(SCREEN_ROWS)..].to_vec()
+}
+
 /// Words the input facts for a failure message, so a turn that never came reads as queued,
 /// refused or typed. Input: the facts. Output: one line.
 pub(crate) fn input_evidence(facts: &InputFacts) -> String {
@@ -856,6 +861,27 @@ fn a_live_master_turn_failure_names_its_input_facts() {
     ] {
         assert!(line.contains(part), "{part} is missing from: {line}");
     }
+}
+
+/// LMS-1 r1 L2: the master pane rows a failure message shows pass through the engine's
+/// redaction, so a token on the master's screen never reaches a test log, and only the last
+/// `SCREEN_ROWS` non-empty rows are kept.
+#[test]
+fn the_master_pane_rows_in_a_failure_are_redacted_and_bounded() {
+    let token = "e2e0".repeat(10);
+    let mut screen = String::new();
+    for row in 0..12 {
+        screen.push_str(&format!("row {row}\r\n"));
+    }
+    screen.push_str(&format!("paste this code {token}\r\n\r\n"));
+    let rows = pane_rows(screen.as_bytes());
+    assert_eq!(rows.len(), SCREEN_ROWS, "{rows:?}");
+    assert_eq!(rows[0], "row 5", "{rows:?}");
+    assert!(
+        rows.last().unwrap().starts_with("paste this code "),
+        "{rows:?}"
+    );
+    assert!(rows.iter().all(|row| !row.contains(&token)), "{rows:?}");
 }
 
 /// LMS-1: a turn wait is BLOCKED only with the custody answer of the runtime's own profile
