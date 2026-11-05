@@ -32,6 +32,16 @@ pub const APP_NOTIFICATIONS_MAX: i64 = 50;
 pub const UNSEEN_PROJECTS_MAX: i64 = 200;
 pub const HOUR_MS: i64 = 3_600_000;
 pub const SCAN_EVERY: Duration = Duration::from_secs(2);
+pub(crate) const OWNER_RESTARTED: &str = "The owner restarted it in its own worktree. It is idle and takes the next task for its harness.";
+pub(crate) const OWNER_WOKE: &str = "The owner woke it again in its own worktree. It is idle and takes the next task for its harness.";
+pub(crate) const OWNER_STOPPED_AGENT: &str = "The owner stopped it and its teammates. Its task waits for it until the owner starts it again; do not hand that work to another agent.";
+pub(crate) const INSTRUCTIONS_RESTARTED: &str = "It restarted in its own worktree and conversation to load the owner's changed instructions. It is idle and takes the next task for its harness.";
+const OWNER_NOTICES: [&str; 4] = [
+    OWNER_RESTARTED,
+    OWNER_WOKE,
+    OWNER_STOPPED_AGENT,
+    INSTRUCTIONS_RESTARTED,
+];
 const SCREEN_ROWS_SCANNED: usize = 40;
 const QUESTION_ROWS_ABOVE: usize = 12;
 const OPTIONS_MAX: usize = 9;
@@ -45,6 +55,10 @@ const BORDERS: [char; 4] = ['│', '|', '┃', '║'];
 const _: () = assert!(EVENTS_QUEUED_MAX < EVENTS_PER_PROJECT_MAX);
 const _: () = assert!(EVENTS_QUEUED_PER_AGENT_MAX < EVENTS_QUEUED_MAX);
 const _: () = assert!(EVENTS_QUEUED_HARD_MAX < EVENTS_PER_PROJECT_MAX);
+const _: () = assert!(OWNER_RESTARTED.len() <= EVENT_TEXT_BYTES_MAX);
+const _: () = assert!(OWNER_WOKE.len() <= EVENT_TEXT_BYTES_MAX);
+const _: () = assert!(OWNER_STOPPED_AGENT.len() <= EVENT_TEXT_BYTES_MAX);
+const _: () = assert!(INSTRUCTIONS_RESTARTED.len() <= EVENT_TEXT_BYTES_MAX);
 const _: () = assert!(COLD_WAKES_PER_HOUR_MAX <= HOURLY_CAP_DEFAULT);
 const _: () = assert!(EVENT_TEXT_BYTES_MAX + 256 < WAKE_BYTES_MAX);
 const _: () = assert!(HOURLY_CAP_DEFAULT <= HOURLY_CAP_MAX);
@@ -1025,8 +1039,11 @@ pub const FORWARDED_PER_TICK_MAX: i64 = 64;
 /// Sends the queued events of a project's workers to each worker's own lead instead of
 /// the master, which hears only its leads' events (DEC-104 K2b): one coordination note per
 /// lead from the engine, holding the event lines up to the message body bound, under each
-/// worker's wake rule, so a muted kind stays muted. Events the layer refuses are dropped,
-/// never sent elsewhere. Takes the connection, the project and the time. Returns any failure.
+/// worker's wake rule, so a muted kind stays muted. The engine's notices of what the owner
+/// did to a worker go in a note of their own under `NOTICES_KEY` whatever the rule: it
+/// wakes no one, so the lead reads them at its next real turn. Events the layer refuses are
+/// dropped, never sent elsewhere. Takes the connection, the project and the time. Returns
+/// any failure.
 pub fn forward_to_parents(
     connection: &Connection,
     project: &ProjectId,
@@ -1052,16 +1069,18 @@ pub fn forward_to_parents(
             "SELECT {EVENT_COLUMNS} FROM team_events WHERE id=?1"
         ))
         .map_err(error)?;
-    let mut by_lead: BTreeMap<i64, Vec<TeamEvent>> = BTreeMap::new();
+    let mut by_lead: BTreeMap<(i64, bool), Vec<TeamEvent>> = BTreeMap::new();
     for (id, agent, lead) in queued {
         let event = full
             .query_row([id], |row| event_row(connection, row))
             .map_err(error)?;
-        if rule(connection, Some(project), Some(agent))?
-            .0
-            .wakes(event.kind)
+        let notice = owner_notice(&event);
+        if notice
+            || rule(connection, Some(project), Some(agent))?
+                .0
+                .wakes(event.kind)
         {
-            by_lead.entry(lead).or_default().push(event);
+            by_lead.entry((lead, notice)).or_default().push(event);
         } else {
             connection
                 .execute(
@@ -1071,7 +1090,8 @@ pub fn forward_to_parents(
                 .map_err(error)?;
         }
     }
-    for (lead, events) in by_lead {
+    for ((lead, notice), events) in by_lead {
+        assert!(events.iter().all(|event| owner_notice(event) == notice));
         let mut text = String::new();
         let mut carried = Vec::new();
         for event in &events {
@@ -1100,7 +1120,11 @@ pub fn forward_to_parents(
                 body: text,
                 idempotency_key: Some(format!(
                     "{}{}",
-                    crate::coord::delivery::EVENTS_KEY,
+                    if notice {
+                        crate::coord::delivery::NOTICES_KEY
+                    } else {
+                        crate::coord::delivery::EVENTS_KEY
+                    },
                     carried[0]
                 )),
             },
@@ -1123,6 +1147,13 @@ pub fn forward_to_parents(
         tx.commit().map_err(error)?;
     }
     Ok(())
+}
+
+/// Tells whether an event is the engine's own notice that the owner woke, restarted or
+/// stopped the agent, or restarted it for the owner's changed instructions (run 5 task 73:
+/// a lead woken for one spent a turn on nothing). Takes the event. Returns the answer.
+fn owner_notice(event: &TeamEvent) -> bool {
+    event.kind == EventKind::Progress && OWNER_NOTICES.contains(&event.text.as_str())
 }
 
 /// The handlers the live master's `message`, `answer` and `status` tools call, set on the
