@@ -251,6 +251,42 @@ impl Engine {
         *slot = Some((found, host.clone()));
         Ok(host)
     }
+
+    /// Names in a team graph read the terminals of finished workers whose last screen the
+    /// open terminal host still keeps (N-D21). Any other read, and every read before a host
+    /// opened, passes unchanged: a host opened later keeps no screen yet. Takes the read.
+    /// Returns it, or `terminal_unavailable` when the host check could not finish.
+    pub(crate) async fn kept_named(
+        &self,
+        read: OwnerReadReply,
+    ) -> Result<OwnerReadReply, EngineError> {
+        let OwnerReadReply {
+            revision,
+            config_id,
+            data,
+        } = read;
+        let host = self
+            .terminal
+            .lock()
+            .ok()
+            .and_then(|slot| slot.as_ref().map(|(_, host)| host.clone()));
+        let data = match (data, host) {
+            (OwnerData::TeamGraph { mut graph }, Some(host)) => {
+                tokio::task::spawn_blocking(move || {
+                    crate::team::graph::name_kept(&mut graph, |agent| host.kept(agent));
+                    OwnerData::TeamGraph { graph }
+                })
+                .await
+                .map_err(|_| failure("terminal_unavailable"))?
+            }
+            (data, _) => data,
+        };
+        Ok(OwnerReadReply {
+            revision,
+            config_id,
+            data,
+        })
+    }
 }
 
 fn engine_root(authority: &Authority) -> Result<PathBuf, EngineError> {
