@@ -1,9 +1,11 @@
 import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { click, shown, texts } from "../settings-steps.mjs";
+import { SETTINGS } from "../trial3-steps.mjs";
 import { appCall, appPaths, changeFiles, commitOutside, git, pathGap, setTruth, stamp } from "../trial4-projects.mjs";
 
-const LAND = "trial3-land";
+/** The branch change sets land on: the trial's Land on setting, trial<n>-land from TRIAL_LAND_ON. */
+export const LAND = SETTINGS.landOn;
 const UI_MS = 30000;
 const FOLLOW_MS = 90000;
 const OPEN = ["pending", "conflict"];

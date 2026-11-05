@@ -10,7 +10,6 @@ or typed as the query proves nothing.
 """
 
 import json
-from pathlib import Path
 import re
 
 import audit
@@ -39,34 +38,33 @@ def read(folders):
     """Reads Claude Code transcripts. Input: the folders. Output: message texts, tool calls as
     {id: (name, input text)} and tool results as {id: output text}."""
     said, calls, results = [], {}, {}
-    for folder in folders:
-        for path in sorted(Path(folder).glob("**/*.jsonl")):
-            try:
-                handle = path.open("r", encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            with handle:
-                for number, line in enumerate(handle, 1):
-                    if number > LINES_PER_FILE_MAX:
-                        break
-                    try:
-                        entry = json.loads(line)
-                    except ValueError:
+    for path in audit.transcript_files(folders):
+        try:
+            handle = path.open("r", encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        with handle:
+            for number, line in enumerate(handle, 1):
+                if number > LINES_PER_FILE_MAX:
+                    break
+                try:
+                    entry = json.loads(line)
+                except ValueError:
+                    continue
+                message = entry.get("message") if isinstance(entry, dict) else None
+                content = message.get("content") if isinstance(message, dict) else None
+                if isinstance(content, str):
+                    said.append(content)
+                    continue
+                for part in content if isinstance(content, list) else []:
+                    if not isinstance(part, dict):
                         continue
-                    message = entry.get("message") if isinstance(entry, dict) else None
-                    content = message.get("content") if isinstance(message, dict) else None
-                    if isinstance(content, str):
-                        said.append(content)
-                        continue
-                    for part in content if isinstance(content, list) else []:
-                        if not isinstance(part, dict):
-                            continue
-                        if part.get("type") == "text" and isinstance(part.get("text"), str):
-                            said.append(part["text"])
-                        elif part.get("type") == "tool_use" and isinstance(part.get("id"), str):
-                            calls[part["id"]] = (str(part.get("name")), json.dumps(part.get("input"), ensure_ascii=False))
-                        elif part.get("type") == "tool_result" and isinstance(part.get("tool_use_id"), str):
-                            results[part["tool_use_id"]] = audit.result_text(part.get("content"))
+                    if part.get("type") == "text" and isinstance(part.get("text"), str):
+                        said.append(part["text"])
+                    elif part.get("type") == "tool_use" and isinstance(part.get("id"), str):
+                        calls[part["id"]] = (str(part.get("name")), json.dumps(part.get("input"), ensure_ascii=False))
+                    elif part.get("type") == "tool_result" and isinstance(part.get("tool_use_id"), str):
+                        results[part["tool_use_id"]] = audit.result_text(part.get("content"))
     return said, calls, results
 
 

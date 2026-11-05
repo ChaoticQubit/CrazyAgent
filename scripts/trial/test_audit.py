@@ -16,6 +16,7 @@ import audit
 HERE = Path(__file__).resolve().parent
 SCHEMA = (HERE / "fixture-schema.sql").read_text(encoding="utf-8")
 MARK = "TRIAL3-PROJECT-RULE"
+APP_SET = "# Mandatory workflow\n\nUse tdd."
 PROJECT = "trial"
 GIT_ENV_KEYS = ("PATH", "TMPDIR", "LANG")
 
@@ -32,6 +33,17 @@ def call(number, name, given, result, error=False):
 
 def launch(text):
     return {"type": "api-request-shape", "shape": {"system": [{"type": "text", "text": text}]}}
+
+
+def rendered(app, project=""):
+    """The text CrazyAgent gives an agent, in the shape crates/crazyagent/src/agent_home.rs
+    render writes: its title, then the app and the project instructions under their
+    headings, a blank part left out. Input: both texts. Output: the text."""
+    text = "# Instructions from CrazyAgent\n"
+    for heading, part in (("## App instructions", app), ("## Project instructions", project)):
+        if part.strip():
+            text += f"\n{heading}\n\n{part.strip()}\n"
+    return text
 
 
 def prompt(ms, text="go on"):
@@ -354,6 +366,103 @@ class AuditTests(unittest.TestCase):
             self.assertNotIn(leaked, (w.out / "checks" / "T3-09.json").read_text())
         self.assertIn(audit.MASK, record["log"])
 
+    def test_t3_09_notes_the_xcrun_lines_of_a_toolchain_call_that_runs_no_git(self):
+        w = self.world
+        sub = w.agent("sub", mode="app_spawned")
+        cache = "  = note: xcrun: error: couldn't create cache file '/var/folders/x/T/xcrun_db-AbCd1234' (errno=Operation not permitted)"
+        w.transcript(sub, call(1, "Bash", {"command": "cargo test 2>&1 | grep -E \"^test result|error\" ; cat calc.py; ls"}, f"{cache}\ntest result: ok. 1 passed"))
+        w.transcript(sub, call(2, "Bash", {"command": "git add calc.py && git commit -qm \"feat: add sub\""}, "[main 376e354] feat: add sub"))
+        record = w.audit("T3-09")
+        self.assertEqual(record["result"], "PASS", record["detail"])
+        self.assertIn("git calls=1 ok=1 xcrun errors=0", record["detail"])
+        self.assertIn("toolchain xcrun notes=1", record["detail"])
+
+    def t3_09_alone(self, command, result, error=False):
+        """Audits T3-09 on a fresh store whose one agent made one shell call, then a clean git
+        call. Takes the call's command, its result and whether it failed. Returns the record."""
+        with tempfile.TemporaryDirectory(prefix="ca-audit-") as folder:
+            world = World(folder)
+            try:
+                agent = world.agent("sub", mode="app_spawned")
+                world.transcript(agent, call(1, "Bash", {"command": command}, result, error=error))
+                world.transcript(agent, call(2, "Bash", {"command": "git status"}, "On branch main"))
+                return world.audit("T3-09")
+            finally:
+                world.close()
+
+    def test_t3_09_finds_git_by_its_parsed_command_word_and_fails_the_xcrun_shim_in_every_shell_form(self):
+        shim = "xcrun: error: couldn't create cache file '/var/folders/x/T/xcrun_db-AbCd1234' (errno=Operation not permitted)"
+        for command in (
+            "/usr/bin/git commit -qm x",
+            "/Library/Developer/CommandLineTools/usr/bin/git status",
+            "cd repo && git status",
+            "true; git log",
+            "echo x | git apply",
+            "false || git fetch",
+            "cd repo && git;",
+            "(git status)",
+            "{ git status; }",
+            "if git diff --quiet; then echo same; fi",
+            "echo `git rev-parse HEAD`",
+            "echo \"$(/usr/bin/git rev-parse HEAD)\"",
+            "$(which git) commit -qm x",
+            "sh -c \"git log\"",
+            "bash -lc 'cd repo && /usr/bin/git status'",
+            "bash -c git",
+            "GIT_DIR=.git git log",
+            "env -i PATH=/usr/bin git log",
+            "xcrun git status",
+            "cd repo\ngit status",
+            "git commit -F - <<'EOF'\nit's done\nEOF",
+        ):
+            with self.subTest(command=command):
+                record = self.t3_09_alone(command, f"{shim}\nfatal: git failed under the sandbox", error=True)
+                self.assertEqual(record["result"], "FAIL", record["detail"])
+                self.assertIn("git calls=2 ok=1 xcrun errors=1", record["detail"])
+
+    def test_t3_09_fails_an_xcrun_line_in_any_call_but_a_known_toolchain_one(self):
+        shim = "xcrun: error: couldn't create cache file '/var/folders/x/T/xcrun_db-AbCd1234' (errno=Operation not permitted)"
+        for command in (
+            "./land.sh",
+            "python3 tools/release.py",
+            "make release && ./land.sh",
+            "cargo test; echo $(date)",
+            "bash -c \"cargo test\"",
+            "xargs cargo build",
+            "cargo test 'open",
+        ):
+            with self.subTest(command=command):
+                record = self.t3_09_alone(command, shim)
+                self.assertEqual(record["result"], "FAIL", record["detail"])
+                self.assertIn("git calls=1 ok=1 xcrun errors=1", record["detail"])
+        for command in (
+            "cargo test 2>&1 | grep -E \"^test result|error\" ; cat calc.py; ls",
+            "cargo build -q",
+            "cd crate && make",
+            "time cargo test",
+            "~/.cargo/bin/cargo test -q",
+            "RUSTFLAGS=-Dwarnings cargo clippy",
+            "rustc main.rs && ls",
+            "swift build 2>&1 | tail -3",
+        ):
+            with self.subTest(command=command):
+                record = self.t3_09_alone(command, f"{shim}\ntest result: ok. 1 passed")
+                self.assertEqual(record["result"], "PASS", record["detail"])
+                self.assertIn("git calls=1 ok=1 xcrun errors=0, toolchain xcrun notes=1", record["detail"])
+
+    def test_t3_09_fails_an_xcrun_line_in_a_toolchain_call_whose_words_name_git(self):
+        shim = "xcrun: error: couldn't create cache file '/var/folders/x/T/xcrun_db-AbCd1234' (errno=Operation not permitted)"
+        for command in (
+            "make GIT=/usr/bin/git",
+            "make release GIT=git",
+            "cargo run -q -- git status",
+            "cargo build --config 'net.git-fetch-with-cli=true' && /usr/bin/git status",
+        ):
+            with self.subTest(command=command):
+                record = self.t3_09_alone(command, shim)
+                self.assertEqual(record["result"], "FAIL", record["detail"])
+                self.assertIn("xcrun errors=1", record["detail"])
+
     def test_t3_10_stop_all_passes_on_a_paused_project_and_fails_while_an_agent_process_lives(self):
         w = self.world
         lead = w.agent("sub", mode="app_spawned")
@@ -624,16 +733,114 @@ class AuditTests(unittest.TestCase):
         lead = w.agent("sub", mode="native", worktree="/w/agent-lead")
         for pane in ("%2", "%3"):
             w.row("team_teammates", agent=lead, project=PROJECT, pane=pane, seen_ms=w.now)
-        self.given(lead, f"{audit.APP_MARK}\n\nUse tdd.\n\n{MARK}\n")
+        (w.root / "instructions.md").write_text(f"\n{APP_SET}\n")
+        self.given(lead, rendered(APP_SET, MARK))
+        codex = w.agent("sub", harness="codex")
+        w.home(codex).mkdir(parents=True)
+        (w.home(codex) / "AGENTS.md").write_text(rendered(APP_SET, MARK))
         w.transcript(lead, [launch(f"Claude.\n{audit.APP_MARK}\n{MARK}")], worktree="/w/agent-lead")
         w.transcript(lead, [launch(f"Mate.\n{audit.APP_MARK}\n")], worktree="/w/agent-lead/.worktrees/mate-one")
         w.transcript(lead, [launch(f"Mate.\n{audit.APP_MARK if mate_reached else 'no set'}\n")], worktree="/w/agent-lead/.worktrees/mate-two")
+
+    def mate_transcript(self, lead, name, entries):
+        """Writes a native teammate's transcript where its Claude Code keeps it: under its
+        lead's teammates' config home, in the folder of the lead's worktree, each line naming
+        the teammate as agent teams do. Inputs: the lead, the agent-team name, the entries."""
+        w = self.world
+        folder = w.root / "team" / "agents" / f"agent-{lead}" / "mates-home" / "projects" / audit.slug_of("/w/agent-lead")
+        folder.mkdir(parents=True, exist_ok=True)
+        with (folder / f"{name}.jsonl").open("a", encoding="utf-8") as handle:
+            for entry in entries:
+                handle.write(json.dumps(dict(entry, agentName=name, teamName="session-1")) + "\n")
+
+    def native_team(self, both_reached=True, rows=True):
+        """A native lead whose two teammates' transcripts are in its teammates' config home,
+        as agent rows with their handles or as pane rows only. Inputs: whether the second
+        teammate's launch had the set and whether teammates have agent rows."""
+        w = self.world
+        lead = w.agent("sub", mode="native", worktree="/w/agent-lead")
+        (w.root / "instructions.md").write_text(f"\n{APP_SET}\n")
+        self.given(lead, rendered(APP_SET, MARK))
+        w.transcript(lead, [launch(f"Claude.\n{audit.APP_MARK}\n{MARK}")], worktree="/w/agent-lead")
+        for number, handle in enumerate(("greeter", "docs"), 1):
+            if rows:
+                mate = w.agent("teammate", parent=lead, pane=f"%{number}", worktree=f"/w/agent-lead/.worktrees/{handle}")
+                w.row("team_names", agent=mate, project=PROJECT, persona=handle.title(), handle=handle)
+            else:
+                w.row("team_teammates", agent=lead, project=PROJECT, pane=f"%{number}", seen_ms=w.now)
+            reached = both_reached or number == 1
+            self.mate_transcript(lead, handle, [launch(f"Mate.\n{audit.APP_MARK if reached else 'no set'}\n{MARK}")])
+        return lead
+
+    def test_t3_11_and_t3_15_read_native_teammates_transcripts_in_their_lead_s_teammate_home(self):
+        self.native_team()
+        record = self.world.audit("T3-11")
+        self.assertEqual(record["result"], "PASS", record["stdout"])
+        self.assertEqual(record["stdout"].count("(teammate) launches ok=1/1"), 2, record["stdout"])
+        self.assertNotIn("no transcript", record["stdout"])
+        record = self.world.audit("T3-15")
+        self.assertNotIn("no transcripts for", record["detail"])
+        self.assertEqual(record["detail"].count("(teammate) files=1"), 2, record["detail"])
+        self.tearDown()
+        self.setUp()
+        self.native_team(both_reached=False)
+        record = self.world.audit("T3-11")
+        self.assertEqual(record["result"], "FAIL")
+        self.assertIn("(teammate) launches ok=0/1", record["stdout"])
+        self.assertIn("(teammate) launches ok=1/1", record["stdout"])
+
+    def test_planted_symlinks_in_a_teammate_home_or_an_agent_home_are_not_read(self):
+        w = self.world
+        lead = self.native_team()
+        outside = w.base / "outside"
+        (outside / "linked").mkdir(parents=True)
+        for path, name in ((outside / "planted.jsonl", "greeter"), (outside / "linked" / "other-session.jsonl", "docs")):
+            path.write_text(json.dumps(dict(launch(f"Mate.\n{audit.APP_MARK}\n{MARK}"), agentName=name, teamName="session-1")) + "\n")
+        mates = w.root / "team" / "agents" / f"agent-{lead}" / "mates-home" / "projects"
+        (mates / audit.slug_of("/w/agent-lead") / "planted.jsonl").symlink_to(outside / "planted.jsonl")
+        (mates / "linked").symlink_to(outside / "linked")
+        sub = w.agent("sub", mode="app_spawned")
+        (outside / "projects" / "elsewhere").mkdir(parents=True)
+        (outside / "projects" / "elsewhere" / "session.jsonl").write_text(json.dumps(launch(f"Sub.\n{audit.APP_MARK}\n{MARK}")) + "\n")
+        w.home(sub).mkdir(parents=True)
+        (w.home(sub) / "projects").symlink_to(outside / "projects")
+        record = w.audit("T3-15")
+        self.assertEqual(record["detail"].count("(teammate) files=1"), 2, record["detail"])
+        self.assertNotIn("files=2", record["detail"])
+        self.assertIn(f"no transcripts for {sub}", record["detail"])
+
+    def test_t3_23_never_reads_a_codex_rollout_planted_as_a_symlink(self):
+        lead = self.role_skills(lead_harness="codex")
+        folder = self.world.home(lead) / "sessions" / "2026" / "11" / "04"
+        rollout = folder / "rollout-2026-11-04T10-00-00-1.jsonl"
+        outside = self.world.base / "outside"
+        outside.mkdir()
+        rollout.rename(outside / rollout.name)
+        rollout.symlink_to(outside / rollout.name)
+        record = self.world.audit("T3-23")
+        self.assertIn("role lead chose grill-me, tdd; given grill-me, tdd; installed unknown (no skill listing in its transcripts)", record["stdout"])
+
+    def test_t3_22_counts_pane_teammates_transcripts_in_their_lead_s_teammate_home(self):
+        self.native_team(rows=False)
+        record = self.world.audit("T3-22")
+        self.assertEqual(record["result"], "PASS", record["stdout"])
+        self.assertIn("lead 1 teammates=2 transcripts=2 with the set=2", record["stdout"])
+        self.tearDown()
+        self.setUp()
+        self.native_team(both_reached=False, rows=False)
+        record = self.world.audit("T3-22")
+        self.assertEqual(record["result"], "FAIL")
+        self.assertIn("with the set=1", record["stdout"])
 
     def test_t3_22_part_one_passes_when_every_agent_and_teammate_got_the_set_and_fails_when_a_teammate_did_not(self):
         self.part_one(mate_reached=True)
         record = self.world.audit("T3-22")
         self.assertEqual(record["result"], "PASS", record["stdout"])
         self.assertIn("lead 1 teammates=2 transcripts=2 with the set=2", record["stdout"])
+        self.assertIn("agents bad=0", record["detail"])
+        self.assertIn("2(lead app_spawned) home AGENTS.md opening=['# Instructions from CrazyAgent', '## App instructions', '# Mandatory workflow']", record["stdout"])
+        same = hashlib.sha256(APP_SET.encode()).hexdigest()[:12]
+        self.assertEqual(record["stdout"].count(f"app part sha256={same} app copy sha256={same}"), 2, record["stdout"])
         self.tearDown()
         self.setUp()
         self.part_one(mate_reached=False)
@@ -641,27 +848,117 @@ class AuditTests(unittest.TestCase):
         self.assertEqual(record["result"], "FAIL")
         self.assertIn("with the set=1", record["stdout"])
 
-    def role_skills(self, worker_given):
+    def test_t3_22_part_one_fails_when_the_given_set_does_not_follow_the_title(self):
+        replaced = f"{audit.APP_MARK}\n\nUse anything."
+        for claude, codex in (
+            (f"{APP_SET}\n", rendered(APP_SET)),
+            (rendered(f"Use tdd.\n\n{audit.APP_MARK}"), rendered(APP_SET)),
+            (rendered(APP_SET), rendered("", APP_SET)),
+            (rendered(replaced, MARK), rendered(APP_SET, MARK)),
+            (rendered(APP_SET, MARK), rendered(replaced, MARK)),
+        ):
+            self.tearDown()
+            self.setUp()
+            self.part_one(mate_reached=True)
+            w = self.world
+            self.given(1, claude)
+            (w.home(2) / "AGENTS.md").write_text(codex)
+            record = w.audit("T3-22")
+            self.assertEqual(record["result"], "FAIL", record["stdout"])
+            self.assertIn("agents bad=1", record["detail"])
+
+    def skill(self, name, hidden=False):
+        """Approves one global skill with the engine's copy of it, its SKILL.md front matter
+        setting disable-model-invocation when hidden. Inputs: the name and the flag."""
         w = self.world
-        w.row("coord_settings", project=PROJECT, json=json.dumps({"role_skills": {"master": None, "lead": ["tdd"], "worker": []}}))
-        lead = w.agent("sub", mode="app_spawned")
+        folder = f"plugins/skills/global/{name}"
+        (w.root / folder).mkdir(parents=True)
+        flag = "disable-model-invocation: true\n" if hidden else ""
+        (w.root / folder / "SKILL.md").write_text(f"---\nname: {name}\ndescription: The {name} skill.\n{flag}---\n\nUse it.\n")
+        record = {"id": f"skill-{name}", "name": name, "description": f"The {name} skill.", "scope": {"kind": "global"}, "enabled": True, "folder": folder}
+        w.row("plugin_items", id=f"skill-{name}", kind="skill", scope="global", name=name, body=json.dumps(record))
+
+    def listing(self, agent, names, content=False):
+        """Writes the skill listing Claude Code records in an agent's transcript, by names or
+        by its text only. Inputs: the agent, the listed names and whether only text is kept."""
+        attachment = {"type": "skill_listing", "content": "".join(f"- {name}: The skill.\n" for name in names), "isInitial": True}
+        if not content:
+            attachment["names"] = list(names)
+        self.world.transcript(agent, [{"type": "attachment", "attachment": attachment}])
+
+    def rollout(self, agent, names):
+        """Writes a Codex rollout whose developer text holds the engine's skills index for an
+        agent's home. Inputs: the agent and the indexed names."""
+        home = self.world.home(agent)
+        folder = home / "sessions" / "2026" / "11" / "04"
+        folder.mkdir(parents=True, exist_ok=True)
+        index = "\n## Skills\n\n" + "".join(f"- {name}: The skill. ({home}/skills/crazyagent/{name}/SKILL.md)\n" for name in names)
+        line = {"type": "response_item", "payload": {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": index}]}}
+        (folder / "rollout-2026-11-04T10-00-00-1.jsonl").write_text(json.dumps(line) + "\n")
+
+    def role_skills(self, worker_given=False, worker_listed=(), lead_harness="claude-code"):
+        """A lead whose role chose tdd and grill-me, which Claude Code lists to no model, and a
+        worker whose role chose none, each with the engine's skills record and the listing its
+        harness made. Inputs: the worker's given skills, its listing and the lead's harness.
+        Output: the lead id."""
+        w = self.world
+        self.skill("tdd")
+        self.skill("grill-me", hidden=True)
+        w.row("coord_settings", project=PROJECT, json=json.dumps({"role_skills": {"master": None, "lead": ["tdd", "grill-me"], "worker": []}}))
+        lead = w.agent("sub", mode="app_spawned", harness=lead_harness)
         worker = w.agent("sub", parent=lead)
-        self.given(lead, "tdd\n", kind="agent-skills")
-        (w.home(lead) / "crazyagent" / "plugin" / "skills" / "tdd").mkdir(parents=True)
+        self.given(lead, "grill-me\ntdd\n", kind="agent-skills")
+        if lead_harness == "codex":
+            self.rollout(lead, ["tdd", "grill-me"])
+        else:
+            self.listing(lead, ["crazyagent:tdd", "update-config"])
         self.given(worker, "tdd\n" if worker_given else "", kind="agent-skills")
+        self.listing(worker, ["update-config", *worker_listed])
+        return lead
 
     def test_t3_23_skills_per_role_pass_when_each_role_gets_its_choice_and_fail_when_a_worker_gets_more(self):
         self.assertEqual(self.verdict("T3-23"), "UNKNOWN")
-        self.role_skills(worker_given=False)
+        self.role_skills()
+        record = self.world.audit("T3-23")
+        self.assertEqual(record["result"], "PASS", record["stdout"])
+        self.assertIn("role lead chose grill-me, tdd; given grill-me, tdd; installed tdd; Claude Code lists none of grill-me to the model", record["stdout"])
+        self.assertIn("role worker chose none; given none; installed none", record["stdout"])
+        self.assertIn("skills Claude Code lists to no model: grill-me", record["detail"])
+        for given in (dict(worker_given=True), dict(worker_listed=["crazyagent:tdd"])):
+            self.tearDown()
+            self.setUp()
+            self.role_skills(**given)
+            record = self.world.audit("T3-23")
+            self.assertEqual(record["result"], "FAIL", (given, record["stdout"]))
+            self.assertIn("role worker chose none; given " + ("tdd" if given.get("worker_given") else "none"), record["stdout"])
+
+    def test_t3_23_reads_codex_skills_from_its_rollout_index_and_claude_skills_from_listing_text(self):
+        self.role_skills(lead_harness="codex")
+        record = self.world.audit("T3-23")
+        self.assertEqual(record["result"], "PASS", record["stdout"])
+        self.assertIn("role lead chose grill-me, tdd; given grill-me, tdd; installed grill-me, tdd", record["stdout"])
+        self.tearDown()
+        self.setUp()
+        w = self.world
+        self.skill("tdd")
+        w.row("coord_settings", project=PROJECT, json=json.dumps({"role_skills": {"master": None, "lead": ["tdd"], "worker": None}}))
+        lead = w.agent("sub", mode="app_spawned")
+        self.given(lead, "tdd\n", kind="agent-skills")
+        self.listing(lead, ["crazyagent:tdd"], content=True)
         record = self.world.audit("T3-23")
         self.assertEqual(record["result"], "PASS", record["stdout"])
         self.assertIn("role lead chose tdd; given tdd; installed tdd", record["stdout"])
-        self.tearDown()
-        self.setUp()
-        self.role_skills(worker_given=True)
+
+    def test_t3_23_is_unknown_when_no_harness_listing_was_read(self):
+        w = self.world
+        self.skill("tdd")
+        w.row("coord_settings", project=PROJECT, json=json.dumps({"role_skills": {"master": None, "lead": ["tdd"], "worker": None}}))
+        lead = w.agent("sub", mode="app_spawned")
+        self.given(lead, "tdd\n", kind="agent-skills")
         record = self.world.audit("T3-23")
-        self.assertEqual(record["result"], "FAIL")
-        self.assertIn("role worker chose none; given tdd", record["stdout"])
+        self.assertEqual(record["result"], "UNKNOWN", record["stdout"])
+        self.assertIn("installed unknown (no skill listing in its transcripts)", record["stdout"])
+        self.assertIn(f"no skill listing read for {lead}(lead app_spawned)", record["detail"])
 
     def nudges(self, ten_minutes_too):
         w = self.world
@@ -769,7 +1066,6 @@ class AuditTests(unittest.TestCase):
             (dict(shown=1), "Finished (1) shown, 2 finished in the store"),
             (dict(shown=2, drawn="Master, worker-bo"), "drawn while finished: worker-bo"),
             (dict(shown=2, ok=False), "the step failed"),
-            (dict(shown=2, show=1), "Finished agents is Show"),
         )
         for given, shown in cases:
             self.tearDown()
@@ -780,10 +1076,49 @@ class AuditTests(unittest.TestCase):
             self.assertIn(shown, record["detail"])
         self.tearDown()
         self.setUp()
+        self.finished(shown=2, show=1)
+        record = self.world.audit("T3-26")
+        self.assertEqual(record["result"], "PASS", record["detail"])
+        self.assertIn("setting at the end=show, a note: the trial sets Show for its final tree", record["detail"])
+        self.tearDown()
+        self.setUp()
         self.world.db.executescript("CREATE TABLE team_finished_view (project TEXT PRIMARY KEY, show INTEGER NOT NULL);")
         record = self.world.audit("T3-26")
         self.assertEqual(record["result"], "UNKNOWN")
         self.assertIn("not exercised", record["detail"])
+
+    def hide_check(self, ok, said):
+        """Finished agents in the store and the trial 4 N-D25 step, which sets Hide once an
+        agent left on its own and Show again at its end, with what it said. Inputs: whether
+        the step held and its detail or failure."""
+        self.finished(shown=2, show=1)
+        w = self.world
+        title = "N-D25 (OP-27) A sub-agent that finished leaves the graph under Hide and Wake brings the same agent back"
+        steps = [
+            {"n": 31, "surface": "desktop", "title": title, "at": iso(w.now - 400_000), "ok": ok, "detail": said, "evidence": ["screenshots/20-finished-hide.png"]},
+            {"n": 32, "surface": "desktop", "title": "Stop all", "at": iso(w.now - 300_000), "ok": True},
+        ]
+        (w.out / "steps.jsonl").write_text("".join(json.dumps(step) + "\n" for step in steps))
+
+    def test_t3_26_judges_hide_at_the_n_d25_step_when_no_hide_step_ran(self):
+        left = "Bo (@worker-bo) left on its own; under Hide it left the graph for Finished (1); Wake ran the same agent 3 again (working); Finished agents set back to Show"
+        cases = (
+            (True, left, "PASS", "N-D25 step 31 ok=True"),
+            (False, "Bo (@worker-bo) did not run again as the same agent after Wake", "PASS", "Hide held before the step failed"),
+            (False, "under Hide, Bo (@worker-bo) did not leave the graph for the Finished list", "FAIL", "under Hide the finished agent stayed in the graph"),
+            (True, "Bo (@worker-bo) left on its own; Finished agents set back to Show", "FAIL", "recorded no Finished (N) count under Hide"),
+            (False, "no sub-agent left on its own after its idle stop within 1200 s; last seen: 2 ended agents", "UNKNOWN", "N-D25 did not reach Hide"),
+            (False, "element not found", "UNKNOWN", "N-D25 failed before Hide could be told"),
+        )
+        for ok, said, result, shown in cases:
+            self.tearDown()
+            self.setUp()
+            self.hide_check(ok, said)
+            record = self.world.audit("T3-26")
+            self.assertEqual(record["result"], result, (said, record["detail"]))
+            self.assertIn(shown, record["detail"])
+            self.assertIn("setting at the end=show, a note", record["detail"])
+            self.assertIn("screenshots/20-finished-hide.png", [item["path"] for item in record["evidence"] if item["kind"] == "screenshot"])
 
     def two_on_accounts(self, first, second, second_role="sub"):
         w = self.world

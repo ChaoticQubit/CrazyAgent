@@ -26,6 +26,7 @@ const LINE_MAX = 1 << 20;
 const GIF_LINES = 60;
 const GIF_BATCH = 40;
 const FOLDERS = ["frames", "logs", "db", "checks", "screenshots"];
+const ORDER_ROWS = 3000;
 const PEM_BEGIN = /-----BEGIN [A-Z ]*PRIVATE KEY-----/;
 const PEM_END = /-----END [A-Z ]*PRIVATE KEY-----/;
 const PEM_BLOCK = /-----BEGIN [A-Z ]*PRIVATE KEY-----.*?-----END [A-Z ]*PRIVATE KEY-----/g;
@@ -241,7 +242,14 @@ function git(folder, args) {
   return result.stdout;
 }
 
-/** Seeds the trial project: one commit on main with the trial rule and a tiny Rust crate whose cargo test agents run, the land-on branch and an untracked hidden folder. Input: the project path and trial number. Output: the seed sha and a log of what git reports. */
+/** The seeded order rows: a header and ORDER_ROWS deterministic id,item,price,quantity lines, enough that printing them all is a large output. Input: none. Output: the CSV text. */
+function orders() {
+  const rows = ["id,item,price,quantity"];
+  for (let id = 1; id <= ORDER_ROWS; id += 1) rows.push(`${id},item-${String(id % 40).padStart(2, "0")},${1 + ((id * 37) % 90)}.${String((id * 53) % 100).padStart(2, "0")},${1 + (id % 4)}`);
+  return `${rows.join("\n")}\n`;
+}
+
+/** Seeds the trial project: one commit on main with the trial rule, a tiny Rust crate whose cargo test agents run, a small Python shop package whose call chain a codebase question follows and an order report whose full output is large, then the land-on branch and an untracked hidden folder. Input: the project path and trial number. Output: the seed sha and a log of what git reports. */
 function seed(project, trial) {
   mkdirSync(project, { recursive: true });
   const files = {
@@ -251,6 +259,12 @@ function seed(project, trial) {
     "README.md": `# ca-trial-${trial}\n\nThrowaway repo for the CrazyAgent DEC-112 trial ${trial}.\n`,
     "calc.py": "def placeholder():\n    \"\"\"Placeholder.\"\"\"\n    return None\n",
     "src/lib.rs": "/// Doubles a number. Input: the number. Output: twice it.\npub fn double(x: i32) -> i32 {\n    x * 2\n}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn doubles() {\n        assert_eq!(super::double(2), 4);\n    }\n}\n",
+    "shop/money.py": "from decimal import ROUND_HALF_UP, Decimal\n\n\ndef round_cents(amount):\n    \"\"\"Rounds an amount to whole cents, halves up.\"\"\"\n    return float(Decimal(str(amount)).quantize(Decimal(\"0.01\"), rounding=ROUND_HALF_UP))\n",
+    "shop/tax.py": "TAX_RATE = 0.08\n\n\ndef add_tax(amount, rate=TAX_RATE):\n    \"\"\"Returns the amount with tax added, unrounded.\"\"\"\n    return amount * (1 + rate)\n",
+    "shop/pricing.py": "from shop.money import round_cents\nfrom shop.tax import add_tax\n\n\ndef line_amount(price, quantity):\n    \"\"\"Returns the untaxed amount of one order line.\"\"\"\n    return price * quantity\n\n\ndef order_total(rows):\n    \"\"\"Returns the taxed total of (price, quantity) rows.\"\"\"\n    return round_cents(add_tax(sum(line_amount(price, quantity) for price, quantity in rows)))\n",
+    "shop/report.py": "from shop.pricing import order_total\n\n\ndef total_line(rows):\n    \"\"\"Returns the printed TOTAL line of (price, quantity) rows.\"\"\"\n    return f\"TOTAL {order_total(rows):.2f}\"\n",
+    "data/orders.csv": orders(),
+    "report.sh": "#!/bin/sh\ncd \"$(dirname \"$0\")\" || exit 1\nexec awk -F, 'NR > 1 { amount = $3 * $4; total += amount; printf \"%s %s %.2f\\n\", $1, $2, amount } END { printf \"TOTAL %.2f\\n\", total }' data/orders.csv\n",
   };
   for (const [name, text] of Object.entries(files)) {
     mkdirSync(dirname(join(project, name)), { recursive: true });
