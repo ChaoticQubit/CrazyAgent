@@ -6577,6 +6577,166 @@ fn a_master_harness_switch_starts_fresh_when_the_owner_chose_it() {
     );
 }
 
+/// Starts the switching runtime's Codex master for session s-one and waits until the
+/// owner's first turn to it ended, so the master is idle. Takes the fixture, the host and
+/// the runtime. Returns the Codex master's agent id.
+#[cfg(target_os = "macos")]
+fn idle_codex_master(fixture: &Fixture, host: &Arc<dyn Host>, team: &mut TeamRuntime) -> i64 {
+    switch_session(&fixture.connection, "s-one");
+    super::super::master::set_live(&fixture.connection, &fixture.setup.project_id, true).unwrap();
+    fixture.until(team, "the Codex master runs and is kept", |f| {
+        live_agent(&f.connection).is_some() && kept_conversation(&f.connection, "s-one").is_some()
+    });
+    let first = masters(&fixture.connection)[0];
+    host.input(&AgentId::team(first).unwrap(), b"hello\r")
+        .unwrap();
+    fixture.until(team, "the owner's turn ends", |f| {
+        live_turns(&f.connection) == (1, false)
+    });
+    first
+}
+
+/// With When the master is idle, the default (N-D26, owner 2026-11-05), a saved master
+/// harness change reaches the running live master once it is idle, with nobody turning the
+/// live master off and on: the same session goes on under the new harness with one
+/// "Switched to" note, the divider and the owner's next line on the new harness.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_saved_master_harness_switch_reaches_the_live_master_once_it_is_idle() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = switching_runtime(&fixture, &host);
+    let project = fixture.setup.project_id.clone();
+    let first = idle_codex_master(&fixture, &host, &mut team);
+    assert_eq!(
+        fixture.status().apply_harness_switch,
+        crate::team::SwitchApply::WhenIdle
+    );
+
+    set_master(&fixture, "claude-code");
+    let note = crate::master_sessions::switched_note("Claude Code", crate::team::SwitchMode::Carry);
+    fixture.until(
+        &mut team,
+        "the idle Codex master hands over to Claude Code",
+        |f| {
+            let all = masters(&f.connection);
+            noted(f, &note) == 1 && all.len() == 2 && live_agent(&f.connection) == Some(all[1])
+        },
+    );
+    let second = masters(&fixture.connection)[1];
+    assert_eq!(masters(&fixture.connection), [first, second]);
+    assert!(
+        super::super::master::live(&fixture.connection, &project).unwrap(),
+        "the live master stayed on"
+    );
+    assert_eq!(
+        fixture.status().live_switch.map(|switch| switch.note),
+        Some(note.clone()),
+        "the session's conversation shows where Claude Code took over"
+    );
+    host.input(&AgentId::team(second).unwrap(), b"hello again\r")
+        .unwrap();
+    fixture.until(
+        &mut team,
+        "the owner's next line goes to Claude Code",
+        |f| {
+            kept_conversation(&f.connection, "s-one").is_some_and(|(_, record)| {
+                record.starts_with(f.base.join("team/agents").join(format!("agent-{second}")))
+            })
+        },
+    );
+    assert_eq!(
+        crate::master_sessions::live_session(&fixture.connection, &project)
+            .unwrap()
+            .as_deref(),
+        Some("s-one"),
+        "the same session goes on"
+    );
+    idle_ticks(&mut team);
+    assert_eq!(
+        masters(&fixture.connection),
+        [first, second],
+        "the switch happens once"
+    );
+}
+
+/// With At the next start, a saved master harness change waits: the idle master keeps its
+/// harness and the conversation shows no switch until the live master starts again, which
+/// then switches it with the note and the divider.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_saved_master_harness_switch_waits_for_the_next_start_when_the_owner_chose_it() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = switching_runtime(&fixture, &host);
+    let project = fixture.setup.project_id.clone();
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::execute(
+            &tx,
+            &fixture.access,
+            &crate::team::TeamAction::ApplyHarnessSwitch {
+                project_id: project.clone(),
+                mode: crate::team::SwitchApply::NextStart,
+            },
+        )
+        .unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    tx.commit().unwrap();
+    assert_eq!(
+        fixture.status().apply_harness_switch,
+        crate::team::SwitchApply::NextStart
+    );
+    let first = idle_codex_master(&fixture, &host, &mut team);
+
+    set_master(&fixture, "claude-code");
+    idle_ticks(&mut team);
+    assert_eq!(
+        masters(&fixture.connection),
+        [first],
+        "the Codex master runs on"
+    );
+    assert_eq!(live_agent(&fixture.connection), Some(first));
+    assert_eq!(
+        fixture.status().live_switch,
+        None,
+        "no divider before the switch"
+    );
+
+    stop_live(&fixture, &mut team);
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    let note = crate::master_sessions::switched_note("Claude Code", crate::team::SwitchMode::Carry);
+    fixture.until(&mut team, "the next start switches to Claude Code", |f| {
+        noted(f, &note) == 1 && masters(&f.connection).len() == 2
+    });
+    assert_eq!(
+        fixture.status().live_switch.map(|switch| switch.note),
+        Some(note)
+    );
+}
+
+/// A saved switch to a harness that no account of the pool can run leaves the idle live
+/// master running on its own harness instead of stopping it for a start that would fail.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_saved_master_harness_switch_no_pool_account_can_run_leaves_the_master_running() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, RESUMING_CODEX);
+    let project = fixture.setup.project_id.clone();
+    let first = idle_codex_master(&fixture, &host, &mut team);
+
+    set_master(&fixture, "claude-code");
+    idle_ticks(&mut team);
+    assert_eq!(masters(&fixture.connection), [first]);
+    assert_eq!(live_agent(&fixture.connection), Some(first));
+    assert!(super::super::master::live(&fixture.connection, &project).unwrap());
+    assert_eq!(fixture.status().live_problem, None);
+    assert_eq!(fixture.status().live_switch, None);
+}
+
 /// The `developer_instructions` a Codex master's own `config.toml` holds. Takes the fixture
 /// and the master. Returns the text.
 #[cfg(target_os = "macos")]
