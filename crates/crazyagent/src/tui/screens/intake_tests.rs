@@ -6,8 +6,8 @@ use crate::engine::Client;
 use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
 use crate::github::{GitHubMethod, GitHubRepo, GitHubRepoPage, GitHubStatus};
-use crate::onboarding::{MappingFacts, OnboardingView, Step};
-use crate::project_setup::{ProjectSetup, SetupAction, SetupQuery};
+use crate::onboarding::{FoundResearch, MappingFacts, OnboardingView, Step};
+use crate::project_setup::{ProjectSetup, ResearchKind, SetupAction, SetupQuery};
 use crate::protocol::ProjectId;
 use crate::tui::client::Connection;
 use crate::tui::client::intake::{IntakeEvent, IntakeJob, IntakeQuery, IntakeView};
@@ -930,6 +930,7 @@ fn review_with(change: impl FnOnce(&mut OnboardingView)) -> (Shell, ProjectId) {
             build_commands: vec!["cargo build".into()],
             test_commands: vec!["cargo test".into()],
             entry_points: vec!["src/main.rs".into()],
+            ..MappingFacts::default()
         },
         missing: vec!["about".into(), "platforms".into()],
         overview: None,
@@ -966,6 +967,31 @@ fn a_graph_step_turned_off_in_setup_says_so_while_mapping_runs() {
         "{rows:#?}"
     );
     assert!(shows(&rows, "Running"), "{rows:#?}");
+}
+
+#[test]
+fn the_review_shows_the_research_and_documents_already_in_the_repo() {
+    let (mut shell, _) = review_with(|view| {
+        view.facts.research = vec![FoundResearch {
+            kind: ResearchKind::CompetitorResearch,
+            files: vec!["research/landscape-2026.md".into()],
+        }];
+        view.facts.documents = vec!["docs/q3-plan.md".into()];
+    });
+    let rows = render(&mut shell, 100, 80);
+    assert!(
+        shows(
+            &rows,
+            "Competitor research - Already in the repo: research/landscape-2026.md"
+        ),
+        "{rows:#?}"
+    );
+    assert!(shows(&rows, "Project documents found:"), "{rows:#?}");
+    assert!(shows(&rows, "- docs/q3-plan.md"), "{rows:#?}");
+    let (mut plain, _) = review_with(|_| {});
+    let rows = render(&mut plain, 100, 80);
+    assert!(!shows(&rows, "Already in the repo"), "{rows:#?}");
+    assert!(!shows(&rows, "Project documents found"), "{rows:#?}");
 }
 
 #[test]

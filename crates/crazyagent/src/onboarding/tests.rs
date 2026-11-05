@@ -1,6 +1,6 @@
 use super::draft::{self, Drafted};
 use super::*;
-use crate::project_setup::Platform;
+use crate::project_setup::{Platform, ResearchKind};
 use std::os::unix::fs::symlink;
 
 const OTHER_GRAPH_MARKER: &str = "# Other project graph 6620";
@@ -115,6 +115,165 @@ fn evidence_never_reads_env_files_or_follows_links() {
     );
     assert!(!prompt.contains("SECRET_VALUE_7731"));
     assert!(!found.languages.contains(&"JavaScript".to_owned()));
+}
+
+fn write_file(root: &Path, path: &str, text: &str) {
+    let path = root.join(path);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, text).unwrap();
+}
+
+#[test]
+fn documents_with_unrelated_names_are_read_from_their_text_and_mapped_to_research() {
+    let dir = rust_repo();
+    let root = dir.path();
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("token"), "SECRET_VALUE_7731").unwrap();
+    write_file(
+        root,
+        "research/landscape-2026.md",
+        "# Landscape\n\nRival note apps: Notion and Obsidian lead. COMPETITOR_TEXT_5521\n",
+    );
+    write_file(
+        root,
+        "notes/q3-sizing.txt",
+        "Serviceable market 2.1B dollars, growing 9% a year. MARKET_TEXT_8830\n",
+    );
+    write_file(root, "docs/plan.md", "Release plan for sync. PLAN_TEXT_4410\n");
+    write_file(root, "docs/spec.pdf", "%PDF-1.7 PDF_BYTES_3390");
+    write_file(root, "private/salaries.md", "PRIVATE_TEXT_6602");
+    write_file(root, "docs/Private/board.md", "PRIVATE_TEXT_6602");
+    write_file(root, ".notes/hidden.md", "HIDDEN_TEXT_1207");
+    write_file(root, "docs/.draft.md", "HIDDEN_TEXT_1207");
+    write_file(root, "node_modules/pkg/README.md", "VENDOR_TEXT_7781");
+    write_file(root, "docs/a/b/c/deep.md", "DEPTH_FOUR_TEXT_2290");
+    write_file(root, "docs/a/b/c/d/deeper.md", "DEPTH_FIVE_TEXT_8121");
+    std::fs::write(root.join("docs/huge.md"), "x".repeat(1024 * 1024 + 1)).unwrap();
+    symlink(outside.path().join("token"), root.join("notes/linked.md")).unwrap();
+    symlink(outside.path(), root.join("docs/linked-folder")).unwrap();
+
+    let evidence = draft::gather(root);
+    let (found, stack) = draft::found_facts(&evidence, root);
+    let prompt = draft::prompt(&evidence, &found);
+    for text in [
+        "COMPETITOR_TEXT_5521",
+        "MARKET_TEXT_8830",
+        "PLAN_TEXT_4410",
+        "DEPTH_FOUR_TEXT_2290",
+        "### research/landscape-2026.md (",
+        "docs/spec.pdf (",
+        "\"research\"",
+    ] {
+        assert!(prompt.contains(text), "{text} is missing from the prompt");
+    }
+    for text in [
+        "SECRET_VALUE_7731",
+        "PRIVATE_TEXT_6602",
+        "HIDDEN_TEXT_1207",
+        "VENDOR_TEXT_7781",
+        "DEPTH_FIVE_TEXT_8121",
+        "PDF_BYTES_3390",
+        "docs/huge.md",
+        "salaries",
+        "linked.md",
+        "linked-folder",
+    ] {
+        assert!(!prompt.contains(text), "{text} reached the prompt");
+    }
+    assert_eq!(prompt.matches("A small greeting tool").count(), 1);
+
+    let answer = draft::parse_answer(concat!(
+        "## Structure\n\nA note app.\n\n## Project documents\n\n",
+        "research/landscape-2026.md holds the competitor analysis.\n\n",
+        "```json\n{\"about\": \"A note app.\", \"research\": [",
+        "{\"kind\": \"competitor_research\", \"files\": [\"research/landscape-2026.md\"]}, ",
+        "{\"kind\": \"market_research\", \"files\": [\"./notes/q3-sizing.txt\", \"research/made-up.md\"]}, ",
+        "{\"kind\": \"sales_research\", \"files\": [\"docs/plan.md\"]}], ",
+        "\"documents\": [\"docs/plan.md\", \"docs/spec.pdf\", \"private/salaries.md\"]}\n```\n",
+    ));
+    let base = Drafted::new("notes".into(), &pool());
+    let merged = draft::merge(&base, &answer, &found, &stack);
+    assert_eq!(
+        merged.facts.research,
+        [
+            FoundResearch {
+                kind: ResearchKind::MarketResearch,
+                files: vec!["notes/q3-sizing.txt".into()],
+            },
+            FoundResearch {
+                kind: ResearchKind::CompetitorResearch,
+                files: vec!["research/landscape-2026.md".into()],
+            },
+        ]
+    );
+    assert_eq!(merged.facts.documents, ["docs/plan.md"]);
+    assert_eq!(merged.draft.about, "A note app.");
+    assert!(
+        merged.draft.research.is_empty(),
+        "mapping never turns research on"
+    );
+    assert!(merged.facts.shown.is_empty());
+    let again = draft::merge(&merged, &draft::Answer::default(), &found, &stack);
+    assert_eq!(again.facts, merged.facts);
+}
+
+#[test]
+fn document_reading_stops_at_its_bounds_and_lists_the_rest() {
+    let dir = rust_repo();
+    for index in 0..60 {
+        write_file(
+            dir.path(),
+            &format!("docs/note-{index:02}.md"),
+            &format!("NOTE_{index:02} {}\n", "y".repeat(7 * 1024)),
+        );
+    }
+    let evidence = draft::gather(dir.path());
+    let read: Vec<&str> = evidence
+        .documents
+        .iter()
+        .map(|document| document.path.as_str())
+        .collect();
+    assert_eq!(read.len(), 8, "{read:?}");
+    assert_eq!(read[0], "docs/note-00.md");
+    assert!(
+        evidence
+            .documents
+            .iter()
+            .all(|document| document.text.len() == 6 * 1024 && document.size == 7177)
+    );
+    assert_eq!(evidence.unread.len(), 52);
+    assert_eq!(evidence.unread[0], ("docs/note-08.md".to_owned(), 7177));
+    let (found, _) = draft::found_facts(&evidence, dir.path());
+    assert_eq!(found.shown.len(), 8);
+    let prompt = draft::prompt(&evidence, &found);
+    assert!(prompt.contains("### docs/note-00.md (7177 bytes, the first 6144 shown)"));
+    assert!(prompt.contains("docs/note-59.md (7177 bytes)"));
+
+    let many = rust_repo();
+    for index in 0..45 {
+        write_file(
+            many.path(),
+            &format!("notes/n-{index:02}.txt"),
+            &format!("Short note {index}.\n"),
+        );
+    }
+    let evidence = draft::gather(many.path());
+    assert_eq!(evidence.documents.len(), 40);
+    assert_eq!(evidence.unread.len(), 5);
+    assert_eq!(evidence.unread[0].0, "notes/n-40.txt");
+}
+
+#[test]
+fn facts_without_documents_serialize_as_before() {
+    assert_eq!(
+        serde_json::to_value(MappingFacts::default()).unwrap(),
+        serde_json::json!({"languages": [], "build_commands": [], "test_commands": [], "entry_points": []})
+    );
+    let old: MappingFacts = serde_json::from_str(
+        r#"{"languages":["Rust"],"build_commands":[],"test_commands":[],"entry_points":[]}"#,
+    )
+    .unwrap();
+    assert!(old.research.is_empty() && old.documents.is_empty() && old.shown.is_empty());
 }
 
 #[test]

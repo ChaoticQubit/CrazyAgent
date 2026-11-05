@@ -44,7 +44,10 @@ pub enum Step {
 }
 
 /// What the manifest scan and the mapping agent found that has no field in
-/// [`ProjectSetup`]: languages, build and test commands and entry points.
+/// [`ProjectSetup`]: languages, build and test commands, entry points, the research the
+/// project's own documents already hold and its other documents, as paths below the
+/// folder. `shown` is the engine's own list of the documents the mapping prompt gave with
+/// their text, the only paths an answer may name; it never leaves the engine.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MappingFacts {
@@ -52,6 +55,21 @@ pub struct MappingFacts {
     pub build_commands: Vec<String>,
     pub test_commands: Vec<String>,
     pub entry_points: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub research: Vec<FoundResearch>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub documents: Vec<String>,
+    #[serde(skip)]
+    pub(crate) shown: Vec<String>,
+}
+
+/// One kind of research the project's own documents already hold, as the mapping agent
+/// read it from their text: the kind and the files below the folder that hold it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FoundResearch {
+    pub kind: crate::project_setup::ResearchKind,
+    pub files: Vec<String>,
 }
 
 /// The onboarding of one found or cloned project as clients read it: the graph and mapping

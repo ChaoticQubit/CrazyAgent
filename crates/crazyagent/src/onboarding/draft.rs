@@ -98,9 +98,10 @@ impl Drafted {
 }
 
 /// The bounded project files a mapping agent is given: top-level entry
-/// names, the README, the build manifests, the code graph report and an
-/// existing overview. No file is read through a link, and no `.env` file or
-/// other unlisted file is read at all.
+/// names, the README, the build manifests, the code graph report, an
+/// existing overview, the text of the project's own documents and the paths
+/// and sizes of documents whose text is not read. No file is read through a
+/// link, and no `.env`, hidden, private or other unlisted file is read at all.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Evidence {
     pub folder: String,
@@ -109,6 +110,17 @@ pub(crate) struct Evidence {
     pub manifests: Vec<(String, String)>,
     pub graph: Option<String>,
     pub overview: Option<String>,
+    pub documents: Vec<Document>,
+    pub unread: Vec<(String, u64)>,
+}
+
+/// One of the project's own documents as the mapping reads it: its path below the
+/// folder with `/` between names, its size in bytes and the start of its text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Document {
+    pub path: String,
+    pub size: u64,
+    pub text: String,
 }
 
 /// What the agent's answer held: its overview text and the draft fields it
@@ -646,6 +658,7 @@ pub(crate) fn parse_answer(text: &str) -> Answer {
             build_commands: clean(&reply.build_commands),
             test_commands: clean(&reply.test_commands),
             entry_points: clean(&reply.entry_points),
+            ..MappingFacts::default()
         },
     }
 }
@@ -705,6 +718,7 @@ pub(crate) fn merge(
         build_commands: facts(|f| f.build_commands.as_slice()),
         test_commands: facts(|f| f.test_commands.as_slice()),
         entry_points: facts(|f| f.entry_points.as_slice()),
+        ..base.facts.clone()
     };
     assert!(merged.draft.validate().is_ok());
     assert_eq!(merged.draft.research, base.draft.research);
