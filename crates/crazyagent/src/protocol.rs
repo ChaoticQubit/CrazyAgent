@@ -27,8 +27,8 @@ const WINDOWS_DEVICE_NAMES: [&str; 22] = [
 /// True when the text is exactly one plain path component that names one child, never
 /// itself, its parent or another root: not empty, `.`, `..`, a separator, a root or a
 /// Windows drive like `c:`, no trailing dot or space, which Windows strips, and no Windows
-/// device name. A colon stays allowed for identities; a name that becomes a folder also
-/// needs none, since Windows reads `name:x` as a stream of `name`. Input: the text.
+/// device name. A colon stays allowed, for identities and as a Unix file name; on Windows
+/// `name:x` is a stream of `name`, so a Windows folder name needs none. Input: the text.
 /// Output: whether it names one child.
 pub(crate) fn single_component(text: &str) -> bool {
     let mut parts = std::path::Path::new(text).components();

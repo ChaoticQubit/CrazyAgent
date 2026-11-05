@@ -561,10 +561,11 @@ fn moved_aside(name: &str, id: &str) -> bool {
 /// Deletes one removed project's skill store folder with everything in it, for the start
 /// sweep. Inputs: the engine root and the project id. Output: Ok when the folder is gone,
 /// including when it was already missing; `plugin_skill_folder_invalid` for a name that is
-/// not one store-relative folder name, a colon included, which Windows reads as a stream or
-/// device suffix instead of that folder.
+/// not one store-relative folder name, on Windows also for a colon, which Windows reads as a
+/// stream or device suffix instead of that folder; elsewhere a project id's colon names the
+/// folder as it always has.
 pub(crate) fn remove_skill_project_folder(root: &Path, project: &str) -> Result<(), EngineError> {
-    if !crate::protocol::single_component(project) || project.contains(':') {
+    if !crate::protocol::single_component(project) || (cfg!(windows) && project.contains(':')) {
         return Err(error("plugin_skill_folder_invalid"));
     }
     match std::fs::remove_dir_all(
