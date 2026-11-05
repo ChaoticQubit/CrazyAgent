@@ -53,8 +53,10 @@ fn marker(secs: u64) -> String {
 /// Saves the project's choice for commands still running in the background at a task's
 /// end through the engine's own team action, and its task limit in the table the engine
 /// reads it from. The owner's listed limit choices start at 30 min, so the limit row is
-/// written as the runtime's unit test writes it, to keep the live run short. Inputs: the
-/// team, the choice and the limit in seconds. Output: the rules the engine now reads.
+/// written as the runtime's unit test writes it, to keep the live run short. No session
+/// limit is saved, so the bound a held own turn gets is the task limit, not the session
+/// time left. Inputs: the team, the choice and the limit in seconds. Output: the rules the
+/// engine now reads.
 fn save_rules(team: &NativeTeam, choice: BackgroundAtEnd, limit: Option<u32>) -> TurnRules {
     let project = team.lead().project.clone();
     let access = (team.runtime.access)().expect("the team's pool");
@@ -80,10 +82,14 @@ fn save_rules(team: &NativeTeam, choice: BackgroundAtEnd, limit: Option<u32>) ->
         .unwrap();
     }
     tx.commit().unwrap();
+    let limits = crate::team::time_limits(&team.runtime.connection, &project).unwrap();
+    assert_eq!(
+        limits.session_time(),
+        None,
+        "no session limit is saved, so a held own turn is bound by the task limit alone"
+    );
     TurnRules {
-        limit: crate::team::time_limits(&team.runtime.connection, &project)
-            .unwrap()
-            .turn_time(),
+        limit: limits.turn_time(),
         background: crate::team::background_at_end(&team.runtime.connection, &project).unwrap(),
     }
 }
@@ -110,7 +116,7 @@ fn own_turn_with_background(team: &mut NativeTeam, marker: &str, saved: TurnRule
         .unwrap();
     team.runtime.send_own_rules().unwrap();
     assert_eq!(
-        team.lead().own_rules,
+        team.lead().own_rules.map(|(_, rules)| rules),
         Some(saved),
         "the engine sends the lead the project's saved rules for its own turn"
     );
