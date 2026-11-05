@@ -31,6 +31,9 @@ pub const NEXT_TURN_BYTES_MAX: usize = 8 * 1024;
 pub const RESULTS_KEY: &str = "lead-results-";
 /// The idempotency key prefix of the engine's note of a lead's workers' events.
 pub const EVENTS_KEY: &str = "events-";
+/// The idempotency key prefix of the engine's note of what the owner did to a lead's
+/// workers; [`waking`] never counts it, so it waits for the lead's next real turn.
+pub const NOTICES_KEY: &str = "owner-notices-";
 const SENDER_BYTES_MAX: usize = 48;
 const HEAD_BYTES_MAX: usize = 160;
 const CUT: &str = " [cut here; read the whole message with inspect_work]";
@@ -311,8 +314,8 @@ fn to_master(
 
 /// Tells whether an agent has a waiting message worth a turn of its own: a prompt, a
 /// question or a reply, or the engine's note of its workers' results or events. Other
-/// notes wait for its next turn. Takes the database and the agent. Returns the answer, or
-/// a database failure.
+/// notes, such as the owner's actions on its workers (`NOTICES_KEY`), wait for its next
+/// turn. Takes the database and the agent. Returns the answer, or a database failure.
 pub fn waking(db: &Connection, agent: AgentId) -> Result<bool, EngineError> {
     db.query_row(
         "SELECT EXISTS(SELECT 1 FROM coord_messages WHERE to_kind='agent' AND to_agent=?1
