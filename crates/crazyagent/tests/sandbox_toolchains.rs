@@ -1050,6 +1050,91 @@ fn a_sandboxed_harness_runs_git_through_the_agent_copy_without_the_xcrun_shim() 
     toolchains::remove_tmp(&case.home).unwrap();
 }
 
+#[test]
+fn a_sandboxed_harness_git_runs_its_helpers_from_its_own_toolchain_not_the_xcrun_shims() {
+    let case = case();
+    let tmp = toolchains::make_tmp(&case.home).unwrap();
+    let sandbox = ProjectSandbox::new(
+        &case.project,
+        &case.home,
+        &case.tmp,
+        SandboxNetwork::Only(Vec::new()),
+    )
+    .unwrap()
+    .allow_scratch(&tmp)
+    .unwrap();
+    let profile = case.profiles.join("git.sb");
+    sandbox.install(&profile).unwrap();
+    let real = real_git_of(&agent_git_script(&tmp));
+    let upstream = case.home.join("upstream");
+    fs::create_dir(&upstream).unwrap();
+    for (folder, subject) in [(&case.project, "one"), (&upstream, "upstream")] {
+        for arguments in [
+            &["init", "-q", "--template="][..],
+            &[
+                "-c",
+                "user.name=A",
+                "-c",
+                "user.email=a@example.invalid",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                subject,
+            ],
+        ] {
+            let mut owner = std::process::Command::new(&real);
+            owner
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .env("HOME", &case.home)
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(arguments)
+                .current_dir(folder)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            let made = crazyagent::spawn_gate::output(&mut owner).unwrap();
+            assert!(made.status.success(), "{made:?}");
+        }
+    }
+    let mut harness = std::process::Command::new("/bin/sh");
+    harness
+        .arg("-c")
+        .arg(format!(
+            "GIT_TRACE=1 git fetch -q '{}' HEAD && git log -1 --format=%s FETCH_HEAD",
+            upstream.display()
+        ))
+        .current_dir(&case.project);
+    let mut wrapped = sandbox.wrap(&profile, &harness).unwrap();
+    wrapped
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let output = crazyagent::spawn_gate::output(&mut wrapped).unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "upstream\n");
+    let helpers = real
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("libexec/git-core");
+    assert!(
+        stderr.contains(&format!(
+            "resolved executable path from Darwin stack: {}\n",
+            helpers.join("git-upload-pack").display()
+        )),
+        "{stderr}"
+    );
+    assert!(
+        !stderr.contains("start_command: /usr/bin/") && !stderr.contains("xcrun"),
+        "{stderr}"
+    );
+    toolchains::remove_tmp(&case.home).unwrap();
+}
+
 fn tmux_at(tmux: &Path, socket: &Path, args: &[&str]) -> Output {
     let mut command = std::process::Command::new(tmux);
     command

@@ -27,8 +27,8 @@ use crate::tui::ctx::{Ctx, Link, Load};
 use crate::tui::frame::{Hint, Message, Modal, draw_lines, hint};
 use crate::tui::keys::Key;
 use crate::tui::master_session::{
-    Context as MasterContext, Event as MasterEvent, Job as MasterJob, State as MasterState,
-    Submission as MasterSubmission,
+    Context as MasterContext, Event as MasterEvent, Job as MasterJob, RENEWAL_NOT_STARTED,
+    State as MasterState, Submission as MasterSubmission,
 };
 use crate::tui::seam::{Arrival, NOT_READY, PoolChange, Request};
 use crate::tui::text::{styled, wrap};
@@ -578,6 +578,9 @@ impl ProjectPage {
 
     fn sync_master(&mut self, ctx: &mut Ctx) {
         self.select_master(ctx);
+        if let Some(reason) = self.master.take_renewal_problem() {
+            ctx.say(Message::warning(RENEWAL_NOT_STARTED, &reason));
+        }
         self.master
             .show_sessions(self.screen.tab == Tab::Conversation);
         if self.master_sent.len() < MASTER_SENT_MAX

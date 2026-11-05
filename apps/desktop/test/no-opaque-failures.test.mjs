@@ -178,6 +178,33 @@ test("every sign-in failure the engine records reads as a sentence, and an unkno
   assert.equal(signInFailure("native_auth_made_up", "claude").text, "Sign-in didn't finish. Try again. (native_auth_made_up)");
 });
 
+test("each sign-in sentence is true on every path that records its code, and an inherited key never reads as one", () => {
+  const sentences = [
+    ["native_auth_codex_exited_before_observation", "Codex stopped before it finished. Try again."],
+    ["native_auth_codex_deadline", "Codex didn't answer in time. Try again."],
+    ["native_auth_codex_protocol_invalid", "Codex gave an answer CrazyAgent couldn't use. Update Codex, then try again."],
+    ["native_auth_codex_io_failed", "CrazyAgent lost contact with Codex. Try again."],
+    ["native_auth_bootstrap_timeout", "CrazyAgent's account helper didn't start in time. Try again."],
+    ["native_auth_claude_native_exit", "Claude Code stopped before it finished. Try again."],
+    ["native_auth_claude_status_invalid", "Claude Code's account check didn't give an answer CrazyAgent could use. Update Claude Code, then try again."],
+    ["native_auth_claude_output_invalid", "Claude Code didn't finish because of a problem CrazyAgent couldn't handle. Try again, and update Claude Code if it keeps happening."],
+    ["native_auth_claude_profile_mismatch", "Claude Code's settings folder for this account didn't match the one CrazyAgent set up. Try again, and update Claude Code if it keeps happening."],
+    ["native_auth_claude_launch_failed", "Claude Code couldn't start. Check that Claude Code is installed and opens on this Mac, then try again."],
+    ["native_auth_claude_keychain_unavailable", "CrazyAgent couldn't set up this account's own keychain for Claude Code. Try again. If it keeps failing, delete the account, then add it again."],
+    ["native_auth_claude_destination_unsupported", "Claude Code gave a sign-in page address CrazyAgent doesn't recognize. Update CrazyAgent and Claude Code, then try again."],
+    ["native_auth_claude_credential_expiring", "Claude Code couldn't renew this account's sign-in before it expires. Try again."],
+    ["native_profile_identity_changed", "This account's sign-in folder no longer matches what CrazyAgent recorded, so CrazyAgent stopped. Delete the account, then add it again."],
+  ];
+  for (const [code, text] of sentences) assert.deepEqual(signInFailure(code, "claude"), { text, hint: "retry" }, code);
+  assert.deepEqual(signInFailure("native_auth_host_executable_unsafe", "chatgpt"),
+    { text: "Codex on this Mac isn't safe to start, so CrazyAgent didn't start it. Reinstall Codex, then try again.", hint: "retry" });
+  assert.deepEqual(signInFailure("native_auth_host_executable_changed", "claude"),
+    { text: "Claude Code changed on this Mac after CrazyAgent checked it, perhaps from an update. Try again.", hint: "retry" });
+  for (const code of ["__proto__", "constructor", "toString", "valueOf"]) {
+    assert.deepEqual(signInFailure(code, "claude"), { text: client.withCode("Sign-in didn't finish. Try again.", code), hint: "retry" }, code);
+  }
+});
+
 const TUI_SIGN_IN = "tui/screens/settings_add_account.rs";
 const TUI_OWN = new Set(["native_auth_recovery_required"]);
 

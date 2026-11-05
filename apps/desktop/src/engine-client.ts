@@ -1329,6 +1329,7 @@ export interface SetupStatus {
   dependencies: Dependency[];
   pack: PackEntry[];
   running: boolean;
+  notes?: string[];
 }
 
 /** Reads the projects home folder and whether the engine watches it. Output: the home. */
