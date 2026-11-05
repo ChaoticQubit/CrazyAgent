@@ -76,11 +76,12 @@ pub(crate) const RUN_NAME_USED: &str = "run name already used";
 const CONTEXT_BUSY: &str = "launch_home_busy";
 const PANE_PREFIX: &str = "research-";
 const PANE_EVENTS_MAX: usize = 200_000;
-/// Ends a tools-off Claude Code run after one model turn. With no tools there is no second
-/// turn to take, and in Claude Code 2.1.309 an answer cut at the output limit would
-/// otherwise be continued with another request.
+/// Gives a tools-off Claude Code run one model turn, as it has no tools to take a second.
+/// It does not stop Claude Code 2.1.309 from continuing an answer cut at the output limit:
+/// it sends up to three more requests for that answer outside the turn count, so the
+/// output cap and the caller's wall time bound such a run.
 const CLAUDE_ONE_TURN: [&str; 2] = ["--max-turns", "1"];
-/// The variable that caps the output tokens of one Claude Code answer.
+/// The variable that caps the output tokens of each Claude Code request.
 const CLAUDE_OUTPUT_TOKENS: &str = "CLAUDE_CODE_MAX_OUTPUT_TOKENS";
 const CLAUDE_ARGUMENTS: [&str; 8] = [
     "--print",
@@ -1222,7 +1223,7 @@ impl ResearchRunner {
 /// such as onboarding's mapping agent: `name` names its agent state and
 /// sandbox profile, `agent` and `project` name whose usage its tokens count
 /// as, `prompt` goes to it on stdin, `wall_time` bounds it and
-/// `output_tokens` caps one Claude Code answer (`None` for Claude Code's own
+/// `output_tokens` caps each Claude Code request (`None` for Claude Code's own
 /// limit; a Codex run has no such cap).
 pub(crate) struct ReadOnlyRun<'a> {
     pub name: &'a str,
@@ -1761,12 +1762,11 @@ fn codex_arguments(
 
 /// Adds Claude Code's print-mode arguments and environment for one research
 /// run: no MCP servers, settings sources, hooks or saved sessions, tools on, or
-/// off with the no-tools system prompt and one model turn, so an answer cut at
-/// the output limit ends the run instead of Claude Code continuing it; the
-/// account as either a managed config directory or a keyless Anthropic
-/// endpoint in bare mode that never reads the keychain.
+/// off with the no-tools system prompt and one model turn; the account as
+/// either a managed config directory or a keyless Anthropic endpoint in bare
+/// mode that never reads the keychain.
 /// Takes the command, the agent home and temp dir, the tools switch, the most
-/// output tokens of one answer (`None` for Claude Code's own limit) and the
+/// output tokens of each request (`None` for Claude Code's own limit) and the
 /// account. Returns an error for an account that does not fit Claude Code.
 fn claude_arguments(
     command: &mut Command,
@@ -2994,6 +2994,7 @@ pub(crate) fn utc_date(time: SystemTime) -> String {
 mod tests {
     use super::*;
     use crate::config::{ModelAuthentication, ModelEndpoint, ModelReference};
+    use crate::harnesses::launch::CLAUDE_NO_TOOLS_PROMPT;
     use crate::protocol::{ConfigId, CredentialRef, Cursor};
     use std::os::unix::fs::PermissionsExt;
 
@@ -4206,6 +4207,54 @@ mod tests {
             }
         }
         assert_eq!(problems, Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_tools_off_claude_run_takes_the_no_tools_prompt_one_turn_and_its_output_cap() {
+        let account = ResearchAccount::AnthropicEndpoint {
+            base_url: "http://127.0.0.1:11434".into(),
+            model: "local-model".into(),
+        };
+        let launch = |tools: bool, output_tokens: Option<u32>| {
+            let mut command = Command::new("/usr/bin/true");
+            claude_arguments(
+                &mut command,
+                Path::new("/agent/home"),
+                Path::new("/agent/tmp"),
+                tools,
+                output_tokens,
+                &account,
+            )
+            .unwrap();
+            let arguments: Vec<String> = command
+                .get_args()
+                .map(|argument| argument.to_str().unwrap().to_owned())
+                .collect();
+            let cap = command
+                .get_envs()
+                .find(|(key, _)| *key == "CLAUDE_CODE_MAX_OUTPUT_TOKENS")
+                .map(|(_, value)| value.unwrap().to_str().unwrap().to_owned());
+            (arguments, cap)
+        };
+        let has = |arguments: &[String], pair: [&str; 2]| {
+            arguments.windows(2).any(|window| window == pair)
+        };
+        let (off, cap) = launch(false, Some(16_000));
+        assert!(has(&off, ["--tools", ""]), "{off:?}");
+        assert!(
+            has(&off, ["--system-prompt", CLAUDE_NO_TOOLS_PROMPT]),
+            "{off:?}"
+        );
+        assert!(has(&off, ["--max-turns", "1"]), "{off:?}");
+        assert_eq!(cap.as_deref(), Some("16000"));
+        assert!(CLAUDE_NO_TOOLS_PROMPT.contains("no tools"));
+        let (on, cap) = launch(true, None);
+        assert!(has(&on, ["--tools", "default"]), "{on:?}");
+        assert!(
+            !on.iter()
+                .any(|argument| argument == "--system-prompt" || argument == "--max-turns")
+        );
+        assert_eq!(cap, None);
     }
 
     #[test]

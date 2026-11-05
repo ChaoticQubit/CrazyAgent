@@ -74,10 +74,12 @@ const CUT_PROMPT: &str = "Write every whole number from 1 to 5000 in order, sepa
 const CUT_TOKENS: u32 = 64;
 const NO_TOOLS_INPUT_MAX: u64 = 1000;
 const CONTINUED: &str = "Output token limit hit";
+const CONTINUES_MAX: usize = 3;
 
 /// Reads the model requests of a Claude Code run from the transcripts under its home's
-/// `projects` folder: per message id, the input tokens with cache reads and writes, the
-/// output tokens and the stop reason. Input: the folder. Output: the requests in file order
+/// `projects` folder: per message id with any tokens, the input tokens with cache reads
+/// and writes, the output tokens and the stop reason; Claude Code's own error message
+/// counts no tokens and is left out. Input: the folder. Output: the requests in file order
 /// and how many transcript lines carry Claude Code's continue message.
 fn model_requests(projects: &Path) -> (Vec<(u64, u64, String)>, usize) {
     let mut requests: Vec<(String, (u64, u64, String))> = Vec::new();
@@ -99,6 +101,9 @@ fn model_requests(projects: &Path) -> (Vec<(u64, u64, String)>, usize) {
                 let message = &entry["message"];
                 let usage = &message["usage"];
                 let tokens = |key: &str| usage[key].as_u64().unwrap_or(0);
+                if tokens("input_tokens") + tokens("output_tokens") == 0 {
+                    continue;
+                }
                 let request = (
                     tokens("input_tokens")
                         + tokens("cache_creation_input_tokens")
@@ -121,14 +126,15 @@ fn model_requests(projects: &Path) -> (Vec<(u64, u64, String)>, usize) {
 }
 
 /// Qualifies the tools-off Claude Code read-only run, the mapping agent's launch, on the
-/// real harness and a managed account: under the no-tools system prompt and one turn, an
-/// answer cut at its output cap ends the run after that one model request, where Claude
-/// Code 2.1.309 otherwise sends another to continue it. Claude Code's own agent prompt
-/// alone costs about 2700 input tokens. One call on the fast model `haiku`, with a prompt
-/// that carries no project data, reading an empty folder.
+/// real harness and a managed account: it runs under the no-tools system prompt, not
+/// Claude Code's own agent prompt, which alone costs about 2700 input tokens; every request
+/// stops at its output cap; and an answer cut there ends the run on its own after Claude
+/// Code 2.1.309's at most three continue requests, which `--max-turns 1` does not stop.
+/// One call on the fast model `haiku`, with a prompt that carries no project data,
+/// reading an empty folder.
 #[test]
 #[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
-fn a_real_tools_off_claude_run_cut_at_its_output_cap_ends_after_its_one_request() {
+fn a_real_tools_off_claude_run_stops_every_request_at_its_output_cap_and_ends_on_its_own() {
     let mut signed_in = SignedIn::claude();
     let engine = ManagedAgent::new("claude-code", &claude());
     let state = engine.base.join("research");
@@ -180,10 +186,13 @@ fn a_real_tools_off_claude_run_cut_at_its_output_cap_ends_after_its_one_request(
         !matches!(ending, ReadOnlyEnding::TimedOut | ReadOnlyEnding::Stopped),
         "{shown}"
     );
-    assert_eq!(requests.len(), 1, "{requests:?}");
-    assert_eq!(continued, 0);
-    let (input, output, stop) = &requests[0];
-    assert_eq!(stop, "max_tokens");
-    assert!(*output <= u64::from(CUT_TOKENS), "{output}");
-    assert!(*input < NO_TOOLS_INPUT_MAX, "{input}");
+    assert!(!requests.is_empty(), "the run made no model request");
+    assert!(requests.len() <= 1 + CONTINUES_MAX, "{requests:?}");
+    assert_eq!(continued, requests.len() - 1);
+    for (_, output, stop) in &requests {
+        assert_eq!(stop, "max_tokens");
+        assert!(*output <= u64::from(CUT_TOKENS), "{output}");
+    }
+    assert!(requests[0].0 < NO_TOOLS_INPUT_MAX, "{requests:?}");
+    assert!(seconds < 120, "{seconds}");
 }
