@@ -1079,6 +1079,7 @@ fn the_graph_leaves_out_the_engine_files_in_the_project() {
         .tempdir_in("/tmp")
         .unwrap();
     let repo = dir.path().canonicalize().unwrap();
+    git_init(&repo);
     std::fs::create_dir(repo.join("src")).unwrap();
     std::fs::write(
         repo.join("src/shop.py"),
@@ -1136,6 +1137,128 @@ fn the_graph_leaves_out_the_engine_files_in_the_project() {
     }
     assert!(engine.join("probe.py").is_file());
     assert!(secret.join("vault.py").is_file());
+}
+
+/// Builds the code graph of `repo` with the installed graphify and no hidden folders, in a
+/// fresh engine state folder. Takes the project folder. Returns how the build ended.
+fn build_graph(repo: &Path) -> graph::GraphEnding {
+    let graphify = service::installed_graphify()
+        .expect("BLOCKED: graphify not installed (~/.local/bin or Homebrew)");
+    let scratch = tempfile::Builder::new()
+        .prefix("ca-state-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let state = scratch.path().canonicalize().unwrap();
+    for folder in ["agents", "profiles"] {
+        std::fs::create_dir(state.join(folder)).unwrap();
+    }
+    graph::update(
+        &graphify,
+        repo,
+        &state,
+        "onboard-g-keep-out",
+        &[],
+        std::time::Duration::from_secs(300),
+        &|| false,
+    )
+    .unwrap()
+}
+
+#[test]
+fn the_graph_never_reads_secret_like_or_git_ignored_files() {
+    let dir = tempfile::Builder::new()
+        .prefix("ca-graph-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let repo = dir.path().canonicalize().unwrap();
+    git_init(&repo);
+    write_file(
+        &repo,
+        "src/shop.py",
+        "def shop_total(items):\n    return sum(items)\n",
+    );
+    write_file(
+        &repo,
+        "notes/ui-direction.md",
+        "# UI direction\n\nDark first.\n",
+    );
+    let kept_out = [
+        (
+            "notes/api-keys.md",
+            "# API keys\n\nDECOY_CANARY_8080\n\n## Rotation\n\nMonthly.\n",
+        ),
+        (
+            "config/Credentials.py",
+            "def credential_loader():\n    return 1\n",
+        ),
+        (
+            "tokens/store.py",
+            "def token_store_reader():\n    return 1\n",
+        ),
+        ("private/plan.md", "# Private plan heading\n"),
+        ("src/gen/out.py", "def generated_ignored():\n    return 1\n"),
+        ("local.py", "def excluded_local():\n    return 1\n"),
+    ];
+    for (path, text) in kept_out {
+        write_file(&repo, path, text);
+    }
+    write_file(&repo, ".gitignore", "private/\n");
+    write_file(&repo, "src/.gitignore", "gen/\n");
+    write_file(&repo, ".git/info/exclude", "local.py\n");
+
+    assert_eq!(build_graph(&repo), graph::GraphEnding::Built);
+    let graph = std::fs::read_to_string(repo.join("graphify-out/graph.json")).unwrap();
+    assert!(
+        graph.contains("shop_total") && graph.contains("UI direction"),
+        "{graph}"
+    );
+    for name in ["graph.json", "manifest.json", "GRAPH_REPORT.md"] {
+        let text = std::fs::read_to_string(repo.join("graphify-out").join(name)).unwrap();
+        for leaked in [
+            "api-keys",
+            "API keys",
+            "Rotation",
+            "DECOY_CANARY_8080",
+            "Credentials.py",
+            "credential_loader",
+            "token_store_reader",
+            "Private plan heading",
+            "generated_ignored",
+            "excluded_local",
+        ] {
+            assert!(!text.contains(leaked), "{leaked} reached {name}: {text}");
+        }
+    }
+    for (path, _) in kept_out {
+        assert!(repo.join(path).is_file(), "{path} was changed");
+    }
+}
+
+#[test]
+fn without_an_answer_from_git_no_graph_is_built() {
+    let dir = tempfile::Builder::new()
+        .prefix("ca-graph-")
+        .tempdir_in("/tmp")
+        .unwrap();
+    let repo = dir.path().canonicalize().unwrap();
+    write_file(
+        &repo,
+        "src/shop.py",
+        "def shop_total(items):\n    return sum(items)\n",
+    );
+    write_file(
+        &repo,
+        "notes/api-keys.md",
+        "# API keys\n\nDECOY_CANARY_8080\n",
+    );
+
+    assert_eq!(
+        build_graph(&repo),
+        graph::GraphEnding::Failed(
+            "Graph not built: the project's git could not tell which files it ignores."
+        )
+    );
+    assert!(!repo.join("graphify-out/graph.json").exists());
 }
 
 #[test]
