@@ -1673,11 +1673,11 @@ fn the_master_view_head_names_the_running_harness_and_the_saved_one_from_the_nex
         "the saved harness while none runs: {}",
         rows[2]
     );
-    shell.arrive(harnessed(Some(false), "codex", None));
+    shell.arrive(turned(false, Ok(())));
     let rows = render(&mut shell);
     assert!(
         rows[2].contains("Live master stopped. Harness: Codex."),
-        "{}",
+        "an accepted stop keeps the harness last read: {}",
         rows[2]
     );
 }

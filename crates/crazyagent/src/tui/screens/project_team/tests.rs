@@ -1622,25 +1622,30 @@ fn stored() -> crate::project_setup::StoredSetup {
     }
 }
 
-/// Team settings name the saved master harness and when a saved change reaches the running
-/// master, each as its own setting on the summary.
+/// Team settings name the saved master harness on the plan line and, after the On harness
+/// switch choice, when a saved change reaches the running master; at 80 columns too, where a
+/// setting of its own would fold the first settings row away.
 #[test]
 fn team_settings_name_the_master_harness_and_when_a_change_reaches_the_running_master() {
     let view = loaded();
-    let rows = frame(&view, 160, 36);
-    assert!(find(&rows, "Master harness").contains("Master harness  Codex"));
-    assert!(
-        words(&rows).contains("Apply a master harness change When the master is idle"),
-        "{}",
-        rows.join("\n")
-    );
+    for (width, height) in [(160, 36), (80, 24)] {
+        let rows = frame(&view, width, height);
+        assert!(find(&rows, "leads.").contains("Codex leads."));
+        assert!(
+            find(&rows, "On harness switch")
+                .contains("On harness switch  Carry over, when the master is idle"),
+            "{}",
+            rows.join("\n")
+        );
+    }
     let mut later = team();
     later.apply_harness_switch = crate::team::SwitchApply::NextStart;
     let mut view = TeamView::new(project());
     let query = view.next_query(NOW).unwrap();
     view.apply(&query, Ok(SetupView::Team(Box::new(later))));
     assert!(
-        words(&frame(&view, 160, 36)).contains("Apply a master harness change At the next start")
+        find(&frame(&view, 160, 36), "On harness switch")
+            .contains("On harness switch  Carry over, at the next start")
     );
     assert!(view.help().contains(&("H", "Master harness")));
     assert!(view.help().contains(&("A", "Apply master change")));
@@ -1877,7 +1882,10 @@ fn the_harness_switch_setting_flips_between_carry_over_and_start_fresh() {
         Some(Notice::plain("The team is still loading."))
     );
     let mut view = loaded();
-    assert!(find(&frame(&view, 120, 36), "Team").contains("On harness switch  Carry over"));
+    assert!(
+        find(&frame(&view, 120, 36), "On harness switch")
+            .contains("On harness switch  Carry over, when the master is idle")
+    );
     let reply = view.key(press(KeyCode::Char('h')));
     assert_eq!(
         reply,
@@ -1906,7 +1914,10 @@ fn the_harness_switch_setting_flips_between_carry_over_and_start_fresh() {
     fresh.on_harness_switch = crate::team::SwitchMode::Fresh;
     let query = view.next_query(NOW + 10).unwrap();
     view.apply(&query, Ok(SetupView::Team(Box::new(fresh))));
-    assert!(find(&frame(&view, 120, 36), "Team").contains("On harness switch  Start fresh"));
+    assert!(
+        find(&frame(&view, 120, 36), "On harness switch")
+            .contains("On harness switch  Start fresh, when the master is idle")
+    );
     assert_eq!(
         view.key(press(KeyCode::Char('h'))),
         TeamReply::Change(TeamAction::OnHarnessSwitch {

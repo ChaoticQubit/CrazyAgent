@@ -1171,8 +1171,16 @@ fn a_saved_shift_enter_choice_switches_the_keyboard_protocol_at_once() {
 
 const SWITCH_ID: &str = "e2e-master-switch";
 const SWITCH_PROJECT: &str = "Master switch e2e";
-const APPLY_IDLE: &str = "Apply a master harness change  When the master is idle";
-const APPLY_NEXT: &str = "Apply a master harness change  At the next start";
+const APPLY_IDLE: &str = ", when the master is idle";
+const APPLY_NEXT: &str = ", at the next start";
+
+/// Whether the Team settings summary shows the Apply a master harness change choice after
+/// the On harness switch choice. Inputs: the screen and the choice words. Output: a boolean.
+fn applied(screen: &str, choice: &str) -> bool {
+    screen
+        .lines()
+        .any(|line| line.contains("On harness switch  ") && line.contains(choice))
+}
 
 /// Starts an engine with one fresh project and opens that project's Team settings in the
 /// TUI. Input: a scratch prefix. Output: the engine, the TUI, the project id and the
@@ -1201,7 +1209,7 @@ fn switch_settings(prefix: &str) -> (Engine, Pty, ProjectId, tempfile::TempDir) 
     open_team(&pty, SWITCH_PROJECT);
     pty.keys(&["s"]);
     pty.until("s on the team tree opens the Team settings", |screen| {
-        screen.contains("Team settings") && screen.contains("Master harness  ")
+        screen.contains("Team settings") && screen.contains("On harness switch  ")
     });
     (engine, pty, ProjectId::new(SWITCH_ID).unwrap(), disk)
 }
@@ -1319,7 +1327,7 @@ fn the_tui_saves_a_master_harness_that_reaches_the_master_once_it_is_idle() {
     let (mode, before) = runtime.block_on(switch_state(&engine, &project));
     assert_eq!(mode, crazyagent::team::SwitchApply::WhenIdle);
     pty.until("the summary names the default", |screen| {
-        screen.contains(APPLY_IDLE)
+        applied(screen, APPLY_IDLE)
     });
 
     let name = pick_other_master(&pty);
@@ -1327,9 +1335,9 @@ fn the_tui_saves_a_master_harness_that_reaches_the_master_once_it_is_idle() {
     pty.until("the save says when the running master switches", |screen| {
         screen.contains(&said) && !screen.contains("Harness for the master")
     });
-    let saved = format!("Master harness  {name}");
+    let saved = format!("{name} leads.");
     pty.until("the summary names the saved harness", |screen| {
-        screen.contains(&saved) && screen.contains(APPLY_IDLE)
+        screen.contains(&saved) && applied(screen, APPLY_IDLE)
     });
     let (mode, after) = runtime.block_on(switch_state(&engine, &project));
     assert_eq!(mode, crazyagent::team::SwitchApply::WhenIdle);
@@ -1349,11 +1357,11 @@ fn the_tui_saves_a_master_harness_that_waits_for_the_masters_next_start() {
         .build()
         .unwrap();
     pty.until("the summary names the default", |screen| {
-        screen.contains(APPLY_IDLE)
+        applied(screen, APPLY_IDLE)
     });
     pty.keys(&["A"]);
     pty.until("A picks At the next start", |screen| {
-        screen.contains(APPLY_NEXT)
+        applied(screen, APPLY_NEXT)
             && screen
                 .contains("A saved master harness change now waits for the master's next start.")
     });
@@ -1366,9 +1374,9 @@ fn the_tui_saves_a_master_harness_that_waits_for_the_masters_next_start() {
         "the save says the change waits for the next start",
         |screen| screen.contains(&said) && !screen.contains("Harness for the master"),
     );
-    let saved = format!("Master harness  {name}");
+    let saved = format!("{name} leads.");
     pty.until("the summary names the saved harness", |screen| {
-        screen.contains(&saved) && screen.contains(APPLY_NEXT)
+        screen.contains(&saved) && applied(screen, APPLY_NEXT)
     });
     let (mode, after) = runtime.block_on(switch_state(&engine, &project));
     assert_eq!(mode, crazyagent::team::SwitchApply::NextStart);
@@ -1376,7 +1384,7 @@ fn the_tui_saves_a_master_harness_that_waits_for_the_masters_next_start() {
 
     pty.keys(&["A"]);
     pty.until("A goes back to When the master is idle", |screen| {
-        screen.contains(APPLY_IDLE)
+        applied(screen, APPLY_IDLE)
             && screen.contains(
                 "A saved master harness change now reaches the running master once it is idle.",
             )
