@@ -587,7 +587,8 @@ impl Team {
     }
 
     /// What the engine records for the project, for a failure message: the masters with
-    /// their account, status and error, the ended turns, the resting accounts and the switch.
+    /// their account, status and error, the ended turns, the resting accounts, the switch
+    /// and the live master's input facts.
     pub(crate) fn seen(&self) -> String {
         let agents: Vec<(i64, Option<String>, String, Option<String>)> = self
             .db
@@ -607,11 +608,79 @@ impl Team {
             })
             .collect();
         format!(
-            "masters {agents:?}; turns {:?}; resting {:?}; live {}",
+            "masters {agents:?}; turns {:?}; resting {:?}; live {}; {}",
             self.turns(),
             self.rested(),
-            super::super::master::live(&self.db, &self.project).unwrap()
+            super::super::master::live(&self.db, &self.project).unwrap(),
+            input_evidence(&self.facts())
         )
+    }
+
+    /// The live master's input facts as the engine holds them now (LMS-1): the project's
+    /// messages, its live master row, the engine's input check, the newest master worker's
+    /// briefing and last profile wait, and the last rows of its pane read through tmux.
+    /// Output: the facts; no master worker leaves the briefing, wait and screen empty.
+    pub(crate) fn facts(&self) -> InputFacts {
+        let messages = self
+            .db
+            .prepare("SELECT author,state FROM team_messages WHERE project=?1 ORDER BY id")
+            .unwrap()
+            .query_map([self.project.as_str()], |row| {
+                Ok(format!(
+                    "{} {}",
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?
+                ))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        let live = self
+            .db
+            .query_row(
+                "SELECT live,agent,turn_open,input_ms,typed_ms,draft FROM team_live_masters WHERE project=?1",
+                [self.project.as_str()],
+                |row| {
+                    Ok(format!(
+                        "live {} agent {:?} turn_open {} input_ms {:?} typed_ms {:?} draft {}",
+                        row.get::<_, bool>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, bool>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                        row.get::<_, Option<i64>>(4)?,
+                        row.get::<_, bool>(5)?
+                    ))
+                },
+            )
+            .optional()
+            .unwrap();
+        let input = format!(
+            "{:?}",
+            super::super::master::input_open(&self.db, None, &self.project, now_ms())
+        );
+        let master = self.runtime.workers.iter().rev().find(|(_, worker)| {
+            worker.project == self.project && worker.role == crate::team::AgentRole::Master
+        });
+        let screen = master
+            .and_then(|(id, _)| crate::terminal::AgentId::team(*id).ok())
+            .and_then(|agent| self.host.screen(&agent).ok())
+            .map(|bytes| {
+                let rows: Vec<String> = crate::team::events::screen_rows(&bytes)
+                    .into_iter()
+                    .map(|row| row.trim().to_owned())
+                    .filter(|row| !row.is_empty())
+                    .collect();
+                rows[rows.len().saturating_sub(SCREEN_ROWS)..].to_vec()
+            })
+            .unwrap_or_default();
+        InputFacts {
+            messages,
+            live,
+            input,
+            briefed: master.map(|(_, worker)| worker.briefed),
+            waited: master.and_then(|(id, _)| self.runtime.grant_waited.get(id).cloned()),
+            screen,
+        }
     }
 
     /// Types one owner message to the master the way the owner's app sends it.
@@ -632,16 +701,22 @@ impl Team {
 
     /// Ticks the runtime until a condition holds. Inputs: what is awaited, the time limit and
     /// the condition, which may panic with a BLOCKED message. Panics with what the engine
-    /// records when the time runs out.
+    /// records when the time runs out, as BLOCKED only when `profile_held` proves it.
     pub(crate) fn until(&mut self, what: &str, limit: Duration, done: impl Fn(&Self) -> bool) {
         let deadline = Instant::now() + limit;
         while !done(self) {
-            assert!(
-                Instant::now() < deadline,
-                "{what} within {} s: {}",
-                limit.as_secs(),
-                self.seen()
-            );
+            if Instant::now() >= deadline {
+                let blocked = if profile_held(&self.facts()) {
+                    "BLOCKED: another process held the owner's profile: "
+                } else {
+                    ""
+                };
+                panic!(
+                    "{blocked}{what} within {} s: {}",
+                    limit.as_secs(),
+                    self.seen()
+                );
+            }
             self.tick();
         }
     }
@@ -718,6 +793,9 @@ impl Drop for Team {
     }
 }
 
+/// How many of the master pane's last non-empty rows a failure message shows.
+const SCREEN_ROWS: usize = 8;
+
 /// What a live master's input shows beside `Team::seen` (LMS-1): each team message's author
 /// and state, the live master row, the engine's input check, whether the master was briefed,
 /// the custody answer of the runtime's last profile wait and the master screen's last rows.
@@ -734,16 +812,22 @@ pub(crate) struct InputFacts {
 /// Words the input facts for a failure message, so a turn that never came reads as queued,
 /// refused or typed. Input: the facts. Output: one line.
 pub(crate) fn input_evidence(facts: &InputFacts) -> String {
-    let _ = facts;
-    String::new()
+    format!(
+        "messages {:?}; live row {:?}; input check {}; briefed {:?}; profile wait {:?}; screen {:?}",
+        facts.messages, facts.live, facts.input, facts.briefed, facts.waited, facts.screen
+    )
 }
 
 /// Whether a turn wait timed out because another process held the owner's profile: an
 /// owner message still pending, a master never briefed and the runtime's last profile wait
 /// answered `native_profile_in_use`. Input: the facts. Output: the answer.
 pub(crate) fn profile_held(facts: &InputFacts) -> bool {
-    let _ = facts;
-    false
+    facts.briefed == Some(false)
+        && facts.waited.as_deref() == Some("native_profile_in_use")
+        && facts
+            .messages
+            .iter()
+            .any(|message| message == "owner pending")
 }
 
 /// LMS-1 evidence: a turn wait's failure names every input fact, so the three silent waits
