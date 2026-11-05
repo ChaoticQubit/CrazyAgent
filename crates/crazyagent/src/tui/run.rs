@@ -2,7 +2,7 @@ use super::client::terminal::Terminals;
 use super::client::{Connection, OwnerEvent};
 use super::ctx::{Ctx, Link};
 use super::glyphs::Glyphs;
-use super::keys::Key;
+use super::keys::{Key, ShiftEnter};
 use super::prefs;
 use super::seam::{Arrival, Request, ShellEvent, ShellRequest};
 use super::shell::Shell;
@@ -11,7 +11,8 @@ use super::{TerminalGuard, TuiError, bounded_area};
 use crate::engine::Client;
 use crossterm::cursor::Show;
 use crossterm::event::{
-    self, DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste, EnableFocusChange, Event,
+    self, DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste, EnableFocusChange,
+    Event, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::LeaveAlternateScreen;
@@ -31,30 +32,105 @@ const PASTE_CHARS_MAX: usize = 100_000;
 struct Extras;
 
 impl Extras {
-    fn enter() -> Result<Self, TuiError> {
+    fn enter(shift_enter: ShiftEnter) -> Result<Self, TuiError> {
         execute!(std::io::stdout(), EnableBracketedPaste, EnableFocusChange)
             .map_err(|error| TuiError(error.to_string()))?;
-        Ok(Self)
+        let extras = Self;
+        push_keyboard(
+            &mut std::io::stdout(),
+            shift_enter,
+            crossterm::terminal::supports_keyboard_enhancement,
+            &KEYBOARD_PUSHED,
+        )
+        .map_err(|error| TuiError(error.to_string()))?;
+        Ok(extras)
     }
 }
 
 impl Drop for Extras {
     fn drop(&mut self) {
-        let _ = execute!(std::io::stdout(), DisableFocusChange, DisableBracketedPaste);
+        let _ = leave(&mut std::io::stdout(), &KEYBOARD_PUSHED);
     }
 }
 
-/// Writes the sequences that hand the terminal back: stop focus and paste
-/// events, show the cursor, leave the alternate screen.
-/// Input: the terminal writer. Output: the write result.
+static KEYBOARD_PUSHED: AtomicBool = AtomicBool::new(false);
+
+/// Turns on the enhanced keyboard protocol (disambiguated escape codes) under Auto when the
+/// terminal says it has it, so Shift-Enter arrives as its own key; Off never asks. The flag
+/// is set before the push is written, so every restore pops it.
+/// Inputs: the writer, the choice, the support query and the pushed flag. Output: the write
+/// result; a failed or timed-out query leaves the terminal as it is.
+fn push_keyboard(
+    out: &mut impl std::io::Write,
+    choice: ShiftEnter,
+    supported: impl FnOnce() -> std::io::Result<bool>,
+    pushed: &AtomicBool,
+) -> std::io::Result<()> {
+    if choice == ShiftEnter::Off || !matches!(supported(), Ok(true)) {
+        return Ok(());
+    }
+    pushed.store(true, Ordering::SeqCst);
+    execute!(
+        out,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    )
+}
+
+/// Pops the keyboard protocol when this TUI pushed it, once; the terminal keeps one stack
+/// per screen, so it runs before the alternate screen is left.
+/// Inputs: the writer and the pushed flag. Output: the write result.
+fn pop_keyboard(out: &mut impl std::io::Write, pushed: &AtomicBool) -> std::io::Result<()> {
+    if pushed.swap(false, Ordering::SeqCst) {
+        execute!(out, PopKeyboardEnhancementFlags)?;
+    }
+    Ok(())
+}
+
+/// Makes the terminal follow a Shift-Enter choice saved in Settings, at once: Off pops the
+/// protocol this TUI pushed without asking the terminal; Auto asks and pushes it when it is
+/// not pushed yet. Inputs: the writer, the saved choice, the support query and the pushed
+/// flag. Output: the write result.
+fn switch_keyboard(
+    out: &mut impl std::io::Write,
+    choice: ShiftEnter,
+    supported: impl FnOnce() -> std::io::Result<bool>,
+    pushed: &AtomicBool,
+) -> std::io::Result<()> {
+    if choice == ShiftEnter::Off {
+        return pop_keyboard(out, pushed);
+    }
+    if pushed.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    push_keyboard(out, choice, supported, pushed)
+}
+
+/// Writes what the normal exit hands back before the screen guard leaves the alternate
+/// screen: the keyboard protocol popped when this TUI pushed it, then focus and paste
+/// events stopped. Inputs: the writer and the pushed flag. Output: the write result.
+fn leave(out: &mut impl std::io::Write, pushed: &AtomicBool) -> std::io::Result<()> {
+    let popped = pop_keyboard(out, pushed);
+    execute!(out, DisableFocusChange, DisableBracketedPaste)?;
+    popped
+}
+
+/// Writes the sequences that hand the terminal back: the keyboard protocol popped when
+/// this TUI pushed it, focus and paste events stopped, the cursor shown, the alternate
+/// screen left. Input: the terminal writer. Output: the write result.
 pub(super) fn restore(out: &mut impl std::io::Write) -> std::io::Result<()> {
+    restore_with(out, &KEYBOARD_PUSHED)
+}
+
+fn restore_with(out: &mut impl std::io::Write, pushed: &AtomicBool) -> std::io::Result<()> {
+    let popped = pop_keyboard(out, pushed);
     execute!(
         out,
         DisableFocusChange,
         DisableBracketedPaste,
         Show,
         LeaveAlternateScreen
-    )
+    )?;
+    popped
 }
 
 /// Installs a panic hook that restores the terminal before the panic message
@@ -84,8 +160,16 @@ pub fn context(var: impl Fn(&str) -> Option<String>, socket: String) -> Result<C
     } else {
         Appearance::Dark
     };
+    let shift_arrows = prefs.as_deref().map_or_else(Default::default, |path| {
+        prefs::load_shift_arrows(&prefs::shift_arrows_path(path))
+    });
+    let shift_enter = prefs.as_deref().map_or_else(Default::default, |path| {
+        prefs::load_shift_enter(&prefs::shift_enter_path(path))
+    });
     let mut ctx = Ctx::new(depth, colors, appearance, Glyphs::detect(&var), socket);
     ctx.prefs = prefs;
+    ctx.shift_arrows = shift_arrows;
+    ctx.shift_enter = shift_enter;
     ctx.home = var("HOME").filter(|home| home.starts_with('/'));
     Ok(ctx)
 }
@@ -106,7 +190,7 @@ pub fn run(client: Client, stopped: &AtomicBool) -> Result<(), TuiError> {
     let mut connection = Connection::connect_paired(client).map_err(TuiError)?;
     restore_on_panic();
     let _guard = TerminalGuard::enter()?;
-    let _extras = Extras::enter()?;
+    let _extras = Extras::enter(ctx.shift_enter)?;
     let (width, height) =
         crossterm::terminal::size().map_err(|error| TuiError(error.to_string()))?;
     let mut terminal = Terminal::with_options(
@@ -140,6 +224,7 @@ fn drive(
     let mut reconnect = Instant::now() + RECONNECT;
     let mut showing_message = false;
     let mut link = shell.ctx.link.clone();
+    let mut shift_enter = shell.ctx.shift_enter;
     while !stopped.load(Ordering::Relaxed) && !shell.quitting() {
         while let Some(event) = connection.poll_owner().map_err(TuiError)? {
             shell.arrive(owner_arrival(event));
@@ -166,6 +251,16 @@ fn drive(
                 reconnect = now + RECONNECT;
             }
             link = shell.ctx.link.clone();
+        }
+        if shell.ctx.shift_enter != shift_enter {
+            shift_enter = shell.ctx.shift_enter;
+            switch_keyboard(
+                &mut std::io::stdout(),
+                shift_enter,
+                crossterm::terminal::supports_keyboard_enhancement,
+                &KEYBOARD_PUSHED,
+            )
+            .map_err(|error| TuiError(error.to_string()))?;
         }
         if !connection.busy() {
             if shell.ctx.take_reconnect() || (link == Link::Reconnecting && now >= reconnect) {
@@ -345,5 +440,100 @@ mod tests {
             text.ends_with("\x1b[?1049l"),
             "the alternate screen is left last"
         );
+    }
+
+    #[test]
+    fn the_keyboard_protocol_is_turned_on_only_under_auto_on_a_terminal_that_has_it() {
+        let pushed = AtomicBool::new(false);
+        let mut out = Vec::new();
+        push_keyboard(&mut out, ShiftEnter::Auto, || Ok(true), &pushed).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "\x1b[>1u");
+        assert!(pushed.load(Ordering::SeqCst));
+        for answer in [Ok(false), Err(std::io::Error::other("no reply within 2 s"))] {
+            let pushed = AtomicBool::new(false);
+            let mut out = Vec::new();
+            push_keyboard(&mut out, ShiftEnter::Auto, move || answer, &pushed).unwrap();
+            assert!(out.is_empty() && !pushed.load(Ordering::SeqCst));
+        }
+        let pushed = AtomicBool::new(false);
+        let mut out = Vec::new();
+        push_keyboard(
+            &mut out,
+            ShiftEnter::Off,
+            || panic!("Off never asks the terminal"),
+            &pushed,
+        )
+        .unwrap();
+        assert!(out.is_empty() && !pushed.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn every_restore_turns_a_pushed_keyboard_protocol_off_before_the_screen_is_left() {
+        let pushed = AtomicBool::new(true);
+        let mut out = Vec::new();
+        restore_with(&mut out, &pushed).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.starts_with("\x1b[<1u"), "{text:?}");
+        assert!(text.ends_with("\x1b[?1049l"), "{text:?}");
+        assert!(!pushed.load(Ordering::SeqCst));
+        let mut again = Vec::new();
+        restore_with(&mut again, &pushed).unwrap();
+        assert!(
+            !String::from_utf8(again).unwrap().contains("\x1b[<"),
+            "a pushed protocol is popped once"
+        );
+
+        let pushed = AtomicBool::new(true);
+        let mut out = Vec::new();
+        leave(&mut out, &pushed).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.starts_with("\x1b[<1u"), "{text:?}");
+        assert!(text.contains("\x1b[?2004l"), "{text:?}");
+        assert!(!pushed.load(Ordering::SeqCst));
+
+        let never = AtomicBool::new(false);
+        let mut out = Vec::new();
+        restore_with(&mut out, &never).unwrap();
+        leave(&mut out, &never).unwrap();
+        assert!(
+            !String::from_utf8(out).unwrap().contains("\x1b[<"),
+            "nothing pushed, nothing popped"
+        );
+    }
+
+    #[test]
+    fn a_saved_shift_enter_choice_switches_the_keyboard_protocol_at_once() {
+        let pushed = AtomicBool::new(true);
+        let mut out = Vec::new();
+        switch_keyboard(
+            &mut out,
+            ShiftEnter::Auto,
+            || panic!("a pushed protocol is not asked for again"),
+            &pushed,
+        )
+        .unwrap();
+        assert!(out.is_empty() && pushed.load(Ordering::SeqCst));
+        switch_keyboard(
+            &mut out,
+            ShiftEnter::Off,
+            || panic!("Off never asks the terminal"),
+            &pushed,
+        )
+        .unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "\x1b[<1u");
+        assert!(!pushed.load(Ordering::SeqCst));
+        let mut out = Vec::new();
+        switch_keyboard(
+            &mut out,
+            ShiftEnter::Off,
+            || panic!("Off never asks the terminal"),
+            &pushed,
+        )
+        .unwrap();
+        switch_keyboard(&mut out, ShiftEnter::Auto, || Ok(false), &pushed).unwrap();
+        assert!(out.is_empty() && !pushed.load(Ordering::SeqCst));
+        switch_keyboard(&mut out, ShiftEnter::Auto, || Ok(true), &pushed).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "\x1b[>1u");
+        assert!(pushed.load(Ordering::SeqCst));
     }
 }
