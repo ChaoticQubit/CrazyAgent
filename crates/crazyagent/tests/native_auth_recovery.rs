@@ -754,3 +754,28 @@ async fn cancelling_a_codex_sign_in_before_its_harness_starts_the_login_settles_
     );
     case.no_fence().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn cancelling_a_codex_sign_in_before_its_harness_is_spawned_settles_cancelled() {
+    let case = Case::with_codex("codex-app-server");
+    let (client, database) = owner(case.root()).await;
+    let account = subscription(&client, Provider::Chatgpt, "Work ChatGPT").await;
+    let (scope, _) = scope(&client, &database, &account).await;
+    let begun = start(&client, &scope, NativeAuthMethod::CodexBrowser)
+        .await
+        .unwrap();
+    assert_eq!(begun.phase, NativeAuthPhase::Starting);
+    cancel(&client, &scope, &begun).await;
+    let finished = settle(&client, &scope, &begun, ended).await;
+    assert!(
+        case.logins().is_empty(),
+        "the Codex stand-in started before the cancel"
+    );
+    assert_eq!(
+        (finished.phase, finished.code.as_deref()),
+        (NativeAuthPhase::Cancelled, None),
+        "{}",
+        case.log()
+    );
+    case.no_fence().await;
+}
