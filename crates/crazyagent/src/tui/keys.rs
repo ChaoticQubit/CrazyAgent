@@ -239,6 +239,21 @@ mod tests {
         );
     }
 
+    /// N-T1 C: a legacy terminal sends Ctrl-I and Ctrl-M as Tab and Enter; under the
+    /// enhanced keyboard protocol they arrive as Ctrl chords and still act as Tab and Enter
+    /// in the shell, while Ctrl-H and Ctrl-J stay the Ctrl keys they are today.
+    #[test]
+    fn ctrl_i_and_ctrl_m_from_the_enhanced_keyboard_protocol_act_as_tab_and_enter() {
+        let control = KeyModifiers::CONTROL;
+        let both = KeyModifiers::CONTROL | KeyModifiers::SHIFT;
+        assert_eq!(press(KeyCode::Char('i'), control), Some(Key::Tab));
+        assert_eq!(press(KeyCode::Char('I'), both), Some(Key::Tab));
+        assert_eq!(press(KeyCode::Char('m'), control), Some(Key::Enter));
+        assert_eq!(press(KeyCode::Char('M'), both), Some(Key::Enter));
+        assert_eq!(press(KeyCode::Char('h'), control), Some(Key::Ctrl('h')));
+        assert_eq!(press(KeyCode::Char('j'), control), Some(Key::Ctrl('j')));
+    }
+
     /// N-T1 C: under the enhanced keyboard protocol (disambiguated escape codes) a terminal
     /// reports Ctrl and Shift chords as CSI u, which crossterm 0.28 gives as the plain key
     /// with the modifier; each reaches an agent's terminal as the bytes the same key sends

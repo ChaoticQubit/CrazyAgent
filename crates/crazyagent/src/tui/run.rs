@@ -60,6 +60,19 @@ fn push_keyboard(
     Ok(())
 }
 
+/// Makes the terminal follow a Shift-Enter choice saved in Settings, at once: Off pops the
+/// protocol this TUI pushed without asking the terminal; Auto asks and pushes it when it is
+/// not pushed yet. Inputs: the writer, the saved choice, the support query and the pushed
+/// flag. Output: the write result.
+fn switch_keyboard(
+    _out: &mut impl std::io::Write,
+    _choice: ShiftEnter,
+    _supported: impl FnOnce() -> std::io::Result<bool>,
+    _pushed: &AtomicBool,
+) -> std::io::Result<()> {
+    Ok(())
+}
+
 /// Writes what the normal exit hands back before the screen guard leaves the alternate
 /// screen: the keyboard protocol popped when this TUI pushed it, then focus and paste
 /// events stopped. Inputs: the writer and the pushed flag. Output: the write result.
@@ -435,5 +448,41 @@ mod tests {
             !String::from_utf8(out).unwrap().contains("\x1b[<"),
             "nothing pushed, nothing popped"
         );
+    }
+
+    #[test]
+    fn a_saved_shift_enter_choice_switches_the_keyboard_protocol_at_once() {
+        let pushed = AtomicBool::new(true);
+        let mut out = Vec::new();
+        switch_keyboard(
+            &mut out,
+            ShiftEnter::Auto,
+            || panic!("a pushed protocol is not asked for again"),
+            &pushed,
+        )
+        .unwrap();
+        assert!(out.is_empty() && pushed.load(Ordering::SeqCst));
+        switch_keyboard(
+            &mut out,
+            ShiftEnter::Off,
+            || panic!("Off never asks the terminal"),
+            &pushed,
+        )
+        .unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "\x1b[<1u");
+        assert!(!pushed.load(Ordering::SeqCst));
+        let mut out = Vec::new();
+        switch_keyboard(
+            &mut out,
+            ShiftEnter::Off,
+            || panic!("Off never asks the terminal"),
+            &pushed,
+        )
+        .unwrap();
+        switch_keyboard(&mut out, ShiftEnter::Auto, || Ok(false), &pushed).unwrap();
+        assert!(out.is_empty() && !pushed.load(Ordering::SeqCst));
+        switch_keyboard(&mut out, ShiftEnter::Auto, || Ok(true), &pushed).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "\x1b[>1u");
+        assert!(pushed.load(Ordering::SeqCst));
     }
 }

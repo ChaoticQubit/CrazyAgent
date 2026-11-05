@@ -1038,3 +1038,98 @@ fn shift_enter_off_never_asks_the_terminal_and_ctrl_j_makes_a_new_line() {
     assert!(found(&written, KEYBOARD_POP).is_empty());
     engine.stop();
 }
+
+fn script_home(pty: &mut ScriptPty) {
+    for step in 0..=STEPS_MAX {
+        assert!(
+            step < STEPS_MAX,
+            "the TUI never reached Home:\n{}",
+            pty.screen()
+        );
+        pty.until("the TUI shows Home or a first-run step", |screen| {
+            at_home(screen, PROJECT) || screen.contains("c Continue without")
+        });
+        let screen = pty.screen();
+        if at_home(&screen, PROJECT) {
+            return;
+        }
+        pty.type_bytes(b"c");
+        pty.until("the first-run step moves on", |now| now != screen);
+    }
+}
+
+/// N-T1 C: a Shift-Enter choice saved in Settings > Profile applies at once. Saving Off
+/// turns the protocol off without asking the terminal, saving Auto asks again and turns it
+/// back on, and the exit turns it off once more before it leaves the alternate screen.
+#[test]
+fn a_saved_shift_enter_choice_switches_the_keyboard_protocol_at_once() {
+    let mut engine = Engine::start("ca-e2e-keys-");
+    let disk = scratch("ca-e2e-keys-projects-");
+    let projects = disk.path().join("Projects");
+    std::fs::create_dir(&projects).unwrap();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut owner = Owner::attach(&engine).await;
+            assert_eq!(owner.save_profile(profile()).await, OwnerResult::Applied);
+            assert_eq!(owner.set_home(&projects).await, OwnerResult::Applied);
+            assert_eq!(
+                owner.create_project("e2e-keys", PROJECT).await,
+                OwnerResult::Applied
+            );
+            owner.controller.detach();
+        });
+    let home = scratch("ca-e2e-keys-home-");
+    let mut pty = ScriptPty::launch(&engine.socket(), home.path());
+    pty.until_written("Auto asks the terminal at start", |written| {
+        found(written, KEYBOARD_QUERY).len() == 1
+    });
+    pty.type_bytes(KEYBOARD_REPLY);
+    pty.until_written("the protocol is turned on at start", |written| {
+        found(written, KEYBOARD_PUSH).len() == 1
+    });
+    script_home(&mut pty);
+    pty.type_bytes(b"s");
+    pty.until("Home opens Settings", |screen| screen.contains("Settings"));
+    pty.type_bytes(b"\x1b[1;2D");
+    pty.until("Settings > Profile shows the Shift-Enter row", |screen| {
+        screen.contains("Shift-Enter") && screen.contains("( ) Off")
+    });
+    pty.type_bytes(b"\t\t\t\t\t\t\t\t\t\x1b[C\t\r");
+    pty.until_written("saving Off turns the protocol off at once", |written| {
+        found(written, KEYBOARD_POP).len() == 1
+    });
+    pty.until("the profile is saved with Off", |screen| {
+        screen.contains("Saved.") && screen.contains("(*) Off")
+    });
+    assert_eq!(
+        found(&pty.written(), KEYBOARD_QUERY).len(),
+        1,
+        "saving Off never asks the terminal"
+    );
+    pty.type_bytes(b"\x1b[Z\x1b[C\t\r");
+    pty.until_written("saving Auto asks the terminal again", |written| {
+        found(written, KEYBOARD_QUERY).len() == 2
+    });
+    pty.type_bytes(KEYBOARD_REPLY);
+    pty.until_written("saving Auto turns the protocol back on", |written| {
+        found(written, KEYBOARD_PUSH).len() == 2
+    });
+    pty.type_bytes(b"\x1b[113;5u");
+    let written = pty.exited();
+    let pushes = found(&written, KEYBOARD_PUSH);
+    let pops = found(&written, KEYBOARD_POP);
+    let leaves = found(&written, LEAVE_SCREEN);
+    assert_eq!(pushes.len(), 2, "{pushes:?}");
+    assert_eq!(pops.len(), 2, "{pops:?}");
+    assert!(
+        pushes[0] < pops[0]
+            && pops[0] < pushes[1]
+            && pushes[1] < pops[1]
+            && leaves.last().is_some_and(|leave| pops[1] < *leave),
+        "push, pop on Off, push on Auto, pop before the alternate screen is left: {pushes:?} {pops:?} {leaves:?}"
+    );
+    engine.stop();
+}
