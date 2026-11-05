@@ -45,6 +45,51 @@ async fn desktop_project_files(
   return command;
 }
 
+/** Builds a lib.rs with one argument type it reads through its own `CommandArg` and a command
+ * taking it. Input: the impl's field lines. Output: the source text. */
+function limitsSource(reads) {
+  return `struct Limits {
+    turn_secs: Option<u32>,
+    idle_secs: Option<u32>,
+}
+
+impl<'de, R: tauri::Runtime> tauri::ipc::CommandArg<'de, R> for Limits {
+    fn from_command(
+        command: tauri::ipc::CommandItem<'de, R>,
+    ) -> Result<Self, tauri::ipc::InvokeError> {
+        Ok(Self {
+${reads}
+        })
+    }
+}
+
+#[tauri::command]
+async fn desktop_team_time_limits(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    limits: Limits,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    let Limits { turn_secs, idle_secs } = limits;
+    lock(&state).await?.team_time_limits(turn_secs, idle_secs).await
+}
+`;
+}
+
+test("an argument the app reads through its own CommandArg is routed by the keys it reads", () => {
+  const route = plan(commands(lib).find((command) => command.name === "desktop_team_time_limits"), impls).route;
+  assert.deepEqual(route.args.find((arg) => arg.name === "limits").keys, [
+    { field: "turn_secs", key: "turnSecs", type: "Option<u32>" },
+    { field: "session_secs", key: "sessionSecs", type: "Option<u32>" },
+    { field: "idle_secs", key: "idleSecs", type: "Option<u32>" },
+  ]);
+  const arm = render(limitsSource('            turn_secs: read("turnSecs")?,\n            idle_secs: read("idleSecs")?,'), impls);
+  assert.match(arm, /struct Limits \{\n\s+#\[serde\(rename = "turnSecs"\)\]\n\s+turn_secs: Option<u32>,\n\s+#\[serde\(rename = "idleSecs"\)\]\n\s+idle_secs: Option<u32>,\n\s+\}/);
+  assert.match(arm, /#\[serde\(flatten\)\]\n\s+limits: Limits,/, "the route reads the keys at the top level, as the app does");
+  assert.throws(() => commands(limitsSource('            turn_secs: read("turnSecs")?,\n            idle_secs: read_idle()?,')), /routes: Limits reads its fields in a way the generator cannot follow/);
+  assert.throws(() => commands(limitsSource('            turn_secs: read("turnSecs")?,\n            idle_secs: read("turnSecs")?,')), /routes: Limits reads its fields in a way the generator cannot follow/);
+});
+
 test("the end-to-end bridge routes match the app's commands", () => {
   assert.equal(readFileSync(ROUTES, "utf8"), render(lib, impls), "routes.rs is stale: run node test/native/bridge-routes.mjs");
 });
