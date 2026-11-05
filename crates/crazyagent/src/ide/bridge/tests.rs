@@ -1265,7 +1265,12 @@ async fn a_write_past_its_bound_answers_its_unknown_outcome_over_the_connection(
         "the write still waits when its bound passes"
     );
     let held = held_writes(case.root.path());
-    let (mut client, server) = UnixStream::pair().unwrap();
+    let (client, server) = crate::spawn_gate::unix_pair_std().unwrap();
+    for end in [&client, &server] {
+        end.set_nonblocking(true).unwrap();
+    }
+    let mut client = UnixStream::from_std(client).unwrap();
+    let server = UnixStream::from_std(server).unwrap();
     let serving = tokio::spawn(serve_within(
         server,
         ide,
@@ -1460,16 +1465,16 @@ async fn ide_git_calls_past_their_cap_are_refused_while_the_others_run() {
     use super::remote_git::{GIT_CALLS_MAX, PROJECT_GIT_CALLS_MAX};
     const LISTEN: Duration = Duration::from_secs(30);
     const REFUSED: Duration = Duration::from_secs(10);
-    assert!(PROJECT_GIT_CALLS_MAX < GIT_CALLS_MAX);
+    const { assert!(PROJECT_GIT_CALLS_MAX < GIT_CALLS_MAX) };
     let mut case = Case::start().await;
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let url = format!(
         "git://127.0.0.1:{}/slow.git",
         listener.local_addr().unwrap().port()
     );
     let (accepted, mut held) = tokio::sync::mpsc::unbounded_channel();
     std::thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
+        for stream in crate::spawn_gate::incoming_tcp_std(&listener).flatten() {
             if accepted.send(stream).is_err() {
                 return;
             }
@@ -1623,7 +1628,7 @@ async fn sandboxed_terminal_runs_in_an_engine_pane_and_cannot_read_the_capabilit
     let folder = case.root.path().join("projects").join("alpha");
     std::fs::write(folder.join("README.md"), "alpha readme\n").unwrap();
     let database = case.root.path().join("engine.db");
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let path = issue(&case.runtime, &alpha).unwrap();
     let socket = case.socket(&path);

@@ -1076,8 +1076,7 @@ fn a_read_after_the_settings_changed_ends_a_sign_in_only_once_it_stopped() {
     let before = case.snapshot();
     let refused = case
         .read(&running)
-        .err()
-        .expect("a running sign-in read under changed settings");
+        .expect_err("a running sign-in read under changed settings");
     assert_eq!(refused.0, "native_profile_source_conflict");
     assert!(
         !crate::engine::owner::ends_operation(&refused.0),
