@@ -206,6 +206,7 @@ pub(in crate::tui) struct ProjectPage {
     import_sent: Option<ProcessQuery>,
     moved: Option<Vec<ImportFile>>,
     uncommitted: Vec<String>,
+    uncommitted_branch: Option<String>,
     uncommitted_asked: bool,
 }
 
@@ -233,6 +234,19 @@ fn import_problem(code: &str) -> String {
         }
         other => super::process::message(other),
     }
+}
+
+/// The banner text shown while an instruction import's move stays uncommitted (DEC-106
+/// addendum): the files and the checked-out branch merges into are refused, or "this
+/// branch" without one. Inputs: the paths and the branch. Output: the text, sanitized.
+pub(in crate::tui) fn move_banner(files: &[String], branch: Option<&str>) -> String {
+    assert!(!files.is_empty());
+    let files: Vec<String> = files.iter().map(|path| sanitize(path)).collect();
+    let target = branch.map_or_else(|| "this branch".to_owned(), sanitize);
+    format!(
+        "Git still shows {} as deleted after the instruction import, so merges into {target} are refused. Ctrl-G Commit the move makes one local commit holding only that move; it is never pushed.",
+        files.join(", ")
+    )
 }
 
 impl ProjectPage {
@@ -269,6 +283,7 @@ impl ProjectPage {
             import_sent: None,
             moved: None,
             uncommitted: Vec::new(),
+            uncommitted_branch: None,
             uncommitted_asked: false,
         };
         page.refresh_pool(ctx);
@@ -363,8 +378,9 @@ impl ProjectPage {
             && *project == self.screen.project
         {
             self.uncommitted_asked = false;
-            if let Ok(ProcessReply::Paths(paths)) = result {
-                self.uncommitted = paths.clone();
+            if let Ok(ProcessReply::Uncommitted(waiting)) = result {
+                self.uncommitted = waiting.files.clone();
+                self.uncommitted_branch = waiting.branch.clone();
             }
             return;
         }
@@ -430,17 +446,13 @@ impl ProjectPage {
     }
 
     /// The banner rows shown above the tabs while an instruction import's move stays
-    /// uncommitted: the files, why it matters and the Ctrl-G action. Inputs: the width and
-    /// the context. Output: the rows, none when no move waits.
+    /// uncommitted: the files, the branch merges into are refused and the Ctrl-G action.
+    /// Inputs: the width and the context. Output: the rows, none when no move waits.
     fn banner(&self, width: usize, ctx: &Ctx) -> Vec<Line<'static>> {
         if self.uncommitted.is_empty() || width < 8 {
             return Vec::new();
         }
-        let files: Vec<String> = self.uncommitted.iter().map(|path| sanitize(path)).collect();
-        let text = format!(
-            "Git still shows {} as deleted after the instruction import, so merges into this branch are refused. Ctrl-G Commit the move makes one local commit holding only that move; it is never pushed.",
-            files.join(", ")
-        );
+        let text = move_banner(&self.uncommitted, self.uncommitted_branch.as_deref());
         wrap(&text, width - 2)
             .into_iter()
             .take(BANNER_ROWS_MAX)

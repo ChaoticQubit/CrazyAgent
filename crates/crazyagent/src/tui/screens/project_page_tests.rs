@@ -3,7 +3,7 @@ use super::new_project_frames::check_frames;
 use super::new_project_input::cells;
 use super::new_project_page::{harness_choices_from, kept_draft, key_event, pool_choices_from};
 use super::project::OpenRequest;
-use super::project_page::{Opening, opening};
+use super::project_page::{Opening, move_banner, opening};
 use super::{Flow, Place, ProjectTab, SettingsSection, open};
 use crate::client_controller::OwnerController;
 use crate::engine::Client;
@@ -304,6 +304,22 @@ impl Engine {
         )
         .unwrap()
     }
+}
+
+#[test]
+fn the_move_banner_names_the_checked_out_branch_merges_into_are_refused() {
+    let files = ["CLAUDE.md".to_owned(), "AGENTS.md".to_owned()];
+    let named = move_banner(&files, Some("trial4-land"));
+    assert!(
+        named.starts_with("Git still shows CLAUDE.md, AGENTS.md as deleted after the instruction import, so merges into trial4-land are refused."),
+        "{named}"
+    );
+    assert!(!named.contains("this branch"), "{named}");
+    let detached = move_banner(&files[..1], None);
+    assert!(
+        detached.contains("so merges into this branch are refused."),
+        "a detached HEAD has no branch to name: {detached}"
+    );
 }
 
 #[test]
@@ -2937,6 +2953,15 @@ async fn confirm_with_tracked_file_offers_commit_then_banner_after_leave() {
     assert!(
         shown.contains("Git still shows CLAUDE.md as deleted after the instruction import"),
         "{shown}"
+    );
+    let checked_out = crate::tui::test_home::git(&folder, &["branch", "--show-current"]);
+    let words = shown.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        words.contains(&format!(
+            "so merges into {} are refused.",
+            checked_out.trim()
+        )),
+        "the banner names the checked-out branch\n{shown}"
     );
     let hints = shown.lines().last().unwrap().to_owned();
     assert!(

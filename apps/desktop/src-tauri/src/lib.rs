@@ -2713,7 +2713,7 @@ async fn desktop_uncommitted_instruction_import(
     window: WebviewWindow,
     state: State<'_, NativeState>,
     project_id: String,
-) -> Result<Vec<String>, BridgeError> {
+) -> Result<crazyagent::engine::owner::UncommittedImport, BridgeError> {
     main_window(&window)?;
     let call = lock(&state)
         .await?

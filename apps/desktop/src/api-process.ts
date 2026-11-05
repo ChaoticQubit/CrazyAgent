@@ -1,7 +1,7 @@
 import { call } from "./api";
 import type { Result } from "./api";
 import { failureCopy } from "./api-projects";
-import type { GraphNode, ImportCommit, ImportFile, Nudges } from "./engine-client";
+import type { GraphNode, ImportCommit, ImportFile, Nudges, UncommittedImport } from "./engine-client";
 import { formatRoute } from "./ui/router";
 
 /** The most bytes one instructions text may hold; the engine refuses more. */
@@ -124,10 +124,11 @@ export function confirmInstructionImport(projectId: string): Promise<Result<Impo
   return call<ImportFile[]>("desktop_confirm_instruction_import", { projectId });
 }
 
-/** Lists the moved instruction files whose move the project's checkout has not committed.
- * Input: the project id. Output: the paths, empty when no move waits for a commit. */
-export function loadUncommittedImport(projectId: string): Promise<Result<string[]>> {
-  return call<string[]>("desktop_uncommitted_instruction_import", { projectId });
+/** Lists the moved instruction files whose move the project's checkout has not committed,
+ * with its checked-out branch. Input: the project id. Output: the paths, empty when no move
+ * waits for a commit, and the branch, null for a detached HEAD. */
+export function loadUncommittedImport(projectId: string): Promise<Result<UncommittedImport>> {
+  return call<UncommittedImport>("desktop_uncommitted_instruction_import", { projectId });
 }
 
 /** Commits the instruction import's move as one local commit on the checkout's current branch
