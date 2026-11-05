@@ -58,6 +58,8 @@ export interface AccountLimits {
   observed_ms: number | null;
   checked_ms: number | null;
   failure: string | null;
+  five_hour_left_out: "claude" | "codex" | null;
+  weekly_left_out: "claude" | "codex" | null;
 }
 
 export interface UsageReport {

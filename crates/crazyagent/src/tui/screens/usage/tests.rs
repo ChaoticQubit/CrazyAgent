@@ -444,10 +444,22 @@ fn a_window_a_good_poll_left_out_names_its_provider_and_a_failed_read_keeps_its_
     });
     let failed = shown(five_hour_out(Provider::Codex, Some("usage_unreachable")));
     for (lines, wanted) in [
-        (&codex, "    5-hour  Codex reports no 5-hour limit for this plan."),
-        (&claude, "    5-hour  Claude reports no 5-hour window right now."),
-        (&weekly, "    Weekly  Codex reports no weekly limit for this plan."),
-        (&failed, "    5-hour  Not read. The last read failed, for the reason above."),
+        (
+            &codex,
+            "    5-hour  Codex reports no 5-hour limit for this plan.",
+        ),
+        (
+            &claude,
+            "    5-hour  Claude reports no 5-hour window right now.",
+        ),
+        (
+            &weekly,
+            "    Weekly  Codex reports no weekly limit for this plan.",
+        ),
+        (
+            &failed,
+            "    5-hour  Not read. The last read failed, for the reason above.",
+        ),
     ] {
         assert!(
             lines.iter().any(|line| line == wanted),

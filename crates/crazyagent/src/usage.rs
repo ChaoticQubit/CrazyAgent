@@ -30,7 +30,9 @@ const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS account_limits (
     five_hour_polled_percent REAL CHECK(five_hour_polled_percent BETWEEN 0 AND 100),
     five_hour_polled_resets_ms INTEGER,
     weekly_polled_percent REAL CHECK(weekly_polled_percent BETWEEN 0 AND 100),
-    weekly_polled_resets_ms INTEGER
+    weekly_polled_resets_ms INTEGER,
+    five_hour_left_out TEXT CHECK(five_hour_left_out IN ('claude','codex')),
+    weekly_left_out TEXT CHECK(weekly_left_out IN ('claude','codex'))
 );";
 
 const ADD_POLLED: &str = "
@@ -45,6 +47,12 @@ const ADD_POLLED: &str = "
         weekly_polled_resets_ms=weekly_resets_ms
     WHERE source='poll';";
 
+const ADD_LEFT_OUT: &str = "
+    ALTER TABLE account_limits ADD COLUMN five_hour_left_out TEXT
+        CHECK(five_hour_left_out IN ('claude','codex'));
+    ALTER TABLE account_limits ADD COLUMN weekly_left_out TEXT
+        CHECK(weekly_left_out IN ('claude','codex'));";
+
 const COLUMNS: &str = "account,plan,five_hour_percent,five_hour_resets_ms,weekly_percent,\
     weekly_resets_ms,five_hour_reset_override_ms,weekly_reset_override_ms,source,observed_ms,\
     checked_ms,failure";
@@ -55,6 +63,8 @@ const POLLED_BEFORE_COPIES: &str = "CASE WHEN source='poll' THEN five_hour_perce
     CASE WHEN source='poll' THEN five_hour_resets_ms END,\
     CASE WHEN source='poll' THEN weekly_percent END,\
     CASE WHEN source='poll' THEN weekly_resets_ms END";
+
+const LEFT_OUT_COLUMNS: &str = "five_hour_left_out,weekly_left_out";
 
 /// One provider limit window as last observed: the share used, 0 to 100, and when the
 /// window resets in milliseconds since the epoch, when the provider said.
@@ -82,8 +92,9 @@ pub enum LimitSource {
     Transcript,
 }
 
-/// What one read of an account's limits found. A window the read did not report stays
-/// as it was stored.
+/// What one read of an account's limits found, and whose usage call a poll made. A window
+/// a poll left out is cleared and marked left out by that provider; one a run's own record
+/// left out stays as it was stored.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Observation {
     pub plan: Option<String>,
@@ -94,7 +105,8 @@ pub struct Observation {
 
 /// An account's stored limits: the last observed windows and plan, the same windows as
 /// the last successful poll read them, the owner's manual reset times, where and when they
-/// were last read, and the plain code of the last failed poll.
+/// were last read, the plain code of the last failed poll, and the provider whose good poll
+/// left each window out until a read reports it again.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AccountLimits {
@@ -183,43 +195,56 @@ pub fn open(runtime: &Path) -> Result<Connection, EngineError> {
     Ok(db)
 }
 
-/// Adds the usage tables to a database when missing, and the polled copies of the
-/// windows to a store made before them, filled from the rows a poll wrote last.
-/// Input: the connection. Output: done, or `usage_unavailable`.
+/// Adds the usage tables to a database when missing, and to a store made before them the
+/// polled copies of the windows, filled from the rows a poll wrote last, and the marks of
+/// windows a poll left out. Input: the connection. Output: done, or `usage_unavailable`.
 pub fn initialize(db: &Connection) -> Result<(), EngineError> {
     db.execute_batch(SCHEMA).map_err(storage)?;
-    if !has_polled_copies(db)? {
-        db.execute_batch("SAVEPOINT usage_polled")
-            .map_err(storage)?;
-        let added = db.execute_batch(ADD_POLLED);
-        let closed = match added {
-            Ok(()) => db.execute_batch("RELEASE usage_polled"),
-            Err(_) => db.execute_batch("ROLLBACK TO usage_polled; RELEASE usage_polled"),
-        };
-        closed.map_err(storage)?;
-        if added.is_err() && !has_polled_copies(db)? {
-            return Err(failure("usage_unavailable"));
-        }
-    }
+    add_columns(db, "weekly_polled_resets_ms", ADD_POLLED)?;
+    add_columns(db, "weekly_left_out", ADD_LEFT_OUT)?;
     db.execute_batch(capture::SCHEMA).map_err(storage)
 }
 
-fn has_polled_copies(db: &Connection) -> Result<bool, EngineError> {
+fn add_columns(db: &Connection, last: &str, batch: &str) -> Result<(), EngineError> {
+    if has_column(db, last)? {
+        return Ok(());
+    }
+    db.execute_batch("SAVEPOINT usage_columns")
+        .map_err(storage)?;
+    let added = db.execute_batch(batch);
+    let closed = match added {
+        Ok(()) => db.execute_batch("RELEASE usage_columns"),
+        Err(_) => db.execute_batch("ROLLBACK TO usage_columns; RELEASE usage_columns"),
+    };
+    closed.map_err(storage)?;
+    if added.is_err() && !has_column(db, last)? {
+        return Err(failure("usage_unavailable"));
+    }
+    Ok(())
+}
+
+fn has_column(db: &Connection, name: &str) -> Result<bool, EngineError> {
     db.query_row(
-        "SELECT COUNT(*) FROM pragma_table_info('account_limits') WHERE name='weekly_polled_resets_ms'",
-        [],
+        "SELECT COUNT(*) FROM pragma_table_info('account_limits') WHERE name=?1",
+        params![name],
         |row| row.get::<_, i64>(0),
     )
     .map(|count| count == 1)
     .map_err(storage)
 }
 
-fn polled_columns(db: &Connection) -> Result<&'static str, EngineError> {
-    Ok(if has_polled_copies(db)? {
+fn read_columns(db: &Connection) -> Result<String, EngineError> {
+    let polled = if has_column(db, "weekly_polled_resets_ms")? {
         POLLED_COLUMNS
     } else {
         POLLED_BEFORE_COPIES
-    })
+    };
+    let left_out = if has_column(db, "weekly_left_out")? {
+        LEFT_OUT_COLUMNS
+    } else {
+        "NULL,NULL"
+    };
+    Ok(format!("{COLUMNS},{polled},{left_out}"))
 }
 
 fn checked_window(window: Option<LimitWindow>) -> Result<Option<LimitWindow>, EngineError> {
@@ -253,11 +278,12 @@ fn checked_text(text: Option<&str>, max: usize) -> Result<Option<&str>, EngineEr
     }
 }
 
-/// Stores what a read of an account's limits found, keeping any window it did not report
-/// and the plan when it reported none. A polled window replaces the owner's manual reset
-/// for it and its polled copy, and a poll clears the last failure. A transcript reading is
-/// advisory: it keeps every manual reset and polled copy, and is ignored while a poll
-/// succeeded within `POLL_EVERY_MS`.
+/// Stores what a read of an account's limits found, keeping the plan when it reported none.
+/// A poll replaces each window, its polled copy and the owner's manual reset for it, clears
+/// the last failure, and marks a window it left out as left out by its provider; a poll
+/// must name its provider. A window any read reports clears that mark. A transcript reading
+/// is advisory: it keeps any window it did not report, every manual reset, polled copy and
+/// mark, and is ignored while a poll succeeded within `POLL_EVERY_MS`.
 /// Inputs: the store, the account, the observation, its source and the time.
 /// Output: done, `usage_limits_invalid` for a share outside 0..=100 or a bad time, or
 /// `usage_unavailable`.
@@ -272,26 +298,33 @@ pub fn record_observation(
     let weekly = checked_window(observation.weekly)?;
     let plan = checked_text(observation.plan.as_deref(), PLAN_BYTES_MAX)?;
     let polled = matches!(source, LimitSource::Poll);
+    assert!(
+        !polled || observation.provider.is_some(),
+        "a poll names whose usage call it made"
+    );
     let checked = polled.then_some(now_ms);
     db.execute(
         "INSERT INTO account_limits (account,plan,five_hour_percent,five_hour_resets_ms,\
             weekly_percent,weekly_resets_ms,source,observed_ms,checked_ms,failure,\
             five_hour_polled_percent,five_hour_polled_resets_ms,weekly_polled_percent,\
-            weekly_polled_resets_ms)
+            weekly_polled_resets_ms,five_hour_left_out,weekly_left_out)
          VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,NULL,CASE WHEN ?12 THEN ?3 END,\
-            CASE WHEN ?12 THEN ?4 END,CASE WHEN ?12 THEN ?5 END,CASE WHEN ?12 THEN ?6 END)
+            CASE WHEN ?12 THEN ?4 END,CASE WHEN ?12 THEN ?5 END,CASE WHEN ?12 THEN ?6 END,\
+            CASE WHEN ?12 AND NOT ?10 THEN ?14 END,CASE WHEN ?12 AND NOT ?11 THEN ?14 END)
          ON CONFLICT(account) DO UPDATE SET
             plan=COALESCE(excluded.plan,plan),
-            five_hour_percent=CASE WHEN ?10 THEN excluded.five_hour_percent ELSE five_hour_percent END,
-            five_hour_resets_ms=CASE WHEN ?10 THEN excluded.five_hour_resets_ms ELSE five_hour_resets_ms END,
-            five_hour_reset_override_ms=CASE WHEN ?10 AND ?12 THEN NULL ELSE five_hour_reset_override_ms END,
-            weekly_percent=CASE WHEN ?11 THEN excluded.weekly_percent ELSE weekly_percent END,
-            weekly_resets_ms=CASE WHEN ?11 THEN excluded.weekly_resets_ms ELSE weekly_resets_ms END,
-            weekly_reset_override_ms=CASE WHEN ?11 AND ?12 THEN NULL ELSE weekly_reset_override_ms END,
-            five_hour_polled_percent=CASE WHEN ?10 AND ?12 THEN excluded.five_hour_percent ELSE five_hour_polled_percent END,
-            five_hour_polled_resets_ms=CASE WHEN ?10 AND ?12 THEN excluded.five_hour_resets_ms ELSE five_hour_polled_resets_ms END,
-            weekly_polled_percent=CASE WHEN ?11 AND ?12 THEN excluded.weekly_percent ELSE weekly_polled_percent END,
-            weekly_polled_resets_ms=CASE WHEN ?11 AND ?12 THEN excluded.weekly_resets_ms ELSE weekly_polled_resets_ms END,
+            five_hour_percent=CASE WHEN ?10 OR ?12 THEN excluded.five_hour_percent ELSE five_hour_percent END,
+            five_hour_resets_ms=CASE WHEN ?10 OR ?12 THEN excluded.five_hour_resets_ms ELSE five_hour_resets_ms END,
+            five_hour_reset_override_ms=CASE WHEN ?12 THEN NULL ELSE five_hour_reset_override_ms END,
+            weekly_percent=CASE WHEN ?11 OR ?12 THEN excluded.weekly_percent ELSE weekly_percent END,
+            weekly_resets_ms=CASE WHEN ?11 OR ?12 THEN excluded.weekly_resets_ms ELSE weekly_resets_ms END,
+            weekly_reset_override_ms=CASE WHEN ?12 THEN NULL ELSE weekly_reset_override_ms END,
+            five_hour_polled_percent=CASE WHEN ?12 THEN excluded.five_hour_percent ELSE five_hour_polled_percent END,
+            five_hour_polled_resets_ms=CASE WHEN ?12 THEN excluded.five_hour_resets_ms ELSE five_hour_polled_resets_ms END,
+            weekly_polled_percent=CASE WHEN ?12 THEN excluded.weekly_percent ELSE weekly_polled_percent END,
+            weekly_polled_resets_ms=CASE WHEN ?12 THEN excluded.weekly_resets_ms ELSE weekly_polled_resets_ms END,
+            five_hour_left_out=CASE WHEN ?10 THEN NULL WHEN ?12 THEN ?14 ELSE five_hour_left_out END,
+            weekly_left_out=CASE WHEN ?11 THEN NULL WHEN ?12 THEN ?14 ELSE weekly_left_out END,
             source=excluded.source,
             observed_ms=excluded.observed_ms,
             checked_ms=COALESCE(excluded.checked_ms,checked_ms),
@@ -311,6 +344,7 @@ pub fn record_observation(
             weekly.is_some(),
             polled,
             service::POLL_EVERY_MS,
+            observation.provider.map(provider_name),
         ],
     )
     .map_err(storage)?;
@@ -371,6 +405,22 @@ fn source_name(source: LimitSource) -> &'static str {
     }
 }
 
+fn provider_name(provider: poll::Provider) -> &'static str {
+    match provider {
+        poll::Provider::Claude => "claude",
+        poll::Provider::Codex => "codex",
+    }
+}
+
+fn left_out(row: &Row<'_>, at: usize) -> rusqlite::Result<Option<poll::Provider>> {
+    match row.get::<_, Option<String>>(at)?.as_deref() {
+        None => Ok(None),
+        Some("claude") => Ok(Some(poll::Provider::Claude)),
+        Some("codex") => Ok(Some(poll::Provider::Codex)),
+        Some(_) => Err(conversion(at)),
+    }
+}
+
 fn window(row: &Row<'_>, percent: usize) -> rusqlite::Result<Option<LimitWindow>> {
     let used: Option<f64> = row.get(percent)?;
     let resets: Option<i64> = row.get(percent + 1)?;
@@ -404,8 +454,8 @@ fn limits_row(row: &Row<'_>) -> rusqlite::Result<AccountLimits> {
         observed_ms: row.get(9)?,
         checked_ms: row.get(10)?,
         failure: row.get(11)?,
-        five_hour_left_out: None,
-        weekly_left_out: None,
+        five_hour_left_out: left_out(row, 16)?,
+        weekly_left_out: left_out(row, 17)?,
     })
 }
 
@@ -416,9 +466,9 @@ pub fn limits(
     db: &Connection,
     account: &CredentialRef,
 ) -> Result<Option<AccountLimits>, EngineError> {
-    let polled = polled_columns(db)?;
+    let columns = read_columns(db)?;
     db.query_row(
-        &format!("SELECT {COLUMNS},{polled} FROM account_limits WHERE account=?1"),
+        &format!("SELECT {columns} FROM account_limits WHERE account=?1"),
         params![account.as_str()],
         limits_row,
     )
@@ -429,10 +479,10 @@ pub fn limits(
 /// Reads every account's stored limits, ordered by account, as `limits` does.
 /// Input: the store. Output: the limits, or `usage_unavailable`.
 pub fn all_limits(db: &Connection) -> Result<Vec<AccountLimits>, EngineError> {
-    let polled = polled_columns(db)?;
+    let columns = read_columns(db)?;
     let mut statement = db
         .prepare(&format!(
-            "SELECT {COLUMNS},{polled} FROM account_limits ORDER BY account"
+            "SELECT {columns} FROM account_limits ORDER BY account"
         ))
         .map_err(storage)?;
     statement

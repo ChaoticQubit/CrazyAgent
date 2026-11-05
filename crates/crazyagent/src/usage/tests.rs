@@ -150,10 +150,10 @@ fn a_transcript_reading_leaves_the_windows_the_last_poll_read() {
 
 /// N-D16 run 6, Claude accounts 3 and 4: a Claude poll that leaves the 5-hour window out
 /// clears the window an older poll stored, whose reset passed long ago, and marks it left out
-/// by Claude. A failed poll or a run's own record that leaves it out keeps the mark, and a poll
-/// that reports the window again clears it.
+/// by Claude. A failed poll or a run's own record that leaves it out keeps the mark, a run's
+/// own record or a poll that reports the window clears it, and only a poll sets it again.
 #[test]
-fn a_poll_that_leaves_a_window_out_clears_the_old_one_and_marks_its_provider_until_a_read_reports_it() {
+fn a_left_out_window_is_cleared_and_marked_until_a_read_reports_it() {
     use crate::usage::poll::Provider;
     const HOUR: i64 = 3_600_000;
     let (_root, db) = store();
@@ -224,6 +224,17 @@ fn a_poll_that_leaves_a_window_out_clears_the_old_one_and_marks_its_provider_unt
     assert_eq!(again.five_hour, back.five_hour);
     assert_eq!(again.five_hour_left_out, None);
     assert_eq!(again.weekly_left_out, None);
+}
+
+#[test]
+#[should_panic(expected = "a poll names whose usage call it made")]
+fn a_poll_that_names_no_provider_is_a_bug() {
+    let (_root, db) = store();
+    let nameless = Observation {
+        five_hour: window(10.0, 5_000),
+        ..Observation::default()
+    };
+    let _ = record_observation(&db, &account("nameless"), &nameless, LimitSource::Poll, 1);
 }
 
 #[test]

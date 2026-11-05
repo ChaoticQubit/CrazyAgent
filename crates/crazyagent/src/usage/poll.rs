@@ -148,7 +148,7 @@ pub fn parse_claude(body: &[u8]) -> Result<Observation, EngineError> {
         plan: None,
         five_hour: claude_window(&value["five_hour"])?,
         weekly: claude_window(&value["seven_day"])?,
-        provider: None,
+        provider: Some(Provider::Claude),
     };
     if observation.five_hour.is_none() && observation.weekly.is_none() {
         return Err(invalid());
@@ -204,7 +204,7 @@ pub fn parse_codex(body: &[u8], now_ms: i64) -> Result<Observation, EngineError>
         plan: plan(value["plan_type"].as_str()),
         five_hour: None,
         weekly: None,
-        provider: None,
+        provider: Some(Provider::Codex),
     };
     for (key, fallback) in [
         ("primary_window", FIVE_HOUR_SECONDS),
