@@ -84,6 +84,9 @@ const WORKTREES_MAX: usize = 8;
 /// graph step's `.crazyagent/`, or a native lead's part of the relay mailbox and its own temp
 /// folder, which its teammates' sandbox hides.
 pub const HIDDEN_MAX: usize = hidden_paths::HIDDEN_PATHS_MAX + 2;
+/// The most files and folders one sandbox keeps out by name: the graph step's secret-like and
+/// git-ignored project paths (MAP-2). A project with more builds no graph.
+pub const KEPT_OUT_MAX: usize = 1024;
 /// The most exact Unix sockets one agent may bind and connect: its own Codex app-server's.
 const SOCKETS_MAX: usize = 2;
 /// The most exact Unix socket grants one agent holds, of every use together: a native lead's
@@ -631,6 +634,7 @@ pub struct ProjectSandbox {
     execs: Vec<PathBuf>,
     scratch: Option<PathBuf>,
     hidden: Vec<PathBuf>,
+    kept_out: Vec<PathBuf>,
     revealed: Vec<PathBuf>,
     network: SandboxNetwork,
     kept_ports: Vec<u16>,
@@ -702,6 +706,7 @@ impl ProjectSandbox {
             execs: Vec::new(),
             scratch: None,
             hidden: Vec::new(),
+            kept_out: Vec::new(),
             revealed: Vec::new(),
             network,
             kept_ports: Vec::new(),
@@ -1186,6 +1191,35 @@ impl ProjectSandbox {
         Ok(self)
     }
 
+    /// Keeps one file or folder inside a granted root out of the agent's reach, read and
+    /// write, as a hidden folder is; the graph step keeps the project's secret-like and
+    /// git-ignored paths from graphify (MAP-2). Input: a clean absolute path below a root, of
+    /// any kind or absent. Output: the narrowed sandbox, or `Invalid` past [`KEPT_OUT_MAX`].
+    /// Only Seatbelt holds it, so the Linux and Windows boundaries refuse such a sandbox.
+    pub fn keep_out(mut self, path: &Path) -> Result<Self, SandboxError> {
+        if self.kept_out.len() >= KEPT_OUT_MAX {
+            return Err(invalid("too many paths kept out"));
+        }
+        let inside = self
+            .writable_roots()
+            .chain(self.read_roots.iter())
+            .any(|root| path.starts_with(root) && path != root.as_path());
+        if !clean_absolute(path) || !inside {
+            return Err(invalid(
+                "a path kept out must be a clean absolute path inside a granted root",
+            ));
+        }
+        self.kept_out.push(path.to_path_buf());
+        Ok(self)
+    }
+
+    /// Whether [`Self::keep_out`] takes the form of `path`, a clean absolute path, so a
+    /// caller can check every path before it makes anything. Input: the path. Output: the
+    /// answer; a path kept out must still lie inside a granted root.
+    pub fn keepable(path: &Path) -> bool {
+        clean_absolute(path)
+    }
+
     /// Lets a native-mode lead run its own tmux server (DEC-104): an exact socket grant, as
     /// `allow_unix_socket` gives, for its own socket in its short temp folder, and read
     /// access to the tmux program's folder when no system root covers it. No other Unix
@@ -1554,9 +1588,9 @@ impl ProjectSandbox {
             text.push_str(&format!("\n  (global-name \"{service}\")"));
         }
         text.push_str(")\n");
-        if !self.hidden.is_empty() {
+        if !self.hidden.is_empty() || !self.kept_out.is_empty() {
             text.push_str("(deny file-read* file-write* process-exec file-link file-clone");
-            for folder in &self.hidden {
+            for folder in self.hidden.iter().chain(&self.kept_out) {
                 if clean_absolute(folder) {
                     text.push_str(&format!("\n  (subpath \"{}\")", folder.display()));
                 }
@@ -2070,7 +2104,7 @@ impl InstalledSandbox {
     /// install refusal, or `Unavailable` where this system has no boundary.
     pub fn install(sandbox: ProjectSandbox, profile: &Path) -> Result<Self, SandboxError> {
         #[cfg(any(target_os = "linux", target_os = "windows"))]
-        if !sandbox.hidden.is_empty() {
+        if !sandbox.hidden.is_empty() || !sandbox.kept_out.is_empty() {
             return Err(SandboxError::Unavailable(HIDDEN_NEEDS_SEATBELT.into()));
         }
         #[cfg(target_os = "windows")]

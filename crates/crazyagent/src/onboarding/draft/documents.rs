@@ -1,7 +1,12 @@
-use super::{Document, ENTRY_NAME_BYTES_MAX, Folder, clip, file_text, open_folder, open_in};
+use super::names::{paths_in, secret_like};
+use super::{
+    Document, ENTRY_NAME_BYTES_MAX, Evidence, Folder, SKIPPED_ENTRIES, clip, file_text,
+    open_folder, open_in,
+};
 use crate::onboarding::FoundResearch;
 use crate::project_setup::{DOCUMENT_PATH_BYTES_MAX, ResearchKind};
 use rustix::fs::{AtFlags, Dir, FileType, Mode, OFlags, Stat};
+use std::collections::BTreeSet;
 use std::io::{Read, Write};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
@@ -35,36 +40,11 @@ const RESEARCH_FILES_MAX: usize = 8;
 const IGNORE_CHECK_TIME: Duration = Duration::from_secs(20);
 const IGNORE_POLL: Duration = Duration::from_millis(5);
 const IGNORE_OUTPUT_BYTES_MAX: usize = 8 * 1024 * 1024;
+const WALKED_ENTRIES_MAX: usize = 100_000;
+const WALKED_DEPTH_MAX: usize = 64;
+const GITLINK_MODE: &str = "160000 ";
 const IGNORES_UNKNOWN: &str =
     "No project document was read: the project's git could not tell which files it ignores.";
-
-/// Words that mark a file or folder name as one that may hold a secret: credentials, keys
-/// and tokens, and key-file extensions such as `.pem` or `.env` kept even when renamed
-/// `.txt`. The mapping prompt goes to the project's model provider, and a document is
-/// chosen by its name alone before any text is read, so a name with one of these words, or
-/// two adjacent words joining into one, is neither read nor listed. A few documents with
-/// such names, such as `key-metrics.md`, are left out with them.
-const SECRET_WORDS: [&str; 19] = [
-    "secret",
-    "secrets",
-    "credential",
-    "credentials",
-    "password",
-    "passwords",
-    "passwd",
-    "token",
-    "tokens",
-    "apikey",
-    "apikeys",
-    "privatekey",
-    "pem",
-    "key",
-    "keys",
-    "p12",
-    "pfx",
-    "env",
-    "netrc",
-];
 
 /// What one document walk gives the prompt: the documents read and the paths and sizes of
 /// those only listed.
@@ -86,8 +66,9 @@ struct Found {
 /// text is cut at 6 KiB, all of them at 48 KiB and 40 files; files past that and PDF, Word
 /// and CSV files are only listed. Takes the folder and the README name already read. Returns
 /// the documents read and the paths and sizes listed, or `None` when the project's git could
-/// not say which files it ignores, so none is read.
-pub(super) fn read(repo: &Path, readme: Option<&str>) -> Option<Reading> {
+/// not say which files it ignores, so none is read. Files in the `hidden` folders, given
+/// below the project folder, are never read or listed.
+pub(super) fn read(repo: &Path, readme: Option<&str>, hidden: &[String]) -> Option<Reading> {
     let Some((root, device)) = open_folder(repo)
         .and_then(|root| rustix::fs::fstat(&root).ok().map(|device| (root, device)))
     else {
@@ -97,7 +78,7 @@ pub(super) fn read(repo: &Path, readme: Option<&str>) -> Option<Reading> {
     let mut visited = 0;
     walk(&root, &device, "", 0, &mut visited, &mut found);
     assert!(visited <= ENTRIES_MAX);
-    found.retain(|file| Some(file.path.as_str()) != readme);
+    found.retain(|file| Some(file.path.as_str()) != readme && !under(&file.path, hidden));
     let paths: Vec<&str> = found.iter().map(|file| file.path.as_str()).collect();
     let ignored = ignored(repo, &paths)?;
     assert_eq!(ignored.len(), found.len());
@@ -133,11 +114,131 @@ pub(super) fn read(repo: &Path, readme: Option<&str>) -> Option<Reading> {
     Some((documents, unread))
 }
 
+/// Drops each file name that looks like it holds a secret or that git ignores from the
+/// mapping evidence (MAP-2): such top-level entries and each README, manifest, overview and
+/// document line naming one, a code graph line also on any secret word, as its nodes may be
+/// bare names. One `check-ignore` call answers for all; a name git does not clear, or every
+/// name when git could not answer, counts as ignored, and so does a name in one of the
+/// `hidden` folders, given below the project folder, written relative or absolute. Takes
+/// the folder, the evidence and the hidden folders.
+pub(super) fn screen(repo: &Path, evidence: &mut Evidence, hidden: &[String]) {
+    let mut names: BTreeSet<String> = evidence.entries.iter().cloned().collect();
+    let texts = evidence
+        .readme
+        .iter()
+        .map(|(_, text)| text)
+        .chain(evidence.manifests.iter().map(|(_, text)| text))
+        .chain(&evidence.graph)
+        .chain(&evidence.overview)
+        .chain(evidence.documents.iter().map(|document| &document.text));
+    for text in texts {
+        names.extend(paths_in(text).filter(|path| below(path)).map(str::to_owned));
+    }
+    let asked: Vec<&str> = names.iter().map(String::as_str).collect();
+    let checked = (!evidence.ignores_unknown)
+        .then(|| ignored(repo, &asked))
+        .flatten();
+    let cleared: BTreeSet<&str> = checked.map_or_else(BTreeSet::new, |flags| {
+        asked
+            .iter()
+            .zip(flags)
+            .filter_map(|(path, ignored)| (!ignored && !under(path, hidden)).then_some(*path))
+            .collect()
+    });
+    let root = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+    let hidden_absolute = |path: &str| {
+        [root.as_path(), repo].iter().any(|base| {
+            Path::new(path)
+                .strip_prefix(base)
+                .ok()
+                .and_then(Path::to_str)
+                .is_some_and(|below| under(below, hidden))
+        })
+    };
+    let shown = |line: &str| {
+        paths_in(line).all(|path| {
+            !secret_like(path)
+                && ((path.starts_with('/') && !hidden_absolute(path))
+                    || path.starts_with('~')
+                    || cleared.contains(path))
+        })
+    };
+    let keep = |text: &mut String, strict: bool| {
+        *text = text
+            .split_inclusive('\n')
+            .filter(|line| !(strict && secret_like(line)) && shown(line))
+            .collect();
+    };
+    evidence
+        .entries
+        .retain(|entry| !secret_like(entry) && cleared.contains(entry.as_str()));
+    if let Some((_, text)) = &mut evidence.readme {
+        keep(text, false);
+    }
+    for (_, text) in &mut evidence.manifests {
+        keep(text, false);
+    }
+    if let Some(text) = &mut evidence.overview {
+        keep(text, false);
+    }
+    for document in &mut evidence.documents {
+        keep(&mut document.text, false);
+    }
+    if let Some(text) = &mut evidence.graph {
+        keep(text, true);
+    }
+}
+
+/// The project's `hidden` folders as paths below `repo`, with `/` between names, for the
+/// mapping to leave out. Takes the folder and the hidden folders. Returns the paths, or
+/// `None` when one is not below the folder or not UTF-8, so nothing is cleared.
+pub(super) fn below_root(repo: &Path, hidden: &[std::path::PathBuf]) -> Option<Vec<String>> {
+    let root = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+    hidden
+        .iter()
+        .map(|folder| {
+            let below = folder
+                .strip_prefix(&root)
+                .or_else(|_| folder.strip_prefix(repo))
+                .ok()?;
+            let text = below.to_str()?;
+            (!text.is_empty()).then(|| text.to_owned())
+        })
+        .collect()
+}
+
+/// Whether `path`, below the project folder and with an optional closing `/`, is one of the
+/// `hidden` folders or lies inside one. Takes the path and the folders. Returns the answer.
+fn under(path: &str, hidden: &[String]) -> bool {
+    let path = path.trim_end_matches('/');
+    hidden.iter().any(|folder| {
+        path.strip_prefix(folder.as_str())
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    })
+}
+
+/// Whether `path` may name a file below the project folder for git to check: not from the
+/// root or a home folder, within the path bound, without control characters, and with no
+/// empty, `.` or `..` name before an optional closing `/`. Takes the path. Returns the answer.
+fn below(path: &str) -> bool {
+    !path.starts_with('/')
+        && !path.starts_with('~')
+        && path.len() <= DOCUMENT_PATH_BYTES_MAX
+        && !path.chars().any(char::is_control)
+        && path
+            .strip_suffix('/')
+            .unwrap_or(path)
+            .split('/')
+            .all(|name| !matches!(name, "" | "." | ".."))
+}
+
 /// Walks `folder`, found at `at` below the project folder and `depth` folders deep, adding
 /// each document file it may read or list to `found`. Entries are taken in name order, at
 /// most 4,000 in all, statted without following links; a root's document folders go first.
 /// A file with more than one link is skipped, since its other name may be outside the
-/// project, and so is a folder on another device than the root, such as a mount.
+/// project, and so is a folder on another device than the root, such as a mount, and a
+/// folder holding a `.git` entry, a nested repository or submodule whose own ignores the
+/// project's git does not apply.
 /// Takes the open folder, the root's status, its path, its depth, the entries visited so far
 /// and the list.
 fn walk(
@@ -213,7 +314,12 @@ fn walk(
         let Ok(child) = rustix::fs::openat(folder, name.as_str(), flags, Mode::empty()) else {
             continue;
         };
-        if rustix::fs::fstat(&child).is_ok_and(|stat| stat.st_dev == root.st_dev) {
+        if rustix::fs::fstat(&child).is_ok_and(|stat| stat.st_dev == root.st_dev)
+            && matches!(
+                rustix::fs::statat(&child, ".git", AtFlags::SYMLINK_NOFOLLOW),
+                Err(rustix::io::Errno::NOENT)
+            )
+        {
             walk(&child, root, &path, depth + 1, visited, found);
         }
     }
@@ -224,52 +330,28 @@ fn named(list: &[&str], name: &str) -> bool {
     list.iter().any(|known| known.eq_ignore_ascii_case(name))
 }
 
-/// Whether the file or folder `name` looks like it holds a secret: one of its words, split
-/// at every character that is not an ASCII letter or digit, or two adjacent words joined,
-/// is in [`SECRET_WORDS`], ignoring case. Takes the full name, extensions included.
-fn secret_like(name: &str) -> bool {
-    let words: Vec<&str> = name
-        .split(|character: char| !character.is_ascii_alphanumeric())
-        .filter(|word| !word.is_empty())
-        .collect();
-    words.iter().any(|word| named(&SECRET_WORDS, word))
-        || words
-            .windows(2)
-            .any(|pair| named(&SECRET_WORDS, &format!("{}{}", pair[0], pair[1])))
-}
-
 /// Asks the project's own git, in one `check-ignore` call, which of `paths` it ignores by
 /// the repository's ignore files, info/exclude and configured excludes file: the real git
 /// with no system or global config, hooks, fsmonitor or pager, given 20 s and 8 MiB of
 /// output. Each name goes in behind `./`, so one starting with `:` is never pathspec magic.
 /// Git must name the ignored paths exactly as sent and in order; any other answer counts as
-/// none, so the mapping never guesses which files git keeps out. Takes the project folder and
-/// the paths below it. Returns whether each path is ignored, or `None` when git is missing,
+/// none, so the mapping never guesses which files git keeps out. A folder outside git
+/// ignores nothing, as a repository without ignore files. Takes the project folder and the
+/// paths below it. Returns whether each path is ignored, or `None` when git is missing,
 /// fails, runs over or answers out of shape.
 fn ignored(repo: &Path, paths: &[&str]) -> Option<Vec<bool>> {
     if paths.is_empty() {
         return Some(Vec::new());
+    }
+    if outside_git(repo) {
+        return Some(vec![false; paths.len()]);
     }
     let sent: Vec<String> = paths.iter().map(|path| format!("./{path}")).collect();
     let input: Vec<u8> = sent
         .iter()
         .flat_map(|path| path.bytes().chain([0]))
         .collect();
-    let mut command = Command::new(crate::research::runner::setup_git());
-    command
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("LC_ALL", "C")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .arg("--no-optional-locks")
-        .args(crate::research::runner::GIT_SAFE)
-        .args(["check-ignore", "-z", "--stdin", "--no-index"])
-        .current_dir(repo)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+    let mut command = git(repo, &["check-ignore", "-z", "--stdin", "--no-index"]);
     let (code, output) = answer(&mut command, input)?;
     let names: Vec<&[u8]> = match output.split_last() {
         None => Vec::new(),
@@ -287,6 +369,147 @@ fn ignored(repo: &Path, paths: &[&str]) -> Option<Vec<bool>> {
         next = at + 1;
     }
     Some(ignored)
+}
+
+/// The project's own git run in `repo` with `args`: the real git with no system or global
+/// config, hooks, fsmonitor or pager, no prompt and the C locale, its input and output piped
+/// and its errors dropped. Takes the folder and the arguments. Returns the command.
+fn git(repo: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new(crate::research::runner::setup_git());
+    command
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("LC_ALL", "C")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .arg("--no-optional-locks")
+        .args(crate::research::runner::GIT_SAFE)
+        .args(args)
+        .current_dir(repo)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    command
+}
+
+/// Whether `repo` is outside every git repository: neither it nor any folder above it holds
+/// a `.git` entry, so no ignore rule applies and it ignores nothing, as a repository without
+/// ignore files. A `.git` that cannot be checked counts as there. Takes the folder. Returns
+/// the answer.
+pub(crate) fn outside_git(repo: &Path) -> bool {
+    repo.is_absolute()
+        && repo.ancestors().all(|folder| {
+            std::fs::symlink_metadata(folder.join(".git"))
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        })
+}
+
+/// The paths below `repo` the code graph must never read (MAP-2), by the rules documents
+/// follow: whatever the project's git ignores, tracked or not, an ignored folder once with
+/// a closing `/`, each submodule and nested repository whole with a closing `/`, as their
+/// own ignores are not the project's, and the outermost file or folder of each other path
+/// whose name is secret-like. Asks git three times, bounded as [`ignored`]; a folder outside
+/// git is walked instead. Takes the folder. Returns the paths, or `None` when git could not
+/// answer, the walk could not finish or a name is not UTF-8, so no graph is built.
+pub(crate) fn kept_out(repo: &Path) -> Option<Vec<String>> {
+    if outside_git(repo) {
+        return walked(repo);
+    }
+    let ignored = listed(
+        repo,
+        &["-c", "-o", "-i", "--exclude-standard", "--directory"],
+    )?;
+    let mut kept: BTreeSet<String> = ignored.into_iter().collect();
+    let mut visible = listed(repo, &["-o", "--exclude-standard"])?;
+    for record in listed(repo, &["-s"])? {
+        let (mode, path) = record.split_once('\t')?;
+        if mode.starts_with(GITLINK_MODE) {
+            kept.insert(format!("{path}/"));
+        } else {
+            visible.push(path.to_owned());
+        }
+    }
+    for path in visible {
+        if path.ends_with('/') {
+            kept.insert(path);
+            continue;
+        }
+        let mut end = 0;
+        for name in path.split('/') {
+            end += name.len();
+            if secret_like(name) {
+                let folder = end < path.len();
+                kept.insert(format!("{}{}", &path[..end], if folder { "/" } else { "" }));
+                break;
+            }
+            end += 1;
+        }
+    }
+    Some(kept.into_iter().collect())
+}
+
+/// The paths below `repo`, a folder outside git, the code graph must never read (MAP-2): the
+/// outermost file or folder of each path whose name is secret-like and each folder holding
+/// a `.git` entry, whole, each folder with a closing `/`. The walk follows no link and skips
+/// the root's engine and graph folders. Takes the folder. Returns the paths, or `None` past
+/// 100,000 entries or 64 folders deep, or when a folder cannot be read or a name is not UTF-8.
+fn walked(repo: &Path) -> Option<Vec<String>> {
+    let mut kept = BTreeSet::new();
+    let mut folders = vec![(repo.to_path_buf(), String::new(), 0)];
+    let mut visited = 0;
+    while let Some((folder, at, depth)) = folders.pop() {
+        for entry in std::fs::read_dir(&folder).ok()? {
+            visited += 1;
+            if visited > WALKED_ENTRIES_MAX {
+                return None;
+            }
+            let entry = entry.ok()?;
+            let name = entry.file_name().into_string().ok()?;
+            if depth == 0 && SKIPPED_ENTRIES.contains(&name.as_str()) {
+                continue;
+            }
+            let path = if at.is_empty() {
+                name.clone()
+            } else {
+                format!("{at}/{name}")
+            };
+            if !entry.file_type().ok()?.is_dir() {
+                if secret_like(&name) {
+                    kept.insert(path);
+                }
+                continue;
+            }
+            let nested = !std::fs::symlink_metadata(entry.path().join(".git"))
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+            if secret_like(&name) || nested {
+                kept.insert(format!("{path}/"));
+            } else if depth + 1 < WALKED_DEPTH_MAX {
+                folders.push((entry.path(), path, depth + 1));
+            } else {
+                return None;
+            }
+        }
+    }
+    Some(kept.into_iter().collect())
+}
+
+/// The paths `git ls-files -z` with `args` names in `repo`, within the bounds of
+/// [`answer`]. Takes the folder and the arguments. Returns the paths, or `None` when git
+/// fails, runs over, answers out of shape or names a path that is not UTF-8.
+fn listed(repo: &Path, args: &[&str]) -> Option<Vec<String>> {
+    let mut command = git(repo, &["ls-files", "-z"]);
+    command.args(args);
+    let (code, output) = answer(&mut command, Vec::new())?;
+    let body = match output.split_last() {
+        _ if code != 0 => return None,
+        None => return Some(Vec::new()),
+        Some((0, body)) => body,
+        Some(_) => return None,
+    };
+    body.split(|byte| *byte == 0)
+        .map(|name| String::from_utf8(name.to_vec()).ok())
+        .collect()
 }
 
 /// Runs `command` within [`IGNORE_CHECK_TIME`], writing `input` to it while keeping at most
@@ -457,8 +680,9 @@ pub(super) fn research(value: &serde_json::Value) -> Vec<FoundResearch> {
 }
 
 /// The file paths an answer's JSON list names: trimmed, a leading `./` dropped, each once,
-/// at most `max`, none empty, past the path bound or holding control characters. Takes the
-/// JSON value and the bound. Returns the paths.
+/// at most `max`, none empty, past the path bound, holding control characters or looking
+/// like it holds a secret, so a guessed secret name is never kept. Takes the JSON value and
+/// the bound. Returns the paths.
 pub(super) fn paths(value: &serde_json::Value, max: usize) -> Vec<String> {
     let mut paths: Vec<String> = Vec::new();
     let listed = value.as_array().into_iter().flatten();
@@ -471,6 +695,7 @@ pub(super) fn paths(value: &serde_json::Value, max: usize) -> Vec<String> {
         if !path.is_empty()
             && path.len() <= DOCUMENT_PATH_BYTES_MAX
             && !path.chars().any(char::is_control)
+            && !secret_like(path)
             && !paths.iter().any(|known| known == path)
         {
             paths.push(path.to_owned());
