@@ -774,39 +774,39 @@ pools = []
         session.map(|session| (session.session_id, session.phase))
     }
 
-    /// Turning a project's live master on from the TUI first opens the owner's default
-    /// master session when the project has none, so the live master runs in a session its
-    /// turns mark used and the Sessions list shows (LMS-1); turning it on again keeps that
-    /// session and opens no second one.
-    #[tokio::test]
-    async fn turning_the_live_master_on_opens_the_owner_s_default_session_first() {
-        let root = tempfile::Builder::new()
-            .prefix("ca-tui-live-")
-            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
-            .unwrap();
-        std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let global = root.path().join("global.toml");
+    /// A started engine with one new project made through the TUI's creation path, for the
+    /// live master tests. Input: the temporary root. Output: the service, the owner worker,
+    /// the app, the project, the stop sender the service watches and the projects home.
+    async fn live_project(
+        root: &std::path::Path,
+    ) -> (
+        EngineService,
+        NativeOwner,
+        App,
+        ProjectId,
+        tokio::sync::watch::Sender<bool>,
+        tempfile::TempDir,
+    ) {
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let global = root.join("global.toml");
         std::fs::write(&global, LIVE_ACCESS).unwrap();
         std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let (_stop, stopped) = tokio::sync::watch::channel(false);
+        let (stop, stopped) = tokio::sync::watch::channel(false);
         let mut service = EngineService::start_with_settings_sources(
-            root.path(),
+            root,
             "e.sock",
             &global,
-            &root.path().join("project.toml"),
+            &root.join("project.toml"),
             &stopped,
         )
         .await
         .unwrap();
-        let mut native = NativeOwner::new(
-            root.path().join("e.sock"),
-            crate::tui::test_home::ENGINE_WAIT,
-        );
+        let mut native = NativeOwner::new(root.join("e.sock"), crate::tui::test_home::ENGINE_WAIT);
         let (_, access) = native.attach().await;
         let mut app = App::new();
         app.apply_owner(access).unwrap();
         assert!(app.owner_ready);
-        let _home =
+        let home =
             crate::tui::test_home::projects_home(native.controller.as_mut().unwrap(), 1).await;
         let setup = ProjectSetup {
             about: "Notes kept by a live master.".into(),
@@ -832,22 +832,34 @@ pools = []
         );
         app.apply_owner(OwnerEvent::Creation(Box::new(event)))
             .unwrap();
-        let snapshot = Client::new(
-            root.path().join("e.sock"),
-            crate::tui::test_home::ENGINE_WAIT,
-        )
-        .unwrap()
-        .request(crate::protocol::WireRequest {
-            protocol_version: crate::protocol::PROTOCOL_VERSION,
-            client_id: crate::protocol::ClientId::new("tui-live-test").unwrap(),
-            request_id: RequestId::new("tui-live-snapshot").unwrap(),
-            expected_revision: Cursor::new(0),
-            command: crate::protocol::Command::Snapshot,
-        })
-        .await
-        .unwrap();
+        let snapshot = Client::new(root.join("e.sock"), crate::tui::test_home::ENGINE_WAIT)
+            .unwrap()
+            .request(crate::protocol::WireRequest {
+                protocol_version: crate::protocol::PROTOCOL_VERSION,
+                client_id: crate::protocol::ClientId::new("tui-live-test").unwrap(),
+                request_id: RequestId::new("tui-live-snapshot").unwrap(),
+                expected_revision: Cursor::new(0),
+                command: crate::protocol::Command::Snapshot,
+            })
+            .await
+            .unwrap();
         app.apply_reply(snapshot).unwrap();
         assert!(!app.has_unresolved_creation());
+        (service, native, app, project, stop, home)
+    }
+
+    /// Turning a project's live master on from the TUI first opens the owner's default
+    /// master session when the project has none, so the live master runs in a session its
+    /// turns mark used and the Sessions list shows (LMS-1); turning it on again keeps that
+    /// session and opens no second one.
+    #[tokio::test]
+    async fn turning_the_live_master_on_opens_the_owner_s_default_session_first() {
+        let root = tempfile::Builder::new()
+            .prefix("ca-tui-live-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        let (mut service, mut native, mut app, project, _stop, _home) =
+            live_project(root.path()).await;
 
         let controller = native.controller.as_mut().unwrap();
         let pools = controller
@@ -936,6 +948,43 @@ pools = []
                 crate::master_session::MasterSessionPhase::Configured
             )),
             "turning it on again keeps the live session"
+        );
+        drop(native);
+        service.shutdown().await.unwrap();
+    }
+
+    /// Turning the live master on for a project whose defaults cannot open a master still
+    /// turns the switch on, and the TUI names why no session opened instead of leaving a
+    /// sessionless live master unexplained (LMS-M1, LMS-L1).
+    #[tokio::test]
+    async fn turning_the_live_master_on_names_why_no_session_opened() {
+        let root = tempfile::Builder::new()
+            .prefix("ca-tui-unopened-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        let (mut service, mut native, mut app, project, _stop, _home) =
+            live_project(root.path()).await;
+        app.request_team_change(crate::team::TeamAction::LiveMaster {
+            project_id: project.clone(),
+            on: true,
+        })
+        .unwrap();
+        let query = app.take_setup_query().unwrap();
+        let event = native.project_setup(query).await;
+        app.apply_owner(OwnerEvent::Setup(Box::new(event))).unwrap();
+        let shown = format!("{:?}", app.setup_view);
+        assert!(
+            shown.contains("No account pool is assigned to this project as its master"),
+            "the TUI names why no session opened: {shown} {:?}",
+            app.setup_problem
+        );
+        let controller = native.controller.as_mut().unwrap();
+        let status = controller.team_status(project.clone()).await.unwrap();
+        assert_eq!(status.live_master, Some(true), "the live switch is on");
+        assert_eq!(
+            master_session(controller, &project).await,
+            None,
+            "no master session opened"
         );
         drop(native);
         service.shutdown().await.unwrap();

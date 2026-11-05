@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import "./load-source.mjs";
 import { bundle, withPage } from "./browser.mjs";
 import { teamStatus } from "./fixtures/team-status.mjs";
@@ -334,4 +336,34 @@ test("starting the live master opens the owner's default session first when none
   for (const phase of ["configured", "closing"]) assert.equal(live.openBeforeLive(state(session(phase))), false, `a ${phase} session is left alone`);
   assert.equal(live.openBeforeLive({ kind: "not_ready" }), false, "no master read, no Open");
   assert.equal(live.openBeforeLive({ kind: "error", code: "stale_selection", message: "" }), false, "a failed read opens nothing");
+});
+
+test("a refused or failed owner Open is named in the live master area while its switch still turns on (LMS-M1)", async () => {
+  assert.equal(typeof live.openProblem, "function", "the area reads the Open's result");
+  const api = await import("../src/api-projects.ts");
+  const source = readFileSync(new URL("../src/screens/project/live-master.tsx", import.meta.url), "utf8");
+  const start = source.slice(source.indexOf("const start = async () => {"), source.indexOf("useEffect(", source.indexOf("const start = async () => {")));
+  const open = start.indexOf("startMaster(");
+  const named = start.indexOf("openProblem(");
+  const on = start.indexOf("setLiveMaster(id, true)");
+  assert.ok(open > 0 && named > open && on > named, `the Open's result is read before the switch turns on: open ${open}, named ${named}, on ${on}`);
+  const receipt = (fields) => ({ kind: "ok", value: { kind: "master", outcome: "applied", pending: false, rejection: null, ...fields } });
+  assert.equal(live.openProblem(receipt({})), null, "an applied Open names nothing");
+  assert.equal(live.openProblem(receipt({ pending: true })), null, "an Open still waiting is not called refused");
+  assert.equal(live.openProblem({ kind: "not_ready" }), null, "a build without the Open says so through the switch");
+  const refused = live.openProblem(receipt({ outcome: "rejected", rejection: "master_open_provenance" }));
+  assert.equal(refused, api.failureCopy({ code: "master_open_provenance" }), "a refused Open is named");
+  const failed = { kind: "error", code: "engine_unreachable", message: "" };
+  assert.equal(live.openProblem(failed), api.failureCopy(failed), "a failed Open is named");
+  const data = {
+    id: "p-1", name: "Harbor Notes", setup: undefined, research: undefined, context: undefined,
+    pools: undefined, harnesses: undefined, assigned: null, now: 61_000, navigate: () => {}, notify: () => {}, reload: () => {}, reloadPools: () => {},
+    team: { result: { kind: "ok", value: { project_id: "p-1", live_switch: null } }, at: 1 }, reloadTeam: () => {},
+  };
+  const view = (openNote) => renderToStaticMarkup(createElement(live.LiveMasterView, {
+    data, harness: "codex", live: { kind: "running", node: null }, onStart: async () => undefined, openNote,
+  }));
+  const shown = view("The engine refused it.");
+  assert.match(shown, /role="alert"[^>]*><p>No master session opened, so this conversation won&#x27;t be in Sessions\. The engine refused it\.<\/p>/, shown);
+  assert.doesNotMatch(view(null), /No master session opened/);
 });
