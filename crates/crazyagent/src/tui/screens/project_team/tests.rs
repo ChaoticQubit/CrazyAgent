@@ -1873,6 +1873,73 @@ fn the_master_harness_picker_saves_the_picked_harness_through_the_project_setup(
     assert!(view.master_pick.is_none());
 }
 
+/// A failed setup read under the master harness picker is said once and read again only
+/// after the refresh interval, not on every arrival that asks for the next read
+/// (rv-code TP1-L1).
+#[test]
+fn a_failed_setup_read_under_the_master_picker_waits_for_the_refresh_interval() {
+    let mut view = loaded();
+    assert_eq!(view.key(press(KeyCode::Char('H'))), TeamReply::Handled);
+    assert_eq!(
+        view.next_query(NOW + 1),
+        Some(SetupQuery::Setup { project: project() })
+    );
+    view.apply(
+        &SetupQuery::Setup { project: project() },
+        Err("team_engine_not_ready".into()),
+    );
+    assert_eq!(
+        view.notice,
+        Some(Notice::problem(
+            "The engine is still starting. Try again in a moment."
+        ))
+    );
+    assert!(view.master_pick.is_some(), "the picker shows the problem");
+    assert_ne!(
+        view.next_query(NOW + 2),
+        Some(SetupQuery::Setup { project: project() }),
+        "a failed setup read is not sent again at once"
+    );
+    assert_ne!(
+        view.next_query(NOW + REFRESH_MS),
+        Some(SetupQuery::Setup { project: project() }),
+        "nor before the refresh interval passed"
+    );
+    assert_eq!(
+        view.next_query(NOW + 1 + REFRESH_MS),
+        Some(SetupQuery::Setup { project: project() }),
+        "the setup is read again after the refresh interval"
+    );
+}
+
+/// A project without a saved setup closes the master harness picker with the reason, so
+/// the picker does not read the missing setup again and again (rv-code TP1-L1).
+#[test]
+fn a_missing_setup_closes_the_master_picker_with_the_reason() {
+    let mut view = loaded();
+    assert_eq!(view.key(press(KeyCode::Char('H'))), TeamReply::Handled);
+    assert_eq!(
+        view.next_query(NOW + 1),
+        Some(SetupQuery::Setup { project: project() })
+    );
+    view.apply(
+        &SetupQuery::Setup { project: project() },
+        Ok(SetupView::Setup(None)),
+    );
+    assert!(view.master_pick.is_none(), "the picker closes");
+    assert_eq!(
+        view.notice,
+        Some(Notice::problem(
+            "This project has no saved setup, so its master harness cannot change."
+        ))
+    );
+    assert_ne!(
+        view.next_query(NOW + 2),
+        Some(SetupQuery::Setup { project: project() }),
+        "the missing setup is not read again"
+    );
+}
+
 #[test]
 fn the_harness_switch_setting_flips_between_carry_over_and_start_fresh() {
     let mut view = TeamView::new(project());
