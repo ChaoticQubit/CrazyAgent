@@ -2194,11 +2194,24 @@ pub(crate) fn setup_git() -> &'static Path {
     }
 }
 
-/// Asks xcrun once, outside any sandbox, for the active toolchain's git. Returns an
-/// absolute path that exists and is not the `/usr/bin/git` shim, or None when xcrun is
-/// absent or fails so the caller keeps using [`GIT`].
+/// The Command Line Tools git. Every agent profile reads its folder, so under Seatbelt this
+/// git finds its own helpers (`git-upload-pack`, `git pack-objects` and the rest) in its
+/// `libexec/git-core` instead of falling through the search path to the `/usr/bin` shims.
+#[cfg(unix)]
+const TOOLS_GIT: &str = "/Library/Developer/CommandLineTools/usr/bin/git";
+
+/// Picks the real git once, outside any sandbox: the Command Line Tools git when it is
+/// installed, else the active toolchain's git from xcrun. An Xcode toolchain's git runs
+/// under the agent profile but cannot see its own helpers there, which the profile does
+/// not read, so its helper calls reach the xcrun shims (T3-09). Returns an absolute path
+/// that exists and is not the `/usr/bin/git` shim, or None when neither resolves so the
+/// caller keeps using [`GIT`].
 #[cfg(unix)]
 fn real_git() -> Option<PathBuf> {
+    let tools = Path::new(TOOLS_GIT);
+    if tools.is_file() {
+        return Some(tools.to_path_buf());
+    }
     let output = crate::spawn_gate::output(
         Command::new("/usr/bin/xcrun")
             .args(["--find", "git"])
