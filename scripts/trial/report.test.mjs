@@ -572,6 +572,38 @@ test("F-L1: two runs that name one log folder are refused, however the second sp
   }
 });
 
+test("PS-2: a compile-break excerpt keeps rustc's numbered source lines, and a macOS ps -ef row after it is still left out", async () => {
+  const logs = await folder("live-rustc-");
+  const repo = await folder("live-rustc-repo-");
+  try {
+    const script = join(repo, "live-pass.sh");
+    const name = "team::runtime::live_claude_tests::under_stop_ends";
+    await put(repo, "live-pass.sh", liveScript([`profile|lib|${name}|60|profile`]));
+    await put(logs, "summary.txt", `== profile: holds a shared lock\nFAIL ${name} 8s exit 101: ${logs}/${logName(name)}\n`);
+    await put(logs, logName(name), [
+      "   Compiling crazyagent v0.2.0",
+      "error[E0308]: mismatched types",
+      "  --> src/team/runtime.rs:12:5",
+      "   |",
+      "12 |     let x: u8 = code_line_mark();",
+      "   |                 ^^^^^^^^^^^^^^^^ expected `u8`, found `u32`",
+      "...",
+      "140 |   fn second_line_mark() {",
+      "",
+      "UID   PID  PPID   C STIME   TTY           TIME CMD",
+      "  501 41234     1   0  4:25PM ttys001    0:00.01 /usr/bin/argv_mark_four --print",
+      "error: could not compile `crazyagent` (lib test) due to 1 previous error",
+      "",
+    ].join("\n"));
+    const html = renderReport(await readLivePass(logs, { script, repo }));
+    assert.ok(html.includes("12 |     let x: u8 = code_line_mark();") && html.includes("140 |   fn second_line_mark() {"), "rustc's numbered source lines stay");
+    assert.ok(!html.includes("argv_mark_four") && html.includes("[process list left out: 2 lines]"), "the ps -ef header and row are left out");
+  } finally {
+    await rm(logs, { recursive: true });
+    await rm(repo, { recursive: true });
+  }
+});
+
 test("D-M1: a failure excerpt leaves out process-list lines, so a dumped ps listing never reaches the report", async () => {
   const logs = await folder("live-ps-");
   const repo = await folder("live-ps-repo-");
