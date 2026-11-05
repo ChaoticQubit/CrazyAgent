@@ -1,7 +1,7 @@
 import { receiptState, type StoredSetup } from "../../api-projects";
 import type {
-  AddFolderMode, Dependency, DependencyName, DependencyState, FoundProject, FoundProjectState, GitHubRepo, GitHubStatus, IntentReceipt, MappingFacts, OnboardingStep,
-  OnboardingView, PackEntry, PackGroup, PackState, ProjectsHome, ResearchKind, SetupStatus,
+  AddFolderMode, Dependency, DependencyName, DependencyState, FoundProject, FoundProjectState, GitHubRepo, GitHubStatus, IntentReceipt, MappingFacts,
+  MappingTry, OnboardingStep, OnboardingView, PackEntry, PackGroup, PackState, ProjectsHome, ResearchKind, SetupStatus,
 } from "../../engine-client";
 import type { Loaded } from "../../state";
 import type { IconName, Tone } from "../../ui";
@@ -188,13 +188,21 @@ export function repoMeta(repo: GitHubRepo): string {
   return `${repo.private ? "Private" : "Public"}, ${formatBytes(repo.size_kb * 1024)}, branch ${displayText(repo.default_branch)}`;
 }
 
-/** Badge word, tone and failure line for one onboarding step; a step waiting out a paused pool
- * names when the pause ends in local time. Inputs: the step and whether the setup is already saved,
- * when a step that never started was skipped. Output: the status word, its tone and the reason when
- * it failed. */
-export function stepView(step: OnboardingStep, finished = false): { word: string; tone: Tone; line: string | null } {
+/** Says which mapping try runs and for how many whole minutes, and why the try before it failed.
+ * Inputs: the try and the time now in ms. Output: one line. */
+function tryLine(progress: MappingTry, now: number): string {
+  const minutes = Math.floor(Math.max(0, now - progress.started_ms) / 60000);
+  const head = `Mapping, try ${progress.number} of ${progress.tries}, ${minutes < 1 ? "under 1 min" : `${minutes} min`}.`;
+  return progress.earlier ? `${head} Try ${progress.number - 1} failed: ${displayText(progress.earlier)}` : head;
+}
+
+/** Badge word, tone and line for one onboarding step; a step waiting out a paused pool names when
+ * the pause ends in local time, and a running mapping step its try. Inputs: the step, whether the
+ * setup is already saved, when a step that never started was skipped, the mapping try and the time
+ * now in ms. Output: the status word, its tone and the try or the reason when it failed. */
+export function stepView(step: OnboardingStep, finished = false, progress: MappingTry | null = null, now = Date.now()): { word: string; tone: Tone; line: string | null } {
   switch (step.kind) {
-    case "running": return { word: "Working", tone: "info", line: null };
+    case "running": return { word: "Working", tone: "info", line: progress ? tryLine(progress, now) : null };
     case "done": return { word: "Done", tone: "ok", line: null };
     case "off": return { word: "Off", tone: "neutral", line: "Graphify is off in Settings, Pack, so no code graph is built." };
     case "not_installed": return { word: "Not installed", tone: "neutral", line: "Graphify isn't installed, so no code graph is built. Install it in Settings, Pack." };

@@ -6,7 +6,8 @@ use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
 use crate::engine::owner::{HostStamp, NativeProfileBinding};
 use crate::engine::{EngineError, NativeProfileCustody};
 use crate::harnesses::launch::{
-    AccountBinding, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest, rate_limited,
+    AccountBinding, CLAUDE_TOOLS_OFF, LaunchError, LaunchEvent, LaunchLimits, LaunchRequest,
+    rate_limited,
 };
 use crate::harnesses::terminal_session::TerminalSession;
 use crate::launch_context::AgentContext;
@@ -75,6 +76,13 @@ pub(crate) const RUN_NAME_USED: &str = "run name already used";
 const CONTEXT_BUSY: &str = "launch_home_busy";
 const PANE_PREFIX: &str = "research-";
 const PANE_EVENTS_MAX: usize = 200_000;
+/// Gives a tools-off Claude Code run one model turn, as it has no tools to take a second.
+/// It does not stop Claude Code 2.1.309 from continuing an answer cut at the output limit:
+/// it sends up to three more requests for that answer outside the turn count, so the
+/// output cap and the caller's wall time bound such a run.
+const CLAUDE_ONE_TURN: [&str; 2] = ["--max-turns", "1"];
+/// The variable that caps the output tokens of each Claude Code request.
+const CLAUDE_OUTPUT_TOKENS: &str = "CLAUDE_CODE_MAX_OUTPUT_TOKENS";
 const CLAUDE_ARGUMENTS: [&str; 8] = [
     "--print",
     "--output-format",
@@ -894,7 +902,7 @@ impl ResearchRunner {
                 (output, "events.jsonl")
             }
             ResearchHarness::ClaudeCode => {
-                claude_arguments(&mut launch, &home, &tmp, job.tools, account)?;
+                claude_arguments(&mut launch, &home, &tmp, job.tools, None, account)?;
                 launch.args(installed.arguments());
                 (agent.join("output.md"), "output.md")
             }
@@ -1214,7 +1222,9 @@ impl ResearchRunner {
 /// One agent run outside the research queue that may only read `folder`,
 /// such as onboarding's mapping agent: `name` names its agent state and
 /// sandbox profile, `agent` and `project` name whose usage its tokens count
-/// as, `prompt` goes to it on stdin, `wall_time` bounds it.
+/// as, `prompt` goes to it on stdin, `wall_time` bounds it and
+/// `output_tokens` caps each Claude Code request (`None` for Claude Code's own
+/// limit; a Codex run has no such cap).
 pub(crate) struct ReadOnlyRun<'a> {
     pub name: &'a str,
     #[cfg(unix)]
@@ -1227,6 +1237,7 @@ pub(crate) struct ReadOnlyRun<'a> {
     pub prompt: &'a str,
     pub account: &'a ResearchAccount,
     pub wall_time: Duration,
+    pub output_tokens: Option<u32>,
 }
 
 /// How a read-only agent run ended: its last message, a plain failure, out
@@ -1261,16 +1272,6 @@ impl ResearchRunner {
         if let Some(line) = confined_unavailable(std::env::consts::OS) {
             return Ok(ReadOnlyEnding::Failed(line.into()));
         }
-        let folder = run.folder.canonicalize()?;
-        if folder != run.folder || !folder.is_dir() || folder.starts_with(&self.state) {
-            return Err(RunError::Invalid(
-                "read-only folder must be canonical".into(),
-            ));
-        }
-        let agent = self.state.join("agents").join(run.name);
-        if fs::symlink_metadata(&agent).is_ok() {
-            return Err(RunError::Invalid(RUN_NAME_USED.into()));
-        }
         let lease = match run.account {
             ResearchAccount::ManagedCodex { connection, .. }
             | ResearchAccount::ManagedClaude { connection, .. } => {
@@ -1286,6 +1287,41 @@ impl ResearchRunner {
             }
             ResearchAccount::Endpoint { .. } | ResearchAccount::AnthropicEndpoint { .. } => None,
         };
+        self.run_read_only_leased(run, lease, stop)
+    }
+
+    /// Runs [`Self::run_read_only`]'s agent on a custody lease already taken for a managed
+    /// account, `None` for an endpoint account. Takes the run, the lease and `stop`.
+    /// Returns how it ended, with the same checks and cleanup as [`Self::run_read_only`].
+    #[cfg(unix)]
+    pub(crate) fn run_read_only_leased(
+        &self,
+        run: &ReadOnlyRun<'_>,
+        lease: Option<NativeProfileUse>,
+        stop: &dyn Fn() -> bool,
+    ) -> Result<ReadOnlyEnding, RunError> {
+        if !valid_run_name(run.name) || run.wall_time.is_zero() {
+            return Err(RunError::Invalid("read-only run name or limit".into()));
+        }
+        let managed = matches!(
+            run.account,
+            ResearchAccount::ManagedCodex { .. } | ResearchAccount::ManagedClaude { .. }
+        );
+        if managed != lease.is_some() {
+            return Err(RunError::Invalid(
+                "read-only run lease does not fit its account".into(),
+            ));
+        }
+        let folder = run.folder.canonicalize()?;
+        if folder != run.folder || !folder.is_dir() || folder.starts_with(&self.state) {
+            return Err(RunError::Invalid(
+                "read-only folder must be canonical".into(),
+            ));
+        }
+        let agent = self.state.join("agents").join(run.name);
+        if fs::symlink_metadata(&agent).is_ok() {
+            return Err(RunError::Invalid(RUN_NAME_USED.into()));
+        }
         private_directory(&agent)?;
         let home = agent.join("home");
         private_directory(&home)?;
@@ -1354,7 +1390,14 @@ impl ResearchRunner {
                 (output, "events.jsonl")
             }
             ResearchHarness::ClaudeCode => {
-                claude_arguments(&mut command, &home, &tmp, false, run.account)?;
+                claude_arguments(
+                    &mut command,
+                    &home,
+                    &tmp,
+                    false,
+                    run.output_tokens,
+                    run.account,
+                )?;
                 (agent.join("output.md"), "output.md")
             }
         };
@@ -1718,16 +1761,19 @@ fn codex_arguments(
 }
 
 /// Adds Claude Code's print-mode arguments and environment for one research
-/// run: no MCP servers, settings sources, hooks or saved sessions, tools on or
-/// off, and the account as either a managed config directory or a keyless
-/// Anthropic endpoint in bare mode that never reads the keychain.
-/// Takes the command, the agent home and temp dir, the tools switch and the
+/// run: no MCP servers, settings sources, hooks or saved sessions, tools on, or
+/// off with the no-tools system prompt and one model turn; the account as
+/// either a managed config directory or a keyless Anthropic endpoint in bare
+/// mode that never reads the keychain.
+/// Takes the command, the agent home and temp dir, the tools switch, the most
+/// output tokens of each request (`None` for Claude Code's own limit) and the
 /// account. Returns an error for an account that does not fit Claude Code.
 fn claude_arguments(
     command: &mut Command,
     home: &Path,
     tmp: &Path,
     tools: bool,
+    output_tokens: Option<u32>,
     account: &ResearchAccount,
 ) -> Result<(), RunError> {
     command
@@ -1748,7 +1794,11 @@ fn claude_arguments(
             ])
             .env("SHELL", "/bin/zsh");
     } else {
-        command.args(["--tools", "", "--disable-slash-commands"]);
+        command.args(CLAUDE_TOOLS_OFF).args(CLAUDE_ONE_TURN);
+    }
+    if let Some(tokens) = output_tokens {
+        assert!(tokens > 0, "an output cap of zero tokens leaves no answer");
+        command.env(CLAUDE_OUTPUT_TOKENS, tokens.to_string());
     }
     match account {
         ResearchAccount::AnthropicEndpoint { base_url, model } => {
@@ -2944,6 +2994,7 @@ pub(crate) fn utc_date(time: SystemTime) -> String {
 mod tests {
     use super::*;
     use crate::config::{ModelAuthentication, ModelEndpoint, ModelReference};
+    use crate::harnesses::launch::CLAUDE_NO_TOOLS_PROMPT;
     use crate::protocol::{ConfigId, CredentialRef, Cursor};
     use std::os::unix::fs::PermissionsExt;
 
@@ -3152,6 +3203,7 @@ mod tests {
             prompt: "Map this repository.",
             account: &account,
             wall_time: Duration::from_secs(5),
+            output_tokens: None,
         };
         assert!(matches!(
             runner.run_read_only(&run, &|| false),
@@ -4158,6 +4210,54 @@ mod tests {
     }
 
     #[test]
+    fn a_tools_off_claude_run_takes_the_no_tools_prompt_one_turn_and_its_output_cap() {
+        let account = ResearchAccount::AnthropicEndpoint {
+            base_url: "http://127.0.0.1:11434".into(),
+            model: "local-model".into(),
+        };
+        let launch = |tools: bool, output_tokens: Option<u32>| {
+            let mut command = Command::new("/usr/bin/true");
+            claude_arguments(
+                &mut command,
+                Path::new("/agent/home"),
+                Path::new("/agent/tmp"),
+                tools,
+                output_tokens,
+                &account,
+            )
+            .unwrap();
+            let arguments: Vec<String> = command
+                .get_args()
+                .map(|argument| argument.to_str().unwrap().to_owned())
+                .collect();
+            let cap = command
+                .get_envs()
+                .find(|(key, _)| *key == "CLAUDE_CODE_MAX_OUTPUT_TOKENS")
+                .map(|(_, value)| value.unwrap().to_str().unwrap().to_owned());
+            (arguments, cap)
+        };
+        let has = |arguments: &[String], pair: [&str; 2]| {
+            arguments.windows(2).any(|window| window == pair)
+        };
+        let (off, cap) = launch(false, Some(16_000));
+        assert!(has(&off, ["--tools", ""]), "{off:?}");
+        assert!(
+            has(&off, ["--system-prompt", CLAUDE_NO_TOOLS_PROMPT]),
+            "{off:?}"
+        );
+        assert!(has(&off, ["--max-turns", "1"]), "{off:?}");
+        assert_eq!(cap.as_deref(), Some("16000"));
+        assert!(CLAUDE_NO_TOOLS_PROMPT.contains("no tools"));
+        let (on, cap) = launch(true, None);
+        assert!(has(&on, ["--tools", "default"]), "{on:?}");
+        assert!(
+            !on.iter()
+                .any(|argument| argument == "--system-prompt" || argument == "--max-turns")
+        );
+        assert_eq!(cap, None);
+    }
+
+    #[test]
     fn the_engine_makes_a_repository_only_in_a_folder_it_created() {
         let temp = tempfile::tempdir().unwrap();
         let base = temp.path().canonicalize().unwrap();
@@ -4227,6 +4327,7 @@ mod windows_tests {
             name: "onboard-m-windows",
             account: &account,
             wall_time: Duration::from_secs(5),
+            output_tokens: None,
         };
         assert_eq!(
             runner.run_read_only(&run, &|| false).unwrap(),

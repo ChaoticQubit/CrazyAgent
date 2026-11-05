@@ -72,8 +72,19 @@ pub struct FoundResearch {
     pub files: Vec<String>,
 }
 
+/// The try a running mapping step is on: its number of `tries`, when it started in ms
+/// since the epoch, and the plain reason the try before it failed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MappingTry {
+    pub number: u32,
+    pub tries: u32,
+    pub started_ms: i64,
+    pub earlier: Option<String>,
+}
+
 /// The onboarding of one found or cloned project as clients read it: the graph and mapping
-/// steps, the proposed name, the setup the owner confirms with `UpdateProjectSetup`, the
+/// steps, the try a running mapping step is on as `mapping_try`, the proposed name, the setup the owner confirms with `UpdateProjectSetup`, the
 /// extra facts, the `missing` fields such as `about`, the `.crazyagent/overview.md` this
 /// engine wrote as `overview` or one it did not write as `folder_overview`, `finished`
 /// once the owner saved the setup, when name and draft are the saved ones, and the
@@ -84,6 +95,8 @@ pub struct OnboardingView {
     pub project_id: ProjectId,
     pub graph: Step,
     pub mapping: Step,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mapping_try: Option<MappingTry>,
     pub name: String,
     pub draft: ProjectSetup,
     pub facts: MappingFacts,
@@ -165,15 +178,21 @@ impl Step {
 
     /// A failed step with `reason` bounded and free of control characters.
     pub(crate) fn failed(reason: &str) -> Self {
-        let reason: String = reason.chars().filter(|c| !c.is_control()).collect();
-        let mut end = reason.len().min(REASON_BYTES_MAX);
-        while !reason.is_char_boundary(end) {
-            end -= 1;
-        }
         Self::Failed {
-            reason: reason[..end].to_owned(),
+            reason: bounded_reason(reason),
         }
     }
+}
+
+/// `reason` free of control characters and cut to [`REASON_BYTES_MAX`] bytes on a
+/// character boundary, as a step's stored reason. Input: the text. Output: the reason.
+pub(crate) fn bounded_reason(reason: &str) -> String {
+    let reason: String = reason.chars().filter(|c| !c.is_control()).collect();
+    let mut end = reason.len().min(REASON_BYTES_MAX);
+    while !reason.is_char_boundary(end) {
+        end -= 1;
+    }
+    reason[..end].to_owned()
 }
 
 fn failure(code: &str) -> EngineError {
@@ -194,8 +213,18 @@ pub(crate) fn now_ms() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
+/// The columns that keep a running mapping step's try for the view, which onboarding
+/// tables made before 18.15 lack: the try number, its start in ms since the epoch and
+/// the reason the try before it failed.
+const TRY_COLUMNS: [(&str, &str); 3] = [
+    ("mapping_try", "INTEGER"),
+    ("mapping_try_ms", "INTEGER"),
+    ("mapping_try_earlier", "TEXT"),
+];
+
 /// Creates the onboarding table: one row per imported project with its
-/// folder, pool, both steps, the current draft and the worker's claim.
+/// folder, pool, both steps, the mapping try, the current draft and the
+/// worker's claim, and adds the try columns to an older table.
 pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection
         .execute_batch(
@@ -207,6 +236,9 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 graph_reason TEXT,
                 mapping_state TEXT NOT NULL,
                 mapping_reason TEXT,
+                mapping_try INTEGER,
+                mapping_try_ms INTEGER,
+                mapping_try_earlier TEXT,
                 drafted TEXT NOT NULL,
                 runs INTEGER NOT NULL DEFAULT 0,
                 claimer TEXT,
@@ -223,7 +255,24 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 seal TEXT NOT NULL CHECK(length(seal)=64)
             );",
         )
-        .map_err(error)
+        .map_err(error)?;
+    for (column, kind) in TRY_COLUMNS {
+        let present: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('onboarding') WHERE name=?1)",
+                [column],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        if !present {
+            connection
+                .execute_batch(&format!(
+                    "ALTER TABLE onboarding ADD COLUMN {column} {kind}"
+                ))
+                .map_err(error)?;
+        }
+    }
+    Ok(())
 }
 
 /// The project id a folder is onboarded as: its name in lower case, every
@@ -595,24 +644,42 @@ pub(crate) fn status(
 ) -> Result<Option<OnboardingView>, EngineError> {
     let row = tx
         .query_row(
-            "SELECT graph_state,graph_reason,mapping_state,mapping_reason,drafted,repo
+            "SELECT graph_state,graph_reason,mapping_state,mapping_reason,drafted,repo,
+                mapping_try,mapping_try_ms,mapping_try_earlier
              FROM onboarding WHERE project=?1",
             [project_id.as_str()],
             |row| {
                 Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, Option<String>>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, Option<String>>(3)?,
-                    row.get::<_, String>(4)?,
-                    row.get::<_, String>(5)?,
+                    (
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                    ),
+                    (
+                        row.get::<_, Option<u32>>(6)?,
+                        row.get::<_, Option<i64>>(7)?,
+                        row.get::<_, Option<String>>(8)?,
+                    ),
                 ))
             },
         )
         .optional()
         .map_err(error)?;
-    let Some((graph, graph_reason, mapping, mapping_reason, drafted, repo)) = row else {
+    let Some(((graph, graph_reason, mapping, mapping_reason, drafted, repo), tried)) = row else {
         return Ok(None);
+    };
+    let mapping = Step::from_columns(&mapping, mapping_reason)?;
+    let mapping_try = match (&mapping, tried) {
+        (Step::Running, (Some(number), Some(started_ms), earlier)) => Some(MappingTry {
+            number,
+            tries: service::MAPPING_TRIES,
+            started_ms,
+            earlier,
+        }),
+        _ => None,
     };
     let mut drafted: draft::Drafted = serde_json::from_str(&drafted).map_err(error)?;
     let saved = crate::project_setup::load_setup(tx, project_id)?.filter(|stored| stored.saved());
@@ -636,7 +703,8 @@ pub(crate) fn status(
     Ok(Some(OnboardingView {
         project_id: project_id.clone(),
         graph: Step::from_columns(&graph, graph_reason)?,
-        mapping: Step::from_columns(&mapping, mapping_reason)?,
+        mapping,
+        mapping_try,
         name: drafted.name,
         draft: drafted.draft,
         facts: drafted.facts,

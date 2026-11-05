@@ -201,6 +201,13 @@ test("repositories filter by name and read their size and branch", () => {
 test("onboarding steps use the fixed words and keep the failure reason", () => {
   assert.deepEqual(intake.stepView({ kind: "waiting" }), { word: "Waiting", tone: "neutral", line: null });
   assert.deepEqual(intake.stepView({ kind: "running" }), { word: "Working", tone: "info", line: null });
+  const started = Date.UTC(2026, 10, 4, 22, 0, 0);
+  const first = { number: 1, tries: 3, started_ms: started, earlier: null };
+  assert.deepEqual(intake.stepView({ kind: "running" }, false, first, started + 20000), { word: "Working", tone: "info", line: "Mapping, try 1 of 3, under 1 min." });
+  const second = { number: 2, tries: 3, started_ms: started, earlier: "Mapping agent ran out of time" };
+  assert.deepEqual(intake.stepView({ kind: "running" }, false, second, started + 150000), { word: "Working", tone: "info", line: "Mapping, try 2 of 3, 2 min. Try 1 failed: Mapping agent ran out of time" });
+  assert.equal(intake.stepView({ kind: "running" }, false, first, started - 5000).line, "Mapping, try 1 of 3, under 1 min.");
+  assert.deepEqual(intake.stepView({ kind: "done" }, false, second, started), { word: "Done", tone: "ok", line: null });
   assert.deepEqual(intake.stepView({ kind: "done" }), { word: "Done", tone: "ok", line: null });
   assert.deepEqual(intake.stepView({ kind: "failed", reason: "graphify isn't installed." }), { word: "Failed", tone: "danger", line: "graphify isn't installed." });
   assert.deepEqual(intake.stepView({ kind: "off" }), { word: "Off", tone: "neutral", line: "Graphify is off in Settings, Pack, so no code graph is built." });

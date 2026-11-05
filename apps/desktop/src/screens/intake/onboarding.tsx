@@ -56,7 +56,7 @@ export function OnboardingReviewView({ name, view, draft, catalog, errors, showE
   return <div className="pj in-page">
     {header}
     <ol className="in-list" aria-label="Setup steps">{STEPS.map((step) => {
-      const shown = stepView(value[step.key], value.finished);
+      const shown = stepView(value[step.key], value.finished, step.key === "mapping" ? value.mapping_try ?? null : null);
       return <li className="in-row" key={step.key}>
         <span className="in-row-main"><strong>{step.title}</strong>{shown.line && <span className={`pj-small ${shown.tone === "danger" ? "pj-error" : "pj-secondary"}`}>{shown.line}</span>}</span>
         <StatusBadge word={shown.word} tone={shown.tone} />

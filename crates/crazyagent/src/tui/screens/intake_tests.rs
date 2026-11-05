@@ -915,6 +915,7 @@ fn review_with(change: impl FnOnce(&mut OnboardingView)) -> (Shell, ProjectId) {
         mapping: Step::Failed {
             reason: "No model answered.".into(),
         },
+        mapping_try: None,
         name: "notes".into(),
         draft: ProjectSetup {
             about: String::new(),
