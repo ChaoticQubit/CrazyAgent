@@ -177,7 +177,8 @@ pub(in crate::tui) fn pool_choices_from(pools: &[PoolSummary]) -> Vec<PoolChoice
 
 /// Builds the Team step's harness choices from the engine's harness catalog.
 /// Takes the catalog entries in owner priority order. Returns one choice per entry with its
-/// state, CantStart when it cannot run team agents, and the limited-control sentence, if any.
+/// state, CantStart when it cannot run team agents, MasterOnly when it runs only as the
+/// project master, and the limited-control sentence, if any.
 pub(in crate::tui) fn harness_choices_from(entries: &[HarnessEntry]) -> Vec<HarnessChoice> {
     entries
         .iter()
@@ -187,6 +188,7 @@ pub(in crate::tui) fn harness_choices_from(entries: &[HarnessEntry]) -> Vec<Harn
             state: match (&entry.status, &entry.team) {
                 (HarnessStatus::NotInstalled, _) => HarnessState::NotInstalled,
                 (_, TeamUse::Unavailable { .. }) => HarnessState::CantStart,
+                (_, TeamUse::MasterOnly { .. }) => HarnessState::MasterOnly,
                 (_, TeamUse::Available) => HarnessState::Ready,
             },
             limited: (control_word(entry) == "Limited control").then(|| control_sentence(entry)),

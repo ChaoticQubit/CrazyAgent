@@ -173,6 +173,42 @@ fn counts_countdowns_and_failed_checks_read_as_plain_words() {
 }
 
 #[test]
+fn a_sign_in_the_limits_check_cannot_use_says_what_it_is_and_what_to_do() {
+    for (code, sentence) in [
+        (
+            "native_profile_codex_api_key",
+            "An API-key account has no 5-hour or weekly window.",
+        ),
+        (
+            "native_profile_codex_token_unreadable",
+            "CrazyAgent can't read this Codex sign-in. Sign in to Codex again in Accounts.",
+        ),
+        (
+            "native_profile_codex_sign_in_expired",
+            "This Codex sign-in expired and CrazyAgent couldn't renew it. Sign in to Codex again in Accounts.",
+        ),
+        (
+            "native_profile_credential_unavailable",
+            "CrazyAgent can't read this account's sign-in. Sign in again in Accounts.",
+        ),
+        (
+            "native_profile_renewal_failed",
+            "CrazyAgent couldn't renew this account's sign-in. It tries again in 10 minutes.",
+        ),
+        (
+            "native_profile_renewal_busy",
+            "Another check of this account's sign-in is running. CrazyAgent tries again in 10 minutes.",
+        ),
+        (
+            "native_profile_sign_in_revoked",
+            "The provider ended this sign-in. Sign in again in Accounts.",
+        ),
+    ] {
+        assert_eq!(poll_failure(code), sentence, "{code}");
+    }
+}
+
+#[test]
 fn the_summary_shows_totals_limits_with_countdowns_and_named_groups() {
     let ctx = ctx(100, 40);
     let lines = text(&summary(

@@ -167,14 +167,36 @@ test("switching to a harness whose tools can't be turned off and back restores t
 });
 
 test("harness choices list every harness and say why one can't be picked", () => {
-  assert.deepEqual(wizard.harnessChoices(catalog).map((choice) => [choice.id, choice.group, choice.disabled]), [
+  assert.deepEqual(wizard.harnessChoices(catalog, "agent").map((choice) => [choice.id, choice.group, choice.disabled]), [
     ["codex", "Ready", false],
     ["claude", "Ready", false],
     ["cursor", "Limited control", true],
     ["gemini", "Not installed", true],
   ]);
-  assert.equal(wizard.harnessChoices(catalog)[2].label, "Cursor CLI - Can't run team agents");
-  assert.equal(wizard.harnessChoices(catalog)[3].label, "Gemini CLI - Not installed");
+  assert.equal(wizard.harnessChoices(catalog, "agent")[2].label, "Cursor CLI - Can't run team agents");
+  assert.equal(wizard.harnessChoices(catalog, "agent")[3].label, "Gemini CLI - Not installed");
+});
+
+test("a master-only harness is offered and valid as the master but never for an agent row", () => {
+  const masterOnly = { kind: "master_only", reason: "runs only as a CrazyAgent master" };
+  const rcli = harness("rcli", "RCLI", { kind: "limited", reason: "runs only as a CrazyAgent master" }, { kind: "limited", reason: "runs without tools" },
+    ["api_key", "open_ai_compatible_url", "local"], masterOnly);
+  const withRcli = [...catalog, rcli];
+  const pick = (role) => wizard.harnessChoices(withRcli, role).find((choice) => choice.id === "rcli");
+  assert.deepEqual(pick("master"), { id: "rcli", label: "RCLI - Master only, no live terminal", group: "Limited control", disabled: false });
+  assert.deepEqual(pick("agent"), { id: "rcli", label: "RCLI - Runs only as the master", group: "Limited control", disabled: true });
+  for (const role of ["master", "agent"]) {
+    const cursor = wizard.harnessChoices(withRcli, role).find((choice) => choice.id === "cursor");
+    assert.deepEqual([cursor.label, cursor.disabled], ["Cursor CLI - Can't run team agents", true], role);
+  }
+  const led = engineTeam("rcli");
+  assert.deepEqual(wizard.teamErrors(led, withRcli), { rows: [] });
+  assert.equal(wizard.teamValid(led, withRcli), true);
+  const asAgent = { ...engineTeam("codex", 1), sub_harnesses: [{ harness: "rcli", agents: 1, tools: true }] };
+  assert.deepEqual(wizard.teamErrors(asAgent, withRcli).rows, ["RCLI runs only as the master. Pick another harness."]);
+  assert.equal(wizard.teamValid(asAgent, withRcli), false);
+  assert.equal(wizard.masterNote(led, withRcli), "RCLI has no terminal app. Its conversation stays on the Conversation tab.");
+  assert.equal(wizard.masterNote(engineTeam("codex"), withRcli), null);
 });
 
 test("team validation mirrors the engine agent range", () => {

@@ -5,14 +5,22 @@ const WINDOWS = ["5-hour", "Weekly"];
 const USED = /^\d{1,3}% used$/;
 const RESETS = /^Resets in (?:under a minute|\d+ min|\d+ h \d+ min|\d+ d \d+ h)(?: \(your time\))?$/;
 
+/** The sentence the Usage card shows for an API-key Codex account, which has no windows. */
+export const API_KEY_READING = "An API-key account has no 5-hour or weekly window.";
+
 /** Says whether Settings, Usage shows every account's 5-hour and weekly use with a meter and
- * the time each window resets (OP-17). Input: the limit cards in screen order, each
- * { windows: [{ label, used, meter, reset }] } as the page shows them. Output: the detail;
- * throws the first account and window that shows less, by its place so no name is logged. */
+ * the time each window resets (OP-17); an API-key account's card saying it has no windows is
+ * a valid reading, though not when every account is one. Input: the limit cards in screen
+ * order, each { notice, windows: [{ label, used, meter, reset }] } as the page shows them.
+ * Output: the detail; throws the first account and window that shows less, by its place so
+ * no name is logged. */
 export function limitsVerdict(cards) {
   assert(Array.isArray(cards), "the limit cards are a list");
   if (cards.length === 0) throw new Error("Settings, Usage shows no account limits");
+  const keyed = cards.filter((card) => card.notice === API_KEY_READING).length;
+  if (keyed === cards.length) throw new Error(`not exercised: every one of the ${cards.length} accounts is an API-key account`);
   cards.forEach((card, at) => {
+    if (card.notice === API_KEY_READING) return;
     const where = `account ${at + 1} of ${cards.length}`;
     const labels = card.windows.map((window) => window.label);
     if (labels.join(",") !== WINDOWS.join(",")) throw new Error(`${where} shows the windows ${JSON.stringify(labels)}, not 5-hour and Weekly`);
@@ -22,7 +30,8 @@ export function limitsVerdict(cards) {
       if (!RESETS.test(window.reset)) throw new Error(`${where} ${window.label}: shows ${JSON.stringify(window.reset)}, not when it resets`);
     }
   });
-  return `${cards.length} accounts each show their 5-hour and weekly use and reset time`;
+  const shown = `${cards.length - keyed} accounts each show their 5-hour and weekly use and reset time`;
+  return keyed === 0 ? shown : `${shown}; ${keyed} API-key accounts have no 5-hour or weekly window`;
 }
 
 /** Says whether each pool that picks by Use it or lose it tries the account whose weekly

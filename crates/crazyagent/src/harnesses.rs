@@ -78,11 +78,13 @@ pub enum ToolControl {
 }
 
 /// States whether a harness can run a team agent, the master or a sub-agent.
+/// MasterOnly runs the project master, with no live terminal, and never a team agent;
 /// Unavailable carries the plain reason, such as no reader for its replies yet.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum TeamUse {
     Available,
+    MasterOnly { reason: String },
     Unavailable { reason: String },
 }
 
@@ -260,6 +262,13 @@ pub fn catalog(search: &Search) -> Vec<HarnessEntry> {
                 account_kinds: spec.account_kinds.to_vec(),
                 team: match interactive::support(spec.id) {
                     interactive::Support::Terminal => TeamUse::Available,
+                    interactive::Support::HeadlessOnly { reason }
+                        if crate::team::master_backend(spec.id).is_some() =>
+                    {
+                        TeamUse::MasterOnly {
+                            reason: reason.into(),
+                        }
+                    }
                     interactive::Support::HeadlessOnly { reason }
                     | interactive::Support::Unavailable { reason } => TeamUse::Unavailable {
                         reason: reason.into(),

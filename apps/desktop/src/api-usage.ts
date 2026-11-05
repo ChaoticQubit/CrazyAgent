@@ -90,6 +90,13 @@ const POLL_FAILURES: Record<string, string> = {
   usage_reply_invalid: "The provider's answer wasn't one CrazyAgent can read.",
   usage_request_invalid: "CrazyAgent couldn't ask the provider for this account's limits.",
   usage_step_panicked: "CrazyAgent's usage check hit an internal error. It tries again on its own.",
+  native_profile_codex_api_key: "An API-key account has no 5-hour or weekly window.",
+  native_profile_codex_token_unreadable: "CrazyAgent can't read this Codex sign-in. Sign in to Codex again in Accounts.",
+  native_profile_codex_sign_in_expired: "This Codex sign-in expired and CrazyAgent couldn't renew it. Sign in to Codex again in Accounts.",
+  native_profile_credential_unavailable: "CrazyAgent can't read this account's sign-in. Sign in again in Accounts.",
+  native_profile_renewal_failed: "CrazyAgent couldn't renew this account's sign-in. It tries again in 10 minutes.",
+  native_profile_renewal_busy: "Another check of this account's sign-in is running. CrazyAgent tries again in 10 minutes.",
+  native_profile_sign_in_revoked: "The provider ended this sign-in. Sign in again in Accounts.",
 };
 
 /** The refusal codes of the usage protocol that have their own sentence. */

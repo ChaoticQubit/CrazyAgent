@@ -1875,12 +1875,25 @@ async fn a_rejected_sign_in_is_not_paused_and_hands_the_next_turn_to_the_next_ac
 
 #[tokio::test]
 async fn a_turn_whose_credential_copy_fails_checks_the_account_and_hands_the_next_turn_on() {
+    for code in [
+        "native_profile_credential_unavailable",
+        "native_profile_codex_api_key",
+        "native_profile_codex_token_unreadable",
+    ] {
+        credential_copy_fails(code).await;
+    }
+}
+
+/// A prepared turn whose credential copy fails with `code`: the turn fails as readiness
+/// unknown with that cause, the account is checked again, not paused or rejected, and the
+/// next turn goes to the next account. Input: the refusal code.
+async fn credential_copy_fails(code: &str) {
     let case = Fixture::open(POOL_CATALOG, pool_selection(), true).await;
     case.sign_in("claude-a", true).await;
     case.sign_in("claude-b", true).await;
     let first = case.prepared(&case.turn.id).await;
     assert_eq!(first.attempt.connection.id, reference("claude-a"));
-    let unavailable = EngineError("native_profile_credential_unavailable".into());
+    let unavailable = EngineError(code.into());
     let result = case
         .command(MasterRuntimeCommand::Fail {
             host: case.runtime().identity(),
@@ -1895,16 +1908,17 @@ async fn a_turn_whose_credential_copy_fails_checks_the_account_and_hands_the_nex
     let MasterRuntimeResult::Turn(failed) = result else {
         panic!("the turn whose credential copy failed did not settle");
     };
-    assert_eq!(failed.phase, MasterTurnPhase::Failed);
-    assert_eq!(failed.reason, Some(MasterReason::ReadinessUnknown));
+    assert_eq!(failed.phase, MasterTurnPhase::Failed, "{code}");
     assert_eq!(
-        failed.cause.as_deref(),
-        Some("native_profile_credential_unavailable")
+        failed.reason,
+        Some(MasterReason::ReadinessUnknown),
+        "{code}"
     );
+    assert_eq!(failed.cause.as_deref(), Some(code));
     drop(first);
-    assert_eq!(case.paused_until("claude-a"), None);
-    assert!(!case.rejected("claude-a"));
-    assert_eq!(case.stale().await, vec![reference("claude-a")]);
+    assert_eq!(case.paused_until("claude-a"), None, "{code}");
+    assert!(!case.rejected("claude-a"), "{code}");
+    assert_eq!(case.stale().await, vec![reference("claude-a")], "{code}");
     let second = case.submit("Summarize what we discussed so far.").await;
     let next = case.prepared(&second).await;
     assert_eq!(next.attempt.connection.id, reference("claude-b"));
