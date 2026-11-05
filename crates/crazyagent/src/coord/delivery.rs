@@ -32,8 +32,12 @@ pub const RESULTS_KEY: &str = "lead-results-";
 /// The idempotency key prefix of the engine's note of a lead's workers' events.
 pub const EVENTS_KEY: &str = "events-";
 /// The idempotency key prefix of the engine's note of what the owner did to a lead's
-/// workers; [`waking`] never counts it, so it waits for the lead's next real turn.
+/// workers; [`waking`] never counts it, and alone it starts no turn of the lead's own.
 pub const NOTICES_KEY: &str = "owner-notices-";
+/// The SQL test of a `coord_messages` row `m` worth a turn of its own, as [`waking`] counts
+/// it, with `?2` bound to `RESULTS_KEY` and `?3` to `EVENTS_KEY`.
+const WAKING_SQL: &str = "(m.kind IN ('prompt','question','reply') OR (m.from_kind='engine'
+ AND (substr(m.idem_key,1,length(?2))=?2 OR substr(m.idem_key,1,length(?3))=?3)))";
 const SENDER_BYTES_MAX: usize = 48;
 const HEAD_BYTES_MAX: usize = 160;
 const CUT: &str = " [cut here; read the whole message with inspect_work]";
@@ -173,20 +177,24 @@ fn requeue_stopped(db: &Connection, project: &ProjectId, now: i64) -> Result<(),
     Ok(())
 }
 
-/// Lists a project's live agents with messages waiting, the one waiting longest first.
+/// Lists a project's live agents with messages waiting: those with a [`waking`] message
+/// first, so agents holding only notes never crowd one out, then the one waiting longest.
 /// Takes the database and the project. Returns at most `RECIPIENTS_PER_TICK_MAX` ids.
 fn recipients(db: &Connection, project: &ProjectId) -> Result<Vec<AgentId>, EngineError> {
     let mut statement = db
-        .prepare(
+        .prepare(&format!(
             "SELECT m.to_agent FROM coord_messages m JOIN team_agents a ON a.id=m.to_agent
              WHERE m.project=?1 AND m.to_kind='agent' AND m.receipt='sent'
              AND a.status IN ('starting','idle','working')
-             GROUP BY m.to_agent ORDER BY MIN(m.id) LIMIT ?2",
-        )
+             GROUP BY m.to_agent ORDER BY MAX(ifnull({WAKING_SQL},0)) DESC, MIN(m.id) LIMIT ?4"
+        ))
         .map_err(state)?;
     let limit = i64::try_from(RECIPIENTS_PER_TICK_MAX).map_err(state)?;
     let found: Vec<AgentId> = statement
-        .query_map(params![project.as_str(), limit], |row| row.get(0))
+        .query_map(
+            params![project.as_str(), RESULTS_KEY, EVENTS_KEY, limit],
+            |row| row.get(0),
+        )
         .map_err(state)?
         .collect::<Result<_, _>>()
         .map_err(state)?;
@@ -198,11 +206,12 @@ fn recipients(db: &Connection, project: &ProjectId) -> Result<Vec<AgentId>, Engi
 /// harness kind and Delivery setting allow: the master hears them through its own engine
 /// input; Codex through its app-server bridge, else typing under Auto; Claude Code
 /// through the relay, typed under Auto only after `NATIVE_GRACE_MS`; other kinds by
-/// typing, or with their next engine-started turn under Native only. A sub-agent's
-/// messages go only with one that is [`waking`], so notes alone start no turn of their own
-/// and ride with its next real message. Takes the database, the project, the agent, the
-/// time and the reach. Returns true when nothing is left to retry soon, false when the
-/// agent should be tried again after `RETRY_MS`.
+/// typing, or with their next engine-started turn under Native only. The owner's notices
+/// alone ([`notices_alone`]) start no turn: they are never typed, and the bridge only
+/// steers them into a turn a working agent already runs, so they ride with its next real
+/// message. Takes the database, the project, the agent, the time and the reach. Returns
+/// true when nothing is left to retry soon, false when the agent should be tried again
+/// after `RETRY_MS`.
 fn deliver_to(
     db: &Connection,
     project: &ProjectId,
@@ -210,15 +219,15 @@ fn deliver_to(
     now: i64,
     reach: &Reach<'_>,
 ) -> Result<bool, EngineError> {
-    let row: Option<(String, String)> = db
+    let row: Option<(String, String, String)> = db
         .query_row(
-            "SELECT harness,role FROM team_agents WHERE id=?1 AND project=?2",
+            "SELECT harness,role,status FROM team_agents WHERE id=?1 AND project=?2",
             params![agent, project.as_str()],
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()
         .map_err(state)?;
-    let Some((harness, role)) = row else {
+    let Some((harness, role, status)) = row else {
         return Ok(true);
     };
     let messages = super::pending(db, agent, PENDING_MAX)?;
@@ -244,24 +253,15 @@ fn deliver_to(
         }
         (Some(HarnessKind::Codex), Delivery::TypingOnly) => messages.as_slice(),
         (Some(HarnessKind::Codex), _) => {
-            if !waking_through(db, agent, messages[messages.len() - 1].id)? {
-                return Ok(true);
-            }
-            let (text, carried) = lines(db, &messages, PROMPT_BYTES_MAX)?;
-            let home = crate::team::runtime::agent_home(reach.state, agent);
-            if codex::deliver(&home, &text) == Bridged::Delivered {
-                mark_all(db, &carried, Receipt::Delivered, now)?;
-                return Ok(carried.len() == messages.len());
-            }
-            if delivery == Delivery::NativeOnly {
-                return Ok(false);
+            if let Some(done) = bridge(db, agent, &status, &messages, delivery, now, reach)? {
+                return Ok(done);
             }
             messages.as_slice()
         }
         (_, Delivery::NativeOnly) => return Ok(true),
         _ => messages.as_slice(),
     };
-    if ready.is_empty() || !waking_through(db, agent, ready[ready.len() - 1].id)? {
+    if ready.is_empty() || notices_alone(db, agent, &messages, ready)? {
         return Ok(true);
     }
     let Some(host) = reach.host else {
@@ -275,6 +275,36 @@ fn deliver_to(
         }
         Typing::Held(_) | Typing::Gone => Ok(false),
     }
+}
+
+/// Hands a Codex agent's waiting messages to its app-server bridge (DEC-104 Q13); the
+/// owner's notices alone only steer a turn the agent runs while its status is working.
+/// Takes the database, the agent, its status, the messages, the Delivery setting, the time
+/// and the reach. Returns what [`deliver_to`] answers once the bridge took them or they
+/// wait, or none when they fall back to typing.
+fn bridge(
+    db: &Connection,
+    agent: AgentId,
+    status: &str,
+    messages: &[Message],
+    delivery: Delivery,
+    now: i64,
+    reach: &Reach<'_>,
+) -> Result<Option<bool>, EngineError> {
+    let alone = notices_alone(db, agent, messages, messages)?;
+    if alone && status != "working" {
+        return Ok(Some(true));
+    }
+    let (text, carried) = lines(db, messages, PROMPT_BYTES_MAX)?;
+    let home = crate::team::runtime::agent_home(reach.state, agent);
+    if codex::deliver(&home, &text, !alone) == Bridged::Delivered {
+        mark_all(db, &carried, Receipt::Delivered, now)?;
+        return Ok(Some(carried.len() == messages.len()));
+    }
+    if alone || delivery == Delivery::NativeOnly {
+        return Ok(Some(false));
+    }
+    Ok(None)
 }
 
 /// Hands a project master its waiting messages through the engine's own master input
@@ -322,19 +352,40 @@ fn to_master(
 /// notes, such as the owner's actions on its workers (`NOTICES_KEY`), wait for its next
 /// turn. Takes the database and the agent. Returns the answer, or a database failure.
 pub fn waking(db: &Connection, agent: AgentId) -> Result<bool, EngineError> {
-    waking_through(db, agent, MessageId::MAX)
+    db.query_row(
+        &format!(
+            "SELECT EXISTS(SELECT 1 FROM coord_messages m WHERE m.to_kind='agent'
+             AND m.to_agent=?1 AND m.receipt='sent' AND {WAKING_SQL})"
+        ),
+        params![agent, RESULTS_KEY, EVENTS_KEY],
+        |row| row.get(0),
+    )
+    .map_err(state)
 }
 
-/// Tells whether one of an agent's waiting messages up to a message id is [`waking`], so
-/// the messages a delivery would carry start a turn only when one of them is worth it.
-/// Takes the database, the agent and the last id. Returns the answer, or a database failure.
-fn waking_through(db: &Connection, agent: AgentId, last: MessageId) -> Result<bool, EngineError> {
+/// Tells whether the ready messages of a sub-agent are only the engine's notes of what the
+/// owner did to its workers (`NOTICES_KEY`), which wait for its next real message instead
+/// of starting a turn; never while `PENDING_MAX` messages wait, so a full window always
+/// moves. `ready` is a prefix of `messages`, the agent's oldest Sent ones, so every Sent
+/// message up to the last ready id is ready. Takes the database, the agent, the waiting
+/// messages and the ready ones. Returns the answer, or a database failure.
+fn notices_alone(
+    db: &Connection,
+    agent: AgentId,
+    messages: &[Message],
+    ready: &[Message],
+) -> Result<bool, EngineError> {
+    let Some(last) = ready.last() else {
+        return Ok(false);
+    };
+    if messages.len() >= PENDING_MAX {
+        return Ok(false);
+    }
     db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM coord_messages WHERE to_kind='agent' AND to_agent=?1
-         AND receipt='sent' AND id<=?4 AND (kind IN ('prompt','question','reply') OR
-         (from_kind='engine' AND (substr(idem_key,1,length(?2))=?2
-         OR substr(idem_key,1,length(?3))=?3))))",
-        params![agent, RESULTS_KEY, EVENTS_KEY, last],
+        "SELECT NOT EXISTS(SELECT 1 FROM coord_messages WHERE to_kind='agent' AND to_agent=?1
+         AND receipt='sent' AND id<=?2 AND NOT (from_kind='engine' AND kind='note'
+         AND ifnull(substr(idem_key,1,length(?3))=?3,0)))",
+        params![agent, last.id, NOTICES_KEY],
         |row| row.get(0),
     )
     .map_err(state)

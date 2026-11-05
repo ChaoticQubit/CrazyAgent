@@ -191,7 +191,7 @@ fn start_app(base: &Path, home: &Path, agent: &AgentId) -> (Server, Tmux) {
 fn greet(home: &Path) {
     let deadline = Instant::now() + START;
     loop {
-        match codex::deliver(home, GREETING) {
+        match codex::deliver(home, GREETING, true) {
             Bridged::Delivered => break,
             Bridged::Unavailable(reason) => {
                 assert!(
@@ -234,11 +234,11 @@ fn a_real_codex_app_takes_coord_messages_through_its_app_server_idle_and_busy() 
     let (_server, host) = start_app(&base, &home, &agent);
     greet(&home);
 
-    assert_eq!(codex::deliver(&home, LONG_TURN), Bridged::Delivered);
+    assert_eq!(codex::deliver(&home, LONG_TURN, true), Bridged::Delivered);
     until(TURN, "the long turn to start", || {
         recorded(&home, LONG_TURN)
     });
-    assert_eq!(codex::deliver(&home, STEER), Bridged::Delivered);
+    assert_eq!(codex::deliver(&home, STEER, true), Bridged::Delivered);
     until(TURN, "the steer to reach the running turn", || {
         recorded(&home, STEER)
     });
@@ -278,7 +278,7 @@ fn a_working_codex_agent_gets_an_owner_notice_and_a_nudge_steered_by_the_deliver
     let agent = AgentId::team(id).unwrap();
     let (_server, host) = start_app(&base, &home, &agent);
     greet(&home);
-    assert_eq!(codex::deliver(&home, LONG_TURN), Bridged::Delivered);
+    assert_eq!(codex::deliver(&home, LONG_TURN, true), Bridged::Delivered);
     until(TURN, "the long turn to start", || {
         recorded(&home, LONG_TURN)
     });

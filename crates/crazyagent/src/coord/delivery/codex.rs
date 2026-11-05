@@ -40,15 +40,16 @@ pub fn prepare_folder() -> Result<PathBuf, &'static str> {
 }
 
 /// Delivers text into the Codex thread an agent's TUI shows, through the agent's own
-/// app-server: `turn/start` while the thread is idle, `turn/steer` on the active turn
-/// while it works (DEC-104 Q13). The socket must be the owner's own, the release one of
-/// `VERSIONS`, and the whole exchange fits in `wire::DEADLINE` and bounded reads; any
-/// doubt fails closed. Takes the agent's `CODEX_HOME` and the text. Returns the outcome.
-pub fn deliver(home: &Path, text: &str) -> Bridged {
+/// app-server: `turn/start` while the thread is idle, only when `start` allows a turn of
+/// its own, and `turn/steer` on the active turn while it works (DEC-104 Q13). The socket
+/// must be the owner's own, the release one of `VERSIONS`, and the whole exchange fits in
+/// `wire::DEADLINE` and bounded reads; any doubt fails closed. Takes the agent's
+/// `CODEX_HOME`, the text and whether an idle thread may start a turn. Returns the outcome.
+pub fn deliver(home: &Path, text: &str, start: bool) -> Bridged {
     let Some(socket) = socket(home) else {
         return Bridged::Unavailable("codex_bridge_unsupported");
     };
-    match wire::deliver(&socket, text) {
+    match wire::deliver(&socket, text, start) {
         Ok(()) => Bridged::Delivered,
         Err(reason) => Bridged::Unavailable(reason),
     }
@@ -131,7 +132,7 @@ mod wire {
         Ok(())
     }
 
-    pub(super) fn deliver(socket: &Path, text: &str) -> Result<(), &'static str> {
+    pub(super) fn deliver(socket: &Path, text: &str, start: bool) -> Result<(), &'static str> {
         let folder = socket.parent().ok_or("codex_bridge_unsupported")?;
         private_folder(folder)?;
         let metadata = match std::fs::symlink_metadata(socket) {
@@ -157,7 +158,7 @@ mod wire {
         wire.notify("initialized")?;
         let thread = wire.thread()?;
         for _ in 0..ATTEMPTS_MAX {
-            if wire.send_into(&thread, text)? {
+            if wire.send_into(&thread, text, start)? {
                 return Ok(());
             }
         }
@@ -408,10 +409,16 @@ mod wire {
             newest.map(|(_, id)| id).ok_or("codex_bridge_thread_absent")
         }
 
-        /// Puts the text into the thread: a new turn while it is idle, a steer of the
-        /// running turn while it works. Takes the thread id and the text. Returns true once
-        /// the server took it, false when the turn changed under the request.
-        fn send_into(&mut self, thread: &str, text: &str) -> Result<bool, &'static str> {
+        /// Puts the text into the thread: a new turn while it is idle, when `start` allows
+        /// one, a steer of the running turn while it works. Takes the thread id, the text
+        /// and `start`. Returns true once the server took it, false when the turn changed
+        /// under the request.
+        fn send_into(
+            &mut self,
+            thread: &str,
+            text: &str,
+            start: bool,
+        ) -> Result<bool, &'static str> {
             let input = json!([{"type": "text", "text": text, "text_elements": []}]);
             let read = self.call(
                 "thread/read",
@@ -422,6 +429,7 @@ mod wire {
                 .and_then(Value::as_str)
                 .ok_or("codex_bridge_protocol_unknown")?;
             match status {
+                "idle" if !start => Err("codex_bridge_thread_idle"),
                 "idle" => {
                     match self.call("turn/start", json!({"threadId": thread, "input": input})) {
                         Ok(_) => Ok(true),
@@ -465,7 +473,7 @@ mod wire {
         Err("codex_bridge_unsupported")
     }
 
-    pub(super) fn deliver(_socket: &Path, _text: &str) -> Result<(), &'static str> {
+    pub(super) fn deliver(_socket: &Path, _text: &str, _start: bool) -> Result<(), &'static str> {
         Err("codex_bridge_unsupported")
     }
 }
