@@ -168,8 +168,7 @@ pub(super) fn exclude_graph(worktree: &Path) {
     let mut file = std::fs::File::from(fd);
     let mut text = String::new();
     if !plain
-        || file
-            .by_ref()
+        || Read::by_ref(&mut file)
             .take(EXCLUDE_BYTES_MAX)
             .read_to_string(&mut text)
             .is_err()
