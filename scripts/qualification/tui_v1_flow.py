@@ -426,7 +426,7 @@ def sign_in(term, tty):
     tty.flush()
 
 
-def accounts(term, tty):
+def chatgpt_choice(term):
     term.key(b"s")
     term.wait("No accounts yet.", 20)
     term.key(ENTER)
@@ -437,6 +437,10 @@ def accounts(term, tty):
     term.key(UP)
     term.key(UP)
     assert "\u258c" in term.row(CHATGPT), term.text()
+
+
+def accounts(term, tty):
+    chatgpt_choice(term)
     term.key(ENTER)
     sign_in(term, tty)
     term.wait("Account name", 5)
