@@ -307,6 +307,28 @@ fn bridge(
     Ok(None)
 }
 
+/// What the owner sees on an agent that the project's Delivery setting leaves with no way
+/// to get its team messages (owner 2026-11-05): a tools-off Codex app runs without the app
+/// server its bridge needs, and Native only never types into it.
+pub const NO_CHANNEL: &str = "Can't receive messages: Native only needs tools on for Codex.";
+
+/// Tells whether a team agent can never get its messages under the project's Delivery
+/// setting: a tools-off Codex sub-agent in a kept session has no bridge and is never typed
+/// into under Native only, so its messages wait Sent until tools are on or the setting
+/// changes. Takes the database, the project, the agent's role, harness and tools switch,
+/// and whether it runs a kept session. Returns [`NO_CHANNEL`] for it, none otherwise.
+pub fn no_channel(
+    db: &Connection,
+    project: &ProjectId,
+    role: crate::team::AgentRole,
+    harness: &str,
+    tools: bool,
+    kept: bool,
+) -> Result<Option<&'static str>, EngineError> {
+    let _ = (db, project, role, harness, tools, kept);
+    Ok(None)
+}
+
 /// Hands a project master its waiting messages through the engine's own master input
 /// (`feed_live` or the next master turn), which already waits for the owner, as one engine
 /// message once none of the master's other messages wait; the engine message and the

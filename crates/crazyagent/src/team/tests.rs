@@ -3280,7 +3280,7 @@ fn a_team_with_long_task_texts_still_fits_one_owner_reply() {
     }
     let full = status(&connection, &setup).unwrap();
     assert!(serde_json::to_vec(&full).unwrap().len() > STATUS_REPLY_BYTES_MAX);
-    let read = owner_status(&connection, &setup).unwrap();
+    let read = owner_status(&connection, &setup, None).unwrap();
     assert!(serde_json::to_vec(&read).unwrap().len() <= STATUS_REPLY_BYTES_MAX);
     assert_eq!(read.tasks.len(), full.tasks.len());
     for (task, whole) in read.tasks.iter().zip(&full.tasks) {
@@ -3290,7 +3290,7 @@ fn a_team_with_long_task_texts_still_fits_one_owner_reply() {
     }
     let cut = read.tasks[0].result.as_deref().unwrap();
     assert!(cut.ends_with(" more bytes]"), "{cut}");
-    let graph = owner_graph(&connection, &setup).unwrap();
+    let graph = owner_graph(&connection, &setup, None).unwrap();
     assert!(serde_json::to_vec(&graph).unwrap().len() <= STATUS_REPLY_BYTES_MAX);
 }
 
@@ -3459,7 +3459,7 @@ fn a_team_with_120_tasks_and_long_escalations_still_reads_within_one_owner_reply
     let full = status(&connection, &setup).unwrap();
     assert_eq!(full.tasks.len(), 100);
     assert!(!full.partial);
-    let read = owner_status(&connection, &setup).unwrap();
+    let read = owner_status(&connection, &setup, None).unwrap();
     assert!(serde_json::to_vec(&read).unwrap().len() <= STATUS_REPLY_BYTES_MAX);
     assert!(read.partial, "older history was left out to fit");
     assert!(read.tasks.len() < full.tasks.len());
@@ -3498,7 +3498,7 @@ fn a_team_with_120_tasks_and_long_escalations_still_reads_within_one_owner_reply
             "{text}"
         );
     }
-    let graph = owner_graph(&connection, &setup).unwrap();
+    let graph = owner_graph(&connection, &setup, None).unwrap();
     assert!(serde_json::to_vec(&graph).unwrap().len() <= STATUS_REPLY_BYTES_MAX);
 }
 
@@ -4145,7 +4145,7 @@ fn the_owner_graph_reads_its_tree_presence_unread_messages_and_overlaps_from_the
         "an unrelated agent claiming src/login.rs overlaps the lead and its worker"
     );
 
-    let graph = owner_graph(&connection, &setup).unwrap();
+    let graph = owner_graph(&connection, &setup, None).unwrap();
     let lead_node = format!("team-{lead}");
     let worker_node = format!("team-{worker}");
     let other_node = format!("team-{other}");
@@ -4270,7 +4270,7 @@ fn the_owner_messages_one_agent_through_the_coordination_layer_and_bad_text_is_r
             crate::coord::Receipt::Sent
         )]
     );
-    let graph = owner_graph(&connection, &setup).unwrap();
+    let graph = owner_graph(&connection, &setup, None).unwrap();
     assert_eq!(graph.messages.len(), 1);
     assert_eq!(graph.messages[0].to, format!("team-{lead}"));
 }
@@ -4315,7 +4315,7 @@ fn a_lead_s_idle_workers_stay_in_view_and_keep_their_tasks_once_every_agent_stop
     );
     let lead_node = format!("team-{lead}");
     let worker_nodes: Vec<String> = workers.iter().map(|id| format!("team-{id}")).collect();
-    let graph = owner_graph(&connection, &setup).unwrap();
+    let graph = owner_graph(&connection, &setup, None).unwrap();
     let tree: Vec<(&str, Option<&str>)> = graph
         .nodes
         .iter()
@@ -4370,7 +4370,7 @@ fn a_lead_s_idle_workers_stay_in_view_and_keep_their_tasks_once_every_agent_stop
         "{:#?}",
         stopped.agents
     );
-    let hidden = owner_graph(&connection, &setup).unwrap();
+    let hidden = owner_graph(&connection, &setup, None).unwrap();
     assert!(
         hidden.nodes.iter().all(|node| !node.kind.agent()),
         "Hide leaves only the master: {:#?}",
@@ -5082,4 +5082,85 @@ fn reask_empty_reply_is_on_until_the_owner_turns_it_off_and_on_again() {
         reask_empty_reply(&connection, &ProjectId::new("team-elsewhere").unwrap()).unwrap(),
         "the choice is per project"
     );
+}
+
+/// Owner 2026-11-05: under Native only the team status and graph say "Can't receive
+/// messages" on a tools-off Codex sub-agent of a keyless endpoint account, which runs a kept
+/// session with no bridge, and on no other agent: not one on a signed-in profile, woken per
+/// turn, nor one with tools on, another harness, the master, one whose account is gone, or
+/// any agent once the setting is Auto.
+#[test]
+fn only_a_tools_off_codex_agent_on_a_keyless_endpoint_says_it_cannot_receive_messages() {
+    use crate::coord::delivery::NO_CHANNEL;
+    use crate::coord::settings::{Delivery, HarnessKind, set_delivery};
+    let (_directory, connection) = database();
+    let setup = stored("team-no-channel", Vec::new());
+    let project = setup.project_id.clone();
+    connection
+        .execute_batch(
+            "CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, body TEXT NOT NULL);",
+        )
+        .unwrap();
+    connection
+        .execute("INSERT INTO projects VALUES (?1,'{}')", [project.as_str()])
+        .unwrap();
+    let access = access(
+        project.as_str(),
+        &["local-b", "codex-signed-in", "anthropic-local"],
+    );
+    let agent = |role: &str, harness: &str, tools: bool, account: &str| -> i64 {
+        connection
+            .execute(
+                "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms)
+                 VALUES (?1,?2,?3,?4,?5,'idle',1,1)",
+                params![project.as_str(), role, harness, tools, account],
+            )
+            .unwrap();
+        connection.last_insert_rowid()
+    };
+    let kept = agent("sub", "codex", false, "local-b");
+    agent("sub", "codex", false, "codex-signed-in");
+    agent("sub", "codex", true, "local-b");
+    agent("sub", "claude-code", false, "anthropic-local");
+    agent("master", "codex", false, "local-b");
+    agent("sub", "codex", false, "gone-account");
+    set_delivery(
+        &connection,
+        &project,
+        HarnessKind::Codex,
+        Delivery::NativeOnly,
+    )
+    .unwrap();
+    let noted = |access: Option<&ModelAccess>| -> (Vec<(i64, String)>, Vec<(Option<i64>, String)>) {
+        let status = owner_status(&connection, &setup, access).unwrap();
+        let graph = owner_graph(&connection, &setup, access).unwrap();
+        (
+            status
+                .agents
+                .iter()
+                .filter_map(|a| Some((a.id, a.message_note.clone()?)))
+                .collect(),
+            graph
+                .nodes
+                .iter()
+                .filter_map(|n| Some((n.agent, n.message_note.clone()?)))
+                .collect(),
+        )
+    };
+    assert_eq!(
+        noted(Some(&access)),
+        (
+            vec![(kept, NO_CHANNEL.to_owned())],
+            vec![(Some(kept), NO_CHANNEL.to_owned())]
+        )
+    );
+    assert_eq!(noted(None), (Vec::new(), Vec::new()));
+    for delivery in [Delivery::Auto, Delivery::TypingOnly] {
+        set_delivery(&connection, &project, HarnessKind::Codex, delivery).unwrap();
+        assert_eq!(
+            noted(Some(&access)),
+            (Vec::new(), Vec::new()),
+            "{delivery:?}"
+        );
+    }
 }

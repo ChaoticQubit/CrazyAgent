@@ -13525,7 +13525,7 @@ fn a_registered_native_teammate_shows_once_in_the_owner_graph_as_its_own_row() {
     )
     .unwrap();
 
-    let before = crate::team::owner_graph(&connection, &setup).unwrap();
+    let before = crate::team::owner_graph(&connection, &setup, None).unwrap();
     let pane_node = format!("teammate-{lead}-7");
     assert!(
         before.nodes.iter().any(|node| node.id == pane_node),
@@ -13541,7 +13541,7 @@ fn a_registered_native_teammate_shows_once_in_the_owner_graph_as_its_own_row() {
             |row| row.get(0),
         )
         .unwrap();
-    let graph = crate::team::owner_graph(&connection, &setup).unwrap();
+    let graph = crate::team::owner_graph(&connection, &setup, None).unwrap();
     let teammates: Vec<&crate::team::GraphNode> = graph
         .nodes
         .iter()

@@ -43,6 +43,7 @@ fn node(id: &str, kind: NodeKind, parent: Option<&str>, label: &str) -> GraphNod
         owner_questions: 0,
         no_worktree: false,
         hookless: false,
+        message_note: None,
     }
 }
 
@@ -846,6 +847,7 @@ fn finished_team() -> crate::team::TeamStatus {
         pane: None,
         hookless: false,
         instructions_changed: false,
+        message_note: None,
     };
     TeamStatus {
         project_id: project(),
@@ -1177,6 +1179,7 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
                 pane: None,
                 hookless: false,
                 instructions_changed: false,
+                message_note: None,
             })
             .collect(),
         tasks: [1, 2, 3, 4, 3]
@@ -3294,5 +3297,47 @@ fn a_hookless_agent_row_says_only_its_receipts_are_unavailable_for_its_account_k
     assert!(
         !tree[hooked + 1].contains("Receipts"),
         "a hooked agent keeps its account row only: {tree:#?}"
+    );
+}
+
+/// Owner 2026-11-05: the team tree prints the engine's message note under the agent it is
+/// on, wrapped whole, as the app shows the same string; an agent without one shows none.
+#[test]
+fn an_agent_the_delivery_setting_leaves_without_messages_says_so_under_its_row() {
+    let mut shell = fresh(120, 30);
+    let mut graph = graph();
+    graph.nodes[3].message_note = Some(crate::coord::delivery::NO_CHANNEL.to_owned());
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph),
+    });
+    let rows = render(&mut shell);
+    let tree: Vec<String> = rows.iter().map(|row| chars(row, 2, 46)).collect();
+    let trimmed = |row: &String| -> String {
+        row.trim_matches(|c: char| c == '│' || c == ' ' || c == '└' || c == '├' || c == '─')
+            .to_owned()
+    };
+    let under = tree
+        .iter()
+        .position(|row| row.contains("codex-1"))
+        .expect("the Codex agent is drawn");
+    assert!(
+        tree[under + 1].contains("ChatGPT Plus"),
+        "its account row stays first: {tree:#?}"
+    );
+    let words: Vec<String> = tree[under + 2..]
+        .iter()
+        .map(trimmed)
+        .take_while(|row| !row.is_empty())
+        .collect();
+    assert_eq!(
+        words.join(" "),
+        crate::coord::delivery::NO_CHANNEL,
+        "{tree:#?}"
+    );
+    assert!(
+        tree.iter()
+            .all(|row| !row.contains("Can't receive") || tree[under + 2..].contains(row)),
+        "only the noted agent says it: {tree:#?}"
     );
 }
