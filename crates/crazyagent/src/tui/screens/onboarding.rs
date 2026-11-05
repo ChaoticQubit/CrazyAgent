@@ -551,7 +551,7 @@ impl OnboardingPage {
         }
         if let Step::Failed { reason } = step {
             lines.extend(
-                wrap(reason, limit.saturating_sub(2))
+                wrap(&sanitize(reason), limit.saturating_sub(2))
                     .into_iter()
                     .map(|text| styled(format!("  {text}"), Role::Muted, theme)),
             );
@@ -649,7 +649,7 @@ impl OnboardingPage {
             && !review.onboarding.finished
         {
             lines.extend(
-                wrap(&format!("Mapping failed: {reason}"), limit)
+                wrap(&format!("Mapping failed: {}", sanitize(reason)), limit)
                     .into_iter()
                     .map(|text| styled(text, Role::Error, theme)),
             );
@@ -1070,7 +1070,8 @@ impl Screen for OnboardingPage {
 
 /// The running mapping try as the setup screen says it, in the desktop review's words: its
 /// number of tries, how many whole minutes it has run and why the try before it failed.
-/// Inputs: the try and the time now in ms. Output: one line, such as
+/// The earlier try's reason is engine text and goes through `sanitize`. Inputs: the try
+/// and the time now in ms. Output: one line, such as
 /// `Mapping, try 2 of 3, 2 min. Try 1 failed: Mapping agent ran out of time`.
 fn try_line(progress: &MappingTry, now_ms: i64) -> String {
     let minutes = now_ms.saturating_sub(progress.started_ms).max(0) / 60_000;
@@ -1085,8 +1086,9 @@ fn try_line(progress: &MappingTry, now_ms: i64) -> String {
     );
     match &progress.earlier {
         Some(earlier) => format!(
-            "{head} Try {} failed: {earlier}",
-            progress.number.saturating_sub(1)
+            "{head} Try {} failed: {}",
+            progress.number.saturating_sub(1),
+            sanitize(earlier)
         ),
         None => head,
     }
