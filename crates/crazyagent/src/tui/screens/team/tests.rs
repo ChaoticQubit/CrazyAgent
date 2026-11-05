@@ -1641,6 +1641,7 @@ fn harnessed(on: Option<bool>, saved: &str, running: Option<&str>) -> Arrival {
             pane: None,
             hookless: false,
             instructions_changed: false,
+            message_note: None,
         })
         .collect();
     team_read(status)
