@@ -125,7 +125,7 @@ fn verified_status(
     Ok(account)
 }
 
-async fn finish_failure(
+pub(in crate::engine) async fn finish_failure(
     session: CustodySession,
     channel: &mut NativeAuthCustodyChannel,
     error: EngineError,

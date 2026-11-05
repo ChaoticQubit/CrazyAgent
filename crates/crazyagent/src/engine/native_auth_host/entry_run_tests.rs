@@ -311,3 +311,52 @@ async fn native_auth_custodian_entry_run_session_check_rejects_real_source_or_ow
         .await;
     }
 }
+
+/// Row 3 (N-E1): a custodian whose profile guard refuses a replaced home seals its channel, and
+/// its failure report then keeps that cause. Claude Code's `finish_failure` and Codex's
+/// `observe_failure` each return `native_profile_custody_unsafe` on a real owner, not the
+/// sealed channel's `native_auth_recovery_required`, so the engine records the listed code.
+#[tokio::test]
+async fn native_auth_custodian_failure_report_keeps_the_cause_that_sealed_its_channel() {
+    for report in ["claude finish_failure", "codex observe_failure"] {
+        channel_case(move |case| async move {
+            let (committed, launch) = case.launch("entry-run-sealed-cause").await;
+            let mut channel = case.channel().await;
+            let guard = case.guard(&committed, NativeProfileUsePurpose::Authentication);
+            let session = CustodySession::new(guard);
+            let home = session.profile_path().unwrap();
+            std::fs::rename(&home, case.root.join("replaced-home")).unwrap();
+            std::fs::create_dir(&home).unwrap();
+            std::fs::set_permissions(&home, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let sealed = session.check(&mut channel).await.err().map(|error| error.0);
+            assert_eq!(sealed.as_deref(), Some("native_profile_custody_unsafe"));
+            let cause = EngineError("native_profile_custody_unsafe".into());
+            let reported = if report.starts_with("claude") {
+                crate::engine::native_auth_host::claude_auth::finish_failure(
+                    session,
+                    &mut channel,
+                    cause,
+                )
+                .await
+                .err()
+            } else {
+                let reported = crate::engine::native_auth_host::codex_auth::observe_failure(
+                    &session,
+                    &mut channel,
+                    cause,
+                )
+                .await
+                .err();
+                drop(session);
+                reported
+            };
+            assert_eq!(
+                reported.map(|error| error.0).as_deref(),
+                Some("native_profile_custody_unsafe"),
+                "{report}"
+            );
+            drop((channel, launch));
+        })
+        .await;
+    }
+}

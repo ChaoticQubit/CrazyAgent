@@ -365,7 +365,7 @@ impl Driver<'_> {
 /// failure code, so the custodian retires instead of leaving custody uncertain. An error
 /// from the engine or the channel is returned as it is, since custody is then in doubt.
 /// Inputs: the session, the channel and the driver's error. Output: done, or the error.
-async fn observe_failure(
+pub(in crate::engine) async fn observe_failure(
     session: &CustodySession,
     channel: &mut NativeAuthCustodyChannel,
     error: EngineError,
