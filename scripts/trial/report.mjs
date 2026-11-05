@@ -30,7 +30,7 @@ const RUN_COMMIT = /^[0-9a-f]{7,40}$/;
 const RUN_SOURCE_MAX = 300;
 const RUN_LOGS = /^[A-Za-z0-9_][A-Za-z0-9_.-]*(?:\/[A-Za-z0-9_][A-Za-z0-9_.-]*){0,3}$/;
 const RUN_LOGS_MAX = 200;
-const PS_LINES = [/\bPID\b.*\b(?:COMMAND|CMD|ARGS|COMM)\b/, /^\s*\d{1,7}\s+\S/, /^\S+\s+\d{1,7}\s+\d+\.\d+\s+\d+\.\d+\s/];
+const PS_LINES = [/\bPID\b.*\b(?:COMMAND|CMD|ARGS|COMM)\b/, /^\s*\d{1,7}\s+(?!\|)\S/, /^\S+\s+\d{1,7}\s+\d+\.\d+\s+\d+\.\d+\s/];
 const RETRO = [
   { trial: 1, audit: "audit.txt", plan: "trial-plan.md", timeline: "timeline.txt", tokens: "tokens.txt", limits: "limits-before.txt", frames: "frames", gif: "trial-1028.gif" },
   { trial: 2, audit: "audit-2.txt", plan: "trial-plan-2.md", timeline: "timeline-2.txt", tokens: "tokens-2.txt", limits: "limits-before-2.txt", frames: "frames-2", gif: "trial-2.gif" },
