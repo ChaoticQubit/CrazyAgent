@@ -1208,3 +1208,112 @@ fn hookless_agent_marks_its_node() {
         graph.nodes
     );
 }
+
+/// A stopped or failed sub-agent or teammate row whose host still keeps its last screen names
+/// that terminal, so its card opens the finished screen (N-D21). Live nodes, stopped leads, a
+/// teammate pane of its lead and a finished row whose screen is gone keep what `graph` gave.
+#[test]
+fn a_finished_worker_whose_last_screen_is_kept_names_its_terminal() {
+    let mut status = tree();
+    status.show_finished = true;
+    for (id, role, parent, state) in [
+        (10, AgentRole::Sub, 3, AgentStatus::Stopped),
+        (11, AgentRole::Sub, 7, AgentStatus::Failed),
+        (12, AgentRole::Teammate, 3, AgentStatus::Stopped),
+        (13, AgentRole::Sub, 3, AgentStatus::Stopped),
+    ] {
+        status.agents.push(TeamAgent {
+            parent: Some(parent),
+            finished: true,
+            pane: (role == AgentRole::Teammate).then(|| "%14".into()),
+            ..agent(id, role, "codex", state)
+        });
+    }
+    let kept: BTreeSet<AgentId> = [3, 4, 5, 7, 10, 11, 12]
+        .into_iter()
+        .map(|id| AgentId::team(id).unwrap())
+        .collect();
+    let before = graph(&status, &none());
+    let mut after = before.clone();
+    name_kept(&mut after, |agent| kept.contains(agent));
+    assert_eq!(after.nodes.len(), before.nodes.len());
+    let mut named: Vec<(&str, Option<String>)> = after
+        .nodes
+        .iter()
+        .zip(&before.nodes)
+        .filter(|(now, was)| now != was)
+        .map(|(now, _)| {
+            (
+                now.id.as_str(),
+                now.terminal.as_ref().map(ToString::to_string),
+            )
+        })
+        .collect();
+    named.sort();
+    assert_eq!(
+        named,
+        [
+            ("team-10", Some("team-10".to_owned())),
+            ("team-11", Some("team-11".to_owned())),
+            ("team-12", Some("team-12".to_owned())),
+        ],
+        "only the finished sub-agents and the teammate row with a kept screen gain a terminal"
+    );
+    let terminal = |graph: &TeamGraph, id: &str| {
+        graph
+            .nodes
+            .iter()
+            .find(|node| node.id == id)
+            .map(|node| node.terminal.clone())
+    };
+    assert_eq!(
+        terminal(&after, "team-13"),
+        Some(None),
+        "no screen kept, no terminal"
+    );
+    assert_eq!(
+        terminal(&after, "team-4"),
+        Some(None),
+        "a stopped lead keeps none"
+    );
+    assert_eq!(
+        terminal(&after, "team-5"),
+        Some(None),
+        "a failed lead keeps none"
+    );
+    assert_eq!(
+        terminal(&after, "teammate-3-13"),
+        Some(None),
+        "an ended pane of its lead is no row of its own"
+    );
+    assert_eq!(
+        terminal(&after, "team-7"),
+        Some(Some(AgentId::team(7).unwrap()))
+    );
+}
+
+/// A host that claims more kept screens than any host keeps trips the bound that keeps the
+/// named graph inside one owner reply.
+#[test]
+#[should_panic(expected = "no host keeps more last screens")]
+fn naming_more_kept_screens_than_a_host_keeps_is_refused() {
+    let mut status = tree();
+    status.show_finished = true;
+    status.agents.extend(
+        (0..=crate::terminal::KEPT_MAX as i64).map(|offset| TeamAgent {
+            parent: Some(3),
+            finished: true,
+            ..agent(100 + offset, AgentRole::Sub, "codex", AgentStatus::Failed)
+        }),
+    );
+    let mut shown = graph(&status, &none());
+    assert!(
+        shown
+            .nodes
+            .iter()
+            .filter(|node| node.status == Some(AgentStatus::Failed) && node.kind == NodeKind::Sub)
+            .count()
+            > crate::terminal::KEPT_MAX
+    );
+    name_kept(&mut shown, |_| true);
+}

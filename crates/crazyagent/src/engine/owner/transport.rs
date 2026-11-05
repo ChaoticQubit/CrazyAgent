@@ -1626,7 +1626,10 @@ impl Engine {
             },
             OwnerOperation::Read { query } => OwnerResponse::Read {
                 state: self
-                    .owner_job(|reply| Job::OwnerRead(a, query.clone(), reply))
+                    .kept_named(
+                        self.owner_job(|reply| Job::OwnerRead(a, query.clone(), reply))
+                            .await?,
+                    )
                     .await?,
             },
             OwnerOperation::Reconcile {

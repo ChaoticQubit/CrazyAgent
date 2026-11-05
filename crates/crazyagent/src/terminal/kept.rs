@@ -6,7 +6,7 @@ use std::sync::{Mutex, MutexGuard, PoisonError};
 
 /// How many ended terminals keep their last screen: two full projects of agents. Past it the
 /// screen kept longest ago is forgotten first.
-const KEPT_MAX: usize = 32;
+pub(crate) const KEPT_MAX: usize = 32;
 /// The largest last screen, label included, a host keeps; a larger screen is not kept.
 const KEPT_BYTES_MAX: usize = VIEWER_BUFFER_BYTES_MAX;
 
@@ -55,6 +55,11 @@ impl LastScreens {
     /// Forgets an agent's kept screen, as its next run starts. Input: the agent. Output: none.
     fn forget(&mut self, agent: &AgentId) {
         self.kept.retain(|kept| kept.agent != *agent);
+    }
+
+    /// Tells whether an agent's last screen is kept. Input: the agent. Output: the answer.
+    fn holds(&self, agent: &AgentId) -> bool {
+        self.kept.iter().any(|kept| kept.agent == *agent)
     }
 
     /// Opens a finished view of an agent's kept screen: its size, the screen and no output
@@ -118,6 +123,10 @@ impl<H: Host> Host for LastScreenHost<H> {
 
     fn screen(&self, agent: &AgentId) -> Result<Vec<u8>, HostError> {
         self.inner.screen(agent)
+    }
+
+    fn kept(&self, agent: &AgentId) -> bool {
+        self.screens().holds(agent)
     }
 
     fn snapshot(&self, agent: &AgentId) -> Result<TerminalStream, HostError> {
@@ -349,5 +358,43 @@ mod tests {
         assert_eq!(host.alive().unwrap(), vec![named.clone()]);
         assert!(host.screens().view(&named).is_none());
         host.kill(&named).unwrap();
+    }
+
+    /// The host says it keeps an agent's screen only between that agent's kill and its next
+    /// run, never for a live terminal or an agent that never ran (N-D21).
+    #[cfg(unix)]
+    #[test]
+    fn a_host_keeps_a_screen_only_between_a_kill_and_the_next_run() {
+        use crate::terminal::tmux::{SOCKET, Tmux, installed};
+        use std::os::unix::fs::PermissionsExt;
+
+        let home = tempfile::tempdir().unwrap();
+        let folder = home.path().join("terminal");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let program = installed(home.path()).expect("tmux is required for this test");
+        let _server = Server(program.clone(), folder.join(SOCKET));
+        let host = LastScreenHost::new(Tmux::open(Some(program), &folder));
+        let (named, never) = (agent(9), agent(10));
+        let run = |text: &str| InteractiveCommand {
+            argv: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                format!("printf '{text}\\n'; exec /bin/sleep 30"),
+            ],
+            cwd: home.path().to_path_buf(),
+            env: Vec::new(),
+            transcript: crate::harnesses::interactive::Transcript::Unavailable,
+        };
+        assert!(!host.kept(&named), "nothing is kept before a run");
+        host.spawn(&named, &run("first run")).unwrap();
+        assert!(!host.kept(&named), "a live terminal keeps no last screen");
+        host.kill(&named).unwrap();
+        assert!(host.kept(&named), "an ended terminal keeps its last screen");
+        assert!(!host.kept(&never), "an agent that never ran keeps nothing");
+        host.spawn(&named, &run("second run")).unwrap();
+        assert!(!host.kept(&named), "a new run forgets the screen kept");
+        host.kill(&named).unwrap();
+        assert!(host.kept(&named));
     }
 }

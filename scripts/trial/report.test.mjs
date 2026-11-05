@@ -315,7 +315,7 @@ test("a live pass folder becomes one row per listed test with its group, what it
       "passed 1, failed or blocked 2",
       "",
     ].join("\n"));
-    await put(logs, "claude_bare_loads_a_plugin_dir.log", "running 1 test\nPASS-LOG-BODY\ntest result: ok. 1 passed\n");
+    await put(logs, "claude_bare_loads_a_plugin_dir.log", "running 1 test\ntest claude_bare_loads_a_plugin_dir ... ok\nPASS-LOG-BODY\ntest result: ok. 1 passed\n");
     await put(logs, "engine.native.keychain.tests.private_home_gets_its_own_keychain.log", [
       ...Array.from({ length: 50 }, (_, n) => `setup line ${n}`),
       "thread 'engine::native::keychain::tests::private_home_gets_its_own_keychain' panicked at src/engine/native/keychain.rs:40:5:",
@@ -340,6 +340,301 @@ test("a live pass folder becomes one row per listed test with its group, what it
     assert.ok(html.includes("temporary keychains; keep the app idle"), "each group says what it needs");
     for (const value of [SECRETS.anthropic, SECRETS.email]) assert.ok(!html.includes(value));
     assert.ok(html.includes("1 passed, 1 failed, 1 blocked, 1 not run"));
+  } finally {
+    await rm(logs, { recursive: true });
+    await rm(repo, { recursive: true });
+  }
+});
+
+function liveScript(rows) {
+  return ["#!/bin/bash", "TESTS=$(", "  cat <<'EOF'", ...rows, "EOF", ")", ""].join("\n");
+}
+
+function okLog(name) {
+  return `running 1 test\ntest ${name} ... ok\n\ntest result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2990 filtered out; finished in 0.45s\n`;
+}
+
+function logName(name) {
+  return `${name.replaceAll("::", ".")}.log`;
+}
+
+function liveRows(html) {
+  return [...html.matchAll(/<tr class="test"><td>\d+<\/td><td>(\w+)<\/td><td><code>([^<]+)<\/code><\/td><td>.*?<\/td><td><span class="result [\w-]+">([A-Z ]+)<\/span>(.*?)<\/td><td>([^<]*)<\/td><\/tr>/g)]
+    .map(([, group, name, result, run, seconds]) => [group, name.split("::").pop(), result, run.replace(/<[^>]+>/g, "").trim(), seconds]);
+}
+
+test("LP14-1: a test that reports BLOCKED after it ran keeps its reason and its duration", async () => {
+  const logs = await folder("live-blocked-");
+  const repo = await folder("live-blocked-repo-");
+  try {
+    const script = join(repo, "live-pass.sh");
+    await put(repo, "live-pass.sh", liveScript([
+      "local|codex_bridge_live|a_real_codex_app_takes_coord_messages|120|codex-app",
+      "profile|lib|team::runtime::live_failover_tests::a_rate_limited_master_fails_over|60|profile",
+      "profile|lib|team::runtime::live_network_none_tests::an_api_key_turn_stays_offline|60|codex-key",
+    ]));
+    await put(logs, "summary.txt", [
+      "== local: no account, no tokens",
+      "BLOCKED a_real_codex_app_takes_coord_messages 60s: prerequisite: /Applications/Codex.app is not installed",
+      "== profile: holds a shared lock on the owner's profile",
+      "BLOCKED team::runtime::live_failover_tests::a_rate_limited_master_fails_over 2s: BLOCKED: no account at its limit",
+      "BLOCKED team::runtime::live_network_none_tests::an_api_key_turn_stays_offline: BLOCKED: no Codex key profile",
+      "passed 0, failed or blocked 3",
+      "",
+    ].join("\n"));
+    const html = renderReport(await readLivePass(logs, { script, repo }));
+    assert.deepEqual(liveRows(html), [
+      ["local", "a_real_codex_app_takes_coord_messages", "BLOCKED", "", "60 s"],
+      ["profile", "a_rate_limited_master_fails_over", "BLOCKED", "", "2 s"],
+      ["profile", "an_api_key_turn_stays_offline", "BLOCKED", "", ""],
+    ]);
+    assert.ok(html.includes("prerequisite: /Applications/Codex.app is not installed"), "a blocked test after its run shows why");
+    assert.ok(html.includes("no account at its limit") && !html.includes("BLOCKED: no account"), "the test's own BLOCKED mark is not repeated");
+    assert.ok(html.includes("0 passed, 0 failed, 3 blocked, 0 not run"));
+  } finally {
+    await rm(logs, { recursive: true });
+    await rm(repo, { recursive: true });
+  }
+});
+
+test("LP14-2: runs.json merges the listed summaries in order, names the commit of each row's run and lists the runs on the cover", async () => {
+  const logs = await folder("live-runs-");
+  const repo = await folder("live-runs-repo-");
+  try {
+    const script = join(repo, "live-pass.sh");
+    await put(repo, "live-pass.sh", liveScript([
+      "local|lib|launch_context::tests::a_local_turn_answers|30|none",
+      "profile|lib|team::runtime::live_claude_tests::under_stop_ends_its_command|60|profile",
+      "profile|lib|team::runtime::live_native_lead_tests::a_teammate_cannot_plant|60|profile",
+    ]));
+    await put(logs, "summary-local.txt", "== local: no account, no tokens\nPASS launch_context::tests::a_local_turn_answers 3s\npassed 1, failed or blocked 0\n");
+    await put(logs, "summary-profile.txt", [
+      "== profile: holds a shared lock on the owner's profile",
+      `FAIL team::runtime::live_claude_tests::under_stop_ends_its_command 8s exit 101: ${logs}/team.runtime.live_claude_tests.under_stop_ends_its_command.log`,
+      "BLOCKED team::runtime::live_native_lead_tests::a_teammate_cannot_plant: BLOCKED: not on this checkout",
+      "passed 0, failed or blocked 2",
+      "",
+    ].join("\n"));
+    await put(logs, "summary-rerun.txt", "== profile: holds a shared lock on the owner's profile\nPASS team::runtime::live_claude_tests::under_stop_ends_its_command 6s\npassed 1, failed or blocked 0\n");
+    await put(logs, "summary.txt", "== profile: a later run of another kind\nPASS team::runtime::live_native_lead_tests::a_teammate_cannot_plant 1s\n");
+    await put(logs, "profile/team.runtime.live_claude_tests.under_stop_ends_its_command.log", "thread 'x' panicked at src/x.rs:1:1:\nRED-RUN-PROCESS-LIST\n");
+    await put(logs, `local/${logName("launch_context::tests::a_local_turn_answers")}`, okLog("launch_context::tests::a_local_turn_answers"));
+    await put(logs, `rerun/${logName("team::runtime::live_claude_tests::under_stop_ends_its_command")}`, okLog("team::runtime::live_claude_tests::under_stop_ends_its_command"));
+    const runs = [
+      { file: "summary-local.txt", commit: "afd69922", source: "local group on the stage", logs: "local" },
+      { file: "summary-profile.txt", mtime: "20261104-155848", commit: "afd69922", source: "profile group on the stage", logs: "profile" },
+      { file: "summary-rerun.txt", commit: "b2d2b49e", source: "under_stop rerun on test/live-ps-piped", logs: "rerun" },
+    ];
+    await put(logs, "runs.json", JSON.stringify(runs));
+    const html = renderReport(await readLivePass(logs, { script, repo }));
+    assert.deepEqual(liveRows(html), [
+      ["local", "a_local_turn_answers", "PASS", "afd69922", "3 s"],
+      ["profile", "under_stop_ends_its_command", "PASS", "b2d2b49e", "6 s"],
+      ["profile", "a_teammate_cannot_plant", "BLOCKED", "afd69922", ""],
+    ]);
+    assert.ok(!html.includes("RED-RUN-PROCESS-LIST"), "a result a later run replaced shows no log");
+    assert.ok(html.includes("2 passed, 0 failed, 1 blocked, 0 not run"), "summary.txt is not read when runs.json lists the runs");
+    const cover = html.slice(0, html.indexOf('<section class="live">'));
+    for (const run of runs) assert.ok(cover.includes(run.file) && cover.includes(run.commit) && cover.includes(run.source), run.file);
+    for (const [bad, why] of [
+      [[{ ...runs[0], file: "../summary-local.txt" }], "a file outside the folder"],
+      [[{ ...runs[0], file: "notes.txt" }], "a file that is not a summary"],
+      [[{ ...runs[0], commit: "afd6992g" }], "a commit that is not a hash"],
+      [[{ ...runs[0], file: "summary-missing.txt" }], "a missing summary"],
+      [[], "no runs"],
+      [{ file: "summary-local.txt" }, "not a list"],
+    ]) {
+      await put(logs, "runs.json", JSON.stringify(bad));
+      await assert.rejects(readLivePass(logs, { script, repo }), /report_live_runs_invalid/, why);
+    }
+  } finally {
+    await rm(logs, { recursive: true });
+    await rm(repo, { recursive: true });
+  }
+});
+
+test("D-M1: a PASS row counts as passed only when its own log shows that test passing; otherwise it reads UNPROVEN", async () => {
+  const logs = await folder("live-unproven-");
+  const repo = await folder("live-unproven-repo-");
+  try {
+    const script = join(repo, "live-pass.sh");
+    const names = ["proven", "no_log", "other_test_log", "no_result_line", "blocked_first"].map((name) => `a::tests::${name}`);
+    await put(repo, "live-pass.sh", liveScript(names.map((name) => `local|lib|${name}|30|none`)));
+    await put(logs, "summary.txt", [
+      "== local: no account, no tokens",
+      "PASS a::tests::proven 3s",
+      "PASS a::tests::no_log 4s",
+      "PASS a::tests::other_test_log 5s",
+      "PASS a::tests::no_result_line 6s",
+      "BLOCKED a::tests::blocked_first: BLOCKED: needs a profile",
+      "",
+    ].join("\n"));
+    await put(logs, logName("a::tests::proven"), okLog("a::tests::proven"));
+    await put(logs, logName("a::tests::other_test_log"), okLog("a::tests::proven"));
+    await put(logs, logName("a::tests::no_result_line"), "running 1 test\ntest a::tests::no_result_line ... ok\n");
+    const html = renderReport(await readLivePass(logs, { script, repo }));
+    assert.deepEqual(liveRows(html), [
+      ["local", "proven", "PASS", "", "3 s"],
+      ["local", "no_log", "UNPROVEN", "", "4 s"],
+      ["local", "other_test_log", "UNPROVEN", "", "5 s"],
+      ["local", "no_result_line", "UNPROVEN", "", "6 s"],
+      ["local", "blocked_first", "BLOCKED", "", ""],
+    ]);
+    assert.ok(html.includes("missing: a.tests.no_log.log"), "a missing log is named");
+    assert.ok(html.includes("1 passed, 0 failed, 1 blocked, 3 unproven, 0 not run"), "an unproven PASS is not counted as passed");
+  } finally {
+    await rm(logs, { recursive: true });
+    await rm(repo, { recursive: true });
+  }
+});
+
+test("D-M1: with runs.json each row reads its log from its own run's folder, never from another run or the folder root", async () => {
+  const logs = await folder("live-bound-");
+  const repo = await folder("live-bound-repo-");
+  try {
+    const script = join(repo, "live-pass.sh");
+    const local = "launch_context::tests::a_local_turn_answers";
+    const device = "github::tests::device_sign_in";
+    const stop = "team::runtime::live_claude_tests::under_stop_ends_its_command";
+    const plant = "team::runtime::live_native_lead_tests::a_teammate_cannot_plant";
+    await put(repo, "live-pass.sh", liveScript([`local|lib|${local}|30|none`, `keychain|lib|${device}|30|host`, `profile|lib|${stop}|60|profile`, `profile|lib|${plant}|60|profile`]));
+    await put(logs, "summary-local.txt", `== local: no account, no tokens\nPASS ${local} 3s\n`);
+    await put(logs, "summary-keychain.txt", `== keychain: temporary keychains\nFAIL ${device} 6s exit 101: ${logs}/keychain/${logName(device)}\n`);
+    await put(logs, "summary-profile.txt", `== profile: holds a shared lock on the owner's profile\nFAIL ${stop} 8s exit 101: ${logs}/profile/${logName(stop)}\nPASS ${plant} 13s\n`);
+    await put(logs, "summary-rerun.txt", `== profile: holds a shared lock on the owner's profile\nPASS ${stop} 6s\n`);
+    await put(logs, `local/${logName(local)}`, okLog(local));
+    await put(logs, `keychain/${logName(device)}`, "thread 'github::tests::device_sign_in' panicked at src/github.rs:240:5:\nassertion failed: keychain_run_fail\n");
+    await put(logs, logName(device), "thread 'github::tests::device_sign_in' panicked at src/other.rs:1:1:\nassertion failed: root_log_fail\n");
+    await put(logs, `profile/${logName(stop)}`, "thread 'x' panicked at src/x.rs:1:1:\nassertion failed: red_run_process_list\n");
+    await put(logs, `rerun/${logName(stop)}`, okLog(stop));
+    await put(logs, logName(plant), okLog(plant));
+    await put(logs, `rerun/${logName(plant)}`, okLog(plant));
+    const runs = [
+      { file: "summary-local.txt", commit: "afd69922", source: "local group", logs: "local" },
+      { file: "summary-keychain.txt", commit: "afd69922", source: "keychain group", logs: "keychain" },
+      { file: "summary-profile.txt", commit: "afd69922", source: "profile group", logs: "profile" },
+      { file: "summary-rerun.txt", commit: "b2d2b49e", source: "under_stop rerun", logs: "rerun" },
+    ];
+    await put(logs, "runs.json", JSON.stringify(runs));
+    const html = renderReport(await readLivePass(logs, { script, repo }));
+    assert.deepEqual(liveRows(html), [
+      ["local", "a_local_turn_answers", "PASS", "afd69922", "3 s"],
+      ["keychain", "device_sign_in", "FAIL", "afd69922", "6 s"],
+      ["profile", "under_stop_ends_its_command", "PASS", "b2d2b49e", "6 s"],
+      ["profile", "a_teammate_cannot_plant", "UNPROVEN", "afd69922", "13 s"],
+    ]);
+    assert.ok(html.includes("keychain_run_fail") && !html.includes("root_log_fail"), "a failure shows its own run's log, not the root log of the same name");
+    assert.ok(!html.includes("red_run_process_list"), "a result a later run replaced shows no log of the earlier run");
+    assert.ok(html.includes(`missing: profile/${logName(plant)}`), "a row whose run folder lacks its log names the missing log, though another run has one");
+    assert.ok(html.includes("2 passed, 1 failed, 0 blocked, 1 unproven, 0 not run"));
+    await mkdir(join(logs, "plain"), { recursive: true });
+    await symlink(join(logs, "local"), join(logs, "linked"));
+    const { logs: _dropped, ...unbound } = runs[0];
+    for (const [bad, why] of [
+      [[unbound], "a run without its log folder"],
+      [[{ ...runs[0], logs: "../local" }], "a log folder outside the folder"],
+      [[{ ...runs[0], logs: join(logs, "local") }], "an absolute log folder"],
+      [[{ ...runs[0], logs: "summary-local.txt" }], "a log folder that is a file"],
+      [[{ ...runs[0], logs: "linked" }], "a log folder that is a link"],
+      [[{ ...runs[0], logs: "nowhere" }], "a missing log folder"],
+    ]) {
+      await put(logs, "runs.json", JSON.stringify(bad));
+      await assert.rejects(readLivePass(logs, { script, repo }), /report_live_runs_invalid/, why);
+    }
+  } finally {
+    await rm(logs, { recursive: true });
+    await rm(repo, { recursive: true });
+  }
+});
+
+test("F-L1: two runs that name one log folder are refused, however the second spells it", async () => {
+  const logs = await folder("live-shared-logs-");
+  const repo = await folder("live-shared-logs-repo-");
+  try {
+    const script = join(repo, "live-pass.sh");
+    const name = "launch_context::tests::a_local_turn_answers";
+    await put(repo, "live-pass.sh", liveScript([`local|lib|${name}|30|none`]));
+    await put(logs, "summary-first.txt", `== local: no account, no tokens\nPASS ${name} 3s\n`);
+    await put(logs, "summary-second.txt", `== local: no account, no tokens\nPASS ${name} 4s\n`);
+    await put(logs, `local/inner/${logName(name)}`, okLog(name));
+    await put(logs, `other/inner/${logName(name)}`, okLog(name));
+    await symlink(join(logs, "local"), join(logs, "alias"));
+    const run = (file, folderName) => ({ file, commit: "afd69922", source: file, logs: folderName });
+    await put(logs, "runs.json", JSON.stringify([run("summary-first.txt", "local/inner"), run("summary-second.txt", "other/inner")]));
+    assert.deepEqual(liveRows(renderReport(await readLivePass(logs, { script, repo }))).map((row) => row[2]), ["PASS"], "two runs with their own folders are read");
+    for (const [second, why] of [["local/inner", "the same folder named twice"], ["alias/inner", "the same folder reached through a linked parent"]]) {
+      await put(logs, "runs.json", JSON.stringify([run("summary-first.txt", "local/inner"), run("summary-second.txt", second)]));
+      await assert.rejects(readLivePass(logs, { script, repo }), /report_live_runs_invalid: summary-second\.txt logs .*already/, why);
+    }
+  } finally {
+    await rm(logs, { recursive: true });
+    await rm(repo, { recursive: true });
+  }
+});
+
+test("PS-2: a compile-break excerpt keeps rustc's numbered source lines, and a macOS ps -ef row after it is still left out", async () => {
+  const logs = await folder("live-rustc-");
+  const repo = await folder("live-rustc-repo-");
+  try {
+    const script = join(repo, "live-pass.sh");
+    const name = "team::runtime::live_claude_tests::under_stop_ends";
+    await put(repo, "live-pass.sh", liveScript([`profile|lib|${name}|60|profile`]));
+    await put(logs, "summary.txt", `== profile: holds a shared lock\nFAIL ${name} 8s exit 101: ${logs}/${logName(name)}\n`);
+    await put(logs, logName(name), [
+      "   Compiling crazyagent v0.2.0",
+      "error[E0308]: mismatched types",
+      "  --> src/team/runtime.rs:12:5",
+      "   |",
+      "12 |     let x: u8 = code_line_mark();",
+      "   |                 ^^^^^^^^^^^^^^^^ expected `u8`, found `u32`",
+      "...",
+      "140 |   fn second_line_mark() {",
+      "",
+      "UID   PID  PPID   C STIME   TTY           TIME CMD",
+      "  501 41234     1   0  4:25PM ttys001    0:00.01 /usr/bin/argv_mark_four --print",
+      "error: could not compile `crazyagent` (lib test) due to 1 previous error",
+      "",
+    ].join("\n"));
+    const html = renderReport(await readLivePass(logs, { script, repo }));
+    assert.ok(html.includes("12 |     let x: u8 = code_line_mark();") && html.includes("140 |   fn second_line_mark() {"), "rustc's numbered source lines stay");
+    assert.ok(!html.includes("argv_mark_four") && html.includes("[process list left out: 2 lines]"), "the ps -ef header and row are left out");
+  } finally {
+    await rm(logs, { recursive: true });
+    await rm(repo, { recursive: true });
+  }
+});
+
+test("D-M1: a failure excerpt leaves out process-list lines, so a dumped ps listing never reaches the report", async () => {
+  const logs = await folder("live-ps-");
+  const repo = await folder("live-ps-repo-");
+  try {
+    const script = join(repo, "live-pass.sh");
+    const stop = "team::runtime::live_claude_tests::under_stop_ends";
+    await put(repo, "live-pass.sh", liveScript([`profile|lib|${stop}|60|profile`]));
+    await put(logs, "summary.txt", `== profile: holds a shared lock\nFAIL ${stop} 8s exit 101: ${logs}/${logName(stop)}\n`);
+    await put(logs, logName(stop), [
+      "running 1 test",
+      `test ${stop} ... FAILED`,
+      "",
+      `---- ${stop} stdout ----`,
+      "  PID  PPID COMMAND",
+      "41234     1 /opt/homebrew/bin/claude --print --model argv_mark_one",
+      `thread '${stop}' panicked at src/team/runtime.rs:10:5:`,
+      "assertion failed: the background command ended with its task",
+      "41240 41234 /bin/sh -c sleep 600 argv_mark_two",
+      "41241 41240 sleep 600",
+      "owner   41250   0.0  0.1 410000 12000 s001  S+   4:25PM   0:00.01 /usr/bin/argv_mark_three --verbose",
+      "",
+      "failures:",
+      "test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 2990 filtered out; finished in 5.68s",
+      "",
+    ].join("\n"));
+    const html = renderReport(await readLivePass(logs, { script, repo }));
+    assert.deepEqual(liveRows(html).map((row) => row[2]), ["FAIL"]);
+    assert.ok(html.includes("panicked at src/team/runtime.rs:10:5") && html.includes("assertion failed: the background command ended with its task"), "the panic and its message stay");
+    assert.ok(html.includes("test result: FAILED. 0 passed; 1 failed"), "the cargo result line stays");
+    for (const shown of ["argv_mark_one", "argv_mark_two", "argv_mark_three", "sleep 600", "PPID"]) assert.ok(!html.includes(shown), shown);
+    assert.ok(html.includes("[process list left out: 2 lines]") && html.includes("[process list left out: 3 lines]"), "each left-out run of lines is marked");
   } finally {
     await rm(logs, { recursive: true });
     await rm(repo, { recursive: true });

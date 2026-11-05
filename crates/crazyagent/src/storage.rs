@@ -100,6 +100,7 @@ pub(crate) enum Job {
     ),
     NativeAuthCustodyReleased(
         Arc<NativeAuthDispatch>,
+        Option<String>,
         oneshot::Sender<Result<Option<NativeAuthFact>, EngineError>>,
     ),
     NativeAuth(
@@ -292,6 +293,7 @@ impl Storage {
                 let _ = ready_send.send(Ok(config.clone()));
                 let mut owner_runtime = None;
                 let mut ended_custody: Option<NativeAuthFact> = None;
+                let mut ended_failure: Option<String> = None;
                 let mut model_access_snapshot = None;
                 let mut home_watch = projects_home::WatchSlot::default();
                 if !readonly {
@@ -381,16 +383,18 @@ impl Storage {
                             };
                             let _ = reply.send(result);
                         }
-                        Job::NativeAuthCustodyReleased(dispatch, reply) => {
+                        Job::NativeAuthCustodyReleased(dispatch, named, reply) => {
                             let result = if readonly {
                                 Err(error("native_auth_readonly"))
                             } else {
                                 ended_custody = Some(dispatch.fact().clone());
+                                ended_failure = named;
                                 native_auth::recover_native_auth(
                                     &mut connection,
                                     custody.as_mut().unwrap(),
                                     &native_auth::dispatch_host(&dispatch),
                                     Some(dispatch.fact()),
+                                    ended_failure.as_deref(),
                                 )
                             };
                             let _ = reply.send(result);
@@ -405,6 +409,7 @@ impl Storage {
                                     sources.as_ref(),
                                     custody.as_mut().unwrap(),
                                     ended_custody.as_ref(),
+                                    ended_failure.as_deref(),
                                     &admission,
                                     command,
                                 )
@@ -521,6 +526,7 @@ impl Storage {
                                     &mut connection,
                                     custody.as_mut().unwrap(),
                                     &started.host,
+                                    None,
                                     None,
                                 ) {
                                     eprintln!("native_auth_recovery_deferred cause={}", error.0);

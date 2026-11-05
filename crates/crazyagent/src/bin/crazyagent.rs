@@ -93,7 +93,7 @@ fn main() -> ExitCode {
         return match run_native_auth_custodian(&args) {
             Ok(()) => ExitCode::SUCCESS,
             Err(error) => {
-                eprintln!("{error}");
+                let _ = writeln!(io::stderr(), "{error}");
                 ExitCode::FAILURE
             }
         };

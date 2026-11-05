@@ -5,7 +5,7 @@ use super::{
 use crate::coord::{AgentState, Party, Presence, Receipt, Snapshot, Waiting};
 use crate::engine::EngineError;
 use crate::protocol::ProjectId;
-use crate::terminal::{AgentId, PANES_PER_PROJECT_MAX};
+use crate::terminal::{AGENT_ID_BYTES_MAX, AgentId, KEPT_MAX, PANES_PER_PROJECT_MAX};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -26,6 +26,11 @@ pub const OVERLAP_REASON_BYTES_MAX: usize = 160;
 pub const STOPPED_SHOWN_MAX: usize = PANES_PER_PROJECT_MAX;
 const TEAMMATE_PREFIX: &str = "teammate-";
 const INSTRUCTIONS_CHANGED: &str = "Instructions changed";
+
+const _: () = assert!(
+    KEPT_MAX * (AGENT_ID_BYTES_MAX - 2)
+        <= (crate::protocol::FRAME_BYTES_MAX - super::STATUS_REPLY_BYTES_MAX) / 2
+);
 
 /// What one node of the who-leads-whom tree stands for (DEC-104 Q16): the master, a harness
 /// lead the master started, a sub-agent a lead started, or a native teammate a lead's
@@ -255,6 +260,35 @@ pub fn branches(
     }
     assert!(found.len() <= status.agents.len());
     Ok(found)
+}
+
+/// Names the terminal of each stopped or failed sub-agent and teammate row whose host still
+/// keeps its last screen, so its card opens that finished screen read-only (N-D21). A live,
+/// lead or master node, a teammate pane of its lead and a row whose screen is gone keep what
+/// `graph` gave them. Takes the graph and whether the host keeps an agent's last screen.
+/// Returns nothing; at most `KEPT_MAX` nodes gain a name, as no host keeps more screens.
+pub fn name_kept(graph: &mut TeamGraph, kept: impl Fn(&AgentId) -> bool) {
+    let mut named = 0;
+    for node in &mut graph.nodes {
+        let finished = matches!(node.kind, NodeKind::Sub | NodeKind::Teammate)
+            && node.status.is_some_and(|status| !status.live())
+            && node.terminal.is_none();
+        let Some(terminal) = node
+            .agent
+            .filter(|_| finished)
+            .and_then(|id| AgentId::team(id).ok())
+        else {
+            continue;
+        };
+        if kept(&terminal) {
+            node.terminal = Some(terminal);
+            named += 1;
+        }
+    }
+    assert!(
+        named <= KEPT_MAX,
+        "no host keeps more last screens than KEPT_MAX"
+    );
 }
 
 /// Builds a project's who-leads-whom graph from its team status and the facts read beside

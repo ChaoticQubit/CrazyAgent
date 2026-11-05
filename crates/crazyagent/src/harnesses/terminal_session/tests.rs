@@ -275,6 +275,58 @@ mod own_turns {
         pane.session.follow_own_turns();
         pane.session.follow_every_turn();
     }
+
+    const BACKGROUND_USE: &str = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_bg","name":"Bash","input":{"command":"sleep 40","run_in_background":true}}],"stop_reason":"tool_use"}}"#;
+    const BACKGROUND_STARTED: &str = r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_bg","content":"Command running in background with ID: bgcheck1."}]},"toolUseResult":{"backgroundTaskId":"bgcheck1"}}"#;
+    const BACKGROUND_NOTICE: &str = r#"{"type":"user","message":{"content":"<task-notification>\n<task-id>bgcheck1</task-id>\n<status>completed</status>\n</task-notification>"}}"#;
+
+    /// N-E9 (OP-26): a turn the app starts by itself that ends while a command it started in
+    /// the background still runs is held, as an engine-typed turn is: its end is not given,
+    /// the app's turn on the command's end notification continues it, and its end is given
+    /// once that turn ends. A later turn of its own with no such command is not held.
+    #[test]
+    fn an_own_turn_held_for_its_background_command_ends_with_its_notice_turn() {
+        let mut pane = start("own-turns-4");
+        pane.session.follow_own_turns();
+
+        pane.write(&[
+            &user("A teammate wrote"),
+            BACKGROUND_USE,
+            BACKGROUND_STARTED,
+            &reply("Waiting for the check."),
+        ]);
+        assert_eq!(
+            pane.session.next_event(Duration::from_millis(500)).unwrap(),
+            None
+        );
+        assert_eq!(
+            pane.own_facts(),
+            vec![TranscriptEvent::TurnStarted, text("Waiting for the check.")],
+            "the turn's end is held while its background command runs"
+        );
+
+        pane.write(&[BACKGROUND_NOTICE, &reply("Check passed.")]);
+        assert_eq!(
+            pane.session.next_event(Duration::from_millis(500)).unwrap(),
+            None
+        );
+        assert_eq!(
+            pane.own_facts(),
+            vec![text("Check passed."), DONE],
+            "the notice turn continues the held turn and ends it"
+        );
+
+        pane.write(&[&user("Another teammate wrote"), &reply("Own two")]);
+        assert_eq!(
+            pane.session.next_event(Duration::from_millis(500)).unwrap(),
+            None
+        );
+        assert_eq!(
+            pane.own_facts(),
+            vec![TranscriptEvent::TurnStarted, text("Own two"), DONE]
+        );
+        assert_eq!(pane.session.stop().unwrap(), None);
+    }
 }
 
 /// Makes a real FIFO at `path` with the system `mkfifo`. Input: the path. Output: none.

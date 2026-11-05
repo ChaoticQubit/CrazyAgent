@@ -296,14 +296,17 @@ fn validate_dispatch(
 /// Settles the sign-in that holds the native fence once no custodian holds its profile, so
 /// a crash, a killed custodian or an old engine run never blocks every later sign-in. A
 /// fence of this engine run is settled only for a dispatch known to have ended, which the
-/// caller names again on later calls while a renewal still held the profile.
-/// Inputs: the database, the profile custody, this engine's host and the fact of the
-/// last dispatch that ended. Output: the settled fact, or `None` when nothing was released.
+/// caller names again on later calls while a renewal still held the profile. An attempt of
+/// that ended dispatch settles Failed with the code its custodian named, if it named one.
+/// Inputs: the database, the profile custody, this engine's host, the fact of the last
+/// dispatch that ended and its custodian's code. Output: the settled fact, or `None` when
+/// nothing was released.
 pub(crate) fn recover_native_auth(
     db: &mut Connection,
     custody: &mut Result<NativeProfileCustody, EngineError>,
     host: &HostStamp,
     ended: Option<&NativeAuthFact>,
+    named: Option<&str>,
 ) -> Result<Option<NativeAuthFact>, EngineError> {
     let custody = custody.as_ref().map_err(|error| error.clone())?;
     settings::ensure_clear(db)?;
@@ -329,10 +332,10 @@ pub(crate) fn recover_native_auth(
     {
         return Err(error("native_auth_fact_invalid"));
     }
-    let eligible = epoch != host.engine_epoch
-        || ended.is_some_and(|ended| {
-            ended.operation_id == fact.operation_id && ended.generation == fact.generation
-        });
+    let own = ended.is_some_and(|ended| {
+        ended.operation_id == fact.operation_id && ended.generation == fact.generation
+    });
+    let eligible = epoch != host.engine_epoch || own;
     if !eligible {
         return Ok(None);
     }
@@ -349,7 +352,8 @@ pub(crate) fn recover_native_auth(
         fact.code = None;
     } else if fact.phase.unfinished() || fact.phase == NativeAuthPhase::Uncertain {
         fact.phase = NativeAuthPhase::Failed;
-        fact.code = Some("native_auth_interrupted".into());
+        let code = named.filter(|_| own).unwrap_or("native_auth_interrupted");
+        fact.code = Some(code.into());
     }
     store_fact(&tx, &fact)?;
     let deleted = tx
@@ -527,19 +531,22 @@ pub(crate) fn initialize(db: &Connection) -> Result<(), EngineError> {
 
 /// Runs one owner sign-in command, first settling a stale fence: one of an old engine run,
 /// or the one of `ended`, the last dispatch whose custodian this run saw end.
-/// Inputs: the database, settings, profile custody, that dispatch, the owner and the
-/// command. Output: the reply and, for a new operation, its work.
+/// Inputs: the database, settings, profile custody, that dispatch and the code its
+/// custodian named, the owner and the command. Output: the reply and, for a new
+/// operation, its work.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute(
     db: &mut Connection,
     config: &EffectiveConfig,
     sources: Option<&settings::SettingsSources>,
     custody: &mut Result<NativeProfileCustody, EngineError>,
     ended: Option<&NativeAuthFact>,
+    named: Option<&str>,
     admission: &Admission,
     command: Command,
 ) -> Result<NativeAuthBegin, EngineError> {
     #[cfg(not(unix))]
-    let _ = ended;
+    let _ = (ended, named);
     let reply = match command {
         Command::Read(request) => {
             #[cfg(unix)]
@@ -551,6 +558,7 @@ pub(crate) fn execute(
                     engine_epoch: admission.engine_epoch.clone(),
                 },
                 ended,
+                named,
             )?;
             read_native_auth(db, config, sources, admission, &request)?
         }
@@ -579,6 +587,7 @@ pub(crate) fn execute(
                         engine_epoch: admission.engine_epoch.clone(),
                     },
                     ended,
+                    named,
                 )?;
             }
             return begin_native_auth(db, config, sources, custody, admission, command);
@@ -601,7 +610,7 @@ pub(crate) fn begin_native_auth(
         engine_epoch: admission.engine_epoch.clone(),
     };
     #[cfg(unix)]
-    recover_native_auth(db, custody, &host, None)?;
+    recover_native_auth(db, custody, &host, None, None)?;
     settings::ensure_clear(db)?;
     let tx = db
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)

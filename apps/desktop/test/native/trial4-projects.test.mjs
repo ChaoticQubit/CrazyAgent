@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -128,6 +129,14 @@ test("the projects checks N-D6, N-D13 and N-D15 have the trial 4 shape and run a
     found.push(check.id);
   }
   assert.deepEqual(found, ["N-D6", "N-D13", "N-D15"]);
+});
+
+test("N-D13 measures change sets from the land branch the runner names in TRIAL_LAND_ON", () => {
+  const module = new URL("./trial4/n-d13-changes-own-files.mjs", import.meta.url).href;
+  const read = `const { LAND } = await import(${JSON.stringify(module)}); process.stdout.write(String(LAND));`;
+  const child = spawnSync(process.execPath, ["--input-type=module", "-e", read], { env: { ...process.env, TRIAL_LAND_ON: "trial4-land" }, encoding: "utf8", timeout: 30000 });
+  assert.equal(child.status, 0, child.stderr);
+  assert.equal(child.stdout, "trial4-land");
 });
 
 test("N-D6 says it is not run without the folder chooser helper, before it makes any folder", async () => {

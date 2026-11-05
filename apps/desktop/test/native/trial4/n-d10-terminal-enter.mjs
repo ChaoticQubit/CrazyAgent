@@ -32,7 +32,7 @@ export const checks = [{
   after: "master-input",
   run: async (kit) => {
     await kit.tab("conversation");
-    const started = await startIfPaused();
+    const started = await startIfPaused(kit, kit.project());
     await terminalLive(kit, REPLY_MS);
     const { master } = masterState((await kit.graph()).nodes);
     if (!master) throw new Error("the team graph has no master");

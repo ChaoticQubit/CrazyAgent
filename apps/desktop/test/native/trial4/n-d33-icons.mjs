@@ -4,7 +4,6 @@ import { approvedBrand, dockIcon, iconsVerdict, served } from "../trial4-icons.m
 const MAIN = "#main";
 const SIDEBAR = "aside.sidebar";
 const MARK = "aside.sidebar .brand-mark[role=\"img\"][aria-label=\"CrazyAgent\"] svg.brand-glyph";
-const FAVICON_BYTES_MAX = 65536;
 
 /** Runs in the page: counts the line icons a region draws, an icon being an svg.icon with
  * shapes that the window shows at a size above zero. Input: the region's selector. Output:
@@ -26,23 +25,40 @@ function shownMarks(selector) {
   }));
 }
 
-/** Runs in the page: fetches each favicon its link rel=icon names, as the window loads it.
- * Inputs: the most bytes to return and the WebDriver callback. Answers [{ href, status, size,
- * bytes }], bytes empty when the file is bigger, or { failed } when a fetch threw. */
-function faviconReadings(max, done) {
-  Promise.all([...document.querySelectorAll("link[rel~=\"icon\"]")].map(async (link) => {
-    const reply = await fetch(link.href);
-    const bytes = new Uint8Array(await reply.arrayBuffer());
-    return { href: link.getAttribute("href"), status: reply.status, size: bytes.length, bytes: bytes.length <= max ? [...bytes] : [] };
-  })).then(done, (failure) => done({ failed: String(failure) }));
+/** Runs in the page: draws each favicon its link rel=icon names and each approved favicon
+ * onto a canvas, from images the window loads as it shows them. It never fetches, which the
+ * app CSP's connect-src refuses. Inputs: the approved favicons [{ label, url }] as data URLs
+ * and the WebDriver callback. Answers { links: [{ href, image }], approved: [{ label, image }] },
+ * an image being { width, height, pixels } or { failed }. */
+export function faviconReadings(approved, done) {
+  const draw = async (source) => {
+    try {
+      const image = new Image();
+      image.src = source;
+      await image.decode();
+      const canvas = document.createElement("canvas");
+      canvas.width = image.naturalWidth;
+      canvas.height = image.naturalHeight;
+      const context = canvas.getContext("2d");
+      context.drawImage(image, 0, 0);
+      return { width: canvas.width, height: canvas.height, pixels: [...context.getImageData(0, 0, canvas.width, canvas.height).data] };
+    } catch (failure) {
+      return { failed: String(failure) };
+    }
+  };
+  Promise.all([
+    Promise.all([...document.querySelectorAll("link[rel~=\"icon\"]")].map(async (link) => ({ href: link.getAttribute("href") ?? "", image: await draw(link.href) }))),
+    Promise.all(approved.map(async ({ label, url }) => ({ label, image: await draw(url) }))),
+  ]).then(([links, drawn]) => done({ links, approved: drawn }), (failure) => done({ failed: String(failure) }));
 }
 
-/** Fetches the window's favicons through the page and hashes them. Output: [{ href, sha }];
- * throws with OP-59 when the window could not fetch one. */
-async function favicons() {
-  const answer = await browser.executeAsync(faviconReadings, FAVICON_BYTES_MAX);
-  if (!Array.isArray(answer)) throw new Error(`OP-59: the window could not fetch its favicons: ${answer?.failed ?? JSON.stringify(answer).slice(0, 300)}`);
-  return served(answer);
+/** Reads the window's favicons through the page and judges them against the approved
+ * brand. Input: the approved brand. Output: [{ label, href, problem }]; throws with OP-59
+ * when the page could not read them at all. */
+async function favicons(approved) {
+  const answer = await browser.executeAsync(faviconReadings, approved.favicons.map(({ label, url }) => ({ label, url })));
+  if (answer?.failed !== undefined) throw new Error(`OP-59: the window could not read its favicons: ${answer.failed}`);
+  return served(answer, approved);
 }
 
 /** Waits until a region draws an icon. Inputs: the kit and the region's selector. Output: the
@@ -72,6 +88,6 @@ export const checks = [{
     const sidebar = await browser.execute(drawnIcons, SIDEBAR);
     const glyphs = await browser.execute(shownMarks, MARK);
     await kit.screen();
-    return iconsVerdict({ home, project, sidebar, glyphs, favicons: await favicons(), dock: dockIcon(process.env.TRIAL3_APP), approved });
+    return iconsVerdict({ home, project, sidebar, glyphs, favicons: await favicons(approved), dock: dockIcon(process.env.TRIAL3_APP), approved });
   },
 }];

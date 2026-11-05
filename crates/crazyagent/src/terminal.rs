@@ -7,6 +7,7 @@ use std::time::Duration;
 
 pub mod buffer;
 mod kept;
+pub(crate) use kept::KEPT_MAX;
 #[cfg(unix)]
 pub mod tmux;
 #[cfg(target_os = "windows")]
@@ -230,6 +231,13 @@ pub trait Host: Send + Sync {
     /// Returns them as a stream; a host that reads only through a viewer returns that viewer.
     fn snapshot(&self, agent: &AgentId) -> Result<TerminalStream, HostError> {
         self.attach(agent)
+    }
+
+    /// Tells whether this host still keeps the last screen of an agent terminal it ended,
+    /// which `attach` then opens as a finished view with no live output after it. Takes the
+    /// name. Returns false for a live or unknown name and always for a host that keeps none.
+    fn kept(&self, _agent: &AgentId) -> bool {
+        false
     }
 
     /// Types bytes into an agent terminal exactly as given, control keys included.

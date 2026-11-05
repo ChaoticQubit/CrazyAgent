@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -33,6 +33,22 @@ test("every committed trial4 check module has a unique id, OP rows, a title, a w
   const checks = await loadChecks(CHECKS, SLUGS);
   t.diagnostic(`${checks.length} checks in ${CHECKS}`);
   for (const loaded of checks) assert.equal(typeof loaded.run, "function", loaded.id);
+});
+
+test("no committed trial4 check hands an XPath to the CSS-only text and texts helpers", () => {
+  const xpathCalls = [];
+  let calls = 0;
+  for (const name of readdirSync(CHECKS).filter((file) => file.endsWith(".mjs")).sort()) {
+    const source = readFileSync(join(CHECKS, name), "utf8");
+    const xpaths = new Set([...source.matchAll(/^const ([A-Z_]+) = [`"]\(?\/\//gmu)].map((match) => match[1]));
+    for (const call of source.matchAll(/\btexts?\(\s*([^,)]+)/gu)) {
+      calls += 1;
+      const argument = call[1].trim();
+      if (/^[`"]\(?(?:\$\{[^}]+\})?\/\//u.test(argument) || xpaths.has(argument)) xpathCalls.push(`${name}: ${argument}`);
+    }
+  }
+  assert(calls > 0, "the scan read the checks' text and texts calls");
+  assert.deepEqual(xpathCalls, []);
 });
 
 test("every committed tui4 check module in scripts/trial/tui4 passes the same convention, and no id is both a desktop and a TUI check", async (t) => {
