@@ -9529,7 +9529,7 @@ fn graph_rule(text: &str) -> Option<bool> {
             )
             .then_some(ignored)
         })
-        .last()
+        .next_back()
 }
 
 /// The Seatbelt profile the engine installs for one team agent, which its harness, and for a
