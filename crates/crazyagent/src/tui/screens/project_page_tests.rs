@@ -20,8 +20,10 @@ use crate::tui::client::process::ProcessQuery;
 use crate::tui::client::settings::SettingsJob;
 use crate::tui::client::{Connection, OwnerEvent};
 use crate::tui::ctx::{Ctx, Load};
+use crate::tui::frame::Tone;
 use crate::tui::glyphs::UNICODE;
 use crate::tui::keys::Key;
+use crate::tui::master_session::{Event as MasterEvent, Job as MasterJob};
 use crate::tui::run::owner_arrival;
 use crate::tui::seam::{ProjectCard, Request, ShellRequest};
 use crate::tui::shell::Shell;
@@ -1326,6 +1328,74 @@ async fn n_after_a_settings_change_on_another_client_starts_a_new_session() {
     let fresh = fresh.unwrap();
     assert_ne!(fresh.session_id, first.session_id);
     assert_eq!(fresh.phase, MasterSessionPhase::Configured);
+}
+
+/// n whose read of the current settings fails says on the page that the new session was
+/// not started and why, and starts none, instead of dropping it behind the generic metadata
+/// line (NT2-L1): the read goes to another engine, which refuses it with
+/// master_owner_identity_changed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn n_whose_settings_read_fails_says_the_new_session_was_not_started() {
+    let mut engine = Engine::start().await;
+    let (notes, mut shell, mut connection, first) =
+        conversation_with_a_settled_turn(&mut engine).await;
+    let other = Engine::start().await;
+    let mut stranger = other.connect();
+    shell.key(Key::Esc);
+    until(&mut shell, &mut connection, |shown| {
+        shown.contains("Session  started")
+    })
+    .await;
+    shell.key(Key::Char('n'));
+    let mut read = None;
+    for _ in 0..shell.ctx.queued() {
+        match shell.ctx.next_request().unwrap() {
+            Request::Master(job) if matches!(*job, MasterJob::Catalog { .. }) => read = Some(job),
+            other => shell.ctx.request(other),
+        }
+    }
+    let read = read.expect("n reads the current settings first");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut asked = false;
+    let event = loop {
+        assert!(Instant::now() < deadline, "the other engine never answered");
+        match stranger.poll_owner().unwrap() {
+            Some(OwnerEvent::Access { ready: true, .. }) if !asked => {
+                stranger.master((*read).clone()).unwrap();
+                asked = true;
+            }
+            Some(OwnerEvent::Master(event)) => break event,
+            _ => tokio::time::sleep(Duration::from_millis(20)).await,
+        }
+    };
+    assert!(
+        matches!(
+            event.as_ref(),
+            MasterEvent::Catalog { result: Err(problem), .. }
+                if problem == "master_owner_identity_changed"
+        ),
+        "the other engine refuses the read"
+    );
+    shell.arrive(owner_arrival(OwnerEvent::Master(event)));
+    let message = shell
+        .ctx
+        .message()
+        .cloned()
+        .expect("the page says what happened");
+    assert_eq!(message.tone, Tone::Warning);
+    assert_eq!(message.lead, "New session not started.");
+    assert_eq!(
+        message.rest,
+        "The current settings could not be read (master_owner_identity_changed). \
+         Press n to try again."
+    );
+    pump(&mut shell, &mut connection).await;
+    let (latest, _) = latest_master(&mut engine, &notes).await;
+    assert_eq!(
+        latest.unwrap().session_id,
+        first.session_id,
+        "no new session was started"
+    );
 }
 
 /// A new session on a project whose master runs live turns the live switch on once the
