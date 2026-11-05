@@ -7,6 +7,7 @@ use crate::checks::*;
 use crate::engine::EngineError;
 use crate::projects_home::CRAZYAGENT_DIRECTORY;
 use crate::protocol::ProjectId;
+use crate::trust::{Origin, Trust};
 use rusqlite::Connection;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -205,6 +206,69 @@ fn an_agent_cannot_approve_a_profile_and_its_proposal_raises_one_owner_question(
         Err(code("checks_profile_revoked"))
     );
     assert_eq!(case.count(PENDING_CHECK_QUESTIONS), 0);
+}
+
+#[test]
+fn an_agent_profile_proposal_is_refused_in_an_untrusted_project() {
+    let case = Case::new();
+    crate::trust::save(&case.db, "alpha", Trust::Untrusted, Origin::Cloned).unwrap();
+    let proposed = profile(vec![unit_check("unit")]);
+    for actor in [AGENT, MASTER] {
+        assert_eq!(
+            case.propose(&case.alpha, &proposed, actor),
+            Err(code("checks_owner_only")),
+            "{actor:?}"
+        );
+    }
+    assert_eq!(
+        case.count("SELECT COUNT(*) FROM check_profiles WHERE project='alpha'"),
+        0
+    );
+    assert_eq!(case.count(PENDING_CHECK_QUESTIONS), 0);
+
+    let reviewed = case.propose(&case.beta, &proposed, AGENT).unwrap();
+    assert!(
+        reviewed.question.is_some(),
+        "a reviewed project still takes an agent proposal"
+    );
+
+    let own = case.propose(&case.alpha, &proposed, Actor::Owner).unwrap();
+    assert_eq!(own.question, None);
+    for actor in [AGENT, MASTER] {
+        assert_eq!(
+            case.propose(&case.alpha, &proposed, actor),
+            Err(code("checks_owner_only")),
+            "the owner's stored profile is not the agent's to propose again: {actor:?}"
+        );
+    }
+    let stored = show(&case.db, &case.alpha, &own.id).unwrap().unwrap();
+    assert_eq!(stored.proposed_by, "owner");
+    assert_eq!(stored.question, None);
+    assert_eq!(case.count(PENDING_CHECK_QUESTIONS), 0);
+    let admitted = approve(&case.db, &case.alpha, &own.id, Actor::Owner).unwrap();
+    assert_eq!(
+        current_profile(&case.db, &case.alpha).unwrap(),
+        Some(admitted)
+    );
+
+    case.db
+        .execute(
+            "UPDATE project_trust SET level='trusted' WHERE project='alpha'",
+            [],
+        )
+        .unwrap();
+    assert_eq!(
+        case.propose(&case.alpha, &numbered(1), AGENT),
+        Err(code("checks_unavailable")),
+        "an unreadable trust level never reads as reviewed"
+    );
+
+    crate::trust::save(&case.db, "alpha", Trust::Reviewed, Origin::Owner).unwrap();
+    let raised = case.propose(&case.alpha, &numbered(2), AGENT).unwrap();
+    assert!(
+        raised.question.is_some(),
+        "the level is read at each proposal"
+    );
 }
 
 #[test]
