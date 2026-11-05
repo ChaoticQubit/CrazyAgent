@@ -12,7 +12,6 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
-use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -1206,7 +1205,7 @@ fn an_agent_reading_a_holdout_run_through_the_tracker_ops_sees_only_its_verdict(
 #[test]
 fn an_untrusted_check_runs_with_network_off_whatever_the_profile_says() {
     let case = Case::new();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = crate::spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let port = listener.local_addr().unwrap().port();
     let probe = format!(
@@ -1249,8 +1248,7 @@ fn an_untrusted_check_runs_with_network_off_whatever_the_profile_says() {
             .collect::<BTreeMap<_, _>>()
     };
     let unreached = || {
-        listener
-            .accept()
+        crate::spawn_gate::accept_tcp_std(&listener)
             .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
     };
     let off = BTreeMap::from([
@@ -1282,7 +1280,7 @@ fn an_untrusted_check_runs_with_network_off_whatever_the_profile_says() {
             ),
         ])
     );
-    assert!(listener.accept().is_ok());
+    assert!(crate::spawn_gate::accept_tcp_std(&listener).is_ok());
     submit();
     set(crate::trust::Trust::Untrusted);
     assert_eq!(
