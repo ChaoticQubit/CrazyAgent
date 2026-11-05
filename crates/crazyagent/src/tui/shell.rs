@@ -602,20 +602,21 @@ impl Shell {
         let vertical = format!("{}{}", glyphs.up, glyphs.down);
         let left = vec![
             styled("Everywhere", Role::Heading, theme),
-            key("Ctrl-K", "Go to anything", 11),
-            key("Esc", "Back or cancel", 11),
-            key("Tab", "Next field or panel", 11),
-            key("Shift-Tab", "Previous", 11),
-            key(&format!("Shift-{arrows}"), "Next tab", 11),
-            key("?", "This help", 11),
-            key("Ctrl-Q", "Quit", 11),
+            key("Ctrl-K", "Go to anything", 13),
+            key("Esc", "Back or cancel", 13),
+            key("Tab", "Next field or panel", 13),
+            key("Shift-Tab", "Previous", 13),
+            key(&format!("Shift-{arrows}"), "Next tab", 13),
+            key("?", "This help", 13),
+            key("Ctrl-Q", "Quit", 13),
             Line::default(),
             styled("Text fields", Role::Heading, theme),
-            key(&arrows, "Move the cursor", 11),
-            key("Ctrl-A E", "Start, end", 11),
-            key("Ctrl-W", "Delete a word", 11),
-            key("Ctrl-U", "Clear the field", 11),
-            key("Ctrl-J", "New line", 11),
+            key(&arrows, "Move the cursor", 13),
+            key("Ctrl-A E", "Start, end", 13),
+            key("Ctrl-W", "Delete a word", 13),
+            key("Ctrl-U", "Clear the field", 13),
+            key("Ctrl-J", "New line", 13),
+            key("Shift-Enter", "New line, if supported", 13),
         ];
         let mut right = vec![
             styled("Lists", Role::Heading, theme),
@@ -643,7 +644,7 @@ impl Shell {
             .collect();
         body.push(Line::default());
         body.push(styled(
-            "Letter keys work when you are not typing in a field.",
+            "Letter keys work outside fields. In tmux, use Ctrl-J for a new line.",
             Role::Muted,
             theme,
         ));

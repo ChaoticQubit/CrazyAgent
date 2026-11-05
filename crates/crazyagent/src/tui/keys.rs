@@ -106,6 +106,10 @@ impl Key {
     /// does not use (function keys, Alt and Super chords). Terminals send Ctrl-]
     /// as byte 0x1d, which crossterm reports as Ctrl-5. Shift+Enter, where the
     /// terminal reports it, is Ctrl-J: the new-line key, a line feed to an agent.
+    /// Ctrl chords a terminal reports under the enhanced keyboard protocol (Ctrl-Enter,
+    /// Ctrl-I, Ctrl-M, Ctrl-Tab, Ctrl-Backspace, Ctrl-Esc, Ctrl-[, Ctrl-3, Ctrl-8) give the
+    /// key the same chord gives from a legacy terminal, so the shell and an agent see the
+    /// same key and bytes.
     pub fn from_event(event: KeyEvent) -> Option<Self> {
         if event.kind == KeyEventKind::Release {
             return None;
@@ -117,9 +121,19 @@ impl Key {
         if modifiers.contains(KeyModifiers::CONTROL) {
             return match event.code {
                 KeyCode::Char(letter) if letter.is_ascii_alphabetic() => {
-                    Some(Self::Ctrl(letter.to_ascii_lowercase()))
+                    match letter.to_ascii_lowercase() {
+                        'i' => Some(Self::Tab),
+                        'm' => Some(Self::Enter),
+                        letter => Some(Self::Ctrl(letter)),
+                    }
                 }
                 KeyCode::Char(']' | '5') => Some(Self::Ctrl(']')),
+                KeyCode::Char('[' | '3') | KeyCode::Esc => Some(Self::Esc),
+                KeyCode::Char('8') => Some(Self::Backspace),
+                KeyCode::Backspace => Some(Self::Ctrl('h')),
+                KeyCode::Enter => Some(Self::Enter),
+                KeyCode::Tab => Some(Self::Tab),
+                KeyCode::BackTab => Some(Self::BackTab),
                 _ => None,
             };
         }

@@ -139,14 +139,26 @@ pub fn shift_enter_path(colors: &Path) -> PathBuf {
 /// Reads the saved Shift-Enter choice.
 /// Input: the file path. Output: the choice; Auto when the file is missing, too large or
 /// unreadable.
-pub fn load_shift_enter(_path: &Path) -> ShiftEnter {
-    ShiftEnter::default()
+pub fn load_shift_enter(path: &Path) -> ShiftEnter {
+    let text = read_word(path).unwrap_or_default();
+    ShiftEnter::ALL
+        .iter()
+        .map(|(choice, _)| *choice)
+        .find(|choice| enter_word(*choice) == text)
+        .unwrap_or_default()
+}
+
+fn enter_word(choice: ShiftEnter) -> &'static str {
+    match choice {
+        ShiftEnter::Auto => "auto",
+        ShiftEnter::Off => "off",
+    }
 }
 
 /// Saves the Shift-Enter choice, replacing the file atomically.
 /// Inputs: the file path and the choice. Output: Ok, or the I/O error text.
-pub fn save_shift_enter(_path: &Path, _choice: ShiftEnter) -> Result<(), String> {
-    Ok(())
+pub fn save_shift_enter(path: &Path, choice: ShiftEnter) -> Result<(), String> {
+    write_word(path, enter_word(choice))
 }
 
 /// Saves the Colors choice, replacing the file atomically.

@@ -11,7 +11,8 @@ use super::{TerminalGuard, TuiError, bounded_area};
 use crate::engine::Client;
 use crossterm::cursor::Show;
 use crossterm::event::{
-    self, DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste, EnableFocusChange, Event,
+    self, DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste, EnableFocusChange,
+    Event, KeyboardEnhancementFlags, PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
 };
 use crossterm::execute;
 use crossterm::terminal::LeaveAlternateScreen;
@@ -31,16 +32,24 @@ const PASTE_CHARS_MAX: usize = 100_000;
 struct Extras;
 
 impl Extras {
-    fn enter() -> Result<Self, TuiError> {
+    fn enter(shift_enter: ShiftEnter) -> Result<Self, TuiError> {
         execute!(std::io::stdout(), EnableBracketedPaste, EnableFocusChange)
             .map_err(|error| TuiError(error.to_string()))?;
-        Ok(Self)
+        let extras = Self;
+        push_keyboard(
+            &mut std::io::stdout(),
+            shift_enter,
+            crossterm::terminal::supports_keyboard_enhancement,
+            &KEYBOARD_PUSHED,
+        )
+        .map_err(|error| TuiError(error.to_string()))?;
+        Ok(extras)
     }
 }
 
 impl Drop for Extras {
     fn drop(&mut self) {
-        let _ = execute!(std::io::stdout(), DisableFocusChange, DisableBracketedPaste);
+        let _ = leave(&mut std::io::stdout(), &KEYBOARD_PUSHED);
     }
 }
 
@@ -52,11 +61,28 @@ static KEYBOARD_PUSHED: AtomicBool = AtomicBool::new(false);
 /// Inputs: the writer, the choice, the support query and the pushed flag. Output: the write
 /// result; a failed or timed-out query leaves the terminal as it is.
 fn push_keyboard(
-    _out: &mut impl std::io::Write,
-    _choice: ShiftEnter,
-    _supported: impl FnOnce() -> std::io::Result<bool>,
-    _pushed: &AtomicBool,
+    out: &mut impl std::io::Write,
+    choice: ShiftEnter,
+    supported: impl FnOnce() -> std::io::Result<bool>,
+    pushed: &AtomicBool,
 ) -> std::io::Result<()> {
+    if choice == ShiftEnter::Off || !matches!(supported(), Ok(true)) {
+        return Ok(());
+    }
+    pushed.store(true, Ordering::SeqCst);
+    execute!(
+        out,
+        PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+    )
+}
+
+/// Pops the keyboard protocol when this TUI pushed it, once; the terminal keeps one stack
+/// per screen, so it runs before the alternate screen is left.
+/// Inputs: the writer and the pushed flag. Output: the write result.
+fn pop_keyboard(out: &mut impl std::io::Write, pushed: &AtomicBool) -> std::io::Result<()> {
+    if pushed.swap(false, Ordering::SeqCst) {
+        execute!(out, PopKeyboardEnhancementFlags)?;
+    }
     Ok(())
 }
 
@@ -65,19 +91,27 @@ fn push_keyboard(
 /// not pushed yet. Inputs: the writer, the saved choice, the support query and the pushed
 /// flag. Output: the write result.
 fn switch_keyboard(
-    _out: &mut impl std::io::Write,
-    _choice: ShiftEnter,
-    _supported: impl FnOnce() -> std::io::Result<bool>,
-    _pushed: &AtomicBool,
+    out: &mut impl std::io::Write,
+    choice: ShiftEnter,
+    supported: impl FnOnce() -> std::io::Result<bool>,
+    pushed: &AtomicBool,
 ) -> std::io::Result<()> {
-    Ok(())
+    if choice == ShiftEnter::Off {
+        return pop_keyboard(out, pushed);
+    }
+    if pushed.load(Ordering::SeqCst) {
+        return Ok(());
+    }
+    push_keyboard(out, choice, supported, pushed)
 }
 
 /// Writes what the normal exit hands back before the screen guard leaves the alternate
 /// screen: the keyboard protocol popped when this TUI pushed it, then focus and paste
 /// events stopped. Inputs: the writer and the pushed flag. Output: the write result.
-fn leave(out: &mut impl std::io::Write, _pushed: &AtomicBool) -> std::io::Result<()> {
-    execute!(out, DisableFocusChange, DisableBracketedPaste)
+fn leave(out: &mut impl std::io::Write, pushed: &AtomicBool) -> std::io::Result<()> {
+    let popped = pop_keyboard(out, pushed);
+    execute!(out, DisableFocusChange, DisableBracketedPaste)?;
+    popped
 }
 
 /// Writes the sequences that hand the terminal back: the keyboard protocol popped when
@@ -87,14 +121,16 @@ pub(super) fn restore(out: &mut impl std::io::Write) -> std::io::Result<()> {
     restore_with(out, &KEYBOARD_PUSHED)
 }
 
-fn restore_with(out: &mut impl std::io::Write, _pushed: &AtomicBool) -> std::io::Result<()> {
+fn restore_with(out: &mut impl std::io::Write, pushed: &AtomicBool) -> std::io::Result<()> {
+    let popped = pop_keyboard(out, pushed);
     execute!(
         out,
         DisableFocusChange,
         DisableBracketedPaste,
         Show,
         LeaveAlternateScreen
-    )
+    )?;
+    popped
 }
 
 /// Installs a panic hook that restores the terminal before the panic message
@@ -127,9 +163,13 @@ pub fn context(var: impl Fn(&str) -> Option<String>, socket: String) -> Result<C
     let shift_arrows = prefs.as_deref().map_or_else(Default::default, |path| {
         prefs::load_shift_arrows(&prefs::shift_arrows_path(path))
     });
+    let shift_enter = prefs.as_deref().map_or_else(Default::default, |path| {
+        prefs::load_shift_enter(&prefs::shift_enter_path(path))
+    });
     let mut ctx = Ctx::new(depth, colors, appearance, Glyphs::detect(&var), socket);
     ctx.prefs = prefs;
     ctx.shift_arrows = shift_arrows;
+    ctx.shift_enter = shift_enter;
     ctx.home = var("HOME").filter(|home| home.starts_with('/'));
     Ok(ctx)
 }
@@ -150,7 +190,7 @@ pub fn run(client: Client, stopped: &AtomicBool) -> Result<(), TuiError> {
     let mut connection = Connection::connect_paired(client).map_err(TuiError)?;
     restore_on_panic();
     let _guard = TerminalGuard::enter()?;
-    let _extras = Extras::enter()?;
+    let _extras = Extras::enter(ctx.shift_enter)?;
     let (width, height) =
         crossterm::terminal::size().map_err(|error| TuiError(error.to_string()))?;
     let mut terminal = Terminal::with_options(
@@ -184,6 +224,7 @@ fn drive(
     let mut reconnect = Instant::now() + RECONNECT;
     let mut showing_message = false;
     let mut link = shell.ctx.link.clone();
+    let mut shift_enter = shell.ctx.shift_enter;
     while !stopped.load(Ordering::Relaxed) && !shell.quitting() {
         while let Some(event) = connection.poll_owner().map_err(TuiError)? {
             shell.arrive(owner_arrival(event));
@@ -210,6 +251,16 @@ fn drive(
                 reconnect = now + RECONNECT;
             }
             link = shell.ctx.link.clone();
+        }
+        if shell.ctx.shift_enter != shift_enter {
+            shift_enter = shell.ctx.shift_enter;
+            switch_keyboard(
+                &mut std::io::stdout(),
+                shift_enter,
+                crossterm::terminal::supports_keyboard_enhancement,
+                &KEYBOARD_PUSHED,
+            )
+            .map_err(|error| TuiError(error.to_string()))?;
         }
         if !connection.busy() {
             if shell.ctx.take_reconnect() || (link == Link::Reconnecting && now >= reconnect) {

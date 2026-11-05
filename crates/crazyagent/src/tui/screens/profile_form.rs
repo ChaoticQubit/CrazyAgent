@@ -172,7 +172,9 @@ impl ProfileForm {
 
     /// Adds the Shift-Enter choice, shown in Settings after the master's Shift-←→.
     /// Input: the current choice. Output: the form.
-    pub fn with_shift_enter(self, _choice: ShiftEnter) -> Self {
+    pub fn with_shift_enter(mut self, choice: ShiftEnter) -> Self {
+        self.shift_enter = Some(choice);
+        self.baseline = self.snapshot();
         self
     }
 
@@ -373,6 +375,13 @@ impl ProfileForm {
                 });
                 FormKey::Handled
             }
+            (Slot::ShiftEnter, Key::Left | Key::Right) => {
+                self.shift_enter = self.shift_enter.map(|choice| match choice {
+                    ShiftEnter::Auto => ShiftEnter::Off,
+                    ShiftEnter::Off => ShiftEnter::Auto,
+                });
+                FormKey::Handled
+            }
             (_, Key::Esc) => {
                 self.focus = None;
                 FormKey::Handled
@@ -482,7 +491,16 @@ impl ProfileForm {
                     ctx,
                 ));
             }
-            out.push(Line::default());
+            if let Some(shift_enter) = self.shift_enter {
+                out.push(self.choice_row(
+                    "Shift-Enter",
+                    ShiftEnter::ALL.map(|(choice, label)| (choice == shift_enter, label)),
+                    self.focus == Some(Slot::ShiftEnter),
+                    ctx,
+                ));
+            } else {
+                out.push(Line::default());
+            }
         }
         if self.saving {
             out.push(ctx.loading("Saving your profile"));
