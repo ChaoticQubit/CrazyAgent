@@ -64,6 +64,11 @@ const MASTER_PASTE_WAIT: &str = "Paste once the master's terminal is open.";
 const MASTER_HELD_FULL: &str = "The master's terminal is still starting.";
 const MASTER_HELD_REST: &str =
     "What you typed so far goes in once it opens; the rest was not kept.";
+const MASTER_HELD_DROPPED: &str = "What you typed for the master was not sent.";
+const MASTER_HELD_AGAIN: &str = "Its terminal did not open. Type it again once it is open.";
+/// The most keys kept while the master's terminal starts. Keys, not bytes: a key's bytes
+/// depend on the modes of the terminal, known once it opens; a kept key is at most 6
+/// bytes, so all of them come to at most 24 KiB, sent in `INPUT_BYTES_MAX` chunks.
 const HELD_KEYS_MAX: usize = 4096;
 /// The master view header's session keys, widest first; the state picks the widest that
 /// fits beside it whole.
@@ -275,8 +280,8 @@ impl Team {
     }
 
     /// Keeps one key typed while the master's terminal starts, up to `HELD_KEYS_MAX` keys
-    /// in all; a paste is not kept, since its bracketing needs the open terminal's mode.
-    /// Inputs: the key and the context. Output: none; a dropped key says why.
+    /// (not bytes) in all; a paste is not kept, since its bracketing needs the open
+    /// terminal's mode. Inputs: the key and the context. Output: none; a dropped key says why.
     fn hold(&mut self, key: &Key, ctx: &mut Ctx) {
         assert!(self.starting());
         if matches!(key, Key::Paste(_)) {
@@ -288,6 +293,18 @@ impl Team {
             return;
         }
         self.held.push(key.clone());
+    }
+
+    /// Drops the keys kept for a master terminal that will not get them: one that closed or
+    /// was rejected before it opened, one dropped or replaced by another, or a start ended
+    /// by a refusal, Stop all or the switch turned off. Says so when any were kept.
+    /// Input: the context. Output: none.
+    fn drop_held(&mut self, ctx: &mut Ctx) {
+        if self.held.is_empty() {
+            return;
+        }
+        self.held.clear();
+        ctx.say(Message::warning(MASTER_HELD_DROPPED, MASTER_HELD_AGAIN));
     }
 
     /// Whether the live master is on as the owner sees it: the owner's last change until the
@@ -607,6 +624,9 @@ impl Team {
     }
 
     fn detach(&mut self, ctx: &mut Ctx) {
+        if self.attached.is_some() {
+            self.drop_held(ctx);
+        }
         if let Some(attached) = self.attached.take()
             && attached.closed.is_none()
         {
@@ -1310,6 +1330,9 @@ impl Screen for Team {
                 }
             }
             _ => {}
+        }
+        if !self.starting() {
+            self.drop_held(ctx);
         }
         self.pump_settings(ctx);
         self.sync(ctx);
