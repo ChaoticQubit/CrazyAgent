@@ -1345,6 +1345,25 @@ fn removing_a_dot_skill_folder_is_refused_and_never_deletes_the_project_root() {
 }
 
 #[test]
+fn removing_a_skill_folder_named_with_a_colon_is_refused_and_touches_no_sibling() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().join("plugins").join("skills").join("project");
+    std::fs::create_dir_all(base.join("name")).unwrap();
+    std::fs::write(base.join("name").join("SKILL.md"), "kept").unwrap();
+    for id in ["name:x", "com1:", "owner:abc"] {
+        let outcome = remove_skill_project_folder(root.path(), id);
+        assert!(
+            matches!(&outcome, Err(refused) if refused.0 == "plugin_skill_folder_invalid"),
+            "{id}: Windows reads a colon as a stream or device, never as this folder: {outcome:?}"
+        );
+    }
+    assert_eq!(
+        std::fs::read_to_string(base.join("name").join("SKILL.md")).unwrap(),
+        "kept"
+    );
+}
+
+#[test]
 fn an_mcp_secret_shorter_than_eight_bytes_is_refused_with_a_plain_reason() {
     let (dir, _connection) = database();
     let root = dir.path();
