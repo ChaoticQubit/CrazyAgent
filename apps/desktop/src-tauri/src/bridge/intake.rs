@@ -155,12 +155,15 @@ const SETUP_CODES: [&str; 33] = [
 
 /// A folder's size before it is copied in, the GitHub owner/name of its `origin`
 /// remote when that remote is on github.com, so the window can suggest a clone instead,
-/// and how many linked git worktrees it has, which a copy leaves with the original.
+/// how many linked git worktrees it has, which a copy leaves with the original, and
+/// whether it can move: not when moving it would break its git worktree links, which the
+/// engine refuses, so the window offers no Move.
 #[derive(Debug, Serialize)]
 pub struct FolderSize {
     pub bytes: u64,
     pub github: Option<String>,
     pub worktrees: usize,
+    pub movable: bool,
 }
 
 fn known(code: &str, list: &[&'static str], fallback: &'static str) -> BridgeError {
@@ -357,19 +360,22 @@ impl NativeBridge {
         }
     }
 
-    /// Measures a folder before Copy, names its GitHub repository when it has one and
-    /// counts its linked git worktrees. Input: an absolute folder path. Output: its size,
-    /// the GitHub owner/name, if any, and the linked worktree count.
+    /// Measures a folder before Copy, names its GitHub repository when it has one, counts
+    /// its linked git worktrees and checks a Move would keep its git links. Input: an
+    /// absolute folder path. Output: its size, the GitHub owner/name, if any, the linked
+    /// worktree count and whether it can move.
     pub async fn folder_size(&mut self, path: String) -> Result<FolderSize, BridgeError> {
         crazyagent::projects_home::path_text(&path, "folder_size_path_invalid")
             .map_err(intake_failure)?;
         let github = origin_on_github(Path::new(&path));
         let worktrees = crazyagent::projects_home::linked_worktrees(Path::new(&path));
+        let movable = !crazyagent::projects_home::git_links(Path::new(&path));
         match self.owner_read(OwnerRead::FolderSize { path }).await? {
             OwnerData::FolderSize { bytes } => bounded(FolderSize {
                 bytes,
                 github,
                 worktrees,
+                movable,
             }),
             _ => Err(failure("owner_read_failed")),
         }
