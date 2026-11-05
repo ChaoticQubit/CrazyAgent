@@ -8,6 +8,7 @@ import { setTimeout as pause } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { stopRelaunched } from "../../apps/desktop/test/native/trial-app.mjs";
+import { MAPPING_FILES } from "./mapping-docs.mjs";
 
 const TRIAL = dirname(fileURLToPath(import.meta.url));
 const REPO = resolve(TRIAL, "..", "..");
@@ -249,8 +250,8 @@ function orders() {
   return `${rows.join("\n")}\n`;
 }
 
-/** Seeds the trial project: one commit on main with the trial rule, a tiny Rust crate whose cargo test agents run, a small Python shop package whose call chain a codebase question follows and an order report whose full output is large, then the land-on branch and an untracked hidden folder. Input: the project path and trial number. Output: the seed sha and a log of what git reports. */
-function seed(project, trial) {
+/** Seeds the trial project: one commit on main with the trial rule, a tiny Rust crate whose cargo test agents run, a small Python shop package whose call chain a codebase question follows, an order report whose full output is large and the mapping checks' research documents and secret-named decoy, then the land-on branch and an untracked hidden folder. Input: the project path and trial number. Output: the seed sha and a log of what git reports. */
+export function seed(project, trial) {
   mkdirSync(project, { recursive: true });
   const files = {
     ".gitignore": ".crazyagent/\nprivate/\ntarget/\nCargo.lock\n",
@@ -265,6 +266,7 @@ function seed(project, trial) {
     "shop/report.py": "from shop.pricing import order_total\n\n\ndef total_line(rows):\n    \"\"\"Returns the printed TOTAL line of (price, quantity) rows.\"\"\"\n    return f\"TOTAL {order_total(rows):.2f}\"\n",
     "data/orders.csv": orders(),
     "report.sh": "#!/bin/sh\ncd \"$(dirname \"$0\")\" || exit 1\nexec awk -F, 'NR > 1 { amount = $3 * $4; total += amount; printf \"%s %s %.2f\\n\", $1, $2, amount } END { printf \"TOTAL %.2f\\n\", total }' data/orders.csv\n",
+    ...MAPPING_FILES,
   };
   for (const [name, text] of Object.entries(files)) {
     mkdirSync(dirname(join(project, name)), { recursive: true });
