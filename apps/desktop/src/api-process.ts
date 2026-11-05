@@ -2,6 +2,7 @@ import { call } from "./api";
 import type { Result } from "./api";
 import { failureCopy } from "./api-projects";
 import type { GraphNode, ImportCommit, ImportFile, Nudges, UncommittedImport } from "./engine-client";
+import { displayText } from "./screens/conversation";
 import { formatRoute } from "./ui/router";
 
 /** The most bytes one instructions text may hold; the engine refuses more. */
@@ -141,7 +142,7 @@ export function commitInstructionImport(projectId: string): Promise<Result<Impor
 /** The toast after a committed move, naming the branch and files. Input: the commit.
  * Output: the sentence. */
 export function committedMessage(commit: ImportCommit): string {
-  return `Committed the move on ${commit.branch}: ${commit.files.join(", ")}. Nothing was pushed.`;
+  return `Committed the move on ${displayText(commit.branch)}: ${commit.files.join(", ")}. Nothing was pushed.`;
 }
 
 /** Why one found instruction file stays in place, in plain words. Input: its refusal code.

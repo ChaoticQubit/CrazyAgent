@@ -31,7 +31,7 @@ use crate::tui::master_session::{
     State as MasterState, Submission as MasterSubmission,
 };
 use crate::tui::seam::{Arrival, NOT_READY, PoolChange, Request};
-use crate::tui::text::{styled, wrap};
+use crate::tui::text::{cut, styled, wrap};
 use crate::tui::theme::Role;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
@@ -46,6 +46,7 @@ const TEAM_WAIT_MS: i64 = 15_000;
 const IMPORT_MODAL_WIDTH: u16 = 72;
 const IMPORT_ROWS_MAX: usize = 12;
 pub(in crate::tui) const BANNER_ROWS_MAX: usize = 3;
+const BANNER_BRANCH_CELLS: usize = 32;
 
 #[derive(PartialEq)]
 enum MasterSent {
@@ -238,13 +239,17 @@ fn import_problem(code: &str) -> String {
 
 /// The banner text shown while an instruction import's move stays uncommitted (DEC-106
 /// addendum): the files and the checked-out branch merges into are refused, or "this
-/// branch" without one. Inputs: the paths, the branch and the ellipsis glyph. Output: the
-/// text, sanitized.
+/// branch" without one; a name wider than `BANNER_BRANCH_CELLS` is cut with the ellipsis,
+/// so "are refused" stays within the banner's rows. Inputs: the paths, the branch and the
+/// ellipsis glyph. Output: the text, sanitized.
 pub(in crate::tui) fn move_banner(files: &[String], branch: Option<&str>, ellipsis: &str) -> String {
     assert!(!files.is_empty());
     let files: Vec<String> = files.iter().map(|path| sanitize(path)).collect();
-    let _ = ellipsis;
-    let target = branch.map_or_else(|| "this branch".to_owned(), sanitize);
+    let target = branch.map_or_else(
+        || "this branch".to_owned(),
+        |name| cut(&sanitize(name), BANNER_BRANCH_CELLS, ellipsis),
+    );
+    assert!(crate::tui::text::width(&target) <= BANNER_BRANCH_CELLS);
     format!(
         "Git still shows {} as deleted after the instruction import, so merges into {target} are refused. Ctrl-G Commit the move makes one local commit holding only that move; it is never pushed.",
         files.join(", ")

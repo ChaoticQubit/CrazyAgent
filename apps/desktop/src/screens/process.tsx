@@ -9,6 +9,7 @@ import {
 import { useAppSession, useLoad, type Loaded } from "../state";
 import { Button, ConfirmDialog, Dialog, EmptyState, LoadError, NotReady, Notice, Panel, Segmented, Skeleton, StatusBadge, Switch, TextArea } from "../ui";
 import { navigate } from "../ui/router";
+import { displayText } from "./conversation";
 import { SkillTag, skillEntries } from "./skill-tag";
 import "./process.css";
 
@@ -380,7 +381,7 @@ export function ImportMoveView({ files, branch, busy, failure, onCommit, onLeave
   const one = files.length === 1;
   return <Notice tone="warn">
     <span className="import-move">
-      <span>Git still shows {files.join(", ")} as deleted, and merges into {branch ?? "this branch"} are refused until the move is committed. Commit the move makes one local commit on your current branch holding only {one ? "this deletion" : "these deletions"}; it is never pushed.</span>
+      <span>Git still shows {files.join(", ")} as deleted, and merges into {branch == null ? "this branch" : displayText(branch)} are refused until the move is committed. Commit the move makes one local commit on your current branch holding only {one ? "this deletion" : "these deletions"}; it is never pushed.</span>
       {failure && <span className="import-move-failure" role="alert">{failure}</span>}
       <span className="import-move-actions">
         {onLeave && <Button disabled={busy} onClick={onLeave}>Leave it</Button>}

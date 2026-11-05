@@ -238,7 +238,8 @@ pub struct ImportCommit {
 
 /// The moved instruction files whose move the owner's checkout has not committed, and the
 /// branch that checkout has checked out, so a notice can name where merges are refused:
-/// none for a detached HEAD, a name over `BRANCH_BYTES_MAX` or when no move waits.
+/// none for a detached HEAD, a name over `BRANCH_BYTES_MAX`, a branch git cannot read for
+/// the engine (a name that is not UTF-8) or when no move waits.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct UncommittedImport {
@@ -859,8 +860,9 @@ pub fn uncommitted(folder: &Path) -> Result<Vec<String>, EngineError> {
 }
 
 /// Lists the moved instruction files whose move the owner's checkout has not committed, as
-/// `uncommitted` does, with the branch the checkout has checked out while any wait. Input:
-/// the project folder. Output: the files and branch, or a plain code as `uncommitted`.
+/// `uncommitted` does, with the branch the checkout has checked out while any wait; a
+/// branch that cannot be read is left unnamed, so the move still shows. Input: the project
+/// folder. Output: the files and branch, or a plain code as `uncommitted`.
 pub fn uncommitted_import(folder: &Path) -> Result<UncommittedImport, EngineError> {
     let root = fs::canonicalize(folder).map_err(|_| failure("process_project_folder_missing"))?;
     let files = uncommitted(&root)?;
@@ -870,8 +872,7 @@ pub fn uncommitted_import(folder: &Path) -> Result<UncommittedImport, EngineErro
             branch: None,
         });
     }
-    let branch = crate::landing::checked_out_branch(&root)
-        .map_err(|_| failure("process_commit_failed"))?;
+    let branch = crate::landing::checked_out_branch(&root).unwrap_or(None);
     Ok(UncommittedImport { files, branch })
 }
 
