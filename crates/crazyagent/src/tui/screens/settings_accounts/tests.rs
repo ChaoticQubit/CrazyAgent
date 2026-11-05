@@ -1,8 +1,12 @@
-use super::super::settings_add_account::{AddAccount, choices, key_problem, provider_tiles};
+use super::super::settings_add_account::{
+    AddAccount, choices, key_problem, provider_tiles, sign_in_problem,
+};
 use super::*;
 use crate::accounts::{AccountStatus, AccountView, Provider, SignInMethod, catalog};
+use crate::engine::owner::{NativeAuthMethod, NativeAuthPhase};
 use crate::pools::{MemberKind, MemberStatus, PoolMember, PoolSummary};
 use crate::tui::client::accounts::AccountsReply;
+use crate::tui::client::settings::SignInView;
 use crate::tui::client::{OwnerEvent, settings::SettingsEvent};
 use crate::tui::ctx::{Link, Load};
 use crate::tui::glyphs::UNICODE;
@@ -1153,4 +1157,82 @@ auth = { method = "native_managed", profile_ref = "profile-claude" }
             .unwrap()
             .unwrap();
     }
+}
+
+/// A failed sign-in view for one recorded code, with or without a device code on screen.
+/// Inputs: the code and the device code. Output: the view the engine reply gives the TUI.
+fn failed(code: &str, device_code: Option<&str>) -> SignInView {
+    SignInView {
+        phase: NativeAuthPhase::Failed,
+        problem: Some(code.to_owned()),
+        generation: 1,
+        page: None,
+        device_code: device_code.map(str::to_owned),
+        claude_prompt: None,
+        email: None,
+        plan: None,
+    }
+}
+
+/// Each recorded sign-in failure reads in the TUI as the app reads it, with the harness of
+/// the method used filled in, even while a device code is on screen; an unknown code still
+/// names itself.
+#[test]
+fn a_recorded_sign_in_failure_reads_the_app_s_sentence_for_the_harness_it_used() {
+    let claude = Some(NativeAuthMethod::ClaudeOfficial);
+    let codex = Some(NativeAuthMethod::CodexBrowser);
+    for (native, code, device_code, sentence) in [
+        (
+            claude,
+            "native_auth_claude_native_exit",
+            None,
+            "Claude Code stopped before it finished. Try again.",
+        ),
+        (
+            codex,
+            "native_auth_codex_io_failed",
+            None,
+            "CrazyAgent lost contact with Codex. Try again.",
+        ),
+        (
+            Some(NativeAuthMethod::CodexDeviceCode),
+            "native_auth_codex_deadline",
+            Some("QX4F-7K2M"),
+            "Codex didn't answer in time. Try again.",
+        ),
+        (
+            codex,
+            "native_auth_host_unavailable",
+            None,
+            "Codex isn't installed on this Mac, so ChatGPT sign-in isn't available. Install Codex, then check again in Settings, Harnesses.",
+        ),
+        (
+            claude,
+            "native_auth_host_executable_unsafe",
+            None,
+            "Claude Code on this Mac isn't safe to start, so CrazyAgent didn't start it. Reinstall Claude Code, then try again.",
+        ),
+        (
+            claude,
+            "native_auth_sign_in_expired",
+            None,
+            "This code expired.",
+        ),
+        (
+            claude,
+            "native_auth_recovery_required",
+            None,
+            "A sign-in didn't confirm how it ended, so changes to its account and new sign-ins wait. Press c in Model access to clear the stuck sign-in, then try again.",
+        ),
+    ] {
+        assert_eq!(
+            sign_in_problem(native, &failed(code, device_code)),
+            sentence,
+            "{code}"
+        );
+    }
+    assert_eq!(
+        sign_in_problem(claude, &failed("native_auth_made_up", None)),
+        "The sign-in did not work. (code: native_auth_made_up)"
+    );
 }

@@ -1579,7 +1579,7 @@ fn plain_sign_in(code: &str) -> String {
     .to_owned()
 }
 
-fn sign_in_problem(native: Option<NativeAuthMethod>, view: &SignInView) -> String {
+pub(super) fn sign_in_problem(native: Option<NativeAuthMethod>, view: &SignInView) -> String {
     match (view.phase, native) {
         (NativeAuthPhase::UnauthenticatedObserved, Some(NativeAuthMethod::CodexExisting)) => {
             "Codex is not signed in on this Mac. Choose Sign in with ChatGPT instead.".into()

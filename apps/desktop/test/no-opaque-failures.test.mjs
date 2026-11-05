@@ -213,8 +213,10 @@ test("the TUI gives every sign-in failure the engine records the app's sentence"
   const start = source.indexOf("const SIGN_IN_SENTENCES");
   assert.ok(start >= 0, `${TUI_SIGN_IN} keeps its sign-in sentences in SIGN_IN_SENTENCES`);
   const table = source.slice(start, source.indexOf("];", start));
-  const sentences = new Map([...table.matchAll(/\(\s*"([a-z][a-z0-9_]*)",\s*"((?:[^"\\]|\\.)*)",?\s*\)/g)].map((match) => [match[1], match[2]]));
-  for (const code of recordedSignInCodes()) {
+  const rows = [...table.matchAll(/\(\s*"([a-z][a-z0-9_]*)",\s*"((?:[^"\\]|\\.)*)",?\s*\)/g)].map((match) => [match[1], match[2]]);
+  const sentences = new Map(rows);
+  assert.equal(sentences.size, rows.length, "each code is listed once");
+  for (const code of new Set([...recordedSignInCodes(), ...sentences.keys()])) {
     assert.ok(sentences.has(code), `${code} has no TUI sentence`);
     for (const [provider, harness, name] of [["chatgpt", "Codex", "ChatGPT"], ["claude", "Claude Code", "Claude"]]) {
       const line = sentences.get(code).replaceAll("{harness}", harness).replaceAll("{name}", name);
