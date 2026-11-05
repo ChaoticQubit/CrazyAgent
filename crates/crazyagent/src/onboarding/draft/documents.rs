@@ -1,6 +1,7 @@
 use super::names::{paths_in, secret_like};
 use super::{
-    Document, ENTRY_NAME_BYTES_MAX, Evidence, Folder, clip, file_text, open_folder, open_in,
+    Document, ENTRY_NAME_BYTES_MAX, Evidence, Folder, SKIPPED_ENTRIES, clip, file_text,
+    open_folder, open_in,
 };
 use crate::onboarding::FoundResearch;
 use crate::project_setup::{DOCUMENT_PATH_BYTES_MAX, ResearchKind};
@@ -39,6 +40,9 @@ const RESEARCH_FILES_MAX: usize = 8;
 const IGNORE_CHECK_TIME: Duration = Duration::from_secs(20);
 const IGNORE_POLL: Duration = Duration::from_millis(5);
 const IGNORE_OUTPUT_BYTES_MAX: usize = 8 * 1024 * 1024;
+const WALKED_ENTRIES_MAX: usize = 100_000;
+const WALKED_DEPTH_MAX: usize = 64;
+const GITLINK_MODE: &str = "160000 ";
 const IGNORES_UNKNOWN: &str =
     "No project document was read: the project's git could not tell which files it ignores.";
 
@@ -189,7 +193,9 @@ fn below(path: &str) -> bool {
 /// each document file it may read or list to `found`. Entries are taken in name order, at
 /// most 4,000 in all, statted without following links; a root's document folders go first.
 /// A file with more than one link is skipped, since its other name may be outside the
-/// project, and so is a folder on another device than the root, such as a mount.
+/// project, and so is a folder on another device than the root, such as a mount, and a
+/// folder holding a `.git` entry, a nested repository or submodule whose own ignores the
+/// project's git does not apply.
 /// Takes the open folder, the root's status, its path, its depth, the entries visited so far
 /// and the list.
 fn walk(
@@ -265,7 +271,12 @@ fn walk(
         let Ok(child) = rustix::fs::openat(folder, name.as_str(), flags, Mode::empty()) else {
             continue;
         };
-        if rustix::fs::fstat(&child).is_ok_and(|stat| stat.st_dev == root.st_dev) {
+        if rustix::fs::fstat(&child).is_ok_and(|stat| stat.st_dev == root.st_dev)
+            && matches!(
+                rustix::fs::statat(&child, ".git", AtFlags::SYMLINK_NOFOLLOW),
+                Err(rustix::io::Errno::NOENT)
+            )
+        {
             walk(&child, root, &path, depth + 1, visited, found);
         }
     }
@@ -281,12 +292,16 @@ fn named(list: &[&str], name: &str) -> bool {
 /// with no system or global config, hooks, fsmonitor or pager, given 20 s and 8 MiB of
 /// output. Each name goes in behind `./`, so one starting with `:` is never pathspec magic.
 /// Git must name the ignored paths exactly as sent and in order; any other answer counts as
-/// none, so the mapping never guesses which files git keeps out. Takes the project folder and
-/// the paths below it. Returns whether each path is ignored, or `None` when git is missing,
+/// none, so the mapping never guesses which files git keeps out. A folder outside git
+/// ignores nothing, as a repository without ignore files. Takes the project folder and the
+/// paths below it. Returns whether each path is ignored, or `None` when git is missing,
 /// fails, runs over or answers out of shape.
 fn ignored(repo: &Path, paths: &[&str]) -> Option<Vec<bool>> {
     if paths.is_empty() {
         return Some(Vec::new());
+    }
+    if outside_git(repo) {
+        return Some(vec![false; paths.len()]);
     }
     let sent: Vec<String> = paths.iter().map(|path| format!("./{path}")).collect();
     let input: Vec<u8> = sent
@@ -335,18 +350,48 @@ fn git(repo: &Path, args: &[&str]) -> Command {
     command
 }
 
+/// Whether `repo` is outside every git repository: neither it nor any folder above it holds
+/// a `.git` entry, so no ignore rule applies and it ignores nothing, as a repository without
+/// ignore files. A `.git` that cannot be checked counts as there. Takes the folder. Returns
+/// the answer.
+pub(crate) fn outside_git(repo: &Path) -> bool {
+    repo.is_absolute()
+        && repo.ancestors().all(|folder| {
+            std::fs::symlink_metadata(folder.join(".git"))
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        })
+}
+
 /// The paths below `repo` the code graph must never read (MAP-2), by the rules documents
 /// follow: whatever the project's git ignores, tracked or not, an ignored folder once with
-/// a closing `/`, and the outermost file or folder of each other path whose name is
-/// secret-like. Asks git twice, bounded as [`ignored`]. Takes the folder. Returns the paths,
-/// or `None` when git could not answer or a name is not UTF-8, so no graph is built.
+/// a closing `/`, each submodule and nested repository whole with a closing `/`, as their
+/// own ignores are not the project's, and the outermost file or folder of each other path
+/// whose name is secret-like. Asks git three times, bounded as [`ignored`]; a folder outside
+/// git is walked instead. Takes the folder. Returns the paths, or `None` when git could not
+/// answer, the walk could not finish or a name is not UTF-8, so no graph is built.
 pub(crate) fn kept_out(repo: &Path) -> Option<Vec<String>> {
+    if outside_git(repo) {
+        return walked(repo);
+    }
     let ignored = listed(
         repo,
         &["-c", "-o", "-i", "--exclude-standard", "--directory"],
     )?;
     let mut kept: BTreeSet<String> = ignored.into_iter().collect();
-    for path in listed(repo, &["-c", "-o", "--exclude-standard"])? {
+    let mut visible = listed(repo, &["-o", "--exclude-standard"])?;
+    for record in listed(repo, &["-s"])? {
+        let (mode, path) = record.split_once('\t')?;
+        if mode.starts_with(GITLINK_MODE) {
+            kept.insert(format!("{path}/"));
+        } else {
+            visible.push(path.to_owned());
+        }
+    }
+    for path in visible {
+        if path.ends_with('/') {
+            kept.insert(path);
+            continue;
+        }
         let mut end = 0;
         for name in path.split('/') {
             end += name.len();
@@ -356,6 +401,51 @@ pub(crate) fn kept_out(repo: &Path) -> Option<Vec<String>> {
                 break;
             }
             end += 1;
+        }
+    }
+    Some(kept.into_iter().collect())
+}
+
+/// The paths below `repo`, a folder outside git, the code graph must never read (MAP-2): the
+/// outermost file or folder of each path whose name is secret-like and each folder holding
+/// a `.git` entry, whole, each folder with a closing `/`. The walk follows no link and skips
+/// the root's engine and graph folders. Takes the folder. Returns the paths, or `None` past
+/// 100,000 entries or 64 folders deep, or when a folder cannot be read or a name is not UTF-8.
+fn walked(repo: &Path) -> Option<Vec<String>> {
+    let mut kept = BTreeSet::new();
+    let mut folders = vec![(repo.to_path_buf(), String::new(), 0)];
+    let mut visited = 0;
+    while let Some((folder, at, depth)) = folders.pop() {
+        for entry in std::fs::read_dir(&folder).ok()? {
+            visited += 1;
+            if visited > WALKED_ENTRIES_MAX {
+                return None;
+            }
+            let entry = entry.ok()?;
+            let name = entry.file_name().into_string().ok()?;
+            if depth == 0 && SKIPPED_ENTRIES.contains(&name.as_str()) {
+                continue;
+            }
+            let path = if at.is_empty() {
+                name.clone()
+            } else {
+                format!("{at}/{name}")
+            };
+            if !entry.file_type().ok()?.is_dir() {
+                if secret_like(&name) {
+                    kept.insert(path);
+                }
+                continue;
+            }
+            let nested = !std::fs::symlink_metadata(entry.path().join(".git"))
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound);
+            if secret_like(&name) || nested {
+                kept.insert(format!("{path}/"));
+            } else if depth + 1 < WALKED_DEPTH_MAX {
+                folders.push((entry.path(), path, depth + 1));
+            } else {
+                return None;
+            }
         }
     }
     Some(kept.into_iter().collect())

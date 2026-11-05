@@ -1,10 +1,11 @@
 /// Words that mark a file or folder name as one that may hold a secret: credentials, keys
-/// and tokens, and key-file extensions such as `.pem` or `.env` kept even when renamed
-/// `.txt`. The mapping prompt goes to the project's model provider, and a document is
-/// chosen by its name alone before any text is read, so a name with one of these words, or
-/// two adjacent words joining into one, is neither read nor listed. A few documents with
+/// and tokens, key and key-store files such as `.pem`, `id_rsa` or `.jks`, and credential
+/// stores such as `.netrc`, `.npmrc`, `kubeconfig` or `terraform.tfstate`, kept even when
+/// renamed `.txt`. The mapping prompt goes to the project's model provider, and a document
+/// is chosen by its name alone before any text is read, so a name with one of these words,
+/// or two adjacent words joining into one, is neither read nor listed. A few documents with
 /// such names, such as `key-metrics.md`, are left out with them.
-const SECRET_WORDS: [&str; 19] = [
+const SECRET_WORDS: [&str; 34] = [
     "secret",
     "secrets",
     "credential",
@@ -24,6 +25,21 @@ const SECRET_WORDS: [&str; 19] = [
     "pfx",
     "env",
     "netrc",
+    "idrsa",
+    "iddsa",
+    "idecdsa",
+    "ided25519",
+    "htpasswd",
+    "jks",
+    "keystore",
+    "kubeconfig",
+    "tfstate",
+    "tfvars",
+    "pgpass",
+    "npmrc",
+    "pypirc",
+    "ppk",
+    "kdbx",
 ];
 
 /// The marks split off around a path written in prose, Markdown or a manifest: quotes,

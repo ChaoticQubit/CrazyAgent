@@ -17,7 +17,7 @@ use std::path::Path;
 #[cfg(unix)]
 mod documents;
 #[cfg(unix)]
-pub(crate) use documents::kept_out;
+pub(crate) use documents::{kept_out, outside_git};
 pub(super) mod names;
 
 const README_NAMES: [&str; 4] = ["README.md", "README", "README.txt", "readme.md"];
@@ -380,7 +380,8 @@ fn clip(text: &str, bytes: usize) -> &str {
 }
 
 /// Gathers the bounded evidence of the project folder `repo`, with no file name in it that
-/// looks like it holds a secret or that the project's git ignores (MAP-2).
+/// looks like it holds a secret or that the project's git ignores, and the code graph only
+/// when the engine built it under the keep-out (MAP-2).
 pub(crate) fn gather(repo: &Path) -> Evidence {
     let mut evidence = Evidence {
         folder: folder_name(repo),
@@ -415,7 +416,11 @@ pub(crate) fn gather(repo: &Path) -> Evidence {
             read_text(&repo.join(name), MANIFEST_BYTES_MAX).map(|text| ((*name).to_owned(), text))
         })
         .collect();
-    if let Some(graph) = open_folder(&repo.join("graphify-out")) {
+    if let Some(graph) = open_folder(&repo.join("graphify-out"))
+        && open_in(&graph, super::graph::KEPT_OUT_MARK)
+            .and_then(|file| file.metadata().ok())
+            .is_some_and(|metadata| metadata.is_file())
+    {
         evidence.graph = open_in(&graph, "GRAPH_REPORT.md")
             .and_then(|file| file_text(file, GRAPH_REPORT_BYTES_MAX))
             .or_else(|| {

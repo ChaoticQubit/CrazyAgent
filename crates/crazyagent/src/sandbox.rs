@@ -1213,6 +1213,13 @@ impl ProjectSandbox {
         Ok(self)
     }
 
+    /// Whether [`Self::keep_out`] takes the form of `path`, a clean absolute path, so a
+    /// caller can check every path before it makes anything. Input: the path. Output: the
+    /// answer; a path kept out must still lie inside a granted root.
+    pub fn keepable(path: &Path) -> bool {
+        clean_absolute(path)
+    }
+
     /// Lets a native-mode lead run its own tmux server (DEC-104): an exact socket grant, as
     /// `allow_unix_socket` gives, for its own socket in its short temp folder, and read
     /// access to the tmux program's folder when no system root covers it. No other Unix
