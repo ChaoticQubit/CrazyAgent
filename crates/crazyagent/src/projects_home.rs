@@ -234,7 +234,8 @@ pub fn git_links(folder: &Path) -> bool {
 /// True when `folder` is itself a checkout whose git data lives in another repository:
 /// its `.git` is a file (a linked worktree or submodule checkout) or a link. A copy of it
 /// would still use that repository's data. An unreadable `.git` counts.
-fn linked_checkout(folder: &Path) -> bool {
+/// [`plan_add`] refuses such a Copy, and the windows offer no Copy for it.
+pub fn linked_checkout(folder: &Path) -> bool {
     match std::fs::symlink_metadata(folder.join(".git")) {
         Err(error) => error.kind() != std::io::ErrorKind::NotFound,
         Ok(metadata) => !metadata.is_dir() || metadata.file_type().is_symlink(),

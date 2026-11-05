@@ -15962,7 +15962,8 @@ fn a_lead_worker_change_set_stays_the_owners_while_lands_is_owner() {
 
 /// A live master's session counts as used once a turn runs in its terminal: started and
 /// kept, the fresh session holds no owner turn and is not listed; once the owner's line runs
-/// as a turn in the master's pane, the session holds one and is listed.
+/// as a turn in the master's pane, the session holds one and is listed, and the list counts
+/// each turn run there as one of its messages.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_turn_in_the_live_master_s_terminal_marks_its_session_used_and_listed() {
@@ -15978,7 +15979,7 @@ fn a_turn_in_the_live_master_s_terminal_marks_its_session_used_and_listed() {
         crate::master_sessions::list(&f.connection, &project)
             .unwrap()
             .into_iter()
-            .map(|summary| summary.session_id)
+            .map(|summary| (summary.session_id, summary.turns))
             .collect::<Vec<_>>()
     };
     super::super::master::set_live(&fixture.connection, &project, true).unwrap();
@@ -16027,7 +16028,19 @@ fn a_turn_in_the_live_master_s_terminal_marks_its_session_used_and_listed() {
         live_turns(&f.connection) == (1, false)
     });
     assert!(used(&fixture), "a turn in the terminal marks the session");
-    assert_eq!(listed(&fixture), vec![session.clone()]);
+    assert_eq!(listed(&fixture), vec![(session.clone(), 1)]);
+
+    host.input(&pane, b"again\r").unwrap();
+    fixture.until(
+        &mut team,
+        "the owner's second turn in the session ends",
+        |f| live_turns(&f.connection) == (2, false),
+    );
+    assert_eq!(
+        listed(&fixture),
+        vec![(session.clone(), 2)],
+        "every turn run in the terminal counts as one of the session's messages"
+    );
     let marked: i64 = fixture
         .connection
         .query_row(

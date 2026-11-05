@@ -8,7 +8,7 @@ import { Button, ConfirmDialog, LoadError, Notice, NotReady, PageHeader, Segment
 import { displayText } from "../conversation";
 import { folderLabel } from "../project/overview";
 import { SetUpDialog } from "./found";
-import { addWay, folderName, joinPath, moveOffered, moveWithheld, pickedFolderProblem, sizeLine, worktreesLine, type AddWay } from "./intake";
+import { addWay, copyOffered, folderName, joinPath, moveOffered, pickedFolderProblem, sizeLine, waysWithheld, worktreesLine, type AddWay } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
 
@@ -22,9 +22,9 @@ const ADD_LABELS: Record<AddWay, string> = { here: "Set up here", move: "Move in
 
 /** Add an existing folder as a view of its state: the chosen folder, used where it is (default)
  * or explicitly moved or copied with the target shown first, Copy with the size first and a
- * warning above 1 GB and the linked worktrees it leaves behind, Move only once the read says the
- * folder can move (otherwise the reason), and a clone suggestion when the code is on GitHub.
- * Inputs: the projects home
+ * warning above 1 GB and the linked worktrees it leaves behind, Move and Copy only once the read
+ * says they keep the folder's git links (otherwise the reason), and a clone suggestion when the code
+ * is on GitHub. Inputs: the projects home
  * read, the source folder, its size read, the way, a busy flag, the last problem and the handlers.
  * Output: the page. */
 export function AddFolderView({ home, source, size, mode, busy, problem, onChoose, onMode, onAdd, onClone, onRetry }: {
@@ -50,8 +50,9 @@ export function AddFolderView({ home, source, size, mode, busy, problem, onChoos
   const bytes = size?.kind === "ok" ? size.value.bytes : null;
   const github = size?.kind === "ok" ? size.value.github ?? null : null;
   const worktrees = size?.kind === "ok" ? size.value.worktrees ?? 0 : 0;
-  const offered = moveOffered(size);
-  const moveLine = moveWithheld(size);
+  const moves = moveOffered(size);
+  const copies = copyOffered(size);
+  const withheld = waysWithheld(size);
   const way = addWay(mode, size);
   const line = sizeLine(way, bytes, root);
   const name = source ? folderName(source) : "";
@@ -70,12 +71,11 @@ export function AddFolderView({ home, source, size, mode, busy, problem, onChoos
       </Notice>}
       <div className="pj-field">
         <span className="pj-label">How to add it</span>
-        <Segmented label="How to add it" value={way} onValue={onMode} options={offered ? WAYS : WAYS.filter((option) => option.value !== "move")} />
+        <Segmented label="How to add it" value={way} onValue={onMode} options={WAYS.filter((option) => (moves || option.value !== "move") && (copies || option.value !== "copy"))} />
       </div>
-      {moveLine && <Notice tone="info">{moveLine}</Notice>}
+      {withheld.map((line) => <Notice key={line} tone="info">{line}</Notice>)}
       {line.warn ? <Notice tone="warn">{line.text}</Notice> : <p className="pj-secondary" role="status">{line.text}</p>}
       {way === "copy" && worktrees > 0 && <Notice tone="info">{worktreesLine(worktrees)}</Notice>}
-      {size?.kind === "not_ready" && way === "copy" && <p className="pj-help">The folder size isn't in this build, so Copy can't show it first.</p>}
       {size?.kind === "error" && <p className="pj-error" role="alert">{size.message}</p>}
       {problem && <p className="pj-error" role="alert">{problem}</p>}
       <span className="pj-row">
@@ -111,8 +111,9 @@ export function MoveConfirmDialog({ open, way, name, source, root, busy, onCance
 }
 
 /** Add an existing folder: picks it in the macOS chooser and reads its size. By default it is set up
- * where it is on a chosen pool; Move is offered once the read says the folder can move and asks to
- * confirm with the target shown, and a moved or copied folder shows on Home as found. */
+ * where it is on a chosen pool; Move and Copy are offered once the read says they keep the folder's
+ * git links, Move asks to confirm with the target shown, and a moved or copied folder shows on Home
+ * as found. */
 export function AddFolder() {
   const session = useAppSession();
   const [home, reload] = useLoad(loadProjectsHome, [], "projects-home");

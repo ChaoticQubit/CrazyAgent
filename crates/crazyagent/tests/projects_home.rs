@@ -1047,6 +1047,8 @@ fn a_copy_of_a_repo_with_linked_worktrees_is_standalone_and_git_in_it_never_reac
     assert_eq!(linked_worktrees(&repo), 3);
     assert!(git_links(&repo));
     assert!(git_links(&sibling) && git_links(&nested));
+    assert!(!linked_checkout(&repo));
+    assert!(linked_checkout(&sibling) && linked_checkout(&nested));
 
     plan_add(&case.home, &case.engine, text(&repo), AddMode::Copy, &[])
         .unwrap()
@@ -1135,6 +1137,7 @@ fn a_linked_worktree_or_a_link_to_a_git_folder_is_not_copied() {
     assert!(plain_problem("home_copy_linked_checkout").is_some());
     assert_eq!(linked_worktrees(&sibling), 0);
     assert!(git_links(&sibling) && git_links(&linked));
+    assert!(linked_checkout(&sibling) && linked_checkout(&linked));
     assert_eq!(names(&case.home), Vec::<String>::new());
     assert_eq!(worktree_paths(&repo).len(), 2);
 }

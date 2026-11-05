@@ -126,11 +126,14 @@ export function worktreesLine(count: number): string {
 /** Why Add folder offers no Move for a folder whose git worktree links a move would break. */
 export const MOVE_WITHHELD = "Move isn't offered: this folder is linked to git worktrees, and moving it would break them.";
 
-/** Why Add folder offers no Move yet while the folder read is still checking its git links. */
-export const MOVE_CHECKING = "Move is offered once CrazyAgent has checked this folder's git links.";
+/** Why Add folder offers no Copy for a folder that is itself a linked git worktree or submodule. */
+export const COPY_WITHHELD = "Copy isn't offered: this folder is a git worktree or submodule of another repository, so a copy would still share it.";
 
-/** Why Add folder offers no Move when the folder read failed or could not say. */
-export const MOVE_UNCHECKED = "Move isn't offered: CrazyAgent couldn't check this folder's git links.";
+/** Why Add folder offers no Move or Copy yet while the folder read is still checking its git links. */
+export const WAYS_CHECKING = "Move and Copy are offered once CrazyAgent has checked this folder's git links.";
+
+/** Why Add folder offers no Move or Copy when the folder read failed or could not say. */
+export const WAYS_UNCHECKED = "Move and Copy aren't offered: CrazyAgent couldn't check this folder's git links.";
 
 /** Whether Add folder offers Move: only once the folder read says moving it keeps its git
  * worktree links, since the engine refuses a Move that would break them. Input: the folder
@@ -139,19 +142,28 @@ export function moveOffered(size: Loaded<FolderSize> | null): boolean {
   return size?.kind === "ok" && size.value.movable === true;
 }
 
-/** Why Add folder offers no Move for a picked folder. Input: the folder read, if any. Output:
- * the reason line, or null when Move is offered or no folder is picked. */
-export function moveWithheld(size: Loaded<FolderSize> | null): string | null {
-  if (size === null || moveOffered(size)) return null;
-  if (size.kind === "loading") return MOVE_CHECKING;
-  if (size.kind === "ok" && size.value.movable === false) return MOVE_WITHHELD;
-  return MOVE_UNCHECKED;
+/** Whether Add folder offers Copy: only once the folder read says it is not itself a linked
+ * git worktree or submodule checkout, whose copy the engine refuses. Input: the folder read, if
+ * any. Output: true only for a read with copyable true. */
+export function copyOffered(size: Loaded<FolderSize> | null): boolean {
+  return size?.kind === "ok" && size.value.copyable === true;
 }
 
-/** The way Add folder uses: the chosen one, or Use where it is for a Move it no longer offers.
- * Inputs: the chosen way and the folder read. Output: the way to show and add with. */
+/** Why Add folder offers no Move or no Copy for a picked folder. Input: the folder read, if any.
+ * Output: the reason lines; none when both are offered or no folder is picked. */
+export function waysWithheld(size: Loaded<FolderSize> | null): string[] {
+  if (size === null) return [];
+  if (size.kind === "loading") return [WAYS_CHECKING];
+  if (size.kind !== "ok" || typeof size.value.movable !== "boolean" || typeof size.value.copyable !== "boolean") return [WAYS_UNCHECKED];
+  return [size.value.movable ? null : MOVE_WITHHELD, size.value.copyable ? null : COPY_WITHHELD].filter((line): line is string => line !== null);
+}
+
+/** The way Add folder uses: the chosen one, or Use where it is for a Move or Copy it no longer
+ * offers. Inputs: the chosen way and the folder read. Output: the way to show and add with. */
 export function addWay(mode: AddWay, size: Loaded<FolderSize> | null): AddWay {
-  return mode === "move" && !moveOffered(size) ? "here" : mode;
+  if (mode === "move" && !moveOffered(size)) return "here";
+  if (mode === "copy" && !copyOffered(size)) return "here";
+  return mode;
 }
 
 /** Says how long the GitHub device code still works. Inputs: its lifetime in seconds, when it
