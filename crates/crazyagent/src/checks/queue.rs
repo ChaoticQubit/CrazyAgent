@@ -465,8 +465,9 @@ fn end(db: &Connection, id: i64, reason: &str) -> Result<Job, CheckRefusal> {
 }
 
 /// Runs the oldest queued job, while fewer than the project's `parallel` jobs run, to its
-/// record: the snapshot of the change set's head, the confined run under the network
-/// ceiling `remotes`, the integrity assessment, then the run, its results and its source,
+/// record: the snapshot of the change set's head, the confined run under the project's
+/// trust ceiling (`off` for an untrusted project or an unreadable level, `remotes` for a
+/// reviewed one), the integrity assessment, then the run, its results and its source,
 /// policy and integrity in one transaction, and the snapshot removed or kept per
 /// `keep_failed_snapshots`. A job whose change set moved on or was discarded before it ran
 /// is cancelled with `checks_change_set_moved` or `checks_change_set_discarded`; one that
@@ -688,7 +689,7 @@ fn run_claimed(db: &Connection, runtime: &Path, claimed: Claimed) -> Result<Job,
         timeout: Duration::from_secs(u64::from(claimed.check.spec.timeout_s)),
         output_cap: runner::OUTPUT_CAP,
         report_cap: runner::REPORT_CAP,
-        network_ceiling: NetworkMode::Remotes,
+        network_ceiling: network_ceiling(db, &claimed.project),
         remotes: Vec::new(),
     };
     let cancel = AtomicBool::new(false);
@@ -715,6 +716,19 @@ fn run_claimed(db: &Connection, runtime: &Path, claimed: Claimed) -> Result<Job,
         Ok(_) => job(db, claimed.id),
         Err(refusal) => end(db, claimed.id, &refusal.0),
     }
+}
+
+/// The widest network any check of a project gets: the project's trust level's
+/// `check_network`, so an untrusted project's checks run with network off whatever its
+/// profile says (threat model N1), and `off` when the level cannot be read. Inputs: the
+/// engine connection and the project. Output: the ceiling.
+fn network_ceiling(db: &Connection, project: &ProjectId) -> NetworkMode {
+    let Ok(trust) = crate::trust::level(db, project.as_str()) else {
+        return NetworkMode::Off;
+    };
+    let ceiling = crate::trust::Enforcement::for_level(trust).check_network;
+    assert!(trust == crate::trust::Trust::Reviewed || ceiling == NetworkMode::Off);
+    ceiling
 }
 
 fn record_run(

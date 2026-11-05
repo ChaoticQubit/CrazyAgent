@@ -12,6 +12,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
+use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -1195,4 +1196,110 @@ fn an_agent_reading_a_holdout_run_through_the_tracker_ops_sees_only_its_verdict(
     assert_eq!(full["results"][0]["name"], "oracle::answers");
     assert_eq!(title(&owner(), &holdout), "hidden");
     assert!(!covered(&owner()).is_null());
+}
+
+/// An untrusted project's checks run with network off whatever its approved profile says: a
+/// check asking for `localhost` cannot reach a loopback listener and one asking for
+/// `remotes` records `off`. The same profile on a reviewed project keeps both networks. Jobs
+/// queued while reviewed run off once the project turns untrusted before they run, and an
+/// unreadable level runs off too (threat model N1, trust item 2).
+#[test]
+fn an_untrusted_check_runs_with_network_off_whatever_the_profile_says() {
+    let case = Case::new();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let probe = format!(
+        "exec /usr/bin/perl -MIO::Socket::INET -e 'IO::Socket::INET->new(PeerAddr => \"127.0.0.1:{port}\", Timeout => 5) or exit 3; exit 0'\n"
+    );
+    let id = case.change_set(&[("connect.sh", &probe), ("pass.sh", "exit 0\n")]);
+    let mut loopback = check("loopback", &["/bin/sh", "connect.sh"], "exit_code", None);
+    loopback["network"] = json!("localhost");
+    let mut wide = check("wide", &["/bin/sh", "pass.sh"], "exit_code", None);
+    wide["network"] = json!("remotes");
+    case.approve(json!([loopback, wide]));
+    let set = |trust: crate::trust::Trust| {
+        crate::trust::save(
+            &case.db,
+            case.project.as_str(),
+            trust,
+            crate::trust::Origin::Owner,
+        )
+        .unwrap();
+    };
+    let submit = || {
+        queue::submit(&case.db, &id, Trigger::OnRequest, Actor::Owner, &[]).unwrap();
+    };
+    let drained = || {
+        let jobs: Vec<Job> =
+            std::iter::from_fn(|| queue::run_next(&case.db, &case.engine).unwrap()).collect();
+        assert!(
+            jobs.len() == 2 && jobs.iter().all(|job| job.state == JobState::Recorded),
+            "{jobs:?}"
+        );
+        record::latest(&case.db, &id)
+            .unwrap()
+            .iter()
+            .map(|run| {
+                (
+                    run.check.clone(),
+                    (case.view(run).policy.network, run.verdict),
+                )
+            })
+            .collect::<BTreeMap<_, _>>()
+    };
+    let unreached = || {
+        listener
+            .accept()
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
+    };
+    let off = BTreeMap::from([
+        (
+            "loopback".to_owned(),
+            (runs::NetworkMode::Off, Some(Verdict::Failed)),
+        ),
+        (
+            "wide".to_owned(),
+            (runs::NetworkMode::Off, Some(Verdict::Passed)),
+        ),
+    ]);
+    set(crate::trust::Trust::Untrusted);
+    submit();
+    assert_eq!(drained(), off);
+    assert!(unreached());
+    set(crate::trust::Trust::Reviewed);
+    submit();
+    assert_eq!(
+        drained(),
+        BTreeMap::from([
+            (
+                "loopback".to_owned(),
+                (runs::NetworkMode::Localhost, Some(Verdict::Passed)),
+            ),
+            (
+                "wide".to_owned(),
+                (runs::NetworkMode::Remotes, Some(Verdict::Passed)),
+            ),
+        ])
+    );
+    assert!(listener.accept().is_ok());
+    submit();
+    set(crate::trust::Trust::Untrusted);
+    assert_eq!(
+        drained(),
+        off,
+        "jobs queued while reviewed run under the level at run time"
+    );
+    let tampered = case
+        .db
+        .execute(
+            "UPDATE project_trust SET level = 'trusted' WHERE project = ?1",
+            [case.project.as_str()],
+        )
+        .unwrap();
+    assert_eq!(tampered, 1);
+    assert!(crate::trust::level(&case.db, case.project.as_str()).is_err());
+    submit();
+    assert_eq!(drained(), off, "an unreadable level runs with network off");
+    assert!(unreached());
 }
