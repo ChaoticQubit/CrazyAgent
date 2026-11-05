@@ -4,7 +4,7 @@ use crazyagent::engine::owner::OwnerMutation;
 use crazyagent::protocol::ProjectId;
 use crazyagent::team::events::{AppEvents, RuleTarget, WakeRule};
 use crazyagent::team::{
-    BackgroundAtEnd, BranchMode, ChildLanding, SwitchMode, TeamAction, TeamStatus,
+    BackgroundAtEnd, BranchMode, ChildLanding, SwitchApply, SwitchMode, TeamAction, TeamStatus,
 };
 
 pub(super) fn read_failure(code: &str) -> BridgeError {
@@ -171,6 +171,22 @@ impl NativeBridge {
         let project_id = project(id)?;
         let mode = SwitchMode::named(mode).ok_or_else(|| failure("team_action_invalid"))?;
         self.team_action(TeamAction::OnHarnessSwitch { project_id, mode }, generation)
+            .await
+    }
+
+    /// Sets when a saved master harness change reaches the running live master: `when_idle`
+    /// switches it once it is idle, `next_start` keeps it on its harness until it starts
+    /// again. Takes the project id, the choice and the client generation. Returns the actual
+    /// commit receipt, or `team_action_invalid` for any other choice.
+    pub async fn team_apply_harness_switch(
+        &mut self,
+        id: &str,
+        mode: &str,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        let mode = SwitchApply::named(mode).ok_or_else(|| failure("team_action_invalid"))?;
+        self.team_action(TeamAction::ApplyHarnessSwitch { project_id, mode }, generation)
             .await
     }
 

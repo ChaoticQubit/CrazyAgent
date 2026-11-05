@@ -799,6 +799,10 @@ export interface TeamMessage {
  * over to the new harness, or start the new harness fresh. */
 export type SwitchMode = "carry" | "fresh";
 
+/** When a saved master harness change reaches the running live master: once it is idle, or at
+ * its next start. */
+export type SwitchApply = "when_idle" | "next_start";
+
 /** What a task does at its turn end while commands its agent started in the background
  * still run: wait for them, give them a grace time in seconds and stop them, or stop them
  * with the turn and tell the agent first. */
@@ -880,6 +884,7 @@ export interface TeamStatus {
   session_limit_secs?: number | null;
   idle_stop_secs?: number | null;
   on_harness_switch?: SwitchMode;
+  apply_harness_switch?: SwitchApply;
   sub_agent_depth?: number;
   child_landing?: ChildLanding;
   show_finished?: boolean;
@@ -1054,6 +1059,12 @@ export function teamTimeLimits(id: string, turnSecs: number | null, sessionSecs:
 
 export function teamOnHarnessSwitch(id: string, mode: SwitchMode, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, generation });
+}
+
+/** Sets when a saved master harness change reaches the running live master. Inputs: the project
+ * id, the choice and a generation. Output: the engine receipt. */
+export function teamApplyHarnessSwitch(id: string, mode: SwitchApply, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_apply_harness_switch", { id, mode, generation });
 }
 
 /** Sets how deep sub-agents may start workers of their own. Inputs: the project id, the depth
