@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 export const LIB = fileURLToPath(new URL("../../src-tauri/src/lib.rs", import.meta.url));
 export const ROUTES = fileURLToPath(new URL("../../src-tauri/e2e_bridge/routes.rs", import.meta.url));
 
-const NATIVE_ONLY = /\bbridge::|\bupdates::|\bterminals\b|\bapp\b|NativeBridge::|Arc::|default_engine\(|SOCKET_OVERRIDE|state\.0/;
+const NATIVE_ONLY = /\bbridge::(?!tracker::writes\b)|\bupdates::|\bterminals\b|\bapp\b|NativeBridge::|Arc::|default_engine\(|SOCKET_OVERRIDE|state\.0/;
 const NATIVE_PARAM = /State<|AppHandle|Channel<|WebviewWindow/;
 
 /** Splits text at the commas that sit outside every bracket.
@@ -94,7 +94,8 @@ function imports(source) {
 }
 
 /** Renders the bridge binary's route table from lib.rs: one arm per routed command that parses
- * its camelCase arguments like Tauri and runs the command body on the shared bridge.
+ * its camelCase arguments like Tauri and runs the command body on the shared bridge, with a
+ * pure `bridge::` helper the body calls named through the desktop crate.
  * Input: the lib.rs source. Output: the routes.rs text. */
 export function render(source) {
   const routes = commands(source).map(plan).filter((planned) => planned.route).map((planned) => planned.route);
@@ -110,7 +111,7 @@ ${fields}            }
             };
 `;
     return `        "${name}" => {
-${parse}            let result: Result<_, BridgeError> = async { ${body} }.await;
+${parse}            let result: Result<_, BridgeError> = async { ${body.replaceAll(/(?<![\w:])bridge::/g, "crazyagent_desktop::bridge::")} }.await;
             routed(result)
         }
 `;
