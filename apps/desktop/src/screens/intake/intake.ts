@@ -1,6 +1,6 @@
 import { receiptState, type StoredSetup } from "../../api-projects";
 import type {
-  AddFolderMode, Dependency, DependencyName, DependencyState, FoundProject, FoundProjectState, GitHubRepo, GitHubStatus, IntentReceipt, MappingFacts,
+  AddFolderMode, Dependency, DependencyName, DependencyState, FolderSize, FoundProject, FoundProjectState, GitHubRepo, GitHubStatus, IntentReceipt, MappingFacts,
   MappingTry, OnboardingStep, OnboardingView, PackEntry, PackGroup, PackState, ProjectsHome, ResearchKind, SetupStatus,
 } from "../../engine-client";
 import type { Loaded } from "../../state";
@@ -121,6 +121,22 @@ export function sizeLine(mode: AddWay, bytes: number | null, home: string): { te
 export function worktreesLine(count: number): string {
   const many = count !== 1;
   return `This folder has ${count} linked git ${many ? "worktrees" : "worktree"}. ${many ? "They stay" : "It stays"} with the original folder; the copy gets the main checkout and every branch.`;
+}
+
+/** Why Add folder offers no Move for a folder whose git worktree links a move would break. */
+export const MOVE_WITHHELD = "Move isn't offered: this folder is linked to git worktrees, and moving it would break them.";
+
+/** Whether Add folder offers Move: not once the folder read says moving it would break its
+ * git worktree links, which the engine refuses. Input: the folder read, if any. Output: true
+ * until a read says the folder cannot move. */
+export function moveOffered(size: Loaded<FolderSize> | null): boolean {
+  return size?.kind !== "ok" || size.value.movable !== false;
+}
+
+/** The way Add folder uses: the chosen one, or Use where it is for a Move it no longer offers.
+ * Inputs: the chosen way and the folder read. Output: the way to show and add with. */
+export function addWay(mode: AddWay, size: Loaded<FolderSize> | null): AddWay {
+  return mode === "move" && !moveOffered(size) ? "here" : mode;
 }
 
 /** Says how long the GitHub device code still works. Inputs: its lifetime in seconds, when it

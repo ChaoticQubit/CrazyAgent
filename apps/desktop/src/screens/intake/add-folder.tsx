@@ -8,7 +8,7 @@ import { Button, ConfirmDialog, LoadError, Notice, NotReady, PageHeader, Segment
 import { displayText } from "../conversation";
 import { folderLabel } from "../project/overview";
 import { SetUpDialog } from "./found";
-import { folderName, joinPath, pickedFolderProblem, sizeLine, worktreesLine, type AddWay } from "./intake";
+import { MOVE_WITHHELD, addWay, folderName, joinPath, moveOffered, pickedFolderProblem, sizeLine, worktreesLine, type AddWay } from "./intake";
 import "../project/projects.css";
 import "./intake.css";
 
@@ -22,8 +22,9 @@ const ADD_LABELS: Record<AddWay, string> = { here: "Set up here", move: "Move in
 
 /** Add an existing folder as a view of its state: the chosen folder, used where it is (default)
  * or explicitly moved or copied with the target shown first, Copy with the size first and a
- * warning above 1 GB and the linked worktrees it leaves behind, and a clone suggestion when the
- * code is on GitHub. Inputs: the projects home
+ * warning above 1 GB and the linked worktrees it leaves behind, no Move with the reason once the
+ * read says moving would break its git worktree links, and a clone suggestion when the code is on
+ * GitHub. Inputs: the projects home
  * read, the source folder, its size read, the way, a busy flag, the last problem and the handlers.
  * Output: the page. */
 export function AddFolderView({ home, source, size, mode, busy, problem, onChoose, onMode, onAdd, onClone, onRetry }: {
@@ -49,13 +50,15 @@ export function AddFolderView({ home, source, size, mode, busy, problem, onChoos
   const bytes = size?.kind === "ok" ? size.value.bytes : null;
   const github = size?.kind === "ok" ? size.value.github ?? null : null;
   const worktrees = size?.kind === "ok" ? size.value.worktrees ?? 0 : 0;
-  const line = sizeLine(mode, bytes, root);
+  const offered = moveOffered(size);
+  const way = addWay(mode, size);
+  const line = sizeLine(way, bytes, root);
   const name = source ? folderName(source) : "";
   return <div className="pj in-page">
     {header}
     <div className="pj-stack-s">
       <span className="pj-row"><Button icon="folder-open" disabled={busy} onClick={onChoose}>{source ? "Choose another folder" : "Choose folder"}</Button></span>
-      {source && (mode === "here"
+      {source && (way === "here"
         ? <p><span className="pj-mono" title={source}>{displayText(folderLabel(source))}</span> stays where it is.</p>
         : <p><span className="pj-mono" title={source}>{displayText(folderLabel(source))}</span> goes to <span className="pj-mono">{displayText(folderLabel(joinPath(root, name)))}</span>.</p>)}
     </div>
@@ -66,17 +69,18 @@ export function AddFolderView({ home, source, size, mode, busy, problem, onChoos
       </Notice>}
       <div className="pj-field">
         <span className="pj-label">How to add it</span>
-        <Segmented label="How to add it" value={mode} onValue={onMode} options={WAYS} />
+        <Segmented label="How to add it" value={way} onValue={onMode} options={offered ? WAYS : WAYS.filter((option) => option.value !== "move")} />
       </div>
+      {!offered && <Notice tone="info">{MOVE_WITHHELD}</Notice>}
       {line.warn ? <Notice tone="warn">{line.text}</Notice> : <p className="pj-secondary" role="status">{line.text}</p>}
-      {mode === "copy" && worktrees > 0 && <Notice tone="info">{worktreesLine(worktrees)}</Notice>}
-      {size?.kind === "not_ready" && mode === "copy" && <p className="pj-help">The folder size isn't in this build, so Copy can't show it first.</p>}
+      {way === "copy" && worktrees > 0 && <Notice tone="info">{worktreesLine(worktrees)}</Notice>}
+      {size?.kind === "not_ready" && way === "copy" && <p className="pj-help">The folder size isn't in this build, so Copy can't show it first.</p>}
       {size?.kind === "error" && <p className="pj-error" role="alert">{size.message}</p>}
       {problem && <p className="pj-error" role="alert">{problem}</p>}
       <span className="pj-row">
-        <Button variant="primary" icon={mode === "here" ? "list-checks" : mode === "move" ? "folder-input" : "copy"} pending={busy}
-          pendingLabel={mode === "move" ? "Moving..." : "Copying..."} disabled={mode === "copy" && bytes === null}
-          onClick={onAdd}>{ADD_LABELS[mode]}</Button>
+        <Button variant="primary" icon={way === "here" ? "list-checks" : way === "move" ? "folder-input" : "copy"} pending={busy}
+          pendingLabel={way === "move" ? "Moving..." : "Copying..."} disabled={way === "copy" && bytes === null}
+          onClick={onAdd}>{ADD_LABELS[way]}</Button>
         <a className="btn quiet" href={formatRoute({ name: "home" })}>Cancel</a>
       </span>
     </>}
@@ -85,8 +89,8 @@ export function AddFolderView({ home, source, size, mode, busy, problem, onChoos
 }
 
 /** Add an existing folder: picks it in the macOS chooser and reads its size. By default it is set up
- * where it is on a chosen pool; Move asks to confirm with the target shown, and a moved or copied
- * folder shows on Home as found. */
+ * where it is on a chosen pool; Move asks to confirm with the target shown and is not offered for a
+ * folder whose git worktree links it would break, and a moved or copied folder shows on Home as found. */
 export function AddFolder() {
   const session = useAppSession();
   const [home, reload] = useLoad(loadProjectsHome, [], "projects-home");
@@ -99,6 +103,7 @@ export function AddFolder() {
   const [busy, setBusy] = useState(false);
   const [problem, setProblem] = useState("");
   const root = home.kind === "ok" ? home.value.path : null;
+  const way = addWay(mode, size);
 
   const choose = async () => {
     setProblem("");
@@ -117,10 +122,10 @@ export function AddFolder() {
   };
 
   const add = async () => {
-    if (!source || busy || mode === "here") return;
+    if (!source || busy || way === "here") return;
     setBusy(true);
     setProblem("");
-    const result = await addExistingFolder(source, mode, nextGeneration());
+    const result = await addExistingFolder(source, way, nextGeneration());
     setBusy(false);
     setConfirming(false);
     if (result.kind !== "ok") { setProblem(result.kind === "not_ready" ? "Adding a folder isn't in this build." : intakeCopy(result)); return; }
@@ -132,8 +137,8 @@ export function AddFolder() {
   };
 
   const start = () => {
-    if (mode === "here") setSettingUp(true);
-    else if (mode === "move") setConfirming(true);
+    if (way === "here") setSettingUp(true);
+    else if (way === "move") setConfirming(true);
     else void add();
   };
 
