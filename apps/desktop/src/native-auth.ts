@@ -57,6 +57,7 @@ export interface NativeAuthState {
   presentation?: NativeAuthView;
   confirming_logout: boolean;
   error?: string;
+  running_account_name?: string;
   invalidated?: boolean;
   rebound?: boolean;
   recover?: boolean;
@@ -69,7 +70,7 @@ export interface NativeAuthState {
 type Event = { kind: "open"; detail: ModelAccessDetail; navigation: number } |
   { kind: "begin"; action: NativeAuthCommand; request: number } |
   { kind: "reply"; navigation: number; request: number; reply: NativeAuthView } |
-  { kind: "failure"; navigation: number; request: number; code: string } |
+  { kind: "failure"; navigation: number; request: number; code: string; account?: string } |
   { kind: "claude_input_begin"; request: number } |
   { kind: "claude_input_accepted" | "claude_input_failure"; navigation: number; request: number } |
   { kind: "close" | "invalidate" | "confirm_logout" | "back" };
@@ -222,10 +223,10 @@ function receipt(state: NativeAuthState, reply: NativeAuthView): NativeAuthState
     presentation: state.open && state.valid && !error ? reply : undefined };
 }
 
-function failed(state: NativeAuthState, code: string): NativeAuthState {
+function failed(state: NativeAuthState, code: string, account?: string): NativeAuthState {
   const action = state.in_flight && actionFor(state.in_flight.action);
   const recover = code === "native_auth_outcome_unknown_read_same_operation";
-  return { ...state, presentation: undefined, in_flight: undefined, error: code,
+  return { ...state, presentation: undefined, in_flight: undefined, error: code, running_account_name: account,
     recover: Boolean(state.recover || recover), recoverAction: action ?? state.recoverAction,
     recoveryContext: state.recoveryContext ?? state.context,
     valid: false, invalidated: true };
@@ -273,7 +274,7 @@ export function reduceNativeAuth(state: NativeAuthState | undefined,
   if (event.kind === "reply" || event.kind === "failure") {
     if (event.navigation !== state.context.navigation ||
       event.request !== state.in_flight?.request) return state;
-    if (event.kind === "failure") return failed(state, event.code);
+    if (event.kind === "failure") return failed(state, event.code, event.account);
     if (!matchesReply(state, event.reply)) {
       return failed(state, "native_auth_outcome_unknown_read_same_operation");
     }
@@ -319,7 +320,16 @@ export function nativeAuthFailureCode(error: unknown): string {
     "native_profile_capacity", "native_profile_new_home_not_empty", "native_profile_in_use",
     "native_profile_lock_unavailable", "owner_queue_not_submitted",
     "native_auth_identity_unavailable",
-    "native_auth_cannot_display_safely", "native_auth_presentation_limit"];
+    "native_auth_cannot_display_safely", "native_auth_presentation_limit",
+    "native_auth_sign_in_running"];
   return typeof code === "string" && allowed.includes(code) ? code :
     "native_auth_outcome_unknown_read_same_operation";
+}
+
+/** The account whose sign-in still runs, from a bridge refusal that names it.
+ * Input: the rejection value. Output: the account id, or undefined for any other failure. */
+export function nativeAuthRunningAccount(error: unknown): string | undefined {
+  if (nativeAuthFailureCode(error) !== "native_auth_sign_in_running") return undefined;
+  const account = typeof error === "object" && error !== null && "account" in error ? error.account : undefined;
+  return typeof account === "string" && account !== "" ? account : undefined;
 }

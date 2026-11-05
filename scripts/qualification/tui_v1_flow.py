@@ -5,13 +5,13 @@ import codecs
 from contextlib import contextmanager
 import errno
 import fcntl
-import json
 import os
 from pathlib import Path
 import re
 import select
 import shutil
 import signal
+import stat
 import struct
 import subprocess
 import sys
@@ -45,15 +45,27 @@ ESC = b"\x1b"
 TAB = b"\t"
 CLEAR = b"\x15"
 GO_TO = b"\x0b"
+UP = b"\x1b[A"
 DOWN = b"\x1b[B"
 SHIFT_LEFT = b"\x1b[1;2D"
 SHIFT_RIGHT = b"\x1b[1;2C"
 QUIT = b"\x11"
+CHATGPT = "Sign in with ChatGPT"
+OPENAI = "Sign in with ChatGPT or use an OpenAI API key"
+SIGN_IN_SECONDS = 900
+RECORDS = ("auth.json", ".credentials.json")
+SHAPES = (
+    ("JWT", re.compile(r"eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")),
+    ("sk- key", re.compile(r"(?<![A-Za-z0-9_-])sk-[A-Za-z0-9_-]{20,}")),
+    ("sess- token", re.compile(r"(?<![A-Za-z0-9_-])sess-[A-Za-z0-9]{20,}")),
+    ("credential key", re.compile(
+        r"(?:access_token|refresh_token|id_token|OPENAI_API_KEY)[\"']?\s*[:=]\s*[\"'][^\"'\s]")),
+)
 TOKEN = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]|\x1b[^\[]|[^\x1b]")
 COMPLETE = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|[^\[])")
 CARRY_MAX = 64
 WINDOW_MAX = 16384
-LIMIT_SECONDS = 2700
+LIMIT_SECONDS = 3600
 STARTED = time.monotonic()
 
 
@@ -65,15 +77,18 @@ def step(text):
     print("[%7.1f s] %s" % (time.monotonic() - STARTED, text), flush=True)
 
 
+def leaks(text):
+    return [kind for kind, shape in SHAPES if shape.search(text)]
+
+
 class Screen:
-    def __init__(self, secrets):
+    def __init__(self):
         self.cells = {}
         self.row = 1
         self.column = 1
         self.carry = ""
         self.window = ""
         self.decoder = codecs.getincrementaldecoder("utf-8")("replace")
-        self.secrets = secrets
 
     def feed(self, data):
         text = self.carry + self.decoder.decode(data)
@@ -83,8 +98,8 @@ class Screen:
             self.carry = text[cut:]
             text = text[:cut]
         self.window = (self.window + text)[-WINDOW_MAX:]
-        assert not any(secret in self.window for secret in self.secrets), \
-            "a sign-in credential reached the terminal"
+        found = leaks(self.window)
+        assert not found, "a %s reached the terminal" % found[0]
         for token in TOKEN.findall(text):
             self.apply(token)
 
@@ -141,9 +156,9 @@ class Screen:
 
 
 class Terminal:
-    def __init__(self, binary, socket, secrets):
+    def __init__(self, binary, socket):
         self.child, self.master, self.slave, self.before = tui_flow.launch(binary, socket)
-        self.screen = Screen(secrets)
+        self.screen = Screen()
         self.closed = False
         step("TUI started pid=%d supervisor=%d" % (self.child.pid, self.child.supervisor.pid))
 
@@ -226,8 +241,8 @@ class Terminal:
 
 
 @contextmanager
-def terminal(binary, socket, secrets):
-    term = Terminal(binary, socket, secrets)
+def terminal(binary, socket):
+    term = Terminal(binary, socket)
     try:
         term.wait("CrazyAgent", 20)
         term.resize()
@@ -242,17 +257,12 @@ def terminal(binary, socket, secrets):
         step("TUI reaped pid=%d" % term.child.pid)
 
 
-def secrets_of(source):
-    data = json.loads((source / "auth.json").read_text())
-    assert isinstance(data, dict), "BLOCKED: the managed profile auth.json is not a sign-in record"
-    tokens = data.get("tokens") or {}
-    values = [value for key, value in tokens.items()
-              if key.endswith("_token") and isinstance(value, str) and len(value) >= 24]
-    key = data.get("OPENAI_API_KEY")
-    if isinstance(key, str) and len(key) >= 24:
-        values.append(key)
-    assert values, "BLOCKED: the managed profile holds no ChatGPT sign-in tokens"
-    return values
+def owner_terminal():
+    try:
+        return open("/dev/tty", "w")
+    except OSError:
+        raise SystemExit("BLOCKED: no terminal to show the ChatGPT sign-in code. "
+                         "Run this test from a terminal in an owner window.") from None
 
 
 def private_file(path, data):
@@ -358,43 +368,91 @@ def home_empty(term):
     step("Home shows the empty state")
 
 
-def seed_signed_in_home(root, source):
-    profiles = root / "native-profiles"
-    slots = [entry for entry in profiles.iterdir() if entry.name != "identity.json"]
-    assert len(slots) == 1, "expected one engine-made managed profile, found %d" % len(slots)
-    home = slots[0] / "home"
-    assert home.is_dir() and not home.is_symlink() and not slots[0].is_symlink()
-    assert (home.stat().st_mode & 0o7777) == 0o700
-    assert not (home / "auth.json").exists(), "the new engine profile already holds a sign-in"
-    private_file(home / "auth.json", (source / "auth.json").read_bytes())
-    return home
+def sign_in_problem(lines, code):
+    for index, line in enumerate(lines):
+        if "Press n for a new code." in line:
+            above = lines[index - 1].strip() if index else ""
+            return above.replace(code, "<code>") if code else above
+    return None
 
 
-def accounts(term, root, source):
+def line_after(lines, label):
+    for index, line in enumerate(lines[:-1]):
+        if label in line:
+            return lines[index + 1].strip()
+    return ""
+
+
+def device_code(term):
+    deadline = time.monotonic() + 60
+    while True:
+        term.pump(0.1)
+        lines = term.text().splitlines()
+        page = line_after(lines, "Open this page on any device")
+        code = line_after(lines, "Enter this code")
+        if page and code:
+            break
+        problem = sign_in_problem(lines, code)
+        assert problem is None, "ChatGPT gave no sign-in code: %s" % problem
+        assert term.child.poll() is None, "the TUI exited before it showed a sign-in code"
+        assert time.monotonic() < deadline, "no ChatGPT sign-in code within 60 s"
+    assert page.startswith("https://auth.openai.com/") and " " not in page, \
+        "the sign-in page row is not an OpenAI page"
+    assert 0 < len(code) <= 32 and re.fullmatch(r"[A-Za-z0-9-]+", code), \
+        "the sign-in code row is not a code"
+    return page, code
+
+
+def sign_in(term, tty):
+    page, code = device_code(term)
+    tty.write("\nV1 TUI qualification: sign in with ChatGPT within %d minutes\n"
+              "  1. Open %s\n  2. Enter the code %s\n  3. Approve CrazyAgent in ChatGPT\n"
+              % (SIGN_IN_SECONDS // 60, page, code))
+    tty.flush()
+    step("the TUI showed a ChatGPT sign-in code; the page and code went to the terminal only")
+    deadline = time.monotonic() + SIGN_IN_SECONDS
+    while True:
+        term.pump(0.5)
+        lines = term.text().splitlines()
+        if any("Add to pools" in line for line in lines):
+            break
+        problem = sign_in_problem(lines, code)
+        assert problem is None, "the ChatGPT sign-in stopped: %s" % problem
+        assert term.child.poll() is None, "the TUI exited during the ChatGPT sign-in"
+        assert time.monotonic() < deadline, \
+            "the ChatGPT sign-in was not approved within %d s" % SIGN_IN_SECONDS
+    assert not any(code in line for line in term.text().splitlines()), \
+        "the sign-in code stayed on the screen after the sign-in"
+    tty.write("ChatGPT sign-in approved; the flow continues.\n")
+    tty.flush()
+
+
+def chatgpt_choice(term):
     term.key(b"s")
     term.wait("No accounts yet.", 20)
     term.key(ENTER)
     term.wait("Where does the model come from?", 20)
-    term.wait("ChatGPT / Codex", 10)
+    term.wait(OPENAI, 10)
+    assert term.row(OPENAI).lstrip().startswith("> "), term.text()
     term.key(ENTER)
+    term.wait("How do you want to connect?", 10)
     term.wait("Use the Codex sign-in on this Mac", 10)
-    term.key(DOWN)
-    term.key(DOWN)
-    assert "\u258c" in term.row("Use the Codex sign-in on this Mac"), term.text()
+    assert OPENAI not in term.text(), term.text()
+    term.key(UP)
+    term.key(UP)
+    assert "\u258c" in term.row(CHATGPT), term.text()
+
+
+def accounts(term, tty):
+    chatgpt_choice(term)
     term.key(ENTER)
-    failed = ("This sign-in is not available on this Mac.", "The sign-in did not finish.")
-    term.wait("Codex is not signed in on this Mac.", 120, failed + ("Add to pools",))
-    step("a new engine-owned profile is not signed in")
-    home = seed_signed_in_home(root, source)
-    term.key(b"n")
-    term.wait("Add to pools", 120, failed + ("Codex is not signed in on this Mac.",))
+    sign_in(term, tty)
     term.wait("Account name", 5)
     step("the engine observed the signed-in managed Codex account")
     term.key(ENTER)
     term.until("the account list", 30, lambda screen: "Add to pools" not in screen
                and "No accounts yet." not in screen and "Signed in" in screen)
     step("Settings, Accounts lists the account as signed in")
-    return home
 
 
 def pools(term):
@@ -515,7 +573,24 @@ def reopened(term):
     step("a second TUI opens Home with the project and no first-run page")
 
 
-def files(root, home, logs, secrets):
+def walk_failed(error):
+    raise error
+
+
+def scanned(folder, skipped=()):
+    paths = []
+    for directory, folders, names in os.walk(folder, onerror=walk_failed):
+        if directory == str(folder):
+            folders[:] = [name for name in folders if name not in skipped]
+        for name in names:
+            assert name not in RECORDS, "a sign-in record %s is in %s" % (name, directory)
+            path = os.path.join(directory, name)
+            if stat.S_ISREG(os.lstat(path).st_mode):
+                paths.append(Path(path))
+    return paths
+
+
+def files(root, home, logs):
     reports = sorted(home.glob("*/.crazyagent/context/research/%s" % REPORT))
     assert reports == [home / FOLDER / ".crazyagent" / "context" / "research" / REPORT], reports
     report = reports[0].read_text()
@@ -523,21 +598,20 @@ def files(root, home, logs, secrets):
     assert "https://" in report, report[:2000]
     brief = (reports[0].parent.parent / "brief.md").read_text()
     assert brief.startswith("# %s\n" % PROJECT) and ABOUT in brief, brief[:400]
-    checked = [root / "global.toml", logs / "engine.out", logs / "engine.err"]
-    checked += [path for path in (root / "project.toml", root / "engine.db", root / "engine.db-wal")
-                if path.is_file()]
-    checked += [path for folder in (root / "projects", home) if folder.is_dir()
-                for path in folder.rglob("*") if path.is_file() and not path.is_symlink()]
+    checked = scanned(root, ("native-profiles",)) + scanned(logs) + scanned(home)
+    for required in (root / "global.toml", root / "engine.db", logs / "engine.out",
+                     logs / "engine.err", reports[0]):
+        assert required in checked, required
     for path in checked:
         data = path.read_bytes()
         assert len(data) <= 268435456, path
-        text = data.decode("utf-8", "replace")
-        assert not any(secret in text for secret in secrets), \
-            "a sign-in credential reached %s" % path.name
-    step("research report, brief and %d engine files checked; no credential found" % len(checked))
+        found = leaks(data.decode("utf-8", "replace"))
+        assert not found, "a %s reached %s" % (found[0], path)
+    step("research report, brief and %d files checked; no sign-in record, credential key "
+         "or token-shaped string" % len(checked))
 
 
-def run(binary, codex, source):
+def run(binary, codex):
     for handled in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP, signal.SIGALRM):
         signal.signal(handled, interrupted)
     signal.setitimer(signal.ITIMER_REAL, LIMIT_SECONDS)
@@ -545,7 +619,7 @@ def run(binary, codex, source):
     os.environ["LANG"] = "en_US.UTF-8"
     for name in ("LC_ALL", "LC_CTYPE"):
         os.environ.pop(name, None)
-    secrets = secrets_of(source)
+    tty = owner_terminal()
     marker = "TIDE%d" % os.getpid()
     base = Path(tempfile.mkdtemp(prefix="ca-v1e2e-", dir="/private/tmp")).resolve()
     engine = None
@@ -559,22 +633,22 @@ def run(binary, codex, source):
         private_file(root / "global.toml", SETTINGS.encode())
         engine = start_engine(binary, root, logs, codex)
         socket = root / "engine.sock"
-        with terminal(binary, socket, secrets) as term:
+        with terminal(binary, socket) as term:
             first_run(term)
             projects_folder(term, home)
             setup(term, root)
             home_empty(term)
-            profile = accounts(term, root, source)
+            accounts(term, tty)
             pools(term)
             new_project(term)
             research(term)
             context(term)
             master(term, marker)
-        with terminal(binary, socket, secrets) as term:
+        with terminal(binary, socket) as term:
             reopened(term)
         stop_engine(engine)
         engine = None
-        files(root, home, logs, secrets + secrets_of(profile))
+        files(root, home, logs)
         step("V1 TUI flow passed")
     finally:
         if engine is not None and engine.poll() is None:
@@ -583,9 +657,12 @@ def run(binary, codex, source):
             except ProcessLookupError:
                 pass
             engine.wait(timeout=5)
-        remove(base)
+        try:
+            remove(base)
+        finally:
+            tty.close()
 
 
 if __name__ == "__main__":
-    assert len(sys.argv) == 4, "usage: tui_v1_flow.py CRAZYAGENT_BINARY CODEX_EXECUTABLE MANAGED_CODEX_HOME"
-    run(str(Path(sys.argv[1]).resolve()), str(Path(sys.argv[2]).resolve()), Path(sys.argv[3]).resolve())
+    assert len(sys.argv) == 3, "usage: tui_v1_flow.py CRAZYAGENT_BINARY CODEX_EXECUTABLE"
+    run(str(Path(sys.argv[1]).resolve()), str(Path(sys.argv[2]).resolve()))

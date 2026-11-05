@@ -755,6 +755,7 @@ export interface TeamAgent {
   teammates?: Teammate[];
   pane?: string | null;
   hookless?: boolean;
+  message_note?: string | null;
 }
 
 /** One teammate a harness split off in its own pane of the harness's terminal: its pane id,
@@ -1417,7 +1418,8 @@ export type Receipt = "sent" | "delivered" | "typed" | "read" | "replied" | "fai
  * its own team agent row and `pane` a native teammate's pane, for Stop. `presence`, `waiting`
  * on the owner in its terminal, `owner_questions` (open For: Me questions) and `no_worktree`
  * come from the coordination layer; `hookless` marks an agent whose launch fires no hooks, so
- * it has no receipts. Older engines leave the optional fields out. */
+ * it has no receipts; `message_note` is the engine's sentence when the Delivery setting leaves
+ * the agent no way to get messages. Older engines leave the optional fields out. */
 export interface GraphNode {
   id: string;
   kind: GraphNodeKind;
@@ -1437,6 +1439,7 @@ export interface GraphNode {
   owner_questions?: number;
   no_worktree?: boolean;
   hookless?: boolean;
+  message_note?: string | null;
 }
 
 /** Unread messages from one party to another: how many and the newest one's receipt. Each end
