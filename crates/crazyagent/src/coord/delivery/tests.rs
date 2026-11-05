@@ -798,6 +798,90 @@ fn auto_types_only_claude_code_messages_past_the_grace_into_an_idle_pane() {
     });
 }
 
+/// rv-secreview r1 F1: a lead the engine does not wake for its messages, an endpoint
+/// (kept) lead or an adopted live pane, idle in its own pane, is not typed a turn of the
+/// owner's notices alone: the owner's Wake of its worker stays Sent and nothing is typed
+/// until a waking message arrives, and then both are typed together, the notice first.
+#[test]
+fn an_owner_notice_alone_is_not_typed_into_an_idle_lead_until_a_waking_message() {
+    let mut fixture = Fixture::new();
+    let host = fixture.host();
+    let owner = OwnerTyping::new(fixture.base.join("typing-never-written.db"));
+    let lead = fixture.agent("sub", "codex", "idle", None);
+    let worker = fixture.agent("sub", "codex", "idle", Some(lead));
+    settings::set_delivery(
+        &fixture.db,
+        &project(),
+        HarnessKind::Codex,
+        Delivery::TypingOnly,
+    )
+    .unwrap();
+    let out = fixture.base.join("typed.txt");
+    fixture.pane(&host, lead, READ_ONE_LINE, &out);
+    let now = now_ms();
+    crate::team::events::record(
+        &fixture.db,
+        &project(),
+        worker,
+        None,
+        crate::team::events::EventKind::Progress,
+        crate::team::events::OWNER_WOKE,
+        now,
+    )
+    .unwrap()
+    .unwrap();
+    crate::team::events::forward_to_parents(&fixture.db, &project(), now).unwrap();
+    let waiting = crate::coord::pending(&fixture.db, lead, PENDING_MAX).unwrap();
+    assert_eq!(waiting.len(), 1);
+    let notice = waiting[0].id;
+    assert!(waiting[0].body.contains(crate::team::events::OWNER_WOKE));
+    assert!(!waking(&fixture.db, lead).unwrap());
+    let pane = crate::terminal::AgentId::team(lead).unwrap();
+    until("a quiet pane", || {
+        host.quiet(&pane).unwrap().unwrap() >= typing::APP_QUIET
+    });
+    let awake = BTreeSet::new();
+    let reached = reach(
+        Some(&host as &dyn Host),
+        Some(&owner),
+        &fixture.base,
+        &awake,
+    );
+    let mut deliveries = Deliveries::default();
+
+    deliveries
+        .tick(&fixture.db, &project(), now, &reached)
+        .unwrap();
+    assert_eq!(
+        fixture.receipt(notice),
+        "sent",
+        "a notices-only batch gives the idle lead no turn"
+    );
+    assert!(deliveries.retry.is_empty());
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(!out.exists(), "nothing was typed into the lead's pane");
+
+    let work = fixture.send(
+        Party::Owner,
+        lead,
+        MessageKind::Prompt,
+        "Merge the branch",
+        now,
+    );
+    deliveries
+        .tick(&fixture.db, &project(), now, &reached)
+        .unwrap();
+    assert_eq!(fixture.receipt(notice), "typed");
+    assert_eq!(fixture.receipt(work), "typed");
+    until("the notice and the work typed as one turn", || {
+        std::fs::read_to_string(&out).is_ok_and(|line| {
+            line.find(crate::team::events::OWNER_WOKE)
+                .zip(line.find("Merge the branch"))
+                .is_some_and(|(notice, work)| notice < work)
+        })
+    });
+}
+
 use crate::coord::{BODY_BYTES_MAX, Message};
 
 #[test]
