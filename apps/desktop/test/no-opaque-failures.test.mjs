@@ -38,6 +38,22 @@ function literals(text, pattern) {
 }
 
 /**
+ * Finds the parenthesis that closes a call. Takes the source text and the index just after
+ * the call's opening parenthesis. Returns the index just after its matching close.
+ */
+function closing(text, start) {
+  let depth = 1;
+  let index = start;
+  while (depth > 0 && index < text.length) {
+    if (text[index] === "(") depth += 1;
+    if (text[index] === ")") depth -= 1;
+    index += 1;
+  }
+  assert.equal(depth, 0, `unclosed call at ${start}`);
+  return index;
+}
+
+/**
  * Reads every code literal a call can pass, including each branch of an if or match argument.
  * Takes the source text and a global pattern that ends at the call's opening parenthesis.
  * Returns the code literals found between that parenthesis and its matching close.
@@ -45,16 +61,25 @@ function literals(text, pattern) {
 function callLiterals(text, call) {
   return [...text.matchAll(call)].flatMap((match) => {
     const start = match.index + match[0].length;
-    let depth = 1;
-    let index = start;
-    while (depth > 0 && index < text.length) {
-      if (text[index] === "(") depth += 1;
-      if (text[index] === ")") depth -= 1;
-      index += 1;
-    }
-    assert.equal(depth, 0, `unclosed call at ${start}`);
-    return literals(text.slice(start, index - 1), /"([a-z][a-z0-9_]*)"/g);
+    return literals(text.slice(start, closing(text, start) - 1), /"([a-z][a-z0-9_]*)"/g);
   });
+}
+
+const PRINT = /\be?print(?:ln)?!\(/g;
+
+/**
+ * Drops every print call from Rust source, so a code literal that only labels a log line is
+ * not read as a code the engine records. Takes the source text. Returns the rest of it.
+ */
+function withoutPrints(text) {
+  let kept = "";
+  let from = 0;
+  for (const match of text.matchAll(PRINT)) {
+    if (match.index < from) continue;
+    kept += text.slice(from, match.index);
+    from = closing(text, match.index + match[0].length);
+  }
+  return kept + text.slice(from);
 }
 
 const REJECT = /\breject(?:ed)?\(/g;
@@ -112,7 +137,7 @@ test("a bridge failure keeps its own sentence and names the engine code behind i
 });
 
 test("every sign-in failure the engine records reads as a sentence, and an unknown one names its code", () => {
-  const facts = new Set(engineFiles.flatMap(({ text }) => literals(text, /Some\(\s*"(native_auth_[a-z_]+)"/g)));
+  const facts = new Set(engineFiles.flatMap(({ text }) => literals(withoutPrints(text), /(?:Some|\.unwrap_or)\(\s*"(native_auth_[a-z_]+)"/g)));
   assert.ok(facts.size >= 6 && facts.has("native_auth_interrupted"), [...facts].join(","));
   for (const code of facts) {
     const { text } = signInFailure(code, "chatgpt");
