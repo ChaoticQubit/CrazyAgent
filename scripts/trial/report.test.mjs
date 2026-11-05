@@ -178,6 +178,7 @@ async function trialFolder() {
   await put(root, "steps.jsonl", [
     { n: 1, surface: "desktop", title: "Open the project", why: "every check starts from the owner's project page", at: "2026-11-02T23:10:05-05:00", ok: true, detail: "page shown", evidence: ["screenshots/01-open-project.png"] },
     { n: 2, surface: "tui", title: "Answer the For: Me question", why: "the owner answers questions from Questions", at: "2026-11-02T23:20:00-05:00", ok: false, detail: `the sign-in asked for ${SECRETS.deviceCode} from ${SECRETS.email}`, evidence: [] },
+    { n: 3, surface: "desktop", title: "Set the project up", why: "the mapping ends on its own", at: "2026-11-02T23:30:00-05:00", ok: false, detail: "BLOCKED: the project's pool was still paused after 901 s (Rate limited until 01:40)", evidence: [] },
   ].map((step) => JSON.stringify(step)).join("\n") + "\n");
   await put(root, "checks/T3-02.json", JSON.stringify({
     id: "T3-02", title: "Lead merges <script>alert(1)</script>", proves: "each lead merges its workers' branches", why: "trial 2 check 7 failed", how: "git log of each lead branch",
@@ -230,6 +231,8 @@ test("a trial folder becomes a report with a cover, a summary table and one sect
     assert.ok(html.includes("T3-03 has no evidence item."), "a check with no evidence says so");
     assert.ok(html.includes("Answer the For: Me question") && html.includes("the owner answers questions from Questions"), "steps show what and why");
     assert.ok(html.includes("<th>Why</th><th>OK</th>"), "contract steps show why and whether they worked");
+    const steps = html.slice(html.indexOf('<table class="steps">'), html.indexOf("</table>", html.indexOf('<table class="steps">')));
+    assert.deepEqual([...steps.matchAll(/<span class="result (\w+)">/g)].map((badge) => badge[1]), ["pass", "fail", "blocked"], "a failed step whose detail says BLOCKED is shown blocked");
     const images = html.slice(html.indexOf('<section class="images">'));
     assert.ok(images.includes("screenshots/01-open-project.png") && images.includes("trial.gif"), "every unmasked image is listed");
     assert.ok(!images.includes("02-key.svg") && !images.includes("f00001.txt"), "masked images are not in the unmasked list");

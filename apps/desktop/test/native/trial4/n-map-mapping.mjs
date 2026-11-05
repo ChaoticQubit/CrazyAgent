@@ -15,6 +15,7 @@ const START = "//dialog[@open]//button[normalize-space(.)=\"Start setup\"]";
 const REVIEW = ".pj-switch-item";
 const SETUP_ROUTE = /^#\/projects\/([^/]+)\/setup$/;
 const RUNNING = ["Working", "Waiting"];
+const PAUSED = /^Rate limited until /;
 const LINE = /^Mapping, try ([1-9][0-9]*) of ([1-9][0-9]*), (?:under 1 min|([0-9]+) min)\./;
 const IN_REPO = "Already in the repo: ";
 const DECOY_MARK = DECOY.split("/").pop().replace(/\.md$/, "").toLowerCase();
@@ -28,9 +29,9 @@ const NEEDED = [
  * is never listed or shown, and this engine unit test that its text never reaches the prompt. */
 export const NEVER_READ = "crates/crazyagent/src/onboarding/tests.rs secret_named_documents_are_neither_read_nor_listed (7a8f4d2e, fix/mapping-reads-content)";
 
-/** What MAP-1 leaves for MAP-2: the id of the project whose setup it started and the window
- * texts its screenshots read. */
-const seen = { id: null, screens: [] };
+/** What MAP-1 leaves for MAP-2: the id of the project whose setup it started, the window
+ * texts its screenshots read and, when the project's pool was still paused at the end, why. */
+const seen = { id: null, screens: [], blocked: null };
 
 /** Reads a mapping progress line. Input: the row's line or null. Output: { number, tries,
  * minutes }, or null when the line names no try. */
@@ -42,23 +43,38 @@ export function tryOf(line) {
   return { number, tries, minutes: match[3] === undefined ? 0 : Number(match[3]) };
 }
 
+/** Tells whether the mapping is still under way. Input: the row's badge word. Output: true
+ * while it works, waits or its pool is paused ("Rate limited until <time>"). */
+export function stillRunning(word) {
+  return RUNNING.includes(word) || PAUSED.test(word);
+}
+
 /** Tells whether the mapping row showed only "Working" too long. Inputs: the reads of the row
  * in time order, { ms, line, word }, and whether the mapping has ended. Output: the fault, or
- * null: Working with no try line for over PROGRESS_MS, or, once ended, no try line ever. */
+ * null: Working with no try line for over PROGRESS_MS since it first read Working or since its
+ * pool was last paused, or, once ended, no try line ever. */
 export function progressFault(samples, ended = false) {
-  const start = samples.find((sample) => sample.word === "Working");
-  if (start) {
-    const named = samples.find((sample) => sample.ms >= start.ms && tryOf(sample.line));
-    const gap = (named ?? samples.at(-1)).ms - start.ms;
+  let since = null;
+  for (const sample of samples) {
+    if (PAUSED.test(sample.word)) {
+      since = null;
+      continue;
+    }
+    if (since === null && sample.word !== "Working") continue;
+    since ??= sample.ms;
+    const gap = sample.ms - since;
     if (gap > PROGRESS_MS) return `the mapping showed only "Working" for ${Math.round(gap / 1000)} s with no try line`;
+    if (tryOf(sample.line)) break;
   }
   return ended && !samples.some((sample) => tryOf(sample.line)) ? "the mapping never showed its progress line" : null;
 }
 
 /** Tells whether the mapping failed to end on its own in time. Input: the last read of its row,
- * { ms, line, word }. Output: the fault, or null when it reads Done within MAPPING_MS. */
+ * { ms, line, word }. Output: the fault, or null when it reads Done within MAPPING_MS; a pool
+ * still paused is a BLOCKED reason, not a fault of the mapping. */
 export function endFault(sample) {
   const seconds = Math.round(sample.ms / 1000);
+  if (PAUSED.test(sample.word)) return `BLOCKED: the project's pool was still paused after ${seconds} s (${sample.word})`;
   if (RUNNING.includes(sample.word)) return `the mapping still read ${sample.word} after ${seconds} s`;
   if (sample.word !== "Done") return `the mapping ended ${sample.word} after ${seconds} s${sample.line ? `: ${sample.line}` : ""}`;
   return sample.ms > MAPPING_MS ? `the mapping ended Done after ${seconds} s, over the ${MAPPING_MS / 1000} s it may take` : null;
@@ -139,6 +155,7 @@ export const checks = [{
   run: async (kit) => {
     seen.id = null;
     seen.screens = [];
+    seen.blocked = null;
     await kit.go("#/home");
     const row = `//li[contains(concat(" ", normalize-space(@class), " "), " in-row ")][.//strong[normalize-space(.)=${kit.lit(kit.NAME)}]]`;
     await kit.until(() => shown(row), 60000, `Home never listed ${kit.NAME} in the projects folder`);
@@ -166,9 +183,11 @@ export const checks = [{
           shot = sample;
           seen.screens.push(await kit.screen());
         }
-        return { done: !RUNNING.includes(read.word), seen: `${read.word}${read.line ? `: ${read.line}` : ""} at ${Math.round(sample.ms / 1000)} s` };
+        return { done: !stillRunning(read.word), seen: `${read.word}${read.line ? `: ${read.line}` : ""} at ${Math.round(sample.ms / 1000)} s` };
       }, MAPPING_MS, `the ${MAP_STEP} step did not end on its own`);
     } catch (error) {
+      const paused = samples.at(-1);
+      if (!progress && paused && PAUSED.test(paused.word)) throw new Error(seen.blocked = endFault(paused));
       throw new Error([progress, error.message].filter(Boolean).join("; "));
     }
     const last = samples.at(-1);
@@ -188,6 +207,7 @@ export const checks = [{
   after: "open-app",
   run: async (kit) => {
     try {
+      if (seen.blocked) throw new Error(`BLOCKED: no review to read, ${seen.blocked.replace(/^BLOCKED: /, "")}`);
       if (!seen.id) throw new Error("MAP-1 did not start the setup, so there is no review to read");
       const id = seen.id;
       const route = `#/projects/${encodeURIComponent(id)}/setup`;

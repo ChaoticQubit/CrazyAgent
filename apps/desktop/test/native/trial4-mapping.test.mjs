@@ -53,6 +53,16 @@ test("MAP-1 passes a mapping that names its try within 60 s, retries and ends Do
   assert.match(mapping.endFault({ ...waiting, ms: 900001, word: "Done" }), /after 900 s, over the 900 s/);
 });
 
+test("MAP-1 waits through a paused pool and reports BLOCKED, not FAIL, when the pool is still paused at the end", () => {
+  const working = { title: "Map the project", line: null, word: "Working" };
+  const paused = { ...working, word: "Rate limited until 01:40" };
+  for (const word of ["Working", "Waiting", paused.word]) assert.equal(mapping.stillRunning(word), true, word);
+  for (const word of ["Done", "Failed", "Off", "Not installed"]) assert.equal(mapping.stillRunning(word), false, word);
+  assert.match(mapping.endFault({ ...paused, ms: 901000 }), /^BLOCKED: the project's pool was still paused after 901 s \(Rate limited until 01:40\)/);
+  assert.equal(mapping.progressFault([{ ...working, ms: 0 }, { ...paused, ms: 30000 }, { ...paused, ms: 600000 }, { ...working, ms: 601000 }, { ...working, ms: 650000 }]), null, "a pause restarts the 60 s");
+  assert.match(mapping.progressFault([{ ...working, ms: 0 }, { ...paused, ms: 30000 }, { ...working, ms: 601000 }, { ...working, ms: 662000 }]), /showed only "Working" for 61 s/);
+});
+
 test("MAP-2 fails the 18.14 review and row: no research kind names a seeded document", () => {
   assert.deepEqual(mapping.repoFiles(ITEMS_1814), { "Market research": [], "Competitor research": [] });
   assert.deepEqual(mapping.missingInReview(mapping.repoFiles(ITEMS_1814)), [`Competitor research: ${RESEARCH_DOCS.competitor}`, `Market research: ${RESEARCH_DOCS.market}`]);
