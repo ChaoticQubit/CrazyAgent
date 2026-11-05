@@ -32,25 +32,54 @@ function splitTop(text) {
   return parts.map((part) => part.trim()).filter(Boolean);
 }
 
+/** Splits Rust text into tokens without layout: words, string literals, lifetimes, `::`, `..`,
+ * `->` and single marks, `///` lines dropped and a comma before a closing bracket left out, so
+ * two rustfmt layouts of the same code give the same list. Input: Rust text. Output: tokens. */
+function tokens(text) {
+  const words = text.replace(/^\s*\/\/\/.*$/gm, "").match(/[A-Za-z_]\w*|\d+|"(?:[^"\\]|\\.)*"|'[a-z_]\w*|::|\.\.|->|\S/g) ?? [];
+  return words.filter((word, index) => !(word === "," && /^[)}\]>]$/.test(words[index + 1] ?? "")));
+}
+
+/** The one `CommandArg` impl the generator follows, the way lib.rs writes it for an argument
+ * whose fields Tauri reads one by one: a fixed head, the command item taken apart, one read
+ * closure that hands each key to Tauri's own reader of the fields' common type, and each field
+ * read from its key with nothing else. Inputs: the type name, its `{ field, key }` list and the
+ * fields' type. Output: the impl's text. */
+function canonicalCommandArg(type, reads, fieldType) {
+  return `impl<'de, R: tauri::Runtime> tauri::ipc::CommandArg<'de, R> for ${type} {
+    fn from_command(command: tauri::ipc::CommandItem<'de, R>) -> Result<Self, tauri::ipc::InvokeError> {
+        let tauri::ipc::CommandItem { plugin, name, message, acl, .. } = command;
+        let read = |key| {
+            <${fieldType} as tauri::ipc::CommandArg<'de, R>>::from_command(tauri::ipc::CommandItem { plugin, name, key, message, acl })
+        };
+        Ok(Self { ${reads.map(({ field, key }) => `${field}: read("${key}")?`).join(", ")} })
+    }
+}`;
+}
+
 /** Reads the argument types lib.rs parses itself through `tauri::ipc::CommandArg`: each struct
- * field and the top-level key its `read("key")` takes it from, the way Tauri hands them over.
+ * field and the top-level key it is read from, the way Tauri hands them over. Every impl of
+ * `CommandArg`, under any path, must be token for token the canonical one for its struct.
  * Input: the lib.rs source. Output: a map from type name to its `{ field, key, type }` list in
- * field order; throws for an impl whose fields are not each read from one key of their own. */
+ * field order; throws for any other impl, which the bridge could not parse as the app does. */
 export function commandArgs(source) {
   const found = new Map();
-  const heads = source.match(/^impl<[^>]*> tauri::ipc::CommandArg<'de, R> for \w+ \{$/gm) ?? [];
-  for (const [, type, body] of source.matchAll(/^impl<[^>]*> tauri::ipc::CommandArg<'de, R> for (\w+) \{\n([\s\S]*?)^\}/gm)) {
+  const heads = source.match(/^impl\b[^{\n]*\bCommandArg\b[^{\n]*\{$/gm) ?? [];
+  for (const [impl, type] of source.matchAll(/^impl\b[^{\n]*\bCommandArg\b[^{\n]*\bfor (\w+) \{\n[\s\S]*?^\}/gm)) {
+    const refused = new Error(`routes: ${type} reads its fields in a way the generator cannot follow`);
     const struct = source.match(new RegExp(`^(?:pub(?:\\([\\w:]+\\))? )?struct ${type} \\{\\n([\\s\\S]*?)^\\}`, "m"));
-    const fields = splitTop(struct?.[1] ?? "").map((field) => {
+    const fields = splitTop((struct?.[1] ?? "").replace(/^\s*\/\/\/.*$/gm, "")).map((field) => {
       const colon = field.indexOf(":");
       return { field: field.slice(0, colon).replace(/^pub(?:\([\w:]+\))? /, "").trim(), type: field.slice(colon + 1).trim().replace(/\s+/g, " ") };
     });
-    const reads = new Map([...body.matchAll(/^\s*(\w+): read\("(\w+)"\)\?,$/gm)].map(([, field, key]) => [field, key]));
-    const keys = new Set(reads.values());
-    const followed = fields.length > 0 && reads.size === fields.length && keys.size === fields.length
-      && (body.match(/: read\(/g) ?? []).length === fields.length && fields.every(({ field }) => reads.has(field));
-    if (!followed) throw new Error(`routes: ${type} reads its fields in a way the generator cannot follow`);
-    found.set(type, fields.map(({ field, type: fieldType }) => ({ field, key: reads.get(field), type: fieldType })));
+    const keys = new Map([...impl.matchAll(/\b(\w+): read\("(\w+)"\)\?/g)].map(([, field, key]) => [field, key]));
+    const reads = fields.map(({ field }) => ({ field, key: keys.get(field) }));
+    const types = new Set(fields.map((field) => field.type));
+    if (fields.length === 0 || types.size !== 1 || reads.some(({ key }) => !key) || new Set(keys.values()).size !== fields.length) throw refused;
+    const expected = tokens(canonicalCommandArg(type, reads, [...types][0]));
+    const actual = tokens(impl);
+    if (actual.length !== expected.length || actual.some((token, index) => token !== expected[index])) throw refused;
+    found.set(type, fields.map(({ field, type: fieldType }) => ({ field, key: keys.get(field), type: fieldType })));
   }
   assert.equal(found.size, heads.length, "every CommandArg impl of lib.rs was read to its end");
   return found;
