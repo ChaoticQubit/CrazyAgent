@@ -31,7 +31,7 @@ use crate::tui::master_session::{
     State as MasterState, Submission as MasterSubmission,
 };
 use crate::tui::seam::{Arrival, NOT_READY, PoolChange, Request};
-use crate::tui::text::{styled, wrap};
+use crate::tui::text::{cut, styled, wrap};
 use crate::tui::theme::Role;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Frame;
@@ -45,7 +45,8 @@ const TEAM_READ_MS: i64 = 3_000;
 const TEAM_WAIT_MS: i64 = 15_000;
 const IMPORT_MODAL_WIDTH: u16 = 72;
 const IMPORT_ROWS_MAX: usize = 12;
-const BANNER_ROWS_MAX: usize = 3;
+pub(in crate::tui) const BANNER_ROWS_MAX: usize = 3;
+const BANNER_BRANCH_CELLS: usize = 32;
 
 #[derive(PartialEq)]
 enum MasterSent {
@@ -206,6 +207,7 @@ pub(in crate::tui) struct ProjectPage {
     import_sent: Option<ProcessQuery>,
     moved: Option<Vec<ImportFile>>,
     uncommitted: Vec<String>,
+    uncommitted_branch: Option<String>,
     uncommitted_asked: bool,
 }
 
@@ -233,6 +235,25 @@ fn import_problem(code: &str) -> String {
         }
         other => super::process::message(other),
     }
+}
+
+/// The banner text shown while an instruction import's move stays uncommitted (DEC-106
+/// addendum): the files and the checked-out branch merges into are refused, or "this
+/// branch" without one; a name wider than `BANNER_BRANCH_CELLS` is cut with the ellipsis,
+/// so "are refused" stays within the banner's rows. Inputs: the paths, the branch and the
+/// ellipsis glyph. Output: the text, sanitized.
+pub(in crate::tui) fn move_banner(files: &[String], branch: Option<&str>, ellipsis: &str) -> String {
+    assert!(!files.is_empty());
+    let files: Vec<String> = files.iter().map(|path| sanitize(path)).collect();
+    let target = branch.map_or_else(
+        || "this branch".to_owned(),
+        |name| cut(&sanitize(name), BANNER_BRANCH_CELLS, ellipsis),
+    );
+    assert!(crate::tui::text::width(&target) <= BANNER_BRANCH_CELLS);
+    format!(
+        "Git still shows {} as deleted after the instruction import, so merges into {target} are refused. Ctrl-G Commit the move makes one local commit holding only that move; it is never pushed.",
+        files.join(", ")
+    )
 }
 
 impl ProjectPage {
@@ -269,6 +290,7 @@ impl ProjectPage {
             import_sent: None,
             moved: None,
             uncommitted: Vec::new(),
+            uncommitted_branch: None,
             uncommitted_asked: false,
         };
         page.refresh_pool(ctx);
@@ -363,8 +385,9 @@ impl ProjectPage {
             && *project == self.screen.project
         {
             self.uncommitted_asked = false;
-            if let Ok(ProcessReply::Paths(paths)) = result {
-                self.uncommitted = paths.clone();
+            if let Ok(ProcessReply::Uncommitted(waiting)) = result {
+                self.uncommitted = waiting.files.clone();
+                self.uncommitted_branch = waiting.branch.clone();
             }
             return;
         }
@@ -430,16 +453,16 @@ impl ProjectPage {
     }
 
     /// The banner rows shown above the tabs while an instruction import's move stays
-    /// uncommitted: the files, why it matters and the Ctrl-G action. Inputs: the width and
-    /// the context. Output: the rows, none when no move waits.
+    /// uncommitted: the files, the branch merges into are refused and the Ctrl-G action.
+    /// Inputs: the width and the context. Output: the rows, none when no move waits.
     fn banner(&self, width: usize, ctx: &Ctx) -> Vec<Line<'static>> {
         if self.uncommitted.is_empty() || width < 8 {
             return Vec::new();
         }
-        let files: Vec<String> = self.uncommitted.iter().map(|path| sanitize(path)).collect();
-        let text = format!(
-            "Git still shows {} as deleted after the instruction import, so merges into this branch are refused. Ctrl-G Commit the move makes one local commit holding only that move; it is never pushed.",
-            files.join(", ")
+        let text = move_banner(
+            &self.uncommitted,
+            self.uncommitted_branch.as_deref(),
+            ctx.glyphs.ellipsis,
         );
         wrap(&text, width - 2)
             .into_iter()
