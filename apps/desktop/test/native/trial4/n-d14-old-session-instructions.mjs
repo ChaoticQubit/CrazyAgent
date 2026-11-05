@@ -2,8 +2,8 @@ import { randomBytes } from "node:crypto";
 import { click, shown, text } from "../settings-steps.mjs";
 import { REPLY_MS, UI_MS, liveLine, masterRows, messageCount, sendToMaster, startIfPaused, terminalLive } from "./n-d8-master-reply.mjs";
 
-/** The trial 3 project, whose master session was recorded on build 18.13. */
-export const OLD_PROJECT = "ca-trial-3";
+/** The trial 4 run 3 project, whose master session the N-D14 record step recorded on build 18.14. */
+export const OLD_PROJECT = "ca-trial-4c";
 
 /** The words that open the line this check adds to the project's instructions. */
 export const MARK = "Trial 4 marker line:";
@@ -44,7 +44,7 @@ async function saveInstructions(kit, value) {
 }
 
 export const checks = [{
-  id: "N-D14", op: ["OP-2", "OP-4", "OP-33"], title: "A master session recorded on 18.13 resumes on 18.14 and reads an edited instruction set",
+  id: "N-D14", op: ["OP-2", "OP-4", "OP-33"], title: "A master session recorded on 18.14 resumes on 18.15 and reads an edited instruction set",
   why: "owner: \"Agents and the master work without the app and project instruction set. The owner cannot see that it was loaded\"",
   after: "open-app",
   run: async (kit) => {

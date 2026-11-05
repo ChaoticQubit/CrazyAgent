@@ -124,3 +124,10 @@ test("a question row's tags are the badge it opens with and its For: tag", () =>
   assert.deepEqual(questions.questionTags("Carrying on For: @lead-a Is the default fine?"), { severity: "Carrying on", forWhom: "@lead-a" });
   assert.equal(questions.questionTags("Ada asks: Urgent? For:").severity, null);
 });
+
+test("N-D14 resumes the master session the 18.14 record step wrote in ca-trial-4c, and its title names that hop", () => {
+  assert.equal(instructions.OLD_PROJECT, "ca-trial-4c");
+  const [check] = instructions.checks;
+  assert.equal(check.id, "N-D14");
+  assert.match(check.title, /^A master session recorded on 18\.14 resumes on 18\.15 /u);
+});
