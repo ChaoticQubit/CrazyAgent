@@ -26,8 +26,9 @@ function token(name: string, fallback: string): string {
 
 /** The view's xterm settings: the app's mono font, the terminal tokens for every ANSI color
  * and the scrollbar, Option as Meta, Option-drag selecting text even while a full-screen app
- * reads the mouse, and `SCROLLBACK_LINES` of scrollback for the history the engine sends on
- * attach. Output: the options for a new terminal. */
+ * reads the mouse, a right-click that keeps the selection for the menu's Copy instead of
+ * picking the word under the pointer, and `SCROLLBACK_LINES` of scrollback for the history
+ * the engine sends on attach. Output: the options for a new terminal. */
 export function terminalOptions(): ITerminalOptions {
   return {
     cursorBlink: true,
@@ -35,6 +36,7 @@ export function terminalOptions(): ITerminalOptions {
     fontSize: 13,
     macOptionIsMeta: true,
     macOptionClickForcesSelection: true,
+    rightClickSelectsWord: false,
     scrollback: SCROLLBACK_LINES,
     theme: {
       background: token("--terminal-bg", "#161513"),
