@@ -1514,8 +1514,9 @@ async fn sign_in_rechecking_due_after_restart() {
 /// browser settles Failed with the custodian's own cause, not still waiting and not the
 /// general interruption. Once the installed Claude Code shows its sign-in link, the temp
 /// profile's home folder is replaced, so the custodian's next profile check refuses it and the
-/// custodian exits non-zero naming `native_profile_binding_conflict`. Needs the installed
-/// Claude Code; the link is never opened and no account is signed in. Runs only by name with
+/// custodian exits non-zero naming `native_profile_custody_unsafe`; the engine's release hold
+/// does not read the home, so the attempt settles with that cause. Needs the installed Claude
+/// Code; the link is never opened and no account is signed in. Runs only by name with
 /// `--ignored` in an owner-approved live window.
 #[ignore = "live: needs the installed Claude Code; a real sign-in runs until it shows its sign-in link"]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1579,7 +1580,7 @@ async fn a_real_claude_sign_in_whose_custodian_fails_settles_with_its_cause() {
             (fact.phase, fact.code.as_deref()),
             (
                 NativeAuthPhase::Failed,
-                Some("native_profile_binding_conflict")
+                Some("native_profile_custody_unsafe")
             )
         );
         assert_eq!(restart.fences(), 0, "the failed custodian left a fence");
