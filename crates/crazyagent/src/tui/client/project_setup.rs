@@ -820,7 +820,7 @@ pools = []
         std::fs::write(&global, LIVE_ACCESS).unwrap();
         std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
         let (stop, stopped) = tokio::sync::watch::channel(false);
-        let mut service = EngineService::start_with_settings_sources(
+        let service = EngineService::start_with_settings_sources(
             root,
             "e.sock",
             &global,

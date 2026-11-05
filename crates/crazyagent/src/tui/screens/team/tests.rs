@@ -2676,9 +2676,10 @@ fn a_live_master_waiting_for_sign_in_rechecks_shows_the_wait_line() {
         Some(true),
         Some(crate::team::master::SIGN_INS_CHECKING),
     ));
+    let sent = requests(&mut shell);
     assert!(
-        requests(&mut shell).is_empty(),
-        "a switch already on is not turned on again"
+        matches!(sent.as_slice(), [check] if session_check(check)),
+        "a switch already on is not turned on again; only the owner's session check goes out (LMS-1): {sent:?}"
     );
     let rows = render(&mut shell);
     assert!(
