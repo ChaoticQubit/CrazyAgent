@@ -1863,6 +1863,21 @@ fn tool_views(
     Ok((key, views))
 }
 
+#[cfg(all(test, windows))]
+mod windows_tests {
+    #[test]
+    fn a_skill_folder_name_with_a_colon_is_refused_on_windows() {
+        let root = tempfile::tempdir().unwrap();
+        for id in ["name:x", "owner:abc"] {
+            let outcome = super::remove_skill_project_folder(root.path(), id);
+            assert!(
+                matches!(&outcome, Err(refused) if refused.0 == "plugin_skill_folder_invalid"),
+                "{id}: Windows reads a colon as a stream or device, never as this folder: {outcome:?}"
+            );
+        }
+    }
+}
+
 #[cfg(all(test, unix))]
 #[path = "plugins_tests.rs"]
 mod tests;
