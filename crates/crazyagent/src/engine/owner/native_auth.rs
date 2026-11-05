@@ -1026,14 +1026,14 @@ auth = { method = "native_managed", profile_ref = "codex-profile" }"#,
             assert_eq!(fact.phase, phase);
             assert_eq!(fact.code, None);
         }
-        let expired = CodexAuthObservation::LoginCanceled {
+        let timed_out = CodexAuthObservation::LoginCanceled {
             id: 3,
             canceled: true,
         };
         let mut fact = codex_fact(NativeAuthPhase::AwaitingOwner);
-        expired.apply(&mut fact).unwrap();
+        timed_out.apply(&mut fact).unwrap();
         assert_eq!(fact.phase, NativeAuthPhase::Failed);
-        assert_eq!(fact.code.as_deref(), Some("native_auth_sign_in_expired"));
+        assert_eq!(fact.code.as_deref(), Some("native_auth_sign_in_timed_out"));
         late.apply(&mut fact).unwrap();
         assert_eq!(fact.phase, NativeAuthPhase::Failed);
         let succeeded = CodexAuthObservation::LoginCompleted {

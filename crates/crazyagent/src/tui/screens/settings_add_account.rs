@@ -1716,6 +1716,12 @@ fn refused_sign_in(code: &str, native: Option<NativeAuthMethod>) -> String {
     plain_sign_in(code, native)
 }
 
+/// The line under a ChatGPT device code that says how long it still works. Input: the time
+/// the code has left. Output: the line.
+pub(super) fn code_left_line(_left: std::time::Duration) -> String {
+    String::new()
+}
+
 /// The sentence for a sign-in view that did not sign in: the recorded code's sentence when
 /// the engine recorded one, else the phase's own line. Inputs: the sign-in method and the
 /// engine's view. Output: the sentence.

@@ -2598,6 +2598,44 @@ fallback_allowed = false
     }
 
     #[tokio::test]
+    async fn native_auth_device_code_sign_in_outlasts_the_code_and_shows_its_time_left() {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            let mut case = Case::open(NativeAuthAction::SignIn {
+                method: NativeAuthMethod::CodexDeviceCode,
+            })
+            .await;
+            let host = case.service.owner_runtime().unwrap();
+            let window = host
+                .authority
+                .native_auth_deadline()
+                .unwrap()
+                .saturating_duration_since(Instant::now());
+            assert!(window > Duration::from_secs(15 * 60 + 40), "{window:?}");
+            let mut browser = case.fact.clone();
+            browser.action = NativeAuthAction::SignIn {
+                method: NativeAuthMethod::CodexBrowser,
+            };
+            assert_eq!(operation_bound(&browser), Duration::from_secs(600));
+            let mut protocol = protocol();
+            case.observe(challenge(&mut protocol, true)).await;
+            let waiting = case.read().await;
+            assert_eq!(waiting.fact.phase, NativeAuthPhase::AwaitingOwner);
+            let wire = serde_json::to_value(
+                crate::engine::owner::native_auth::presentation::encode(&waiting).unwrap(),
+            )
+            .unwrap();
+            let left = wire["challenge"]["left_s"].as_u64();
+            assert!(
+                left.is_some_and(|left| (880..=900).contains(&left)),
+                "{left:?}"
+            );
+            case.close().await;
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
     async fn native_auth_observation_device_challenge_rejects_foreign_generation_guard() {
         tokio::time::timeout(Duration::from_secs(20), async {
             let mut case = Case::open(NativeAuthAction::SignIn {

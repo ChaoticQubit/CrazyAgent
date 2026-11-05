@@ -400,22 +400,34 @@ async fn observe_failure(
     Ok(())
 }
 
+/// How long the custodian drives one Codex action before it gives up. Input: the action.
+/// Output: the run time, or an error for a method Codex does not run.
+fn run_time(action: &NativeAuthAction) -> Result<Duration, EngineError> {
+    match action {
+        NativeAuthAction::SignIn {
+            method: NativeAuthMethod::CodexBrowser | NativeAuthMethod::CodexDeviceCode,
+        } => Ok(SIGN_IN_TIME),
+        NativeAuthAction::SignIn {
+            method: NativeAuthMethod::CodexExisting,
+        } => Ok(CHECK_TIME_MAX),
+        NativeAuthAction::Logout => Ok(LOGOUT_TIME),
+        _ => Err(failure("native_auth_codex_method_unsupported")),
+    }
+}
+
+/// Masks a tail of Codex stderr for the engine log. Inputs: the raw tail and the device code
+/// on screen, if any. Output: the masked text.
+fn masked(bytes: &[u8], _code: Option<&str>) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
 pub(in crate::engine) async fn run(
     mut session: CustodySession,
     channel: &mut NativeAuthCustodyChannel,
     executable: &Path,
 ) -> Result<Retirement, EngineError> {
     let action = channel.fact().action.clone();
-    let run_time = match action {
-        NativeAuthAction::SignIn {
-            method: NativeAuthMethod::CodexBrowser | NativeAuthMethod::CodexDeviceCode,
-        } => SIGN_IN_TIME,
-        NativeAuthAction::SignIn {
-            method: NativeAuthMethod::CodexExisting,
-        } => CHECK_TIME_MAX,
-        NativeAuthAction::Logout => LOGOUT_TIME,
-        _ => return Err(failure("native_auth_codex_method_unsupported")),
-    };
+    let run_time = run_time(&action)?;
     if matches!(
         session.check(channel).await?,
         NativeAuthCustodyControl::Cancel

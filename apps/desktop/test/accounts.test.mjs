@@ -366,3 +366,18 @@ test("the API key field is masked and uncontrolled, and its copy says the key is
   assert.match(markup, />Save key<\/button>/);
   assert.doesNotMatch(markup, claims);
 });
+
+test("the device code panel says how long the code still works, and the engine's own give-up says to get a new code", () => {
+  const waiting = (left_s) => panel(answered({ challenge: { kind: "codex_device_code", user_code: "QX4F-9KTB", verification_url: "https://auth.example.invalid/codex/device", left_s } }));
+  assert.match(waiting(600), /QX4F-9KTB/);
+  assert.match(waiting(600), /This code works for 10 more minutes\./);
+  assert.match(waiting(61), /This code works for 2 more minutes\./);
+  assert.match(waiting(60), /This code works for 1 more minute\./);
+  assert.match(waiting(0), /This code ran out\./);
+  assert.doesNotMatch(waiting(null), /This code works|ran out/);
+  assert.doesNotMatch(waiting(-5), /QX4F-9KTB/);
+  const timedOut = answered({ phase: "failed", challenge: null, code: "native_auth_sign_in_timed_out" });
+  const text = "CrazyAgent stopped waiting for this code. Get a new code and enter it within 15 minutes.";
+  assert.deepEqual(signInStage(timedOut, "chatgpt"), { kind: "failed", text, hint: "expired" });
+  assert.match(panel(timedOut), />Get a new code<\/button>/);
+});
