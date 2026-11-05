@@ -64,6 +64,7 @@ pub(super) struct NativeAuthSlot {
     supervisor: Option<tokio::task::AbortHandle>,
     pub(super) dispatch_task: Option<tokio::task::JoinHandle<Result<(), EngineError>>>,
     pub(super) child: Option<Child>,
+    custodian_failure: Option<String>,
     retained: bool,
     cleaning: bool,
     committed: bool,
@@ -261,6 +262,27 @@ impl NativeAuthDispatchHost {
             .ok_or_else(|| failure("native_auth_recovery_required"))?
             .try_wait()
             .map_err(io_error)
+    }
+
+    /// Keeps the failure code the custodian named before it exited, for the release that
+    /// settles its attempt. Input: the code. Output: Ok once kept in this dispatch's slot.
+    pub(crate) fn record_custodian_failure(&self, code: &str) -> Result<(), EngineError> {
+        let authority = self
+            .authority
+            .upgrade()
+            .ok_or_else(|| failure("owner_runtime_stale"))?;
+        let mut current = authority
+            .native_auth
+            .lock()
+            .map_err(|_| failure("native_auth_recovery_required"))?;
+        let slot = current
+            .as_mut()
+            .ok_or_else(|| failure("native_auth_recovery_required"))?;
+        if slot.fact != self.fact || slot.admission != self.admission || slot.cleaning {
+            return Err(failure("native_auth_recovery_required"));
+        }
+        slot.custodian_failure = Some(code.to_owned());
+        Ok(())
     }
 }
 
@@ -661,6 +683,7 @@ impl OwnerRuntimeHandle {
                 runtime.spawn(crate::engine::native_auth_host::dispatch(work, host)),
             ),
             child: None,
+            custodian_failure: None,
             retained: true,
             cleaning: false,
             committed: false,
@@ -991,6 +1014,7 @@ impl Authority {
                 supervisor: None,
                 dispatch_task: None,
                 child: None,
+                custodian_failure: None,
                 retained: false,
                 cleaning: false,
                 committed: false,
@@ -1214,7 +1238,7 @@ impl Authority {
                 continue;
             }
             self.cleanup_native_auth_child()?;
-            let dispatch = {
+            let (dispatch, named) = {
                 let mut current = self
                     .native_auth
                     .lock()
@@ -1242,11 +1266,12 @@ impl Authority {
                     self.native_auth_changed.notify_waiters();
                     return Ok(());
                 };
+                let named = slot.custodian_failure.clone();
                 current.as_mut().unwrap().cleaning = true;
-                dispatch
+                (dispatch, named)
             };
             let released = engine
-                .native_auth_job(|reply| Job::NativeAuthCustodyReleased(dispatch, reply))
+                .native_auth_job(|reply| Job::NativeAuthCustodyReleased(dispatch, named, reply))
                 .await;
             {
                 let mut current = self

@@ -277,8 +277,14 @@ impl CustodyCase {
     }
 
     fn recover(&mut self, ended: Option<&NativeAuthFact>) -> Option<NativeAuthFact> {
-        native_auth::recover_native_auth(&mut self.db, &mut self.custody, &self.started.host, ended)
-            .unwrap()
+        native_auth::recover_native_auth(
+            &mut self.db,
+            &mut self.custody,
+            &self.started.host,
+            ended,
+            None,
+        )
+        .unwrap()
     }
 
     fn end_custody(&mut self, dispatch: &NativeAuthDispatch) -> Option<NativeAuthFact> {
@@ -848,7 +854,7 @@ async fn native_auth_custody_that_ended_during_a_renewal_is_settled_by_a_later_r
     .unwrap();
     assert_eq!(lost.phase, NativeAuthPhase::Uncertain);
     let released = ask(&storage, |send| {
-        Job::NativeAuthCustodyReleased(dispatch.clone(), send)
+        Job::NativeAuthCustodyReleased(dispatch.clone(), None, send)
     })
     .await
     .unwrap();
