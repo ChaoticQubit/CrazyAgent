@@ -5647,13 +5647,15 @@ exec /bin/sleep 300
 /// How a turn a kept native lead's app took by itself ended while a command it started in
 /// the background outlived its app's turn: the turn's end and result text, the time from
 /// its app's turn end to its end, whether the lead's worker stopped by itself, whether the
-/// command finished, and whether it still ran once the lead stopped.
+/// session still held the turn when the worker returned, whether the command finished, and
+/// whether it still ran once the lead stopped.
 #[cfg(target_os = "macos")]
 struct OwnOutlived {
     end: TurnEnd,
     text: String,
     waited: Duration,
     stopped_itself: bool,
+    held_at_end: bool,
     finished: bool,
     alive: bool,
 }
@@ -5750,10 +5752,7 @@ fn own_turn_outliving(fixture: &Fixture, name: &str, secs: u32, rules: TurnRules
         )
     });
     assert!(matches!(next, Next::Stop));
-    assert!(
-        !session.own_held(),
-        "no turn is held once its end was given"
-    );
+    let held_at_end = session.own_held();
     let finished = home.join("background-done").exists();
     session.stop().unwrap();
     let alive = alive_by_pid_file(&home.join("background-pid"));
@@ -5763,6 +5762,7 @@ fn own_turn_outliving(fixture: &Fixture, name: &str, secs: u32, rules: TurnRules
         text,
         waited,
         stopped_itself,
+        held_at_end,
         finished,
         alive,
     }
@@ -5801,6 +5801,7 @@ fn under_wait_a_native_lead_s_own_turn_stays_open_until_its_background_command_e
         !outlived.stopped_itself,
         "the lead stopped for a command that ended in time"
     );
+    assert!(!outlived.held_at_end, "the notice turn ended the hold");
 }
 
 /// N-E9: under Stop, a native lead's own turn whose background command outlives its app's
@@ -5827,6 +5828,10 @@ fn under_stop_a_native_lead_s_own_turn_ends_at_once_and_its_background_command_s
         outlived.waited
     );
     assert!(outlived.stopped_itself);
+    assert!(
+        outlived.held_at_end,
+        "the lead stops with its turn still held, as an engine-typed turn's release does"
+    );
     assert!(!outlived.finished);
     assert!(
         !outlived.alive,
@@ -5858,6 +5863,10 @@ fn with_grace_a_native_lead_s_own_turn_ends_after_the_grace_time_and_its_command
         outlived.waited
     );
     assert!(outlived.stopped_itself);
+    assert!(
+        outlived.held_at_end,
+        "the lead stops with its turn still held, as an engine-typed turn's release does"
+    );
     assert!(!outlived.finished);
     assert!(
         !outlived.alive,
@@ -5889,6 +5898,10 @@ fn a_task_limit_cuts_a_native_lead_s_own_turn_held_for_its_background_command() 
         outlived.waited
     );
     assert!(outlived.stopped_itself);
+    assert!(
+        outlived.held_at_end,
+        "the lead stops with its turn still held, as an engine-typed turn's release does"
+    );
     assert!(!outlived.finished);
     assert!(
         !outlived.alive,
