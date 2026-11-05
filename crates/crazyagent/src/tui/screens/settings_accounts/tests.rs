@@ -1158,60 +1158,60 @@ auth = { method = "native_managed", profile_ref = "profile-claude" }
             .unwrap();
     }
 
-    /// Rewrites the account's latest stored sign-in to `phase` and `code`, as the engine
-    /// stores one another client still has open or one an earlier run left unconfirmed.
-    /// Inputs: the engine root, the phase and the code. Output: none.
-    fn store_sign_in(root: &std::path::Path, phase: NativeAuthPhase, code: Option<&str>) {
-        let db = rusqlite::Connection::open(root.join("engine.db")).unwrap();
-        db.busy_timeout(ENGINE_WAIT).unwrap();
-        let (id, generation, bytes): (String, i64, Vec<u8>) = db
-            .query_row(
-                "SELECT id,generation,fact FROM native_auth_operations
-                 ORDER BY generation DESC LIMIT 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .unwrap();
-        let mut fact = crate::engine::owner::native_auth::decode_fact(&bytes).unwrap();
-        fact.phase = phase;
-        fact.code = code.map(str::to_owned);
-        let stored = match phase {
-            NativeAuthPhase::Starting => "starting",
-            NativeAuthPhase::Uncertain => "uncertain",
-            NativeAuthPhase::Unavailable => "unavailable",
-            other => panic!("no stored phase for {other:?}"),
-        };
-        let updated = db
-            .execute(
-                "UPDATE native_auth_operations SET fact=?1,phase=?2 WHERE id=?3 AND generation=?4",
-                rusqlite::params![
-                    crate::engine::owner::native_auth::encode_fact(&fact).unwrap(),
-                    stored,
-                    id,
-                    generation
-                ],
-            )
-            .unwrap();
-        assert_eq!(updated, 1);
+    const CODEX: &str = r#"
+[model_access]
+accounts = ["account-chatgpt"]
+[[model_access.connections]]
+id = "acct-000"
+provider = "provider-chatgpt"
+harness = "codex"
+protocol = "native"
+account_ref = "account-chatgpt"
+endpoint = { kind = "native" }
+model = { id = "model-chatgpt", author = "author-chatgpt" }
+auth = { method = "native_managed", profile_ref = "profile-chatgpt" }
+"#;
+
+    /// Counts what the engine has stored about sign-ins. Inputs: the engine root and the
+    /// table. Output: the row count.
+    fn rows(root: &std::path::Path, table: &str) -> i64 {
+        rusqlite::Connection::open_with_flags(
+            root.join("engine.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap()
+        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+            row.get(0)
+        })
+        .unwrap()
     }
 
-    /// Counts the sign-ins the engine has stored. Input: the engine root. Output: the count.
-    fn stored_sign_ins(root: &std::path::Path) -> i64 {
-        rusqlite::Connection::open(root.join("engine.db"))
-            .unwrap()
-            .query_row("SELECT COUNT(*) FROM native_auth_operations", [], |row| {
-                row.get(0)
-            })
-            .unwrap()
+    /// Registers a stand-in custodian that reads its bootstrap and keeps running, so the
+    /// sign-in it serves stays open and holds its fence, until `release` exists; then it
+    /// exits 1 without naming a cause. Inputs: the service and the engine root. Output: the
+    /// release path.
+    fn hold_sign_ins(service: &mut EngineService, root: &std::path::Path) -> std::path::PathBuf {
+        let release = root.join("release");
+        let custodian = root.join("held-custodian");
+        std::fs::write(
+            &custodian,
+            format!(
+                "#!/bin/sh\n/bin/cat >/dev/null\nwhile [ ! -e '{}' ]; do /bin/sleep 0.05; done\nexit 1\n",
+                release.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&custodian, std::fs::Permissions::from_mode(0o700)).unwrap();
+        service.register_native_auth_host(&custodian).unwrap();
+        release
     }
 
-    /// On Settings, Add account, a sign-in the engine refuses because another sign-in of the
-    /// account is still open, or an earlier one never confirmed how it ended, says so with a
-    /// way out, and the n it names sends a new start each time; once the other sign-in has
-    /// ended, n starts a fresh one. A harness that is not installed names itself and how to
-    /// install it, as the engine records it (phase Unavailable).
+    /// On Settings, Add account, a sign-in the engine refuses because another client's
+    /// sign-in of the same account is still open says so with a way out, and the n it
+    /// names sends a new start each time; once that sign-in is cancelled and its custodian
+    /// has let go, n starts a fresh one.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_sign_in_held_open_or_unconfirmed_elsewhere_says_how_it_clears_and_n_tries_again() {
+    async fn a_sign_in_held_open_by_another_client_says_how_it_clears_and_n_tries_again() {
         let root = tempfile::Builder::new()
             .prefix("ca-tacc-open-")
             .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
@@ -1220,7 +1220,7 @@ auth = { method = "native_managed", profile_ref = "profile-claude" }
         let global = root.path().join("global.toml");
         std::fs::write(
             &global,
-            format!("timeout_ms = {}\n{CLAUDE}", ENGINE_WAIT.as_millis()),
+            format!("timeout_ms = {}\n{CODEX}", ENGINE_WAIT.as_millis()),
         )
         .unwrap();
         std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
@@ -1234,60 +1234,104 @@ auth = { method = "native_managed", profile_ref = "profile-claude" }
         )
         .await
         .unwrap();
+        let release = hold_sign_ins(&mut service, root.path());
+
+        let mut other = crate::client_controller::OwnerController::attach(
+            root.path(),
+            crate::engine::owner::OwnerClientKind::Desktop,
+            ENGINE_WAIT,
+        )
+        .await
+        .unwrap();
+        let held_account = crate::protocol::CredentialRef::new("acct-000").unwrap();
+        let read = other
+            .read(crate::engine::owner::OwnerRead::ModelAccessRecord {
+                collection: crate::engine::owner::ModelAccessCollection::Connections,
+                id: held_account.clone(),
+            })
+            .await
+            .unwrap();
+        let crate::engine::owner::OwnerData::ModelAccessRecord { source_hash, .. } = read.data
+        else {
+            panic!("the engine has no record for the account");
+        };
+        let scope = crate::engine::owner::NativeAuthScope {
+            expected_database_instance: other.identity().database_instance().into(),
+            connection: held_account,
+            expected_config_id: read.config_id,
+            expected_source_hash: source_hash,
+        };
+        let held = other
+            .start_native_auth(crate::engine::owner::NativeAuthStart {
+                request_id: crate::protocol::RequestId::new("held-elsewhere").unwrap(),
+                scope: scope.clone(),
+                method: NativeAuthMethod::CodexBrowser,
+            })
+            .await
+            .unwrap();
+        assert_eq!(held.fact.phase, NativeAuthPhase::Starting);
+        assert_eq!(rows(root.path(), "native_auth_fences"), 1);
+
         let mut connection = Connection::connect_paired(
             Client::new(root.path().join("e.sock"), ENGINE_WAIT).unwrap(),
         )
         .unwrap();
-        let claude = account(
+        let chatgpt = account(
             0,
-            "Work Claude",
-            Provider::Claude,
+            "Work ChatGPT",
+            Provider::Chatgpt,
             SignInMethod::Subscription,
             AccountStatus::NotSignedIn,
         );
-        let mut shell = Shell::with(ctx(320, 40), Box::new(AddAccount::again(claude)));
+        let mut shell = Shell::with(ctx(320, 40), Box::new(AddAccount::again(chatgpt)));
         until(&mut shell, &mut connection, ready).await;
         send(&mut shell, &mut connection, |job| {
             matches!(job, SettingsJob::Accounts(AccountsRequest::Catalog))
         })
         .await;
         shell.refresh();
-        let start = |job: &SettingsJob| matches!(job, SettingsJob::SignIn(_));
-        send(&mut shell, &mut connection, start).await;
-        let installed = "Claude Code isn't installed on this Mac, so Claude sign-in isn't available. Install Claude Code, then check again in Settings, Harnesses.";
-        let page = render(&mut shell, 320, 40).join("\n");
-        assert!(page.contains("Press n to try again."), "{page}");
-        assert_eq!(stored_sign_ins(root.path()), 1);
-
-        for (phase, code) in [
-            (NativeAuthPhase::Starting, None),
-            (
-                NativeAuthPhase::Uncertain,
-                Some("native_auth_recovery_required"),
-            ),
-        ] {
-            store_sign_in(root.path(), phase, code);
-            shell.key(Key::Char('n'));
-            send(&mut shell, &mut connection, start).await;
+        let sign_in = |job: &SettingsJob| matches!(job, SettingsJob::SignIn(_));
+        send(&mut shell, &mut connection, sign_in).await;
+        for attempt in ["first start", "n"] {
+            if attempt == "n" {
+                shell.key(Key::Char('n'));
+                send(&mut shell, &mut connection, sign_in).await;
+            }
             let page = render(&mut shell, 320, 40).join("\n");
-            assert!(page.contains(STILL_OPEN), "{phase:?}: {page}");
-            assert!(page.contains("Press n to try again."), "{phase:?}: {page}");
-            assert!(!page.contains("recovery_required"), "{phase:?}: {page}");
-            assert_eq!(stored_sign_ins(root.path()), 1, "{phase:?}");
+            assert!(page.contains(STILL_OPEN), "{attempt}: {page}");
+            assert!(
+                page.contains("Press n for a new code."),
+                "{attempt}: {page}"
+            );
+            assert!(!page.contains("recovery_required"), "{attempt}: {page}");
+            assert_eq!(rows(root.path(), "native_auth_operations"), 1, "{attempt}");
         }
 
-        store_sign_in(
-            root.path(),
-            NativeAuthPhase::Unavailable,
-            Some("native_auth_host_unavailable"),
-        );
+        let cancelled = other
+            .cancel_native_auth(crate::engine::owner::NativeAuthCancel {
+                request_id: crate::protocol::RequestId::new("cancel-elsewhere").unwrap(),
+                scope,
+                operation_id: held.fact.operation_id.clone(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(cancelled.fact.phase, NativeAuthPhase::Cancelling);
+        std::fs::write(&release, b"").unwrap();
+        let deadline = std::time::Instant::now() + ENGINE_WAIT;
+        while rows(root.path(), "native_auth_fences") != 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the cancelled sign-in never let go of its fence"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         shell.key(Key::Char('n'));
-        send(&mut shell, &mut connection, start).await;
+        send(&mut shell, &mut connection, sign_in).await;
         let page = render(&mut shell, 320, 40).join("\n");
-        assert!(page.contains(installed), "{page}");
         assert!(!page.contains(STILL_OPEN), "{page}");
-        assert_eq!(stored_sign_ins(root.path()), 2);
+        assert_eq!(rows(root.path(), "native_auth_operations"), 2);
         drop(connection);
+        drop(other);
         tokio::time::timeout(Duration::from_secs(5), service.shutdown())
             .await
             .unwrap()
@@ -1295,8 +1339,8 @@ auth = { method = "native_managed", profile_ref = "profile-claude" }
     }
 }
 
-const UNCONFIRMED: &str = "This sign-in didn't confirm how it ended, so changes to its account and new sign-ins wait. Wait a few minutes, then try again. If this keeps happening, restart CrazyAgent.";
-const STILL_OPEN: &str = "A sign-in for this account is still open or didn't confirm how it ended. Wait a few minutes, then try again. If this keeps happening, restart CrazyAgent.";
+const UNCONFIRMED: &str = "This sign-in didn't confirm how it ended, so changes to its account and new sign-ins wait. Wait a few minutes, then try again. If this keeps happening, restart the CrazyAgent engine.";
+const STILL_OPEN: &str = "A sign-in for this account is still open or didn't confirm how it ended. Wait a few minutes, then try again. If this keeps happening, restart the CrazyAgent engine.";
 
 /// A failed sign-in view for one recorded code, with or without a device code on screen.
 /// Inputs: the code and the device code. Output: the view the engine reply gives the TUI.
