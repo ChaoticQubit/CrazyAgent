@@ -1697,4 +1697,66 @@ mod tests {
         };
         assert_eq!(note, LOST_NOTE);
     }
+
+    /// A conversation kept while the master ran on one pool account resumes when the
+    /// schedule starts the master on another account of the pool (DEC-091, N-D14): the
+    /// record lives in the agent's own home whichever account runs it. Another harness
+    /// still does not resume it.
+    #[test]
+    fn a_kept_conversation_resumes_on_another_pool_account() {
+        let folder = tempfile::tempdir().unwrap();
+        let connection = rusqlite::Connection::open(folder.path().join("engine.db")).unwrap();
+        crate::storage::initialize_authority_schemas(&connection).unwrap();
+        let owner = connection.unchecked_transaction().unwrap();
+        crate::conversation::initialize(&owner).unwrap();
+        owner.commit().unwrap();
+        let project = ProjectId::new("pool-project").unwrap();
+        connection
+            .execute(
+                "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms)
+                 VALUES (?1,'master','claude',1,'account-a','stopped',1,1)",
+                [project.as_str()],
+            )
+            .unwrap();
+        let agent = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir)
+                 VALUES (?1,?2,'/repo','/repo/.crazyagent/worktrees/agent-1','/repo/.git')",
+                rusqlite::params![agent, project.as_str()],
+            )
+            .unwrap();
+        let id = "5b0e2c1a-7d3f-4e8b-9a6c-2f1e0d9c8b7a";
+        let record = folder.path().join(format!("{id}.jsonl"));
+        std::fs::write(&record, "{}\n").unwrap();
+        let kept = SessionConversation {
+            agent,
+            harness: "claude-code".into(),
+            connection: "account-a".into(),
+            resume: Resume {
+                id: id.into(),
+                record: record.clone(),
+            },
+        };
+        keep_conversation(&connection, &project, "s-pool", &kept).unwrap();
+        let session = SessionId::new("s-pool").unwrap();
+
+        let plan =
+            resume_harness(&connection, &project, &session, "claude-code", "account-b").unwrap();
+        assert_eq!(
+            plan,
+            ResumePlan::Resume {
+                agent,
+                conversation: id.into(),
+                record: record.clone(),
+            },
+            "the master the schedule starts on account-b continues the conversation kept on account-a"
+        );
+
+        let plan = resume_harness(&connection, &project, &session, "codex", "account-a").unwrap();
+        assert!(
+            !matches!(plan, ResumePlan::Resume { .. }),
+            "another harness never resumes the kept conversation: {plan:?}"
+        );
+    }
 }
