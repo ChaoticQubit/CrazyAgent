@@ -2650,6 +2650,8 @@ impl TeamRuntime {
         id: i64,
         project: &ProjectId,
     ) -> Result<Option<Box<Grant>>, String> {
+        #[cfg(test)]
+        self.grant_waited.remove(&id);
         let connection = self.workers[&id].connection.clone();
         let (host, fact) = match self.sign_in(access, &connection) {
             Ok(signed) => signed,
@@ -2674,11 +2676,7 @@ impl TeamRuntime {
             generation,
             NativeProfileUsePurpose::Execution,
         ) {
-            Ok(profile) => {
-                #[cfg(test)]
-                self.grant_waited.remove(&id);
-                profile
-            }
+            Ok(profile) => profile,
             Err(problem) if problem.0 == "native_profile_in_use" => {
                 #[cfg(test)]
                 self.grant_waited.insert(id, problem.0);

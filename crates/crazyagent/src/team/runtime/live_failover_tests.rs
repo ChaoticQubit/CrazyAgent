@@ -808,7 +808,7 @@ pub(crate) struct InputFacts {
 pub(crate) fn pane_rows(screen: &[u8]) -> Vec<String> {
     let rows: Vec<String> = crate::team::events::screen_rows(screen)
         .into_iter()
-        .map(|row| row.trim().to_owned())
+        .map(|row| crate::project_setup::redact(row.trim()))
         .filter(|row| !row.is_empty())
         .collect();
     rows[rows.len().saturating_sub(SCREEN_ROWS)..].to_vec()
