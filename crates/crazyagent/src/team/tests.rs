@@ -3591,10 +3591,7 @@ fn a_native_teammate_gets_the_task_start_reminder_on_the_first_prompt_of_each_ta
     let (_directory, connection) = database();
     let project = crate::protocol::ProjectId::new("tidepool").unwrap();
     connection
-        .execute(
-            "INSERT INTO projects VALUES (?1,?2)",
-            params![project.as_str(), "{}"],
-        )
+        .execute_batch("CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, body TEXT NOT NULL); INSERT INTO projects VALUES ('tidepool','{}');")
         .unwrap();
     let add = |role: &str, parent: Option<i64>, pane: Option<&str>| {
         connection
