@@ -378,7 +378,7 @@ impl RunOutcome {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "sight", rename_all = "snake_case")]
 pub enum Sighted {
-    Full(RunPage),
+    Full(Box<RunPage>),
     Outcome(RunOutcome),
 }
 
@@ -689,7 +689,7 @@ pub fn show_as(
     input: &RunShow,
 ) -> Result<Sighted, StoreError> {
     match host.run_sight(tx, input.id.key(), actor, &input.id)? {
-        Sight::Full => show(tx, input).map(Sighted::Full),
+        Sight::Full => show(tx, input).map(|page| Sighted::Full(Box::new(page))),
         Sight::Outcome => Ok(Sighted::Outcome(RunOutcome::of(&load(tx, &input.id)?.view))),
     }
 }

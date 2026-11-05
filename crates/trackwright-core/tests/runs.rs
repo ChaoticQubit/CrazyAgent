@@ -1362,7 +1362,7 @@ fn the_standalone_host_shows_every_actor_each_run_in_full() {
         assert_eq!(sight, Sight::Full);
         assert_eq!(
             runs::show_as(&tx, &Standalone, &reader, &show).unwrap(),
-            Sighted::Full(runs::show(&tx, &show).unwrap())
+            Sighted::Full(Box::new(runs::show(&tx, &show).unwrap()))
         );
         assert_eq!(
             runs::list_as(&tx, &Standalone, &reader, &list_of(None)).unwrap(),

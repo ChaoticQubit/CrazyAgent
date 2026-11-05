@@ -168,7 +168,7 @@ pub(super) fn run_show<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> 
         after,
     };
     let shown = match runs::show_as(cx.tx, cx.host, cx.actor, &input)? {
-        Sighted::Full(shown) => shown,
+        Sighted::Full(shown) => *shown,
         Sighted::Outcome(outcome) => {
             assert_eq!(&outcome.id, id);
             return Ok(outcome_only(cx, &outcome));
