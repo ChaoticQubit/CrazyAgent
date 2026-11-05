@@ -1563,7 +1563,7 @@ impl AddAccount {
 /// The sentence for each sign-in failure code the engine can record: the words the app's sign-in
 /// panel shows, so both clients say the same thing, except `native_auth_recovery_required`:
 /// the app names its own button, and the TUI says that the engine clears it on a later try
-/// or after a restart. `{harness}` and `{name}` stand for the harness and provider of the
+/// or after an engine restart. `{harness}` and `{name}` stand for the harness and provider of the
 /// sign-in method.
 const SIGN_IN_SENTENCES: [(&str, &str); 28] = [
     (
@@ -1654,7 +1654,7 @@ const SIGN_IN_SENTENCES: [(&str, &str); 28] = [
     ),
     (
         "native_auth_recovery_required",
-        "This sign-in didn't confirm how it ended, so changes to its account and new sign-ins wait. Wait a few minutes, then try again. If this keeps happening, restart CrazyAgent.",
+        "This sign-in didn't confirm how it ended, so changes to its account and new sign-ins wait. Wait a few minutes, then try again. If this keeps happening, restart the CrazyAgent engine.",
     ),
     ("native_auth_sign_in_expired", "This code expired."),
     (
@@ -1707,11 +1707,11 @@ fn plain_sign_in(code: &str, native: Option<NativeAuthMethod>) -> String {
 /// The sentence for a sign-in request the engine refused. `native_auth_recovery_required`
 /// is its refusal while a sign-in of the account is still open or never confirmed how it
 /// ended; every start first lets the engine settle one whose harness has let go, so a
-/// later try or a restart clears it. Inputs: the refusal code and the sign-in method.
+/// later try or an engine restart clears it. Inputs: the refusal code and the sign-in method.
 /// Output: the sentence.
 fn refused_sign_in(code: &str, native: Option<NativeAuthMethod>) -> String {
     if code == "native_auth_recovery_required" {
-        return "A sign-in for this account is still open or didn't confirm how it ended. Wait a few minutes, then try again. If this keeps happening, restart CrazyAgent.".to_owned();
+        return "A sign-in for this account is still open or didn't confirm how it ended. Wait a few minutes, then try again. If this keeps happening, restart the CrazyAgent engine.".to_owned();
     }
     plain_sign_in(code, native)
 }
