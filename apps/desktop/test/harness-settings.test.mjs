@@ -75,7 +75,7 @@ test("an ordinary key is a switch, select or field with help, Save once changed 
   assert.match(choice, /<select[^>]*>/);
   assert.match(choice, /<option value="light">light<\/option>/);
   const field = row(setting({ key: "cleanupPeriodDays", label: "Keep transcripts", type: "integer", min: 1, max: 365, default: 30, value: 30 }));
-  assert.match(field, /<input[^>]*inputmode="numeric"[^>]*value="30"/);
+  assert.match(field, /<input[^>]*inputMode="numeric"[^>]*value="30"/);
   assert.match(row(setting(), { busy: true, draft: false }), /<button[^>]*disabled=""[^>]*>.*Saving\.\.\.<\/button>/);
   assert.match(row(setting(), { note: "This value doesn't fit the setting." }), /role="status">This value doesn&#x27;t fit the setting.</);
 });
@@ -195,7 +195,7 @@ test("agent and catalog text shows through displayText, so hidden characters can
   assert.equal(client.valueText(false), "Off");
   assert.equal(client.valueText(12), "12");
   assert.equal(client.valueText(null), "Not set");
-  assert.throws(() => client.draftOf(setting({ value: null })), /an editable key has a value/);
+  assert.throws(() => client.draftOf(setting({ value: null, source: "app" })), /only the harness default leaves a key without a value/);
 });
 
 test("a stale change reads the page again, and every harness settings code reads as a sentence", () => {
