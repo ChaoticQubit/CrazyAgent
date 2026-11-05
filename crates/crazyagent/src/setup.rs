@@ -278,6 +278,8 @@ pub struct SetupStatus {
     pub dependencies: Vec<DependencyStatus>,
     pub pack: Vec<PackEntry>,
     pub running: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
 }
 
 /// One Python tool setup installs only from its bundled lock: the package, its version,
@@ -377,7 +379,11 @@ pub trait Installer: Send + Sync {
 /// The code every setup step reports on a system setup has no installer for yet.
 pub const PLATFORM_UNSUPPORTED: &str = "setup_platform_unsupported";
 
-const REASONS: [(&str, &str); 25] = [
+/// The code for a Mac with no Command Line Tools git, the only git whose helpers an agent
+/// profile reads: the Setup note, and a refused agent git step.
+pub const AGENT_GIT_NEEDS_TOOLS: &str = "agent_git_needs_tools";
+
+const REASONS: [(&str, &str); 26] = [
     (
         "setup_checksum_mismatch",
         "The download did not match its checksum, so it was not installed.",
@@ -458,6 +464,10 @@ const REASONS: [(&str, &str); 25] = [
     (
         PLATFORM_UNSUPPORTED,
         "Setup can't install this on this system yet. Install it yourself, then check again.",
+    ),
+    (
+        AGENT_GIT_NEEDS_TOOLS,
+        "Agent git needs the Command Line Tools: run xcode-select --install.",
     ),
     (
         "setup_local_app_data_missing",

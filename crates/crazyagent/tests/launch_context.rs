@@ -108,8 +108,8 @@ impl Case {
         .unwrap();
         let tx = connection.unchecked_transaction().unwrap();
         let switch = launch_context::master_tools(&tx, project).map_err(|problem| problem.0)?;
-        let text =
-            launch_context::for_master(&tx, project, tools, None).map_err(|problem| problem.0)?;
+        let text = launch_context::for_master(&tx, project, tools.then_some(&[][..]), None)
+            .map_err(|problem| problem.0)?;
         drop(tx);
         Ok((switch, text))
     }
@@ -795,11 +795,11 @@ async fn a_codex_agent_with_tools_on_gets_the_skill_index_with_each_description_
     assert_eq!(
         developer,
         format!(
-            "{}\n## Skills\n\nThe owner approved these skills for this project. Check this list first: before work that involves files, a specialised tool or a repeatable workflow, look here for a skill that fits. To use one, read its SKILL.md at the path shown and follow it.\n\n- release-notes: Teaches release-notes. ({})\n",
+            "{}\n## Tools to use\n\nThe owner's instructions and the sections above come first. This section only names the tools this launch has as you call them; where other instructions name one another way, use the name here.\n\n- graphify: when `graphify-out/graph.json` is in your worktree, run `graphify query \"<question>\"` in the shell before you read or edit code, `graphify path \"<A>\" \"<B>\"` for how two parts connect and `graphify explain \"<name>\"` for one part.\n- Skills: before each task, read the SKILL.md of every skill in the Skills section below that fits and follow it. A skill other instructions name as `superpowers:NAME`, `software-practices:NAME` or `crazyagent:NAME` is the one listed as NAME there.\n\n## Skills\n\nThe owner approved these skills for this project. Check this list first: before work that involves files, a specialised tool or a repeatable workflow, look here for a skill that fits. To use one, read its SKILL.md at the path shown and follow it.\n\n- release-notes: Teaches release-notes. ({})\n",
             context.instructions(),
             skill.display()
         ),
-        "the project context, then the index of the one skill on for the project, told to read the file since Codex has no Skill tool"
+        "the project context, the Tools to use section of a tools-on launch with no context-mode server (graphify and the Codex skill line), then the index of the one skill on for the project, told to read the file since Codex has no Skill tool"
     );
     drop(files);
 

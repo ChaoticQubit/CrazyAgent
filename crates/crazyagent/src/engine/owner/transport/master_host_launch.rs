@@ -158,6 +158,7 @@ impl OwnerRuntimeHandle {
                 &master_prompt(&prepared.instructions, &process.text),
                 wall_time,
                 delegate,
+                &prepared.tools_off,
             )?
         } else {
             codex_master_turn(
@@ -167,9 +168,15 @@ impl OwnerRuntimeHandle {
                 &prepared.attempt.connection,
                 wall_time,
                 delegate,
+                &prepared.tools_off,
             )?
         };
-        require_master_delegate(prepared.session.selection.backend, &turn, engine.as_deref())?;
+        require_master_delegate(
+            prepared.session.selection.backend,
+            &turn,
+            engine.as_deref(),
+            &prepared.tools_off,
+        )?;
         let harness = if claude {
             crate::agent_home::Harness::Claude
         } else {
@@ -286,15 +293,18 @@ pub(super) struct MasterTurnLaunch {
     pub(super) tool_record: Option<PathBuf>,
 }
 
-/// Builds one Claude Code master turn: its startup instruction file, a private home in the
-/// turn folder holding a no-refresh copy of the account's credential (DEC-090), and the
-/// command and Seatbelt boundary on that home: tools off, or with `engine` the tools-on
-/// command whose `delegate` tool that engine executable serves (DEC-093). The keychain stays
-/// denied and the managed home is never given to the master. Inputs: where the turn runs, the
-/// account lease, the registered executable, the attempt's connection, the instruction text,
-/// the turn's wall time and the engine executable for tools on. Output: the launch parts with
-/// the copy, or the refusal of the part that failed, `native_profile_renewal_failed`, a
-/// transient refusal, when the token still lapses within a minute after a renewal.
+/// Builds one Claude Code master turn: its startup instruction file, a private home in the turn
+/// folder holding a no-refresh copy of the account's credential (DEC-090), and the command and
+/// Seatbelt boundary on that home: tools off, or with `engine` the tools-on command whose team
+/// server that engine executable serves (DEC-093): `delegate`, and `remember` and `recall` through
+/// a new private mailbox in the turn's temporary folder, less the tools switched off. The keychain
+/// stays denied and the managed home is never given to the master. Inputs: where the turn runs, the
+/// account lease, the registered executable, the attempt's connection, the instruction text, the
+/// turn's wall time, the engine executable for tools on and the team tools switched off. Output:
+/// the launch parts with the copy, or the refusal of the part that failed,
+/// `native_profile_renewal_failed`, a transient refusal, when the token still lapses within a
+/// minute after a renewal.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn claude_master_turn(
     place: &MasterTurnPlace<'_>,
     profile: &NativeProfileUse,
@@ -303,6 +313,7 @@ pub(super) fn claude_master_turn(
     instructions: &str,
     wall_time: Duration,
     engine: Option<&Path>,
+    tools_off: &[String],
 ) -> Result<MasterTurnLaunch, EngineError> {
     let instructions = write_master_instructions(place.root, place.runtime_ref, instructions)?;
     let home = master_turn_home(place.root, place.runtime_ref)?;
@@ -342,10 +353,10 @@ pub(super) fn claude_master_turn(
                 place.policy,
                 place.hidden,
             )?;
-            let drop = sandbox
-                .sandbox()
-                .agent_tmp()
-                .join(crate::team::tool::DROP_FILE);
+            let tmp = sandbox.sandbox().agent_tmp();
+            let drop = tmp.join(crate::team::tool::DROP_FILE);
+            let mailbox = tmp.join(crate::team::tool::MAILBOX_FOLDER);
+            make_mailbox(&mailbox)?;
             let command = crate::engine::claude_host::tools_launch_command(
                 executable,
                 place.worktree,
@@ -355,6 +366,8 @@ pub(super) fn claude_master_turn(
                 crate::engine::claude_host::MasterTools {
                     engine,
                     drop: &drop,
+                    mailbox: &mailbox,
+                    off: tools_off,
                 },
             )?;
             (command, sandbox, Some(drop))
@@ -369,16 +382,15 @@ pub(super) fn claude_master_turn(
     })
 }
 
-/// Builds one Codex master turn in a private home in the turn folder holding a no-refresh
-/// copy of the account's credential (DEC-090), so a master never refreshes the managed
-/// home beside other holders of its shared lease (CR2-17). With tools off it is the
-/// read-only app-server. With `engine` its tools are on (DEC-093): shell and patch tools
-/// with Codex's own sandbox off because macOS refuses a Seatbelt profile inside the
-/// master's, which keeps writes to the leased worktree and the turn's own folders, and only
-/// the engine's `delegate` server. Inputs: where the turn runs, the account lease, the
-/// registered executable, the attempt's connection, the turn's wall time and the engine
-/// executable for tools on. Output: the launch parts with the copy, or the refusal of the
-/// part that failed.
+/// Builds one Codex master turn in a private home in the turn folder holding a no-refresh copy of
+/// the account's credential (DEC-090), so a master never refreshes the managed home beside other
+/// holders of its shared lease (CR2-17). With tools off it is the read-only app-server. With
+/// `engine` its tools are on (DEC-093): shell and patch tools with Codex's own sandbox off because
+/// macOS refuses a Seatbelt profile inside the master's, which keeps writes to the leased worktree
+/// and the turn's own folders, and only the engine's team server, as for Claude Code. Inputs: where
+/// the turn runs, the account lease, the registered executable, the attempt's connection, the
+/// turn's wall time, the engine executable for tools on and the team tools switched off. Output:
+/// the launch parts with the copy, or the refusal of the part that failed.
 pub(super) fn codex_master_turn(
     place: &MasterTurnPlace<'_>,
     profile: &NativeProfileUse,
@@ -386,6 +398,7 @@ pub(super) fn codex_master_turn(
     connection: &ModelConnection,
     wall_time: Duration,
     engine: Option<&Path>,
+    tools_off: &[String],
 ) -> Result<MasterTurnLaunch, EngineError> {
     let model = &connection.model.id;
     let home = master_turn_home(place.root, place.runtime_ref)?;
@@ -421,10 +434,10 @@ pub(super) fn codex_master_turn(
         place.policy,
         place.hidden,
     )?;
-    let drop = sandbox
-        .sandbox()
-        .agent_tmp()
-        .join(crate::team::tool::DROP_FILE);
+    let tmp = sandbox.sandbox().agent_tmp();
+    let drop = tmp.join(crate::team::tool::DROP_FILE);
+    let mailbox = tmp.join(crate::team::tool::MAILBOX_FOLDER);
+    make_mailbox(&mailbox)?;
     let command = master_command(
         executable,
         &home,
@@ -433,6 +446,8 @@ pub(super) fn codex_master_turn(
         Some(crate::engine::claude_host::MasterTools {
             engine,
             drop: &drop,
+            mailbox: &mailbox,
+            off: tools_off,
         }),
     )?;
     Ok(MasterTurnLaunch {
@@ -442,6 +457,30 @@ pub(super) fn codex_master_turn(
         credential,
         tool_record: Some(drop),
     })
+}
+
+/// Makes the mailbox of one master turn with its tools on, where its team server leaves the
+/// `remember` and `recall` calls the engine answers while the turn runs: a new 0700 folder in
+/// the turn's own temporary folder, as a team master's. Input: the mailbox path. Output: Ok,
+/// or `master_mailbox_unsafe` when it already exists or is not a private folder.
+#[cfg(unix)]
+fn make_mailbox(mailbox: &Path) -> Result<(), EngineError> {
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(mailbox)
+        .map_err(|_| failure("master_mailbox_unsafe"))?;
+    let made = std::fs::symlink_metadata(mailbox).map_err(io_error)?;
+    if !made.is_dir() || made.mode() & 0o7777 != 0o700 {
+        return Err(failure("master_mailbox_unsafe"));
+    }
+    Ok(())
+}
+
+/// Refuses a master turn mailbox where a private folder cannot be made. Takes the path,
+/// unused. Returns `master_mailbox_unsafe`.
+#[cfg(not(unix))]
+fn make_mailbox(_mailbox: &Path) -> Result<(), EngineError> {
+    Err(failure("master_mailbox_unsafe"))
 }
 
 /// Makes the private home of one master turn inside its turn folder, so everything the
@@ -505,9 +544,10 @@ impl Drop for MasterRuntimeFolder {
 /// read-only sandbox, approvals never granted, and no shell, patch, web, goal or MCP tools.
 /// Tools on (DEC-093): approvals never granted, no apps, plugins, goals or Codex's own
 /// sub-agents, Codex's own sandbox off inside the master's, and exactly one MCP server, the
-/// engine's `delegate` server served by exactly the expected engine executable on the turn's
-/// own drop file. Every `-c` setting must be one the switch allows. Input: the command and, for tools on, the expected delegate
-/// server parts. Output: Ok, `master_delegate_unverified` for any other server, or the
+/// engine's team server served by exactly the expected engine executable on the turn's own
+/// drop file and mailbox with the team tools switched off. Every `-c` setting must be one the
+/// switch allows. Input: the command and, for tools on, the expected team server parts.
+/// Output: Ok, `master_delegate_unverified` for any other server, or the
 /// unsupported-backend refusal.
 fn require_master_tool_policy(
     command: &Command,
@@ -580,11 +620,14 @@ fn require_master_tool_policy(
     Ok(())
 }
 
-/// Checks that a Codex `mcp_servers=` setting names only the engine's `delegate` server: one
+/// Checks that a Codex `mcp_servers=` setting names only the engine's team server: one
 /// `crazyagent-team` entry whose command is exactly the expected engine executable and whose
-/// arguments are exactly the tool server command and the turn's drop file. Input: the setting
-/// and the expected parts. Output: whether it does.
+/// arguments are exactly the team server's arguments for the turn's drop file, mailbox and
+/// tools switched off. Input: the setting and the expected parts. Output: whether it does.
 fn delegate_only(setting: &str, tools: crate::engine::claude_host::MasterTools<'_>) -> bool {
+    let Ok(expected) = tools.server_args() else {
+        return false;
+    };
     let Ok(parsed) = toml::from_str::<toml::Table>(setting) else {
         return false;
     };
@@ -608,31 +651,33 @@ fn delegate_only(setting: &str, tools: crate::engine::claude_host::MasterTools<'
         && server.len() == 2
         && named(server.get("command"), tools.engine)
         && args.is_some_and(|args| {
-            args.len() == 2
-                && args[0].as_str() == Some(crate::team::tool::SERVER_COMMAND)
-                && named(args.get(1), tools.drop)
+            args.iter()
+                .map(toml::Value::as_str)
+                .eq(expected.iter().map(|arg| Some(arg.as_str())))
         })
 }
 
 /// Confirms a built master turn names exactly the delegate server the engine registered: for
 /// tools on, the registered engine executable at its canonical path, outside every folder the
-/// turn's sandbox lets it write, serving the drop file in the turn's own sandbox temporary
-/// folder, and for tools off no server. Inputs: the backend, the turn and, for tools on, the
-/// registered engine executable. Output: Ok, or the refusal code of the check that failed.
+/// turn's sandbox lets it write, serving the drop file and mailbox in the turn's own sandbox
+/// temporary folder with the team tools switched off, and for tools off no server. Inputs: the
+/// backend, the turn, for tools on the registered engine executable, and the tools switched
+/// off. Output: Ok, or the refusal code of the check that failed.
 fn require_master_delegate(
     backend: MasterBackend,
     turn: &MasterTurnLaunch,
     engine: Option<&crate::engine::native_auth_host::RegisteredNativeAuthHost>,
+    tools_off: &[String],
 ) -> Result<(), EngineError> {
-    let drop = turn
-        .sandbox
-        .sandbox()
-        .agent_tmp()
-        .join(crate::team::tool::DROP_FILE);
+    let tmp = turn.sandbox.sandbox().agent_tmp();
+    let drop = tmp.join(crate::team::tool::DROP_FILE);
+    let mailbox = tmp.join(crate::team::tool::MAILBOX_FOLDER);
     let expected = match engine {
         Some(engine) => Some(crate::engine::claude_host::MasterTools {
             engine: delegate_engine(engine)?,
             drop: &drop,
+            mailbox: &mailbox,
+            off: tools_off,
         }),
         None => None,
     };
@@ -782,8 +827,9 @@ fn master_command(
 }
 
 /// Renders the one `mcp_servers` setting of a tools-on Codex master: the engine executable
-/// serving its `delegate` tool with the turn's drop file. Input: the tools-on parts. Output:
-/// the setting, or `master_runtime_binding` for a relative path or one that is not text.
+/// serving its team server on the turn's drop file and mailbox with the tools switched off.
+/// Input: the tools-on parts. Output: the setting, or `master_runtime_binding` for a relative
+/// path, one that is not text or an unknown tool name.
 #[cfg(unix)]
 fn delegate_servers(
     tools: &crate::engine::claude_host::MasterTools<'_>,
@@ -794,12 +840,17 @@ fn delegate_servers(
             .map(|text| toml_edit::Value::from(text).to_string())
             .ok_or_else(|| failure("master_runtime_binding"))
     };
+    let args = tools
+        .server_args()
+        .map_err(|_| failure("master_runtime_binding"))?
+        .iter()
+        .map(|arg| toml_edit::Value::from(arg.as_str()).to_string())
+        .collect::<Vec<_>>()
+        .join(",");
     let setting = format!(
-        "{DELEGATE_SERVERS}{{{}={{command={},args=[{},{}]}}}}",
+        "{DELEGATE_SERVERS}{{{}={{command={},args=[{args}]}}}}",
         crate::team::tool::SERVER_NAME,
         text(tools.engine)?,
-        toml_edit::Value::from(crate::team::tool::SERVER_COMMAND),
-        text(tools.drop)?
     );
     assert!(delegate_only(&setting, *tools));
     Ok(setting)
@@ -2385,6 +2436,9 @@ mod live_claude_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "master_host_launch/live_codex_tests.rs"]
 mod live_codex_tests;
+#[cfg(all(test, target_os = "macos"))]
+#[path = "master_host_launch/live_rcli_tests.rs"]
+mod live_rcli_tests;
 
 #[cfg(all(test, target_os = "macos"))]
 #[path = "master_host_launch/claude_turn_tests.rs"]

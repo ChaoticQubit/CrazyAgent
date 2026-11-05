@@ -690,6 +690,14 @@ fn a_team_answer_for_another_project_is_a_bug() {
 }
 
 #[test]
+fn a_refused_agent_git_step_names_the_command_line_tools_fix() {
+    assert_eq!(
+        team_plain("agent_git_needs_tools"),
+        "Agent git needs the Command Line Tools: run xcode-select --install."
+    );
+}
+
+#[test]
 fn titles_and_plain_reasons() {
     assert_eq!(
         title("\n  Fix the login bug  \nDetails"),

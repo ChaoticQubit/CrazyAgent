@@ -152,6 +152,7 @@ async fn a_real_codex_master_with_tools_on_works_in_its_worktree_and_delegates()
         &connection,
         Duration::from_millis(budget.wall_time_ms),
         Some(&engine),
+        &[],
     )
     .unwrap();
     assert_ne!(home, managed);
@@ -161,6 +162,8 @@ async fn a_real_codex_master_with_tools_on_works_in_its_worktree_and_delegates()
         Some(crate::engine::claude_host::MasterTools {
             engine: &engine,
             drop: &record,
+            mailbox: &record.with_file_name(crate::team::tool::MAILBOX_FOLDER),
+            off: &[],
         }),
     )
     .unwrap();
@@ -374,6 +377,7 @@ async fn browsky_master_turn(prompt: &str, tools_section: bool) -> BrowskyTurn {
         &connection,
         Duration::from_millis(budget.wall_time_ms),
         Some(&engine),
+        &[],
     )
     .unwrap();
     let record = tool_record.unwrap();

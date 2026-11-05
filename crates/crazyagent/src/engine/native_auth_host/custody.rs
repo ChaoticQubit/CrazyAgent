@@ -715,6 +715,21 @@ impl CustodySession {
         channel.observe_codex(guard, event).await
     }
 
+    /// Reports how the session's started Codex child ended without an app-server outcome.
+    /// Inputs: the channel and the host observation. Output: whether to go on or cancel.
+    pub(in crate::engine) async fn observe_codex_host(
+        &self,
+        channel: &mut NativeAuthCustodyChannel,
+        observation: crate::engine::owner::native_auth::CodexAuthObservation,
+    ) -> Result<NativeAuthCustodyControl, EngineError> {
+        assert!(self.child_attempted);
+        let guard = self
+            .guard
+            .as_ref()
+            .expect("session retains its physical guard");
+        channel.observe_codex_host(guard, observation).await
+    }
+
     pub(in crate::engine) async fn observe_claude(
         &self,
         channel: &mut NativeAuthCustodyChannel,

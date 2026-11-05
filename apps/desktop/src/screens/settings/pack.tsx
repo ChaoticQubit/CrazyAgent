@@ -29,8 +29,9 @@ export function packConfirm(ask: PackAsk): { title: string; body: string; confir
       : `Agents in every project can use this skill. It comes from ${displayText(ask.entry.source)}.` };
 }
 
-/** The Tools section of Settings, Pack: tmux, uv and graphify with their state, and Install
- * tools while one is missing or failed and nothing is checking or installing.
+/** The Tools section of Settings, Pack: tmux, uv and graphify with their state, any readiness
+ * note such as agent git needing the Command Line Tools, and Install tools while one is
+ * missing or failed and nothing is checking or installing.
  * Inputs: the setup status, the change in flight and the Install tools handler. */
 function ToolsSection({ status, busy, onInstallTools }: { status: SetupStatus; busy: string | null; onInstallTools: () => void }) {
   const step = toolsStep({ kind: "ok", value: status });
@@ -49,6 +50,7 @@ function ToolsSection({ status, busy, onInstallTools }: { status: SetupStatus; b
         </span>
       </li>;
     })}</ul>
+    {status.notes?.map((note) => <p className="pj-small pj-error" key={note}>{displayText(note)}</p>)}
     {offer && <span><Button variant="primary" size="small" icon="wrench" disabled={busy !== null && busy !== TOOLS_BUSY} pending={busy === TOOLS_BUSY}
       pendingLabel="Starting..." onClick={onInstallTools}>Install tools</Button></span>}
   </section>;

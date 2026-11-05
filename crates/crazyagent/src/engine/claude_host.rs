@@ -59,12 +59,47 @@ const MCP_CONFIG_FLAG: &str = "--mcp-config";
 const DENY_FLAG_SPELLINGS: [&str; 2] = [CLAUDE_DENY_FLAG, "--disallowed-tools"];
 
 /// What a Claude Code or Codex master turn with its tools on is given beyond the team agents'
-/// tool set: the engine executable that serves its `delegate` tool, and the absolute drop file
-/// in the turn's private temporary folder where that tool records each proposed task.
+/// tool set: the engine executable that serves its team server, the absolute drop file in the
+/// turn's private temporary folder where its `delegate` tool records each proposed task, the
+/// mailbox beside it where its `remember` and `recall` calls wait for the engine, and the team
+/// tools the owner switched off, which the server leaves out.
 #[derive(Clone, Copy)]
 pub(in crate::engine) struct MasterTools<'a> {
     pub(in crate::engine) engine: &'a Path,
     pub(in crate::engine) drop: &'a Path,
+    pub(in crate::engine) mailbox: &'a Path,
+    pub(in crate::engine) off: &'a [String],
+}
+
+impl MasterTools<'_> {
+    /// The arguments of the engine's team server, the same for Claude Code and Codex and in
+    /// the team runtime's order: `team-mcp`, the drop file, the mailbox and the tools left out.
+    /// Input: the tools. Output: the arguments, or `claude_host_invalid_launch` for a relative
+    /// path, one with a control character or an unknown tool name.
+    pub(in crate::engine) fn server_args(&self) -> Result<Vec<String>, EngineError> {
+        let (Some(drop), Some(mailbox)) = (plain_path(self.drop), plain_path(self.mailbox)) else {
+            return Err(failure("claude_host_invalid_launch"));
+        };
+        if !crate::team::tool::known_tools(self.off) {
+            return Err(failure("claude_host_invalid_launch"));
+        }
+        Ok(
+            [crate::team::tool::SERVER_COMMAND.to_owned(), drop, mailbox]
+                .into_iter()
+                .chain(self.off.iter().cloned())
+                .collect(),
+        )
+    }
+}
+
+/// Spells an absolute path as text for a launch argument. Input: the path. Output: the text,
+/// or none for a relative path, one that is not text or one with a control character.
+fn plain_path(path: &Path) -> Option<String> {
+    path.is_absolute()
+        .then(|| path.to_str())
+        .flatten()
+        .filter(|text| !text.chars().any(char::is_control))
+        .map(str::to_owned)
 }
 
 /// The most stream output one Claude master run may read: the 64 MiB a default master turn
@@ -143,9 +178,9 @@ pub(in crate::engine) fn launch_command(
 }
 
 /// Builds the Claude Code master command for one turn whose tools are on (DEC-093): the team
-/// agents' tool flags, a bounded number of steps, hooks and setting sources still off, and
-/// only the engine's `delegate` MCP server. Input: as `launch_command`, plus the engine
-/// executable and drop file. Output: the command, or a plain refusal for an unsafe input.
+/// agents' tool flags, a bounded number of steps, hooks and setting sources still off, and only the
+/// engine's team MCP server. Input: as `launch_command`, plus the engine executable, drop file,
+/// mailbox and tools switched off. Output: the command, or a plain refusal for an unsafe input.
 #[cfg(unix)]
 pub(in crate::engine) fn tools_launch_command(
     executable: &Path,
@@ -166,23 +201,17 @@ pub(in crate::engine) fn tools_launch_command(
 }
 
 /// Renders the strict MCP configuration of a tools-on master: one stdio server, the engine
-/// executable serving `team-mcp` on the drop file. Input: the tools. Output: the JSON text,
-/// or `claude_host_invalid_launch` for a relative path or one with a control character.
+/// executable serving `team-mcp` on the drop file and mailbox with the tools switched off.
+/// Input: the tools. Output: the JSON text, or `claude_host_invalid_launch` for a relative
+/// path, one with a control character or an unknown tool name.
 fn delegate_config(tools: MasterTools<'_>) -> Result<String, EngineError> {
-    let plain = |path: &Path| {
-        path.is_absolute()
-            .then(|| path.to_str())
-            .flatten()
-            .filter(|text| !text.chars().any(char::is_control))
-            .map(str::to_owned)
-    };
-    let (Some(engine), Some(drop)) = (plain(tools.engine), plain(tools.drop)) else {
+    let Some(engine) = plain_path(tools.engine) else {
         return Err(failure("claude_host_invalid_launch"));
     };
     let config = serde_json::json!({"mcpServers": {crate::team::tool::SERVER_NAME: {
         "type": "stdio",
         "command": engine,
-        "args": [crate::team::tool::SERVER_COMMAND, drop],
+        "args": tools.server_args()?,
     }}});
     Ok(config.to_string())
 }
@@ -654,18 +683,31 @@ fn failure(code: &'static str) -> EngineError {
     EngineError(code.into())
 }
 
-/// Reads the delegate server a tools-on master command names, so the command can be built
-/// again from it and compared. Input: the `--mcp-config` text. Output: the engine executable
-/// and drop file, or none when the text is not one engine server.
+/// Reads the team server a tools-on master command names, so the command can be built
+/// again from it and compared. Input: the `--mcp-config` text. Output: the engine executable,
+/// drop file, mailbox and tools switched off, or none when the text is not one engine server.
 #[cfg(unix)]
-fn named_tools(config: &str) -> Option<(PathBuf, PathBuf)> {
+fn named_tools(config: &str) -> Option<(PathBuf, PathBuf, PathBuf, Vec<String>)> {
     let config: serde_json::Value = serde_json::from_str(config).ok()?;
     let server = config
         .get("mcpServers")?
         .get(crate::team::tool::SERVER_NAME)?;
     let engine = server.get("command")?.as_str()?;
-    let drop = server.get("args")?.as_array()?.get(1)?.as_str()?;
-    Some((PathBuf::from(engine), PathBuf::from(drop)))
+    let args = server
+        .get("args")?
+        .as_array()?
+        .iter()
+        .map(serde_json::Value::as_str)
+        .collect::<Option<Vec<&str>>>()?;
+    let [_, drop, mailbox, off @ ..] = args.as_slice() else {
+        return None;
+    };
+    Some((
+        PathBuf::from(engine),
+        PathBuf::from(drop),
+        PathBuf::from(mailbox),
+        off.iter().map(|tool| (*tool).to_owned()).collect(),
+    ))
 }
 
 /// Confirms a Claude Code master command names exactly the delegate server the engine gave
@@ -793,7 +835,12 @@ fn validate_command(
         instructions,
         named
             .as_ref()
-            .map(|(engine, drop)| MasterTools { engine, drop }),
+            .map(|(engine, drop, mailbox, off)| MasterTools {
+                engine,
+                drop,
+                mailbox,
+                off,
+            }),
     )
     .map_err(|_| Fault::Host("claude_host_invalid_command"))?;
     if command.get_args().ne(expected.get_args()) || command.get_envs().ne(expected.get_envs()) {

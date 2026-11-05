@@ -345,6 +345,8 @@ fn a_real_tools_on_claude_master_keeps_its_default_tools_but_no_built_in_sub_age
         MasterTools {
             engine: Path::new("/usr/bin/true"),
             drop: &drop,
+            mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
+            off: &[],
         },
     )
     .unwrap();
@@ -855,7 +857,12 @@ fn a_claude_master_with_tools_on_gets_the_team_tool_flags_and_only_the_engine_de
             &directories.home,
             "native-default",
             None,
-            MasterTools { engine, drop },
+            MasterTools {
+                engine,
+                drop,
+                mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
+                off: &[],
+            },
         )
     };
     let command = launch(engine, &drop).unwrap();
@@ -866,7 +873,13 @@ fn a_claude_master_with_tools_on_gets_the_team_tool_flags_and_only_the_engine_de
         serde_json::json!({"mcpServers": {"crazyagent-team": {
             "type": "stdio",
             "command": "/approved/crazyagent",
-            "args": ["team-mcp", drop.to_str().unwrap()],
+            "args": [
+                "team-mcp",
+                drop.to_str().unwrap(),
+                drop.with_file_name(crate::team::tool::MAILBOX_FOLDER)
+                    .to_str()
+                    .unwrap()
+            ],
         }}})
     );
     assert_eq!(
@@ -967,6 +980,8 @@ fn the_host_runs_a_tools_on_master_only_as_the_engine_builds_it() {
     let tools = MasterTools {
         engine: &engine,
         drop: &drop,
+        mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
+        off: &[],
     };
     let on = tools_launch_command(
         Path::new("/approved/claude"),
@@ -1001,7 +1016,7 @@ fn the_host_runs_a_tools_on_master_only_as_the_engine_builds_it() {
         changed
     };
     let widened = serde_json::json!({"mcpServers": {
-        "crazyagent-team": {"type": "stdio", "command": engine, "args": ["team-mcp", drop]},
+        "crazyagent-team": {"type": "stdio", "command": engine, "args": ["team-mcp", drop, drop.with_file_name(crate::team::tool::MAILBOX_FOLDER)]},
         "extra": {"type": "stdio", "command": "/bin/sh", "args": []},
     }})
     .to_string();
@@ -1047,6 +1062,8 @@ async fn a_tools_on_claude_master_starts_with_a_shell_for_its_tools() {
         MasterTools {
             engine: &engine,
             drop: &drop,
+            mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
+            off: &[],
         },
     )
     .unwrap();
@@ -1117,6 +1134,8 @@ async fn tool_step_turn(
             MasterTools {
                 engine: &engine,
                 drop: &drop,
+                mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
+                off: &[],
             },
         )
     } else {
@@ -1243,6 +1262,8 @@ async fn a_claude_master_turn_ends_at_its_result_when_a_background_task_continue
         MasterTools {
             engine: &engine,
             drop: &drop,
+            mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
+            off: &[],
         },
     )
     .unwrap();

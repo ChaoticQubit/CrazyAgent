@@ -360,6 +360,31 @@ impl OwnerRuntimeHandle {
         ))
     }
 
+    /// Answers the memory calls a running console master turn with its tools on left in its
+    /// mailbox, `remember` and `recall` under the master's name, as the team runtime does for
+    /// a master without its live terminal. Takes the prepared turn, its id and the turn's
+    /// mailbox. Returns Ok, or the refusal of a turn that is not running with its tools on.
+    pub(super) async fn serve_master_memory(
+        &self,
+        prepared: &PreparedMasterTurn,
+        turn_id: &RequestId,
+        mailbox: &std::path::Path,
+    ) -> Result<(), EngineError> {
+        match self
+            .master_runtime_command(MasterRuntimeCommand::ServeMemory {
+                host: self.identity(),
+                project_id: prepared.session.project_id.clone(),
+                session_id: prepared.session.session_id.clone(),
+                turn_id: turn_id.clone(),
+                mailbox: mailbox.to_path_buf(),
+            })
+            .await?
+        {
+            MasterRuntimeResult::Turn(_) => Ok(()),
+            _ => Err(failure("master_runtime_result")),
+        }
+    }
+
     /// Takes the profile of a prepared master turn and names its conversation in the agent
     /// register as a holder of the turn's account until the returned hold is dropped, which
     /// the caller keeps until the turn's host has closed. Takes the prepared turn and its
@@ -681,6 +706,10 @@ impl OwnerRuntimeHandle {
         let _credential = launch.credential;
         let tool_record = launch.tool_record;
         let (access, toolchains) = (launch.access, launch.toolchains);
+        let mailbox = tool_record
+            .as_deref()
+            .and_then(std::path::Path::parent)
+            .map(|tmp| tmp.join(crate::team::tool::MAILBOX_FOLDER));
         if !crate::engine::owner::is_hex_id(&launch.artifact_sha256)
             || launch.command.get_current_dir() != Some(prepared.cwd.as_path())
         {
@@ -749,7 +778,7 @@ impl OwnerRuntimeHandle {
             toolchains,
         };
         let observed = self
-            .collect_master_turn(prepared, turn_id, &mut active)
+            .collect_master_turn(prepared, turn_id, &mut active, mailbox.as_deref())
             .await;
         if !matches!(&observed, Ok(MasterRuntimeObservation::Response { .. })) {
             let _ = active.host.cancel().await;
@@ -840,11 +869,17 @@ impl OwnerRuntimeHandle {
         eprintln!("master usage not counted: {problem}");
     }
 
+    /// Collects a running console master turn to its end: the host's events up to the
+    /// reply, with the turn inspected for cancellation and its memory calls served one
+    /// INSPECT_INTERVAL after the last inspection ended, so a slow inspection never leaves
+    /// the host's events and deadline unread (OP-22 r1). Inputs: the prepared turn, its id,
+    /// the active host and the turn's mailbox. Output: the observation, or an engine error.
     async fn collect_master_turn(
         &self,
         prepared: &PreparedMasterTurn,
         turn_id: &RequestId,
         active: &mut ActiveMaster,
+        mailbox: Option<&std::path::Path>,
     ) -> Result<MasterRuntimeObservation, EngineError> {
         self.record_master_child(prepared, turn_id, active.host.process_group())
             .await?;
@@ -915,6 +950,13 @@ impl OwnerRuntimeHandle {
                             return Err(failure(narrowed.code()));
                         }
                     }
+                    if let Some(mailbox) = mailbox
+                        && crate::team::tool::calls_waiting(mailbox)
+                        && let Err(error) = self.serve_master_memory(prepared, turn_id, mailbox).await
+                    {
+                        eprintln!("{}", super::master_memory_diagnostic(&error));
+                    }
+                    inspect.reset();
                     continue;
                 }
                 event = active.host.next_event() => event?,

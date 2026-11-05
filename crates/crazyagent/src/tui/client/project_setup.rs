@@ -828,9 +828,27 @@ pools = []
         tokio::sync::watch::Sender<bool>,
         tempfile::TempDir,
     ) {
+        live_project_with(root, LIVE_ACCESS, None).await
+    }
+
+    /// [`live_project`] on the given global settings with the given team plan, None for
+    /// the engine's default. Inputs: the root, the settings text and the plan. Output: as
+    /// [`live_project`].
+    async fn live_project_with(
+        root: &std::path::Path,
+        access: &str,
+        team: Option<crate::project_setup::TeamPlan>,
+    ) -> (
+        EngineService,
+        NativeOwner,
+        App,
+        ProjectId,
+        tokio::sync::watch::Sender<bool>,
+        tempfile::TempDir,
+    ) {
         std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.join("global.toml");
-        std::fs::write(&global, LIVE_ACCESS).unwrap();
+        std::fs::write(&global, access).unwrap();
         std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
         let (stop, stopped) = tokio::sync::watch::channel(false);
         let service = EngineService::start_with_settings_sources(
@@ -855,7 +873,7 @@ pools = []
             platforms: vec![Platform::Cli],
             research: vec![],
             pool: None,
-            team: None,
+            team,
             documents: vec![],
         };
         let spec = ProjectSpec {
@@ -893,6 +911,13 @@ pools = []
     /// project for its project leader, as the owner does on the pools page. Inputs: the
     /// controller and the project. Output: none; it panics unless the engine applied it.
     async fn assign_live_pool(controller: &mut OwnerController, project: &ProjectId) {
+        assign_pool(controller, project, "api-a").await;
+    }
+
+    /// Creates the project's master pool from one connection, assigned to the project for
+    /// its project leader, as the owner does on the pools page. Inputs: the controller, the
+    /// project and the connection. Output: none; it panics unless the engine applied it.
+    async fn assign_pool(controller: &mut OwnerController, project: &ProjectId, member: &str) {
         let pools = controller
             .read(OwnerRead::ModelAccessPage {
                 collection: crate::engine::owner::ModelAccessCollection::Pools,
@@ -914,7 +939,7 @@ pools = []
                         pool: crate::config::AccountPool {
                             id: reference("pool-live"),
                             name: None,
-                            members: vec![reference("api-a")],
+                            members: vec![reference(member)],
                             projects: vec![reference(project.as_str())],
                             roles: vec![reference("project_leader")],
                             fallback_allowed: false,
@@ -999,6 +1024,160 @@ pools = []
         );
         drop(native);
         service.shutdown().await.unwrap();
+    }
+
+    /// LMS-1, live: turning a new project's live master on from the TUI opens the owner's
+    /// default master session on the owner's signed-in Claude account before any master
+    /// runs, since no team runtime runs yet; once that engine stops, the team runtime on its
+    /// database starts the live master in tmux in that same session, and its first real
+    /// turn is counted in it with the reply as its last line. Account ids are never printed.
+    /// Runs in a live window only.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
+    fn turning_a_real_claude_live_master_on_opens_the_owner_s_default_session() {
+        use crate::team::runtime::live_failover_tests::{ASK, OwnerClaude, START, TURN, Team};
+        let owner = OwnerClaude::pick();
+        let connection = owner.connection().clone();
+        let mut settings = "version = 1\ntimeout_ms = 10000\nallowed_destinations = []\n"
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        settings["model_access"] = toml_edit::Item::Table(
+            toml_edit::ser::to_document(&crate::config::ModelAccess {
+                accounts: vec![connection.account_ref.clone()],
+                connections: vec![connection.clone()],
+                pools: vec![],
+            })
+            .unwrap()
+            .into_table(),
+        );
+        let plan = crate::project_setup::TeamPlan {
+            master: "claude-code".into(),
+            master_tools: true,
+            sub_harnesses: vec![],
+            min_agents: 1,
+            max_agents: 1,
+        };
+        let root = tempfile::Builder::new()
+            .prefix("ca-tui-live-lms-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        let engine = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (project, session, _home) = engine.block_on(async {
+            let (mut service, mut native, mut app, project, _stop, home) =
+                live_project_with(root.path(), &settings.to_string(), Some(plan)).await;
+            let controller = native.controller.as_mut().unwrap();
+            assign_pool(controller, &project, connection.id.as_str()).await;
+            assert_eq!(
+                master_session(controller, &project).await,
+                None,
+                "a new project has no master session"
+            );
+            app.request_team_change(crate::team::TeamAction::LiveMaster {
+                project_id: project.clone(),
+                on: true,
+            })
+            .unwrap();
+            let query = app.take_setup_query().unwrap();
+            let event = native.project_setup(query).await;
+            app.apply_owner(OwnerEvent::Setup(Box::new(event))).unwrap();
+            assert!(
+                matches!(
+                    &app.setup_view,
+                    Some((
+                        SetupQuery::TeamChange { .. },
+                        SetupView::Changed(crate::engine::owner::OwnerResult::Applied)
+                    ))
+                ),
+                "the live switch turns on: {:?} {:?}",
+                app.setup_view,
+                app.setup_problem
+            );
+            let state = native
+                .controller
+                .as_mut()
+                .unwrap()
+                .read(OwnerRead::ProjectMaster {
+                    project_id: project.clone(),
+                })
+                .await
+                .unwrap();
+            let OwnerData::ProjectMaster {
+                session: Some(session),
+            } = state.data
+            else {
+                panic!(
+                    "turning the live master on opened no master session: {:?}",
+                    app.setup_problem
+                );
+            };
+            assert_eq!(
+                session.phase,
+                crate::master_session::MasterSessionPhase::Configured,
+                "the opened session is the live one"
+            );
+            assert_eq!(
+                session.selection.backend,
+                crate::master_session::MasterBackend::Claude,
+                "the owner's default master runs on the team plan's Claude Code"
+            );
+            assert!(
+                session.selection.route.account_ref == connection.account_ref,
+                "the default session is on the owner's signed-in Claude account"
+            );
+            assert_eq!(
+                session.current_turn, None,
+                "the session opened before the master's first turn"
+            );
+            drop(native);
+            service.shutdown().await.unwrap();
+            (project, session.session_id.as_str().to_owned(), home)
+        });
+        drop(engine);
+
+        let mut team = Team::on_engine(
+            root.path(),
+            &root.path().join("global.toml"),
+            &root.path().join("project.toml"),
+            &project,
+            &owner,
+        );
+        assert!(team.live(), "the TUI's switch is on: {}", team.seen());
+        assert_eq!(
+            team.engine_session(),
+            Some(session.clone()),
+            "the engine keeps the opened session for the live master"
+        );
+        team.until(
+            "the live master starts on the owner's account",
+            START,
+            |t| {
+                t.master()
+                    .is_some_and(|(id, account)| account == "working" && t.live_agent() == Some(id))
+            },
+        );
+        let (master, _) = team.master().unwrap();
+        assert_eq!(
+            team.live_session(master),
+            Some(session.clone()),
+            "the live master runs in the owner's default session: {}",
+            team.seen()
+        );
+        team.say(ASK);
+        team.until("the live master's first owner turn answers", TURN, |t| {
+            t.turns().iter().any(|(_, outcome)| outcome == "success")
+        });
+        let counted = team.session_turns(&session);
+        assert!(
+            counted.as_ref().is_some_and(|(turns, line)| *turns >= 1
+                && line.as_deref().is_some_and(|line| line.contains("READY"))),
+            "the live master's real turn is counted in the opened session with its reply: {counted:?} {}",
+            team.seen()
+        );
+        println!("live LMS-1: {counted:?} {}", team.seen());
     }
 
     /// Turning the live master on for a project whose defaults cannot open a master still

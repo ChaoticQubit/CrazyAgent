@@ -50,8 +50,15 @@ const MARKS: &str = "CREATE TABLE IF NOT EXISTS session_marks (
 const OWNER_TURNS: &str = "CREATE TABLE session_owner_turns (
     session TEXT PRIMARY KEY CHECK(length(session) BETWEEN 1 AND 128),
     project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),
-    turns INTEGER NOT NULL DEFAULT 1 CHECK(turns >= 0)
+    turns INTEGER NOT NULL DEFAULT 1 CHECK(turns >= 0),
+    last_line TEXT CHECK(last_line IS NULL OR length(last_line) BETWEEN 1 AND 80)
 )";
+
+/// Gives a table an older engine made the newest line of each session's terminal turns.
+#[cfg(unix)]
+const OWNER_TURNS_LINED: &str = "ALTER TABLE session_owner_turns ADD COLUMN last_line TEXT CHECK(last_line IS NULL OR length(last_line) BETWEEN 1 AND 80);";
+
+const _: () = assert!(LINE_CHARS_MAX == 80);
 
 /// Gives a table an older engine made its turn count: a row of a session with no engine
 /// turn counts the one terminal turn it proves, while a row of a session with engine turns
@@ -69,7 +76,8 @@ const HAS_OWNER_TURN: &str = "(EXISTS(SELECT 1 FROM master_turns t WHERE t.sessi
 /// One master session as the Sessions list shows it. `created` and `last_activity` are
 /// engine revisions; `started_ms` and `active_ms` are wall-clock times, absent for sessions
 /// older than the marks. `turns` counts the engine-run owner turns and the turns run in the
-/// live terminal. `agents` names the session's own sub-agents, newest first;
+/// live terminal; `last_line` is the newest engine-run line, else the newest terminal reply
+/// kept. `agents` names the session's own sub-agents, newest first;
 /// `results_waiting` counts finished sub-agent results queued for this session's master.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -117,24 +125,25 @@ pub const LOST_NOTE: &str = "This session continues in a new harness conversatio
 /// the engine database opens. The first creation counts every session that kept a harness
 /// conversation and ran no engine turn as having one terminal turn, so sessions used only
 /// in the live terminal stay listed; a table an older engine made without the turn count
-/// gains it as `OWNER_TURNS_COUNTED` says. Takes the engine connection. Returns any SQLite
-/// failure, with the table left as it was.
+/// gains it as `OWNER_TURNS_COUNTED` says. A new table, or one that gains the newest line,
+/// fills it once by `fill_lines`. Takes the engine connection. Returns any SQLite failure,
+/// with the table left as it was.
 #[cfg(unix)]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(MARKS).map_err(error)?;
     if table_exists(connection, "session_owner_turns")? {
-        let counted: bool = connection
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('session_owner_turns') WHERE name='turns')",
-                [],
-                |row| row.get(0),
-            )
-            .map_err(error)?;
-        return if counted {
-            Ok(())
-        } else {
-            owner_turns_change(connection, OWNER_TURNS_COUNTED)
-        };
+        if !owner_turns_column(connection, "turns")? {
+            owner_turns_change(connection, |connection| {
+                connection.execute_batch(OWNER_TURNS_COUNTED).map_err(error)
+            })?;
+        }
+        if !owner_turns_column(connection, "last_line")? {
+            owner_turns_change(connection, |connection| {
+                connection.execute_batch(OWNER_TURNS_LINED).map_err(error)?;
+                fill_lines(connection)
+            })?;
+        }
+        return Ok(());
     }
     let backfill = if table_exists(connection, "team_master_conversations")? {
         "INSERT OR IGNORE INTO session_owner_turns(session,project)
@@ -144,20 +153,98 @@ pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     } else {
         ""
     };
-    owner_turns_change(connection, &format!("{OWNER_TURNS}; {backfill}"))
+    owner_turns_change(connection, |connection| {
+        connection
+            .execute_batch(&format!("{OWNER_TURNS}; {backfill}"))
+            .map_err(error)?;
+        fill_lines(connection)
+    })
+}
+
+#[cfg(unix)]
+fn owner_turns_column(connection: &Connection, name: &str) -> Result<bool, EngineError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('session_owner_turns') WHERE name=?1)",
+            [name],
+            |row| row.get(0),
+        )
+        .map_err(error)
 }
 
 /// Applies a change to the table of sessions with an owner turn all or nothing. Takes the
-/// engine connection and the statements. Returns any SQLite failure, rolled back.
+/// engine connection and the change. Returns any failure, rolled back.
 #[cfg(unix)]
-fn owner_turns_change(connection: &Connection, statements: &str) -> Result<(), EngineError> {
-    let applied = connection.execute_batch(&format!(
-        "SAVEPOINT session_owner_turns; {statements} RELEASE session_owner_turns;"
-    ));
-    if let Err(failure) = applied {
+fn owner_turns_change(
+    connection: &Connection,
+    change: impl FnOnce(&Connection) -> Result<(), EngineError>,
+) -> Result<(), EngineError> {
+    connection
+        .execute_batch("SAVEPOINT session_owner_turns")
+        .map_err(error)?;
+    let applied = change(connection).and_then(|()| {
+        connection
+            .execute_batch("RELEASE session_owner_turns")
+            .map_err(error)
+    });
+    if applied.is_err() {
         let _ = connection
             .execute_batch("ROLLBACK TO session_owner_turns; RELEASE session_owner_turns;");
-        return Err(error(failure));
+    }
+    applied
+}
+
+/// Fills the newest line of the sessions with terminal turns and no line yet from the last
+/// message of the harness conversation each kept, newest sessions first and at most
+/// `SESSIONS_LISTED_MAX`, so a session an older engine recorded shows a line once. A record
+/// that cannot be read leaves its line empty. Takes the engine connection. Returns any
+/// SQLite failure.
+#[cfg(unix)]
+fn fill_lines(connection: &Connection) -> Result<(), EngineError> {
+    if !table_exists(connection, "team_master_conversations")? {
+        return Ok(());
+    }
+    let mut statement = connection
+        .prepare(
+            "SELECT o.session,c.harness,c.record FROM session_owner_turns o
+             JOIN team_master_conversations c ON c.session=o.session
+             JOIN master_sessions s ON s.id=o.session
+             WHERE o.turns > 0 AND o.last_line IS NULL AND length(c.harness) <= 64
+             ORDER BY s.version DESC LIMIT ?1",
+        )
+        .map_err(error)?;
+    let kept = statement
+        .query_map(
+            [i64::try_from(SESSIONS_LISTED_MAX).map_err(error)?],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .map_err(error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(error)?;
+    assert!(kept.len() <= SESSIONS_LISTED_MAX);
+    for (session, harness, record) in kept {
+        let messages = crate::harnesses::transcript::conversation_messages(
+            &harness,
+            std::path::Path::new(&record),
+        );
+        let Some(line) = messages
+            .last()
+            .and_then(|(_, text)| clip(text, LINE_CHARS_MAX))
+        else {
+            continue;
+        };
+        connection
+            .execute(
+                "UPDATE session_owner_turns SET last_line=?1 WHERE session=?2",
+                params![line, session],
+            )
+            .map_err(error)?;
     }
     Ok(())
 }
@@ -192,6 +279,37 @@ pub(crate) fn mark_owner_turn(
             "INSERT INTO session_owner_turns(session,project) VALUES (?1,?2)
              ON CONFLICT(session) DO UPDATE SET turns=turns+1 WHERE project=excluded.project",
             params![session, project.as_str()],
+        )
+        .map_err(error)?;
+    Ok(())
+}
+
+/// Keeps the reply of a turn a project's master session ran in its live terminal as the
+/// session's newest line in the Sessions list, counting the turn when its start was not
+/// seen; a row another project holds is left as it is. Takes the engine database, the
+/// project, the session and the reply. Returns Ok, also when the reply shows no words, the
+/// session id cannot be one or the table does not exist.
+pub(crate) fn mark_owner_reply(
+    connection: &Connection,
+    project: &ProjectId,
+    session: &str,
+    reply: &str,
+) -> Result<(), EngineError> {
+    let Some(line) = clip(reply, LINE_CHARS_MAX) else {
+        return Ok(());
+    };
+    if session.is_empty()
+        || session.len() > 128
+        || !table_exists(connection, "session_owner_turns")?
+    {
+        return Ok(());
+    }
+    connection
+        .execute(
+            "INSERT INTO session_owner_turns(session,project,last_line) VALUES (?1,?2,?3)
+             ON CONFLICT(session) DO UPDATE SET last_line=excluded.last_line
+             WHERE project=excluded.project",
+            params![session, project.as_str(), line],
         )
         .map_err(error)?;
     Ok(())
@@ -376,6 +494,7 @@ pub(crate) fn list(
         if created == 0 || version < created || active < version {
             return Err(error("master_session_record"));
         }
+        let (terminal_turns, terminal_line) = terminal(connection, &session_id)?;
         let summary = MasterSessionSummary {
             phase,
             created: Cursor::new(created),
@@ -383,10 +502,10 @@ pub(crate) fn list(
             started_ms: started_ms.map(u64::try_from).transpose().map_err(error)?,
             active_ms: active_ms.map(u64::try_from).transpose().map_err(error)?,
             turns: turn_count(connection, &session_id)?
-                .checked_add(terminal_turns(connection, &session_id)?)
+                .checked_add(terminal_turns)
                 .ok_or_else(|| error("master_session_record"))?,
             first_line: first_line(connection, &session_id)?,
-            last_line: last_line(connection, &session_id)?,
+            last_line: last_line(connection, &session_id)?.or(terminal_line),
             agents: agent_names(connection, project, &session_id)?,
             results_waiting: results_waiting(connection, &session_id)?,
             session_id,
@@ -414,16 +533,26 @@ fn turn_count(connection: &Connection, session: &SessionId) -> Result<u64, Engin
     u64::try_from(count).map_err(error)
 }
 
-fn terminal_turns(connection: &Connection, session: &SessionId) -> Result<u64, EngineError> {
-    let turns: Option<i64> = connection
+/// The turns a session ran in its live terminal and the newest line kept from them, clipped
+/// for the list. Takes the connection and session. Returns 0 and None for a session with none.
+fn terminal(
+    connection: &Connection,
+    session: &SessionId,
+) -> Result<(u64, Option<String>), EngineError> {
+    let row: Option<(i64, Option<String>)> = connection
         .query_row(
-            "SELECT turns FROM session_owner_turns WHERE session=?1",
+            "SELECT turns,CASE WHEN length(CAST(last_line AS BLOB))<=1024 THEN last_line END
+             FROM session_owner_turns WHERE session=?1",
             [session.as_str()],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()
         .map_err(error)?;
-    u64::try_from(turns.unwrap_or(0)).map_err(error)
+    let (turns, line) = row.unwrap_or((0, None));
+    Ok((
+        u64::try_from(turns).map_err(error)?,
+        line.and_then(|line| clip(&line, LINE_CHARS_MAX)),
+    ))
 }
 
 /// The first line of a session's first owner message, clipped for the list.

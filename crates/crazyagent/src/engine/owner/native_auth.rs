@@ -240,6 +240,34 @@ pub(crate) enum CodexAuthObservation {
         id: i64,
         method: String,
     },
+    HostFailed {
+        reason: CodexHostFailure,
+    },
+    HostCancelled,
+}
+
+/// Why the custodian saw a started Codex child end without an app-server outcome: it
+/// exited (or closed its input) first, the sign-in ran out of time, it broke the
+/// app-server protocol, or its pipes failed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum CodexHostFailure {
+    ExitedBeforeObservation,
+    Deadline,
+    ProtocolInvalid,
+    IoFailed,
+}
+
+impl CodexHostFailure {
+    /// The failure code the sign-in settles with. Output: the code.
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::ExitedBeforeObservation => "native_auth_codex_exited_before_observation",
+            Self::Deadline => "native_auth_codex_deadline",
+            Self::ProtocolInvalid => "native_auth_codex_protocol_invalid",
+            Self::IoFailed => "native_auth_codex_io_failed",
+        }
+    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -336,7 +364,7 @@ impl CodexAuthObservation {
 
     pub(crate) fn request_id(&self) -> Option<i64> {
         match self {
-            Self::LoginCompleted { .. } => None,
+            Self::LoginCompleted { .. } | Self::HostFailed { .. } | Self::HostCancelled => None,
             Self::LoginStarted { id, .. }
             | Self::AccountRead { id, .. }
             | Self::LoginCanceled { id, .. }
@@ -426,14 +454,17 @@ impl CodexAuthObservation {
             NativeAuthPhase::Failed | NativeAuthPhase::Cancelled
         ) && matches!(
             self,
-            Self::AccountRead { .. } | Self::LoginCompleted { success: false, .. }
+            Self::AccountRead { .. }
+                | Self::LoginCompleted { success: false, .. }
+                | Self::HostFailed { .. }
+                | Self::HostCancelled
         ) {
             return Ok(());
         }
         if fact.phase == NativeAuthPhase::Cancelling
             && !matches!(
                 self,
-                Self::LoginCanceled { .. } | Self::RequestFailed { .. }
+                Self::LoginCanceled { .. } | Self::RequestFailed { .. } | Self::HostCancelled
             )
         {
             return Ok(());
@@ -493,6 +524,27 @@ impl CodexAuthObservation {
                     Some("native_auth_native_request_failed"),
                 )
             }
+            Self::HostFailed { reason }
+                if matches!(
+                    fact.phase,
+                    NativeAuthPhase::Starting
+                        | NativeAuthPhase::AwaitingOwner
+                        | NativeAuthPhase::CheckingAccount
+                ) =>
+            {
+                (NativeAuthPhase::Failed, Some(reason.code()))
+            }
+            Self::HostCancelled
+                if matches!(
+                    fact.phase,
+                    NativeAuthPhase::Starting
+                        | NativeAuthPhase::AwaitingOwner
+                        | NativeAuthPhase::CheckingAccount
+                        | NativeAuthPhase::Cancelling
+                ) =>
+            {
+                (NativeAuthPhase::Cancelled, None)
+            }
             _ => {
                 if std::env::var_os("CRAZYAGENT_DEBUG_CUSTODIAN").is_some() {
                     let event = match self {
@@ -504,6 +556,8 @@ impl CodexAuthObservation {
                         Self::LoginCanceled { canceled: true, .. } => "login_canceled",
                         Self::LoginCanceled { .. } => "login_cancel_not_found",
                         Self::RequestFailed { .. } => "request_failed",
+                        Self::HostFailed { .. } => "host_failed",
+                        Self::HostCancelled => "host_cancelled",
                     };
                     eprintln!(
                         "native_auth_observation_order phase={} event={event}",
@@ -538,7 +592,10 @@ impl CodexAuthObservation {
             ) => true,
             (Self::LoggedOut { .. }, NativeAuthAction::Logout) => true,
             (
-                Self::AccountRead { .. } | Self::RequestFailed { .. },
+                Self::AccountRead { .. }
+                | Self::RequestFailed { .. }
+                | Self::HostFailed { .. }
+                | Self::HostCancelled,
                 NativeAuthAction::Logout
                 | NativeAuthAction::SignIn {
                     method:

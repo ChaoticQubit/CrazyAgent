@@ -5922,8 +5922,9 @@ struct OwnOutlived {
 /// command of `secs` seconds and a notice turn of `notice` seconds, through
 /// `next_lead_turn` under the given rules as the lead's worker does, sending `later` as the
 /// engine's rules order once the app holds the turn, then stops the lead as `serve` does on
-/// a stop. Takes the fixture, the pane name, both times and both rules. Returns how the
-/// turn ended.
+/// a stop. An own turn that ends before the stand-in's held mark is seen, as under Stop,
+/// waits for the mark, so its `waited` is zero. Takes the fixture, the pane name, both
+/// times and both rules. Returns how the turn ended.
 #[cfg(target_os = "macos")]
 fn own_turn_outliving(
     fixture: &Fixture,
@@ -5999,7 +6000,17 @@ fn own_turn_outliving(
                 Ok(Report::Own {
                     end: Some(end),
                     text,
-                }) => break (end, text, Instant::now()),
+                }) => {
+                    let at = Instant::now();
+                    while held.is_none() && Instant::now() < deadline {
+                        if home.join("held").exists() {
+                            held = Some(Instant::now());
+                        } else {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                    }
+                    break (end, text, at);
+                }
                 Ok(_) | Err(RecvTimeoutError::Timeout) => {
                     assert!(Instant::now() < deadline, "the own turn never ended");
                 }
@@ -6016,7 +6027,7 @@ fn own_turn_outliving(
         if !stopped_itself {
             order.send(Order::Stop).unwrap();
         }
-        let held = held.expect("the stand-in's turn ended before the own turn's end");
+        let held = held.expect("the stand-in never held its turn");
         let next = worker.join().unwrap();
         (
             next,
@@ -16743,7 +16754,7 @@ fn a_lead_worker_change_set_stays_the_owners_while_lands_is_owner() {
 /// A live master's session counts as used once a turn runs in its terminal: started and
 /// kept, the fresh session holds no owner turn and is not listed; once the owner's line runs
 /// as a turn in the master's pane, the session holds one and is listed, and the list counts
-/// each turn run there as one of its messages.
+/// each turn run there as one of its messages and shows the newest reply as its line.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_turn_in_the_live_master_s_terminal_marks_its_session_used_and_listed() {
@@ -16759,7 +16770,7 @@ fn a_turn_in_the_live_master_s_terminal_marks_its_session_used_and_listed() {
         crate::master_sessions::list(&f.connection, &project)
             .unwrap()
             .into_iter()
-            .map(|summary| (summary.session_id, summary.turns))
+            .map(|summary| (summary.session_id, summary.turns, summary.last_line))
             .collect::<Vec<_>>()
     };
     super::super::master::set_live(&fixture.connection, &project, true).unwrap();
@@ -16808,7 +16819,11 @@ fn a_turn_in_the_live_master_s_terminal_marks_its_session_used_and_listed() {
         live_turns(&f.connection) == (1, false)
     });
     assert!(used(&fixture), "a turn in the terminal marks the session");
-    assert_eq!(listed(&fixture), vec![(session.clone(), 1)]);
+    assert_eq!(
+        listed(&fixture),
+        vec![(session.clone(), 1, Some("Done.".to_owned()))],
+        "the list shows the reply of the turn run in the terminal as the session's line"
+    );
 
     host.input(&pane, b"again\r").unwrap();
     fixture.until(
@@ -16818,7 +16833,7 @@ fn a_turn_in_the_live_master_s_terminal_marks_its_session_used_and_listed() {
     );
     assert_eq!(
         listed(&fixture),
-        vec![(session.clone(), 2)],
+        vec![(session.clone(), 2, Some("Done.".to_owned()))],
         "every turn run in the terminal counts as one of the session's messages"
     );
     let marked: i64 = fixture

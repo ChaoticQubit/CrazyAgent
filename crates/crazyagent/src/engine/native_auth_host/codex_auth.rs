@@ -1,5 +1,6 @@
 use super::custody::{CustodySession, Retirement, cleanup_owned_group};
 use crate::adapters::codex::{AuthControl, CodexProtocol, Event, FRAME_BYTES_MAX, LoginChallenge};
+use crate::engine::owner::native_auth::{CodexAuthObservation, CodexHostFailure};
 use crate::engine::owner::transport::native_auth_channel::{
     NativeAuthCustodyChannel, NativeAuthCustodyControl,
 };
@@ -350,13 +351,53 @@ impl Driver<'_> {
                     .map_err(io_error)?
                     .is_some()
             {
-                self.protocol.finish().map_err(protocol_error)?;
+                let _ = self.protocol.finish();
                 return Err(failure("native_auth_codex_exited_before_observation"));
             }
             tokio::time::sleep(POLL_TIME).await;
         }
         Err(failure("native_auth_codex_deadline"))
     }
+}
+
+/// Settles a sign-in whose started Codex child ended without an app-server outcome, after
+/// the child is reaped: Cancelled when the owner cancelled, else Failed with the Codex
+/// failure code, so the custodian retires instead of leaving custody uncertain. An error
+/// from the engine or the channel is returned as it is, since custody is then in doubt.
+/// Inputs: the session, the channel and the driver's error. Output: done, or the error.
+async fn observe_failure(
+    session: &CustodySession,
+    channel: &mut NativeAuthCustodyChannel,
+    error: EngineError,
+) -> Result<(), EngineError> {
+    let reason = match error.0.as_str() {
+        "native_auth_cancelled" => None,
+        "native_auth_codex_exited_before_observation" | "native_auth_codex_input_closed" => {
+            Some(CodexHostFailure::ExitedBeforeObservation)
+        }
+        "native_auth_codex_deadline" => Some(CodexHostFailure::Deadline),
+        "native_auth_codex_protocol_invalid"
+        | "native_auth_codex_event_unexpected"
+        | "native_auth_codex_output_bound"
+        | "native_auth_codex_input_bound"
+        | "native_auth_codex_request_failed" => Some(CodexHostFailure::ProtocolInvalid),
+        code if !code.starts_with("native_auth_") => Some(CodexHostFailure::IoFailed),
+        _ => return Err(error),
+    };
+    let observation = reason.map_or(CodexAuthObservation::HostCancelled, |reason| {
+        CodexAuthObservation::HostFailed { reason }
+    });
+    let cancelled = matches!(observation, CodexAuthObservation::HostCancelled);
+    if matches!(
+        session.observe_codex_host(channel, observation).await?,
+        NativeAuthCustodyControl::Cancel
+    ) && !cancelled
+    {
+        session
+            .observe_codex_host(channel, CodexAuthObservation::HostCancelled)
+            .await?;
+    }
+    Ok(())
 }
 
 pub(in crate::engine) async fn run(
@@ -409,9 +450,13 @@ pub(in crate::engine) async fn run(
     let result = driver.run().await;
     drop(driver);
     let cleaned = cleanup_owned_group(session.child_mut()?, group, Instant::now() + CLEANUP_TIME);
-    result?;
     if !cleaned.map_err(io_error)? {
-        return Err(failure("native_auth_child_cleanup_uncertain"));
+        return Err(result
+            .err()
+            .unwrap_or_else(|| failure("native_auth_child_cleanup_uncertain")));
+    }
+    if let Err(error) = result {
+        observe_failure(&session, channel, error).await?;
     }
     session.seal_after_child_reaped()
 }

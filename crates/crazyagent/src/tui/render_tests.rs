@@ -294,7 +294,10 @@ fn project_swaps(old: &str) -> Vec<(&'static str, String)> {
         ),
         ("Updated 4 min ago", "Created 4 min ago".into()),
         ("Updated yesterday", "Created yesterday".into()),
-        ("Updated Oct 19", format!("Created {old}")),
+        (
+            "Updated Oct 19",
+            format!("{:>1$}", format!("Created {old}"), "Updated Oct 19".len()),
+        ),
     ]
 }
 

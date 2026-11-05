@@ -709,6 +709,7 @@ pub(crate) fn status(
         .optional()
         .map_err(error)?;
     let wrote = sealed.is_some() && found.as_deref().map(draft::overview_seal) == sealed;
+    let found = found.map(|text| draft::names::without_secret_paths(&text));
     let (overview, folder_overview) = if wrote { (found, None) } else { (None, found) };
     Ok(Some(OnboardingView {
         project_id: project_id.clone(),

@@ -13,6 +13,7 @@ use crate::engine::owner::{
 use crate::protocol::{ConfigId, CredentialRef, RequestId};
 use crate::tui::app::{App, Focus, UiEvent};
 use crate::tui::client::{Connection, OwnerEvent};
+use crate::tui::test_home::ENGINE_WAIT;
 use crate::tui::{key_event, model_access, views};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::Terminal;
@@ -26,7 +27,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 const CATALOG: &str = r#"
-timeout_ms = 1000
+timeout_ms = 10000
 [model_access]
 accounts = ["account-codex", "account-claude", "account-api", "account-local"]
 [[model_access.connections]]
@@ -91,6 +92,15 @@ impl Case {
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let global = root.path().join("global.toml");
         let project = root.path().join("project.toml");
+        assert_eq!(
+            u128::from(
+                crate::config::resolve_config_bytes(CATALOG, "")
+                    .unwrap()
+                    .settings
+                    .timeout_ms
+            ),
+            ENGINE_WAIT.as_millis()
+        );
         std::fs::write(&global, CATALOG).unwrap();
         std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
         let (stop, stopped) = tokio::sync::watch::channel(false);
@@ -114,13 +124,9 @@ impl Case {
     }
 
     async fn controller(&self) -> OwnerController {
-        OwnerController::attach(
-            self.root.path(),
-            OwnerClientKind::Tui,
-            Duration::from_secs(2),
-        )
-        .await
-        .unwrap()
+        OwnerController::attach(self.root.path(), OwnerClientKind::Tui, ENGINE_WAIT)
+            .await
+            .unwrap()
     }
 
     async fn selected(&self, id: &str) -> (model_access::Basis, ModelConnection) {
@@ -223,7 +229,7 @@ struct Ui {
 
 impl Ui {
     async fn new(case: &Case) -> Self {
-        let client = Client::new(case.root.path().join("e.sock"), Duration::from_secs(2)).unwrap();
+        let client = Client::new(case.root.path().join("e.sock"), ENGINE_WAIT).unwrap();
         let mut ui = Self {
             connection: Connection::connect_paired(client).unwrap(),
             app: App::new(),
@@ -237,7 +243,7 @@ impl Ui {
     }
 
     async fn owner_event(&mut self) -> OwnerEvent {
-        let deadline = Instant::now() + Duration::from_secs(3);
+        let deadline = Instant::now() + ENGINE_WAIT;
         loop {
             if let Some(event) = self.connection.poll_owner().unwrap() {
                 return event;
@@ -251,7 +257,7 @@ impl Ui {
     }
 
     async fn drain(&mut self) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + ENGINE_WAIT;
         loop {
             while let Some(event) = self.connection.poll_owner().unwrap() {
                 self.app.apply_owner(event).unwrap();
@@ -1531,13 +1537,10 @@ async fn real_unconfirmed_sign_in_leaves_other_owner_changes_open() {
 }
 
 async fn remove_elsewhere(case: &Case, id: &str) {
-    let mut other = OwnerController::attach(
-        case.root.path(),
-        OwnerClientKind::Desktop,
-        Duration::from_secs(2),
-    )
-    .await
-    .unwrap();
+    let mut other =
+        OwnerController::attach(case.root.path(), OwnerClientKind::Desktop, ENGINE_WAIT)
+            .await
+            .unwrap();
     let read = other.read(record_query(id)).await.unwrap();
     let OwnerData::ModelAccessRecord { source_hash, .. } = read.data else {
         panic!("actual connection record required");

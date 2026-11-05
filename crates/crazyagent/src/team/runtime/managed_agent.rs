@@ -7,6 +7,7 @@ use crate::config::{
 };
 use crate::engine::NativeProfileCustody;
 use crate::engine::bootstrap::{NativeProfileUse, NativeProfileUsePurpose};
+use crate::engine::owner::native_auth::decode_fact;
 use crate::engine::owner::{HostStamp, NativeProfileBinding};
 use crate::harnesses::terminal_session::{PaneRecord, Resume, paste};
 use crate::project_setup::{HarnessSlot, StoredSetup, TeamPlan};
@@ -14,10 +15,9 @@ use crate::protocol::{ConfigId, CredentialRef, Cursor, ProjectId, RequestId};
 use crate::sandbox::policy::{AgentAccess, AgentNetwork, AgentPolicy};
 use crate::team::{AgentRole, TaskSource, TeamAccount, TeamReach};
 use crate::terminal::{AgentId, Host};
-use rusqlite::{Connection, params};
-use serde_json::Value;
-use sha2::{Digest, Sha256};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsStr;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -33,9 +33,10 @@ const SIGNED_IN_CODEX: &str = "CRAZYAGENT_MANAGED_CODEX_PROFILE";
 const SIGNED_IN_CODEX_KEY: &str = "CRAZYAGENT_MANAGED_CODEX_KEY_PROFILE";
 
 /// The owner's signed-in managed profile of a real engine, named by its slot folder in
-/// `CRAZYAGENT_MANAGED_CLAUDE_PROFILE` or `CRAZYAGENT_MANAGED_CODEX_PROFILE`, held through
-/// that engine's own custody, which only reads its database and takes a shared lock on the
-/// slot. Output of `claude` and `codex`: the profile's connection and custody, or a panic
+/// `CRAZYAGENT_MANAGED_CLAUDE_PROFILE`, `CRAZYAGENT_MANAGED_CODEX_PROFILE` or
+/// `CRAZYAGENT_MANAGED_CODEX_KEY_PROFILE`, bound as the running engine proved its sign-in
+/// and held through that engine's own custody, which only reads its database and takes a
+/// shared lock on the slot. Output of `claude` and `codex`: the profile's connection and custody, or a panic
 /// with the plain BLOCKED message.
 pub(crate) struct SignedIn {
     pub(crate) connection: ModelConnection,
@@ -61,73 +62,98 @@ impl SignedIn {
         Self::open(SIGNED_IN_CODEX_KEY, "codex", "Codex with an OpenAI API key")
     }
 
-    /// Opens the slot one variable names and checks it belongs to the expected harness.
-    /// Inputs: the variable, the harness reference and the account wording. Output: the
-    /// held profile, or a panic with the plain BLOCKED message.
+    /// Opens the slot one variable names through its engine's read-only database, with the
+    /// checks the engine's usage poll makes before it holds a profile: the slot path gives
+    /// only the profile key, the running engine's host and its proved sign-in for that key
+    /// give the binding, and a sign-in the provider rejected is refused. The slot itself is
+    /// never read, listed or checked. Inputs: the variable, the harness reference and the
+    /// account wording. Output: the held profile, or a panic with the plain BLOCKED message.
     fn open(variable: &str, harness: &str, account: &str) -> Self {
-        let slot = std::env::var_os(variable).unwrap_or_else(|| {
+        let slot = PathBuf::from(std::env::var_os(variable).unwrap_or_else(|| {
             panic!(
                 "BLOCKED: no signed-in managed {harness} profile. Sign in to {account} in CrazyAgent, then run with {variable}=<engine folder>/native-profiles/<profile key>"
             )
-        });
-        let slot = PathBuf::from(slot)
-            .canonicalize()
-            .unwrap_or_else(|_| panic!("BLOCKED: {variable} does not name a profile slot"));
-        let manifest = std::fs::read(slot.join("identity.json"))
-            .unwrap_or_else(|_| panic!("BLOCKED: {variable} has no identity manifest"));
-        let identity: Value = serde_json::from_slice(&manifest).unwrap();
-        let bound = |key: &str| reference(identity["binding"][key].as_str().unwrap());
-        if bound("harness").as_str() != harness {
+        }));
+        let key = slot
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| {
+                name.len() == 64
+                    && name
+                        .bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            });
+        let engine = slot
+            .parent()
+            .filter(|root| {
+                slot.is_absolute() && root.file_name() == Some(OsStr::new("native-profiles"))
+            })
+            .and_then(Path::parent);
+        let (Some(key), Some(engine)) = (key, engine) else {
+            panic!("BLOCKED: {variable} does not name a profile slot");
+        };
+        let database = engine.join("engine.db");
+        let db = Connection::open_with_flags(
+            &database,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .unwrap_or_else(|_| panic!("BLOCKED: {variable} is not in a CrazyAgent engine folder"));
+        let tx = db.unchecked_transaction().unwrap();
+        let host = tx
+            .query_row(
+                "SELECT db_instance,engine_epoch FROM owner_meta WHERE singleton=1 AND schema_version=1 AND runtime_state='active'",
+                [],
+                |row| {
+                    Ok(HostStamp {
+                        db_instance: row.get(0)?,
+                        engine_epoch: row.get(1)?,
+                    })
+                },
+            )
+            .optional()
+            .unwrap()
+            .unwrap_or_else(|| {
+                panic!("BLOCKED: the engine that keeps {variable} is not running. Open CrazyAgent, then rerun")
+            });
+        let latest: Option<Vec<u8>> = tx
+            .query_row(
+                "SELECT fact FROM native_auth_operations WHERE profile_key=?1 ORDER BY generation DESC LIMIT 1",
+                params![key],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        let latest =
+            latest.unwrap_or_else(|| panic!("BLOCKED: {variable} has no sign-in in its engine"));
+        let connection = decode_fact(&latest).unwrap().binding.connection;
+        if connection.harness.as_str() != harness {
             panic!(
                 "BLOCKED: {variable} names a {} profile, not a {harness} one",
-                bound("harness").as_str()
+                connection.harness.as_str()
             );
         }
-        let database = slot
-            .parent()
-            .and_then(Path::parent)
-            .unwrap()
-            .join("engine.db");
-        let instance = identity["root"]["database_instance"]
-            .as_str()
-            .unwrap()
-            .to_owned();
-        let connection = ModelConnection {
-            id: reference(&format!("{harness}-live-connection")),
-            provider: bound("provider"),
-            harness: bound("harness"),
-            protocol: bound("protocol"),
-            account_ref: bound("account_ref"),
-            endpoint: ModelEndpoint::Native {},
-            model: ModelReference {
-                id: "native-default".into(),
-                author: bound("provider"),
+        let fact = crate::storage::native_sign_in(&tx, &host, &connection, None).unwrap_or_else(
+            |problem| {
+                panic!(
+                    "BLOCKED: the sign-in {variable} names is not proved on the running engine ({}). Sign in to {account} again in CrazyAgent, then rerun",
+                    problem.0
+                )
             },
-            auth: ModelAuthentication::NativeManaged {
-                profile_ref: bound("profile_ref"),
-            },
-        };
+        );
+        if crate::model_gateway::sign_in_rejected(&tx, &connection).unwrap() {
+            panic!(
+                "BLOCKED: the provider rejected the sign-in {variable} names (usage_sign_in_rejected). Sign in to {account} again in CrazyAgent, then rerun"
+            );
+        }
+        drop(tx);
         let custody =
             NativeProfileCustody::capture(&database, &std::fs::metadata(&database).unwrap())
                 .unwrap();
-        let host = HostStamp {
-            db_instance: instance.clone(),
-            engine_epoch: "b".repeat(64),
-        };
-        let binding = NativeProfileBinding {
-            database_instance: instance,
-            engine_epoch: host.engine_epoch.clone(),
-            config_id: ConfigId::new("c".repeat(64)).unwrap(),
-            source_hash: "d".repeat(64),
-            at_revision: Cursor::new(1),
-            connection: connection.clone(),
-            custody_id: format!("{:x}", Sha256::digest(&manifest)),
-        };
         Self {
             connection,
             custody,
             host,
-            binding,
+            binding: fact.binding,
         }
     }
 

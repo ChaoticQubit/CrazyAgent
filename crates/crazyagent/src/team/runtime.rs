@@ -6622,14 +6622,7 @@ impl TeamRuntime {
         id: i64,
         role: AgentRole,
     ) -> Result<Vec<String>, EngineError> {
-        let mut off: Vec<String> = crate::coord::tool_switches::off_tools(
-            &self.connection,
-            project,
-            crate::coord::tool_switches::CRAZYAGENT_SERVER,
-        )?
-        .into_iter()
-        .filter(|name| tool::TEAM_TOOLS.contains(&name.as_str()))
-        .collect();
+        let mut off = super::master::switched_off_tools(&self.connection, project)?;
         let leads = role == AgentRole::Master
             || super::agent_depth(&self.connection, id)?
                 < super::nesting(&self.connection, project)?.depth;
@@ -6949,6 +6942,7 @@ impl TeamRuntime {
                     worker.connection.clone(),
                     worker.team_tool,
                 );
+                let live_session = worker.session.clone().filter(|_| worker.live);
                 if end == TurnEnd::RateLimited {
                     self.pause(&connection)?;
                     self.workers.get_mut(&id).expect("worker exists").stopping = true;
@@ -6961,6 +6955,14 @@ impl TeamRuntime {
                     now_ms(),
                     end.name(),
                 )?;
+                if let Some(session) = &live_session {
+                    crate::master_sessions::mark_owner_reply(
+                        &self.connection,
+                        &project,
+                        session,
+                        &text,
+                    )?;
+                }
                 self.connection
                     .execute("UPDATE team_agents SET turns=turns+1 WHERE id=?1", [id])
                     .map_err(error)?;
@@ -9932,7 +9934,7 @@ mod live_claude_tests;
 mod live_codex_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "runtime/live_failover_tests.rs"]
-mod live_failover_tests;
+pub(crate) mod live_failover_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "runtime/live_native_lead_tests.rs"]
 mod live_native_lead_tests;
