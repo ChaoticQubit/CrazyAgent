@@ -221,6 +221,11 @@ pub fn session_conversation(
 /// still waits for this engine run's sign-in re-check (DEC-108); the views show it as is.
 pub(crate) const SIGN_INS_CHECKING: &str = "Checking account sign-ins after the restart. The live master starts once an account in this project's pool passes its check.";
 
+/// The live master's problem line and team note while its account's profile is held by
+/// another process, such as a sign-in or a sign-out, so it cannot be handed the account
+/// yet (LMS-1); the views show it as is.
+pub(crate) const PROFILE_IN_USE: &str = "Waiting for the account: another process is using its profile, such as a sign-in or a sign-out. The live master starts once the profile is free.";
+
 /// Turns a project's live master on or off: on, the runtime keeps the master's own app
 /// running in a terminal; off, the master ends with its next stop. Turning it on clears why
 /// it last could not start, and either way a sign-in wait line no longer applies. Takes the

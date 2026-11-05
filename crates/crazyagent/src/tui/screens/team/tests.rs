@@ -3071,6 +3071,52 @@ fn a_live_master_waiting_for_sign_in_rechecks_shows_the_wait_line() {
     );
 }
 
+/// LMS-1: a started live master that waits for its account's profile has a terminal the
+/// graph names but no pane yet; the engine's wait line shows in the master pane while the
+/// terminal has not started, also when the engine closes the early attach, and goes once
+/// the engine clears it.
+#[test]
+fn a_started_live_master_waiting_for_its_profile_shows_the_wait_line_until_its_terminal_starts() {
+    let waiting = crate::team::master::PROFILE_IN_USE;
+    let pane = |shell: &mut Shell| {
+        let rows = render(shell);
+        let lines: Vec<String> = rows[4..12]
+            .iter()
+            .map(|row| chars(row, 2, 78))
+            .take_while(|row| row.starts_with('│'))
+            .map(|row| row.trim_matches('│').trim().to_owned())
+            .collect();
+        (lines.join(" ").trim().to_owned(), rows)
+    };
+    let mut shell = master_view(80, 24);
+    requests(&mut shell);
+    shell.arrive(switch(Some(true), Some(waiting)));
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    let sent = requests(&mut shell);
+    assert!(
+        sent.iter().any(
+            |request| matches!(request, Request::TerminalAttach { agent } if agent.as_str() == "team-1")
+        ),
+        "the graph names the master's terminal, so the view attaches: {sent:?}"
+    );
+    let (shown, rows) = pane(&mut shell);
+    assert_eq!(shown, waiting, "while the attach waits: {rows:#?}");
+    close_master(&mut shell, "terminal_agent_unknown");
+    let (shown, rows) = pane(&mut shell);
+    assert_eq!(shown, waiting, "once the early attach is closed: {rows:#?}");
+    assert!(
+        rows.iter()
+            .all(|row| !row.contains("This agent has stopped")),
+        "{rows:#?}"
+    );
+    shell.arrive(switch(Some(true), None));
+    let (shown, rows) = pane(&mut shell);
+    assert!(!shown.contains("Waiting for the account"), "{rows:#?}");
+}
+
 fn paused_read(on: Option<bool>) -> Arrival {
     let mut arrival = switch(on, None);
     let Arrival::Owner(event) = &mut arrival else {

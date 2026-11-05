@@ -119,6 +119,21 @@ test("a live master that waits for this run's sign-in re-checks shows the engine
   assert.doesNotMatch(seen.text, /Waiting for the master's terminal\./);
 });
 
+test("a started live master that waits for its account's profile shows the engine's wait line above its terminal, and none once it is cleared (LMS-1)", async () => {
+  const wait = "Waiting for the account: another process is using its profile, such as a sign-in or a sign-out. The live master starts once the profile is free.";
+  const status = (problem) => ({ kind: "ok", value: teamStatus({ live_master: true, live_problem: problem }) });
+  const seen = await inPage(async ({ evaluate }) => {
+    await evaluate(`Fixture.mountView("running", "", ${JSON.stringify(status(wait))})`);
+    const waiting = await evaluate("Fixture.shown()");
+    await evaluate(`Fixture.mountView("running", "", ${JSON.stringify(status(null))})`);
+    return { waiting, briefed: await evaluate("Fixture.shown()") };
+  });
+  assert.equal(seen.waiting.terminal, true, "the started master keeps its terminal");
+  assert.ok(seen.waiting.text.includes(wait), seen.waiting.text);
+  assert.equal(seen.briefed.terminal, true);
+  assert.ok(!seen.briefed.text.includes(wait), seen.briefed.text);
+});
+
 test("a stopped live master says why it stopped, or that opening the tab or a new session starts it, with no Start button", async () => {
   const why = "The live master could not start: no signed-in account.";
   const seen = await inPage(async ({ evaluate }) => {
