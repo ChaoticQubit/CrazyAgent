@@ -82,3 +82,11 @@ test("a note in Your notes reads Saved once agents use it, and one an agent aske
   assert.match(waiting, /Approve it in Settings, Memory\./);
   assert.match(waiting, /Delete/);
 });
+
+test("a note an agent wrote names that agent in Your notes, and the owner's own note names none (OP-22)", () => {
+  assert.match(noteRow(note()), /From Master/);
+  assert.match(noteRow(note({ origin: "requested" })), /From Master/);
+  assert.match(noteRow(note({ agent: null })), /From an agent/);
+  assert.match(noteRow(note({ agent: "Ma\u202ester" })), /From Ma\\u202ester/);
+  assert.doesNotMatch(noteRow(note({ origin: "written", agent: null })), /From /);
+});

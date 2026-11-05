@@ -897,7 +897,7 @@ impl OwnerRuntimeHandle {
                         && crate::team::tool::calls_waiting(mailbox)
                         && let Err(error) = self.serve_master_memory(prepared, turn_id, mailbox).await
                     {
-                        eprintln!("master memory calls not answered: {}", error.0);
+                        eprintln!("{}", super::master_memory_diagnostic(&error));
                     }
                     continue;
                 }
