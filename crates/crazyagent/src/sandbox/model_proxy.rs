@@ -330,7 +330,7 @@ fn serve(listeners: &[TcpListener; 2], shared: &Arc<Shared>) {
 fn admit(client: TcpStream, shared: &Arc<Shared>) {
     let admitted = shared
         .open
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
             (count < TUNNELS_MAX).then_some(count + 1)
         });
     if admitted.is_err() {
