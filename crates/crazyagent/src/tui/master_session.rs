@@ -40,7 +40,7 @@ const RENEWAL_LEFT: &str = "You left the project before the settings were read."
 
 /// What the owner reads when New session is pressed again while the last one is still under
 /// way: reading the current settings, being sent or waiting for the engine (P2).
-const NEW_SESSION_STARTING: &str = "A new session is already starting.";
+pub(super) const NEW_SESSION_STARTING: &str = "A new session is already starting.";
 
 /// Why a New session waiting for the current settings ended unsent when the engine
 /// connection changed while they were read.
