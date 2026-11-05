@@ -125,6 +125,7 @@ pub(in crate::tui) enum SettingsJob {
     Ranking,
     HarnessSettings(Box<super::harness_settings::HarnessSettingsQuery>),
     Checks(Box<super::checks::ChecksJob>),
+    Tracker(Box<super::tracker::TrackerJob>),
 }
 
 /// One change to skills and MCP servers, from Settings or from a project's
@@ -232,6 +233,7 @@ impl std::fmt::Debug for SettingsJob {
             Self::Ranking => "Ranking",
             Self::HarnessSettings(_) => "HarnessSettings",
             Self::Checks(job) => super::checks::job_name(job),
+            Self::Tracker(job) => super::tracker::job_name(job),
         })
     }
 }
@@ -357,6 +359,7 @@ pub(in crate::tui) enum SettingsEvent {
     Ranking(Result<Vec<crate::scheduling::PoolRanking>, String>),
     HarnessSettings(Box<super::harness_settings::HarnessSettingsEvent>),
     Checks(Box<super::checks::ChecksEvent>),
+    Tracker(Box<super::tracker::TrackerEvent>),
 }
 
 impl SettingsEvent {
@@ -421,6 +424,9 @@ impl SettingsEvent {
             )),
             SettingsJob::Checks(job) => {
                 Self::Checks(Box::new(super::checks::ChecksEvent::unavailable(job)))
+            }
+            SettingsJob::Tracker(job) => {
+                Self::Tracker(Box::new(super::tracker::TrackerEvent::unavailable(job)))
             }
         }
     }
@@ -690,6 +696,9 @@ impl NativeOwner {
             }),
             SettingsJob::Checks(job) => {
                 SettingsEvent::Checks(Box::new(self.checks(*job, lost).await))
+            }
+            SettingsJob::Tracker(job) => {
+                SettingsEvent::Tracker(Box::new(self.tracker(*job, lost).await))
             }
             SettingsJob::Ranking => SettingsEvent::Ranking(match self.settings_controller() {
                 Ok(controller) => controller

@@ -12,6 +12,7 @@ use super::questions::ProjectQuestions;
 use super::recovery_banner::ProjectRecovery;
 use super::sessions::{Sessions, SessionsAction, SessionsReply};
 use super::tests::ProjectTests;
+use super::tickets::ProjectTickets;
 use crate::ide::bridge::reveal::RevealTarget;
 use crate::memory::{KnowledgeEntry, KnowledgeStatus, ReviewDecision};
 use crate::pools::PoolSummary;
@@ -53,6 +54,7 @@ pub(in crate::tui) enum Tab {
     Questions,
     Context,
     Tests,
+    Tickets,
     Settings,
 }
 
@@ -65,6 +67,7 @@ impl Tab {
         Self::Questions,
         Self::Context,
         Self::Tests,
+        Self::Tickets,
         Self::Settings,
     ];
 
@@ -80,6 +83,7 @@ impl Tab {
             Self::Questions => "Questions",
             Self::Context => "Context",
             Self::Tests => "Tests",
+            Self::Tickets => "Tickets",
             Self::Settings => "Settings",
         }
     }
@@ -96,6 +100,7 @@ impl Tab {
             Self::Questions => "\u{225f}",
             Self::Context => "\u{29c9}",
             Self::Tests => "\u{2713}",
+            Self::Tickets => "\u{25a6}",
             Self::Settings => "\u{2630}",
         }
     }
@@ -641,6 +646,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub changes: ProjectChanges,
     pub questions: ProjectQuestions,
     pub tests: ProjectTests,
+    pub tickets: ProjectTickets,
     pub recovery: ProjectRecovery,
     pub sessions: Sessions,
     pub now_ms: i64,
@@ -671,6 +677,7 @@ impl ProjectScreen {
             changes: ProjectChanges::new(project.clone()),
             questions: ProjectQuestions::new(project.clone()),
             tests: ProjectTests::new(project.clone(), name.clone()),
+            tickets: ProjectTickets::new(project.clone(), name.clone()),
             recovery: ProjectRecovery::new(project.clone()),
             sessions: Sessions::default(),
             project,
@@ -974,6 +981,7 @@ impl ProjectScreen {
                 }
                 self.name = setup.name.clone();
                 self.tests.rename(&setup.name);
+                self.tickets.rename(&setup.name);
                 self.setup = Some(*setup);
                 self.setup_due = false;
                 self.setup_failed_ms = None;
@@ -1512,6 +1520,7 @@ impl ProjectScreen {
             Tab::Changes => ProjectReply::Ignored,
             Tab::Questions => ProjectReply::Ignored,
             Tab::Tests => ProjectReply::Ignored,
+            Tab::Tickets => ProjectReply::Ignored,
             Tab::Context => self.context_key(key),
             Tab::Settings => self.settings_key(key),
         };
@@ -1566,6 +1575,9 @@ impl ProjectScreen {
             return ProjectReply::Handled;
         }
         if self.tab == Tab::Tests && self.tests.paste(text) {
+            return ProjectReply::Handled;
+        }
+        if self.tab == Tab::Tickets && self.tickets.paste(text) {
             return ProjectReply::Handled;
         }
         ProjectReply::Ignored

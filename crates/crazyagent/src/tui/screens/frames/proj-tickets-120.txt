@@ -1,0 +1,36 @@
+ [◆▪◆▪] CrazyAgent  /  Home  /  Fieldnotes Mobile  /  Tickets
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  ◫ Overview   » Conversation   ⊛ Agents   ∓ Changes   ≟ Questions   ⧉ Context   ▦ Tickets   ☰ Settings
+─────────────────────────────────────────────────────────────────────────────────━━━━━━━━━──────────────────────────────
+  [Tickets]  Ready   Board   Roadmap
+   FM  Tickets                                                                                             5 tickets
+
+     ID    Title                                                                      Status      Pri Assignee
+   > FM-1  Sync notes when the signal returns                                         In progress P1
+     FM-2  Offline map tiles for survey sites                                         Todo        P2
+     FM-3  Photo captions lose their accents                                          In review   P0
+     FM-4  Export each site as one CSV file                                           Backlog     P3
+     FM-5  Species list loads before the notebook opens                               Todo        P2
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+ ↑↓ Select   Enter Open   r Reload   Tab Page   s Settings   Shift-←→ Tabs   Esc Home                            ? Help

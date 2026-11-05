@@ -39,6 +39,7 @@ pub(super) mod recovery;
 pub(super) mod settings;
 mod shell;
 pub(super) mod terminal;
+pub(super) mod tracker;
 pub(super) use project_setup::{SetupEvent, SetupQuery, SetupView};
 
 enum WorkerMode {

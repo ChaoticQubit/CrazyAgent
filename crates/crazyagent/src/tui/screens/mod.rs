@@ -39,6 +39,7 @@ pub mod settings_plugins;
 pub mod startup;
 pub mod team;
 pub(in crate::tui) mod tests;
+pub(in crate::tui) mod tickets;
 pub(in crate::tui) mod usage;
 pub mod welcome;
 
@@ -138,6 +139,7 @@ pub enum ProjectTab {
     Questions,
     Context,
     Tests,
+    Tickets,
     Settings,
 }
 
@@ -151,6 +153,7 @@ impl ProjectTab {
         Self::Questions,
         Self::Context,
         Self::Tests,
+        Self::Tickets,
         Self::Settings,
     ];
 
@@ -165,6 +168,7 @@ impl ProjectTab {
             Self::Questions => "Questions",
             Self::Context => "Context",
             Self::Tests => "Tests",
+            Self::Tickets => "Tickets",
             Self::Settings => "Settings",
         }
     }
@@ -228,6 +232,9 @@ pub enum Place {
         project: Option<ProjectId>,
     },
     CheckSettings {
+        project: Option<(ProjectId, String)>,
+    },
+    TicketSettings {
         project: Option<(ProjectId, String)>,
     },
 }
@@ -407,6 +414,15 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
         Place::Usage => Box::new(usage::UsagePage::new()),
         Place::CheckSettings { project } => {
             Box::new(settings::checks::CheckSettingsPage::new(match project {
+                None => process::Scope::App,
+                Some((id, name)) => process::Scope::Project {
+                    id: id.clone(),
+                    name: name.clone(),
+                },
+            }))
+        }
+        Place::TicketSettings { project } => {
+            Box::new(settings::tickets::TicketSettingsPage::new(match project {
                 None => process::Scope::App,
                 Some((id, name)) => process::Scope::Project {
                     id: id.clone(),
