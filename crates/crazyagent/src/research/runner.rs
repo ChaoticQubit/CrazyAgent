@@ -4507,5 +4507,8 @@ mod live_claude_tests;
 #[path = "runner/live_codex_tests.rs"]
 mod live_codex_tests;
 #[cfg(all(test, target_os = "macos"))]
+#[path = "runner/live_engine_tests.rs"]
+pub(crate) mod live_engine_tests;
+#[cfg(all(test, target_os = "macos"))]
 #[path = "runner/warden_tests.rs"]
 mod warden_tests;
