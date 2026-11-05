@@ -2942,7 +2942,7 @@ impl TeamRuntime {
             if on && !worker.briefed {
                 return self.brief(stored, access, id);
             }
-            return Ok(());
+            return self.switch_when_idle(stored, access, paused, id);
         }
         let harness = stored.team.master.clone();
         let live_capable = launch_harness(&harness)
@@ -2996,6 +2996,61 @@ impl TeamRuntime {
                 &format!("it could not start: {}", bound_text(&reason, 300)),
             ),
         }
+    }
+
+    /// Applies a saved master harness change to the project's running live master under the
+    /// owner's When the master is idle choice: once it is quiet with no turn of its own it
+    /// stops for a planned restart that `keep_live` starts on the new harness, which writes
+    /// the switch and its divider. Under At the next start, or while no pool account can run
+    /// the new harness, the master keeps running. Takes the setup, the access, the paused
+    /// accounts and the master's id. Returns any SQLite failure.
+    fn switch_when_idle(
+        &mut self,
+        stored: &StoredSetup,
+        access: &ModelAccess,
+        paused: &BTreeSet<CredentialRef>,
+        id: i64,
+    ) -> Result<(), EngineError> {
+        let project = &stored.project_id;
+        let worker = &self.workers[&id];
+        assert!(worker.role == AgentRole::Master && &worker.project == project);
+        let Some(saved) = launch_harness(&stored.team.master) else {
+            return Ok(());
+        };
+        if !worker.live
+            || launch_harness(&worker.harness) == Some(saved)
+            || !self.live_master(project, AgentRole::Master, saved)
+            || super::apply_harness_switch(&self.connection, project)?
+                != super::SwitchApply::WhenIdle
+        {
+            return Ok(());
+        }
+        let waits = worker.kept_session && self.lead_waits(id)?;
+        let quiet = super::master::quiet(
+            &self.connection,
+            self.agents.as_deref().map(Agents::typing),
+            project,
+            now_ms(),
+        );
+        let worker = &self.workers[&id];
+        let idle = worker.busy.is_none()
+            && worker.own_turn.is_none()
+            && worker.turn_started.is_none()
+            && !waits;
+        if !idle
+            || !quiet
+            || !matches!(
+                self.account_for(access, project, saved, paused),
+                Ok(Some(_))
+            )
+        {
+            return Ok(());
+        }
+        let worker = self.workers.get_mut(&id).expect("master worker exists");
+        worker.stopping = true;
+        let _ = worker.orders.send(Order::Stop);
+        self.master_restarts.insert(project.clone());
+        Ok(())
     }
 
     /// Starts a project's live master for its live session. A session whose harness
