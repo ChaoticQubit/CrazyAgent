@@ -134,3 +134,41 @@ test("a listed live session with no messages is new already, and Delete says why
   assert.equal(api.failureCopy("master_session_unused"), "This session has no messages yet, so it already is a new session.");
   assert.match(api.failureCopy("master_session_files_kept"), /nothing was deleted/);
 });
+
+const { bundle, withPage } = await import("./browser.mjs");
+const counted = await bundle(new URL("./fixtures/sessions-count.mjs", import.meta.url).pathname);
+
+/** Runs one Sessions bar count check in a page with the count fixture loaded. Input: the
+ * check, given the page's evaluate. Output: what the check returns. */
+const inCountPage = (check) => withPage(async ({ evaluate }) => {
+  await evaluate(counted);
+  return check(evaluate);
+});
+
+test("the live master's Sessions bar re-reads its count when the master's turn state changes, with no timer read", async () => {
+  const seen = await inCountPage(async (evaluate) => {
+    await evaluate('Fixture.mountLive("working")');
+    const first = await evaluate('Fixture.liveLine("1 message", 3000)');
+    await evaluate('Fixture.turnLive("idle")');
+    const second = await evaluate('Fixture.liveLine("2 messages", 3000)');
+    const quiet = await evaluate('Fixture.liveLine("never", 2500)');
+    return { first, second, quiet };
+  });
+  assert.equal(seen.first.line, "Live session · Started earlier · 1 message");
+  assert.equal(seen.second.line, "Live session · Started earlier · 2 messages", "the master's ended turn shows in the count");
+  assert.equal(seen.quiet.reads, seen.second.reads, "the bar reads the list again only on a turn change");
+});
+
+test("the conversation's Sessions bar re-reads its count when a second turn shows, with no timer read", async () => {
+  const seen = await inCountPage(async (evaluate) => {
+    await evaluate("Fixture.mountConversation()");
+    const first = await evaluate('Fixture.liveLine("1 message", 3000)');
+    await evaluate("Fixture.turnConversation()");
+    const second = await evaluate('Fixture.liveLine("2 messages", 5000)');
+    const quiet = await evaluate('Fixture.liveLine("never", 4500)');
+    return { first, second, quiet };
+  });
+  assert.equal(seen.first.line, "Live session · Started earlier · 1 message");
+  assert.equal(seen.second.line, "Live session · Started earlier · 2 messages", "the second turn shows in the count");
+  assert.equal(seen.quiet.reads, seen.second.reads, "the conversation's two-second turn reads leave the list alone");
+});
