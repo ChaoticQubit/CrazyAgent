@@ -293,21 +293,7 @@ fn ignored(repo: &Path, paths: &[&str]) -> Option<Vec<bool>> {
         .iter()
         .flat_map(|path| path.bytes().chain([0]))
         .collect();
-    let mut command = Command::new(crate::research::runner::setup_git());
-    command
-        .env_clear()
-        .env("PATH", "/usr/bin:/bin")
-        .env("LC_ALL", "C")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .arg("--no-optional-locks")
-        .args(crate::research::runner::GIT_SAFE)
-        .args(["check-ignore", "-z", "--stdin", "--no-index"])
-        .current_dir(repo)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+    let mut command = git(repo, &["check-ignore", "-z", "--stdin", "--no-index"]);
     let (code, output) = answer(&mut command, input)?;
     let names: Vec<&[u8]> = match output.split_last() {
         None => Vec::new(),
@@ -325,6 +311,72 @@ fn ignored(repo: &Path, paths: &[&str]) -> Option<Vec<bool>> {
         next = at + 1;
     }
     Some(ignored)
+}
+
+/// The project's own git run in `repo` with `args`: the real git with no system or global
+/// config, hooks, fsmonitor or pager, no prompt and the C locale, its input and output piped
+/// and its errors dropped. Takes the folder and the arguments. Returns the command.
+fn git(repo: &Path, args: &[&str]) -> Command {
+    let mut command = Command::new(crate::research::runner::setup_git());
+    command
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("LC_ALL", "C")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .arg("--no-optional-locks")
+        .args(crate::research::runner::GIT_SAFE)
+        .args(args)
+        .current_dir(repo)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    command
+}
+
+/// The paths below `repo` the code graph must never read (MAP-2), by the rules documents
+/// follow: whatever the project's git ignores, tracked or not, an ignored folder once with
+/// a closing `/`, and the outermost file or folder of each other path whose name is
+/// secret-like. Asks git twice, bounded as [`ignored`]. Takes the folder. Returns the paths,
+/// or `None` when git could not answer or a name is not UTF-8, so no graph is built.
+pub(crate) fn kept_out(repo: &Path) -> Option<Vec<String>> {
+    let ignored = listed(
+        repo,
+        &["-c", "-o", "-i", "--exclude-standard", "--directory"],
+    )?;
+    let mut kept: BTreeSet<String> = ignored.into_iter().collect();
+    for path in listed(repo, &["-c", "-o", "--exclude-standard"])? {
+        let mut end = 0;
+        for name in path.split('/') {
+            end += name.len();
+            if secret_like(name) {
+                let folder = end < path.len();
+                kept.insert(format!("{}{}", &path[..end], if folder { "/" } else { "" }));
+                break;
+            }
+            end += 1;
+        }
+    }
+    Some(kept.into_iter().collect())
+}
+
+/// The paths `git ls-files -z` with `args` names in `repo`, within the bounds of
+/// [`answer`]. Takes the folder and the arguments. Returns the paths, or `None` when git
+/// fails, runs over, answers out of shape or names a path that is not UTF-8.
+fn listed(repo: &Path, args: &[&str]) -> Option<Vec<String>> {
+    let mut command = git(repo, &["ls-files", "-z"]);
+    command.args(args);
+    let (code, output) = answer(&mut command, Vec::new())?;
+    let body = match output.split_last() {
+        _ if code != 0 => return None,
+        None => return Some(Vec::new()),
+        Some((0, body)) => body,
+        Some(_) => return None,
+    };
+    body.split(|byte| *byte == 0)
+        .map(|name| String::from_utf8(name.to_vec()).ok())
+        .collect()
 }
 
 /// Runs `command` within [`IGNORE_CHECK_TIME`], writing `input` to it while keeping at most

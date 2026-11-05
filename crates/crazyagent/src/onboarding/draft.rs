@@ -16,6 +16,8 @@ use std::path::Path;
 
 #[cfg(unix)]
 mod documents;
+#[cfg(unix)]
+pub(crate) use documents::kept_out;
 pub(super) mod names;
 
 const README_NAMES: [&str; 4] = ["README.md", "README", "README.txt", "readme.md"];

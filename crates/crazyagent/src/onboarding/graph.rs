@@ -37,6 +37,14 @@ const POLL: Duration = Duration::from_millis(100);
 
 /// The plain reason a graph step fails with when no graphify is installed.
 pub(crate) const GRAPHIFY_MISSING: &str = "graphify not installed";
+/// The plain reason a graph step fails with when the project's git cannot say which files it
+/// ignores, so the build could not leave them out (MAP-2).
+pub(crate) const GRAPH_IGNORES_UNKNOWN: &str =
+    "Graph not built: the project's git could not tell which files it ignores.";
+/// The plain reason a graph step fails with when the paths it must leave out are more than
+/// the sandbox holds or one has a name the sandbox cannot hold (MAP-2).
+pub(crate) const GRAPH_KEEP_OUT_REFUSED: &str =
+    "Graph not built: the files it must leave out could not all be kept out.";
 
 /// The owner's line for a graph build on a system that runs no confined graphify in V1:
 /// Linux (DEC-094), where the build would start the macOS Seatbelt tool that is not there.
@@ -94,10 +102,11 @@ fn read_roots(graphify: &Path) -> Vec<PathBuf> {
 
 /// Runs the free, AST-only `graphify update .` in `repo` under a sandbox with
 /// no network that may read the project but not its engine files in `.crazyagent/`,
-/// which stay out of the graph, and graphify's install, and write only
-/// `repo/graphify-out`, its own home and temp dirs. Takes the graphify
-/// executable, the project folder, the engine state folder, a unique run
-/// name, the time limit and `stop`, polled while it runs. Returns how it
+/// the hidden folders, nor any secret-like or git-ignored path (MAP-2), which stay out
+/// of the graph, and graphify's install, and write only `repo/graphify-out`, its own
+/// home and temp dirs; without git's answer no graph is built. Takes the graphify
+/// executable, the project folder, the engine state folder, a unique run name, the
+/// hidden folders, the time limit and `stop`, polled while it runs. Returns how it
 /// ended; its process group is stopped on every path.
 #[cfg(unix)]
 #[allow(clippy::too_many_arguments)]
@@ -129,6 +138,9 @@ pub(crate) fn update(
     if !std::fs::symlink_metadata(&out)?.file_type().is_dir() {
         return Ok(GraphEnding::Failed("graphify-out is not a folder"));
     }
+    let Some(kept_out) = crate::onboarding::draft::kept_out(repo) else {
+        return Ok(GraphEnding::Failed(GRAPH_IGNORES_UNKNOWN));
+    };
     let agent = state.join("agents").join(name);
     if std::fs::symlink_metadata(&agent).is_ok() {
         return Err(RunError::Invalid(
@@ -151,6 +163,16 @@ pub(crate) fn update(
     }
     for folder in hidden {
         sandbox = sandbox.hide(folder)?;
+    }
+    for path in &kept_out {
+        let top = path.split('/').next().unwrap_or_default();
+        if top == GRAPH_OUT || top == crate::projects_home::CRAZYAGENT_DIRECTORY {
+            continue;
+        }
+        sandbox = match sandbox.keep_out(&repo.join(path.trim_end_matches('/'))) {
+            Ok(sandbox) => sandbox,
+            Err(_) => return Ok(GraphEnding::Failed(GRAPH_KEEP_OUT_REFUSED)),
+        };
     }
     let profile = state.join("profiles").join(format!("{name}.sb"));
     sandbox.install(&profile)?;
