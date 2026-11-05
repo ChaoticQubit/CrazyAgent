@@ -323,7 +323,7 @@ test("the head word for a stopped team warns, and only a good read of the same p
 
 test("starting the live master opens the owner's default session first when none is live, then turns the switch on (LMS-1)", () => {
   const source = readFileSync(new URL("../src/screens/project/live-master.tsx", import.meta.url), "utf8");
-  const start = source.slice(source.indexOf("const start = async () => {"), source.indexOf("useEffect(", source.indexOf("const start = async () => {")));
+  const start = source.slice(source.indexOf("const start = async ("), source.indexOf("useEffect(", source.indexOf("const start = async (")));
   const read = start.indexOf("openBeforeLive(");
   const open = start.indexOf("startMaster(");
   const on = start.indexOf("setLiveMaster(id, true)");
@@ -342,7 +342,7 @@ test("a refused or failed owner Open is named in the live master area while its 
   assert.equal(typeof live.openProblem, "function", "the area reads the Open's result");
   const api = await import("../src/api-projects.ts");
   const source = readFileSync(new URL("../src/screens/project/live-master.tsx", import.meta.url), "utf8");
-  const start = source.slice(source.indexOf("const start = async () => {"), source.indexOf("useEffect(", source.indexOf("const start = async () => {")));
+  const start = source.slice(source.indexOf("const start = async ("), source.indexOf("useEffect(", source.indexOf("const start = async (")));
   const open = start.indexOf("startMaster(");
   const named = start.indexOf("openProblem(");
   const on = start.indexOf("setLiveMaster(id, true)");
@@ -366,4 +366,22 @@ test("a refused or failed owner Open is named in the live master area while its 
   const shown = view("The engine refused it.");
   assert.match(shown, /role="alert"[^>]*><p>No master session opened, so this conversation won&#x27;t be in Sessions\. The engine refused it\.<\/p>/, shown);
   assert.doesNotMatch(view(null), /No master session opened/);
+});
+
+test("opening the area with the live switch already on still sends the owner's Open once when no session is live (LMS-1, existing projects)", () => {
+  assert.equal(typeof live.onOpen, "function", "the area decides what one open does");
+  assert.equal(live.onOpen(undefined, false, false), null, "nothing before the switch is read");
+  assert.equal(live.onOpen(true, false, false), "session", "a switch already on gets the owner's session");
+  assert.equal(live.onOpen(true, false, true), null, "the session check goes out once per open");
+  assert.equal(live.onOpen(true, true, false), null, "a start this open already sent the Open");
+  for (const on of [false, null]) assert.equal(live.onOpen(on, false, false), "start", `a switch ${on} turns on`);
+  assert.equal(live.onOpen(false, true, false), null, "a master stopped after this open's start stays stopped");
+  const source = readFileSync(new URL("../src/screens/project/live-master.tsx", import.meta.url), "utf8");
+  const start = source.slice(source.indexOf("const start = async ("), source.indexOf("useEffect(", source.indexOf("const start = async (")));
+  const open = start.indexOf("startMaster(");
+  const only = start.indexOf("if (!turn) return;");
+  const on = start.indexOf("setLiveMaster(id, true)");
+  assert.ok(open > 0 && only > open && on > only, `a switch already on gets only the Open: open ${open}, only ${only}, on ${on}`);
+  assert.match(source, /const next = onOpen\(on, asked\.current, checked\.current\);/);
+  assert.match(source, /if \(next\) void start\(next === "start"\);/);
 });

@@ -1797,9 +1797,25 @@ fn the_master_view_turns_an_off_switch_on_at_open() {
     let mut running = master_view(100, 24);
     requests(&mut running);
     running.arrive(switch(Some(true), None));
+    let sent = requests(&mut running);
+    assert!(
+        sent.iter().all(|sent| !live_master_change(sent, true)),
+        "a switch already on is not turned on again: {sent:?}"
+    );
+    assert_eq!(
+        sent.len(),
+        1,
+        "a switch already on gets the owner's session check once (LMS-1): {sent:?}"
+    );
+    let check = format!("{:?}", sent[0]);
+    assert!(
+        check.starts_with("Setup(OpenLiveSession {") && check.contains(project().as_str()),
+        "{check}"
+    );
+    running.arrive(switch(Some(true), None));
     assert!(
         requests(&mut running).is_empty(),
-        "a switch already on is not turned on again"
+        "the session check goes out once per open"
     );
     let rows = render(&mut running);
     assert_eq!(
