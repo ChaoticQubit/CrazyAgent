@@ -1084,6 +1084,9 @@ impl AddAccount {
                         ));
                     }
                 }
+                if view.phase == NativeAuthPhase::Uncertain {
+                    sign_in.problem = Some(sign_in_problem(sign_in.choice.native, view));
+                }
                 match view.phase {
                     NativeAuthPhase::AuthenticatedObserved => self.done_from_sign_in(ctx),
                     NativeAuthPhase::UnauthenticatedObserved
@@ -1103,7 +1106,7 @@ impl AddAccount {
                     _ => {}
                 }
             }
-            Err(code) => sign_in.problem = Some(plain_sign_in(code, sign_in.choice.native)),
+            Err(code) => sign_in.problem = Some(refused_sign_in(code, sign_in.choice.native)),
         }
     }
 
@@ -1558,9 +1561,10 @@ impl AddAccount {
 }
 
 /// The sentence for each sign-in failure code the engine can record: the words the app's sign-in
-/// panel shows, so both clients say the same thing, except `native_auth_recovery_required`,
-/// whose remedy here is the TUI's own key. `{harness}` and `{name}` stand for the harness
-/// and provider of the sign-in method.
+/// panel shows, so both clients say the same thing, except `native_auth_recovery_required`:
+/// the app names its own button, and the TUI says that the engine clears it on a later try
+/// or after a restart. `{harness}` and `{name}` stand for the harness and provider of the
+/// sign-in method.
 const SIGN_IN_SENTENCES: [(&str, &str); 28] = [
     (
         "native_auth_bootstrap_timeout",
@@ -1650,7 +1654,7 @@ const SIGN_IN_SENTENCES: [(&str, &str); 28] = [
     ),
     (
         "native_auth_recovery_required",
-        "A sign-in didn't confirm how it ended, so changes to its account and new sign-ins wait. Press c in Model access to clear the stuck sign-in, then try again.",
+        "This sign-in didn't confirm how it ended, so changes to its account and new sign-ins wait. Wait a few minutes, then try again. If this keeps happening, restart CrazyAgent.",
     ),
     ("native_auth_sign_in_expired", "This code expired."),
     (
@@ -1677,7 +1681,9 @@ fn plain_sign_in(code: &str, native: Option<NativeAuthMethod>) -> String {
             | NativeAuthMethod::CodexDeviceCode
             | NativeAuthMethod::CodexExisting,
         ) => ("Codex", "ChatGPT"),
-        _ => ("Claude Code", "Claude"),
+        Some(NativeAuthMethod::ClaudeOfficial | NativeAuthMethod::ClaudeExisting) | None => {
+            ("Claude Code", "Claude")
+        }
     };
     if let Some((_, sentence)) = SIGN_IN_SENTENCES.iter().find(|(listed, _)| *listed == code) {
         return sentence
@@ -1698,24 +1704,35 @@ fn plain_sign_in(code: &str, native: Option<NativeAuthMethod>) -> String {
     .to_owned()
 }
 
-/// The sentence for a finished sign-in that did not sign in. Inputs: the sign-in method and
-/// the engine's view. Output: the sentence for its phase, or for its recorded code.
+/// The sentence for a sign-in request the engine refused. `native_auth_recovery_required`
+/// is its refusal while a sign-in of the account is still open or never confirmed how it
+/// ended; every start first lets the engine settle one whose harness has let go, so a
+/// later try or a restart clears it. Inputs: the refusal code and the sign-in method.
+/// Output: the sentence.
+fn refused_sign_in(code: &str, native: Option<NativeAuthMethod>) -> String {
+    if code == "native_auth_recovery_required" {
+        return "A sign-in for this account is still open or didn't confirm how it ended. Wait a few minutes, then try again. If this keeps happening, restart CrazyAgent.".to_owned();
+    }
+    plain_sign_in(code, native)
+}
+
+/// The sentence for a sign-in view that did not sign in: the recorded code's sentence when
+/// the engine recorded one, else the phase's own line. Inputs: the sign-in method and the
+/// engine's view. Output: the sentence.
 pub(super) fn sign_in_problem(native: Option<NativeAuthMethod>, view: &SignInView) -> String {
-    match (view.phase, native) {
-        (NativeAuthPhase::UnauthenticatedObserved, Some(NativeAuthMethod::CodexExisting)) => {
+    match (view.phase, native, view.problem.as_deref()) {
+        (NativeAuthPhase::UnauthenticatedObserved, Some(NativeAuthMethod::CodexExisting), _) => {
             "Codex is not signed in on this Mac. Choose Sign in with ChatGPT instead.".into()
         }
-        (NativeAuthPhase::Cancelled, _) => "The sign-in was cancelled.".into(),
-        (NativeAuthPhase::Unavailable, _) => "This sign-in is not available on this Mac.".into(),
-        (_, Some(NativeAuthMethod::CodexDeviceCode))
-            if view.device_code.is_some() && view.problem.is_none() =>
-        {
+        (_, _, Some(code)) => plain_sign_in(code, native),
+        (NativeAuthPhase::Cancelled, _, None) => "The sign-in was cancelled.".into(),
+        (NativeAuthPhase::Unavailable, _, None) => {
+            "This sign-in is not available on this Mac.".into()
+        }
+        (_, Some(NativeAuthMethod::CodexDeviceCode), None) if view.device_code.is_some() => {
             "The code expired or was not approved.".into()
         }
-        _ => match view.problem.as_deref() {
-            Some(code) => plain_sign_in(code, native),
-            None => "The sign-in did not finish.".into(),
-        },
+        (_, _, None) => "The sign-in did not finish.".into(),
     }
 }
 
