@@ -81,6 +81,13 @@ test("MAP-2 reads the onboarding row only from this project's answer, never from
   assert.throws(() => mapping.rowResearch({ project_id: ID }, ID), /desktop_onboarding answered no mapping facts for ca-trial-4d/);
 });
 
+test("MAP-2 claims only that the decoy is never listed or shown, and names the engine unit test that proves it is never read", () => {
+  const check = mapping.checks.find((one) => one.id === "MAP-2");
+  assert.match(check.title, /never lists or shows the secret-named decoy$/);
+  assert.match(mapping.NEVER_READ, /secret_named_documents_are_neither_read_nor_listed/);
+  assert.match(mapping.NEVER_READ, /7a8f4d2e/);
+});
+
 test("the decoy's name or canary anywhere is a leak; the research documents are not", () => {
   assert.deepEqual(mapping.leaks(`Project documents found\n${RESEARCH_DOCS.design}\n${RESEARCH_DOCS.competitor}`), []);
   assert.deepEqual(mapping.leaks(`Project documents found\n${DECOY}`), [DECOY]);

@@ -7,11 +7,13 @@ export const RESEARCH_DOCS = {
   design: "notes/ui-direction.md",
 };
 
-/** The secret-named decoy the runner seeds in a document folder: the mapping must neither read
- * nor list it, so neither its name nor its canary may reach the window or the onboarding row. */
+/** The secret-named decoy the runner seeds in a document folder: MAP-2 checks that neither its
+ * name nor its canary is listed or shown in the window or the onboarding row; an engine unit test
+ * proves the mapping never reads it. */
 export const DECOY = "notes/api-keys.md";
 
-/** The fake value the decoy holds, never a real secret: seen anywhere, the mapping read the decoy. */
+/** The fake value the decoy holds, never a real secret: seen in a window read or the onboarding
+ * row, the mapping showed the decoy's text. */
 export const CANARY = "CA-DECOY-CANARY-5HQ2";
 
 /** The files the runner commits for the mapping checks, path to text: the three research

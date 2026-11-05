@@ -23,6 +23,11 @@ const NEEDED = [
   { kind: "market_research", label: "Market research", file: RESEARCH_DOCS.market },
 ];
 
+/** Where "never read" is proven: the app has no read command for the mapping run's prompt or
+ * transcript, which stay in the engine's managed agent home, so MAP-2 proves only that the decoy
+ * is never listed or shown, and this engine unit test that its text never reaches the prompt. */
+export const NEVER_READ = "crates/crazyagent/src/onboarding/tests.rs secret_named_documents_are_neither_read_nor_listed (7a8f4d2e, fix/mapping-reads-content)";
+
 /** What MAP-1 leaves for MAP-2: the id of the project whose setup it started and the window
  * texts its screenshots read. */
 const seen = { id: null, screens: [] };
@@ -178,7 +183,7 @@ export const checks = [{
     return `set up ${kit.NAME} (${seen.id}); "${shot.line}" ${Math.round((shot.ms - working.ms) / 1000)} s after Working; Done after ${Math.round(last.ms / 1000)} s on try ${reached} of ${tries}; ${samples.length} reads of the row`;
   },
 }, {
-  id: "MAP-2", op: ["MAP-2"], title: "The project mapping reads the project's research documents and never the secret-named decoy",
+  id: "MAP-2", op: ["MAP-2"], title: "The project mapping reads the project's research documents and never lists or shows the secret-named decoy",
   why: "owner: \"I already have the context in the project about the project and competitor analysis and market analysis ... it doesn't analyze or map them\"",
   after: "open-app",
   run: async (kit) => {
@@ -201,7 +206,7 @@ export const checks = [{
       ];
       if (faults.length > 0) throw new Error(faults.join("; "));
       const named = Object.entries(files).filter(([, paths]) => paths.length > 0).map(([label, paths]) => `${label}: ${paths.join(", ")}`);
-      return `review shows Already in the repo for ${named.join("; ")}; the onboarding row holds ${Object.keys(research).join(", ")}; neither ${DECOY} nor its canary in ${screens.length} window reads or the onboarding row`;
+      return `review shows Already in the repo for ${named.join("; ")}; the onboarding row holds ${Object.keys(research).join(", ")}; neither ${DECOY} nor its canary listed or shown in ${screens.length} window reads or the onboarding row (never read: ${NEVER_READ})`;
     } finally {
       await kit.go("#/home");
     }
