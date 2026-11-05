@@ -759,7 +759,8 @@ class AuditTests(unittest.TestCase):
         teammate's launch had the set and whether teammates have agent rows."""
         w = self.world
         lead = w.agent("sub", mode="native", worktree="/w/agent-lead")
-        self.given(lead, f"{audit.APP_MARK}\n\nUse tdd.\n\n{MARK}\n")
+        (w.root / "instructions.md").write_text(f"\n{APP_SET}\n")
+        self.given(lead, rendered(APP_SET, MARK))
         w.transcript(lead, [launch(f"Claude.\n{audit.APP_MARK}\n{MARK}")], worktree="/w/agent-lead")
         for number, handle in enumerate(("greeter", "docs"), 1):
             if rows:
