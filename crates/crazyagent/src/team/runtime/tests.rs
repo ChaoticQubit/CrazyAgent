@@ -5664,8 +5664,9 @@ struct OwnOutlived {
 /// command of `secs` seconds and a notice turn of `notice` seconds, through
 /// `next_lead_turn` under the given rules as the lead's worker does, sending `later` as the
 /// engine's rules order once the app holds the turn, then stops the lead as `serve` does on
-/// a stop. Takes the fixture, the pane name, both times and both rules. Returns how the
-/// turn ended.
+/// a stop. An own turn that ends before the stand-in's held mark is seen, as under Stop,
+/// waits for the mark, so its `waited` is zero. Takes the fixture, the pane name, both
+/// times and both rules. Returns how the turn ended.
 #[cfg(target_os = "macos")]
 fn own_turn_outliving(
     fixture: &Fixture,
@@ -5741,7 +5742,17 @@ fn own_turn_outliving(
                 Ok(Report::Own {
                     end: Some(end),
                     text,
-                }) => break (end, text, Instant::now()),
+                }) => {
+                    let at = Instant::now();
+                    while held.is_none() && Instant::now() < deadline {
+                        if home.join("held").exists() {
+                            held = Some(Instant::now());
+                        } else {
+                            std::thread::sleep(Duration::from_millis(10));
+                        }
+                    }
+                    break (end, text, at);
+                }
                 Ok(_) | Err(RecvTimeoutError::Timeout) => {
                     assert!(Instant::now() < deadline, "the own turn never ended");
                 }
@@ -5758,7 +5769,7 @@ fn own_turn_outliving(
         if !stopped_itself {
             order.send(Order::Stop).unwrap();
         }
-        let held = held.expect("the stand-in's turn ended before the own turn's end");
+        let held = held.expect("the stand-in never held its turn");
         let next = worker.join().unwrap();
         (
             next,
