@@ -282,3 +282,6 @@ fn under_stop_a_real_claude_agent_s_background_command_ends_with_its_task() {
 
 #[path = "live_kept_screen_tests.rs"]
 mod kept_screen;
+
+#[path = "live_display_tests.rs"]
+mod display;

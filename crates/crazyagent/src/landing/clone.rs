@@ -87,7 +87,8 @@ pub(super) fn add(
 /// Fills the folder `add` just made with the clone, so `add` can remove the folder again
 /// when any step fails (GA-R2): private, its git folder made with no template, the
 /// alternates line naming the owner's objects, an `info/exclude` that keeps the
-/// teammates' worktree folder out of what the agent's own `git add` takes, its branch at
+/// teammates' worktree folder and the project graph the engine shows there out of what the
+/// agent's own `git add` takes, its branch at
 /// the owner's commit and checked out with nothing left modified. Inputs: the new worktree, the branch, the
 /// alternates line, the object format and the commit. Output: Ok once checked out, else
 /// `changes_git_failed` or a git failure.
@@ -119,7 +120,11 @@ fn fill(
         .and_then(|()| {
             std::fs::write(
                 git_dir.join("info").join("exclude"),
-                format!("/{}/\n", agent_git::TEAMMATES_FOLDER),
+                format!(
+                    "/{}/\n{}\n",
+                    agent_git::TEAMMATES_FOLDER,
+                    agent_git::GRAPH_EXCLUDE
+                ),
             )
         })
         .map_err(|_| failure("changes_git_failed"))?;
@@ -133,6 +138,54 @@ fn fill(
     assert_eq!(pointer, format!("ref: refs/heads/{branch}\n").as_bytes());
     assert_eq!(clone.commit_of("HEAD")?.as_deref(), Some(head));
     Ok(())
+}
+
+/// The most bytes of a clone's `info/exclude` that `exclude_graph` reads and appends to.
+const EXCLUDE_BYTES_MAX: u64 = 256 * 1024;
+
+/// Adds the graph line to a clone's `info/exclude` when no line there keeps the project graph
+/// out of git yet, as `fill` writes it for every new clone, so a clone made before that
+/// shows the graph too (18.15.1). Every step goes through its folder's own descriptor
+/// without following a link, and only a plain file with no other hard link (F1) of at most
+/// `EXCLUDE_BYTES_MAX` bytes is read and appended to. Anything else, or a failed write,
+/// leaves the clone without the graph, never without its launch. Takes the clone's worktree.
+pub(super) fn exclude_graph(worktree: &Path) {
+    use rustix::fs::{CWD, FileType, Mode, OFlags, fstat, openat};
+    use std::io::{Read, Write};
+    let folder = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let append = OFlags::RDWR | OFlags::APPEND | OFlags::NOFOLLOW | OFlags::NONBLOCK;
+    let opened = openat(CWD, worktree, folder, Mode::empty())
+        .and_then(|tree| openat(&tree, ".git", folder, Mode::empty()))
+        .and_then(|git| openat(&git, "info", folder, Mode::empty()))
+        .and_then(|info| openat(&info, "exclude", append | OFlags::CLOEXEC, Mode::empty()));
+    let Ok(fd) = opened else {
+        return;
+    };
+    let plain = fstat(&fd).is_ok_and(|stat| {
+        FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile
+            && stat.st_nlink == 1
+            && u64::try_from(stat.st_size).is_ok_and(|size| size <= EXCLUDE_BYTES_MAX)
+    });
+    let mut file = std::fs::File::from(fd);
+    let mut text = String::new();
+    if !plain
+        || Read::by_ref(&mut file)
+            .take(EXCLUDE_BYTES_MAX)
+            .read_to_string(&mut text)
+            .is_err()
+        || agent_git::graph_rule(&text) == Some(true)
+    {
+        return;
+    }
+    assert!(text.len() as u64 <= EXCLUDE_BYTES_MAX);
+    let lead = match text.is_empty() || text.ends_with('\n') {
+        true => "",
+        false => "\n",
+    };
+    let line = format!("{lead}{}\n", agent_git::GRAPH_EXCLUDE);
+    let _ = file
+        .write_all(line.as_bytes())
+        .and_then(|()| file.sync_all());
 }
 
 /// Makes the clone's pack folder and its 256 loose-object folders `00` to `ff` where any is

@@ -1,6 +1,6 @@
 use super::*;
 use crate::client_controller::OwnerController;
-use crate::coord::settings::{CoordSettings, RoleSkills};
+use crate::coord::settings::{ClaudeDisplay, CoordSettings, RoleSkills};
 use crate::engine::Client;
 use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::{OwnerClientKind, OwnerResponse};
@@ -2133,8 +2133,10 @@ async fn a_real_engine_keeps_the_coordination_the_owner_sets_in_the_editor() {
         SubagentMode::Native
     );
 
-    view.key(press(KeyCode::Down));
-    view.key(press(KeyCode::Down));
+    for _ in 0..3 {
+        view.key(press(KeyCode::Down));
+    }
+    assert_eq!(view.coord.as_ref().unwrap().row, 3);
     assert_eq!(view.key(press(KeyCode::Right)), TeamReply::Handled);
     assert!(
         view.notice
@@ -2158,7 +2160,7 @@ async fn a_real_engine_keeps_the_coordination_the_owner_sets_in_the_editor() {
     for _ in 0..4 {
         view.key(press(KeyCode::Down));
     }
-    assert_eq!(view.coord.as_ref().unwrap().row, 7);
+    assert_eq!(view.coord.as_ref().unwrap().row, 8);
     for (generation, overlaps) in [
         (4, Overlaps::Block),
         (5, Overlaps::Off),
@@ -2171,7 +2173,7 @@ async fn a_real_engine_keeps_the_coordination_the_owner_sets_in_the_editor() {
 
     view.key(press(KeyCode::Down));
     view.key(press(KeyCode::Down));
-    assert_eq!(view.coord.as_ref().unwrap().row, 9);
+    assert_eq!(view.coord.as_ref().unwrap().row, 10);
     assert_eq!(view.key(press(KeyCode::Enter)), TeamReply::Handled);
     assert!(view.typing());
     clear_counted(&mut view);
@@ -2252,10 +2254,10 @@ async fn skills_per_role_are_set_in_the_coordination_editor_through_a_real_engin
     for role in ["Master skills", "Lead skills", "Worker skills"] {
         assert!(find(&shown, role).contains("All approved skills"), "{role}");
     }
-    for _ in 0..12 {
+    for _ in 0..13 {
         assert_eq!(view.key(press(KeyCode::Down)), TeamReply::Handled);
     }
-    assert_eq!(view.coord.as_ref().unwrap().row, 12);
+    assert_eq!(view.coord.as_ref().unwrap().row, 13);
     let (_, help) = view.rows(116, 40, &accounts(), &Look::plain());
     assert!(
         help.contains(&("Space", "All or chosen")) && help.contains(&("Enter", "Edit skills")),
@@ -2342,7 +2344,7 @@ fn workflow_nudges_show_off_by_default_and_space_steps_through_every_option() {
     assert_eq!(view.key(press(KeyCode::Char('c'))), TeamReply::Handled);
     let nudges = |view: &TeamView| find(&frame(view, 120, 40), "Workflow nudges").to_owned();
     assert!(nudges(&view).contains("Off"), "{}", nudges(&view));
-    for _ in 0..8 {
+    for _ in 0..9 {
         assert_eq!(view.key(press(KeyCode::Down)), TeamReply::Handled);
     }
     let mut at = NOW;
@@ -2371,6 +2373,58 @@ fn workflow_nudges_show_off_by_default_and_space_steps_through_every_option() {
             )))
         );
         assert!(nudges(&view).contains(words), "{}", nudges(&view));
+    }
+}
+
+/// The Claude Code terminal display shows Classic in the coordination editor of a project
+/// with no saved settings, read from a real engine database, on row 2 under the Claude Code
+/// rows (N-D9), and Space on the row flips it to Fullscreen and back: each press sends the
+/// whole settings with the other display, the engine's answer names it and the row shows
+/// the stored one.
+#[test]
+fn the_claude_code_display_shows_classic_by_default_and_space_flips_it() {
+    let folder = tempfile::tempdir().unwrap();
+    let connection = rusqlite::Connection::open(folder.path().join("engine.db")).unwrap();
+    crate::storage::initialize_authority_schemas(&connection).unwrap();
+    let coordination = crate::team::coordination(&connection, &project()).unwrap();
+    assert_eq!(coordination.settings.claude_display, ClaudeDisplay::Classic);
+    let mut view = TeamView::new(project());
+    let query = view.next_query(NOW).unwrap();
+    let mut stored = team();
+    stored.coordination = Some(coordination.clone());
+    view.apply(&query, Ok(SetupView::Team(Box::new(stored.clone()))));
+    assert_eq!(view.key(press(KeyCode::Char('c'))), TeamReply::Handled);
+    let display =
+        |view: &TeamView| find(&frame(view, 120, 40), "Claude Code terminal display").to_owned();
+    assert!(display(&view).contains("Classic"), "{}", display(&view));
+    for _ in 0..2 {
+        assert_eq!(view.key(press(KeyCode::Down)), TeamReply::Handled);
+    }
+    assert_eq!(view.coord.as_ref().unwrap().row, 2);
+    let mut at = NOW;
+    for (next, words) in [
+        (ClaudeDisplay::Fullscreen, "Fullscreen"),
+        (ClaudeDisplay::Classic, "Classic"),
+    ] {
+        let mut settings = coordination.settings.clone();
+        settings.claude_display = next;
+        let reply = view.key(press(KeyCode::Char(' ')));
+        assert_eq!(
+            reply,
+            TeamReply::Change(TeamAction::CoordSettings {
+                project_id: project(),
+                settings: settings.clone(),
+            })
+        );
+        stored.coordination.as_mut().unwrap().settings = settings;
+        at += 60_000;
+        assert_eq!(
+            settled(&mut view, reply, &stored, at),
+            Some(Notice::plain(format!(
+                "Claude Code terminals now open {words}."
+            )))
+        );
+        assert!(display(&view).contains(words), "{}", display(&view));
     }
 }
 

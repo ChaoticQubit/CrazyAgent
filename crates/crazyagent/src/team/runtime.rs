@@ -177,7 +177,8 @@ struct Grant {
 /// `scratch_pin` is the agent's short temp folder as the engine made it (DEC-111 S1R1-1);
 /// `proxy` is the model proxy an agent with tools under the None network reaches its model
 /// through, the only network its profile allows (S4b); `network` is the project network its
-/// profile was made for, which a narrower saved choice stops it for (CS-2).
+/// profile was made for, which a narrower saved choice stops it for (CS-2); `claude_display`
+/// is the project's Claude Code terminal display, read when the agent is prepared (N-D9).
 struct Plan {
     harness: String,
     executable: PathBuf,
@@ -200,6 +201,7 @@ struct Plan {
     #[cfg(unix)]
     scratch_pin: Option<(u64, u64)>,
     proxy: Option<Arc<ModelProxy>>,
+    claude_display: crate::coord::settings::ClaudeDisplay,
 }
 
 /// Why a native-mode lead does not start at Full access: its own tmux server, its teammate
@@ -217,14 +219,15 @@ const OVERLAP_BLOCK_NEEDS_HOOKS: &str = "Overlaps set to Block needs hooks, and 
 impl Plan {
     /// Gives a native-mode lead's launch context its agent team (DEC-104 K5a): agent teams on,
     /// `--teammate-mode tmux`, tmux on its PATH and the teammates' instructions. A plan with a
-    /// model proxy also points the launch's variables at it (S4b). Other plans keep the
-    /// context as it is. Takes the context. Returns it.
+    /// model proxy also points the launch's variables at it (S4b). Every plan gives its
+    /// Claude Code terminal the project's display (N-D9). Takes the context. Returns it.
     fn team_context(&self, context: AgentContext) -> AgentContext {
         assert_eq!(
             self.native,
             self.tmux.is_some(),
             "a native plan carries its tmux"
         );
+        let context = context.with_claude_display(self.claude_display);
         let context = match &self.proxy {
             Some(proxy) => context.with_model_proxy(proxy.port()),
             None => context,
@@ -6240,6 +6243,14 @@ impl TeamRuntime {
                 .map_err(sandboxed)?;
         }
         sandbox.install(&profile).map_err(sandboxed)?;
+        let claude_display = crate::coord::settings::read(&self.connection, &stored.project_id)
+            .map_err(|e| {
+                with_code(
+                    "the project's coordination settings could not be read",
+                    Some(&e.0),
+                )
+            })?
+            .claude_display;
         let plan = Plan {
             harness: launch.into(),
             executable: executable.to_path_buf(),
@@ -6272,6 +6283,7 @@ impl TeamRuntime {
             #[cfg(unix)]
             scratch_pin,
             proxy,
+            claude_display,
         };
         let mode = match &account.reach {
             TeamReach::Endpoint { base_url, .. } => Mode::Kept {
@@ -9414,9 +9426,10 @@ const GITIGNORE_BYTES_MAX: u64 = 256 * 1024;
 /// Shows the project's graphify graph read-only in an agent's worktree (I3): a real
 /// `graphify-out` folder there holds links to the project's graph, report and wiki, which the
 /// agent's sandbox reads but never writes, so `graphify query` and the graphify reminder hook
-/// find the graph from the worktree. Only when the worktree's `.gitignore` ignores the
-/// folder, so it never shows as a change; anything the agent made there itself is left alone,
-/// and every step works through the folder's own descriptor without following a link. A
+/// find the graph from the worktree. Only when git ignores the folder there (see
+/// [`ignores_graph`]), so it never shows as a change; anything the agent made there itself
+/// is left alone, and every step works through the folder's own descriptor without following
+/// a link. A
 /// failure leaves the agent without the graph, never without its start. Takes the project
 /// folder and the worktree.
 #[cfg(unix)]
@@ -9427,7 +9440,7 @@ fn expose_graph(root: &Path, worktree: &Path) {
     };
     let source = root.join(GRAPH_FOLDER);
     let shared = std::fs::symlink_metadata(&source).is_ok_and(|metadata| metadata.is_dir());
-    if !shared || !ignores_graph(worktree) {
+    if !shared || !ignores_graph(root, worktree) {
         return;
     }
     let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
@@ -9465,17 +9478,38 @@ fn expose_graph(root: &Path, worktree: &Path) {
     }
 }
 
-/// Whether a worktree's `.gitignore` ignores the graph folder by one of its usual spellings,
-/// read as a plain file, never through a link or from a pipe, at most `GITIGNORE_BYTES_MAX`
-/// bytes. Takes the worktree. Returns the answer; anything unreadable reads as no.
+/// Whether git keeps the graph folder out of a worktree's changes, by one of its usual
+/// spellings: the last line about it in the worktree's `.gitignore` decides, and with none
+/// there the repository's `info/exclude` does, a clone's own where `.git` is a folder and
+/// the project repository's, which the engine writes, for a linked worktree. Takes the
+/// project folder and the worktree. Returns the answer; an unreadable file names nothing.
 #[cfg(unix)]
-fn ignores_graph(worktree: &Path) -> bool {
+fn ignores_graph(root: &Path, worktree: &Path) -> bool {
+    let git = worktree.join(".git");
+    let exclude = match std::fs::symlink_metadata(&git) {
+        Ok(metadata) if metadata.is_dir() => Some(git.join("info").join("exclude")),
+        Ok(metadata) if metadata.is_file() => Some(root.join(".git").join("info").join("exclude")),
+        _ => None,
+    };
+    match plain_text(&worktree.join(".gitignore"))
+        .and_then(|text| crate::agent_git::graph_rule(&text))
+    {
+        Some(ignored) => ignored,
+        None => exclude
+            .and_then(|path| plain_text(&path))
+            .and_then(|text| crate::agent_git::graph_rule(&text))
+            .unwrap_or(false),
+    }
+}
+
+/// Reads one ignore file as a plain file, never through a link or from a pipe, at most
+/// `GITIGNORE_BYTES_MAX` bytes. Takes its path. Returns the text, none when unreadable.
+#[cfg(unix)]
+fn plain_text(path: &Path) -> Option<String> {
     use rustix::fs::{CWD, FileType, Mode, OFlags, fstat, openat};
     use std::io::Read;
     let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
-    let Ok(fd) = openat(CWD, worktree.join(".gitignore"), flags, Mode::empty()) else {
-        return false;
-    };
+    let fd = openat(CWD, path, flags, Mode::empty()).ok()?;
     let plain =
         fstat(&fd).is_ok_and(|stat| FileType::from_raw_mode(stat.st_mode) == FileType::RegularFile);
     let mut text = String::new();
@@ -9485,14 +9519,10 @@ fn ignores_graph(worktree: &Path) -> bool {
             .read_to_string(&mut text)
             .is_err()
     {
-        return false;
+        return None;
     }
-    text.lines().map(str::trim).any(|line| {
-        matches!(
-            line,
-            "graphify-out" | "graphify-out/" | "/graphify-out" | "/graphify-out/"
-        )
-    })
+    assert!(text.len() as u64 <= GITIGNORE_BYTES_MAX);
+    Some(text)
 }
 
 /// The Seatbelt profile the engine installs for one team agent, which its harness, and for a
