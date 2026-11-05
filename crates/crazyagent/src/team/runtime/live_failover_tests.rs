@@ -19,9 +19,9 @@ use std::time::{Duration, Instant};
 
 const PROJECT: &str = "live-failover";
 const SIGNED_IN: &str = "CRAZYAGENT_MANAGED_CLAUDE_PROFILE";
-const START: Duration = Duration::from_secs(120);
-const TURN: Duration = Duration::from_secs(300);
-const ASK: &str = "Reply with only the word READY.";
+pub(crate) const START: Duration = Duration::from_secs(120);
+pub(crate) const TURN: Duration = Duration::from_secs(300);
+pub(crate) const ASK: &str = "Reply with only the word READY.";
 
 /// One latest sign-in row of `native_auth_operations` as the owner's engine stores it: id,
 /// profile key, generation, phase, request and fact.
@@ -159,26 +159,65 @@ fn signed_in_accounts(profiles: &Path, owner: &Connection, host: &HostStamp) -> 
     found
 }
 
-/// The test's own team engine in a new folder with one project whose live master is Claude
-/// Code and whose pool holds the limited account first, then the working one. Its database
-/// carries the owner's engine run and the two accounts' proven sign-in rows as they stand,
-/// and its custody is the owner's engine's own, which only reads that database and takes a
-/// shared lock on a profile for each launch, as every engine run does.
-struct Team {
+/// One of the owner's signed-in Claude accounts that the running app's engine does not read
+/// at a limit, with that engine's database and the run the account's sign-in is proven in.
+pub(crate) struct OwnerClaude {
+    database: PathBuf,
+    host: HostStamp,
+    account: Account,
+}
+
+impl OwnerClaude {
+    /// Picks the first such account of the running app's engine, read only. Input: none.
+    /// Output: the account, or a panic with the plain BLOCKED message.
+    pub(crate) fn pick() -> Self {
+        let (profiles, database, owner, host) = owner_engine();
+        let found = signed_in_accounts(&profiles, &owner, &host);
+        drop(owner);
+        let count = found.len();
+        let account = found
+            .into_iter()
+            .find(|account| !account.limited)
+            .unwrap_or_else(|| {
+                panic!(
+                    "BLOCKED: no working account: none of the {count} signed-in Claude accounts of the app's engine is free of a limit"
+                )
+            });
+        Self {
+            database,
+            host,
+            account,
+        }
+    }
+
+    /// The account's connection as the owner's settings name it. Output: the connection.
+    pub(crate) fn connection(&self) -> &ModelConnection {
+        &self.account.connection
+    }
+}
+
+/// The test's own team engine with one project whose live master is Claude Code, on a pool
+/// of the owner's signed-in Claude accounts. Its database carries the owner's engine run and
+/// those accounts' proven sign-in rows as they stand, and its custody is the owner's
+/// engine's own, which only reads that database and takes a shared lock on a profile for
+/// each launch, as every engine run does. The failover test builds it in a new folder; the
+/// LMS-1 test opens it on the database a real engine left.
+pub(crate) struct Team {
     runtime: TeamRuntime,
     db: Connection,
     project: ProjectId,
     host: Arc<dyn Host>,
     tmux: PathBuf,
     base: PathBuf,
-    limited: CredentialRef,
+    limited: Option<CredentialRef>,
     working: CredentialRef,
-    _root: tempfile::TempDir,
+    _root: Option<tempfile::TempDir>,
 }
 
 impl Team {
-    /// Prepares the engine. Inputs: the owner's run, the owner's database and the two
-    /// accounts. Output: the team, its live switch still off.
+    /// Prepares the engine in a new folder whose pool holds the limited account first, then
+    /// the working one. Inputs: the owner's run, the owner's database and the two accounts.
+    /// Output: the team, its live switch still off.
     fn new(host: &HostStamp, owner_database: &Path, limited: &Account, working: &Account) -> Self {
         assert!(limited.limited && !working.limited);
         assert_ne!(limited.connection.id, working.connection.id);
@@ -188,7 +227,6 @@ impl Team {
             .unwrap();
         std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let base = root.path().canonicalize().unwrap();
-        let tmux = installed(&base).expect("BLOCKED: tmux must be installed");
         let db = Connection::open(base.join("engine.db")).unwrap();
         crate::storage::initialize_authority_schemas(&db).unwrap();
         let owner = db.unchecked_transaction().unwrap();
@@ -245,34 +283,6 @@ impl Team {
             params![PROJECT, serde_json::to_string(&setup).unwrap()],
         )
         .unwrap();
-        db.execute(
-            "INSERT OR REPLACE INTO owner_meta(singleton,schema_version,db_instance,engine_epoch,runtime_state) VALUES (1,1,?1,?2,'active')",
-            params![host.db_instance, host.engine_epoch],
-        )
-        .unwrap();
-        for account in [limited, working] {
-            let (id, key, generation, phase, request, fact) = &account.operation;
-            db.execute(
-                "INSERT INTO native_auth_operations(id,profile_key,generation,phase,request,fact) VALUES (?1,?2,?3,?4,?5,?6)",
-                params![id, key, generation, phase, request, fact],
-            )
-            .unwrap();
-        }
-        let revision = limited
-            .fact
-            .binding
-            .at_revision
-            .value()
-            .max(working.fact.binding.at_revision.value());
-        assert_eq!(
-            db.execute(
-                "UPDATE state SET revision=MAX(revision,?1) WHERE id=1",
-                [i64::try_from(revision).unwrap()],
-            )
-            .unwrap(),
-            1,
-            "the engine keeps one revision row"
-        );
         let access = ModelAccess {
             accounts: vec![
                 limited.connection.account_ref.clone(),
@@ -289,13 +299,101 @@ impl Team {
                 provider_quota_policy: Default::default(),
             }],
         };
+        let mut team = Self::open(
+            base,
+            db,
+            project,
+            host,
+            owner_database,
+            &[limited, working],
+            Box::new(move || Some(access.clone())),
+        );
+        team.limited = Some(limited.connection.id.clone());
+        team._root = Some(root);
+        team
+    }
+
+    /// Opens the team runtime on the database a real engine left in `base` after it
+    /// stopped, with the owner's signed-in account and the pools its settings files hold,
+    /// read on every tick as the engine's own team runtime reads them. Inputs: the engine
+    /// folder, its global and project settings files, the project and the owner's account.
+    /// Output: the team, its live switch as the engine left it.
+    pub(crate) fn on_engine(
+        base: &Path,
+        global: &Path,
+        settings: &Path,
+        project: &ProjectId,
+        owner: &OwnerClaude,
+    ) -> Self {
+        let base = base.canonicalize().unwrap();
+        let db = Connection::open(base.join("engine.db")).unwrap();
+        db.busy_timeout(Duration::from_secs(5)).unwrap();
+        let (global, settings) = (global.to_path_buf(), settings.to_path_buf());
+        Self::open(
+            base,
+            db,
+            project.clone(),
+            &owner.host,
+            &owner.database,
+            &[&owner.account],
+            Box::new(move || {
+                crate::config::resolve_config(&global, &settings)
+                    .ok()?
+                    .settings
+                    .model_access
+            }),
+        )
+    }
+
+    /// Records the owner's engine run and the accounts' proven sign-in rows in the prepared
+    /// database, raises its revision to theirs and opens the runtime on the owner's engine's
+    /// custody with tmux. Inputs: the folder, its database, the project, the owner's run and
+    /// database, the accounts, the last of which is the working one, and the pool source.
+    /// Output: the team.
+    fn open(
+        base: PathBuf,
+        db: Connection,
+        project: ProjectId,
+        host: &HostStamp,
+        owner_database: &Path,
+        accounts: &[&Account],
+        access: super::AccessSource,
+    ) -> Self {
+        let tmux = installed(&base).expect("BLOCKED: tmux must be installed");
+        db.execute(
+            "INSERT OR REPLACE INTO owner_meta(singleton,schema_version,db_instance,engine_epoch,runtime_state) VALUES (1,1,?1,?2,'active')",
+            params![host.db_instance, host.engine_epoch],
+        )
+        .unwrap();
+        for account in accounts {
+            let (id, key, generation, phase, request, fact) = &account.operation;
+            db.execute(
+                "INSERT INTO native_auth_operations(id,profile_key,generation,phase,request,fact) VALUES (?1,?2,?3,?4,?5,?6)",
+                params![id, key, generation, phase, request, fact],
+            )
+            .unwrap();
+        }
+        let revision = accounts
+            .iter()
+            .map(|account| account.fact.binding.at_revision.value())
+            .max()
+            .expect("at least one signed-in account");
+        assert_eq!(
+            db.execute(
+                "UPDATE state SET revision=MAX(revision,?1) WHERE id=1",
+                [i64::try_from(revision).unwrap()],
+            )
+            .unwrap(),
+            1,
+            "the engine keeps one revision row"
+        );
         let host_terminal: Arc<dyn Host> =
             Arc::new(Tmux::open(Some(tmux.clone()), &base.join(FOLDER)));
         let mut runtime = TeamRuntime::open(
             &base.join("engine.db"),
             &base.join("team"),
             BTreeMap::from([("claude-code", super::managed_agent::claude())]),
-            Box::new(move || Some(access.clone())),
+            access,
             TeamLimits::default(),
         )
         .unwrap()
@@ -306,6 +404,7 @@ impl Team {
             &std::fs::metadata(owner_database).unwrap(),
         )
         .unwrap());
+        let working = accounts.last().expect("a working account");
         Self {
             runtime,
             db,
@@ -313,9 +412,9 @@ impl Team {
             host: host_terminal,
             tmux,
             base,
-            limited: limited.connection.id.clone(),
+            limited: None,
             working: working.connection.id.clone(),
-            _root: root,
+            _root: None,
         }
     }
 
@@ -324,18 +423,18 @@ impl Team {
         self.db
             .prepare("SELECT id,connection FROM team_agents WHERE project=?1 AND role='master' ORDER BY id")
             .unwrap()
-            .query_map([PROJECT], |row| Ok((row.get(0)?, row.get(1)?)))
+            .query_map([self.project.as_str()], |row| Ok((row.get(0)?, row.get(1)?)))
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap()
     }
 
     /// The agent the project's live master record runs, if any.
-    fn live_agent(&self) -> Option<i64> {
+    pub(crate) fn live_agent(&self) -> Option<i64> {
         self.db
             .query_row(
                 "SELECT agent FROM team_live_masters WHERE project=?1",
-                [PROJECT],
+                [self.project.as_str()],
                 |row| row.get(0),
             )
             .optional()
@@ -344,11 +443,13 @@ impl Team {
     }
 
     /// Every ended master turn kept for the project. Output: (turn, outcome) by turn.
-    fn turns(&self) -> Vec<(i64, String)> {
+    pub(crate) fn turns(&self) -> Vec<(i64, String)> {
         self.db
             .prepare("SELECT turn,outcome FROM team_master_turns WHERE project=?1 ORDER BY turn")
             .unwrap()
-            .query_map([PROJECT], |row| Ok((row.get(0)?, row.get(1)?)))
+            .query_map([self.project.as_str()], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap()
@@ -365,10 +466,17 @@ impl Team {
             .collect()
     }
 
-    /// Which of the two accounts a connection is, so the record never prints an account id.
+    /// Which of the accounts a connection is, so the record never prints an account id.
     fn name(&self, connection: Option<&str>) -> &'static str {
         match connection {
-            Some(id) if id == self.limited.as_str() => "limited",
+            Some(id)
+                if self
+                    .limited
+                    .as_ref()
+                    .is_some_and(|limited| id == limited.as_str()) =>
+            {
+                "limited"
+            }
             Some(id) if id == self.working.as_str() => "working",
             Some(_) => "other",
             None => "none",
@@ -376,7 +484,7 @@ impl Team {
     }
 
     /// The one master and the account it runs on, named, once exactly one master row exists.
-    fn master(&self) -> Option<(i64, &'static str)> {
+    pub(crate) fn master(&self) -> Option<(i64, &'static str)> {
         match self.masters().as_slice() {
             [(id, connection)] => Some((*id, self.name(connection.as_deref()))),
             _ => None,
@@ -385,12 +493,12 @@ impl Team {
 
     /// What the engine records for the project, for a failure message: the masters with
     /// their account, status and error, the ended turns, the resting accounts and the switch.
-    fn seen(&self) -> String {
+    pub(crate) fn seen(&self) -> String {
         let agents: Vec<(i64, Option<String>, String, Option<String>)> = self
             .db
             .prepare("SELECT id,connection,status,error FROM team_agents WHERE project=?1 AND role='master' ORDER BY id")
             .unwrap()
-            .query_map([PROJECT], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
+            .query_map([self.project.as_str()], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
@@ -412,7 +520,7 @@ impl Team {
     }
 
     /// Types one owner message to the master the way the owner's app sends it.
-    fn say(&self, text: &str) {
+    pub(crate) fn say(&self, text: &str) {
         let tx = self.db.unchecked_transaction().unwrap();
         append_message(
             &tx,
@@ -430,7 +538,7 @@ impl Team {
     /// Ticks the runtime until a condition holds. Inputs: what is awaited, the time limit and
     /// the condition, which may panic with a BLOCKED message. Panics with what the engine
     /// records when the time runs out.
-    fn until(&mut self, what: &str, limit: Duration, done: impl Fn(&Self) -> bool) {
+    pub(crate) fn until(&mut self, what: &str, limit: Duration, done: impl Fn(&Self) -> bool) {
         let deadline = Instant::now() + limit;
         while !done(self) {
             assert!(
@@ -442,6 +550,39 @@ impl Team {
             self.runtime.tick().unwrap();
             std::thread::sleep(Duration::from_millis(200));
         }
+    }
+
+    /// Whether the project's live switch is on in the database. Output: the switch.
+    pub(crate) fn live(&self) -> bool {
+        super::super::master::live(&self.db, &self.project).unwrap()
+    }
+
+    /// The master session the engine holds open for the project's live master, if any.
+    pub(crate) fn engine_session(&self) -> Option<String> {
+        crate::master_sessions::live_session(&self.db, &self.project).unwrap()
+    }
+
+    /// The master session one running agent's live terminal turns are counted in. Input:
+    /// the agent. Output: the session, or None for an agent the runtime does not run live.
+    pub(crate) fn live_session(&self, agent: i64) -> Option<String> {
+        self.runtime
+            .workers
+            .get(&agent)
+            .filter(|worker| worker.live)
+            .and_then(|worker| worker.session.clone())
+    }
+
+    /// What the Sessions list counts for one master session from its live terminal: its
+    /// turns and its last reply line. Input: the session. Output: both, or None before any.
+    pub(crate) fn session_turns(&self, session: &str) -> Option<(i64, Option<String>)> {
+        self.db
+            .query_row(
+                "SELECT turns,last_line FROM session_owner_turns WHERE session=?1 AND project=?2",
+                params![session, self.project.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()
+            .unwrap()
     }
 }
 
