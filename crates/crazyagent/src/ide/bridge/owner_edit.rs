@@ -81,7 +81,14 @@ pub(crate) fn edit(
     let message = format!(
         "The owner edited {path} in your worktree while you work. Keep their edit; it is part of your change set."
     );
-    let sent = crate::team::events::send_to_agent(&db, host, project, &id.to_string(), &message)?;
+    let sent = crate::team::events::send_to_agent(
+        &db,
+        host,
+        project,
+        &id.to_string(),
+        crate::team::events::Said::Notice,
+        &message,
+    )?;
     Ok(sent.is_ok())
 }
 

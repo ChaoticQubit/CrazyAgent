@@ -36,7 +36,6 @@ const UPDATED_NOTICE: &str =
 const MOVED_NOTE: &str = "These changes moved on since you opened them. They are read again from the top: Accept and Discard come back at the last page.";
 const WAITING_NOTE: &str = "Your branch is merged into the agent's copy, but the agent wasn't handed the work to resolve it. Ask it to update again, or discard.";
 const NO_FILE_SHOWN: &str = "Scroll the diff to a changed text file to open it in your editor.";
-const DIFF_HEADER: &str = "diff --git ";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Ask {

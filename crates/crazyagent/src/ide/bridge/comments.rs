@@ -5,7 +5,7 @@ use crate::engine::EngineError;
 use crate::engine::owner::failure;
 use crate::landing::{self, AgentKind, ChangeSetId, ChangeState, FileStatus};
 use crate::protocol::{Outcome, ProjectId};
-use crate::team::events::{SEND_BYTES_MAX, plain_agent_text, send_to_agent};
+use crate::team::events::{SEND_BYTES_MAX, Said, plain_agent_text, send_to_agent};
 use crate::team::{AgentStatus, MESSAGE_BYTES_MAX, TeamAction, bound_text};
 use crate::terminal::Host;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -84,12 +84,12 @@ fn message(agent: &str, title: &str, path: &str, line: u32, text: &str) -> Strin
 /// set takes it as one owner message in the project's team conversation through the team
 /// Message path; its frame quotes the agent's own text, so it is never an owner turn a
 /// master may name as an answer. A sub-agent's set types it into that agent's live terminal
-/// as its master's messages are typed. An owner conversation's set is refused, since the IDE
-/// holds no owner admission to drive that conversation. Only an open set of the IDE's project
-/// and a file it changed that still exists take a comment. Inputs: the store, the terminal
-/// host, the project, the set, the path, the line from 1 and the text. Output: Ok once
-/// delivered, or `changes_not_found`, `changes_closed`, `ide_comment_master_unavailable` or
-/// the team's refusal.
+/// as an engine notice in its Messages timeline. An owner conversation's set is refused,
+/// since the IDE holds no owner admission to drive that conversation. Only an open set of
+/// the IDE's project and a file it changed that still exists take a comment. Inputs: the
+/// store, the terminal host, the project, the set, the path, the line from 1 and the text.
+/// Output: Ok once delivered, or `changes_not_found`, `changes_closed`,
+/// `ide_comment_master_unavailable` or the team's refusal.
 pub(crate) fn comment(
     db: &Connection,
     host: Option<&dyn Host>,
@@ -140,7 +140,14 @@ pub(crate) fn comment(
                 return Err(failure("team_agent_not_running"));
             }
             let host = host.ok_or_else(|| failure("team_agent_unreachable"))?;
-            match send_to_agent(db, host, project, &format!("team-{agent}"), &text)? {
+            match send_to_agent(
+                db,
+                host,
+                project,
+                &format!("team-{agent}"),
+                Said::Notice,
+                &text,
+            )? {
                 Ok(typed) => {
                     assert_eq!(typed, agent);
                     Ok(())
