@@ -52,6 +52,16 @@ export function SavedMemoryRow({ item, busy, onPromote, onDelete }: { item: Memo
   </li>;
 }
 
+/** One note in Your notes with its exact stored text, hidden characters as escapes, next to
+ * Delete. Inputs: the memory, whether it is busy and the delete action. Output: the row. */
+export function OwnNoteRow({ memory, busy, onDelete }: { memory: SavedMemory; busy: boolean; onDelete: () => void }) {
+  return <li className="pj-memory">
+    <p className="pj-note-text">{displayText(memory.text)}</p>
+    <span className="pj-row"><StatusBadge word="Saved" tone="ok" />
+      <Button size="small" variant="danger-text" disabled={busy} onClick={onDelete}>Delete</Button></span>
+  </li>;
+}
+
 /** The project's memories in the Context tab: Suggested ones wait for Save to memory, Edit
  * first or Dismiss, Saved ones can be used in all projects with one click or deleted, and the owner's
  * own notes can be deleted. Input: the project data. Output: the panel. */
@@ -137,11 +147,8 @@ export function ProjectMemory({ data }: { data: ProjectData }) {
     </section>}
     {ownNotes.length > 0 && <section className="pj-stack-s" aria-labelledby="pj-mem-notes">
       <h3 id="pj-mem-notes">Your notes</h3>
-      <ul className="pj-rows">{ownNotes.map((memory) => <li key={memory.id} className="pj-memory">
-        <p className="pj-note-text">{displayText(memory.text)}</p>
-        <span className="pj-row"><StatusBadge word="Saved" tone="ok" />
-          <Button size="small" variant="danger-text" disabled={busy === memory.id} onClick={() => setForgetting(memory)}>Delete</Button></span>
-      </li>)}</ul>
+      <ul className="pj-rows">{ownNotes.map((memory) => <OwnNoteRow key={memory.id} memory={memory} busy={busy === memory.id}
+        onDelete={() => setForgetting(memory)} />)}</ul>
       {notes.kind === "ok" && notes.value.next !== null && <p className="pj-small pj-muted">Showing your newest {ownNotes.length} notes. Settings, Memory lists them all.</p>}
     </section>}
     {value && value.more && <p className="pj-small pj-muted">Showing the first {value.items.length} memories.</p>}
