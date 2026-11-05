@@ -9,7 +9,7 @@ export type NativeAuthPhase = "starting" | "awaiting_owner" | "checking_account"
   "failed" | "cancelled" | "unavailable" | "uncertain";
 type StatusField = { state: "missing" } | { state: "null" } | { state: "value"; text: string };
 type Challenge = { kind: "codex_browser"; auth_url: string } |
-  { kind: "codex_device_code"; user_code: string; verification_url: string } |
+  { kind: "codex_device_code"; user_code: string; verification_url: string; left_s?: number | null } |
   { kind: "claude_official"; auth_url: string; accepts_code: boolean; prompt_id: "1" | null };
 type Account = { kind: "codex_api_key" } |
   { kind: "codex_chatgpt"; email: string | null; plan_type: string } |
@@ -167,6 +167,8 @@ export function safeChallenge(challenge: Challenge): boolean {
   }
   const fields = challenge.kind === "codex_browser" ? [challenge.auth_url] :
     challenge.kind === "codex_device_code" ? [challenge.user_code, challenge.verification_url] : [];
+  if (challenge.kind === "codex_device_code" && challenge.left_s != null &&
+    !(Number.isInteger(challenge.left_s) && challenge.left_s >= 0 && challenge.left_s <= 900)) return false;
   return fields.length > 0 && fields.every((value) => typeof value === "string" &&
     !/[\u0000-\u001f\u007f-\u009f]/u.test(value) &&
     !/[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/u.test(value));

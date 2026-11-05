@@ -63,12 +63,23 @@ export function signInFailure(code: string, provider: SubscriptionProvider, runn
   }
   if (code === "native_auth_host_executable_changed") return { text: `${harness} changed on this Mac after CrazyAgent checked it, perhaps from an update. Try again.`, hint: "retry" };
   if (EXPIRED.includes(code)) return { text: "This code expired.", hint: "expired" };
+  if (code === "native_auth_sign_in_timed_out") {
+    return { text: "CrazyAgent stopped waiting for this code. Get a new code and enter it within 15 minutes.", hint: "expired" };
+  }
   if (CHECK.includes(code)) return { text: plainError(code), hint: "check" };
   if (code === "native_auth_cancelled") return { text: "Sign-in cancelled.", hint: "retry" };
   if (code === "native_auth_authentication_failed") return { text: "Sign-in didn't finish.", hint: "retry" };
   if (UNFINISHED.includes(code)) return { text: "Sign-in didn't finish. Try again.", hint: "retry" };
   const text = Object.hasOwn(SIGN_IN_TEXT, code) ? SIGN_IN_TEXT[code] : undefined;
   return { text: text ?? knownError(code) ?? withCode("Sign-in didn't finish. Try again.", code), hint: "retry" };
+}
+
+/** The line under a ChatGPT device code that says how long it still works, in whole minutes
+ * rounded up. Input: the seconds the engine said the code has left. Output: the line. */
+export function codeLeftLine(leftS: number): string {
+  const minutes = Math.ceil(leftS / 60);
+  if (minutes <= 0) return "This code ran out.";
+  return `This code works for ${minutes} more ${minutes === 1 ? "minute" : "minutes"}.`;
 }
 
 const GONE = new Set(["native_auth_operation_missing", "native_profile_source_conflict"]);
@@ -323,6 +334,7 @@ function ChallengeView({ challenge }: { challenge: Challenge }) {
       <p>Enter this code on the sign-in page:</p>
       <div className="device-code" aria-label="Sign-in code">{nativeAuthText(challenge.user_code)}</div>
       <span><CopyButton text={challenge.user_code} label="Copy code" /></span>
+      {typeof challenge.left_s === "number" && <p className="small secondary">{codeLeftLine(challenge.left_s)}</p>}
     </>}
     <p className="small secondary">{challenge.kind === "codex_device_code" ? "Sign-in page" : "Open this page in your browser to sign in"}</p>
     <p className="mono small sign-in-url">{nativeAuthText(url)}</p>

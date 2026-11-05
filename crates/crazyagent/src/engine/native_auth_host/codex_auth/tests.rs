@@ -267,10 +267,7 @@ fn native_auth_codex_device_code_wait_outlasts_the_fifteen_minute_code() {
         (NativeAuthMethod::CodexExisting, 60),
     ] {
         let action = NativeAuthAction::SignIn { method };
-        assert_eq!(
-            super::run_time(&action).unwrap(),
-            Duration::from_secs(time)
-        );
+        assert_eq!(super::run_time(&action).unwrap(), Duration::from_secs(time));
     }
     assert_eq!(
         super::run_time(&NativeAuthAction::Logout).unwrap(),
@@ -306,7 +303,22 @@ ERROR codex_login: device auth timed out after 15 minutes\n";
         "{text}"
     );
     assert!(text.len() <= 512);
-    assert!(text.bytes().all(|byte| byte.is_ascii_graphic() || byte == b' '));
+    assert!(
+        text.bytes()
+            .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+    );
     let long = vec![b'a'; 64 * 1024];
     assert!(super::masked(&long, None).len() <= 512);
+}
+
+#[test]
+fn native_auth_codex_dropped_notification_names_keep_only_short_plain_methods() {
+    assert_eq!(
+        super::dropped_name("account/login/completedV2"),
+        "account/login/completedV2"
+    );
+    assert_eq!(super::dropped_name(""), "*");
+    assert_eq!(super::dropped_name("account/login code=QX4F"), "*");
+    assert_eq!(super::dropped_name(&"m".repeat(65)), "*");
+    assert_eq!(super::dropped_name(&"m".repeat(64)), "m".repeat(64));
 }

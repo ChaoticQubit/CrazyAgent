@@ -3,6 +3,7 @@ use crate::config::ModelConnection;
 use crate::protocol::{ConfigId, CredentialRef, Cursor, RequestId};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::time::Duration;
 
 pub(crate) mod presentation;
 
@@ -12,6 +13,10 @@ mod presentation_tests;
 pub(crate) const REQUEST_BYTES_MAX: usize = 8192;
 pub(crate) const FACT_BYTES_MAX: usize = 16384;
 pub(crate) const OPERATIONS_MAX: i64 = 1024;
+pub const CODEX_DEVICE_CODE_LIFE: Duration = Duration::from_secs(15 * 60);
+pub(crate) const CODEX_LOG_DROPPED_MAX: usize = 8;
+pub(crate) const CODEX_LOG_NAME_BYTES_MAX: usize = 64;
+pub(crate) const CODEX_LOG_STDERR_BYTES_MAX: usize = 512;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -30,6 +35,23 @@ pub enum NativeAuthMethod {
     CodexExisting,
     ClaudeOfficial,
     ClaudeExisting,
+}
+
+impl NativeAuthMethod {
+    /// How long the engine keeps one sign-in of this method open: a minute past the life of a
+    /// ChatGPT device code, so the engine never gives up on a code Codex and OpenAI still take,
+    /// and ten minutes for every other method. Input: the method. Output: the window.
+    pub(crate) fn sign_in_window(self) -> Duration {
+        let window = match self {
+            Self::CodexDeviceCode => CODEX_DEVICE_CODE_LIFE + Duration::from_secs(60),
+            Self::CodexBrowser
+            | Self::CodexExisting
+            | Self::ClaudeOfficial
+            | Self::ClaudeExisting => Duration::from_secs(600),
+        };
+        assert!(window >= Duration::from_secs(600));
+        window
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -157,11 +179,34 @@ pub struct NativeAuthFact {
     pub code: Option<String>,
 }
 
-pub struct NativeAuthChallenge(crate::adapters::codex::LoginChallenge);
+pub struct NativeAuthChallenge {
+    codex: crate::adapters::codex::LoginChallenge,
+    left: Option<Duration>,
+}
 
 impl NativeAuthChallenge {
+    /// Pairs a Codex sign-in challenge with the time its device code has left, which only a
+    /// device code carries. Inputs: the challenge and the time left. Output: the challenge.
+    pub(crate) fn new(
+        codex: crate::adapters::codex::LoginChallenge,
+        left: Option<Duration>,
+    ) -> Self {
+        let left = match codex {
+            crate::adapters::codex::LoginChallenge::DeviceCode { .. } => left,
+            crate::adapters::codex::LoginChallenge::Browser { .. } => None,
+        };
+        assert!(left.is_none_or(|left| left <= CODEX_DEVICE_CODE_LIFE));
+        Self { codex, left }
+    }
+
     pub fn codex(&self) -> &crate::adapters::codex::LoginChallenge {
-        &self.0
+        &self.codex
+    }
+
+    /// How long the device code on screen still works, as the engine counted it when it
+    /// answered. Input: the challenge. Output: the time left, or none for a browser page.
+    pub fn left(&self) -> Option<Duration> {
+        self.left
     }
 }
 
@@ -244,6 +289,42 @@ pub(crate) enum CodexAuthObservation {
         reason: CodexHostFailure,
     },
     HostCancelled,
+}
+
+/// What the custodian saw of Codex when a sign-in failed or ran out of time, for the engine
+/// log: the names of the notifications it dropped and a masked tail of Codex stderr, never
+/// their params or any code.
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct CodexLog {
+    pub(crate) dropped: Vec<String>,
+    pub(crate) stderr: String,
+}
+
+impl CodexLog {
+    /// Checks the log stays within its bounds and holds only plain printable text, so the
+    /// engine log never takes a control byte or an unbounded line. Input: the log. Output:
+    /// done, or `native_auth_codex_log_invalid`.
+    pub(crate) fn validate(&self) -> Result<(), EngineError> {
+        let name = |name: &String| {
+            !name.is_empty()
+                && name.len() <= CODEX_LOG_NAME_BYTES_MAX
+                && name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"/_.-*".contains(&byte))
+        };
+        if self.dropped.len() > CODEX_LOG_DROPPED_MAX
+            || !self.dropped.iter().all(name)
+            || self.stderr.len() > CODEX_LOG_STDERR_BYTES_MAX
+            || !self
+                .stderr
+                .bytes()
+                .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+        {
+            return Err(failure("native_auth_codex_log_invalid"));
+        }
+        Ok(())
+    }
 }
 
 /// Why the custodian saw a started Codex child end without an app-server outcome: it
@@ -508,7 +589,10 @@ impl CodexAuthObservation {
             Self::LoginCanceled { canceled: true, .. }
                 if fact.phase == NativeAuthPhase::AwaitingOwner =>
             {
-                (NativeAuthPhase::Failed, Some("native_auth_sign_in_expired"))
+                (
+                    NativeAuthPhase::Failed,
+                    Some("native_auth_sign_in_timed_out"),
+                )
             }
             Self::RequestFailed { .. }
                 if matches!(
@@ -616,9 +700,11 @@ impl CodexAuthObservation {
 pub(crate) fn apply_codex_presentation(
     reply: &mut NativeAuthReply,
     challenge: Option<crate::adapters::codex::LoginChallenge>,
+    shown: Option<Duration>,
     account: Option<crate::adapters::codex::AuthAccount>,
 ) -> Result<(), EngineError> {
-    reply.challenge = challenge.map(NativeAuthChallenge);
+    let left = shown.map(|shown| CODEX_DEVICE_CODE_LIFE.saturating_sub(shown));
+    reply.challenge = challenge.map(|codex| NativeAuthChallenge::new(codex, left));
     reply.account = account.map(NativeAuthAccount::Codex);
     presentation::encode(reply)?;
     Ok(())
@@ -1045,5 +1131,56 @@ auth = { method = "native_managed", profile_ref = "codex-profile" }"#,
             succeeded.apply(&mut fact),
             Err(failure("native_auth_observation_order"))
         );
+    }
+
+    #[test]
+    fn only_a_chatgpt_device_code_sign_in_waits_past_the_code_s_fifteen_minutes() {
+        assert_eq!(CODEX_DEVICE_CODE_LIFE, Duration::from_secs(15 * 60));
+        assert!(NativeAuthMethod::CodexDeviceCode.sign_in_window() > CODEX_DEVICE_CODE_LIFE);
+        for method in [
+            NativeAuthMethod::CodexBrowser,
+            NativeAuthMethod::CodexExisting,
+            NativeAuthMethod::ClaudeOfficial,
+            NativeAuthMethod::ClaudeExisting,
+        ] {
+            assert_eq!(
+                method.sign_in_window(),
+                Duration::from_secs(600),
+                "{method:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_codex_log_holds_only_bounded_plain_text() {
+        let log = |dropped: Vec<&str>, stderr: &str| CodexLog {
+            dropped: dropped.into_iter().map(str::to_owned).collect(),
+            stderr: stderr.to_owned(),
+        };
+        assert!(
+            log(
+                vec!["account/login/x", "*"],
+                "ERROR codex_login: * timed out"
+            )
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            log(vec![], &"a".repeat(CODEX_LOG_STDERR_BYTES_MAX))
+                .validate()
+                .is_ok()
+        );
+        let invalid = failure("native_auth_codex_log_invalid");
+        for bad in [
+            log(vec![], &"a".repeat(CODEX_LOG_STDERR_BYTES_MAX + 1)),
+            log(vec![], "line\nbreak"),
+            log(vec![], "escape \u{1b}[0m"),
+            log(vec!["a"; CODEX_LOG_DROPPED_MAX + 1], ""),
+            log(vec![""], ""),
+            log(vec!["has space"], ""),
+            log(vec![&"m".repeat(CODEX_LOG_NAME_BYTES_MAX + 1)], ""),
+        ] {
+            assert_eq!(bad.validate(), Err(invalid.clone()));
+        }
     }
 }

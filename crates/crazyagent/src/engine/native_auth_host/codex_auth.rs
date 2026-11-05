@@ -1,6 +1,9 @@
 use super::custody::{CustodySession, Retirement, cleanup_owned_group};
 use crate::adapters::codex::{AuthControl, CodexProtocol, Event, FRAME_BYTES_MAX, LoginChallenge};
-use crate::engine::owner::native_auth::{CodexAuthObservation, CodexHostFailure};
+use crate::engine::owner::native_auth::{
+    CODEX_DEVICE_CODE_LIFE, CODEX_LOG_DROPPED_MAX, CODEX_LOG_NAME_BYTES_MAX,
+    CODEX_LOG_STDERR_BYTES_MAX, CodexAuthObservation, CodexHostFailure, CodexLog,
+};
 use crate::engine::owner::transport::native_auth_channel::{
     NativeAuthCustodyChannel, NativeAuthCustodyControl,
 };
@@ -19,8 +22,10 @@ const READ_BYTES: usize = 4096;
 const READ_BATCH: usize = 16;
 const POLL_TIME: Duration = Duration::from_millis(20);
 const CHECK_TIME: Duration = Duration::from_millis(100);
-const SIGN_IN_TIME: Duration = Duration::from_secs(590);
+const WINDOW_HEADROOM: Duration = Duration::from_secs(10);
 const EXPIRY_MARGIN: Duration = Duration::from_secs(40);
+const STDERR_TAIL_BYTES: usize = 4096;
+const WORD_BYTES_MAX: usize = 32;
 const CHECK_TIME_MAX: Duration = Duration::from_secs(60);
 const LOGOUT_TIME: Duration = Duration::from_secs(5);
 const CLEANUP_TIME: Duration = Duration::from_secs(2);
@@ -153,6 +158,10 @@ struct Driver<'a> {
     protocol: CodexProtocol,
     action: NativeAuthAction,
     login_id: Option<String>,
+    user_code: Option<String>,
+    stderr: Vec<u8>,
+    dropped: Vec<String>,
+    logged: bool,
     completion: Option<AuthControl>,
     account_requested: bool,
     cancel_requested: bool,
@@ -216,6 +225,45 @@ impl Driver<'_> {
         Ok(())
     }
 
+    /// Keeps the last bytes Codex wrote to stderr, at most `STDERR_TAIL_BYTES`. Input: the
+    /// bytes just read. Output: none.
+    fn keep_stderr(&mut self, bytes: &[u8]) {
+        self.stderr.extend_from_slice(bytes);
+        let over = self.stderr.len().saturating_sub(STDERR_TAIL_BYTES);
+        self.stderr.drain(..over);
+        assert!(self.stderr.len() <= STDERR_TAIL_BYTES);
+    }
+
+    /// Takes what the driver saw of Codex for the engine log, once per run. Input: the driver.
+    /// Output: the log, or none once it was taken.
+    fn take_log(&mut self) -> Option<CodexLog> {
+        if self.logged {
+            return None;
+        }
+        self.logged = true;
+        let log = CodexLog {
+            dropped: self.dropped.clone(),
+            stderr: masked(&self.stderr, self.user_code.as_deref()),
+        };
+        assert!(log.validate().is_ok());
+        Some(log)
+    }
+
+    /// Sends what the driver saw of Codex to the engine log when a sign-in fails or runs out
+    /// of time. Input: the driver. Output: done, or the channel's error.
+    async fn log(&mut self) -> Result<(), EngineError> {
+        let Some(log) = self.take_log() else {
+            return Ok(());
+        };
+        if matches!(
+            self.session.log_codex(self.channel, log).await?,
+            NativeAuthCustodyControl::Cancel
+        ) {
+            self.cancel_requested = true;
+        }
+        Ok(())
+    }
+
     async fn read_account(&mut self) -> Result<(), EngineError> {
         if self.account_requested {
             return Ok(());
@@ -255,6 +303,9 @@ impl Driver<'_> {
                     LoginChallenge::Browser { login_id, .. }
                     | LoginChallenge::DeviceCode { login_id, .. } => login_id.clone(),
                 });
+                if let LoginChallenge::DeviceCode { user_code, .. } = challenge {
+                    self.user_code = Some(user_code.expose().to_owned());
+                }
                 self.observe(event).await?;
                 if let Some(completed) = self.completion.take() {
                     self.observe(completed.clone()).await?;
@@ -262,7 +313,10 @@ impl Driver<'_> {
                     self.read_account().await?;
                 }
             }
-            AuthControl::LoginCompleted { .. } => {
+            AuthControl::LoginCompleted { success, .. } => {
+                if !success {
+                    self.log().await?;
+                }
                 self.completion = Some(event.clone());
                 if self.login_id.is_some() {
                     self.observe(event).await?;
@@ -291,7 +345,13 @@ impl Driver<'_> {
         match event {
             Event::Initialized => self.initialized().await,
             Event::AuthControl(event) => self.auth(event).await,
-            Event::UnsupportedNotification { .. } => Ok(()),
+            Event::UnsupportedNotification { method } => {
+                let name = dropped_name(&method);
+                if self.dropped.len() < CODEX_LOG_DROPPED_MAX && !self.dropped.contains(&name) {
+                    self.dropped.push(name);
+                }
+                Ok(())
+            }
             Event::ApprovalRequired { id, .. } | Event::UnsupportedRequest { id, .. } => {
                 let frame = self.protocol.deny_request(&id).map_err(protocol_error)?;
                 self.write(frame, true).await
@@ -328,7 +388,8 @@ impl Driver<'_> {
                 checked = Instant::now();
             }
             let bytes = self.pipes.output.read()?;
-            self.pipes.errors.read()?;
+            let errors = self.pipes.errors.read()?;
+            self.keep_stderr(&errors);
             let events = self.protocol.receive(&bytes).map_err(protocol_error)?;
             for event in events {
                 self.event(event).await?;
@@ -338,8 +399,10 @@ impl Driver<'_> {
             }
             if self.login_id.is_some()
                 && self.completion.is_none()
+                && !self.cancel_requested
                 && Instant::now() + EXPIRY_MARGIN >= self.deadline
             {
+                self.log().await?;
                 self.cancel_requested = true;
             }
             self.cancel().await?;
@@ -369,6 +432,7 @@ async fn observe_failure(
     session: &CustodySession,
     channel: &mut NativeAuthCustodyChannel,
     error: EngineError,
+    log: Option<CodexLog>,
 ) -> Result<(), EngineError> {
     let reason = match error.0.as_str() {
         "native_auth_cancelled" => None,
@@ -384,6 +448,9 @@ async fn observe_failure(
         code if !code.starts_with("native_auth_") => Some(CodexHostFailure::IoFailed),
         _ => return Err(error),
     };
+    if let (Some(_), Some(log)) = (reason, log) {
+        session.log_codex(channel, log).await?;
+    }
     let observation = reason.map_or(CodexAuthObservation::HostCancelled, |reason| {
         CodexAuthObservation::HostFailed { reason }
     });
@@ -405,8 +472,16 @@ async fn observe_failure(
 fn run_time(action: &NativeAuthAction) -> Result<Duration, EngineError> {
     match action {
         NativeAuthAction::SignIn {
-            method: NativeAuthMethod::CodexBrowser | NativeAuthMethod::CodexDeviceCode,
-        } => Ok(SIGN_IN_TIME),
+            method: method @ (NativeAuthMethod::CodexBrowser | NativeAuthMethod::CodexDeviceCode),
+        } => {
+            let time = method.sign_in_window() - WINDOW_HEADROOM;
+            assert!(time > EXPIRY_MARGIN);
+            assert!(
+                *method != NativeAuthMethod::CodexDeviceCode
+                    || time - EXPIRY_MARGIN > CODEX_DEVICE_CODE_LIFE
+            );
+            Ok(time)
+        }
         NativeAuthAction::SignIn {
             method: NativeAuthMethod::CodexExisting,
         } => Ok(CHECK_TIME_MAX),
@@ -415,10 +490,75 @@ fn run_time(action: &NativeAuthAction) -> Result<Duration, EngineError> {
     }
 }
 
-/// Masks a tail of Codex stderr for the engine log. Inputs: the raw tail and the device code
-/// on screen, if any. Output: the masked text.
-fn masked(bytes: &[u8], _code: Option<&str>) -> String {
-    String::from_utf8_lossy(bytes).into_owned()
+/// Squashes text to its letters and digits in upper case, so a code matches however Codex
+/// spaced or cased it. Input: the text. Output: the squashed text.
+fn squashed(text: &str) -> String {
+    text.chars()
+        .filter(char::is_ascii_alphanumeric)
+        .map(|c| c.to_ascii_uppercase())
+        .collect()
+}
+
+/// Tells whether one word of Codex stderr may reach the engine log as it is: a short word of
+/// letters and plain punctuation that holds no address and no part of the device code, or a
+/// number of at most four digits. Inputs: the word and the squashed device code. Output: true
+/// to keep it.
+fn plain(word: &str, code: Option<&str>) -> bool {
+    let number = word.len() <= 4 && word.bytes().all(|byte| byte.is_ascii_digit());
+    let text = word.len() <= WORD_BYTES_MAX
+        && !word.contains("//")
+        && word
+            .bytes()
+            .all(|byte| byte.is_ascii_alphabetic() || b".,:;()[]'\"_-/".contains(&byte));
+    let part = squashed(word);
+    (number || text) && !code.is_some_and(|code| part.len() >= 3 && code.contains(part.as_str()))
+}
+
+/// Masks a tail of Codex stderr for the engine log: every word that is not plain becomes `*`
+/// and only the last words that fit in `CODEX_LOG_STDERR_BYTES_MAX` stay. Inputs: the raw
+/// tail and the device code on screen, if any. Output: the masked text.
+fn masked(bytes: &[u8], code: Option<&str>) -> String {
+    let code = code.map(squashed).filter(|code| !code.is_empty());
+    let text = String::from_utf8_lossy(bytes);
+    let mut kept = Vec::new();
+    let mut size = 0;
+    for word in text
+        .split(|c: char| c.is_whitespace() || c.is_control())
+        .filter(|word| !word.is_empty())
+        .rev()
+    {
+        let word = if plain(word, code.as_deref()) {
+            word
+        } else {
+            "*"
+        };
+        let grown = size + word.len() + usize::from(!kept.is_empty());
+        if grown > CODEX_LOG_STDERR_BYTES_MAX {
+            break;
+        }
+        size = grown;
+        kept.push(word);
+    }
+    kept.reverse();
+    let shown = kept.join(" ");
+    assert_eq!(shown.len(), size);
+    assert!(shown.len() <= CODEX_LOG_STDERR_BYTES_MAX);
+    shown
+}
+
+/// The name a dropped Codex notification goes into the engine log as: its method when that
+/// is a short plain name, else `*`. Input: the method. Output: the name.
+fn dropped_name(method: &str) -> String {
+    let plain = !method.is_empty()
+        && method.len() <= CODEX_LOG_NAME_BYTES_MAX
+        && method
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"/_.-".contains(&byte));
+    if plain {
+        method.to_owned()
+    } else {
+        "*".to_owned()
+    }
 }
 
 pub(in crate::engine) async fn run(
@@ -452,6 +592,10 @@ pub(in crate::engine) async fn run(
         protocol: CodexProtocol::new(),
         action,
         login_id: None,
+        user_code: None,
+        stderr: Vec::new(),
+        dropped: Vec::new(),
+        logged: false,
         completion: None,
         account_requested: false,
         cancel_requested: false,
@@ -460,6 +604,7 @@ pub(in crate::engine) async fn run(
         deadline: Instant::now() + run_time,
     };
     let result = driver.run().await;
+    let log = result.as_ref().err().and_then(|_| driver.take_log());
     drop(driver);
     let cleaned = cleanup_owned_group(session.child_mut()?, group, Instant::now() + CLEANUP_TIME);
     if !cleaned.map_err(io_error)? {
@@ -468,7 +613,7 @@ pub(in crate::engine) async fn run(
             .unwrap_or_else(|| failure("native_auth_child_cleanup_uncertain")));
     }
     if let Err(error) = result {
-        observe_failure(&session, channel, error).await?;
+        observe_failure(&session, channel, error, log).await?;
     }
     session.seal_after_child_reaped()
 }

@@ -1351,6 +1351,7 @@ fn failed(code: &str, device_code: Option<&str>) -> SignInView {
         generation: 1,
         page: None,
         device_code: device_code.map(str::to_owned),
+        code_left: None,
         claude_prompt: None,
         email: None,
         plan: None,
