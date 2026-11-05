@@ -320,6 +320,92 @@ fn a_manual_reset_is_marked_and_an_empty_range_says_so() {
     assert!(all.contains("No limits read yet."), "{all}");
 }
 
+/// R4 N-D16 follow-up: an account whose read failed before any window was read shows its
+/// cause first and each window as not read, pointing at that cause, never as a window the
+/// provider left out.
+#[test]
+fn a_failed_read_with_no_window_shows_each_window_as_not_read_after_its_cause() {
+    let ctx = ctx(100, 40);
+    let unread = AccountLimits {
+        plan: None,
+        five_hour: None,
+        weekly: None,
+        polled_five_hour: None,
+        polled_weekly: None,
+        source: None,
+        observed_ms: None,
+        ..limits(Some("native_profile_credential_unavailable"))
+    };
+    let lines = text(&summary(
+        &UsageReport {
+            limits: vec![unread],
+            ..report()
+        },
+        UsageRange::Week,
+        &names(),
+        NOW,
+        0,
+        96,
+        &ctx,
+    ));
+    let at = |wanted: &str| lines.iter().position(|line| line == wanted);
+    let cause = at("    CrazyAgent can't read this account's sign-in. Sign in again in Accounts.");
+    let five_hour = at("    5-hour  Not read. The last read failed, for the reason above.");
+    let weekly = at("    Weekly  Not read. The last read failed, for the reason above.");
+    assert!(
+        cause.is_some() && five_hour.is_some() && weekly.is_some(),
+        "{lines:#?}"
+    );
+    assert!(cause < five_hour && five_hour < weekly, "{lines:#?}");
+    assert!(
+        !lines.iter().any(|line| line.contains("Not reported")),
+        "{lines:#?}"
+    );
+}
+
+/// F1 / ND16F-M1: an API-key account has no 5-hour or weekly window by design, so its
+/// windows keep the provider-omitted wording under its note, never a failed read.
+#[test]
+fn an_api_key_account_s_windows_keep_the_provider_omitted_wording() {
+    let ctx = ctx(100, 40);
+    let keyed = AccountLimits {
+        plan: None,
+        five_hour: None,
+        weekly: None,
+        polled_five_hour: None,
+        polled_weekly: None,
+        source: None,
+        observed_ms: None,
+        ..limits(Some("native_profile_codex_api_key"))
+    };
+    let lines = text(&summary(
+        &UsageReport {
+            limits: vec![keyed],
+            ..report()
+        },
+        UsageRange::Week,
+        &names(),
+        NOW,
+        0,
+        96,
+        &ctx,
+    ));
+    for wanted in [
+        "    An API-key account has no 5-hour or weekly window.",
+        "    5-hour  Not reported",
+        "    Weekly  Not reported",
+    ] {
+        assert!(
+            lines.iter().any(|line| line == wanted),
+            "{wanted:?} in {lines:#?}"
+        );
+    }
+    assert!(
+        !lines.iter().any(|line| line.contains("Not read.")),
+        "{lines:#?}"
+    );
+}
+
 fn asked_since(ctx: &mut Ctx) -> Option<i64> {
     match ctx.next_request() {
         Some(Request::Settings(job)) => match *job {
