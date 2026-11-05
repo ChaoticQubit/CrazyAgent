@@ -741,25 +741,38 @@ fn changed_effective_config_blocks_publication_and_cancellation() {
 }
 
 #[test]
-fn changed_source_with_same_config_blocks_publication_and_cancellation() {
-    let mut case = HostCase::new();
+fn a_settings_edit_that_leaves_the_config_as_it_was_lets_publication_and_cancellation_go_on() {
+    let mut published = HostCase::new();
     let (fact, _work) = fresh_work(
-        case.begin(case.start("changed-source", "connection-a"))
+        published
+            .begin(published.start("changed-source", "connection-a"))
             .unwrap(),
     );
-    std::fs::write(&case.global, format!("\n{CATALOG}")).unwrap();
-    assert_eq!(case.sources.config().unwrap().id, fact.binding.config_id);
+    std::fs::write(&published.global, format!("\n{CATALOG}")).unwrap();
+    assert_eq!(
+        published.sources.config().unwrap().id,
+        fact.binding.config_id
+    );
     assert_ne!(
-        settings::verified_source_hash(&case.config, Some(&case.sources)).unwrap(),
+        settings::verified_source_hash(&published.config, Some(&published.sources)).unwrap(),
         fact.binding.source_hash
     );
-    let before = case.snapshot();
-    assert!(
-        case.publish(&fact, NativeAuthHostUpdate::Unavailable)
-            .is_err()
+    let update = published
+        .publish(&fact, NativeAuthHostUpdate::Unavailable)
+        .unwrap();
+    assert_eq!(update.phase, NativeAuthPhase::Unavailable);
+    assert_eq!(published.read(&fact).unwrap().fact, update);
+
+    let mut cancelled = HostCase::new();
+    let (fact, _work) = fresh_work(
+        cancelled
+            .begin(cancelled.start("changed-source-cancel", "connection-a"))
+            .unwrap(),
     );
-    assert!(case.cancel(&fact).is_err());
-    assert_eq!(case.snapshot(), before);
+    std::fs::write(&cancelled.global, format!("\n{CATALOG}")).unwrap();
+    let cancelling = cancelled.cancel(&fact).unwrap();
+    assert_eq!(cancelling.fact.phase, NativeAuthPhase::Cancelling);
+    assert_eq!(cancelled.read(&fact).unwrap().fact, cancelling.fact);
 }
 
 #[test]
