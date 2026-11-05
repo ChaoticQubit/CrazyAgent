@@ -450,7 +450,7 @@ fn a_research_pane_an_earlier_engine_left_is_swept_with_what_it_started() {
     );
 }
 
-const LEAVING_STAND_IN: &str = "#!/bin/sh\n/usr/bin/perl -mPOSIX -e 'POSIX::setsid() > 0 or exit 1; open(my $file, \">\", \"$ENV{HOME}/descendant.pid\") or exit 1; print $file \"$$\\n\"; close($file); sleep 30' < /dev/null > /dev/null 2>&1 &\n(/usr/bin/nohup /bin/sleep 31 < /dev/null > /dev/null 2>&1 & echo $! > \"$HOME/member.pid\")\n/bin/stty raw -echo\nprintf '\\033[?2004hstand-in ready\\n'\nexec /bin/cat > \"$HOME/typed\"\n";
+const LEAVING_STAND_IN: &str = "#!/bin/sh\n/usr/bin/perl -mPOSIX -e 'POSIX::setsid() > 0 or exit 1; open(my $file, \">\", \"$ENV{HOME}/descendant.pid\") or exit 1; print $file \"$$\\n\"; close($file); sleep 30' < /dev/null > /dev/null 2>&1 &\n(/usr/bin/perl -e '$SIG{HUP} = \"IGNORE\"; setpgrp(0, 0) or exit 1; open(my $file, \">\", \"$ENV{HOME}/member.pid\") or exit 1; print $file \"$$\\n\"; close($file); exec \"/bin/sleep\", \"31\"' < /dev/null > /dev/null 2>&1 &)\n(/usr/bin/nohup /bin/sleep 32 < /dev/null > /dev/null 2>&1 & echo $! > \"$HOME/grouped.pid\")\n/bin/stty raw -echo\nprintf '\\033[?2004hstand-in ready\\n'\nexec /bin/cat > \"$HOME/typed\"\n";
 
 /// Kills, by id, the processes a test's stand-in agent left, however the test ends.
 struct Leftover(Vec<rustix::process::Pid>);
@@ -498,9 +498,10 @@ fn named_in(report: &str) -> BTreeMap<i32, String> {
 }
 
 /// A shell script stands in for Claude Code at Full access in a real tmux pane and leaves
-/// a process in its own session and one in the pane's session that ignores the hangup.
-/// Ending the pane reaches neither, so the stop names both instead of reporting a clean
-/// stop (CB-2).
+/// a process in its own session, one in the pane's session but a process group of its own
+/// that ignores the hangup, and one in the pane's process group. Ending the pane and its
+/// group reaches neither of the first two, so the stop names both instead of reporting a
+/// clean stop (CB-2), and it ends the third.
 #[test]
 fn stopping_a_full_access_pane_names_what_it_left_running() {
     let root = tempfile::Builder::new()
@@ -542,18 +543,23 @@ fn stopping_a_full_access_pane_names_what_it_left_running() {
     let leader =
         rustix::process::Pid::from_raw(i32::try_from(session.process_group()).unwrap()).unwrap();
     let deadline = Instant::now() + Duration::from_secs(20);
-    let (descendant, member) = loop {
-        if let (Some(descendant), Some(member)) =
-            (pid_in(&home, "descendant.pid"), pid_in(&home, "member.pid"))
-            && parent_of(member) == Some(1)
+    let (descendant, member, grouped) = loop {
+        if let (Some(descendant), Some(member), Some(grouped)) = (
+            pid_in(&home, "descendant.pid"),
+            pid_in(&home, "member.pid"),
+            pid_in(&home, "grouped.pid"),
+        ) && parent_of(member) == Some(1)
+            && parent_of(grouped) == Some(1)
         {
-            break (descendant, member);
+            break (descendant, member, grouped);
         }
         assert!(Instant::now() < deadline, "stand-in agent never started");
         std::thread::sleep(Duration::from_millis(10));
     };
-    let _leftover = Leftover(vec![descendant, member]);
+    let _leftover = Leftover(vec![descendant, member, grouped]);
     assert_eq!(rustix::process::getsid(Some(member)), Ok(leader));
+    assert_ne!(getpgid(Some(member)), Ok(leader));
+    assert_eq!(getpgid(Some(grouped)), Ok(leader));
     assert_ne!(rustix::process::getsid(Some(descendant)), Ok(leader));
 
     let left = match session.stop() {
@@ -563,6 +569,10 @@ fn stopping_a_full_access_pane_names_what_it_left_running() {
         ),
     };
     assert!(!host.alive().unwrap().contains(&agent));
+    assert!(
+        within(Duration::from_secs(10), || test_kill_process(grouped).is_err()),
+        "the stop of a Full access pane left {grouped:?} of its process group running"
+    );
     let report = left.plain();
     assert_eq!(
         named_in(&report),
