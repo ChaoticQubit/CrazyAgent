@@ -65,7 +65,8 @@ async function command(name, args) {
 }
 
 /** Reads a project's live master session through the app's commands, opening the project as its
- * Sessions bar does. Input: the project id. Output: the session id. */
+ * Sessions bar does; that takes the window's selection until the window opens the project again.
+ * Input: the project id. Output: the session id. */
 async function liveSession(id) {
   const opened = await command("desktop_open_project", { id });
   if (opened?.failed !== undefined || typeof opened?.ticket !== "string") throw new Error(`desktop_open_project answered no ticket for ${id}: ${opened?.failed ?? "no failure"}`);
@@ -129,6 +130,11 @@ export const checks = [{
       const live = await liveSession(id);
       if (live !== RECORDED_SESSION) throw new Error(`the live ${OLD_PROJECT} session is ${live}, not ${RECORDED_SESSION}, which the 18.14 record step wrote`);
       await noResumeNote(id);
+      await kit.go(`${base}/process`);
+      await kit.until(() => shown(EDITOR), UI_MS, `the ${OLD_PROJECT} instructions editor was never shown`);
+      await kit.go(`${base}/conversation`);
+      await terminalLive(kit, REPLY_MS);
+      await kit.until(async () => (messageCount(await liveLine()) ?? 0) > 0, UI_MS, `the ${OLD_PROJECT} master area did not read its sessions again after the check opened the project`);
       const session = await liveLine();
       const sent = await sendToMaster(kit, QUESTION);
       await kit.waitFor(async () => {
