@@ -33,7 +33,9 @@ impl ProfilePage {
     }
 
     fn form(profile: Option<&crate::owner_profile::OwnerProfile>, ctx: &Ctx) -> ProfileForm {
-        let mut form = ProfileForm::new(profile, Some(ctx.colors));
+        let mut form = ProfileForm::new(profile, Some(ctx.colors))
+            .with_shift_arrows(ctx.shift_arrows)
+            .with_shift_enter(ctx.shift_enter);
         form.set_focus(None);
         form
     }
@@ -114,10 +116,35 @@ impl Screen for ProfilePage {
                             None => Ok(()),
                         };
                         ctx.restyle(colors, ctx.appearance);
-                        match saved_colors {
-                            Ok(()) => ctx.say(Message::success("Saved.", "")),
-                            Err(_) => ctx.say(Message::warning(
+                        let shift_arrows = form.shift_arrows().unwrap_or_default();
+                        let saved_keys = match &ctx.prefs {
+                            Some(path) => prefs::save_shift_arrows(
+                                &prefs::shift_arrows_path(path),
+                                shift_arrows,
+                            ),
+                            None => Ok(()),
+                        };
+                        ctx.shift_arrows = shift_arrows;
+                        let shift_enter = form.shift_enter().unwrap_or_default();
+                        let saved_enter = match &ctx.prefs {
+                            Some(path) => {
+                                prefs::save_shift_enter(&prefs::shift_enter_path(path), shift_enter)
+                            }
+                            None => Ok(()),
+                        };
+                        ctx.shift_enter = shift_enter;
+                        match (saved_colors, saved_keys, saved_enter) {
+                            (Ok(()), Ok(()), Ok(())) => ctx.say(Message::success("Saved.", "")),
+                            (Err(_), _, _) => ctx.say(Message::warning(
                                 "Profile saved, but the color choice could not be kept on this Mac.",
+                                "",
+                            )),
+                            (Ok(()), Err(_), _) => ctx.say(Message::warning(
+                                "Profile saved, but the Shift-arrows choice could not be kept on this Mac.",
+                                "",
+                            )),
+                            (Ok(()), Ok(()), Err(_)) => ctx.say(Message::warning(
+                                "Profile saved, but the Shift-Enter choice could not be kept on this Mac.",
                                 "",
                             )),
                         }

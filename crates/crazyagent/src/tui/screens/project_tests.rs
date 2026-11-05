@@ -1262,6 +1262,7 @@ fn a_wide_conversation_shows_the_team_panel_beside_the_master_and_t_opens_the_te
             owner_questions: 0,
             no_worktree: false,
             hookless: false,
+            message_note: None,
         }],
         edges: Vec::new(),
         messages: Vec::new(),
@@ -2267,6 +2268,7 @@ fn console_screen() -> ProjectScreen {
         owner_questions: 0,
         no_worktree: false,
         hookless: false,
+        message_note: None,
     };
     screen.team = crate::tui::ctx::Load::Ready(Box::new(TeamGraph {
         project_id: project.clone(),

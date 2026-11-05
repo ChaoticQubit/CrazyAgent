@@ -8,24 +8,24 @@
                                                                                                                         
     Ledgerline         ┌─ Keys ─────────────────────────────────────────────────────────────────┐                 Idle  
     Invoicing for small│ Everywhere                          Lists                              │                       
-    Research: 3 done   │ Ctrl-K     Go to anything           ↑↓        Move                     │    Updated yesterday  
-                       │ Esc        Back or cancel           PgUp PgDn Page                     │                       
-    Fieldnotes Mobile  │ Tab        Next field or panel      Home End  First, last              │       ! Needs a pool  
-    Offline field notes│ Shift-Tab  Previous                 /         Filter                   │                       
-    Research: needs a p│ Shift-←→   Next tab                 Space     Select                   │       Updated Oct 19  
-                       │ ?          This help                Enter     Open                     │                       
-                       │ Ctrl-Q     Quit                                                        │                       
+    Research: 3 done   │ Ctrl-K       Go to anything         ↑↓        Move                     │    Updated yesterday  
+                       │ Esc          Back or cancel         PgUp PgDn Page                     │                       
+    Fieldnotes Mobile  │ Tab          Next field or panel    Home End  First, last              │       ! Needs a pool  
+    Offline field notes│ Shift-Tab    Previous               /         Filter                   │                       
+    Research: needs a p│ Shift-←→     Next tab               Space     Select                   │       Updated Oct 19  
+                       │ ?            This help              Enter     Open                     │                       
+                       │ Ctrl-Q       Quit                                                      │                       
                        │                                                                        │                       
                        │ Text fields                         This screen                        │                       
-                       │ ←→         Move the cursor          n         New project              │                       
-                       │ Ctrl-A E   Start, end               a         Add project              │                       
-                       │ Ctrl-W     Delete a word            s         Settings                 │                       
-                       │ Ctrl-U     Clear the field          Enter     Open project             │                       
-                       │ Ctrl-J     New line                 f         Projects folder          │                       
+                       │ ←→           Move the cursor        n         New project              │                       
+                       │ Ctrl-A E     Start, end             a         Add project              │                       
+                       │ Ctrl-W       Delete a word          s         Settings                 │                       
+                       │ Ctrl-U       Clear the field        Enter     Open project             │                       
+                       │ Ctrl-J       New line               f         Projects folder          │                       
+                       │ Shift-Enter  New line, if supported                                    │                       
                        │                                                                        │                       
-                       │ Letter keys work when you are not typing in a field.                   │                       
+                       │ Letter keys work outside fields. In tmux, use Ctrl-J for a new line.   │                       
                        └────────────────────────────────────────────────────────────────────────┘                       
-                                                                                                                        
                                                                                                                         
                                                                                                                         
                                                                                                                         

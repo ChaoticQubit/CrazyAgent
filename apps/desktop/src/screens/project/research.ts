@@ -106,6 +106,7 @@ export interface TeamAgentRow {
   stop: { agent: number } | null;
   stoppedByYou: boolean;
   teammates: TeammateRow[];
+  messageNote: string | null;
 }
 
 /** One teammate a harness split off in its own terminal window, as the Team panel shows it. */
@@ -219,6 +220,7 @@ export function teamPanel(status: Pick<TeamStatus, "agents" | "tasks" | "show_fi
       stop: agent.role !== "master" && agent.owner_stopped !== true && LIVE_AGENT.includes(agent.status) ? { agent: agent.id } : null,
       stoppedByYou: agent.owner_stopped === true,
       teammates: agent.role === "sub" ? teammateRows(agent, agent.owner_stopped !== true && LIVE_AGENT.includes(agent.status)) : [],
+      messageNote: agent.message_note ?? null,
     };
   });
   const tasks = status.tasks.filter((item) => filter === "all" || item.status === "running" || WAITING.includes(item.status)).map((item): TeamTaskRow => ({

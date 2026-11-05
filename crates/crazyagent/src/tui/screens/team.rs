@@ -13,7 +13,7 @@ use crate::tui::clock::now_ms;
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::glyphs::{Glyphs, Status};
-use crate::tui::keys::Key;
+use crate::tui::keys::{Key, ShiftArrows};
 use crate::tui::screens::new_project_page::{key_event, look};
 use crate::tui::screens::new_project_view::Row;
 use crate::tui::screens::process::{message, size};
@@ -818,7 +818,7 @@ impl Team {
                 | ProcessReply::Settings(_)
                 | ProcessReply::Adoption(_)
                 | ProcessReply::Files(_)
-                | ProcessReply::Paths(_)
+                | ProcessReply::Uncommitted(_)
                 | ProcessReply::Committed(_),
             ) => {
                 return;
@@ -858,6 +858,12 @@ impl Team {
             self.focus = Focus::Tree;
             return Flow::Handled;
         }
+        if self.master
+            && ctx.shift_arrows == ShiftArrows::SwitchTabs
+            && matches!(key, Key::ShiftLeft | Key::ShiftRight)
+        {
+            return self.step_tab(*key == Key::ShiftRight, ctx);
+        }
         if self.starting() {
             if *key == Key::Esc {
                 self.held.clear();
@@ -884,6 +890,17 @@ impl Team {
             });
         }
         Flow::Handled
+    }
+
+    /// Leaves the master view for the project's previous or next tab, as the desktop tab
+    /// strip beside its live terminal does; keys kept while the terminal started go with
+    /// the view. Inputs: the direction and the context. Output: back to the project page.
+    fn step_tab(&mut self, forward: bool, ctx: &mut Ctx) -> Flow {
+        assert!(self.master);
+        self.held.clear();
+        self.detach(ctx);
+        ctx.project_step = Some((self.project.clone(), forward));
+        Flow::Back
     }
 
     fn tree_lines(&mut self, limit: usize, height: usize, ctx: &Ctx) -> Vec<Line<'static>> {
@@ -1195,6 +1212,12 @@ impl Screen for Team {
             if self.starting() {
                 hints.push(hint("Esc", "Back"));
             }
+            if ctx.shift_arrows == ShiftArrows::SwitchTabs {
+                hints.push(hint(
+                    &format!("Shift-{}{}", ctx.glyphs.left, ctx.glyphs.right),
+                    "Tabs",
+                ));
+            }
             return hints;
         }
         if self.terminal_keys() {
@@ -1280,6 +1303,13 @@ impl Screen for Team {
 
     fn raw(&self) -> bool {
         self.terminal_keys()
+    }
+
+    fn step(&mut self, forward: bool, ctx: &mut Ctx) -> Flow {
+        if !self.master {
+            return Flow::Ignored;
+        }
+        self.step_tab(forward, ctx)
     }
 
     fn typing(&self) -> bool {
@@ -1642,9 +1672,10 @@ fn lead_rows(
 }
 
 /// Adds the rows under an agent: its account and branch on one row, then, for an agent
-/// whose launch fires no hooks, that its receipts are unavailable, wrapped to
-/// the width left after the prefix so the words are never cut. Inputs: the rows, the node,
-/// the prefix and the row width. Output: none; rows are appended.
+/// whose launch fires no hooks, that its receipts are unavailable, then the engine's note
+/// when the Delivery setting leaves it no way to get messages, each wrapped to the width
+/// left after the prefix so the words are never cut. Inputs: the rows, the node, the
+/// prefix and the row width. Output: none; rows are appended.
 fn detail_row(out: &mut Vec<TreeRow>, node: &GraphNode, prefix: String, width: usize) {
     if node.account.is_some() || node.branch.is_some() {
         out.push(TreeRow {
@@ -1656,11 +1687,16 @@ fn detail_row(out: &mut Vec<TreeRow>, node: &GraphNode, prefix: String, width: u
             },
         });
     }
-    if node.hookless {
-        let words = format!("Receipts {}", crate::coord::adoption::HOOKLESS_WORDS);
-        let room = width
-            .saturating_sub(crate::tui::text::width(&prefix))
-            .max(1);
+    let room = width
+        .saturating_sub(crate::tui::text::width(&prefix))
+        .max(1);
+    let hookless = node
+        .hookless
+        .then(|| format!("Receipts {}", crate::coord::adoption::HOOKLESS_WORDS));
+    for words in hookless
+        .into_iter()
+        .chain(node.message_note.as_deref().map(plain))
+    {
         out.extend(wrap(&words, room).into_iter().map(|line| TreeRow {
             item: None,
             prefix: prefix.clone(),

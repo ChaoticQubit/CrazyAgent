@@ -78,7 +78,7 @@ impl NativeBridge {
         settings: SandboxSettings,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
-        self.allow_new_auth()?;
+        self.allow_new_auth().await?;
         if self.blocked() {
             return Err(failure("pending_intent"));
         }

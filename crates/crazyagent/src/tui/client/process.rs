@@ -56,7 +56,8 @@ pub(in crate::tui) enum ProcessQuery {
 /// What one Process request returned: the text read, what a save comes to beside what a
 /// Claude master takes, what one team agent received at its last launch, one project's
 /// agent instruction settings as stored, its workflow adoption, the instruction files an
-/// import would move or moved, the moved paths still waiting for a commit, or that commit.
+/// import would move or moved, the moved paths still waiting for a commit with the
+/// checked-out branch, or that commit.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum ProcessReply {
     Text(String),
@@ -65,7 +66,7 @@ pub(in crate::tui) enum ProcessReply {
     Settings(crate::engine::owner::InstructionSettings),
     Adoption(Box<crate::engine::owner::Adoption>),
     Files(Vec<crate::engine::owner::ImportFile>),
-    Paths(Vec<String>),
+    Uncommitted(crate::engine::owner::UncommittedImport),
     Committed(crate::engine::owner::ImportCommit),
 }
 
@@ -171,7 +172,7 @@ impl NativeOwner {
             ProcessQuery::Uncommitted { project } => controller
                 .uncommitted_instruction_import(project)
                 .await
-                .map(ProcessReply::Paths),
+                .map(ProcessReply::Uncommitted),
             ProcessQuery::CommitImport { project } => controller
                 .commit_instruction_import(project)
                 .await

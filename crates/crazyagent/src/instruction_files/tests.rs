@@ -927,6 +927,66 @@ mod import {
     }
 
     #[test]
+    fn the_uncommitted_import_names_the_checked_out_branch_while_a_move_waits() {
+        let checkout = Checkout::new();
+        assert_eq!(
+            uncommitted_import(&checkout.folder).unwrap(),
+            UncommittedImport {
+                files: Vec::new(),
+                branch: None
+            },
+            "no move waits, so no branch is read"
+        );
+        import(&checkout.folder).unwrap();
+        let waiting = |branch: Option<&str>| UncommittedImport {
+            files: vec!["CLAUDE.md".to_owned(), ".claude/CLAUDE.md".to_owned()],
+            branch: branch.map(str::to_owned),
+        };
+        assert_eq!(
+            uncommitted_import(&checkout.folder).unwrap(),
+            waiting(Some("main"))
+        );
+        checkout.git(&["checkout", "-q", "-b", "release/2.0"]);
+        assert_eq!(
+            uncommitted_import(&checkout.folder).unwrap(),
+            waiting(Some("release/2.0"))
+        );
+        let long = "a/".repeat(crate::landing::BRANCH_BYTES_MAX / 2 + 1) + "b";
+        assert!(long.len() > crate::landing::BRANCH_BYTES_MAX);
+        checkout.git(&["checkout", "-q", "-b", &long]);
+        assert_eq!(
+            uncommitted_import(&checkout.folder).unwrap(),
+            waiting(None),
+            "a name over the bound is not shown"
+        );
+        checkout.git(&["checkout", "-q", "--detach"]);
+        assert_eq!(
+            uncommitted_import(&checkout.folder).unwrap(),
+            waiting(None),
+            "a detached HEAD has no branch to name"
+        );
+    }
+
+    #[test]
+    fn a_branch_name_the_engine_cannot_read_keeps_the_waiting_move_with_no_branch() {
+        let checkout = Checkout::new();
+        import(&checkout.folder).unwrap();
+        let git = checkout.folder.join(".git");
+        let mut packed = format!("{} refs/heads/", checkout.tip()).into_bytes();
+        packed.extend_from_slice(b"\xffname\n");
+        fs::write(git.join("packed-refs"), packed).unwrap();
+        fs::write(git.join("HEAD"), b"ref: refs/heads/\xffname\n").unwrap();
+        assert_eq!(
+            uncommitted_import(&checkout.folder).unwrap(),
+            UncommittedImport {
+                files: vec!["CLAUDE.md".to_owned(), ".claude/CLAUDE.md".to_owned()],
+                branch: None
+            },
+            "a branch that is not UTF-8 is not named, and the move still waits"
+        );
+    }
+
+    #[test]
     fn a_folder_without_git_moves_its_files_with_nothing_to_commit() {
         let checkout = Checkout::new();
         let plain = checkout.root.join("plain");

@@ -10,6 +10,7 @@ use crazyagent::terminal::tmux::installed;
 use e2e_support::{ENGINE, Engine, Owner, TMUX, hex, profile, repository, scratch, stop_tmux};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const COLUMNS: &str = "120";
@@ -403,6 +404,13 @@ fn to_tab(pty: &Pty, project: &str, tab: &str, keys: &[&str]) {
         let screen = pty.screen();
         let shown = tab_shown(&screen, project);
         if shown.as_deref() == Some(tab) {
+            return;
+        }
+        if tab == "Conversation" && shown.as_deref() == Some("Master") {
+            pty.keys(&["Escape"]);
+            pty.until("Esc leaves the master view for the console", |now| {
+                tab_shown(now, project).as_deref() == Some(tab)
+            });
             return;
         }
         assert!(step < STEPS_MAX, "no project tab is {tab}:\n{screen}");
@@ -801,4 +809,362 @@ fn the_tui_types_into_a_live_agent_terminal_from_the_team_tree() {
     pty.until("the typed text is erased again", |screen| {
         !screen.contains(&marker)
     });
+}
+
+const KEYBOARD_QUERY: &[u8] = b"\x1b[?u";
+const KEYBOARD_PUSH: &[u8] = b"\x1b[>1u";
+const KEYBOARD_POP: &[u8] = b"\x1b[<1u";
+const KEYBOARD_REPLY: &[u8] = b"\x1b[?0u\x1b[?62;22c";
+const DEVICE_ONLY_REPLY: &[u8] = b"\x1b[?62;22c";
+const LEAVE_SCREEN: &[u8] = b"\x1b[?1049l";
+const SHIFT_ENTER: &[u8] = b"\x1b[13;2u";
+
+/// A TUI on a pseudo-terminal from `/usr/bin/script` that the test plays the terminal for:
+/// it keeps every byte the TUI writes and types bytes back, so it can answer the keyboard
+/// protocol query tmux leaves unanswered. Built from the engine socket and the home folder
+/// the TUI keeps its choices in; dropping it ends `script` and with it the TUI.
+struct ScriptPty {
+    child: std::process::Child,
+    input: std::process::ChildStdin,
+    output: Arc<Mutex<Vec<u8>>>,
+    reader: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ScriptPty {
+    fn launch(engine_socket: &Path, home: &Path) -> Self {
+        let engine_socket = engine_socket.to_str().unwrap();
+        assert!(!ENGINE.contains('\'') && !engine_socket.contains('\''));
+        let command =
+            format!("stty cols {COLUMNS} rows {ROWS}; exec '{ENGINE}' tui '{engine_socket}'");
+        let mut script = Command::new("/usr/bin/script");
+        if cfg!(target_os = "macos") {
+            script.args(["-q", "/dev/null", "/bin/sh", "-c", &command]);
+        } else {
+            script.args(["-q", "-e", "-c", &command, "/dev/null"]);
+        }
+        script
+            .env("HOME", home)
+            .env("TERM", "xterm-256color")
+            .env_remove("XDG_CONFIG_HOME")
+            .env_remove("TMUX")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null());
+        let mut child = crazyagent::spawn_gate::spawn(&mut script)
+            .expect("/usr/bin/script runs the TUI on a pseudo-terminal");
+        let input = child.stdin.take().unwrap();
+        let mut stdout = child.stdout.take().unwrap();
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&output);
+        let reader = std::thread::spawn(move || {
+            let mut chunk = [0u8; 4096];
+            loop {
+                match std::io::Read::read(&mut stdout, &mut chunk) {
+                    Ok(0) | Err(_) => break,
+                    Ok(read) => sink.lock().unwrap().extend_from_slice(&chunk[..read]),
+                }
+            }
+        });
+        Self {
+            child,
+            input,
+            output,
+            reader: Some(reader),
+        }
+    }
+
+    fn type_bytes(&mut self, bytes: &[u8]) {
+        std::io::Write::write_all(&mut self.input, bytes).unwrap();
+        std::io::Write::flush(&mut self.input).unwrap();
+    }
+
+    fn written(&self) -> Vec<u8> {
+        self.output.lock().unwrap().clone()
+    }
+
+    fn screen(&self) -> String {
+        let mut parser = vt100::Parser::new(ROWS.parse().unwrap(), COLUMNS.parse().unwrap(), 0);
+        parser.process(&self.written());
+        parser.screen().contents()
+    }
+
+    fn until_written(&self, what: &str, check: impl Fn(&[u8]) -> bool) {
+        let start = Instant::now();
+        while !check(&self.written()) {
+            assert!(start.elapsed() < SCREEN_TIME, "{what}:\n{}", self.screen());
+            std::thread::sleep(POLL_TIME);
+        }
+    }
+
+    fn until(&self, what: &str, check: impl Fn(&str) -> bool) {
+        let start = Instant::now();
+        loop {
+            let screen = self.screen();
+            if check(&screen) {
+                return;
+            }
+            assert!(start.elapsed() < SCREEN_TIME, "{what}:\n{screen}");
+            std::thread::sleep(POLL_TIME);
+        }
+    }
+
+    fn exited(mut self) -> Vec<u8> {
+        let start = Instant::now();
+        while self.child.try_wait().unwrap().is_none() {
+            assert!(
+                start.elapsed() < SCREEN_TIME,
+                "the TUI never exited:\n{}",
+                self.screen()
+            );
+            std::thread::sleep(POLL_TIME);
+        }
+        if let Some(reader) = self.reader.take() {
+            reader.join().unwrap();
+        }
+        self.written()
+    }
+}
+
+impl Drop for ScriptPty {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn found(written: &[u8], sequence: &[u8]) -> Vec<usize> {
+    written
+        .windows(sequence.len())
+        .enumerate()
+        .filter(|(_, window)| *window == sequence)
+        .map(|(index, _)| index)
+        .collect()
+}
+
+fn pushes_a_keyboard_protocol(written: &[u8]) -> bool {
+    found(written, b"\x1b[>").into_iter().any(|start| {
+        let rest = &written[start + 3..];
+        let digits = rest.iter().take_while(|byte| byte.is_ascii_digit()).count();
+        digits > 0 && rest.get(digits) == Some(&b'u')
+    })
+}
+
+fn bio_lines(screen: &str, first: &str, second: &str) -> bool {
+    let rows: Vec<&str> = screen.lines().collect();
+    rows.windows(2).any(|pair| {
+        pair[0].contains(&format!("[ {first} ")) && pair[1].contains(&format!("[ {second} "))
+    })
+}
+
+fn welcome_bio(pty: &ScriptPty) {
+    pty.until("the first-run profile form shows", |screen| {
+        screen.contains("Welcome to CrazyAgent") && screen.contains("Short bio")
+    });
+}
+
+/// N-T1 C, Auto (the default): a terminal that answers the keyboard protocol query gets
+/// the protocol turned on, Shift-Enter (CSI 13;2u) then makes a new line in the bio, and
+/// the exit turns the protocol off before it leaves the alternate screen, so the shell is
+/// back to legacy keys.
+#[test]
+fn shift_enter_auto_turns_the_keyboard_protocol_on_and_the_exit_turns_it_off() {
+    let mut engine = Engine::start("ca-e2e-keys-");
+    let home = scratch("ca-e2e-keys-home-");
+    let mut pty = ScriptPty::launch(&engine.socket(), home.path());
+    pty.until_written(
+        "Auto asks the terminal for the keyboard protocol",
+        |written| !found(written, KEYBOARD_QUERY).is_empty(),
+    );
+    pty.type_bytes(KEYBOARD_REPLY);
+    pty.until_written(
+        "a terminal that has it gets the protocol turned on",
+        |written| !found(written, KEYBOARD_PUSH).is_empty(),
+    );
+    welcome_bio(&pty);
+    pty.type_bytes(b"\t\tfirst");
+    pty.type_bytes(SHIFT_ENTER);
+    pty.type_bytes(b"second");
+    pty.until("Shift-Enter makes a new line in the bio", |screen| {
+        bio_lines(screen, "first", "second")
+    });
+    pty.type_bytes(b"\x1b[117;5u");
+    pty.until("Ctrl-U from the protocol clears the bio", |screen| {
+        !screen.contains("second")
+    });
+    pty.type_bytes(b"\x1b[113;5u");
+    let written = pty.exited();
+    let pushes = found(&written, KEYBOARD_PUSH);
+    let pops = found(&written, KEYBOARD_POP);
+    let leaves = found(&written, LEAVE_SCREEN);
+    assert_eq!(pushes.len(), 1, "{pushes:?}");
+    assert_eq!(pops.len(), 1, "the exit turns the protocol off once");
+    assert!(
+        pushes[0] < pops[0] && leaves.last().is_some_and(|leave| pops[0] < *leave),
+        "popped after the push and before the alternate screen is left: {pushes:?} {pops:?} {leaves:?}"
+    );
+    engine.stop();
+}
+
+/// N-T1 C, Auto on a terminal without the protocol: it answers the query with its device
+/// attributes only, so the TUI never turns the protocol on and the exit has nothing to turn
+/// off; Ctrl-J still makes a new line in the bio.
+#[test]
+fn shift_enter_auto_leaves_a_terminal_without_the_protocol_as_it_is() {
+    let mut engine = Engine::start("ca-e2e-keys-");
+    let home = scratch("ca-e2e-keys-home-");
+    let mut pty = ScriptPty::launch(&engine.socket(), home.path());
+    pty.until_written(
+        "Auto asks the terminal for the keyboard protocol",
+        |written| !found(written, KEYBOARD_QUERY).is_empty(),
+    );
+    pty.type_bytes(DEVICE_ONLY_REPLY);
+    welcome_bio(&pty);
+    pty.type_bytes(b"\t\tfirst\nsecond");
+    pty.until("Ctrl-J makes a new line in the bio", |screen| {
+        bio_lines(screen, "first", "second")
+    });
+    pty.type_bytes(b"\x15");
+    pty.until("Ctrl-U clears the bio", |screen| !screen.contains("second"));
+    pty.type_bytes(b"\x11");
+    let written = pty.exited();
+    assert_eq!(found(&written, KEYBOARD_QUERY).len(), 1, "Auto asks once");
+    assert!(
+        !pushes_a_keyboard_protocol(&written),
+        "a terminal without the protocol never gets it turned on"
+    );
+    assert!(
+        found(&written, KEYBOARD_POP).is_empty(),
+        "nothing pushed, nothing popped"
+    );
+    engine.stop();
+}
+
+/// N-T1 C, Off: the TUI never asks the terminal and never turns the protocol on, and Ctrl-J
+/// makes a new line in the bio.
+#[test]
+fn shift_enter_off_never_asks_the_terminal_and_ctrl_j_makes_a_new_line() {
+    let mut engine = Engine::start("ca-e2e-keys-");
+    let home = scratch("ca-e2e-keys-home-");
+    let prefs = if cfg!(target_os = "macos") {
+        home.path().join("Library/Application Support/CrazyAgent")
+    } else {
+        home.path().join(".config/crazyagent")
+    };
+    std::fs::create_dir_all(&prefs).unwrap();
+    std::fs::write(prefs.join("tui-shift-enter"), "off").unwrap();
+    let mut pty = ScriptPty::launch(&engine.socket(), home.path());
+    welcome_bio(&pty);
+    pty.type_bytes(b"\t\tfirst\nsecond");
+    pty.until("Ctrl-J makes a new line in the bio", |screen| {
+        bio_lines(screen, "first", "second")
+    });
+    pty.type_bytes(b"\x15");
+    pty.until("Ctrl-U clears the bio", |screen| !screen.contains("second"));
+    pty.type_bytes(b"\x11");
+    let written = pty.exited();
+    assert!(
+        found(&written, KEYBOARD_QUERY).is_empty(),
+        "Off never asks the terminal"
+    );
+    assert!(
+        !pushes_a_keyboard_protocol(&written),
+        "Off never turns the protocol on"
+    );
+    assert!(found(&written, KEYBOARD_POP).is_empty());
+    engine.stop();
+}
+
+fn script_home(pty: &mut ScriptPty) {
+    for step in 0..=STEPS_MAX {
+        assert!(
+            step < STEPS_MAX,
+            "the TUI never reached Home:\n{}",
+            pty.screen()
+        );
+        pty.until("the TUI shows Home or a first-run step", |screen| {
+            at_home(screen, PROJECT) || screen.contains("c Continue without")
+        });
+        let screen = pty.screen();
+        if at_home(&screen, PROJECT) {
+            return;
+        }
+        pty.type_bytes(b"c");
+        pty.until("the first-run step moves on", |now| now != screen);
+    }
+}
+
+/// N-T1 C: a Shift-Enter choice saved in Settings > Profile applies at once. Saving Off
+/// turns the protocol off without asking the terminal, saving Auto asks again and turns it
+/// back on, and the exit turns it off once more before it leaves the alternate screen.
+#[test]
+fn a_saved_shift_enter_choice_switches_the_keyboard_protocol_at_once() {
+    let mut engine = Engine::start("ca-e2e-keys-");
+    let disk = scratch("ca-e2e-keys-projects-");
+    let projects = disk.path().join("Projects");
+    std::fs::create_dir(&projects).unwrap();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut owner = Owner::attach(&engine).await;
+            assert_eq!(owner.save_profile(profile()).await, OwnerResult::Applied);
+            assert_eq!(owner.set_home(&projects).await, OwnerResult::Applied);
+            assert_eq!(
+                owner.create_project("e2e-keys", PROJECT).await,
+                OwnerResult::Applied
+            );
+            owner.controller.detach();
+        });
+    let home = scratch("ca-e2e-keys-home-");
+    let mut pty = ScriptPty::launch(&engine.socket(), home.path());
+    pty.until_written("Auto asks the terminal at start", |written| {
+        found(written, KEYBOARD_QUERY).len() == 1
+    });
+    pty.type_bytes(KEYBOARD_REPLY);
+    pty.until_written("the protocol is turned on at start", |written| {
+        found(written, KEYBOARD_PUSH).len() == 1
+    });
+    script_home(&mut pty);
+    pty.type_bytes(b"s");
+    pty.until("Home opens Settings", |screen| screen.contains("Settings"));
+    pty.type_bytes(b"\x1b[1;2D");
+    pty.until("Settings > Profile shows the Shift-Enter row", |screen| {
+        screen.contains("Shift-Enter") && screen.contains("( ) Off")
+    });
+    pty.type_bytes(b"\t\t\t\t\t\t\t\t\t\x1b[C\t\r");
+    pty.until_written("saving Off turns the protocol off at once", |written| {
+        found(written, KEYBOARD_POP).len() == 1
+    });
+    pty.until("the profile is saved with Off", |screen| {
+        screen.contains("Saved.") && screen.contains("(*) Off")
+    });
+    assert_eq!(
+        found(&pty.written(), KEYBOARD_QUERY).len(),
+        1,
+        "saving Off never asks the terminal"
+    );
+    pty.type_bytes(b"\x1b[Z\x1b[C\t\r");
+    pty.until_written("saving Auto asks the terminal again", |written| {
+        found(written, KEYBOARD_QUERY).len() == 2
+    });
+    pty.type_bytes(KEYBOARD_REPLY);
+    pty.until_written("saving Auto turns the protocol back on", |written| {
+        found(written, KEYBOARD_PUSH).len() == 2
+    });
+    pty.type_bytes(b"\x1b[113;5u");
+    let written = pty.exited();
+    let pushes = found(&written, KEYBOARD_PUSH);
+    let pops = found(&written, KEYBOARD_POP);
+    let leaves = found(&written, LEAVE_SCREEN);
+    assert_eq!(pushes.len(), 2, "{pushes:?}");
+    assert_eq!(pops.len(), 2, "{pops:?}");
+    assert!(
+        pushes[0] < pops[0]
+            && pops[0] < pushes[1]
+            && pushes[1] < pops[1]
+            && leaves.last().is_some_and(|leave| pops[1] < *leave),
+        "push, pop on Off, push on Auto, pop before the alternate screen is left: {pushes:?} {pops:?} {leaves:?}"
+    );
+    engine.stop();
 }

@@ -821,6 +821,89 @@ async fn desktop_native_auth_cancelled_sign_in_releases_settings_changes() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_native_auth_cancel_settled_while_unread_does_not_block_sign_in_again() {
+    run_case(|fixture| async move {
+        let running = sleeping_login(&fixture).await;
+        let mut bridge = fixture.bridge().await;
+        let detail = inspect(&mut bridge, "connection-z").await;
+        let started = serde_json::to_value(
+            bridge
+                .start_native_auth(&detail.ticket, NativeAuthMethod::ClaudeOfficial)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        login_pid(&running).await;
+        let current = inspect(&mut bridge, "connection-z").await;
+        let cancelling =
+            serde_json::to_value(bridge.cancel_native_auth(&current.ticket).await.unwrap())
+                .unwrap();
+        assert_eq!(cancelling["operation_id"], started["operation_id"]);
+        assert_eq!(cancelling["phase"], "cancelling");
+        let mut phase = NativeAuthPhase::Cancelling;
+        for _ in 0..120 {
+            phase = fixture.owner_fact(&cancelling).await.fact.phase;
+            if phase == NativeAuthPhase::Cancelled {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        assert_eq!(phase, NativeAuthPhase::Cancelled);
+        let stuck = bridge.status().stuck_sign_in;
+        let renamed = bridge
+            .rename_account("connection-z", "Renamed after the cancel".into())
+            .await
+            .err()
+            .map(|error| error.code);
+        let again = inspect(&mut bridge, "connection-z").await;
+        let retried = bridge
+            .start_native_auth(&again.ticket, NativeAuthMethod::ClaudeOfficial)
+            .await;
+        let refused = retried.as_ref().err().map(|error| error.code);
+        assert_eq!(
+            (stuck.as_deref(), renamed, refused),
+            (None, None, None),
+            "a cancel the engine settled while the desktop did not read it again leaves no stuck sign-in, and its account changes and signs in again"
+        );
+        let retried = serde_json::to_value(retried.unwrap()).unwrap();
+        assert_ne!(retried["operation_id"], started["operation_id"]);
+        let current = inspect(&mut bridge, "connection-z").await;
+        bridge.cancel_native_auth(&current.ticket).await.unwrap();
+        settle(&mut bridge, "cancelled").await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn desktop_native_auth_running_sign_in_is_not_reported_stuck() {
+    run_case(|fixture| async move {
+        let running = sleeping_login(&fixture).await;
+        let mut bridge = fixture.bridge().await;
+        let detail = inspect(&mut bridge, "connection-z").await;
+        bridge
+            .start_native_auth(&detail.ticket, NativeAuthMethod::ClaudeOfficial)
+            .await
+            .unwrap();
+        login_pid(&running).await;
+        assert_eq!(bridge.status().stuck_sign_in, None);
+        let other = inspect(&mut bridge, "connection-z").await;
+        assert_eq!(
+            bridge
+                .start_native_auth(&other.ticket, NativeAuthMethod::ClaudeOfficial)
+                .await
+                .err()
+                .map(|error| serde_json::to_value(error).unwrap()),
+            Some(serde_json::json!({ "code": "native_auth_sign_in_running", "account": "connection-z" })),
+            "a second sign-in waits while the engine still runs the first, and the refusal names the running account, not a stuck one"
+        );
+        let current = inspect(&mut bridge, "connection-z").await;
+        bridge.cancel_native_auth(&current.ticket).await.unwrap();
+        settle(&mut bridge, "cancelled").await;
+    })
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn desktop_native_auth_settings_change_mid_sign_in_does_not_wedge_the_desktop() {
     run_case(|fixture| async move {
         let running = sleeping_login(&fixture).await;
@@ -839,9 +922,9 @@ async fn desktop_native_auth_settings_change_mid_sign_in_does_not_wedge_the_desk
             bridge.remove_account("connection-z").await,
         ] {
             assert_eq!(
-                refused.unwrap_err().code,
-                "native_auth_recovery_required",
-                "the desktop does not change the account a running sign-in is bound to"
+                serde_json::to_value(refused.unwrap_err()).unwrap(),
+                serde_json::json!({ "code": "native_auth_sign_in_running", "account": "connection-z" }),
+                "the desktop does not change the account a running sign-in is bound to, and says that sign-in runs"
             );
         }
         bridge
@@ -862,15 +945,8 @@ async fn desktop_native_auth_settings_change_mid_sign_in_does_not_wedge_the_desk
             .unwrap();
         let moved = inspect(&mut bridge, "connection-z").await;
         assert_ne!(moved.source_hash, detail.source_hash);
-        assert_eq!(
-            bridge
-                .cancel_native_auth(&moved.ticket)
-                .await
-                .err()
-                .unwrap()
-                .code,
-            "native_profile_source_conflict"
-        );
+        bridge.cancel_native_auth(&moved.ticket).await.unwrap();
+        settle(&mut bridge, "cancelled").await;
         add_account_ref(&mut bridge, "account-after-source-change", 1).await;
         bridge
             .add_account(claude_draft("Added after the source moved"), None)

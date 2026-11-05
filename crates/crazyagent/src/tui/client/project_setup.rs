@@ -828,16 +828,17 @@ pools = []
         tokio::sync::watch::Sender<bool>,
         tempfile::TempDir,
     ) {
-        live_project_with(root, LIVE_ACCESS, None).await
+        live_project_with(root, LIVE_ACCESS, None, vec![]).await
     }
 
     /// [`live_project`] on the given global settings with the given team plan, None for
-    /// the engine's default. Inputs: the root, the settings text and the plan. Output: as
-    /// [`live_project`].
+    /// the engine's default, and research toggles. Inputs: the root, the settings text, the
+    /// plan and the toggles. Output: as [`live_project`].
     async fn live_project_with(
         root: &std::path::Path,
         access: &str,
         team: Option<crate::project_setup::TeamPlan>,
+        research: Vec<ResearchKind>,
     ) -> (
         EngineService,
         NativeOwner,
@@ -871,7 +872,7 @@ pools = []
             about: "Notes kept by a live master.".into(),
             tech_stack: vec!["rust".into()],
             platforms: vec![Platform::Cli],
-            research: vec![],
+            research,
             pool: None,
             team,
             documents: vec![],
@@ -961,6 +962,26 @@ pools = []
         );
     }
 
+    /// The global settings of a test engine whose model access names only the owner's
+    /// signed-in account, with no pool yet. Input: the account's connection as the owner's
+    /// settings name it. Output: the settings text.
+    #[cfg(target_os = "macos")]
+    fn owner_settings(connection: &crate::config::ModelConnection) -> String {
+        let mut settings = "version = 1\ntimeout_ms = 10000\nallowed_destinations = []\n"
+            .parse::<toml_edit::DocumentMut>()
+            .unwrap();
+        settings["model_access"] = toml_edit::Item::Table(
+            toml_edit::ser::to_document(&crate::config::ModelAccess {
+                accounts: vec![connection.account_ref.clone()],
+                connections: vec![connection.clone()],
+                pools: vec![],
+            })
+            .unwrap()
+            .into_table(),
+        );
+        settings.to_string()
+    }
+
     /// Turning a project's live master on from the TUI first opens the owner's default
     /// master session when the project has none, so the live master runs in a session its
     /// turns mark used and the Sessions list shows (LMS-1); turning it on again keeps that
@@ -1036,21 +1057,10 @@ pools = []
     #[test]
     #[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
     fn turning_a_real_claude_live_master_on_opens_the_owner_s_default_session() {
-        use crate::team::runtime::live_failover_tests::{ASK, OwnerClaude, START, TURN, Team};
-        let owner = OwnerClaude::pick();
+        use crate::team::runtime::live_failover_tests::{ASK, OwnerAccount, START, TURN, Team};
+        let owner = OwnerAccount::claude();
         let connection = owner.connection().clone();
-        let mut settings = "version = 1\ntimeout_ms = 10000\nallowed_destinations = []\n"
-            .parse::<toml_edit::DocumentMut>()
-            .unwrap();
-        settings["model_access"] = toml_edit::Item::Table(
-            toml_edit::ser::to_document(&crate::config::ModelAccess {
-                accounts: vec![connection.account_ref.clone()],
-                connections: vec![connection.clone()],
-                pools: vec![],
-            })
-            .unwrap()
-            .into_table(),
-        );
+        let settings = owner_settings(&connection);
         let plan = crate::project_setup::TeamPlan {
             master: "claude-code".into(),
             master_tools: true,
@@ -1068,7 +1078,7 @@ pools = []
             .unwrap();
         let (project, session, _home) = engine.block_on(async {
             let (mut service, mut native, mut app, project, _stop, home) =
-                live_project_with(root.path(), &settings.to_string(), Some(plan)).await;
+                live_project_with(root.path(), &settings, Some(plan), vec![]).await;
             let controller = native.controller.as_mut().unwrap();
             assign_pool(controller, &project, connection.id.as_str()).await;
             assert_eq!(
@@ -1178,6 +1188,334 @@ pools = []
             team.seen()
         );
         println!("live LMS-1: {counted:?} {}", team.seen());
+    }
+
+    /// How long one live DEC-090 task or research job may run on a real account.
+    #[cfg(target_os = "macos")]
+    const LIVE_RUN_LIMIT: std::time::Duration = std::time::Duration::from_secs(1200);
+
+    /// The team plan of a live test project: a tools-on master and one tools-on sub-agent,
+    /// both on the owner account's launch harness. Input: the harness. Output: the plan.
+    #[cfg(target_os = "macos")]
+    fn owner_team(harness: &str) -> crate::project_setup::TeamPlan {
+        crate::project_setup::TeamPlan {
+            master: harness.into(),
+            master_tools: true,
+            sub_harnesses: vec![crate::project_setup::HarnessSlot {
+                harness: harness.into(),
+                agents: 1,
+                tools: true,
+            }],
+            min_agents: 1,
+            max_agents: 2,
+        }
+    }
+
+    /// The project's folder as the engine records it in the database it left, else its
+    /// folder under `<root>/projects`, as the engine's research finds it. Inputs: the engine
+    /// folder and the project. Output: the project's CrazyAgent state folder.
+    #[cfg(target_os = "macos")]
+    fn engine_state_folder(root: &std::path::Path, project: &ProjectId) -> std::path::PathBuf {
+        let database = rusqlite::Connection::open_with_flags(
+            root.join("engine.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let tx = database.unchecked_transaction().unwrap();
+        let folder = crate::project_setup::load_setup(&tx, project)
+            .unwrap()
+            .map(|stored| stored.project_folder())
+            .unwrap_or_else(|| root.join("projects").join(project.as_str()));
+        crate::projects_home::state_folder(&folder)
+    }
+
+    /// DEC-090, live: the owner hands one shell task to a tools-on sub-agent through the
+    /// owner client of a test engine whose only account is the owner's signed-in managed one;
+    /// once that engine stops, the team runtime on its database runs the task on that account
+    /// under the owner engine's custody, and the task reports the command's output. Input:
+    /// the owner's account. Output: none; it panics unless the task is done with the output.
+    #[cfg(target_os = "macos")]
+    fn managed_agent_completes_a_tool_turn(
+        owner: crate::team::runtime::live_failover_tests::OwnerAccount,
+    ) {
+        use crate::team::TaskStatus;
+        use crate::team::runtime::live_failover_tests::Team;
+        use std::time::{Instant, SystemTime, UNIX_EPOCH};
+        let connection = owner.connection().clone();
+        let (harness, _) = owner.launch();
+        let nonce = format!(
+            "DEC090-OK-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis()
+        );
+        let prompt = format!(
+            "Use your shell to run this command in your working folder: printf {nonce} > dec-090-check.txt && cat dec-090-check.txt. Then reply with exactly what it printed."
+        );
+        let root = tempfile::Builder::new()
+            .prefix("ca-tui-live-dec090-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        let engine = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (project, _home) = engine.block_on(async {
+            let (mut service, mut native, _app, project, _stop, home) = live_project_with(
+                root.path(),
+                &owner_settings(&connection),
+                Some(owner_team(harness)),
+                vec![],
+            )
+            .await;
+            let controller = native.controller.as_mut().unwrap();
+            assign_pool(controller, &project, connection.id.as_str()).await;
+            let delegated = controller
+                .team_action(
+                    crate::team::TeamAction::Delegate {
+                        project_id: project.clone(),
+                        harness: Some(harness.into()),
+                        prompt: prompt.clone(),
+                    },
+                    1,
+                )
+                .await
+                .unwrap();
+            assert!(
+                matches!(
+                    &delegated,
+                    OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation }
+                        if operation.result == crate::engine::owner::OwnerResult::Applied
+                ),
+                "the engine applies the owner's delegate: {delegated:?}"
+            );
+            let status = controller.team_status(project.clone()).await.unwrap();
+            let queued = status
+                .tasks
+                .iter()
+                .find(|task| task.prompt == prompt)
+                .expect("the delegated task is listed");
+            assert!(
+                !matches!(
+                    queued.status,
+                    TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled
+                ),
+                "no team runtime runs yet, so the task waits: {}",
+                queued.status_label
+            );
+            drop(native);
+            service.shutdown().await.unwrap();
+            (project, home)
+        });
+        drop(engine);
+
+        let (global, settings) = (
+            root.path().join("global.toml"),
+            root.path().join("project.toml"),
+        );
+        assert!(
+            root.path().join("engine.db").is_file(),
+            "the test engine keeps its engine.db"
+        );
+        assert!(
+            crate::config::resolve_config(&global, &settings)
+                .unwrap()
+                .settings
+                .model_access
+                .is_some(),
+            "the engine settings configure model access"
+        );
+        let database = rusqlite::Connection::open_with_flags(
+            root.path().join("engine.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .unwrap();
+        let tx = database.unchecked_transaction().unwrap();
+        let stored = crate::project_setup::load_setup(&tx, &project)
+            .unwrap()
+            .expect("the engine keeps the project it set up");
+        drop(tx);
+        drop(database);
+        assert!(
+            stored
+                .team
+                .sub_harnesses
+                .iter()
+                .any(|slot| slot.tools
+                    && crate::team::launch_harness(&slot.harness) == Some(harness)),
+            "the project's team has a tools-on {harness} sub-agent"
+        );
+
+        let mut team = Team::on_engine(root.path(), &global, &settings, &project, &owner);
+        let deadline = Instant::now() + LIVE_RUN_LIMIT;
+        let task = loop {
+            let task = team.task(&prompt).expect("the delegated task is listed");
+            if matches!(
+                task.status,
+                TaskStatus::Done | TaskStatus::Failed | TaskStatus::Cancelled
+            ) {
+                break task;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "task {} is still {}: {:?}",
+                task.id,
+                task.status_label,
+                task.problem
+            );
+            team.tick();
+        };
+        assert_eq!(task.status, TaskStatus::Done, "{:?}", task.problem);
+        assert!(
+            task.result
+                .as_deref()
+                .is_some_and(|text| text.contains(&nonce)),
+            "{:?}",
+            task.result
+        );
+        println!(
+            "live DEC-090 {harness}: task {} {} after {} attempts",
+            task.id, task.status_label, task.attempts
+        );
+    }
+
+    /// DEC-090, live, Claude Code: a tools-on Claude Code sub-agent completes one shell task
+    /// on the owner's signed-in managed Claude account. Runs in a live window only.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
+    fn a_tools_on_claude_agent_completes_a_turn_on_its_signed_in_managed_account() {
+        managed_agent_completes_a_tool_turn(
+            crate::team::runtime::live_failover_tests::OwnerAccount::claude(),
+        );
+    }
+
+    /// DEC-090, live, Codex: a tools-on Codex sub-agent completes one shell task on the
+    /// owner's managed ChatGPT account for Codex. Runs in a live window only.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CODEX_PROFILE"]
+    fn a_tools_on_codex_agent_completes_a_turn_on_its_signed_in_managed_account() {
+        managed_agent_completes_a_tool_turn(
+            crate::team::runtime::live_failover_tests::OwnerAccount::codex(),
+        );
+    }
+
+    /// Research, live: a project created through the owner client of a test engine whose
+    /// only account is the owner's signed-in managed one queues one research job; once its
+    /// pool is assigned and that engine stops, the engine's research service on its database
+    /// runs the job on that account under the owner engine's custody. Inputs: the owner's
+    /// account and the research toggle. Output: the report the job wrote.
+    #[cfg(target_os = "macos")]
+    fn engine_research(
+        owner: crate::team::runtime::live_failover_tests::OwnerAccount,
+        kind: ResearchKind,
+    ) -> String {
+        use crate::research::runner::live_engine_tests::EngineResearch;
+        let connection = owner.connection().clone();
+        let (harness, _) = owner.launch();
+        let root = tempfile::Builder::new()
+            .prefix("ca-tui-live-research-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        let engine = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (project, id, _home) = engine.block_on(async {
+            let (mut service, mut native, _app, project, _stop, home) = live_project_with(
+                root.path(),
+                &owner_settings(&connection),
+                Some(owner_team(harness)),
+                vec![kind],
+            )
+            .await;
+            let controller = native.controller.as_mut().unwrap();
+            assign_pool(controller, &project, connection.id.as_str()).await;
+            let jobs = controller.research_jobs(project.clone()).await.unwrap();
+            let [job] = jobs.as_slice() else {
+                panic!("one research job for the one toggle: {jobs:?}");
+            };
+            assert_eq!(
+                (job.kind, job.harness.as_str(), job.tools),
+                (kind, harness, true),
+                "the job runs on the team's tools-on {harness} agent"
+            );
+            assert!(
+                matches!(
+                    job.status,
+                    ResearchStatus::Queued | ResearchStatus::NeedsPool
+                ),
+                "no research runs yet: {}",
+                job.status_label
+            );
+            let id = job.id;
+            drop(native);
+            service.shutdown().await.unwrap();
+            (project, id, home)
+        });
+        drop(engine);
+
+        let (global, settings) = (
+            root.path().join("global.toml"),
+            root.path().join("project.toml"),
+        );
+        assert!(
+            root.path().join("engine.db").is_file(),
+            "the test engine keeps its engine.db"
+        );
+        let research = EngineResearch::on_engine(root.path(), &global, &settings, &owner);
+        let job = research.until_ended(id, LIVE_RUN_LIMIT);
+        drop(research);
+        assert_eq!(
+            job.status,
+            crate::research::jobs::ResearchStatus::Done,
+            "{:?}",
+            job.error
+        );
+        assert_eq!(
+            job.report_path.as_deref(),
+            Some(format!("context/research/{}.md", kind.name()).as_str())
+        );
+        let report = engine_state_folder(root.path(), &project)
+            .join("context")
+            .join("research")
+            .join(format!("{}.md", kind.name()));
+        std::fs::read_to_string(&report)
+            .unwrap_or_else(|error| panic!("{}: {error}", report.display()))
+    }
+
+    /// Research, live, Codex: a competitor research job runs on the owner's managed ChatGPT
+    /// account for Codex and writes its report with links. Runs in a live window only.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CODEX_PROFILE"]
+    fn research_runs_on_a_signed_in_managed_codex_account() {
+        let report = engine_research(
+            crate::team::runtime::live_failover_tests::OwnerAccount::codex(),
+            ResearchKind::CompetitorResearch,
+        );
+        assert!(report.starts_with("# Competitor research\n"), "{report}");
+        assert!(report.contains("Researched by Codex"), "{report}");
+        assert!(report.contains("## Links and references"), "{report}");
+        assert!(report.contains("https://"), "{report}");
+    }
+
+    /// Research, live, Claude Code: a market research job runs on the owner's signed-in
+    /// managed Claude account and writes its report with links. Runs in a live window only.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "live qualification: needs CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
+    fn research_runs_on_a_signed_in_managed_claude_account() {
+        let report = engine_research(
+            crate::team::runtime::live_failover_tests::OwnerAccount::claude(),
+            ResearchKind::MarketResearch,
+        );
+        assert!(report.starts_with("# Market research\n"), "{report}");
+        assert!(report.contains("Researched by Claude Code"), "{report}");
+        assert!(report.contains("## Links and references"), "{report}");
+        assert!(report.contains("https://"), "{report}");
     }
 
     /// Turning the live master on for a project whose defaults cannot open a master still

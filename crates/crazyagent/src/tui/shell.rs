@@ -625,20 +625,21 @@ impl Shell {
         let vertical = format!("{}{}", glyphs.up, glyphs.down);
         let left = vec![
             styled("Everywhere", Role::Heading, theme),
-            key("Ctrl-K", "Go to anything", 11),
-            key("Esc", "Back or cancel", 11),
-            key("Tab", "Next field or panel", 11),
-            key("Shift-Tab", "Previous", 11),
-            key(&format!("Shift-{arrows}"), "Next tab", 11),
-            key("?", "This help", 11),
-            key("Ctrl-Q", "Quit", 11),
+            key("Ctrl-K", "Go to anything", 13),
+            key("Esc", "Back or cancel", 13),
+            key("Tab", "Next field or panel", 13),
+            key("Shift-Tab", "Previous", 13),
+            key(&format!("Shift-{arrows}"), "Next tab", 13),
+            key("?", "This help", 13),
+            key("Ctrl-Q", "Quit", 13),
             Line::default(),
             styled("Text fields", Role::Heading, theme),
-            key(&arrows, "Move the cursor", 11),
-            key("Ctrl-A E", "Start, end", 11),
-            key("Ctrl-W", "Delete a word", 11),
-            key("Ctrl-U", "Clear the field", 11),
-            key("Ctrl-J", "New line", 11),
+            key(&arrows, "Move the cursor", 13),
+            key("Ctrl-A E", "Start, end", 13),
+            key("Ctrl-W", "Delete a word", 13),
+            key("Ctrl-U", "Clear the field", 13),
+            key("Ctrl-J", "New line", 13),
+            key("Shift-Enter", "New line, if supported", 13),
         ];
         let mut right = vec![
             styled("Lists", Role::Heading, theme),
@@ -666,7 +667,7 @@ impl Shell {
             .collect();
         body.push(Line::default());
         body.push(styled(
-            "Letter keys work when you are not typing in a field.",
+            "Letter keys work outside fields. In tmux, use Ctrl-J for a new line.",
             Role::Muted,
             theme,
         ));
@@ -896,6 +897,7 @@ mod tests {
     use crate::owner_profile::OwnerProfile;
     use crate::protocol::ProjectId;
     use crate::tui::glyphs::UNICODE;
+    use crate::tui::keys::{ShiftArrows, ShiftEnter};
     use crate::tui::seam::{Activity, ResearchCounts};
     use crate::tui::theme::{Appearance, Colors, Depth};
 
@@ -1283,7 +1285,7 @@ mod tests {
         let mut shell = loaded();
         shell.key(Key::Tab);
         shell.key(Key::Char('!'));
-        for _ in 0..7 {
+        for _ in 0..9 {
             shell.key(Key::Tab);
         }
         shell.key(Key::Enter);
@@ -1297,6 +1299,82 @@ mod tests {
         shell.arrive(Arrival::ProfileSaved(Ok(())));
         shell.key(Key::Ctrl('q'));
         assert!(shell.quitting(), "a saved profile has nothing to lose");
+    }
+
+    #[test]
+    fn saving_the_profile_keeps_the_master_shift_arrows_choice_on_this_computer() {
+        let folder = tempfile::tempdir().unwrap();
+        let colors = folder.path().join("tui-colors");
+        let mut ctx = ctx();
+        ctx.prefs = Some(colors.clone());
+        ctx.store.profile = Load::Ready(Some(OwnerProfile {
+            name: "Mira".into(),
+            role: String::new(),
+            bio: String::new(),
+            preferred_stack: Vec::new(),
+            working_style: Default::default(),
+        }));
+        let mut shell = at(Place::Settings(SettingsSection::Profile), ctx);
+        assert_eq!(shell.ctx.shift_arrows, ShiftArrows::SwitchTabs);
+        for _ in 0..8 {
+            shell.key(Key::Tab);
+        }
+        shell.key(Key::Right);
+        shell.key(Key::Tab);
+        shell.key(Key::Tab);
+        shell.key(Key::Enter);
+        assert!(drain(&mut shell).contains(&"SaveProfile".to_owned()));
+        assert_eq!(
+            shell.ctx.shift_arrows,
+            ShiftArrows::SwitchTabs,
+            "the choice applies once saved"
+        );
+        shell.arrive(Arrival::ProfileSaved(Ok(())));
+        assert_eq!(shell.ctx.shift_arrows, ShiftArrows::SendToAgent);
+        assert_eq!(
+            crate::tui::prefs::load_shift_arrows(&crate::tui::prefs::shift_arrows_path(&colors)),
+            ShiftArrows::SendToAgent
+        );
+    }
+
+    #[test]
+    fn saving_the_profile_keeps_the_shift_enter_choice_on_this_computer() {
+        let folder = tempfile::tempdir().unwrap();
+        let colors = folder.path().join("tui-colors");
+        let mut ctx = ctx();
+        ctx.prefs = Some(colors.clone());
+        ctx.store.profile = Load::Ready(Some(OwnerProfile {
+            name: "Mira".into(),
+            role: String::new(),
+            bio: String::new(),
+            preferred_stack: Vec::new(),
+            working_style: Default::default(),
+        }));
+        let mut shell = at(Place::Settings(SettingsSection::Profile), ctx);
+        assert_eq!(shell.ctx.shift_enter, ShiftEnter::Auto);
+        for _ in 0..9 {
+            shell.key(Key::Tab);
+        }
+        shell.key(Key::Right);
+        shell.key(Key::Tab);
+        shell.key(Key::Enter);
+        assert!(drain(&mut shell).contains(&"SaveProfile".to_owned()));
+        assert_eq!(
+            shell.ctx.shift_enter,
+            ShiftEnter::Auto,
+            "the choice applies once saved"
+        );
+        shell.arrive(Arrival::ProfileSaved(Ok(())));
+        assert_eq!(shell.ctx.shift_enter, ShiftEnter::Off);
+        assert_eq!(
+            crate::tui::prefs::load_shift_enter(&crate::tui::prefs::shift_enter_path(&colors)),
+            ShiftEnter::Off
+        );
+        assert_eq!(
+            crate::tui::prefs::load_shift_arrows(&crate::tui::prefs::shift_arrows_path(&colors)),
+            ShiftArrows::SwitchTabs,
+            "the other choice is kept as it was"
+        );
     }
 
     #[test]

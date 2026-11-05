@@ -232,6 +232,11 @@
   color: var(--text);
 }
 
+.tg-chip.note {
+  min-width: 0;
+  overflow: hidden;
+}
+
 .tg-card.master {
   border: 2px solid var(--brand);
 }

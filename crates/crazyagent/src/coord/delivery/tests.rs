@@ -10,6 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const PROJECT: &str = "coord-delivery";
 const WAIT: Duration = Duration::from_secs(20);
 const READ_ONE_LINE: &str = "IFS= read -r line\nprintf '%s\\n' \"$line\" > \"$1\"\nexec sleep 60\n";
+const READ_RAW: &str = "stty -icanon\nexec cat >> \"$1\"\n";
 const ASK: &str = "printf ' Do you want to proceed?\\n \\342\\235\\257 1. Yes\\n   2. No\\n\\n Esc to cancel\\n'\nexec sleep 60\n";
 
 struct Fixture {
@@ -798,6 +799,366 @@ fn auto_types_only_claude_code_messages_past_the_grace_into_an_idle_pane() {
     });
 }
 
+/// rv-secreview r1 F1: a lead the engine does not wake for its messages, an endpoint
+/// (kept) lead or an adopted live pane, idle in its own pane, is not typed a turn of the
+/// owner's notices alone: the owner's Wake of its worker stays Sent and nothing is typed
+/// until a waking message arrives, and then both are typed together, the notice first.
+#[test]
+fn an_owner_notice_alone_is_not_typed_into_an_idle_lead_until_a_waking_message() {
+    let mut fixture = Fixture::new();
+    let host = fixture.host();
+    let owner = OwnerTyping::new(fixture.base.join("typing-never-written.db"));
+    let lead = fixture.agent("sub", "codex", "idle", None);
+    let worker = fixture.agent("sub", "codex", "idle", Some(lead));
+    settings::set_delivery(
+        &fixture.db,
+        &project(),
+        HarnessKind::Codex,
+        Delivery::TypingOnly,
+    )
+    .unwrap();
+    let out = fixture.base.join("typed.txt");
+    fixture.pane(&host, lead, READ_ONE_LINE, &out);
+    let now = now_ms();
+    crate::team::events::record(
+        &fixture.db,
+        &project(),
+        worker,
+        None,
+        crate::team::events::EventKind::Progress,
+        crate::team::events::OWNER_WOKE,
+        now,
+    )
+    .unwrap()
+    .unwrap();
+    crate::team::events::forward_to_parents(&fixture.db, &project(), now).unwrap();
+    let waiting = crate::coord::pending(&fixture.db, lead, PENDING_MAX).unwrap();
+    assert_eq!(waiting.len(), 1);
+    let notice = waiting[0].id;
+    assert!(waiting[0].body.contains(crate::team::events::OWNER_WOKE));
+    assert!(!waking(&fixture.db, lead).unwrap());
+    let pane = crate::terminal::AgentId::team(lead).unwrap();
+    until("a quiet pane", || {
+        host.quiet(&pane).unwrap().unwrap() >= typing::APP_QUIET
+    });
+    let awake = BTreeSet::new();
+    let reached = reach(
+        Some(&host as &dyn Host),
+        Some(&owner),
+        &fixture.base,
+        &awake,
+    );
+    let mut deliveries = Deliveries::default();
+
+    deliveries
+        .tick(&fixture.db, &project(), now, &reached)
+        .unwrap();
+    assert_eq!(
+        fixture.receipt(notice),
+        "sent",
+        "a notices-only batch gives the idle lead no turn"
+    );
+    assert!(deliveries.retry.is_empty());
+    std::thread::sleep(Duration::from_secs(1));
+    assert!(!out.exists(), "nothing was typed into the lead's pane");
+
+    let work = fixture.send(
+        Party::Owner,
+        lead,
+        MessageKind::Prompt,
+        "Merge the branch",
+        now,
+    );
+    deliveries
+        .tick(&fixture.db, &project(), now, &reached)
+        .unwrap();
+    assert_eq!(fixture.receipt(notice), "typed");
+    assert_eq!(fixture.receipt(work), "typed");
+    until("the notice and the work typed as one turn", || {
+        std::fs::read_to_string(&out).is_ok_and(|line| {
+            line.find(crate::team::events::OWNER_WOKE)
+                .zip(line.find("Merge the branch"))
+                .is_some_and(|(notice, work)| notice < work)
+        })
+    });
+}
+
+/// owner-wake r2 OWAKE2-M1: only the owner's notices wait for a waking message; any other
+/// note, such as a teammate's, is still typed alone into an idle awake agent's pane.
+#[test]
+fn a_teammate_note_alone_is_still_typed_into_an_idle_awake_agent() {
+    let mut fixture = Fixture::new();
+    let host = fixture.host();
+    let owner = OwnerTyping::new(fixture.base.join("typing-never-written.db"));
+    let lead = fixture.agent("sub", "codex", "idle", None);
+    let worker = fixture.agent("sub", "codex", "idle", Some(lead));
+    settings::set_delivery(
+        &fixture.db,
+        &project(),
+        HarnessKind::Codex,
+        Delivery::TypingOnly,
+    )
+    .unwrap();
+    let out = fixture.base.join("typed.txt");
+    fixture.pane(&host, lead, READ_ONE_LINE, &out);
+    let note = fixture.send(
+        Party::Agent(worker),
+        lead,
+        MessageKind::Note,
+        "The API moved to v2",
+        1,
+    );
+    assert!(!waking(&fixture.db, lead).unwrap());
+    let pane = crate::terminal::AgentId::team(lead).unwrap();
+    until("a quiet pane", || {
+        host.quiet(&pane).unwrap().unwrap() >= typing::APP_QUIET
+    });
+    let awake = BTreeSet::new();
+    let mut deliveries = Deliveries::default();
+    deliveries
+        .tick(
+            &fixture.db,
+            &project(),
+            now_ms(),
+            &reach(
+                Some(&host as &dyn Host),
+                Some(&owner),
+                &fixture.base,
+                &awake,
+            ),
+        )
+        .unwrap();
+    assert_eq!(
+        fixture.receipt(note),
+        "typed",
+        "a teammate's note is not held"
+    );
+    until("the typed note", || {
+        std::fs::read_to_string(&out).is_ok_and(|line| line.contains("The API moved to v2"))
+    });
+}
+
+/// owner-wake r2 rv-secreview: a window of `PENDING_MAX` owner notices never holds back the
+/// prompt behind it: the full window's head is typed, and the prompt follows at the next
+/// tries.
+#[test]
+fn a_full_window_of_owner_notices_never_holds_a_later_prompt() {
+    let mut fixture = Fixture::new();
+    let host = fixture.host();
+    let owner = OwnerTyping::new(fixture.base.join("typing-never-written.db"));
+    let lead = fixture.agent("sub", "codex", "idle", None);
+    settings::set_delivery(
+        &fixture.db,
+        &project(),
+        HarnessKind::Codex,
+        Delivery::TypingOnly,
+    )
+    .unwrap();
+    let out = fixture.base.join("typed.txt");
+    fixture.pane(&host, lead, READ_RAW, &out);
+    for notice in 0..PENDING_MAX {
+        fixture.send_keyed(
+            Party::Engine,
+            lead,
+            MessageKind::Note,
+            &format!("Owner notice {notice}"),
+            Some(&format!("{NOTICES_KEY}{notice}")),
+            1,
+        );
+    }
+    let work = fixture.send(
+        Party::Owner,
+        lead,
+        MessageKind::Prompt,
+        "Merge the branch",
+        2,
+    );
+    assert_eq!(
+        crate::coord::pending(&fixture.db, lead, PENDING_MAX)
+            .unwrap()
+            .len(),
+        PENDING_MAX
+    );
+    let pane = crate::terminal::AgentId::team(lead).unwrap();
+    let awake = BTreeSet::new();
+    let reached = reach(
+        Some(&host as &dyn Host),
+        Some(&owner),
+        &fixture.base,
+        &awake,
+    );
+    let mut deliveries = Deliveries::default();
+    let now = now_ms();
+    for round in 0..4 {
+        until("a quiet pane", || {
+            host.quiet(&pane).unwrap().unwrap() >= typing::APP_QUIET
+        });
+        deliveries
+            .tick(&fixture.db, &project(), now + round * RETRY_MS, &reached)
+            .unwrap();
+        if fixture.receipt(work) == "typed" {
+            break;
+        }
+    }
+    assert_eq!(
+        fixture.receipt(work),
+        "typed",
+        "the prompt behind a full window of notices was typed"
+    );
+    until("the typed prompt", || {
+        std::fs::read_to_string(&out).is_ok_and(|lines| lines.contains("Merge the branch"))
+    });
+}
+
+/// owner-wake r2 OWAKE2-M1: a working Codex agent's notes go to its app-server bridge, an
+/// owner notice alone included, and are tried again while the bridge cannot take them; an
+/// idle agent's owner notice alone is neither bridged nor typed and waits with no retry.
+/// The steer itself needs a real Codex app (`tests/codex_bridge_live.rs`).
+#[test]
+fn a_working_codex_agents_notes_are_tried_on_its_bridge_and_an_idle_ones_notice_waits() {
+    let fixture = Fixture::new();
+    let nudged = fixture.agent("sub", "codex", "working", None);
+    let noticed = fixture.agent("sub", "codex", "working", None);
+    let idle = fixture.agent("sub", "codex", "idle", None);
+    let nudge = fixture.send_keyed(
+        Party::Engine,
+        nudged,
+        MessageKind::Note,
+        "CrazyAgent reminder: declare your work",
+        Some(&format!("adoption-edits_without_start_work-{nudged}")),
+        1,
+    );
+    let notices: Vec<MessageId> = [noticed, idle]
+        .iter()
+        .map(|agent| {
+            fixture.send_keyed(
+                Party::Engine,
+                *agent,
+                MessageKind::Note,
+                "Owner notice",
+                Some(&format!("{NOTICES_KEY}{agent}")),
+                1,
+            )
+        })
+        .collect();
+    let awake = BTreeSet::new();
+    let mut deliveries = Deliveries::default();
+    deliveries
+        .tick(
+            &fixture.db,
+            &project(),
+            2,
+            &reach(None, None, &fixture.base, &awake),
+        )
+        .unwrap();
+    assert_eq!(
+        deliveries.retry.keys().copied().collect::<Vec<_>>(),
+        [nudged, noticed],
+        "the working agents' notes were tried and wait for a retry, the idle one's notice waits"
+    );
+    for message in [nudge, notices[0], notices[1]] {
+        assert_eq!(fixture.receipt(message), "sent");
+    }
+}
+
+/// owner-wake r3 OWAKE3-L1: when the byte cut would leave only an owner notice ahead of
+/// the prompt behind it, the turn starts at the prompt instead: one typed turn carries the
+/// prompt, and the notice waits Sent for a later one.
+#[test]
+fn a_cut_never_types_an_owner_notice_alone_ahead_of_a_long_prompt() {
+    let mut fixture = Fixture::new();
+    let host = fixture.host();
+    let owner = OwnerTyping::new(fixture.base.join("typing-never-written.db"));
+    let lead = fixture.agent("sub", "codex", "idle", None);
+    settings::set_delivery(
+        &fixture.db,
+        &project(),
+        HarnessKind::Codex,
+        Delivery::TypingOnly,
+    )
+    .unwrap();
+    let out = fixture.base.join("typed.txt");
+    fixture.pane(&host, lead, READ_RAW, &out);
+    let notice = fixture.send_keyed(
+        Party::Engine,
+        lead,
+        MessageKind::Note,
+        "Owner notice: worker 7 woke again",
+        Some(&format!("{NOTICES_KEY}1")),
+        1,
+    );
+    let body = format!("Merge the branch {}", "x".repeat(3970));
+    assert!(body.len() <= BODY_BYTES_MAX);
+    let work = fixture.send(Party::Owner, lead, MessageKind::Prompt, &body, 2);
+    let waiting = crate::coord::pending(&fixture.db, lead, PENDING_MAX).unwrap();
+    let (_, whole) = lines(&fixture.db, &waiting, PROMPT_BYTES_MAX).unwrap();
+    assert_eq!(whole, [notice], "the prompt does not fit behind the notice");
+    let pane = crate::terminal::AgentId::team(lead).unwrap();
+    until("a quiet pane", || {
+        host.quiet(&pane).unwrap().unwrap() >= typing::APP_QUIET
+    });
+    let awake = BTreeSet::new();
+    let mut deliveries = Deliveries::default();
+    deliveries
+        .tick(
+            &fixture.db,
+            &project(),
+            now_ms(),
+            &reach(
+                Some(&host as &dyn Host),
+                Some(&owner),
+                &fixture.base,
+                &awake,
+            ),
+        )
+        .unwrap();
+    assert_eq!(
+        (fixture.receipt(notice), fixture.receipt(work)),
+        ("sent".to_owned(), "typed".to_owned()),
+        "the turn carries the prompt, never the notice alone"
+    );
+    until("the typed prompt", || {
+        std::fs::read_to_string(&out).is_ok_and(|text| text.contains("Merge the branch"))
+    });
+    assert!(
+        !std::fs::read_to_string(&out)
+            .unwrap()
+            .contains("worker 7 woke")
+    );
+}
+
+/// owner-wake r2 L1: agents with a waking message come first among a tick's recipients, so
+/// `RECIPIENTS_PER_TICK_MAX` agents holding only older notices never keep one out.
+#[test]
+fn recipients_rank_agents_with_a_waking_message_first() {
+    let fixture = Fixture::new();
+    let holders: Vec<i64> = (0..RECIPIENTS_PER_TICK_MAX)
+        .map(|_| fixture.agent("sub", "codex", "idle", None))
+        .collect();
+    for (index, holder) in holders.iter().enumerate() {
+        fixture.send_keyed(
+            Party::Engine,
+            *holder,
+            MessageKind::Note,
+            "Owner notice",
+            Some(&format!("{NOTICES_KEY}{index}")),
+            1,
+        );
+    }
+    let asked = fixture.agent("sub", "codex", "idle", None);
+    fixture.send(
+        Party::Owner,
+        asked,
+        MessageKind::Prompt,
+        "Merge the branch",
+        2,
+    );
+    let found = recipients(&fixture.db, &project()).unwrap();
+    assert_eq!(found.len(), RECIPIENTS_PER_TICK_MAX);
+    assert_eq!(found[0], asked, "the agent with work for it comes first");
+    assert_eq!(found[1..], holders[..RECIPIENTS_PER_TICK_MAX - 1]);
+}
+
 use crate::coord::{BODY_BYTES_MAX, Message};
 
 #[test]
@@ -842,4 +1203,111 @@ fn a_note_line_says_it_takes_no_reply_within_the_head_bound() {
     };
     let asked = line(&connection, &prompt, NEXT_TURN_BYTES_MAX).unwrap();
     assert!(asked.contains(": work for you, answer with update_work: "));
+}
+
+/// Owner 2026-11-05: only a tools-off Codex sub-agent in a kept session has no channel
+/// under Native only; tools on, a signed-in agent the engine wakes per turn, the master,
+/// another harness, and the Auto or Typing only setting each still reach the agent.
+#[test]
+fn no_channel_names_only_a_tools_off_codex_sub_agent_in_a_kept_session_under_native_only() {
+    use crate::team::AgentRole;
+    let fixture = Fixture::new();
+    let mut named = Vec::new();
+    for delivery in [Delivery::Auto, Delivery::NativeOnly, Delivery::TypingOnly] {
+        for kind in [
+            HarnessKind::Codex,
+            HarnessKind::ClaudeCode,
+            HarnessKind::Rcli,
+        ] {
+            settings::set_delivery(&fixture.db, &project(), kind, delivery).unwrap();
+        }
+        for role in [AgentRole::Master, AgentRole::Sub, AgentRole::Teammate] {
+            for harness in ["codex", "claude-code", "rcli"] {
+                for tools in [false, true] {
+                    for kept in [false, true] {
+                        let note = no_channel(&fixture.db, &project(), role, harness, tools, kept)
+                            .unwrap();
+                        if let Some(note) = note {
+                            assert_eq!(note, NO_CHANNEL);
+                            named.push((delivery, role, harness, tools, kept));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(
+        named,
+        [(Delivery::NativeOnly, AgentRole::Sub, "codex", false, true)]
+    );
+    assert_eq!(
+        NO_CHANNEL,
+        "Can't receive messages: Native only needs tools on for Codex."
+    );
+}
+
+/// Owner 2026-11-05: Native only never drops nor types a tools-off Codex agent's message:
+/// it stays Sent over ticks, retried, with nothing in its pane; once the setting is Auto
+/// the next tick types it in.
+#[test]
+fn native_only_keeps_a_tools_off_codex_agents_messages_sent_until_auto_types_them() {
+    let mut fixture = Fixture::new();
+    let host = fixture.host();
+    let owner = OwnerTyping::new(fixture.base.join("typing-never-written.db"));
+    let agent = fixture.agent("sub", "codex", "idle", None);
+    fixture
+        .db
+        .execute("UPDATE team_agents SET tools=0 WHERE id=?1", [agent])
+        .unwrap();
+    settings::set_delivery(
+        &fixture.db,
+        &project(),
+        HarnessKind::Codex,
+        Delivery::NativeOnly,
+    )
+    .unwrap();
+    let out = fixture.base.join("typed.txt");
+    fixture.pane(&host, agent, READ_ONE_LINE, &out);
+    let now = now_ms();
+    let message = fixture.send(
+        Party::Owner,
+        agent,
+        MessageKind::Prompt,
+        "Check the gate",
+        now,
+    );
+    let pane = crate::terminal::AgentId::team(agent).unwrap();
+    until("a quiet pane", || {
+        host.quiet(&pane).unwrap().unwrap() >= typing::APP_QUIET
+    });
+    let asleep = BTreeSet::new();
+    let reach = reach(
+        Some(&host as &dyn Host),
+        Some(&owner),
+        &fixture.base,
+        &asleep,
+    );
+    let mut deliveries = Deliveries::default();
+    for tick in 0..3 {
+        let at = now + tick * RETRY_MS;
+        deliveries
+            .tick(&fixture.db, &project(), at, &reach)
+            .unwrap();
+        assert_eq!(fixture.receipt(message), "sent");
+        assert_eq!(deliveries.retry.get(&agent), Some(&(at + RETRY_MS)));
+    }
+    assert!(
+        !out.exists(),
+        "Native only typed into a tools-off Codex agent"
+    );
+    settings::set_delivery(&fixture.db, &project(), HarnessKind::Codex, Delivery::Auto).unwrap();
+    deliveries
+        .tick(&fixture.db, &project(), now + 3 * RETRY_MS, &reach)
+        .unwrap();
+    assert_eq!(fixture.receipt(message), "typed");
+    until("the typed line", || {
+        std::fs::read_to_string(&out).is_ok_and(|line| {
+            line == format!("[crazyagent msg {message}] from the owner: work for you, answer with update_work: Check the gate\n")
+        })
+    });
 }

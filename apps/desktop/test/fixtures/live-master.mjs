@@ -209,6 +209,12 @@ export function clearSelection() {
   terminal.clearSelection();
 }
 
+/** Whether the panel's xterm settings let a right-click replace the selection with the word
+ * under the pointer. Output: the setting as `terminalOptions` gives it. */
+export function rightClickSelectsWord() {
+  return terminalOptions().rightClickSelectsWord;
+}
+
 /** The text the routed keys typed, in order. */
 export function typedText() {
   return [...typed];

@@ -900,22 +900,21 @@ fn record_summary(kept: &SessionConversation) -> Option<String> {
 }
 
 /// The engine hook the live master calls before it starts a project's live session. It
-/// continues the harness conversation the session kept when the master about to start
-/// can: the same harness and account, the session's master agent stopped with its own
-/// worktree, an id the harness resumes by and the record still a plain file. Otherwise
-/// the session starts as `fresh_harness` says. Takes the connection, project, session,
-/// the master's launch harness and the account connection. Returns the plan.
+/// continues the conversation the session kept when it can: the same harness, a kept account
+/// `continues` accepts for the one about to start, the session's master stopped with its
+/// worktree, a resumable id and the record a plain file; else as `fresh_harness` says. Takes
+/// the connection, project, session, launch harness and `continues`. Returns the plan.
 pub fn resume_harness(
     connection: &Connection,
     project: &ProjectId,
     session: &SessionId,
     harness: &str,
-    account: &str,
+    continues: &dyn Fn(&str) -> bool,
 ) -> Result<ResumePlan, EngineError> {
     let kept = crate::team::master::session_conversation(connection, project, session.as_str())?;
     if let Some(kept) = &kept
         && crate::harnesses::same(&kept.harness, harness)
-        && kept.connection == account
+        && continues(&kept.connection)
         && crate::harnesses::interactive::resumable(&kept.resume.id)
         && std::fs::symlink_metadata(&kept.resume.record).is_ok_and(|meta| meta.is_file())
         && stopped_master(connection, project, kept.agent)?
@@ -1726,7 +1725,7 @@ mod tests {
                 &project,
                 &SessionId::new("s-fifo").unwrap(),
                 "claude-code",
-                "local-a",
+                &|_| true,
             );
             let _ = sent.send(plan.map_err(|problem| problem.0));
         });
@@ -1738,5 +1737,81 @@ mod tests {
             panic!("a FIFO is no record to resume: {plan:?}");
         };
         assert_eq!(note, LOST_NOTE);
+    }
+
+    /// A conversation kept while the master ran on one pool account resumes on the account the
+    /// schedule picks when the caller accepts the kept account for it (DEC-091, N-D14), and
+    /// starts fresh when it does not (ND14-L1); the caller is asked about the kept account.
+    /// Another harness never resumes it.
+    #[test]
+    fn a_kept_conversation_resumes_on_another_pool_account() {
+        let folder = tempfile::tempdir().unwrap();
+        let connection = rusqlite::Connection::open(folder.path().join("engine.db")).unwrap();
+        crate::storage::initialize_authority_schemas(&connection).unwrap();
+        let owner = connection.unchecked_transaction().unwrap();
+        crate::conversation::initialize(&owner).unwrap();
+        owner.commit().unwrap();
+        let project = ProjectId::new("pool-project").unwrap();
+        connection
+            .execute(
+                "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms)
+                 VALUES (?1,'master','claude',1,'account-a','stopped',1,1)",
+                [project.as_str()],
+            )
+            .unwrap();
+        let agent = connection.last_insert_rowid();
+        connection
+            .execute(
+                "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir)
+                 VALUES (?1,?2,'/repo','/repo/.crazyagent/worktrees/agent-1','/repo/.git')",
+                rusqlite::params![agent, project.as_str()],
+            )
+            .unwrap();
+        let id = "5b0e2c1a-7d3f-4e8b-9a6c-2f1e0d9c8b7a";
+        let record = folder.path().join(format!("{id}.jsonl"));
+        std::fs::write(&record, "{}\n").unwrap();
+        let kept = SessionConversation {
+            agent,
+            harness: "claude-code".into(),
+            connection: "account-a".into(),
+            resume: Resume {
+                id: id.into(),
+                record: record.clone(),
+            },
+        };
+        keep_conversation(&connection, &project, "s-pool", &kept).unwrap();
+        let session = SessionId::new("s-pool").unwrap();
+
+        let subscription = |kept: &str| kept == "account-a";
+        let plan = resume_harness(
+            &connection,
+            &project,
+            &session,
+            "claude-code",
+            &subscription,
+        )
+        .unwrap();
+        assert_eq!(
+            plan,
+            ResumePlan::Resume {
+                agent,
+                conversation: id.into(),
+                record: record.clone(),
+            },
+            "a master started on another subscription continues the conversation kept on account-a"
+        );
+
+        let plan =
+            resume_harness(&connection, &project, &session, "claude-code", &|_| false).unwrap();
+        assert!(
+            matches!(plan, ResumePlan::Fresh { .. }),
+            "an account that cannot take the kept history starts fresh: {plan:?}"
+        );
+
+        let plan = resume_harness(&connection, &project, &session, "codex", &|_| true).unwrap();
+        assert!(
+            !matches!(plan, ResumePlan::Resume { .. }),
+            "another harness never resumes the kept conversation: {plan:?}"
+        );
     }
 }

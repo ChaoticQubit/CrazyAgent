@@ -3,7 +3,7 @@ use super::new_project_frames::check_frames;
 use super::new_project_input::cells;
 use super::new_project_page::{harness_choices_from, kept_draft, key_event, pool_choices_from};
 use super::project::OpenRequest;
-use super::project_page::{Opening, opening};
+use super::project_page::{BANNER_ROWS_MAX, Opening, move_banner, opening};
 use super::{Flow, Place, ProjectTab, SettingsSection, open};
 use crate::client_controller::OwnerController;
 use crate::engine::Client;
@@ -14,7 +14,7 @@ use crate::master_session::{
     MasterOwnerAction, MasterSessionPhase, MasterSessionView, MasterTurnView,
 };
 use crate::pools::{MemberKind, MemberStatus, PoolMember, PoolSummary};
-use crate::project_setup::{Platform, ProjectSetup, ResearchKind, SetupQuery, SetupView};
+use crate::project_setup::{Platform, ProjectSetup, ResearchKind, SetupQuery, SetupView, TeamPlan};
 use crate::protocol::{ConfigId, CredentialRef, ProjectId, ProjectSpec, SessionId};
 use crate::tui::client::process::ProcessQuery;
 use crate::tui::client::settings::SettingsJob;
@@ -256,6 +256,16 @@ impl Engine {
     }
 
     async fn project(&mut self, id: &str, name: &str, generation: u64) -> ProjectId {
+        self.project_led_by(id, name, generation, None).await
+    }
+
+    async fn project_led_by(
+        &mut self,
+        id: &str,
+        name: &str,
+        generation: u64,
+        team: Option<TeamPlan>,
+    ) -> ProjectId {
         let project = ProjectId::new(id).unwrap();
         let created = self
             .controller
@@ -271,7 +281,7 @@ impl Engine {
                     platforms: vec![Platform::Cli],
                     research: vec![ResearchKind::CompetitorResearch],
                     pool: None,
-                    team: None,
+                    team,
                     documents: vec![],
                 },
                 generation,
@@ -295,6 +305,48 @@ impl Engine {
         )
         .unwrap()
     }
+}
+
+#[test]
+fn the_move_banner_names_the_checked_out_branch_merges_into_are_refused() {
+    let files = ["CLAUDE.md".to_owned(), "AGENTS.md".to_owned()];
+    let named = move_banner(&files, Some("trial4-land"), "…");
+    assert!(
+        named.starts_with("Git still shows CLAUDE.md, AGENTS.md as deleted after the instruction import, so merges into trial4-land are refused."),
+        "{named}"
+    );
+    assert!(!named.contains("this branch"), "{named}");
+    let detached = move_banner(&files[..1], None, "…");
+    assert!(
+        detached.contains("so merges into this branch are refused."),
+        "a detached HEAD has no branch to name: {detached}"
+    );
+}
+
+#[test]
+fn the_move_banner_keeps_are_refused_within_its_rows_for_the_longest_branch_names() {
+    let files: Vec<String> = ["CLAUDE.md", ".claude/CLAUDE.md", "AGENTS.md", "CLAUDE.local.md"]
+        .map(str::to_owned)
+        .to_vec();
+    let ascii = "a".repeat(crate::landing::BRANCH_BYTES_MAX);
+    let wide = "\u{8a9e}".repeat(crate::landing::BRANCH_BYTES_MAX / 3);
+    for branch in [&ascii, &wide] {
+        assert!(branch.len() <= crate::landing::BRANCH_BYTES_MAX);
+        let text = move_banner(&files, Some(branch), "…");
+        for width in [78, 118] {
+            let shown = crate::tui::text::wrap(&text, width)
+                .into_iter()
+                .take(BANNER_ROWS_MAX)
+                .collect::<Vec<_>>()
+                .join(" ");
+            assert!(shown.contains(" are refused."), "{width}: {shown}");
+        }
+    }
+    let cut = move_banner(&files[..1], Some(&ascii), ".");
+    assert!(
+        cut.contains(". are refused.") && !cut.contains(&ascii),
+        "a long name is cut with the ellipsis glyph: {cut}"
+    );
 }
 
 #[test]
@@ -608,6 +660,7 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
+    leave_the_master_view(&mut shell, &notes, "Notes CLI");
     let shown = render(&mut shell, 80, 24);
     assert!(
         shown.contains("This project has no pool, so the master cannot start."),
@@ -616,9 +669,13 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
     shell.key(Key::Char('h'));
     shell.key(Key::Enter);
     while let Some(request) = shell.ctx.next_request() {
-        assert!(
-            matches!(
-                request,
+        let read = match &request {
+            Request::Process(query) => matches!(
+                **query,
+                ProcessQuery::PendingImport { .. } | ProcessQuery::Uncommitted { .. }
+            ),
+            other => matches!(
+                other,
                 Request::Pools
                     | Request::PoolProjects
                     | Request::Master(_)
@@ -628,10 +685,11 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
                         SetupQuery::Jobs { .. }
                             | SetupQuery::Context { .. }
                             | SetupQuery::Memories { .. }
+                            | SetupQuery::Team { .. }
                     )
             ),
-            "{request:?}"
-        );
+        };
+        assert!(read, "{request:?}");
     }
 }
 
@@ -932,6 +990,7 @@ async fn the_first_message_opens_the_master_and_reaches_the_engine() {
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
+    leave_the_master_view(&mut shell, &notes, "Notes CLI");
     let sent = pump(&mut shell, &mut connection).await;
     assert!(sent.contains(&"master"), "{sent:?}");
     let shown = render(&mut shell, 80, 24);
@@ -1099,6 +1158,7 @@ async fn conversation_with_a_settled_turn(
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
+    leave_the_master_view(&mut shell, &notes, "Notes CLI");
     pump(&mut shell, &mut connection).await;
     say(&mut shell, &mut connection, "Plan the first slice").await;
     let first = settled_master(engine, &notes, &mut shell, &mut connection, 1).await;
@@ -1136,6 +1196,7 @@ async fn a_message_after_a_settings_change_lands_in_a_new_conversation() {
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
     shell.key(Key::ShiftLeft);
+    leave_the_master_view(&mut shell, &notes, "Notes CLI");
     pump(&mut shell, &mut connection).await;
     say(&mut shell, &mut connection, "Add a dark theme").await;
     let shown = until(&mut shell, &mut connection, |shown| {
@@ -1541,6 +1602,7 @@ async fn a_new_session_with_no_session_in_view_turns_the_live_switch_on() {
     for _ in 0..4 {
         shell.key(Key::ShiftLeft);
     }
+    leave_the_master_view(&mut shell, &notes, "Notes CLI");
     pump(&mut shell, &mut connection).await;
     let (none, _) = latest_master(&mut engine, &notes).await;
     assert!(none.is_none(), "the project has no master session yet");
@@ -1599,6 +1661,7 @@ async fn removing_a_project_with_an_open_master_conversation_ends_it_and_lands_o
     for _ in 0..4 {
         shell.key(Key::ShiftLeft);
     }
+    leave_the_master_view(&mut shell, &notes, "Notes CLI");
     pump(&mut shell, &mut connection).await;
     shell.key(Key::Enter);
     for character in "Plan the first slice".chars() {
@@ -2094,6 +2157,7 @@ async fn an_at_word_in_the_console_lists_the_project_files_through_the_engine() 
     for _ in 0..4 {
         shell.key(Key::ShiftLeft);
     }
+    leave_the_master_view(&mut shell, &notes, "Notes CLI");
     let sent = pump(&mut shell, &mut connection).await;
     assert!(!sent.contains(&"project files"), "{sent:?}");
     let shown = render(&mut shell, 80, 24);
@@ -2184,6 +2248,7 @@ async fn ctrl_t_on_the_conversation_input_opens_team_and_keeps_the_draft() {
     );
     let mut shell = Shell::with(ctx, screen);
     pump(&mut shell, &mut connection).await;
+    leave_the_master_view(&mut shell, &notes, "Notes CLI");
     let shown = render(&mut shell, 120, 24);
     assert!(shown.contains("No messages yet."), "{shown}");
     let conversation = shell.place();
@@ -2984,6 +3049,15 @@ async fn confirm_with_tracked_file_offers_commit_then_banner_after_leave() {
         shown.contains("Git still shows CLAUDE.md as deleted after the instruction import"),
         "{shown}"
     );
+    let checked_out = crate::tui::test_home::git(&folder, &["branch", "--show-current"]);
+    let words = shown.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        words.contains(&format!(
+            "so merges into {} are refused.",
+            checked_out.trim()
+        )),
+        "the banner names the checked-out branch\n{shown}"
+    );
     let hints = shown.lines().last().unwrap().to_owned();
     assert!(
         hints.trim_start().starts_with("Ctrl-G Commit the move"),
@@ -3725,4 +3799,149 @@ async fn a_session_switch_from_the_master_view_opens_the_master_view_again() {
     let fresh = fresh.unwrap();
     assert_ne!(fresh.session_id, first.session_id);
     assert_ne!(fresh.session_id, second.session_id);
+}
+
+fn shell_on(place: &Place) -> Shell {
+    let mut ctx = ctx(100, 40);
+    let screen = open(place, &mut ctx);
+    Shell::with(ctx, screen)
+}
+
+async fn stays_on(shell: &mut Shell, connection: &mut Connection, place: &Place, why: &str) {
+    for _ in 0..3 {
+        shell.refresh();
+        pump(shell, connection).await;
+        assert_eq!(
+            shell.place().as_ref(),
+            Some(place),
+            "{why}:\n{}",
+            render(shell, 100, 40)
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+fn leave_the_master_view(shell: &mut Shell, project: &ProjectId, name: &str) {
+    assert_eq!(
+        shell.place(),
+        Some(Place::Master {
+            id: project.clone(),
+            name: name.into(),
+        }),
+        "the Conversation tab of a live master opens its terminal"
+    );
+    shell.key(Key::Esc);
+    assert_eq!(
+        shell.place(),
+        Some(Place::Project {
+            id: project.clone(),
+            name: name.into(),
+            tab: ProjectTab::Conversation,
+        })
+    );
+}
+
+/// The Conversation tab of a Codex or Claude Code master is that master's live terminal, as
+/// on the desktop (N-T1 B): a page opened on the tab opens the master view once the stored
+/// plan is read, Esc there lands on the tab's console and stays, and walking off the tab and
+/// back opens the view again. A key typed on the tab before the plan is read keeps the
+/// console, and an RCLI master keeps the console.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_conversation_tab_of_a_live_master_is_its_terminal() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let conversation = Place::Project {
+        id: notes.clone(),
+        name: "Notes CLI".into(),
+        tab: ProjectTab::Conversation,
+    };
+    let master = Place::Master {
+        id: notes.clone(),
+        name: "Notes CLI".into(),
+    };
+    let mut connection = engine.connect();
+    let mut shell = shell_on(&conversation);
+    until_place(&mut shell, &mut connection, &master).await;
+
+    shell.key(Key::Esc);
+    stays_on(
+        &mut shell,
+        &mut connection,
+        &conversation,
+        "Esc lands on the tab's console and stays there",
+    )
+    .await;
+    shell.key(Key::ShiftRight);
+    pump(&mut shell, &mut connection).await;
+    let next = shell.place();
+    assert!(
+        next.as_ref() != Some(&conversation) && next.as_ref() != Some(&master),
+        "the tab keys pass the Conversation tab: {next:?}"
+    );
+    shell.key(Key::ShiftLeft);
+    until_place(&mut shell, &mut connection, &master).await;
+
+    let mut early_connection = engine.connect();
+    let mut early = shell_on(&conversation);
+    early.key(Key::Char('h'));
+    stays_on(
+        &mut early,
+        &mut early_connection,
+        &conversation,
+        "a key typed before the plan is read keeps the console",
+    )
+    .await;
+
+    let rcli = TeamPlan {
+        master: "rcli".into(),
+        master_tools: true,
+        sub_harnesses: vec![],
+        min_agents: 1,
+        max_agents: 1,
+    };
+    let local = engine
+        .project_led_by("local-notes", "Local Notes", 2, Some(rcli))
+        .await;
+    let local_conversation = Place::Project {
+        id: local,
+        name: "Local Notes".into(),
+        tab: ProjectTab::Conversation,
+    };
+    let mut local_connection = engine.connect();
+    let mut local_shell = shell_on(&local_conversation);
+    stays_on(
+        &mut local_shell,
+        &mut local_connection,
+        &local_conversation,
+        "an RCLI master keeps the console",
+    )
+    .await;
+}
+
+/// N-T1 B, Switch tabs: Shift-←→ in the master view move the project page one tab, so a
+/// walk across the tabs passes the Conversation tab of a live master.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shift_arrows_walk_the_project_tabs_across_the_master_view() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let tab = |tab: ProjectTab| Place::Project {
+        id: notes.clone(),
+        name: "Notes CLI".into(),
+        tab,
+    };
+    let master = Place::Master {
+        id: notes.clone(),
+        name: "Notes CLI".into(),
+    };
+    let mut connection = engine.connect();
+    let mut shell = shell_on(&tab(ProjectTab::Overview));
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::ShiftRight);
+    until_place(&mut shell, &mut connection, &master).await;
+    shell.key(Key::ShiftRight);
+    assert_eq!(shell.place(), Some(tab(ProjectTab::Agents)));
+    shell.key(Key::ShiftLeft);
+    until_place(&mut shell, &mut connection, &master).await;
+    shell.key(Key::ShiftLeft);
+    assert_eq!(shell.place(), Some(tab(ProjectTab::Overview)));
 }

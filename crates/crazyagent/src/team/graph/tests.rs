@@ -30,6 +30,7 @@ fn agent(id: i64, role: AgentRole, harness: &str, status: AgentStatus) -> TeamAg
         pane: None,
         hookless: false,
         instructions_changed: false,
+        message_note: None,
     }
 }
 
@@ -1192,7 +1193,7 @@ fn hookless_agent_marks_its_node() {
     let master = agent("master", true);
     let hooked = agent("sub", false);
     let bare = agent("sub", true);
-    let graph = crate::team::owner_graph(&connection, &setup).unwrap();
+    let graph = crate::team::owner_graph(&connection, &setup, None).unwrap();
     let marked: Vec<(Option<i64>, bool)> = graph
         .nodes
         .iter()

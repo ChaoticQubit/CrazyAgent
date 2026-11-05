@@ -59,6 +59,8 @@ pub struct BridgeError {
     pub code: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cause: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub account: Option<String>,
 }
 
 impl std::fmt::Display for BridgeError {
@@ -95,7 +97,11 @@ pub fn attention(
 }
 
 fn failure(code: &'static str) -> BridgeError {
-    BridgeError { code, cause: None }
+    BridgeError {
+        code,
+        cause: None,
+        account: None,
+    }
 }
 
 /// A bridge failure that keeps the engine code behind it, so the window names it after its
@@ -107,6 +113,7 @@ fn caused(code: &'static str, engine: &str) -> BridgeError {
     BridgeError {
         code,
         cause: (cause != code).then(|| cause.to_owned()),
+        account: None,
     }
 }
 

@@ -80,7 +80,8 @@ export function GraphCard({ placed, graph, harness, open, tipId, items, onOpen, 
       <span className="tg-card-detail tg-clip">{displayText(text.detail)}</span>
       {text.branch && <span className="tg-card-branch"><Icon name="git-branch" size={12} /><span className="tg-clip">{displayText(text.branch)}</span></span>}
       <span className="tg-card-task">{text.task.map((line, index) => <span key={index} className="tg-clip">{line}</span>)}</span>
-      {(waiting || unread) && <span className="tg-chips">
+      {(waiting || unread || node.message_note) && <span className="tg-chips">
+        {node.message_note && <span className="tg-chip warn note"><span className="tg-clip">{displayText(node.message_note)}</span></span>}
         {waiting && <span className="tg-chip warn">{waiting.word}</span>}
         {unread && <span className="tg-chip">From you {unread.unread}{node.hookless ? "" : ` ${receiptTicks(unread.receipt).ticks}`}</span>}
       </span>}
@@ -117,6 +118,17 @@ export function actionNote(result: Receipted, what: string): string | null {
   const state = receiptState(result.value);
   if (state.kind === "applied") return null;
   return state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check the graph before trying again.";
+}
+
+/** The helper under the Message box: where the message goes and how its receipt shows, that
+ * its receipts are unavailable when its launch fires no hooks, and the engine's sentence when
+ * the Delivery setting leaves the agent no way to get it yet. Input: the node. Output: the
+ * helper text. */
+export function messageHelper(node: Pick<GraphNode, "hookless" | "message_note">): string {
+  if (node.message_note) return `${node.message_note} It waits in the agent's mailbox until tools are on or message delivery changes.`;
+  return node.hookless
+    ? `It goes to the agent's mailbox. Its receipts are ${HOOKLESS_WORDS}.`
+    : "It goes to the agent's mailbox. Its receipt shows on the graph: one tick sent, two delivered, then read and answered.";
 }
 
 /** Why the owner's message cannot go yet: empty, or more bytes than the coordination layer
@@ -403,9 +415,7 @@ export function TeamGraphView({ projectId, harness, account }: {
         <Button variant="primary" icon="send" pending={busy} disabled={messageProblem(draft) !== null} onClick={() => void send()}>Send</Button></>}>
       <TextArea id={`${ids}-message`} label="Message" value={draft} onValue={(value) => { setDraft(value); setSendNote(null); }} rows={5}
         maxLength={AGENT_MESSAGE_BYTES_MAX} counterAt={AGENT_MESSAGE_BYTES_MAX - 400} error={sendNote ?? undefined}
-        helper={acting.node.hookless
-          ? `It goes to the agent's mailbox. Its receipts are ${HOOKLESS_WORDS}.`
-          : "It goes to the agent's mailbox. Its receipt shows on the graph: one tick sent, two delivered, then read and answered."} />
+        helper={displayText(messageHelper(acting.node))} />
     </Dialog>}
     {acting?.kind === "stop" && <ConfirmDialog open title={`Stop ${displayText(acting.node.label)}?`} confirmLabel="Stop" pending={busy}
       onConfirm={() => void halt()} onCancel={() => setActing(null)}>

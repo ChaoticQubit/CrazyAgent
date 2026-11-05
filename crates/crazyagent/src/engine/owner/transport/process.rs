@@ -3,7 +3,7 @@ use crate::agent_home::{LoadedFile, PROCESS_BYTES_MAX, TEXT_BYTES_MAX};
 pub use crate::coord::adoption::Adoption;
 pub use crate::instruction_files::{
     ImportCommit, ImportFile, Mode as InstructionMode, Record as InstructionRecord,
-    Settings as InstructionSettings,
+    Settings as InstructionSettings, UncommittedImport,
 };
 use crate::protocol::encode_frame;
 use rusqlite::OptionalExtension;
@@ -146,6 +146,7 @@ enum Reply {
     },
     Uncommitted {
         files: Vec<String>,
+        branch: Option<String>,
     },
     Committed {
         commit: ImportCommit,
@@ -211,7 +212,7 @@ enum Answer {
     Settings(InstructionSettings),
     Adoption(Adoption),
     Imports(Vec<ImportFile>),
-    Uncommitted(Vec<String>),
+    Uncommitted(UncommittedImport),
     Committed(ImportCommit),
 }
 
@@ -292,20 +293,26 @@ impl OwnerClient {
 
     /// Lists the project's moved instruction files whose move the owner's checkout has not
     /// committed, so a merge refusal for uncommitted changes can name them and offer the
-    /// commit. Input: the project. Output: the paths inside the project folder, empty when
-    /// no move waits for a commit.
+    /// commit, with the branch the checkout has checked out. Input: the project. Output: the
+    /// paths inside the project folder, empty when no move waits for a commit, and the
+    /// branch, none for a detached HEAD or when no move waits.
     pub async fn uncommitted_instruction_import(
         &self,
         project: ProjectId,
-    ) -> Result<Vec<String>, EngineError> {
+    ) -> Result<UncommittedImport, EngineError> {
         match self
             .process_exchange(Action::UncommittedImport { project }, None)
             .await?
         {
-            (Reply::Uncommitted { files }, None)
-                if files.len() <= crate::instruction_files::PROJECT_FILES.len() =>
+            (Reply::Uncommitted { files, branch }, None)
+                if files.len() <= crate::instruction_files::PROJECT_FILES.len()
+                    && branch.as_ref().is_none_or(|name| {
+                        !files.is_empty()
+                            && !name.is_empty()
+                            && name.len() <= crate::landing::BRANCH_BYTES_MAX
+                    }) =>
             {
-                Ok(files)
+                Ok(UncommittedImport { files, branch })
             }
             _ => Err(unknown()),
         }
@@ -614,9 +621,10 @@ pub(super) async fn serve(
             assert!(files.len() <= crate::instruction_files::PROJECT_FILES.len());
             (Reply::Imports { files }, None)
         }
-        Ok(Answer::Uncommitted(files)) => {
+        Ok(Answer::Uncommitted(UncommittedImport { files, branch })) => {
             assert!(files.len() <= crate::instruction_files::PROJECT_FILES.len());
-            (Reply::Uncommitted { files }, None)
+            assert!(branch.is_none() || !files.is_empty());
+            (Reply::Uncommitted { files, branch }, None)
         }
         Ok(Answer::Committed(commit)) => {
             assert!(!commit.files.is_empty());
@@ -701,7 +709,7 @@ async fn handle(
             crate::instruction_files::import(&project_folder(&root, &project)?).map(Answer::Imports)
         }
         Action::UncommittedImport { project } if text.is_none() => {
-            crate::instruction_files::uncommitted(&project_folder(&root, &project)?)
+            crate::instruction_files::uncommitted_import(&project_folder(&root, &project)?)
                 .map(Answer::Uncommitted)
         }
         Action::CommitImport { project } if text.is_none() => {

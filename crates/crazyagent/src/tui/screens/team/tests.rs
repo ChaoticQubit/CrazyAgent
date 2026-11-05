@@ -6,7 +6,7 @@ use crate::tui::client::OwnerEvent;
 use crate::tui::client::process::{ProcessEvent, ProcessQuery, ProcessReply};
 use crate::tui::ctx::{Ctx, Link, Load};
 use crate::tui::glyphs::UNICODE;
-use crate::tui::keys::Key;
+use crate::tui::keys::{Key, ShiftArrows};
 use crate::tui::screens::{Place, open};
 use crate::tui::seam::{AccountRow, Arrival, NOT_READY, Request};
 use crate::tui::shell::Shell;
@@ -43,6 +43,7 @@ fn node(id: &str, kind: NodeKind, parent: Option<&str>, label: &str) -> GraphNod
         owner_questions: 0,
         no_worktree: false,
         hookless: false,
+        message_note: None,
     }
 }
 
@@ -846,6 +847,7 @@ fn finished_team() -> crate::team::TeamStatus {
         pane: None,
         hookless: false,
         instructions_changed: false,
+        message_note: None,
     };
     TeamStatus {
         project_id: project(),
@@ -1278,6 +1280,7 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
                 pane: None,
                 hookless: false,
                 instructions_changed: false,
+                message_note: None,
             })
             .collect(),
         tasks: [1, 2, 3, 4, 3]
@@ -2280,6 +2283,96 @@ fn the_live_master_turned_off_while_its_terminal_starts_drops_the_keys_kept_for_
         Some("The live master was turned off: it could not start."),
     ));
     assert!(said_not_sent(&mut shell), "{:?}", render(&mut shell));
+}
+
+fn attached_master_view(shift_arrows: ShiftArrows) -> Shell {
+    let mut shell = master_view(80, 24);
+    shell.ctx.shift_arrows = shift_arrows;
+    shell.arrive(switch(Some(true), None));
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    shell.arrive(Arrival::Terminal {
+        agent: terminal("team-1"),
+        frame: TerminalFrame::Attached {
+            agent_id: terminal("team-1"),
+            cols: 74,
+            rows: 17,
+        },
+    });
+    requests(&mut shell);
+    shell
+}
+
+/// N-T1 B, Switch tabs (the default): Shift-←→ while the master's terminal has the keys
+/// leave the master view for the project's previous or next tab, attached or still
+/// starting, and are never typed in; keys kept while it started go with the view.
+#[test]
+fn shift_arrows_in_the_master_terminal_switch_project_tabs_by_default() {
+    let mut shell = attached_master_view(ShiftArrows::default());
+    assert_eq!(ShiftArrows::default(), ShiftArrows::SwitchTabs);
+    let rows = render(&mut shell);
+    assert!(rows[23].contains("Shift-←→ Tabs"), "{}", rows[23]);
+    shell.key(Key::ShiftRight);
+    let sent = requests(&mut shell);
+    assert!(
+        sent.iter().all(|sent| input(sent).is_none()),
+        "Shift-→ is never typed in: {sent:?}"
+    );
+    assert!(
+        sent.iter().any(
+            |sent| matches!(sent, Request::TerminalDetach { agent } if agent.as_str() == "team-1")
+        ),
+        "{sent:?}"
+    );
+    assert_eq!(shell.ctx.project_step, Some((project(), true)));
+
+    let mut starting = master_view(80, 24);
+    starting.arrive(switch(Some(true), None));
+    requests(&mut starting);
+    starting.key(Key::Char('h'));
+    starting.key(Key::ShiftLeft);
+    assert_eq!(starting.ctx.project_step, Some((project(), false)));
+    starting.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    starting.arrive(Arrival::Terminal {
+        agent: terminal("team-1"),
+        frame: TerminalFrame::Attached {
+            agent_id: terminal("team-1"),
+            cols: 74,
+            rows: 17,
+        },
+    });
+    let sent = requests(&mut starting);
+    assert!(
+        sent.iter().all(|sent| input(sent).is_none()),
+        "the key kept before Shift-← went with the view: {sent:?}"
+    );
+}
+
+/// N-T1 B, Send to the agent: Shift-←→ while the master's terminal has the keys are typed
+/// into it and the view stays; after Ctrl-] they move the project tab in either choice.
+#[test]
+fn shift_arrows_in_the_master_terminal_go_to_the_agent_when_set_so() {
+    let mut shell = attached_master_view(ShiftArrows::SendToAgent);
+    let rows = render(&mut shell);
+    assert!(!rows[23].contains("Tabs"), "{}", rows[23]);
+    shell.key(Key::ShiftRight);
+    let sent = requests(&mut shell);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(input(&sent[0]), Some(("team-1", &b"\x1b[1;2C"[..])));
+    assert_eq!(shell.ctx.project_step, None);
+
+    shell.key(LEADER);
+    shell.key(Key::ShiftLeft);
+    assert_eq!(shell.ctx.project_step, Some((project(), false)));
+    let mut switching = attached_master_view(ShiftArrows::SwitchTabs);
+    switching.key(LEADER);
+    switching.key(Key::ShiftRight);
+    assert_eq!(switching.ctx.project_step, Some((project(), true)));
 }
 
 #[test]
@@ -3536,5 +3629,47 @@ fn m_on_the_master_card_says_where_its_conversation_is_and_reads_nothing() {
             .expect("m on a card without a team agent says why")
             .lead,
         "This card has no messages to show."
+    );
+}
+
+/// Owner 2026-11-05: the team tree prints the engine's message note under the agent it is
+/// on, wrapped whole, as the app shows the same string; an agent without one shows none.
+#[test]
+fn an_agent_the_delivery_setting_leaves_without_messages_says_so_under_its_row() {
+    let mut shell = fresh(120, 30);
+    let mut graph = graph();
+    graph.nodes[3].message_note = Some(crate::coord::delivery::NO_CHANNEL.to_owned());
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph),
+    });
+    let rows = render(&mut shell);
+    let tree: Vec<String> = rows.iter().map(|row| chars(row, 2, 46)).collect();
+    let trimmed = |row: &String| -> String {
+        row.trim_matches(|c: char| c == '│' || c == ' ' || c == '└' || c == '├' || c == '─')
+            .to_owned()
+    };
+    let under = tree
+        .iter()
+        .position(|row| row.contains("codex-1"))
+        .expect("the Codex agent is drawn");
+    assert!(
+        tree[under + 1].contains("ChatGPT Plus"),
+        "its account row stays first: {tree:#?}"
+    );
+    let words: Vec<String> = tree[under + 2..]
+        .iter()
+        .map(trimmed)
+        .take_while(|row| !row.is_empty())
+        .collect();
+    assert_eq!(
+        words.join(" "),
+        crate::coord::delivery::NO_CHANNEL,
+        "{tree:#?}"
+    );
+    assert!(
+        tree.iter()
+            .all(|row| !row.contains("Can't receive") || tree[under + 2..].contains(row)),
+        "only the noted agent says it: {tree:#?}"
     );
 }
