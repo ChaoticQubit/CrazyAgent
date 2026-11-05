@@ -559,9 +559,13 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
     shell.key(Key::Char('h'));
     shell.key(Key::Enter);
     while let Some(request) = shell.ctx.next_request() {
-        assert!(
-            matches!(
-                request,
+        let read = match &request {
+            Request::Process(query) => matches!(
+                **query,
+                ProcessQuery::PendingImport { .. } | ProcessQuery::Uncommitted { .. }
+            ),
+            other => matches!(
+                other,
                 Request::Pools
                     | Request::PoolProjects
                     | Request::Master(_)
@@ -574,8 +578,8 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
                             | SetupQuery::Team { .. }
                     )
             ),
-            "{request:?}"
-        );
+        };
+        assert!(read, "{request:?}");
     }
 }
 
