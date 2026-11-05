@@ -9391,6 +9391,132 @@ fn an_asleep_agent_with_a_waking_message_gets_one_pinned_wake_task() {
     team.workers.clear();
 }
 
+/// 18.15.2 (run 5 task 73): the owner's Wake, restart or stop of a worker reaches its
+/// lead's mailbox as a note that wakes no one, under the shipped rule with progress off as
+/// under an app rule with progress on, so the lead spends no turn on it; the lead reads all
+/// of them under "Messages for you" at its next real turn, here the wake its worker's
+/// result brings.
+#[test]
+fn an_owner_action_on_a_worker_waits_for_its_leads_next_real_turn() {
+    let fixture = Fixture::new(2);
+    let mut team = fixture.runtime();
+    let project = ProjectId::new(PROJECT).unwrap();
+    crate::coord::ensure(&fixture.connection).unwrap();
+    let lead = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    let worker = fixture.agent(AgentRole::Sub, "codex", AgentStatus::Idle);
+    fixture
+        .connection
+        .execute(
+            "UPDATE team_agents SET parent=?1 WHERE id=?2",
+            [lead, worker],
+        )
+        .unwrap();
+    team.workers
+        .insert(lead, between_turns(&project, AgentRole::Sub, true, true));
+    let tick = |team: &mut TeamRuntime| {
+        crate::team::events::forward_to_parents(&fixture.connection, &project, now_ms()).unwrap();
+        let asleep = team.asleep(&project);
+        assert_eq!(asleep, BTreeSet::from([lead]));
+        team.wake_for_messages(&fixture.setup, &fixture.access, &asleep)
+            .unwrap();
+    };
+    let pinned = || -> i64 {
+        fixture
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM team_task_pins p JOIN team_tasks t ON t.id=p.task
+                 WHERE p.project=?1 AND p.agent=?2 AND t.status IN ('queued','needs_pool','running')",
+                params![PROJECT, lead],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let waiting = || -> Vec<String> {
+        crate::coord::pending(&fixture.connection, lead, crate::coord::PENDING_MAX)
+            .unwrap()
+            .into_iter()
+            .map(|note| note.body)
+            .collect()
+    };
+
+    team.owner_woke(&project, worker, true, false).unwrap();
+    tick(&mut team);
+    assert_eq!(pinned(), 0, "the owner's Wake gives the lead no turn");
+    assert!(!crate::coord::delivery::waking(&fixture.connection, lead).unwrap());
+    let notes = waiting();
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].contains(OWNER_WOKE), "{notes:?}");
+
+    crate::team::events::set_rule(
+        &fixture.connection,
+        &crate::team::events::RuleTarget::App,
+        Some(&crate::team::events::WakeRule {
+            progress: true,
+            ..crate::team::events::WakeRule::default()
+        }),
+    )
+    .unwrap()
+    .unwrap();
+    team.owner_woke(&project, worker, true, true).unwrap();
+    tick(&mut team);
+    crate::team::events::record(
+        &fixture.connection,
+        &project,
+        worker,
+        None,
+        crate::team::events::EventKind::Progress,
+        OWNER_STOPPED_AGENT,
+        now_ms(),
+    )
+    .unwrap()
+    .unwrap();
+    tick(&mut team);
+    assert_eq!(
+        pinned(),
+        0,
+        "with progress on the owner's restart and stop still give the lead no turn"
+    );
+    assert!(!crate::coord::delivery::waking(&fixture.connection, lead).unwrap());
+    let notes = waiting();
+    assert_eq!(notes.len(), 3, "{notes:?}");
+    assert!(notes[1].contains(OWNER_RESTARTED), "{notes:?}");
+    assert!(notes[2].contains(OWNER_STOPPED_AGENT), "{notes:?}");
+
+    crate::team::events::record(
+        &fixture.connection,
+        &project,
+        worker,
+        None,
+        crate::team::events::EventKind::Finished,
+        "Wrote page.md",
+        now_ms(),
+    )
+    .unwrap()
+    .unwrap();
+    tick(&mut team);
+    assert_eq!(pinned(), 1, "the worker's result wakes the lead");
+    let (orders, turns) = channel();
+    team.workers.get_mut(&lead).unwrap().orders = orders;
+    team.dispatch(&fixture.setup, &fixture.access, &BTreeSet::new())
+        .unwrap();
+    let Ok(Order::Turn(typed, None, _)) = turns.try_recv() else {
+        panic!("the woken lead's kept session got no turn");
+    };
+    let (_, messages) = typed
+        .split_once("\n\nMessages for you:\n")
+        .expect("the lead's turn carries its messages");
+    for text in [
+        OWNER_WOKE,
+        OWNER_RESTARTED,
+        OWNER_STOPPED_AGENT,
+        "Wrote page.md",
+    ] {
+        assert!(messages.contains(text), "{text} missing: {messages}");
+    }
+    assert!(waiting().is_empty(), "the real turn carried every note");
+    team.workers.clear();
+}
+
 /// Audit A: a delivery database failure no longer ends the team step: when putting back a
 /// stopped agent's message fails, the same tick still dispatches, here ending a queued
 /// task whose harness left the team plan.
