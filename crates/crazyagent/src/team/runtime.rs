@@ -5527,55 +5527,15 @@ impl TeamRuntime {
                     Some("team_native_needs_sandbox"),
                 ));
             }
-            let tmux = self
-                .state
-                .parent()
-                .and_then(crate::terminal::tmux::installed)
-                .ok_or_else(|| {
-                    with_code(
-                        "native teammates need tmux",
-                        Some(crate::terminal::OWN_SERVER_UNAVAILABLE),
-                    )
-                })?;
-            let socket = scratch.join(crate::terminal::HARNESS_SOCKET);
-            assert!(
-                self.state
-                    .parent()
-                    .zip(AgentId::team(id).ok())
-                    .and_then(
-                        |(runtime, lead)| crate::terminal::harness_socket(runtime, &lead).ok()
-                    )
-                    .is_some_and(|named| named == socket),
-                "the lead's own socket is the one the terminal host routes to"
-            );
-            let runtime = self
-                .state
-                .parent()
-                .ok_or("the team state folder has no engine root")?;
-            let lead = AgentId::team(id)
-                .map_err(|e| with_code("the lead has no terminal name", Some(&e.0)))?;
-            let mates_socket = crate::terminal::renew_teammates_socket(runtime, &lead)
-                .map_err(|e| with_code("the teammates' socket could not be named", Some(&e.0)))?;
-            assert!(
-                mates_socket.parent() == Some(scratch.as_path())
-                    && crate::terminal::teammates_socket(runtime, &lead)
-                        .is_ok_and(|named| named == mates_socket),
-                "the teammates' socket is the one the terminal host routes to"
-            );
-            let callers = scratch.join(super::caller::CALLER_SOCKET);
-            assert_eq!(
-                super::caller::socket_for_mailbox(&self.mailbox(id)).as_deref(),
-                Some(callers.as_path()),
-                "the lead's servers find the caller socket its sandbox reaches"
-            );
-            let (lead, mates) = sandbox
-                .native_team(&socket, &mates_socket, &callers, &tmux)
-                .map_err(sandboxed)?;
+            let (lead, mates, tmux) = self.split_native_team(sandbox, &scratch, id)?;
             sandbox = lead;
             teammates = Some(mates);
             native_tmux = Some(tmux);
         }
+        #[cfg(unix)]
         expose_graph(&root, &working_dir);
+        #[cfg(not(unix))]
+        expose_graph(&root, &working_dir)?;
         if let Some(engine) = self
             .delegation_tool
             .as_ref()
@@ -5640,6 +5600,85 @@ impl TeamRuntime {
         };
         made.keep();
         Ok((root, plan, mode))
+    }
+
+    /// Splits a native-mode lead's sandbox into the lead's and its teammates' (DEC-104): finds
+    /// tmux beside the engine and names the lead's own server, the teammates' server and the
+    /// engine's caller socket in the lead's temp folder. Inputs: the lead's sandbox, its temp
+    /// folder and its id. Output: the lead's and the teammates' sandboxes and the tmux
+    /// program, or the owner line why not.
+    #[cfg(unix)]
+    fn split_native_team(
+        &self,
+        sandbox: ProjectSandbox,
+        scratch: &Path,
+        id: i64,
+    ) -> Result<(ProjectSandbox, ProjectSandbox, PathBuf), String> {
+        let tmux = self
+            .state
+            .parent()
+            .and_then(crate::terminal::tmux::installed)
+            .ok_or_else(|| {
+                with_code(
+                    "native teammates need tmux",
+                    Some(crate::terminal::OWN_SERVER_UNAVAILABLE),
+                )
+            })?;
+        let socket = scratch.join(crate::terminal::HARNESS_SOCKET);
+        assert!(
+            self.state
+                .parent()
+                .zip(AgentId::team(id).ok())
+                .and_then(|(runtime, lead)| crate::terminal::harness_socket(runtime, &lead).ok())
+                .is_some_and(|named| named == socket),
+            "the lead's own socket is the one the terminal host routes to"
+        );
+        let runtime = self
+            .state
+            .parent()
+            .ok_or("the team state folder has no engine root")?;
+        let lead = AgentId::team(id)
+            .map_err(|e| with_code("the lead has no terminal name", Some(&e.0)))?;
+        let mates_socket = crate::terminal::renew_teammates_socket(runtime, &lead)
+            .map_err(|e| with_code("the teammates' socket could not be named", Some(&e.0)))?;
+        assert!(
+            mates_socket.parent() == Some(scratch)
+                && crate::terminal::teammates_socket(runtime, &lead)
+                    .is_ok_and(|named| named == mates_socket),
+            "the teammates' socket is the one the terminal host routes to"
+        );
+        let callers = scratch.join(super::caller::CALLER_SOCKET);
+        assert_eq!(
+            super::caller::socket_for_mailbox(&self.mailbox(id)).as_deref(),
+            Some(callers.as_path()),
+            "the lead's servers find the caller socket its sandbox reaches"
+        );
+        let (lead, mates) = sandbox
+            .native_team(&socket, &mates_socket, &callers, &tmux)
+            .map_err(|e| {
+                with_code(
+                    "the agent sandbox could not be set up",
+                    Some(sandbox_code(&e)),
+                )
+            })?;
+        Ok((lead, mates, tmux))
+    }
+
+    /// Refuses a native-mode lead on Windows, which has no tmux server for its teammates'
+    /// panes and no unix socket for the engine's caller; no lead starts without them. Takes
+    /// the lead's sandbox, its temp folder and its id, all unused. Returns the owner line with
+    /// `terminal_own_server_unavailable`.
+    #[cfg(not(unix))]
+    fn split_native_team(
+        &self,
+        _sandbox: ProjectSandbox,
+        _scratch: &Path,
+        _id: i64,
+    ) -> Result<(ProjectSandbox, ProjectSandbox, PathBuf), String> {
+        Err(with_code(
+            "Native teammates are not available on Windows in this version",
+            Some(crate::terminal::OWN_SERVER_UNAVAILABLE),
+        ))
     }
 
     /// The bounds of one agent process: the longest a launched harness may run. The owner's
@@ -8590,10 +8629,25 @@ pub fn agent_home(state: &Path, id: i64) -> PathBuf {
 
 /// The project folder graphify keeps its graph in, and the entries of it an agent's
 /// worktree shows: the graph the CLI queries, its report and its wiki.
+#[cfg(unix)]
 const GRAPH_FOLDER: &str = "graphify-out";
+#[cfg(unix)]
 const GRAPH_ENTRIES: [&str; 3] = ["graph.json", "GRAPH_REPORT.md", "wiki"];
 /// The most bytes of a worktree's `.gitignore` read to see whether it ignores the graph.
+#[cfg(unix)]
 const GITIGNORE_BYTES_MAX: u64 = 256 * 1024;
+
+/// Refuses to show the project's graph in an agent's worktree on Windows, where the engine
+/// has no folder-relative, no-follow steps to place the links with; no agent starts with
+/// links placed any other way. Takes the project folder and the worktree, both unused.
+/// Returns the owner line with `team_graph_unavailable`.
+#[cfg(not(unix))]
+fn expose_graph(_root: &Path, _worktree: &Path) -> Result<(), String> {
+    Err(with_code(
+        "The project graph is not shown to agents on Windows in this version",
+        Some("team_graph_unavailable"),
+    ))
+}
 
 /// Shows the project's graphify graph read-only in an agent's worktree (I3): a real
 /// `graphify-out` folder there holds links to the project's graph, report and wiki, which the
@@ -8603,6 +8657,7 @@ const GITIGNORE_BYTES_MAX: u64 = 256 * 1024;
 /// and every step works through the folder's own descriptor without following a link. A
 /// failure leaves the agent without the graph, never without its start. Takes the project
 /// folder and the worktree.
+#[cfg(unix)]
 fn expose_graph(root: &Path, worktree: &Path) {
     use rustix::fs::{
         AtFlags, CWD, FileType, Mode, OFlags, mkdirat, openat, readlinkat, statat, symlinkat,
@@ -8651,6 +8706,7 @@ fn expose_graph(root: &Path, worktree: &Path) {
 /// Whether a worktree's `.gitignore` ignores the graph folder by one of its usual spellings,
 /// read as a plain file, never through a link or from a pipe, at most `GITIGNORE_BYTES_MAX`
 /// bytes. Takes the worktree. Returns the answer; anything unreadable reads as no.
+#[cfg(unix)]
 fn ignores_graph(worktree: &Path) -> bool {
     use rustix::fs::{CWD, FileType, Mode, OFlags, fstat, openat};
     use std::io::Read;

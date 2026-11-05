@@ -1144,6 +1144,7 @@ fn branches_name_what_each_real_linked_worktree_and_own_clone_has_checked_out() 
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn hookless_agent_marks_its_node() {
     let directory = tempfile::tempdir().unwrap();
