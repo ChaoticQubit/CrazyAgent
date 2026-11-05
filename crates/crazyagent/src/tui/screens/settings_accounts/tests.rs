@@ -1,5 +1,5 @@
 use super::super::settings_add_account::{
-    AddAccount, choices, key_problem, provider_tiles, sign_in_problem,
+    AddAccount, choices, code_left_line, key_problem, provider_tiles, sign_in_problem,
 };
 use super::*;
 use crate::accounts::{AccountStatus, AccountView, Provider, SignInMethod, catalog};
@@ -1351,6 +1351,7 @@ fn failed(code: &str, device_code: Option<&str>) -> SignInView {
         generation: 1,
         page: None,
         device_code: device_code.map(str::to_owned),
+        code_left: None,
         claude_prompt: None,
         email: None,
         plan: None,
@@ -1394,6 +1395,18 @@ fn a_recorded_sign_in_failure_reads_the_app_s_sentence_for_the_harness_it_used()
             "native_auth_sign_in_expired",
             None,
             "This code expired.",
+        ),
+        (
+            Some(NativeAuthMethod::CodexDeviceCode),
+            "native_auth_sign_in_timed_out",
+            Some("QX4F-7K2M"),
+            "CrazyAgent stopped waiting for this code. Get a new code and enter it within 15 minutes.",
+        ),
+        (
+            codex,
+            "native_auth_sign_in_page_timed_out",
+            None,
+            "CrazyAgent stopped waiting for the sign-in page. Start the sign-in again.",
         ),
     ] {
         assert_eq!(
@@ -1463,5 +1476,21 @@ fn a_recorded_code_wins_over_the_phase_line_and_an_unconfirmed_sign_in_says_how_
             sentence,
             "{phase:?} {code:?}"
         );
+    }
+}
+
+/// The code screen says how long the ChatGPT device code still works, in whole minutes
+/// rounded up, and that it ran out once no time is left.
+#[test]
+fn the_device_code_screen_counts_the_code_s_minutes_down() {
+    use std::time::Duration;
+    for (left, line) in [
+        (900, "This code works for 15 more minutes."),
+        (61, "This code works for 2 more minutes."),
+        (60, "This code works for 1 more minute."),
+        (1, "This code works for 1 more minute."),
+        (0, "This code ran out."),
+    ] {
+        assert_eq!(code_left_line(Duration::from_secs(left)), line, "{left}");
     }
 }

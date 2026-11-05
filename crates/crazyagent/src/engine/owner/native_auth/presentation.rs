@@ -29,6 +29,8 @@ enum WireChallenge {
         login_id: String,
         user_code: String,
         verification_url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        left_s: Option<u64>,
     },
 }
 
@@ -79,10 +81,7 @@ pub(in crate::engine) fn encode(
         return Ok(None);
     }
     let wire = WirePresentation {
-        challenge: reply
-            .challenge
-            .as_ref()
-            .map(|value| WireChallenge::from_native(value.codex())),
+        challenge: reply.challenge.as_ref().map(WireChallenge::from_native),
         claude_challenge: reply.claude_challenge.clone(),
         account: reply.account.as_ref().map(WireAccount::from_native),
     };
@@ -202,8 +201,8 @@ fn validate_account(
 }
 
 impl WireChallenge {
-    fn from_native(value: &codex::LoginChallenge) -> Self {
-        match value {
+    fn from_native(value: &NativeAuthChallenge) -> Self {
+        match value.codex() {
             codex::LoginChallenge::Browser { login_id, auth_url } => Self::CodexBrowser {
                 login_id: login_id.clone(),
                 auth_url: auth_url.expose().into(),
@@ -216,21 +215,32 @@ impl WireChallenge {
                 login_id: login_id.clone(),
                 user_code: user_code.expose().into(),
                 verification_url: verification_url.expose().into(),
+                left_s: value.left().map(|left| left.as_secs()),
             },
         }
     }
 
     fn materialize(&self) -> Result<NativeAuthChallenge, EngineError> {
-        let (login_id, url, user_code) = match self {
-            Self::CodexBrowser { login_id, auth_url } => (login_id, auth_url, None),
+        let (login_id, url, user_code, left_s) = match self {
+            Self::CodexBrowser { login_id, auth_url } => (login_id, auth_url, None, None),
             Self::CodexDeviceCode {
                 login_id,
                 user_code,
                 verification_url,
-            } => (login_id, verification_url, Some(user_code.as_str())),
+                left_s,
+            } => (
+                login_id,
+                verification_url,
+                Some(user_code.as_str()),
+                *left_s,
+            ),
         };
+        let left = left_s.map(std::time::Duration::from_secs);
+        if left.is_some_and(|left| left > super::CODEX_DEVICE_CODE_LIFE) {
+            return Err(invalid());
+        }
         codex::owner_login_challenge(login_id, url, user_code)
-            .map(NativeAuthChallenge)
+            .map(|codex| NativeAuthChallenge::new(codex, left))
             .map_err(|_| invalid())
     }
 }

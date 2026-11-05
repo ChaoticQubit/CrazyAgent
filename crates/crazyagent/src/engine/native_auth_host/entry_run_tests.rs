@@ -387,12 +387,59 @@ async fn native_auth_custodian_codex_failure_report_keeps_the_cause_that_sealed_
             &session,
             &mut channel,
             EngineError("native_profile_custody_unsafe".into()),
+            None,
         )
         .await
         .err();
         assert_eq!(
             reported.map(|error| error.0).as_deref(),
             Some("native_profile_custody_unsafe")
+        );
+        drop((session, channel, launch));
+    })
+    .await;
+}
+
+/// Row 12 r1 F2, Codex: the engine log write is best effort. When the engine refuses the
+/// log, `observe_failure` still returns the Codex failure it was given, not the log
+/// exchange's error, so the custodian's cause stays the one that ended the sign-in.
+#[tokio::test]
+async fn native_auth_custodian_codex_failure_report_keeps_its_cause_when_the_log_is_refused() {
+    channel_case(|case| async move {
+        let (committed, launch) = case.launch("entry-run-log-cause").await;
+        let mut channel = case.channel().await;
+        let guard = case.guard(&committed, NativeProfileUsePurpose::Authentication);
+        let mut session = CustodySession::new(guard);
+        let child = crate::spawn_gate::spawn(
+            ProcessCommand::new("/usr/bin/true")
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .process_group(0),
+        )
+        .unwrap();
+        if let Err((error, mut child)) = session.retain_child(child) {
+            let _ = child.wait();
+            panic!("retained child rejected: {error}");
+        }
+        assert!(session.child_mut().unwrap().wait().unwrap().success());
+        let refused = crate::engine::owner::native_auth::CodexLog {
+            dropped: Vec::new(),
+            stderr: "line\nbreak".into(),
+        };
+        assert!(refused.validate().is_err());
+        let reported = crate::engine::native_auth_host::codex_auth::observe_failure(
+            &session,
+            &mut channel,
+            EngineError("native_auth_codex_deadline".into()),
+            Some(refused),
+        )
+        .await
+        .err();
+        assert_eq!(
+            reported.map(|error| error.0).as_deref(),
+            Some("native_auth_codex_deadline")
         );
         drop((session, channel, launch));
     })

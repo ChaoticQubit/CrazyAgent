@@ -601,6 +601,11 @@ impl SignIn {
                         lines.push(Line::raw("2. Enter this code"));
                         lines.push(join([Line::raw("   "), styled(code, Role::Heading, theme)]));
                         lines.push(Line::raw("3. Approve CrazyAgent in ChatGPT"));
+                        if let Some(left) = view.and_then(|v| v.code_left)
+                            && self.problem.is_none()
+                        {
+                            lines.push(Line::raw(format!("   {}", code_left_line(left))));
+                        }
                         lines.push(Line::default());
                     }
                     (Some(page), None) => {
@@ -1565,7 +1570,7 @@ impl AddAccount {
 /// the app names its own button, and the TUI says that the engine clears it on a later try
 /// or after an engine restart. `{harness}` and `{name}` stand for the harness and provider of the
 /// sign-in method.
-const SIGN_IN_SENTENCES: [(&str, &str); 28] = [
+const SIGN_IN_SENTENCES: [(&str, &str); 30] = [
     (
         "native_auth_bootstrap_timeout",
         "CrazyAgent's account helper didn't start in time. Try again.",
@@ -1658,6 +1663,14 @@ const SIGN_IN_SENTENCES: [(&str, &str); 28] = [
     ),
     ("native_auth_sign_in_expired", "This code expired."),
     (
+        "native_auth_sign_in_page_timed_out",
+        "CrazyAgent stopped waiting for the sign-in page. Start the sign-in again.",
+    ),
+    (
+        "native_auth_sign_in_timed_out",
+        "CrazyAgent stopped waiting for this code. Get a new code and enter it within 15 minutes.",
+    ),
+    (
         "native_profile_custody_unsafe",
         "CrazyAgent couldn't safely use this account's sign-in folder on this Mac, so it stopped. Delete the account, then add it again.",
     ),
@@ -1714,6 +1727,16 @@ fn refused_sign_in(code: &str, native: Option<NativeAuthMethod>) -> String {
         return "A sign-in for this account is still open or didn't confirm how it ended. Wait a few minutes, then try again. If this keeps happening, restart the CrazyAgent engine.".to_owned();
     }
     plain_sign_in(code, native)
+}
+
+/// The line under a ChatGPT device code that says how long it still works. Input: the time
+/// the code has left. Output: the line.
+pub(super) fn code_left_line(left: std::time::Duration) -> String {
+    match left.as_secs().div_ceil(60) {
+        0 => "This code ran out.".to_owned(),
+        1 => "This code works for 1 more minute.".to_owned(),
+        minutes => format!("This code works for {minutes} more minutes."),
+    }
 }
 
 /// The sentence for a sign-in view that did not sign in: the recorded code's sentence when
