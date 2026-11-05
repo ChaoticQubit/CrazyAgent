@@ -503,6 +503,52 @@ fn managed_profiles_are_listed_only_for_their_own_harness() {
     );
 }
 
+/// A kept master conversation resumes on the same account of any kind, and across accounts
+/// only from one native subscription of the pool to another (ND14-L1): never onto an
+/// endpoint, never from an endpoint, and never from an account no longer in the pool.
+#[test]
+fn a_kept_conversation_moves_only_between_subscriptions_of_the_pool() {
+    let subscription = |id: &str| TeamAccount {
+        connection: reference(id),
+        reach: TeamReach::Managed {
+            profile_ref: reference(&format!("{id}-profile")),
+            model: None,
+        },
+    };
+    let endpoint = |id: &str| TeamAccount {
+        connection: reference(id),
+        reach: TeamReach::Endpoint {
+            base_url: "http://127.0.0.1:11434/v1".into(),
+            model: "qwen2.5:0.5b".into(),
+        },
+    };
+    let pool = [
+        subscription("claude-a"),
+        subscription("claude-b"),
+        endpoint("local-a"),
+        endpoint("local-b"),
+    ];
+    assert!(resumes_on(&pool, &pool[1], "claude-a"));
+    assert!(resumes_on(&pool, &pool[0], "claude-a"));
+    assert!(resumes_on(&pool, &pool[2], "local-a"));
+    assert!(
+        !resumes_on(&pool, &pool[2], "claude-a"),
+        "never onto an endpoint"
+    );
+    assert!(
+        !resumes_on(&pool, &pool[0], "local-a"),
+        "never from an endpoint"
+    );
+    assert!(
+        !resumes_on(&pool, &pool[3], "local-a"),
+        "never between endpoints"
+    );
+    assert!(
+        !resumes_on(&pool, &pool[0], "claude-gone"),
+        "never from an account no longer in the pool"
+    );
+}
+
 #[test]
 fn work_spreads_across_pool_members_and_skips_paused_accounts() {
     let project = ProjectId::new("team-spread").unwrap();

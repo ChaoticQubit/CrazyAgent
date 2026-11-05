@@ -900,21 +900,21 @@ fn record_summary(kept: &SessionConversation) -> Option<String> {
 }
 
 /// The engine hook the live master calls before it starts a project's live session. It
-/// continues the harness conversation the session kept when the master about to start
-/// can: the same harness, the session's master agent stopped with its own worktree, an id
-/// the harness resumes by and the record still a plain file. The pool account may differ,
-/// since the record lives in the agent's own home whichever account runs it (DEC-091).
-/// Otherwise the session starts as `fresh_harness` says. Takes the connection, project,
-/// session and the master's launch harness. Returns the plan.
+/// continues the conversation the session kept when it can: the same harness, a kept account
+/// `continues` accepts for the one about to start, the session's master stopped with its
+/// worktree, a resumable id and the record a plain file; else as `fresh_harness` says. Takes
+/// the connection, project, session, launch harness and `continues`. Returns the plan.
 pub fn resume_harness(
     connection: &Connection,
     project: &ProjectId,
     session: &SessionId,
     harness: &str,
+    continues: &dyn Fn(&str) -> bool,
 ) -> Result<ResumePlan, EngineError> {
     let kept = crate::team::master::session_conversation(connection, project, session.as_str())?;
     if let Some(kept) = &kept
         && crate::harnesses::same(&kept.harness, harness)
+        && continues(&kept.connection)
         && crate::harnesses::interactive::resumable(&kept.resume.id)
         && std::fs::symlink_metadata(&kept.resume.record).is_ok_and(|meta| meta.is_file())
         && stopped_master(connection, project, kept.agent)?
@@ -1683,6 +1683,7 @@ mod tests {
                 &project,
                 &SessionId::new("s-fifo").unwrap(),
                 "claude-code",
+                &|_| true,
             );
             let _ = sent.send(plan.map_err(|problem| problem.0));
         });
@@ -1696,10 +1697,10 @@ mod tests {
         assert_eq!(note, LOST_NOTE);
     }
 
-    /// A conversation kept while the master ran on one pool account resumes when the
-    /// schedule starts the master on another account of the pool (DEC-091, N-D14): the
-    /// record lives in the agent's own home whichever account runs it. Another harness
-    /// still does not resume it.
+    /// A conversation kept while the master ran on one pool account resumes on the account the
+    /// schedule picks when the caller accepts the kept account for it (DEC-091, N-D14), and
+    /// starts fresh when it does not (ND14-L1); the caller is asked about the kept account.
+    /// Another harness never resumes it.
     #[test]
     fn a_kept_conversation_resumes_on_another_pool_account() {
         let folder = tempfile::tempdir().unwrap();
@@ -1739,7 +1740,15 @@ mod tests {
         keep_conversation(&connection, &project, "s-pool", &kept).unwrap();
         let session = SessionId::new("s-pool").unwrap();
 
-        let plan = resume_harness(&connection, &project, &session, "claude-code").unwrap();
+        let subscription = |kept: &str| kept == "account-a";
+        let plan = resume_harness(
+            &connection,
+            &project,
+            &session,
+            "claude-code",
+            &subscription,
+        )
+        .unwrap();
         assert_eq!(
             plan,
             ResumePlan::Resume {
@@ -1747,10 +1756,17 @@ mod tests {
                 conversation: id.into(),
                 record: record.clone(),
             },
-            "the master the schedule starts on any pool account continues the conversation kept on account-a"
+            "a master started on another subscription continues the conversation kept on account-a"
         );
 
-        let plan = resume_harness(&connection, &project, &session, "codex").unwrap();
+        let plan =
+            resume_harness(&connection, &project, &session, "claude-code", &|_| false).unwrap();
+        assert!(
+            matches!(plan, ResumePlan::Fresh { .. }),
+            "an account that cannot take the kept history starts fresh: {plan:?}"
+        );
+
+        let plan = resume_harness(&connection, &project, &session, "codex", &|_| true).unwrap();
         assert!(
             !matches!(plan, ResumePlan::Resume { .. }),
             "another harness never resumes the kept conversation: {plan:?}"
