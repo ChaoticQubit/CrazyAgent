@@ -1061,6 +1061,72 @@ fn a_working_codex_agents_notes_are_tried_on_its_bridge_and_an_idle_ones_notice_
     }
 }
 
+/// owner-wake r3 OWAKE3-L1: when the byte cut would leave only an owner notice ahead of
+/// the prompt behind it, the turn starts at the prompt instead: one typed turn carries the
+/// prompt, and the notice waits Sent for a later one.
+#[test]
+fn a_cut_never_types_an_owner_notice_alone_ahead_of_a_long_prompt() {
+    let mut fixture = Fixture::new();
+    let host = fixture.host();
+    let owner = OwnerTyping::new(fixture.base.join("typing-never-written.db"));
+    let lead = fixture.agent("sub", "codex", "idle", None);
+    settings::set_delivery(
+        &fixture.db,
+        &project(),
+        HarnessKind::Codex,
+        Delivery::TypingOnly,
+    )
+    .unwrap();
+    let out = fixture.base.join("typed.txt");
+    fixture.pane(&host, lead, READ_RAW, &out);
+    let notice = fixture.send_keyed(
+        Party::Engine,
+        lead,
+        MessageKind::Note,
+        "Owner notice: worker 7 woke again",
+        Some(&format!("{NOTICES_KEY}1")),
+        1,
+    );
+    let body = format!("Merge the branch {}", "x".repeat(3970));
+    assert!(body.len() <= BODY_BYTES_MAX);
+    let work = fixture.send(Party::Owner, lead, MessageKind::Prompt, &body, 2);
+    let waiting = crate::coord::pending(&fixture.db, lead, PENDING_MAX).unwrap();
+    let (_, whole) = lines(&fixture.db, &waiting, PROMPT_BYTES_MAX).unwrap();
+    assert_eq!(whole, [notice], "the prompt does not fit behind the notice");
+    let pane = crate::terminal::AgentId::team(lead).unwrap();
+    until("a quiet pane", || {
+        host.quiet(&pane).unwrap().unwrap() >= typing::APP_QUIET
+    });
+    let awake = BTreeSet::new();
+    let mut deliveries = Deliveries::default();
+    deliveries
+        .tick(
+            &fixture.db,
+            &project(),
+            now_ms(),
+            &reach(
+                Some(&host as &dyn Host),
+                Some(&owner),
+                &fixture.base,
+                &awake,
+            ),
+        )
+        .unwrap();
+    assert_eq!(
+        (fixture.receipt(notice), fixture.receipt(work)),
+        ("sent".to_owned(), "typed".to_owned()),
+        "the turn carries the prompt, never the notice alone"
+    );
+    until("the typed prompt", || {
+        std::fs::read_to_string(&out).is_ok_and(|text| text.contains("Merge the branch"))
+    });
+    assert!(
+        !std::fs::read_to_string(&out)
+            .unwrap()
+            .contains("worker 7 woke")
+    );
+}
+
 /// owner-wake r2 L1: agents with a waking message come first among a tick's recipients, so
 /// `RECIPIENTS_PER_TICK_MAX` agents holding only older notices never keep one out.
 #[test]
