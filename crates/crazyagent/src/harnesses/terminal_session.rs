@@ -48,6 +48,7 @@ pub struct TerminalSession {
     ready: bool,
     turn: bool,
     held: bool,
+    own_held: bool,
     live: bool,
     own: bool,
     facts: VecDeque<TranscriptEvent>,
@@ -225,6 +226,7 @@ impl TerminalSession {
             ready: false,
             turn: false,
             held: false,
+            own_held: false,
             live: false,
             own: false,
             facts: VecDeque::new(),
@@ -386,10 +388,19 @@ impl TerminalSession {
     }
 
     /// Takes the oldest kept fact of a turn the app started by itself, read by the last
-    /// poll of `next_event`. Takes the session. Returns the fact, or none.
+    /// poll of `next_event`. A successful end of such a turn while commands it started in
+    /// the background still run is held back, and the app's turn on their end notification
+    /// continues it, as for an engine-typed turn. Takes the session. Returns the fact, or none.
     pub fn next_own_fact(&mut self) -> Option<TranscriptEvent> {
         assert!(self.own && !self.live);
         self.facts.pop_front()
+    }
+
+    /// Says whether a turn the app started by itself has ended in the app and is held open
+    /// only for commands it started in the background, every fact it gave taken. Output:
+    /// the answer.
+    pub fn own_held(&self) -> bool {
+        self.own_held && self.facts.is_empty()
     }
 
     /// Waits up to `wait` for the next turn fact of a session that follows every turn: a
@@ -526,7 +537,15 @@ impl TerminalSession {
                     && self.facts.len() < OWN_FACTS_MAX
                     && !matches!(fact, TranscriptEvent::ToolUse { .. })
                 {
-                    self.facts.push_back(fact);
+                    match fact {
+                        TranscriptEvent::TurnFinished { success: true }
+                            if !self.background.is_empty() =>
+                        {
+                            self.own_held = true;
+                        }
+                        TranscriptEvent::TurnStarted if self.own_held => self.own_held = false,
+                        other => self.facts.push_back(other),
+                    }
                 }
                 continue;
             }
@@ -740,6 +759,16 @@ impl AgentSession {
         match self {
             Self::Piped(_) => None,
             Self::Terminal(session) => session.next_own_fact(),
+        }
+    }
+
+    /// Says whether a pane app's own turn has ended and is held open only for its
+    /// background commands, see [`TerminalSession::own_held`]; a headless agent starts no
+    /// turn of its own. Output: the answer.
+    pub fn own_held(&self) -> bool {
+        match self {
+            Self::Piped(_) => false,
+            Self::Terminal(session) => session.own_held(),
         }
     }
 
