@@ -1,6 +1,7 @@
 use super::*;
 use crate::engine::native_auth_host::entry::run;
 use std::os::fd::OwnedFd;
+use std::os::unix::process::CommandExt;
 
 fn bootstrap_input(bytes: &[u8]) -> OwnedFd {
     assert!(bytes.len() <= 33);
@@ -361,11 +362,27 @@ async fn native_auth_custodian_claude_failure_report_keeps_the_cause_that_sealed
 
 /// Row 3 (N-E1), Codex: on a channel a refused replaced home sealed, `observe_failure`
 /// returns that cause, `native_profile_custody_unsafe`, not the sealed channel's
-/// `native_auth_recovery_required`, so the engine records the listed custodian code.
+/// `native_auth_recovery_required`, so the engine records the listed custodian code. As in
+/// `codex_auth::run`, the session's started child is reaped before the report.
 #[tokio::test]
 async fn native_auth_custodian_codex_failure_report_keeps_the_cause_that_sealed_its_channel() {
     channel_case(|case| async move {
-        let (launch, mut channel, session) = sealed_by_a_replaced_home(&case).await;
+        let (launch, mut channel, mut session) = sealed_by_a_replaced_home(&case).await;
+        let child = crate::spawn_gate::spawn(
+            ProcessCommand::new("/usr/bin/true")
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .process_group(0),
+        )
+        .unwrap();
+        if let Err((error, mut child)) = session.retain_child(child) {
+            let _ = child.wait();
+            panic!("retained child rejected: {error}");
+        }
+        assert!(session.child_mut().unwrap().wait().unwrap().success());
+        assert!(session.child_attempted());
         let reported = crate::engine::native_auth_host::codex_auth::observe_failure(
             &session,
             &mut channel,
