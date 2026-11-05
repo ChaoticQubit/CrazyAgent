@@ -205,10 +205,12 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
 /// not the current one raises one owner question, kept on the profile until approve, revoke
 /// or eviction settles it; a later proposal while it waits returns it. When the owner already
 /// has the most questions waiting, the profile is stored without one. The owner's own
-/// proposal raises none. Inputs: the engine connection, the project, the profile JSON and the
-/// actor. Output: the proposal, or `checks_profile_invalid`, `checks_holdout_missing`,
-/// `checks_profile_revoked`, `checks_profiles_full`, `checks_project_missing`, another
-/// questions refusal, or `checks_unavailable`.
+/// proposal raises none, and only the owner proposes in a project whose trust level allows no
+/// agent proposals (threat model D5). Inputs: the engine connection, the project, the profile
+/// JSON and the actor. Output: the proposal, or `checks_profile_invalid`,
+/// `checks_owner_only`, `checks_holdout_missing`, `checks_profile_revoked`,
+/// `checks_profiles_full`, `checks_project_missing`, another questions refusal, or
+/// `checks_unavailable`.
 pub fn propose(
     db: &Connection,
     project: &ProjectId,
@@ -220,6 +222,12 @@ pub fn propose(
     let id = profile.identity()?;
     let tx = immediate(db)?;
     project_known(&tx, project)?;
+    if actor != Actor::Owner {
+        let trust = crate::trust::level(&tx, project.as_str()).map_err(unavailable)?;
+        if !crate::trust::Enforcement::for_level(trust).agent_profile_proposals {
+            return Err(failure("checks_owner_only"));
+        }
+    }
     for digest in profile
         .holdouts
         .iter()
