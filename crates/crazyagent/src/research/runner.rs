@@ -1243,6 +1243,7 @@ pub(crate) struct ReadOnlyRun<'a> {
     pub prompt: &'a str,
     pub account: &'a ResearchAccount,
     pub wall_time: Duration,
+    #[cfg(unix)]
     pub output_tokens: Option<u32>,
 }
 
@@ -4488,7 +4489,6 @@ mod windows_tests {
             name: "onboard-m-windows",
             account: &account,
             wall_time: Duration::from_secs(5),
-            output_tokens: None,
         };
         assert_eq!(
             runner.run_read_only(&run, &|| false).unwrap(),

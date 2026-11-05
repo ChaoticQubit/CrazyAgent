@@ -296,6 +296,7 @@ pub enum Layout {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Part {
     Single,
+    #[cfg(unix)]
     Lead,
     Teammates,
 }
@@ -305,6 +306,7 @@ pub(crate) enum Part {
 /// or the I/O error.
 pub(crate) fn part_folder(mailbox: Mailbox, part: Part) -> std::io::Result<Mailbox> {
     match part {
+        #[cfg(unix)]
         Part::Lead => mailbox.folder(LEAD_PART),
         Part::Single | Part::Teammates => Ok(mailbox),
     }
@@ -726,7 +728,9 @@ pub(crate) fn read_letter(folder: &Mailbox, name: &str) -> Option<Letter> {
 pub(crate) fn read_roster(folder: &Mailbox, part: Part) -> Option<Roster> {
     let name = match part {
         Part::Teammates => format!("{LEAD_PART}/{ROSTER_FILE}"),
-        Part::Single | Part::Lead => ROSTER_FILE.to_owned(),
+        Part::Single => ROSTER_FILE.to_owned(),
+        #[cfg(unix)]
+        Part::Lead => ROSTER_FILE.to_owned(),
     };
     let bytes = read_entry(folder, &name, ROSTER_BYTES_MAX)?;
     serde_json::from_slice(&bytes).ok()
