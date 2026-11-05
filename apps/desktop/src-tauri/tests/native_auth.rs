@@ -892,9 +892,9 @@ async fn desktop_native_auth_running_sign_in_is_not_reported_stuck() {
                 .start_native_auth(&other.ticket, NativeAuthMethod::ClaudeOfficial)
                 .await
                 .err()
-                .map(|error| error.code),
-            Some("native_auth_recovery_required"),
-            "a second sign-in waits while the engine still runs the first"
+                .map(|error| serde_json::to_value(error).unwrap()),
+            Some(serde_json::json!({ "code": "native_auth_sign_in_running", "account": "connection-z" })),
+            "a second sign-in waits while the engine still runs the first, and the refusal names the running account, not a stuck one"
         );
         let current = inspect(&mut bridge, "connection-z").await;
         bridge.cancel_native_auth(&current.ticket).await.unwrap();
@@ -922,9 +922,9 @@ async fn desktop_native_auth_settings_change_mid_sign_in_does_not_wedge_the_desk
             bridge.remove_account("connection-z").await,
         ] {
             assert_eq!(
-                refused.unwrap_err().code,
-                "native_auth_recovery_required",
-                "the desktop does not change the account a running sign-in is bound to"
+                serde_json::to_value(refused.unwrap_err()).unwrap(),
+                serde_json::json!({ "code": "native_auth_sign_in_running", "account": "connection-z" }),
+                "the desktop does not change the account a running sign-in is bound to, and says that sign-in runs"
             );
         }
         bridge

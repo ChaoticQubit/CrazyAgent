@@ -8,6 +8,7 @@ const ACCOUNT = {
   id: "acct-1", name: "Claude one", provider: "claude", provider_name: "Claude", method: "subscription",
   method_label: "Sign in with your Claude subscription", url: null, model: null, status: "not_signed_in", status_label: "Not signed in",
 };
+const RUNNING = { ...ACCOUNT, id: "acct-2", name: "Claude two", status: "signing_in", status_label: "Signing in" };
 const DETAIL = {
   ticket: "ticket-1", collection: "connections", revision: "1", config_id: "config-1", source_hash: "source-1", writable: true, fresh: true,
   record: { kind: "connection", connection: {
@@ -21,14 +22,15 @@ const noted = [];
 
 /** Mounts the real account drawer with Sign in again open, under a session that records every
  * result it is asked to note, with the bridge refusing a new sign-in with the given code.
- * Input: the refusal code. */
-export function mount(refusal) {
+ * Inputs: the refusal code and, for a sign-in that still runs, the id of its account. */
+export function mount(refusal, account) {
   root?.unmount();
   noted.length = 0;
   window.__TAURI_INTERNALS__ = {
     invoke: async (command) => {
       if (command === "desktop_inspect_model_access") return DETAIL;
-      if (command === "desktop_start_native_auth") throw { code: refusal, message: refusal };
+      if (command === "desktop_list_accounts") return { accounts: [ACCOUNT, RUNNING], next: null };
+      if (command === "desktop_start_native_auth") throw account ? { code: refusal, account } : { code: refusal, message: refusal };
       throw { code: "unknown", message: command };
     },
     transformCallback: () => 0,
