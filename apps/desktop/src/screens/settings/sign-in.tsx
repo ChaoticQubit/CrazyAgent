@@ -5,6 +5,7 @@ import {
   nativeAuthAllowed, nativeAuthFailureCode, nativeAuthText, nativeClaudeInputAllowed, reduceNativeAuth, validateClaudeAuthCode,
   type NativeAuthCommand, type NativeAuthMethod, type NativeAuthState, type NativeAuthView,
 } from "../../native-auth";
+import { useAppSession } from "../../state";
 import { Button, Icon, Notice, SecretField } from "../../ui";
 
 type Challenge = NonNullable<NativeAuthView["challenge"]>;
@@ -194,12 +195,16 @@ export function signInRunning(state: NativeAuthState | undefined): boolean {
 }
 
 /** Runs managed sign-in for one subscription account: reads its sign-in record, starts,
- * polls, cancels and sends the Claude code through the native-auth reducer.
- * Input: the account id. Output: the state and the actions. */
+ * polls, cancels and sends the Claude code through the native-auth reducer, and hands every
+ * failure to the session, so a stuck sign-in raises Clear stuck sign-in at the top of the
+ * window. Input: the account id. Output: the state and the actions. */
 export function useSignIn(accountId: string | undefined) {
   const [state, setState] = useState<NativeAuthState>();
   const current = useRef<NativeAuthState | undefined>(undefined);
   const navigation = useRef(0);
+  const session = useAppSession();
+  const note = useRef(session.noteResult);
+  note.current = session.noteResult;
   const update = useCallback((event: Parameters<typeof reduceNativeAuth>[1]) => {
     current.current = reduceNativeAuth(current.current, event);
     setState(current.current);
@@ -218,14 +223,16 @@ export function useSignIn(accountId: string | undefined) {
         : await startNativeAuth(ticket, action);
       update({ kind: "reply", navigation: turn, request, reply });
     } catch (failure) {
-      update({ kind: "failure", navigation: turn, request, code: nativeAuthFailureCode(failure) });
+      const code = nativeAuthFailureCode(failure);
+      note.current({ kind: "error", code, message: plainError(code) });
+      update({ kind: "failure", navigation: turn, request, code });
     }
   }, [update]);
 
   const open = useCallback(async () => {
     if (!accountId) return;
     const turn = navigation.current;
-    const record = await signInRecord(accountId);
+    const record = note.current(await signInRecord(accountId));
     if (turn !== navigation.current) return;
     if (record.kind !== "ok") {
       current.current = { open: true, valid: false, confirming_logout: false, error: record.kind === "not_ready" ? "unavailable" : record.code,
