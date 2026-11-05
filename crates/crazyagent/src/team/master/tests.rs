@@ -230,6 +230,75 @@ fn engine_input_reaches_an_idle_live_master_only_while_the_owner_is_not_typing()
     );
 }
 
+/// Engine input waits while the live master's app has not turned bracketed paste on, as
+/// while it still boots: nothing is typed and no input time is kept, so the line is never
+/// left unsent in a prompt that does not read keys yet (row 10, 2026-11-05). Once the app
+/// turns bracketed paste on, the same input is typed.
+#[test]
+fn engine_input_waits_until_the_live_masters_app_reads_keys() {
+    let mut fixture = Fixture::new();
+    let host = fixture.host();
+    let project = fixture.setup.project_id.clone();
+    let typed = fixture.base.join("typed");
+    let go = fixture.base.join("go");
+    let command = InteractiveCommand {
+        argv: vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            format!(
+                "/bin/stty raw -echo; printf 'booting\\n'; while [ ! -e '{}' ]; do /bin/sleep 0.1; done; printf '\\033[?2004hready\\n'; exec /bin/cat > '{}'",
+                go.display(),
+                typed.display()
+            ),
+        ],
+        cwd: fixture.base.clone(),
+        env: Vec::new(),
+        transcript: Transcript::Unavailable,
+    };
+    let pane = AgentId::team(MASTER).unwrap();
+    host.spawn(&pane, &command).unwrap();
+    fixture.live(Some(MASTER));
+    let input = |now: i64| {
+        master_input_at(
+            &fixture.connection,
+            host.as_ref(),
+            None,
+            &project,
+            "hello",
+            now,
+        )
+    };
+
+    assert_eq!(
+        input(NOW),
+        Err(InputRefused::Busy),
+        "the app does not read keys yet"
+    );
+    let input_ms: Option<i64> = fixture
+        .connection
+        .query_row(
+            "SELECT input_ms FROM team_live_masters WHERE project=?1",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(input_ms, None, "a refused input keeps no input time");
+
+    std::fs::write(&go, "").unwrap();
+    let until = Instant::now() + Duration::from_secs(15);
+    while !host.input_live(&pane).unwrap() {
+        assert!(Instant::now() < until, "the app turns bracketed paste on");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(input(NOW), Ok(()));
+    let pasted = b"\x1b[200~hello\x1b[201~\r";
+    let seen = typed_until(&typed, pasted);
+    assert_eq!(
+        seen, pasted,
+        "the line is typed once, after the app reads keys"
+    );
+}
+
 #[test]
 fn owner_keys_leave_a_draft_until_enter_ctrl_c_or_ctrl_u_and_arrows_change_nothing() {
     assert_eq!(keys(b"abc"), (false, true));

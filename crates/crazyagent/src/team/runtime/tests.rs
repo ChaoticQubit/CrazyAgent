@@ -2977,6 +2977,85 @@ fn a_message_waiting_as_the_live_switch_goes_off_waits_for_the_stopping_master()
     host.close(&[]).unwrap();
 }
 
+/// `LIVE_CODEX` whose start takes a while, as a real app's boot does: before its ready line
+/// it runs `boot`, then drops whatever was typed meanwhile, since a line typed before the
+/// app reads keys is left unsent in its prompt (row 10, 2026-11-05). Takes the boot lines.
+/// Returns the script.
+#[cfg(target_os = "macos")]
+fn booting_codex(boot: &str) -> String {
+    let ready = "printf '\\033[?2004hCodex stand-in ready\\n'\n";
+    let script = LIVE_CODEX.replacen(
+        ready,
+        &format!(
+            "{boot}/bin/stty -icanon min 0 time 0\n/bin/cat > /dev/null\n/bin/stty icanon\n{ready}"
+        ),
+        1,
+    );
+    assert_ne!(script, LIVE_CODEX);
+    script
+}
+
+/// Starts a live master on `script`, leaves one owner line pending as soon as its pane runs
+/// and waits until that line opened the master's first turn. Takes the script.
+#[cfg(target_os = "macos")]
+fn first_owner_line_opens_a_turn(script: &str) {
+    let mut fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, script);
+    let project = fixture.setup.project_id.clone();
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the live master's pane runs", |f| {
+        live_agent(&f.connection).is_some()
+    });
+    let tx = fixture.connection.transaction().unwrap();
+    let message = append_message(
+        &tx,
+        &project,
+        MessageAuthor::Owner,
+        "Reply with only the word READY.",
+        MessageState::Pending,
+        now_ms(),
+    )
+    .unwrap()
+    .unwrap();
+    tx.commit().unwrap();
+
+    fixture.until(&mut team, "the owner's first line opens a turn", |f| {
+        live_turns(&f.connection).0 >= 1
+    });
+    let state: String = fixture
+        .connection
+        .query_row(
+            "SELECT state FROM team_messages WHERE id=?1",
+            [message],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "answered");
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// An owner line for a live master whose app still boots, with bracketed paste off and no
+/// keys read, waits until the app reads keys and then opens a turn, instead of being typed
+/// at once and left unsent.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_owner_line_waits_until_the_live_masters_app_reads_keys() {
+    first_owner_line_opens_a_turn(&booting_codex("/bin/sleep 2\n"));
+}
+
+/// An owner line for a live master whose app turned bracketed paste on but is still
+/// drawing its start waits until the screen has been quiet as long as an engine-typed turn
+/// waits for, and then opens a turn.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_owner_line_waits_until_the_live_masters_screen_is_quiet() {
+    first_owner_line_opens_a_turn(&booting_codex(
+        "printf '\\033[?2004h'\ni=0\nwhile [ \"$i\" -lt 10 ]; do printf 'loading %s\\n' \"$i\"; /bin/sleep 0.2; i=$((i+1)); done\n",
+    ));
+}
+
 #[cfg(target_os = "macos")]
 const RESUMING_CODEX: &str = r#"#!/bin/sh
 [ "$1" = app-server ] && exit 0
