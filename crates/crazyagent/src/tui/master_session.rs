@@ -42,6 +42,11 @@ const RENEWAL_LEFT: &str = "You left the project before the settings were read."
 /// way: reading the current settings, being sent or waiting for the engine (P2).
 pub(super) const NEW_SESSION_STARTING: &str = "A new session is already starting.";
 
+/// What the owner reads when New session is pressed while another master step, such as a
+/// sent message, a session switch or a stop, is still under way (P2 r1, TUIP2-L1).
+const LAST_STEP_UNDER_WAY: &str =
+    "Your last request is still being handled. Press n again when it is done.";
+
 /// Why a New session waiting for the current settings ended unsent when the engine
 /// connection changed while they were read.
 const RENEWAL_DROPPED: &str =
@@ -770,6 +775,9 @@ impl State {
         }
         if self.renewing() {
             return Err(NEW_SESSION_STARTING.into());
+        }
+        if self.pending.is_some() || self.job.is_some() {
+            return Err(LAST_STEP_UNDER_WAY.into());
         }
         self.intent_free()?;
         self.renewal = Some(cancel_running);
