@@ -3548,6 +3548,7 @@ fn schedule_rows(case: &Fixture, limits: &[(&str, f64, i64)], plans: &[(&str, u8
                     used_percent: *weekly,
                     resets_at_ms: Some(*resets),
                 }),
+                provider: Some(crate::usage::poll::Provider::Claude),
             },
             crate::usage::LimitSource::Poll,
             clock_ms(),
