@@ -447,7 +447,7 @@ pub fn make_tmp(home: &Path) -> io::Result<PathBuf> {
     }
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700))?;
     assert!(private_folder(&path));
-    if let Some(script) = git_script(crate::research::runner::setup_git(), false)
+    if let Some(script) = git_script(crate::research::runner::sandboxed_git(), false)
         && let Err(error) = write_git(&path, &script)
     {
         eprintln!("agent_git_not_written kind={:?}", error.kind());
@@ -485,7 +485,7 @@ fn git_script(git: &Path, lead: bool) -> Option<String> {
 /// is the shim and no copy is written, or the write failure.
 #[cfg(unix)]
 pub fn lead_git(tmp: &Path) -> io::Result<()> {
-    match git_script(crate::research::runner::setup_git(), true) {
+    match git_script(crate::research::runner::sandboxed_git(), true) {
         Some(script) => write_git(tmp, &script),
         None => Ok(()),
     }

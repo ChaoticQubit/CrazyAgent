@@ -114,6 +114,7 @@ fn first_run_status() -> SetupStatus {
             ),
         ],
         running: false,
+        notes: Vec::new(),
     }
 }
 
@@ -231,6 +232,24 @@ fn tools_show_found_missing_and_failed_in_plain_words() {
                 .all(|row| row.chars().count() <= usize::from(width))
         );
     }
+}
+
+#[test]
+fn a_setup_note_shows_its_plain_reason_under_tools() {
+    let mut shell = Shell::with(ctx(120, 36), Box::new(AppSetup::new(true)));
+    assert!(matches!(jobs(&mut shell).as_slice(), [AppSetupJob::Status]));
+    let mut status = first_run_status();
+    status.notes = vec!["agent_git_needs_tools".into()];
+    shell.arrive(event(AppSetupEvent::Status(Ok(status))));
+    let rows = render(&mut shell, 120, 36);
+    find(
+        &rows,
+        "Agent git needs the Command Line Tools: run xcode-select --install",
+    );
+    assert!(
+        rows.iter()
+            .all(|row| !row.contains("agent_git_needs_tools"))
+    );
 }
 
 #[test]
