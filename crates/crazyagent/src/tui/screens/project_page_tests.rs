@@ -1417,6 +1417,49 @@ async fn n_whose_settings_read_fails_says_the_new_session_was_not_started() {
     );
 }
 
+/// A second n while the first New session still starts says so in plain words on the
+/// page, not the client's internal intent line, and only one new session is made (P2,
+/// trial 4 run 6 N-T2): the first n is still reading the current settings when the
+/// second arrives.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_n_while_the_first_new_session_starts_says_it_is_already_starting() {
+    let mut engine = Engine::start().await;
+    let (notes, mut shell, mut connection, first) =
+        conversation_with_a_settled_turn(&mut engine).await;
+    shell.key(Key::Esc);
+    until(&mut shell, &mut connection, |shown| {
+        shown.contains("Session  started")
+    })
+    .await;
+    shell.key(Key::Char('n'));
+    shell.key(Key::Char('n'));
+    let message = shell
+        .ctx
+        .message()
+        .cloned()
+        .expect("the second n is answered on the page");
+    assert_eq!(message.tone, Tone::Error);
+    assert_eq!(message.lead, "The session did not switch.");
+    assert_eq!(message.rest, "A new session is already starting.");
+    let shown = render(&mut shell, 100, 40);
+    assert!(
+        shown.contains("A new session is already starting."),
+        "{shown}"
+    );
+    for internal in ["intent", "exact identity", "Ctrl-R recovers"] {
+        assert!(!shown.contains(internal), "{internal}:\n{shown}");
+    }
+    until(&mut shell, &mut connection, |shown| {
+        shown.contains("No messages yet.") && !shown.contains("Plan the first slice")
+    })
+    .await;
+    let (fresh, _) = latest_master(&mut engine, &notes).await;
+    assert_ne!(fresh.unwrap().session_id, first.session_id);
+    shell.key(Key::Char('l'));
+    let shown = render(&mut shell, 100, 40);
+    assert!(shown.contains("Sessions  2"), "one new session, not two:\n{shown}");
+}
+
 /// A new session on a project whose master runs live turns the live switch on once the
 /// engine has made the new session, so the live master starts on the fresh conversation
 /// even when it was stopped or never started.
