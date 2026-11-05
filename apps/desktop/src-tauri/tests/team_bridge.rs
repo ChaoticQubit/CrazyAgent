@@ -14,7 +14,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-const COMMANDS: [&str; 13] = [
+const COMMANDS: [&str; 14] = [
     "desktop_team_status",
     "desktop_team_message",
     "desktop_team_delegate",
