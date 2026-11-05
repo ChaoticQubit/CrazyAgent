@@ -238,7 +238,14 @@ enum Placement {
 
 impl ManagedAgent {
     pub(crate) fn new(harness: &'static str, executable: &Path) -> Self {
-        Self::open(harness, executable, Placement::Child, AgentRole::Sub, None)
+        Self::open(
+            harness,
+            executable,
+            Placement::Child,
+            AgentRole::Sub,
+            None,
+            None,
+        )
     }
 
     /// The same agent in a project whose agents run under the None network (S4b), so the
@@ -251,6 +258,7 @@ impl ManagedAgent {
             Placement::Child,
             AgentRole::Sub,
             Some(AgentNetwork::None),
+            None,
         )
     }
 
@@ -269,7 +277,28 @@ impl ManagedAgent {
         host: Arc<dyn Host>,
         role: AgentRole,
     ) -> Self {
-        Self::open(harness, executable, Placement::Pane(host), role, None)
+        Self::open(harness, executable, Placement::Pane(host), role, None, None)
+    }
+
+    /// The same agent in a pane, in a project whose owner chose `display` for its Claude Code
+    /// terminals (N-D9), saved in the project's coordination settings before the runtime
+    /// prepares it. Inputs: the launch harness, its executable, the host, the role and the
+    /// display. Output: the prepared agent.
+    pub(crate) fn in_pane_with_display(
+        harness: &'static str,
+        executable: &Path,
+        host: Arc<dyn Host>,
+        role: AgentRole,
+        display: crate::coord::settings::ClaudeDisplay,
+    ) -> Self {
+        Self::open(
+            harness,
+            executable,
+            Placement::Pane(host),
+            role,
+            None,
+            Some(display),
+        )
     }
 
     /// A Claude Code lead the runtime itself plans as a native-mode lead (DEC-104, TTDL): the
@@ -284,6 +313,7 @@ impl ManagedAgent {
             Placement::NativeLead,
             AgentRole::Sub,
             None,
+            None,
         )
     }
 
@@ -293,6 +323,7 @@ impl ManagedAgent {
         placement: Placement,
         role: AgentRole,
         network: Option<AgentNetwork>,
+        display: Option<crate::coord::settings::ClaudeDisplay>,
     ) -> Self {
         let native = matches!(placement, Placement::NativeLead);
         let root = tempfile::Builder::new()
@@ -370,6 +401,17 @@ impl ManagedAgent {
                     access: AgentAccess::Sandboxed,
                     network,
                     ..AgentPolicy::default()
+                },
+            )
+            .unwrap();
+        }
+        if let Some(claude_display) = display {
+            crate::coord::settings::write(
+                &connection,
+                &setup.project_id,
+                &crate::coord::settings::CoordSettings {
+                    claude_display,
+                    ..crate::coord::settings::CoordSettings::default()
                 },
             )
             .unwrap();

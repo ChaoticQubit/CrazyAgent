@@ -698,6 +698,10 @@ fn claude_runs_its_own_app_under_a_known_session_and_keeps_its_transcript() {
                 "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC".to_owned(),
                 "1".to_owned()
             ),
+            (
+                "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".to_owned(),
+                "1".to_owned()
+            ),
         ])
     );
     let folder = claude_project_folder(&case.path().join("work")).unwrap();
@@ -1164,6 +1168,97 @@ fn claude_settings(built: &InteractiveCommand) -> serde_json::Value {
         .position(|argument| argument == "--settings")
         .unwrap();
     serde_json::from_str(&built.argv[at + 1]).unwrap()
+}
+
+/// The display variables a built Claude Code command carries, in order. Input: the command.
+/// Output: the name and value pairs of the two variables N-D9 sets.
+fn display_variables(built: &InteractiveCommand) -> Vec<(String, String)> {
+    built
+        .env
+        .iter()
+        .filter(|(name, _)| {
+            name == "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN" || name == "CLAUDE_CODE_SCROLL_SPEED"
+        })
+        .cloned()
+        .collect()
+}
+
+/// A Claude Code terminal at the Classic display, the default and the display of a launch
+/// without a project context, turns Claude Code's alternate screen off (N-D9), so Claude
+/// Code draws on the normal screen and leaves the wheel and a plain drag to the terminal.
+/// A native lead's teammates get the same variable through their script.
+#[test]
+fn a_classic_claude_code_terminal_turns_the_alternate_screen_off() {
+    let case = Case::new();
+    let request = case.request("claude-code", case.subscription(), true);
+    let classic = [(
+        "CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN".to_owned(),
+        "1".to_owned(),
+    )];
+    let bare = command(&request, None, &run(None)).unwrap();
+    assert_eq!(display_variables(&bare), classic, "{:?}", bare.env);
+
+    let plain = project_context(&case, "plain")
+        .install("claude-code", &case.home(), true)
+        .unwrap();
+    let built = command(&request, Some(&plain), &run(None)).unwrap();
+    assert_eq!(display_variables(&built), classic, "{:?}", built.env);
+    drop(plain);
+
+    let tmux = case.executable("tmux", "#!/bin/sh\nexit 0\n");
+    let lead = project_context(&case, "lead")
+        .with_native_team(&tmux, &case.path().join("work"))
+        .with_claude_display(crate::coord::settings::ClaudeDisplay::Classic)
+        .install("claude-code", &case.home(), true)
+        .unwrap();
+    let built = command(&request, Some(&lead), &run(None)).unwrap();
+    assert_eq!(display_variables(&built), classic, "{:?}", built.env);
+    write_teammate_command(&case.home(), &built, &request, lead.native().unwrap()).unwrap();
+    let written =
+        std::fs::read_to_string(crate::launch_context::teammate_command(&case.home())).unwrap();
+    assert!(
+        written.contains(" 'CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1' "),
+        "{written}"
+    );
+    drop(lead);
+}
+
+/// A Claude Code terminal at the Fullscreen display keeps Claude Code's own view with 3
+/// rows a wheel notch (N-D9), the step Claude Code picks itself for xterm.js, and does not
+/// turn the alternate screen off. A native lead's teammates get the same variable.
+#[test]
+fn a_fullscreen_claude_code_terminal_keeps_its_view_at_three_rows_a_notch() {
+    let case = Case::new();
+    let request = case.request("claude-code", case.subscription(), true);
+    let fullscreen = [("CLAUDE_CODE_SCROLL_SPEED".to_owned(), "3".to_owned())];
+    let chosen = project_context(&case, "chosen")
+        .with_claude_display(crate::coord::settings::ClaudeDisplay::Fullscreen)
+        .install("claude-code", &case.home(), true)
+        .unwrap();
+    let built = command(&request, Some(&chosen), &run(None)).unwrap();
+    assert_eq!(display_variables(&built), fullscreen, "{:?}", built.env);
+    drop(chosen);
+
+    let tmux = case.executable("tmux", "#!/bin/sh\nexit 0\n");
+    let lead = project_context(&case, "lead")
+        .with_native_team(&tmux, &case.path().join("work"))
+        .with_claude_display(crate::coord::settings::ClaudeDisplay::Fullscreen)
+        .install("claude-code", &case.home(), true)
+        .unwrap();
+    let built = command(&request, Some(&lead), &run(None)).unwrap();
+    assert_eq!(display_variables(&built), fullscreen, "{:?}", built.env);
+    write_teammate_command(&case.home(), &built, &request, lead.native().unwrap()).unwrap();
+    let written =
+        std::fs::read_to_string(crate::launch_context::teammate_command(&case.home())).unwrap();
+    assert!(
+        written.contains(" 'CLAUDE_CODE_SCROLL_SPEED=3' "),
+        "{written}"
+    );
+    assert!(
+        !written.contains("CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN"),
+        "{written}"
+    );
+    drop(lead);
 }
 
 #[test]

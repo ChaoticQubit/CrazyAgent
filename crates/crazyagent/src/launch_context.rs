@@ -1,5 +1,5 @@
 use crate::agent_git::Layout;
-use crate::coord::settings::{RoleSkills, SkillRole};
+use crate::coord::settings::{ClaudeDisplay, RoleSkills, SkillRole};
 use crate::harnesses::launch::LaunchError;
 use crate::plugins::{
     EffectiveHook, EffectivePlugins, EffectiveSkill, LaunchPlugins, LaunchSecret, LaunchServer,
@@ -122,8 +122,9 @@ fn skill_unavailable<E>(_: E) -> LaunchError {
 /// one bounded startup instruction holding the project brief, an index of its context files
 /// and the owner-approved memories, whether a headless Claude run keeps its transcript,
 /// whether a Claude Code lead runs its own agent team, the engine executable and mailbox
-/// of a team agent's message relay, and the loopback port of the model proxy a team agent
-/// under the None network reaches its model through (S4b).
+/// of a team agent's message relay, the loopback port of the model proxy a team agent
+/// under the None network reaches its model through (S4b), and the display its Claude Code
+/// terminal draws with (N-D9).
 #[derive(Debug)]
 pub struct AgentContext {
     plugins: LaunchPlugins,
@@ -134,6 +135,7 @@ pub struct AgentContext {
     native_team: Option<(PathBuf, PathBuf)>,
     relay: Option<(PathBuf, PathBuf)>,
     model_proxy: Option<u16>,
+    claude_display: ClaudeDisplay,
 }
 
 /// The project whose app and project instructions and instruction files each launch reads
@@ -159,6 +161,7 @@ pub struct Installed {
     denied: Vec<String>,
     native: Option<NativeTeam>,
     model_proxy: Option<u16>,
+    claude_display: ClaudeDisplay,
     _lock: File,
 }
 
@@ -221,6 +224,7 @@ pub fn for_project(
         native_team: None,
         relay: None,
         model_proxy: None,
+        claude_display: ClaudeDisplay::Classic,
     })
 }
 
@@ -569,6 +573,14 @@ impl AgentContext {
         self
     }
 
+    /// Gives this launch's Claude Code terminal the project's display (N-D9): Classic turns
+    /// Claude Code's alternate screen off, Fullscreen keeps Claude Code's own view. Other
+    /// harnesses and headless runs ignore it. Input: the display. Output: the context.
+    pub fn with_claude_display(mut self, display: ClaudeDisplay) -> Self {
+        self.claude_display = display;
+        self
+    }
+
     /// Gives a team agent's Claude Code launch the message relay plugin (DEC-104 K2a), which
     /// delivers its team messages and reports its activity through its mailbox, and which its
     /// native teammates get from it. Other harnesses ignore it. Input: the absolute engine
@@ -785,6 +797,7 @@ impl AgentContext {
             denied: Vec::new(),
             native: None,
             model_proxy: self.model_proxy,
+            claude_display: self.claude_display,
             _lock: lock,
         };
         remove(&state);
@@ -984,6 +997,11 @@ impl Installed {
         self.model_proxy
     }
 
+    /// Names the display this launch's Claude Code terminal draws with (N-D9).
+    pub fn claude_display(&self) -> ClaudeDisplay {
+        self.claude_display
+    }
+
     /// Names where this launch wrote its files, for the record of a pane that may outlive
     /// the engine. Output: the files, none once `keep` left them to the pane.
     pub fn files(&self) -> Option<&InstalledFiles> {
@@ -1006,6 +1024,7 @@ impl Installed {
             denied: Vec::new(),
             native: None,
             model_proxy: None,
+            claude_display: ClaudeDisplay::Classic,
             _lock: lock,
         })
     }

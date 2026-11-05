@@ -789,6 +789,10 @@ impl ResearchRunner {
             return Err(RunError::Invalid(reason.into()));
         }
         let (network, proxy) = job_reach(&policy, job.tools, account, job.id)?;
+        let display = jobs
+            .claude_display(&project)
+            .map_err(|_| RunError::Invalid("project coordination settings unreadable".into()))?;
+        let context = context.with_claude_display(display);
         let context = match &proxy {
             Some(proxy) => context.with_model_proxy(proxy.port()),
             None => context,
@@ -3034,6 +3038,47 @@ mod tests {
         let none = profile(AgentNetwork::None, true);
         assert!(!none.contains("(remote ip \"*:"), "{none}");
         assert!(!none.contains("mDNSResponder"), "{none}");
+    }
+
+    /// A research job's Claude Code pane gets the display the owner chose for the project's
+    /// terminals (N-D9): Classic while none is saved, Fullscreen once chosen, and a project
+    /// without settings stays Classic.
+    #[test]
+    fn a_research_job_reads_the_claude_code_display_of_its_project() {
+        use crate::coord::settings::{ClaudeDisplay, CoordSettings, write};
+        use std::os::unix::fs::PermissionsExt;
+        let folder = tempfile::tempdir().unwrap();
+        let database = folder.path().join("engine.db");
+        let connection = rusqlite::Connection::open(&database).unwrap();
+        crate::storage::initialize_authority_schemas(&connection).unwrap();
+        std::fs::set_permissions(&database, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let project = ProjectId::new("research-display").unwrap();
+        connection
+            .execute(
+                "INSERT INTO projects(id, body) VALUES (?1, '{}')",
+                [project.as_str()],
+            )
+            .unwrap();
+        let jobs = ResearchJobs::open(&database).unwrap();
+        assert_eq!(
+            jobs.claude_display(&project).unwrap(),
+            ClaudeDisplay::Classic
+        );
+        write(
+            &connection,
+            &project,
+            &CoordSettings {
+                claude_display: ClaudeDisplay::Fullscreen,
+                ..CoordSettings::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            jobs.claude_display(&project).unwrap(),
+            ClaudeDisplay::Fullscreen
+        );
+        let other = ProjectId::new("research-elsewhere").unwrap();
+        assert_eq!(jobs.claude_display(&other).unwrap(), ClaudeDisplay::Classic);
     }
 
     /// A research job with tools under None reaches its model only through a model proxy
