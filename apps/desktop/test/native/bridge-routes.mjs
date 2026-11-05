@@ -32,9 +32,35 @@ function splitTop(text) {
   return parts.map((part) => part.trim()).filter(Boolean);
 }
 
-/** Reads every `#[tauri::command]` of lib.rs with its parameters and body.
+/** Reads the argument types lib.rs parses itself through `tauri::ipc::CommandArg`: each struct
+ * field and the top-level key its `read("key")` takes it from, the way Tauri hands them over.
+ * Input: the lib.rs source. Output: a map from type name to its `{ field, key, type }` list in
+ * field order; throws for an impl whose fields are not each read from one key of their own. */
+export function commandArgs(source) {
+  const found = new Map();
+  const heads = source.match(/^impl<[^>]*> tauri::ipc::CommandArg<'de, R> for \w+ \{$/gm) ?? [];
+  for (const [, type, body] of source.matchAll(/^impl<[^>]*> tauri::ipc::CommandArg<'de, R> for (\w+) \{\n([\s\S]*?)^\}/gm)) {
+    const struct = source.match(new RegExp(`^(?:pub(?:\\([\\w:]+\\))? )?struct ${type} \\{\\n([\\s\\S]*?)^\\}`, "m"));
+    const fields = splitTop(struct?.[1] ?? "").map((field) => {
+      const colon = field.indexOf(":");
+      return { field: field.slice(0, colon).replace(/^pub(?:\([\w:]+\))? /, "").trim(), type: field.slice(colon + 1).trim().replace(/\s+/g, " ") };
+    });
+    const reads = new Map([...body.matchAll(/^\s*(\w+): read\("(\w+)"\)\?,$/gm)].map(([, field, key]) => [field, key]));
+    const keys = new Set(reads.values());
+    const followed = fields.length > 0 && reads.size === fields.length && keys.size === fields.length
+      && (body.match(/: read\(/g) ?? []).length === fields.length && fields.every(({ field }) => reads.has(field));
+    if (!followed) throw new Error(`routes: ${type} reads its fields in a way the generator cannot follow`);
+    found.set(type, fields.map(({ field, type: fieldType }) => ({ field, key: reads.get(field), type: fieldType })));
+  }
+  assert.equal(found.size, heads.length, "every CommandArg impl of lib.rs was read to its end");
+  return found;
+}
+
+/** Reads every `#[tauri::command]` of lib.rs with its parameters and body; a parameter of a
+ * type lib.rs reads through its own `CommandArg` carries the keys it reads.
  * Input: the lib.rs source. Output: one record per command, in source order. */
 export function commands(source) {
+  const custom = commandArgs(source);
   const found = [];
   const head = /#\[tauri::command\]\s*(?:pub\s+)?(?:async\s+)?fn\s+(desktop_\w+)\s*\(/g;
   for (let match = head.exec(source); match; match = head.exec(source)) {
@@ -59,7 +85,8 @@ export function commands(source) {
     const body = source.slice(open + 1, close - 1).split("\n").map((line) => line.trim()).filter(Boolean).join(" ");
     found.push({ name: match[1], params: splitTop(params).map((param) => {
       const colon = param.indexOf(":");
-      return { name: param.slice(0, colon).trim(), type: param.slice(colon + 1).trim().replace(/\s+/g, " ") };
+      const type = param.slice(colon + 1).trim().replace(/\s+/g, " ");
+      return { name: param.slice(0, colon).trim(), type, ...(custom.has(type) && { keys: custom.get(type) }) };
     }), body });
     head.lastIndex = close;
   }
@@ -173,7 +200,7 @@ export function plan(command, impls = bridgeMethods()) {
   const rest = (queued ? body.slice("state.".length) : body).replaceAll("lock(state)", "").replaceAll("read(state)", "");
   if (/\bstate\b/.test(rest)) return { skip: "uses the state directly" };
   resolve(command.name, body, impls);
-  return { route: { name: command.name, args: args.map((arg) => ({ name: arg.name, type: arg.type.replaceAll(/\bbridge::/g, "crazyagent_desktop::bridge::") })), body } };
+  return { route: { name: command.name, args: args.map((arg) => ({ name: arg.name, type: arg.type.replaceAll(/\bbridge::/g, "crazyagent_desktop::bridge::"), ...(arg.keys && { keys: arg.keys }) })), body } };
 }
 
 /** Reads the leaf names lib.rs imports, mapped to paths the bridge binary can name.
@@ -193,14 +220,20 @@ function imports(source) {
 }
 
 /** Renders the bridge binary's route table from lib.rs: one arm per routed command that parses
- * its camelCase arguments like Tauri and runs the command body on the shared bridge.
+ * its camelCase arguments like Tauri and runs the command body on the shared bridge. An argument
+ * lib.rs reads through its own `CommandArg` gets a same-named struct in the arm that takes each
+ * field from the key the app reads, flattened so those keys sit beside the other arguments.
  * Inputs: the lib.rs source and `methods` output, the app's bridge when omitted. Output: the
  * routes.rs text. */
 export function render(source, impls = bridgeMethods()) {
   const routes = commands(source).map((command) => plan(command, impls)).filter((planned) => planned.route).map((planned) => planned.route);
   const arms = routes.map(({ name, args, body }) => {
-    const fields = args.map((arg) => `                ${arg.name}: ${arg.type},\n`).join("");
-    const parse = args.length === 0 ? "" : `            #[derive(serde::Deserialize)]
+    const structs = args.filter((arg) => arg.keys).map((arg) => `            #[derive(serde::Deserialize)]
+            struct ${arg.type} {
+${arg.keys.map(({ field, key, type }) => `                #[serde(rename = "${key}")]\n                ${field}: ${type},\n`).join("")}            }
+`).join("");
+    const fields = args.map((arg) => `${arg.keys ? "                #[serde(flatten)]\n" : ""}                ${arg.name}: ${arg.type},\n`).join("");
+    const parse = args.length === 0 ? "" : `${structs}            #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
             struct Args {
 ${fields}            }
