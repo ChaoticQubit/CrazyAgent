@@ -731,6 +731,15 @@ async fn cancelling_a_codex_sign_in_before_its_harness_starts_the_login_settles_
         .await
         .unwrap();
     assert_eq!(begun.phase, NativeAuthPhase::Starting);
+    let spawned = Instant::now() + Duration::from_secs(10);
+    while case.logins().is_empty() {
+        assert!(Instant::now() < spawned, "the Codex stand-in never started");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(
+        read(&client, &scope, &begun).await.phase,
+        NativeAuthPhase::Starting
+    );
     cancel(&client, &scope, &begun).await;
     let finished = settle(&client, &scope, &begun, ended).await;
     assert_eq!(
