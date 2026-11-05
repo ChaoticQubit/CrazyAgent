@@ -280,6 +280,203 @@ fn facts_without_documents_serialize_as_before() {
     assert!(old.research.is_empty() && old.documents.is_empty() && old.shown.is_empty());
 }
 
+fn git_init(root: &Path) {
+    let mut command = std::process::Command::new(crate::research::runner::setup_git());
+    command
+        .args(["init", "-q", "--template="])
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .current_dir(root);
+    let status = crate::spawn_gate::status(&mut command);
+    assert!(
+        status.as_ref().is_ok_and(std::process::ExitStatus::success),
+        "git init: {status:?}"
+    );
+}
+
+fn mapping_prompt(root: &Path) -> String {
+    let evidence = draft::gather(root);
+    let (found, _) = draft::found_facts(&evidence, root);
+    draft::prompt(&evidence, &found)
+}
+
+#[test]
+fn git_ignored_documents_are_neither_read_nor_listed() {
+    let dir = rust_repo();
+    let root = dir.path();
+    git_init(root);
+    write_file(
+        root,
+        ".gitignore",
+        "notes/private-*.md\n!notes/private-ok.md\ndocs/scratch/\n*.log.md\n",
+    );
+    write_file(root, ".git/info/exclude", "docs/excluded.md\n");
+    write_file(
+        root,
+        "docs/plan.md",
+        "Release plan for sync. PLAN_TEXT_4410\n",
+    );
+    write_file(
+        root,
+        "docs/meeting notes.md",
+        "Weekly sync. SPACED_TEXT_6161\n",
+    );
+    write_file(
+        root,
+        "notes/private-ok.md",
+        "Kept by a rule. NEGATED_TEXT_1414\n",
+    );
+    write_file(root, "docs/spec.pdf", "%PDF-1.7");
+    let ignored = [
+        "notes/private-plan.md",
+        "docs/scratch/idea.md",
+        "docs/scratch/spec.pdf",
+        "docs/run.log.md",
+        "docs/excluded.md",
+    ];
+    for path in ignored {
+        write_file(root, path, "IGNORED_TEXT_3141 api_key=sk-test-0000\n");
+    }
+
+    let prompt = mapping_prompt(root);
+    for text in [
+        "PLAN_TEXT_4410",
+        "SPACED_TEXT_6161",
+        "NEGATED_TEXT_1414",
+        "docs/spec.pdf (",
+    ] {
+        assert!(prompt.contains(text), "{text} is missing from the prompt");
+    }
+    assert!(
+        !prompt.contains("IGNORED_TEXT_3141"),
+        "git-ignored text reached the prompt"
+    );
+    for path in ignored {
+        assert!(!prompt.contains(path), "the git-ignored {path} is listed");
+    }
+}
+
+#[test]
+fn secret_named_documents_are_neither_read_nor_listed() {
+    let dir = rust_repo();
+    let root = dir.path();
+    git_init(root);
+    write_file(
+        root,
+        "docs/plan.md",
+        "Release plan for sync. PLAN_TEXT_4410\n",
+    );
+    let kept = [
+        "docs/monkey-business.md",
+        "docs/tokenizer.md",
+        "docs/keynote.md",
+        "docs/environment.md",
+    ];
+    for path in kept {
+        write_file(root, path, &format!("KEPT_TEXT_5150 {path}\n"));
+    }
+    let secret = [
+        "docs/credentials.txt",
+        "docs/api-keys.md",
+        "notes/Passwords.md",
+        "docs/server.pem.txt",
+        "docs/prod.env.md",
+        "research/aws_secret_notes.md",
+        "docs/privateKey.txt",
+        "docs/tokens.md",
+        "docs/Api_Key.txt",
+        "docs/client.p12.txt",
+        "docs/cert.PFX.md",
+        "notes/passwd.txt",
+        "docs/deploy.key.md",
+        "secrets/notes.md",
+        "docs/Credential.pdf",
+    ];
+    for path in secret {
+        write_file(root, path, "SECRET_TEXT_9001 password=hunter2\n");
+    }
+
+    let prompt = mapping_prompt(root);
+    assert!(prompt.contains("PLAN_TEXT_4410"));
+    for path in kept {
+        assert!(
+            prompt.contains(&format!("KEPT_TEXT_5150 {path}")),
+            "{path} is missing from the prompt"
+        );
+    }
+    assert!(
+        !prompt.contains("SECRET_TEXT_9001"),
+        "a secret file's text reached the prompt"
+    );
+    for path in secret {
+        assert!(!prompt.contains(path), "the secret-named {path} is listed");
+    }
+}
+
+#[test]
+fn hard_linked_documents_are_neither_read_nor_listed() {
+    let dir = rust_repo();
+    let root = dir.path();
+    git_init(root);
+    let outside = tempfile::tempdir().unwrap();
+    std::fs::write(outside.path().join("notes.md"), "HARDLINK_TEXT_4242\n").unwrap();
+    write_file(
+        root,
+        "docs/plan.md",
+        "Release plan for sync. PLAN_TEXT_4410\n",
+    );
+    std::fs::hard_link(
+        outside.path().join("notes.md"),
+        root.join("docs/linked-copy.md"),
+    )
+    .unwrap();
+    write_file(root, "docs/twin-a.md", "TWIN_TEXT_4243\n");
+    std::fs::hard_link(root.join("docs/twin-a.md"), root.join("docs/twin-b.md")).unwrap();
+
+    let prompt = mapping_prompt(root);
+    assert!(prompt.contains("PLAN_TEXT_4410"));
+    for text in [
+        "HARDLINK_TEXT_4242",
+        "docs/linked-copy.md",
+        "TWIN_TEXT_4243",
+        "docs/twin-a.md",
+        "docs/twin-b.md",
+    ] {
+        assert!(
+            !prompt.contains(text),
+            "the hard-linked {text} reached the prompt"
+        );
+    }
+}
+
+#[test]
+fn without_an_answer_from_git_no_document_is_read_and_the_prompt_says_so() {
+    let dir = rust_repo();
+    let root = dir.path();
+    write_file(
+        root,
+        "docs/plan.md",
+        "Release plan for sync. PLAN_TEXT_4410\n",
+    );
+    write_file(root, "docs/spec.pdf", "%PDF-1.7");
+
+    let evidence = draft::gather(root);
+    assert!(
+        evidence.documents.is_empty() && evidence.unread.is_empty(),
+        "documents were read without git saying which it ignores"
+    );
+    let prompt = mapping_prompt(root);
+    assert!(!prompt.contains("PLAN_TEXT_4410") && !prompt.contains("docs/spec.pdf"));
+    assert!(
+        prompt.contains(
+            "No project document was read: the project's git could not tell which files it ignores."
+        ),
+        "the prompt does not say why no document was read"
+    );
+}
+
 #[test]
 fn the_last_json_block_fills_the_answer() {
     let text = concat!(
