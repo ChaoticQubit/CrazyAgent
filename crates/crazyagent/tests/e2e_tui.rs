@@ -405,6 +405,13 @@ fn to_tab(pty: &Pty, project: &str, tab: &str, keys: &[&str]) {
         if shown.as_deref() == Some(tab) {
             return;
         }
+        if tab == "Conversation" && shown.as_deref() == Some("Master") {
+            pty.keys(&["Escape"]);
+            pty.until("Esc leaves the master view for the console", |now| {
+                tab_shown(now, project).as_deref() == Some(tab)
+            });
+            return;
+        }
         assert!(step < STEPS_MAX, "no project tab is {tab}:\n{screen}");
         pty.bytes(keys);
         pty.until("the next project tab shows", |now| {

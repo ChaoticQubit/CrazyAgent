@@ -823,6 +823,7 @@ mod tests {
     use crate::owner_profile::OwnerProfile;
     use crate::protocol::ProjectId;
     use crate::tui::glyphs::UNICODE;
+    use crate::tui::keys::ShiftArrows;
     use crate::tui::seam::{Activity, ResearchCounts};
     use crate::tui::theme::{Appearance, Colors, Depth};
 
@@ -1209,7 +1210,7 @@ mod tests {
         let mut shell = loaded();
         shell.key(Key::Tab);
         shell.key(Key::Char('!'));
-        for _ in 0..7 {
+        for _ in 0..8 {
             shell.key(Key::Tab);
         }
         shell.key(Key::Enter);
@@ -1223,6 +1224,41 @@ mod tests {
         shell.arrive(Arrival::ProfileSaved(Ok(())));
         shell.key(Key::Ctrl('q'));
         assert!(shell.quitting(), "a saved profile has nothing to lose");
+    }
+
+    #[test]
+    fn saving_the_profile_keeps_the_master_shift_arrows_choice_on_this_computer() {
+        let folder = tempfile::tempdir().unwrap();
+        let colors = folder.path().join("tui-colors");
+        let mut ctx = ctx();
+        ctx.prefs = Some(colors.clone());
+        ctx.store.profile = Load::Ready(Some(OwnerProfile {
+            name: "Mira".into(),
+            role: String::new(),
+            bio: String::new(),
+            preferred_stack: Vec::new(),
+            working_style: Default::default(),
+        }));
+        let mut shell = at(Place::Settings(SettingsSection::Profile), ctx);
+        assert_eq!(shell.ctx.shift_arrows, ShiftArrows::SwitchTabs);
+        for _ in 0..8 {
+            shell.key(Key::Tab);
+        }
+        shell.key(Key::Right);
+        shell.key(Key::Tab);
+        shell.key(Key::Enter);
+        assert!(drain(&mut shell).contains(&"SaveProfile".to_owned()));
+        assert_eq!(
+            shell.ctx.shift_arrows,
+            ShiftArrows::SwitchTabs,
+            "the choice applies once saved"
+        );
+        shell.arrive(Arrival::ProfileSaved(Ok(())));
+        assert_eq!(shell.ctx.shift_arrows, ShiftArrows::SendToAgent);
+        assert_eq!(
+            crate::tui::prefs::load_shift_arrows(&crate::tui::prefs::shift_arrows_path(&colors)),
+            ShiftArrows::SendToAgent
+        );
     }
 
     #[test]

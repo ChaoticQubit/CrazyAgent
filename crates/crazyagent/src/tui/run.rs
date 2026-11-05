@@ -84,8 +84,12 @@ pub fn context(var: impl Fn(&str) -> Option<String>, socket: String) -> Result<C
     } else {
         Appearance::Dark
     };
+    let shift_arrows = prefs.as_deref().map_or_else(Default::default, |path| {
+        prefs::load_shift_arrows(&prefs::shift_arrows_path(path))
+    });
     let mut ctx = Ctx::new(depth, colors, appearance, Glyphs::detect(&var), socket);
     ctx.prefs = prefs;
+    ctx.shift_arrows = shift_arrows;
     ctx.home = var("HOME").filter(|home| home.starts_with('/'));
     Ok(ctx)
 }

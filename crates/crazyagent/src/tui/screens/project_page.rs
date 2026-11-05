@@ -200,6 +200,7 @@ pub(in crate::tui) struct ProjectPage {
     covered: bool,
     from_master: bool,
     reopen_master: bool,
+    master_entry: bool,
     import: Option<Vec<ImportFile>>,
     import_asked: bool,
     import_sent: Option<ProcessQuery>,
@@ -262,6 +263,7 @@ impl ProjectPage {
             covered: false,
             from_master: false,
             reopen_master: false,
+            master_entry: tab == ProjectTab::Conversation,
             import: None,
             import_asked: false,
             import_sent: None,
@@ -1121,6 +1123,37 @@ impl ProjectPage {
         ctx.request(Request::Setup(query));
     }
 
+    /// Notes a key's move onto or off the Conversation tab: entering the tab offers the live
+    /// master view, a key typed on the tab or leaving it withdraws the offer.
+    /// Inputs: the tab before the key and the flow the key gave. Output: the flow to apply.
+    fn entered(&mut self, before: Tab, flow: Flow) -> Flow {
+        self.master_entry = self.screen.tab == Tab::Conversation && before != Tab::Conversation;
+        self.offer_master(flow)
+    }
+
+    /// Opens the master view on the Conversation tab just entered, once the stored plan is
+    /// read, when its master runs live (Codex or Claude Code), as the desktop shows that
+    /// master's terminal there; another master keeps the console.
+    /// Input: the flow so far. Output: that flow, or the master view.
+    fn offer_master(&mut self, flow: Flow) -> Flow {
+        if !matches!(flow, Flow::Handled)
+            || !self.master_entry
+            || self.covered
+            || self.screen.setup.is_none()
+        {
+            return flow;
+        }
+        self.master_entry = false;
+        if !self.screen.live_master() {
+            return flow;
+        }
+        self.covered = true;
+        Flow::Open(Place::Master {
+            id: self.screen.project.clone(),
+            name: self.screen.name.clone(),
+        })
+    }
+
     fn reply(&mut self, reply: ProjectReply, ctx: &mut Ctx) -> Flow {
         let flow = match reply {
             ProjectReply::Ignored => Flow::Ignored,
@@ -1345,6 +1378,7 @@ impl Screen for ProjectPage {
     }
 
     fn key(&mut self, key: &Key, ctx: &mut Ctx) -> Flow {
+        let before = self.screen.tab;
         if self.moved.is_some() {
             return self.moved_key(key, ctx);
         }
@@ -1380,6 +1414,7 @@ impl Screen for ProjectPage {
             },
         };
         let flow = self.reply(reply, ctx);
+        let flow = self.entered(before, flow);
         self.covered = matches!(&flow, Flow::Open(place) if Some(place) != self.place().as_ref());
         self.ask_team(ctx);
         self.ask_files(ctx);
@@ -1392,8 +1427,10 @@ impl Screen for ProjectPage {
         } else {
             KeyCode::Left
         };
+        let before = self.screen.tab;
         let reply = self.screen.key(KeyEvent::new(code, KeyModifiers::SHIFT));
-        self.reply(reply, ctx)
+        let flow = self.reply(reply, ctx);
+        self.entered(before, flow)
     }
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
@@ -1477,7 +1514,7 @@ impl Screen for ProjectPage {
                 name: self.screen.name.clone(),
             });
         }
-        Flow::Handled
+        self.offer_master(Flow::Handled)
     }
 
     fn shown(&mut self, ctx: &mut Ctx) {
@@ -1497,6 +1534,12 @@ impl Screen for ProjectPage {
                 .screen
                 .key(KeyEvent::new(KeyCode::Char(code), KeyModifiers::NONE));
             let _ = self.reply(reply, ctx);
+        }
+        if let Some((_, forward)) = ctx
+            .project_step
+            .take_if(|(project, _)| *project == self.screen.project)
+        {
+            let _ = self.step(forward, ctx);
         }
         self.ask_team(ctx);
         self.ask_import(ctx);

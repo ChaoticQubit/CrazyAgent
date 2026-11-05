@@ -67,6 +67,24 @@ pub enum Global {
     NextSection,
 }
 
+/// What Shift-←→ do while the master's terminal has the keys, a choice kept on this
+/// computer. Input: picked in Settings, Profile. Output: `SwitchTabs`, the default, leaves
+/// the master view for the project's previous or next tab; `SendToAgent` types them in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ShiftArrows {
+    #[default]
+    SwitchTabs,
+    SendToAgent,
+}
+
+impl ShiftArrows {
+    /// Every choice with its label, in the order Settings shows them.
+    pub const ALL: [(ShiftArrows, &'static str); 2] = [
+        (Self::SwitchTabs, "Switch tabs"),
+        (Self::SendToAgent, "Send to the agent"),
+    ];
+}
+
 impl Key {
     /// Normalizes one crossterm key event.
     /// Input: the event. Output: the key, or None for releases and keys the TUI
