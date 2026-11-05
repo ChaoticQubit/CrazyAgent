@@ -447,7 +447,7 @@ struct Worker {
     briefed: bool,
     kept_session: bool,
     own_turn: Option<i64>,
-    own_rules: Option<TurnRules>,
+    own_rules: Option<(Duration, TurnRules)>,
     turn_started: Option<i64>,
     session: Option<String>,
     seed: Option<String>,
@@ -1081,21 +1081,28 @@ impl TeamRuntime {
     /// why in its terminal. A lead whose own pane is not found among its window's panes keeps
     /// its panes, so its own pane is never ended. Returns any SQLite failure.
     /// Sends each kept lead whose app runs a turn by itself the project's current rules for
-    /// it, its task limit and what its end does while background commands still run,
-    /// whenever they differ from the ones it last got, so a held own turn ends as the
-    /// owner's saved settings say now and not as an older or default copy (N-E9). The
-    /// session limit stays with `end_session`. Takes the runtime. Returns a failed read.
+    /// it, its bound as `turn_bound` gives it, the task limit or the session time left when
+    /// the turn was first seen, whichever is shorter, and what its end does while background
+    /// commands still run, whenever they differ from the ones it last got, so a held own turn
+    /// ends as the owner's saved settings say now and not as an older or default copy
+    /// (N-E9). Takes the runtime. Returns a failed read.
     fn send_own_rules(&mut self) -> Result<(), EngineError> {
         for worker in self.workers.values_mut() {
             if !worker.kept_session || worker.own_turn.is_none() {
                 continue;
             }
+            let ran = worker
+                .own_rules
+                .map_or_else(|| worker.ran(), |(ran, _)| ran);
+            let bound = turn_bound(super::time_limits(&self.connection, &worker.project)?, ran);
             let rules = TurnRules {
-                limit: super::time_limits(&self.connection, &worker.project)?.turn_time(),
+                limit: bound.map(|(limit, _)| limit),
                 background: super::background_at_end(&self.connection, &worker.project)?,
             };
-            if worker.own_rules != Some(rules) && worker.orders.send(Order::Rules(rules)).is_ok() {
-                worker.own_rules = Some(rules);
+            if worker.own_rules.map(|(_, sent)| sent) != Some(rules)
+                && worker.orders.send(Order::Rules(rules)).is_ok()
+            {
+                worker.own_rules = Some((ran, rules));
             }
         }
         Ok(())

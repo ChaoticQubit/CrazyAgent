@@ -6046,6 +6046,47 @@ fn send_own_rules_gives_a_kept_lead_s_own_turn_the_saved_rules_and_their_changes
     assert_eq!(got(&idle_orders), None);
 }
 
+/// N-E9 r2 (NE9R2-L1): a held own turn is bound by the session time its lead has left, as
+/// `turn_bound` bounds an engine-typed turn, when that is shorter than the task limit; the
+/// time left is taken once per own turn, so the same rules are not sent again.
+#[cfg(target_os = "macos")]
+#[test]
+fn send_own_rules_bounds_a_kept_lead_s_own_turn_by_the_session_time_left() {
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let mut team = fixture.runtime();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_time_limits(project,turn_secs,session_secs) VALUES (?1,4,103)",
+            [PROJECT],
+        )
+        .unwrap();
+    let mut owned = between_turns(&project, AgentRole::Sub, true, true);
+    let (order, orders) = channel();
+    owned.orders = order;
+    owned.own_turn = Some(now_ms());
+    owned.ran_before = Duration::from_secs(100);
+    team.workers.insert(7, owned);
+
+    team.send_own_rules().unwrap();
+    let Ok(Order::Rules(rules)) = orders.try_recv() else {
+        panic!("no rules for the own turn");
+    };
+    assert_eq!(rules.background, crate::team::BackgroundAtEnd::Wait);
+    let limit = rules.limit.expect("a bound for the own turn");
+    assert!(
+        limit > Duration::from_secs(2) && limit <= Duration::from_secs(3),
+        "the session's 3 s left bound the turn, not the 4 s task limit: {limit:?}"
+    );
+    std::thread::sleep(Duration::from_millis(50));
+    team.send_own_rules().unwrap();
+    assert!(
+        orders.try_recv().is_err(),
+        "the time left is taken once per own turn"
+    );
+}
+
 /// Under Stop, a Codex sub-agent whose app keeps running between tasks is not told that its
 /// background commands stop when its turn ends: its rollout reports no such commands, so
 /// the engine neither holds its turn for them nor stops them, and the line would be untrue
