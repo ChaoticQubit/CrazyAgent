@@ -68,15 +68,13 @@ impl TestPage {
 }
 
 /// One thing the test views do on the owner worker: show a page, act on a key, show the
-/// next verdict filter of the run list, read coverage of a ticket or release, or open one
-/// run's detail.
+/// next verdict filter of the run list, or read coverage of a ticket or release.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum Step {
     Open(TestPage),
     Key(ViewKey),
     Filter,
     Cover(String),
-    Show(String),
 }
 
 #[derive(Debug, Deserialize)]
@@ -144,6 +142,7 @@ impl TestViews {
     }
 
     /// The run list's verdict filter. Output: the verdict, or None for every run.
+    #[cfg(test)]
     pub(in crate::tui) fn filter(&self) -> Option<Verdict> {
         self.runs.filter
     }
@@ -172,9 +171,6 @@ impl TestViews {
                     .map(|coverage| self.coverage = Some(coverage))
                     .map_err(|refused| said(&refused.code, &refused.message))
             }
-            Step::Show(id) => RunDetail::load(id, client)
-                .map(|detail| self.detail = Some(detail))
-                .map_err(|refused| said(&refused.code, &refused.message)),
         };
         if let Err(problem) = done {
             self.problem = Some(problem);
@@ -574,12 +570,6 @@ impl ProjectTests {
         name.clone_into(&mut self.name);
     }
 
-    /// Opens a run's detail, as the change set screen asks when the owner opens a check's
-    /// run. Input: the run id.
-    pub(in crate::tui) fn show(&mut self, run: &str) {
-        self.queue(Step::Show(run.to_owned()));
-    }
-
     /// The next request to send: the project's tracker key first, then the views with up
     /// to `STEPS_PER_JOB_MAX` queued steps. Output: the job, or none while one is in flight
     /// or nothing waits.
@@ -659,13 +649,8 @@ impl ProjectTests {
 
     fn turn_on(&mut self, key: ProjectKey) {
         self.state = State::On(Arc::new(Mutex::new(TestViews::new(key))));
-        let shown = self
-            .steps
-            .drain(..)
-            .filter(|step| matches!(step, Step::Show(_)));
-        let shown: Vec<Step> = shown.collect();
+        self.steps.clear();
         self.steps.push_back(Step::Open(self.page));
-        self.steps.extend(shown);
         self.detail = false;
     }
 
