@@ -10,8 +10,8 @@ use crate::reply::{
 };
 use crate::requests::{self, Args, Remembered, Request};
 use crate::store::{self, NewTicket, StoreError, TicketChange};
-use crate::{criteria, export, import, plan, ready};
 use crate::tests_model::TestId;
+use crate::{criteria, export, import, plan, ready};
 use rusqlite::{Transaction, params};
 use serde_json::{Value, json};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -875,9 +875,8 @@ fn list<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
     assert!(rows.len() <= PAGE_ROWS_MAX + 1);
     let mut page = Page::new(cx.data_bytes_max);
     assert!(page.put("tickets", json!([])));
-    let mut shown = 0;
     let mut cursor = None;
-    for (number, title, status, priority, assignee) in &rows {
+    for (shown, (number, title, status, priority, assignee)) in rows.iter().enumerate() {
         let (title, elided) = reply::elide(title, LISTED_TITLE_BYTES_MAX);
         let mut row = json!({
             "id": format!("{}-{number}", project.key),
@@ -894,7 +893,6 @@ fn list<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
             cursor = Some(format!("tickets:{}", rows[shown - 1].0));
             break;
         }
-        shown += 1;
     }
     let mut next = Vec::new();
     if let Some((number, ..)) = rows.first() {
@@ -948,12 +946,15 @@ fn history<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
     })
 }
 
+/// One stored event as `events` reads it: when, who, which op, and the row before and after.
+type EventRow = (i64, String, String, Option<String>, Option<String>);
+
 fn events(
     tx: &Transaction<'_>,
     sql: &'static str,
     params: impl rusqlite::Params,
 ) -> Result<Vec<Value>, Failure> {
-    let rows: Vec<(i64, String, String, Option<String>, Option<String>)> = store::prepare(tx, sql)?
+    let rows: Vec<EventRow> = store::prepare(tx, sql)?
         .query_map(params, |row| {
             Ok((
                 row.get(0)?,
