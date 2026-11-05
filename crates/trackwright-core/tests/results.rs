@@ -493,7 +493,7 @@ fn input_over_each_bound_is_refused_plainly() {
     assert!(
         parse(
             ResultFormat::Libtest,
-            libtest_block(&[longest.clone()]).as_bytes()
+            libtest_block(std::slice::from_ref(&longest)).as_bytes()
         )
         .is_ok()
     );
