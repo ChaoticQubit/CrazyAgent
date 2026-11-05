@@ -6061,9 +6061,10 @@ impl TeamRuntime {
         Ok((lead, mates, tmux))
     }
 
-    /// Refuses a native lead outside Unix, where no tmux server runs. Takes the lead, its
+    /// Refuses a native lead on Windows, which has no tmux server for its teammates' panes and
+    /// no unix socket for the engine's caller; no lead starts without them. Takes the lead, its
     /// temp folder, home, the tool homes, the working folder and the sandbox, all unused.
-    /// Returns the plain refusal with `terminal_own_server_unavailable`.
+    /// Returns the owner line with `terminal_own_server_unavailable`.
     #[cfg(not(unix))]
     fn native_sandboxes(
         &self,
@@ -6075,7 +6076,7 @@ impl TeamRuntime {
         _sandbox: ProjectSandbox,
     ) -> Result<(ProjectSandbox, ProjectSandbox, PathBuf), String> {
         Err(with_code(
-            "native teammates need tmux",
+            "Native teammates are not available on Windows in this version",
             Some(crate::terminal::OWN_SERVER_UNAVAILABLE),
         ))
     }
@@ -6383,6 +6384,8 @@ impl TeamRuntime {
         }
         #[cfg(unix)]
         expose_graph(&root, &working_dir);
+        #[cfg(not(unix))]
+        expose_graph(&root, &working_dir)?;
         if let Some(engine) = self
             .delegation_tool
             .as_ref()
@@ -9594,6 +9597,18 @@ const GRAPH_ENTRIES: [&str; 3] = ["graph.json", "GRAPH_REPORT.md", "wiki"];
 /// The most bytes of a worktree's `.gitignore` read to see whether it ignores the graph.
 #[cfg(unix)]
 const GITIGNORE_BYTES_MAX: u64 = 256 * 1024;
+
+/// Refuses to show the project's graph in an agent's worktree on Windows, where the engine
+/// has no folder-relative, no-follow steps to place the links with; no agent starts with
+/// links placed any other way. Takes the project folder and the worktree, both unused.
+/// Returns the owner line with `team_graph_unavailable`.
+#[cfg(not(unix))]
+fn expose_graph(_root: &Path, _worktree: &Path) -> Result<(), String> {
+    Err(with_code(
+        "The project graph is not shown to agents on Windows in this version",
+        Some("team_graph_unavailable"),
+    ))
+}
 
 /// Shows the project's graphify graph read-only in an agent's worktree (I3): a real
 /// `graphify-out` folder there holds links to the project's graph, report and wiki, which the

@@ -142,7 +142,7 @@ async fn the_team_view_reads_a_sub_agents_messages_and_saves_their_settings_thro
     for _ in 0..at {
         view.key(press(KeyCode::Down));
     }
-    assert_eq!(view.key(press(KeyCode::Char('m'))), TeamReply::Handled);
+    assert_eq!(view.key(press(KeyCode::Char('M'))), TeamReply::Handled);
     let query = view.next_query(AT + 10 * MINUTE).unwrap();
     assert_eq!(
         query,
@@ -167,7 +167,7 @@ async fn the_team_view_reads_a_sub_agents_messages_and_saves_their_settings_thro
             rows.join("\n")
         );
         assert!(
-            find(&rows, "Agent < question: Which database should I use?")
+            find(&rows, "Agent < question: Which database(31m should I use?")
                 .contains(&clock(AT + MINUTE, 0))
         );
         for row in &rows {
@@ -206,7 +206,7 @@ async fn the_team_view_reads_a_sub_agents_messages_and_saves_their_settings_thro
     );
 
     assert_eq!(view.key(press(KeyCode::Esc)), TeamReply::Handled);
-    assert_eq!(view.key(press(KeyCode::Char('m'))), TeamReply::Handled);
+    assert_eq!(view.key(press(KeyCode::Char('M'))), TeamReply::Handled);
     let query = view.next_query(AT + 12 * MINUTE).unwrap();
     let event = native.project_setup(query).await;
     let Ok(SetupView::TeamMessages(page)) = event.result else {
