@@ -272,7 +272,6 @@ fn keep_name(
 
 /// The name the engine keeps for a native teammate's row (DEC-111 Q18, RH-2). Inputs: the
 /// connection and the row. Output: the name, or none, also when unread.
-#[cfg(unix)]
 pub(super) fn name(connection: &Connection, teammate: i64) -> Option<String> {
     connection
         .query_row(

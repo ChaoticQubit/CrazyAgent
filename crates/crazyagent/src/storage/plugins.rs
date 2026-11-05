@@ -562,7 +562,6 @@ fn moved_aside(name: &str, id: &str) -> bool {
 /// sweep. Inputs: the engine root and the project id. Output: Ok when the folder is gone,
 /// including when it was already missing; `plugin_skill_folder_invalid` for a name that is
 /// not one store-relative folder name.
-#[cfg(unix)]
 pub(crate) fn remove_skill_project_folder(root: &Path, project: &str) -> Result<(), EngineError> {
     if !crate::protocol::single_component(project) {
         return Err(error("plugin_skill_folder_invalid"));

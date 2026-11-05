@@ -250,6 +250,7 @@ impl Engine {
     /// open terminal host still keeps (N-D21). Any other read, and every read before a host
     /// opened, passes unchanged: a host opened later keeps no screen yet. Takes the read.
     /// Returns it, or `terminal_unavailable` when the host check could not finish.
+    #[cfg(unix)]
     pub(crate) async fn kept_named(
         &self,
         read: OwnerReadReply,
@@ -280,6 +281,16 @@ impl Engine {
             config_id,
             data,
         })
+    }
+
+    /// Passes a read unchanged where no terminal host opens, so no finished worker's screen
+    /// is kept to name. Takes the read. Returns it.
+    #[cfg(not(unix))]
+    pub(crate) async fn kept_named(
+        &self,
+        read: OwnerReadReply,
+    ) -> Result<OwnerReadReply, EngineError> {
+        Ok(read)
     }
 
     /// Refuses a terminal host where no tmux runs: no agent pane opens off the macOS
