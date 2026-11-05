@@ -332,6 +332,28 @@ fn longest_key() -> String {
     )
 }
 
+/// WINB-L1: off macOS no terminal host confines a pane, so a pane that asks for the sandbox is
+/// refused with a code naming the system, and only the owner's own unconfined shell opens.
+#[test]
+fn a_confined_pane_is_refused_off_macos_and_an_unconfined_one_opens_everywhere() {
+    assert_eq!(
+        unconfinable("windows", false),
+        Some("launch_sandbox_unavailable_on_windows")
+    );
+    assert_eq!(
+        unconfinable("linux", false),
+        Some("launch_sandbox_unavailable_on_linux")
+    );
+    assert_eq!(
+        unconfinable("freebsd", false),
+        Some("launch_sandbox_unavailable")
+    );
+    assert_eq!(unconfinable("macos", false), None);
+    for os in ["macos", "linux", "windows", "freebsd"] {
+        assert_eq!(unconfinable(os, true), None, "{os}");
+    }
+}
+
 #[test]
 fn dropping_a_key_file_that_still_holds_its_key_removes_it() {
     let folder = key_folder();
