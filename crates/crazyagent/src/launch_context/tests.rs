@@ -1313,6 +1313,187 @@ fn a_native_lead_gives_its_teammates_its_instructions_and_the_lead_graph() {
     drop(installed);
 }
 
+/// Cuts the "Tools to use" section out of one launch's instructions, up to the next
+/// section. Input: the instructions. Output: the section, empty when there is none.
+fn tools_section(text: &str) -> &str {
+    let Some(start) = text.find("\n## Tools to use\n") else {
+        return "";
+    };
+    let rest = &text[start + 1..];
+    let end = rest[1..].find("\n## ").map_or(rest.len(), |at| at + 2);
+    &rest[..end]
+}
+
+#[test]
+fn a_tools_on_launch_is_told_when_to_use_context_mode_graphify_and_its_skills() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let source = root.join("skill-store").join("brainstorming");
+    fs::create_dir_all(&source).unwrap();
+    fs::write(
+        source.join("SKILL.md"),
+        "---\nname: brainstorming\ndescription: Explores intent before new work.\n---\n\nSteps.\n",
+    )
+    .unwrap();
+    let plugins = |skills: bool| LaunchPlugins {
+        skills: match skills {
+            true => vec![EffectiveSkill {
+                name: "brainstorming".into(),
+                folder: source.clone(),
+            }],
+            false => Vec::new(),
+        },
+        servers: vec![command_server("context-mode"), command_server("graph")],
+    };
+    let off = || {
+        vec![(
+            "context-mode".to_owned(),
+            vec!["ctx_fetch_and_index".to_owned()],
+        )]
+    };
+    let declared = |tool: &str| format!("mcp__plugin_context-mode_context-mode__{tool}");
+    let on = [
+        "ctx_batch_execute",
+        "ctx_execute",
+        "ctx_execute_file",
+        "ctx_search",
+    ];
+
+    let claude = private_home(&root, "claude");
+    let context = context_with(&root, plugins(true), off());
+    crate::agent_home::save_app(&root.join("data"), "APP-RULE-61\n").unwrap();
+    let installed = context.install("claude-code", &claude, true).unwrap();
+    let prompt = fs::read_to_string(claude.join(STATE).join("instructions.md")).unwrap();
+    drop(installed);
+    let section = tools_section(&prompt);
+    assert!(!section.is_empty(), "{prompt}");
+    assert!(
+        section.contains("The owner's instructions and the sections above come first."),
+        "{section}"
+    );
+    assert!(
+        !section.contains("as said here"),
+        "the section names tools and never outranks other instructions: {section}"
+    );
+    for tool in on {
+        assert!(
+            section.contains(&format!("`{}`", declared(tool))),
+            "{tool}: {section}"
+        );
+    }
+    assert!(
+        section.contains(&format!(
+            "ToolSearch with `select:{}`",
+            on.map(declared).join(",")
+        )),
+        "Claude Code defers MCP tools, so the section says how to load them: {section}"
+    );
+    assert!(
+        !section.contains("ctx_fetch_and_index"),
+        "a switched-off tool is never named"
+    );
+    for command in [
+        "`graphify query \"<question>\"`",
+        "`graphify path \"<A>\" \"<B>\"`",
+        "`graphify explain \"<name>\"`",
+    ] {
+        assert!(section.contains(command), "{command}: {section}");
+    }
+    assert!(
+        section.contains("Skill tool") && section.contains("`crazyagent:brainstorming`"),
+        "the Skill tool is named with the exact skill name the index uses: {section}"
+    );
+    assert!(
+        section.contains("`superpowers:NAME`") && section.contains("`crazyagent:NAME`"),
+        "a skill the owner's instructions name under its own plugin maps to its name here"
+    );
+    let tools = prompt.find("\n## Tools to use\n").unwrap();
+    assert!(
+        prompt.find("APP-RULE-61").unwrap() < tools,
+        "the section follows the owner's instructions"
+    );
+    assert!(
+        tools < prompt.find("\n## Skills\n").unwrap(),
+        "the section comes just before the skills it points to"
+    );
+
+    let codex = private_home(&root, "codex");
+    let installed = context_with(&root, plugins(true), off())
+        .install("codex", &codex, true)
+        .unwrap();
+    let config: toml::Table = fs::read_to_string(codex.join("config.toml"))
+        .unwrap()
+        .parse()
+        .unwrap();
+    let developer = config["developer_instructions"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    drop(installed);
+    let section = tools_section(&developer);
+    assert!(!section.is_empty(), "{developer}");
+    assert!(
+        section.contains("The owner's instructions and the sections above come first."),
+        "{section}"
+    );
+    assert!(
+        !section.contains("as said here"),
+        "the section names tools and never outranks other instructions: {section}"
+    );
+    for tool in on {
+        assert!(section.contains(&format!("`{tool}`")), "{tool}: {section}");
+    }
+    assert!(
+        section.contains("`plugin_context-mode_context-mode`"),
+        "{section}"
+    );
+    assert!(!section.contains("ToolSearch"), "{section}");
+    assert!(!section.contains("Skill tool"), "{section}");
+    assert!(
+        section.contains("`graphify query \"<question>\"`"),
+        "{section}"
+    );
+    assert!(section.contains("SKILL.md"), "{section}");
+
+    let plain = private_home(&root, "claude-plain");
+    let installed = context_with(
+        &root,
+        LaunchPlugins {
+            skills: Vec::new(),
+            servers: vec![command_server("graph")],
+        },
+        Vec::new(),
+    )
+    .install("claude-code", &plain, true)
+    .unwrap();
+    let prompt = fs::read_to_string(plain.join(STATE).join("instructions.md")).unwrap();
+    drop(installed);
+    let section = tools_section(&prompt);
+    assert!(
+        section.contains("`graphify query \"<question>\"`"),
+        "{prompt}"
+    );
+    assert!(
+        !section.contains("context-mode"),
+        "a launch without context-mode is told only what it has: {section}"
+    );
+    assert!(
+        !section.contains("Skill"),
+        "a launch without skills is told only what it has: {section}"
+    );
+
+    let off_home = private_home(&root, "claude-tools-off");
+    let installed = context_with(&root, plugins(true), off())
+        .install("claude-code", &off_home, false)
+        .unwrap();
+    let prompt = fs::read_to_string(off_home.join(STATE).join("instructions.md")).unwrap();
+    drop(installed);
+    assert!(
+        !prompt.contains("## Tools to use"),
+        "a tools-off launch has none of these tools"
+    );
+}
+
 #[test]
 fn the_skills_index_gives_each_skill_its_description_and_path_and_says_check_it_first() {
     let sources = tempfile::tempdir().unwrap();
