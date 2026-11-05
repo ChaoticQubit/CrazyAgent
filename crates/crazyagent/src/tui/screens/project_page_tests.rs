@@ -14,7 +14,7 @@ use crate::master_session::{
     MasterOwnerAction, MasterSessionPhase, MasterSessionView, MasterTurnView,
 };
 use crate::pools::{MemberKind, MemberStatus, PoolMember, PoolSummary};
-use crate::project_setup::{Platform, ProjectSetup, ResearchKind, SetupQuery, SetupView};
+use crate::project_setup::{Platform, ProjectSetup, ResearchKind, SetupQuery, SetupView, TeamPlan};
 use crate::protocol::{ConfigId, CredentialRef, ProjectId, ProjectSpec, SessionId};
 use crate::tui::client::process::ProcessQuery;
 use crate::tui::client::settings::SettingsJob;
@@ -253,6 +253,16 @@ impl Engine {
     }
 
     async fn project(&mut self, id: &str, name: &str, generation: u64) -> ProjectId {
+        self.project_led_by(id, name, generation, None).await
+    }
+
+    async fn project_led_by(
+        &mut self,
+        id: &str,
+        name: &str,
+        generation: u64,
+        team: Option<TeamPlan>,
+    ) -> ProjectId {
         let project = ProjectId::new(id).unwrap();
         let created = self
             .controller
@@ -268,7 +278,7 @@ impl Engine {
                     platforms: vec![Platform::Cli],
                     research: vec![ResearchKind::CompetitorResearch],
                     pool: None,
-                    team: None,
+                    team,
                     documents: vec![],
                 },
                 generation,
@@ -2915,4 +2925,101 @@ async fn a_session_switch_from_the_master_view_opens_the_master_view_again() {
     let fresh = fresh.unwrap();
     assert_ne!(fresh.session_id, first.session_id);
     assert_ne!(fresh.session_id, second.session_id);
+}
+
+fn shell_on(place: &Place) -> Shell {
+    let mut ctx = ctx(100, 40);
+    let screen = open(place, &mut ctx);
+    Shell::with(ctx, screen)
+}
+
+async fn stays_on(shell: &mut Shell, connection: &mut Connection, place: &Place, why: &str) {
+    for _ in 0..3 {
+        shell.refresh();
+        pump(shell, connection).await;
+        assert_eq!(
+            shell.place().as_ref(),
+            Some(place),
+            "{why}:\n{}",
+            render(shell, 100, 40)
+        );
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// The Conversation tab of a Codex or Claude Code master is that master's live terminal, as
+/// on the desktop (N-T1 B): a page opened on the tab opens the master view once the stored
+/// plan is read, Esc there lands on the tab's console and stays, and walking off the tab and
+/// back opens the view again. A key typed on the tab before the plan is read keeps the
+/// console, and an RCLI master keeps the console.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_conversation_tab_of_a_live_master_is_its_terminal() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let conversation = Place::Project {
+        id: notes.clone(),
+        name: "Notes CLI".into(),
+        tab: ProjectTab::Conversation,
+    };
+    let master = Place::Master {
+        id: notes.clone(),
+        name: "Notes CLI".into(),
+    };
+    let mut connection = engine.connect();
+    let mut shell = shell_on(&conversation);
+    until_place(&mut shell, &mut connection, &master).await;
+
+    shell.key(Key::Esc);
+    stays_on(
+        &mut shell,
+        &mut connection,
+        &conversation,
+        "Esc lands on the tab's console and stays there",
+    )
+    .await;
+    shell.key(Key::ShiftRight);
+    pump(&mut shell, &mut connection).await;
+    let next = shell.place();
+    assert!(
+        next.as_ref() != Some(&conversation) && next.as_ref() != Some(&master),
+        "the tab keys pass the Conversation tab: {next:?}"
+    );
+    shell.key(Key::ShiftLeft);
+    until_place(&mut shell, &mut connection, &master).await;
+
+    let mut early_connection = engine.connect();
+    let mut early = shell_on(&conversation);
+    early.key(Key::Char('h'));
+    stays_on(
+        &mut early,
+        &mut early_connection,
+        &conversation,
+        "a key typed before the plan is read keeps the console",
+    )
+    .await;
+
+    let rcli = TeamPlan {
+        master: "rcli".into(),
+        master_tools: true,
+        sub_harnesses: vec![],
+        min_agents: 1,
+        max_agents: 1,
+    };
+    let local = engine
+        .project_led_by("local-notes", "Local Notes", 2, Some(rcli))
+        .await;
+    let local_conversation = Place::Project {
+        id: local,
+        name: "Local Notes".into(),
+        tab: ProjectTab::Conversation,
+    };
+    let mut local_connection = engine.connect();
+    let mut local_shell = shell_on(&local_conversation);
+    stays_on(
+        &mut local_shell,
+        &mut local_connection,
+        &local_conversation,
+        "an RCLI master keeps the console",
+    )
+    .await;
 }
