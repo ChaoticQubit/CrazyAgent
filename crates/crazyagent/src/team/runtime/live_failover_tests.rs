@@ -9,7 +9,6 @@ use crate::team::{MessageAuthor, MessageState, append_message, now_ms};
 use crate::terminal::tmux::{SOCKET, Tmux, installed};
 use crate::terminal::{FOLDER, Host};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
-use serde_json::Value;
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -37,20 +36,50 @@ struct Account {
     limited: bool,
 }
 
+/// The most profile keys the live tests read from the owner's engine.
+const PROFILES_MAX: usize = 256;
+
+/// Stops a live run whose `CRAZYAGENT_MANAGED_CLAUDE_PROFILE` is not a profile slot path.
+/// Input: none. Output: never returns; panics with the plain BLOCKED message.
+fn not_a_slot() -> ! {
+    panic!(
+        "BLOCKED: {SIGNED_IN} does not name a profile slot <engine folder>/native-profiles/<profile key>"
+    )
+}
+
 /// The running engine of the app that holds the managed profile `CRAZYAGENT_MANAGED_CLAUDE_PROFILE`
-/// names, read only: its profiles folder, its database path, a read-only connection to that
-/// database and the run it is in. Output: the four, or a panic with the plain BLOCKED message.
-fn owner_engine() -> (PathBuf, PathBuf, Connection, HostStamp) {
-    let slot = std::env::var_os(SIGNED_IN).unwrap_or_else(|| {
+/// names, found from that path alone: the slot's profile key (its folder name), the database
+/// beside its profiles folder, a read-only connection to that database and the run it is in.
+/// The slot, its profiles folder and their files are never opened, read or listed. Output:
+/// the four, or a panic with the plain BLOCKED message.
+fn owner_engine() -> (String, PathBuf, Connection, HostStamp) {
+    let slot = PathBuf::from(std::env::var_os(SIGNED_IN).unwrap_or_else(|| {
         panic!(
             "BLOCKED: no signed-in managed Claude profile. Run with {SIGNED_IN}=<engine folder>/native-profiles/<profile key>"
         )
-    });
-    let slot = PathBuf::from(slot)
-        .canonicalize()
-        .unwrap_or_else(|_| panic!("BLOCKED: {SIGNED_IN} does not name a profile slot"));
-    let profiles = slot.parent().unwrap().to_path_buf();
-    let database = profiles.parent().unwrap().join("engine.db");
+    }));
+    let key = slot
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|key| {
+            key.len() == 64
+                && key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        })
+        .unwrap_or_else(|| not_a_slot())
+        .to_owned();
+    let profiles = slot
+        .parent()
+        .filter(|profiles| {
+            profiles.is_absolute()
+                && profiles.file_name() == Some(std::ffi::OsStr::new("native-profiles"))
+        })
+        .unwrap_or_else(|| not_a_slot());
+    let database = profiles
+        .parent()
+        .unwrap_or_else(|| not_a_slot())
+        .join("engine.db");
     let path = database.to_str().unwrap();
     let uri = format!(
         "file:{}?mode=ro",
@@ -83,84 +112,88 @@ fn owner_engine() -> (PathBuf, PathBuf, Connection, HostStamp) {
         .unwrap_or_else(|| {
             panic!("BLOCKED: the app's engine is not running, so no sign-in is proved for this run. Open CrazyAgent first")
         });
-    (profiles, database, owner, host)
+    (key, database, owner, host)
 }
 
-/// Every Claude profile of the owner's engine whose latest sign-in passes this run's launch
-/// check, as every master turn checks it, with whether the engine reads the account at a
-/// limit: a 5-hour or weekly window, observed or polled, at 100 percent used now. Reads only
-/// each slot's identity manifest, never a credential. Inputs: the profiles folder, the
-/// read-only engine and its run. Output: the accounts in slot name order.
-fn signed_in_accounts(profiles: &Path, owner: &Connection, host: &HostStamp) -> Vec<Account> {
-    let mut slots: Vec<PathBuf> = std::fs::read_dir(profiles)
-        .unwrap()
-        .map(|entry| entry.unwrap().path())
-        .filter(|slot| slot.join("identity.json").is_file())
-        .collect();
-    slots.sort();
-    let now = now_ms();
-    let mut found = Vec::new();
-    for slot in slots {
-        let identity: Value =
-            serde_json::from_slice(&std::fs::read(slot.join("identity.json")).unwrap()).unwrap();
-        if identity["binding"]["harness"].as_str() != Some("claude") {
-            continue;
-        }
-        let Some(profile_ref) = identity["binding"]["profile_ref"].as_str() else {
-            continue;
-        };
-        let key = crate::memory::hash(profile_ref.as_bytes());
-        let operation: Option<Operation> = owner
-            .query_row(
-                "SELECT id,profile_key,generation,phase,request,fact FROM native_auth_operations WHERE profile_key=?1 ORDER BY generation DESC LIMIT 1",
-                [&key],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
-            )
-            .optional()
-            .unwrap();
-        let Some(operation) = operation else {
-            continue;
-        };
-        let fact = crate::engine::owner::native_auth::decode_fact(&operation.5).unwrap();
-        let connection = fact.binding.connection.clone();
-        assert_eq!(
-            connection.auth,
-            crate::config::ModelAuthentication::NativeManaged {
-                profile_ref: CredentialRef::new(profile_ref).unwrap(),
-            },
-            "a profile's sign-in names that profile"
-        );
-        let tx = owner.unchecked_transaction().unwrap();
-        let proved = crate::storage::native_sign_in(&tx, host, &connection, None).is_ok();
-        drop(tx);
-        if !proved {
-            continue;
-        }
-        let limited = crate::usage::limits(owner, &connection.id)
-            .unwrap()
-            .is_some_and(|limits| {
-                [
-                    limits.five_hour_at(now),
-                    limits.weekly_at(now),
-                    limits.polled_five_hour_at(now),
-                    limits.polled_weekly_at(now),
-                ]
-                .into_iter()
-                .flatten()
-                .any(|window| window.used_percent >= 100.0)
-            });
-        found.push(Account {
-            connection,
-            operation,
-            fact,
-            limited,
-        });
+/// The owner's Claude account behind one profile key, from the read-only engine database
+/// alone: the key's latest sign-in row, when its fact names a Claude managed connection and
+/// passes this run's launch check, as every master turn checks it, with whether the engine
+/// reads the account at a limit: a 5-hour or weekly window, observed or polled, at 100
+/// percent used now. Inputs: the read-only engine, its run and the key. Output: the
+/// account, or None.
+fn signed_in_account(owner: &Connection, host: &HostStamp, key: &str) -> Option<Account> {
+    let operation: Operation = owner
+        .query_row(
+            "SELECT id,profile_key,generation,phase,request,fact FROM native_auth_operations WHERE profile_key=?1 ORDER BY generation DESC LIMIT 1",
+            [key],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?)),
+        )
+        .optional()
+        .unwrap()?;
+    let fact = crate::engine::owner::native_auth::decode_fact(&operation.5).unwrap();
+    let connection = fact.binding.connection.clone();
+    let crate::config::ModelAuthentication::NativeManaged { profile_ref } = &connection.auth else {
+        return None;
+    };
+    assert_eq!(
+        crate::memory::hash(profile_ref.as_str().as_bytes()),
+        key,
+        "a profile's sign-in names that profile"
+    );
+    if connection.harness.as_str() != "claude" {
+        return None;
     }
-    found
+    let tx = owner.unchecked_transaction().unwrap();
+    let proved = crate::storage::native_sign_in(&tx, host, &connection, None).is_ok();
+    drop(tx);
+    if !proved {
+        return None;
+    }
+    let now = now_ms();
+    let limited = crate::usage::limits(owner, &connection.id)
+        .unwrap()
+        .is_some_and(|limits| {
+            [
+                limits.five_hour_at(now),
+                limits.weekly_at(now),
+                limits.polled_five_hour_at(now),
+                limits.polled_weekly_at(now),
+            ]
+            .into_iter()
+            .flatten()
+            .any(|window| window.used_percent >= 100.0)
+        });
+    Some(Account {
+        connection,
+        operation,
+        fact,
+        limited,
+    })
 }
 
-/// One of the owner's signed-in Claude accounts that the running app's engine does not read
-/// at a limit, with that engine's database and the run the account's sign-in is proven in.
+/// Every Claude account of the owner's engine whose latest sign-in passes this run's launch
+/// check, from that engine's database alone: one per distinct profile key of its sign-in
+/// rows, at most [`PROFILES_MAX`]. Inputs: the read-only engine and its run. Output: the
+/// accounts in profile key order.
+fn signed_in_accounts(owner: &Connection, host: &HostStamp) -> Vec<Account> {
+    let keys: Vec<String> = owner
+        .prepare(
+            "SELECT DISTINCT profile_key FROM native_auth_operations ORDER BY profile_key LIMIT ?1",
+        )
+        .unwrap()
+        .query_map([i64::try_from(PROFILES_MAX).unwrap()], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(keys.len() <= PROFILES_MAX);
+    keys.iter()
+        .filter_map(|key| signed_in_account(owner, host, key))
+        .collect()
+}
+
+/// The owner's signed-in Claude account of the profile `CRAZYAGENT_MANAGED_CLAUDE_PROFILE`
+/// names, which the running app's engine does not read at a limit, with that engine's
+/// database and the run the account's sign-in is proven in.
 pub(crate) struct OwnerClaude {
     database: PathBuf,
     host: HostStamp,
@@ -168,21 +201,22 @@ pub(crate) struct OwnerClaude {
 }
 
 impl OwnerClaude {
-    /// Picks the first such account of the running app's engine, read only. Input: none.
-    /// Output: the account, or a panic with the plain BLOCKED message.
+    /// Takes the account of the named profile from the running app's engine database alone.
+    /// Input: none. Output: the account, or a panic with the plain BLOCKED message when its
+    /// sign-in is not proven for this run or the engine reads it at a limit.
     pub(crate) fn pick() -> Self {
-        let (profiles, database, owner, host) = owner_engine();
-        let found = signed_in_accounts(&profiles, &owner, &host);
+        let (key, database, owner, host) = owner_engine();
+        let account = signed_in_account(&owner, &host, &key).unwrap_or_else(|| {
+            panic!(
+                "BLOCKED: the profile {SIGNED_IN} names has no Claude sign-in the app's engine proves for this run"
+            )
+        });
         drop(owner);
-        let count = found.len();
-        let account = found
-            .into_iter()
-            .find(|account| !account.limited)
-            .unwrap_or_else(|| {
-                panic!(
-                    "BLOCKED: no working account: none of the {count} signed-in Claude accounts of the app's engine is free of a limit"
-                )
-            });
+        if account.limited {
+            panic!(
+                "BLOCKED: the Claude account {SIGNED_IN} names is at its 5-hour or weekly limit in the engine's usage reading"
+            );
+        }
         Self {
             database,
             host,
@@ -611,8 +645,8 @@ impl Drop for Team {
 #[test]
 #[ignore = "live qualification: needs the running app's engine with two signed-in Claude accounts, one it reads at its limit, CRAZYAGENT_MANAGED_CLAUDE_PROFILE"]
 fn live_a_rate_limited_live_master_stops_and_its_next_turn_runs_on_the_working_pool_account() {
-    let (profiles, owner_database, owner, host) = owner_engine();
-    let found = signed_in_accounts(&profiles, &owner, &host);
+    let (_, owner_database, owner, host) = owner_engine();
+    let found = signed_in_accounts(&owner, &host);
     drop(owner);
     let limited = found.iter().find(|account| account.limited).unwrap_or_else(|| {
         panic!(
