@@ -159,6 +159,25 @@ fn codex_poll_sends_the_account_id_and_places_windows_by_length() {
     assert_eq!(bare.provider, Some(Provider::Codex));
 }
 
+/// N-D16 r1 NDX-L1: a Codex window of a length that is neither 5 hours nor a week cannot be
+/// placed, so the reply is refused as a failed read rather than read as one leaving that
+/// window out.
+#[test]
+fn a_codex_window_of_an_unknown_length_refuses_the_reply() {
+    for windows in [
+        r#""primary_window":{"used_percent":10,"limit_window_seconds":86400},"secondary_window":{"used_percent":20,"limit_window_seconds":604800}"#,
+        r#""primary_window":{"used_percent":10,"limit_window_seconds":18000},"secondary_window":{"used_percent":20,"limit_window_seconds":2592000}"#,
+        r#""primary_window":{"used_percent":10,"limit_window_seconds":604800},"secondary_window":{"used_percent":20,"limit_window_seconds":0}"#,
+    ] {
+        let body = format!(r#"{{"plan_type":"pro","rate_limit":{{{windows}}}}}"#);
+        assert_eq!(
+            parse_codex(body.as_bytes(), NOW).unwrap_err().0,
+            "usage_reply_invalid",
+            "{windows}"
+        );
+    }
+}
+
 #[test]
 fn a_reply_that_leaves_a_window_out_reads_the_other_and_names_its_provider() {
     let prolite = parse_codex(

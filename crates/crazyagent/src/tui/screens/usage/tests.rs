@@ -63,6 +63,8 @@ fn limits(failure: Option<&str>) -> AccountLimits {
         failure: failure.map(Into::into),
         five_hour_left_out: None,
         weekly_left_out: None,
+        five_hour_left_out_label: None,
+        weekly_left_out_label: None,
     }
 }
 
@@ -428,33 +430,44 @@ fn a_window_a_good_poll_left_out_names_its_provider_and_a_failed_read_keeps_its_
             &ctx,
         ))
     };
-    let five_hour_out = |provider: Provider, failure: Option<&str>| AccountLimits {
+    let five_hour_out = |provider: Provider, label: &str, failure: Option<&str>| AccountLimits {
         five_hour: None,
         polled_five_hour: None,
         five_hour_left_out: Some(provider),
+        five_hour_left_out_label: Some(label.into()),
         ..limits(failure)
     };
-    let codex = shown(five_hour_out(Provider::Codex, None));
-    let claude = shown(five_hour_out(Provider::Claude, None));
+    let codex = shown(five_hour_out(
+        Provider::Codex,
+        "Codex reports no 5-hour limit for this plan.",
+        None,
+    ));
+    let engine = shown(five_hour_out(
+        Provider::Claude,
+        "A sentence only the engine wrote.",
+        None,
+    ));
     let weekly = shown(AccountLimits {
         weekly: None,
         polled_weekly: None,
         weekly_left_out: Some(Provider::Codex),
+        weekly_left_out_label: Some("A weekly sentence only the engine wrote.".into()),
         ..limits(None)
     });
-    let failed = shown(five_hour_out(Provider::Codex, Some("usage_unreachable")));
+    let failed = shown(five_hour_out(
+        Provider::Codex,
+        "Codex reports no 5-hour limit for this plan.",
+        Some("usage_unreachable"),
+    ));
     for (lines, wanted) in [
         (
             &codex,
             "    5-hour  Codex reports no 5-hour limit for this plan.",
         ),
-        (
-            &claude,
-            "    5-hour  Claude reports no 5-hour window right now.",
-        ),
+        (&engine, "    5-hour  A sentence only the engine wrote."),
         (
             &weekly,
-            "    Weekly  Codex reports no weekly limit for this plan.",
+            "    Weekly  A weekly sentence only the engine wrote.",
         ),
         (
             &failed,

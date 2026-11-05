@@ -124,6 +124,8 @@ pub struct AccountLimits {
     pub failure: Option<String>,
     pub five_hour_left_out: Option<poll::Provider>,
     pub weekly_left_out: Option<poll::Provider>,
+    pub five_hour_left_out_label: Option<String>,
+    pub weekly_left_out_label: Option<String>,
 }
 
 impl AccountLimits {
@@ -193,6 +195,14 @@ pub fn open(runtime: &Path) -> Result<Connection, EngineError> {
     db.busy_timeout(Duration::from_secs(5)).map_err(storage)?;
     initialize(&db)?;
     Ok(db)
+}
+
+/// The sentence the cards show for a window a good poll left out: Codex has no such limit on
+/// the account's plan, and Claude has no such window running now. Inputs: the provider and
+/// the window. Output: the sentence.
+pub fn left_out_label(provider: poll::Provider, kind: WindowKind) -> &'static str {
+    let _ = (provider, kind);
+    ""
 }
 
 /// Adds the usage tables to a database when missing, and to a store made before them the
@@ -456,6 +466,8 @@ fn limits_row(row: &Row<'_>) -> rusqlite::Result<AccountLimits> {
         failure: row.get(11)?,
         five_hour_left_out: left_out(row, 16)?,
         weekly_left_out: left_out(row, 17)?,
+        five_hour_left_out_label: None,
+        weekly_left_out_label: None,
     })
 }
 

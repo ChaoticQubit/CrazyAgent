@@ -49,6 +49,8 @@ fn limits_round_trip_through_the_engine_database_and_reopen() {
             failure: None,
             five_hour_left_out: None,
             weekly_left_out: None,
+            five_hour_left_out_label: None,
+            weekly_left_out_label: None,
         }
     );
     assert_eq!(limits(&db, &account("codex-other")).unwrap(), None);
@@ -86,9 +88,14 @@ fn a_poll_keeps_the_plan_and_clears_a_window_it_left_out_with_its_manual_reset()
         stored.five_hour_left_out,
         Some(crate::usage::poll::Provider::Codex)
     );
+    assert_eq!(
+        stored.five_hour_left_out_label.as_deref(),
+        Some("Codex reports no 5-hour limit for this plan.")
+    );
     assert_eq!(stored.weekly, window(25.0, 5_000));
     assert_eq!(stored.weekly_reset_override_ms, None);
     assert_eq!(stored.weekly_left_out, None);
+    assert_eq!(stored.weekly_left_out_label, None);
     assert_eq!(stored.source, Some(LimitSource::Poll));
     assert_eq!(stored.observed_ms, Some(200));
     assert_eq!(stored.checked_ms, Some(200));
@@ -145,6 +152,10 @@ fn a_transcript_reading_leaves_the_windows_the_last_poll_read() {
         after.weekly_left_out,
         Some(crate::usage::poll::Provider::Codex)
     );
+    assert_eq!(
+        after.weekly_left_out_label.as_deref(),
+        Some("Codex reports no weekly limit for this plan.")
+    );
     assert_eq!(after.five_hour_reset_override_ms, None);
 }
 
@@ -180,6 +191,10 @@ fn a_left_out_window_is_cleared_and_marked_until_a_read_reports_it() {
     assert_eq!(stored.five_hour_reset_override_ms, None);
     assert_eq!(stored.five_hour_at(later), None);
     assert_eq!(stored.five_hour_left_out, Some(Provider::Claude));
+    assert_eq!(
+        stored.five_hour_left_out_label.as_deref(),
+        Some("Claude reports no 5-hour window right now.")
+    );
     assert_eq!(stored.weekly, window(31.0, 400 * HOUR));
     assert_eq!(stored.weekly_left_out, None);
     assert_eq!(stored.plan.as_deref(), Some("max"));
@@ -223,7 +238,38 @@ fn a_left_out_window_is_cleared_and_marked_until_a_read_reports_it() {
     let again = limits(&db, &claude).unwrap().unwrap();
     assert_eq!(again.five_hour, back.five_hour);
     assert_eq!(again.five_hour_left_out, None);
+    assert_eq!(again.five_hour_left_out_label, None);
     assert_eq!(again.weekly_left_out, None);
+}
+
+/// N-D16 r1 F1: the engine holds the one sentence each client shows for a left-out window.
+#[test]
+fn the_engine_words_each_left_out_window_for_its_provider() {
+    use crate::usage::poll::Provider;
+    for (provider, kind, sentence) in [
+        (
+            Provider::Codex,
+            WindowKind::FiveHour,
+            "Codex reports no 5-hour limit for this plan.",
+        ),
+        (
+            Provider::Codex,
+            WindowKind::Weekly,
+            "Codex reports no weekly limit for this plan.",
+        ),
+        (
+            Provider::Claude,
+            WindowKind::FiveHour,
+            "Claude reports no 5-hour window right now.",
+        ),
+        (
+            Provider::Claude,
+            WindowKind::Weekly,
+            "Claude reports no weekly window right now.",
+        ),
+    ] {
+        assert_eq!(left_out_label(provider, kind), sentence);
+    }
 }
 
 #[test]
