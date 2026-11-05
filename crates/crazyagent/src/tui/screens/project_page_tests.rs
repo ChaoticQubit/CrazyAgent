@@ -1257,6 +1257,76 @@ async fn n_starts_a_new_session_and_the_sessions_list_resumes_the_old_one() {
     assert_eq!(resumed.phase, MasterSessionPhase::Configured);
 }
 
+/// n after another client changed the settings starts a new session on the current
+/// settings instead of "The master could not start" with master_source_conflict (N-T2,
+/// trial 4 run 5 step 60): the page read its catalog and the live session's binding before
+/// the change.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn n_after_a_settings_change_on_another_client_starts_a_new_session() {
+    let mut engine = Engine::start().await;
+    let (notes, mut shell, mut connection, first) =
+        conversation_with_a_settled_turn(&mut engine).await;
+    let pools = engine
+        .controller
+        .read(OwnerRead::ModelAccessPage {
+            collection: crate::engine::owner::ModelAccessCollection::Pools,
+            cursor: None,
+            limit: 1,
+        })
+        .await
+        .unwrap();
+    let OwnerData::ModelAccessPage { source_hash, .. } = &pools.data else {
+        panic!("pool page required");
+    };
+    let reference = |value: &str| CredentialRef::new(value).unwrap();
+    engine
+        .controller
+        .begin_mutation(
+            OwnerMutation::ModelAccess {
+                expected_config_id: pools.config_id.clone(),
+                expected_source_hash: source_hash.clone(),
+                edit: crate::config::ModelAccessEdit::ReplacePool {
+                    pool: crate::config::AccountPool {
+                        id: reference("pool-b"),
+                        name: Some("Spare notes".into()),
+                        members: vec![reference("local-a")],
+                        projects: vec![],
+                        roles: vec![],
+                        fallback_allowed: false,
+                        provider_quota_policy: crate::config::ProviderQuotaPolicy::default(),
+                    },
+                },
+            },
+            1,
+        )
+        .unwrap();
+    let renamed = engine.controller.send_pending().await.unwrap();
+    assert!(
+        matches!(
+            &renamed,
+            OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation }
+                if operation.result == crate::engine::owner::OwnerResult::Applied
+        ),
+        "another client changes the settings: {renamed:?}"
+    );
+
+    shell.key(Key::Esc);
+    until(&mut shell, &mut connection, |shown| {
+        shown.contains("Session  started")
+    })
+    .await;
+    shell.key(Key::Char('n'));
+    let shown = until(&mut shell, &mut connection, |shown| {
+        shown.contains("No messages yet.") && !shown.contains("Plan the first slice")
+    })
+    .await;
+    assert!(!shown.contains("could not start"), "{shown}");
+    let (fresh, _) = latest_master(&mut engine, &notes).await;
+    let fresh = fresh.unwrap();
+    assert_ne!(fresh.session_id, first.session_id);
+    assert_eq!(fresh.phase, MasterSessionPhase::Configured);
+}
+
 /// A new session on a project whose master runs live turns the live switch on once the
 /// engine has made the new session, so the live master starts on the fresh conversation
 /// even when it was stopped or never started.
