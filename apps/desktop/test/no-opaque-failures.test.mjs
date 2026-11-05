@@ -150,7 +150,12 @@ test("a bridge failure keeps its own sentence and names the engine code behind i
   assert.equal(api.classifyFailure({ code: "made_up_code", cause: "engine_detail" }).message, `${FALLBACK} (engine_detail)`);
 });
 
-test("every sign-in failure the engine records reads as a sentence, and an unknown one names its code", () => {
+/**
+ * Collects every sign-in failure code the engine records: the custodian codes it keeps, each
+ * engine failure type's `fn code` arms and its Some(...) and .unwrap_or(...) literals.
+ * Takes nothing. Returns the codes, after checking each source was found.
+ */
+function recordedSignInCodes() {
   const listed = production(join(ENGINE, "storage/native_auth.rs")).match(/\bCUSTODIAN_CODES: \[&str; \d+\] = \[([^\]]*)\]/);
   assert.ok(listed, "storage/native_auth.rs lists the codes a custodian may name");
   const custodian = literals(listed[1], /"([a-z][a-z0-9_]*)"/g);
@@ -162,11 +167,34 @@ test("every sign-in failure the engine records reads as a sentence, and an unkno
     ...engineFiles.flatMap(({ text }) => literals(withoutPrints(text), /(?:Some|\.unwrap_or)\(\s*"(native_auth_[a-z_]+)"/g)),
   ]);
   assert.ok(facts.size >= 6 && facts.has("native_auth_interrupted"), [...facts].join(","));
-  for (const code of facts) {
+  return facts;
+}
+
+test("every sign-in failure the engine records reads as a sentence, and an unknown one names its code", () => {
+  for (const code of recordedSignInCodes()) {
     const { text } = signInFailure(code, "chatgpt");
     assert.doesNotMatch(text, / \([a-z0-9_]+\)$|_/, `${code}: ${text}`);
   }
   assert.equal(signInFailure("native_auth_made_up", "claude").text, "Sign-in didn't finish. Try again. (native_auth_made_up)");
+});
+
+const TUI_SIGN_IN = "tui/screens/settings_add_account.rs";
+const TUI_OWN = new Set(["native_auth_recovery_required"]);
+
+test("the TUI gives every sign-in failure the engine records the app's sentence", () => {
+  const source = readFileSync(join(ENGINE, TUI_SIGN_IN), "utf8");
+  const start = source.indexOf("const SIGN_IN_SENTENCES");
+  assert.ok(start >= 0, `${TUI_SIGN_IN} keeps its sign-in sentences in SIGN_IN_SENTENCES`);
+  const table = source.slice(start, source.indexOf("];", start));
+  const sentences = new Map([...table.matchAll(/\(\s*"([a-z][a-z0-9_]*)",\s*"((?:[^"\\]|\\.)*)",?\s*\)/g)].map((match) => [match[1], match[2]]));
+  for (const code of recordedSignInCodes()) {
+    assert.ok(sentences.has(code), `${code} has no TUI sentence`);
+    for (const [provider, harness, name] of [["chatgpt", "Codex", "ChatGPT"], ["claude", "Claude Code", "Claude"]]) {
+      const line = sentences.get(code).replaceAll("{harness}", harness).replaceAll("{name}", name);
+      if (TUI_OWN.has(code)) assert.doesNotMatch(line, / \([a-z0-9_]+\)$|_|[{}]/, `${code}: ${line}`);
+      else assert.equal(line, signInFailure(code, provider).text, `${code} for ${provider}`);
+    }
+  }
 });
 
 test("every refusal the engine can give an owner change reads as a sentence or names its code", () => {
