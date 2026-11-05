@@ -408,4 +408,65 @@ mod tests {
         host.kill(&named).unwrap();
         assert!(host.kept(&named));
     }
+
+    /// KEPT-L1: when a terminal outlives the stop that kept its last screen, as when its
+    /// keeper does not end it in time, and its screen then changes, as when the harness clears
+    /// it on the way out, the kill that follows keeps the screen kept before, not the cleared
+    /// one.
+    #[cfg(unix)]
+    #[test]
+    fn a_kill_after_the_last_screen_was_kept_never_replaces_it_with_a_later_screen() {
+        use crate::terminal::tmux::{SOCKET, Tmux, installed};
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{Duration, Instant};
+
+        let home = tempfile::tempdir().unwrap();
+        let folder = home.path().join("terminal");
+        std::fs::create_dir(&folder).unwrap();
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let program = installed(home.path()).expect("tmux is required for this test");
+        let _server = Server(program.clone(), folder.join(SOCKET));
+        let host = LastScreenHost::new(Tmux::open(Some(program), &folder));
+        let named = agent(11);
+        let run = InteractiveCommand {
+            argv: vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf 'harness answer 3825\\n'; read line; printf '\\033[2J\\033[H'; exec /bin/sleep 30"
+                    .into(),
+            ],
+            cwd: home.path().to_path_buf(),
+            env: Vec::new(),
+            transcript: crate::harnesses::interactive::Transcript::Unavailable,
+        };
+        let shows = |wanted: bool| {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let screen = host.snapshot(&named).unwrap().screen;
+                if contains(&screen, b"harness answer 3825") == wanted {
+                    return true;
+                }
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        };
+        host.spawn(&named, &run).unwrap();
+        assert!(shows(true), "the terminal never showed its answer");
+        host.keep_last(&named);
+        assert!(host.kept(&named));
+        host.input(&named, b"\r").unwrap();
+        assert!(shows(false), "the terminal never cleared its screen");
+
+        host.kill(&named).unwrap();
+        assert!(host.alive().unwrap().is_empty());
+        let finished = host.attach(&named).unwrap();
+        assert!(
+            contains(&finished.screen, b"harness answer 3825"),
+            "the kill replaced the kept last screen with the cleared one: {}",
+            String::from_utf8_lossy(&finished.screen)
+        );
+        assert!(contains(&finished.screen, b" Finished at "));
+    }
 }
