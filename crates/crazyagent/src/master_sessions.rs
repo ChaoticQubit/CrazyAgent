@@ -49,8 +49,13 @@ const MARKS: &str = "CREATE TABLE IF NOT EXISTS session_marks (
 #[cfg(unix)]
 const OWNER_TURNS: &str = "CREATE TABLE session_owner_turns (
     session TEXT PRIMARY KEY CHECK(length(session) BETWEEN 1 AND 128),
-    project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128)
+    project TEXT NOT NULL CHECK(length(project) BETWEEN 1 AND 128),
+    turns INTEGER NOT NULL DEFAULT 1 CHECK(turns >= 1)
 )";
+
+#[cfg(unix)]
+const OWNER_TURNS_COUNTED: &str =
+    "ALTER TABLE session_owner_turns ADD COLUMN turns INTEGER NOT NULL DEFAULT 1 CHECK(turns >= 1)";
 
 /// The SQL condition that the master session `s` holds an owner turn: a turn the engine ran
 /// for an owner message, or a turn its live master started in the terminal.
@@ -58,7 +63,8 @@ const HAS_OWNER_TURN: &str = "(EXISTS(SELECT 1 FROM master_turns t WHERE t.sessi
 
 /// One master session as the Sessions list shows it. `created` and `last_activity` are
 /// engine revisions; `started_ms` and `active_ms` are wall-clock times, absent for sessions
-/// older than the marks. `agents` names the session's own sub-agents, newest first;
+/// older than the marks. `turns` counts the engine-run owner turns and the turns run in the
+/// live terminal. `agents` names the session's own sub-agents, newest first;
 /// `results_waiting` counts finished sub-agent results queued for this session's master.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -104,12 +110,25 @@ pub const LOST_NOTE: &str = "This session continues in a new harness conversatio
 
 /// Creates the tables of session wall-clock marks and of sessions with an owner turn when
 /// the engine database opens. The first creation counts every session that kept a harness
-/// conversation as having one, so sessions used only in the live terminal stay listed.
+/// conversation as having one, so sessions used only in the live terminal stay listed; a
+/// table an older engine made without the turn count gains it, each row counting one turn.
 /// Takes the engine connection. Returns any SQLite failure.
 #[cfg(unix)]
 pub(crate) fn initialize(connection: &Connection) -> Result<(), EngineError> {
     connection.execute_batch(MARKS).map_err(error)?;
     if table_exists(connection, "session_owner_turns")? {
+        let counted: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('session_owner_turns') WHERE name='turns')",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        if !counted {
+            connection
+                .execute_batch(OWNER_TURNS_COUNTED)
+                .map_err(error)?;
+        }
         return Ok(());
     }
     let backfill = if table_exists(connection, "team_master_conversations")? {
@@ -140,9 +159,10 @@ fn table_exists(connection: &Connection, name: &str) -> Result<bool, EngineError
         .map_err(error)
 }
 
-/// Records that a project's master session had a turn in its live terminal, so the session
-/// is listed and New session may leave it. Takes the engine database, the project and the
-/// session. Returns Ok, also when the session id cannot be one or the table does not exist.
+/// Counts one turn a project's master session ran in its live terminal, so the session is
+/// listed, New session may leave it and the list shows the turn as a message; a row another
+/// project holds is left as it is. Takes the engine database, the project and the session.
+/// Returns Ok, also when the session id cannot be one or the table does not exist.
 pub(crate) fn mark_owner_turn(
     connection: &Connection,
     project: &ProjectId,
@@ -156,7 +176,8 @@ pub(crate) fn mark_owner_turn(
     }
     connection
         .execute(
-            "INSERT OR IGNORE INTO session_owner_turns(session,project) VALUES (?1,?2)",
+            "INSERT INTO session_owner_turns(session,project) VALUES (?1,?2)
+             ON CONFLICT(session) DO UPDATE SET turns=turns+1 WHERE project=excluded.project",
             params![session, project.as_str()],
         )
         .map_err(error)?;
@@ -348,7 +369,9 @@ pub(crate) fn list(
             last_activity: Cursor::new(active),
             started_ms: started_ms.map(u64::try_from).transpose().map_err(error)?,
             active_ms: active_ms.map(u64::try_from).transpose().map_err(error)?,
-            turns: turn_count(connection, &session_id)?,
+            turns: turn_count(connection, &session_id)?
+                .checked_add(terminal_turns(connection, &session_id)?)
+                .ok_or_else(|| error("master_session_record"))?,
             first_line: first_line(connection, &session_id)?,
             last_line: last_line(connection, &session_id)?,
             agents: agent_names(connection, project, &session_id)?,
@@ -376,6 +399,18 @@ fn turn_count(connection: &Connection, session: &SessionId) -> Result<u64, Engin
         )
         .map_err(error)?;
     u64::try_from(count).map_err(error)
+}
+
+fn terminal_turns(connection: &Connection, session: &SessionId) -> Result<u64, EngineError> {
+    let turns: Option<i64> = connection
+        .query_row(
+            "SELECT turns FROM session_owner_turns WHERE session=?1",
+            [session.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    u64::try_from(turns.unwrap_or(0)).map_err(error)
 }
 
 /// The first line of a session's first owner message, clipped for the list.
