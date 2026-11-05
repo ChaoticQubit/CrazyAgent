@@ -561,9 +561,11 @@ fn moved_aside(name: &str, id: &str) -> bool {
 /// Deletes one removed project's skill store folder with everything in it, for the start
 /// sweep. Inputs: the engine root and the project id. Output: Ok when the folder is gone,
 /// including when it was already missing; `plugin_skill_folder_invalid` for a name that is
-/// not one store-relative folder name.
+/// not one store-relative folder name, on Windows also for a colon, which Windows reads as a
+/// stream or device suffix instead of that folder; elsewhere a project id's colon names the
+/// folder as it always has.
 pub(crate) fn remove_skill_project_folder(root: &Path, project: &str) -> Result<(), EngineError> {
-    if !crate::protocol::single_component(project) {
+    if !crate::protocol::single_component(project) || (cfg!(windows) && project.contains(':')) {
         return Err(error("plugin_skill_folder_invalid"));
     }
     match std::fs::remove_dir_all(
@@ -1860,6 +1862,21 @@ fn tool_views(
     assert!(views.len() <= TOOLS_MAX.max(BUILTIN_TOOLS.len()));
     assert!(project.is_some() || views.iter().all(|view| view.here.is_none()));
     Ok((key, views))
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    #[test]
+    fn a_skill_folder_name_with_a_colon_is_refused_on_windows() {
+        let root = tempfile::tempdir().unwrap();
+        for id in ["name:x", "owner:abc"] {
+            let outcome = super::remove_skill_project_folder(root.path(), id);
+            assert!(
+                matches!(&outcome, Err(refused) if refused.0 == "plugin_skill_folder_invalid"),
+                "{id}: Windows reads a colon as a stream or device, never as this folder: {outcome:?}"
+            );
+        }
+    }
 }
 
 #[cfg(all(test, unix))]

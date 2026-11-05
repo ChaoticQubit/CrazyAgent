@@ -1345,6 +1345,30 @@ fn removing_a_dot_skill_folder_is_refused_and_never_deletes_the_project_root() {
 }
 
 #[test]
+fn a_colon_project_s_skill_folder_is_still_swept_off_windows_and_a_device_name_is_refused() {
+    let root = tempfile::tempdir().unwrap();
+    let base = root.path().join("plugins").join("skills").join("project");
+    std::fs::create_dir_all(base.join("name:x")).unwrap();
+    std::fs::write(base.join("name:x").join("SKILL.md"), "stale").unwrap();
+    std::fs::create_dir_all(base.join("name")).unwrap();
+    std::fs::write(base.join("name").join("SKILL.md"), "kept").unwrap();
+    let swept = remove_skill_project_folder(root.path(), "name:x");
+    assert!(
+        matches!(swept, Ok(())) && !base.join("name:x").exists(),
+        "a project id may hold a colon, and create and the trash sweep still clear its folder here: {swept:?}"
+    );
+    let device = remove_skill_project_folder(root.path(), "com1:");
+    assert!(
+        matches!(&device, Err(refused) if refused.0 == "plugin_skill_folder_invalid"),
+        "{device:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(base.join("name").join("SKILL.md")).unwrap(),
+        "kept"
+    );
+}
+
+#[test]
 fn an_mcp_secret_shorter_than_eight_bytes_is_refused_with_a_plain_reason() {
     let (dir, _connection) = database();
     let root = dir.path();

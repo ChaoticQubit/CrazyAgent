@@ -24,11 +24,12 @@ const WINDOWS_DEVICE_NAMES: [&str; 22] = [
     "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
 ];
 
-/// True when the text is exactly one plain path component that names the same child
-/// folder on every platform, never itself, its parent or another root: not empty, `.`,
-/// `..`, a separator, a root or a Windows drive like `c:`, no trailing dot or space,
-/// which Windows strips, and no Windows device name. Input: the text. Output: whether
-/// it names one child folder.
+/// True when the text is exactly one plain path component that names one child, never
+/// itself, its parent or another root: not empty, `.`, `..`, a separator, a root or a
+/// Windows drive like `c:`, no trailing dot or space, which Windows strips, and no Windows
+/// device name. A colon stays allowed, for identities and as a Unix file name; on Windows
+/// `name:x` is a stream of `name`, so a Windows folder name needs none. Input: the text.
+/// Output: whether it names one child.
 pub(crate) fn single_component(text: &str) -> bool {
     let mut parts = std::path::Path::new(text).components();
     matches!(
@@ -39,10 +40,11 @@ pub(crate) fn single_component(text: &str) -> bool {
 }
 
 /// True when Windows opens the name as a device instead of a file: CON, PRN, AUX, NUL,
-/// COM1 to COM9 or LPT1 to LPT9 in any case, alone or before an extension, with or
-/// without spaces before the dot. Input: one path component. Output: whether it is
-/// reserved on Windows.
+/// COM1 to COM9 or LPT1 to LPT9 in any case, alone, before an extension or before one
+/// trailing colon, with or without spaces before the dot. Input: one path component.
+/// Output: whether it is reserved on Windows.
 pub(crate) fn windows_device(name: &str) -> bool {
+    let name = name.strip_suffix(':').unwrap_or(name);
     let stem = name
         .split_once('.')
         .map_or(name, |(stem, _)| stem)
@@ -580,6 +582,25 @@ mod tests {
             assert!(single_component(text), "single_component refused {text:?}");
             assert!(ProjectId::new(text).is_ok(), "ProjectId refused {text:?}");
         }
+    }
+
+    #[test]
+    fn a_device_name_with_a_trailing_colon_is_still_a_device_and_no_identity() {
+        for text in ["con:", "CON:", "com1:", "LPT9:", "nul.txt:"] {
+            assert!(windows_device(text), "windows_device missed {text:?}");
+            assert!(
+                !single_component(text),
+                "single_component accepted {text:?}"
+            );
+            assert!(ProjectId::new(text).is_err(), "ProjectId accepted {text:?}");
+        }
+        for text in ["owner:abc", "console:", "com10:"] {
+            assert!(!windows_device(text), "windows_device refused {text:?}");
+        }
+        assert!(
+            ClientId::new("owner:abc").is_ok(),
+            "an identity keeps its colon"
+        );
     }
 
     #[cfg(windows)]
