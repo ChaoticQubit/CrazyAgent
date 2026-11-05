@@ -556,6 +556,7 @@ fallback_allowed = false
             agent_project: prepared.agent_project.clone(),
             agent_policy: prepared.agent_policy.clone(),
             hidden_paths: prepared.hidden_paths.clone(),
+            tools_off: prepared.tools_off.clone(),
         }
     }
 

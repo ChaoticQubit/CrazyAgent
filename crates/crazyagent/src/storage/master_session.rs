@@ -162,6 +162,7 @@ pub(crate) struct PreparedMasterTurn {
     pub(crate) agent_project: crate::agent_home::AgentProject,
     pub(crate) agent_policy: crate::sandbox::policy::AgentPolicy,
     pub(crate) hidden_paths: Vec<std::path::PathBuf>,
+    pub(crate) tools_off: Vec<String>,
 }
 
 impl PreparedMasterTurn {
@@ -2805,6 +2806,7 @@ fn bundle(
         agent_project,
         agent_policy,
         hidden_paths,
+        tools_off: Vec::new(),
     };
     assert_eq!(
         prepared.attempt.request.task_id,

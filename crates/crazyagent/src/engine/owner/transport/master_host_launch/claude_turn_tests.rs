@@ -36,6 +36,33 @@ fn rewritten(command: &Command, change: impl Fn(&mut Vec<String>)) -> Command {
     copy
 }
 
+/// Lists the tools the engine's `team-mcp` server offers when it runs, in this process, on
+/// the arguments a master turn's MCP configuration gives it. Input: the server's arguments
+/// after its executable. Output: the tool names in the order the server lists them.
+pub(super) fn listed_by(args: &[String]) -> Vec<String> {
+    assert_eq!(args[0], crate::team::tool::SERVER_COMMAND);
+    let request = format!(
+        "{}\n",
+        json!({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+    );
+    let mut output = Vec::new();
+    crate::team::tool::serve(
+        std::io::Cursor::new(request),
+        &mut output,
+        Path::new(&args[1]),
+        args.get(2).map(Path::new),
+        args.get(3..).unwrap_or_default(),
+    )
+    .unwrap();
+    let answer: Value = serde_json::from_slice(&output).unwrap();
+    answer["result"]["tools"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|tool| tool["name"].as_str().unwrap().to_owned())
+        .collect()
+}
+
 fn reference(value: &str) -> CredentialRef {
     CredentialRef::new(value).unwrap()
 }
@@ -167,6 +194,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         "Unit master instructions.",
         Duration::from_secs(3600),
         None,
+        &[],
     )
     .unwrap();
     assert_eq!(
@@ -229,6 +257,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         &"x".repeat(host_limit + 1),
         Duration::from_secs(3600),
         None,
+        &[],
     );
     assert_eq!(
         refused.err().map(|error| error.0),
@@ -268,6 +297,7 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         "Unit master instructions.",
         Duration::from_secs(3600),
         Some(&engine),
+        &[crate::team::tool::RECALL_TOOL.to_owned()],
     )
     .unwrap();
     let turn = runtime.join(format!("master-runtime-{}", tools_ref.as_str()));
@@ -283,12 +313,33 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
     );
     let config = args[args.iter().position(|arg| *arg == "--mcp-config").unwrap() + 1];
     let config: Value = serde_json::from_str(config).unwrap();
+    let mailbox = turn.join("tmp").join(crate::team::tool::MAILBOX_FOLDER);
+    let served: Vec<String> = config["mcpServers"]["crazyagent-team"]["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|arg| arg.as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        listed_by(&served),
+        [
+            crate::team::tool::TOOL_NAME,
+            crate::team::tool::REMEMBER_TOOL
+        ],
+        "a console master with tools remembers through the engine, less the tools switched off"
+    );
+    assert_eq!(std::fs::metadata(&mailbox).unwrap().mode() & 0o7777, 0o700);
     assert_eq!(
         config,
         json!({"mcpServers": {"crazyagent-team": {
             "type": "stdio",
             "command": engine.to_str().unwrap(),
-            "args": ["team-mcp", record.to_str().unwrap()],
+            "args": [
+                "team-mcp",
+                record.to_str().unwrap(),
+                mailbox.to_str().unwrap(),
+                "recall"
+            ],
         }}})
     );
     let tools = crate::engine::claude_host::MasterTools {

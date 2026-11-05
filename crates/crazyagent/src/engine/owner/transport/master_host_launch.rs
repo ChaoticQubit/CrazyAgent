@@ -157,6 +157,7 @@ impl OwnerRuntimeHandle {
                 &master_prompt(&prepared.instructions, &process.text),
                 wall_time,
                 delegate,
+                &prepared.tools_off,
             )?
         } else {
             codex_master_turn(
@@ -166,6 +167,7 @@ impl OwnerRuntimeHandle {
                 &prepared.attempt.connection,
                 wall_time,
                 delegate,
+                &prepared.tools_off,
             )?
         };
         require_master_delegate(prepared.session.selection.backend, &turn, engine.as_deref())?;
@@ -300,7 +302,9 @@ pub(super) fn claude_master_turn(
     instructions: &str,
     wall_time: Duration,
     engine: Option<&Path>,
+    tools_off: &[String],
 ) -> Result<MasterTurnLaunch, EngineError> {
+    let _ = tools_off;
     let instructions = write_master_instructions(place.root, place.runtime_ref, instructions)?;
     let home = master_turn_home(place.root, place.runtime_ref)?;
     let credential = profile.hand_to_agent(&home, wall_time, executable)?;
@@ -383,7 +387,9 @@ pub(super) fn codex_master_turn(
     connection: &ModelConnection,
     wall_time: Duration,
     engine: Option<&Path>,
+    tools_off: &[String],
 ) -> Result<MasterTurnLaunch, EngineError> {
+    let _ = tools_off;
     let model = &connection.model.id;
     let home = master_turn_home(place.root, place.runtime_ref)?;
     let credential = profile.hand_to_agent(&home, wall_time, executable)?;

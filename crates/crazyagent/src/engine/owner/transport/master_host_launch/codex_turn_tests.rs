@@ -170,6 +170,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         &connection,
         Duration::from_secs(3600),
         None,
+        &[],
     )
     .unwrap();
     let off_turn = runtime.join(format!("master-runtime-{}", off_ref.as_str()));
@@ -228,6 +229,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         &connection,
         Duration::from_secs(3600),
         Some(&engine),
+        &[crate::team::tool::RECALL_TOOL.to_owned()],
     )
     .unwrap();
     let turn = runtime.join(format!("master-runtime-{}", tools_ref.as_str()));
@@ -286,10 +288,27 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         .collect();
     assert_eq!(servers.len(), 1, "{settings:?}");
     let parsed: toml::Table = toml::from_str(servers[0]).unwrap();
+    let mailbox = turn.join("tmp").join(crate::team::tool::MAILBOX_FOLDER);
+    let served: Vec<String> = parsed["mcp_servers"]["crazyagent-team"]["args"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|arg| arg.as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(
+        super::claude_turn_tests::listed_by(&served),
+        [
+            crate::team::tool::TOOL_NAME,
+            crate::team::tool::REMEMBER_TOOL
+        ],
+        "a console master with tools remembers through the engine, less the tools switched off"
+    );
+    assert_eq!(std::fs::metadata(&mailbox).unwrap().mode() & 0o7777, 0o700);
     let expected: toml::Table = toml::from_str(&format!(
-        "[mcp_servers.crazyagent-team]\ncommand = {:?}\nargs = [\"team-mcp\", {:?}]\n",
+        "[mcp_servers.crazyagent-team]\ncommand = {:?}\nargs = [\"team-mcp\", {:?}, {:?}, \"recall\"]\n",
         engine.to_str().unwrap(),
-        record.to_str().unwrap()
+        record.to_str().unwrap(),
+        mailbox.to_str().unwrap()
     ))
     .unwrap();
     assert_eq!(parsed, expected);

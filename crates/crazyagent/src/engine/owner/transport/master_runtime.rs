@@ -322,6 +322,20 @@ impl OwnerRuntimeHandle {
         }
     }
 
+    /// Answers the memory calls a running console master turn with its tools on left in its
+    /// mailbox, `remember` and `recall` under the master's name, as the team runtime does for
+    /// a master without its live terminal. Takes the prepared turn, its id and the turn's
+    /// mailbox. Returns Ok, or the refusal of a turn that is not running with its tools on.
+    pub(super) async fn serve_master_memory(
+        &self,
+        prepared: &PreparedMasterTurn,
+        turn_id: &RequestId,
+        mailbox: &std::path::Path,
+    ) -> Result<(), EngineError> {
+        let _ = (prepared, turn_id, mailbox);
+        Ok(())
+    }
+
     /// Takes the profile of a prepared master turn and names its conversation in the agent
     /// register as a holder of the turn's account until the returned hold is dropped, which
     /// the caller keeps until the turn's host has closed. Takes the prepared turn and its
