@@ -1183,6 +1183,24 @@ fn set_live_on_clears_problem_and_off_clears_only_wait_line() {
     );
 }
 
+/// LMS-1: the line that the live master waits for its account's profile is a wait line
+/// too: turning the live master off clears it, as it clears the sign-in wait line.
+#[test]
+fn set_live_off_clears_the_profile_wait_line() {
+    let (_directory, connection) = database();
+    let setup = stored("live-profile-wait", Vec::new());
+    let project = &setup.project_id;
+    master::set_live(&connection, project, true).unwrap();
+    assert!(master::problem(&connection, project, Some(master::PROFILE_IN_USE)).unwrap());
+    master::set_live(&connection, project, false).unwrap();
+    let team = status(&connection, &setup).unwrap();
+    assert_eq!(
+        (team.live_master, team.live_problem),
+        (Some(false), None),
+        "a profile wait line no longer applies once the master is off"
+    );
+}
+
 #[test]
 fn the_owner_renames_a_sub_agent_and_the_team_status_names_every_agent() {
     let (_directory, mut connection) = database();

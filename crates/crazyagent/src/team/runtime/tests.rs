@@ -9615,6 +9615,46 @@ fn a_teammate_row_kept_before_rows_held_their_pane_process_is_pinned_at_its_next
 /// A worker record for an agent that has no session thread, as a per-turn agent between
 /// turns. Takes the project, the role, whether it runs one session per turn and whether
 /// it keeps a native lead's session. Returns the worker, idle and not live.
+/// LMS-1 r1: a live master whose grant fails after it waited for its account's profile
+/// stops with its own note, and its wait line goes with it, so the switch no longer says
+/// the profile is in use until the next start.
+#[test]
+fn a_failed_brief_after_a_profile_wait_clears_the_wait_line() {
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let mut team = fixture.runtime();
+    let mut master = between_turns(&project, AgentRole::Master, true, false);
+    master.connection = reference("left-the-pool");
+    master.live = true;
+    master.briefed = false;
+    team.workers.insert(7, master);
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    assert!(
+        super::super::master::problem(
+            &fixture.connection,
+            &project,
+            Some(super::super::master::PROFILE_IN_USE)
+        )
+        .unwrap()
+    );
+
+    team.brief(&fixture.setup, &fixture.access, 7).unwrap();
+    assert!(team.workers[&7].stopping, "the master stops");
+    assert!(
+        fixture
+            .status()
+            .messages
+            .iter()
+            .any(|message| message.text.starts_with("The live master could not start")),
+        "the failure has its own note"
+    );
+    assert_eq!(
+        fixture.status().live_problem,
+        None,
+        "the profile wait line goes with the stop"
+    );
+}
+
 fn between_turns(
     project: &ProjectId,
     role: AgentRole,

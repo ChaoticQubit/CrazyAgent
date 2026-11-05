@@ -1109,6 +1109,19 @@ impl Team {
             boxed(frame, area, title, false, lines, ctx);
             return None;
         };
+        if let Some(waiting) = self
+            .switch
+            .as_ref()
+            .and_then(|switch| switch.problem.as_deref())
+            .filter(|_| self.master && !self.paused && !attached.started)
+        {
+            let lines = wrap(waiting, limit)
+                .into_iter()
+                .map(|text| styled(text, Role::Muted, theme))
+                .collect();
+            boxed(frame, area, &attached.label, false, lines, ctx);
+            return None;
+        }
         if let Some(code) = &attached.closed {
             let (lead, rest) = closed_words(code);
             let mut lines = vec![Line::raw(lead)];

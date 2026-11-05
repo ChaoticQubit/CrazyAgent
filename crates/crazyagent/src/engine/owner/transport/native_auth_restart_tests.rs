@@ -1722,6 +1722,75 @@ async fn live_master_waits_for_restart_recheck() {
     .expect("the live master wait case exceeded 60 seconds");
 }
 
+/// LMS-1: while another process holds the signed-in account's profile for a sign-in, the
+/// started live master cannot be handed the account: over more ticks it stays on, its
+/// problem line and one team note say the profile is in use. Once the profile is free it
+/// is handed the account on the next tick and its wait line is cleared.
+#[cfg(target_os = "macos")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_master_says_it_waits_while_another_process_holds_its_profile() {
+    use crate::team::{MessageAuthor, MessageState, TeamAction};
+    let restart = Restart::new();
+    tokio::time::timeout(Duration::from_secs(60), async {
+        let run = restart.start().await;
+        let signed = run.sign_in(&restart).await;
+        run.create_project().await;
+        let path = restart.root.path().join("engine.db");
+        let held =
+            crate::engine::NativeProfileCustody::capture(&path, &std::fs::metadata(&path).unwrap())
+                .unwrap()
+                .acquire_use(
+                    &run.handle.identity(),
+                    &signed.binding,
+                    &request("lms1-held-sign-in"),
+                    1,
+                    crate::engine::bootstrap::NativeProfileUsePurpose::Authentication,
+                )
+                .unwrap();
+        let reproving = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (mut team, setup, _host) = restart.live_team(reproving);
+        restart.team_action(TeamAction::LiveMaster {
+            project_id: setup.project_id.clone(),
+            on: true,
+        });
+        for _ in 0..5 {
+            team.tick().unwrap();
+        }
+        let waiting = crate::team::master::PROFILE_IN_USE;
+        assert_eq!(
+            restart.live_switch(),
+            (Some(true), Some(waiting.to_owned())),
+            "the switch stays on and its problem line says the profile is in use"
+        );
+        assert_eq!(
+            restart.messages(&setup),
+            [(
+                MessageAuthor::Engine,
+                MessageState::Note,
+                waiting.to_owned()
+            )],
+            "one note"
+        );
+        assert_eq!(
+            restart.team_agents("master").len(),
+            1,
+            "the master started and waits for its account"
+        );
+        drop(held);
+        team.tick().unwrap();
+        assert_eq!(
+            restart.live_switch(),
+            (Some(true), None),
+            "the master is handed the account and its wait line is cleared"
+        );
+        assert_eq!(restart.messages(&setup).len(), 1, "no second note");
+        team.shutdown().unwrap();
+        run.stop().await;
+    })
+    .await
+    .expect("the live master profile wait case exceeded 60 seconds");
+}
+
 /// DEC-108: once the account an earlier run signed in passes this run's re-check, the
 /// waiting live master starts on the next tick and its wait line is cleared. Needs a live
 /// Claude account: the installed Claude Code answers the re-check and runs the master, and
