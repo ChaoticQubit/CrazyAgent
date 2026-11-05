@@ -34,14 +34,14 @@ mod native_auth_custody_tests;
 pub(crate) mod plugins;
 pub(crate) mod setup;
 pub(crate) mod trash;
+#[cfg(unix)]
+pub(crate) use native_auth::CUSTODIAN_CODES;
 #[cfg(all(test, unix))]
 pub(crate) use native_auth::NativeAuthRetirementCheckpoint;
 #[cfg(all(test, unix))]
 pub(crate) use native_auth::doubt_sign_in;
 pub(crate) use native_auth::sign_in_rechecking;
-pub(crate) use native_auth::{
-    CUSTODIAN_CODES, NativeAuthBegin, NativeAuthDispatch, NativeAuthWork,
-};
+pub(crate) use native_auth::{NativeAuthBegin, NativeAuthDispatch, NativeAuthWork};
 #[cfg(all(test, unix))]
 mod model_access_page_tests;
 #[cfg(all(test, unix))]
