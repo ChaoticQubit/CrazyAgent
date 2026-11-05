@@ -438,7 +438,7 @@ fn a_criterion_closes_when_its_linked_tests_last_passed() {
         2_000,
     );
     assert_eq!(failing.run.verdict, Some(Verdict::Failed));
-    assert_eq!(failing.tickets, [id.clone()]);
+    assert_eq!(failing.tickets, std::slice::from_ref(&id));
     assert_eq!(state(&tx, &id, position), CriterionState::Open);
     assert_eq!(status(&tx, &id), TicketStatus::Todo);
     assert!(evidence_on(&tx, &Standalone, &view(&id, position, &first)).satisfied);
@@ -454,7 +454,7 @@ fn a_criterion_closes_when_its_linked_tests_last_passed() {
         3_000,
     );
     assert_eq!(passing.run.verdict, Some(Verdict::Passed));
-    assert_eq!(passing.tickets, [id.clone()]);
+    assert_eq!(passing.tickets, std::slice::from_ref(&id));
     assert_eq!(state(&tx, &id, position), CriterionState::Met);
     let closed = store::ticket(&tx, &id).unwrap();
     assert_eq!(closed.status, TicketStatus::Done);
@@ -504,7 +504,7 @@ fn a_no_tests_run_never_satisfies_a_test_check() {
         2_000,
     );
     assert_eq!(empty.run.verdict, Some(Verdict::NoTests));
-    assert_eq!(empty.tickets, [id.clone()]);
+    assert_eq!(empty.tickets, std::slice::from_ref(&id));
     assert_eq!(state(&tx, &id, position), CriterionState::Open);
     assert!(!evidence_on(&tx, &Standalone, &check).satisfied);
     set_policy(&tx, &Standalone, PolicyKey::SkippedCounts, "neutral");
@@ -516,7 +516,7 @@ fn a_no_tests_run_never_satisfies_a_test_check() {
         Some(0),
         3_000,
     );
-    assert_eq!(passing.tickets, [id.clone()]);
+    assert_eq!(passing.tickets, std::slice::from_ref(&id));
     assert_eq!(state(&tx, &id, position), CriterionState::Met);
 
     let unread = started(&tx, &hex('b', 40), 4_000);
@@ -535,7 +535,7 @@ fn a_no_tests_run_never_satisfies_a_test_check() {
         4_002,
     );
     assert_eq!(unread.run.verdict, Some(Verdict::Unknown));
-    assert_eq!(unread.tickets, [id.clone()]);
+    assert_eq!(unread.tickets, std::slice::from_ref(&id));
     assert_eq!(state(&tx, &id, position), CriterionState::Open);
     let detail = evidence_on(&tx, &Standalone, &check);
     assert!(!detail.satisfied);
@@ -567,7 +567,7 @@ fn a_no_tests_run_never_satisfies_a_test_check() {
         Some(0),
         7_000,
     );
-    assert_eq!(again.tickets, [id.clone()]);
+    assert_eq!(again.tickets, std::slice::from_ref(&id));
     assert_eq!(state(&tx, &id, position), CriterionState::Met);
     assert_eq!(status(&tx, &id), TicketStatus::Todo);
 }
@@ -598,7 +598,7 @@ fn current_source_ignores_a_pass_on_another_tree() {
         Some(0),
         2_000,
     );
-    assert_eq!(unknown.tickets, [id.clone()]);
+    assert_eq!(unknown.tickets, std::slice::from_ref(&id));
     assert_eq!(state(&tx, &id, position), CriterionState::Open);
     assert!(!evidence_on(&tx, &TreeHost, &check).satisfied);
 
@@ -616,7 +616,7 @@ fn current_source_ignores_a_pass_on_another_tree() {
         3_000,
     );
     assert_eq!(elsewhere.run.verdict, Some(Verdict::Passed));
-    assert_eq!(elsewhere.tickets, [id.clone()]);
+    assert_eq!(elsewhere.tickets, std::slice::from_ref(&id));
     assert_eq!(state(&tx, &id, position), CriterionState::Open);
     assert_eq!(status(&tx, &id), TicketStatus::Todo);
     assert!(!evidence_on(&tx, &TreeHost, &check).satisfied);
@@ -630,7 +630,7 @@ fn current_source_ignores_a_pass_on_another_tree() {
         Some(0),
         4_000,
     );
-    assert_eq!(here.tickets, [id.clone()]);
+    assert_eq!(here.tickets, std::slice::from_ref(&id));
     assert_eq!(state(&tx, &id, position), CriterionState::Met);
     assert_eq!(status(&tx, &id), TicketStatus::Done);
     let proven = evidence_on(&tx, &TreeHost, &check);
@@ -792,7 +792,7 @@ fn a_newer_interrupted_run_leaves_the_check_unsatisfied() {
         Some(0),
         2_000,
     );
-    assert_eq!(passing.tickets, [id.clone()]);
+    assert_eq!(passing.tickets, std::slice::from_ref(&id));
     assert_eq!(state(&tx, &id, position), CriterionState::Met);
 
     let empty = cancel(&started(&tx, &hex('b', 40), 3_000), 3_001);
@@ -806,7 +806,7 @@ fn a_newer_interrupted_run_leaves_the_check_unsatisfied() {
     let hung = cancel(&hung, 4_002);
     assert_eq!(hung.run.state, RunState::Interrupted);
     assert_eq!(hung.run.verdict, None);
-    assert_eq!(hung.tickets, [id.clone()]);
+    assert_eq!(hung.tickets, std::slice::from_ref(&id));
     assert_eq!(state(&tx, &id, position), CriterionState::Open);
     let masked = evidence_on(&tx, &Standalone, &check);
     assert!(!masked.satisfied);
@@ -840,7 +840,7 @@ fn a_newer_interrupted_run_leaves_the_check_unsatisfied() {
         Some(0),
         5_000,
     );
-    assert_eq!(again.tickets, [id.clone()]);
+    assert_eq!(again.tickets, std::slice::from_ref(&id));
     assert_eq!(state(&tx, &id, position), CriterionState::Met);
     assert_eq!(status(&tx, &id), TicketStatus::Todo);
     assert_eq!(
@@ -889,7 +889,7 @@ fn a_skipped_linked_case_leaves_the_check_open_under_fail() {
         3_000,
     );
     assert_eq!(skipping.run.verdict, Some(Verdict::Passed));
-    assert_eq!(skipping.tickets, [id.clone()]);
+    assert_eq!(skipping.tickets, std::slice::from_ref(&id));
     assert_eq!(state(&tx, &id, position), CriterionState::Open);
     let open = evidence_on(&tx, &Standalone, &check);
     assert!(!open.satisfied);
@@ -908,7 +908,7 @@ fn a_skipped_linked_case_leaves_the_check_open_under_fail() {
         Some(0),
         4_000,
     );
-    assert_eq!(not_run.tickets, [id.clone()]);
+    assert_eq!(not_run.tickets, std::slice::from_ref(&id));
     assert_eq!(state(&tx, &id, position), CriterionState::Met);
 }
 
@@ -932,7 +932,7 @@ fn the_plan_option_counts_only_runs_of_the_release_active_plan() {
         Some(0),
         2_000,
     );
-    assert_eq!(unplanned.tickets, [id.clone()]);
+    assert_eq!(unplanned.tickets, std::slice::from_ref(&id));
     assert_eq!(state(&tx, &id, position), CriterionState::Open);
     assert!(!evidence_on(&tx, &Standalone, &check).satisfied);
 
@@ -969,7 +969,7 @@ fn the_plan_option_counts_only_runs_of_the_release_active_plan() {
         Some(0),
         3_002,
     );
-    assert_eq!(planned.tickets, [id.clone()]);
+    assert_eq!(planned.tickets, std::slice::from_ref(&id));
     assert_eq!(state(&tx, &id, position), CriterionState::Met);
 
     let later = run(
@@ -978,7 +978,7 @@ fn the_plan_option_counts_only_runs_of_the_release_active_plan() {
         Some(1),
         4_000,
     );
-    assert_eq!(later.tickets, [id.clone()]);
+    assert_eq!(later.tickets, std::slice::from_ref(&id));
     assert_eq!(state(&tx, &id, position), CriterionState::Met);
     let proven = evidence_on(&tx, &Standalone, &check);
     assert!(proven.detail.contains(&planned.run.id.to_string()));
@@ -1069,7 +1069,7 @@ fn recorded_evidence_never_satisfies_a_check_that_names_a_case() {
         Some(0),
         2_000,
     );
-    assert_eq!(passing.tickets, [id.clone()]);
+    assert_eq!(passing.tickets, std::slice::from_ref(&id));
     assert_eq!(state(&tx, &id, named), CriterionState::Met);
     assert_eq!(state(&tx, &id, missing), CriterionState::Open);
     assert_eq!(status(&tx, &id), opened_as);
