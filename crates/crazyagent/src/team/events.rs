@@ -35,7 +35,13 @@ pub const SCAN_EVERY: Duration = Duration::from_secs(2);
 pub(crate) const OWNER_RESTARTED: &str = "The owner restarted it in its own worktree. It is idle and takes the next task for its harness.";
 pub(crate) const OWNER_WOKE: &str = "The owner woke it again in its own worktree. It is idle and takes the next task for its harness.";
 pub(crate) const OWNER_STOPPED_AGENT: &str = "The owner stopped it and its teammates. Its task waits for it until the owner starts it again; do not hand that work to another agent.";
-const OWNER_NOTICES: [&str; 3] = [OWNER_RESTARTED, OWNER_WOKE, OWNER_STOPPED_AGENT];
+pub(crate) const INSTRUCTIONS_RESTARTED: &str = "It restarted in its own worktree and conversation to load the owner's changed instructions. It is idle and takes the next task for its harness.";
+const OWNER_NOTICES: [&str; 4] = [
+    OWNER_RESTARTED,
+    OWNER_WOKE,
+    OWNER_STOPPED_AGENT,
+    INSTRUCTIONS_RESTARTED,
+];
 const SCREEN_ROWS_SCANNED: usize = 40;
 const QUESTION_ROWS_ABOVE: usize = 12;
 const OPTIONS_MAX: usize = 9;
@@ -52,6 +58,7 @@ const _: () = assert!(EVENTS_QUEUED_HARD_MAX < EVENTS_PER_PROJECT_MAX);
 const _: () = assert!(OWNER_RESTARTED.len() <= EVENT_TEXT_BYTES_MAX);
 const _: () = assert!(OWNER_WOKE.len() <= EVENT_TEXT_BYTES_MAX);
 const _: () = assert!(OWNER_STOPPED_AGENT.len() <= EVENT_TEXT_BYTES_MAX);
+const _: () = assert!(INSTRUCTIONS_RESTARTED.len() <= EVENT_TEXT_BYTES_MAX);
 const _: () = assert!(COLD_WAKES_PER_HOUR_MAX <= HOURLY_CAP_DEFAULT);
 const _: () = assert!(EVENT_TEXT_BYTES_MAX + 256 < WAKE_BYTES_MAX);
 const _: () = assert!(HOURLY_CAP_DEFAULT <= HOURLY_CAP_MAX);
@@ -1143,8 +1150,8 @@ pub fn forward_to_parents(
 }
 
 /// Tells whether an event is the engine's own notice that the owner woke, restarted or
-/// stopped the agent (run 5 task 73: a lead woken for one spent a turn on nothing). Takes
-/// the event. Returns the answer.
+/// stopped the agent, or restarted it for the owner's changed instructions (run 5 task 73:
+/// a lead woken for one spent a turn on nothing). Takes the event. Returns the answer.
 fn owner_notice(event: &TeamEvent) -> bool {
     event.kind == EventKind::Progress && OWNER_NOTICES.contains(&event.text.as_str())
 }
