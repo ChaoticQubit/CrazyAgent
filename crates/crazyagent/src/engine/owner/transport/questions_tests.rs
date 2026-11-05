@@ -1,11 +1,14 @@
 use super::*;
+#[cfg(unix)]
 use crate::questions::{Ask, Asker, Page, QuestionStatus, Settlement};
 use serde_json::json;
 
+#[cfg(unix)]
 const PROJECT: &str = "alpha";
 
 /// An engine root whose database holds the team tables and one set-up project with its
 /// `.crazyagent/` folder. Output: the temporary folder, the engine root and the project.
+#[cfg(unix)]
 fn engine() -> (tempfile::TempDir, PathBuf, ProjectId) {
     let tmp = tempfile::Builder::new()
         .prefix("ca-owner-questions-")
@@ -28,12 +31,14 @@ fn engine() -> (tempfile::TempDir, PathBuf, ProjectId) {
 /// Sends one request through this protocol's selector, parsing and handler, as an owner
 /// client's frame body. Inputs: the engine root and the body. Output: the reply, or the
 /// refusal.
+#[cfg(unix)]
 fn send(root: &Path, body: serde_json::Value) -> Result<Reply, EngineError> {
     let bytes = serde_json::to_vec(&body).unwrap();
     assert!(matches!(protocol(&bytes).unwrap(), Protocol::Questions));
     run(root, parse(&bytes)?)
 }
 
+#[cfg(unix)]
 fn listed(root: &Path, after: Option<u64>) -> Page {
     let body = json!({"questions": {"kind": "list", "project": PROJECT, "after": after}});
     match send(root, body).unwrap() {
@@ -42,6 +47,7 @@ fn listed(root: &Path, after: Option<u64>) -> Page {
     }
 }
 
+#[cfg(unix)]
 fn settled(reply: Result<Reply, EngineError>) -> Settlement {
     match reply.unwrap() {
         Reply::Settled { settlement } => settlement,
@@ -49,6 +55,7 @@ fn settled(reply: Result<Reply, EngineError>) -> Settlement {
     }
 }
 
+#[cfg(unix)]
 fn asked(question: &str) -> Ask {
     Ask {
         question: question.into(),
@@ -58,6 +65,7 @@ fn asked(question: &str) -> Ask {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn the_owner_lists_answers_and_dismisses_each_question_once_by_its_version() {
     let (_tmp, root, project) = engine();
@@ -182,6 +190,7 @@ fn the_owner_lists_answers_and_dismisses_each_question_once_by_its_version() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn a_full_page_of_the_largest_questions_fits_one_owner_frame() {
     let (_tmp, root, project) = engine();
