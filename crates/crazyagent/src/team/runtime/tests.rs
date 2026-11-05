@@ -9534,8 +9534,9 @@ fn an_owner_wake_reaches_the_lead_under_the_shipped_rule_at_its_next_real_turn()
 }
 
 /// 18.15.2, progress on as the owner's app rule had it in run 5: the owner's Wake, restart
-/// or stop of a worker pins no wake task for its lead; each notice waits in the lead's
-/// mailbox and the lead's next real turn carries them all.
+/// or stop of a worker, or its restart for the owner's changed instructions (OWAKE-L1), pins
+/// no wake task for its lead; each notice waits in the lead's mailbox and the lead's next
+/// real turn carries them all.
 #[test]
 fn an_owner_action_never_pins_a_wake_task_for_the_lead_with_progress_on() {
     let mut case = OwnerActionCase::new();
@@ -9577,11 +9578,26 @@ fn an_owner_action_never_pins_a_wake_task_for_the_lead_with_progress_on() {
         0,
         "the owner's stop pins no wake task for the lead"
     );
+    case.record(
+        crate::team::events::EventKind::Progress,
+        INSTRUCTIONS_RESTARTED,
+    );
+    case.tick();
+    assert_eq!(
+        case.pinned(),
+        0,
+        "a restart for the owner's changed instructions pins no wake task for the lead"
+    );
     assert!(!crate::coord::delivery::waking(&case.fixture.connection, case.lead).unwrap());
     let notes = case.waiting();
-    assert_eq!(notes.len(), 3, "{notes:?}");
+    assert_eq!(notes.len(), 4, "{notes:?}");
     let messages = case.real_turn();
-    for text in [OWNER_WOKE, OWNER_RESTARTED, OWNER_STOPPED_AGENT] {
+    for text in [
+        OWNER_WOKE,
+        OWNER_RESTARTED,
+        OWNER_STOPPED_AGENT,
+        INSTRUCTIONS_RESTARTED,
+    ] {
         assert!(messages.contains(text), "{text} missing: {messages}");
     }
     case.team.workers.clear();
