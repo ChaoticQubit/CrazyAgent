@@ -1904,6 +1904,13 @@ impl NativeAuthCustodyChannel {
         self.stream.take();
     }
 
+    /// Tells whether the channel is sealed: a refused profile guard or a failed exchange
+    /// closed it, or a retirement began, so it refuses every later report. Input: none.
+    /// Output: true once sealed.
+    pub(crate) fn sealed(&self) -> bool {
+        self.sealed
+    }
+
     fn guard_or_close(&mut self, guard: &NativeProfileUse) -> Result<(), EngineError> {
         if let Err(error) = self.verify_guard(guard) {
             self.close();
