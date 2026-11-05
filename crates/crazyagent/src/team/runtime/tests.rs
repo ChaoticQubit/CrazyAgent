@@ -5661,11 +5661,20 @@ struct OwnOutlived {
 }
 
 /// Runs one turn a kept native lead's stand-in app takes by itself, with a background
-/// command of `secs` seconds, through `next_lead_turn` under the given rules as the lead's
-/// worker does, then stops the lead as `serve` does on a stop. Takes the fixture, the pane
-/// name, the seconds and the rules. Returns how the turn ended.
+/// command of `secs` seconds and a notice turn of `notice` seconds, through
+/// `next_lead_turn` under the given rules as the lead's worker does, sending `later` as the
+/// engine's rules order once the app holds the turn, then stops the lead as `serve` does on
+/// a stop. Takes the fixture, the pane name, both times and both rules. Returns how the
+/// turn ended.
 #[cfg(target_os = "macos")]
-fn own_turn_outliving(fixture: &Fixture, name: &str, secs: u32, rules: TurnRules) -> OwnOutlived {
+fn own_turn_outliving(
+    fixture: &Fixture,
+    name: &str,
+    secs: u32,
+    notice: &str,
+    rules: TurnRules,
+    later: Option<TurnRules>,
+) -> OwnOutlived {
     let base = fixture.base.join(name);
     let (home, work, bin) = (base.join("home"), base.join("work"), base.join("bin"));
     for path in [&home, &work, &bin] {
@@ -5675,6 +5684,8 @@ fn own_turn_outliving(fixture: &Fixture, name: &str, secs: u32, rules: TurnRules
     let script =
         OWN_BACKGROUND_CLAUDE.replace("/bin/sleep SECS\n", &format!("/bin/sleep {secs}\n"));
     assert_eq!(script.matches(&format!("/bin/sleep {secs}\n")).count(), 1);
+    assert_eq!(script.matches("  /bin/sleep 0.3\n").count(), 1);
+    let script = script.replace("  /bin/sleep 0.3\n", &format!("  /bin/sleep {notice}\n"));
     let executable = bin.join("claude");
     std::fs::write(&executable, script).unwrap();
     std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -5713,12 +5724,18 @@ fn own_turn_outliving(fixture: &Fixture, name: &str, secs: u32, rules: TurnRules
     let deadline = Instant::now() + Duration::from_secs(90);
     let (lead, cancel_flag, own_state) = (&mut session, &cancel, &mut own);
     let (next, end, text, waited, stopped_itself) = std::thread::scope(|scope| {
-        let worker = scope
-            .spawn(move || next_lead_turn(&orders, cancel_flag, lead, &reports, own_state, rules));
+        let worker = scope.spawn(move || {
+            let mut rules = rules;
+            next_lead_turn(&orders, cancel_flag, lead, &reports, own_state, &mut rules)
+        });
         let mut held = None;
+        let mut later = later;
         let (end, text, at) = loop {
             if held.is_none() && home.join("held").exists() {
                 held = Some(Instant::now());
+                if let Some(saved) = later.take() {
+                    order.send(Order::Rules(saved)).unwrap();
+                }
             }
             match reported.recv_timeout(Duration::from_millis(50)) {
                 Ok(Report::Own {
@@ -5781,7 +5798,7 @@ fn under_wait_a_native_lead_s_own_turn_stays_open_until_its_background_command_e
         limit: None,
         background: crate::team::BackgroundAtEnd::Wait,
     };
-    let outlived = own_turn_outliving(&fixture, "own-bg-wait", 3, rules);
+    let outlived = own_turn_outliving(&fixture, "own-bg-wait", 3, "0.3", rules, None);
     let text = &outlived.text;
     assert_eq!(outlived.end, TurnEnd::Success, "{text}");
     assert!(
@@ -5815,7 +5832,7 @@ fn under_stop_a_native_lead_s_own_turn_ends_at_once_and_its_background_command_s
         limit: None,
         background: crate::team::BackgroundAtEnd::Stop,
     };
-    let outlived = own_turn_outliving(&fixture, "own-bg-stop", 25, rules);
+    let outlived = own_turn_outliving(&fixture, "own-bg-stop", 25, "0.3", rules, None);
     let text = &outlived.text;
     assert_eq!(outlived.end, TurnEnd::Success, "{text}");
     assert!(
@@ -5850,7 +5867,7 @@ fn with_grace_a_native_lead_s_own_turn_ends_after_the_grace_time_and_its_command
         limit: None,
         background: crate::team::BackgroundAtEnd::Grace { secs: 10 },
     };
-    let outlived = own_turn_outliving(&fixture, "own-bg-grace", 25, rules);
+    let outlived = own_turn_outliving(&fixture, "own-bg-grace", 25, "0.3", rules, None);
     let text = &outlived.text;
     assert_eq!(outlived.end, TurnEnd::Success, "{text}");
     assert!(
@@ -5885,7 +5902,7 @@ fn a_task_limit_cuts_a_native_lead_s_own_turn_held_for_its_background_command() 
         limit: Some(Duration::from_secs(4)),
         background: crate::team::BackgroundAtEnd::Wait,
     };
-    let outlived = own_turn_outliving(&fixture, "own-bg-limit", 25, rules);
+    let outlived = own_turn_outliving(&fixture, "own-bg-limit", 25, "0.3", rules, None);
     let text = &outlived.text;
     assert_eq!(outlived.end, TurnEnd::TimedOut, "{text}");
     assert!(
@@ -5907,6 +5924,126 @@ fn a_task_limit_cuts_a_native_lead_s_own_turn_held_for_its_background_command() 
         !outlived.alive,
         "the limit left the background command running"
     );
+}
+
+/// N-E9 r1 (NE9-M1): a held own turn ends by the rules the owner saved now, which the engine
+/// sends while the turn runs, not by the Wait the lead's last engine turn carried. Here
+/// the lead started under Wait, the owner's Stop arrives while its app holds the turn, and
+/// the turn ends at once with the Stop line and the lead stops with its command.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_rules_order_ends_a_native_lead_s_held_own_turn_by_the_owner_s_saved_setting() {
+    let fixture = Fixture::new(1);
+    let wait = TurnRules {
+        limit: None,
+        background: crate::team::BackgroundAtEnd::Wait,
+    };
+    let stop = TurnRules {
+        limit: None,
+        background: crate::team::BackgroundAtEnd::Stop,
+    };
+    let outlived = own_turn_outliving(&fixture, "own-bg-saved", 25, "0.3", wait, Some(stop));
+    let text = &outlived.text;
+    assert_eq!(outlived.end, TurnEnd::Success, "{text}");
+    assert!(
+        text.starts_with(BACKGROUND_STOPPED) && text.contains("Waiting for the check."),
+        "{text}"
+    );
+    assert!(
+        outlived.waited < Duration::from_secs(5),
+        "{:?}",
+        outlived.waited
+    );
+    assert!(outlived.stopped_itself);
+    assert!(outlived.held_at_end);
+    assert!(!outlived.finished);
+    assert!(
+        !outlived.alive,
+        "the lead's stop left its background command running"
+    );
+}
+
+/// N-E9 r1 (NE9-M2, NE9-L1): the task limit counts from the own turn's start through the
+/// notice turn after the hold, as `turn` checks it on every pass, and a turn cut once its
+/// background command has ended says nothing about a command that was stopped.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_task_limit_cuts_a_native_lead_s_own_turn_in_its_notice_turn() {
+    let fixture = Fixture::new(1);
+    let rules = TurnRules {
+        limit: Some(Duration::from_secs(6)),
+        background: crate::team::BackgroundAtEnd::Wait,
+    };
+    let outlived = own_turn_outliving(&fixture, "own-bg-notice", 2, "20", rules, None);
+    let text = &outlived.text;
+    assert_eq!(outlived.end, TurnEnd::TimedOut, "{text}");
+    assert!(
+        text.contains("Waiting for the check.") && !text.contains("Check passed."),
+        "{text}"
+    );
+    assert!(!text.contains(BACKGROUND_CUT), "{text}");
+    assert!(outlived.finished, "the command ended before the cut");
+    assert!(
+        outlived.waited >= Duration::from_secs(3) && outlived.waited < Duration::from_secs(12),
+        "{:?}",
+        outlived.waited
+    );
+    assert!(outlived.stopped_itself);
+    assert!(!outlived.held_at_end, "the notice turn had ended the hold");
+}
+
+/// N-E9 r1 (NE9-M1): the engine sends a kept lead whose app runs a turn by itself the
+/// project's saved task limit and background choice, once, and again after the owner
+/// changes them; a kept lead with no own turn gets nothing.
+#[cfg(target_os = "macos")]
+#[test]
+fn send_own_rules_gives_a_kept_lead_s_own_turn_the_saved_rules_and_their_changes() {
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let mut team = fixture.runtime();
+    fixture
+        .connection
+        .execute(
+            "INSERT INTO team_time_limits(project,turn_secs,session_secs) VALUES (?1,4,NULL)",
+            [PROJECT],
+        )
+        .unwrap();
+    choose_background(&fixture, crate::team::BackgroundAtEnd::Stop);
+    let mut owned = between_turns(&project, AgentRole::Sub, true, true);
+    let (order, orders) = channel();
+    owned.orders = order;
+    owned.own_turn = Some(now_ms());
+    team.workers.insert(7, owned);
+    let mut idle = between_turns(&project, AgentRole::Sub, true, true);
+    let (order, idle_orders) = channel();
+    idle.orders = order;
+    team.workers.insert(8, idle);
+    let got = |orders: &Receiver<Order>| match orders.try_recv() {
+        Ok(Order::Rules(rules)) => Some(rules),
+        Ok(_) => panic!("an order that is not the rules"),
+        Err(_) => None,
+    };
+
+    team.send_own_rules().unwrap();
+    assert_eq!(
+        got(&orders),
+        Some(TurnRules {
+            limit: Some(Duration::from_secs(4)),
+            background: crate::team::BackgroundAtEnd::Stop,
+        })
+    );
+    team.send_own_rules().unwrap();
+    assert_eq!(got(&orders), None, "unchanged rules are sent once");
+    choose_background(&fixture, crate::team::BackgroundAtEnd::Grace { secs: 10 });
+    team.send_own_rules().unwrap();
+    assert_eq!(
+        got(&orders),
+        Some(TurnRules {
+            limit: Some(Duration::from_secs(4)),
+            background: crate::team::BackgroundAtEnd::Grace { secs: 10 },
+        })
+    );
+    assert_eq!(got(&idle_orders), None);
 }
 
 /// Under Stop, a Codex sub-agent whose app keeps running between tasks is not told that its
@@ -8945,6 +9082,7 @@ fn between_turns(
         briefed: true,
         kept_session,
         own_turn: None,
+        own_rules: None,
         turn_started: None,
         session: None,
         seed: None,
