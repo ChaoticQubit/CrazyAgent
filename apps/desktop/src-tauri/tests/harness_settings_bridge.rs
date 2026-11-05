@@ -494,8 +494,12 @@ async fn disagreeing(root: std::path::PathBuf) -> Result<(), Box<dyn Error>> {
     let at = wrong
         .settings
         .iter()
-        .position(|row| row.key == "project_doc_max_bytes")
+        .position(|row| row.key == "hide_agent_reasoning")
         .unwrap();
+    assert!(
+        matches!(wrong.settings[at].access, Access::Editable),
+        "the wrong-type case needs a key the catalog leaves editable"
+    );
     wrong.settings[at].effective = json!("many");
     let mut stray = values()?;
     let mut extra = stray.settings[0].clone();
