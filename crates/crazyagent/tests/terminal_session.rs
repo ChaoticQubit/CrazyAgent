@@ -570,7 +570,8 @@ fn stopping_a_full_access_pane_names_what_it_left_running() {
     };
     assert!(!host.alive().unwrap().contains(&agent));
     assert!(
-        within(Duration::from_secs(10), || test_kill_process(grouped).is_err()),
+        within(Duration::from_secs(10), || test_kill_process(grouped)
+            .is_err()),
         "the stop of a Full access pane left {grouped:?} of its process group running"
     );
     let report = left.plain();
