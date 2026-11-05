@@ -4,7 +4,7 @@ use super::project_markdown::sanitize;
 use super::project_time::{clock, local_offset};
 use super::{Flow, Place, ProjectTab, Screen, SettingsSection, open};
 use crate::engine::owner::OwnerResult;
-use crate::onboarding::{OnboardingView, Step};
+use crate::onboarding::{MappingTry, OnboardingView, Step};
 use crate::pools::PoolSummary;
 use crate::project_setup::{Platform, SetupAction, SetupQuery, SetupView};
 use crate::protocol::{CredentialRef, ProjectId};
@@ -993,6 +993,18 @@ impl Screen for OnboardingPage {
                         limit,
                         ctx,
                     ));
+                    if let (Step::Running, Some(progress)) =
+                        (&onboarding.mapping, &onboarding.mapping_try)
+                    {
+                        lines.extend(
+                            wrap(
+                                &try_line(progress, crate::tui::clock::now_ms()),
+                                limit.saturating_sub(2),
+                            )
+                            .into_iter()
+                            .map(|text| styled(format!("  {text}"), Role::Muted, theme)),
+                        );
+                    }
                     lines.push(Line::default());
                     lines.push(styled(
                         "The setup draft shows here when both steps finish.",
@@ -1053,5 +1065,29 @@ impl Screen for OnboardingPage {
             name: self.name.clone(),
             project: self.project.clone(),
         })
+    }
+}
+
+/// The running mapping try as the setup screen says it, in the desktop review's words: its
+/// number of tries, how many whole minutes it has run and why the try before it failed.
+/// Inputs: the try and the time now in ms. Output: one line, such as
+/// `Mapping, try 2 of 3, 2 min. Try 1 failed: Mapping agent ran out of time`.
+fn try_line(progress: &MappingTry, now_ms: i64) -> String {
+    let minutes = now_ms.saturating_sub(progress.started_ms).max(0) / 60_000;
+    let elapsed = if minutes < 1 {
+        "under 1 min".to_owned()
+    } else {
+        format!("{minutes} min")
+    };
+    let head = format!(
+        "Mapping, try {} of {}, {elapsed}.",
+        progress.number, progress.tries
+    );
+    match &progress.earlier {
+        Some(earlier) => format!(
+            "{head} Try {} failed: {earlier}",
+            progress.number.saturating_sub(1)
+        ),
+        None => head,
     }
 }

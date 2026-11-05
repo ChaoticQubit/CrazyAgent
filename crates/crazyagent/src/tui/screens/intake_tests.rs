@@ -6,7 +6,7 @@ use crate::engine::Client;
 use crate::engine::bootstrap::EngineService;
 use crate::engine::owner::{OwnerClientKind, OwnerResponse, OwnerResult};
 use crate::github::{GitHubMethod, GitHubRepo, GitHubRepoPage, GitHubStatus};
-use crate::onboarding::{MappingFacts, OnboardingView, Step};
+use crate::onboarding::{MappingFacts, MappingTry, OnboardingView, Step};
 use crate::project_setup::{ProjectSetup, SetupAction, SetupQuery};
 use crate::protocol::ProjectId;
 use crate::tui::client::Connection;
@@ -967,6 +967,56 @@ fn a_graph_step_turned_off_in_setup_says_so_while_mapping_runs() {
         "{rows:#?}"
     );
     assert!(shows(&rows, "Running"), "{rows:#?}");
+}
+
+#[test]
+fn a_running_mapping_shows_its_try_its_minutes_and_why_the_earlier_try_failed() {
+    let now = crate::tui::clock::now_ms();
+    let (mut shell, _) = review_with(|view| {
+        view.mapping = Step::Running;
+        view.mapping_try = Some(MappingTry {
+            number: 2,
+            tries: 3,
+            started_ms: now - 150_000,
+            earlier: Some("Mapping agent ran out of time".into()),
+        });
+    });
+    let rows = render(&mut shell, 100, 40);
+    assert!(
+        shows(
+            &rows,
+            "Mapping, try 2 of 3, 2 min. Try 1 failed: Mapping agent ran out of time"
+        ),
+        "{rows:#?}"
+    );
+
+    let (mut shell, _) = review_with(|view| {
+        view.mapping = Step::Running;
+        view.mapping_try = Some(MappingTry {
+            number: 1,
+            tries: 3,
+            started_ms: now + 5_000,
+            earlier: None,
+        });
+    });
+    let rows = render(&mut shell, 100, 40);
+    assert!(
+        shows(&rows, "Mapping, try 1 of 3, under 1 min."),
+        "{rows:#?}"
+    );
+    assert!(!shows(&rows, "failed:"), "{rows:#?}");
+
+    let (mut shell, _) = review_with(|view| {
+        view.mapping = Step::WAITING;
+        view.mapping_try = Some(MappingTry {
+            number: 2,
+            tries: 3,
+            started_ms: now,
+            earlier: Some("Mapping agent ran out of time".into()),
+        });
+    });
+    let rows = render(&mut shell, 100, 40);
+    assert!(!shows(&rows, "Mapping, try"), "{rows:#?}");
 }
 
 #[test]
