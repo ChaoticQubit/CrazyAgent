@@ -725,3 +725,70 @@ fn a_shown_profile_is_kept_only_when_its_body_hashes_to_the_id_asked_for() {
         "a body that does not hash to its id is not shown for approval"
     );
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn after_a_lost_connection_a_tests_views_job_calls_the_engine_no_more() {
+    use crate::engine::bootstrap::EngineService;
+    use crate::engine::owner::OwnerClientKind;
+    use std::os::unix::fs::PermissionsExt;
+
+    let root = tempfile::Builder::new()
+        .prefix("ca-tui-ck-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    let global = root.path().join("global.toml");
+    std::fs::write(&global, "version = 1\ntimeout_ms = 5000\n").unwrap();
+    std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let (_stop, stopped) = tokio::sync::watch::channel(false);
+    let mut service = EngineService::start_with_settings_sources(
+        root.path(),
+        "e.sock",
+        &global,
+        &root.path().join("project.toml"),
+        &stopped,
+    )
+    .await
+    .unwrap();
+    let (client, _) = OwnerClient::discover(
+        root.path(),
+        OwnerClientKind::Tui,
+        std::time::Duration::from_secs(20),
+    )
+    .await
+    .unwrap();
+    let client = Arc::new(client);
+    let handle = tokio::runtime::Handle::current();
+    let (answered, after_refused, after_lost, kept) = tokio::task::spawn_blocking(move || {
+        let mut tests = OwnerTests {
+            client,
+            handle,
+            failure: None,
+        };
+        let answered = tests.call(OpKind::Schema, json!({}));
+        tests.failure = Some(EngineError("tracker_unavailable".into()));
+        let after_refused = tests.call(OpKind::Schema, json!({}));
+        tests.failure = Some(EngineError("tracker_outcome_unknown".into()));
+        let after_lost = tests.call(OpKind::Schema, json!({}));
+        (
+            answered,
+            after_refused,
+            after_lost,
+            tests.failure.map(|error| error.0),
+        )
+    })
+    .await
+    .unwrap();
+    assert_eq!(answered["ok"], json!(true), "{answered}");
+    assert_eq!(
+        after_refused["ok"],
+        json!(true),
+        "a connect the engine refused is no lost connection: {after_refused}"
+    );
+    assert_eq!(after_lost, refused("tracker_outcome_unknown"));
+    assert_eq!(kept.as_deref(), Some("tracker_outcome_unknown"));
+    tokio::time::timeout(std::time::Duration::from_secs(10), service.shutdown())
+        .await
+        .unwrap()
+        .unwrap();
+}
