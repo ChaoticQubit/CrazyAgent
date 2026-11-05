@@ -1,11 +1,12 @@
 /// Words that mark a file or folder name as one that may hold a secret: credentials, keys
-/// and tokens, key and key-store files such as `.pem`, `id_rsa` or `.jks`, and credential
-/// stores such as `.netrc`, `.npmrc`, `kubeconfig` or `terraform.tfstate`, kept even when
+/// and tokens, key and key-store files such as `.pem`, `id_rsa` or `.jks`, credential
+/// stores such as `.netrc`, `.npmrc`, `kubeconfig`, `terraform.tfstate`, `.envrc`, a
+/// service-account JSON, `.dockercfg` or `.s3cfg`, and GnuPG keyrings, kept even when
 /// renamed `.txt`. The mapping prompt goes to the project's model provider, and a document
 /// is chosen by its name alone before any text is read, so a name with one of these words,
 /// or two adjacent words joining into one, is neither read nor listed. A few documents with
 /// such names, such as `key-metrics.md`, are left out with them.
-const SECRET_WORDS: [&str; 34] = [
+const SECRET_WORDS: [&str; 41] = [
     "secret",
     "secrets",
     "credential",
@@ -40,6 +41,13 @@ const SECRET_WORDS: [&str; 34] = [
     "pypirc",
     "ppk",
     "kdbx",
+    "envrc",
+    "serviceaccount",
+    "gnupg",
+    "secring",
+    "pubring",
+    "dockercfg",
+    "s3cfg",
 ];
 
 /// The marks split off around a path written in prose, Markdown or a manifest: quotes,

@@ -494,7 +494,7 @@ fn no_secret_like_or_git_ignored_name_reaches_the_mapping_prompt() {
     write_file(
         root,
         &format!("graphify-out/{}", graph::KEPT_OUT_MARK),
-        "keep-out v1 test\n",
+        &graph::current_mark(root, &[]).unwrap(),
     );
     write_file(
         root,
@@ -975,11 +975,12 @@ fn a_graph_folder_swapped_for_a_link_mid_gather_is_never_followed() {
     let other = outside.path().join("graphify-out");
     std::fs::create_dir(&other).unwrap();
     std::fs::write(other.join("GRAPH_REPORT.md"), OTHER_GRAPH_MARKER).unwrap();
-    std::fs::write(other.join(graph::KEPT_OUT_MARK), "keep-out v1 test\n").unwrap();
+    let mark = graph::current_mark(&repo, &[]).unwrap();
+    std::fs::write(other.join(graph::KEPT_OUT_MARK), &mark).unwrap();
     let graph = repo.join("graphify-out");
     std::fs::create_dir(&graph).unwrap();
     std::fs::write(graph.join("GRAPH_REPORT.md"), "# Own graph\n").unwrap();
-    std::fs::write(graph.join(graph::KEPT_OUT_MARK), "keep-out v1 test\n").unwrap();
+    std::fs::write(graph.join(graph::KEPT_OUT_MARK), &mark).unwrap();
     let swap = repo.join("graphify-swap");
     symlink(&other, &swap).unwrap();
     let stop = Arc::new(AtomicBool::new(false));

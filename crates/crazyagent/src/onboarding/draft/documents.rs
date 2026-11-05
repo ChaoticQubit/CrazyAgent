@@ -66,8 +66,9 @@ struct Found {
 /// text is cut at 6 KiB, all of them at 48 KiB and 40 files; files past that and PDF, Word
 /// and CSV files are only listed. Takes the folder and the README name already read. Returns
 /// the documents read and the paths and sizes listed, or `None` when the project's git could
-/// not say which files it ignores, so none is read.
-pub(super) fn read(repo: &Path, readme: Option<&str>) -> Option<Reading> {
+/// not say which files it ignores, so none is read. Files in the `hidden` folders, given
+/// below the project folder, are never read or listed.
+pub(super) fn read(repo: &Path, readme: Option<&str>, hidden: &[String]) -> Option<Reading> {
     let Some((root, device)) = open_folder(repo)
         .and_then(|root| rustix::fs::fstat(&root).ok().map(|device| (root, device)))
     else {
@@ -77,7 +78,7 @@ pub(super) fn read(repo: &Path, readme: Option<&str>) -> Option<Reading> {
     let mut visited = 0;
     walk(&root, &device, "", 0, &mut visited, &mut found);
     assert!(visited <= ENTRIES_MAX);
-    found.retain(|file| Some(file.path.as_str()) != readme);
+    found.retain(|file| Some(file.path.as_str()) != readme && !under(&file.path, hidden));
     let paths: Vec<&str> = found.iter().map(|file| file.path.as_str()).collect();
     let ignored = ignored(repo, &paths)?;
     assert_eq!(ignored.len(), found.len());
@@ -117,8 +118,10 @@ pub(super) fn read(repo: &Path, readme: Option<&str>) -> Option<Reading> {
 /// mapping evidence (MAP-2): such top-level entries and each README, manifest, overview and
 /// document line naming one, a code graph line also on any secret word, as its nodes may be
 /// bare names. One `check-ignore` call answers for all; a name git does not clear, or every
-/// name when git could not answer, counts as ignored. Takes the folder and the evidence.
-pub(super) fn screen(repo: &Path, evidence: &mut Evidence) {
+/// name when git could not answer, counts as ignored, and so does a name in one of the
+/// `hidden` folders, given below the project folder, written relative or absolute. Takes
+/// the folder, the evidence and the hidden folders.
+pub(super) fn screen(repo: &Path, evidence: &mut Evidence, hidden: &[String]) {
     let mut names: BTreeSet<String> = evidence.entries.iter().cloned().collect();
     let texts = evidence
         .readme
@@ -139,13 +142,25 @@ pub(super) fn screen(repo: &Path, evidence: &mut Evidence) {
         asked
             .iter()
             .zip(flags)
-            .filter_map(|(path, ignored)| (!ignored).then_some(*path))
+            .filter_map(|(path, ignored)| (!ignored && !under(path, hidden)).then_some(*path))
             .collect()
     });
+    let root = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+    let hidden_absolute = |path: &str| {
+        [root.as_path(), repo].iter().any(|base| {
+            Path::new(path)
+                .strip_prefix(base)
+                .ok()
+                .and_then(Path::to_str)
+                .is_some_and(|below| under(below, hidden))
+        })
+    };
     let shown = |line: &str| {
         paths_in(line).all(|path| {
             !secret_like(path)
-                && (path.starts_with('/') || path.starts_with('~') || cleared.contains(path))
+                && ((path.starts_with('/') && !hidden_absolute(path))
+                    || path.starts_with('~')
+                    || cleared.contains(path))
         })
     };
     let keep = |text: &mut String, strict: bool| {
@@ -172,6 +187,34 @@ pub(super) fn screen(repo: &Path, evidence: &mut Evidence) {
     if let Some(text) = &mut evidence.graph {
         keep(text, true);
     }
+}
+
+/// The project's `hidden` folders as paths below `repo`, with `/` between names, for the
+/// mapping to leave out. Takes the folder and the hidden folders. Returns the paths, or
+/// `None` when one is not below the folder or not UTF-8, so nothing is cleared.
+pub(super) fn below_root(repo: &Path, hidden: &[std::path::PathBuf]) -> Option<Vec<String>> {
+    let root = repo.canonicalize().unwrap_or_else(|_| repo.to_path_buf());
+    hidden
+        .iter()
+        .map(|folder| {
+            let below = folder
+                .strip_prefix(&root)
+                .or_else(|_| folder.strip_prefix(repo))
+                .ok()?;
+            let text = below.to_str()?;
+            (!text.is_empty()).then(|| text.to_owned())
+        })
+        .collect()
+}
+
+/// Whether `path`, below the project folder and with an optional closing `/`, is one of the
+/// `hidden` folders or lies inside one. Takes the path and the folders. Returns the answer.
+fn under(path: &str, hidden: &[String]) -> bool {
+    let path = path.trim_end_matches('/');
+    hidden.iter().any(|folder| {
+        path.strip_prefix(folder.as_str())
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    })
 }
 
 /// Whether `path` may name a file below the project folder for git to check: not from the

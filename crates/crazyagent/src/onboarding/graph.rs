@@ -34,13 +34,15 @@ const VENV_BYTES_MAX: u64 = 4096;
 const LOG_BYTES_MAX: u64 = 1024 * 1024;
 #[cfg(unix)]
 const POLL: Duration = Duration::from_millis(100);
+/// The most bytes of a graph's keep-out mark that are read.
 #[cfg(unix)]
-const MARK_BYTES_MAX: u64 = 128;
+pub(crate) const MARK_BYTES_MAX: u64 = 128;
 
 /// The file the engine writes into `graphify-out` once a graph is built under the keep-out
-/// (MAP-2), holding a digest of the paths kept out and hidden. The mapping never reads a
-/// graph without it, as one an older build or another tool made, and the next graph step
-/// rebuilds such a graph from nothing, as it does one built while other paths were kept out.
+/// (MAP-2), holding a digest of the paths kept out and hidden. The mapping reads a graph
+/// only when it holds the mark of the keep-out as it is now, so never one an older build or
+/// another tool made nor one built before a folder was hidden or a path kept out, and the
+/// next graph step rebuilds such a graph from nothing.
 pub(crate) const KEPT_OUT_MARK: &str = ".crazyagent-keep-out";
 
 /// The plain reason a graph step fails with when no graphify is installed.
@@ -158,14 +160,7 @@ pub(crate) fn update(
     if let Err(code) = crate::sandbox::hidden_paths::none_tracked(repo, hidden) {
         return Ok(GraphEnding::Failed(code));
     }
-    let kept: Vec<PathBuf> = kept_out
-        .iter()
-        .filter(|path| {
-            let top = path.split('/').next().unwrap_or_default();
-            top != GRAPH_OUT && top != crate::projects_home::CRAZYAGENT_DIRECTORY
-        })
-        .map(|path| repo.join(path.trim_end_matches('/')))
-        .collect();
+    let kept = kept_paths(repo, &kept_out);
     if kept.len() > crate::sandbox::KEPT_OUT_MAX
         || !kept.iter().all(|path| ProjectSandbox::keepable(path))
     {
@@ -285,6 +280,30 @@ pub(crate) fn update(
             .write_all(mark.as_bytes())?;
     }
     Ok(ending)
+}
+
+/// The mark a graph built now under the keep-out of `repo` and its `hidden` folders carries,
+/// as [`update`] writes it. Takes the folder and the hidden folders. Returns the mark's text,
+/// or `None` when the paths to keep out cannot be listed, so no graph is read.
+#[cfg(unix)]
+pub(crate) fn current_mark(repo: &Path, hidden: &[PathBuf]) -> Option<String> {
+    let kept_out = crate::onboarding::draft::kept_out(repo)?;
+    Some(kept_out_mark(&kept_paths(repo, &kept_out), hidden))
+}
+
+/// The paths of `kept_out`, below `repo`, the sandbox keeps out: all but those under the
+/// graph's own output, which graphify writes, and the engine folder, hidden anyway. Takes
+/// the folder and the listed paths. Returns the absolute paths.
+#[cfg(unix)]
+fn kept_paths(repo: &Path, kept_out: &[String]) -> Vec<PathBuf> {
+    kept_out
+        .iter()
+        .filter(|path| {
+            let top = path.split('/').next().unwrap_or_default();
+            top != GRAPH_OUT && top != crate::projects_home::CRAZYAGENT_DIRECTORY
+        })
+        .map(|path| repo.join(path.trim_end_matches('/')))
+        .collect()
 }
 
 /// The mark of a graph built under the keep-out: a SHA-256 digest of the paths kept out

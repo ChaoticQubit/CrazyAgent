@@ -380,9 +380,10 @@ fn clip(text: &str, bytes: usize) -> &str {
 }
 
 /// Gathers the bounded evidence of the project folder `repo`, with no file name in it that
-/// looks like it holds a secret or that the project's git ignores, and the code graph only
-/// when the engine built it under the keep-out (MAP-2).
-pub(crate) fn gather(repo: &Path, _hidden: &[std::path::PathBuf]) -> Evidence {
+/// looks like it holds a secret, that the project's git ignores or that lies in one of the
+/// project's `hidden` folders, and the code graph only when it holds the mark of the
+/// keep-out as it is now (MAP-2).
+pub(crate) fn gather(repo: &Path, hidden: &[std::path::PathBuf]) -> Evidence {
     let mut evidence = Evidence {
         folder: folder_name(repo),
         ..Evidence::default()
@@ -416,11 +417,19 @@ pub(crate) fn gather(repo: &Path, _hidden: &[std::path::PathBuf]) -> Evidence {
             read_text(&repo.join(name), MANIFEST_BYTES_MAX).map(|text| ((*name).to_owned(), text))
         })
         .collect();
-    if let Some(graph) = open_folder(&repo.join("graphify-out"))
-        && open_in(&graph, super::graph::KEPT_OUT_MARK)
-            .and_then(|file| file.metadata().ok())
-            .is_some_and(|metadata| metadata.is_file())
-    {
+    #[cfg(not(unix))]
+    let _ = hidden;
+    #[cfg(unix)]
+    let graph = open_folder(&repo.join("graphify-out")).filter(|graph| {
+        super::graph::current_mark(repo, hidden).is_some_and(|mark| {
+            open_in(graph, super::graph::KEPT_OUT_MARK)
+                .and_then(|file| file_text(file, super::graph::MARK_BYTES_MAX))
+                .is_some_and(|text| text == mark.trim())
+        })
+    });
+    #[cfg(not(unix))]
+    let graph: Option<Folder> = None;
+    if let Some(graph) = graph {
         evidence.graph = open_in(&graph, "GRAPH_REPORT.md")
             .and_then(|file| file_text(file, GRAPH_REPORT_BYTES_MAX))
             .or_else(|| {
@@ -437,13 +446,17 @@ pub(crate) fn gather(repo: &Path, _hidden: &[std::path::PathBuf]) -> Evidence {
     #[cfg(unix)]
     {
         let readme = evidence.readme.as_ref().map(|(name, _)| name.as_str());
-        match documents::read(repo, readme) {
+        let hidden = documents::below_root(repo, hidden);
+        let reading = hidden
+            .as_deref()
+            .and_then(|hidden| documents::read(repo, readme, hidden));
+        match reading {
             Some((documents, unread)) => {
                 (evidence.documents, evidence.unread) = (documents, unread)
             }
             None => evidence.ignores_unknown = true,
         }
-        documents::screen(repo, &mut evidence);
+        documents::screen(repo, &mut evidence, hidden.as_deref().unwrap_or_default());
     }
     assert!(evidence.entries.len() <= ENTRIES_MAX);
     assert!(evidence.manifests.len() <= MANIFESTS.len());
