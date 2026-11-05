@@ -2397,6 +2397,11 @@ async fn a_console_master_turn_s_remember_lands_on_the_project_memory_page() {
             .unwrap();
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
+    assert_eq!(
+        std::fs::read_dir(&mailbox).unwrap().count(),
+        0,
+        "every call was answered and taken"
+    );
     let answers: Vec<serde_json::Value> = server
         .join()
         .unwrap()
@@ -2462,7 +2467,6 @@ async fn a_console_master_turn_s_remember_lands_on_the_project_memory_page() {
             }
         )]
     );
-    assert_eq!(std::fs::read_dir(&mailbox).unwrap().count(), 0);
 }
 
 #[tokio::test]

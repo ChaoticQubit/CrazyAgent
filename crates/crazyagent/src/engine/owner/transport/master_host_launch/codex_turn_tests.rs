@@ -196,6 +196,8 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
     let unused = crate::engine::claude_host::MasterTools {
         engine: &engine,
         drop: &engine,
+        mailbox: &engine,
+        off: &[],
     };
     assert!(require_master_tool_policy(&command, Some(unused)).is_err());
     assert_eq!(
@@ -242,9 +244,12 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
     assert_eq!(written["tokens"]["refresh_token"], "");
     let record = turn.join("tmp").join(crate::team::tool::DROP_FILE);
     assert_eq!(tool_record.as_deref(), Some(record.as_path()));
+    let off = [crate::team::tool::RECALL_TOOL.to_owned()];
     let tools = crate::engine::claude_host::MasterTools {
         engine: &engine,
         drop: &record,
+        mailbox: &turn.join("tmp").join(crate::team::tool::MAILBOX_FOLDER),
+        off: &off,
     };
     let envs: Vec<(String, String)> = command
         .get_envs()
@@ -334,9 +339,10 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
             .position(|arg| arg.starts_with("mcp_servers="))
             .unwrap();
         args[server] = format!(
-            "mcp_servers={{crazyagent-team={{command={:?},args=[\"team-mcp\",{:?}]}},owner={{command=\"/usr/bin/true\"}}}}",
+            "mcp_servers={{crazyagent-team={{command={:?},args=[\"team-mcp\",{:?},{:?},\"recall\"]}},owner={{command=\"/usr/bin/true\"}}}}",
             engine.to_str().unwrap(),
-            record.to_str().unwrap()
+            record.to_str().unwrap(),
+            mailbox.to_str().unwrap()
         );
     });
     assert!(require_master_tool_policy(&widened, Some(tools)).is_err());
@@ -417,20 +423,47 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         })
     };
     assert_eq!(
-        require_master_tool_policy(&served(&engine, &[&record]), Some(tools)),
+        require_master_tool_policy(
+            &served(&engine, &[&record, &mailbox, Path::new("recall")]),
+            Some(tools)
+        ),
         Ok(())
     );
     for (name, refused) in [
         (
             "another executable",
-            served(Path::new("/usr/bin/true"), &[&record]),
+            served(
+                Path::new("/usr/bin/true"),
+                &[&record, &mailbox, Path::new("recall")],
+            ),
         ),
-        ("a link to the engine", served(&link, &[&record])),
-        ("a hard link to the engine", served(&hard, &[&record])),
-        ("another turn's drop file", served(&engine, &[&other_drop])),
+        (
+            "a link to the engine",
+            served(&link, &[&record, &mailbox, Path::new("recall")]),
+        ),
+        (
+            "a hard link to the engine",
+            served(&hard, &[&record, &mailbox, Path::new("recall")]),
+        ),
+        (
+            "another turn's drop file",
+            served(&engine, &[&other_drop, &mailbox, Path::new("recall")]),
+        ),
+        (
+            "a switched-off tool listed again",
+            served(&engine, &[&record, &mailbox]),
+        ),
         (
             "an extra argument",
-            served(&engine, &[&record, Path::new("--verbose")]),
+            served(
+                &engine,
+                &[
+                    &record,
+                    &mailbox,
+                    Path::new("recall"),
+                    Path::new("--verbose"),
+                ],
+            ),
         ),
         (
             "a second setting in the same flag",
@@ -460,11 +493,19 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         credential,
         tool_record,
     };
-    let checked = |backend, turn: &MasterTurnLaunch, engine: Option<&Path>| {
+    let checked_off = |backend, turn: &MasterTurnLaunch, engine: Option<&Path>, off: &[String]| {
         let engine = engine.map(registered);
-        require_master_delegate(backend, turn, engine.as_ref()).map_err(|error| error.0)
+        require_master_delegate(backend, turn, engine.as_ref(), off).map_err(|error| error.0)
+    };
+    let checked = |backend, turn: &MasterTurnLaunch, engine: Option<&Path>| {
+        checked_off(backend, turn, engine, &off)
     };
     let unverified: Result<(), String> = Err("master_delegate_unverified".to_owned());
+    assert_eq!(
+        checked_off(MasterBackend::Codex, &turn, Some(&engine), &[]),
+        unverified,
+        "a turn built with recall switched off is not the turn with every tool on"
+    );
     assert_eq!(checked(MasterBackend::Codex, &turn, Some(&engine)), Ok(()));
     assert_eq!(
         checked(MasterBackend::Codex, &turn, Some(&hard)),
@@ -551,6 +592,8 @@ fn the_installed_codex_reads_a_tools_on_master_with_its_own_sub_agents_off() {
     let tools = crate::engine::claude_host::MasterTools {
         engine: &codex,
         drop: &drop,
+        mailbox: &drop.with_file_name(crate::team::tool::MAILBOX_FOLDER),
+        off: &[],
     };
     let command = master_command(&codex, &home, &base, ACCOUNT_DEFAULT_MODEL, Some(tools)).unwrap();
     let mut features = Command::new(&codex);

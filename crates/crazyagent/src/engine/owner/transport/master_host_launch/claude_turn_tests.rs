@@ -342,9 +342,12 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
             ],
         }}})
     );
+    let off = [crate::team::tool::RECALL_TOOL.to_owned()];
     let tools = crate::engine::claude_host::MasterTools {
         engine: &engine,
         drop: &record,
+        mailbox: &mailbox,
+        off: &off,
     };
     let delegate = |command: &Command, tools| {
         crate::engine::claude_host::require_delegate(command, tools).map_err(|error| error.0)
@@ -413,7 +416,15 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         }}})
         .to_string()
     };
-    let legit = served(&engine, json!(["team-mcp", record.to_str().unwrap()]));
+    let legit = served(
+        &engine,
+        json!([
+            "team-mcp",
+            record.to_str().unwrap(),
+            mailbox.to_str().unwrap(),
+            "recall"
+        ]),
+    );
     assert_eq!(
         delegate(&configured(&command, &legit, &[]), Some(tools)),
         Ok(())
@@ -425,30 +436,93 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
             "another executable",
             served(
                 Path::new("/usr/bin/true"),
-                json!(["team-mcp", record.to_str().unwrap()]),
+                json!([
+                    "team-mcp",
+                    record.to_str().unwrap(),
+                    mailbox.to_str().unwrap(),
+                    "recall"
+                ]),
             ),
             vec![],
         ),
         (
             "a link to the engine",
-            served(&link, json!(["team-mcp", record.to_str().unwrap()])),
+            served(
+                &link,
+                json!([
+                    "team-mcp",
+                    record.to_str().unwrap(),
+                    mailbox.to_str().unwrap(),
+                    "recall"
+                ]),
+            ),
             vec![],
         ),
         (
             "a hard link to the engine",
-            served(&hard, json!(["team-mcp", record.to_str().unwrap()])),
+            served(
+                &hard,
+                json!([
+                    "team-mcp",
+                    record.to_str().unwrap(),
+                    mailbox.to_str().unwrap(),
+                    "recall"
+                ]),
+            ),
             vec![],
         ),
         (
             "another turn's drop file",
-            served(&engine, json!(["team-mcp", other_drop.to_str().unwrap()])),
+            served(
+                &engine,
+                json!([
+                    "team-mcp",
+                    other_drop.to_str().unwrap(),
+                    mailbox.to_str().unwrap(),
+                    "recall"
+                ]),
+            ),
             vec![],
         ),
         (
             "an extra argument",
             served(
                 &engine,
-                json!(["team-mcp", record.to_str().unwrap(), "--verbose"]),
+                json!([
+                    "team-mcp",
+                    record.to_str().unwrap(),
+                    mailbox.to_str().unwrap(),
+                    "recall",
+                    "--verbose"
+                ]),
+            ),
+            vec![],
+        ),
+        (
+            "another turn's mailbox",
+            served(
+                &engine,
+                json!([
+                    "team-mcp",
+                    record.to_str().unwrap(),
+                    other_drop
+                        .with_file_name(crate::team::tool::MAILBOX_FOLDER)
+                        .to_str()
+                        .unwrap(),
+                    "recall"
+                ]),
+            ),
+            vec![],
+        ),
+        (
+            "a switched-off tool listed again",
+            served(
+                &engine,
+                json!([
+                    "team-mcp",
+                    record.to_str().unwrap(),
+                    mailbox.to_str().unwrap()
+                ]),
             ),
             vec![],
         ),
@@ -488,11 +562,19 @@ fn a_claude_master_turn_runs_in_its_own_home_with_a_copy_that_cannot_refresh() {
         credential,
         tool_record,
     };
-    let checked = |backend, turn: &MasterTurnLaunch, engine: Option<&Path>| {
+    let checked_off = |backend, turn: &MasterTurnLaunch, engine: Option<&Path>, off: &[String]| {
         let engine = engine.map(registered);
-        require_master_delegate(backend, turn, engine.as_ref()).map_err(|error| error.0)
+        require_master_delegate(backend, turn, engine.as_ref(), off).map_err(|error| error.0)
+    };
+    let checked = |backend, turn: &MasterTurnLaunch, engine: Option<&Path>| {
+        checked_off(backend, turn, engine, &off)
     };
     let unverified: Result<(), String> = Err("master_delegate_unverified".to_owned());
+    assert_eq!(
+        checked_off(MasterBackend::Claude, &turn, Some(&engine), &[]),
+        unverified,
+        "a turn built with recall switched off is not the turn with every tool on"
+    );
     assert_eq!(checked(MasterBackend::Claude, &turn, Some(&engine)), Ok(()));
     assert_eq!(
         checked(MasterBackend::Claude, &turn, Some(&hard)),

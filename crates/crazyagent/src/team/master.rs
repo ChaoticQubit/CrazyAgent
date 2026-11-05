@@ -878,6 +878,25 @@ pub fn serve_memory_calls(
     Ok(taken.len())
 }
 
+/// The team tools the owner switched off or deleted for a project (DEC-104), which a
+/// master's team server leaves out of its list and the engine refuses. Takes the database
+/// and the project. Returns the names, sorted, or a SQLite failure.
+pub fn switched_off_tools(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<Vec<String>, EngineError> {
+    let off: Vec<String> = crate::coord::tool_switches::off_tools(
+        connection,
+        project,
+        crate::coord::tool_switches::CRAZYAGENT_SERVER,
+    )?
+    .into_iter()
+    .filter(|name| tool::TEAM_TOOLS.contains(&name.as_str()))
+    .collect();
+    assert!(tool::known_tools(&off));
+    Ok(off)
+}
+
 /// Says whether the owner switched a call's tool off or deleted it for the project
 /// (DEC-104), so the engine refuses it even from a server that still lists it. Takes the
 /// database, the project and the call. Returns the answer, or a SQLite failure.

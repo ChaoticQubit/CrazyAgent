@@ -200,6 +200,8 @@ async fn a_real_claude_master_with_tools_on_works_in_its_worktree_and_delegates(
         Some(crate::engine::claude_host::MasterTools {
             engine: &engine,
             drop: &record,
+            mailbox: &record.with_file_name(crate::team::tool::MAILBOX_FOLDER),
+            off: &[],
         }),
     )
     .unwrap();

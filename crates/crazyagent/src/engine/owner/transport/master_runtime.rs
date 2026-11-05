@@ -332,8 +332,19 @@ impl OwnerRuntimeHandle {
         turn_id: &RequestId,
         mailbox: &std::path::Path,
     ) -> Result<(), EngineError> {
-        let _ = (prepared, turn_id, mailbox);
-        Ok(())
+        match self
+            .master_runtime_command(MasterRuntimeCommand::ServeMemory {
+                host: self.identity(),
+                project_id: prepared.session.project_id.clone(),
+                session_id: prepared.session.session_id.clone(),
+                turn_id: turn_id.clone(),
+                mailbox: mailbox.to_path_buf(),
+            })
+            .await?
+        {
+            MasterRuntimeResult::Turn(_) => Ok(()),
+            _ => Err(failure("master_runtime_result")),
+        }
     }
 
     /// Takes the profile of a prepared master turn and names its conversation in the agent
@@ -655,6 +666,10 @@ impl OwnerRuntimeHandle {
         let _folder = launch.folder;
         let _credential = launch.credential;
         let tool_record = launch.tool_record;
+        let mailbox = tool_record
+            .as_deref()
+            .and_then(std::path::Path::parent)
+            .map(|tmp| tmp.join(crate::team::tool::MAILBOX_FOLDER));
         if !crate::engine::owner::is_hex_id(&launch.artifact_sha256)
             || launch.command.get_current_dir() != Some(prepared.cwd.as_path())
         {
@@ -721,7 +736,7 @@ impl OwnerRuntimeHandle {
             reported: Tokens::default(),
         };
         let observed = self
-            .collect_master_turn(prepared, turn_id, &mut active)
+            .collect_master_turn(prepared, turn_id, &mut active, mailbox.as_deref())
             .await;
         if !matches!(&observed, Ok(MasterRuntimeObservation::Response { .. })) {
             let _ = active.host.cancel().await;
@@ -817,6 +832,7 @@ impl OwnerRuntimeHandle {
         prepared: &PreparedMasterTurn,
         turn_id: &RequestId,
         active: &mut ActiveMaster,
+        mailbox: Option<&std::path::Path>,
     ) -> Result<MasterRuntimeObservation, EngineError> {
         self.record_master_child(prepared, turn_id, active.host.process_group())
             .await?;
@@ -876,6 +892,12 @@ impl OwnerRuntimeHandle {
                     }
                     if !matches!(turn.phase, MasterTurnPhase::Prepared | MasterTurnPhase::Running) {
                         return Err(failure("master_runtime_state_changed"));
+                    }
+                    if let Some(mailbox) = mailbox
+                        && crate::team::tool::calls_waiting(mailbox)
+                        && let Err(error) = self.serve_master_memory(prepared, turn_id, mailbox).await
+                    {
+                        eprintln!("master memory calls not answered: {}", error.0);
                     }
                     continue;
                 }
