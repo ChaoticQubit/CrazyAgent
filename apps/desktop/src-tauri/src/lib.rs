@@ -863,6 +863,21 @@ async fn desktop_team_on_harness_switch(
 }
 
 #[tauri::command]
+async fn desktop_team_apply_harness_switch(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    mode: String,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_apply_harness_switch(&id, &mode, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_team_sub_agent_depth(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -3083,6 +3098,7 @@ pub fn run() {
             desktop_team_keep_warm,
             desktop_team_time_limits,
             desktop_team_on_harness_switch,
+            desktop_team_apply_harness_switch,
             desktop_team_sub_agent_depth,
             desktop_team_child_landing,
             desktop_team_finished_agents,

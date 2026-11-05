@@ -16,7 +16,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 pub const INPUT_TEXT_MAX: usize = 16 * 1024;
-const OWNER_QUIET_MS: i64 = 10_000;
+pub(crate) const OWNER_QUIET_MS: i64 = 10_000;
 const DRAFT_ABANDONED_MS: i64 = 120_000;
 const INPUT_SETTLE_MS: i64 = 30_000;
 const PASTE_SETTLE: Duration = Duration::from_millis(200);

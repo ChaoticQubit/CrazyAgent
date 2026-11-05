@@ -142,6 +142,7 @@ fn team() -> TeamStatus {
         session_limit_secs: None,
         idle_stop_secs: None,
         on_harness_switch: crate::team::SwitchMode::Carry,
+        apply_harness_switch: crate::team::SwitchApply::WhenIdle,
         sub_agent_depth: crate::team::DEPTH_DEFAULT,
         child_landing: crate::team::ChildLanding::Lead,
         max_harnesses: None,
