@@ -609,6 +609,20 @@ pub fn committed_files(checkout: &Path, paths: &[&str]) -> Result<Vec<bool>, Eng
     }
 }
 
+/// The short name of the branch the owner's checkout has checked out, with one engine git
+/// repository that runs nothing the repository configures. Input: the checkout root.
+/// Output: the name, none for a detached HEAD or a name over `BRANCH_BYTES_MAX`, or a
+/// plain git code.
+pub fn checked_out_branch(checkout: &Path) -> Result<Option<String>, EngineError> {
+    #[cfg(unix)]
+    return owner::checked_out_branch(checkout);
+    #[cfg(not(unix))]
+    {
+        let _ = checkout;
+        Err(unavailable())
+    }
+}
+
 #[cfg(unix)]
 fn head_files(checkout: &Path, paths: &[&str]) -> Result<Vec<bool>, EngineError> {
     assert!(paths.iter().enumerate().all(|(at, path)| {

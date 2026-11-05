@@ -203,6 +203,17 @@ fn current_branch(owner: &Repo) -> Result<Option<String>, EngineError> {
     Ok(reference.starts_with("refs/heads/").then_some(reference))
 }
 
+/// The short name of the branch a checkout has checked out, for the owner to read. Input:
+/// the checkout root. Output: the name, none for a detached HEAD or a name over
+/// `BRANCH_BYTES_MAX`, or a plain git code.
+pub(super) fn checked_out_branch(checkout: &Path) -> Result<Option<String>, EngineError> {
+    let owner = Repo::open(checkout, &checkout.join(".git"), None)?;
+    let name = current_branch(&owner)?
+        .and_then(|reference| reference.strip_prefix("refs/heads/").map(str::to_owned))
+        .filter(|name| !name.is_empty() && name.len() <= BRANCH_BYTES_MAX);
+    Ok(name)
+}
+
 /// The owner's checked-out branch and its commit, refusing a detached HEAD or an
 /// unfinished git operation. Input: the owner checkout. Output: the ref and commit.
 fn owner_branch(owner: &Repo, repository: &Path) -> Result<(String, String), EngineError> {

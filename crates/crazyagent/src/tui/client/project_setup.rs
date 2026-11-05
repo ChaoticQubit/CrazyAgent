@@ -1325,9 +1325,12 @@ pools = []
         drop(tx);
         drop(database);
         assert!(
-            stored.team.sub_harnesses.iter().any(
-                |slot| slot.tools && crate::team::launch_harness(&slot.harness) == Some(harness)
-            ),
+            stored
+                .team
+                .sub_harnesses
+                .iter()
+                .any(|slot| slot.tools
+                    && crate::team::launch_harness(&slot.harness) == Some(harness)),
             "the project's team has a tools-on {harness} sub-agent"
         );
 

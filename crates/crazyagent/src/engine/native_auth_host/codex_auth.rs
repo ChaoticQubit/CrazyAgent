@@ -426,14 +426,19 @@ impl Driver<'_> {
 /// Settles a sign-in whose started Codex child ended without an app-server outcome, after
 /// the child is reaped: Cancelled when the owner cancelled, else Failed with the Codex
 /// failure code, so the custodian retires instead of leaving custody uncertain. An error
-/// from the engine or the channel is returned as it is, since custody is then in doubt.
+/// from the engine or the channel is returned as it is, since custody is then in doubt, and a
+/// channel the driver's error already closed, such as a refused profile guard, takes no
+/// report, so that error is returned as the custodian's cause.
 /// Inputs: the session, the channel and the driver's error. Output: done, or the error.
-async fn observe_failure(
+pub(in crate::engine) async fn observe_failure(
     session: &CustodySession,
     channel: &mut NativeAuthCustodyChannel,
     error: EngineError,
     log: Option<CodexLog>,
 ) -> Result<(), EngineError> {
+    if channel.sealed() {
+        return Err(error);
+    }
     let reason = match error.0.as_str() {
         "native_auth_cancelled" => None,
         "native_auth_codex_exited_before_observation" | "native_auth_codex_input_closed" => {
