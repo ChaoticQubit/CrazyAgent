@@ -380,4 +380,7 @@ test("the device code panel says how long the code still works, and the engine's
   const text = "CrazyAgent stopped waiting for this code. Get a new code and enter it within 15 minutes.";
   assert.deepEqual(signInStage(timedOut, "chatgpt"), { kind: "failed", text, hint: "expired" });
   assert.match(panel(timedOut), />Get a new code<\/button>/);
+  const pageTimedOut = answered({ phase: "failed", challenge: null, code: "native_auth_sign_in_page_timed_out" }, "codex_browser");
+  assert.deepEqual(signInStage(pageTimedOut, "chatgpt"),
+    { kind: "failed", text: "CrazyAgent stopped waiting for the sign-in page. Start the sign-in again.", hint: "retry" });
 });

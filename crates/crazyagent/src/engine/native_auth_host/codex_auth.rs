@@ -346,7 +346,7 @@ impl Driver<'_> {
             Event::Initialized => self.initialized().await,
             Event::AuthControl(event) => self.auth(event).await,
             Event::UnsupportedNotification { method } => {
-                let name = dropped_name(&method);
+                let name = dropped_name(&method, None);
                 if self.dropped.len() < CODEX_LOG_DROPPED_MAX && !self.dropped.contains(&name) {
                     self.dropped.push(name);
                 }
@@ -547,8 +547,9 @@ fn masked(bytes: &[u8], code: Option<&str>) -> String {
 }
 
 /// The name a dropped Codex notification goes into the engine log as: its method when that
-/// is a short plain name, else `*`. Input: the method. Output: the name.
-fn dropped_name(method: &str) -> String {
+/// is a short plain name, else `*`. Inputs: the method and the device code on screen, if
+/// any. Output: the name.
+fn dropped_name(method: &str, _code: Option<&str>) -> String {
     let plain = !method.is_empty()
         && method.len() <= CODEX_LOG_NAME_BYTES_MAX
         && method

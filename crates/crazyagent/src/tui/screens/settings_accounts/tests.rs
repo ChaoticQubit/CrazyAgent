@@ -1402,6 +1402,12 @@ fn a_recorded_sign_in_failure_reads_the_app_s_sentence_for_the_harness_it_used()
             Some("QX4F-7K2M"),
             "CrazyAgent stopped waiting for this code. Get a new code and enter it within 15 minutes.",
         ),
+        (
+            codex,
+            "native_auth_sign_in_page_timed_out",
+            None,
+            "CrazyAgent stopped waiting for the sign-in page. Start the sign-in again.",
+        ),
     ] {
         assert_eq!(
             sign_in_problem(native, &failed(code, device_code)),

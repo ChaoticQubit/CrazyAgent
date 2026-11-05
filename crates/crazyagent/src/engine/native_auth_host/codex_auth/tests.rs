@@ -314,11 +314,51 @@ ERROR codex_login: device auth timed out after 15 minutes\n";
 #[test]
 fn native_auth_codex_dropped_notification_names_keep_only_short_plain_methods() {
     assert_eq!(
-        super::dropped_name("account/login/completedV2"),
+        super::dropped_name("account/login/completedV2", None),
         "account/login/completedV2"
     );
-    assert_eq!(super::dropped_name(""), "*");
-    assert_eq!(super::dropped_name("account/login code=QX4F"), "*");
-    assert_eq!(super::dropped_name(&"m".repeat(65)), "*");
-    assert_eq!(super::dropped_name(&"m".repeat(64)), "m".repeat(64));
+    assert_eq!(super::dropped_name("", None), "*");
+    assert_eq!(super::dropped_name("account/login code=QX4F", None), "*");
+    assert_eq!(super::dropped_name(&"m".repeat(65), None), "*");
+    assert_eq!(super::dropped_name(&"m".repeat(64), None), "m".repeat(64));
+}
+
+#[test]
+fn native_auth_codex_stderr_masks_a_letters_only_code_inside_joined_words() {
+    let stderr = br#"ERROR codex_login: {"user_code":"WDJB-MJHT", code:WDJB-MJHT (code:WDJB-MJHT) Code:"wdjb-mjht" token=WDJBMJHT xWDJBx MJHT.
+ERROR codex_login: device auth timed out after 15 minutes"#;
+    let text = super::masked(stderr, Some("WDJB-MJHT"));
+    for secret in ["WDJB", "MJHT", "wdjb", "mjht"] {
+        assert!(!text.contains(secret), "{secret} in {text}");
+    }
+    assert!(
+        text.ends_with("ERROR codex_login: device auth timed out after 15 minutes"),
+        "{text}"
+    );
+    let unknown = super::masked(
+        br#"{"user_code":"ABCD-EFGH"} code:KLMN-PQRS userCode=TUVW-XYZA user code: BCDF-GHJK ok"#,
+        None,
+    );
+    for secret in ["ABCD", "EFGH", "KLMN", "PQRS", "TUVW", "XYZA", "BCDF", "GHJK"] {
+        assert!(!unknown.contains(secret), "{secret} in {unknown}");
+    }
+    assert!(unknown.ends_with(" ok"), "{unknown}");
+}
+
+#[test]
+fn native_auth_codex_dropped_names_never_carry_a_letters_only_code() {
+    let code = Some("WDJB-MJHT");
+    for method in [
+        "account/login/WDJB-MJHT",
+        "account/login/wdjbmjht",
+        "device/WDJB",
+        "codeMJHT/x",
+    ] {
+        assert_eq!(super::dropped_name(method, code), "*", "{method}");
+    }
+    assert_eq!(
+        super::dropped_name("account/login/completedV2", code),
+        "account/login/completedV2"
+    );
+    assert_eq!(super::dropped_name("code/KLMN-PQRS", None), "*");
 }

@@ -268,6 +268,8 @@ pub(crate) enum CodexAuthObservation {
     LoginCompleted {
         login_id: Option<String>,
         success: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        code_ran_out: bool,
     },
     AccountRead {
         id: i64,
@@ -419,7 +421,11 @@ impl CodexAuthObservation {
             },
             AuthControl::LoginCompleted {
                 login_id, success, ..
-            } => Self::LoginCompleted { login_id, success },
+            } => Self::LoginCompleted {
+                login_id,
+                success,
+                code_ran_out: false,
+            },
             AuthControl::AccountRead {
                 id,
                 account,
@@ -695,6 +701,13 @@ impl CodexAuthObservation {
         }
         Ok(())
     }
+}
+
+/// Tells whether a ChatGPT device code shown this long has run out, with half a minute of
+/// slack for Codex, which starts the code's 15 minutes a moment before the engine records it.
+/// Input: how long the code has been shown. Output: true once it has run out.
+pub(crate) fn code_ran_out(_shown: Duration) -> bool {
+    false
 }
 
 pub(crate) fn apply_codex_presentation(
@@ -1105,6 +1118,7 @@ auth = { method = "native_managed", profile_ref = "codex-profile" }"#,
         let late = CodexAuthObservation::LoginCompleted {
             login_id: Some("login-1".into()),
             success: false,
+            code_ran_out: false,
         };
         for phase in [NativeAuthPhase::Cancelled, NativeAuthPhase::Failed] {
             let mut fact = codex_fact(phase);
@@ -1125,6 +1139,7 @@ auth = { method = "native_managed", profile_ref = "codex-profile" }"#,
         let succeeded = CodexAuthObservation::LoginCompleted {
             login_id: Some("login-1".into()),
             success: true,
+            code_ran_out: false,
         };
         let mut fact = codex_fact(NativeAuthPhase::Cancelled);
         assert_eq!(
@@ -1181,6 +1196,47 @@ auth = { method = "native_managed", profile_ref = "codex-profile" }"#,
             log(vec![&"m".repeat(CODEX_LOG_NAME_BYTES_MAX + 1)], ""),
         ] {
             assert_eq!(bad.validate(), Err(invalid.clone()));
+        }
+    }
+
+    #[test]
+    fn the_engine_s_own_give_up_names_the_page_for_a_browser_sign_in() {
+        let give_up = CodexAuthObservation::LoginCanceled {
+            id: 3,
+            canceled: true,
+        };
+        for (method, code) in [
+            (NativeAuthMethod::CodexDeviceCode, "native_auth_sign_in_timed_out"),
+            (NativeAuthMethod::CodexBrowser, "native_auth_sign_in_page_timed_out"),
+        ] {
+            let mut fact = codex_fact(NativeAuthPhase::AwaitingOwner);
+            fact.action = NativeAuthAction::SignIn { method };
+            give_up.apply(&mut fact).unwrap();
+            assert_eq!(fact.phase, NativeAuthPhase::Failed);
+            assert_eq!(fact.code.as_deref(), Some(code), "{method:?}");
+        }
+    }
+
+    #[test]
+    fn a_device_code_that_ran_out_before_approval_reads_as_timed_out() {
+        assert!(!code_ran_out(Duration::from_secs(869)));
+        assert!(code_ran_out(Duration::from_secs(870)));
+        assert!(code_ran_out(Duration::from_secs(901)));
+        let failed = |code_ran_out| CodexAuthObservation::LoginCompleted {
+            login_id: Some("login-1".into()),
+            success: false,
+            code_ran_out,
+        };
+        for (method, ran_out, code) in [
+            (NativeAuthMethod::CodexDeviceCode, true, "native_auth_sign_in_timed_out"),
+            (NativeAuthMethod::CodexDeviceCode, false, "native_auth_login_failed"),
+            (NativeAuthMethod::CodexBrowser, true, "native_auth_login_failed"),
+        ] {
+            let mut fact = codex_fact(NativeAuthPhase::AwaitingOwner);
+            fact.action = NativeAuthAction::SignIn { method };
+            failed(ran_out).apply(&mut fact).unwrap();
+            assert_eq!(fact.phase, NativeAuthPhase::Failed);
+            assert_eq!(fact.code.as_deref(), Some(code), "{method:?} {ran_out}");
         }
     }
 }
