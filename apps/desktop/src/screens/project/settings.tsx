@@ -2,10 +2,11 @@ import { nextGeneration, poolSummaries } from "../../api";
 import type { HarnessEntry, Result } from "../../api";
 import { useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, receiptState, removeProject, saveAgentPolicy, saveHiddenPaths, saveReadPaths, setProjectPool, updateProjectSetup, type ReadPaths } from "../../api-projects";
-import type { AgentAccess, AgentNetwork, PolicyView, ProjectCatalog, StoredSetup } from "../../api-projects";
+import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, loadTrust, receiptState, removeProject, saveAgentPolicy, saveHiddenPaths, saveReadPaths, saveTrust, setProjectPool, updateProjectSetup, type ReadPaths } from "../../api-projects";
+import type { AgentAccess, AgentNetwork, PolicyView, ProjectCatalog, StoredSetup, Trust, TrustView } from "../../api-projects";
 import type { IntentReceipt } from "../../engine-client";
 import { AccessLevels, FULL_ACCESS_WARNING, IdeGitHooksSwitch, LOWERING_STOPS_AGENTS, NetworkChoices, ToolchainSwitches, accessLabel, confirmFirst, policyOf } from "./access";
+import { RAISE_WARNING, TRUST_STALE, TrustLevels, TrustRules, raises, trustLabel } from "./trust";
 import { Button, ConfirmDialog, Select } from "../../ui";
 import { displayText } from "../conversation";
 import { BasicsFields, ResearchSwitches } from "../new-project/fields";
@@ -19,7 +20,9 @@ import { PlanningLine } from "./planning";
 import { SessionContext, useLoad } from "../../state";
 import { ProjectAccountOrder } from "../settings/account-choice";
 import { HarnessPage } from "../settings/harness-page";
+import { ProjectChecks } from "../settings/checks";
 import { PluginsAndSkills } from "../settings/plugins";
+import { TicketSettingsPanel } from "../settings/tickets";
 import { NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 
@@ -29,8 +32,11 @@ const SECTIONS = [
   { id: "team", label: "Team" },
   { id: "harnesses", label: "Harnesses" },
   { id: "plugins", label: "Plugins and skills" },
+  { id: "tickets", label: "Tickets" },
   { id: "access", label: "Agent access" },
+  { id: "trust", label: "Repository trust" },
   { id: "sandbox", label: "Sandbox" },
+  { id: "checks", label: "Checks" },
   { id: "remove", label: "Remove project" },
 ] as const;
 
@@ -500,6 +506,72 @@ function AccessSection({ data }: { data: ProjectData }) {
   </div>;
 }
 
+function TrustSection({ data }: { data: ProjectData }) {
+  const [view, setView] = useState<TrustView | null>(null);
+  const [trust, setTrust] = useState<Trust>("reviewed");
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+  const notReady = "Not ready yet: repository trust isn't in this build.";
+  function seed(next: TrustView) {
+    setView(next);
+    setTrust(next.trust);
+  }
+  useEffect(() => {
+    let live = true;
+    void loadTrust(data.id).then((result) => {
+      if (!live) return;
+      if (result.kind === "ok") seed(result.value);
+      else setNote(result.kind === "not_ready" ? notReady : failureCopy(result));
+    });
+    return () => { live = false; };
+  }, [data.id]);
+
+  async function save(confirmRaise: boolean) {
+    if (!view) return;
+    setConfirming(false);
+    setBusy(true);
+    const result = await saveTrust(data.id, trust, confirmRaise, view.version, nextGeneration());
+    if (savedStale(result)) {
+      const fresh = await loadTrust(data.id);
+      setBusy(false);
+      if (fresh.kind !== "ok") return setNote("Repository trust changed since you opened it. Reopen this page to see it.");
+      seed(fresh.value);
+      return setNote(TRUST_STALE);
+    }
+    if (result.kind !== "ok") {
+      setBusy(false);
+      return setNote(result.kind === "not_ready" ? notReady : failureCopy(result));
+    }
+    const state = receiptState(result.value);
+    if (state.kind !== "applied") {
+      setBusy(false);
+      return setNote(state.kind === "rejected" ? failureCopy(state) : "We couldn't confirm your last change. Check it and save again.");
+    }
+    const fresh = await loadTrust(data.id);
+    setBusy(false);
+    if (fresh.kind === "ok") seed(fresh.value);
+    setNote("");
+    data.notify(`Repository trust saved: ${trustLabel(view, trust)}. Agents, checks and the IDE started from now on use it.`);
+  }
+
+  const changed = view !== null && trust !== view.trust;
+  return <div className="pj-stack">
+    <h2>Repository trust</h2>
+    <p className="pj-secondary">How far you trust this repository's code and files. Untrusted locks the rules below; no level closes the gaps.</p>
+    {view === null && !note && <p className="pj-muted" role="status">Loading...</p>}
+    {view && <TrustLevels name="ps-trust" view={view} value={trust} onChange={setTrust} />}
+    {note && <p className="pj-note warn" role="status">{note}</p>}
+    <div><Button variant="primary" pending={busy} pendingLabel="Saving..." disabled={!changed || busy}
+      onClick={() => view && raises(view.trust, trust) ? setConfirming(true) : void save(false)}>Save repository trust</Button></div>
+    {view && <TrustRules view={view} />}
+    <ConfirmDialog open={confirming} title="Raise this repository to Reviewed?" confirmLabel="Raise trust" cancelLabel="Keep Untrusted" pending={busy}
+      onCancel={() => setConfirming(false)} onConfirm={() => void save(true)}>
+      {RAISE_WARNING}
+    </ConfirmDialog>
+  </div>;
+}
+
 /** Picks the Settings section a route asks for. Links from before skills and MCP servers shared
  * one section still open it. Input: the route's section, if any. Output: a known section. */
 export function settingsSection(wanted: string | null | undefined): SectionId {
@@ -507,8 +579,9 @@ export function settingsSection(wanted: string | null | undefined): SectionId {
   return SECTIONS.find((item) => item.id === wanted)?.id ?? "general";
 }
 
-/** Project Settings tab: General, Pool, Team, Harnesses, Plugins and skills, Agent access, Sandbox and Remove project. A setup
- * that belongs to another project counts as still loading, so no form seeds from it.
+/** Project Settings tab: General, Pool, Team, Harnesses, Plugins and skills, Tickets, Agent
+ * access, Repository trust, Sandbox, Checks and Remove project. A setup that belongs to another
+ * project counts as still loading, so no form seeds from it.
  * Inputs: the project data and an optional section from the route. Output: the tab. */
 export function SettingsTab({ data, section }: { data: ProjectData; section?: string }) {
   const [active, setActive] = useState<SectionId>(settingsSection(section ?? hashSection()));
@@ -532,8 +605,15 @@ export function SettingsTab({ data, section }: { data: ProjectData; section?: st
         <p className="pj-secondary">What you add here applies to this project only. Items from Settings, Plugins and skills can be switched off for this project.</p>
         <PluginsAndSkills projectId={data.id} />
       </div>}
+      {active === "tickets" && <div className="pj-stack">
+        <h2>Tickets</h2>
+        <p className="pj-secondary">Choose a value here to override the app's ticket settings for this project only.</p>
+        <TicketSettingsPanel projectId={data.id} />
+      </div>}
       {active === "access" && <AccessSection data={data} />}
+      {active === "trust" && <TrustSection data={data} />}
       {active === "sandbox" && <div className="pj-stack"><SandboxSection data={data} /><HiddenSection data={data} /></div>}
+      {active === "checks" && <ProjectChecks projectId={data.id} />}
       {active === "remove" && <RemoveSection data={data} setup={setup} />}
     </div>
   </div>;

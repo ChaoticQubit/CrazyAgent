@@ -28,6 +28,8 @@ fn main() {
         "desktop_set_project_read_paths",
         "desktop_project_agent_policy",
         "desktop_set_project_agent_policy",
+        "desktop_project_trust",
+        "desktop_set_project_trust",
         "desktop_project_files",
         "desktop_team_status",
         "desktop_team_message",
@@ -227,6 +229,10 @@ fn main() {
         "desktop_usage_report",
         "desktop_usage_refresh",
         "desktop_usage_set_reset",
+        "desktop_scorecard",
+        "desktop_scorecard_set",
+        "desktop_tests_read",
+        "desktop_checks",
         "desktop_ide_extension_asks",
         "desktop_ide_extension_approve",
         "desktop_ide_extension_decline",
@@ -246,6 +252,12 @@ fn main() {
         "desktop_engine_versions",
         "desktop_restart_engine",
         "desktop_ide_focus",
+        "desktop_tracker_op",
+        "desktop_tracker_projects",
+        "desktop_tracker_attach",
+        "desktop_tracker_open_change_set",
+        "desktop_ticket_settings",
+        "desktop_save_ticket_settings",
     ]);
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(manifest))
         .expect("desktop build configuration failed");

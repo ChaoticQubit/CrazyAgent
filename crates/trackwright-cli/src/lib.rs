@@ -2,6 +2,7 @@
 
 mod args;
 mod human;
+mod import_cmd;
 mod locate;
 pub mod tui;
 pub mod views;
@@ -99,7 +100,9 @@ pub fn run(args: &[OsString]) -> ExitCode {
         {
             schema()
         }
-        Command::Init { .. } | Command::Mcp | Command::Op { .. } => as_actor(invocation),
+        Command::Init { .. } | Command::Mcp | Command::Op { .. } | Command::Import(_) => {
+            as_actor(invocation)
+        }
     }
 }
 
@@ -124,6 +127,7 @@ fn as_actor(invocation: Invocation) -> ExitCode {
             place.and_then(|place| init(&actor, &place, &key, name.as_deref()))
         }
         Command::Op { spec, args } => place.and_then(|place| operation(&actor, &place, spec, args)),
+        Command::Import(import) => place.and_then(|place| import_cmd::run(&actor, &place, &import)),
         Command::Help(_) => unreachable!("help is answered before an actor is needed"),
     };
     reply(

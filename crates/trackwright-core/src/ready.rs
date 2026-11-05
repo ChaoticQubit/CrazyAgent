@@ -290,12 +290,15 @@ fn cycle_tally_json(row: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     }))
 }
 
+/// A ticket's placement names: its parent's short id, its release name and its cycle number.
+type PlacementNames = (Option<String>, Option<String>, Option<u32>);
+
 /// The names a ticket's placement shows: its parent's short id, its product version's name
 /// and its cycle's number. Inputs: the transaction and the ticket. Output: the three names.
 pub(crate) fn placement_names(
     tx: &Transaction<'_>,
     ticket: &Ticket,
-) -> Result<(Option<String>, Option<String>, Option<u32>), Failure> {
+) -> Result<PlacementNames, Failure> {
     let (parent, release, cycle): (Option<u32>, Option<String>, Option<u32>) =
         store::prepare(tx, PLACEMENT_NAMES)?.query_row(
             params![ticket.parent_id, ticket.version_id, ticket.cycle_id],

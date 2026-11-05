@@ -127,6 +127,7 @@ impl Agent {
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         LaunchRequest {
             harness: harness.into(),
+            trust: crate::trust::Trust::Reviewed,
             executable,
             working_dir: self.work(),
             account: AccountBinding::Subscription { home: self.home() },
@@ -987,6 +988,7 @@ mod live {
             tools: plan.tools,
             sandbox_profile: plan.sandbox_profile.clone(),
             access: plan.access,
+            trust: plan.trust,
             layout: plan.layout,
             git_identity: plan.git_identity.clone(),
             limits: plan.limits,

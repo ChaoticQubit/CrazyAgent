@@ -822,6 +822,17 @@ fn a_newer_interrupted_run_leaves_the_check_unsatisfied() {
             verdict: Verdict::Passed,
         })
     );
+    assert_eq!(
+        coverage::coverage_as(
+            &tx,
+            &Standalone,
+            &actor("agent:1"),
+            &query(CoverageOf::Ticket(id.clone()), None)
+        )
+        .unwrap(),
+        page,
+        "the standalone host gives every actor full sight"
+    );
 
     let again = run(
         &tx,

@@ -1,5 +1,7 @@
 use crate::events::{self, Recorded};
+use crate::host::{Authority, Sight};
 use crate::model::{Actor, ProjectKey, Refusal, ShortId, codes as core_codes};
+use crate::standalone::Standalone;
 use crate::store::{self, StoreError};
 use crate::tests_model::{
     CASE_TITLE_BYTES_MAX, CASES_PER_PROJECT_MAX, CASES_PER_SET_MAX, CRITERIA_PER_CASE_MAX, Case,
@@ -237,8 +239,8 @@ const CASE_LINKS_OF_PROJECT: &str = "SELECT k.case_id, k.criterion_id FROM tk_ca
      JOIN tk_cases c ON c.id = k.case_id WHERE c.project = ?1 ORDER BY k.case_id, k.criterion_id";
 const SETS_OF_CASE: &str = "SELECT s.number FROM tk_set_cases m JOIN tk_sets s \
      ON s.id = m.set_id WHERE m.case_id = ?1 ORDER BY s.number";
-const LATEST_OUTCOME: &str = "SELECT r.outcome FROM tk_results r JOIN tk_runs u \
-     ON u.id = r.run_id WHERE r.case_id = ?1 AND u.state = 'finished' \
+const LATEST_OUTCOME: &str = "SELECT r.outcome, u.number FROM tk_results r \
+     JOIN tk_runs u ON u.id = r.run_id WHERE r.case_id = ?1 AND u.state = 'finished' \
      ORDER BY u.started_ms DESC, u.id DESC, r.position DESC LIMIT 1";
 const VISIBILITY_READ: &str =
     "SELECT value_json FROM tk_policy WHERE project = ?1 AND key = 'case_protected_visibility'";
@@ -1180,12 +1182,25 @@ pub fn case_for(
     Ok(Some(found.short_id))
 }
 
-/// Shows one case as the actor may see it under `case_protected_visibility`. Inputs: the
-/// transaction, the actor and the case. Output: the view, or `case_unknown`.
+/// Shows one case as the actor may see it under `case_protected_visibility`, with full run
+/// sight (the standalone host's). Inputs: the transaction, the actor and the case. Output:
+/// the view, or `case_unknown`.
 pub fn case_show(tx: &Transaction<'_>, actor: &Actor, id: &TestId) -> Result<CaseView, StoreError> {
+    case_show_as(tx, &Standalone, actor, id)
+}
+
+/// Shows one case as `case_show` does, without its latest outcome when that came from a run
+/// the host's `run_sight` gives the actor as an outcome only. Inputs: the transaction, the
+/// host, the actor and the case. Output: the view, `case_unknown`, or the host's refusal.
+pub fn case_show_as(
+    tx: &Transaction<'_>,
+    host: &(impl Authority + ?Sized),
+    actor: &Actor,
+    id: &TestId,
+) -> Result<CaseView, StoreError> {
     let found = case(tx, id)?;
     let detail = case_detail(tx, &found)?;
-    let latest = latest_outcome(tx, found.id)?;
+    let latest = latest_as(tx, host, actor, &found)?;
     let visibility = protected_visibility(tx, found.project)?;
     let view = case_view(&found, detail, latest, actor, visibility);
     assert_eq!(&view.id, id);
@@ -1195,10 +1210,24 @@ pub fn case_show(tx: &Transaction<'_>, actor: &Actor, id: &TestId) -> Result<Cas
 
 /// Lists one page of a project's cases, at most `LIST_ROWS_MAX`, in number order. For an
 /// actor that may not see protected cases, their kind and status stay hidden and no kind,
-/// status, set or unlinked filter matches them. Inputs: the transaction, actor, key and
-/// filter. Output: the rows, or `project_unknown`, `set_unknown` or `cross_project`.
+/// status, set or unlinked filter matches them. Run sight is full (the standalone host's).
+/// Inputs: the transaction, actor, key and filter. Output: the rows, or `project_unknown`,
+/// `set_unknown` or `cross_project`.
 pub fn case_list(
     tx: &Transaction<'_>,
+    actor: &Actor,
+    key: &ProjectKey,
+    filter: &CaseFilter,
+) -> Result<Vec<CaseRow>, StoreError> {
+    case_list_as(tx, &Standalone, actor, key, filter)
+}
+
+/// Lists cases as `case_list` does, leaving out each latest outcome that came from a run the
+/// host's `run_sight` gives the actor as an outcome only. Inputs: the transaction, host,
+/// actor, key and filter. Output: the rows, the refusals of `case_list`, or the host's.
+pub fn case_list_as(
+    tx: &Transaction<'_>,
+    host: &(impl Authority + ?Sized),
     actor: &Actor,
     key: &ProjectKey,
     filter: &CaseFilter,
@@ -1249,7 +1278,7 @@ pub fn case_list(
                 protected: found.protected,
                 kind: shown.then_some(found.kind),
                 status: shown.then_some(found.status),
-                latest: latest_outcome(tx, found.id)?,
+                latest: latest_as(tx, host, actor, found)?,
             })
         })
         .collect()
@@ -1432,10 +1461,10 @@ impl Replayed {
                     Membership<Case, CaseCriterion>,
                     Membership<Case, CaseCriterion>,
                 ) = (decoded(before)?, decoded(after)?);
-                if let Some(member) = was.member {
-                    if !self.case_criteria.remove(&member) {
-                        return Err(unmatched());
-                    }
+                if let Some(member) = was.member
+                    && !self.case_criteria.remove(&member)
+                {
+                    return Err(unmatched());
                 }
                 self.case_criteria.extend(now.member);
                 self.cases.insert(now.parent.id, now.parent);
@@ -1562,10 +1591,36 @@ fn case_detail(tx: &Transaction<'_>, case: &Case) -> Result<CaseDetail, StoreErr
     })
 }
 
-fn latest_outcome(tx: &Transaction<'_>, case_id: i64) -> Result<Option<ResultOutcome>, StoreError> {
+fn latest_outcome(
+    tx: &Transaction<'_>,
+    found: &Case,
+) -> Result<Option<(ResultOutcome, TestId)>, StoreError> {
+    let key = found.short_id.key();
     Ok(prepare(tx, LATEST_OUTCOME)?
-        .query_row([case_id], |row| named(row, 0, ResultOutcome::parse))
+        .query_row([found.id], |row| {
+            let run = TestId::new(key.clone(), TestObject::Run, row.get(1)?)
+                .map_err(|refused| store::conversion(1, refused))?;
+            Ok((named(row, 0, ResultOutcome::parse)?, run))
+        })
         .optional()?)
+}
+
+/// A case's latest outcome as the actor may read it: None when the host's `run_sight`
+/// gives the actor only the outcome of the run it came from. Inputs: the transaction, the
+/// host, the actor and the case. Output: the outcome, or the host's refusal.
+fn latest_as(
+    tx: &Transaction<'_>,
+    host: &(impl Authority + ?Sized),
+    actor: &Actor,
+    found: &Case,
+) -> Result<Option<ResultOutcome>, StoreError> {
+    let Some((outcome, run)) = latest_outcome(tx, found)? else {
+        return Ok(None);
+    };
+    Ok(match host.run_sight(tx, run.key(), actor, &run)? {
+        Sight::Full => Some(outcome),
+        Sight::Outcome => None,
+    })
 }
 
 fn criterion_id(

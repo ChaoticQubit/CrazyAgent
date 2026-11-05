@@ -96,8 +96,8 @@ pub enum Asker {
 }
 
 /// The engine steps that raise their own questions, stored as `engine:mapping`,
-/// `engine:research:<kind>`, `engine:landing:<change set>`, `engine:planning` and
-/// `engine:checks`.
+/// `engine:research:<kind>`, `engine:landing:<change set>`, `engine:planning`,
+/// `engine:checks` and `engine:scorecard`, the go/no-go scorecard's daily question.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EngineSource {
     Mapping,
@@ -105,6 +105,7 @@ pub enum EngineSource {
     Landing(String),
     Planning,
     Checks,
+    Scorecard,
 }
 
 /// Where a question stands. It waits for the owner until answered or dismissed; a box the
@@ -231,6 +232,7 @@ impl EngineSource {
             Self::Mapping => Some("engine:mapping".into()),
             Self::Planning => Some("engine:planning".into()),
             Self::Checks => Some("engine:checks".into()),
+            Self::Scorecard => Some("engine:scorecard".into()),
             Self::Research(kind) if named(kind) => Some(format!("engine:research:{kind}")),
             Self::Landing(set) if named(set) => Some(format!("engine:landing:{set}")),
             Self::Research(_) | Self::Landing(_) => None,
@@ -344,6 +346,7 @@ pub fn asker_label(asker: &str) -> String {
         ("engine", "mapping") => "project mapping".into(),
         ("engine", "planning") => "roadmap planning".into(),
         ("engine", "checks") => "check profiles".into(),
+        ("engine", "scorecard") => "the go/no-go scorecard".into(),
         ("engine", rest) => match rest.split_once(':') {
             Some(("research", kind)) => format!("research ({})", kind.replace('_', " ")),
             Some(("landing", set)) => format!("landing change set {set}"),
@@ -935,6 +938,7 @@ fn settle(
     } else {
         deliver(tx, &question, answer)?
     };
+    let at = now_ms();
     let changed = tx
         .execute(
             "UPDATE owner_questions SET status=?2, answer=?3, answered_by=?4, message=?5, settled_ms=?6
@@ -945,11 +949,19 @@ fn settle(
                 answer,
                 by.map(AnsweredBy::name),
                 message,
-                now_ms()
+                at
             ],
         )
         .map_err(unavailable)?;
     assert_eq!(changed, 1);
+    let counted = match status {
+        QuestionStatus::Answered => by != Some(AnsweredBy::Chat),
+        QuestionStatus::AnsweredInTerminal => true,
+        QuestionStatus::Pending | QuestionStatus::Dismissed => false,
+    };
+    if counted {
+        crate::scorecard::answered(tx, &project, &question.asker, question.id, answer, at);
+    }
     prune(tx, &project)?;
     Ok(Settlement::Settled)
 }
@@ -985,6 +997,7 @@ fn deliver(
             ),
             true,
         ),
+        ("engine", "scorecard") => return Ok(None),
         ("engine", _) => (
             MessageAuthor::Engine,
             told(

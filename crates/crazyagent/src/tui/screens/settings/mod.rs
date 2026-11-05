@@ -1,4 +1,5 @@
 pub mod account_choice;
+pub mod checks;
 pub(in crate::tui) mod harness_page;
 pub mod pool_editor;
 pub mod pools;

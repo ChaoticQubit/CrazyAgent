@@ -1,6 +1,7 @@
 import { PageHeader, Tabs, formatRoute, type IconName, type SettingsTab } from "../../ui";
 import type { SettingsAction } from "../../ui/router";
 import { Accounts } from "./accounts";
+import { ChecksSettings } from "./checks";
 import { GitHubSettings } from "./github";
 import { Harnesses } from "./harnesses";
 import { MemorySettings } from "./memory";
@@ -11,6 +12,7 @@ import { ProcessSettings } from "../process";
 import { ProfileSettings } from "./profile";
 import { ProjectsHomeSettings } from "./projects-home";
 import { TeamAlertsSettings } from "./team-alerts";
+import { TicketSettings } from "./tickets";
 import { UpdatesSettings } from "./updates";
 import { UsageSettings } from "./usage";
 
@@ -20,7 +22,9 @@ const TABS: { id: SettingsTab; label: string; icon: IconName }[] = [
   { id: "harnesses", label: "Harnesses", icon: "terminal" },
   { id: "plugins", label: "Plugins and skills", icon: "puzzle" },
   { id: "process", label: "Process", icon: "list-checks" },
+  { id: "tickets", label: "Tickets", icon: "circle-check" },
   { id: "pack", label: "Pack", icon: "boxes" },
+  { id: "checks", label: "Checks", icon: "shield-check" },
   { id: "home", label: "Projects folder", icon: "folder" },
   { id: "github", label: "GitHub", icon: "git-branch" },
   { id: "memory", label: "Memory", icon: "brain" },
@@ -44,7 +48,9 @@ export function Settings({ tab, action, account, skill, harness }: { tab: Settin
         : tab === "harnesses" ? <Harnesses harness={harness} />
         : tab === "plugins" ? <PluginsAndSkills skill={skill} />
         : tab === "process" ? <ProcessSettings />
+        : tab === "tickets" ? <TicketSettings />
         : tab === "pack" ? <PackSettings />
+        : tab === "checks" ? <ChecksSettings />
         : tab === "home" ? <ProjectsHomeSettings />
         : tab === "github" ? <GitHubSettings />
         : tab === "memory" ? <MemorySettings />

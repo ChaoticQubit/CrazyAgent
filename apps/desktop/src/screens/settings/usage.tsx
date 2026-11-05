@@ -7,6 +7,7 @@ import {
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, EmptyState, LoadError, NotReady, Notice, Panel, Segmented, Skeleton, TextField } from "../../ui";
 import { NextAccountsPanel } from "./account-choice";
+import { ScorecardPanel } from "./scorecard";
 import "../project/projects.css";
 import "./usage.css";
 
@@ -372,7 +373,8 @@ export function UsageView({ report, range, names, nowMs, failure, busy, next, on
 }
 
 /** Settings, Usage: reads the usage report for the chosen range every 30 seconds, asks the
- * engine to check limits now, and saves the owner's manual reset times. */
+ * engine to check limits now, saves the owner's manual reset times, and shows the go/no-go
+ * scorecard below. */
 export function UsageSettings() {
   const session = useAppSession();
   const [range, setRange] = useState<UsageRange>("7d");
@@ -408,10 +410,13 @@ export function UsageSettings() {
     reload();
   }
 
-  return <UsageView report={report} range={range} names={names} nowMs={nowMs} failure={failure} busy={busy}
-    next={<NextAccountsPanel ranking={ranking} pools={pools} names={names.accounts} nowMs={nowMs} />}
-    onRange={(next) => { setRange(next); setNowMs(Date.now()); }} onRetry={reload}
-    onRefresh={() => void act("refresh", refreshUsage, "Checking limits now. They update here within a minute.")}
-    onSetReset={(account, kind, at) => void act(`${account}/${kind}`, () => setManualReset(account, kind, at),
-      at === null ? "Using the provider's reset time." : "Reset time saved.")} />;
+  return <div className="stack">
+    <UsageView report={report} range={range} names={names} nowMs={nowMs} failure={failure} busy={busy}
+      next={<NextAccountsPanel ranking={ranking} pools={pools} names={names.accounts} nowMs={nowMs} />}
+      onRange={(next) => { setRange(next); setNowMs(Date.now()); }} onRetry={reload}
+      onRefresh={() => void act("refresh", refreshUsage, "Checking limits now. They update here within a minute.")}
+      onSetReset={(account, kind, at) => void act(`${account}/${kind}`, () => setManualReset(account, kind, at),
+        at === null ? "Using the provider's reset time." : "Reset time saved.")} />
+    <ScorecardPanel />
+  </div>;
 }

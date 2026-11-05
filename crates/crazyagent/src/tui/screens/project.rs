@@ -7,9 +7,11 @@ use super::planning_line::{Planning, planning, planning_key};
 use super::project_access::{AccessEdit, AccessKey};
 use super::project_markdown::{MdLine, render, sanitize};
 use super::project_plugins::ProjectPlugins;
+use super::project_trust::{TrustEdit, TrustKey};
 use super::questions::ProjectQuestions;
 use super::recovery_banner::ProjectRecovery;
 use super::sessions::{Sessions, SessionsAction, SessionsReply};
+use super::tests::ProjectTests;
 use crate::ide::bridge::reveal::RevealTarget;
 use crate::memory::{KnowledgeEntry, KnowledgeStatus, ReviewDecision};
 use crate::pools::PoolSummary;
@@ -39,7 +41,7 @@ pub(in crate::tui) const GENERAL_FIELDS: usize = 3 + Platform::ALL.len() + Resea
 const STALE_READING: &str = "This project changed since you opened the form. Your edit is kept while the saved one is read.";
 const KEEP_MINE: &str = "Enter saves your edit over it; Esc keeps the saved one.";
 
-/// Names the seven tabs of a project.
+/// Names the eight tabs of a project.
 /// Each tab has a label and a section glyph for the tab strip.
 /// The order is the tab order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,17 +52,19 @@ pub(in crate::tui) enum Tab {
     Changes,
     Questions,
     Context,
+    Tests,
     Settings,
 }
 
 impl Tab {
-    pub const ALL: [Tab; 7] = [
+    pub const ALL: [Tab; 8] = [
         Self::Overview,
         Self::Conversation,
         Self::Agents,
         Self::Changes,
         Self::Questions,
         Self::Context,
+        Self::Tests,
         Self::Settings,
     ];
 
@@ -75,6 +79,7 @@ impl Tab {
             Self::Changes => "Changes",
             Self::Questions => "Questions",
             Self::Context => "Context",
+            Self::Tests => "Tests",
             Self::Settings => "Settings",
         }
     }
@@ -90,6 +95,7 @@ impl Tab {
             Self::Changes => "\u{2213}",
             Self::Questions => "\u{225f}",
             Self::Context => "\u{29c9}",
+            Self::Tests => "\u{2713}",
             Self::Settings => "\u{2630}",
         }
     }
@@ -342,7 +348,8 @@ impl Field {
 /// The General form on the Settings tab: the project's name, description,
 /// tech stack, platforms and research, saved as one engine edit.
 /// Holds the setup revision it started from, so a change made elsewhere is refused; after
-/// such a refusal it keeps the draft and takes the revision of the setup read next.
+/// such a refusal it keeps the draft, takes the revision of the setup read next and names the
+/// fields changed since the owner last saw them.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::tui) struct GeneralEdit {
     pub name: TextInput,
@@ -355,6 +362,50 @@ pub(in crate::tui) struct GeneralEdit {
     pub busy: bool,
     pub error: Option<String>,
     pub stale: bool,
+    seen: GeneralSeen,
+}
+
+/// The General form's fields in the setup last shown to the owner: the one the form opened
+/// at, or the one read after a stale refusal. Platforms and research are sorted, and research
+/// leaves out roadmap planning, which the form has no switch for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GeneralSeen {
+    name: String,
+    about: String,
+    tech_stack: Vec<String>,
+    platforms: Vec<Platform>,
+    research: Vec<ResearchKind>,
+}
+
+impl GeneralSeen {
+    fn of(setup: &StoredSetup) -> Self {
+        Self {
+            name: setup.name.clone(),
+            about: setup.about.clone(),
+            tech_stack: setup.tech_stack.clone(),
+            platforms: sorted(&setup.platforms),
+            research: sorted(&setup.research)
+                .into_iter()
+                .filter(|kind| *kind != ResearchKind::RoadmapPlanning)
+                .collect(),
+        }
+    }
+
+    /// Names the fields that differ between two readings of the setup.
+    /// Takes the earlier reading and the later one.
+    /// Returns the field names as the form labels them, in form order.
+    fn changed(&self, now: &Self) -> Vec<&'static str> {
+        [
+            ("name", self.name != now.name),
+            ("description", self.about != now.about),
+            ("tech stack", self.tech_stack != now.tech_stack),
+            ("platforms", self.platforms != now.platforms),
+            ("research", self.research != now.research),
+        ]
+        .into_iter()
+        .filter_map(|(field, differs)| differs.then_some(field))
+        .collect()
+    }
 }
 
 impl GeneralEdit {
@@ -379,6 +430,7 @@ impl GeneralEdit {
             busy: false,
             error: None,
             stale: false,
+            seen: GeneralSeen::of(setup),
         }
     }
 
@@ -578,6 +630,8 @@ pub(in crate::tui) struct ProjectScreen {
     pub hidden_paths: Option<Vec<String>>,
     pub access: Option<AccessEdit>,
     pub agent_policy: Option<crate::sandbox::policy::PolicyView>,
+    pub trust_edit: Option<TrustEdit>,
+    pub repository_trust: Option<crate::trust::TrustView>,
     pub schedule: Option<crate::scheduling::Schedule>,
     pub general: Option<GeneralEdit>,
     pub removed: bool,
@@ -586,6 +640,7 @@ pub(in crate::tui) struct ProjectScreen {
     pub plugins: ProjectPlugins,
     pub changes: ProjectChanges,
     pub questions: ProjectQuestions,
+    pub tests: ProjectTests,
     pub recovery: ProjectRecovery,
     pub sessions: Sessions,
     pub now_ms: i64,
@@ -598,6 +653,8 @@ pub(in crate::tui) struct ProjectScreen {
     hidden_paths_read_ms: Option<i64>,
     agent_policy_read_ms: Option<i64>,
     access_stale: bool,
+    repository_trust_read_ms: Option<i64>,
+    trust_stale: bool,
     memories_read_ms: Option<i64>,
     setup_failed_ms: Option<i64>,
     setup_due: bool,
@@ -613,6 +670,7 @@ impl ProjectScreen {
             plugins: ProjectPlugins::new(project.clone()),
             changes: ProjectChanges::new(project.clone()),
             questions: ProjectQuestions::new(project.clone()),
+            tests: ProjectTests::new(project.clone(), name.clone()),
             recovery: ProjectRecovery::new(project.clone()),
             sessions: Sessions::default(),
             project,
@@ -657,6 +715,8 @@ impl ProjectScreen {
             hidden_paths: None,
             access: None,
             agent_policy: None,
+            trust_edit: None,
+            repository_trust: None,
             schedule: None,
             general: None,
             removed: false,
@@ -672,6 +732,8 @@ impl ProjectScreen {
             hidden_paths_read_ms: None,
             agent_policy_read_ms: None,
             access_stale: false,
+            repository_trust_read_ms: None,
+            trust_stale: false,
             memories_read_ms: None,
             setup_failed_ms: None,
             setup_due: false,
@@ -692,6 +754,7 @@ impl ProjectScreen {
         self.adding = None;
         self.folders = None;
         self.access = None;
+        self.trust_edit = None;
         self.general = None;
         self.typing = tab == Tab::Conversation;
         if tab == Tab::Changes {
@@ -740,6 +803,11 @@ impl ProjectScreen {
             && due(self.agent_policy_read_ms)
         {
             SetupQuery::AgentPolicy { project }
+        } else if self.repository_trust.is_none()
+            && self.tab == Tab::Settings
+            && due(self.repository_trust_read_ms)
+        {
+            SetupQuery::RepositoryTrust { project }
         } else if due(self.memories_read_ms)
             && (self.memories.is_none() || matches!(self.tab, Tab::Overview))
         {
@@ -865,6 +933,9 @@ impl ProjectScreen {
                     SetupQuery::AgentPolicy { .. } => {
                         self.agent_policy_read_ms = Some(self.now_ms);
                     }
+                    SetupQuery::RepositoryTrust { .. } => {
+                        self.repository_trust_read_ms = Some(self.now_ms);
+                    }
                     SetupQuery::Memories { .. } => self.memories_read_ms = Some(self.now_ms),
                     SetupQuery::Item { path, .. } => {
                         if let Some(preview) = self.preview.as_mut().filter(|p| &p.path == path) {
@@ -890,11 +961,19 @@ impl ProjectScreen {
         match view {
             SetupView::Setup(Some(setup)) => {
                 if let Some(general) = self.general.as_mut().filter(|general| general.stale) {
+                    let now = GeneralSeen::of(&setup);
+                    let changed = general.seen.changed(&now);
+                    general.seen = now;
                     general.revision = setup.revision;
                     general.stale = false;
-                    general.error = Some(format!("This project changed elsewhere. {KEEP_MINE}"));
+                    general.error = Some(if changed.is_empty() {
+                        "This project changed elsewhere, but not on this form. Enter saves your edit; Esc keeps the saved one.".to_owned()
+                    } else {
+                        format!("Changed elsewhere: {}. {KEEP_MINE}", changed.join(", "))
+                    });
                 }
                 self.name = setup.name.clone();
+                self.tests.rename(&setup.name);
                 self.setup = Some(*setup);
                 self.setup_due = false;
                 self.setup_failed_ms = None;
@@ -946,6 +1025,19 @@ impl ProjectScreen {
                 self.agent_policy = Some(view);
                 self.agent_policy_read_ms = Some(self.now_ms);
             }
+            SetupView::RepositoryTrust(view) => {
+                if std::mem::take(&mut self.trust_stale)
+                    && let Some(edit) = self.trust_edit.as_mut()
+                {
+                    edit.view = (*view).clone();
+                    edit.error = Some(format!(
+                        "Saved now: {}. {KEEP_MINE}",
+                        super::project_trust::summary(Some(&view))
+                    ));
+                }
+                self.repository_trust = Some(*view);
+                self.repository_trust_read_ms = Some(self.now_ms);
+            }
             SetupView::Item(chunk) => {
                 if let Some(preview) = self.preview.as_mut().filter(|p| p.path == chunk.path) {
                     preview.loaded = true;
@@ -985,10 +1077,7 @@ impl ProjectScreen {
         let SetupQuery::Change { action, .. } = query else {
             return false;
         };
-        let stale = matches!(
-            code,
-            crate::storage::versioned::STALE_CODE | "project_setup_revision"
-        );
+        let stale = code == crate::storage::versioned::STALE_CODE;
         let reason = Some(if stale {
             STALE_READING.to_owned()
         } else {
@@ -1030,6 +1119,18 @@ impl ProjectScreen {
                     self.access_stale = true;
                     self.agent_policy = None;
                     self.agent_policy_read_ms = None;
+                }
+                true
+            }
+            SetupAction::SetRepositoryTrust { .. } if self.trust_edit.is_some() => {
+                if let Some(edit) = self.trust_edit.as_mut() {
+                    edit.busy = false;
+                    edit.error = reason;
+                }
+                if stale {
+                    self.trust_stale = true;
+                    self.repository_trust = None;
+                    self.repository_trust_read_ms = None;
                 }
                 true
             }
@@ -1111,6 +1212,18 @@ impl ProjectScreen {
                 self.agent_policy_read_ms = None;
                 if applied {
                     self.access = None;
+                }
+            }
+            SetupQuery::Change {
+                action: SetupAction::SetRepositoryTrust { .. },
+                ..
+            } => {
+                self.repository_trust = None;
+                self.repository_trust_read_ms = None;
+                self.agent_policy = None;
+                self.agent_policy_read_ms = None;
+                if applied {
+                    self.trust_edit = None;
                 }
             }
             SetupQuery::Change {
@@ -1269,6 +1382,7 @@ impl ProjectScreen {
             || self.folders.is_some()
             || self.hidden.is_some()
             || self.access.is_some()
+            || self.trust_edit.is_some()
             || self.general.is_some()
             || self.confirm_remove
             || self.pool_picker.is_some()
@@ -1298,6 +1412,9 @@ impl ProjectScreen {
         }
         if self.access.is_some() {
             return self.access_key(key);
+        }
+        if self.trust_edit.is_some() {
+            return self.trust_key(key);
         }
         if self.general.is_some() {
             return self.general_key(key);
@@ -1394,6 +1511,7 @@ impl ProjectScreen {
             Tab::Agents => self.agents_key(key),
             Tab::Changes => ProjectReply::Ignored,
             Tab::Questions => ProjectReply::Ignored,
+            Tab::Tests => ProjectReply::Ignored,
             Tab::Context => self.context_key(key),
             Tab::Settings => self.settings_key(key),
         };
@@ -1445,6 +1563,9 @@ impl ProjectScreen {
             return ProjectReply::Handled;
         }
         if self.tab == Tab::Questions && self.questions.paste(text) {
+            return ProjectReply::Handled;
+        }
+        if self.tab == Tab::Tests && self.tests.paste(text) {
             return ProjectReply::Handled;
         }
         ProjectReply::Ignored
@@ -2210,6 +2331,19 @@ impl ProjectScreen {
                 }
                 ProjectReply::Handled
             }
+            KeyCode::Char('k') => {
+                match &self.repository_trust {
+                    Some(view) => {
+                        self.trust_edit = Some(TrustEdit::of(view));
+                        self.trust_stale = false;
+                    }
+                    None => {
+                        self.problem =
+                            Some("Still loading the repository trust. Try again.".into());
+                    }
+                }
+                ProjectReply::Handled
+            }
             KeyCode::Char('i') => ProjectReply::Process,
             KeyCode::Char('h') => ProjectReply::Harnesses,
             KeyCode::Char('u') => match &self.schedule {
@@ -2423,6 +2557,36 @@ impl ProjectScreen {
         }
     }
 
+    /// Handles one key in the Repository trust box (see [`TrustEdit::key`]): a save sends
+    /// the level with the owner's raise confirm and keeps the box busy until the engine
+    /// answers. Takes the key event. Returns the change to send, or what the box did.
+    fn trust_key(&mut self, key: KeyEvent) -> ProjectReply {
+        let Some(edit) = self.trust_edit.as_mut() else {
+            return ProjectReply::Ignored;
+        };
+        match edit.key(key) {
+            TrustKey::Handled => ProjectReply::Handled,
+            TrustKey::Close => {
+                self.trust_edit = None;
+                ProjectReply::Handled
+            }
+            TrustKey::Save {
+                trust,
+                confirm_raise,
+            } => {
+                assert!(confirm_raise || !trust.raises(edit.view.trust));
+                edit.busy = true;
+                edit.error = None;
+                ProjectReply::Change(Box::new(SetupAction::SetRepositoryTrust {
+                    project_id: self.project.clone(),
+                    version: edit.view.version,
+                    trust,
+                    confirm_raise,
+                }))
+            }
+        }
+    }
+
     fn add_key(&mut self, key: KeyEvent) -> ProjectReply {
         let Some(adding) = self.adding.as_mut() else {
             return ProjectReply::Ignored;
@@ -2531,6 +2695,7 @@ impl ProjectScreen {
             self.folders.is_some(),
             self.hidden.is_some(),
             self.access.is_some(),
+            self.trust_edit.is_some(),
             self.general.is_some(),
             self.confirm_remove,
         ];
@@ -2549,6 +2714,7 @@ impl ProjectScreen {
             || self.folders.is_some()
             || self.hidden.is_some()
             || self.access.is_some()
+            || self.trust_edit.is_some()
         {
             assert_eq!(self.tab, Tab::Settings);
         }
@@ -2624,6 +2790,13 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "context_item_protected" => "The project brief can't be deleted.",
         "read_path_not_absolute" => "Type the full path of each folder, starting with /.",
         "agent_access_unavailable" => "That access level can't run agents on this computer.",
+        "agent_access_untrusted" => crate::trust::UNTRUSTED_ACCESS,
+        "trust_raise_unconfirmed" => "Confirm the raise to Reviewed first.",
+        "trust_platform_unqualified" => crate::trust::UNQUALIFIED_PLATFORM,
+        "launch_harness_untrusted" => crate::trust::PLAIN_HARNESS,
+        "repository_trust_unreadable" => {
+            "CrazyAgent couldn't read this project's repository trust."
+        }
         "agent_policy_invalid" => "Each toolchain can be listed once.",
         "agent_policy_unreadable" => "CrazyAgent couldn't read this project's agent access.",
         "read_path_missing" => "One of those folders doesn't exist on this computer.",
@@ -2707,9 +2880,7 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         }
         "platforms_duplicate" => "Each platform can be picked once.",
         "research_duplicate" => "Each kind of research can be picked once.",
-        "stale_revision" | "project_setup_revision" => {
-            "This project changed since you opened the form. Open it again."
-        }
+        "stale_revision" => "This project changed since you opened the form. Open it again.",
         "invalid_project" => "This project no longer exists.",
         "change_outcome_unknown" => "We couldn't confirm the change. Check it and try again.",
         _ => return coded("That didn't work. Try again.", code),

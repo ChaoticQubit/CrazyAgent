@@ -41,6 +41,13 @@ pub(in crate::tui) enum SettingsJob {
         offset_minutes: i32,
     },
     RefreshUsage,
+    Scorecard {
+        offset_minutes: i32,
+    },
+    ScorecardSet {
+        settings: crate::scorecard::Settings,
+        version: u64,
+    },
     SignIn(SignInJob),
     JoinPools {
         account: CredentialRef,
@@ -117,6 +124,7 @@ pub(in crate::tui) enum SettingsJob {
     },
     Ranking,
     HarnessSettings(Box<super::harness_settings::HarnessSettingsQuery>),
+    Checks(Box<super::checks::ChecksJob>),
 }
 
 /// One change to skills and MCP servers, from Settings or from a project's
@@ -196,6 +204,8 @@ impl std::fmt::Debug for SettingsJob {
             Self::Harnesses => "Harnesses",
             Self::Usage { .. } => "Usage",
             Self::RefreshUsage => "RefreshUsage",
+            Self::Scorecard { .. } => "Scorecard",
+            Self::ScorecardSet { .. } => "ScorecardSet",
             Self::SignIn(_) => "SignIn",
             Self::JoinPools { .. } => "JoinPools",
             Self::Memories { .. } => "Memories",
@@ -221,6 +231,7 @@ impl std::fmt::Debug for SettingsJob {
             Self::SetSchedule { .. } => "SetSchedule",
             Self::Ranking => "Ranking",
             Self::HarnessSettings(_) => "HarnessSettings",
+            Self::Checks(job) => super::checks::job_name(job),
         })
     }
 }
@@ -312,6 +323,8 @@ pub(in crate::tui) enum SettingsEvent {
     Harnesses(Result<Vec<HarnessEntry>, String>),
     Usage(Result<Box<UsageReport>, String>),
     UsageRefreshed(Result<(), String>),
+    Scorecard(Result<Box<crate::scorecard::Scorecard>, String>),
+    ScorecardSaved(Result<crate::engine::owner::ScorecardSaved, String>),
     SignIn(Result<(SignInTicket, SignInView), String>),
     PoolsJoined(Result<usize, String>),
     Memories(Result<Vec<SavedMemory>, String>),
@@ -343,6 +356,7 @@ pub(in crate::tui) enum SettingsEvent {
     ScheduleSet(u64, Result<(), String>),
     Ranking(Result<Vec<crate::scheduling::PoolRanking>, String>),
     HarnessSettings(Box<super::harness_settings::HarnessSettingsEvent>),
+    Checks(Box<super::checks::ChecksEvent>),
 }
 
 impl SettingsEvent {
@@ -356,6 +370,8 @@ impl SettingsEvent {
             SettingsJob::Harnesses => Self::Harnesses(Err(problem)),
             SettingsJob::Usage { .. } => Self::Usage(Err(problem)),
             SettingsJob::RefreshUsage => Self::UsageRefreshed(Err(problem)),
+            SettingsJob::Scorecard { .. } => Self::Scorecard(Err(problem)),
+            SettingsJob::ScorecardSet { .. } => Self::ScorecardSaved(Err(problem)),
             SettingsJob::SignIn(_) => Self::SignIn(Err(problem)),
             SettingsJob::JoinPools { .. } => Self::PoolsJoined(Err(problem)),
             SettingsJob::Memories { .. } => Self::Memories(Err(problem)),
@@ -403,6 +419,9 @@ impl SettingsEvent {
             SettingsJob::HarnessSettings(query) => Self::HarnessSettings(Box::new(
                 super::harness_settings::HarnessSettingsEvent::unavailable((**query).clone()),
             )),
+            SettingsJob::Checks(job) => {
+                Self::Checks(Box::new(super::checks::ChecksEvent::unavailable(job)))
+            }
         }
     }
 }
@@ -529,6 +548,25 @@ impl NativeOwner {
                     Err(error) => Err(error),
                 })
             }
+            SettingsJob::Scorecard { offset_minutes } => {
+                SettingsEvent::Scorecard(match self.settings_controller() {
+                    Ok(controller) => controller
+                        .scorecard_report(offset_minutes)
+                        .await
+                        .map(Box::new)
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                })
+            }
+            SettingsJob::ScorecardSet { settings, version } => {
+                SettingsEvent::ScorecardSaved(match self.settings_controller() {
+                    Ok(controller) => controller
+                        .scorecard_set(settings, version)
+                        .await
+                        .map_err(|error| problem(&error, lost)),
+                    Err(error) => Err(error),
+                })
+            }
             SettingsJob::SignIn(job) => SettingsEvent::SignIn(self.sign_in(job, lost).await),
             SettingsJob::JoinPools { account, pools } => {
                 SettingsEvent::PoolsJoined(self.join_pools(account, pools, lost).await)
@@ -650,6 +688,9 @@ impl NativeOwner {
                     .map_err(|error| problem(&error, lost)),
                 Err(error) => Err(error),
             }),
+            SettingsJob::Checks(job) => {
+                SettingsEvent::Checks(Box::new(self.checks(*job, lost).await))
+            }
             SettingsJob::Ranking => SettingsEvent::Ranking(match self.settings_controller() {
                 Ok(controller) => controller
                     .account_ranking()

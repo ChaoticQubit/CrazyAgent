@@ -6,7 +6,8 @@ use rusqlite::{OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use trackwright_core::host::{
-    Authority, CheckView, Evidence, EvidenceState, LinkKind, LinkState, Links, Paths, TicketView,
+    Authority, CheckView, Evidence, EvidenceState, LinkKind, LinkState, Links, Paths, Sight,
+    TicketView,
 };
 use trackwright_core::model::{
     Actor, AgentEditPolicy, ClosePolicy, CreatePolicy, CycleDays, ImportPolicy, OpKind, Policy,
@@ -15,7 +16,7 @@ use trackwright_core::model::{
 use trackwright_core::policy;
 use trackwright_core::runs::{RunWriters, SourceRef};
 use trackwright_core::tests_model::{
-    CaseProtectedVisibility, RunRetention, SkippedCounts, TestEvidence,
+    CaseProtectedVisibility, RunRetention, SkippedCounts, TestEvidence, TestId,
 };
 
 const STORED: &str = "SELECT body FROM tracker_settings WHERE scope = ?1";
@@ -336,6 +337,16 @@ impl Authority for SettingsWriter {
 
     fn policy_locked(&self, setting: PolicyKey) -> Option<&'static str> {
         super::host::locked(setting)
+    }
+
+    fn run_sight(
+        &self,
+        tx: &Transaction<'_>,
+        project: &ProjectKey,
+        actor: &Actor,
+        run: &TestId,
+    ) -> Result<Sight, Refusal> {
+        super::Host.run_sight(tx, project, actor, run)
     }
 }
 

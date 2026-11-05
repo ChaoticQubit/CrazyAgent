@@ -7,11 +7,11 @@ use crate::landing::{self, AgentKind, ChangeAgent, ChangeSetId, TurnEnd, TurnOut
 use crate::protocol::ProjectId;
 use crate::sandbox::SandboxRemote;
 use crate::sandbox::toolchains::Toolchain;
+use crate::spawn_gate;
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::fs;
-use std::net::TcpListener;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -376,7 +376,7 @@ fn a_check_cannot_write_the_agent_worktree_or_read_the_owner_home() {
 #[test]
 fn a_check_with_network_off_cannot_open_a_socket() {
     let case = Case::new();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let port = listener.local_addr().unwrap().port();
     let probe = format!(
@@ -393,8 +393,7 @@ fn a_check_with_network_off_cannot_open_a_socket() {
     );
     assert_eq!(off.network, NetworkMode::Off);
     assert!(
-        listener
-            .accept()
+        spawn_gate::accept_tcp_std(&listener)
             .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
     );
     let mut loopback = check(&["/bin/sh", "connect.sh"]);
@@ -405,8 +404,7 @@ fn a_check_with_network_off_cannot_open_a_socket() {
     assert_eq!(lowered.exit, Some(3));
     assert_eq!(lowered.network, NetworkMode::Off);
     assert!(
-        listener
-            .accept()
+        spawn_gate::accept_tcp_std(&listener)
             .is_err_and(|error| error.kind() == std::io::ErrorKind::WouldBlock)
     );
     let local = run(&snapshot, &loopback, &limits());
@@ -418,7 +416,7 @@ fn a_check_with_network_off_cannot_open_a_socket() {
     );
     assert_eq!(stdout(&local), "connected\n");
     assert_eq!(local.network, NetworkMode::Localhost);
-    assert!(listener.accept().is_ok());
+    assert!(spawn_gate::accept_tcp_std(&listener).is_ok());
     assert_ne!(off.sandbox_digest, local.sandbox_digest);
 }
 
@@ -646,7 +644,7 @@ fn holdout_files_exist_only_inside_the_snapshot_during_the_run() {
 #[test]
 fn a_snapshot_that_ran_a_holdout_check_refuses_every_later_check() {
     let case = Case::new();
-    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let listener = spawn_gate::bind_tcp_std("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let port = listener.local_addr().unwrap().port();
     let id = case.change_set(&[("visible.txt", "visible\n")]);
@@ -677,7 +675,7 @@ fn a_snapshot_that_ran_a_holdout_check_refuses_every_later_check() {
     );
     assert_eq!(stdout(&execution), "copied\n");
     assert!(execution.holdout);
-    assert!(listener.accept().is_err());
+    assert!(spawn_gate::accept_tcp_std(&listener).is_err());
     assert!(snapshot.root.join("copied.txt").exists());
     assert!(!snapshot.root.join("holdout").exists());
     let later = run(&snapshot, &check(&["/bin/cat", "copied.txt"]), &limits());

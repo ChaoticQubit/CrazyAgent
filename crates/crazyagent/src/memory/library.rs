@@ -556,10 +556,11 @@ pub(crate) fn agent_writes(connection: &rusqlite::Connection) -> Result<AgentWri
 /// Saves one memory an agent gave with its `remember` tool, with the agent named as its
 /// origin: held for the owner's approval under Ask me first, else saved at once. A team
 /// agent's memory is linked, in the same transaction, to the tickets of the task it runs.
-/// The text is untrusted and checked like a hand-written note. Inputs: the engine
-/// connection, the agent's project, its team id (None for a caller that is no team agent)
-/// and label, whether the memory is app-wide and the text. Output: whether it waits for
-/// approval, or a refusal code `plain_problem` explains.
+/// The text is untrusted and checked like a hand-written note. An untrusted project's agent
+/// never saves an app-wide memory: it is kept to the project whatever scope it asks for.
+/// Inputs: the engine connection, the agent's project, its team id (None for a caller that
+/// is no team agent) and label, whether the memory is app-wide and the text. Output: whether
+/// it waits for approval, or a refusal code `plain_problem` explains.
 pub(crate) fn agent_remember(
     connection: &mut rusqlite::Connection,
     project: &ProjectId,
@@ -584,6 +585,9 @@ pub(crate) fn agent_remember(
     if !project_exists(&tx, project)? {
         return Ok(Err("memory_project_missing".into()));
     }
+    let app = app
+        && crate::trust::level(&tx, project.as_str()).map_err(error)?
+            != crate::trust::Trust::Untrusted;
     let scope = if app {
         MemoryScope::Global
     } else {

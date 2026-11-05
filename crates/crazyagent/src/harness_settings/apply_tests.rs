@@ -92,6 +92,7 @@ impl Case {
         std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700)).unwrap();
         LaunchRequest {
             harness: harness.into(),
+            trust: crate::trust::Trust::Reviewed,
             executable,
             working_dir: self.base.join("project"),
             account: AccountBinding::Subscription {

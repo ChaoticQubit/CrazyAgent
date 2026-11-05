@@ -313,12 +313,11 @@ fn page_of(text: &str, page: u16) -> Option<BasePage> {
 }
 
 /// Answers `ide.accept`: lands a change set of the IDE's project through the engine as one
-/// commit under the owner's git identity; the IDE never merges by itself. While the agent
-/// worktree holds anything but the recorded head it is `changes_agent_busy`, so the owner
-/// accepts only once the agent stopped changing what the diff shows. Inputs: the store,
-/// the owner's home, the project, the set, the head the owner reviewed and the owner's
-/// message. Output: the commit, or the conflicting files; a head that is no commit id is
-/// `changes_stale`.
+/// commit under the owner's git identity; the IDE never merges by itself. It lands the
+/// recorded head the diff shows, as the desktop's Accept does, so an agent already working
+/// on its next turn does not hold it back. Inputs: the store, the owner's home, the
+/// project, the set, the head the owner reviewed and the owner's message. Output: the
+/// commit, or the conflicting files; a head that is no commit id is `changes_stale`.
 pub(crate) fn accept(
     db: &Connection,
     owner_home: &Path,
@@ -330,7 +329,7 @@ pub(crate) fn accept(
     if !commit_id(expected_head) {
         return Err(failure("changes_stale"));
     }
-    landing::ide::agent_idle(db, project, id)?;
+    landing::ide::locate(db, project, id)?;
     landing::accept(db, owner_home, id, expected_head, Some(message))
 }
 

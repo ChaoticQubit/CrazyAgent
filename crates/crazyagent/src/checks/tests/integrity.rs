@@ -514,6 +514,34 @@ fn the_inventory_reads_a_baseline_the_trackwright_recorder_wrote_into_the_migrat
 }
 
 #[test]
+fn the_integrity_test_tables_carry_the_checks_the_hand_copy_lacked() {
+    let case = Case::new(
+        &[("tests/math.rs", MATH_BASE)],
+        &[("tests/math.rs", Some("#[test]\nfn adds() {}\n"))],
+    );
+    let run = case.seed_run(&case.base, "unit", "passed", 100, &["math::adds"], None);
+
+    for change in [
+        "finished_ms = NULL",
+        "version = 0",
+        "number = 0",
+        "passed = -1",
+    ] {
+        let refused = case
+            .db
+            .execute(
+                &format!("UPDATE tk_runs SET {change} WHERE id = ?1"),
+                params![run],
+            )
+            .unwrap_err();
+        assert!(
+            refused.to_string().contains("CHECK constraint failed"),
+            "{change}: {refused}"
+        );
+    }
+}
+
+#[test]
 fn run_base_compares_with_the_latest_finished_base_run_and_off_compares_nothing() {
     let case = Case::new(
         &[("tests/math.rs", MATH_BASE)],

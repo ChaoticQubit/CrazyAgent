@@ -24,6 +24,7 @@ mod account_profile;
 pub(super) mod accounts;
 pub(super) mod app_setup;
 pub(super) mod changes;
+pub(super) mod checks;
 mod claude_code;
 pub(super) mod cleanup;
 pub(super) mod conflict;

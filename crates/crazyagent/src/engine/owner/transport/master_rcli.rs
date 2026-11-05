@@ -210,6 +210,7 @@ impl OwnerRuntimeHandle {
             &launch.executable,
             &prepared.attempt.connection.endpoint,
             &prepared.agent_policy,
+            prepared.agent_project.trust,
             &prepared.hidden_paths,
         )?;
         if !given.text.is_empty() {

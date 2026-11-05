@@ -70,7 +70,8 @@ pub struct BatchId(String);
 
 /// Where one job of a batch stands: waiting for a free run slot, running in its snapshot,
 /// recorded as a trackwright run, or cancelled before it was recorded.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum JobState {
     Queued,
     Running,
@@ -219,15 +220,16 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
 }
 
 /// Queues one run of each check of the change set's current profile that `trigger` names,
-/// holdouts included, as one batch: every such check when `only` is empty, else just the
-/// ones it names. An agent's or master's request counts against the project's
-/// `agent_requests` per hour, and a change set whose head already has a queued or running
-/// job of a check gets no second one. Inputs: the engine connection, the change set, the
-/// trigger, the actor the engine set and the check ids. Output: the batch, or
+/// holdouts included, as one batch: every such check when `only` is empty, else just the ones
+/// it names, where an agent or master may name only checks whose `when` holds the trigger and
+/// the owner any check. Each agent's or master's request counts against its own
+/// `agent_requests` per hour in the project, and a change set whose head already has a queued
+/// or running job of a check gets no second one. Inputs: the engine connection, the change set,
+/// the trigger, the actor the engine set and the check ids. Output: the batch, or
 /// `checks_change_set_unknown`, `checks_change_set_discarded`, `checks_change_set_accepted`,
-/// `checks_no_profile`, `checks_check_unknown`, `checks_nothing_to_run`,
-/// `checks_requests_off`, `checks_rate_limited`, `checks_queue_full` or
-/// `checks_unavailable`.
+/// `checks_no_profile`, `checks_check_unknown`, `checks_not_on_request`,
+/// `checks_nothing_to_run`, `checks_requests_off`, `checks_rate_limited`, `checks_queue_full`
+/// or `checks_unavailable`.
 pub fn submit(
     db: &Connection,
     change_set: &ChangeSetId,
@@ -259,11 +261,25 @@ pub fn submit(
         {
             return Err(failure("checks_check_unknown"));
         }
-        checks
+        let chosen: Vec<&AdmittedCheck> = checks
             .iter()
             .filter(|check| named.contains(check.spec.id.as_str()))
-            .collect()
+            .collect();
+        if actor != Actor::Owner
+            && chosen
+                .iter()
+                .any(|check| !check.spec.when.contains(&trigger))
+        {
+            return Err(failure("checks_not_on_request"));
+        }
+        chosen
     };
+    assert!(
+        actor == Actor::Owner
+            || chosen
+                .iter()
+                .all(|check| check.spec.when.contains(&trigger))
+    );
     let now = now_ms();
     if trigger == Trigger::OnRequest && actor != Actor::Owner {
         let allowed = settings::effective(&tx, &project)?.agent_requests;
@@ -273,9 +289,9 @@ pub fn submit(
         let asked: i64 = tx
             .query_row(
                 "SELECT COUNT(DISTINCT batch) FROM check_jobs
-                  WHERE project = ?1 AND trigger = 'on_request' AND actor <> 'owner'
-                    AND queued_ms > ?2",
-                params![project.as_str(), now - HOUR_MS],
+                  WHERE project = ?1 AND trigger = 'on_request' AND actor = ?2
+                    AND queued_ms > ?3",
+                params![project.as_str(), actor_text(actor), now - HOUR_MS],
                 |row| row.get(0),
             )
             .map_err(unavailable)?;
@@ -442,13 +458,19 @@ fn end(db: &Connection, id: i64, reason: &str) -> Result<Job, CheckRefusal> {
             params![id, reason, now_ms()],
         )
         .map_err(unavailable)?;
-    assert_eq!(ended, 1);
-    job(db, id)
+    assert!(ended <= 1);
+    let stored = job(db, id)?;
+    assert!(matches!(
+        stored.state,
+        JobState::Cancelled | JobState::Recorded
+    ));
+    Ok(stored)
 }
 
 /// Runs the oldest queued job, while fewer than the project's `parallel` jobs run, to its
-/// record: the snapshot of the change set's head, the confined run under the network
-/// ceiling `remotes`, the integrity assessment, then the run, its results and its source,
+/// record: the snapshot of the change set's head, the confined run under the project's
+/// trust ceiling (`off` for an untrusted project or an unreadable level, `remotes` for a
+/// reviewed one), the integrity assessment, then the run, its results and its source,
 /// policy and integrity in one transaction, and the snapshot removed or kept per
 /// `keep_failed_snapshots`. A job whose change set moved on or was discarded before it ran
 /// is cancelled with `checks_change_set_moved` or `checks_change_set_discarded`; one that
@@ -484,17 +506,31 @@ struct Queued {
 /// was queued.
 pub fn after_turn(db: &Connection, change_set: &ChangeSetId) -> Option<BatchId> {
     let batch = submit(db, change_set, Trigger::TurnEnd, Actor::Owner, &[]).ok()?;
-    let runtime = db
+    start(db, change_set);
+    Some(batch)
+}
+
+/// Starts the project's `parallel` check runners in the background, each on its own
+/// connection to the same `engine.db`, running queued jobs until none can start. Inputs:
+/// the engine connection on `<runtime>/engine.db` and the change set whose project sets
+/// `parallel`. Output: how many runners started, 0 when the database has no absolute
+/// folder or no thread could start.
+pub fn start(db: &Connection, change_set: &ChangeSetId) -> u8 {
+    let Some(runtime) = db
         .path()
         .map(Path::new)
         .and_then(Path::parent)
-        .filter(|runtime| runtime.is_absolute())?
-        .to_path_buf();
+        .filter(|runtime| runtime.is_absolute())
+        .map(Path::to_path_buf)
+    else {
+        return 0;
+    };
     let parallel = landing::change_set(db, change_set)
         .ok()
         .flatten()
         .and_then(|(project, _)| settings::effective(db, &project).ok())
         .map_or(1, |settings| settings.parallel.max(1));
+    let mut started = 0;
     for _ in 0..parallel {
         let runtime = runtime.clone();
         let spawned = std::thread::Builder::new()
@@ -508,8 +544,10 @@ pub fn after_turn(db: &Connection, change_set: &ChangeSetId) -> Option<BatchId> 
         if spawned.is_err() {
             break;
         }
+        started += 1;
     }
-    Some(batch)
+    assert!(started <= parallel);
+    started
 }
 
 /// What one pick of the queue found: nothing to start, a job it cancelled at once, or a
@@ -654,7 +692,7 @@ fn run_claimed(db: &Connection, runtime: &Path, claimed: Claimed) -> Result<Job,
         timeout: Duration::from_secs(u64::from(claimed.check.spec.timeout_s)),
         output_cap: runner::OUTPUT_CAP,
         report_cap: runner::REPORT_CAP,
-        network_ceiling: NetworkMode::Remotes,
+        network_ceiling: network_ceiling(db, &claimed.project),
         remotes: Vec::new(),
     };
     let cancel = AtomicBool::new(false);
@@ -681,6 +719,19 @@ fn run_claimed(db: &Connection, runtime: &Path, claimed: Claimed) -> Result<Job,
         Ok(_) => job(db, claimed.id),
         Err(refusal) => end(db, claimed.id, &refusal.0),
     }
+}
+
+/// The widest network any check of a project gets: the project's trust level's
+/// `check_network`, so an untrusted project's checks run with network off whatever its
+/// profile says (threat model N1), and `off` when the level cannot be read. Inputs: the
+/// engine connection and the project. Output: the ceiling.
+fn network_ceiling(db: &Connection, project: &ProjectId) -> NetworkMode {
+    let Ok(trust) = crate::trust::level(db, project.as_str()) else {
+        return NetworkMode::Off;
+    };
+    let ceiling = crate::trust::Enforcement::for_level(trust).check_network;
+    assert!(trust == crate::trust::Trust::Reviewed || ceiling == NetworkMode::Off);
+    ceiling
 }
 
 fn record_run(

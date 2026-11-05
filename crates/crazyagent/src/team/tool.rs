@@ -69,6 +69,7 @@ pub const RECORD_TOOL: &str = "record_answer";
 /// question for the owner and `record_answer` records the owner's chat message that
 /// answered one of the master's own. A sub-agent's server leaves `record_answer` out.
 pub const QUESTION_TOOLS: [&str; 2] = [ASK_TOOL, RECORD_TOOL];
+pub use checks::{CHECKS_RESULTS_TOOL, CHECKS_RUN_TOOL, CHECKS_TOOLS};
 pub const MAILBOX_FOLDER: &str = "crazyagent-team-calls";
 pub const CALLS_PER_TICK_MAX: usize = 8;
 pub const CALLS_PENDING_MAX: usize = 16;
@@ -111,6 +112,8 @@ const RECALL_INVALID: &str = "Not searched: give plain words on one line of up t
 const CALL_INVALID: &str = "Not done: the engine could not read this call. Call the tool again.";
 const SWITCHED_OFF: &str = "Not done: the owner switched this tool off.";
 const ASK_INVALID: &str = "Not asked: give one plain question of up to 2048 bytes with no hidden characters, at most 6 distinct one-line options of up to 200 bytes, and if you choose them a recommended answer (one of the options, or up to 200 bytes when there are none) and context of up to 4096 bytes.";
+const CHECKS_RUN_INVALID: &str = "Not run: give checks as a list of up to 24 distinct check ids of the project's profile, or leave it out for every check the profile runs on request.";
+const CHECKS_RESULTS_INVALID: &str = "Not read: checks_results takes no arguments.";
 const RECORD_INVALID: &str = "Not recorded: give the question number, the version you read (0 while it waits) and the number of the owner's chat message that answers it.";
 const ASK_KEYS: [&str; 4] = ["question", "options", "recommended", "context"];
 const RECORD_KEYS: [&str; 3] = ["question", "version", "owner_turn"];
@@ -166,9 +169,10 @@ const _: () = assert!(
 /// verbs `start_work`, `inspect_work`, `update_work`, `transfer_work` and `finish_work`,
 /// the lead verbs `spawn`, `stop` and `merge`, and `sessions`, `session`, `remember` and
 /// `recall` over past conversations and saved memory, and `ask` and `record_answer` for
-/// the owner's questions log (DEC-099 A), and the `ticket_` tools that each run one
-/// tracker operation (TI-3). The engine names the caller from the mailbox it read the
-/// call from, never from the call.
+/// the owner's questions log (DEC-099 A), the `ticket_` tools that each run one tracker
+/// operation (TI-3), and `checks_run` and `checks_results` for the project's checks on the
+/// caller's own change set (V3b VE-6). The engine names the caller from the mailbox it read
+/// the call from, never from the call.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "tool", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Call {
@@ -242,11 +246,16 @@ pub enum Call {
         op: trackwright_core::model::OpKind,
         arguments: Value,
     },
+    ChecksRun {
+        checks: Vec<String>,
+    },
+    ChecksResults,
 }
 
 impl Call {
     /// The tool this call came from, the name the owner's tool switches use. Takes the
-    /// call. Returns one of `TEAM_TOOLS` or `QUESTION_TOOLS`, or a ticket tool's name.
+    /// call. Returns one of `TEAM_TOOLS`, `QUESTION_TOOLS` or `CHECKS_TOOLS`, or a ticket tool's
+    /// name.
     pub fn name(&self) -> &'static str {
         let name = match self {
             Self::StartWork { .. } => START_WORK_TOOL,
@@ -266,11 +275,14 @@ impl Call {
             Self::Ticket { op, .. } => {
                 tracker::tool_name(*op).expect("a ticket call names an offered operation")
             }
+            Self::ChecksRun { .. } => CHECKS_RUN_TOOL,
+            Self::ChecksResults => CHECKS_RESULTS_TOOL,
         };
         assert!(
             TEAM_TOOLS.contains(&name)
                 || QUESTION_TOOLS.contains(&name)
                 || name.starts_with(tracker::TOOL_PREFIX)
+                || CHECKS_TOOLS.contains(&name)
         );
         name
     }
@@ -364,9 +376,11 @@ pub fn serve_live(
 /// Says whether every name is one of the team tools, as the engine subcommands check the
 /// tools they are told to leave out. Takes the names. Returns the answer.
 pub fn known_tools(names: &[String]) -> bool {
-    names.len() <= TEAM_TOOLS.len() + QUESTION_TOOLS.len()
+    names.len() <= TEAM_TOOLS.len() + QUESTION_TOOLS.len() + CHECKS_TOOLS.len()
         && names.iter().all(|name| {
-            TEAM_TOOLS.contains(&name.as_str()) || QUESTION_TOOLS.contains(&name.as_str())
+            TEAM_TOOLS.contains(&name.as_str())
+                || QUESTION_TOOLS.contains(&name.as_str())
+                || CHECKS_TOOLS.contains(&name.as_str())
         })
 }
 
@@ -467,8 +481,9 @@ fn answer(request: &Value, drop: &Path) -> Option<Value> {
     Some(json!({"jsonrpc": "2.0", "id": id, "result": result}))
 }
 
-/// The team tools a server lists, in `BUILTIN_TOOLS` order, without the ones left out,
-/// then the ticket tools. Takes the tools left out. Returns the MCP `tools/list` result.
+/// The team tools a server lists, in `BUILTIN_TOOLS` order, then the questions and checks
+/// tools, without the ones left out, then the ticket tools. Takes the tools left out.
+/// Returns the MCP `tools/list` result.
 fn team_tools(off: &[String]) -> Value {
     let on = |name: &str| !off.iter().any(|tool| tool == name);
     let mut tools: Vec<Value> = TEAM_TOOLS
@@ -482,10 +497,19 @@ fn team_tools(off: &[String]) -> Value {
     if on(RECORD_TOOL) {
         tools.push(record_tool());
     }
+    if on(CHECKS_RUN_TOOL) {
+        tools.push(checks::run_listing());
+    }
+    if on(CHECKS_RESULTS_TOOL) {
+        tools.push(checks::results_listing());
+    }
     tools.extend(tracker::tools());
     assert!(
         tools.len()
-            <= TEAM_TOOLS.len() + QUESTION_TOOLS.len() + trackwright_core::catalog::catalog().len()
+            <= TEAM_TOOLS.len()
+                + QUESTION_TOOLS.len()
+                + CHECKS_TOOLS.len()
+                + trackwright_core::catalog::catalog().len()
     );
     json!({ "tools": tools })
 }
@@ -875,6 +899,8 @@ pub fn live_call(name: &str, arguments: Option<&Value>) -> Option<Result<Call, &
         },
         ASK_TOOL => ask_call(arguments).ok_or(ASK_INVALID),
         RECORD_TOOL => record_call(arguments).ok_or(RECORD_INVALID),
+        CHECKS_RUN_TOOL => checks::run_call(arguments).ok_or(CHECKS_RUN_INVALID),
+        CHECKS_RESULTS_TOOL => checks::results_call(arguments).ok_or(CHECKS_RESULTS_INVALID),
         _ => return tracker::call(name, arguments),
     })
 }
@@ -1049,6 +1075,8 @@ pub fn checked(call: Call) -> Result<Call, &'static str> {
             }
             arguments.clone()
         }
+        Call::ChecksRun { checks } => json!({"checks": checks}),
+        Call::ChecksResults => json!({}),
     };
     let again = live_call(call.name(), Some(&arguments)).expect("every call names a team tool")?;
     if again != call {
@@ -1693,6 +1721,7 @@ fn remove_drop(drop: &Path) {
     }
 }
 
+pub mod checks;
 pub mod questions;
 pub mod tracker;
 

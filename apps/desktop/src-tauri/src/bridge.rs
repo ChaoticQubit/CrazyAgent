@@ -21,6 +21,7 @@ mod account_setup;
 mod accounts;
 mod agents;
 mod changes;
+pub mod checks;
 mod cleanup;
 mod coord;
 mod coord_questions;
@@ -45,8 +46,11 @@ pub mod questions;
 mod queue;
 mod recovery;
 mod scheduling;
+pub mod scorecard;
 mod team;
 pub mod terminal;
+pub mod ticket_settings;
+pub mod tracker;
 mod usage;
 pub use account_profile::{AccountProfileView, ConfiguredAccountPlan};
 pub use account_setup::ManagedAccountPlan;
@@ -650,6 +654,9 @@ impl NativeBridge {
                 Some(project_id.as_str().to_owned()),
                 None,
             ),
+            OwnerMutation::SetProjectTrust { project_id, .. } => {
+                ("project_trust", Some(project_id.as_str().to_owned()), None)
+            }
             OwnerMutation::Team { action } => (
                 "team",
                 action.project().map(|project| project.as_str().to_owned()),

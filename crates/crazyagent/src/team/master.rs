@@ -999,6 +999,12 @@ fn answer(
             version,
             owner_turn,
         } => record_answer(connection, project, question, version, owner_turn)?,
+        call @ (Call::ChecksRun { .. } | Call::ChecksResults) => tool::checks::serve(
+            connection,
+            project,
+            crate::checks::Actor::Master(master),
+            call,
+        ),
         call => return answer_work(connection, answering, master, true, call),
     })
 }
@@ -1042,6 +1048,12 @@ pub(super) fn answer_sub(
         call @ (Call::Ask { .. } | Call::RecordAnswer { .. }) => {
             tool::questions::agent_ask(connection, &answering.stored.project_id, agent, call)
         }
+        call @ (Call::ChecksRun { .. } | Call::ChecksResults) => tool::checks::serve(
+            connection,
+            &answering.stored.project_id,
+            crate::checks::Actor::Agent(agent),
+            call,
+        ),
         Call::Sessions { .. }
         | Call::Session { .. }
         | Call::Remember { .. }

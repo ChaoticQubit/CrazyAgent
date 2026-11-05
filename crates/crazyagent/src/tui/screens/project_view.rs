@@ -84,6 +84,7 @@ pub(in crate::tui) fn project_screen(
         Tab::Agents => agents(screen, width, content, room, look),
         Tab::Changes => screen.changes.rows(content, room, screen.now_ms, look),
         Tab::Questions => screen.questions.rows(content, room, screen.offset, look),
+        Tab::Tests => screen.tests.rows(content, room, look),
         Tab::Context => {
             if screen.reading
                 && width < 100
@@ -301,6 +302,29 @@ pub(in crate::tui) fn project_screen(
         return Screen {
             rows,
             cursor,
+            crumbs,
+            help,
+            status: header_status(running, look),
+        };
+    }
+    if let Some(edit) = &screen.trust_edit {
+        let body = edit.body(look, body_height.saturating_sub(4));
+        rows = modal(&rows, width, 62, "Repository trust", body, 2, look);
+        help = if edit.busy {
+            vec![("Esc", "Close")]
+        } else if edit.confirm_raise {
+            vec![("y", "Raise trust"), ("n", "Keep")]
+        } else {
+            vec![
+                ("Left/Right", "Change"),
+                ("Up/Down", "Scroll"),
+                ("Enter", "Save"),
+                ("Esc", "Cancel"),
+            ]
+        };
+        return Screen {
+            rows,
+            cursor: None,
             crumbs,
             help,
             status: header_status(running, look),
@@ -2095,6 +2119,14 @@ fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) ->
                 look.fg,
             )
             .push("   c Agent access", look.muted),
+        ),
+        entry(
+            "Trust",
+            Row::of(
+                super::project_trust::summary(screen.repository_trust.as_ref()),
+                look.fg,
+            )
+            .push("   k Repository trust", look.muted),
         ),
         entry(
             "Process",

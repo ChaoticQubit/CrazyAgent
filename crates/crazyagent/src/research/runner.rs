@@ -790,18 +790,26 @@ impl ResearchRunner {
         private_directory(&agent)?;
         let tmp = agent.join("tmp");
         private_directory(&tmp)?;
+        let trust = jobs
+            .trust(&project)
+            .map_err(|_| RunError::Invalid("project repository trust unreadable".into()))?;
+        let enforcement = crate::trust::Enforcement::for_level(trust);
+        let open = job.tools && !enforcement.model_endpoints_only;
         let policy = jobs
             .agent_policy(&project)
             .map_err(|_| RunError::Invalid("project agent access unreadable".into()))?;
         if let Some(reason) = policy.access.unavailable() {
             return Err(RunError::Invalid(reason.into()));
         }
-        let network = job_network(&policy, job.tools, model_remote(account)?);
+        if let Some((line, _)) = enforcement.refusal(policy.access) {
+            return Err(RunError::Invalid(line.into()));
+        }
+        let network = job_network(&policy, open, model_remote(account)?);
         let unconfined = policy.access == AgentAccess::Full;
         let homes = ToolHomes::owner()?;
         let scratch = toolchains::ScopedTmp::make(&home)?;
         toolchains::prepare_cargo_home(&home, &homes)?;
-        let kept = match (&self.settings, job.tools) {
+        let kept = match (&self.settings, open) {
             (Some((global, local)), true) => crate::config::resolve_config(global, local)
                 .ok()
                 .and_then(|config| config.settings.model_access)
@@ -828,6 +836,9 @@ impl ResearchRunner {
         ensure_repository(&root, &tmp)?;
         add_worktree(&sandbox, &profile, &worktree)?;
         let mut sandbox = sandbox.confine_to_worktree(&worktree)?;
+        if enforcement.repo_config_as_text {
+            sandbox = sandbox.hide_repository_config(&root)?;
+        }
         let hidden = jobs
             .hidden_paths(&project)
             .map_err(|_| RunError::Invalid("project hidden folders unreadable".into()))?;
@@ -837,6 +848,9 @@ impl ResearchRunner {
         for folder in &hidden {
             sandbox = sandbox.hide(folder)?;
         }
+        assert!(
+            !enforcement.model_endpoints_only || !matches!(sandbox.network(), SandboxNetwork::Open)
+        );
         sandbox.install(&profile)?;
         drop(setup);
         still_held(jobs, job)?;
@@ -850,6 +864,7 @@ impl ResearchRunner {
             let (binding, model) = pane_account(account, &home);
             let request = LaunchRequest {
                 harness: harness.id().to_owned(),
+                trust,
                 executable: executable.to_path_buf(),
                 working_dir: worktree.clone(),
                 account: binding,
@@ -889,7 +904,15 @@ impl ResearchRunner {
         let (output, stdout_log) = match harness {
             ResearchHarness::Codex => {
                 let output = tmp.join("report.md");
-                codex_arguments(&mut launch, &worktree, &output, &home, job.tools, account)?;
+                codex_arguments(
+                    &mut launch,
+                    &worktree,
+                    &output,
+                    &home,
+                    job.tools,
+                    trust,
+                    account,
+                )?;
                 (output, "events.jsonl")
             }
             ResearchHarness::ClaudeCode => {
@@ -1275,6 +1298,9 @@ impl ResearchRunner {
         if fs::symlink_metadata(&agent).is_ok() {
             return Err(RunError::Invalid(RUN_NAME_USED.into()));
         }
+        let trust = ResearchJobs::open(&self.database)?
+            .folder_trust(run.project, &folder)
+            .map_err(|_| RunError::Invalid("project repository trust unreadable".into()))?;
         let lease = match run.account {
             ResearchAccount::ManagedCodex { connection, .. }
             | ResearchAccount::ManagedClaude { connection, .. } => {
@@ -1333,6 +1359,13 @@ impl ResearchRunner {
         if let Some(parent) = executable.canonicalize()?.parent() {
             sandbox = sandbox.allow_read(parent)?;
         }
+        if crate::trust::Enforcement::for_level(trust).repo_config_as_text {
+            sandbox = sandbox.hide_repository_config(&folder)?;
+        }
+        assert_eq!(
+            sandbox.hides_repository_config(),
+            trust == crate::trust::Trust::Untrusted
+        );
         let hidden = match run.project {
             Some(project) => ResearchJobs::open(&self.database)?
                 .hidden_paths(project)
@@ -1352,7 +1385,15 @@ impl ResearchRunner {
         let (output, stdout_log) = match harness {
             ResearchHarness::Codex => {
                 let output = tmp.join("answer.md");
-                codex_arguments(&mut command, &folder, &output, &home, false, run.account)?;
+                codex_arguments(
+                    &mut command,
+                    &folder,
+                    &output,
+                    &home,
+                    false,
+                    trust,
+                    run.account,
+                )?;
                 (output, "events.jsonl")
             }
             ResearchHarness::ClaudeCode => {
@@ -1584,6 +1625,7 @@ fn codex_arguments(
     output: &Path,
     home: &Path,
     tools: bool,
+    trust: crate::trust::Trust,
     account: &ResearchAccount,
 ) -> Result<(), RunError> {
     command
@@ -1646,6 +1688,13 @@ fn codex_arguments(
         ResearchAccount::AnthropicEndpoint { .. } | ResearchAccount::ManagedClaude { .. } => {
             return Err(RunError::Invalid("account does not fit Codex".into()));
         }
+    }
+    if trust == crate::trust::Trust::Untrusted {
+        let folder = crate::harnesses::launch::codex_project(trust, worktree)
+            .ok_or_else(|| RunError::Invalid("launch_working_dir_unavailable".into()))?;
+        command
+            .args(["-c", crate::harnesses::launch::CODEX_NO_PROJECT_DOCS, "-c"])
+            .arg(folder);
     }
     command.arg("-");
     Ok(())
@@ -3048,6 +3097,7 @@ mod tests {
                 Path::new("/work/report.md"),
                 Path::new("/home"),
                 tools,
+                crate::trust::Trust::Reviewed,
                 &account,
             )
             .unwrap();
@@ -3062,6 +3112,53 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A research agent of an untrusted project reads no project docs and Codex names its
+    /// worktree untrusted, with the prompt still last; a reviewed one gets neither setting.
+    #[test]
+    fn an_untrusted_research_codex_reads_no_project_docs_and_names_its_worktree_untrusted() {
+        let account = ResearchAccount::ManagedCodex {
+            connection: codex_connection(),
+            model: None,
+        };
+        let args = |trust: crate::trust::Trust| {
+            let mut command = Command::new("/usr/bin/true");
+            codex_arguments(
+                &mut command,
+                Path::new("/work/tree"),
+                Path::new("/work/report.md"),
+                Path::new("/home"),
+                true,
+                trust,
+                &account,
+            )
+            .unwrap();
+            command
+                .get_args()
+                .map(|argument| argument.to_str().unwrap().to_owned())
+                .collect::<Vec<_>>()
+        };
+        let untrusted = args(crate::trust::Trust::Untrusted);
+        for setting in [
+            "project_doc_max_bytes=0",
+            "projects={\"/work/tree\"={trust_level=\"untrusted\"}}",
+        ] {
+            assert!(
+                untrusted
+                    .windows(2)
+                    .any(|pair| pair[0] == "-c" && pair[1] == setting),
+                "{setting}: {untrusted:?}"
+            );
+        }
+        assert_eq!(untrusted.last().map(String::as_str), Some("-"));
+        let reviewed = args(crate::trust::Trust::Reviewed);
+        assert!(
+            reviewed.iter().all(|argument| {
+                !argument.contains("project_doc_max_bytes") && !argument.contains("trust_level")
+            }),
+            "{reviewed:?}"
+        );
     }
 
     /// A research job's lease names the job as a holder of its account in the agent

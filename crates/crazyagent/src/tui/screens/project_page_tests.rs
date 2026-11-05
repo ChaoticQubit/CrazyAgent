@@ -143,6 +143,7 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                         SetupQuery::ReadPaths { .. } => "read paths",
                         SetupQuery::HiddenPaths { .. } => "hidden paths",
                         SetupQuery::AgentPolicy { .. } => "agent policy",
+                        SetupQuery::RepositoryTrust { .. } => "repository trust",
                         SetupQuery::CoordQuestions { .. } => "coord questions",
                     });
                     connection.project_setup(query).unwrap();

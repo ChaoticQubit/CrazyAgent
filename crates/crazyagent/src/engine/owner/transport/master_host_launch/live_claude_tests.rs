@@ -42,6 +42,7 @@ async fn a_real_claude_master_turn_is_signed_in_inside_the_master_sandbox() {
         repository: &repository,
         worktree: &worktree,
         policy: &AgentPolicy::default(),
+        trust: crate::trust::Trust::Reviewed,
         hidden: &[],
     };
     let budget = ResourceBudget::unit();
@@ -171,6 +172,7 @@ async fn a_real_claude_master_with_tools_on_works_in_its_worktree_and_delegates(
         repository: &repository,
         worktree: &worktree,
         policy: &AgentPolicy::default(),
+        trust: crate::trust::Trust::Reviewed,
         hidden: &[],
     };
     let budget = ResourceBudget {
@@ -311,6 +313,7 @@ async fn a_real_claude_master_asked_for_a_background_task_ends_its_turn_at_the_r
         repository: &repository,
         worktree: &worktree,
         policy: &AgentPolicy::default(),
+        trust: crate::trust::Trust::Reviewed,
         hidden: &[],
     };
     let budget = ResourceBudget {
@@ -482,6 +485,7 @@ async fn start_detaching_master(base: &Path, name: &str) -> DetachingMaster {
         repository: &repository,
         worktree: &worktree,
         policy: &AgentPolicy::default(),
+        trust: crate::trust::Trust::Reviewed,
         hidden: &[],
     };
     let budget = ResourceBudget {

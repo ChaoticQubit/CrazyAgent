@@ -90,6 +90,10 @@ async fn read(screen: &mut ProjectScreen, controller: &mut OwnerController, now_
                 .project_agent_policy(project)
                 .await
                 .map(SetupView::AgentPolicy),
+            SetupQuery::RepositoryTrust { project } => controller
+                .project_trust(project)
+                .await
+                .map(|view| SetupView::RepositoryTrust(Box::new(view))),
             other => panic!("unexpected read {other:?}"),
         };
         screen.apply(&query, result.map_err(|error| error.0));

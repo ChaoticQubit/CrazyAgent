@@ -158,6 +158,7 @@ fn a_real_codex_app_takes_coord_messages_through_its_app_server_idle_and_busy() 
         unconfined: false,
         git_identity: None,
         limits: LaunchLimits::default(),
+        trust: crazyagent::trust::Trust::Reviewed,
     };
     let built = command(
         &request,

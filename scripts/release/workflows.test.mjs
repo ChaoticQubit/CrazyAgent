@@ -353,6 +353,7 @@ test("macOS CI provisions the pinned VSCodium build the IDE server tests need fr
   assert.match(step, /\n\s+cp "\$work\/vscodium\.tgz" "\$prefix\/vscodium\.tgz\.\$\$"\n\s+mv "\$prefix\/vscodium\.tgz\.\$\$" "\$prefix\/vscodium\.tgz"\n/);
   assert.match(step, /build="\.local-state\/ide-cache\/vscodium-\$IDE_VERSION"/);
   assert.match(step, /\n\s+tar -xzf "\$work\/vscodium\.tgz" -C "\$build"\n\s+test -f "\$build\/out\/server-main\.js"/);
+  assert.match(step, /\n\s+test -f "\$build\/out\/server-main\.js"\n\s+find "\$RUNNER_TOOL_CACHE\/vscodium-reh-web" -mindepth 1 -maxdepth 1 ! -name "\$IDE_VERSION" -exec rm -rf \{\} \+$/, "once the pinned build is provisioned, the tool cache drops the archives of every other version");
 });
 
 /**

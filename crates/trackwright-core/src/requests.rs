@@ -1,5 +1,5 @@
 use crate::catalog::{
-    self, CURSOR_BYTES_MAX, FieldSpec, FieldType, KEY_BYTES_MAX, KEYS_MAX, PATH_BYTES_MAX,
+    self, CURSOR_BYTES_MAX, FieldSpec, FieldType, KEY_BYTES_MAX, KEYS_MAX, PATH_BYTES_MAX, Shape,
     WORD_BYTES_MAX,
 };
 use crate::model::{
@@ -8,7 +8,9 @@ use crate::model::{
     VersionStatus, codes,
 };
 use crate::reply::{REPLY_BYTES_DEFAULT, REPLY_BYTES_MAX, Reply};
+use crate::runs::{IntegrityRef, NewResult, PolicyRef, RunEnd, SourceRef, StopReason};
 use crate::store::{self, StoreError};
+use crate::tests_model::{CaseKind, CaseStatus, PlanStatus, TestId, Verdict};
 use crate::text;
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde_json::{Map, Value, json};
@@ -33,12 +35,14 @@ pub(crate) const REQUESTS_TRIM: &str = "DELETE FROM tk_requests WHERE (actor, re
 pub(crate) enum Arg {
     Project(ProjectKey),
     Ticket(ShortId),
+    Test(TestId),
     Actor(Actor),
     Text(String),
     Integer(i64),
     Choice(&'static str),
     Flag(bool),
     Keys(Vec<String>),
+    Json(Value),
 }
 
 impl Arg {
@@ -46,12 +50,14 @@ impl Arg {
         match self {
             Arg::Project(key) => json!(key.as_str()),
             Arg::Ticket(id) => json!(id.to_string()),
+            Arg::Test(id) => json!(id.to_string()),
             Arg::Actor(actor) => json!(actor.as_str()),
             Arg::Text(text) => json!(text),
             Arg::Integer(value) => json!(value),
             Arg::Choice(name) => json!(name),
             Arg::Flag(value) => json!(value),
             Arg::Keys(keys) => json!(keys),
+            Arg::Json(value) => value.clone(),
         }
     }
 }
@@ -75,6 +81,24 @@ impl<'a> FromArg<'a> for &'a ShortId {
     fn from_arg(arg: &'a Arg) -> Option<Self> {
         match arg {
             Arg::Ticket(id) => Some(id),
+            _ => None,
+        }
+    }
+}
+
+impl<'a> FromArg<'a> for &'a TestId {
+    fn from_arg(arg: &'a Arg) -> Option<Self> {
+        match arg {
+            Arg::Test(id) => Some(id),
+            _ => None,
+        }
+    }
+}
+
+impl<'a> FromArg<'a> for &'a Value {
+    fn from_arg(arg: &'a Arg) -> Option<Self> {
+        match arg {
+            Arg::Json(value) => Some(value),
             _ => None,
         }
     }
@@ -150,7 +174,13 @@ choice_arg!(
     EvidenceResult,
     VersionStatus,
     PolicyKey,
-    OpKind
+    OpKind,
+    CaseKind,
+    CaseStatus,
+    PlanStatus,
+    Verdict,
+    RunEnd,
+    StopReason
 );
 
 /// One request's checked arguments in catalog order, the request id kept apart.
@@ -168,6 +198,15 @@ impl Args {
             .fields
             .iter()
             .any(|field| field.name == name)
+    }
+
+    /// The catalog type of one field. Input: the name. Output: its type, or None when the
+    /// operation has no field of that name.
+    pub(crate) fn field_type(&self, name: &str) -> Option<FieldType> {
+        let fields = catalog::spec(self.kind).fields;
+        let found = fields.iter().find(|field| field.name == name);
+        assert!(found.is_none() || self.has_field(name));
+        found.map(|field| field.ty)
     }
 
     /// Reads an optional field. Input: the name, a field of this operation. Output: its
@@ -333,6 +372,11 @@ fn checked(field: &FieldSpec, value: &Value) -> Result<Arg, Refusal> {
     match field.ty {
         FieldType::Project => shaped(ProjectKey::new(string(value, &invalid)?).map(Arg::Project)),
         FieldType::Ticket => shaped(ShortId::parse(string(value, &invalid)?).map(Arg::Ticket)),
+        FieldType::Test(object) => {
+            shaped(TestId::parse_of(string(value, &invalid)?, object).map(Arg::Test))
+        }
+        FieldType::Line { bytes_max } => line(value, bytes_max, &invalid),
+        FieldType::Shape(shape) => whole(value, shape, &invalid),
         FieldType::Actor => shaped(Actor::new(string(value, &invalid)?).map(Arg::Actor)),
         FieldType::Text(kind) => {
             let text = string(value, &invalid)?;
@@ -371,6 +415,47 @@ fn checked(field: &FieldSpec, value: &Value) -> Result<Arg, Refusal> {
         }
         FieldType::Keys => keys(value, &invalid),
     }
+}
+
+fn line(
+    value: &Value,
+    bytes_max: usize,
+    invalid: &dyn Fn(&str) -> Refusal,
+) -> Result<Arg, Refusal> {
+    assert!(bytes_max > 0);
+    let text = string(value, invalid)?;
+    if text.trim().is_empty() || text.len() > bytes_max {
+        return Err(invalid(&format!("is 1 to {bytes_max} bytes")));
+    }
+    if text.contains(['\n', '\r']) || text::hidden(text) {
+        return Err(invalid("is one line of visible characters"));
+    }
+    assert!(!text.is_empty());
+    Ok(Arg::Text(text.to_owned()))
+}
+
+fn whole(value: &Value, shape: Shape, invalid: &dyn Fn(&str) -> Refusal) -> Result<Arg, Refusal> {
+    let bytes_max = shape.bytes_max();
+    let json = value.to_string();
+    if json.len() > bytes_max {
+        return Err(invalid(&format!("is at most {bytes_max} bytes of JSON")));
+    }
+    let read = |ok: bool, what: &str| if ok { Ok(()) } else { Err(invalid(what)) };
+    match shape {
+        Shape::Steps => read(
+            serde_json::from_str::<Vec<String>>(&json).is_ok(),
+            "is an array of step texts",
+        )?,
+        Shape::Results => read(
+            serde_json::from_str::<Vec<NewResult>>(&json).is_ok(),
+            "is an array of results with name and outcome",
+        )?,
+        Shape::Source => SourceRef::parse(&json).map(|_| ())?,
+        Shape::Policy => PolicyRef::parse(&json).map(|_| ())?,
+        Shape::Integrity => IntegrityRef::parse(&json).map(|_| ())?,
+    }
+    assert!(value.is_array() || value.is_object());
+    Ok(Arg::Json(value.clone()))
 }
 
 fn string<'v>(value: &'v Value, invalid: &dyn Fn(&str) -> Refusal) -> Result<&'v str, Refusal> {

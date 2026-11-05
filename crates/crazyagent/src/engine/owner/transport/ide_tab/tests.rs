@@ -155,6 +155,7 @@ const NOT_OPEN: &[&str] = &[
     "ide_events_lagged",
     "ide_extension_ask_missing",
     "ide_extension_decide_outcome_unknown",
+    "ide_extension_request_outcome_unknown",
     "ide_extensions_full",
     "ide_git_outcome_unknown",
     "ide_memory_decide_outcome_unknown",
@@ -168,6 +169,7 @@ const NOT_OPEN: &[&str] = &[
     "ide_server_group_unrecorded",
     "ide_session_required",
     "ide_session_taken",
+    "ide_show_all_agents_outcome_unknown",
     "ide_terminal_unavailable",
 ];
 

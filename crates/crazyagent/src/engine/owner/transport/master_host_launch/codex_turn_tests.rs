@@ -155,6 +155,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         repository: &repository,
         worktree: &worktree,
         policy: &AgentPolicy::default(),
+        trust: crate::trust::Trust::Reviewed,
         hidden: &[],
     };
     let MasterTurnLaunch {
@@ -213,6 +214,7 @@ fn a_codex_master_with_tools_on_runs_in_its_own_home_with_only_the_engine_delega
         repository: &repository,
         worktree: &worktree,
         policy: &AgentPolicy::default(),
+        trust: crate::trust::Trust::Reviewed,
         hidden: &[],
     };
     let MasterTurnLaunch {

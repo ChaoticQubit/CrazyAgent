@@ -33,6 +33,8 @@
     "allow-desktop-set-project-read-paths",
     "allow-desktop-project-agent-policy",
     "allow-desktop-set-project-agent-policy",
+    "allow-desktop-project-trust",
+    "allow-desktop-set-project-trust",
     "allow-desktop-project-files",
     "allow-desktop-team-status",
     "allow-desktop-team-message",
@@ -198,6 +200,10 @@
     "allow-desktop-usage-report",
     "allow-desktop-usage-refresh",
     "allow-desktop-usage-set-reset",
+    "allow-desktop-scorecard",
+    "allow-desktop-scorecard-set",
+    "allow-desktop-tests-read",
+    "allow-desktop-checks",
     "allow-desktop-ide-extension-asks",
     "allow-desktop-ide-extension-approve",
     "allow-desktop-ide-extension-decline",
@@ -250,6 +256,12 @@
     "allow-desktop-link-cli",
     "allow-desktop-engine-versions",
     "allow-desktop-restart-engine",
-    "allow-desktop-ide-focus"
+    "allow-desktop-ide-focus",
+    "allow-desktop-tracker-op",
+    "allow-desktop-tracker-projects",
+    "allow-desktop-tracker-attach",
+    "allow-desktop-tracker-open-change-set",
+    "allow-desktop-ticket-settings",
+    "allow-desktop-save-ticket-settings"
   ]
 }

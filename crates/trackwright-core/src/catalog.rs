@@ -4,7 +4,15 @@ use crate::model::{
     TicketStatus, VERSIONS_PER_PROJECT_MAX, VersionStatus, codes,
 };
 use crate::reply::{API, NEXT_MAX, REPLY_BYTES_DEFAULT, REPLY_BYTES_MAX};
-use crate::text::{self, TextField};
+use crate::runs::{RESULT_MESSAGE_INPUT_BYTES_MAX, RunEnd, SOURCE_JSON_BYTES_MAX, StopReason};
+use crate::tests_model::{
+    CASE_TITLE_BYTES_MAX, CaseKind, CaseStatus, INTEGRITY_JSON_BYTES_MAX, PLAN_NAME_BYTES_MAX,
+    POLICY_JSON_BYTES_MAX, PlanStatus, RESULT_ARTIFACT_BYTES_MAX, RESULT_NAME_BYTES_MAX,
+    RESULT_ROWS_PER_RECORD_MAX, RUN_BATCH_BYTES_MAX, RUN_REASON_BYTES_MAX, RUN_TITLE_BYTES_MAX,
+    ResultOutcome, SET_NAME_BYTES_MAX, STABLE_NAME_BYTES_MAX, STEP_BYTES_MAX, STEPS_PER_CASE_MAX,
+    TestObject, Verdict,
+};
+use crate::text::{self, TITLE_BYTES_MAX, TextField};
 use serde_json::{Map, Value, json};
 
 pub const CURSOR_BYTES_MAX: usize = 64;
@@ -12,6 +20,7 @@ pub const WORD_BYTES_MAX: usize = 32;
 pub const PATH_BYTES_MAX: usize = 4096;
 pub const KEY_BYTES_MAX: usize = 64;
 pub const KEYS_MAX: usize = 256;
+pub const COMMIT_BYTES_MAX: usize = 64;
 
 /// A closed set of names a field may take, each read from its model enum so the catalog,
 /// the schema and the store never disagree.
@@ -25,6 +34,12 @@ pub enum Named {
     VersionStatus,
     PolicyKey,
     Op,
+    CaseKind,
+    CaseStatus,
+    PlanStatus,
+    Verdict,
+    RunEnd,
+    StopReason,
 }
 
 impl Named {
@@ -39,18 +54,55 @@ impl Named {
             Named::VersionStatus => VersionStatus::ALL.iter().map(|v| v.as_str()).collect(),
             Named::PolicyKey => PolicyKey::ALL.iter().map(|v| v.as_str()).collect(),
             Named::Op => OpKind::ALL.iter().map(|v| v.as_str()).collect(),
+            Named::CaseKind => CaseKind::ALL.iter().map(|v| v.as_str()).collect(),
+            Named::CaseStatus => CaseStatus::ALL.iter().map(|v| v.as_str()).collect(),
+            Named::PlanStatus => PlanStatus::ALL.iter().map(|v| v.as_str()).collect(),
+            Named::Verdict => Verdict::ALL.iter().map(|v| v.as_str()).collect(),
+            Named::RunEnd => RunEnd::ALL.iter().map(|v| v.as_str()).collect(),
+            Named::StopReason => StopReason::ALL.iter().map(|v| v.as_str()).collect(),
         };
         assert!(!names.is_empty());
         names
     }
 }
 
+/// A JSON value one field holds whole, read into its core type when the request is parsed:
+/// a case's steps, one batch of results, and a run's source, policy and integrity blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Shape {
+    Steps,
+    Results,
+    Source,
+    Policy,
+    Integrity,
+}
+
+impl Shape {
+    /// The most bytes the value may take as compact JSON; the request bound caps steps and
+    /// results. Output: the bound, at most `REQUEST_BYTES_MAX`.
+    pub fn bytes_max(self) -> usize {
+        let bytes_max = match self {
+            Shape::Steps | Shape::Results => REQUEST_BYTES_MAX,
+            Shape::Source => SOURCE_JSON_BYTES_MAX,
+            Shape::Policy => POLICY_JSON_BYTES_MAX,
+            Shape::Integrity => INTEGRITY_JSON_BYTES_MAX,
+        };
+        assert!(bytes_max > 0);
+        assert!(bytes_max <= REQUEST_BYTES_MAX);
+        bytes_max
+    }
+}
+
 /// What one field holds on the wire, with its bounds. Every type is a JSON scalar except
-/// `Keys`, a short list of item keys.
+/// `Keys`, a short list of item keys, and `Shape`, a JSON value read whole. `Line` is one
+/// line of visible text up to its byte bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldType {
     Project,
     Ticket,
+    Test(TestObject),
+    Line { bytes_max: usize },
+    Shape(Shape),
     Actor,
     Text(TextField),
     Version,
@@ -158,6 +210,37 @@ const CYCLE: FieldSpec = opt(
     },
     "The open cycle it is planned for, by number.",
 );
+const CASE: FieldType = FieldType::Test(TestObject::Case);
+const SET: FieldType = FieldType::Test(TestObject::Set);
+const PLAN: FieldType = FieldType::Test(TestObject::Plan);
+const CASE_KIND: FieldType = FieldType::Choice(Named::CaseKind);
+const CASE_STATUS: FieldType = FieldType::Choice(Named::CaseStatus);
+const PLAN_STATUS: FieldType = FieldType::Choice(Named::PlanStatus);
+const STEPS: FieldType = FieldType::Shape(Shape::Steps);
+const STABLE_NAME: FieldType = FieldType::Line {
+    bytes_max: STABLE_NAME_BYTES_MAX,
+};
+const BATCH: FieldType = FieldType::Line {
+    bytes_max: RUN_BATCH_BYTES_MAX,
+};
+const RELEASE_NAME: FieldType = FieldType::Text(TextField::VersionName);
+const CASE_ID: FieldSpec = req("id", CASE, "The case's id, for example CA-T3.");
+const SET_ID: FieldSpec = req("id", SET, "The set's id, for example CA-S1.");
+const PLAN_ID: FieldSpec = req("id", PLAN, "The plan's id, for example CA-P2.");
+const RUN_ID: FieldSpec = req(
+    "id",
+    FieldType::Test(TestObject::Run),
+    "The run's id, for example CA-R7.",
+);
+const CRITERION_TICKET: FieldSpec = req(
+    "ticket",
+    FieldType::Ticket,
+    "The ticket holding the criterion, for example CA-42.",
+);
+const _: () = assert!(CASE_TITLE_BYTES_MAX == TITLE_BYTES_MAX);
+const _: () = assert!(SET_NAME_BYTES_MAX == TITLE_BYTES_MAX);
+const _: () = assert!(PLAN_NAME_BYTES_MAX == TITLE_BYTES_MAX);
+const _: () = assert!(RUN_TITLE_BYTES_MAX == TITLE_BYTES_MAX);
 
 const CATALOG: &[OpSpec] = &[
     OpSpec {
@@ -625,6 +708,312 @@ const CATALOG: &[OpSpec] = &[
             REQUEST_ID,
         ],
     },
+    OpSpec {
+        kind: OpKind::CaseList,
+        summary: "Lists a project's cases by number, optionally by kind, status, set or no link.",
+        fields: &[
+            PROJECT,
+            opt("kind", CASE_KIND, "Only cases of this kind."),
+            opt("status", CASE_STATUS, "Only cases in this status."),
+            opt("set", SET, "Only cases in this set."),
+            opt(
+                "unlinked",
+                FieldType::Flag,
+                "Only cases linked to no criterion when true.",
+            ),
+            CURSOR,
+        ],
+    },
+    OpSpec {
+        kind: OpKind::CaseShow,
+        summary: "Shows one case: steps as policy allows, criteria, sets and latest outcome.",
+        fields: &[CASE_ID, CURSOR],
+    },
+    OpSpec {
+        kind: OpKind::SetShow,
+        summary: "Shows one set and its cases in order.",
+        fields: &[SET_ID, CURSOR],
+    },
+    OpSpec {
+        kind: OpKind::PlanList,
+        summary: "Lists a project's plans by number, optionally by status.",
+        fields: &[
+            PROJECT,
+            opt("status", PLAN_STATUS, "Only plans in this status."),
+            CURSOR,
+        ],
+    },
+    OpSpec {
+        kind: OpKind::PlanShow,
+        summary: "Shows one plan: its release, cycle, status and items in order.",
+        fields: &[PLAN_ID, CURSOR],
+    },
+    OpSpec {
+        kind: OpKind::RunList,
+        summary: "Lists a project's runs newest first, by plan, batch, verdict or commit.",
+        fields: &[
+            PROJECT,
+            opt("plan", PLAN, "Only runs of this plan."),
+            opt("batch", BATCH, "Only runs of this batch."),
+            opt(
+                "verdict",
+                FieldType::Choice(Named::Verdict),
+                "Only runs with this verdict.",
+            ),
+            opt(
+                "commit",
+                FieldType::Line {
+                    bytes_max: COMMIT_BYTES_MAX,
+                },
+                "Only runs of this source commit, 40 hex digits.",
+            ),
+            CURSOR,
+        ],
+    },
+    OpSpec {
+        kind: OpKind::RunShow,
+        summary: "Shows one run: its source and policy binding, integrity, totals and results.",
+        fields: &[RUN_ID, CURSOR],
+    },
+    OpSpec {
+        kind: OpKind::Coverage,
+        summary: "Shows each criterion of a ticket or release with its cases and latest results.",
+        fields: &[
+            PROJECT,
+            opt(
+                "ticket",
+                FieldType::Ticket,
+                "Cover this ticket's criteria; give ticket or release.",
+            ),
+            opt(
+                "release",
+                RELEASE_NAME,
+                "Cover the criteria of this release's tickets; give ticket or release.",
+            ),
+            CURSOR,
+        ],
+    },
+    OpSpec {
+        kind: OpKind::CaseCreate,
+        summary: "Creates a test case in a project.",
+        fields: &[
+            PROJECT,
+            req("title", TITLE, "One line naming what the case proves."),
+            req("kind", CASE_KIND, "What the case checks."),
+            opt(
+                "stable_name",
+                STABLE_NAME,
+                "The runner's name for the test; imports match results by it.",
+            ),
+            opt("steps", STEPS, "The steps in order, each in Markdown."),
+            opt(
+                "protected",
+                FieldType::Flag,
+                "Hides the steps from agents as policy says; false when absent.",
+            ),
+            opt("status", CASE_STATUS, "draft when absent."),
+            REQUEST_ID,
+        ],
+    },
+    OpSpec {
+        kind: OpKind::CaseEdit,
+        summary: "Changes a case's title, kind, stable name, steps, protection or status.",
+        fields: &[
+            CASE_ID,
+            VERSION,
+            opt("title", TITLE, "The new title."),
+            opt("kind", CASE_KIND, "The new kind."),
+            opt("stable_name", STABLE_NAME, "The new stable name."),
+            opt(
+                "clear_stable_name",
+                FieldType::Flag,
+                "Removes the stable name when true.",
+            ),
+            opt("steps", STEPS, "The new steps."),
+            opt("protected", FieldType::Flag, "The new protection."),
+            opt("status", CASE_STATUS, "The new status."),
+            REQUEST_ID,
+        ],
+    },
+    OpSpec {
+        kind: OpKind::CaseLink,
+        summary: "Links a case to one acceptance criterion it proves.",
+        fields: &[CASE_ID, VERSION, CRITERION_TICKET, POSITION, REQUEST_ID],
+    },
+    OpSpec {
+        kind: OpKind::CaseUnlink,
+        summary: "Removes a case's link to one acceptance criterion.",
+        fields: &[CASE_ID, VERSION, CRITERION_TICKET, POSITION, REQUEST_ID],
+    },
+    OpSpec {
+        kind: OpKind::SetUpsert,
+        summary: "Creates a set, or renames one at the version you read.",
+        fields: &[
+            PROJECT,
+            opt("id", SET, "The set to rename; a new set when absent."),
+            opt(
+                "version",
+                FieldType::Version,
+                "The set version you last read; required with id.",
+            ),
+            req("name", TITLE, "One line naming the set."),
+            REQUEST_ID,
+        ],
+    },
+    OpSpec {
+        kind: OpKind::SetAdd,
+        summary: "Adds a case to the end of a set.",
+        fields: &[
+            SET_ID,
+            VERSION,
+            req("case", CASE, "The case to add."),
+            REQUEST_ID,
+        ],
+    },
+    OpSpec {
+        kind: OpKind::SetRemove,
+        summary: "Removes a case from a set.",
+        fields: &[
+            SET_ID,
+            VERSION,
+            req("case", CASE, "The case to remove."),
+            REQUEST_ID,
+        ],
+    },
+    OpSpec {
+        kind: OpKind::PlanUpsert,
+        summary: "Creates a plan, or sets one's fields at the version you read.",
+        fields: &[
+            PROJECT,
+            opt("id", PLAN, "The plan to change; a new plan when absent."),
+            opt(
+                "version",
+                FieldType::Version,
+                "The plan version you last read; required with id.",
+            ),
+            req("name", TITLE, "One line naming the plan."),
+            opt(
+                "release",
+                RELEASE_NAME,
+                "The project's release version the plan is for.",
+            ),
+            opt(
+                "cycle",
+                FieldType::Integer {
+                    min: 1,
+                    max: CYCLES_PER_PROJECT_MAX as i64,
+                },
+                "The project's cycle number the plan is for.",
+            ),
+            opt("status", PLAN_STATUS, "draft when absent."),
+            REQUEST_ID,
+        ],
+    },
+    OpSpec {
+        kind: OpKind::PlanAdd,
+        summary: "Adds one case or one set to the end of a plan.",
+        fields: &[
+            PLAN_ID,
+            VERSION,
+            opt("case", CASE, "The case to add; give case or set."),
+            opt("set", SET, "The set to add; give case or set."),
+            REQUEST_ID,
+        ],
+    },
+    OpSpec {
+        kind: OpKind::PlanRemove,
+        summary: "Removes one case or one set from a plan.",
+        fields: &[
+            PLAN_ID,
+            VERSION,
+            opt("case", CASE, "The case to remove; give case or set."),
+            opt("set", SET, "The set to remove; give case or set."),
+            REQUEST_ID,
+        ],
+    },
+    OpSpec {
+        kind: OpKind::RunStart,
+        summary: "Starts a run of a project's tests with its source and policy bound.",
+        fields: &[
+            PROJECT,
+            req("title", TITLE, "One line naming the run."),
+            opt("plan", PLAN, "The plan the run runs."),
+            opt("batch", BATCH, "The label grouping one trigger's runs."),
+            req(
+                "source",
+                FieldType::Shape(Shape::Source),
+                "The source the run covers: a commit or a declared source.",
+            ),
+            req(
+                "policy",
+                FieldType::Shape(Shape::Policy),
+                "The check policy the run ran under.",
+            ),
+            REQUEST_ID,
+        ],
+    },
+    OpSpec {
+        kind: OpKind::RunRecord,
+        summary: "Appends one batch of results to a running run.",
+        fields: &[
+            RUN_ID,
+            VERSION,
+            req(
+                "results",
+                FieldType::Shape(Shape::Results),
+                "1 to 500 results: name, outcome, optional duration_ms, message, artifact.",
+            ),
+            REQUEST_ID,
+        ],
+    },
+    OpSpec {
+        kind: OpKind::RunFinish,
+        summary: "Finishes a running run; its verdict follows the locked verdict rules.",
+        fields: &[
+            RUN_ID,
+            VERSION,
+            req(
+                "end",
+                FieldType::Choice(Named::RunEnd),
+                "How the run ended.",
+            ),
+            opt(
+                "exit_code",
+                FieldType::Integer {
+                    min: i32::MIN as i64,
+                    max: i32::MAX as i64,
+                },
+                "The process exit code, when a process ran.",
+            ),
+            opt(
+                "reason",
+                FieldType::Line {
+                    bytes_max: RUN_REASON_BYTES_MAX,
+                },
+                "Why the run never started; only with not_started.",
+            ),
+            opt(
+                "integrity",
+                FieldType::Shape(Shape::Integrity),
+                "The host's integrity evidence.",
+            ),
+            REQUEST_ID,
+        ],
+    },
+    OpSpec {
+        kind: OpKind::RunCancel,
+        summary: "Interrupts a running run.",
+        fields: &[
+            RUN_ID,
+            VERSION,
+            req(
+                "reason",
+                FieldType::Choice(Named::StopReason),
+                "Why the run stopped.",
+            ),
+            REQUEST_ID,
+        ],
+    },
 ];
 
 const _: () = {
@@ -711,6 +1100,21 @@ fn type_schema(ty: FieldType) -> Map<String, Value> {
     let schema = match ty {
         FieldType::Project => json!({"type": "string", "pattern": "^[A-Z]{2,8}$"}),
         FieldType::Ticket => json!({"type": "string", "pattern": "^[A-Z]{2,8}-[1-9][0-9]{0,9}$"}),
+        FieldType::Test(object) => json!({
+            "type": "string",
+            "pattern": format!("^[A-Z]{{2,8}}-{}[1-9][0-9]{{0,9}}$", object.letter()),
+        }),
+        FieldType::Line { bytes_max } => {
+            assert!(bytes_max > 0);
+            json!({
+                "type": "string",
+                "minLength": 1,
+                "maxLength": bytes_max,
+                "maxBytes": bytes_max,
+                "pattern": "^[^\\r\\n]+$",
+            })
+        }
+        FieldType::Shape(shape) => shape_schema(shape),
         FieldType::Actor => json!({
             "type": "string",
             "minLength": 1,
@@ -772,6 +1176,45 @@ fn type_schema(ty: FieldType) -> Map<String, Value> {
         Value::Object(map) => map,
         other => panic!("a type schema is an object, not {other}"),
     }
+}
+
+fn shape_schema(shape: Shape) -> Value {
+    let bytes_max = shape.bytes_max();
+    match shape {
+        Shape::Steps => json!({
+            "type": "array",
+            "maxItems": STEPS_PER_CASE_MAX,
+            "maxBytes": bytes_max,
+            "items": {"type": "string", "minLength": 1, "maxLength": STEP_BYTES_MAX},
+        }),
+        Shape::Results => json!({
+            "type": "array",
+            "minItems": 1,
+            "maxItems": RESULT_ROWS_PER_RECORD_MAX,
+            "maxBytes": bytes_max,
+            "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["name", "outcome"],
+                "properties": {
+                    "name": {"type": "string", "minLength": 1, "maxLength": RESULT_NAME_BYTES_MAX},
+                    "outcome": {"type": "string", "enum": outcome_names()},
+                    "duration_ms": {"type": "integer", "minimum": 0, "maximum": u32::MAX},
+                    "message": {"type": "string", "maxLength": RESULT_MESSAGE_INPUT_BYTES_MAX},
+                    "artifact": {"type": "string", "maxLength": RESULT_ARTIFACT_BYTES_MAX},
+                },
+            },
+        }),
+        Shape::Source | Shape::Policy | Shape::Integrity => {
+            json!({"type": "object", "maxBytes": bytes_max})
+        }
+    }
+}
+
+fn outcome_names() -> Vec<&'static str> {
+    let names: Vec<&'static str> = ResultOutcome::ALL.iter().map(|v| v.as_str()).collect();
+    assert!(!names.is_empty());
+    names
 }
 
 fn text_schema(field: TextField) -> Value {

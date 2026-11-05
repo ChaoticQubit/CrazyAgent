@@ -53,6 +53,7 @@ pub mod research;
 pub mod routing;
 pub mod sandbox;
 pub mod scheduling;
+pub mod scorecard;
 pub mod service;
 pub mod setup;
 pub mod skills;
@@ -67,6 +68,7 @@ pub mod storage;
 pub mod team;
 pub mod terminal;
 pub mod tracker;
+pub mod trust;
 pub mod tui;
 /// `crazyagent update`: release channel, signed download, verification and executable swap.
 pub mod update;

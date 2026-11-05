@@ -60,6 +60,7 @@ const DELEGATION_ROUNDS_MAX: i64 = 3;
 const PROGRESS_EVERY: Duration = Duration::from_secs(1);
 const EVENT_WAIT: Duration = Duration::from_millis(200);
 const ORDER_WAIT: Duration = Duration::from_millis(100);
+const DAILY_EVERY: Duration = Duration::from_secs(60);
 const IDLE_EVENT_WAIT: Duration = Duration::from_millis(5);
 const JOIN_WAIT: Duration = Duration::from_secs(15);
 /// How often a project's running agents are checked for an owner instruction edit under
@@ -178,6 +179,7 @@ struct Plan {
     sandbox_profile: PathBuf,
     access: AgentAccess,
     layout: Layout,
+    trust: crate::trust::Trust,
     git_identity: Option<GitIdentity>,
     limits: LaunchLimits,
     pane: Option<(Arc<dyn Host>, AgentId)>,
@@ -244,6 +246,7 @@ impl Plan {
         );
         Ok(LaunchRequest {
             harness: self.harness.clone(),
+            trust: self.trust,
             executable: self.executable.clone(),
             working_dir: self.working_dir.clone(),
             account,
@@ -460,6 +463,7 @@ pub struct TeamRuntime {
     watch: super::events::Watch,
     master_watch: super::screen_questions::MasterWatch,
     teammates_next: Option<Instant>,
+    daily_next: Option<Instant>,
     receipts_next: BTreeMap<ProjectId, Instant>,
     live_starts: BTreeMap<ProjectId, Vec<Instant>>,
     resuming: Option<(i64, Resume)>,
@@ -624,6 +628,7 @@ impl TeamRuntime {
             watch: super::events::Watch::default(),
             master_watch: super::screen_questions::MasterWatch::default(),
             teammates_next: None,
+            daily_next: None,
             receipts_next: BTreeMap::new(),
             live_starts: BTreeMap::new(),
             resuming: None,
@@ -944,8 +949,9 @@ impl TeamRuntime {
     /// register, sends pending messages to the master, delivers finished results, starts or
     /// reuses sub-agents within the plan's limits, stops idle or cancelled agents, ends team
     /// panes no agent owns, rewrites each followed IDE workspace whose sections changed, logs
-    /// the questions masters' harnesses ask the owner in their own terminals, then alerts the
-    /// owner to new questions and terminal waits by severity.
+    /// the questions masters' harnesses ask the owner in their own terminals, asks the
+    /// scorecard's daily question when it is due, then alerts the owner to new questions and
+    /// terminal waits by severity.
     pub fn tick(&mut self) -> Result<(), EngineError> {
         self.settle()?;
         self.collect()?;
@@ -964,7 +970,29 @@ impl TeamRuntime {
         self.sweep()?;
         crate::ide::workspace::follow(&self.connection, &self.root)?;
         self.watch_master_questions()?;
+        self.ask_daily()?;
         super::questions::tick(&mut self.connection, now_ms())
+    }
+
+    /// Asks the owner the scorecard's daily question, checked at most once each
+    /// `DAILY_EVERY`; `scorecard::ask_daily` asks only while its setting is on and none was
+    /// asked in the last 20 hours. A failure is logged by its plain code and retried at the
+    /// next check, so the tick goes on.
+    fn ask_daily(&mut self) -> Result<(), EngineError> {
+        let now = Instant::now();
+        if self.daily_next.is_some_and(|next| now < next) {
+            return Ok(());
+        }
+        self.daily_next = Some(now + DAILY_EVERY);
+        let projects = self.active_projects()?;
+        if let Err(problem) = crate::scorecard::ask_daily(&self.connection, &projects, now_ms()) {
+            eprintln!(
+                "scorecard_daily_failed cause={}",
+                crate::protocol::plain_code(&problem.0)
+            );
+        }
+        assert!(self.daily_next.is_some_and(|next| next > now));
+        Ok(())
     }
 
     /// Logs each question a live master's harness asks the owner in its own terminal as
@@ -2610,6 +2638,11 @@ impl TeamRuntime {
         if let Some(reason) = access.unavailable() {
             return Err(with_code(reason, Some("agent_access_unavailable")));
         }
+        if let Some((line, code)) =
+            crate::trust::Enforcement::for_level(self.trust_level(project)?).refusal(access)
+        {
+            return Err(with_code(line, Some(code)));
+        }
         let worker = self.workers.get_mut(&id).expect("worker exists");
         worker.grants = generation;
         worker.access = access;
@@ -2618,6 +2651,17 @@ impl TeamRuntime {
             context,
             access,
         })))
+    }
+
+    /// Reads how far the owner trusts the project's repository. Takes the project. Returns
+    /// the level, or the owner's line when it cannot be read.
+    fn trust_level(&self, project: &ProjectId) -> Result<crate::trust::Trust, String> {
+        crate::trust::level(&self.connection, project.as_str()).map_err(|_| {
+            with_code(
+                "the project's repository trust could not be read",
+                Some("repository_trust_unreadable"),
+            )
+        })
     }
 
     fn note(&mut self, project: &ProjectId, text: &str) -> Result<(), EngineError> {
@@ -5431,12 +5475,18 @@ impl TeamRuntime {
         let context = self
             .context(&stored.project_id, id, role, tools, layout)?
             .with_harness_settings(settings);
+        let trust = self.trust_level(&stored.project_id)?;
+        let enforcement = crate::trust::Enforcement::for_level(trust);
         let policy = crate::sandbox::policy::load(&self.connection, stored.project_id.as_str())
             .map_err(|_| with_code("the project's agent access could not be read", None))?;
         if let Some(reason) = policy.access.unavailable() {
             return Err(with_code(reason, Some("agent_access_unavailable")));
         }
-        let network = if tools {
+        if let Some((line, code)) = enforcement.refusal(policy.access) {
+            return Err(with_code(line, Some(code)));
+        }
+        let open = tools && !enforcement.model_endpoints_only;
+        let network = if open {
             policy.network.sandbox(Some(remote))
         } else {
             SandboxNetwork::Only(vec![remote])
@@ -5456,7 +5506,7 @@ impl TeamRuntime {
         }
         toolchains::prepare_cargo_home(&home, &homes)
             .map_err(|e| with_code("the agent cargo home could not be made", Some(io_code(&e))))?;
-        let kept = if tools {
+        let kept = if open {
             (self.access)().map_or_else(Vec::new, |access| crate::sandbox::owner_ports(&access))
         } else {
             Vec::new()
@@ -5592,6 +5642,12 @@ impl TeamRuntime {
             Layout::Clone => sandbox.confine_to_clone(&working_dir),
         }
         .map_err(sandboxed)?;
+        if enforcement.repo_config_as_text {
+            sandbox = sandbox.hide_repository_config(&root).map_err(sandboxed)?;
+        }
+        assert!(
+            !enforcement.model_endpoints_only || !matches!(sandbox.network(), SandboxNetwork::Open)
+        );
         let hidden =
             crate::sandbox::hidden_paths::load(&self.connection, stored.project_id.as_str())
                 .map_err(|_| with_code("the project's hidden folders could not be read", None))?;
@@ -5686,6 +5742,7 @@ impl TeamRuntime {
             sandbox_profile: profile,
             access: policy.access,
             layout,
+            trust,
             git_identity: owner_git_identity(&root),
             limits: self.launch_limits(),
             pane: self

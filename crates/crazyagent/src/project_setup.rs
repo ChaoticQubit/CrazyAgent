@@ -652,6 +652,9 @@ pub enum SetupQuery {
     AgentPolicy {
         project: ProjectId,
     },
+    RepositoryTrust {
+        project: ProjectId,
+    },
     Item {
         project: ProjectId,
         path: String,
@@ -698,6 +701,7 @@ pub enum SetupView {
     ReadPaths(ReadPaths),
     HiddenPaths(Vec<String>),
     AgentPolicy(crate::sandbox::policy::PolicyView),
+    RepositoryTrust(Box<crate::trust::TrustView>),
     Item(ContextChunk),
     Log(Vec<String>),
     Changed(crate::engine::owner::OwnerResult),
@@ -761,6 +765,12 @@ pub enum SetupAction {
         project_id: ProjectId,
         version: u64,
         policy: crate::sandbox::policy::AgentPolicy,
+    },
+    SetRepositoryTrust {
+        project_id: ProjectId,
+        version: u64,
+        trust: crate::trust::Trust,
+        confirm_raise: bool,
     },
 }
 
@@ -838,7 +848,9 @@ impl SetupAction {
                 }
                 setup.validate()
             }
-            Self::Remove { .. } | Self::PlanRoadmap { .. } => Ok(()),
+            Self::Remove { .. } | Self::PlanRoadmap { .. } | Self::SetRepositoryTrust { .. } => {
+                Ok(())
+            }
             Self::CancelResearch { job, .. } | Self::RetryResearch { job, .. } => {
                 if *job <= 0 {
                     return Err(failure("research_job_missing"));
@@ -1841,6 +1853,12 @@ pub(crate) fn execute(
             version,
             policy,
         } => set_agent_policy(tx, project_id, *version, policy),
+        SetupAction::SetRepositoryTrust {
+            project_id,
+            version,
+            trust,
+            confirm_raise,
+        } => crate::trust::set(tx, project_id, *version, *trust, *confirm_raise),
         SetupAction::RetryResearch { project_id, job } => {
             retry_research(tx, config, project_id, *job)
         }
@@ -2334,13 +2352,16 @@ fn plan_roadmap(
 
 /// The tables whose rows belong to one project and go with it when it is removed.
 /// Live team agents are not listed: the team runtime stops them and keeps their rows.
-const REMOVED_WITH_PROJECT: [&str; 29] = [
+const REMOVED_WITH_PROJECT: [&str; 32] = [
     "research_jobs",
     "onboarding",
     "team_messages",
     "team_tasks",
     "team_owner_prompts",
     "team_settings",
+    "team_wake_rules",
+    "team_nesting",
+    "team_new_folder_limit",
     "team_time_limits",
     "team_master_switch",
     "team_session_switches",
@@ -2429,8 +2450,9 @@ fn set_hidden_paths(
 /// Saves a project's agent policy (DEC-101, DEC-102): its access level and toolchain
 /// choices, when the owner's screen showed the current version. Takes the transaction,
 /// project, the version the screen read and the policy. Returns Applied, or a plain
-/// rejection for an unknown project, an invalid policy, a level this computer cannot run or
-/// a policy that changed since it was read (`stale_revision`).
+/// rejection for an unknown project, an invalid policy, a level this computer cannot run, a
+/// level wider than the project's repository trust allows (`agent_access_untrusted`) or a
+/// policy that changed since it was read (`stale_revision`).
 fn set_agent_policy(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
@@ -2453,6 +2475,11 @@ fn set_agent_policy(
     if policy.access.unavailable().is_some() {
         return Ok(rejected("agent_access_unavailable"));
     }
+    let trust = crate::trust::level(tx, project_id.as_str())
+        .map_err(|_| failure("repository_trust_unreadable"))?;
+    if !crate::trust::Enforcement::for_level(trust).allows(policy.access) {
+        return Ok(rejected(crate::trust::ACCESS_CODE));
+    }
     let item = crate::storage::versioned::agent_policy_item(project_id);
     if crate::storage::versioned::owner_write(tx, &item, version)?.is_err() {
         return Ok(rejected(crate::storage::versioned::STALE_CODE));
@@ -2464,15 +2491,16 @@ fn set_agent_policy(
 /// Removes a project from CrazyAgent and leaves its folder on disk where it is.
 /// Takes the transaction, the project and the revision before the removal. Its open master
 /// conversation ends in the same change; its onboarding, research jobs, team conversation,
-/// tasks, settings and ended agents are deleted, so a waiting step is never claimed and a
-/// running one stops; its read folders, agent access, agent settings and its agents' own
-/// instructions go too. Its project-scoped MCP servers, skills, secrets and per-project
+/// tasks, settings (sub-agent nesting and the new folder limit among them), wake rules and
+/// ended agents are deleted, so a waiting step is never claimed and a running one stops; its
+/// read folders, agent access, agent settings and its agents' own instructions go too, and
+/// its repository trust. Its project-scoped MCP servers, skills, secrets and per-project
 /// switches are cleared too, so a new project reusing the id never inherits them. The
-/// versions of its read folders, agent access, agent settings, project instructions and
-/// team settings move on once more, so a project added again under the same id refuses a
-/// save from a screen read before the removal (V2V-1, V2SYNC-2); agent ids are never
-/// reused, so its agents' instruction versions are dropped. Returns `invalid_project` for
-/// an unknown project.
+/// versions of its read folders, agent access, agent settings, project instructions, team
+/// settings, trust and project wake rule move on once more, so a project added again under
+/// the same id refuses a save from a screen read before the removal (V2V-1, V2SYNC-2); agent
+/// ids are never reused, so its agents' instruction versions are dropped and their wake rule
+/// versions need no move. Returns `invalid_project` for an unknown project.
 fn remove(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
@@ -2501,12 +2529,15 @@ fn remove(
     crate::questions::forget_project(tx, project_id)?;
     crate::sandbox::hidden_paths::save(tx, project_id.as_str(), &[]).map_err(error)?;
     crate::sandbox::policy::remove(tx, project_id.as_str()).map_err(error)?;
+    crate::trust::remove(tx, project_id.as_str()).map_err(error)?;
     for item in [
         crate::storage::versioned::read_paths_item(project_id),
         crate::storage::versioned::agent_policy_item(project_id),
         crate::storage::versioned::instruction_settings_item(project_id),
         crate::storage::versioned::process_text_item(Some(project_id)),
         crate::storage::versioned::team_settings_item(project_id),
+        crate::trust::item(project_id),
+        crate::storage::versioned::team_rule_item(Some(project_id), 0),
     ] {
         crate::storage::versioned::retire(tx, &item)?;
     }

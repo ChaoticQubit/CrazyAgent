@@ -1,7 +1,6 @@
-import { useEffect, useRef } from "react";
 import { call } from "./api";
 import type { Result } from "./api";
-import { loadQuestionCounts, loadQuestions, pendingByProject } from "./api-questions";
+import { loadQuestions, pendingByProject, type QuestionCount } from "./api-questions";
 import { navigate } from "./ui";
 
 export type SystemNotifications = "available" | "unavailable";
@@ -12,7 +11,6 @@ export interface PendingQuestion {
   project_id: string;
 }
 
-export const QUESTION_READ_MS = 10_000;
 export const PAGES_MAX = 64;
 export const NOTIFY_PER_READ_MAX = 3;
 
@@ -98,51 +96,41 @@ async function pendingOf(projectId: string): Promise<PendingQuestion[] | null> {
   return found;
 }
 
-/** Watches pending questions while the engine runs: every 10 s it reads them and, while the
- * window is in the background, sends one macOS notification per new question, a few per read.
- * When the window comes to the front after a click it opens that project's Questions tab.
- * Inputs: whether the engine runs and the toast action, used once when the plugin refuses. */
-export function useQuestionNotifications(running: boolean, showToast: (message: string) => void) {
-  const toast = useRef(showToast);
-  toast.current = showToast;
-  useEffect(() => {
-    if (!running) return;
-    let live = true;
-    let timer = 0;
-    let known: Set<number> | null = null;
-    let failed = false;
-    const system = systemNotifications();
-    const read = async () => {
-      const counts = await loadQuestionCounts();
-      if (!live) return;
-      if (counts.kind === "ok") {
-        const pages = await Promise.all([...pendingByProject(counts.value).keys()].map(pendingOf));
-        if (live && pages.every((page) => page !== null)) {
-          const notifying = shouldNotify(inBackground(), await system);
-          const watched = freshQuestions(known, pages.flatMap((page) => page ?? []), notifying);
-          known = watched.known;
-          for (const question of watched.send) {
-            const line = failureLine(await notifyQuestion(question.project_id, question.id));
-            if (line && !failed) {
-              failed = true;
-              toast.current(line);
-            }
-          }
+/** Watches pending questions from the counts the app's alerts read takes, so the counts are
+ * read once per look: each look reads the pending questions of every project with any and,
+ * while the window is in the background, sends one macOS notification per new question, a few
+ * per look. When the window comes to the front after a click it opens that project's
+ * Questions tab. Input: the toast action, used once when the plugin refuses. Output: `look`,
+ * awaited once per read with that read's counts, and `stop`, which ends the watch. */
+export function questionWatch(showToast: (message: string) => void) {
+  let live = true;
+  let known: Set<number> | null = null;
+  let failed = false;
+  const system = systemNotifications();
+  const onFocus = () => {
+    void takeNotificationTarget().then((result) => {
+      if (live && result.kind === "ok" && result.value !== null) navigate({ name: "project", id: result.value, tab: "questions" });
+    });
+  };
+  window.addEventListener("focus", onFocus);
+  return {
+    async look(counts: readonly QuestionCount[]) {
+      const pages = await Promise.all([...pendingByProject(counts).keys()].map(pendingOf));
+      if (!live || pages.some((page) => page === null)) return;
+      const notifying = shouldNotify(inBackground(), await system);
+      const watched = freshQuestions(known, pages.flatMap((page) => page ?? []), notifying);
+      known = watched.known;
+      for (const question of watched.send) {
+        const line = failureLine(await notifyQuestion(question.project_id, question.id));
+        if (line && !failed) {
+          failed = true;
+          showToast(line);
         }
       }
-      if (live) timer = window.setTimeout(read, QUESTION_READ_MS);
-    };
-    const onFocus = () => {
-      void takeNotificationTarget().then((result) => {
-        if (live && result.kind === "ok" && result.value !== null) navigate({ name: "project", id: result.value, tab: "questions" });
-      });
-    };
-    window.addEventListener("focus", onFocus);
-    void read();
-    return () => {
+    },
+    stop() {
       live = false;
-      window.clearTimeout(timer);
       window.removeEventListener("focus", onFocus);
-    };
-  }, [running]);
+    },
+  };
 }

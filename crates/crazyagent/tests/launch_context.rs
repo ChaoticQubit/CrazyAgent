@@ -155,6 +155,7 @@ fn request(case: &Case, harness: &str, home: &Path, tools: bool) -> LaunchReques
     fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
     LaunchRequest {
         harness: harness.into(),
+        trust: crazyagent::trust::Trust::Reviewed,
         executable: PathBuf::from("/usr/bin/true"),
         working_dir: case.root.path().canonicalize().unwrap(),
         account: AccountBinding::Url {

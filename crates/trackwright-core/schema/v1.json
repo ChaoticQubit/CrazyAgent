@@ -120,6 +120,340 @@
     "test_id_invalid"
   ],
   "ops": {
+    "case_create": {
+      "args": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "description": "What the case checks.",
+            "enum": [
+              "unit",
+              "integration",
+              "e2e",
+              "smoke",
+              "scenario",
+              "manual"
+            ],
+            "type": "string"
+          },
+          "project": {
+            "description": "The project's key, for example CA.",
+            "pattern": "^[A-Z]{2,8}$",
+            "type": "string"
+          },
+          "protected": {
+            "description": "Hides the steps from agents as policy says; false when absent.",
+            "type": "boolean"
+          },
+          "request_id": {
+            "description": "Your key for this write; repeating it with the same fields returns the first reply.",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9._:-]+$",
+            "type": "string"
+          },
+          "stable_name": {
+            "description": "The runner's name for the test; imports match results by it.",
+            "maxBytes": 512,
+            "maxLength": 512,
+            "minLength": 1,
+            "pattern": "^[^\\r\\n]+$",
+            "type": "string"
+          },
+          "status": {
+            "description": "draft when absent.",
+            "enum": [
+              "draft",
+              "ready",
+              "deprecated"
+            ],
+            "type": "string"
+          },
+          "steps": {
+            "description": "The steps in order, each in Markdown.",
+            "items": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxBytes": 16384,
+            "maxItems": 64,
+            "type": "array"
+          },
+          "title": {
+            "description": "One line naming what the case proves.",
+            "maxBytes": 200,
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[^\\r\\n]*$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project",
+          "title",
+          "kind"
+        ],
+        "type": "object"
+      },
+      "summary": "Creates a test case in a project.",
+      "write": true
+    },
+    "case_edit": {
+      "args": {
+        "additionalProperties": false,
+        "properties": {
+          "clear_stable_name": {
+            "description": "Removes the stable name when true.",
+            "type": "boolean"
+          },
+          "id": {
+            "description": "The case's id, for example CA-T3.",
+            "pattern": "^[A-Z]{2,8}-T[1-9][0-9]{0,9}$",
+            "type": "string"
+          },
+          "kind": {
+            "description": "The new kind.",
+            "enum": [
+              "unit",
+              "integration",
+              "e2e",
+              "smoke",
+              "scenario",
+              "manual"
+            ],
+            "type": "string"
+          },
+          "protected": {
+            "description": "The new protection.",
+            "type": "boolean"
+          },
+          "request_id": {
+            "description": "Your key for this write; repeating it with the same fields returns the first reply.",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9._:-]+$",
+            "type": "string"
+          },
+          "stable_name": {
+            "description": "The new stable name.",
+            "maxBytes": 512,
+            "maxLength": 512,
+            "minLength": 1,
+            "pattern": "^[^\\r\\n]+$",
+            "type": "string"
+          },
+          "status": {
+            "description": "The new status.",
+            "enum": [
+              "draft",
+              "ready",
+              "deprecated"
+            ],
+            "type": "string"
+          },
+          "steps": {
+            "description": "The new steps.",
+            "items": {
+              "maxLength": 1024,
+              "minLength": 1,
+              "type": "string"
+            },
+            "maxBytes": 16384,
+            "maxItems": 64,
+            "type": "array"
+          },
+          "title": {
+            "description": "The new title.",
+            "maxBytes": 200,
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[^\\r\\n]*$",
+            "type": "string"
+          },
+          "version": {
+            "description": "The version you last read; a newer stored version refuses the write as stale.",
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "version"
+        ],
+        "type": "object"
+      },
+      "summary": "Changes a case's title, kind, stable name, steps, protection or status.",
+      "write": true
+    },
+    "case_link": {
+      "args": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "description": "The case's id, for example CA-T3.",
+            "pattern": "^[A-Z]{2,8}-T[1-9][0-9]{0,9}$",
+            "type": "string"
+          },
+          "position": {
+            "description": "The criterion's position on the ticket, from 1.",
+            "maximum": 32,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "request_id": {
+            "description": "Your key for this write; repeating it with the same fields returns the first reply.",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9._:-]+$",
+            "type": "string"
+          },
+          "ticket": {
+            "description": "The ticket holding the criterion, for example CA-42.",
+            "pattern": "^[A-Z]{2,8}-[1-9][0-9]{0,9}$",
+            "type": "string"
+          },
+          "version": {
+            "description": "The version you last read; a newer stored version refuses the write as stale.",
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "version",
+          "ticket",
+          "position"
+        ],
+        "type": "object"
+      },
+      "summary": "Links a case to one acceptance criterion it proves.",
+      "write": true
+    },
+    "case_list": {
+      "args": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "description": "The cursor of the previous page, to read the next one.",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-z0-9:_-]+$",
+            "type": "string"
+          },
+          "kind": {
+            "description": "Only cases of this kind.",
+            "enum": [
+              "unit",
+              "integration",
+              "e2e",
+              "smoke",
+              "scenario",
+              "manual"
+            ],
+            "type": "string"
+          },
+          "project": {
+            "description": "The project's key, for example CA.",
+            "pattern": "^[A-Z]{2,8}$",
+            "type": "string"
+          },
+          "set": {
+            "description": "Only cases in this set.",
+            "pattern": "^[A-Z]{2,8}-S[1-9][0-9]{0,9}$",
+            "type": "string"
+          },
+          "status": {
+            "description": "Only cases in this status.",
+            "enum": [
+              "draft",
+              "ready",
+              "deprecated"
+            ],
+            "type": "string"
+          },
+          "unlinked": {
+            "description": "Only cases linked to no criterion when true.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "project"
+        ],
+        "type": "object"
+      },
+      "summary": "Lists a project's cases by number, optionally by kind, status, set or no link.",
+      "write": false
+    },
+    "case_show": {
+      "args": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "description": "The cursor of the previous page, to read the next one.",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-z0-9:_-]+$",
+            "type": "string"
+          },
+          "id": {
+            "description": "The case's id, for example CA-T3.",
+            "pattern": "^[A-Z]{2,8}-T[1-9][0-9]{0,9}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "summary": "Shows one case: steps as policy allows, criteria, sets and latest outcome.",
+      "write": false
+    },
+    "case_unlink": {
+      "args": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "description": "The case's id, for example CA-T3.",
+            "pattern": "^[A-Z]{2,8}-T[1-9][0-9]{0,9}$",
+            "type": "string"
+          },
+          "position": {
+            "description": "The criterion's position on the ticket, from 1.",
+            "maximum": 32,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "request_id": {
+            "description": "Your key for this write; repeating it with the same fields returns the first reply.",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9._:-]+$",
+            "type": "string"
+          },
+          "ticket": {
+            "description": "The ticket holding the criterion, for example CA-42.",
+            "pattern": "^[A-Z]{2,8}-[1-9][0-9]{0,9}$",
+            "type": "string"
+          },
+          "version": {
+            "description": "The version you last read; a newer stored version refuses the write as stale.",
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "version",
+          "ticket",
+          "position"
+        ],
+        "type": "object"
+      },
+      "summary": "Removes a case's link to one acceptance criterion.",
+      "write": true
+    },
     "check_add": {
       "args": {
         "additionalProperties": false,
@@ -253,6 +587,44 @@
       },
       "summary": "Closes a ticket as done or cancelled, as the project's close policy allows.",
       "write": true
+    },
+    "coverage": {
+      "args": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "description": "The cursor of the previous page, to read the next one.",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-z0-9:_-]+$",
+            "type": "string"
+          },
+          "project": {
+            "description": "The project's key, for example CA.",
+            "pattern": "^[A-Z]{2,8}$",
+            "type": "string"
+          },
+          "release": {
+            "description": "Cover the criteria of this release's tickets; give ticket or release.",
+            "maxBytes": 64,
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[^\\r\\n]*$",
+            "type": "string"
+          },
+          "ticket": {
+            "description": "Cover this ticket's criteria; give ticket or release.",
+            "pattern": "^[A-Z]{2,8}-[1-9][0-9]{0,9}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project"
+        ],
+        "type": "object"
+      },
+      "summary": "Shows each criterion of a ticket or release with its cases and latest results.",
+      "write": false
     },
     "create": {
       "args": {
@@ -1020,6 +1392,214 @@
       "summary": "Moves a ticket to another open status; close and reopen change the closed ones.",
       "write": true
     },
+    "plan_add": {
+      "args": {
+        "additionalProperties": false,
+        "properties": {
+          "case": {
+            "description": "The case to add; give case or set.",
+            "pattern": "^[A-Z]{2,8}-T[1-9][0-9]{0,9}$",
+            "type": "string"
+          },
+          "id": {
+            "description": "The plan's id, for example CA-P2.",
+            "pattern": "^[A-Z]{2,8}-P[1-9][0-9]{0,9}$",
+            "type": "string"
+          },
+          "request_id": {
+            "description": "Your key for this write; repeating it with the same fields returns the first reply.",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9._:-]+$",
+            "type": "string"
+          },
+          "set": {
+            "description": "The set to add; give case or set.",
+            "pattern": "^[A-Z]{2,8}-S[1-9][0-9]{0,9}$",
+            "type": "string"
+          },
+          "version": {
+            "description": "The version you last read; a newer stored version refuses the write as stale.",
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "version"
+        ],
+        "type": "object"
+      },
+      "summary": "Adds one case or one set to the end of a plan.",
+      "write": true
+    },
+    "plan_list": {
+      "args": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "description": "The cursor of the previous page, to read the next one.",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-z0-9:_-]+$",
+            "type": "string"
+          },
+          "project": {
+            "description": "The project's key, for example CA.",
+            "pattern": "^[A-Z]{2,8}$",
+            "type": "string"
+          },
+          "status": {
+            "description": "Only plans in this status.",
+            "enum": [
+              "draft",
+              "active",
+              "closed"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "project"
+        ],
+        "type": "object"
+      },
+      "summary": "Lists a project's plans by number, optionally by status.",
+      "write": false
+    },
+    "plan_remove": {
+      "args": {
+        "additionalProperties": false,
+        "properties": {
+          "case": {
+            "description": "The case to remove; give case or set.",
+            "pattern": "^[A-Z]{2,8}-T[1-9][0-9]{0,9}$",
+            "type": "string"
+          },
+          "id": {
+            "description": "The plan's id, for example CA-P2.",
+            "pattern": "^[A-Z]{2,8}-P[1-9][0-9]{0,9}$",
+            "type": "string"
+          },
+          "request_id": {
+            "description": "Your key for this write; repeating it with the same fields returns the first reply.",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9._:-]+$",
+            "type": "string"
+          },
+          "set": {
+            "description": "The set to remove; give case or set.",
+            "pattern": "^[A-Z]{2,8}-S[1-9][0-9]{0,9}$",
+            "type": "string"
+          },
+          "version": {
+            "description": "The version you last read; a newer stored version refuses the write as stale.",
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "version"
+        ],
+        "type": "object"
+      },
+      "summary": "Removes one case or one set from a plan.",
+      "write": true
+    },
+    "plan_show": {
+      "args": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "description": "The cursor of the previous page, to read the next one.",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-z0-9:_-]+$",
+            "type": "string"
+          },
+          "id": {
+            "description": "The plan's id, for example CA-P2.",
+            "pattern": "^[A-Z]{2,8}-P[1-9][0-9]{0,9}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "summary": "Shows one plan: its release, cycle, status and items in order.",
+      "write": false
+    },
+    "plan_upsert": {
+      "args": {
+        "additionalProperties": false,
+        "properties": {
+          "cycle": {
+            "description": "The project's cycle number the plan is for.",
+            "maximum": 520,
+            "minimum": 1,
+            "type": "integer"
+          },
+          "id": {
+            "description": "The plan to change; a new plan when absent.",
+            "pattern": "^[A-Z]{2,8}-P[1-9][0-9]{0,9}$",
+            "type": "string"
+          },
+          "name": {
+            "description": "One line naming the plan.",
+            "maxBytes": 200,
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[^\\r\\n]*$",
+            "type": "string"
+          },
+          "project": {
+            "description": "The project's key, for example CA.",
+            "pattern": "^[A-Z]{2,8}$",
+            "type": "string"
+          },
+          "release": {
+            "description": "The project's release version the plan is for.",
+            "maxBytes": 64,
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[^\\r\\n]*$",
+            "type": "string"
+          },
+          "request_id": {
+            "description": "Your key for this write; repeating it with the same fields returns the first reply.",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9._:-]+$",
+            "type": "string"
+          },
+          "status": {
+            "description": "draft when absent.",
+            "enum": [
+              "draft",
+              "active",
+              "closed"
+            ],
+            "type": "string"
+          },
+          "version": {
+            "description": "The plan version you last read; required with id.",
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "project",
+          "name"
+        ],
+        "type": "object"
+      },
+      "summary": "Creates a plan, or sets one's fields at the version you read.",
+      "write": true
+    },
     "policy_get": {
       "args": {
         "additionalProperties": false,
@@ -1219,6 +1799,326 @@
       "summary": "Shows a project's versions and cycles with closed and total tickets each.",
       "write": false
     },
+    "run_cancel": {
+      "args": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "description": "The run's id, for example CA-R7.",
+            "pattern": "^[A-Z]{2,8}-R[1-9][0-9]{0,9}$",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Why the run stopped.",
+            "enum": [
+              "cancelled",
+              "timed_out"
+            ],
+            "type": "string"
+          },
+          "request_id": {
+            "description": "Your key for this write; repeating it with the same fields returns the first reply.",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9._:-]+$",
+            "type": "string"
+          },
+          "version": {
+            "description": "The version you last read; a newer stored version refuses the write as stale.",
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "version",
+          "reason"
+        ],
+        "type": "object"
+      },
+      "summary": "Interrupts a running run.",
+      "write": true
+    },
+    "run_finish": {
+      "args": {
+        "additionalProperties": false,
+        "properties": {
+          "end": {
+            "description": "How the run ended.",
+            "enum": [
+              "completed",
+              "build_failed",
+              "report_unreadable",
+              "not_started"
+            ],
+            "type": "string"
+          },
+          "exit_code": {
+            "description": "The process exit code, when a process ran.",
+            "maximum": 2147483647,
+            "minimum": -2147483648,
+            "type": "integer"
+          },
+          "id": {
+            "description": "The run's id, for example CA-R7.",
+            "pattern": "^[A-Z]{2,8}-R[1-9][0-9]{0,9}$",
+            "type": "string"
+          },
+          "integrity": {
+            "description": "The host's integrity evidence.",
+            "maxBytes": 8192,
+            "type": "object"
+          },
+          "reason": {
+            "description": "Why the run never started; only with not_started.",
+            "maxBytes": 200,
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[^\\r\\n]+$",
+            "type": "string"
+          },
+          "request_id": {
+            "description": "Your key for this write; repeating it with the same fields returns the first reply.",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9._:-]+$",
+            "type": "string"
+          },
+          "version": {
+            "description": "The version you last read; a newer stored version refuses the write as stale.",
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "version",
+          "end"
+        ],
+        "type": "object"
+      },
+      "summary": "Finishes a running run; its verdict follows the locked verdict rules.",
+      "write": true
+    },
+    "run_list": {
+      "args": {
+        "additionalProperties": false,
+        "properties": {
+          "batch": {
+            "description": "Only runs of this batch.",
+            "maxBytes": 64,
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[^\\r\\n]+$",
+            "type": "string"
+          },
+          "commit": {
+            "description": "Only runs of this source commit, 40 hex digits.",
+            "maxBytes": 64,
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[^\\r\\n]+$",
+            "type": "string"
+          },
+          "cursor": {
+            "description": "The cursor of the previous page, to read the next one.",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-z0-9:_-]+$",
+            "type": "string"
+          },
+          "plan": {
+            "description": "Only runs of this plan.",
+            "pattern": "^[A-Z]{2,8}-P[1-9][0-9]{0,9}$",
+            "type": "string"
+          },
+          "project": {
+            "description": "The project's key, for example CA.",
+            "pattern": "^[A-Z]{2,8}$",
+            "type": "string"
+          },
+          "verdict": {
+            "description": "Only runs with this verdict.",
+            "enum": [
+              "passed",
+              "failed",
+              "no_tests",
+              "build_failed",
+              "unknown",
+              "unavailable"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "project"
+        ],
+        "type": "object"
+      },
+      "summary": "Lists a project's runs newest first, by plan, batch, verdict or commit.",
+      "write": false
+    },
+    "run_record": {
+      "args": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "description": "The run's id, for example CA-R7.",
+            "pattern": "^[A-Z]{2,8}-R[1-9][0-9]{0,9}$",
+            "type": "string"
+          },
+          "request_id": {
+            "description": "Your key for this write; repeating it with the same fields returns the first reply.",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9._:-]+$",
+            "type": "string"
+          },
+          "results": {
+            "description": "1 to 500 results: name, outcome, optional duration_ms, message, artifact.",
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "artifact": {
+                  "maxLength": 512,
+                  "type": "string"
+                },
+                "duration_ms": {
+                  "maximum": 4294967295,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "message": {
+                  "maxLength": 1048576,
+                  "type": "string"
+                },
+                "name": {
+                  "maxLength": 512,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "outcome": {
+                  "enum": [
+                    "passed",
+                    "failed",
+                    "skipped",
+                    "errored",
+                    "not_run"
+                  ],
+                  "type": "string"
+                }
+              },
+              "required": [
+                "name",
+                "outcome"
+              ],
+              "type": "object"
+            },
+            "maxBytes": 16384,
+            "maxItems": 500,
+            "minItems": 1,
+            "type": "array"
+          },
+          "version": {
+            "description": "The version you last read; a newer stored version refuses the write as stale.",
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "version",
+          "results"
+        ],
+        "type": "object"
+      },
+      "summary": "Appends one batch of results to a running run.",
+      "write": true
+    },
+    "run_show": {
+      "args": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "description": "The cursor of the previous page, to read the next one.",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-z0-9:_-]+$",
+            "type": "string"
+          },
+          "id": {
+            "description": "The run's id, for example CA-R7.",
+            "pattern": "^[A-Z]{2,8}-R[1-9][0-9]{0,9}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "summary": "Shows one run: its source and policy binding, integrity, totals and results.",
+      "write": false
+    },
+    "run_start": {
+      "args": {
+        "additionalProperties": false,
+        "properties": {
+          "batch": {
+            "description": "The label grouping one trigger's runs.",
+            "maxBytes": 64,
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[^\\r\\n]+$",
+            "type": "string"
+          },
+          "plan": {
+            "description": "The plan the run runs.",
+            "pattern": "^[A-Z]{2,8}-P[1-9][0-9]{0,9}$",
+            "type": "string"
+          },
+          "policy": {
+            "description": "The check policy the run ran under.",
+            "maxBytes": 4096,
+            "type": "object"
+          },
+          "project": {
+            "description": "The project's key, for example CA.",
+            "pattern": "^[A-Z]{2,8}$",
+            "type": "string"
+          },
+          "request_id": {
+            "description": "Your key for this write; repeating it with the same fields returns the first reply.",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9._:-]+$",
+            "type": "string"
+          },
+          "source": {
+            "description": "The source the run covers: a commit or a declared source.",
+            "maxBytes": 2048,
+            "type": "object"
+          },
+          "title": {
+            "description": "One line naming the run.",
+            "maxBytes": 200,
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[^\\r\\n]*$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "project",
+          "title",
+          "source",
+          "policy"
+        ],
+        "type": "object"
+      },
+      "summary": "Starts a run of a project's tests with its source and policy bound.",
+      "write": true
+    },
     "schema": {
       "args": {
         "additionalProperties": false,
@@ -1262,7 +2162,29 @@
               "cycle_close",
               "import_preview",
               "import_apply",
-              "policy_set"
+              "policy_set",
+              "case_list",
+              "case_show",
+              "set_show",
+              "plan_list",
+              "plan_show",
+              "run_list",
+              "run_show",
+              "coverage",
+              "case_create",
+              "case_edit",
+              "case_link",
+              "case_unlink",
+              "set_upsert",
+              "set_add",
+              "set_remove",
+              "plan_upsert",
+              "plan_add",
+              "plan_remove",
+              "run_start",
+              "run_record",
+              "run_finish",
+              "run_cancel"
             ],
             "type": "string"
           }
@@ -1272,6 +2194,149 @@
       },
       "summary": "Lists the operations, or one operation's fields.",
       "write": false
+    },
+    "set_add": {
+      "args": {
+        "additionalProperties": false,
+        "properties": {
+          "case": {
+            "description": "The case to add.",
+            "pattern": "^[A-Z]{2,8}-T[1-9][0-9]{0,9}$",
+            "type": "string"
+          },
+          "id": {
+            "description": "The set's id, for example CA-S1.",
+            "pattern": "^[A-Z]{2,8}-S[1-9][0-9]{0,9}$",
+            "type": "string"
+          },
+          "request_id": {
+            "description": "Your key for this write; repeating it with the same fields returns the first reply.",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9._:-]+$",
+            "type": "string"
+          },
+          "version": {
+            "description": "The version you last read; a newer stored version refuses the write as stale.",
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "version",
+          "case"
+        ],
+        "type": "object"
+      },
+      "summary": "Adds a case to the end of a set.",
+      "write": true
+    },
+    "set_remove": {
+      "args": {
+        "additionalProperties": false,
+        "properties": {
+          "case": {
+            "description": "The case to remove.",
+            "pattern": "^[A-Z]{2,8}-T[1-9][0-9]{0,9}$",
+            "type": "string"
+          },
+          "id": {
+            "description": "The set's id, for example CA-S1.",
+            "pattern": "^[A-Z]{2,8}-S[1-9][0-9]{0,9}$",
+            "type": "string"
+          },
+          "request_id": {
+            "description": "Your key for this write; repeating it with the same fields returns the first reply.",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9._:-]+$",
+            "type": "string"
+          },
+          "version": {
+            "description": "The version you last read; a newer stored version refuses the write as stale.",
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "id",
+          "version",
+          "case"
+        ],
+        "type": "object"
+      },
+      "summary": "Removes a case from a set.",
+      "write": true
+    },
+    "set_show": {
+      "args": {
+        "additionalProperties": false,
+        "properties": {
+          "cursor": {
+            "description": "The cursor of the previous page, to read the next one.",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[a-z0-9:_-]+$",
+            "type": "string"
+          },
+          "id": {
+            "description": "The set's id, for example CA-S1.",
+            "pattern": "^[A-Z]{2,8}-S[1-9][0-9]{0,9}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "summary": "Shows one set and its cases in order.",
+      "write": false
+    },
+    "set_upsert": {
+      "args": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "description": "The set to rename; a new set when absent.",
+            "pattern": "^[A-Z]{2,8}-S[1-9][0-9]{0,9}$",
+            "type": "string"
+          },
+          "name": {
+            "description": "One line naming the set.",
+            "maxBytes": 200,
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[^\\r\\n]*$",
+            "type": "string"
+          },
+          "project": {
+            "description": "The project's key, for example CA.",
+            "pattern": "^[A-Z]{2,8}$",
+            "type": "string"
+          },
+          "request_id": {
+            "description": "Your key for this write; repeating it with the same fields returns the first reply.",
+            "maxLength": 64,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9._:-]+$",
+            "type": "string"
+          },
+          "version": {
+            "description": "The set version you last read; required with id.",
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "project",
+          "name"
+        ],
+        "type": "object"
+      },
+      "summary": "Creates a set, or renames one at the version you read.",
+      "write": true
     },
     "show": {
       "args": {
@@ -1487,7 +2552,29 @@
                     "cycle_close",
                     "import_preview",
                     "import_apply",
-                    "policy_set"
+                    "policy_set",
+                    "case_list",
+                    "case_show",
+                    "set_show",
+                    "plan_list",
+                    "plan_show",
+                    "run_list",
+                    "run_show",
+                    "coverage",
+                    "case_create",
+                    "case_edit",
+                    "case_link",
+                    "case_unlink",
+                    "set_upsert",
+                    "set_add",
+                    "set_remove",
+                    "plan_upsert",
+                    "plan_add",
+                    "plan_remove",
+                    "run_start",
+                    "run_record",
+                    "run_finish",
+                    "run_cancel"
                   ],
                   "type": "string"
                 },
@@ -1570,7 +2657,29 @@
                     "cycle_close",
                     "import_preview",
                     "import_apply",
-                    "policy_set"
+                    "policy_set",
+                    "case_list",
+                    "case_show",
+                    "set_show",
+                    "plan_list",
+                    "plan_show",
+                    "run_list",
+                    "run_show",
+                    "coverage",
+                    "case_create",
+                    "case_edit",
+                    "case_link",
+                    "case_unlink",
+                    "set_upsert",
+                    "set_add",
+                    "set_remove",
+                    "plan_upsert",
+                    "plan_add",
+                    "plan_remove",
+                    "run_start",
+                    "run_record",
+                    "run_finish",
+                    "run_cancel"
                   ],
                   "type": "string"
                 },
