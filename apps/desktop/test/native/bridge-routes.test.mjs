@@ -45,6 +45,91 @@ async fn desktop_project_files(
   return command;
 }
 
+const LIMITS_HEAD = "impl<'de, R: tauri::Runtime> tauri::ipc::CommandArg<'de, R> for Limits";
+const LIMITS_TAKE = `let tauri::ipc::CommandItem {
+            plugin,
+            name,
+            message,
+            acl,
+            ..
+        } = command;`;
+const LIMITS_READ = `|key| {
+            <Option<u32> as tauri::ipc::CommandArg<'de, R>>::from_command(tauri::ipc::CommandItem {
+                plugin,
+                name,
+                key,
+                message,
+                acl,
+            })
+        }`;
+const LIMITS_READS = '            turn_secs: read("turnSecs")?,\n            idle_secs: read("idleSecs")?,';
+
+/** Builds a lib.rs with one argument type it reads through its own `CommandArg` and a command
+ * taking it, in the canonical Tauri form unless a part is given. Input: the impl head, the
+ * item destructuring, the read closure, lines before the answer and the field lines. Output:
+ * the source text. */
+function limitsSource({ head = LIMITS_HEAD, take = LIMITS_TAKE, read = LIMITS_READ, before = "", reads = LIMITS_READS } = {}) {
+  return `struct Limits {
+    turn_secs: Option<u32>,
+    idle_secs: Option<u32>,
+}
+
+${head} {
+    /// Reads each limit from its own key.
+    fn from_command(
+        command: tauri::ipc::CommandItem<'de, R>,
+    ) -> Result<Self, tauri::ipc::InvokeError> {
+        ${take}
+        let read = ${read};
+${before}        Ok(Self {
+${reads}
+        })
+    }
+}
+
+#[tauri::command]
+async fn desktop_team_time_limits(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    limits: Limits,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    let Limits { turn_secs, idle_secs } = limits;
+    lock(&state).await?.team_time_limits(turn_secs, idle_secs).await
+}
+`;
+}
+
+test("an argument the app reads through its own CommandArg is routed by the keys it reads", () => {
+  const route = plan(commands(lib).find((command) => command.name === "desktop_team_time_limits"), impls).route;
+  assert.deepEqual(route.args.find((arg) => arg.name === "limits").keys, [
+    { field: "turn_secs", key: "turnSecs", type: "Option<u32>" },
+    { field: "session_secs", key: "sessionSecs", type: "Option<u32>" },
+    { field: "idle_secs", key: "idleSecs", type: "Option<u32>" },
+  ]);
+  const arm = render(limitsSource(), impls);
+  assert.match(arm, /struct Limits \{\n\s+#\[serde\(rename = "turnSecs"\)\]\n\s+turn_secs: Option<u32>,\n\s+#\[serde\(rename = "idleSecs"\)\]\n\s+idle_secs: Option<u32>,\n\s+\}/);
+  assert.match(arm, /#\[serde\(flatten\)\]\n\s+limits: Limits,/, "the route reads the keys at the top level, as the app does");
+  assert.throws(() => commands(limitsSource({ reads: '            turn_secs: read("turnSecs")?,\n            idle_secs: read_idle()?,' })), /routes: Limits reads its fields in a way the generator cannot follow/);
+  assert.throws(() => commands(limitsSource({ reads: '            turn_secs: read("turnSecs")?,\n            idle_secs: read("turnSecs")?,' })), /routes: Limits reads its fields in a way the generator cannot follow/);
+});
+
+test("only the canonical Tauri CommandArg body is followed, whatever its layout; any other shape is refused", () => {
+  const keys = (source) => commands(source).find((command) => command.name === "desktop_team_time_limits").params.find((param) => param.name === "limits").keys?.map(({ key }) => key);
+  assert.deepEqual(keys(limitsSource()), ["turnSecs", "idleSecs"]);
+  assert.deepEqual(keys(limitsSource({ take: "let tauri::ipc::CommandItem { plugin, name, message, acl, .. } = command;" })), ["turnSecs", "idleSecs"], "the same tokens on one line");
+  const shapes = {
+    "a read closure that defaults a missing key": { read: "|key| { <Option<u32> as tauri::ipc::CommandArg<'de, R>>::from_command(tauri::ipc::CommandItem { plugin, name, key, message, acl }).map(|v| v.or(Some(60))) }" },
+    "a read closure that reads one fixed key": { read: "|key| { let _ = key; <Option<u32> as tauri::ipc::CommandArg<'de, R>>::from_command(tauri::ipc::CommandItem { plugin, name, key: \"limits\", message, acl }) }" },
+    "an impl head that names CommandArg through a use": { head: "impl<'de, R: tauri::Runtime> CommandArg<'de, R> for Limits" },
+    "a body that validates before it answers": { before: "        if plugin.is_some() {\n            return Err(tauri::ipc::InvokeError::from(\"plugin\"));\n        }\n" },
+    "a field read with a transform": { reads: '            turn_secs: read("turnSecs")?.map(|s| s * 60),\n            idle_secs: read("idleSecs")?,' },
+  };
+  for (const [shape, parts] of Object.entries(shapes)) {
+    assert.throws(() => commands(limitsSource(parts)), /routes: Limits reads its fields in a way the generator cannot follow/, shape);
+  }
+});
+
 test("the end-to-end bridge routes match the app's commands", () => {
   assert.equal(readFileSync(ROUTES, "utf8"), render(lib, impls), "routes.rs is stale: run node test/native/bridge-routes.mjs");
 });
