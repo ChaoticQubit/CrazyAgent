@@ -13,7 +13,7 @@ use crate::tui::clock::now_ms;
 use crate::tui::ctx::{Ctx, Load};
 use crate::tui::frame::{Hint, Message, draw_lines, hint};
 use crate::tui::glyphs::{Glyphs, Status};
-use crate::tui::keys::Key;
+use crate::tui::keys::{Key, ShiftArrows};
 use crate::tui::screens::new_project_page::{key_event, look};
 use crate::tui::screens::new_project_view::Row;
 use crate::tui::screens::process::{message, size};
@@ -794,6 +794,12 @@ impl Team {
             self.focus = Focus::Tree;
             return Flow::Handled;
         }
+        if self.master
+            && ctx.shift_arrows == ShiftArrows::SwitchTabs
+            && matches!(key, Key::ShiftLeft | Key::ShiftRight)
+        {
+            return self.step_tab(*key == Key::ShiftRight, ctx);
+        }
         if self.starting() {
             if *key == Key::Esc {
                 self.held.clear();
@@ -820,6 +826,17 @@ impl Team {
             });
         }
         Flow::Handled
+    }
+
+    /// Leaves the master view for the project's previous or next tab, as the desktop tab
+    /// strip beside its live terminal does; keys kept while the terminal started go with
+    /// the view. Inputs: the direction and the context. Output: back to the project page.
+    fn step_tab(&mut self, forward: bool, ctx: &mut Ctx) -> Flow {
+        assert!(self.master);
+        self.held.clear();
+        self.detach(ctx);
+        ctx.project_step = Some((self.project.clone(), forward));
+        Flow::Back
     }
 
     fn tree_lines(&mut self, limit: usize, height: usize, ctx: &Ctx) -> Vec<Line<'static>> {
@@ -1119,6 +1136,12 @@ impl Screen for Team {
             if self.starting() {
                 hints.push(hint("Esc", "Back"));
             }
+            if ctx.shift_arrows == ShiftArrows::SwitchTabs {
+                hints.push(hint(
+                    &format!("Shift-{}{}", ctx.glyphs.left, ctx.glyphs.right),
+                    "Tabs",
+                ));
+            }
             return hints;
         }
         if self.terminal_keys() {
@@ -1196,6 +1219,13 @@ impl Screen for Team {
 
     fn raw(&self) -> bool {
         self.terminal_keys()
+    }
+
+    fn step(&mut self, forward: bool, ctx: &mut Ctx) -> Flow {
+        if !self.master {
+            return Flow::Ignored;
+        }
+        self.step_tab(forward, ctx)
     }
 
     fn typing(&self) -> bool {

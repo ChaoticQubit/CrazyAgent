@@ -37,7 +37,13 @@ pub enum FormKey {
 }
 
 /// The raw values of the form, compared to tell edited from saved.
-type Snapshot = ([String; 4], AnswerDetail, Initiative, Option<Colors>);
+type Snapshot = (
+    [String; 4],
+    AnswerDetail,
+    Initiative,
+    Option<Colors>,
+    Option<ShiftArrows>,
+);
 
 /// The profile form shared by the first-run Welcome page and Settings, Profile.
 /// Input: an optional saved profile and, in Settings, the Colors choice.
@@ -97,6 +103,7 @@ impl ProfileForm {
             self.detail,
             self.initiative,
             self.colors,
+            self.shift_arrows,
         )
     }
 
@@ -128,6 +135,9 @@ impl ProfileForm {
         if self.colors.is_some() {
             slots.push(Slot::Colors);
         }
+        if self.shift_arrows.is_some() {
+            slots.push(Slot::ShiftArrows);
+        }
         slots.push(Slot::Save);
         slots
     }
@@ -146,7 +156,9 @@ impl ProfileForm {
 
     /// Adds the master terminal's Shift-←→ choice, shown in Settings after Colors.
     /// Input: the current choice. Output: the form.
-    pub fn with_shift_arrows(self, _choice: ShiftArrows) -> Self {
+    pub fn with_shift_arrows(mut self, choice: ShiftArrows) -> Self {
+        self.shift_arrows = Some(choice);
+        self.baseline = self.snapshot();
         self
     }
 
@@ -334,6 +346,13 @@ impl ProfileForm {
                 self.colors = Some(Colors::ALL[next].0);
                 FormKey::Handled
             }
+            (Slot::ShiftArrows, Key::Left | Key::Right) => {
+                self.shift_arrows = self.shift_arrows.map(|choice| match choice {
+                    ShiftArrows::SwitchTabs => ShiftArrows::SendToAgent,
+                    ShiftArrows::SendToAgent => ShiftArrows::SwitchTabs,
+                });
+                FormKey::Handled
+            }
             (_, Key::Esc) => {
                 self.focus = None;
                 FormKey::Handled
@@ -435,6 +454,14 @@ impl ProfileForm {
                     .collect::<Vec<_>>()
                     .join("   "),
             ));
+            if let Some(shift_arrows) = self.shift_arrows {
+                out.push(self.choice_row(
+                    &format!("Master Shift-{}{}", ctx.glyphs.left, ctx.glyphs.right),
+                    ShiftArrows::ALL.map(|(choice, label)| (choice == shift_arrows, label)),
+                    self.focus == Some(Slot::ShiftArrows),
+                    ctx,
+                ));
+            }
             out.push(Line::default());
         }
         if self.saving {
