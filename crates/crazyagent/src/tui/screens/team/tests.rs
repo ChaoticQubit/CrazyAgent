@@ -1807,11 +1807,7 @@ fn the_master_view_turns_an_off_switch_on_at_open() {
         1,
         "a switch already on gets the owner's session check once (LMS-1): {sent:?}"
     );
-    let check = format!("{:?}", sent[0]);
-    assert!(
-        check.starts_with("Setup(OpenLiveSession {") && check.contains(project().as_str()),
-        "{check}"
-    );
+    assert!(session_check(&sent[0]), "{sent:?}");
     running.arrive(switch(Some(true), None));
     assert!(
         requests(&mut running).is_empty(),
@@ -2746,6 +2742,14 @@ fn resumed(result: Result<(), &str>) -> Arrival {
     ))))
 }
 
+fn session_check(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::Setup(crate::project_setup::SetupQuery::OpenLiveSession { project: asked, .. })
+            if *asked == project()
+    )
+}
+
 fn resume_sent(request: &Request) -> bool {
     matches!(
         request,
@@ -2798,8 +2802,8 @@ fn master_view_on_a_paused_team_offers_start_all() {
     shell.arrive(resumed(Ok(())));
     let sent = requests(&mut shell);
     assert!(
-        matches!(sent.as_slice(), [read] if switch_read(read)),
-        "an accepted Start all reads the team again: {sent:?}"
+        matches!(sent.as_slice(), [read, check] if switch_read(read) && session_check(check)),
+        "an accepted Start all reads the team again and sends the owner's session check (LMS-1): {sent:?}"
     );
     shell.arrive(switch(Some(true), None));
     assert!(requests(&mut shell).is_empty());

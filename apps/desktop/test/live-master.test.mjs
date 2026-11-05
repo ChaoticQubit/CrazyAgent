@@ -385,3 +385,27 @@ test("opening the area with the live switch already on still sends the owner's O
   assert.match(source, /const next = onOpen\(on, asked\.current, checked\.current\);/);
   assert.match(source, /if \(next\) void start\(next === "start"\);/);
 });
+
+test("a failed project open or master read before the live switch is named like a refused Open (LMS2-L1)", async () => {
+  assert.equal(typeof live.readProblem, "function", "the area names a failed open or read");
+  const api = await import("../src/api-projects.ts");
+  assert.equal(live.readProblem({ kind: "ok", value: { project_id: "alpha", ticket: "1", session: null } }), null, "a good read names nothing");
+  assert.equal(live.readProblem({ kind: "not_ready" }), null, "a build without the read says so elsewhere");
+  const failed = { kind: "error", code: "stale_selection", message: "" };
+  assert.equal(live.readProblem(failed), api.failureCopy(failed), "a failed open or read is named");
+  const source = readFileSync(new URL("../src/screens/project/live-master.tsx", import.meta.url), "utf8");
+  const start = source.slice(source.indexOf("const start = async ("), source.indexOf("useEffect(", source.indexOf("const start = async (")));
+  assert.match(start, /const master = opened\.kind === "ok" \? await readMaster\(opened\.value\) : opened;/, "a failed open is the read that failed");
+  const named = start.indexOf("readProblem(master)");
+  const open = start.indexOf("startMaster(");
+  assert.ok(named > 0 && open > named, `the failed open or read is named before any Open: named ${named}, open ${open}`);
+});
+
+test("Start all sends the owner's session check once the team runs again (LMS-1)", () => {
+  const source = readFileSync(new URL("../src/screens/project/live-master.tsx", import.meta.url), "utf8");
+  const team = source.slice(source.indexOf("const startTeam = async () => {"), source.indexOf("const state = liveWord(live);"));
+  const resumed = team.indexOf("setTeamStopped(data.id, false)");
+  const check = team.indexOf("await onSession?.()");
+  assert.ok(resumed > 0 && check > resumed, `Start all sends the session check after the team runs again: resumed ${resumed}, check ${check}`);
+  assert.match(source, /onSession=\{\(\) => start\(false\)\}/, "the area's session check is the Open only");
+});

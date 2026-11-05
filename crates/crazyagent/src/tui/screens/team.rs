@@ -50,7 +50,7 @@ const MASTER_WAITING: &str =
 const MASTER_ON: &str = "Live master on. It starts when you open this view.";
 const MASTER_ON_SWITCHED: &str = "Live master on.";
 const MASTER_OFF: &str = "Live master stopped.";
-const MASTER_NO_SESSION: &str =
+pub(in crate::tui) const MASTER_NO_SESSION: &str =
     "No master session opened, so this conversation won't be in Sessions.";
 const MASTER_STOPPED: &str = "The live master is stopped.";
 const MASTER_RESTART: &str =
@@ -267,9 +267,10 @@ impl Team {
         }));
     }
 
-    /// Sends the owner's default Open check for a switch already on, once per open of this
-    /// master view, so an existing project's live master with no session gets one and
-    /// restarts on it (LMS-1). Input: the context. Output: none; the check is queued.
+    /// Sends the owner's default Open check for a switch already on, once per open of a
+    /// running team's master view and after each accepted Start all, so an existing
+    /// project's live master with no session gets one and restarts on it (LMS-1).
+    /// Input: the context. Output: none; the check is queued.
     fn check_session(&mut self, ctx: &mut Ctx) {
         self.checked = true;
         let generation = ctx.next_generation();
@@ -287,9 +288,10 @@ impl Team {
 
     /// Takes a team status read, a live switch change or a session check of this master
     /// view: a good read replaces the switch, and the first one of this open turns a switch
-    /// that is not on on, or checks the session of a switch already on; a failed read changes
-    /// nothing; an accepted change is the switch until the next read, which is read at once;
-    /// an Open that opened no session is named.
+    /// that is not on on, or checks the session of a running team's switch already on; a
+    /// failed read changes nothing; an accepted change is the switch until the next read,
+    /// which is read at once, and an accepted Start all checks the session too; an Open that
+    /// opened no session is named.
     /// Inputs: the setup query, its result and the context. Output: none.
     fn took_setup(
         &mut self,
@@ -318,7 +320,7 @@ impl Team {
                 self.switch = Some(switch);
                 if off && !self.asked {
                     self.start_live(ctx);
-                } else if !off && !self.asked && !self.checked {
+                } else if !off && !self.paused && !self.asked && !self.checked {
                     self.check_session(ctx);
                 }
             }
@@ -348,7 +350,10 @@ impl Team {
                 action: TeamAction::Resume { project_id },
                 ..
             } if *project_id == self.project => match result {
-                Ok(_) => self.read_switch(ctx),
+                Ok(_) => {
+                    self.read_switch(ctx);
+                    self.check_session(ctx);
+                }
                 Err(code) => ctx.say(Message::error(&refusal(code), "")),
             },
             SetupQuery::OpenLiveSession { project, .. } if *project == self.project => {
@@ -1586,7 +1591,7 @@ fn refusal(code: &str) -> String {
 /// The plain words for why the owner's Open opened no master session (LMS-M1): the sentence
 /// a code has, or the reason itself when it is a sentence already. Input: the code or
 /// reason. Output: the words.
-fn unopened(why: &str) -> String {
+pub(in crate::tui) fn unopened(why: &str) -> String {
     if crate::tui::text::plain_code(why) {
         refusal(why)
     } else {

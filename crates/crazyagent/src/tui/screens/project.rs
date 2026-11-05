@@ -902,6 +902,14 @@ impl ProjectScreen {
                 }
             }
             SetupView::Changed(result) => self.changed(query, result),
+            SetupView::LiveWithoutSession(why) => {
+                self.changed(query, crate::engine::owner::OwnerResult::Applied);
+                self.problem = Some(format!(
+                    "{} {}",
+                    crate::tui::screens::team::MASTER_NO_SESSION,
+                    crate::tui::screens::team::unopened(&why)
+                ));
+            }
             SetupView::Catalog(_)
             | SetupView::Team(_)
             | SetupView::CoordQuestions(_)

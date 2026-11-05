@@ -96,6 +96,14 @@ export function openProblem(opened: Result<IntentReceipt>): string | null {
   return state.kind === "rejected" ? failureCopy(state) : null;
 }
 
+/** Why the owner's Open could not even be sent before the live switch: the project's master
+ * could not be opened or read (LMS2-L1). Input: the failed open, or the master read when the
+ * open went through. Output: the plain copy for a failure; null for a good read or a build
+ * without it, which the switch itself then shows. */
+export function readProblem(master: Result<unknown>): string | null {
+  return master.kind === "error" ? failureCopy(master) : null;
+}
+
 /** What one open of the area does with the live master switch as last read: turn a switch
  * not on on, sending the owner's Open first, or only send that Open for a switch already on,
  * so an existing project's master gets its session too (LMS-1); nothing before the switch is
@@ -142,10 +150,12 @@ function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
       setLive({ kind: "starting" });
     }
     setOpenNote(null);
-    const ticket = await sessions.opened();
-    if (ticket && openBeforeLive(await readMaster(ticket))) {
-      const opened = await startMaster(ticket, nextGeneration());
-      if (mounted.current) setOpenNote(openProblem(opened));
+    const opened = await sessions.opened();
+    const master = opened.kind === "ok" ? await readMaster(opened.value) : opened;
+    if (mounted.current) setOpenNote(readProblem(master));
+    if (opened.kind === "ok" && openBeforeLive(master)) {
+      const sent = await startMaster(opened.value, nextGeneration());
+      if (mounted.current) setOpenNote(openProblem(sent));
       await sessions.reread();
     }
     if (!turn) return;
@@ -203,13 +213,13 @@ function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
     : live.kind === "refused" ? live
     : on === false ? { kind: "stopped", problem: engine?.problem ?? null }
     : live;
-  return <LiveMasterView data={data} harness={harness} live={shown} onStart={() => start()} sessions={sessions} openNote={openNote} />;
+  return <LiveMasterView data={data} harness={harness} live={shown} onStart={() => start()} onSession={() => start(false)} sessions={sessions} openNote={openNote} />;
 }
 
 /** The master ticket and live session the live master's New session and Sessions controls
- * act on, with `opened` resolving to the ticket once the project's open settles, empty when
- * it failed or never ran. */
-export type MasterSessions = { ticket: string; liveId: string | null; reread: () => Promise<void>; opened: () => Promise<string> };
+ * act on, with `opened` resolving to the ticket once the project's open settles, the failure
+ * when it failed, or not ready when it never ran or the area moved to another project. */
+export type MasterSessions = { ticket: string; liveId: string | null; reread: () => Promise<void>; opened: () => Promise<Result<string>> };
 
 /** The master ticket and live session of one project, opened once per project as the
  * conversation opens them; a project open makes every earlier ticket stale, so one area
@@ -220,7 +230,7 @@ export function useMasterSessions(projectId: string, enabled = true): MasterSess
   const [ticket, setTicket] = useState("");
   const [liveId, setLiveId] = useState<string | null>(null);
   const current = useRef(projectId);
-  const opening = useRef<Promise<string>>(Promise.resolve(""));
+  const opening = useRef<Promise<Result<string>>>(Promise.resolve({ kind: "not_ready" }));
   current.current = projectId;
 
   const read = async (opened: string, id: string) => {
@@ -234,12 +244,13 @@ export function useMasterSessions(projectId: string, enabled = true): MasterSess
     setLiveId(null);
     if (!enabled) return;
     const id = projectId;
-    opening.current = (async () => {
+    opening.current = (async (): Promise<Result<string>> => {
       const opened = await openMasterProject(id);
-      if (opened.kind !== "ok" || opened.value.project_id !== id || current.current !== id) return "";
+      if (opened.kind !== "ok") return opened;
+      if (opened.value.project_id !== id || current.current !== id) return { kind: "not_ready" };
       setTicket(opened.value.ticket);
       await read(opened.value.ticket, id);
-      return opened.value.ticket;
+      return { kind: "ok", value: opened.value.ticket };
     })();
   }, [projectId, enabled]);
 
@@ -247,7 +258,7 @@ export function useMasterSessions(projectId: string, enabled = true): MasterSess
     ticket,
     liveId,
     reread: async () => {
-      const held = ticket || await opening.current;
+      const held = ticket || await opening.current.then((opened) => opened.kind === "ok" ? opened.value : "");
       if (held) await read(held, projectId);
     },
     opened: () => opening.current,
@@ -274,9 +285,10 @@ export function liveWord(live: Live): { word: string; tone: "ok" | "muted" | "wa
  * while it starts, can't or is stopped; a stopped team (Stop all) says so and offers
  * Start all. An engine that says the master has no terminal app
  * gets today's conversation instead. Inputs: the project data, the master harness id, the
- * state, the start action, the area's sessions when its owner already holds them and why the
- * owner's Open opened no session, if it did not. Output: the area. */
-export function LiveMasterView({ data, harness, live, onStart, sessions: held, openNote = null }: { data: ProjectData; harness: string; live: Live; onStart: () => Promise<void>; sessions?: MasterSessions; openNote?: string | null }) {
+ * state, the start action, the session check Start all sends once the team runs again, the
+ * area's sessions when its owner already holds them and why the owner's Open opened no
+ * session, if it did not. Output: the area. */
+export function LiveMasterView({ data, harness, live, onStart, onSession, sessions: held, openNote = null }: { data: ProjectData; harness: string; live: Live; onStart: () => Promise<void>; onSession?: () => Promise<void>; sessions?: MasterSessions; openNote?: string | null }) {
   const [input] = useState(readMasterInput);
   const [resuming, setResuming] = useState(false);
   const [resumeNote, setResumeNote] = useState("");
@@ -292,6 +304,7 @@ export function LiveMasterView({ data, harness, live, onStart, sessions: held, o
     const note = changeNote(await setTeamStopped(data.id, false), "starting the team again");
     setResuming(false);
     setResumeNote(note);
+    await onSession?.();
     data.reloadTeam();
   };
   const state = liveWord(live);
