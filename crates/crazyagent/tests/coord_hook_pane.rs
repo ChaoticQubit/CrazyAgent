@@ -100,6 +100,7 @@ struct Team {
     alpha: String,
     beta: String,
     runs: u32,
+    starts: crazyagent::coord::relay::TaskStarts,
 }
 
 impl Team {
@@ -209,6 +210,7 @@ impl Team {
             alpha,
             beta,
             runs: 0,
+            starts: crazyagent::coord::relay::TaskStarts::default(),
         }
     }
 
@@ -257,6 +259,7 @@ impl Team {
             (self.beta.as_str(), Whom::Teammate("beta".to_owned())),
         ];
         let (db, project, lead) = (&self.db, &self.project_id, self.lead_id);
+        let starts = &mut self.starts;
         let deadline = Instant::now() + Duration::from_secs(30);
         while !done.exists() && Instant::now() < deadline {
             if let Some(callers) = self.callers.as_mut() {
@@ -270,8 +273,11 @@ impl Team {
                     &mut |pane, _, request, out| {
                         crazyagent::coord::relay::answer(
                             db,
-                            project,
-                            lead,
+                            crazyagent::coord::relay::ForLead {
+                                project,
+                                id: lead,
+                                starts: &mut *starts,
+                            },
                             pane,
                             request,
                             out,
@@ -434,6 +440,50 @@ fn a_teammate_hook_claiming_another_pane_acts_as_its_own_pane() {
             .as_deref()
             .is_some_and(|reason| reason.contains("you are teammate alpha")),
         "{printed}"
+    );
+}
+
+/// T3-15: a native teammate's prompt hook, run in its own pane over the lead's caller
+/// socket, adds the lead's Task-start reminder to its first prompt of a task as the prompt's
+/// added context, adds nothing to a prompt mid-task, and adds it again to its first prompt
+/// after it rested.
+#[test]
+fn a_teammate_prompt_hook_adds_the_task_start_reminder_to_the_first_prompt_of_each_task() {
+    const TEXT: &str = "Task start reminder: before you work on this task, call the Skill tool for each of these skills that fits this task: `crazyagent:tdd`.";
+    let mut team = Team::new();
+    team.starts.text = Some(TEXT.into());
+    let alpha = team.alpha.clone();
+    let prompt = json!({"session_id": MATE_SESSION, "prompt": "Write notes.md"});
+    let context = json!({"hookSpecificOutput": {
+        "hookEventName": "UserPromptSubmit",
+        "additionalContext": TEXT,
+    }});
+    let added = |printed: String| serde_json::from_str::<Value>(printed.trim()).ok();
+
+    assert_eq!(
+        added(team.hook(&alpha, &alpha, "prompt", &prompt, false)),
+        Some(context.clone()),
+        "the first prompt of a task"
+    );
+    assert_eq!(
+        team.hook(&alpha, &alpha, "prompt", &prompt, false),
+        "",
+        "a prompt mid-task"
+    );
+    assert_eq!(
+        team.hook(
+            &alpha,
+            &alpha,
+            "stop",
+            &json!({"session_id": MATE_SESSION}),
+            false
+        ),
+        ""
+    );
+    assert_eq!(
+        added(team.hook(&alpha, &alpha, "prompt", &prompt, false)),
+        Some(context),
+        "the first prompt after it rested"
     );
 }
 

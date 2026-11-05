@@ -834,6 +834,7 @@ impl ManagedAgent {
             access: crate::sandbox::policy::AgentAccess::Sandboxed,
             network: crate::sandbox::policy::AgentNetwork::Open,
             proxy: None,
+            task_start: None,
         };
         let (orders, ordered) = channel();
         let (reports, reported) = channel();
