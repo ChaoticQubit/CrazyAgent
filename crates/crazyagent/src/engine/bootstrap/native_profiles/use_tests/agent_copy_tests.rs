@@ -429,7 +429,10 @@ fn a_codex_usage_read_gets_a_full_size_chatgpt_access_token() {
     );
     let mut record: Value = serde_json::from_slice(&codex_auth(now() + 3600)).unwrap();
     record["tokens"]["access_token"] = json!(access);
-    private_file(&case.home().join("auth.json"), record.to_string().as_bytes());
+    private_file(
+        &case.home().join("auth.json"),
+        record.to_string().as_bytes(),
+    );
     let guard = execution(&mut case);
     let read = guard.usage_credential(&no_harness(&case));
     assert_eq!(
