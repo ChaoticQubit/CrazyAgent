@@ -85,6 +85,21 @@ impl ShiftArrows {
     ];
 }
 
+/// Whether the TUI asks the terminal for the enhanced keyboard protocol, so Shift-Enter
+/// reaches it as its own key: `Auto` asks at start and turns the protocol on when the
+/// terminal has it; `Off` never asks, and Ctrl-J stays the only new-line key.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ShiftEnter {
+    #[default]
+    Auto,
+    Off,
+}
+
+impl ShiftEnter {
+    /// Every choice with its label, in the order Settings shows them.
+    pub const ALL: [(ShiftEnter, &'static str); 2] = [(Self::Auto, "Auto"), (Self::Off, "Off")];
+}
+
 impl Key {
     /// Normalizes one crossterm key event.
     /// Input: the event. Output: the key, or None for releases and keys the TUI
@@ -222,6 +237,94 @@ mod tests {
             crate::tui::terminal_pane::encode(&Key::Enter, false, false),
             b"\r"
         );
+    }
+
+    /// N-T1 C: under the enhanced keyboard protocol (disambiguated escape codes) a terminal
+    /// reports Ctrl and Shift chords as CSI u, which crossterm 0.28 gives as the plain key
+    /// with the modifier; each reaches an agent's terminal as the bytes the same key sends
+    /// from a legacy terminal today.
+    #[test]
+    fn keys_from_the_enhanced_keyboard_protocol_reach_an_agent_as_legacy_bytes() {
+        let control = KeyModifiers::CONTROL;
+        let shift = KeyModifiers::SHIFT;
+        let none = KeyModifiers::NONE;
+        let pairs = [
+            (
+                "Ctrl-Enter",
+                press(KeyCode::Enter, control),
+                press(KeyCode::Enter, none),
+            ),
+            (
+                "Ctrl-Shift-Enter",
+                press(KeyCode::Enter, control | shift),
+                press(KeyCode::Enter, none),
+            ),
+            (
+                "Ctrl-Tab",
+                press(KeyCode::Tab, control),
+                press(KeyCode::Tab, none),
+            ),
+            (
+                "Ctrl-Shift-Tab",
+                press(KeyCode::BackTab, control | shift),
+                press(KeyCode::BackTab, shift),
+            ),
+            (
+                "Ctrl-Backspace",
+                press(KeyCode::Backspace, control),
+                press(KeyCode::Char('h'), control),
+            ),
+            (
+                "Ctrl-Esc",
+                press(KeyCode::Esc, control),
+                press(KeyCode::Esc, none),
+            ),
+            (
+                "Ctrl-[",
+                press(KeyCode::Char('['), control),
+                press(KeyCode::Esc, none),
+            ),
+            (
+                "Ctrl-3",
+                press(KeyCode::Char('3'), control),
+                press(KeyCode::Esc, none),
+            ),
+            (
+                "Ctrl-8",
+                press(KeyCode::Char('8'), control),
+                press(KeyCode::Backspace, none),
+            ),
+            (
+                "Ctrl-]",
+                press(KeyCode::Char(']'), control),
+                press(KeyCode::Char('5'), control),
+            ),
+            (
+                "Ctrl-Shift-A",
+                press(KeyCode::Char('A'), control | shift),
+                press(KeyCode::Char('a'), control),
+            ),
+            (
+                "Shift-Esc",
+                press(KeyCode::Esc, shift),
+                press(KeyCode::Esc, none),
+            ),
+            (
+                "Shift-Backspace",
+                press(KeyCode::Backspace, shift),
+                press(KeyCode::Backspace, none),
+            ),
+        ];
+        for (name, enhanced, legacy) in pairs {
+            let legacy = legacy.unwrap_or_else(|| panic!("{name}: a legacy terminal sends it"));
+            let enhanced =
+                enhanced.unwrap_or_else(|| panic!("{name}: dropped under the enhanced protocol"));
+            assert_eq!(
+                crate::tui::terminal_pane::encode(&enhanced, false, false),
+                crate::tui::terminal_pane::encode(&legacy, false, false),
+                "{name}"
+            );
+        }
     }
 
     #[test]

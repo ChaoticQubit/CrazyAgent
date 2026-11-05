@@ -3,7 +3,7 @@ use crate::owner_profile::{
     WorkingStyle, plain_problem,
 };
 use crate::tui::ctx::Ctx;
-use crate::tui::keys::{Key, ShiftArrows};
+use crate::tui::keys::{Key, ShiftArrows, ShiftEnter};
 use crate::tui::text::{join, pad};
 use crate::tui::theme::Colors;
 use crate::tui::widgets::{TextField, buttons, radio};
@@ -25,6 +25,7 @@ pub enum Slot {
     Initiative,
     Colors,
     ShiftArrows,
+    ShiftEnter,
     Save,
 }
 
@@ -43,6 +44,7 @@ type Snapshot = (
     Initiative,
     Option<Colors>,
     Option<ShiftArrows>,
+    Option<ShiftEnter>,
 );
 
 /// The profile form shared by the first-run Welcome page and Settings, Profile.
@@ -59,6 +61,7 @@ pub struct ProfileForm {
     initiative: Initiative,
     colors: Option<Colors>,
     shift_arrows: Option<ShiftArrows>,
+    shift_enter: Option<ShiftEnter>,
     focus: Option<Slot>,
     pub saving: bool,
 }
@@ -82,6 +85,7 @@ impl ProfileForm {
             initiative: Initiative::AskFirst,
             colors,
             shift_arrows: None,
+            shift_enter: None,
             focus: Some(Slot::Name),
             saving: false,
         };
@@ -104,6 +108,7 @@ impl ProfileForm {
             self.initiative,
             self.colors,
             self.shift_arrows,
+            self.shift_enter,
         )
     }
 
@@ -138,6 +143,9 @@ impl ProfileForm {
         if self.shift_arrows.is_some() {
             slots.push(Slot::ShiftArrows);
         }
+        if self.shift_enter.is_some() {
+            slots.push(Slot::ShiftEnter);
+        }
         slots.push(Slot::Save);
         slots
     }
@@ -160,6 +168,18 @@ impl ProfileForm {
         self.shift_arrows = Some(choice);
         self.baseline = self.snapshot();
         self
+    }
+
+    /// Adds the Shift-Enter choice, shown in Settings after the master's Shift-←→.
+    /// Input: the current choice. Output: the form.
+    pub fn with_shift_enter(self, _choice: ShiftEnter) -> Self {
+        self
+    }
+
+    /// The chosen Shift-Enter value in Settings.
+    /// Input: none. Output: the choice, or None on Welcome.
+    pub fn shift_enter(&self) -> Option<ShiftEnter> {
+        self.shift_enter
     }
 
     /// The chosen Shift-←→ value in Settings.
@@ -542,6 +562,36 @@ mod tests {
         assert_eq!(profile.working_style.detail, AnswerDetail::Detailed);
         assert_eq!(profile.working_style.initiative, Initiative::ActFirst);
         assert_eq!(form.key(&Key::Char('x')), FormKey::Ignored);
+    }
+
+    #[test]
+    fn settings_shows_the_shift_enter_choice_after_the_master_shift_arrows_and_arrows_switch_it() {
+        let mut form = ProfileForm::new(None, Some(Colors::Dark))
+            .with_shift_arrows(ShiftArrows::SwitchTabs)
+            .with_shift_enter(ShiftEnter::Auto);
+        let slots = form.slots();
+        assert_eq!(
+            &slots[slots.len() - 3..],
+            [Slot::ShiftArrows, Slot::ShiftEnter, Slot::Save]
+        );
+        let welcome = ProfileForm::new(None, None);
+        assert!(!welcome.slots().contains(&Slot::ShiftEnter));
+        assert_eq!(welcome.shift_enter(), None);
+        form.set_focus(Some(Slot::ShiftArrows));
+        form.key(&Key::Tab);
+        assert_eq!(form.focus(), Some(Slot::ShiftEnter));
+        assert!(!form.edited());
+        assert_eq!(form.key(&Key::Right), FormKey::Handled);
+        assert_eq!(form.shift_enter(), Some(ShiftEnter::Off));
+        assert!(
+            form.edited(),
+            "a changed choice is an edit that quit warns about"
+        );
+        assert_eq!(form.key(&Key::Left), FormKey::Handled);
+        assert_eq!(form.shift_enter(), Some(ShiftEnter::Auto));
+        assert!(!form.edited());
+        form.key(&Key::Tab);
+        assert_eq!(form.focus(), Some(Slot::Save));
     }
 
     #[test]

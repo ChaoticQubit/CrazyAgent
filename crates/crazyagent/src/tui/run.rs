@@ -2,7 +2,7 @@ use super::client::terminal::Terminals;
 use super::client::{Connection, OwnerEvent};
 use super::ctx::{Ctx, Link};
 use super::glyphs::Glyphs;
-use super::keys::Key;
+use super::keys::{Key, ShiftEnter};
 use super::prefs;
 use super::seam::{Arrival, Request, ShellEvent, ShellRequest};
 use super::shell::Shell;
@@ -44,10 +44,37 @@ impl Drop for Extras {
     }
 }
 
-/// Writes the sequences that hand the terminal back: stop focus and paste
-/// events, show the cursor, leave the alternate screen.
-/// Input: the terminal writer. Output: the write result.
+static KEYBOARD_PUSHED: AtomicBool = AtomicBool::new(false);
+
+/// Turns on the enhanced keyboard protocol (disambiguated escape codes) under Auto when the
+/// terminal says it has it, so Shift-Enter arrives as its own key; Off never asks. The flag
+/// is set before the push is written, so every restore pops it.
+/// Inputs: the writer, the choice, the support query and the pushed flag. Output: the write
+/// result; a failed or timed-out query leaves the terminal as it is.
+fn push_keyboard(
+    _out: &mut impl std::io::Write,
+    _choice: ShiftEnter,
+    _supported: impl FnOnce() -> std::io::Result<bool>,
+    _pushed: &AtomicBool,
+) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Writes what the normal exit hands back before the screen guard leaves the alternate
+/// screen: the keyboard protocol popped when this TUI pushed it, then focus and paste
+/// events stopped. Inputs: the writer and the pushed flag. Output: the write result.
+fn leave(out: &mut impl std::io::Write, _pushed: &AtomicBool) -> std::io::Result<()> {
+    execute!(out, DisableFocusChange, DisableBracketedPaste)
+}
+
+/// Writes the sequences that hand the terminal back: the keyboard protocol popped when
+/// this TUI pushed it, focus and paste events stopped, the cursor shown, the alternate
+/// screen left. Input: the terminal writer. Output: the write result.
 pub(super) fn restore(out: &mut impl std::io::Write) -> std::io::Result<()> {
+    restore_with(out, &KEYBOARD_PUSHED)
+}
+
+fn restore_with(out: &mut impl std::io::Write, _pushed: &AtomicBool) -> std::io::Result<()> {
     execute!(
         out,
         DisableFocusChange,
@@ -348,6 +375,65 @@ mod tests {
         assert!(
             text.ends_with("\x1b[?1049l"),
             "the alternate screen is left last"
+        );
+    }
+
+    #[test]
+    fn the_keyboard_protocol_is_turned_on_only_under_auto_on_a_terminal_that_has_it() {
+        let pushed = AtomicBool::new(false);
+        let mut out = Vec::new();
+        push_keyboard(&mut out, ShiftEnter::Auto, || Ok(true), &pushed).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "\x1b[>1u");
+        assert!(pushed.load(Ordering::SeqCst));
+        for answer in [Ok(false), Err(std::io::Error::other("no reply within 2 s"))] {
+            let pushed = AtomicBool::new(false);
+            let mut out = Vec::new();
+            push_keyboard(&mut out, ShiftEnter::Auto, move || answer, &pushed).unwrap();
+            assert!(out.is_empty() && !pushed.load(Ordering::SeqCst));
+        }
+        let pushed = AtomicBool::new(false);
+        let mut out = Vec::new();
+        push_keyboard(
+            &mut out,
+            ShiftEnter::Off,
+            || panic!("Off never asks the terminal"),
+            &pushed,
+        )
+        .unwrap();
+        assert!(out.is_empty() && !pushed.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn every_restore_turns_a_pushed_keyboard_protocol_off_before_the_screen_is_left() {
+        let pushed = AtomicBool::new(true);
+        let mut out = Vec::new();
+        restore_with(&mut out, &pushed).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.starts_with("\x1b[<1u"), "{text:?}");
+        assert!(text.ends_with("\x1b[?1049l"), "{text:?}");
+        assert!(!pushed.load(Ordering::SeqCst));
+        let mut again = Vec::new();
+        restore_with(&mut again, &pushed).unwrap();
+        assert!(
+            !String::from_utf8(again).unwrap().contains("\x1b[<"),
+            "a pushed protocol is popped once"
+        );
+
+        let pushed = AtomicBool::new(true);
+        let mut out = Vec::new();
+        leave(&mut out, &pushed).unwrap();
+        let text = String::from_utf8(out).unwrap();
+        assert!(text.starts_with("\x1b[<1u"), "{text:?}");
+        assert!(text.contains("\x1b[?2004l"), "{text:?}");
+        assert!(!pushed.load(Ordering::SeqCst));
+
+        let never = AtomicBool::new(false);
+        let mut out = Vec::new();
+        restore_with(&mut out, &never).unwrap();
+        leave(&mut out, &never).unwrap();
+        assert!(
+            !String::from_utf8(out).unwrap().contains("\x1b[<"),
+            "nothing pushed, nothing popped"
         );
     }
 }

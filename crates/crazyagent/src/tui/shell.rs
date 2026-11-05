@@ -823,7 +823,7 @@ mod tests {
     use crate::owner_profile::OwnerProfile;
     use crate::protocol::ProjectId;
     use crate::tui::glyphs::UNICODE;
-    use crate::tui::keys::ShiftArrows;
+    use crate::tui::keys::{ShiftArrows, ShiftEnter};
     use crate::tui::seam::{Activity, ResearchCounts};
     use crate::tui::theme::{Appearance, Colors, Depth};
 
@@ -1210,7 +1210,7 @@ mod tests {
         let mut shell = loaded();
         shell.key(Key::Tab);
         shell.key(Key::Char('!'));
-        for _ in 0..8 {
+        for _ in 0..9 {
             shell.key(Key::Tab);
         }
         shell.key(Key::Enter);
@@ -1246,6 +1246,7 @@ mod tests {
         }
         shell.key(Key::Right);
         shell.key(Key::Tab);
+        shell.key(Key::Tab);
         shell.key(Key::Enter);
         assert!(drain(&mut shell).contains(&"SaveProfile".to_owned()));
         assert_eq!(
@@ -1258,6 +1259,46 @@ mod tests {
         assert_eq!(
             crate::tui::prefs::load_shift_arrows(&crate::tui::prefs::shift_arrows_path(&colors)),
             ShiftArrows::SendToAgent
+        );
+    }
+
+    #[test]
+    fn saving_the_profile_keeps_the_shift_enter_choice_on_this_computer() {
+        let folder = tempfile::tempdir().unwrap();
+        let colors = folder.path().join("tui-colors");
+        let mut ctx = ctx();
+        ctx.prefs = Some(colors.clone());
+        ctx.store.profile = Load::Ready(Some(OwnerProfile {
+            name: "Mira".into(),
+            role: String::new(),
+            bio: String::new(),
+            preferred_stack: Vec::new(),
+            working_style: Default::default(),
+        }));
+        let mut shell = at(Place::Settings(SettingsSection::Profile), ctx);
+        assert_eq!(shell.ctx.shift_enter, ShiftEnter::Auto);
+        for _ in 0..9 {
+            shell.key(Key::Tab);
+        }
+        shell.key(Key::Right);
+        shell.key(Key::Tab);
+        shell.key(Key::Enter);
+        assert!(drain(&mut shell).contains(&"SaveProfile".to_owned()));
+        assert_eq!(
+            shell.ctx.shift_enter,
+            ShiftEnter::Auto,
+            "the choice applies once saved"
+        );
+        shell.arrive(Arrival::ProfileSaved(Ok(())));
+        assert_eq!(shell.ctx.shift_enter, ShiftEnter::Off);
+        assert_eq!(
+            crate::tui::prefs::load_shift_enter(&crate::tui::prefs::shift_enter_path(&colors)),
+            ShiftEnter::Off
+        );
+        assert_eq!(
+            crate::tui::prefs::load_shift_arrows(&crate::tui::prefs::shift_arrows_path(&colors)),
+            ShiftArrows::SwitchTabs,
+            "the other choice is kept as it was"
         );
     }
 
