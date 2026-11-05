@@ -2367,6 +2367,14 @@ fn master_turn_diagnostic(error: &EngineError) -> String {
     format!("master_turn_not_completed cause={cause}")
 }
 
+/// Renders the engine log line for a console master's memory calls that one tick of its
+/// turn could not answer (OP22-L2). Input: the ServeMemory error. Output: the line naming its
+/// plain code, or a redacted marker for storage text, which can carry a memory's words.
+fn master_memory_diagnostic(error: &EngineError) -> String {
+    let cause = plain_cause(error, "master_memory_error_redacted");
+    format!("master_memory_calls_not_answered cause={cause}")
+}
+
 /// Picks the text an engine diagnostic may show for an error. Inputs: the error and the
 /// marker to show instead. Output: the error code when it is at most 192 lowercase
 /// letters, digits, `_`, `:` or `;`, else the marker.

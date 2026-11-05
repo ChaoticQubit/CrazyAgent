@@ -5,7 +5,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 const api = await import("../src/api.ts");
-const { MemorySuggestion, SavedMemoryRow } = await import("../src/screens/project/memory.tsx");
+const { MemorySuggestion, OwnNoteRow, SavedMemoryRow } = await import("../src/screens/project/memory.tsx");
 
 const forbidden = () => { throw new Error("static rendering must not call the engine"); };
 const item = (patch = {}) => ({ id: "entry-7", version: 2, text: "Competitors charge per seat.", status: "Provisional", human_reviewed: false, ...patch });
@@ -67,4 +67,26 @@ test("an edited project memory is refused before the engine when the text breaks
   assert.deepEqual(await api.editProjectMemory("project-harbor", "entry-7", 2, "x".repeat(4097), 1),
     { kind: "error", code: "invalid_knowledge_text", message: "Too long: 4097 of 4096 bytes." });
   assert.equal((await api.editProjectMemory("project-harbor", "entry-7", 2, "Competitors charge per team.", 1)).code, "engine_unreachable");
+});
+
+const note = (patch = {}) => ({ id: "memory-3", text: "Use cargo nextest.", scope: "project", project_id: "project-harbor", origin: "agent",
+  from_project_id: null, source_path: null, agent: "Master", ...patch });
+const noteRow = (memory) => visible(renderToStaticMarkup(createElement(OwnNoteRow, { memory, busy: false, onDelete: forbidden })));
+
+test("a note in Your notes reads Saved once agents use it, and one an agent asked for says it needs approval (OP-22)", () => {
+  assert.match(noteRow(note()), /Saved/);
+  const waiting = noteRow(note({ origin: "requested" }));
+  assert.match(waiting, /Use cargo nextest\./);
+  assert.doesNotMatch(waiting, /Saved/);
+  assert.match(waiting, /Needs approval/);
+  assert.match(waiting, /Approve it in Settings, Memory\./);
+  assert.match(waiting, /Delete/);
+});
+
+test("a note an agent wrote names that agent in Your notes, and the owner's own note names none (OP-22)", () => {
+  assert.match(noteRow(note()), /From Master/);
+  assert.match(noteRow(note({ origin: "requested" })), /From Master/);
+  assert.match(noteRow(note({ agent: null })), /From an agent/);
+  assert.match(noteRow(note({ agent: "Ma\u202ester" })), /From Ma\\u202ester/);
+  assert.doesNotMatch(noteRow(note({ origin: "written", agent: null })), /From /);
 });

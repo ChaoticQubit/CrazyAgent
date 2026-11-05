@@ -31,8 +31,13 @@ pub const MEMORY_SECTION_BYTES_MAX: usize = crate::memory::library::LAUNCH_BYTES
 pub const INSTRUCTIONS_BYTES_MAX: usize = 34 * 1024;
 pub const SKILLS_INDEX_BYTES_MAX: usize = 8 * 1024;
 pub const TEAM_INDEX_BYTES_MAX: usize = 4 * 1024;
-pub const MASTER_INSTRUCTIONS_BYTES_MAX: usize =
-    INSTRUCTIONS_BYTES_MAX + TEAM_INDEX_BYTES_MAX + SECTION_SLACK + MASTER_LANDING_RULES.len();
+pub const MASTER_INSTRUCTIONS_BYTES_MAX: usize = INSTRUCTIONS_BYTES_MAX
+    + TEAM_INDEX_BYTES_MAX
+    + SECTION_SLACK
+    + MEMORY_TOOLS_BYTES_MAX
+    + MASTER_LANDING_RULES.len();
+/// The most bytes of the section that names a master's `remember` and `recall` tools.
+pub const MEMORY_TOOLS_BYTES_MAX: usize = 512;
 
 const _: () = assert!(TOOLS_SECTION_BYTES_MAX <= TEAM_INDEX_BYTES_MAX);
 /// The most bytes of the team tools section a live master or sub-agent with tools reads.
@@ -360,26 +365,25 @@ pub fn master_tools(tx: &Transaction<'_>, project: &ProjectId) -> Result<bool, L
         .is_some_and(|setup| setup.team.master_tools))
 }
 
-/// Builds the startup instruction for the engine's own project master conversation: the
-/// same project context, approved memories and linked-worktree landing rules every
-/// Sandboxed agent gets, since the conversation runs in a linked worktree, then with tools on what
-/// its tools are and how it starts a sub-agent (DEC-093), or with tools off the names of
-/// the approved skills and MCP servers that team agents with tools on receive, with the team
-/// roles each skill goes to when the owner chose skills per role, then how the team's work
-/// lands. No secret
-/// value, command, URL or file of a server is read or given. Input: a transaction the caller
-/// holds on `engine.db`, the project, its master tools switch and the live model access,
-/// none without settings. Output: at most `MASTER_INSTRUCTIONS_BYTES_MAX` bytes of markdown,
-/// or a plain code.
+/// Builds the startup instruction for the engine's own project master conversation: the same
+/// project context, approved memories and linked-worktree landing rules every Sandboxed agent gets,
+/// since the conversation runs in a linked worktree, then with tools on what its tools are, how it
+/// starts a sub-agent (DEC-093) and its memory tools less the ones switched off, as a team
+/// master's, or with tools off the names of the approved skills and MCP servers that team agents
+/// with tools on receive, with the team roles each skill goes to when the owner chose skills per
+/// role, then how the team's work lands. No secret value, command, URL or file of a server is read
+/// or given. Input: a transaction the caller holds on `engine.db`, the project, with tools on the
+/// team tools switched off, none with tools off, and the live model access, none without settings.
+/// Output: at most `MASTER_INSTRUCTIONS_BYTES_MAX` bytes of markdown, or a plain code.
 pub fn for_master(
     tx: &Transaction<'_>,
     project: &ProjectId,
-    tools: bool,
+    tools: Option<&[String]>,
     access: Option<&crate::config::ModelAccess>,
 ) -> Result<String, LaunchError> {
     let root = engine_root(tx)?;
     let mut text = project_instructions(tx, project, Layout::Linked)?;
-    if tools {
+    if let Some(off) = tools {
         let setup = crate::project_setup::load_setup(tx, project)
             .map_err(unavailable)?
             .ok_or_else(|| failure("launch_context_master_tools_without_plan"))?;
@@ -387,6 +391,7 @@ pub fn for_master(
             .map(|access| crate::team::available_harnesses(access, project))
             .unwrap_or_default();
         text.push_str(&master_tools_section(&setup, &available));
+        text.push_str(&memory_tools_section(off));
     } else {
         let plugins = crate::storage::plugins::effective(tx, &root, project)
             .map_err(|problem| LaunchError(problem.0))?;
@@ -457,9 +462,9 @@ pub fn team_tools_section(off: &[String]) -> String {
     section
 }
 
-/// Renders the section that names the memory tools of a team master running without its
-/// live terminal, less the ones switched off, and says that only they keep what later
-/// sessions and the owner see. Takes the tools left out. Returns the markdown, empty when
+/// Renders the section that names the memory tools of a master running without its live terminal, a
+/// team master or a console turn, less the ones switched off, and says that only they keep what
+/// later sessions and the owner see. Takes the tools left out. Returns the markdown, empty when
 /// both are off.
 fn memory_tools_section(off: &[String]) -> String {
     let lines: String = crate::coord::tool_switches::BUILTIN_TOOLS
@@ -476,7 +481,7 @@ fn memory_tools_section(off: &[String]) -> String {
         "\n## Memory tools\n\nYour memory tools are in the `{}` MCP server. Keep what later sessions should know with remember: the owner sees it in Project memory, and memory you keep anywhere else is never seen there:\n{lines}",
         crate::team::tool::SERVER_NAME
     );
-    assert!(section.len() <= TOOLS_SECTION_BYTES_MAX);
+    assert!(section.len() <= MEMORY_TOOLS_BYTES_MAX);
     section
 }
 

@@ -124,6 +124,13 @@ pub(crate) enum MasterRuntimeCommand {
         project_id: ProjectId,
         session_id: SessionId,
     },
+    ServeMemory {
+        host: HostStamp,
+        project_id: ProjectId,
+        session_id: SessionId,
+        turn_id: RequestId,
+        mailbox: PathBuf,
+    },
     Checked {
         provisioned: Box<crate::worktrees::Provisioned>,
         prepare: Box<MasterRuntimeCommand>,
@@ -162,6 +169,7 @@ pub(crate) struct PreparedMasterTurn {
     pub(crate) agent_project: crate::agent_home::AgentProject,
     pub(crate) agent_policy: crate::sandbox::policy::AgentPolicy,
     pub(crate) hidden_paths: Vec<std::path::PathBuf>,
+    pub(crate) tools_off: Vec<String>,
 }
 
 impl PreparedMasterTurn {
@@ -2774,12 +2782,16 @@ fn bundle(
         .clone()
         .ok_or_else(|| error("master_attempt_missing"))?;
     let tools = turn_tools(tx, &session)?;
+    let tools_off = match tools {
+        true => crate::team::master::switched_off_tools(tx, &session.project_id)?,
+        false => Vec::new(),
+    };
     let instructions = match session.selection.backend {
         MasterBackend::Rcli => String::new(),
         MasterBackend::Codex | MasterBackend::Claude => crate::launch_context::for_master(
             tx,
             &session.project_id,
-            tools,
+            tools.then_some(tools_off.as_slice()),
             config.settings.model_access.as_ref(),
         )
         .map_err(|problem| EngineError(problem.0))?,
@@ -2805,6 +2817,7 @@ fn bundle(
         agent_project,
         agent_policy,
         hidden_paths,
+        tools_off,
     };
     assert_eq!(
         prepared.attempt.request.task_id,
@@ -4042,6 +4055,13 @@ pub(super) fn runtime(
             session_id,
             turn_id,
             ..
+        }
+        | MasterRuntimeCommand::ServeMemory {
+            host,
+            project_id,
+            session_id,
+            turn_id,
+            ..
         } => (host, project_id, session_id, turn_id),
     };
     let (mut session, mut turn) = load_runtime_turn(&tx, host, project_id, session_id, turn_id)?;
@@ -4122,6 +4142,19 @@ pub(super) fn runtime(
                 )?,
             };
             Ok(MasterRuntimeResult::Profile(Box::new(guard)))
+        }
+        MasterRuntimeCommand::ServeMemory {
+            ref host,
+            ref mailbox,
+            ..
+        } => {
+            current_scope(&tx, config, sources, host, &session, &turn)?;
+            if turn.phase != MasterTurnPhase::Running || !turn_tools(&tx, &session)? {
+                return Err(error("master_memory_turn_not_running"));
+            }
+            tx.commit().map_err(error)?;
+            crate::team::master::serve_memory_calls(db, &session.project_id, mailbox)?;
+            Ok(MasterRuntimeResult::Turn(Box::new(turn)))
         }
         MasterRuntimeCommand::RecordChild { group, .. } => {
             super::harness_groups::record(&tx, &session.session_id, &turn.id, group)?;

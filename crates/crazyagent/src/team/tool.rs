@@ -1040,6 +1040,13 @@ pub(crate) fn call_id_valid(id: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// Says whether a mailbox holds a call the engine has not taken yet, so a master turn asks
+/// storage to answer only when there is something to answer. A link at the mailbox's own
+/// name is never followed. Takes the mailbox. Returns the answer.
+pub fn calls_waiting(mailbox: &Path) -> bool {
+    !calls(mailbox, CALL_SUFFIX).is_empty()
+}
+
 /// Lists the mailbox entries with one suffix whose names carry a valid call id, oldest
 /// first, never more than `MAILBOX_SCAN_MAX` entries looked at; a link at the mailbox's
 /// own name is never followed.
