@@ -677,7 +677,12 @@ fn the_daily_question_is_off_by_default_and_asks_nothing() {
         stored(&score.case.db).unwrap().settings.daily_question,
         DailyQuestion::Off
     );
-    let asked = ask_daily(&score.case.db, &[score.case.project.clone()], now_ms()).unwrap();
+    let asked = ask_daily(
+        &score.case.db,
+        std::slice::from_ref(&score.case.project),
+        now_ms(),
+    )
+    .unwrap();
     assert_eq!(asked, None);
     let pending = questions::pending(&score.case.db, &score.case.project).unwrap();
     assert!(pending.is_empty());
