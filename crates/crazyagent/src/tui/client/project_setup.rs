@@ -114,12 +114,21 @@ impl NativeOwner {
             SetupQuery::CoordQuestions { project } => SetupView::CoordQuestions(Box::new(
                 controller.coord_questions(project).await.map_err(problem)?,
             )),
-            SetupQuery::TeamChange { action, generation } => changed(
-                controller
-                    .team_action(action, generation)
-                    .await
-                    .map_err(problem)?,
-            )?,
+            SetupQuery::TeamChange { action, generation } => {
+                if let crate::team::TeamAction::LiveMaster {
+                    project_id,
+                    on: true,
+                } = &action
+                {
+                    open_live_session(controller, project_id, generation).await?;
+                }
+                changed(
+                    controller
+                        .team_action(action, generation)
+                        .await
+                        .map_err(problem)?,
+                )?
+            }
             SetupQuery::Library(query) => SetupView::Library(match query {
                 LibraryQuery::Page {
                     scope,
@@ -226,6 +235,49 @@ impl NativeOwner {
 
 fn changed(response: OwnerResponse) -> Result<SetupView, String> {
     owner_result(response).map(SetupView::Changed)
+}
+
+/// Sends the owner's default master Open before a project's live master switch turns on,
+/// when the project has no live session, so the live master runs in a session its turns
+/// mark used and the Sessions list shows (LMS-1). A project whose defaults cannot open a
+/// master, or whose Open the engine refuses, still turns its switch on as before.
+/// Inputs: the controller, the project and the change's generation. Output: Ok, or the
+/// problem when the master read or the Open's delivery failed.
+async fn open_live_session(
+    controller: &mut OwnerController,
+    project: &ProjectId,
+    generation: u64,
+) -> Result<(), String> {
+    let problem = |error: crate::engine::EngineError| bounded_problem(&error.0);
+    let state = controller
+        .read(OwnerRead::ProjectMaster {
+            project_id: project.clone(),
+        })
+        .await
+        .map_err(problem)?;
+    let OwnerData::ProjectMaster { session } = &state.data else {
+        return Err("master_fresh_read_required".into());
+    };
+    if session.as_ref().is_some_and(|session| {
+        matches!(
+            session.phase,
+            crate::master_session::MasterSessionPhase::Configured
+                | crate::master_session::MasterSessionPhase::Closing
+        )
+    }) {
+        return Ok(());
+    }
+    let Ok(action) = crate::tui::default_master_open(controller, project).await else {
+        return Ok(());
+    };
+    controller
+        .read(OwnerRead::Capabilities)
+        .await
+        .map_err(problem)?;
+    controller
+        .begin_mutation(OwnerMutation::ProjectMaster { action }, generation)
+        .map_err(problem)?;
+    owner_result(controller.send_pending().await.map_err(problem)?).map(|_| ())
 }
 
 fn owner_result(response: OwnerResponse) -> Result<crate::engine::owner::OwnerResult, String> {

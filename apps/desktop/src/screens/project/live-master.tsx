@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { loadTeamGraph, setLiveMaster, setTeamStopped } from "../../api";
+import { loadTeamGraph, nextGeneration, setLiveMaster, setTeamStopped } from "../../api";
 import type { Result } from "../../api";
-import { failureCopy, openMasterProject, readMaster, receiptState } from "../../api-projects";
-import type { GraphNode, TeamStatus } from "../../engine-client";
+import { failureCopy, openMasterProject, readMaster, receiptState, startMaster } from "../../api-projects";
+import type { GraphNode, MasterState, TeamStatus } from "../../engine-client";
 import { Button, Icon } from "../../ui";
 import { displayText } from "../conversation";
 import { harnessName } from "../new-project/team-editor";
@@ -74,6 +74,16 @@ export function wantSettled(want: Want | null, readAt: number): boolean {
   return want !== null && readAt > want.after;
 }
 
+/** Whether starting the live master first sends the owner's default Open: only after a good
+ * master read that holds no live session, so the live master runs in a session its turns
+ * mark used and the Sessions list shows (LMS-1); a session still closing is left to finish.
+ * Input: the master read. Output: true when the Open goes out. */
+export function openBeforeLive(state: Result<MasterState>): boolean {
+  if (state.kind !== "ok") return false;
+  const phase = state.value.session?.phase;
+  return phase === undefined || phase === "parked" || phase === "closed";
+}
+
 /** The project's master area. A Codex or Claude Code master is its own app in a live
  * terminal filling the area, where Enter sends and Shift+Enter starts a new line; every open
  * of the area starts it, and it stops only on the master idle stop or when the app quits.
@@ -95,6 +105,7 @@ function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
   const [want, setWant] = useState<Want | null>(null);
   const asked = useRef(false);
   const mounted = useRef(true);
+  const sessions = useMasterSessions(data.id);
   const engine = liveSwitch(data.team.result, data.id);
   const on = want?.on ?? engine?.on;
 
@@ -103,6 +114,11 @@ function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
     asked.current = true;
     setWant({ on: true, after: Infinity });
     setLive({ kind: "starting" });
+    const ticket = await sessions.opened();
+    if (ticket && openBeforeLive(await readMaster(ticket))) {
+      await startMaster(ticket, nextGeneration());
+      await sessions.reread();
+    }
     const turned = await setLiveMaster(id, true);
     const state = turned.kind === "ok" ? receiptState(turned.value) : null;
     const failed: Live | null = turned.kind === "not_ready" ? { kind: "not_ready" }
@@ -155,17 +171,24 @@ function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
     : live.kind === "refused" ? live
     : on === false ? { kind: "stopped", problem: engine?.problem ?? null }
     : live;
-  return <LiveMasterView data={data} harness={harness} live={shown} onStart={start} />;
+  return <LiveMasterView data={data} harness={harness} live={shown} onStart={start} sessions={sessions} />;
 }
 
 /** The master ticket and live session the live master's New session and Sessions controls
- * act on, opened once per project as the conversation opens them. Input: the project id.
- * Output: the ticket, empty until opened, the live session id or null, and a re-read for
- * after a switch. */
-export function useMasterSessions(projectId: string): { ticket: string; liveId: string | null; reread: () => Promise<void> } {
+ * act on, with `opened` resolving to the ticket once the project's open settles, empty when
+ * it failed or never ran. */
+export type MasterSessions = { ticket: string; liveId: string | null; reread: () => Promise<void>; opened: () => Promise<string> };
+
+/** The master ticket and live session of one project, opened once per project as the
+ * conversation opens them; a project open makes every earlier ticket stale, so one area
+ * holds one. Inputs: the project id and whether this hook opens the project at all.
+ * Output: the ticket, empty until opened, the live session id or null, a re-read for after
+ * a switch and the settled open. */
+export function useMasterSessions(projectId: string, enabled = true): MasterSessions {
   const [ticket, setTicket] = useState("");
   const [liveId, setLiveId] = useState<string | null>(null);
   const current = useRef(projectId);
+  const opening = useRef<Promise<string>>(Promise.resolve(""));
   current.current = projectId;
 
   const read = async (opened: string, id: string) => {
@@ -177,16 +200,26 @@ export function useMasterSessions(projectId: string): { ticket: string; liveId: 
   useEffect(() => {
     setTicket("");
     setLiveId(null);
+    if (!enabled) return;
     const id = projectId;
-    void (async () => {
+    opening.current = (async () => {
       const opened = await openMasterProject(id);
-      if (opened.kind !== "ok" || opened.value.project_id !== id || current.current !== id) return;
+      if (opened.kind !== "ok" || opened.value.project_id !== id || current.current !== id) return "";
       setTicket(opened.value.ticket);
       await read(opened.value.ticket, id);
+      return opened.value.ticket;
     })();
-  }, [projectId]);
+  }, [projectId, enabled]);
 
-  return { ticket, liveId, reread: () => ticket ? read(ticket, projectId) : Promise.resolve() };
+  return {
+    ticket,
+    liveId,
+    reread: async () => {
+      const held = ticket || await opening.current;
+      if (held) await read(held, projectId);
+    },
+    opened: () => opening.current,
+  };
 }
 
 /** The word and tone the console head shows for one live master state. Input: the state.
@@ -209,12 +242,14 @@ export function liveWord(live: Live): { word: string; tone: "ok" | "muted" | "wa
  * while it starts, can't or is stopped; a stopped team (Stop all) says so and offers
  * Start all. An engine that says the master has no terminal app
  * gets today's conversation instead. Inputs: the project data, the master harness id, the
- * state and the start action. Output: the area. */
-export function LiveMasterView({ data, harness, live, onStart }: { data: ProjectData; harness: string; live: Live; onStart: () => Promise<void> }) {
+ * state, the start action and the area's sessions when its owner already holds them.
+ * Output: the area. */
+export function LiveMasterView({ data, harness, live, onStart, sessions: held }: { data: ProjectData; harness: string; live: Live; onStart: () => Promise<void>; sessions?: MasterSessions }) {
   const [input] = useState(readMasterInput);
   const [resuming, setResuming] = useState(false);
   const [resumeNote, setResumeNote] = useState("");
-  const sessions = useMasterSessions(data.id);
+  const own = useMasterSessions(data.id, held === undefined);
+  const sessions = held ?? own;
   const harnesses = valueOf(data.harnesses);
   const name = (id: string) => harnessName(harnesses, id);
   if (live.kind === "refused" && live.code === NO_TERMINAL) return <ConversationTab data={data} />;
