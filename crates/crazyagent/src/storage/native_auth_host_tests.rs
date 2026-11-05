@@ -726,7 +726,7 @@ fn changed_effective_config_blocks_publication_and_cancellation() {
     );
     std::fs::write(
         &case.global,
-        CATALOG.replace("timeout_ms = 1000", "timeout_ms = 1001"),
+        CATALOG.replace(r#"id = "model-a""#, r#"id = "model-a2""#),
     )
     .unwrap();
     case.config = case.sources.config().unwrap();
