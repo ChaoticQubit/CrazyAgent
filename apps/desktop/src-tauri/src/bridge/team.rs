@@ -186,8 +186,11 @@ impl NativeBridge {
     ) -> Result<IntentReceipt, BridgeError> {
         let project_id = project(id)?;
         let mode = SwitchApply::named(mode).ok_or_else(|| failure("team_action_invalid"))?;
-        self.team_action(TeamAction::ApplyHarnessSwitch { project_id, mode }, generation)
-            .await
+        self.team_action(
+            TeamAction::ApplyHarnessSwitch { project_id, mode },
+            generation,
+        )
+        .await
     }
 
     /// Sets how deep the project's sub-agents may start workers of their own: 1 lets only
