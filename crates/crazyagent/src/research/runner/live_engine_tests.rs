@@ -47,7 +47,12 @@ impl EngineResearch {
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(error) => panic!("research folder: {error}"),
             }
-            assert!(fs::symlink_metadata(directory).unwrap().file_type().is_dir());
+            assert!(
+                fs::symlink_metadata(directory)
+                    .unwrap()
+                    .file_type()
+                    .is_dir()
+            );
         }
         let (harness, executable) = owner.launch();
         let codex = match harness {

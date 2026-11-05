@@ -307,11 +307,8 @@ impl OwnerAccount {
     /// The owner's engine's custody, which only reads its database and takes a shared lock
     /// on a profile for each launch. Output: the custody.
     pub(crate) fn custody(&self) -> NativeProfileCustody {
-        NativeProfileCustody::capture(
-            &self.database,
-            &std::fs::metadata(&self.database).unwrap(),
-        )
-        .unwrap()
+        NativeProfileCustody::capture(&self.database, &std::fs::metadata(&self.database).unwrap())
+            .unwrap()
     }
 }
 
