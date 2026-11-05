@@ -137,10 +137,16 @@ fn host_failure(error: HostError) -> LaunchError {
 }
 
 /// The refusal code for an agent pane on a system that cannot hold it under the macOS
-/// confinement. Input: the operating system name as `std::env::consts::OS` gives it.
-/// Output: the code, or None where an agent pane may open or be taken over.
-fn agent_pane_unavailable(_os: &str) -> Option<&'static str> {
-    None
+/// confinement: every system but macOS, whatever the pane's unconfined flag, which also marks
+/// Full access agents. Only agent launches come here, never the owner's own shell. Input: the
+/// operating system name as `std::env::consts::OS` gives it. Output: the code, or None.
+fn agent_pane_unavailable(os: &str) -> Option<&'static str> {
+    match os {
+        "macos" => None,
+        "windows" => Some("launch_unavailable_on_windows"),
+        "linux" => Some("launch_unavailable_on_linux"),
+        _ => Some("launch_unavailable"),
+    }
 }
 
 impl TerminalSession {

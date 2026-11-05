@@ -246,21 +246,12 @@ impl Engine {
         Ok(host)
     }
 
-    /// Gives this platform's terminal host where no tmux runs: the ConPTY host on Windows,
-    /// made on first use and kept, with no tmux program behind it. Takes the engine root.
-    /// Returns the host, or `terminal_unavailable` when its slot cannot be read.
+    /// Refuses a terminal host where no tmux runs: no agent pane opens off the macOS
+    /// confinement, and the engine does not run on Windows in this version. Takes the engine
+    /// root, unused. Returns `terminal_unavailable`.
     #[cfg(not(unix))]
-    pub(crate) fn terminal(&self, root: &Path) -> Result<Arc<dyn Host>, EngineError> {
-        let mut slot = self
-            .terminal
-            .lock()
-            .map_err(|_| failure("terminal_unavailable"))?;
-        if let Some((_, host)) = slot.as_ref() {
-            return Ok(host.clone());
-        }
-        let (_, host) = crate::terminal::platform(root);
-        *slot = Some((None, host.clone()));
-        Ok(host)
+    pub(crate) fn terminal(&self, _root: &Path) -> Result<Arc<dyn Host>, EngineError> {
+        Err(failure("terminal_unavailable"))
     }
 }
 

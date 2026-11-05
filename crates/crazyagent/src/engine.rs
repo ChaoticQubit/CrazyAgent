@@ -459,6 +459,7 @@ async fn serve_client(mut stream: UnixStream, engine: std::sync::Arc<Engine>, ti
 
 /// The terminal host the engine serves agent terminals through, once one is made: the tmux
 /// program it was made for, none when tmux was not found, and the host.
+#[cfg(unix)]
 type TerminalHost = (
     Option<std::path::PathBuf>,
     std::sync::Arc<dyn crate::terminal::Host>,
@@ -471,6 +472,7 @@ pub struct Engine {
     owner_egress: tokio::sync::RwLock<()>,
     dispatch_drive: tokio::sync::Mutex<()>,
     agents: Mutex<Option<std::sync::Arc<crate::agents::Agents>>>,
+    #[cfg(unix)]
     terminal: Mutex<Option<TerminalHost>>,
     harness_probe: std::sync::Arc<crate::harnesses::ProbeCache>,
     settings_files: Option<(std::path::PathBuf, std::path::PathBuf)>,
@@ -570,6 +572,7 @@ impl Engine {
                 owner_egress: tokio::sync::RwLock::new(()),
                 dispatch_drive: tokio::sync::Mutex::new(()),
                 agents: Mutex::default(),
+                #[cfg(unix)]
                 terminal: Mutex::default(),
                 harness_probe: crate::harnesses::ProbeCache::new(HARNESS_PROBE_FRESH),
                 settings_files: Some((global.to_path_buf(), project.to_path_buf())),
@@ -588,6 +591,7 @@ impl Engine {
             owner_egress: tokio::sync::RwLock::new(()),
             dispatch_drive: tokio::sync::Mutex::new(()),
             agents: Mutex::default(),
+            #[cfg(unix)]
             terminal: Mutex::default(),
             harness_probe: crate::harnesses::ProbeCache::new(HARNESS_PROBE_FRESH),
             settings_files: None,
@@ -604,6 +608,7 @@ impl Engine {
             owner_egress: tokio::sync::RwLock::new(()),
             dispatch_drive: tokio::sync::Mutex::new(()),
             agents: Mutex::default(),
+            #[cfg(unix)]
             terminal: Mutex::default(),
             harness_probe: crate::harnesses::ProbeCache::new(HARNESS_PROBE_FRESH),
             settings_files: None,

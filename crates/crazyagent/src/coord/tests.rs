@@ -1,19 +1,26 @@
-#![cfg(unix)]
-
+#[cfg(unix)]
 use super::settings::{
     self, CoordSettings, Delivery, HarnessKind, Nudges, Overlaps, QuestionsTo, RoleSkills,
     SkillRole, SubagentMode,
 };
+#[cfg(unix)]
 use super::store::Change;
+#[cfg(unix)]
 use super::tool_switches::{self, Switch};
 use super::*;
+#[cfg(unix)]
 use rusqlite::{Connection, params};
 
+#[cfg(unix)]
 const PROJECT: &str = "coord-units";
+#[cfg(unix)]
 const OTHER: &str = "coord-other";
+#[cfg(unix)]
 const NOW: i64 = 1_000_000_000;
+#[cfg(unix)]
 const MINUTE: i64 = 60_000;
 
+#[cfg(unix)]
 fn db() -> Connection {
     let connection = Connection::open_in_memory().unwrap();
     crate::storage::initialize_authority_schemas(&connection).unwrap();
@@ -35,10 +42,12 @@ fn db() -> Connection {
     connection
 }
 
+#[cfg(unix)]
 fn project() -> ProjectId {
     ProjectId::new(PROJECT).unwrap()
 }
 
+#[cfg(unix)]
 fn agent_in(
     connection: &Connection,
     project: &str,
@@ -55,6 +64,7 @@ fn agent_in(
     connection.last_insert_rowid()
 }
 
+#[cfg(unix)]
 fn agent(connection: &Connection, role: &str, parent: Option<AgentId>) -> AgentId {
     agent_in(connection, PROJECT, role, parent, "working")
 }
@@ -63,6 +73,7 @@ fn code(result: Result<impl std::fmt::Debug, crate::engine::EngineError>) -> Str
     result.unwrap_err().0
 }
 
+#[cfg(unix)]
 fn note(from: Party, to: Party, kind: MessageKind, body: &str) -> NewMessage {
     NewMessage {
         project: project(),
@@ -77,6 +88,7 @@ fn note(from: Party, to: Party, kind: MessageKind, body: &str) -> NewMessage {
     }
 }
 
+#[cfg(unix)]
 fn question(from: AgentId, target: QuestionFor, severity: Severity, body: &str) -> NewMessage {
     NewMessage {
         question: Some((target, severity)),
@@ -89,11 +101,13 @@ fn question(from: AgentId, target: QuestionFor, severity: Severity, body: &str) 
     }
 }
 
+#[cfg(unix)]
 fn routed(connection: &Connection, message: NewMessage) -> Party {
     let id = send(connection, message, NOW).unwrap();
     super::message(connection, id).unwrap().to
 }
 
+#[cfg(unix)]
 #[test]
 fn a_prompt_goes_to_its_agent_and_only_reply_answers_it() {
     let connection = db();
@@ -167,6 +181,7 @@ fn a_prompt_goes_to_its_agent_and_only_reply_answers_it() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_question_for_the_owner_is_answered_only_by_the_owner() {
     let connection = db();
@@ -196,6 +211,7 @@ fn a_question_for_the_owner_is_answered_only_by_the_owner() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_question_for_the_lead_goes_up_the_team_and_for_the_master_needs_one() {
     let connection = db();
@@ -280,6 +296,7 @@ fn a_question_for_the_lead_goes_up_the_team_and_for_the_master_needs_one() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_question_passed_up_keeps_its_severity_and_its_addressee() {
     let connection = db();
@@ -349,6 +366,7 @@ fn a_question_passed_up_keeps_its_severity_and_its_addressee() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_message_is_checked_and_a_repeated_key_returns_the_first_id() {
     let connection = db();
@@ -484,6 +502,7 @@ fn a_message_is_checked_and_a_repeated_key_returns_the_first_id() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_receipt_only_moves_forward_and_a_dead_agent_s_unread_mail_is_requeued() {
     let connection = db();
@@ -542,6 +561,7 @@ fn a_receipt_only_moves_forward_and_a_dead_agent_s_unread_mail_is_requeued() {
     assert!(Receipt::Sent.unread() && Receipt::Typed.unread() && !Receipt::Read.unread());
 }
 
+#[cfg(unix)]
 #[test]
 fn pending_lists_only_sent_mail_oldest_first_up_to_its_cap() {
     let connection = db();
@@ -572,6 +592,7 @@ fn pending_lists_only_sent_mail_oldest_first_up_to_its_cap() {
     assert_eq!(unread(&connection, sub, usize::MAX).unwrap()[0].id, ids[0]);
 }
 
+#[cfg(unix)]
 fn audits(connection: &Connection, work: WorkId) -> Vec<(String, i64, i64)> {
     let mut statement = connection
         .prepare("SELECT action,from_version,to_version FROM coord_audit WHERE work=?1 ORDER BY id")
@@ -583,6 +604,7 @@ fn audits(connection: &Connection, work: WorkId) -> Vec<(String, i64, i64)> {
         .unwrap()
 }
 
+#[cfg(unix)]
 fn held(connection: &Connection, agent: AgentId, work: WorkId) -> usize {
     connection
         .query_row(
@@ -593,6 +615,7 @@ fn held(connection: &Connection, agent: AgentId, work: WorkId) -> usize {
         .unwrap() as usize
 }
 
+#[cfg(unix)]
 #[test]
 fn work_moves_through_its_transfer_table_one_version_at_a_time() {
     let connection = db();
@@ -749,6 +772,7 @@ fn work_moves_through_its_transfer_table_one_version_at_a_time() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn finishing_work_needs_evidence_and_the_lead_completes_review_ready_work() {
     let connection = db();
@@ -929,6 +953,7 @@ fn a_glob_star_stays_in_its_folder_and_a_double_star_crosses_folders() {
     );
 }
 
+#[cfg(unix)]
 fn overlap(mine: &str, theirs: &str) -> Vec<String> {
     let connection = db();
     let first = agent(&connection, "sub", None);
@@ -957,6 +982,7 @@ fn overlap(mine: &str, theirs: &str) -> Vec<String> {
         .collect()
 }
 
+#[cfg(unix)]
 #[test]
 fn an_overlap_names_why_two_claims_meet() {
     for (mine, theirs, reason) in [
@@ -996,6 +1022,7 @@ fn an_overlap_names_why_two_claims_meet() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn a_lead_and_its_own_sub_agent_never_overlap_and_a_quiet_claim_goes_stale() {
     let connection = db();
@@ -1118,6 +1145,7 @@ fn a_broad_claim_says_why_it_should_be_split() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn presence_follows_the_last_activity_and_a_wait_keeps_its_start() {
     let connection = db();
@@ -1192,6 +1220,7 @@ fn presence_follows_the_last_activity_and_a_wait_keeps_its_start() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn a_snapshot_counts_chosen_tools_orders_owner_questions_and_sums_unread_edges() {
     let connection = db();
@@ -1286,6 +1315,7 @@ fn a_snapshot_counts_chosen_tools_orders_owner_questions_and_sums_unread_edges()
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn coordination_settings_default_validate_and_keep_each_harness_column() {
     let connection = db();
@@ -1408,6 +1438,7 @@ fn coordination_settings_default_validate_and_keep_each_harness_column() {
 /// DEC-111 R3: each team role's skill choice validates with the skill name rule, keeps its
 /// order through a save, and a row saved before the choice existed reads as All approved
 /// skills for every role.
+#[cfg(unix)]
 #[test]
 fn role_skill_choices_validate_save_and_default_for_rows_saved_before_them() {
     let connection = db();
@@ -1472,6 +1503,7 @@ fn role_skill_choices_validate_save_and_default_for_rows_saved_before_them() {
 /// Settings saved before the nudge options (DEC-111 R4) held `nudges` as a bool: a stored
 /// `true` reads as TenMinutes and `false` as Off, each option is stored by its own name and
 /// reads back, and a name this build does not know is refused.
+#[cfg(unix)]
 #[test]
 fn an_old_true_nudge_setting_reads_as_ten_minutes() {
     let connection = db();
@@ -1521,6 +1553,7 @@ fn an_old_true_nudge_setting_reads_as_ten_minutes() {
     assert_eq!(code(stored(&old(r#""hourly""#))), "coord_settings_invalid");
 }
 
+#[cfg(unix)]
 #[test]
 fn a_project_tool_switch_overrides_the_global_one_and_restores_by_scope() {
     let connection = db();
@@ -1594,6 +1627,7 @@ fn a_project_tool_switch_overrides_the_global_one_and_restores_by_scope() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_coord_write_inside_a_caller_s_transaction_rolls_back_with_it() {
     let connection = db();
@@ -1660,6 +1694,7 @@ fn a_coord_write_inside_a_caller_s_transaction_rolls_back_with_it() {
     assert!(connection.is_autocommit());
 }
 
+#[cfg(unix)]
 #[test]
 fn removing_a_project_forgets_its_coordination_and_leaves_other_projects() {
     let connection = db();
