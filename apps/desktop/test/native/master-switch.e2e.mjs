@@ -7,7 +7,7 @@ import { setTimeout as pause } from "node:timers/promises";
 import { TURN_S } from "./master-switch.wdio.conf.mjs";
 import { click, shown, toasts } from "./settings-steps.mjs";
 import { go, paste, pick, reopen, run, tab, until, waitFor } from "./trial-kit.mjs";
-import { liveLine, masterRows, messageCount, sendToMaster, startIfPaused, terminalLive } from "./trial4/n-d8-master-reply.mjs";
+import { masterRows, sendToMaster, startIfPaused, terminalLive } from "./trial4/n-d8-master-reply.mjs";
 
 const root = process.env.MS_ROOT;
 const GIT = "/usr/bin/git";
@@ -121,16 +121,25 @@ async function liveMaster(name) {
 }
 
 /** Sends one owner line to the live master and waits until its turn shows on the terminal.
- * Inputs: the line and the harness name the stand-in prints. Output: the message count before. */
+ * Inputs: the line and the harness name the stand-in prints. Output: none. */
 async function ownerTurn(line, name) {
-  const before = messageCount(await liveLine()) ?? 0;
   const turns = (await masterRows()).filter((row) => row.includes(`${name} stand-in turn`)).length;
   await sendToMaster(kit, line);
   await waitFor(async () => {
     const now = (await masterRows()).filter((row) => row.includes(`${name} stand-in turn`)).length;
     return { done: now > turns, seen: `${now} ${name} turns on the terminal` };
   }, UI_MS, `${name} never started a turn for "${line}"`);
-  return before;
+}
+
+/** Reads the owner turns the engine counted from the live terminal in the project's newest
+ * master session. Input: the project id. Output: { turns, last } or null before any. */
+function ownerTurns(id) {
+  const store = new DatabaseSync(join(root, "engine", "engine.db"), { readOnly: true });
+  try {
+    return store.prepare("SELECT turns, last_line AS last FROM session_owner_turns WHERE project=? ORDER BY rowid DESC LIMIT 1").get(id) ?? null;
+  } finally {
+    store.close();
+  }
 }
 
 /** Reads the switches the engine wrote for a project. Input: the project id. Output: the
@@ -189,11 +198,12 @@ describe("A saved master harness change reaches the live master as the owner's A
     assert.deepEqual(switches(id), []);
     const after = await switchedTo("Codex");
     assert.deepEqual(switches(id), ["codex"], "the engine wrote one switch row, to Codex");
-    const before = await ownerTurn("Now on Codex.", "Codex");
+    const counted = ownerTurns(id)?.turns ?? 0;
+    await ownerTurn("Now on Codex.", "Codex");
     await waitFor(async () => {
-      const count = messageCount(await liveLine()) ?? 0;
-      return { done: count > before, seen: `${count} messages, ${before} before the Codex turn` };
-    }, SWITCH_MS, "the Codex turn never reached the live session");
+      const now = ownerTurns(id);
+      return { done: (now?.turns ?? 0) > counted, seen: `${JSON.stringify(now)}, ${counted} turns before the Codex turn` };
+    }, SWITCH_MS, "the engine never counted the Codex turn in the live session");
     assert.ok(after.divider.includes("Codex"));
   });
 
