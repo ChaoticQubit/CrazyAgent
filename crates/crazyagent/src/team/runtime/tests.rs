@@ -3072,10 +3072,10 @@ fn noted(fixture: &Fixture, text: &str) -> usize {
 }
 
 /// Each master session keeps its own harness conversation: switching sessions restarts the
-/// project's one live master in its worktree, a session it ran before continues by the
-/// stored conversation id and reads only the turns added after the resume, and a session
-/// whose conversation cannot continue, kept on another account or with its record gone,
-/// starts a fresh harness conversation seeded with what could be read, with a note saying so.
+/// project's one live master in its worktree, a session it ran before continues by its
+/// stored id and reads only turns added after the resume, and a session whose conversation
+/// cannot continue, kept on another account than this endpoint or with its record gone,
+/// starts a fresh conversation seeded with what could be read, with a note saying so.
 #[cfg(target_os = "macos")]
 #[test]
 fn a_resumed_session_continues_its_own_harness_conversation_or_says_why_not() {
@@ -3177,6 +3177,16 @@ fn a_resumed_session_continues_its_own_harness_conversation_or_says_why_not() {
     switch_session(&fixture.connection, "s-two");
     fixture.until(
         &mut team,
+        "a session kept on another account starts its master again",
+        |f| launches(f, master).len() == 4 && host.alive().unwrap() == names(&[master]),
+    );
+    assert!(
+        !launches(&fixture, master)[3].contains("resume"),
+        "an endpoint master never resumes a conversation kept on another account: {:?}",
+        launches(&fixture, master)
+    );
+    fixture.until(
+        &mut team,
         "a session kept on another account starts fresh",
         |f| {
             noted(f, crate::master_sessions::FRESH_NOTE) == 1
@@ -3185,7 +3195,6 @@ fn a_resumed_session_continues_its_own_harness_conversation_or_says_why_not() {
         },
     );
     assert_eq!(live_turns(&fixture.connection), (3, false));
-    assert!(!launches(&fixture, master)[3].contains("resume"));
     let seeded = codex_instructions(&fixture, master);
     assert!(
         seeded.contains("Your earlier harness conversation in this session"),
@@ -4161,6 +4170,181 @@ fn a_finished_sub_agent_wakes_by_name_in_its_own_worktree_and_conversation() {
     });
     assert_eq!(subs(&fixture), vec![member]);
     assert_eq!(agent_worktree(&fixture, member), worktree);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// Starts the runtime on a one-agent keyless endpoint team with Codex messages set to
+/// Native only, hands it a task and waits until its tools-off sub-agent finished and
+/// stopped. Takes the fixture and the host. Returns the runtime and the sub-agent.
+#[cfg(target_os = "macos")]
+fn native_only_stopped_sub(fixture: &Fixture, host: &Arc<dyn Host>) -> (TeamRuntime, i64) {
+    let mut team = limited_runtime(fixture, host, RESUMING_CODEX, TeamLimits::default());
+    idle_stop(fixture, WAKE_IDLE);
+    crate::coord::settings::set_delivery(
+        &fixture.connection,
+        &fixture.setup.project_id,
+        crate::coord::settings::HarnessKind::Codex,
+        crate::coord::settings::Delivery::NativeOnly,
+    )
+    .unwrap();
+    delegate_page(fixture);
+    fixture.until(
+        &mut team,
+        "the tools-off sub-agent finishes and stops",
+        stopped_sub,
+    );
+    (team, subs(fixture)[0])
+}
+
+#[cfg(target_os = "macos")]
+fn stopped_sub(fixture: &Fixture) -> bool {
+    subs(fixture)
+        .first()
+        .is_some_and(|id| fixture.agent_status(*id).0 == AgentStatus::Stopped)
+}
+
+/// Stores the team plan with the Codex agent row's tools switch as the owner set it. Takes
+/// the fixture and the switch.
+#[cfg(target_os = "macos")]
+fn codex_tools(fixture: &Fixture, tools: bool) {
+    let mut plan = fixture.setup.clone();
+    plan.team.sub_harnesses[0].tools = tools;
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?1 WHERE project=?2",
+            params![serde_json::to_string(&plan).unwrap(), PROJECT],
+        )
+        .unwrap();
+}
+
+/// Reads one agent's stored tools switch and the Native only sentence the owner's team
+/// status shows for it. Takes the fixture and the agent.
+#[cfg(target_os = "macos")]
+fn tools_and_note(fixture: &Fixture, agent: i64) -> (bool, Option<String>) {
+    let tools: bool = fixture
+        .connection
+        .query_row(
+            "SELECT tools FROM team_agents WHERE id=?1",
+            [agent],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let note =
+        super::super::owner_status(&fixture.connection, &fixture.setup, Some(&fixture.access))
+            .unwrap()
+            .agents
+            .into_iter()
+            .find(|found| found.id == agent)
+            .and_then(|found| found.message_note);
+    (tools, note)
+}
+
+/// Review NOC-L2 (11-05): a woken sub-agent runs with the team plan's tools switch at its
+/// wake, and its row records that switch, so the Native only sentence follows it both ways.
+/// Started tools off on a keyless endpoint, the stopped agent says it can't receive
+/// messages; woken after the owner turns the Codex row's tools on, its row reads tools on
+/// and the sentence is gone; woken after tools go off again, the sentence is back.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_woken_sub_agent_s_row_and_native_only_sentence_follow_the_tools_switch_it_wakes_with() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let (mut team, member) = native_only_stopped_sub(&fixture, &host);
+    let no_channel = Some(crate::coord::delivery::NO_CHANNEL.to_owned());
+    assert_eq!(
+        tools_and_note(&fixture, member),
+        (false, no_channel.clone())
+    );
+    let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Stopped);
+    assert_eq!(masters(&fixture.connection), [master]);
+    let mailbox = fixture.base.join("mailbox");
+    std::fs::create_dir(&mailbox).unwrap();
+    let persona = names::name(&fixture.connection, member)
+        .unwrap()
+        .unwrap()
+        .persona;
+    for (call, tools, note) in [(1_u32, true, None), (2, false, no_channel)] {
+        codex_tools(&fixture, tools);
+        assert!(
+            !wake_call(
+                &fixture,
+                &mailbox,
+                call,
+                &persona,
+                "Add a footer to page.md."
+            )
+            .1
+        );
+        fixture.until(&mut team, "the woken sub-agent starts again", |f| {
+            launches(f, member).len() == call as usize + 1
+        });
+        assert_eq!(
+            tools_and_note(&fixture, member),
+            (tools, note.clone()),
+            "woken with tools {tools}"
+        );
+        fixture.until(
+            &mut team,
+            "the woken sub-agent finishes and stops again",
+            stopped_sub,
+        );
+        assert_eq!(
+            tools_and_note(&fixture, member),
+            (tools, note),
+            "stopped after a run with tools {tools}"
+        );
+    }
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// Decision "Native only delivery to a tools-off Codex agent", acceptance "tools on delivers
+/// it" (review NOC-L2): under Native only the owner's message to a stopped tools-off Codex
+/// sub-agent on a keyless endpoint reaches it once the owner turns the Codex row's tools on
+/// and the agent wakes: it runs tools on, its first turn carries the message, the message
+/// leaves Sent and the sentence is gone.
+#[cfg(target_os = "macos")]
+#[test]
+fn under_native_only_a_message_for_a_tools_off_codex_agent_reaches_it_once_it_wakes_tools_on() {
+    const NOTE: &str = "Please add a line about pears too.";
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let (mut team, member) = native_only_stopped_sub(&fixture, &host);
+    codex_tools(&fixture, true);
+    owner(
+        &fixture,
+        &[crate::team::TeamAction::MessageAgent {
+            project_id: fixture.setup.project_id.clone(),
+            agent: member,
+            text: NOTE.into(),
+        }],
+    );
+    let master = fixture.agent(AgentRole::Master, "codex", AgentStatus::Stopped);
+    assert_eq!(masters(&fixture.connection), [master]);
+    let mailbox = fixture.base.join("mailbox");
+    std::fs::create_dir(&mailbox).unwrap();
+    let persona = names::name(&fixture.connection, member)
+        .unwrap()
+        .unwrap()
+        .persona;
+    assert!(!wake_call(&fixture, &mailbox, 1, &persona, "Add a footer to page.md.").1);
+    fixture.until(
+        &mut team,
+        "the agent woken tools on gets the owner's message in its first turn",
+        |f| launches(f, member).len() == 2 && typed(f, member).contains(NOTE),
+    );
+    let receipt: String = fixture
+        .connection
+        .query_row(
+            "SELECT receipt FROM coord_messages WHERE to_agent=?1 AND body=?2",
+            params![member, NOTE],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_ne!(receipt, "sent");
+    assert_eq!(tools_and_note(&fixture, member), (true, None));
     team.shutdown().unwrap();
     host.close(&[]).unwrap();
 }
@@ -13525,7 +13709,7 @@ fn a_registered_native_teammate_shows_once_in_the_owner_graph_as_its_own_row() {
     )
     .unwrap();
 
-    let before = crate::team::owner_graph(&connection, &setup).unwrap();
+    let before = crate::team::owner_graph(&connection, &setup, None).unwrap();
     let pane_node = format!("teammate-{lead}-7");
     assert!(
         before.nodes.iter().any(|node| node.id == pane_node),
@@ -13541,7 +13725,7 @@ fn a_registered_native_teammate_shows_once_in_the_owner_graph_as_its_own_row() {
             |row| row.get(0),
         )
         .unwrap();
-    let graph = crate::team::owner_graph(&connection, &setup).unwrap();
+    let graph = crate::team::owner_graph(&connection, &setup, None).unwrap();
     let teammates: Vec<&crate::team::GraphNode> = graph
         .nodes
         .iter()

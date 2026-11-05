@@ -2983,7 +2983,7 @@ impl TeamRuntime {
                 .or_default()
                 .push(Instant::now());
         }
-        match self.start_master(stored, &harness, &account, session.as_deref())? {
+        match self.start_master(stored, access, &harness, &account, session.as_deref())? {
             Ok((id, note)) => {
                 super::master::problem(&self.connection, project, None)?;
                 if let Some(note) = note {
@@ -3006,12 +3006,13 @@ impl TeamRuntime {
     /// conversation seeded with them, and its note says so. A session whose conversation ran
     /// on another harness follows the owner's On harness switch setting: Carry over seeds
     /// the new conversation with a bounded handoff, Start fresh seeds nothing, and either
-    /// note marks the switch. Takes the setup, the master harness, the account and the live
-    /// session. Returns the agent id with the note to show, or the plain reason it could not
-    /// start.
+    /// note marks the switch. Takes the setup, the model access, the master harness, the account
+    /// and the live session. Returns the agent id with the note to show, or the plain reason it
+    /// could not start.
     fn start_master(
         &mut self,
         stored: &StoredSetup,
+        access: &ModelAccess,
         harness: &str,
         account: &TeamAccount,
         session: Option<&str>,
@@ -3057,13 +3058,19 @@ impl TeamRuntime {
                     }
                 }
             }
-            (Some(session), None) => crate::master_sessions::resume_harness(
-                &self.connection,
-                project,
-                session,
-                launch,
-                account.connection.as_str(),
-            )?,
+            (Some(session), None) => {
+                let pool = match eligible_accounts(access, project, launch) {
+                    Accounts::Usable(pool) => pool,
+                    Accounts::NoPool => Vec::new(),
+                };
+                crate::master_sessions::resume_harness(
+                    &self.connection,
+                    project,
+                    session,
+                    launch,
+                    &|kept| super::resumes_on(&pool, account, kept),
+                )?
+            }
             (None, _) => ResumePlan::New,
         };
         if let ResumePlan::Resume {
@@ -4814,9 +4821,10 @@ impl TeamRuntime {
     }
 
     /// Starts a stopped agent again under its own id in the worktree and home it left: a
-    /// sub-agent through [`TeamRuntime::wake`], or a project's live master. The agent shows no
-    /// process group until its new process is ready, never the one that ended. It clears only
-    /// the agent's own owner stop; the owner's Wake or restart clears its lead tree in
+    /// sub-agent through [`TeamRuntime::wake`], or a project's live master. Its row takes the
+    /// tools switch it starts with now. The agent shows no process group until its new
+    /// process is ready, never the one that ended. It clears only the agent's own owner
+    /// stop; the owner's Wake or restart clears its lead tree in
     /// [`TeamRuntime::start_again`]. Takes the setup, the agent, its role, harness and
     /// tools switch, the account to run on and the register restart if any. Returns its id,
     /// or the plain reason it could not start; the worktree must still be the one recorded
@@ -4852,9 +4860,9 @@ impl TeamRuntime {
         let changed = self
             .connection
             .execute(
-                "UPDATE team_agents SET status='starting', connection=?3, task=NULL, error=NULL, stopped_ms=NULL, turns=0, heartbeat_ms=?4, process_group=NULL
+                "UPDATE team_agents SET status='starting', connection=?3, tools=?6, task=NULL, error=NULL, stopped_ms=NULL, turns=0, heartbeat_ms=?4, process_group=NULL
                  WHERE id=?1 AND project=?2 AND role=?5 AND status IN ('stopped','failed')",
-                params![id, stored.project_id.as_str(), account.connection.as_str(), now_ms(), role.name()],
+                params![id, stored.project_id.as_str(), account.connection.as_str(), now_ms(), role.name(), tools],
             )
             .map_err(error)?;
         if changed != 1 {
