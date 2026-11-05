@@ -96,7 +96,7 @@ pub(super) async fn after_owner(
                 status.dependencies = dependency_rows(&root, deadline).await;
                 status.notes = crate::research::runner::agent_git_problem()
                     .into_iter()
-                    .map(str::to_owned)
+                    .map(|code| plain_reason(code).to_owned())
                     .collect();
             }
         }

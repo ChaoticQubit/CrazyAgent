@@ -136,6 +136,7 @@ const COPY: Record<string, string> = {
   agent_access_unavailable: "That agent access level can't run on this computer. Pick another level.",
   agent_policy_invalid: "That agent access choice isn't valid. Open Agent access and save again.",
   agent_policy_unreadable: "CrazyAgent couldn't read this project's agent access. Try again.",
+  agent_git_needs_tools: "Agent git needs the Command Line Tools: run xcode-select --install.",
   project_network_unreadable: "CrazyAgent couldn't read this project's network choice, so the check was refused. Try again.",
 };
 

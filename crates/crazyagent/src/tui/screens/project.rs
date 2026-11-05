@@ -2403,6 +2403,7 @@ pub(in crate::tui) fn plain_problem(code: &str) -> String {
         "context_item_protected" => "The project brief can't be deleted.",
         "read_path_not_absolute" => "Type the full path of each folder, starting with /.",
         "agent_access_unavailable" => "That access level can't run agents on this computer.",
+        crate::setup::AGENT_GIT_NEEDS_TOOLS => crate::setup::plain_reason(code),
         "agent_policy_invalid" => "Each toolchain can be listed once.",
         "agent_policy_unreadable" => "CrazyAgent couldn't read this project's agent access.",
         "read_path_missing" => "One of those folders doesn't exist on this computer.",

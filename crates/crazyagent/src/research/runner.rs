@@ -17,6 +17,8 @@ use crate::sandbox::policy::AgentAccess;
 use crate::sandbox::toolchains::{self, ToolHomes, Toolchains};
 use crate::sandbox::warden::Warden;
 use crate::sandbox::{ProjectSandbox, SandboxError, SandboxNetwork, SandboxRemote};
+#[cfg(unix)]
+use crate::setup::AGENT_GIT_NEEDS_TOOLS;
 use crate::terminal::{AgentId, Host};
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
@@ -2194,9 +2196,10 @@ pub(crate) fn setup_git() -> &'static Path {
     }
 }
 
-/// The Command Line Tools git. Every agent profile reads its folder, so under Seatbelt this
-/// git finds its own helpers (`git-upload-pack`, `git pack-objects` and the rest) in its
-/// `libexec/git-core` instead of falling through the search path to the `/usr/bin` shims.
+/// The Command Line Tools git, [`TOOLS_ROOT`]'s `usr/bin/git`. Every agent profile reads its
+/// folder, so under Seatbelt this git finds its own helpers (`git-upload-pack`,
+/// `git pack-objects` and the rest) in its `libexec/git-core` instead of falling through the
+/// search path to the `/usr/bin` shims.
 #[cfg(unix)]
 const TOOLS_GIT: &str = "/Library/Developer/CommandLineTools/usr/bin/git";
 
@@ -2204,28 +2207,40 @@ const TOOLS_GIT: &str = "/Library/Developer/CommandLineTools/usr/bin/git";
 #[cfg(unix)]
 const TOOLS_ROOT: &str = "/Library/Developer/CommandLineTools";
 
-/// The code for a Mac with no Command Line Tools git, the only git whose helpers an agent
-/// profile can read.
-pub(crate) const AGENT_GIT_NEEDS_TOOLS: &str = "agent_git_needs_tools";
-
 /// The git for commands that run inside an agent's sandbox: the agent's own git script and
-/// the engine's setup steps under the agent profile. Returns the path.
+/// the engine's setup steps under the agent profile. On a Mac that is the Command Line Tools
+/// git whenever it is installed, since a toolchain git elsewhere, such as Xcode's, runs under
+/// the profile but cannot read its own helpers there (T3-09); else [`setup_git`]. Engine git
+/// outside any sandbox keeps the selected toolchain's [`setup_git`]. Returns the path.
 #[cfg(unix)]
 pub(crate) fn sandboxed_git() -> &'static Path {
-    setup_git()
+    if cfg!(target_os = "macos") && agent_git_problem_at(Path::new(TOOLS_ROOT)).is_none() {
+        Path::new(TOOLS_GIT)
+    } else {
+        setup_git()
+    }
 }
 
-/// Whether agent git lacks the Command Line Tools on this Mac. Output: the code, or none.
+/// Whether agent git lacks the Command Line Tools on this Mac, so its helper calls would
+/// reach the denied xcrun shims. Output: [`AGENT_GIT_NEEDS_TOOLS`], or none.
+#[cfg(target_os = "macos")]
+pub(crate) fn agent_git_problem() -> Option<&'static str> {
+    agent_git_problem_at(Path::new(TOOLS_ROOT))
+}
+
+/// Whether agent git lacks the Command Line Tools; off a Mac agent git needs none.
+/// Output: none.
+#[cfg(not(target_os = "macos"))]
 pub(crate) fn agent_git_problem() -> Option<&'static str> {
     None
 }
 
-/// Whether a toolchain root lacks the Command Line Tools git. Input: the root. Output: the
-/// code, or none.
+/// Whether a toolchain root lacks the Command Line Tools git (`usr/bin/git` under it).
+/// Input: the absolute root. Output: [`AGENT_GIT_NEEDS_TOOLS`], or none when the git is there.
 #[cfg(unix)]
 fn agent_git_problem_at(tools: &Path) -> Option<&'static str> {
     assert!(tools.is_absolute());
-    None
+    (!tools.join("usr").join("bin").join("git").is_file()).then_some(AGENT_GIT_NEEDS_TOOLS)
 }
 
 /// The code a failed setup git step reports: the missing Command Line Tools when that is
@@ -2240,18 +2255,11 @@ fn step_failure(failed: &'static str, tools: &Path) -> &'static str {
     }
 }
 
-/// Picks the real git once, outside any sandbox: the Command Line Tools git when it is
-/// installed, else the active toolchain's git from xcrun. An Xcode toolchain's git runs
-/// under the agent profile but cannot see its own helpers there, which the profile does
-/// not read, so its helper calls reach the xcrun shims (T3-09). Returns an absolute path
-/// that exists and is not the `/usr/bin/git` shim, or None when neither resolves so the
-/// caller keeps using [`GIT`].
+/// Asks xcrun once, outside any sandbox, for the active toolchain's git. Returns an
+/// absolute path that exists and is not the `/usr/bin/git` shim, or None when xcrun is
+/// absent or fails so the caller keeps using [`GIT`].
 #[cfg(unix)]
 fn real_git() -> Option<PathBuf> {
-    let tools = Path::new(TOOLS_GIT);
-    if tools.is_file() {
-        return Some(tools.to_path_buf());
-    }
     let output = crate::spawn_gate::output(
         Command::new("/usr/bin/xcrun")
             .args(["--find", "git"])
