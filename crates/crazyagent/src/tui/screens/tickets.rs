@@ -63,6 +63,7 @@ pub(in crate::tui) struct ProjectTickets {
     steps: VecDeque<Step>,
     turning_on: Option<(TextInput, Option<String>)>,
     attach: Option<ProjectKey>,
+    rechecking: Option<(String, String)>,
     shot: Vec<Row>,
     notice: Option<Notice>,
     detail: bool,
@@ -82,6 +83,7 @@ impl ProjectTickets {
             steps: VecDeque::new(),
             turning_on: None,
             attach: None,
+            rechecking: None,
             shot: Vec::new(),
             notice: None,
             detail: false,
@@ -131,16 +133,12 @@ impl ProjectTickets {
     }
 
     /// Forgets the request in flight after the engine connection dropped: the projects
-    /// are asked again, a lost turn-on says so, and lent views stay with the worker's last
-    /// state.
+    /// are asked again, a turn-on that may have taken effect is settled by reading them,
+    /// and lent views stay with the worker's last state.
     pub(in crate::tui) fn forget_reads(&mut self) {
         match self.sent.take() {
             Some(Sent::Projects) => self.asked = false,
-            Some(Sent::Attach) => {
-                self.notice = Some(Notice::problem(
-                    "The engine connection dropped before it answered. Press r to check whether tickets are on.",
-                ));
-            }
+            Some(Sent::Attach) => self.recheck("tracker_outcome_unknown"),
             Some(Sent::Views) | None => {}
         }
     }
@@ -166,12 +164,24 @@ impl ProjectTickets {
                 self.sent = None;
                 match result {
                     Ok(projects) => {
-                        match projects
+                        let tracked = projects
                             .iter()
                             .find(|tracked| tracked.project == self.project)
-                        {
-                            Some(tracked) => self.turn_on(tracked.key.clone()),
-                            None => self.state = State::Off,
+                            .map(|tracked| tracked.key.clone());
+                        match (tracked, self.rechecking.take()) {
+                            (Some(key), Some(_)) => self.turned_on(key),
+                            (Some(key), None) => self.turn_on(key),
+                            (None, Some((code, typed))) if code == "project_exists" => {
+                                self.state = State::Off;
+                                self.open_field(&typed, Some(sentence(&code)));
+                            }
+                            (None, Some(_)) => {
+                                self.state = State::Off;
+                                self.notice = Some(Notice::problem(
+                                    "Tickets did not turn on. Press t to try again.",
+                                ));
+                            }
+                            (None, None) => self.state = State::Off,
                         }
                     }
                     Err(code) => self.state = State::Failed(sentence(code)),
@@ -182,13 +192,9 @@ impl ProjectTickets {
             {
                 self.sent = None;
                 match result {
-                    Ok(tracked) => {
-                        self.turning_on = None;
-                        self.turn_on(tracked.key.clone());
-                        self.notice = Some(Notice::plain(format!(
-                            "Tickets are on. Ticket ids start with {}.",
-                            tracked.key.as_str()
-                        )));
+                    Ok(tracked) => self.turned_on(tracked.key.clone()),
+                    Err(code) if code == "tracker_outcome_unknown" || code == "project_exists" => {
+                        self.recheck(code);
                     }
                     Err(code) => match self.turning_on.as_mut() {
                         Some((_, error)) => *error = Some(sentence(code)),
@@ -212,6 +218,44 @@ impl ProjectTickets {
             }
             _ => {}
         }
+    }
+
+    /// Closes the key field after a turn-on only the tracked projects can settle: one whose
+    /// outcome is unknown, or one refused because a project already has tickets, which may
+    /// be this one. The projects are asked again. Input: the code the turn-on ended with.
+    fn recheck(&mut self, code: &str) {
+        assert!(
+            matches!(self.state, State::Off),
+            "a turn-on starts from Off"
+        );
+        assert!(self.attach.is_none(), "one turn-on at a time");
+        let typed = self
+            .turning_on
+            .take()
+            .map(|(input, _)| input.value().to_owned())
+            .unwrap_or_default();
+        self.state = State::Unread;
+        self.asked = false;
+        self.notice = None;
+        self.rechecking = Some((code.to_owned(), typed));
+    }
+
+    /// Shows the tickets after a turn-on took effect and says under which key. Input: the
+    /// key.
+    fn turned_on(&mut self, key: ProjectKey) {
+        self.turning_on = None;
+        self.notice = Some(Notice::plain(format!(
+            "Tickets are on. Ticket ids start with {}.",
+            key.as_str()
+        )));
+        self.turn_on(key);
+    }
+
+    /// Opens the key field. Inputs: the text it starts with and the problem it shows, if any.
+    fn open_field(&mut self, text: &str, error: Option<String>) {
+        let mut input = TextInput::single(KEY_BYTES_MAX);
+        input.set(text);
+        self.turning_on = Some((input, error));
     }
 
     fn turn_on(&mut self, key: ProjectKey) {
@@ -274,9 +318,7 @@ impl ProjectTickets {
             },
             State::Off => match key.code {
                 KeyCode::Char('t') => {
-                    let mut input = TextInput::single(KEY_BYTES_MAX);
-                    input.set(&suggested_key(&self.name));
-                    self.turning_on = Some((input, None));
+                    self.open_field(&suggested_key(&self.name), None);
                     TicketsReply::Handled
                 }
                 KeyCode::Char('r') => {

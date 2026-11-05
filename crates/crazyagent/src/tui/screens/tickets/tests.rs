@@ -268,3 +268,169 @@ fn a_suggested_key_takes_each_word_s_first_letter() {
     assert_eq!(suggested_key("A b c d e f g h i j"), "ABCDEFGH");
     assert_eq!(suggested_key("42"), "TK");
 }
+
+fn turn_on_job(tickets: &mut ProjectTickets) -> (ProjectId, ProjectKey, String) {
+    assert_eq!(tickets.key(key(KeyCode::Char('t'))), TicketsReply::Handled);
+    assert_eq!(tickets.key(key(KeyCode::Enter)), TicketsReply::Handled);
+    let Some(TrackerJob::Attach { project, key, name }) = tickets.next_job() else {
+        panic!("Enter turns tickets on");
+    };
+    (project, key, name)
+}
+
+fn ends_with(tickets: &mut ProjectTickets, line: &str) {
+    let (rows, _, _) = tickets.rows(76, 18, &Look::plain());
+    assert!(
+        rows.last().is_some_and(|row| row.text() == line),
+        "{}",
+        text(&rows)
+    );
+}
+
+#[test]
+fn a_turn_on_whose_outcome_is_unknown_reads_the_projects_again() {
+    let mut engine = Engine::bare();
+    let mut tickets = tab(&mut engine);
+    let (project, chosen, name) = turn_on_job(&mut tickets);
+    engine.attach(&project, &chosen, &name).unwrap();
+    tickets.apply(&SettingsEvent::Tracker(Box::new(TrackerEvent::Attached {
+        project,
+        result: Err("tracker_outcome_unknown".into()),
+    })));
+    assert!(!tickets.editing(), "the key field closes");
+    let (rows, _, _) = tickets.rows(76, 18, &Look::plain());
+    assert!(
+        text(&rows).contains("Loading tickets..."),
+        "{}",
+        text(&rows)
+    );
+    let Some(job @ TrackerJob::Projects) = tickets.next_job() else {
+        panic!("the tab reads the tracked projects again");
+    };
+    tickets.apply(&answer(job, &mut engine));
+    settle(&mut tickets, &mut engine);
+    let (rows, _, _) = tickets.rows(76, 18, &Look::plain());
+    assert!(text(&rows).contains(" FM  Tickets"), "{}", text(&rows));
+    ends_with(&mut tickets, "Tickets are on. Ticket ids start with FM.");
+
+    let mut engine = Engine::bare();
+    let mut tickets = tab(&mut engine);
+    let (project, _, _) = turn_on_job(&mut tickets);
+    tickets.apply(&SettingsEvent::Tracker(Box::new(TrackerEvent::Attached {
+        project,
+        result: Err("tracker_outcome_unknown".into()),
+    })));
+    settle(&mut tickets, &mut engine);
+    assert!(engine.tracked().is_empty());
+    assert!(!tickets.editing());
+    ends_with(
+        &mut tickets,
+        "Tickets did not turn on. Press t to try again.",
+    );
+    let (_, _, help) = tickets.rows(76, 18, &Look::plain());
+    assert_eq!(help[0], ("t", "Turn on tickets"));
+}
+
+#[test]
+fn a_turn_on_the_connection_dropped_under_reads_the_projects_again() {
+    let mut engine = Engine::bare();
+    let mut tickets = tab(&mut engine);
+    let (project, chosen, name) = turn_on_job(&mut tickets);
+    engine.attach(&project, &chosen, &name).unwrap();
+    tickets.forget_reads();
+    assert!(!tickets.editing(), "the key field closes");
+    settle(&mut tickets, &mut engine);
+    ends_with(&mut tickets, "Tickets are on. Ticket ids start with FM.");
+
+    let mut engine = Engine::bare();
+    let mut tickets = tab(&mut engine);
+    turn_on_job(&mut tickets);
+    tickets.forget_reads();
+    settle(&mut tickets, &mut engine);
+    assert!(!tickets.editing());
+    ends_with(
+        &mut tickets,
+        "Tickets did not turn on. Press t to try again.",
+    );
+}
+
+#[test]
+fn a_retried_turn_on_the_engine_already_took_turns_the_tab_on() {
+    let mut engine = Engine::bare();
+    let mut tickets = tab(&mut engine);
+    engine
+        .attach(
+            &fieldnotes(),
+            &ProjectKey::new("FM").unwrap(),
+            "Fieldnotes Mobile",
+        )
+        .unwrap();
+    let (project, chosen, name) = turn_on_job(&mut tickets);
+    tickets.apply(&answer(
+        TrackerJob::Attach {
+            project,
+            key: chosen,
+            name,
+        },
+        &mut engine,
+    ));
+    assert!(
+        !tickets.editing(),
+        "project_exists for this project is no key to change"
+    );
+    settle(&mut tickets, &mut engine);
+    ends_with(&mut tickets, "Tickets are on. Ticket ids start with FM.");
+}
+
+#[test]
+fn a_key_another_project_holds_keeps_the_field_open_with_the_key_typed() {
+    let mut engine = Engine::bare();
+    engine
+        .attach(
+            &ProjectId::new("field-manual").unwrap(),
+            &ProjectKey::new("FM").unwrap(),
+            "Field Manual",
+        )
+        .unwrap();
+    let mut tickets = tab(&mut engine);
+    let (project, chosen, name) = turn_on_job(&mut tickets);
+    tickets.apply(&answer(
+        TrackerJob::Attach {
+            project,
+            key: chosen,
+            name,
+        },
+        &mut engine,
+    ));
+    settle(&mut tickets, &mut engine);
+    assert!(tickets.editing());
+    let (rows, _, _) = tickets.rows(76, 18, &Look::plain());
+    let shown = text(&rows);
+    assert!(shown.contains("Key [ FM "), "{shown}");
+    assert!(
+        shown.contains("Another project has that key. Pick another one."),
+        "{shown}"
+    );
+    tickets.key(key(KeyCode::Backspace));
+    tickets.key(key(KeyCode::Char('n')));
+    assert_eq!(tickets.key(key(KeyCode::Enter)), TicketsReply::Handled);
+    settle(&mut tickets, &mut engine);
+    assert!(!tickets.editing());
+    ends_with(&mut tickets, "Tickets are on. Ticket ids start with FN.");
+}
+
+#[test]
+fn a_recheck_outside_a_turn_on_in_flight_is_refused() {
+    let mut reading = ProjectTickets::new(fieldnotes(), "Fieldnotes Mobile".into());
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        reading.recheck("project_exists");
+    }));
+    assert!(refused.is_err(), "a tab still reading has no turn-on");
+    let mut engine = Engine::bare();
+    let mut tickets = tab(&mut engine);
+    tickets.attach = Some(ProjectKey::new("FM").unwrap());
+    let refused = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tickets.recheck("project_exists");
+    }));
+    assert!(refused.is_err(), "a turn-on not sent yet has no outcome");
+}

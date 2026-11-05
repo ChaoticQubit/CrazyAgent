@@ -258,7 +258,7 @@ impl TicketSettingsPage {
                 match result {
                     Ok(SettingsSaved::Saved { .. }) => ctx.say(Message::success(
                         "Saved.",
-                        "New tickets and cycles follow it from now on.",
+                        "It applies from the next change on.",
                     )),
                     Ok(SettingsSaved::Stale { .. }) => ctx.say(Message::warning(
                         "Changed somewhere else.",
@@ -636,10 +636,10 @@ fn option_text(key: &str, value: &Value) -> (String, String) {
             "A ticket closes once every criterion is met and every check has passing evidence.",
         ),
         ("close", "owner") => ("Owner", "Only you close tickets."),
-        ("create", "direct") => ("Backlog", "New tickets go straight to the backlog."),
+        ("create", "direct") => ("Direct", "New tickets start where their creator puts them."),
         ("create", "triage") => (
             "Triage",
-            "New tickets wait in triage until you accept them.",
+            "Tickets agents create wait in triage until you accept them.",
         ),
         ("create", "owner_only") => ("Owner only", "Only you create tickets."),
         ("agent_edit", "any") => ("Anything", "Agents may change any field of any ticket."),

@@ -277,3 +277,29 @@ fn every_key_and_option_has_a_name_and_a_line() {
         ("\"someday\"".to_owned(), String::new())
     );
 }
+
+#[test]
+fn the_create_lines_and_the_saved_line_say_what_the_engine_does() {
+    assert_eq!(
+        option_text("create", &serde_json::json!("triage")).1,
+        "Tickets agents create wait in triage until you accept them."
+    );
+    assert_eq!(
+        option_text("create", &serde_json::json!("direct")),
+        (
+            "Direct".to_owned(),
+            "New tickets start where their creator puts them.".to_owned()
+        )
+    );
+    let mut engine = Engine::new();
+    let mut shell = Shell::with(ctx(80, 24), Box::new(TicketSettingsPage::new(project())));
+    serve(&mut shell, &mut engine);
+    shell.key(Key::Enter);
+    shell.key(Key::Right);
+    shell.key(Key::Enter);
+    let job = one(&mut shell);
+    reply(&mut shell, &mut engine, job);
+    let message = shell.ctx.message().unwrap();
+    assert_eq!(message.lead, "Saved.");
+    assert_eq!(message.rest, "It applies from the next change on.");
+}
