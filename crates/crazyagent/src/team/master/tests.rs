@@ -122,6 +122,16 @@ impl Drop for Fixture {
     }
 }
 
+/// Waits until a pane's app has turned bracketed paste on, which engine input to a live
+/// master waits for. Takes the host and the pane.
+fn reads_keys(host: &dyn Host, pane: &AgentId) {
+    let until = Instant::now() + Duration::from_secs(15);
+    while !host.input_live(pane).unwrap() {
+        assert!(Instant::now() < until, "the app turns bracketed paste on");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn typed_until(file: &Path, wanted: &[u8]) -> Vec<u8> {
     let until = Instant::now() + Duration::from_secs(15);
     loop {
@@ -154,6 +164,7 @@ fn engine_input_reaches_an_idle_live_master_only_while_the_owner_is_not_typing()
     };
     host.spawn(&AgentId::team(MASTER).unwrap(), &command)
         .unwrap();
+    reads_keys(host.as_ref(), &AgentId::team(MASTER).unwrap());
     let input = |text: &str, now: i64| {
         master_input_at(
             &fixture.connection,
@@ -215,7 +226,7 @@ fn engine_input_reaches_an_idle_live_master_only_while_the_owner_is_not_typing()
 
     host.kill(&AgentId::team(MASTER).unwrap()).unwrap();
     let gone = input("fourth", NOW + DRAFT_ABANDONED_MS + 1 + INPUT_SETTLE_MS);
-    assert!(matches!(gone, Err(InputRefused::Failed(_))), "{gone:?}");
+    assert_eq!(gone, Err(InputRefused::Busy), "an ended pane reads no keys");
     let input_ms: Option<i64> = fixture
         .connection
         .query_row(
@@ -225,8 +236,9 @@ fn engine_input_reaches_an_idle_live_master_only_while_the_owner_is_not_typing()
         )
         .unwrap();
     assert_eq!(
-        input_ms, None,
-        "a failed input frees the master for the next one"
+        input_ms,
+        Some(NOW + DRAFT_ABANDONED_MS + 1),
+        "a refused input keeps the last typed input's time"
     );
 }
 
@@ -285,11 +297,7 @@ fn engine_input_waits_until_the_live_masters_app_reads_keys() {
     assert_eq!(input_ms, None, "a refused input keeps no input time");
 
     std::fs::write(&go, "").unwrap();
-    let until = Instant::now() + Duration::from_secs(15);
-    while !host.input_live(&pane).unwrap() {
-        assert!(Instant::now() < until, "the app turns bracketed paste on");
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    reads_keys(host.as_ref(), &pane);
     assert_eq!(input(NOW), Ok(()));
     let pasted = b"\x1b[200~hello\x1b[201~\r";
     let seen = typed_until(&typed, pasted);
@@ -352,6 +360,7 @@ fn owner_typing_kept_in_memory_holds_engine_input_back_before_any_write_lands() 
     };
     host.spawn(&AgentId::team(MASTER).unwrap(), &command)
         .unwrap();
+    reads_keys(host.as_ref(), &AgentId::team(MASTER).unwrap());
     fixture.live(Some(MASTER));
     let typing = OwnerTyping::new(fixture.base.join("never-written.db"));
     let input = |text: &str, now: i64| {

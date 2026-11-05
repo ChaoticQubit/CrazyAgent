@@ -265,6 +265,7 @@ impl TerminalSession {
             checked: Instant::now(),
             events,
             ready: true,
+            first: None,
             turn: false,
             held: false,
             own_held: false,

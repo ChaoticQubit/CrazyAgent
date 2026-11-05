@@ -6,7 +6,7 @@ use super::launch::{
 use super::transcript::{TranscriptEvent, TranscriptReader};
 use crate::launch_context::{AgentContext, Installed};
 use crate::model_gateway::relay::{Relay, is_placeholder};
-use crate::terminal::{AgentId, Host, HostError, INPUT_BYTES_MAX};
+use crate::terminal::{AgentId, Host, HostError, INPUT_BYTES_MAX, TerminalStream};
 use std::collections::{BTreeSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -46,6 +46,7 @@ pub struct TerminalSession {
     checked: Instant,
     events: usize,
     ready: bool,
+    first: Option<FirstScreen>,
     turn: bool,
     held: bool,
     own_held: bool,
@@ -59,6 +60,16 @@ pub struct TerminalSession {
     _key: Option<KeyFile>,
     _context: Option<Installed>,
     _relay: Option<Relay>,
+}
+
+/// What the engine saw of an app's first screen while it waits for the app to read keys:
+/// the attached stream, when the wait began, whether anything was drawn and when the
+/// screen last changed.
+struct FirstScreen {
+    stream: TerminalStream,
+    started: Instant,
+    drawn: bool,
+    quiet: Instant,
 }
 
 /// An account's key file, removed when the agent session holding it ends.
@@ -224,6 +235,7 @@ impl TerminalSession {
             checked: Instant::now(),
             events: 0,
             ready: false,
+            first: None,
             turn: false,
             held: false,
             own_held: false,
@@ -454,37 +466,60 @@ impl TerminalSession {
         self.host.input(&self.agent, bytes).map_err(host_failure)
     }
 
+    /// Looks once, without waiting, whether the app reads keys yet by the rule its first
+    /// prompt waits for: it has drawn its screen, nothing changed on it for `READY_QUIET`
+    /// and it turned bracketed paste on (see [`Host::input_live`]), or `READY_WAIT` passed
+    /// since the first look. Output: the answer, or `launch_closed` once the pane ended.
+    pub fn poll_ready(&mut self) -> Result<bool, LaunchError> {
+        if self.ready {
+            return Ok(true);
+        }
+        let first = match &mut self.first {
+            Some(first) => first,
+            None => {
+                let stream = self.host.attach(&self.agent).map_err(host_failure)?;
+                let drawn = !stream.screen.iter().all(u8::is_ascii_whitespace);
+                self.first.insert(FirstScreen {
+                    stream,
+                    started: Instant::now(),
+                    drawn,
+                    quiet: Instant::now(),
+                })
+            }
+        };
+        loop {
+            match first.stream.chunks.try_recv() {
+                Ok(chunk) => {
+                    first.drawn |= !chunk.is_empty();
+                    first.quiet = Instant::now();
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.first = None;
+                    self.exited = true;
+                    return Err(failure("launch_closed"));
+                }
+            }
+        }
+        let ready = first.started.elapsed() >= READY_WAIT
+            || (first.drawn
+                && first.quiet.elapsed() >= READY_QUIET
+                && self.host.input_live(&self.agent).map_err(host_failure)?);
+        if ready {
+            self.ready = true;
+            self.first = None;
+        }
+        Ok(ready)
+    }
+
     fn wait_ready(&mut self, cancel: &AtomicBool) -> Result<(), LaunchError> {
-        let mut stream = self.host.attach(&self.agent).map_err(host_failure)?;
-        let started = Instant::now();
-        let mut drawn = !stream.screen.iter().all(u8::is_ascii_whitespace);
-        let mut quiet = Instant::now();
-        while started.elapsed() < READY_WAIT {
+        while !self.poll_ready()? {
             if cancel.load(Ordering::SeqCst) {
+                self.first = None;
                 return Err(failure("launch_cancelled"));
             }
             std::thread::sleep(POLL);
-            loop {
-                match stream.chunks.try_recv() {
-                    Ok(chunk) => {
-                        drawn |= !chunk.is_empty();
-                        quiet = Instant::now();
-                    }
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => {
-                        self.exited = true;
-                        return Err(failure("launch_closed"));
-                    }
-                }
-            }
-            if drawn
-                && quiet.elapsed() >= READY_QUIET
-                && self.host.input_live(&self.agent).map_err(host_failure)?
-            {
-                break;
-            }
         }
-        self.ready = true;
         Ok(())
     }
 

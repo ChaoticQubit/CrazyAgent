@@ -401,7 +401,9 @@ pub(crate) fn turn_ended(
 }
 
 /// Types one engine message into a project's live master as one paste plus Enter, only
-/// while the master is idle and the owner is not typing, so w-events can queue team events.
+/// while the master is idle, its app reads keys (bracketed paste on, so a line is never
+/// left unsent in a prompt that is still booting) and the owner is not typing, so
+/// w-events can queue team events.
 /// Takes the engine database, the terminal host, the engine's owner typing signal when it
 /// has one, the project and the text. The newer of the signal and the stored owner typing
 /// counts. Returns Ok once typed, or why it was not typed; nothing is typed on refusal.
@@ -433,6 +435,12 @@ pub(crate) fn master_input_at(
         Transaction::new_unchecked(connection, TransactionBehavior::Immediate).map_err(failed)?;
     let agent = input_open(&tx, typing, project, now)?;
     let pane = AgentId::team(agent).map_err(|problem| InputRefused::Failed(problem.0))?;
+    if !host
+        .input_live(&pane)
+        .map_err(|problem| InputRefused::Failed(problem.0))?
+    {
+        return Err(InputRefused::Busy);
+    }
     tx.execute(
         "UPDATE team_live_masters SET input_ms=?2 WHERE project=?1",
         params![project.as_str(), now],

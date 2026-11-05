@@ -9664,6 +9664,7 @@ fn between_turns(
         hosted: None,
         live: false,
         briefed: true,
+        input_ready: true,
         kept_session,
         own_turn: None,
         own_rules: None,

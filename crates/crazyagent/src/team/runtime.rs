@@ -417,6 +417,7 @@ enum Report {
     },
     Conversation(Resume),
     ResumeRefused,
+    InputReady,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -449,6 +450,7 @@ struct Worker {
     hosted: Option<Hosted>,
     live: bool,
     briefed: bool,
+    input_ready: bool,
     kept_session: bool,
     own_turn: Option<i64>,
     own_rules: Option<(Duration, TurnRules)>,
@@ -3622,7 +3624,8 @@ impl TeamRuntime {
         let Some(host) = self.terminal.clone() else {
             return Ok(());
         };
-        if !self.workers[&id].live || !self.workers[&id].briefed {
+        let worker = &self.workers[&id];
+        if !worker.live || !worker.briefed || !worker.input_ready {
             return Ok(());
         }
         let pending: Option<(i64, String, String)> = self
@@ -5184,6 +5187,7 @@ impl TeamRuntime {
                 hosted: seat.hosted,
                 live,
                 briefed,
+                input_ready: false,
                 kept_session,
                 own_turn: None,
                 own_rules: None,
@@ -6732,6 +6736,13 @@ impl TeamRuntime {
                 }
                 Ok(false)
             }
+            Report::InputReady => {
+                self.workers
+                    .get_mut(&id)
+                    .expect("ready worker exists")
+                    .input_ready = true;
+                Ok(false)
+            }
             Report::ResumeRefused => {
                 let worker = self.workers.get_mut(&id).expect("worker exists");
                 worker.stopping = true;
@@ -7924,7 +7935,8 @@ fn live_adopted(
 /// start and end with the turn's reply text, bounded, for landing, usage and reply-line
 /// delegation. A turn the provider refused for a rate limit ends the session so the
 /// engine moves the master to another pool account. Nothing is typed into the pane at
-/// start. Takes the session, the worker's channels and flags, and whether a later engine
+/// start; once the app reads keys by the rule a first prompt waits for, it tells the
+/// engine, which types no message before that. Takes the session, the worker's channels and flags, and whether a later engine
 /// may take the pane over. Returns the problem that ended it, if any.
 fn live_serve(
     mut session: TerminalSession,
@@ -7943,7 +7955,18 @@ fn live_serve(
     let (mut limited, mut interrupted) = (false, false);
     let mut problem = None;
     let mut named = false;
+    let mut reads_keys = false;
     while !cancel.load(Ordering::SeqCst) {
+        if !reads_keys {
+            match session.poll_ready() {
+                Ok(false) => {}
+                Ok(true) => {
+                    reads_keys = true;
+                    let _ = reports.send(Report::InputReady);
+                }
+                Err(_) => reads_keys = true,
+            }
+        }
         if !named && let Some(conversation) = session.conversation() {
             named = reports.send(Report::Conversation(conversation)).is_ok();
         }
