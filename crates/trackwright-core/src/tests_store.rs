@@ -1432,10 +1432,10 @@ impl Replayed {
                     Membership<Case, CaseCriterion>,
                     Membership<Case, CaseCriterion>,
                 ) = (decoded(before)?, decoded(after)?);
-                if let Some(member) = was.member {
-                    if !self.case_criteria.remove(&member) {
-                        return Err(unmatched());
-                    }
+                if let Some(member) = was.member
+                    && !self.case_criteria.remove(&member)
+                {
+                    return Err(unmatched());
                 }
                 self.case_criteria.extend(now.member);
                 self.cases.insert(now.parent.id, now.parent);

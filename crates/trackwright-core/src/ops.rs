@@ -830,9 +830,8 @@ fn list<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
     assert!(rows.len() <= PAGE_ROWS_MAX + 1);
     let mut page = Page::new(cx.data_bytes_max);
     assert!(page.put("tickets", json!([])));
-    let mut shown = 0;
     let mut cursor = None;
-    for (number, title, status, priority, assignee) in &rows {
+    for (shown, (number, title, status, priority, assignee)) in rows.iter().enumerate() {
         let (title, elided) = reply::elide(title, LISTED_TITLE_BYTES_MAX);
         let mut row = json!({
             "id": format!("{}-{number}", project.key),
@@ -849,7 +848,6 @@ fn list<H: Host>(cx: &Cx<'_, '_, H>) -> Result<Outcome, Failure> {
             cursor = Some(format!("tickets:{}", rows[shown - 1].0));
             break;
         }
-        shown += 1;
     }
     let mut next = Vec::new();
     if let Some((number, ..)) = rows.first() {
@@ -908,7 +906,8 @@ fn events(
     sql: &'static str,
     params: impl rusqlite::Params,
 ) -> Result<Vec<Value>, Failure> {
-    let rows: Vec<(i64, String, String, Option<String>, Option<String>)> = store::prepare(tx, sql)?
+    type Row = (i64, String, String, Option<String>, Option<String>);
+    let rows: Vec<Row> = store::prepare(tx, sql)?
         .query_map(params, |row| {
             Ok((
                 row.get(0)?,
