@@ -24,11 +24,12 @@ const WINDOWS_DEVICE_NAMES: [&str; 22] = [
     "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
 ];
 
-/// True when the text is exactly one plain path component that names the same child
-/// folder on every platform, never itself, its parent or another root: not empty, `.`,
-/// `..`, a separator, a root or a Windows drive like `c:`, no trailing dot or space,
-/// which Windows strips, and no Windows device name. Input: the text. Output: whether
-/// it names one child folder.
+/// True when the text is exactly one plain path component that names one child, never
+/// itself, its parent or another root: not empty, `.`, `..`, a separator, a root or a
+/// Windows drive like `c:`, no trailing dot or space, which Windows strips, and no Windows
+/// device name. A colon stays allowed for identities; a name that becomes a folder also
+/// needs none, since Windows reads `name:x` as a stream of `name`. Input: the text.
+/// Output: whether it names one child.
 pub(crate) fn single_component(text: &str) -> bool {
     let mut parts = std::path::Path::new(text).components();
     matches!(
@@ -39,10 +40,11 @@ pub(crate) fn single_component(text: &str) -> bool {
 }
 
 /// True when Windows opens the name as a device instead of a file: CON, PRN, AUX, NUL,
-/// COM1 to COM9 or LPT1 to LPT9 in any case, alone or before an extension, with or
-/// without spaces before the dot. Input: one path component. Output: whether it is
-/// reserved on Windows.
+/// COM1 to COM9 or LPT1 to LPT9 in any case, alone, before an extension or before one
+/// trailing colon, with or without spaces before the dot. Input: one path component.
+/// Output: whether it is reserved on Windows.
 pub(crate) fn windows_device(name: &str) -> bool {
+    let name = name.strip_suffix(':').unwrap_or(name);
     let stem = name
         .split_once('.')
         .map_or(name, |(stem, _)| stem)
