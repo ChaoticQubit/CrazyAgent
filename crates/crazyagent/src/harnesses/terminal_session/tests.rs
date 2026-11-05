@@ -330,6 +330,7 @@ mod own_turns {
 }
 
 /// Makes a real FIFO at `path` with the system `mkfifo`. Input: the path. Output: none.
+#[cfg(unix)]
 fn fifo(path: &std::path::Path) {
     let made = crate::spawn_gate::status(
         std::process::Command::new("/usr/bin/mkfifo")
@@ -343,6 +344,7 @@ fn fifo(path: &std::path::Path) {
 
 /// Opens the FIFO at `path` for writing without waiting and closes it, so a reader a
 /// failing test left blocked on it ends. Input: the path. Output: none.
+#[cfg(unix)]
 fn release_fifo(path: &std::path::Path) {
     use std::os::unix::fs::OpenOptionsExt;
     let _ = std::fs::OpenOptions::new()
@@ -351,15 +353,26 @@ fn release_fifo(path: &std::path::Path) {
         .open(path);
 }
 
-/// A private folder under the canonical `/tmp` for one key file test.
+/// A private folder for one key file test: under the canonical `/tmp` with mode 0700 on
+/// unix, in the system temp folder elsewhere.
 fn key_folder() -> tempfile::TempDir {
-    use std::os::unix::fs::PermissionsExt;
-    let folder = tempfile::Builder::new()
-        .prefix("ca-key-")
-        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
-        .unwrap();
-    std::fs::set_permissions(folder.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    folder
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let folder = tempfile::Builder::new()
+            .prefix("ca-key-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        std::fs::set_permissions(folder.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        folder
+    }
+    #[cfg(not(unix))]
+    {
+        tempfile::Builder::new()
+            .prefix("ca-key-")
+            .tempdir()
+            .unwrap()
+    }
 }
 
 /// The longest key the engine writes: a relay token.
@@ -369,6 +382,25 @@ fn longest_key() -> String {
         crate::model_gateway::relay::TOKEN_PREFIX,
         "a".repeat(64)
     )
+}
+
+/// WINB-L1 with rv-secreview F1: off macOS no agent pane runs, whatever its unconfined flag,
+/// since that flag is also set for Full access agents; each refusal names the system.
+#[test]
+fn every_agent_pane_is_refused_off_macos_with_a_code_naming_the_system() {
+    assert_eq!(
+        agent_pane_unavailable("windows"),
+        Some("launch_unavailable_on_windows")
+    );
+    assert_eq!(
+        agent_pane_unavailable("linux"),
+        Some("launch_unavailable_on_linux")
+    );
+    assert_eq!(
+        agent_pane_unavailable("freebsd"),
+        Some("launch_unavailable")
+    );
+    assert_eq!(agent_pane_unavailable("macos"), None);
 }
 
 #[test]
@@ -393,6 +425,7 @@ fn dropping_a_key_file_whose_path_now_holds_another_key_keeps_it() {
     assert_eq!(std::fs::read_to_string(&path).unwrap(), other);
 }
 
+#[cfg(unix)]
 #[test]
 fn dropping_a_key_file_whose_path_now_holds_a_fifo_keeps_it_and_never_blocks() {
     let folder = key_folder();

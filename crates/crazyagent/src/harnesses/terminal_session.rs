@@ -137,6 +137,19 @@ fn host_failure(error: HostError) -> LaunchError {
     LaunchError(error.0, None)
 }
 
+/// The refusal code for an agent pane on a system that cannot hold it under the macOS
+/// confinement: every system but macOS, whatever the pane's unconfined flag, which also marks
+/// Full access agents. Only agent launches come here, never the owner's own shell. Input: the
+/// operating system name as `std::env::consts::OS` gives it. Output: the code, or None.
+fn agent_pane_unavailable(os: &str) -> Option<&'static str> {
+    match os {
+        "macos" => None,
+        "windows" => Some("launch_unavailable_on_windows"),
+        "linux" => Some("launch_unavailable_on_linux"),
+        _ => Some("launch_unavailable"),
+    }
+}
+
 impl TerminalSession {
     /// Starts an agent's interactive app in a new pane named `agent`, with the project's
     /// approved context installed into the agent home when given, the way every team agent
@@ -196,6 +209,9 @@ impl TerminalSession {
         validate(&request)?;
         if interactive::support(&request.harness) != Support::Terminal {
             return Err(failure("launch_terminal_unsupported"));
+        }
+        if let Some(code) = agent_pane_unavailable(std::env::consts::OS) {
+            return Err(failure(code));
         }
         let (request, relay) = route(request)?;
         let home = request.account.home().to_path_buf();
