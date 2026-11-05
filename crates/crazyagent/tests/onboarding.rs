@@ -1887,7 +1887,7 @@ async fn a_step_that_cannot_start_records_its_cause_code() {
     let created = onboarding_created_ms(&bench.root);
     let taken = [
         format!("onboard-g-{PROJECT}-{created}-1"),
-        format!("onboard-m-{PROJECT}-{created}-2"),
+        format!("onboard-m-{PROJECT}-{created}-2-t1"),
     ];
     for name in &taken {
         leftover_agent(&agents, name);
