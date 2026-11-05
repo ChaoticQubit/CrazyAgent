@@ -19,6 +19,18 @@ fn assert_no_effect_fact(actual: &NativeAuthFact, committed: &NativeAuthFact) {
     assert_eq!(actual.code.as_deref(), Some("native_auth_host_unavailable"));
 }
 
+/// Checks that a childless retire after the owner's cancel settled the committed attempt
+/// Cancelled with no code (ND1-CDX-2, leader 08:51). Inputs: the retired fact and the
+/// committed one. Output: none; panics on a difference.
+fn assert_cancelled_without_effect(actual: &NativeAuthFact, committed: &NativeAuthFact) {
+    assert_eq!(actual.operation_id, committed.operation_id);
+    assert_eq!(actual.generation, committed.generation);
+    assert_eq!(actual.binding, committed.binding);
+    assert_eq!(actual.action, committed.action);
+    assert_eq!(actual.phase, NativeAuthPhase::Cancelled);
+    assert_eq!(actual.code, None);
+}
+
 #[tokio::test]
 async fn native_auth_custodian_entry_codex_digest_mismatch_never_retires_without_effect() {
     channel_case(|case| async move {
@@ -207,7 +219,7 @@ async fn native_auth_custodian_entry_run_honors_committed_cancel_before_attachme
         assert_eq!(cancelled.fact.phase, NativeAuthPhase::Cancelling);
         assert_eq!(case.snapshot().fences.len(), 1);
         let actual = run(&case.root, bootstrap_input(&case.token())).await.unwrap();
-        assert_no_effect_fact(&actual, &committed);
+        assert_cancelled_without_effect(&actual, &committed);
         assert_eq!(case.snapshot().facts, vec![actual]);
         assert!(case.snapshot().fences.is_empty());
         drop(launch);
@@ -250,7 +262,7 @@ async fn native_auth_custodian_entry_run_session_check_reads_real_cancel_and_ret
             .retire(session.seal_without_effect().unwrap())
             .await
             .unwrap();
-        assert_no_effect_fact(&actual, &committed);
+        assert_cancelled_without_effect(&actual, &committed);
         rustix::fs::flock(&probe, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
         drop((probe, channel, launch));
     })

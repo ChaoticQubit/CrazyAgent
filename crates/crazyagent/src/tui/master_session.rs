@@ -30,6 +30,19 @@ const DIMENSIONS: [&str; 7] = [
     "spend_microunits",
 ];
 
+/// The lead of the owner's line when a New session waiting for the current settings ends
+/// unsent; the reason follows it (NT2-L1).
+pub(super) const RENEWAL_NOT_STARTED: &str = "New session not started.";
+
+/// Why a New session waiting for the current settings ended unsent when the owner left its
+/// project while they were read.
+const RENEWAL_LEFT: &str = "You left the project before the settings were read.";
+
+/// Why a New session waiting for the current settings ended unsent when the engine
+/// connection changed while they were read.
+const RENEWAL_DROPPED: &str =
+    "The connection to the engine changed before the settings were read. Press n to try again.";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Context {
     pub identity: OwnerConnectionIdentity,
@@ -144,6 +157,8 @@ pub(super) struct State {
     forms: Vec<Form>,
     catalog: Option<Catalog>,
     catalog_attempted: bool,
+    renewal: Option<bool>,
+    renewal_problem: Option<String>,
     view: Option<View>,
     flight: Option<Context>,
     next_read: Instant,
@@ -165,6 +180,8 @@ impl Default for State {
             forms: Vec::new(),
             catalog: None,
             catalog_attempted: false,
+            renewal: None,
+            renewal_problem: None,
             view: None,
             flight: None,
             next_read: Instant::now(),
@@ -213,6 +230,14 @@ impl State {
                 .ok_or("Master view generation exhausted")?;
             self.view = None;
             self.flight = None;
+            self.drop_renewal(
+                if self.project == project {
+                    RENEWAL_DROPPED
+                } else {
+                    RENEWAL_LEFT
+                }
+                .into(),
+            );
             self.next_read = Instant::now();
             if self.identity != identity {
                 self.catalog = None;
@@ -227,6 +252,7 @@ impl State {
 
     pub fn access(&mut self) {
         self.home_confirmation = None;
+        self.drop_renewal(RENEWAL_DROPPED.into());
         self.catalog = None;
         self.catalog_attempted = false;
         self.view = None;
@@ -598,14 +624,19 @@ impl State {
         })
     }
 
-    fn enqueue(&mut self, action: MasterOwnerAction, generation: u64) -> Result<(), String> {
-        if !self.ready || self.pending.is_some() || self.job.is_some() {
+    fn intent_free(&self) -> Result<(), String> {
+        if !self.ready || self.pending.is_some() || self.job.is_some() || self.renewal.is_some() {
             return Err(concat!(
                 "Master owner intent pending or unavailable; ",
                 "draft and exact identity retained; Ctrl-R recovers"
             )
             .into());
         }
+        Ok(())
+    }
+
+    fn enqueue(&mut self, action: MasterOwnerAction, generation: u64) -> Result<(), String> {
+        self.intent_free()?;
         let submission = Submission {
             identity: self
                 .identity
@@ -694,31 +725,65 @@ impl State {
     }
 
     /// Parks the live session and opens a fresh one in one engine step, with the backend,
-    /// pool, account, sandbox and allowance of the session the view shows. Input: whether a
-    /// running reply may be stopped, set only after the owner confirms a
-    /// `master_turn_running` refusal. Output: the intent is queued, or why it cannot be.
+    /// pool, account, sandbox and allowance of the session the view shows, on the settings
+    /// as they are now: the current catalog is read first, since another client may have
+    /// changed them (N-T2). Input: whether a running reply may be stopped, set only after the
+    /// owner confirms a `master_turn_running` refusal. Output: the intent is waiting for the
+    /// catalog, or why it cannot be.
     pub fn new_session(&mut self, cancel_running: bool) -> Result<(), String> {
         if !self.ready {
             return Err("Waiting for actual master state; Ctrl-R reconnects".into());
         }
-        let Some(session) = self.view.as_ref().and_then(|view| view.session.as_ref()) else {
+        if self
+            .view
+            .as_ref()
+            .and_then(|view| view.session.as_ref())
+            .is_none()
+        {
             return self.open();
-        };
-        let (config_id, source_hash) = match &self.catalog {
-            Some(catalog) => (catalog.config_id.clone(), catalog.source_hash.clone()),
-            None => {
-                let (config_id, source_hash) = session.binding();
-                (config_id.clone(), source_hash.to_owned())
-            }
+        }
+        self.intent_free()?;
+        self.renewal = Some(cancel_running);
+        self.catalog = None;
+        self.catalog_attempted = false;
+        self.notice = "Reading the current settings for the new session".into();
+        Ok(())
+    }
+
+    /// Queues the New session the owner asked for on the catalog just read, with the
+    /// selection of the session the view shows. Input: whether a running reply may be
+    /// stopped. Output: the intent is queued, or why it cannot be.
+    fn renew(&mut self, cancel_running: bool) -> Result<(), String> {
+        let (Some(session), Some(catalog)) = (
+            self.view.as_ref().and_then(|view| view.session.as_ref()),
+            self.catalog.as_ref(),
+        ) else {
+            return Err("No live master session to replace; Ctrl-R refreshes".into());
         };
         let action = MasterOwnerAction::NewSession {
             project_id: session.project_id.clone(),
-            expected_config_id: config_id,
-            expected_source_hash: source_hash,
+            expected_config_id: catalog.config_id.clone(),
+            expected_source_hash: catalog.source_hash.clone(),
             selection: Box::new(session.selection.clone()),
             cancel_running,
         };
         self.enqueue(action, self.generation)
+    }
+
+    /// Ends a New session waiting for the current settings without sending it, and keeps
+    /// why for the notice and for the page to say once (NT2-L1). Input: the reason, a
+    /// sentence. Output: none; nothing changes when no New session waits.
+    fn drop_renewal(&mut self, reason: String) {
+        if self.renewal.take().is_some() {
+            self.notice = format!("{RENEWAL_NOT_STARTED} {reason}");
+            self.renewal_problem = Some(reason);
+        }
+    }
+
+    /// Takes why the last waiting New session ended unsent, once, so the page says it.
+    /// Input: none. Output: the reason, or None when there is nothing new to say.
+    pub fn take_renewal_problem(&mut self) -> Option<String> {
+        self.renewal_problem.take()
     }
 
     /// Makes a parked session live again, parking the live one, in one engine step.
@@ -860,7 +925,10 @@ impl State {
             project,
             generation: self.generation,
         };
-        if self.is_open() && !self.catalog_attempted && self.pending.is_none() {
+        if (self.is_open() || self.renewal.is_some())
+            && !self.catalog_attempted
+            && self.pending.is_none()
+        {
             self.catalog_attempted = true;
             self.flight = Some(context.clone());
             return Some(Job::Catalog { context });
@@ -914,6 +982,7 @@ impl State {
         }
         self.flight = None;
         if !self.matches(&context) {
+            self.drop_renewal(RENEWAL_DROPPED.into());
             return;
         }
         match result {
@@ -927,11 +996,19 @@ impl State {
                     "native delivery/authentication remain unsupported"
                 )
                 .into();
+                if let Some(cancel_running) = self.renewal.take()
+                    && let Err(problem) = self.renew(cancel_running)
+                {
+                    self.notice = problem;
+                }
             }
             Err(problem) => {
                 self.catalog = None;
                 self.notice =
                     format!("Metadata unavailable: {problem}; inspect Settings; Ctrl-R refreshes");
+                self.drop_renewal(format!(
+                    "The current settings could not be read ({problem}). Press n to try again."
+                ));
             }
         }
         self.assert_consistent();

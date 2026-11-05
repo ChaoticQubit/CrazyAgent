@@ -2405,6 +2405,9 @@ mod live_claude_tests;
 #[cfg(all(test, target_os = "macos"))]
 #[path = "master_host_launch/live_codex_tests.rs"]
 mod live_codex_tests;
+#[cfg(all(test, target_os = "macos"))]
+#[path = "master_host_launch/live_rcli_tests.rs"]
+mod live_rcli_tests;
 
 #[cfg(all(test, target_os = "macos"))]
 #[path = "master_host_launch/claude_turn_tests.rs"]

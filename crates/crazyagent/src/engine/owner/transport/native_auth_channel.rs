@@ -1939,6 +1939,35 @@ impl NativeAuthCustodyChannel {
         }
         self.guard_or_close(guard)?;
         let observation = CodexAuthObservation::from_native(event)?;
+        self.send_codex(guard, observation).await
+    }
+
+    /// Reports how the custodian saw its started Codex child end without an app-server
+    /// outcome, a host failure or the owner's cancel, so the engine settles the sign-in.
+    /// Inputs: the held profile and the observation. Output: whether to go on or cancel.
+    pub(crate) async fn observe_codex_host(
+        &mut self,
+        guard: &NativeProfileUse,
+        observation: CodexAuthObservation,
+    ) -> Result<NativeAuthCustodyControl, EngineError> {
+        assert!(matches!(
+            observation,
+            CodexAuthObservation::HostFailed { .. } | CodexAuthObservation::HostCancelled
+        ));
+        if self.sealed {
+            return Err(failure("native_auth_recovery_required"));
+        }
+        self.guard_or_close(guard)?;
+        self.send_codex(guard, observation).await
+    }
+
+    /// Sends one Codex observation and reads the engine's answer. Inputs: the held
+    /// profile and the observation. Output: whether to go on or cancel.
+    async fn send_codex(
+        &mut self,
+        guard: &NativeProfileUse,
+        observation: CodexAuthObservation,
+    ) -> Result<NativeAuthCustodyControl, EngineError> {
         let reply = self
             .exchange(RequestKind::ObserveCodex, Some(observation))
             .await?;

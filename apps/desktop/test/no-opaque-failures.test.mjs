@@ -38,6 +38,23 @@ function literals(text, pattern) {
 }
 
 /**
+ * Finds the bracket that closes a call or a body. Takes the source text, the index just after
+ * the opening bracket and the bracket pair, parentheses unless given. Returns the index just
+ * after its matching close.
+ */
+function closing(text, start, open = "(", close = ")") {
+  let depth = 1;
+  let index = start;
+  while (depth > 0 && index < text.length) {
+    if (text[index] === open) depth += 1;
+    if (text[index] === close) depth -= 1;
+    index += 1;
+  }
+  assert.equal(depth, 0, `unclosed ${open} at ${start}`);
+  return index;
+}
+
+/**
  * Reads every code literal a call can pass, including each branch of an if or match argument.
  * Takes the source text and a global pattern that ends at the call's opening parenthesis.
  * Returns the code literals found between that parenthesis and its matching close.
@@ -45,15 +62,37 @@ function literals(text, pattern) {
 function callLiterals(text, call) {
   return [...text.matchAll(call)].flatMap((match) => {
     const start = match.index + match[0].length;
-    let depth = 1;
-    let index = start;
-    while (depth > 0 && index < text.length) {
-      if (text[index] === "(") depth += 1;
-      if (text[index] === ")") depth -= 1;
-      index += 1;
-    }
-    assert.equal(depth, 0, `unclosed call at ${start}`);
-    return literals(text.slice(start, index - 1), /"([a-z][a-z0-9_]*)"/g);
+    return literals(text.slice(start, closing(text, start) - 1), /"([a-z][a-z0-9_]*)"/g);
+  });
+}
+
+const PRINT = /\be?print(?:ln)?!\(/g;
+
+/**
+ * Drops every print call from Rust source, so a code literal that only labels a log line is
+ * not read as a code the engine records. Takes the source text. Returns the rest of it.
+ */
+function withoutPrints(text) {
+  let kept = "";
+  let from = 0;
+  for (const match of text.matchAll(PRINT)) {
+    if (match.index < from) continue;
+    kept += text.slice(from, match.index);
+    from = closing(text, match.index + match[0].length);
+  }
+  return kept + text.slice(from);
+}
+
+const CODE_FN = /\bfn code\(&?self\)\s*->\s*&'static str\s*\{/g;
+
+/**
+ * Reads the sign-in codes every `fn code` of an engine failure type returns, one per match
+ * arm. Takes the source text. Returns the `native_auth_` literals inside each such body.
+ */
+function codeArms(text) {
+  return [...text.matchAll(CODE_FN)].flatMap((match) => {
+    const start = match.index + match[0].length;
+    return literals(text.slice(start, closing(text, start, "{", "}") - 1), /"(native_auth_[a-z_]+)"/g);
   });
 }
 
@@ -112,13 +151,49 @@ test("a bridge failure keeps its own sentence and names the engine code behind i
 });
 
 test("every sign-in failure the engine records reads as a sentence, and an unknown one names its code", () => {
-  const facts = new Set(engineFiles.flatMap(({ text }) => literals(text, /Some\(\s*"(native_auth_[a-z_]+)"/g)));
+  const listed = production(join(ENGINE, "storage/native_auth.rs")).match(/\bCUSTODIAN_CODES: \[&str; \d+\] = \[([^\]]*)\]/);
+  assert.ok(listed, "storage/native_auth.rs lists the codes a custodian may name");
+  const custodian = literals(listed[1], /"([a-z][a-z0-9_]*)"/g);
+  const arms = engineFiles.flatMap(({ text }) => codeArms(text));
+  assert.ok(custodian.length > 0 && arms.length > 0, `${custodian.length} custodian codes, ${arms.length} failure arms`);
+  const facts = new Set([
+    ...custodian,
+    ...arms,
+    ...engineFiles.flatMap(({ text }) => literals(withoutPrints(text), /(?:Some|\.unwrap_or)\(\s*"(native_auth_[a-z_]+)"/g)),
+  ]);
   assert.ok(facts.size >= 6 && facts.has("native_auth_interrupted"), [...facts].join(","));
   for (const code of facts) {
     const { text } = signInFailure(code, "chatgpt");
     assert.doesNotMatch(text, / \([a-z0-9_]+\)$|_/, `${code}: ${text}`);
   }
   assert.equal(signInFailure("native_auth_made_up", "claude").text, "Sign-in didn't finish. Try again. (native_auth_made_up)");
+});
+
+test("each sign-in sentence is true on every path that records its code, and an inherited key never reads as one", () => {
+  const sentences = [
+    ["native_auth_codex_exited_before_observation", "Codex stopped before it finished. Try again."],
+    ["native_auth_codex_deadline", "Codex didn't answer in time. Try again."],
+    ["native_auth_codex_protocol_invalid", "Codex gave an answer CrazyAgent couldn't use. Update Codex, then try again."],
+    ["native_auth_codex_io_failed", "CrazyAgent lost contact with Codex. Try again."],
+    ["native_auth_bootstrap_timeout", "CrazyAgent's account helper didn't start in time. Try again."],
+    ["native_auth_claude_native_exit", "Claude Code stopped before it finished. Try again."],
+    ["native_auth_claude_status_invalid", "Claude Code's account check didn't give an answer CrazyAgent could use. Update Claude Code, then try again."],
+    ["native_auth_claude_output_invalid", "Claude Code didn't finish because of a problem CrazyAgent couldn't handle. Try again, and update Claude Code if it keeps happening."],
+    ["native_auth_claude_profile_mismatch", "Claude Code's settings folder for this account didn't match the one CrazyAgent set up. Try again, and update Claude Code if it keeps happening."],
+    ["native_auth_claude_launch_failed", "Claude Code couldn't start. Check that Claude Code is installed and opens on this Mac, then try again."],
+    ["native_auth_claude_keychain_unavailable", "CrazyAgent couldn't set up this account's own keychain for Claude Code. Try again. If it keeps failing, delete the account, then add it again."],
+    ["native_auth_claude_destination_unsupported", "Claude Code gave a sign-in page address CrazyAgent doesn't recognize. Update CrazyAgent and Claude Code, then try again."],
+    ["native_auth_claude_credential_expiring", "Claude Code couldn't renew this account's sign-in before it expires. Try again."],
+    ["native_profile_identity_changed", "This account's sign-in folder no longer matches what CrazyAgent recorded, so CrazyAgent stopped. Delete the account, then add it again."],
+  ];
+  for (const [code, text] of sentences) assert.deepEqual(signInFailure(code, "claude"), { text, hint: "retry" }, code);
+  assert.deepEqual(signInFailure("native_auth_host_executable_unsafe", "chatgpt"),
+    { text: "Codex on this Mac isn't safe to start, so CrazyAgent didn't start it. Reinstall Codex, then try again.", hint: "retry" });
+  assert.deepEqual(signInFailure("native_auth_host_executable_changed", "claude"),
+    { text: "Claude Code changed on this Mac after CrazyAgent checked it, perhaps from an update. Try again.", hint: "retry" });
+  for (const code of ["__proto__", "constructor", "toString", "valueOf"]) {
+    assert.deepEqual(signInFailure(code, "claude"), { text: client.withCode("Sign-in didn't finish. Try again.", code), hint: "retry" }, code);
+  }
 });
 
 test("every refusal the engine can give an owner change reads as a sentence or names its code", () => {
