@@ -1,20 +1,30 @@
 use super::*;
+#[cfg(target_os = "macos")]
 use crate::harnesses::interactive::InteractiveCommand;
+#[cfg(target_os = "macos")]
 use crate::terminal::FOLDER;
+#[cfg(target_os = "macos")]
 use crate::terminal::tmux::{SOCKET, Tmux, installed};
+#[cfg(target_os = "macos")]
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+#[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
 
+#[cfg(target_os = "macos")]
 const TURN_OPEN: &str = r#"{"type":"user","message":{"content":"Fix the build"}}"#;
+#[cfg(target_os = "macos")]
 const TURN_DONE: &str = r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Done"}],"stop_reason":"end_turn"}}"#;
+#[cfg(target_os = "macos")]
 const ESCAPE_HARNESS: &str = r#"stty raw -echo; while :; do c=$(dd bs=1 count=1 2>/dev/null); if [ "$c" = "$(printf '\033')" ]; then printf '%s\n' '{"type":"user","message":{"content":[{"type":"text","text":"[Request interrupted by user]"}]}}' >> "$1"; fi; done"#;
 
+#[cfg(target_os = "macos")]
 struct Fixture {
     root: tempfile::TempDir,
     tmux: PathBuf,
 }
 
+#[cfg(target_os = "macos")]
 impl Fixture {
     fn new() -> Self {
         let root = tempfile::Builder::new()
@@ -71,6 +81,7 @@ impl Fixture {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Drop for Fixture {
     fn drop(&mut self) {
         let _ = crate::spawn_gate::status(
@@ -86,10 +97,12 @@ impl Drop for Fixture {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn lines(file: &Path) -> usize {
     std::fs::read_to_string(file).unwrap().lines().count()
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn an_idle_pane_is_adopted_as_it_is() {
     let fixture = Fixture::new();
@@ -133,6 +146,7 @@ fn an_idle_pane_is_adopted_as_it_is() {
     );
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn a_turn_still_running_is_stopped_before_the_pane_is_adopted() {
     let fixture = Fixture::new();
@@ -159,6 +173,7 @@ fn a_turn_still_running_is_stopped_before_the_pane_is_adopted() {
     drop(session);
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn a_turn_that_does_not_stop_leaves_no_pane_behind() {
     let fixture = Fixture::new();
@@ -179,6 +194,7 @@ fn a_turn_that_does_not_stop_leaves_no_pane_behind() {
     assert!(host.alive().unwrap().is_empty());
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn a_pane_that_ended_cannot_be_adopted() {
     let fixture = Fixture::new();
@@ -285,6 +301,7 @@ fn pane_records_round_trip_and_refuse_unsafe_values() {
     );
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn an_adopted_pane_removes_its_key_file_when_it_stops_but_not_when_left() {
     let fixture = Fixture::new();
@@ -316,6 +333,7 @@ fn an_adopted_pane_removes_its_key_file_when_it_stops_but_not_when_left() {
     assert!(host.alive().unwrap().is_empty());
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn an_adopted_pane_keeps_only_the_run_time_left_since_its_launch() {
     let fixture = Fixture::new();
@@ -346,6 +364,7 @@ fn an_adopted_pane_keeps_only_the_run_time_left_since_its_launch() {
     );
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn an_adopted_pane_counts_the_events_it_already_had_against_its_budget() {
     let fixture = Fixture::new();

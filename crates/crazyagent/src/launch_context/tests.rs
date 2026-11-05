@@ -864,7 +864,12 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
         request(),
         Some(context()),
     );
-    assert_eq!(pane.err(), Some(named));
+    let refused_pane = match std::env::consts::OS {
+        "macos" => named,
+        "linux" => LaunchError("launch_unavailable_on_linux".into(), None),
+        _ => LaunchError("launch_unavailable".into(), None),
+    };
+    assert_eq!(pane.err(), Some(refused_pane));
     assert!(
         !home.join("config.toml").exists(),
         "a refused launch leaves no generated file holding the secret"
@@ -873,6 +878,7 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
 
 /// A Codex agent pane started with an MCP secret in its project context and left running,
 /// as an engine leaves it when it quits, with what a later engine needs to adopt it.
+#[cfg(target_os = "macos")]
 struct LeftPane {
     _directory: tempfile::TempDir,
     config: PathBuf,
@@ -883,6 +889,7 @@ struct LeftPane {
     socket: PathBuf,
 }
 
+#[cfg(target_os = "macos")]
 impl LeftPane {
     /// Starts the pane as team agent `team` in a fresh private home under a `prefix`
     /// folder, then leaves it. Returns the left pane.
@@ -997,12 +1004,14 @@ impl LeftPane {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Drop for LeftPane {
     fn drop(&mut self) {
         self.kill_server();
     }
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn an_adopted_pane_removes_the_files_holding_its_mcp_secrets_when_it_stops() {
     let pane = LeftPane::start("ca-adopt-ctx-", 7);
@@ -1014,6 +1023,7 @@ fn an_adopted_pane_removes_the_files_holding_its_mcp_secrets_when_it_stops() {
     );
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn a_left_pane_that_cannot_be_taken_over_has_its_mcp_secret_files_removed() {
     let pane = LeftPane::start("ca-adopt-gone-", 8);
