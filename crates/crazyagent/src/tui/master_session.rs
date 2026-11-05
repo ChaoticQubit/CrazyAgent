@@ -30,9 +30,18 @@ const DIMENSIONS: [&str; 7] = [
     "spend_microunits",
 ];
 
-/// The owner's line when a New session waiting for the current settings is dropped unsent,
-/// because the master view changed or reconnected while they were read.
-const RENEWAL_DROPPED: &str = "New session not sent: the master view changed; ask again";
+/// The lead of the owner's line when a New session waiting for the current settings ends
+/// unsent; the reason follows it (NT2-L1).
+pub(super) const RENEWAL_NOT_STARTED: &str = "New session not started.";
+
+/// Why a New session waiting for the current settings ended unsent when the owner left its
+/// project while they were read.
+const RENEWAL_LEFT: &str = "You left the project before the settings were read.";
+
+/// Why a New session waiting for the current settings ended unsent when the engine
+/// connection changed while they were read.
+const RENEWAL_DROPPED: &str =
+    "The connection to the engine changed before the settings were read. Press n to try again.";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct Context {
@@ -149,6 +158,7 @@ pub(super) struct State {
     catalog: Option<Catalog>,
     catalog_attempted: bool,
     renewal: Option<bool>,
+    renewal_problem: Option<String>,
     view: Option<View>,
     flight: Option<Context>,
     next_read: Instant,
@@ -171,6 +181,7 @@ impl Default for State {
             catalog: None,
             catalog_attempted: false,
             renewal: None,
+            renewal_problem: None,
             view: None,
             flight: None,
             next_read: Instant::now(),
@@ -219,7 +230,14 @@ impl State {
                 .ok_or("Master view generation exhausted")?;
             self.view = None;
             self.flight = None;
-            self.renewal = None;
+            self.drop_renewal(
+                if self.project == project {
+                    RENEWAL_DROPPED
+                } else {
+                    RENEWAL_LEFT
+                }
+                .into(),
+            );
             self.next_read = Instant::now();
             if self.identity != identity {
                 self.catalog = None;
@@ -234,9 +252,7 @@ impl State {
 
     pub fn access(&mut self) {
         self.home_confirmation = None;
-        if self.renewal.take().is_some() {
-            self.notice = RENEWAL_DROPPED.into();
-        }
+        self.drop_renewal(RENEWAL_DROPPED.into());
         self.catalog = None;
         self.catalog_attempted = false;
         self.view = None;
@@ -754,6 +770,22 @@ impl State {
         self.enqueue(action, self.generation)
     }
 
+    /// Ends a New session waiting for the current settings without sending it, and keeps
+    /// why for the notice and for the page to say once (NT2-L1). Input: the reason, a
+    /// sentence. Output: none; nothing changes when no New session waits.
+    fn drop_renewal(&mut self, reason: String) {
+        if self.renewal.take().is_some() {
+            self.notice = format!("{RENEWAL_NOT_STARTED} {reason}");
+            self.renewal_problem = Some(reason);
+        }
+    }
+
+    /// Takes why the last waiting New session ended unsent, once, so the page says it.
+    /// Input: none. Output: the reason, or None when there is nothing new to say.
+    pub fn take_renewal_problem(&mut self) -> Option<String> {
+        self.renewal_problem.take()
+    }
+
     /// Makes a parked session live again, parking the live one, in one engine step.
     /// Inputs: a session from the Sessions list and whether a running reply may be stopped,
     /// set only after the owner confirms. Output: the intent is queued, or why it cannot be.
@@ -950,9 +982,7 @@ impl State {
         }
         self.flight = None;
         if !self.matches(&context) {
-            if self.renewal.take().is_some() {
-                self.notice = RENEWAL_DROPPED.into();
-            }
+            self.drop_renewal(RENEWAL_DROPPED.into());
             return;
         }
         match result {
@@ -974,9 +1004,11 @@ impl State {
             }
             Err(problem) => {
                 self.catalog = None;
-                self.renewal = None;
                 self.notice =
                     format!("Metadata unavailable: {problem}; inspect Settings; Ctrl-R refreshes");
+                self.drop_renewal(format!(
+                    "The current settings could not be read ({problem}). Press n to try again."
+                ));
             }
         }
         self.assert_consistent();
