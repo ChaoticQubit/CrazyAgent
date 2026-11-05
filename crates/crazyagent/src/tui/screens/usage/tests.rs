@@ -363,6 +363,49 @@ fn a_failed_read_with_no_window_shows_each_window_as_not_read_after_its_cause() 
     );
 }
 
+/// F1 / ND16F-M1: an API-key account has no 5-hour or weekly window by design, so its
+/// windows keep the provider-omitted wording under its note, never a failed read.
+#[test]
+fn an_api_key_account_s_windows_keep_the_provider_omitted_wording() {
+    let ctx = ctx(100, 40);
+    let keyed = AccountLimits {
+        plan: None,
+        five_hour: None,
+        weekly: None,
+        polled_five_hour: None,
+        polled_weekly: None,
+        source: None,
+        observed_ms: None,
+        ..limits(Some("native_profile_codex_api_key"))
+    };
+    let lines = text(&summary(
+        &UsageReport {
+            limits: vec![keyed],
+            ..report()
+        },
+        UsageRange::Week,
+        &names(),
+        NOW,
+        0,
+        96,
+        &ctx,
+    ));
+    for wanted in [
+        "    An API-key account has no 5-hour or weekly window.",
+        "    5-hour  Not reported",
+        "    Weekly  Not reported",
+    ] {
+        assert!(
+            lines.iter().any(|line| line == wanted),
+            "{wanted:?} in {lines:#?}"
+        );
+    }
+    assert!(
+        !lines.iter().any(|line| line.contains("Not read.")),
+        "{lines:#?}"
+    );
+}
+
 fn asked_since(ctx: &mut Ctx) -> Option<i64> {
     match ctx.next_request() {
         Some(Request::Settings(job)) => match *job {
