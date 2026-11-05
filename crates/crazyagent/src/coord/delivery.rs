@@ -267,7 +267,7 @@ fn deliver_to(
     let Some(host) = reach.host else {
         return Ok(false);
     };
-    let (text, carried) = lines(db, ready, PROMPT_BYTES_MAX)?;
+    let (text, carried) = batch(db, agent, ready)?;
     match typing::type_into(db, host, reach.owner, agent, &text, now)? {
         Typing::Typed => {
             mark_all(db, &carried, Receipt::Typed, now)?;
@@ -295,7 +295,7 @@ fn bridge(
     if alone && status != "working" {
         return Ok(Some(true));
     }
-    let (text, carried) = lines(db, messages, PROMPT_BYTES_MAX)?;
+    let (text, carried) = batch(db, agent, messages)?;
     let home = crate::team::runtime::agent_home(reach.state, agent);
     if codex::deliver(&home, &text, !alone) == Bridged::Delivered {
         mark_all(db, &carried, Receipt::Delivered, now)?;
@@ -381,14 +381,48 @@ fn notices_alone(
     if messages.len() >= PENDING_MAX {
         return Ok(false);
     }
+    Ok(first_other(db, agent, last.id)?.is_none())
+}
+
+/// Finds an agent's oldest Sent message up to an id that is not an owner notice
+/// (`NOTICES_KEY` engine note; a note with no key is never one). Takes the database, the
+/// agent and the last id. Returns its id, none when every such message is a notice.
+fn first_other(
+    db: &Connection,
+    agent: AgentId,
+    last: MessageId,
+) -> Result<Option<MessageId>, EngineError> {
     db.query_row(
-        "SELECT NOT EXISTS(SELECT 1 FROM coord_messages WHERE to_kind='agent' AND to_agent=?1
+        "SELECT MIN(id) FROM coord_messages WHERE to_kind='agent' AND to_agent=?1
          AND receipt='sent' AND id<=?2 AND NOT (from_kind='engine' AND kind='note'
-         AND ifnull(substr(idem_key,1,length(?3))=?3,0)))",
-        params![agent, last.id, NOTICES_KEY],
+         AND ifnull(substr(idem_key,1,length(?3))=?3,0))",
+        params![agent, last, NOTICES_KEY],
         |row| row.get(0),
     )
     .map_err(state)
+}
+
+/// Writes one turn of a sub-agent's ready messages as [`lines`] does within
+/// `PROMPT_BYTES_MAX`, but never the owner's notices alone ahead of another message the
+/// byte cut left out (OWAKE3-L1): the turn then starts at the first other message, and the
+/// notices it skips stay Sent for a later turn. Takes the database, the agent and the ready
+/// messages, oldest first. Returns the text and the ids it carries.
+fn batch(
+    db: &Connection,
+    agent: AgentId,
+    ready: &[Message],
+) -> Result<(String, Vec<MessageId>), EngineError> {
+    let (text, carried) = lines(db, ready, PROMPT_BYTES_MAX)?;
+    if carried.len() == ready.len() {
+        return Ok((text, carried));
+    }
+    let Some(other) = first_other(db, agent, ready[ready.len() - 1].id)? else {
+        return Ok((text, carried));
+    };
+    match ready.iter().position(|message| message.id == other) {
+        Some(start) if !carried.contains(&other) => lines(db, &ready[start..], PROMPT_BYTES_MAX),
+        _ => Ok((text, carried)),
+    }
 }
 
 /// Takes the messages waiting for an agent that fit in `NEXT_TURN_BYTES_MAX`, as the lines
