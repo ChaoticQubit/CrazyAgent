@@ -9,6 +9,7 @@ use crate::engine::owner::transport::native_auth_channel::{
 };
 use crate::engine::owner::{NativeAuthAction, NativeAuthMethod};
 use crate::engine::{EngineError, io_error};
+use crate::storage::CUSTODIAN_CODES;
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
 use rustix::process::Pid;
 use std::os::fd::OwnedFd;
@@ -255,17 +256,20 @@ impl Driver<'_> {
     }
 
     /// Sends what the driver saw of Codex to the engine log when a sign-in fails or runs out
-    /// of time. The log is best effort: a failed send changes nothing here, and the driver's
-    /// next exchange meets the closed channel. Input: the driver. Output: none.
-    async fn log(&mut self) {
+    /// of time. The log is best effort, except that a failed send naming a custodian code,
+    /// such as a profile guard the send refused, is the driver's error, so the custodian
+    /// reports the code that sealed its channel. Input: the driver. Output: done, or that
+    /// error.
+    async fn log(&mut self) -> Result<(), EngineError> {
         let Some(log) = self.take_log() else {
-            return;
+            return Ok(());
         };
-        if let Ok(NativeAuthCustodyControl::Cancel) =
-            self.session.log_codex(self.channel, log).await
-        {
-            self.cancel_requested = true;
+        match self.session.log_codex(self.channel, log).await {
+            Ok(NativeAuthCustodyControl::Cancel) => self.cancel_requested = true,
+            Ok(NativeAuthCustodyControl::Continue) => {}
+            Err(error) => custodian_cause(error)?,
         }
+        Ok(())
     }
 
     async fn read_account(&mut self) -> Result<(), EngineError> {
@@ -319,7 +323,7 @@ impl Driver<'_> {
             }
             AuthControl::LoginCompleted { success, .. } => {
                 if !success {
-                    self.log().await;
+                    self.log().await?;
                 }
                 self.completion = Some(event.clone());
                 if self.login_id.is_some() {
@@ -406,7 +410,7 @@ impl Driver<'_> {
                 && !self.cancel_requested
                 && Instant::now() + EXPIRY_MARGIN >= self.deadline
             {
-                self.log().await;
+                self.log().await?;
                 self.cancel_requested = true;
             }
             self.cancel().await?;
@@ -427,13 +431,26 @@ impl Driver<'_> {
     }
 }
 
+/// Keeps a failed engine log write as the custodian's cause when it names one of
+/// `CUSTODIAN_CODES`, such as a profile guard the write refused, which sealed the channel.
+/// Any other failure is dropped, since the log is best effort. Input: the write's error.
+/// Output: done, or that error.
+fn custodian_cause(error: EngineError) -> Result<(), EngineError> {
+    if CUSTODIAN_CODES.contains(&error.0.as_str()) {
+        return Err(error);
+    }
+    Ok(())
+}
+
 /// Settles a sign-in whose started Codex child ended without an app-server outcome, after
 /// the child is reaped: Cancelled when the owner cancelled, else Failed with the Codex
 /// failure code, so the custodian retires instead of leaving custody uncertain. An error
 /// from the engine or the channel is returned as it is, since custody is then in doubt, and a
 /// channel the driver's error already closed, such as a refused profile guard, takes no
 /// report, so that error is returned as the custodian's cause. The engine log goes first and
-/// is best effort: when it fails, the driver's error is returned as the cause.
+/// is best effort: when it fails, the driver's error is returned as the cause, unless the
+/// failure names a custodian code, such as a profile guard the log write refused, which is
+/// then the cause.
 /// Inputs: the session, the channel, the driver's error and the log. Output: done, or the
 /// error.
 pub(in crate::engine) async fn observe_failure(
@@ -460,8 +477,9 @@ pub(in crate::engine) async fn observe_failure(
         _ => return Err(error),
     };
     if let (Some(_), Some(log)) = (reason, log)
-        && session.log_codex(channel, log).await.is_err()
+        && let Err(refused) = session.log_codex(channel, log).await
     {
+        custodian_cause(refused)?;
         return Err(error);
     }
     let observation = reason.map_or(CodexAuthObservation::HostCancelled, |reason| {
