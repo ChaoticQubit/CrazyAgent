@@ -8,7 +8,8 @@ use crate::coord::settings::{
     HarnessKind, Nudges, Overlaps, QuestionsTo, ROLE_SKILLS_MAX, SkillRole, SubagentMode,
 };
 use crate::engine::owner::OwnerResult;
-use crate::project_setup::{SetupQuery, SetupView};
+use crate::harnesses::HarnessEntry;
+use crate::project_setup::{SetupAction, SetupQuery, SetupView};
 use crate::protocol::ProjectId;
 use crate::team::events::{EventKind, HOURLY_CAP_MAX, RuleTarget, WakeRule};
 use crate::team::{
@@ -96,6 +97,13 @@ pub(in crate::tui) enum TeamReply {
     Ignored,
     Handled,
     Change(TeamAction),
+    Save(SetupAction),
+}
+
+/// The open master harness picker.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::tui) struct MasterPick {
+    pub cursor: Option<usize>,
 }
 
 /// A task the owner is writing for a sub-agent.
@@ -213,6 +221,7 @@ pub(in crate::tui) struct TeamView {
     pub branch_edit: Option<BranchEdit>,
     pub wake: Option<WakeEdit>,
     pub coord: Option<CoordEdit>,
+    pub master_pick: Option<MasterPick>,
     pub alerts: bool,
     pub notice: Option<Notice>,
     pub now_ms: i64,
@@ -239,6 +248,7 @@ impl TeamView {
             branch_edit: None,
             wake: None,
             coord: None,
+            master_pick: None,
             alerts: false,
             notice: None,
             now_ms: 0,
@@ -269,6 +279,14 @@ impl TeamView {
     pub fn forget_reads(&mut self) {
         self.waiting = false;
     }
+
+    /// Red stub. Takes the view. Returns false.
+    pub fn wants_catalog(&mut self) -> bool {
+        false
+    }
+
+    /// Red stub. Takes the catalog read. Returns nothing.
+    pub fn take_catalog(&mut self, _result: &Result<Vec<HarnessEntry>, String>) {}
 
     /// Applies one team read or team change result for this project.
     /// Takes the query that was sent and the engine's view or plain problem code.

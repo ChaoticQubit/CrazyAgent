@@ -1168,3 +1168,221 @@ fn a_saved_shift_enter_choice_switches_the_keyboard_protocol_at_once() {
     );
     engine.stop();
 }
+
+const SWITCH_ID: &str = "e2e-master-switch";
+const SWITCH_PROJECT: &str = "Master switch e2e";
+const APPLY_IDLE: &str = "Apply a master harness change  When the master is idle";
+const APPLY_NEXT: &str = "Apply a master harness change  At the next start";
+
+/// Starts an engine with one fresh project and opens that project's Team settings in the
+/// TUI. Input: a scratch prefix. Output: the engine, the TUI, the project id and the
+/// projects home, which lives as long as the test needs it.
+fn switch_settings(prefix: &str) -> (Engine, Pty, ProjectId, tempfile::TempDir) {
+    let engine = Engine::start(prefix);
+    let tmux = installed(engine.path()).expect(TMUX);
+    let disk = scratch("ca-e2e-home-");
+    let home = disk.path().join("Projects");
+    std::fs::create_dir(&home).unwrap();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut owner = Owner::attach(&engine).await;
+            assert_eq!(owner.save_profile(profile()).await, OwnerResult::Applied);
+            assert_eq!(owner.set_home(&home).await, OwnerResult::Applied);
+            assert_eq!(
+                owner.create_project(SWITCH_ID, SWITCH_PROJECT).await,
+                OwnerResult::Applied
+            );
+            owner.controller.detach();
+        });
+    let pty = Pty::launch(tmux, &engine.socket());
+    open_team(&pty, SWITCH_PROJECT);
+    pty.keys(&["s"]);
+    pty.until("s on the team tree opens the Team settings", |screen| {
+        screen.contains("Team settings") && screen.contains("Master harness  ")
+    });
+    (engine, pty, ProjectId::new(SWITCH_ID).unwrap(), disk)
+}
+
+/// Reads what the engine keeps for the master harness switch.
+/// Inputs: the engine and the project. Output: the Apply a master harness change mode and
+/// the master harness id saved in the project setup.
+async fn switch_state(
+    engine: &Engine,
+    project: &ProjectId,
+) -> (crazyagent::team::SwitchApply, String) {
+    let mut owner = Owner::attach(engine).await;
+    let status = owner
+        .controller
+        .read(OwnerRead::TeamStatus {
+            project_id: project.clone(),
+        })
+        .await
+        .unwrap();
+    let OwnerData::TeamStatus { status } = status.data else {
+        panic!("the engine answers with the team status")
+    };
+    let setup = owner
+        .controller
+        .read(OwnerRead::ProjectSetup {
+            project_id: project.clone(),
+        })
+        .await
+        .unwrap();
+    owner.controller.detach();
+    let OwnerData::ProjectSetup {
+        setup: Some(setup), ..
+    } = setup.data
+    else {
+        panic!("the engine answers with the saved project setup")
+    };
+    (status.apply_harness_switch, setup.team.master)
+}
+
+/// The master harness picker as the screen shows it: each offered harness name in order
+/// and the picked row. Input: the screen. Output: the names and the picked index, none
+/// when no row is picked.
+fn picker_rows(screen: &str) -> (Vec<String>, Option<usize>) {
+    let lines: Vec<&str> = screen.lines().collect();
+    let Some(top) = lines
+        .iter()
+        .position(|line| line.contains("Harness for the master"))
+    else {
+        return (Vec::new(), None);
+    };
+    let mut names = Vec::new();
+    let mut picked = None;
+    for line in &lines[top + 1..] {
+        let inner = match (line.find('│'), line.rfind('│')) {
+            (Some(left), Some(right)) if left < right => &line[left + '│'.len_utf8()..right],
+            _ => line,
+        }
+        .trim();
+        if inner.is_empty() || inner.starts_with("Enter saves it.") {
+            break;
+        }
+        let (chosen, name) = match inner.strip_prefix("> ") {
+            Some(name) => (true, name),
+            None => (false, inner),
+        };
+        if chosen {
+            picked = Some(names.len());
+        }
+        names.push(name.trim_end_matches("  now").trim().to_owned());
+    }
+    (names, picked)
+}
+
+/// Opens the master harness picker with H and saves the harness next to the saved one.
+/// Input: the TUI on the Team settings. Output: the name of the harness it saved; panics
+/// as a missing prerequisite when fewer than two harnesses can run the master here.
+fn pick_other_master(pty: &Pty) -> String {
+    pty.keys(&["H"]);
+    let screen = pty.until(
+        "H opens the master harness picker with its harnesses",
+        |screen| {
+            screen.contains("Enter saves it.") || screen.contains("No harness can run the master")
+        },
+    );
+    let (names, picked) = picker_rows(&screen);
+    assert!(
+        names.len() >= 2,
+        "prerequisite: switching the master needs two harnesses that can run it; the picker offers {names:?}:\n{screen}"
+    );
+    let picked =
+        picked.unwrap_or_else(|| panic!("the picker starts on the saved harness:\n{screen}"));
+    let (key, target) = if picked + 1 < names.len() {
+        ("Down", picked + 1)
+    } else {
+        ("Up", picked - 1)
+    };
+    pty.keys(&[key]);
+    pty.until("the picker moves to the other harness", |screen| {
+        picker_rows(screen).1 == Some(target)
+    });
+    pty.keys(&["Enter"]);
+    names[target].clone()
+}
+
+/// When the master is idle (the default, OP-28): the TUI saves a master harness picked in
+/// Team settings through the project setup and says the running master switches once it is
+/// idle.
+#[test]
+fn the_tui_saves_a_master_harness_that_reaches_the_master_once_it_is_idle() {
+    let (mut engine, pty, project, _disk) = switch_settings("ca-e2e-idle-");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (mode, before) = runtime.block_on(switch_state(&engine, &project));
+    assert_eq!(mode, crazyagent::team::SwitchApply::WhenIdle);
+    pty.until("the summary names the default", |screen| {
+        screen.contains(APPLY_IDLE)
+    });
+
+    let name = pick_other_master(&pty);
+    let said = format!("The master switches to {name} once it is idle.");
+    pty.until("the save says when the running master switches", |screen| {
+        screen.contains(&said) && !screen.contains("Harness for the master")
+    });
+    let saved = format!("Master harness  {name}");
+    pty.until("the summary names the saved harness", |screen| {
+        screen.contains(&saved) && screen.contains(APPLY_IDLE)
+    });
+    let (mode, after) = runtime.block_on(switch_state(&engine, &project));
+    assert_eq!(mode, crazyagent::team::SwitchApply::WhenIdle);
+    assert_ne!(after, before, "the project setup keeps the picked master");
+    drop(pty);
+    engine.stop();
+}
+
+/// At the next start (OP-28): A saves the choice in the engine, a master harness picked
+/// after it says it waits for the master's next start, and A again goes back to When the
+/// master is idle.
+#[test]
+fn the_tui_saves_a_master_harness_that_waits_for_the_masters_next_start() {
+    let (mut engine, pty, project, _disk) = switch_settings("ca-e2e-next-");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    pty.until("the summary names the default", |screen| {
+        screen.contains(APPLY_IDLE)
+    });
+    pty.keys(&["A"]);
+    pty.until("A picks At the next start", |screen| {
+        screen.contains(APPLY_NEXT)
+            && screen
+                .contains("A saved master harness change now waits for the master's next start.")
+    });
+    let (mode, before) = runtime.block_on(switch_state(&engine, &project));
+    assert_eq!(mode, crazyagent::team::SwitchApply::NextStart);
+
+    let name = pick_other_master(&pty);
+    let said = format!("The master switches to {name} at its next start.");
+    pty.until(
+        "the save says the change waits for the next start",
+        |screen| screen.contains(&said) && !screen.contains("Harness for the master"),
+    );
+    let saved = format!("Master harness  {name}");
+    pty.until("the summary names the saved harness", |screen| {
+        screen.contains(&saved) && screen.contains(APPLY_NEXT)
+    });
+    let (mode, after) = runtime.block_on(switch_state(&engine, &project));
+    assert_eq!(mode, crazyagent::team::SwitchApply::NextStart);
+    assert_ne!(after, before, "the project setup keeps the picked master");
+
+    pty.keys(&["A"]);
+    pty.until("A goes back to When the master is idle", |screen| {
+        screen.contains(APPLY_IDLE)
+            && screen.contains(
+                "A saved master harness change now reaches the running master once it is idle.",
+            )
+    });
+    let (mode, _) = runtime.block_on(switch_state(&engine, &project));
+    assert_eq!(mode, crazyagent::team::SwitchApply::WhenIdle);
+    drop(pty);
+    engine.stop();
+}

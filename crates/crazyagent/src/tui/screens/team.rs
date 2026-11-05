@@ -237,6 +237,7 @@ impl Team {
                     generation,
                 }));
             }
+            TeamReply::Save(_) => {}
             TeamReply::Ignored if *key == Key::Esc => self.settings = None,
             TeamReply::Ignored | TeamReply::Handled => {}
         }
