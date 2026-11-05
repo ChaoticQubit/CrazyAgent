@@ -287,6 +287,7 @@ fn saves_at_once_each_read_back_the_settings_they_stored() {
     assert!(options.contains(&instruction_settings(&root, &project, None).unwrap()));
 }
 
+#[cfg(unix)]
 fn team_agent(root: &Path, project: &str, role: &str, harness: &str) -> i64 {
     let connection = rusqlite::Connection::open(root.join("engine.db")).unwrap();
     crate::team::initialize(&connection).unwrap();
@@ -643,6 +644,7 @@ fn process_codes_cover_every_refusal_of_the_store_and_protocol() {
     assert_eq!(sorted, PROCESS_CODES);
 }
 
+#[cfg(unix)]
 #[test]
 fn process_adoption_round_trip() {
     let (_directory, root) = root();

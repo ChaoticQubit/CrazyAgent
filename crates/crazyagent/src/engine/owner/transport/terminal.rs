@@ -229,6 +229,7 @@ impl Engine {
     /// program stays the one found and opened anew when it changes, such as when setup
     /// installs its own copy over an unsupported one or an upgrade removes the old one.
     /// Takes the engine root. Returns the host, or `terminal_unavailable`.
+    #[cfg(unix)]
     pub(crate) fn terminal(&self, root: &Path) -> Result<Arc<dyn Host>, EngineError> {
         let mut slot = self
             .terminal
@@ -242,6 +243,23 @@ impl Engine {
         }
         let host = crate::terminal::tmux_host(root, found.clone());
         *slot = Some((found, host.clone()));
+        Ok(host)
+    }
+
+    /// Gives this platform's terminal host where no tmux runs: the ConPTY host on Windows,
+    /// made on first use and kept, with no tmux program behind it. Takes the engine root.
+    /// Returns the host, or `terminal_unavailable` when its slot cannot be read.
+    #[cfg(not(unix))]
+    pub(crate) fn terminal(&self, root: &Path) -> Result<Arc<dyn Host>, EngineError> {
+        let mut slot = self
+            .terminal
+            .lock()
+            .map_err(|_| failure("terminal_unavailable"))?;
+        if let Some((_, host)) = slot.as_ref() {
+            return Ok(host.clone());
+        }
+        let (_, host) = crate::terminal::platform(root);
+        *slot = Some((None, host.clone()));
         Ok(host)
     }
 }
