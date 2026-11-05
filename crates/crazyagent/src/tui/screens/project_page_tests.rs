@@ -20,7 +20,7 @@ use crate::tui::client::process::ProcessQuery;
 use crate::tui::client::settings::SettingsJob;
 use crate::tui::client::{Connection, OwnerEvent};
 use crate::tui::ctx::{Ctx, Load};
-use crate::tui::frame::Tone;
+use crate::tui::frame::{Message, Tone};
 use crate::tui::glyphs::UNICODE;
 use crate::tui::keys::Key;
 use crate::tui::master_session::{Event as MasterEvent, Job as MasterJob};
@@ -1420,7 +1420,7 @@ async fn n_whose_settings_read_fails_says_the_new_session_was_not_started() {
 /// A second n while the first New session still starts says so in plain words on the
 /// page, not the client's internal intent line, and only one new session is made (P2,
 /// trial 4 run 6 N-T2): the first n is still reading the current settings when the
-/// second arrives.
+/// second arrives. Once the new session lands, the wait is over and the error is gone.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_second_n_while_the_first_new_session_starts_says_it_is_already_starting() {
     let mut engine = Engine::start().await;
@@ -1455,14 +1455,16 @@ async fn a_second_n_while_the_first_new_session_starts_says_it_is_already_starti
     .await;
     let (fresh, _) = latest_master(&mut engine, &notes).await;
     assert_ne!(fresh.unwrap().session_id, first.session_id);
-    shell.key(Key::Char('l'));
+    assert_eq!(master_sessions(&engine, &notes), 2, "one new session, not two");
+    assert_eq!(shell.ctx.message(), None, "the wait ended, so its error is gone");
     let shown = render(&mut shell, 100, 40);
-    assert!(shown.contains("Sessions  2"), "one new session, not two:\n{shown}");
+    assert!(!shown.contains("A new session is already starting."), "{shown}");
 }
 
 /// A second n once the first New session has its settings and waits on the engine says
 /// the same plain words (P2): the settings read is answered by hand, so the New session
-/// is queued for the engine and not yet made when the second n arrives.
+/// is queued for the engine and not yet made when the second n arrives. An error said
+/// after it stays when the new session lands.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_second_n_while_the_engine_makes_the_first_new_session_says_it_is_already_starting() {
     let mut engine = Engine::start().await;
@@ -1504,15 +1506,16 @@ async fn a_second_n_while_the_engine_makes_the_first_new_session_says_it_is_alre
         .expect("the second n is answered on the page");
     assert_eq!(message.lead, "The session did not switch.");
     assert_eq!(message.rest, "A new session is already starting.");
+    let other = Message::error("The master's turn did not stop.", "It had already ended.");
+    shell.ctx.say(other.clone());
     until(&mut shell, &mut connection, |shown| {
         shown.contains("No messages yet.") && !shown.contains("Plan the first slice")
     })
     .await;
     let (fresh, _) = latest_master(&mut engine, &notes).await;
     assert_ne!(fresh.unwrap().session_id, first.session_id);
-    shell.key(Key::Char('l'));
-    let shown = render(&mut shell, 100, 40);
-    assert!(shown.contains("Sessions  2"), "one new session, not two:\n{shown}");
+    assert_eq!(master_sessions(&engine, &notes), 2, "one new session, not two");
+    assert_eq!(shell.ctx.message(), Some(&other), "an error said after the wait stays");
 }
 
 /// A new session on a project whose master runs live turns the live switch on once the
@@ -2291,6 +2294,18 @@ async fn team_settings(shell: &mut Shell, connection: &mut Connection) {
     assert_eq!(sent, ["team"]);
     let shown = render(shell, 200, 40);
     assert!(shown.contains("Team settings"), "{shown}");
+}
+
+fn master_sessions(engine: &Engine, project: &ProjectId) -> i64 {
+    let connection = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    connection.busy_timeout(Duration::from_secs(5)).unwrap();
+    connection
+        .query_row(
+            "SELECT COUNT(*) FROM master_sessions WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap()
 }
 
 fn seed_question(engine: &Engine, project: &ProjectId, text: &str) {
