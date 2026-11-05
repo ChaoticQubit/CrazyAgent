@@ -53,6 +53,7 @@ const MAPPING_NOT_STARTED: &str = "Mapping agent could not start";
 /// 3000-token answer. Claude Code 2.1.309 continues an answer cut here at most three
 /// times, so a runaway try writes at most 32000 tokens and ends by itself in about 200 s,
 /// inside [`MAPPING_TRY_TIME`].
+#[cfg(unix)]
 const MAPPING_OUTPUT_TOKENS: u32 = 8_000;
 /// How long one mapping try may run by default before a fresh try starts.
 const MAPPING_TRY_TIME: Duration = Duration::from_secs(240);
@@ -689,6 +690,7 @@ fn mapping_step(
             prompt: &prompt,
             account: &account,
             wall_time: work.limits.mapping_try_time.min(left),
+            #[cfg(unix)]
             output_tokens: Some(MAPPING_OUTPUT_TOKENS),
         };
         let cause = match work.runner.run_read_only(&run, beat) {

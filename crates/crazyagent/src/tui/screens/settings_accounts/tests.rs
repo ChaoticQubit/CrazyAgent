@@ -1340,6 +1340,7 @@ auth = { method = "native_managed", profile_ref = "profile-chatgpt" }
 }
 
 const UNCONFIRMED: &str = "This sign-in didn't confirm how it ended, so changes to its account and new sign-ins wait. Wait a few minutes, then try again. If this keeps happening, restart the CrazyAgent engine.";
+#[cfg(unix)]
 const STILL_OPEN: &str = "A sign-in for this account is still open or didn't confirm how it ended. Wait a few minutes, then try again. If this keeps happening, restart the CrazyAgent engine.";
 
 /// A failed sign-in view for one recorded code, with or without a device code on screen.
