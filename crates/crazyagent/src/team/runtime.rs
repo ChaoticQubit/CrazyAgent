@@ -3025,18 +3025,14 @@ impl TeamRuntime {
         {
             return Ok(());
         }
-        let waits = worker.kept_session && self.lead_waits(id)?;
         let quiet = super::master::quiet(
             &self.connection,
             self.agents.as_deref().map(Agents::typing),
             project,
             now_ms(),
         );
-        let worker = &self.workers[&id];
-        let idle = worker.busy.is_none()
-            && worker.own_turn.is_none()
-            && worker.turn_started.is_none()
-            && !waits;
+        let idle =
+            worker.busy.is_none() && worker.own_turn.is_none() && worker.turn_started.is_none();
         if !idle
             || !quiet
             || !matches!(
