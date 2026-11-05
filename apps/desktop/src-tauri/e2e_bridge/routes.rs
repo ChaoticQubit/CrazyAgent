@@ -676,15 +676,19 @@ pub(super) async fn route(state: &super::Shared, command: &str, args: serde_json
         "desktop_team_time_limits" => {
             #[derive(serde::Deserialize)]
             #[serde(rename_all = "camelCase")]
-            struct Args {
-                id: String,
+            struct Limits {
                 turn_secs: Option<u32>,
                 session_secs: Option<u32>,
                 idle_secs: Option<u32>,
+            }
+            #[derive(serde::Deserialize)]
+            struct Args {
+                id: String,
+                limits: Limits,
                 revision: u64,
                 generation: u64,
             }
-            let Args { id, turn_secs, session_secs, idle_secs, revision, generation } = match parse(args) {
+            let Args { id, limits: Limits { turn_secs, session_secs, idle_secs }, revision, generation } = match parse(args) {
                 Ok(args) => args,
                 Err(invalid) => return invalid,
             };

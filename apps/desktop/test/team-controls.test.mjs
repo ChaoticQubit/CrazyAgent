@@ -199,10 +199,10 @@ test("team settings changes send the revision the window read, so the engine ref
   assert.match(source, /setTeamTimeLimits\(projectId, next\.turn, next\.session, next\.idle, status\.settings_revision \?\? 0\)/);
   assert.match(source, /setOnHarnessSwitch\(projectId, mode, status\.settings_revision \?\? 0\)/);
   const api = read("../src/api.ts");
-  assert.match(api, /call<IntentReceipt>\("desktop_team_time_limits", \{ id, turnSecs, sessionSecs, idleSecs, revision, generation: nextGeneration\(\) \}\)/);
+  assert.match(api, /call<IntentReceipt>\("desktop_team_time_limits", \{ id, limits: \{ turnSecs, sessionSecs, idleSecs \}, revision, generation: nextGeneration\(\) \}\)/);
   assert.match(api, /call<IntentReceipt>\("desktop_team_on_harness_switch", \{ id, mode, revision, generation: nextGeneration\(\) \}\)/);
   const client = read("../src/engine-client.ts");
-  assert.match(client, /invoke<IntentReceipt>\("desktop_team_time_limits", \{ id, turnSecs, sessionSecs, idleSecs, revision, generation \}\)/);
+  assert.match(client, /invoke<IntentReceipt>\("desktop_team_time_limits", \{ id, limits: \{ turnSecs, sessionSecs, idleSecs \}, revision, generation \}\)/);
   assert.match(client, /invoke<IntentReceipt>\("desktop_team_on_harness_switch", \{ id, mode, revision, generation \}\)/);
   assert.match(client, /settings_revision\?: number;/);
   const lib = read("../src-tauri/src/lib.rs");

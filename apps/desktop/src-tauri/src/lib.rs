@@ -855,21 +855,34 @@ async fn desktop_team_keep_warm(
         .await
 }
 
+/// The three Team settings time limits one change sets, as the window sends them under
+/// `limits`: seconds for a task turn, an agent session and a sub-agent's idle stop, each from
+/// the listed choices or none for no limit.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct TeamTimeLimits {
+    turn_secs: Option<u32>,
+    session_secs: Option<u32>,
+    idle_secs: Option<u32>,
+}
+
 /// Sets a project team's task and session time limits and sub-agent idle stop from Team
 /// settings: seconds from the listed choices, or none for no limit. Output: the receipt.
-#[allow(clippy::too_many_arguments)]
 #[tauri::command]
 async fn desktop_team_time_limits(
     window: WebviewWindow,
     state: State<'_, NativeState>,
     id: String,
-    turn_secs: Option<u32>,
-    session_secs: Option<u32>,
-    idle_secs: Option<u32>,
+    limits: TeamTimeLimits,
     revision: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
+    let TeamTimeLimits {
+        turn_secs,
+        session_secs,
+        idle_secs,
+    } = limits;
     lock(&state)
         .await?
         .team_time_limits(

@@ -1102,7 +1102,7 @@ export function teamKeepWarm(id: string, on: boolean, generation: number): Promi
  * limits in seconds or null for no limit, the team settings revision read and a generation.
  * Output: the engine receipt. */
 export function teamTimeLimits(id: string, turnSecs: number | null, sessionSecs: number | null, idleSecs: number | null, revision: number, generation: number): Promise<IntentReceipt> {
-  return invoke<IntentReceipt>("desktop_team_time_limits", { id, turnSecs, sessionSecs, idleSecs, revision, generation });
+  return invoke<IntentReceipt>("desktop_team_time_limits", { id, limits: { turnSecs, sessionSecs, idleSecs }, revision, generation });
 }
 
 export function teamOnHarnessSwitch(id: string, mode: SwitchMode, revision: number, generation: number): Promise<IntentReceipt> {
