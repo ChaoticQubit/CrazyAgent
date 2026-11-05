@@ -39,11 +39,15 @@ const WAYS: [(Way, &str); 3] = [
     (Way::Into(AddMode::Copy), "Copy"),
 ];
 
+const MOVE_WITHHELD: &str =
+    "Move isn't offered: this folder is linked to git worktrees, and moving it would break them.";
+
 /// The Existing folder page: sets up a folder on this computer where it is
 /// by default, or moves or copies it into the projects folder with the target
 /// shown first, a Move confirmed with a second Enter, and a Copy with its size
 /// shown first, a warning above 1 GB and the linked git worktrees it leaves with
-/// the original. The folder then opens its setup.
+/// the original. A folder whose git worktree links a move would break is offered no
+/// Move, with the reason. The folder then opens its setup.
 pub struct AddFolder {
     field: TextField,
     way: Way,
@@ -52,6 +56,7 @@ pub struct AddFolder {
     home: Option<String>,
     size: Option<(String, Load<u64>)>,
     worktrees: usize,
+    withheld: Option<String>,
     sent: Option<String>,
     problem: Option<String>,
 }
@@ -69,6 +74,7 @@ impl AddFolder {
             home: None,
             size: None,
             worktrees: 0,
+            withheld: None,
             sent: None,
             problem: None,
         }
@@ -110,17 +116,50 @@ impl AddFolder {
             .map(|home| format!("{home}/{name}"))
     }
 
-    fn step(&mut self, forward: bool) {
-        let at = WAYS
+    /// Checks the typed folder as the engine does before a Move: when moving it would break
+    /// its git worktree links, Move is withheld and a chosen Move goes back to Use where it
+    /// is. Takes the context. Returns true when it took a chosen Move back.
+    fn withhold_move(&mut self, ctx: &Ctx) -> bool {
+        self.withheld = self
+            .source(ctx)
+            .ok()
+            .filter(|source| crate::projects_home::git_links(Path::new(source)));
+        if self.withheld.is_none() || self.way != Way::Into(AddMode::Move) {
+            return false;
+        }
+        self.way = Way::Here;
+        self.confirming = false;
+        true
+    }
+
+    /// True unless Move is withheld for the folder typed now.
+    fn move_offered(&self, ctx: &Ctx) -> bool {
+        match &self.withheld {
+            None => true,
+            Some(folder) => self.source(ctx).ok().as_ref() != Some(folder),
+        }
+    }
+
+    /// The ways offered for the folder typed now. Takes the context. Returns them in order.
+    fn ways(&self, ctx: &Ctx) -> Vec<(Way, &'static str)> {
+        let offered = self.move_offered(ctx);
+        WAYS.into_iter()
+            .filter(|(way, _)| offered || *way != Way::Into(AddMode::Move))
+            .collect()
+    }
+
+    fn step(&mut self, forward: bool, ctx: &Ctx) {
+        let ways = self.ways(ctx);
+        let at = ways
             .iter()
             .position(|(way, _)| *way == self.way)
             .unwrap_or(0);
         let next = if forward {
-            (at + 1) % WAYS.len()
+            (at + 1) % ways.len()
         } else {
-            (at + WAYS.len() - 1) % WAYS.len()
+            (at + ways.len() - 1) % ways.len()
         };
-        self.way = WAYS[next].0;
+        self.way = ways[next].0;
         self.confirming = false;
     }
 
@@ -162,6 +201,9 @@ impl AddFolder {
             }
         };
         self.problem = None;
+        if self.withhold_move(ctx) {
+            return Flow::Handled;
+        }
         let mode = match self.way {
             Way::Here => return self.here(&source, ctx),
             Way::Into(mode) => mode,
@@ -283,7 +325,10 @@ impl Screen for AddFolder {
             (Focus::Folder, Key::Tab) => {
                 match complete(self.field.value(), Self::user_home(ctx), true) {
                     Some(completed) => self.field.set(&completed),
-                    None => self.focus = Focus::Mode,
+                    None => {
+                        self.focus = Focus::Mode;
+                        self.withhold_move(ctx);
+                    }
                 }
                 Flow::Handled
             }
@@ -300,11 +345,11 @@ impl Screen for AddFolder {
                 Flow::Handled
             }
             (Focus::Mode, Key::Right | Key::Char(' ')) => {
-                self.step(true);
+                self.step(true, ctx);
                 Flow::Handled
             }
             (Focus::Mode, Key::Left) => {
-                self.step(false);
+                self.step(false, ctx);
                 Flow::Handled
             }
             (_, Key::Esc) => Flow::Ignored,
@@ -393,13 +438,16 @@ impl Screen for AddFolder {
             theme.text
         };
         let mut ways = Vec::with_capacity(WAYS.len() * 2);
-        for (way, label) in WAYS {
+        for (way, label) in self.ways(ctx) {
             if !ways.is_empty() {
                 ways.push(Span::raw("   "));
             }
             ways.push(Span::styled(radio(self.way == way, label), mode_style));
         }
         lines.push(Line::from(ways));
+        if !self.move_offered(ctx) {
+            lines.extend(wrap(MOVE_WITHHELD, limit).into_iter().map(Line::raw));
+        }
         let source = self.source(ctx).ok();
         match (
             self.way,
