@@ -855,15 +855,44 @@ async fn desktop_team_keep_warm(
         .await
 }
 
-/// The three Team settings time limits one change sets, as the window sends them under
-/// `limits`: seconds for a task turn, an agent session and a sub-agent's idle stop, each from
-/// the listed choices or none for no limit.
-#[derive(serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+/// The three Team settings time limits one change sets: seconds for a task turn, an agent
+/// session and a sub-agent's idle stop, each from the listed choices or none for no limit.
+/// The window sends them as the separate `turnSecs`, `sessionSecs` and `idleSecs` keys.
 struct TeamTimeLimits {
     turn_secs: Option<u32>,
     session_secs: Option<u32>,
     idle_secs: Option<u32>,
+}
+
+impl<'de, R: tauri::Runtime> tauri::ipc::CommandArg<'de, R> for TeamTimeLimits {
+    /// Reads each limit from its own key of the command call, the way Tauri reads an optional
+    /// argument: a missing key or null is no limit, any other non-number is refused. Input:
+    /// the command item. Output: the limits, or Tauri's invalid-argument error for that key.
+    fn from_command(
+        command: tauri::ipc::CommandItem<'de, R>,
+    ) -> Result<Self, tauri::ipc::InvokeError> {
+        let tauri::ipc::CommandItem {
+            plugin,
+            name,
+            message,
+            acl,
+            ..
+        } = command;
+        let read = |key| {
+            <Option<u32> as tauri::ipc::CommandArg<'de, R>>::from_command(tauri::ipc::CommandItem {
+                plugin,
+                name,
+                key,
+                message,
+                acl,
+            })
+        };
+        Ok(Self {
+            turn_secs: read("turnSecs")?,
+            session_secs: read("sessionSecs")?,
+            idle_secs: read("idleSecs")?,
+        })
+    }
 }
 
 /// Sets a project team's task and session time limits and sub-agent idle stop from Team

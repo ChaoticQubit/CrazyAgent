@@ -1152,7 +1152,7 @@ export function keepTeamWarm(id: string, on: boolean): Promise<Result<IntentRece
  * seconds and the team settings revision the window read. Output: the engine receipt, refused
  * as stale once another client changed the settings, not ready, or a plain error. */
 export function setTeamTimeLimits(id: string, turnSecs: number | null, sessionSecs: number | null, idleSecs: number | null, revision: number): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_team_time_limits", { id, limits: { turnSecs, sessionSecs, idleSecs }, revision, generation: nextGeneration() });
+  return call<IntentReceipt>("desktop_team_time_limits", { id, turnSecs, sessionSecs, idleSecs, revision, generation: nextGeneration() });
 }
 
 /** Sets what the live master does with the conversation when the master harness changes.
