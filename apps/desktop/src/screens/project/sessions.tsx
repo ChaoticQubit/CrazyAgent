@@ -132,8 +132,9 @@ type Pending = { kind: "new" } | { kind: "resume"; session: MasterSessionSummary
 /** The master view's session header: the live session, a visible New session button and
  * the Sessions list, where clicking a parked session resumes it and Delete removes it after
  * the owner confirms. A running reply is stopped only after the owner confirms. New session
- * does nothing while the live session has no owner turn; only the newest list read shows.
- * Inputs: the master ticket, the live session id as the view read it, a mark of the
+ * does nothing while the live session has no owner turn; only the newest list read shows,
+ * and a list read that works clears the problem a refused list read showed, never the
+ * problem of a switch. Inputs: the master ticket, the live session id as the view read it, a mark of the
  * master's turns as the view last read them, whose every change reads the list again so
  * its message count follows each turn, and a refresh for the view after a switch. */
 export function SessionsBar({ ticket, liveId, mark = null, onSwitched }: { ticket: string; liveId: string | null; mark?: string | null; onSwitched: () => Promise<void> }) {
@@ -143,6 +144,7 @@ export function SessionsBar({ ticket, liveId, mark = null, onSwitched }: { ticke
   const [working, setWorking] = useState(false);
   const [pending, setPending] = useState<Pending | null>(null);
   const [problem, setProblem] = useState("");
+  const [readProblem, setReadProblem] = useState("");
   const reads = useRef(0);
   const marked = useRef(mark);
   const now = Date.now();
@@ -155,7 +157,8 @@ export function SessionsBar({ ticket, liveId, mark = null, onSwitched }: { ticke
     if (read.kind === "ok") {
       setSessions(read.value.sessions);
       setListed(true);
-    } else if (read.kind === "error") setProblem(failureCopy(read));
+      setReadProblem("");
+    } else if (read.kind === "error") setReadProblem(failureCopy(read));
   }
 
   useEffect(() => {
@@ -222,7 +225,7 @@ export function SessionsBar({ ticket, liveId, mark = null, onSwitched }: { ticke
         <button type="button" className="btn" disabled={working} onClick={() => setPending(null)}>Keep it</button>
       </span>
     </div>}
-    {problem && <p className="pj-error" role="alert">{problem}</p>}
+    {(problem || readProblem) && <p className="pj-error" role="alert">{problem || readProblem}</p>}
     {shown && <ul className="pj-session-list" aria-label="Sessions">
       {others.length === 0 && <li className="pj-small pj-muted">No other sessions yet.</li>}
       {others.map((session) => {
