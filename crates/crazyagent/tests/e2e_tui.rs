@@ -240,6 +240,48 @@ fn the_tui_walks_from_home_into_the_project_team_tree() {
     engine.stop();
 }
 
+const NEWER_PROJECT: &str = "Tidepool e2e readd";
+
+/// Home highlights its most recent card; a project whose name that newer card's name starts
+/// with is still the one opened, by its exact name (live row 7 on 18.15 opened
+/// ca-trial-4-readd-202611051754 for ca-trial-4).
+#[test]
+fn the_tui_opens_the_project_named_exactly_when_a_newer_card_starts_with_its_name() {
+    let mut engine = Engine::start("ca-e2e-tui-");
+    let tmux = installed(engine.path()).expect(TMUX);
+    let disk = scratch("ca-e2e-home-");
+    let home = disk.path().join("Projects");
+    std::fs::create_dir(&home).unwrap();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut owner = Owner::attach(&engine).await;
+            assert_eq!(owner.save_profile(profile()).await, OwnerResult::Applied);
+            assert_eq!(owner.set_home(&home).await, OwnerResult::Applied);
+            assert_eq!(
+                owner.create_project("e2e-tui", PROJECT).await,
+                OwnerResult::Applied
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            assert_eq!(
+                owner.create_project("e2e-tui-readd", NEWER_PROJECT).await,
+                OwnerResult::Applied
+            );
+            owner.controller.detach();
+        });
+
+    let pty = Pty::launch(tmux, &engine.socket());
+    reach_home(&pty, |screen| at_home(screen, NEWER_PROJECT));
+    open_team(&pty, PROJECT);
+    let screen = pty.screen();
+    assert!(on_team(&screen, PROJECT), "{screen}");
+    assert!(!screen.contains(NEWER_PROJECT), "{screen}");
+    drop(pty);
+    engine.stop();
+}
+
 const STOPPED_PROJECT: &str = "Stopped team e2e";
 const LEAD_TASK: &str = "Run a native agent team";
 const WORKER_TASKS: [&str; 2] = ["Write greet.py", "Write the README"];
