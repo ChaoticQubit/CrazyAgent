@@ -230,6 +230,10 @@ fn a_finished_real_claude_sub_agent_s_card_opens_its_kept_last_screen() {
     println!("real claude sub-agent turn: end={end:?} cause={cause:?} reply={text:?}");
     assert_eq!(end, TurnEnd::Success, "{cause:?}");
     assert!(text.contains(SUM), "{text}");
+    assert!(
+        !agent.home.join(".credentials.json").exists(),
+        "the turn's credential copy left the sub-agent's home"
+    );
     let finished = AgentId::team(AGENT).unwrap();
     assert_eq!(
         engine
