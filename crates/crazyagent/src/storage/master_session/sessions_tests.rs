@@ -568,7 +568,6 @@ async fn resume_swaps_the_live_session_atomically_and_keeps_every_turn() {
         &second.project_id,
         &second.session_id,
         "codex",
-        "conn-1",
     )
     .unwrap() else {
         panic!("a session with earlier turns and no kept conversation starts fresh");

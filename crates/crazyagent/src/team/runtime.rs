@@ -3057,13 +3057,9 @@ impl TeamRuntime {
                     }
                 }
             }
-            (Some(session), None) => crate::master_sessions::resume_harness(
-                &self.connection,
-                project,
-                session,
-                launch,
-                account.connection.as_str(),
-            )?,
+            (Some(session), None) => {
+                crate::master_sessions::resume_harness(&self.connection, project, session, launch)?
+            }
             (None, _) => ResumePlan::New,
         };
         if let ResumePlan::Resume {
