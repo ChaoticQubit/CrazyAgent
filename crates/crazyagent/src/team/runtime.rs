@@ -6456,14 +6456,7 @@ impl TeamRuntime {
         id: i64,
         role: AgentRole,
     ) -> Result<Vec<String>, EngineError> {
-        let mut off: Vec<String> = crate::coord::tool_switches::off_tools(
-            &self.connection,
-            project,
-            crate::coord::tool_switches::CRAZYAGENT_SERVER,
-        )?
-        .into_iter()
-        .filter(|name| tool::TEAM_TOOLS.contains(&name.as_str()))
-        .collect();
+        let mut off = super::master::switched_off_tools(&self.connection, project)?;
         let leads = role == AgentRole::Master
             || super::agent_depth(&self.connection, id)?
                 < super::nesting(&self.connection, project)?.depth;

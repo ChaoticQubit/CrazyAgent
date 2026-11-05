@@ -1,5 +1,6 @@
 use super::{
-    master_dispatch_shutdown_line, master_turn_diagnostic, native_auth_dispatch_diagnostic,
+    master_dispatch_shutdown_line, master_memory_diagnostic, master_turn_diagnostic,
+    native_auth_dispatch_diagnostic,
 };
 use crate::engine::EngineError;
 use crate::engine::native_auth_host::RegisteredNativeAuthHost;
@@ -93,5 +94,20 @@ fn master_dispatch_shutdown_logs_a_plain_code_but_never_driver_or_parser_text() 
             "master_runtime_cleanup_uncertain:rcli_master_wait_failed".into()
         )),
         "master_dispatch_shutdown cause=master_runtime_cleanup_uncertain:rcli_master_wait_failed"
+    );
+}
+
+#[test]
+fn master_memory_diagnostic_logs_a_plain_code_but_never_storage_text() {
+    let refused = EngineError("master_memory_turn_not_running".into());
+    assert_eq!(
+        master_memory_diagnostic(&refused),
+        "master_memory_calls_not_answered cause=master_memory_turn_not_running"
+    );
+    let sqlite =
+        EngineError("database is locked: UPDATE memories SET text = 'Use cargo nextest.'".into());
+    assert_eq!(
+        master_memory_diagnostic(&sqlite),
+        "master_memory_calls_not_answered cause=master_memory_error_redacted"
     );
 }
