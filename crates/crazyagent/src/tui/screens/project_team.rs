@@ -6,6 +6,7 @@ use super::project_time::{clock, duration};
 use crate::coord::settings::{
     COUNTED_TOOL_BYTES_MAX, COUNTED_TOOLS_DEFAULT, COUNTED_TOOLS_MAX, ClaudeDisplay, Delivery,
     HarnessKind, Nudges, Overlaps, QuestionsTo, ROLE_SKILLS_MAX, SkillRole, SubagentMode,
+    TaskStart,
 };
 use crate::engine::owner::OwnerResult;
 use crate::project_setup::{SetupQuery, SetupView};
@@ -136,7 +137,8 @@ pub(in crate::tui) struct CoordEdit {
 
 /// One row of the coordination editor: a harness kind's sub-agent mode or message delivery,
 /// the Claude Code terminal display (N-D9), where sub-agent questions go, overlapping edits,
-/// workflow nudges, the counted tools or the skills one team role gets (DEC-111 R3).
+/// workflow nudges, the Task-start reminder (T3-15), the counted tools or the skills one team
+/// role gets (DEC-111 R3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum CoordRow {
     Mode(HarnessKind),
@@ -145,11 +147,12 @@ pub(in crate::tui) enum CoordRow {
     Questions,
     Overlaps,
     Nudges,
+    TaskStart,
     Counted,
     Skills(SkillRole),
 }
 
-const COORD_ROWS: [CoordRow; 14] = [
+const COORD_ROWS: [CoordRow; 15] = [
     CoordRow::Mode(HarnessKind::ClaudeCode),
     CoordRow::Delivery(HarnessKind::ClaudeCode),
     CoordRow::ClaudeDisplay,
@@ -160,6 +163,7 @@ const COORD_ROWS: [CoordRow; 14] = [
     CoordRow::Questions,
     CoordRow::Overlaps,
     CoordRow::Nudges,
+    CoordRow::TaskStart,
     CoordRow::Counted,
     CoordRow::Skills(SkillRole::Master),
     CoordRow::Skills(SkillRole::Lead),
@@ -1855,6 +1859,20 @@ impl TeamView {
                     done,
                 )
             }
+            CoordRow::TaskStart => {
+                settings.task_start = cycle(&TaskStart::ALL, settings.task_start, forward);
+                let done = format!(
+                    "Task-start reminder: {}.",
+                    settings.task_start.words().to_lowercase()
+                );
+                (
+                    TeamAction::CoordSettings {
+                        project_id,
+                        settings,
+                    },
+                    done,
+                )
+            }
             CoordRow::Counted => return TeamReply::Handled,
             CoordRow::Skills(role) => {
                 if settings.role_skills.of(role).is_none() {
@@ -2054,6 +2072,11 @@ impl TeamView {
                 CoordRow::Nudges => (
                     "Workflow nudges".to_owned(),
                     view.settings.nudges.words().to_owned(),
+                    "",
+                ),
+                CoordRow::TaskStart => (
+                    "Task-start reminder".to_owned(),
+                    view.settings.task_start.words().to_owned(),
                     "",
                 ),
                 CoordRow::Counted => (

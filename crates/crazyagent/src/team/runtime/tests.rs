@@ -6436,6 +6436,67 @@ fn send_own_rules_bounds_a_kept_lead_s_own_turn_by_the_session_time_left() {
     );
 }
 
+/// T3-15: while the Task-start reminder is On, its default, a tools-on Codex sub-agent's task
+/// turn carries the reminder naming its approved skill once; after the owner sets it Off,
+/// its next task's turn carries none.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_tools_on_sub_agent_s_task_turn_carries_the_task_start_reminder_only_while_it_is_on() {
+    const REMINDER: &str = "Task start reminder: before you work on this task, read the SKILL.md of each of these skills that fits this task and follow it: `meal-tips`.";
+    let mut fixture = Fixture::new(1);
+    fixture.setup.team.sub_harnesses[0].tools = true;
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?1 WHERE project=?2",
+            params![serde_json::to_string(&fixture.setup).unwrap(), PROJECT],
+        )
+        .unwrap();
+    approve_skills(&fixture, &["meal-tips"]);
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, &recording_codex());
+    owner(&fixture, &[hand_off(&fixture, "Write page.md")]);
+    fixture.until(&mut team, "the first task is done", |f| {
+        task_of(f, "Write page.md").0 == "done"
+    });
+    let agent = subs(&fixture)[0];
+    let first = typed(&fixture, agent);
+    assert!(first.contains("Write page.md"), "{first}");
+    assert_eq!(
+        first.matches(REMINDER).count(),
+        1,
+        "the first turn carries the reminder once: {first}"
+    );
+
+    crate::coord::settings::write(
+        &fixture.connection,
+        &fixture.setup.project_id,
+        &crate::coord::settings::CoordSettings {
+            task_start: crate::coord::settings::TaskStart::Off,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    owner(&fixture, &[hand_off(&fixture, "Write menu.md")]);
+    fixture.until(&mut team, "the second task is done", |f| {
+        task_of(f, "Write menu.md").0 == "done"
+    });
+    let text = typed(&fixture, agent);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    assert_eq!(
+        subs(&fixture),
+        [agent],
+        "the same agent took the second task"
+    );
+    let second = &text[first.len()..];
+    assert!(second.contains("Write menu.md"), "{second}");
+    assert!(
+        !second.contains("Task start reminder"),
+        "Off gives none: {second}"
+    );
+}
+
 /// Under Stop, a Codex sub-agent whose app keeps running between tasks is not told that its
 /// background commands stop when its turn ends: its rollout reports no such commands, so
 /// the engine neither holds its turn for them nor stops them, and the line would be untrue
@@ -8015,6 +8076,7 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         scratch_pin: None,
         proxy: None,
         claude_display: crate::coord::settings::ClaudeDisplay::Classic,
+        task_start: None,
     };
     let account = || AccountBinding::Subscription {
         home: PathBuf::from("/tmp/home"),
@@ -9704,6 +9766,46 @@ fn a_teammate_row_kept_before_rows_held_their_pane_process_is_pinned_at_its_next
 /// A worker record for an agent that has no session thread, as a per-turn agent between
 /// turns. Takes the project, the role, whether it runs one session per turn and whether
 /// it keeps a native lead's session. Returns the worker, idle and not live.
+/// LMS-1 r1: a live master whose grant fails after it waited for its account's profile
+/// stops with its own note, and its wait line goes with it, so the switch no longer says
+/// the profile is in use until the next start.
+#[test]
+fn a_failed_brief_after_a_profile_wait_clears_the_wait_line() {
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let mut team = fixture.runtime();
+    let mut master = between_turns(&project, AgentRole::Master, true, false);
+    master.connection = reference("left-the-pool");
+    master.live = true;
+    master.briefed = false;
+    team.workers.insert(7, master);
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    assert!(
+        super::super::master::problem(
+            &fixture.connection,
+            &project,
+            Some(super::super::master::PROFILE_IN_USE)
+        )
+        .unwrap()
+    );
+
+    team.brief(&fixture.setup, &fixture.access, 7).unwrap();
+    assert!(team.workers[&7].stopping, "the master stops");
+    assert!(
+        fixture
+            .status()
+            .messages
+            .iter()
+            .any(|message| message.text.starts_with("The live master could not start")),
+        "the failure has its own note"
+    );
+    assert_eq!(
+        fixture.status().live_problem,
+        None,
+        "the profile wait line goes with the stop"
+    );
+}
+
 fn between_turns(
     project: &ProjectId,
     role: AgentRole,
@@ -9756,6 +9858,7 @@ fn between_turns(
         ready: true,
         reask: None,
         reasked: None,
+        starts: crate::coord::relay::TaskStarts::default(),
     }
 }
 
@@ -13026,6 +13129,7 @@ fn hooks_plan(harness: &str, hookless: bool) -> Plan {
         scratch_pin: None,
         proxy: None,
         claude_display: crate::coord::settings::ClaudeDisplay::Classic,
+        task_start: None,
     }
 }
 
@@ -13669,6 +13773,7 @@ fn reap_keeps_a_kept_lead_past_its_idle_limit_while_its_teammate_works() {
             access: AgentAccess::Sandboxed,
             network: crate::sandbox::policy::AgentNetwork::Open,
             proxy: None,
+            task_start: None,
         })),
         Seat {
             project: ProjectId::new(PROJECT).unwrap(),
@@ -13748,6 +13853,7 @@ fn kept_lead_with_a_task(fixture: &Fixture) -> (TeamRuntime, i64, i64) {
             access: AgentAccess::Sandboxed,
             network: crate::sandbox::policy::AgentNetwork::Open,
             proxy: None,
+            task_start: None,
         })),
         Seat {
             project: ProjectId::new(PROJECT).unwrap(),
@@ -13884,6 +13990,7 @@ fn wiring_a_native_lead_adopted_without_its_account_is_killed() {
             access: AgentAccess::Sandboxed,
             network: crate::sandbox::policy::AgentNetwork::Open,
             proxy: None,
+            task_start: None,
         };
         let (orders, ordered) = channel();
         let (reports, reported) = channel();
@@ -14184,6 +14291,7 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
         scratch_pin: None,
         proxy: None,
         claude_display: crate::coord::settings::ClaudeDisplay::Classic,
+        task_start: None,
     };
     let account = || AccountBinding::Subscription {
         home: PathBuf::from("/private/tmp/agent-1-home"),

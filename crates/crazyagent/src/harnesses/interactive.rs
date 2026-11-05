@@ -83,6 +83,7 @@ const TEAMMATE_HOME_VARIABLES: [&str; 4] = [
 ];
 /// The variables of a native lead's command that name a place in the lead's own temp folder,
 /// which its teammates get at the same place in the short temp folder they share instead.
+#[cfg(unix)]
 const TEAMMATE_TMP_VARIABLES: [&str; 2] = ["TMPDIR", "TMPPREFIX"];
 
 /// What the terminal host runs for one interactive agent: the full argument list, starting

@@ -43,16 +43,19 @@ pub(crate) const MARK_BYTES_MAX: u64 = 128;
 /// only when it holds the mark of the keep-out as it is now, so never one an older build or
 /// another tool made nor one built before a folder was hidden or a path kept out, and the
 /// next graph step rebuilds such a graph from nothing.
+#[cfg(unix)]
 pub(crate) const KEPT_OUT_MARK: &str = ".crazyagent-keep-out";
 
 /// The plain reason a graph step fails with when no graphify is installed.
 pub(crate) const GRAPHIFY_MISSING: &str = "graphify not installed";
 /// The plain reason a graph step fails with when the project's git cannot say which files it
 /// ignores, so the build could not leave them out (MAP-2).
+#[cfg(unix)]
 pub(crate) const GRAPH_IGNORES_UNKNOWN: &str =
     "Graph not built: the project's git could not tell which files it ignores.";
 /// The plain reason a graph step fails with when the paths it must leave out are more than
 /// the sandbox holds or one has a name the sandbox cannot hold (MAP-2).
+#[cfg(unix)]
 pub(crate) const GRAPH_KEEP_OUT_REFUSED: &str =
     "Graph not built: the files it must leave out could not all be kept out.";
 

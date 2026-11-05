@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { listSkills, setCoordSettings, setHarnessDelivery, setHarnessMode, type SkillView } from "../../api";
-import type { ClaudeDisplay, CoordHarness, CoordinationView, CoordSettings, Delivery, Nudges, Overlaps, QuestionsTo, SkillRole, SubagentMode, TeamStatus } from "../../engine-client";
+import type { ClaudeDisplay, CoordHarness, CoordinationView, CoordSettings, Delivery, Nudges, Overlaps, QuestionsTo, SkillRole, SubagentMode, TaskStart, TeamStatus } from "../../engine-client";
 import { useLoad, type Loaded } from "../../state";
 import { Button, Checkbox, Segmented, Select } from "../../ui";
 import type { SelectOption } from "../../ui";
@@ -21,6 +21,7 @@ export const COORD_DEFAULTS: CoordSettings = {
   counted_tools: ["start_work", "inspect_work", "update_work", "transfer_work", "finish_work", "ctx_*", "graphify", "Skill"],
   role_skills: { master: null, lead: null, worker: null },
   claude_display: "classic",
+  task_start: "on",
 };
 
 const ROLES: { role: SkillRole; label: string; about: string }[] = [
@@ -123,8 +124,8 @@ export function countedToolsInput(text: string): { kind: "ok"; tools: string[] }
 }
 
 /** Coordination settings on the Agents tab: each harness kind's sub-agent mode and delivery,
- * where sub-agent questions go, what overlapping claims do, workflow nudges, the counted tools
- * and the skills each team role gets. Every option is selectable; the plan defaults show for
+ * where sub-agent questions go, what overlapping claims do, workflow nudges, the Task-start
+ * reminder, the counted tools and the skills each team role gets. Every option is selectable; the plan defaults show for
  * an older engine. Inputs: the project id, the latest team status and a reload. Output: the
  * controls. */
 export function CoordinationControls({ projectId, status, reload }: { projectId: string; status: TeamStatus; reload: () => void }) {
@@ -184,6 +185,12 @@ export function CoordinationControls({ projectId, status, reload }: { projectId:
       <Segmented label="Workflow nudges" value={view.settings.nudges} onValue={(value: Nudges) => void save({ nudges: value }, "workflow nudges")}
         options={[{ value: "off", label: "Off" }, { value: "ten_minutes", label: "Every 10 minutes" }, { value: "first_edit", label: "First edit" }]} />
       <span className="tg-terminal-note">Every 10 minutes sends an agent one reminder when it edits without start_work, or works 10 minutes without graphify or ctx tools. First edit reminds an agent once when it edits a file before any graphify query; the edit still runs.</span>
+    </div>
+    <div className="pj-row">
+      <span aria-hidden="true">Task-start reminder</span>
+      <Segmented label="Task-start reminder" value={view.settings.task_start} onValue={(value: TaskStart) => void save({ task_start: value }, "the task-start reminder")}
+        options={[{ value: "on", label: "On" }, { value: "off", label: "Off" }]} />
+      <span className="tg-terminal-note">On adds a short reminder to the first turn of each task of every sub-agent and teammate with tools on: load the context-mode tools (Claude Code runs ToolSearch with their select string) and use the approved skills that fit. Off adds nothing. It is advice; nothing is blocked.</span>
     </div>
     <form className="pj-row" aria-label="Counted tools" onSubmit={(event) => { event.preventDefault(); void saveCounted(); }}>
       <label htmlFor={`tg-counted-${projectId}`}>Counted tools</label>
