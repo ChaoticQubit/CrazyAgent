@@ -51,6 +51,7 @@ SHIFT_LEFT = b"\x1b[1;2D"
 SHIFT_RIGHT = b"\x1b[1;2C"
 QUIT = b"\x11"
 CHATGPT = "Sign in with ChatGPT"
+OPENAI = "Sign in with ChatGPT or use an OpenAI API key"
 SIGN_IN_SECONDS = 900
 RECORDS = ("auth.json", ".credentials.json")
 SHAPES = (
@@ -426,17 +427,24 @@ def sign_in(term, tty):
     tty.flush()
 
 
-def accounts(term, tty):
+def chatgpt_choice(term):
     term.key(b"s")
     term.wait("No accounts yet.", 20)
     term.key(ENTER)
     term.wait("Where does the model come from?", 20)
-    term.wait("ChatGPT / Codex", 10)
+    term.wait(OPENAI, 10)
+    assert term.row(OPENAI).lstrip().startswith("> "), term.text()
     term.key(ENTER)
+    term.wait("How do you want to connect?", 10)
     term.wait("Use the Codex sign-in on this Mac", 10)
+    assert OPENAI not in term.text(), term.text()
     term.key(UP)
     term.key(UP)
     assert "\u258c" in term.row(CHATGPT), term.text()
+
+
+def accounts(term, tty):
+    chatgpt_choice(term)
     term.key(ENTER)
     sign_in(term, tty)
     term.wait("Account name", 5)

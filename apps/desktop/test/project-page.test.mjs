@@ -603,11 +603,11 @@ test("the Team panel names each agent, its account and current task, and lists t
   const running = research.teamPanel(status, accounts, label, "running", 61_000);
   assert.deepEqual(running.agents, [
     { key: "agent-1", role: "Master", name: "Master", harness: "Claude Code", account: "Work Claude", word: "Running", task: "", folder: "Works in the project folder", rename: null,
-      depth: 0, lead: null, stop: null, stoppedByYou: false, teammates: [] },
+      depth: 0, lead: null, stop: null, stoppedByYou: false, teammates: [], messageNote: null },
     { key: "agent-2", role: "Sub-agent", name: "Sub-agent 2", harness: "Codex", account: "Codex main", word: "Running", task: "Build the login screen", folder: "Works in worktrees/agent-2", rename: null,
-      depth: 0, lead: null, stop: { agent: 2 }, stoppedByYou: false, teammates: [] },
+      depth: 0, lead: null, stop: { agent: 2 }, stoppedByYou: false, teammates: [], messageNote: null },
     { key: "agent-3", role: "Sub-agent", name: "Sub-agent 3", harness: "Codex", account: "An account in the pool", word: "Ready", task: "Last task: Task 12", folder: "", rename: null,
-      depth: 0, lead: null, stop: { agent: 3 }, stoppedByYou: false, teammates: [] },
+      depth: 0, lead: null, stop: { agent: 3 }, stoppedByYou: false, teammates: [], messageNote: null },
   ], "the master has no Stop; each live sub-agent has its own");
   assert.deepEqual(running.tasks.map((row) => [row.key, row.from, row.to, row.word, row.prompt, row.summary, row.elapsed, row.stop]), [
     ["task-10", "From the master", "Sub-agent 2", "Running", "Build the login screen", "", "1 min", { task: 10, label: "Stop" }],
@@ -615,7 +615,7 @@ test("the Team panel names each agent, its account and current task, and lists t
   ]);
   const all = research.teamPanel(status, accounts, label, "all", 61_000);
   assert.deepEqual(all.agents[3], { key: "agent-4", role: "Sub-agent", name: "Sub-agent 4", harness: "Codex", account: "No account yet", word: "Failed", task: "Codex stopped answering.", folder: "", rename: null,
-    depth: 0, lead: null, stop: null, stoppedByYou: false, teammates: [] }, "a failed sub-agent has nothing left to stop");
+    depth: 0, lead: null, stop: null, stoppedByYou: false, teammates: [], messageNote: null }, "a failed sub-agent has nothing left to stop");
   assert.deepEqual(all.tasks.map((row) => [row.key, row.to, row.word, row.summary, row.elapsed, row.stop]), [
     ["task-10", "Sub-agent 2", "Running", "", "1 min", { task: 10, label: "Stop" }],
     ["task-11", "Codex", "Queued", "", "", { task: 11, label: "Cancel" }],
@@ -889,4 +889,10 @@ test("every desktop memory list and count reads all memory batches, never one en
   assert.match(body(source("api.ts"), "memorySuggestions"), /loadAllProjectMemories\(project\.id\)[\s\S]*suggestionsFrom\(project, memories\.value\.items\)/);
   assert.match(source("screens/project/overview.tsx"), /loadAllProjectMemories\(data\.id\)\.then\(\(result\) => \{[^}]*memoryGroups\(result\.value\.items\)\.suggested\.length/);
   assert.match(source("screens/project/memory.tsx"), /loadAllProjectMemories\(data\.id\)/);
+});
+
+test("a Team panel row carries the engine's sentence for an agent the Delivery setting leaves without messages, and no other row does", () => {
+  const note = "Can't receive messages: Native only needs tools on for Codex.";
+  const panel = research.teamPanel({ agents: [teamAgent(2, "idle", { tools: false, message_note: note }), teamAgent(3, "idle")], tasks: [] }, [], (id) => id, "all", 0);
+  assert.deepEqual(panel.agents.map((row) => [row.key, row.messageNote]), [["agent-2", note], ["agent-3", null]]);
 });
