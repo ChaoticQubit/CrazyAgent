@@ -6921,6 +6921,111 @@ fn a_saved_master_harness_switch_no_pool_account_can_run_leaves_the_master_runni
     assert_eq!(fixture.status().live_switch, None);
 }
 
+/// `RESUMING_CODEX` whose turn on a line with "long" in it stays open until `go` exists in
+/// the agent's Codex home. Returns the script.
+#[cfg(target_os = "macos")]
+fn holding_codex() -> String {
+    let script = RESUMING_CODEX.replacen(
+        "  printf '{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\\n' >> \"$f\"\n",
+        "  printf '{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\\n' >> \"$f\"\n  case \"$line\" in *long*) while [ ! -e \"$CODEX_HOME/go\" ]; do /bin/sleep 0.1; done ;; esac\n",
+        1,
+    );
+    assert_ne!(script, RESUMING_CODEX);
+    script
+}
+
+/// Ticks the runtime for longer than the owner's quiet time after a key, so only an open
+/// turn or an unsent line can still hold a saved switch back. Takes the runtime.
+#[cfg(target_os = "macos")]
+fn ticks_past_owner_quiet(team: &mut TeamRuntime) {
+    let deadline =
+        Instant::now() + Duration::from_millis(super::super::master::OWNER_QUIET_MS as u64 + 2000);
+    while Instant::now() < deadline {
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// With When the master is idle, a master harness change saved while the live master is in
+/// a turn waits for that turn: the master keeps its harness through the rest of the turn,
+/// and once the turn ends it hands over to the new harness with one "Switched to" note.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_saved_master_harness_switch_waits_until_the_live_masters_turn_ends() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = switching_runtime(&fixture, &host);
+    std::fs::write(fixture.base.join("bin/codex"), holding_codex()).unwrap();
+    let first = idle_codex_master(&fixture, &host, &mut team);
+    host.input(&AgentId::team(first).unwrap(), b"a long turn\r")
+        .unwrap();
+    fixture.until(&mut team, "the long turn opens", |f| {
+        live_turns(&f.connection).1
+    });
+
+    set_master(&fixture, "claude-code");
+    ticks_past_owner_quiet(&mut team);
+    assert!(live_turns(&fixture.connection).1, "the turn is still open");
+    assert_eq!(
+        masters(&fixture.connection),
+        [first],
+        "the Codex master is not stopped in its turn"
+    );
+    assert_eq!(live_agent(&fixture.connection), Some(first));
+    assert_eq!(
+        fixture.status().live_switch,
+        None,
+        "no switch while the turn runs"
+    );
+
+    std::fs::write(stand_in_file(&fixture, first, "go"), "").unwrap();
+    let note = crate::master_sessions::switched_note("Claude Code", crate::team::SwitchMode::Carry);
+    fixture.until(
+        &mut team,
+        "the turn ends and the Codex master hands over to Claude Code",
+        |f| {
+            let all = masters(&f.connection);
+            noted(f, &note) == 1 && all.len() == 2 && live_agent(&f.connection) == Some(all[1])
+        },
+    );
+    assert_eq!(masters(&fixture.connection)[0], first);
+}
+
+/// With When the master is idle, a master harness change waits while the owner holds an
+/// unsent line in the live master's terminal, past the quiet time after a key, so the stop
+/// for the switch never drops the line; once the owner clears it, the master hands over.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_saved_master_harness_switch_waits_while_the_owner_holds_an_unsent_line() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = switching_runtime(&fixture, &host);
+    let first = idle_codex_master(&fixture, &host, &mut team);
+    super::super::master::owner_typed(&fixture.connection, first, b"half a line", now_ms())
+        .unwrap();
+
+    set_master(&fixture, "claude-code");
+    ticks_past_owner_quiet(&mut team);
+    assert_eq!(
+        masters(&fixture.connection),
+        [first],
+        "the Codex master is not stopped under the owner's unsent line"
+    );
+    assert_eq!(live_agent(&fixture.connection), Some(first));
+    assert_eq!(fixture.status().live_switch, None);
+
+    super::super::master::owner_typed(&fixture.connection, first, b"\x15", now_ms()).unwrap();
+    let note = crate::master_sessions::switched_note("Claude Code", crate::team::SwitchMode::Carry);
+    fixture.until(
+        &mut team,
+        "the owner clears the line and the Codex master hands over to Claude Code",
+        |f| {
+            let all = masters(&f.connection);
+            noted(f, &note) == 1 && all.len() == 2 && live_agent(&f.connection) == Some(all[1])
+        },
+    );
+}
+
 /// The `developer_instructions` a Codex master's own `config.toml` holds. Takes the fixture
 /// and the master. Returns the text.
 #[cfg(target_os = "macos")]
