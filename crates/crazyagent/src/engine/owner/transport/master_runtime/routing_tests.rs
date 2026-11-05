@@ -2542,6 +2542,8 @@ async fn console_claude_master(
             worktree_lease: prepared.worktree_lease.clone(),
         },
         reported: Tokens::default(),
+        access: crate::sandbox::policy::AgentAccess::Sandboxed,
+        toolchains: Vec::new(),
     };
     (fixture, active, record, mailbox)
 }
