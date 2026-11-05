@@ -96,6 +96,8 @@ const CONTEXT_MODE_TOOLS: [&str; 5] = [
 /// The most bytes of the section that tells a tools-on launch when to use context-mode,
 /// graphify and its skills.
 pub const TOOL_USE_BYTES_MAX: usize = 2 * 1024;
+/// The most bytes of the Task-start reminder the first turn of a task carries (T3-15).
+pub const TASK_START_BYTES_MAX: usize = 1024;
 const TEAMMATE_COMMAND: &str = "teammate";
 const TEAMMATE_INSTRUCTIONS: &str = "teammate.md";
 const MATES_HOME: &str = "mates-home";
@@ -520,6 +522,14 @@ impl AgentContext {
     /// Returns the approved skills and MCP servers given to agents whose tools are on.
     pub fn plugins(&self) -> &LaunchPlugins {
         &self.plugins
+    }
+
+    /// Builds the Task-start reminder the first turn of each task carries while the setting
+    /// is On (T3-15). Inputs: the harness id and the launch's tools switch. Output: at most
+    /// `TASK_START_BYTES_MAX` bytes, or None.
+    pub fn task_start(&self, harness: &str, tools: bool) -> Option<String> {
+        let _ = (harness, tools);
+        None
     }
 
     /// Keeps only the approved skills the owner chose for one team role (DEC-111 R3); a

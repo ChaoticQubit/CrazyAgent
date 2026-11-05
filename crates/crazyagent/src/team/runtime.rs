@@ -3473,6 +3473,7 @@ impl TeamRuntime {
                             request,
                             out,
                             now_ms(),
+                            &mut crate::coord::relay::TaskStarts::default(),
                         );
                     },
                 );

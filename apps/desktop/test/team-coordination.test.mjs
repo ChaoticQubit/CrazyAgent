@@ -103,3 +103,20 @@ test("Claude Code's row offers both terminal displays with Classic as the defaul
     assert.doesNotMatch(markup.slice(markup.indexOf('aria-label="Codex"')), /terminal display/, "only Claude Code has the display");
   }
 });
+
+test("the Task-start reminder row follows Workflow nudges with On as the default and both options (T3-15)", () => {
+  assert.equal(coord.COORD_DEFAULTS.task_start, "on");
+  for (const [option, checked] of [["on", "On"], ["off", "Off"]]) {
+    const status = { project_id: "p", coordination: { settings: { ...coord.COORD_DEFAULTS, task_start: option }, harnesses: [] } };
+    const markup = renderToStaticMarkup(createElement(coord.CoordinationControls, { projectId: "p", status, reload: forbidden }));
+    const nudges = markup.indexOf('aria-label="Workflow nudges"');
+    const reminder = markup.indexOf('aria-label="Task-start reminder"');
+    const counted = markup.indexOf('aria-label="Counted tools"');
+    assert.ok(nudges >= 0 && nudges < reminder && reminder < counted, `the reminder row sits between Workflow nudges and Counted tools: ${option}`);
+    const row = markup.slice(reminder, counted);
+    assert.deepEqual([...row.matchAll(/role="radio" aria-checked="(true|false)"[^>]*>([^<]+)</gu)].map((match) => [match[2], match[1]]),
+      [["On", String(checked === "On")], ["Off", String(checked === "Off")]], option);
+    assert.match(row, /ToolSearch/, option);
+    assert.match(row, /first turn of each task/, option);
+  }
+});

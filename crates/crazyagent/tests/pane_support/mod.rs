@@ -281,6 +281,7 @@ fn relay(engine: &Path, pane: &str, request: &[u8], out: &mut dyn Write) {
         request,
         out,
         now,
+        &mut crazyagent::coord::relay::TaskStarts::default(),
     )
     .unwrap();
 }

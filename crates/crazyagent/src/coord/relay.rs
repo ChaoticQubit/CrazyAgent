@@ -453,6 +453,14 @@ impl Request {
     }
 }
 
+/// The Task-start reminder of one native lead's teammates (T3-15): the lead's text, none
+/// when its launch names nothing, and the teammates given it since they last rested.
+#[derive(Debug, Default)]
+pub struct TaskStarts {
+    pub text: Option<String>,
+    pub reminded: BTreeSet<AgentId>,
+}
+
 /// Answers one relay request a native teammate's hook or monitor sent on its lead's caller
 /// socket (relay over the caller socket, OQ-7 B). It acts for the live teammate the
 /// engine's rows put in `pane`, the pane the socket found the connecting process in, never
@@ -460,8 +468,9 @@ impl Request {
 /// The answer is `ok` and its payload, written at once; letters and the first-edit reminder
 /// are marked Delivered only once written whole. A pane no live teammate of the lead holds,
 /// a malformed request and a failure get `no`. Inputs: the database, the project, the lead,
-/// the pane, the request, the connection and the time in ms. Output: Ok, or the SQLite
-/// failure after answering no.
+/// the pane, the request, the connection, the time in ms and the lead's Task-start
+/// reminder. Output: Ok, or the SQLite failure after answering no.
+#[allow(clippy::too_many_arguments)]
 pub fn answer(
     db: &Connection,
     project: &ProjectId,
@@ -470,7 +479,9 @@ pub fn answer(
     request: &[u8],
     out: &mut dyn Write,
     now: i64,
+    starts: &mut TaskStarts,
 ) -> Result<(), EngineError> {
+    let _ = starts;
     let reply = match reply(db, project, lead, pane, request, now) {
         Ok(reply) => reply,
         Err(problem) => {
