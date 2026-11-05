@@ -942,6 +942,137 @@ async fn team_plan_writes_refuse_harnesses_that_cannot_run_team_agents_but_saved
 }
 
 #[tokio::test]
+async fn team_plans_take_a_master_only_harness_as_the_master_but_never_as_a_team_agent() {
+    let engine = Engine::start().await;
+    let mut owner = engine.owner().await;
+    let rcli_master = TeamPlan {
+        master: "rcli".into(),
+        master_tools: true,
+        sub_harnesses: vec![],
+        min_agents: 1,
+        max_agents: 1,
+    };
+    let rcli_row = HarnessSlot {
+        harness: "rcli".into(),
+        agents: 1,
+        tools: true,
+    };
+    let project = ProjectId::new("setup-pooled").unwrap();
+    let created = owner
+        .setup_project(
+            project.clone(),
+            spec("Meal planner"),
+            ProjectSetup {
+                team: Some(rcli_master.clone()),
+                ..pooled_setup(vec![])
+            },
+            1,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result(created),
+        OwnerResult::Applied,
+        "a new project takes RCLI as its master"
+    );
+    let saved = owner.project_setup(project.clone()).await.unwrap().unwrap();
+    assert_eq!(saved.team.master, "rcli");
+    let status = owner.team_status(project.clone()).await.unwrap();
+    assert_eq!(
+        (
+            status.harnesses[0].harness.as_str(),
+            status.harnesses[0].runnable
+        ),
+        ("rcli", true),
+        "the team lists its RCLI master as one that runs"
+    );
+    let with_rcli_row = TeamPlan {
+        sub_harnesses: vec![rcli_row.clone()],
+        max_agents: 2,
+        ..rcli_master.clone()
+    };
+    let refused = owner
+        .update_project_setup(
+            project.clone(),
+            saved.revision,
+            None,
+            ProjectSetup {
+                team: Some(with_rcli_row),
+                ..pooled_setup(vec![])
+            },
+            2,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result(refused),
+        rejected("team_harness_unavailable"),
+        "a saved RCLI master does not let RCLI in as a team agent"
+    );
+    let codex_master = TeamPlan {
+        master: "codex".into(),
+        ..rcli_master.clone()
+    };
+    let switched = owner
+        .update_project_setup(
+            project.clone(),
+            saved.revision,
+            None,
+            ProjectSetup {
+                team: Some(codex_master),
+                ..pooled_setup(vec![])
+            },
+            3,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(switched), OwnerResult::Applied);
+    let back = owner
+        .update_project_setup(
+            project.clone(),
+            saved.revision + 1,
+            None,
+            ProjectSetup {
+                team: Some(rcli_master.clone()),
+                ..pooled_setup(vec![])
+            },
+            4,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        result(back),
+        OwnerResult::Applied,
+        "Settings switches the master to RCLI"
+    );
+    let other = ProjectId::new("setup-rcli-row").unwrap();
+    let row_refused = owner
+        .setup_project(
+            other,
+            spec("Recipe box"),
+            ProjectSetup {
+                team: Some(TeamPlan {
+                    master: "codex".into(),
+                    sub_harnesses: vec![rcli_row],
+                    max_agents: 2,
+                    ..rcli_master
+                }),
+                ..pooled_setup(vec![])
+            },
+            5,
+        )
+        .await
+        .unwrap();
+    assert_eq!(result(row_refused), rejected("team_harness_unavailable"));
+    assert_eq!(
+        engine.rows("SELECT count(*) FROM projects WHERE id='setup-rcli-row'"),
+        0
+    );
+    drop(owner);
+    engine.stop().await;
+}
+
+#[tokio::test]
 async fn owner_stops_and_retries_research_and_reads_its_plain_log() {
     let engine = Engine::start().await;
     let mut owner = engine.owner().await;

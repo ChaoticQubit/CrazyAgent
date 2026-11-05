@@ -141,6 +141,10 @@ test("every usage refusal and failed limit check reads as its own sentence", () 
   const failures = new Set([...poll.matchAll(/"(usage_[a-z_]+)"/g)].map((match) => match[1]).filter((code) => code !== "usage_unavailable"));
   assert.ok(failures.size >= 7, `poll failure codes: ${failures.size}`);
   for (const code of failures) assert.ok(client.USAGE_POLL_FAILURES.includes(code), `${code} has its own sentence`);
+  const copy = readFileSync(new URL("../../../crates/crazyagent/src/engine/bootstrap/native_profiles/agent_copy.rs", import.meta.url), "utf8");
+  const codex = new Set([...copy.matchAll(/"(native_profile_codex_[a-z_]+)"/g)].map((match) => match[1]));
+  assert.equal(codex.size, 3, `Codex credential codes: ${[...codex]}`);
+  for (const code of codex) assert.ok(client.USAGE_POLL_FAILURES.includes(code), `${code} has its own sentence`);
   for (const line of [...client.USAGE_REFUSALS.map((code) => client.usageRefusal({ code })), ...client.USAGE_POLL_FAILURES.map(client.pollFailure)]) {
     assert.match(line, /^[A-Z].*\.$/);
     assert.doesNotMatch(line, /_/, line);
@@ -160,6 +164,28 @@ test("a reading with a home cut at the scan bound says it is partial", () => {
   assert.doesNotMatch(text(render()), /may be missing/);
   const cut = text(render({ report: { kind: "ok", value: report({ partial_homes: 2 }) } }));
   assert.match(cut, /Some usage may be missing: 2 agent homes hold more records than one scan reads/);
+});
+
+test("a sign-in the limits check cannot use says on the card what it is and what to do, never the fallback", () => {
+  const sentences = {
+    native_profile_codex_api_key: "An API-key account has no 5-hour or weekly window.",
+    native_profile_codex_token_unreadable: "CrazyAgent can't read this Codex sign-in. Sign in to Codex again in Accounts.",
+    native_profile_codex_sign_in_expired: "This Codex sign-in expired and CrazyAgent couldn't renew it. Sign in to Codex again in Accounts.",
+    native_profile_credential_unavailable: "CrazyAgent can't read this account's sign-in. Sign in again in Accounts.",
+    native_profile_renewal_failed: "CrazyAgent couldn't renew this account's sign-in. It tries again in 10 minutes.",
+    native_profile_renewal_busy: "Another check of this account's sign-in is running. CrazyAgent tries again in 10 minutes.",
+    native_profile_sign_in_revoked: "The provider ended this sign-in. Sign in again in Accounts.",
+  };
+  for (const [code, sentence] of Object.entries(sentences)) {
+    assert.equal(client.pollFailure(code), sentence, code);
+    const unread = { plan: null, five_hour: null, weekly: null, source: null, observed_ms: null, failure: code };
+    const markup = render({ report: { kind: "ok", value: report({ limits: [limits(unread)] }) } });
+    const words = text(markup);
+    assert.ok(words.includes(sentence), `${code}: ${words}`);
+    assert.doesNotMatch(words, /Something went wrong|native_profile/, code);
+    const tone = code === "native_profile_codex_api_key" ? "notice info" : "notice";
+    assert.match(markup, new RegExp(`<div class="${tone}"[^>]*>(?:(?!</div>).)*${sentence.slice(0, 10)}`), code);
+  }
 });
 
 test("the usage page shows totals, limits with countdowns, named groups and lines changed", () => {

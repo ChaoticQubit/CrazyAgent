@@ -1,3 +1,4 @@
+import "../load-source.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { TRIAL3_STEPS } from "./trial3-steps.mjs";
@@ -29,6 +30,17 @@ test("every account showing its 5-hour and weekly use, meter and reset passes an
   assert.throws(() => limitsVerdict([card({ reset: "Next reset not known yet" })]), /account 1 of 1 5-hour: shows "Next reset not known yet", not when it resets/);
   assert.throws(() => limitsVerdict([card({ meter: false })]), /account 1 of 1 5-hour: shows no use meter/);
   assert.throws(() => limitsVerdict([{ windows: [window("Weekly")] }]), /account 1 of 1 shows the windows \["Weekly"\], not 5-hour and Weekly/);
+});
+
+test("an API-key account's card is a valid reading, while an unreadable sign-in or only API-key accounts are not", async () => {
+  const client = await import("../../src/api-usage.ts");
+  const unread = { used: "Not reported", meter: false, reset: "The provider hasn't reported this window." };
+  const keyed = { notice: client.pollFailure("native_profile_codex_api_key"), ...card(unread, unread) };
+  assert.equal(limitsVerdict([card(), keyed, card()]),
+    "2 accounts each show their 5-hour and weekly use and reset time; 1 API-key accounts have no 5-hour or weekly window");
+  assert.throws(() => limitsVerdict([card(), { ...keyed, notice: client.pollFailure("native_profile_codex_token_unreadable") }]),
+    /account 2 of 2 5-hour: shows "Not reported", not how much is used/);
+  assert.throws(() => limitsVerdict([keyed]), /not exercised: every one of the 1 accounts is an API-key account/);
 });
 
 test("a Use it or lose it pool passes when the soonest weekly reset is tried first and fails when a sooner one waits", () => {

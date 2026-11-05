@@ -40,6 +40,10 @@ mod queue;
 mod scheduling;
 mod team;
 pub mod terminal;
+/// The one-shot folder pick a WebDriver trial answers for the app's folder chooser (N-D6).
+/// Compiled only into native-webdriver builds, so the shipped app has no such seam.
+#[cfg(all(unix, feature = "native-webdriver"))]
+pub mod trial_pick;
 mod usage;
 pub use account_profile::{AccountProfileView, ConfiguredAccountPlan};
 pub use account_setup::ManagedAccountPlan;

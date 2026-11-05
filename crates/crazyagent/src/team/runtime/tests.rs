@@ -17254,7 +17254,7 @@ fn a_native_teammate_cannot_read_or_plant_in_its_lead_s_own_temp_folder() {
         "the temp folder's file system tells case apart, so the upper-case probe proves nothing"
     );
 
-    let tried = work.join("tried.txt");
+    let tried = shared.join("tried.txt");
     let mate = work.join("mate.sh");
     std::fs::write(
         &mate,

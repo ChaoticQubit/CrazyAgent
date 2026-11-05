@@ -277,23 +277,27 @@ impl TeamPlan {
         Ok(())
     }
 
-    /// Refuses a plan the owner writes when it adds a harness that cannot run team agents.
-    /// Takes the written plan and the saved plan it replaces; a harness the saved plan already
-    /// names is kept, so an old plan still saves unchanged. Returns `team_harness_unavailable`.
+    /// Refuses a plan the owner writes when its master cannot run the project master or an
+    /// agent row cannot run team agents. Takes the written plan and the saved plan it
+    /// replaces; the saved master and saved rows are kept in their own place, so an old plan
+    /// still saves unchanged but a master-only harness never becomes an agent row. Returns
+    /// `team_harness_unavailable`.
     fn check_writable(&self, saved: Option<&TeamPlan>) -> Result<(), &'static str> {
-        let added = self.harnesses().any(|id| {
-            crate::team::launch_harness(id).is_none()
-                && !saved.is_some_and(|saved| saved.harnesses().any(|known| known == id))
+        let master = crate::team::master_backend(&self.master).is_some()
+            || saved.is_some_and(|saved| saved.master == self.master);
+        let rows = self.sub_harnesses.iter().all(|slot| {
+            crate::team::launch_harness(&slot.harness).is_some()
+                || saved.is_some_and(|saved| {
+                    saved
+                        .sub_harnesses
+                        .iter()
+                        .any(|known| known.harness == slot.harness)
+                })
         });
-        if added {
+        if !(master && rows) {
             return Err("team_harness_unavailable");
         }
         Ok(())
-    }
-
-    fn harnesses(&self) -> impl Iterator<Item = &str> {
-        std::iter::once(self.master.as_str())
-            .chain(self.sub_harnesses.iter().map(|slot| slot.harness.as_str()))
     }
 
     /// Counts the master and every sub-harness agent.

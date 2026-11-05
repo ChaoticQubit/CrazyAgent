@@ -26,9 +26,10 @@ async function accountNames() {
   throw new Error(`there are more than ${PAGES_MAX * 200} accounts to name`);
 }
 
-/** The limit cards Settings, Usage shows, in screen order. Output: [{ windows }]. */
+/** The limit cards Settings, Usage shows, in screen order. Output: [{ notice, windows }]. */
 function limitCards() {
   return browser.execute(() => [...document.querySelectorAll("section.usage-limits")].map((card) => ({
+    notice: card.querySelector(".notice")?.innerText.trim() ?? "",
     windows: [...card.querySelectorAll(".usage-window")].map((window) => ({
       label: window.querySelector(".usage-window-head strong")?.innerText.trim() ?? "",
       used: window.querySelector(".usage-window-head span")?.innerText.trim() ?? "",

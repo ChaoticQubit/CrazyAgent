@@ -52,6 +52,18 @@ const AGENT_CLAUDE_FORBIDDEN_SCOPE_PREFIX: &str = "org:";
 /// the harness at all, so a record missing it, or with no scopes, is not a usable sign-in.
 const AGENT_CLAUDE_REQUIRED_SCOPE: &str = "user:inference";
 
+fn codex_api_key() -> EngineError {
+    failure("native_profile_codex_api_key")
+}
+
+fn codex_unreadable() -> EngineError {
+    failure("native_profile_codex_token_unreadable")
+}
+
+fn codex_expired() -> EngineError {
+    failure("native_profile_codex_sign_in_expired")
+}
+
 /// The harness whose credential record a managed account keeps.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Harness {
@@ -147,8 +159,9 @@ impl NativeProfileUse {
     /// refusal, when the token still lapses within a minute after a renewal that ended
     /// without a fresh token (no network, a timeout); `native_profile_sign_in_revoked` when
     /// Claude Code ended the sign-in after its provider refused a refresh;
-    /// `native_profile_credential_unavailable`, `native_profile_renewal_busy` or
-    /// `native_profile_agent_home_unsafe`.
+    /// `native_profile_codex_api_key` or `native_profile_codex_token_unreadable` for a
+    /// Codex record without usable ChatGPT tokens; `native_profile_credential_unavailable`,
+    /// `native_profile_renewal_busy` or `native_profile_agent_home_unsafe`.
     pub(crate) fn hand_to_agent(
         &self,
         agent_home: &Path,
@@ -201,8 +214,10 @@ impl NativeProfileUse {
     /// first renewing it through the harness when it lapses within a minute, as an agent
     /// handoff does. The token is read from the same refresh-free copy an agent gets and
     /// never leaves the returned value. Input: the harness executable. Output: the token,
-    /// the ChatGPT account id Codex sends with it and the plan Claude Code recorded;
-    /// `native_profile_renewal_failed` or the unavailable refusal.
+    /// the ChatGPT account id Codex sends with it and the plan Claude Code recorded; for a
+    /// token that still lapses after its renewal, `native_profile_codex_sign_in_expired`
+    /// for Codex and `native_profile_renewal_failed` for Claude Code; the Codex record's own
+    /// refusals, or the unavailable refusal.
     pub(crate) fn usage_credential(
         &self,
         executable: &Path,
@@ -225,7 +240,10 @@ impl NativeProfileUse {
             record = off_worker(|| renewal.renew(record.expires))?;
             if record.expires <= since_epoch()? + USABLE_MIN {
                 record.copy.fill(0);
-                return Err(renewal_failed());
+                return Err(match harness {
+                    Harness::Codex => codex_expired(),
+                    Harness::Claude => renewal_failed(),
+                });
             }
         }
         let credential = poll_credential(harness, &record.copy);
@@ -337,19 +355,31 @@ pub(super) fn place(home: &File, name: &str, bytes: &[u8]) -> Result<(), EngineE
 /// Builds the agent's Codex `auth.json` from the account's: the ChatGPT tokens with the
 /// refresh token emptied, no API key, and the id token's signature dropped so the agent
 /// reads its claims but cannot exchange it for a durable API key. Input: the account's
-/// record. Output: the copy with its access token's expiry, or the unavailable refusal.
+/// record. Output: the copy with its access token's expiry; `native_profile_codex_api_key`
+/// for an API-key sign-in without ChatGPT tokens, `native_profile_codex_token_unreadable`
+/// for a malformed record or token, or the unavailable refusal.
 fn codex_copy(record: &[u8]) -> Result<Record, EngineError> {
-    let record: Value = serde_json::from_slice(record).map_err(|_| unavailable())?;
+    let record: Value = serde_json::from_slice(record).map_err(|_| codex_unreadable())?;
     let tokens = record
         .get("tokens")
         .and_then(Value::as_object)
-        .ok_or_else(unavailable)?;
+        .ok_or_else(|| {
+            let keyed = record
+                .get("OPENAI_API_KEY")
+                .and_then(Value::as_str)
+                .is_some_and(|key| !key.is_empty());
+            if keyed {
+                codex_api_key()
+            } else {
+                codex_unreadable()
+            }
+        })?;
     let text = |key: &str| {
         tokens
             .get(key)
             .and_then(Value::as_str)
             .filter(|value| !value.is_empty())
-            .ok_or_else(unavailable)
+            .ok_or_else(codex_unreadable)
     };
     let access = text("access_token")?;
     let identity = claims_only(text("id_token")?)?;
@@ -379,8 +409,8 @@ const AGENT_ID_TOKEN_SIGNATURE: &str = "unexchangeable";
 /// credential. A compact JWS is three non-empty dot-separated parts; this returns the
 /// header and payload unchanged with [`AGENT_ID_TOKEN_SIGNATURE`] in place of the real
 /// signature, so a parser that rejects an empty part still loads it. Input: the account's
-/// id token. Output: the claims-only token, or the unavailable refusal when the input is
-/// not a three-part JWT.
+/// id token. Output: the claims-only token, or `native_profile_codex_token_unreadable`
+/// when the input is not a three-part JWT.
 fn claims_only(token: &str) -> Result<String, EngineError> {
     let mut parts = token.split('.');
     let header = parts.next().filter(|part| !part.is_empty());
@@ -388,7 +418,7 @@ fn claims_only(token: &str) -> Result<String, EngineError> {
     let signature = parts.next().filter(|part| !part.is_empty());
     let (header, payload) = match (header, payload, signature, parts.next()) {
         (Some(header), Some(payload), Some(_), None) => (header, payload),
-        _ => return Err(unavailable()),
+        _ => return Err(codex_unreadable()),
     };
     let stripped = format!("{header}.{payload}.{AGENT_ID_TOKEN_SIGNATURE}");
     assert!(stripped.matches('.').count() == 2 && !stripped.ends_with('.'));
@@ -397,7 +427,9 @@ fn claims_only(token: &str) -> Result<String, EngineError> {
 
 /// Takes what a usage poll sends from an agent's copy of the account's credential: the
 /// access token, the ChatGPT account id for Codex, and the plan for Claude Code.
-/// Inputs: the harness and the copy. Output: the poll credential, or unavailable.
+/// Inputs: the harness and the copy. Output: the poll credential;
+/// `native_profile_codex_token_unreadable` for a Codex copy without an access token, or
+/// unavailable.
 fn poll_credential(
     harness: Harness,
     copy: &[u8],
@@ -423,7 +455,10 @@ fn poll_credential(
     };
     let token = token
         .filter(|token| !token.is_empty())
-        .ok_or_else(unavailable)?;
+        .ok_or_else(|| match harness {
+            Harness::Codex => codex_unreadable(),
+            Harness::Claude => unavailable(),
+        })?;
     Ok(crate::usage::poll::PollCredential {
         token: crate::credentials::SecretString::new(token.as_bytes().to_vec())
             .map_err(|_| unavailable())?,
@@ -434,16 +469,16 @@ fn poll_credential(
 
 /// Reads the `exp` claim of a ChatGPT access token without checking its signature, which
 /// the engine cannot and need not do for a token Codex itself wrote. Input: the token.
-/// Output: the expiry in seconds since the epoch, or unavailable.
+/// Output: the expiry in seconds since the epoch, or `native_profile_codex_token_unreadable`.
 fn token_expiry(token: &str) -> Result<u64, EngineError> {
-    let claims = token.split('.').nth(1).ok_or_else(unavailable)?;
+    let claims = token.split('.').nth(1).ok_or_else(codex_unreadable)?;
     let claims = base64::engine::general_purpose::URL_SAFE_NO_PAD
         .decode(claims.trim_end_matches('='))
-        .map_err(|_| unavailable())?;
+        .map_err(|_| codex_unreadable())?;
     serde_json::from_slice::<Value>(&claims)
         .ok()
         .and_then(|claims| claims.get("exp").and_then(Value::as_u64))
-        .ok_or_else(unavailable)
+        .ok_or_else(codex_unreadable)
 }
 
 /// Builds the agent's Claude Code `.credentials.json`: only the fields Claude Code reads

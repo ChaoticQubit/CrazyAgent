@@ -557,6 +557,73 @@ fn harnesses_that_cannot_run_team_agents_are_listed_but_not_picked() {
 }
 
 #[test]
+fn a_master_only_harness_is_picked_for_the_master_but_never_for_agents() {
+    use std::os::unix::fs::PermissionsExt;
+    let bin = tempfile::Builder::new()
+        .prefix("ca-tui-master-only-")
+        .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+        .unwrap();
+    for name in ["codex", "crazyagent-rcli"] {
+        let path = bin.path().join(name);
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let entries = crate::harnesses::catalog(&crate::harnesses::Search::new(
+        vec![bin.path().to_path_buf()],
+        None,
+        Vec::new(),
+    ));
+    let choices = super::new_project_page::harness_choices_from(&entries);
+    let at = |id: &str| choices.iter().position(|choice| choice.id == id).unwrap();
+    let mut wizard = wizard();
+    wizard.research = vec![ResearchKind::MarketResearch];
+    load_catalog(&mut wizard, &["c-codex"]);
+    wizard.go(Step::Team);
+    wizard.set_harnesses(choices.clone());
+    let rows = wizard.team.as_ref().unwrap().sub_harnesses.len();
+    assert_eq!(wizard.team.as_ref().unwrap().master, "codex");
+    assert!(rows >= 1, "the default team has an agent row");
+    wizard.key(key(KeyCode::Enter));
+    for _ in 0..at("rcli") {
+        wizard.key(key(KeyCode::Down));
+    }
+    wizard.key(key(KeyCode::Enter));
+    assert_eq!(wizard.picker, None, "RCLI is picked for the master");
+    assert_eq!(wizard.team.as_ref().unwrap().master, "rcli");
+    assert!(
+        wizard.check_team().is_ok(),
+        "{:?}",
+        wizard.check_team().err()
+    );
+    for _ in 0..=rows {
+        wizard.key(key(KeyCode::Down));
+    }
+    assert_eq!(wizard.team_row, rows + 1);
+    wizard.key(key(KeyCode::Enter));
+    assert_eq!(
+        wizard.picker,
+        Some(Picker {
+            target: PickFor::NewSlot,
+            cursor: 0
+        })
+    );
+    for _ in 0..at("rcli") {
+        wizard.key(key(KeyCode::Down));
+    }
+    wizard.key(key(KeyCode::Enter));
+    assert!(
+        wizard.picker.is_some(),
+        "RCLI is listed for agents but not picked"
+    );
+    assert_eq!(wizard.team.as_ref().unwrap().sub_harnesses.len(), rows);
+    wizard.team.as_mut().unwrap().sub_harnesses[0].harness = "rcli".into();
+    assert_eq!(
+        wizard.check_team().unwrap_err().text,
+        "RCLI runs only as the master. Pick another harness."
+    );
+}
+
+#[test]
 fn the_default_team_moves_off_harnesses_that_are_not_installed() {
     let mut fresh = wizard();
     fresh.research = vec![

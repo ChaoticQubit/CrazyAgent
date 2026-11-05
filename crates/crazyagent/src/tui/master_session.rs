@@ -2529,20 +2529,32 @@ fn default_master_budget(capacities: &[ResourceBudget; 3]) -> ResourceBudget {
 
 /// Builds the master Open action the TUI submits with its default choices for a project.
 /// Inputs: a connected owner controller and the project. Output: an Open action using the
-/// first assigned, approved project_leader pool (RCLI, then Codex, then Claude), its first
-/// account as the one tried first (the engine runs each turn on a ready account of that
-/// pool), the first allowed sandbox and the unit allowance; or a plain-language reason.
+/// first assigned, approved project_leader pool for the team plan's master harness, else for
+/// RCLI, then Codex, then Claude; its first account as the one tried first (the engine runs
+/// each turn on a ready account of that pool), the first allowed sandbox and the unit
+/// allowance; or a plain-language reason.
 pub async fn default_master_open(
     controller: &mut OwnerController,
     project_id: &ProjectId,
 ) -> Result<MasterOwnerAction, String> {
     let catalog = read_catalog(controller).await?;
     let budget = default_master_budget(&catalog.capacities);
-    for backend in [
+    let planned = controller
+        .project_setup(project_id.clone())
+        .await
+        .map_err(|_| "The project's team plan could not be read".to_owned())?
+        .and_then(|setup| crate::team::master_backend(&setup.team.master));
+    let order = [
         MasterBackend::Rcli,
         MasterBackend::Codex,
         MasterBackend::Claude,
-    ] {
+    ];
+    let backends = planned.into_iter().chain(
+        order
+            .into_iter()
+            .filter(|backend| Some(*backend) != planned),
+    );
+    for backend in backends {
         let mut form = Form {
             database: None,
             project: project_id.clone(),

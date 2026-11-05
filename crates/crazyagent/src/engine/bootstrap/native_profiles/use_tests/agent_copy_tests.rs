@@ -361,23 +361,83 @@ fn a_missing_or_unusable_codex_record_is_refused() {
         "native_profile_credential_unavailable"
     );
     drop(guard);
-    for record in [
-        b"not json".to_vec(),
-        json!({"OPENAI_API_KEY": "sk-unit-api-key"})
-            .to_string()
-            .into_bytes(),
-        json!({"tokens": {"id_token": "a", "access_token": "no-claims", "refresh_token": "r"}})
-            .to_string()
-            .into_bytes(),
+    let unreadable = "native_profile_codex_token_unreadable";
+    let api_key = "native_profile_codex_api_key";
+    let bytes = |record: Value| record.to_string().into_bytes();
+    for (record, code) in [
+        (b"not json".to_vec(), unreadable),
+        (bytes(json!({"OPENAI_API_KEY": "sk-unit-api-key"})), api_key),
+        (
+            bytes(json!({"OPENAI_API_KEY": "sk-unit-api-key", "tokens": null})),
+            api_key,
+        ),
+        (
+            bytes(json!({"OPENAI_API_KEY": "", "tokens": null})),
+            unreadable,
+        ),
+        (bytes(json!({"OPENAI_API_KEY": null})), unreadable),
+        (
+            bytes(
+                json!({"tokens": {"id_token": "a", "access_token": "no-claims", "refresh_token": "r"}}),
+            ),
+            unreadable,
+        ),
+        (
+            bytes(json!({"tokens": {"access_token": token(now() + 3600), "refresh_token": "r"}})),
+            unreadable,
+        ),
+        (
+            bytes(
+                json!({"tokens": {"id_token": token(now() + 3600), "access_token": "", "refresh_token": "r"}}),
+            ),
+            unreadable,
+        ),
     ] {
         private_file(&source, &record);
         let guard = execution(&mut case);
         assert_eq!(
             refused(guard.hand_to_agent(&agent, TURN, &no_harness(&case))),
-            "native_profile_credential_unavailable"
+            code
         );
+        assert_eq!(usage_refused(&guard, &no_harness(&case)), code);
         assert!(entries(&agent).is_empty());
     }
+}
+
+/// The refusal of a usage read of this account. Inputs: the held account and the harness.
+/// Output: the refusal code; panics when a credential was read.
+fn usage_refused(guard: &NativeProfileUse, executable: &Path) -> String {
+    match guard.usage_credential(executable) {
+        Ok(_) => panic!("the usage read got a credential"),
+        Err(problem) => problem.0,
+    }
+}
+
+#[test]
+fn a_codex_usage_read_whose_lapsed_token_the_renewal_cannot_refresh_says_the_sign_in_expired() {
+    let mut case = UseCase::new();
+    let harness = case.root.path().join("offline-codex");
+    std::fs::write(&harness, "#!/bin/sh\n: > \"$0.ran\"\nexit 1\n").unwrap();
+    std::fs::set_permissions(&harness, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let source = case.home().join("auth.json");
+    private_file(&source, &codex_auth(now() + 3600));
+    let guard = execution(&mut case);
+    let read = guard.usage_credential(&harness).unwrap();
+    assert_eq!(read.account_id.as_deref(), Some("acct-unit"));
+    assert!(!case.root.path().join("offline-codex.ran").exists());
+    drop((read, guard));
+    let lapsing = codex_auth(now() + 30);
+    private_file(&source, &lapsing);
+    let guard = execution(&mut case);
+    assert_eq!(
+        usage_refused(&guard, &harness),
+        "native_profile_codex_sign_in_expired"
+    );
+    assert!(
+        case.root.path().join("offline-codex.ran").is_file(),
+        "the renewal never ran before the refusal"
+    );
+    assert_eq!(std::fs::read(&source).unwrap(), lapsing);
 }
 
 #[test]

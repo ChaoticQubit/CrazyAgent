@@ -355,6 +355,19 @@ pub fn launch_harness(harness: &str) -> Option<&'static str> {
         .filter(|id| matches!(*id, "codex" | "claude-code"))
 }
 
+/// Maps a team plan master harness to the backend that runs the project's master on it.
+/// Takes the harness identifier or a connection name for it. Returns Codex, Claude or
+/// RCLI, the only harnesses a master runs on, or none for any other harness.
+pub fn master_backend(harness: &str) -> Option<crate::master_session::MasterBackend> {
+    use crate::master_session::MasterBackend;
+    match crate::harnesses::spec(harness)?.id {
+        "codex" => Some(MasterBackend::Codex),
+        "claude-code" => Some(MasterBackend::Claude),
+        "rcli" => Some(MasterBackend::Rcli),
+        _ => None,
+    }
+}
+
 /// Records how a master on this harness asks for sub-agents.
 /// Takes the team plan harness identifier and the master's tools switch.
 /// Returns the tool path with tools on, the reply path with tools off, unavailable when it cannot launch.
@@ -4037,7 +4050,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         live: live(AgentRole::Master, &plan.master),
         delegation: Some(master_path),
         delegation_label: Some(master_path.label().into()),
-        runnable: launch_harness(&plan.master).is_some(),
+        runnable: master_backend(&plan.master).is_some(),
     }];
     let slots = if plan.sub_harnesses.is_empty() {
         let subs_max = plan.max_agents.saturating_sub(1);
