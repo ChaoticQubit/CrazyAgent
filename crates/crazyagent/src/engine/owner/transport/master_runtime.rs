@@ -827,6 +827,11 @@ impl OwnerRuntimeHandle {
         eprintln!("master usage not counted: {problem}");
     }
 
+    /// Collects a running console master turn to its end: the host's events up to the
+    /// reply, with the turn inspected for cancellation and its memory calls served one
+    /// INSPECT_INTERVAL after the last inspection ended, so a slow inspection never leaves
+    /// the host's events and deadline unread (OP-22 r1). Inputs: the prepared turn, its id,
+    /// the active host and the turn's mailbox. Output: the observation, or an engine error.
     async fn collect_master_turn(
         &self,
         prepared: &PreparedMasterTurn,
@@ -899,6 +904,7 @@ impl OwnerRuntimeHandle {
                     {
                         eprintln!("{}", super::master_memory_diagnostic(&error));
                     }
+                    inspect.reset();
                     continue;
                 }
                 event = active.host.next_event() => event?,
