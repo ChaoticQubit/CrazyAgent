@@ -144,6 +144,7 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                         SetupQuery::HiddenPaths { .. } => "hidden paths",
                         SetupQuery::AgentPolicy { .. } => "agent policy",
                         SetupQuery::CoordQuestions { .. } => "coord questions",
+                        SetupQuery::OpenLiveSession { .. } => "live session open",
                     });
                     connection.project_setup(query).unwrap();
                 }

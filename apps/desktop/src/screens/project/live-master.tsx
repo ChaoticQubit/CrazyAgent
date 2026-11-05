@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { loadTeamGraph, nextGeneration, setLiveMaster, setTeamStopped } from "../../api";
 import type { Result } from "../../api";
 import { failureCopy, openMasterProject, readMaster, receiptState, startMaster } from "../../api-projects";
-import type { GraphNode, MasterState, TeamStatus } from "../../engine-client";
+import type { GraphNode, IntentReceipt, MasterState, TeamStatus } from "../../engine-client";
 import { Button, Icon } from "../../ui";
 import { displayText } from "../conversation";
 import { harnessName } from "../new-project/team-editor";
@@ -46,6 +46,7 @@ const NO_TERMINAL = "team_master_no_terminal";
 const STOPPED = "The live master is stopped. It starts again when you open this tab or start a new session.";
 const PAUSED = "The team is stopped (Stop all). Start the team to run the master.";
 const WAITING = "Waiting for the master's terminal. It opens once the master signs in and starts.";
+const NO_SESSION = "No master session opened, so this conversation won't be in Sessions.";
 
 /** Whether the latest good team read of this project says the team is stopped (Stop all),
  * when the engine runs none of its agents and the live master cannot start. Inputs: the team
@@ -84,6 +85,28 @@ export function openBeforeLive(state: Result<MasterState>): boolean {
   return phase === undefined || phase === "parked" || phase === "closed";
 }
 
+/** Why the owner's default Open sent before the live switch opened no session, so the area
+ * names it while the live master still starts (LMS-M1). Input: the Open's result. Output:
+ * the plain copy for a refused or failed Open; null when it applied, is still unconfirmed,
+ * or the build has no Open, which the switch itself then shows. */
+export function openProblem(opened: Result<IntentReceipt>): string | null {
+  if (opened.kind === "not_ready") return null;
+  if (opened.kind !== "ok") return failureCopy(opened);
+  const state = receiptState(opened.value);
+  return state.kind === "rejected" ? failureCopy(state) : null;
+}
+
+/** What one open of the area does with the live master switch as last read: turn a switch
+ * not on on, sending the owner's Open first, or only send that Open for a switch already on,
+ * so an existing project's master gets its session too (LMS-1); nothing before the switch is
+ * read or once this open did either. Inputs: the switch, whether this open turned it on and
+ * whether it sent the Open check. Output: "start", "session" or null. */
+export function onOpen(on: boolean | null | undefined, asked: boolean, checked: boolean): "start" | "session" | null {
+  if (on === undefined) return null;
+  if (on !== true) return asked ? null : "start";
+  return asked || checked ? null : "session";
+}
+
 /** The project's master area. A Codex or Claude Code master is its own app in a live
  * terminal filling the area, where Enter sends and Shift+Enter starts a new line; every open
  * of the area starts it, and it stops only on the master idle stop or when the app quits.
@@ -103,22 +126,29 @@ export function MasterArea({ data }: { data: ProjectData }) {
 function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
   const [live, setLive] = useState<Live>({ kind: "starting" });
   const [want, setWant] = useState<Want | null>(null);
+  const [openNote, setOpenNote] = useState<string | null>(null);
   const asked = useRef(false);
+  const checked = useRef(false);
   const mounted = useRef(true);
   const sessions = useMasterSessions(data.id);
   const engine = liveSwitch(data.team.result, data.id);
   const on = want?.on ?? engine?.on;
 
-  const start = async () => {
+  const start = async (turn = true) => {
     const id = data.id;
-    asked.current = true;
-    setWant({ on: true, after: Infinity });
-    setLive({ kind: "starting" });
+    if (turn) {
+      asked.current = true;
+      setWant({ on: true, after: Infinity });
+      setLive({ kind: "starting" });
+    }
+    setOpenNote(null);
     const ticket = await sessions.opened();
     if (ticket && openBeforeLive(await readMaster(ticket))) {
-      await startMaster(ticket, nextGeneration());
+      const opened = await startMaster(ticket, nextGeneration());
+      if (mounted.current) setOpenNote(openProblem(opened));
       await sessions.reread();
     }
+    if (!turn) return;
     const turned = await setLiveMaster(id, true);
     const state = turned.kind === "ok" ? receiptState(turned.value) : null;
     const failed: Live | null = turned.kind === "not_ready" ? { kind: "not_ready" }
@@ -143,7 +173,9 @@ function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
   }, [data.team.at, want]);
 
   useEffect(() => {
-    if (on !== undefined && on !== true && !asked.current) void start();
+    const next = onOpen(on, asked.current, checked.current);
+    if (next === "session") checked.current = true;
+    if (next) void start(next === "start");
   }, [on]);
 
   useEffect(() => {
@@ -171,7 +203,7 @@ function LiveMaster({ data, harness }: { data: ProjectData; harness: string }) {
     : live.kind === "refused" ? live
     : on === false ? { kind: "stopped", problem: engine?.problem ?? null }
     : live;
-  return <LiveMasterView data={data} harness={harness} live={shown} onStart={start} sessions={sessions} />;
+  return <LiveMasterView data={data} harness={harness} live={shown} onStart={() => start()} sessions={sessions} openNote={openNote} />;
 }
 
 /** The master ticket and live session the live master's New session and Sessions controls
@@ -242,9 +274,9 @@ export function liveWord(live: Live): { word: string; tone: "ok" | "muted" | "wa
  * while it starts, can't or is stopped; a stopped team (Stop all) says so and offers
  * Start all. An engine that says the master has no terminal app
  * gets today's conversation instead. Inputs: the project data, the master harness id, the
- * state, the start action and the area's sessions when its owner already holds them.
- * Output: the area. */
-export function LiveMasterView({ data, harness, live, onStart, sessions: held }: { data: ProjectData; harness: string; live: Live; onStart: () => Promise<void>; sessions?: MasterSessions }) {
+ * state, the start action, the area's sessions when its owner already holds them and why the
+ * owner's Open opened no session, if it did not. Output: the area. */
+export function LiveMasterView({ data, harness, live, onStart, sessions: held, openNote = null }: { data: ProjectData; harness: string; live: Live; onStart: () => Promise<void>; sessions?: MasterSessions; openNote?: string | null }) {
   const [input] = useState(readMasterInput);
   const [resuming, setResuming] = useState(false);
   const [resumeNote, setResumeNote] = useState("");
@@ -276,6 +308,9 @@ export function LiveMasterView({ data, harness, live, onStart, sessions: held }:
       data.reloadTeam();
     }} />}
     <SwitchDivider team={data.team.result} />
+    {openNote && <div className="pj-note warn" role="alert">
+      <p>{`${NO_SESSION} ${displayText(openNote)}`}</p>
+    </div>}
     {live.kind === "stopped" && <div className={`pj-note${live.problem ? " warn" : ""}`} role={live.problem ? "alert" : "status"}>
       <p>{displayText(live.problem ?? STOPPED)}</p>
     </div>}
