@@ -351,7 +351,7 @@ impl Driver<'_> {
                     .map_err(io_error)?
                     .is_some()
             {
-                self.protocol.finish().map_err(protocol_error)?;
+                let _ = self.protocol.finish();
                 return Err(failure("native_auth_codex_exited_before_observation"));
             }
             tokio::time::sleep(POLL_TIME).await;
