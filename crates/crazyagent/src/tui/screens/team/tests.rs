@@ -1797,9 +1797,21 @@ fn the_master_view_turns_an_off_switch_on_at_open() {
     let mut running = master_view(100, 24);
     requests(&mut running);
     running.arrive(switch(Some(true), None));
+    let sent = requests(&mut running);
+    assert!(
+        sent.iter().all(|sent| !live_master_change(sent, true)),
+        "a switch already on is not turned on again: {sent:?}"
+    );
+    assert_eq!(
+        sent.len(),
+        1,
+        "a switch already on gets the owner's session check once (LMS-1): {sent:?}"
+    );
+    assert!(session_check(&sent[0]), "{sent:?}");
+    running.arrive(switch(Some(true), None));
     assert!(
         requests(&mut running).is_empty(),
-        "a switch already on is not turned on again"
+        "the session check goes out once per open"
     );
     let rows = render(&mut running);
     assert_eq!(
@@ -2664,9 +2676,10 @@ fn a_live_master_waiting_for_sign_in_rechecks_shows_the_wait_line() {
         Some(true),
         Some(crate::team::master::SIGN_INS_CHECKING),
     ));
+    let sent = requests(&mut shell);
     assert!(
-        requests(&mut shell).is_empty(),
-        "a switch already on is not turned on again"
+        matches!(sent.as_slice(), [check] if session_check(check)),
+        "a switch already on is not turned on again; only the owner's session check goes out (LMS-1): {sent:?}"
     );
     let rows = render(&mut shell);
     assert!(
@@ -2730,6 +2743,14 @@ fn resumed(result: Result<(), &str>) -> Arrival {
     ))))
 }
 
+fn session_check(request: &Request) -> bool {
+    matches!(
+        request,
+        Request::Setup(crate::project_setup::SetupQuery::OpenLiveSession { project: asked, .. })
+            if *asked == project()
+    )
+}
+
 fn resume_sent(request: &Request) -> bool {
     matches!(
         request,
@@ -2782,8 +2803,8 @@ fn master_view_on_a_paused_team_offers_start_all() {
     shell.arrive(resumed(Ok(())));
     let sent = requests(&mut shell);
     assert!(
-        matches!(sent.as_slice(), [read] if switch_read(read)),
-        "an accepted Start all reads the team again: {sent:?}"
+        matches!(sent.as_slice(), [read, check] if switch_read(read) && session_check(check)),
+        "an accepted Start all reads the team again and sends the owner's session check (LMS-1): {sent:?}"
     );
     shell.arrive(switch(Some(true), None));
     assert!(requests(&mut shell).is_empty());

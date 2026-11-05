@@ -114,12 +114,34 @@ impl NativeOwner {
             SetupQuery::CoordQuestions { project } => SetupView::CoordQuestions(Box::new(
                 controller.coord_questions(project).await.map_err(problem)?,
             )),
-            SetupQuery::TeamChange { action, generation } => changed(
-                controller
-                    .team_action(action, generation)
-                    .await
-                    .map_err(problem)?,
-            )?,
+            SetupQuery::TeamChange { action, generation } => {
+                let unopened = match &action {
+                    crate::team::TeamAction::LiveMaster {
+                        project_id,
+                        on: true,
+                    } => open_live_session(controller, project_id, generation).await,
+                    _ => None,
+                };
+                let view = changed(
+                    controller
+                        .team_action(action, generation)
+                        .await
+                        .map_err(problem)?,
+                )?;
+                match (view, unopened) {
+                    (SetupView::Changed(crate::engine::owner::OwnerResult::Applied), Some(why)) => {
+                        SetupView::LiveWithoutSession(why)
+                    }
+                    (view, _) => view,
+                }
+            }
+            SetupQuery::OpenLiveSession {
+                project,
+                generation,
+            } => match open_live_session(controller, &project, generation).await {
+                Some(why) => SetupView::LiveWithoutSession(why),
+                None => SetupView::Changed(crate::engine::owner::OwnerResult::Applied),
+            },
             SetupQuery::Library(query) => SetupView::Library(match query {
                 LibraryQuery::Page {
                     scope,
@@ -226,6 +248,64 @@ impl NativeOwner {
 
 fn changed(response: OwnerResponse) -> Result<SetupView, String> {
     owner_result(response).map(SetupView::Changed)
+}
+
+/// Sends the owner's default master Open for a project's live master when no live session
+/// holds it, before its switch turns on or for a switch already on, so the live master runs
+/// in a session its turns mark used and the Sessions list shows (LMS-1). Nothing here stops
+/// the switch: a project whose defaults cannot open a master, an Open the engine refuses
+/// and a read or delivery failure each come back as the reason (LMS-M1, LMS-L1).
+/// Inputs: the controller, the project and the generation. Output: None when a live
+/// session holds the master or the Open applied, else the engine's code or plain reason.
+async fn open_live_session(
+    controller: &mut OwnerController,
+    project: &ProjectId,
+    generation: u64,
+) -> Option<String> {
+    let problem = |error: crate::engine::EngineError| bounded_problem(&error.0);
+    let state = match controller
+        .read(OwnerRead::ProjectMaster {
+            project_id: project.clone(),
+        })
+        .await
+    {
+        Ok(state) => state,
+        Err(error) => return Some(problem(error)),
+    };
+    let OwnerData::ProjectMaster { session } = &state.data else {
+        return Some("master_fresh_read_required".into());
+    };
+    if session.as_ref().is_some_and(|session| {
+        matches!(
+            session.phase,
+            crate::master_session::MasterSessionPhase::Configured
+                | crate::master_session::MasterSessionPhase::Closing
+        )
+    }) {
+        return None;
+    }
+    let action = match crate::tui::default_master_open(controller, project).await {
+        Ok(action) => action,
+        Err(why) => return Some(why),
+    };
+    if let Err(error) = controller.read(OwnerRead::Capabilities).await {
+        return Some(problem(error));
+    }
+    if let Err(error) =
+        controller.begin_mutation(OwnerMutation::ProjectMaster { action }, generation)
+    {
+        return Some(problem(error));
+    }
+    match controller
+        .send_pending()
+        .await
+        .map_err(problem)
+        .and_then(owner_result)
+    {
+        Ok(crate::engine::owner::OwnerResult::Rejected { code }) => Some(bounded_problem(&code)),
+        Ok(_) => None,
+        Err(why) => Some(why),
+    }
 }
 
 fn owner_result(response: OwnerResponse) -> Result<crate::engine::owner::OwnerResult, String> {
@@ -683,6 +763,333 @@ mod tests {
             panic!("setup read required");
         };
         assert!(removed.is_none(), "a removed project has no setup");
+        drop(native);
+        service.shutdown().await.unwrap();
+    }
+
+    /// One API key account and its connection, for a project whose pool lets the owner's
+    /// default Open pick a master.
+    const LIVE_ACCESS: &str = r#"version = 1
+timeout_ms = 10000
+allowed_destinations = []
+
+[model_access]
+accounts = ["api-1"]
+connections = [
+  { id = "api-a", provider = "openrouter", harness = "rcli", protocol = "openai-chat", account_ref = "api-1", endpoint = { kind = "http", url = "https://openrouter.ai/api/v1" }, model = { id = "some/model", author = "openrouter" }, auth = { method = "api_key", credential_ref = "api-key-ref" } },
+]
+pools = []
+"#;
+
+    /// Reads a project's master session as the engine holds it. Inputs: the controller and
+    /// the project. Output: the session id and phase, or None before any session.
+    async fn master_session(
+        controller: &mut OwnerController,
+        project: &ProjectId,
+    ) -> Option<(
+        crate::protocol::SessionId,
+        crate::master_session::MasterSessionPhase,
+    )> {
+        let state = controller
+            .read(OwnerRead::ProjectMaster {
+                project_id: project.clone(),
+            })
+            .await
+            .unwrap();
+        let OwnerData::ProjectMaster { session } = state.data else {
+            panic!("project master read required");
+        };
+        session.map(|session| (session.session_id, session.phase))
+    }
+
+    /// A started engine with one new project made through the TUI's creation path, for the
+    /// live master tests. Input: the temporary root. Output: the service, the owner worker,
+    /// the app, the project, the stop sender the service watches and the projects home.
+    async fn live_project(
+        root: &std::path::Path,
+    ) -> (
+        EngineService,
+        NativeOwner,
+        App,
+        ProjectId,
+        tokio::sync::watch::Sender<bool>,
+        tempfile::TempDir,
+    ) {
+        std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let global = root.join("global.toml");
+        std::fs::write(&global, LIVE_ACCESS).unwrap();
+        std::fs::set_permissions(&global, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let (stop, stopped) = tokio::sync::watch::channel(false);
+        let service = EngineService::start_with_settings_sources(
+            root,
+            "e.sock",
+            &global,
+            &root.join("project.toml"),
+            &stopped,
+        )
+        .await
+        .unwrap();
+        let mut native = NativeOwner::new(root.join("e.sock"), crate::tui::test_home::ENGINE_WAIT);
+        let (_, access) = native.attach().await;
+        let mut app = App::new();
+        app.apply_owner(access).unwrap();
+        assert!(app.owner_ready);
+        let home =
+            crate::tui::test_home::projects_home(native.controller.as_mut().unwrap(), 1).await;
+        let setup = ProjectSetup {
+            about: "Notes kept by a live master.".into(),
+            tech_stack: vec!["rust".into()],
+            platforms: vec![Platform::Cli],
+            research: vec![],
+            pool: None,
+            team: None,
+            documents: vec![],
+        };
+        let spec = ProjectSpec {
+            name: "Live notes".into(),
+            repositories: vec![],
+        };
+        app.queue_project_setup(spec, setup).unwrap();
+        let job = app.take_creation_job().unwrap();
+        let project = job.submission.project_id.clone();
+        let event = native.creation(job).await;
+        assert!(
+            matches!(event.result.as_deref(), Ok(OwnerResponse::Applied { .. })),
+            "creation must commit: {:?}",
+            event.result
+        );
+        app.apply_owner(OwnerEvent::Creation(Box::new(event)))
+            .unwrap();
+        let snapshot = Client::new(root.join("e.sock"), crate::tui::test_home::ENGINE_WAIT)
+            .unwrap()
+            .request(crate::protocol::WireRequest {
+                protocol_version: crate::protocol::PROTOCOL_VERSION,
+                client_id: crate::protocol::ClientId::new("tui-live-test").unwrap(),
+                request_id: RequestId::new("tui-live-snapshot").unwrap(),
+                expected_revision: Cursor::new(0),
+                command: crate::protocol::Command::Snapshot,
+            })
+            .await
+            .unwrap();
+        app.apply_reply(snapshot).unwrap();
+        assert!(!app.has_unresolved_creation());
+        (service, native, app, project, stop, home)
+    }
+
+    /// Creates the project's master pool from the one API key connection, assigned to the
+    /// project for its project leader, as the owner does on the pools page. Inputs: the
+    /// controller and the project. Output: none; it panics unless the engine applied it.
+    async fn assign_live_pool(controller: &mut OwnerController, project: &ProjectId) {
+        let pools = controller
+            .read(OwnerRead::ModelAccessPage {
+                collection: crate::engine::owner::ModelAccessCollection::Pools,
+                cursor: None,
+                limit: 1,
+            })
+            .await
+            .unwrap();
+        let OwnerData::ModelAccessPage { source_hash, .. } = &pools.data else {
+            panic!("pool page required");
+        };
+        let reference = |value: &str| crate::protocol::CredentialRef::new(value).unwrap();
+        controller
+            .begin_mutation(
+                OwnerMutation::ModelAccess {
+                    expected_config_id: pools.config_id.clone(),
+                    expected_source_hash: source_hash.clone(),
+                    edit: crate::config::ModelAccessEdit::CreatePool {
+                        pool: crate::config::AccountPool {
+                            id: reference("pool-live"),
+                            name: None,
+                            members: vec![reference("api-a")],
+                            projects: vec![reference(project.as_str())],
+                            roles: vec![reference("project_leader")],
+                            fallback_allowed: false,
+                            provider_quota_policy: crate::config::ProviderQuotaPolicy::default(),
+                        },
+                    },
+                },
+                1,
+            )
+            .unwrap();
+        let assigned = controller.send_pending().await.unwrap();
+        assert!(
+            matches!(
+                &assigned,
+                OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation }
+                    if operation.result == crate::engine::owner::OwnerResult::Applied
+            ),
+            "the pool is created and assigned: {assigned:?}"
+        );
+    }
+
+    /// Turning a project's live master on from the TUI first opens the owner's default
+    /// master session when the project has none, so the live master runs in a session its
+    /// turns mark used and the Sessions list shows (LMS-1); turning it on again keeps that
+    /// session and opens no second one.
+    #[tokio::test]
+    async fn turning_the_live_master_on_opens_the_owner_s_default_session_first() {
+        let root = tempfile::Builder::new()
+            .prefix("ca-tui-live-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        let (mut service, mut native, mut app, project, _stop, _home) =
+            live_project(root.path()).await;
+
+        let controller = native.controller.as_mut().unwrap();
+        assign_live_pool(controller, &project).await;
+        assert_eq!(
+            master_session(controller, &project).await,
+            None,
+            "a new project has no master session"
+        );
+
+        let mut opened = Vec::new();
+        for _ in 0..2 {
+            app.request_team_change(crate::team::TeamAction::LiveMaster {
+                project_id: project.clone(),
+                on: true,
+            })
+            .unwrap();
+            let query = app.take_setup_query().unwrap();
+            let event = native.project_setup(query).await;
+            app.apply_owner(OwnerEvent::Setup(Box::new(event))).unwrap();
+            assert!(
+                matches!(
+                    &app.setup_view,
+                    Some((
+                        SetupQuery::TeamChange { .. },
+                        SetupView::Changed(crate::engine::owner::OwnerResult::Applied)
+                    ))
+                ),
+                "the live switch turns on: {:?} {:?}",
+                app.setup_view,
+                app.setup_problem
+            );
+            opened.push(master_session(native.controller.as_mut().unwrap(), &project).await);
+        }
+        let Some((session, phase)) = opened[0].clone() else {
+            panic!("turning the live master on opened no master session: {opened:?}");
+        };
+        assert_eq!(
+            phase,
+            crate::master_session::MasterSessionPhase::Configured,
+            "the opened session is the live one"
+        );
+        assert_eq!(
+            opened[1],
+            Some((
+                session,
+                crate::master_session::MasterSessionPhase::Configured
+            )),
+            "turning it on again keeps the live session"
+        );
+        drop(native);
+        service.shutdown().await.unwrap();
+    }
+
+    /// Turning the live master on for a project whose defaults cannot open a master still
+    /// turns the switch on, and the TUI names why no session opened instead of leaving a
+    /// sessionless live master unexplained (LMS-M1, LMS-L1).
+    #[tokio::test]
+    async fn turning_the_live_master_on_names_why_no_session_opened() {
+        let root = tempfile::Builder::new()
+            .prefix("ca-tui-unopened-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        let (mut service, mut native, mut app, project, _stop, _home) =
+            live_project(root.path()).await;
+        app.request_team_change(crate::team::TeamAction::LiveMaster {
+            project_id: project.clone(),
+            on: true,
+        })
+        .unwrap();
+        let query = app.take_setup_query().unwrap();
+        let event = native.project_setup(query).await;
+        app.apply_owner(OwnerEvent::Setup(Box::new(event))).unwrap();
+        let shown = format!("{:?}", app.setup_view);
+        assert!(
+            shown.contains("No account pool is assigned to this project as its master"),
+            "the TUI names why no session opened: {shown} {:?}",
+            app.setup_problem
+        );
+        let controller = native.controller.as_mut().unwrap();
+        let status = controller.team_status(project.clone()).await.unwrap();
+        assert_eq!(status.live_master, Some(true), "the live switch is on");
+        assert_eq!(
+            master_session(controller, &project).await,
+            None,
+            "no master session opened"
+        );
+        drop(native);
+        service.shutdown().await.unwrap();
+    }
+
+    /// A project whose live master switch is already on with no session, as an existing
+    /// project's is, gets the owner's default session from the session check the master
+    /// view sends at open, and a second check keeps it (LMS-1).
+    #[tokio::test]
+    async fn a_switch_already_on_gets_the_owner_s_default_session_from_the_session_check() {
+        let root = tempfile::Builder::new()
+            .prefix("ca-tui-on-")
+            .tempdir_in(std::fs::canonicalize("/tmp").unwrap())
+            .unwrap();
+        let (mut service, mut native, _app, project, _stop, _home) =
+            live_project(root.path()).await;
+        let controller = native.controller.as_mut().unwrap();
+        assign_live_pool(controller, &project).await;
+        let switched = controller
+            .team_action(
+                crate::team::TeamAction::LiveMaster {
+                    project_id: project.clone(),
+                    on: true,
+                },
+                1,
+            )
+            .await
+            .unwrap();
+        assert!(
+            matches!(
+                &switched,
+                OwnerResponse::Applied { operation } | OwnerResponse::Committed { operation }
+                    if operation.result == crate::engine::owner::OwnerResult::Applied
+            ),
+            "the switch is on: {switched:?}"
+        );
+        assert_eq!(
+            master_session(controller, &project).await,
+            None,
+            "a switch turned on before LMS-1 left the master without a session"
+        );
+        let mut opened = Vec::new();
+        for generation in [2, 3] {
+            let event = native
+                .project_setup(SetupQuery::OpenLiveSession {
+                    project: project.clone(),
+                    generation,
+                })
+                .await;
+            assert_eq!(
+                event.result,
+                Ok(SetupView::Changed(
+                    crate::engine::owner::OwnerResult::Applied
+                )),
+                "the session check applies"
+            );
+            opened.push(master_session(native.controller.as_mut().unwrap(), &project).await);
+        }
+        let Some((session, phase)) = opened[0].clone() else {
+            panic!("the session check opened no master session: {opened:?}");
+        };
+        assert_eq!(phase, crate::master_session::MasterSessionPhase::Configured);
+        assert_eq!(
+            opened[1],
+            Some((
+                session,
+                crate::master_session::MasterSessionPhase::Configured
+            )),
+            "a second check keeps the live session"
+        );
         drop(native);
         service.shutdown().await.unwrap();
     }

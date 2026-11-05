@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import "./load-source.mjs";
 import { bundle, withPage } from "./browser.mjs";
 import { teamStatus } from "./fixtures/team-status.mjs";
@@ -317,4 +319,93 @@ test("the head word for a stopped team warns, and only a good read of the same p
   assert.equal(live.teamPaused({ kind: "error", code: "engine_unavailable" }, "alpha"), false, "a failed read is not a stopped team");
   assert.equal(live.teamPaused({ kind: "not_ready" }, "alpha"), false);
   assert.equal(live.teamPaused(undefined, "alpha"), false, "no read yet");
+});
+
+test("starting the live master opens the owner's default session first when none is live, then turns the switch on (LMS-1)", () => {
+  const source = readFileSync(new URL("../src/screens/project/live-master.tsx", import.meta.url), "utf8");
+  const start = source.slice(source.indexOf("const start = async ("), source.indexOf("useEffect(", source.indexOf("const start = async (")));
+  const read = start.indexOf("openBeforeLive(");
+  const open = start.indexOf("startMaster(");
+  const on = start.indexOf("setLiveMaster(id, true)");
+  assert.ok(on > 0, "start turns the live switch on");
+  assert.ok(read > 0 && open > read && on > open, `the owner's Open goes out after the master read and before the switch turns on: read ${read}, open ${open}, on ${on}`);
+  const state = (session) => ({ kind: "ok", value: { project_id: "alpha", ticket: "1", session } });
+  const session = (phase) => ({ session_id: "master-1", phase, current_turn: null });
+  assert.equal(live.openBeforeLive(state(null)), true, "a project with no session gets one");
+  for (const phase of ["parked", "closed"]) assert.equal(live.openBeforeLive(state(session(phase))), true, `only a ${phase} session: a new one opens`);
+  for (const phase of ["configured", "closing"]) assert.equal(live.openBeforeLive(state(session(phase))), false, `a ${phase} session is left alone`);
+  assert.equal(live.openBeforeLive({ kind: "not_ready" }), false, "no master read, no Open");
+  assert.equal(live.openBeforeLive({ kind: "error", code: "stale_selection", message: "" }), false, "a failed read opens nothing");
+});
+
+test("a refused or failed owner Open is named in the live master area while its switch still turns on (LMS-M1)", async () => {
+  assert.equal(typeof live.openProblem, "function", "the area reads the Open's result");
+  const api = await import("../src/api-projects.ts");
+  const source = readFileSync(new URL("../src/screens/project/live-master.tsx", import.meta.url), "utf8");
+  const start = source.slice(source.indexOf("const start = async ("), source.indexOf("useEffect(", source.indexOf("const start = async (")));
+  const open = start.indexOf("startMaster(");
+  const named = start.indexOf("openProblem(");
+  const on = start.indexOf("setLiveMaster(id, true)");
+  assert.ok(open > 0 && named > open && on > named, `the Open's result is read before the switch turns on: open ${open}, named ${named}, on ${on}`);
+  const receipt = (fields) => ({ kind: "ok", value: { kind: "master", outcome: "applied", pending: false, rejection: null, ...fields } });
+  assert.equal(live.openProblem(receipt({})), null, "an applied Open names nothing");
+  assert.equal(live.openProblem(receipt({ pending: true })), null, "an Open still waiting is not called refused");
+  assert.equal(live.openProblem({ kind: "not_ready" }), null, "a build without the Open says so through the switch");
+  const refused = live.openProblem(receipt({ outcome: "rejected", rejection: "master_open_provenance" }));
+  assert.equal(refused, api.failureCopy({ code: "master_open_provenance" }), "a refused Open is named");
+  const failed = { kind: "error", code: "engine_unreachable", message: "" };
+  assert.equal(live.openProblem(failed), api.failureCopy(failed), "a failed Open is named");
+  const data = {
+    id: "p-1", name: "Harbor Notes", setup: undefined, research: undefined, context: undefined,
+    pools: undefined, harnesses: undefined, assigned: null, now: 61_000, navigate: () => {}, notify: () => {}, reload: () => {}, reloadPools: () => {},
+    team: { result: { kind: "ok", value: { project_id: "p-1", live_switch: null } }, at: 1 }, reloadTeam: () => {},
+  };
+  const view = (openNote) => renderToStaticMarkup(createElement(live.LiveMasterView, {
+    data, harness: "codex", live: { kind: "running", node: null }, onStart: async () => undefined, openNote,
+  }));
+  const shown = view("The engine refused it.");
+  assert.match(shown, /role="alert"[^>]*><p>No master session opened, so this conversation won&#x27;t be in Sessions\. The engine refused it\.<\/p>/, shown);
+  assert.doesNotMatch(view(null), /No master session opened/);
+});
+
+test("opening the area with the live switch already on still sends the owner's Open once when no session is live (LMS-1, existing projects)", () => {
+  assert.equal(typeof live.onOpen, "function", "the area decides what one open does");
+  assert.equal(live.onOpen(undefined, false, false), null, "nothing before the switch is read");
+  assert.equal(live.onOpen(true, false, false), "session", "a switch already on gets the owner's session");
+  assert.equal(live.onOpen(true, false, true), null, "the session check goes out once per open");
+  assert.equal(live.onOpen(true, true, false), null, "a start this open already sent the Open");
+  for (const on of [false, null]) assert.equal(live.onOpen(on, false, false), "start", `a switch ${on} turns on`);
+  assert.equal(live.onOpen(false, true, false), null, "a master stopped after this open's start stays stopped");
+  const source = readFileSync(new URL("../src/screens/project/live-master.tsx", import.meta.url), "utf8");
+  const start = source.slice(source.indexOf("const start = async ("), source.indexOf("useEffect(", source.indexOf("const start = async (")));
+  const open = start.indexOf("startMaster(");
+  const only = start.indexOf("if (!turn) return;");
+  const on = start.indexOf("setLiveMaster(id, true)");
+  assert.ok(open > 0 && only > open && on > only, `a switch already on gets only the Open: open ${open}, only ${only}, on ${on}`);
+  assert.match(source, /const next = onOpen\(on, asked\.current, checked\.current\);/);
+  assert.match(source, /if \(next\) void start\(next === "start"\);/);
+});
+
+test("a failed project open or master read before the live switch is named like a refused Open (LMS2-L1)", async () => {
+  assert.equal(typeof live.readProblem, "function", "the area names a failed open or read");
+  const api = await import("../src/api-projects.ts");
+  assert.equal(live.readProblem({ kind: "ok", value: { project_id: "alpha", ticket: "1", session: null } }), null, "a good read names nothing");
+  assert.equal(live.readProblem({ kind: "not_ready" }), null, "a build without the read says so elsewhere");
+  const failed = { kind: "error", code: "stale_selection", message: "" };
+  assert.equal(live.readProblem(failed), api.failureCopy(failed), "a failed open or read is named");
+  const source = readFileSync(new URL("../src/screens/project/live-master.tsx", import.meta.url), "utf8");
+  const start = source.slice(source.indexOf("const start = async ("), source.indexOf("useEffect(", source.indexOf("const start = async (")));
+  assert.match(start, /const master = opened\.kind === "ok" \? await readMaster\(opened\.value\) : opened;/, "a failed open is the read that failed");
+  const named = start.indexOf("readProblem(master)");
+  const open = start.indexOf("startMaster(");
+  assert.ok(named > 0 && open > named, `the failed open or read is named before any Open: named ${named}, open ${open}`);
+});
+
+test("Start all sends the owner's session check once the team runs again (LMS-1)", () => {
+  const source = readFileSync(new URL("../src/screens/project/live-master.tsx", import.meta.url), "utf8");
+  const team = source.slice(source.indexOf("const startTeam = async () => {"), source.indexOf("const state = liveWord(live);"));
+  const resumed = team.indexOf("setTeamStopped(data.id, false)");
+  const check = team.indexOf("await onSession?.()");
+  assert.ok(resumed > 0 && check > resumed, `Start all sends the session check after the team runs again: resumed ${resumed}, check ${check}`);
+  assert.match(source, /onSession=\{\(\) => start\(false\)\}/, "the area's session check is the Open only");
 });
