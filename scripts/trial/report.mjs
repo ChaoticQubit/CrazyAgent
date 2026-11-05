@@ -679,19 +679,20 @@ function parseSummary(raw) {
 async function logFolder(root, path) {
   const full = join(root, path);
   const info = await lstat(full).catch((error) => (error.code === "ENOENT" || error.code === "ENOTDIR" ? null : Promise.reject(error)));
-  if (info === null) return `missing: ${path}`;
-  if (info.isSymbolicLink()) return "refused: a link";
-  if (!info.isDirectory()) return "refused: not a folder";
-  const inner = relative(root, await realpath(full));
-  if (inner === "" || inner.startsWith("..") || isAbsolute(inner)) return "refused: outside the run folder";
-  return null;
+  if (info === null) return { problem: `missing: ${path}` };
+  if (info.isSymbolicLink()) return { problem: "refused: a link" };
+  if (!info.isDirectory()) return { problem: "refused: not a folder" };
+  const real = await realpath(full);
+  const inner = relative(root, real);
+  if (inner === "" || inner.startsWith("..") || isAbsolute(inner)) return { problem: "refused: outside the run folder" };
+  return { real };
 }
 
 /**
  * Lists the summaries of a live-pass folder in merge order: the runs runs.json names, or summary.txt alone.
  * Input: the real folder path. Output: each run's file, commit (empty for summary.txt), source, log folder
  * (empty for the folder itself), text and time. Throws report_live_runs_invalid for a malformed runs.json,
- * a listed summary that is not a plain file here or a log folder that is not a plain folder here.
+ * a listed summary that is not a plain file here, or a log folder that is not a plain folder here or is another run's.
  */
 async function liveRuns(root) {
   if ((await place(root, "runs.json")).problem?.startsWith("missing:")) {
@@ -702,6 +703,7 @@ async function liveRuns(root) {
   const listed = await readJson(root, "runs.json", "report_live_runs_invalid");
   if (!Array.isArray(listed) || listed.length === 0 || listed.length > RUNS_MAX) fail(`report_live_runs_invalid: a list of 1 to ${RUNS_MAX} runs`);
   const runs = [];
+  const owners = new Map();
   for (const run of listed) {
     const { file, commit, source, logs } = run ?? {};
     if (typeof file !== "string" || !RUN_FILE.test(file) || typeof commit !== "string" || !RUN_COMMIT.test(commit) || typeof source !== "string" || source.length > RUN_SOURCE_MAX) {
@@ -710,8 +712,10 @@ async function liveRuns(root) {
     if (typeof logs !== "string" || logs.length > RUN_LOGS_MAX || !RUN_LOGS.test(logs)) fail(`report_live_runs_invalid: ${file} needs logs, the plain folder here that holds its run's logs`);
     const where = await place(root, file);
     if (where.problem) fail(`report_live_runs_invalid: ${file} ${where.problem}`);
-    const folderProblem = await logFolder(root, logs);
-    if (folderProblem) fail(`report_live_runs_invalid: ${file} logs ${folderProblem}`);
+    const logsAt = await logFolder(root, logs);
+    if (logsAt.problem) fail(`report_live_runs_invalid: ${file} logs ${logsAt.problem}`);
+    if (owners.has(logsAt.real)) fail(`report_live_runs_invalid: ${file} logs ${logs} is already the log folder of ${owners.get(logsAt.real)}`);
+    owners.set(logsAt.real, file);
     runs.push({ file, commit, source, logs, text: (await readBounded(where.full, TEXT_BYTES * 4)).bytes.toString("utf8"), written: (await stat(where.full)).mtime });
   }
   return runs;
