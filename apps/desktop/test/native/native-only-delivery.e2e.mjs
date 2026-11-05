@@ -166,6 +166,8 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
         await page.send("Page.enable");
         await page.send("Page.addScriptToEvaluateOnNewDocument", { source: INTERNALS });
         await page.send("Emulation.setDeviceMetricsOverride", { width: 1280, height: 900, deviceScaleFactor: 1, mobile: false });
+        await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/settings?section=team` });
+        await codexToolsOff(me, page, () => value(bridge, "desktop_project_setup", { id: project }));
         await page.send("Page.navigate", { url: `http://127.0.0.1:${site.port}/#/projects/${encodeURIComponent(project)}/agents` });
         await me.waitFor("the Team graph and the Codex delivery setting on the Agents tab", (text) => text.includes("Team graph") && text.includes("Messages to Codex agents"));
         await steps({ project, runtime, me, page, status, graph });
@@ -187,6 +189,32 @@ pools = [{ id = "local-pool", members = ["local-connection"], projects = [], rol
     await stop(engine);
   }
   if (!process.env.E2E_EVIDENCE) rmSync(root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+}
+
+/** Gives the project one Codex agent row with tools off in Project Settings > Team, as the owner
+ * does, and waits until the engine keeps that team. Inputs: the owner on the page, the page and
+ * the stored setup reader. Output: none. */
+async function codexToolsOff(me, page, setup) {
+  await me.waitFor("the Team section", (text) => text.includes("+ Add harness") && text.includes("Save team"));
+  await me.click("+ Add harness");
+  const picked = await page.evaluate(`(() => {
+    const select = document.getElementById("ps-row-0");
+    if (!select || ![...select.options].some((option) => option.value === "codex" && !option.disabled)) return false;
+    select.focus();
+    Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype, "value").set.call(select, "codex");
+    select.dispatchEvent(new Event("input", { bubbles: true }));
+    select.dispatchEvent(new Event("change", { bubbles: true }));
+    return true;
+  })()`);
+  assert.ok(picked, "no Codex to pick for the new agent row");
+  await me.follow(`[id="ps-tools-0"]`);
+  assert.equal(await page.evaluate(`document.getElementById("ps-tools-0")?.getAttribute("aria-checked")`), "false", "the Codex row's tools switch is off");
+  await me.click("Save team");
+  for (const deadline = Date.now() + STEP_MS; ; await pause(POLL_MS)) {
+    const rows = (await setup())?.team?.sub_harnesses ?? [];
+    if (rows.length === 1 && rows[0].harness === "codex" && rows[0].tools === false) return;
+    assert.ok(Date.now() < deadline, `the engine never kept a tools-off Codex row: ${JSON.stringify(rows)}`);
+  }
 }
 
 /** Picks one choice of the Agents tab's "Messages to Codex agents" setting, as the owner's pick
