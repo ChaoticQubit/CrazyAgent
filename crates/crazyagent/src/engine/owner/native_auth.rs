@@ -560,14 +560,26 @@ impl CodexAuthObservation {
             Self::LoginStarted { .. } if fact.phase == NativeAuthPhase::Starting => {
                 (NativeAuthPhase::AwaitingOwner, None)
             }
-            Self::LoginCompleted { success, .. }
+            Self::LoginCompleted { success: true, .. }
                 if fact.phase == NativeAuthPhase::AwaitingOwner =>
             {
-                if *success {
-                    (NativeAuthPhase::CheckingAccount, None)
-                } else {
-                    (NativeAuthPhase::Failed, Some("native_auth_login_failed"))
-                }
+                (NativeAuthPhase::CheckingAccount, None)
+            }
+            Self::LoginCompleted {
+                code_ran_out: true, ..
+            } if fact.phase == NativeAuthPhase::AwaitingOwner
+                && fact.action
+                    == (NativeAuthAction::SignIn {
+                        method: NativeAuthMethod::CodexDeviceCode,
+                    }) =>
+            {
+                (
+                    NativeAuthPhase::Failed,
+                    Some("native_auth_sign_in_timed_out"),
+                )
+            }
+            Self::LoginCompleted { .. } if fact.phase == NativeAuthPhase::AwaitingOwner => {
+                (NativeAuthPhase::Failed, Some("native_auth_login_failed"))
             }
             Self::AccountRead { account, .. }
                 if matches!(
@@ -592,6 +604,18 @@ impl CodexAuthObservation {
             Self::LoginCanceled {
                 canceled: false, ..
             } if fact.phase == NativeAuthPhase::Cancelling => (NativeAuthPhase::Cancelling, None),
+            Self::LoginCanceled { canceled: true, .. }
+                if fact.phase == NativeAuthPhase::AwaitingOwner
+                    && fact.action
+                        == (NativeAuthAction::SignIn {
+                            method: NativeAuthMethod::CodexBrowser,
+                        }) =>
+            {
+                (
+                    NativeAuthPhase::Failed,
+                    Some("native_auth_sign_in_page_timed_out"),
+                )
+            }
             Self::LoginCanceled { canceled: true, .. }
                 if fact.phase == NativeAuthPhase::AwaitingOwner =>
             {
@@ -706,8 +730,8 @@ impl CodexAuthObservation {
 /// Tells whether a ChatGPT device code shown this long has run out, with half a minute of
 /// slack for Codex, which starts the code's 15 minutes a moment before the engine records it.
 /// Input: how long the code has been shown. Output: true once it has run out.
-pub(crate) fn code_ran_out(_shown: Duration) -> bool {
-    false
+pub(crate) fn code_ran_out(shown: Duration) -> bool {
+    shown + Duration::from_secs(30) >= CODEX_DEVICE_CODE_LIFE
 }
 
 pub(crate) fn apply_codex_presentation(

@@ -241,27 +241,31 @@ impl Driver<'_> {
             return None;
         }
         self.logged = true;
+        let code = self.user_code.as_deref();
         let log = CodexLog {
-            dropped: self.dropped.clone(),
-            stderr: masked(&self.stderr, self.user_code.as_deref()),
+            dropped: self
+                .dropped
+                .iter()
+                .map(|name| dropped_name(name, code))
+                .collect(),
+            stderr: masked(&self.stderr, code),
         };
         assert!(log.validate().is_ok());
         Some(log)
     }
 
     /// Sends what the driver saw of Codex to the engine log when a sign-in fails or runs out
-    /// of time. Input: the driver. Output: done, or the channel's error.
-    async fn log(&mut self) -> Result<(), EngineError> {
+    /// of time. The log is best effort: a failed send changes nothing here, and the driver's
+    /// next exchange meets the closed channel. Input: the driver. Output: none.
+    async fn log(&mut self) {
         let Some(log) = self.take_log() else {
-            return Ok(());
+            return;
         };
-        if matches!(
-            self.session.log_codex(self.channel, log).await?,
-            NativeAuthCustodyControl::Cancel
-        ) {
+        if let Ok(NativeAuthCustodyControl::Cancel) =
+            self.session.log_codex(self.channel, log).await
+        {
             self.cancel_requested = true;
         }
-        Ok(())
     }
 
     async fn read_account(&mut self) -> Result<(), EngineError> {
@@ -315,7 +319,7 @@ impl Driver<'_> {
             }
             AuthControl::LoginCompleted { success, .. } => {
                 if !success {
-                    self.log().await?;
+                    self.log().await;
                 }
                 self.completion = Some(event.clone());
                 if self.login_id.is_some() {
@@ -402,7 +406,7 @@ impl Driver<'_> {
                 && !self.cancel_requested
                 && Instant::now() + EXPIRY_MARGIN >= self.deadline
             {
-                self.log().await?;
+                self.log().await;
                 self.cancel_requested = true;
             }
             self.cancel().await?;
@@ -428,8 +432,10 @@ impl Driver<'_> {
 /// failure code, so the custodian retires instead of leaving custody uncertain. An error
 /// from the engine or the channel is returned as it is, since custody is then in doubt, and a
 /// channel the driver's error already closed, such as a refused profile guard, takes no
-/// report, so that error is returned as the custodian's cause.
-/// Inputs: the session, the channel and the driver's error. Output: done, or the error.
+/// report, so that error is returned as the custodian's cause. The engine log goes first and
+/// is best effort: when it fails, the driver's error is returned as the cause.
+/// Inputs: the session, the channel, the driver's error and the log. Output: done, or the
+/// error.
 pub(in crate::engine) async fn observe_failure(
     session: &CustodySession,
     channel: &mut NativeAuthCustodyChannel,
@@ -453,8 +459,10 @@ pub(in crate::engine) async fn observe_failure(
         code if !code.starts_with("native_auth_") => Some(CodexHostFailure::IoFailed),
         _ => return Err(error),
     };
-    if let (Some(_), Some(log)) = (reason, log) {
-        session.log_codex(channel, log).await?;
+    if let (Some(_), Some(log)) = (reason, log)
+        && session.log_codex(channel, log).await.is_err()
+    {
+        return Err(error);
     }
     let observation = reason.map_or(CodexAuthObservation::HostCancelled, |reason| {
         CodexAuthObservation::HostFailed { reason }
@@ -504,19 +512,57 @@ fn squashed(text: &str) -> String {
         .collect()
 }
 
+/// Tells whether text holds any part of the device code three or more characters long, in any
+/// case and however Codex spaced or glued it, or the whole of a shorter code. Inputs: the text
+/// and the squashed device code. Output: true when it does.
+fn holds_code(text: &str, code: Option<&str>) -> bool {
+    let Some(code) = code.filter(|code| !code.is_empty()) else {
+        return false;
+    };
+    let part = squashed(text);
+    if code.len() < 3 {
+        return part.contains(code);
+    }
+    code.as_bytes()
+        .windows(3)
+        .any(|window| part.as_bytes().windows(3).any(|seen| seen == window))
+}
+
+/// Tells whether text names a code, as a `code`, `user_code` or `userCode` key does. Input:
+/// the text. Output: true when it does.
+fn names_code(text: &str) -> bool {
+    text.to_ascii_lowercase().contains("code")
+}
+
+/// Tells whether text holds something shaped like a device code: two runs of three or more
+/// letters or digits joined by a dash, as in `ABCD-EFGH`. Input: the text. Output: true when
+/// it does.
+fn code_shaped(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let run = |side: &mut dyn Iterator<Item = &u8>| {
+        side.take_while(|byte| byte.is_ascii_alphanumeric()).count()
+    };
+    (0..bytes.len()).any(|at| {
+        bytes[at] == b'-'
+            && run(&mut bytes[..at].iter().rev()) >= 3
+            && run(&mut bytes[at + 1..].iter()) >= 3
+    })
+}
+
 /// Tells whether one word of Codex stderr may reach the engine log as it is: a short word of
-/// letters and plain punctuation that holds no address and no part of the device code, or a
-/// number of at most four digits. Inputs: the word and the squashed device code. Output: true
+/// letters and plain punctuation that holds no address, no part of the device code and no
+/// code-shaped value at or after a code key, or a number of at most four digits. Inputs: the
+/// word, the squashed device code and whether the word before it names a code. Output: true
 /// to keep it.
-fn plain(word: &str, code: Option<&str>) -> bool {
+fn plain(word: &str, code: Option<&str>, after_key: bool) -> bool {
     let number = word.len() <= 4 && word.bytes().all(|byte| byte.is_ascii_digit());
     let text = word.len() <= WORD_BYTES_MAX
         && !word.contains("//")
         && word
             .bytes()
             .all(|byte| byte.is_ascii_alphabetic() || b".,:;()[]'\"_-/".contains(&byte));
-    let part = squashed(word);
-    (number || text) && !code.is_some_and(|code| part.len() >= 3 && code.contains(part.as_str()))
+    let keyed = code_shaped(word) && (after_key || names_code(word));
+    (number || text) && !holds_code(word, code) && !keyed
 }
 
 /// Masks a tail of Codex stderr for the engine log: every word that is not plain becomes `*`
@@ -525,14 +571,15 @@ fn plain(word: &str, code: Option<&str>) -> bool {
 fn masked(bytes: &[u8], code: Option<&str>) -> String {
     let code = code.map(squashed).filter(|code| !code.is_empty());
     let text = String::from_utf8_lossy(bytes);
-    let mut kept = Vec::new();
-    let mut size = 0;
-    for word in text
+    let words: Vec<&str> = text
         .split(|c: char| c.is_whitespace() || c.is_control())
         .filter(|word| !word.is_empty())
-        .rev()
-    {
-        let word = if plain(word, code.as_deref()) {
+        .collect();
+    let mut kept = Vec::new();
+    let mut size = 0;
+    for (at, word) in words.iter().enumerate().rev() {
+        let after_key = at > 0 && names_code(words[at - 1]);
+        let word = if plain(word, code.as_deref(), after_key) {
             word
         } else {
             "*"
@@ -552,14 +599,18 @@ fn masked(bytes: &[u8], code: Option<&str>) -> String {
 }
 
 /// The name a dropped Codex notification goes into the engine log as: its method when that
-/// is a short plain name, else `*`. Inputs: the method and the device code on screen, if
-/// any. Output: the name.
-fn dropped_name(method: &str, _code: Option<&str>) -> String {
+/// is a short plain name that holds no part of the device code and no code-shaped value under
+/// a code key, else `*`. Inputs: the method and the device code on screen, if any. Output:
+/// the name.
+fn dropped_name(method: &str, code: Option<&str>) -> String {
+    let code = code.map(squashed);
     let plain = !method.is_empty()
         && method.len() <= CODEX_LOG_NAME_BYTES_MAX
         && method
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || b"/_.-".contains(&byte));
+            .all(|byte| byte.is_ascii_alphanumeric() || b"/_.-".contains(&byte))
+        && !holds_code(method, code.as_deref())
+        && !(code_shaped(method) && names_code(method));
     if plain {
         method.to_owned()
     } else {

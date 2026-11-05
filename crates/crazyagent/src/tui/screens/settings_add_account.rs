@@ -1570,7 +1570,7 @@ impl AddAccount {
 /// the app names its own button, and the TUI says that the engine clears it on a later try
 /// or after an engine restart. `{harness}` and `{name}` stand for the harness and provider of the
 /// sign-in method.
-const SIGN_IN_SENTENCES: [(&str, &str); 29] = [
+const SIGN_IN_SENTENCES: [(&str, &str); 30] = [
     (
         "native_auth_bootstrap_timeout",
         "CrazyAgent's account helper didn't start in time. Try again.",
@@ -1662,6 +1662,10 @@ const SIGN_IN_SENTENCES: [(&str, &str); 29] = [
         "This sign-in didn't confirm how it ended, so changes to its account and new sign-ins wait. Wait a few minutes, then try again. If this keeps happening, restart the CrazyAgent engine.",
     ),
     ("native_auth_sign_in_expired", "This code expired."),
+    (
+        "native_auth_sign_in_page_timed_out",
+        "CrazyAgent stopped waiting for the sign-in page. Start the sign-in again.",
+    ),
     (
         "native_auth_sign_in_timed_out",
         "CrazyAgent stopped waiting for this code. Get a new code and enter it within 15 minutes.",

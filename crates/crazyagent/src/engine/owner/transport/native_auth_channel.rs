@@ -1619,6 +1619,38 @@ impl Session {
         Ok(())
     }
 
+    /// Sets whether a failed completion came once the device code on screen ran out, from the
+    /// owner's own count of when it recorded the code, never from the custodian's word.
+    /// Input: the observation. Output: the observation with that flag set by the owner.
+    fn counted(&self, event: CodexAuthObservation) -> CodexAuthObservation {
+        let (login_id, success) = match event {
+            CodexAuthObservation::LoginCompleted {
+                login_id, success, ..
+            } => (login_id, success),
+            other => return other,
+        };
+        let shown = self.authority.upgrade().and_then(|owner| {
+            owner.native_auth.lock().ok().and_then(|current| {
+                current
+                    .as_ref()
+                    .filter(|slot| {
+                        slot.dispatch
+                            .as_ref()
+                            .is_some_and(|dispatch| Arc::ptr_eq(dispatch, &self.dispatch))
+                    })
+                    .and_then(|slot| slot.progress.as_ref())
+                    .and_then(|progress| progress.challenge_seen)
+                    .map(|seen| seen.elapsed())
+            })
+        });
+        CodexAuthObservation::LoginCompleted {
+            login_id,
+            success,
+            code_ran_out: !success
+                && shown.is_some_and(crate::engine::owner::native_auth::code_ran_out),
+        }
+    }
+
     fn record_observation(
         &self,
         event: &CodexAuthObservation,
@@ -1693,6 +1725,10 @@ async fn custody_reply(
     if let Some(event) = &request.observation {
         session.validate_observation(event)?;
     }
+    let observation = request
+        .observation
+        .clone()
+        .map(|event| session.counted(event));
     if let Some(event) = &request.claude_observation {
         session.validate_claude(event)?;
     }
@@ -1718,7 +1754,7 @@ async fn custody_reply(
                     )
                 })
                 .await
-        } else if let Some(event) = &request.observation {
+        } else if let Some(event) = &observation {
             engine
                 .native_auth_job(|reply| {
                     Job::NativeAuthCustodyObserve(
@@ -1761,7 +1797,7 @@ async fn custody_reply(
         ReplyKind::Retired
     } else {
         session.validate()?;
-        if let Some(event) = &request.observation {
+        if let Some(event) = &observation {
             session.record_observation(event, fact.clone())?;
         }
         if let Some(event) = &request.claude_observation {

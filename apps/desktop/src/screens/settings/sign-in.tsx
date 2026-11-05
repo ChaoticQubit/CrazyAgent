@@ -63,6 +63,9 @@ export function signInFailure(code: string, provider: SubscriptionProvider, runn
   }
   if (code === "native_auth_host_executable_changed") return { text: `${harness} changed on this Mac after CrazyAgent checked it, perhaps from an update. Try again.`, hint: "retry" };
   if (EXPIRED.includes(code)) return { text: "This code expired.", hint: "expired" };
+  if (code === "native_auth_sign_in_page_timed_out") {
+    return { text: "CrazyAgent stopped waiting for the sign-in page. Start the sign-in again.", hint: "retry" };
+  }
   if (code === "native_auth_sign_in_timed_out") {
     return { text: "CrazyAgent stopped waiting for this code. Get a new code and enter it within 15 minutes.", hint: "expired" };
   }
