@@ -550,6 +550,7 @@ pub(crate) fn status(tx: &Transaction<'_>, path: &Path) -> Result<SetupStatus, E
         dependencies: progress::dependency_rows(&progress),
         pack: progress::pack_rows(&manifest, &installed, &progress),
         running: progress.running,
+        notes: Vec::new(),
     })
 }
 
