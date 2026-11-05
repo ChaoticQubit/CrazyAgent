@@ -463,6 +463,29 @@ test("adding an existing folder uses it where it is by default, shows the target
   assert.match(html(AddFolderView, { ...base, home: notReady, source: null, size: null, mode: "move" }), /Not ready yet/);
 });
 
+test("adding a folder whose git worktree links a move would break offers no Move and says why", () => {
+  const base = { home: ok({ path: "/Users/mira/Projects", watching: true }), busy: false, problem: "", onChoose: noop, onMode: noop, onAdd: noop, onClone: noop };
+  const moveRadio = /role="radio"[^>]*>(<svg[\s\S]*?<\/svg>)?Move</;
+  const why = /Move isn(&#x27;|')t offered: this folder is linked to git worktrees, and moving it would break them\./;
+  const linked = (mode) => html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10, worktrees: 1, movable: false }), mode });
+  for (const mode of ["here", "move", "copy"]) {
+    const markup = linked(mode);
+    assert.doesNotMatch(markup, moveRadio, mode);
+    assert.match(markup, why, mode);
+    assert.doesNotMatch(markup, /Move into projects folder/, mode);
+  }
+  assert.match(linked("move"), /role="radio" aria-checked="true"[^>]*>(<svg[\s\S]*?<\/svg>)?Use where it is</);
+  assert.match(linked("move"), /~\/Code\/shop<\/span> stays where it is\./);
+  assert.match(linked("move"), />Set up here<\/button>/);
+  assert.match(linked("copy"), /This folder has 1 linked git worktree\./);
+  const movable = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: ok({ bytes: 10, worktrees: 0, movable: true }), mode: "move" });
+  assert.match(movable, /role="radio" aria-checked="true"[^>]*>(<svg[\s\S]*?<\/svg>)?Move</);
+  assert.doesNotMatch(movable, why);
+  const measuring = html(AddFolderView, { ...base, source: "/Users/mira/Code/shop", size: { kind: "loading" }, mode: "here" });
+  assert.match(measuring, moveRadio);
+  assert.doesNotMatch(measuring, why);
+});
+
 test("GitHub sign-in shows the three ways, then the device code, and the token field never holds a value", () => {
   const base = { device: null, now: 0, busy: false, problem: "", tokenOpen: false, tokenRef: { current: null }, onDevice: noop, onCli: noop, onTokenOpen: noop, onToken: noop, onOpenPage: noop };
   const start = html(GitHubSignInView, base);
