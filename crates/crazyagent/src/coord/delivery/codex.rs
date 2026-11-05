@@ -72,6 +72,7 @@ fn daemon_folder() -> Option<PathBuf> {
 
 /// Reads a Codex app-server's `userAgent`, `<client>/<release> (...)`, and checks the
 /// release against `VERSIONS`. Takes the text. Returns whether the bridge may run.
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn supported(user_agent: &str) -> bool {
     user_agent
         .split_whitespace()

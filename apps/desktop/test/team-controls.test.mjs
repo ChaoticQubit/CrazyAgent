@@ -211,4 +211,10 @@ test("team settings changes send the revision the window read, so the engine ref
     assert.ok(start >= 0, command);
     assert.ok(lib.slice(start, lib.indexOf(")", start)).includes("revision: u64"), `${command} takes the revision`);
   }
+  const limits = lib.indexOf("CommandArg<'de, R> for TeamTimeLimits");
+  assert.ok(limits >= 0, "the native command reads the time limits through one argument");
+  const reads = lib.slice(limits, lib.indexOf("\n}\n", limits));
+  for (const key of ["turnSecs", "sessionSecs", "idleSecs"]) {
+    assert.ok(reads.includes(`read("${key}")`), `the native command reads ${key} as its own key`);
+  }
 });
