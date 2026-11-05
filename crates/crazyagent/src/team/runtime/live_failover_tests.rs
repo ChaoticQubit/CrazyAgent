@@ -307,11 +307,8 @@ impl OwnerAccount {
     /// The owner's engine's custody, which only reads its database and takes a shared lock
     /// on a profile for each launch. Output: the custody.
     pub(crate) fn custody(&self) -> NativeProfileCustody {
-        NativeProfileCustody::capture(
-            &self.database,
-            &std::fs::metadata(&self.database).unwrap(),
-        )
-        .unwrap()
+        NativeProfileCustody::capture(&self.database, &std::fs::metadata(&self.database).unwrap())
+            .unwrap()
     }
 }
 
@@ -718,6 +715,115 @@ impl Drop for Team {
                 .stdout(Stdio::null())
                 .stderr(Stdio::null()),
         );
+    }
+}
+
+/// What a live master's input shows beside `Team::seen` (LMS-1): each team message's author
+/// and state, the live master row, the engine's input check, whether the master was briefed,
+/// the custody answer of the runtime's last profile wait and the master screen's last rows.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct InputFacts {
+    messages: Vec<String>,
+    live: Option<String>,
+    input: String,
+    briefed: Option<bool>,
+    waited: Option<String>,
+    screen: Vec<String>,
+}
+
+/// Words the input facts for a failure message, so a turn that never came reads as queued,
+/// refused or typed. Input: the facts. Output: one line.
+pub(crate) fn input_evidence(facts: &InputFacts) -> String {
+    let _ = facts;
+    String::new()
+}
+
+/// Whether a turn wait timed out because another process held the owner's profile: an
+/// owner message still pending, a master never briefed and the runtime's last profile wait
+/// answered `native_profile_in_use`. Input: the facts. Output: the answer.
+pub(crate) fn profile_held(facts: &InputFacts) -> bool {
+    let _ = facts;
+    false
+}
+
+/// LMS-1 evidence: a turn wait's failure names every input fact, so the three silent waits
+/// (never briefed, input refused, typed with no turn) read apart.
+#[test]
+fn a_live_master_turn_failure_names_its_input_facts() {
+    let facts = InputFacts {
+        messages: vec!["owner pending".into()],
+        live: Some(
+            "live true agent Some(7) turn_open false input_ms None typed_ms None draft false"
+                .into(),
+        ),
+        input: "Err(NoMaster)".into(),
+        briefed: Some(false),
+        waited: Some("native_profile_in_use".into()),
+        screen: vec!["Welcome to Claude Code".into()],
+    };
+    let line = input_evidence(&facts);
+    for part in [
+        "messages [\"owner pending\"]",
+        "live row Some(\"live true agent Some(7)",
+        "input check Err(NoMaster)",
+        "briefed Some(false)",
+        "profile wait Some(\"native_profile_in_use\")",
+        "screen [\"Welcome to Claude Code\"]",
+    ] {
+        assert!(line.contains(part), "{part} is missing from: {line}");
+    }
+}
+
+/// LMS-1: a turn wait is BLOCKED only with the custody answer of the runtime's own profile
+/// wait on a master it never briefed while the owner's message waits; every other timeout
+/// stays a FAIL.
+#[test]
+fn only_a_recorded_profile_wait_on_an_unbriefed_master_blocks_a_turn_wait() {
+    let held = InputFacts {
+        messages: vec!["owner pending".into()],
+        briefed: Some(false),
+        waited: Some("native_profile_in_use".into()),
+        ..InputFacts::default()
+    };
+    assert!(profile_held(&held), "the profile wait is proven");
+    for (why, facts) in [
+        (
+            "no profile wait recorded",
+            InputFacts {
+                waited: None,
+                ..held.clone()
+            },
+        ),
+        (
+            "a sign-in check, not another process",
+            InputFacts {
+                waited: Some(super::SIGN_IN_CHECKING.into()),
+                ..held.clone()
+            },
+        ),
+        (
+            "the master was briefed",
+            InputFacts {
+                briefed: Some(true),
+                ..held.clone()
+            },
+        ),
+        (
+            "no master worker",
+            InputFacts {
+                briefed: None,
+                ..held.clone()
+            },
+        ),
+        (
+            "the message was typed",
+            InputFacts {
+                messages: vec!["owner answered".into()],
+                ..held.clone()
+            },
+        ),
+    ] {
+        assert!(!profile_held(&facts), "{why} stays a FAIL");
     }
 }
 
