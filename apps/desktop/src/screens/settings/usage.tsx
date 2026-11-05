@@ -15,6 +15,7 @@ const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
 const TICK_MS = 30_000;
 const NOT_READY = "This isn't ready in this build yet.";
+const API_KEY_ACCOUNT = "native_profile_codex_api_key";
 const COMPACT = new Intl.NumberFormat("en-US", { notation: "compact", maximumFractionDigits: 1 });
 
 export type UsageRange = "today" | "7d" | "30d" | "all";
@@ -117,10 +118,11 @@ export function readLine(limits: AccountLimits, nowMs: number): string {
 }
 
 /** What a window with no current reading says: not read when the last read failed, whose
- * cause the card's notice above gives, or not reported by the provider. Input: the account's
- * last failure. Output: the window's state and its line. */
+ * cause the card's notice above gives, or not reported by the provider, as for an API-key
+ * account, which has no such window. Input: the account's last failure. Output: the
+ * window's state and its line. */
 export function missingWindow(failure: string | null): [string, string] {
-  return failure
+  return failure && failure !== API_KEY_ACCOUNT
     ? ["Not read", "The last read failed, for the reason above."]
     : ["Not reported", "The provider hasn't reported this window."];
 }
@@ -285,7 +287,7 @@ function LimitsCard({ limits, name, nowMs, busy, onSetReset }: {
       {limits.plan && <span className="badge">{limits.plan}</span>}
     </div>
     <span className="muted small">{readLine(limits, nowMs)}</span>
-    {limits.failure && <Notice tone={limits.failure === "native_profile_codex_api_key" ? "info" : "warn"}>{pollFailure(limits.failure)}</Notice>}
+    {limits.failure && <Notice tone={limits.failure === API_KEY_ACCOUNT ? "info" : "warn"}>{pollFailure(limits.failure)}</Notice>}
     <WindowLine limits={limits} kind="five_hour" nowMs={nowMs} pending={busy === `${limits.account}/five_hour`} onSetReset={onSetReset} />
     <WindowLine limits={limits} kind="weekly" nowMs={nowMs} pending={busy === `${limits.account}/weekly`} onSetReset={onSetReset} />
   </section>;

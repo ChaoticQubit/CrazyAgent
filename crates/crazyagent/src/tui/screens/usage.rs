@@ -257,7 +257,10 @@ fn limits_lines(
             lines.push(styled(format!("  {part}"), Role::Warning, theme));
         }
     }
-    let failed = limits.failure.is_some();
+    let failed = limits
+        .failure
+        .as_deref()
+        .is_some_and(|code| code != "native_profile_codex_api_key");
     lines.push(Line::raw(format!(
         "  {}",
         window_line(
