@@ -7,6 +7,7 @@ use trackwright_core::tests_model::{
 };
 
 const NODE_JUNIT: &[u8] = include_bytes!("fixtures/results/node-test.junit.xml");
+const PYTEST_JUNIT: &[u8] = include_bytes!("fixtures/results/pytest.junit.xml");
 const LIBTEST_FAILED: &str = include_str!("fixtures/results/libtest-failed.txt");
 const LIBTEST_BUILD_FAILED: &str = include_str!("fixtures/results/libtest-build-failed.txt");
 const ALLURE_BROKEN: &str = include_str!("fixtures/results/allure-broken-result.json");
@@ -76,6 +77,42 @@ fn a_real_junit_file_records_one_result_per_case() {
     );
     assert_eq!(parsed.summary, None);
     assert!(!parsed.build_failed);
+}
+
+#[test]
+fn a_real_pytest_junit_file_records_one_result_per_case() {
+    let parsed =
+        parse(ResultFormat::Junit, PYTEST_JUNIT).expect("real pytest --junitxml output parses");
+    assert_eq!(
+        parsed,
+        ParsedResults {
+            rows: vec![
+                ResultRow {
+                    name: "test_sample.test_adds_two_numbers".to_string(),
+                    outcome: ResultOutcome::Passed,
+                    duration_ms: Some(0),
+                    message: None,
+                },
+                ResultRow {
+                    name: "test_sample.test_reports_a_wrong_sum".to_string(),
+                    outcome: ResultOutcome::Failed,
+                    duration_ms: Some(1),
+                    message: Some(
+                        "def test_reports_a_wrong_sum():\n>       assert 1 + 1 == 3\nE       assert (1 + 1) == 3\n\ntest_sample.py:9: AssertionError"
+                            .to_string()
+                    ),
+                },
+                ResultRow {
+                    name: "test_sample.test_waits_for_a_fixture".to_string(),
+                    outcome: ResultOutcome::Skipped,
+                    duration_ms: Some(0),
+                    message: Some("/work/test_sample.py:12: fixture not ready".to_string()),
+                },
+            ],
+            summary: None,
+            build_failed: false,
+        }
+    );
 }
 
 #[test]
