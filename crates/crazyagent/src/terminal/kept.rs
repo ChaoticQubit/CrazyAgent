@@ -87,9 +87,10 @@ fn finished_label() -> String {
 
 /// A terminal host that keeps the last screen of each terminal it ends, so a viewer opening
 /// an agent between runs sees how its last run finished, labeled with the local time it
-/// ended, instead of a refusal; a new run of the agent forgets it. A kill and a spawn each
-/// hold the kept screens while they act, so a respawn never lands between a kill and the
-/// screen it keeps. Screens live only in the engine's memory: a terminal that exits on its
+/// ended, instead of a refusal; a new run of the agent forgets it. A kill keeps no newer
+/// screen over one already kept for the run, as before a keeper ends it. A kill and a spawn
+/// each hold the kept screens while they act, so a respawn never lands between a kill and
+/// the screen it keeps. Screens live only in the engine's memory: a terminal that exits on its
 /// own, or an engine restart, keeps none.
 pub(super) struct LastScreenHost<H> {
     inner: H,
@@ -164,7 +165,11 @@ impl<H: Host> Host for LastScreenHost<H> {
 
     fn kill(&self, agent: &AgentId) -> Result<(), HostError> {
         let mut screens = self.screens();
-        let last = self.inner.snapshot(agent).ok();
+        let last = if screens.holds(agent) {
+            None
+        } else {
+            self.inner.snapshot(agent).ok()
+        };
         self.inner.kill(agent)?;
         if let Some(last) = last {
             screens.keep(agent, &last.screen, last.cols, last.rows, &finished_label());
