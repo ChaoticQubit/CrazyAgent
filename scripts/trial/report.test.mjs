@@ -547,6 +547,31 @@ test("D-M1: with runs.json each row reads its log from its own run's folder, nev
   }
 });
 
+test("F-L1: two runs that name one log folder are refused, however the second spells it", async () => {
+  const logs = await folder("live-shared-logs-");
+  const repo = await folder("live-shared-logs-repo-");
+  try {
+    const script = join(repo, "live-pass.sh");
+    const name = "launch_context::tests::a_local_turn_answers";
+    await put(repo, "live-pass.sh", liveScript([`local|lib|${name}|30|none`]));
+    await put(logs, "summary-first.txt", `== local: no account, no tokens\nPASS ${name} 3s\n`);
+    await put(logs, "summary-second.txt", `== local: no account, no tokens\nPASS ${name} 4s\n`);
+    await put(logs, `local/inner/${logName(name)}`, okLog(name));
+    await put(logs, `other/inner/${logName(name)}`, okLog(name));
+    await symlink(join(logs, "local"), join(logs, "alias"));
+    const run = (file, folderName) => ({ file, commit: "afd69922", source: file, logs: folderName });
+    await put(logs, "runs.json", JSON.stringify([run("summary-first.txt", "local/inner"), run("summary-second.txt", "other/inner")]));
+    assert.deepEqual(liveRows(renderReport(await readLivePass(logs, { script, repo }))).map((row) => row[2]), ["PASS"], "two runs with their own folders are read");
+    for (const [second, why] of [["local/inner", "the same folder named twice"], ["alias/inner", "the same folder reached through a linked parent"]]) {
+      await put(logs, "runs.json", JSON.stringify([run("summary-first.txt", "local/inner"), run("summary-second.txt", second)]));
+      await assert.rejects(readLivePass(logs, { script, repo }), /report_live_runs_invalid: summary-second\.txt logs .*already/, why);
+    }
+  } finally {
+    await rm(logs, { recursive: true });
+    await rm(repo, { recursive: true });
+  }
+});
+
 test("D-M1: a failure excerpt leaves out process-list lines, so a dumped ps listing never reaches the report", async () => {
   const logs = await folder("live-ps-");
   const repo = await folder("live-ps-repo-");
