@@ -1157,11 +1157,20 @@ export type AddFolderMode = "move" | "copy";
 
 export type OnboardingStep = { kind: "waiting"; until_ms?: number } | { kind: "running" } | { kind: "done" } | { kind: "off" } | { kind: "not_installed" } | { kind: "failed"; reason: string };
 
+/** One kind of research the project's own documents already hold, read from their text:
+ * the kind and the files below the project folder that hold it. */
+export interface FoundResearch {
+  kind: ResearchKind;
+  files: string[];
+}
+
 export interface MappingFacts {
   languages: string[];
   build_commands: string[];
   test_commands: string[];
   entry_points: string[];
+  research?: FoundResearch[];
+  documents?: string[];
 }
 
 /** One instruction file of a project (CLAUDE.md, .claude/CLAUDE.md, AGENTS.md or

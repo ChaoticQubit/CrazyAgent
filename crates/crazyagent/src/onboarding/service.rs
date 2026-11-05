@@ -365,6 +365,7 @@ fn finish(
 ) -> Result<(), String> {
     let (state, reason) = step.columns();
     assert_ne!(state, "running");
+    let found = drafted.and_then(draft::found_column);
     let drafted = drafted
         .map(serde_json::to_string)
         .transpose()
@@ -373,11 +374,20 @@ fn finish(
         .execute(
             &format!(
                 "UPDATE onboarding SET {0}_state=?3,{0}_reason=?4,
-                    drafted=COALESCE(?5,drafted),claimer=NULL,heartbeat_ms=NULL,updated_ms=?6
+                    drafted=COALESCE(?5,drafted),mapping_found=COALESCE(?7,mapping_found),
+                    claimer=NULL,heartbeat_ms=NULL,updated_ms=?6
                  WHERE project=?1 AND claimer=?2",
                 claimed.kind.prefix()
             ),
-            params![claimed.project, claimer, state, reason, drafted, now_ms()],
+            params![
+                claimed.project,
+                claimer,
+                state,
+                reason,
+                drafted,
+                now_ms(),
+                found
+            ],
         )
         .map_err(|error| error.to_string())?;
     Ok(())
@@ -416,8 +426,15 @@ fn store_draft(
     let body = serde_json::to_string(drafted).map_err(|error| error.to_string())?;
     database
         .execute(
-            "UPDATE onboarding SET drafted=?3,updated_ms=?4 WHERE project=?1 AND claimer=?2",
-            params![claimed.project, claimer, body, now_ms()],
+            "UPDATE onboarding SET drafted=?3,mapping_found=COALESCE(?5,mapping_found),updated_ms=?4
+             WHERE project=?1 AND claimer=?2",
+            params![
+                claimed.project,
+                claimer,
+                body,
+                now_ms(),
+                draft::found_column(drafted)
+            ],
         )
         .map_err(|error| error.to_string())?;
     Ok(())

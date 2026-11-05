@@ -262,3 +262,117 @@ fn an_unreadable_row_fails_plainly_instead_of_being_claimed_again_and_again() {
     assert_eq!(claimed(&database).as_deref(), Some("shop"));
     assert_eq!(recover_stale(&database).unwrap(), 0);
 }
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct DraftedOn1814 {
+    name: String,
+    draft: crate::project_setup::ProjectSetup,
+    facts: FactsOn1814,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FactsOn1814 {
+    languages: Vec<String>,
+    build_commands: Vec<String>,
+    test_commands: Vec<String>,
+    entry_points: Vec<String>,
+}
+
+#[test]
+fn a_row_with_documents_found_still_reads_on_18_14_and_the_view_keeps_them() {
+    let mut database = database();
+    waiting_to_map(&database, "mapped", 1);
+    let claimed = claim(&database, "claim-test").unwrap().unwrap();
+    let mut drafted = claimed.drafted.clone();
+    drafted.facts.languages = vec!["Rust".into()];
+    drafted.facts.research = vec![crate::onboarding::FoundResearch {
+        kind: crate::project_setup::ResearchKind::CompetitorResearch,
+        files: vec!["research/landscape.md".into()],
+    }];
+    drafted.facts.documents = vec!["docs/plan.md".into()];
+    assert_eq!(
+        finish(
+            &database,
+            "claim-test",
+            &claimed,
+            &Step::Done,
+            Some(&drafted)
+        ),
+        Ok(())
+    );
+
+    let row = database
+        .query_row(
+            "SELECT graph_state,graph_reason,mapping_state,mapping_reason,drafted,repo
+             FROM onboarding WHERE project=?1",
+            ["mapped"],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            },
+        )
+        .unwrap();
+    assert_eq!((row.2.as_str(), row.5.as_str()), ("done", "/repos/mapped"));
+    let old = serde_json::from_str::<DraftedOn1814>(&row.4);
+    assert!(old.is_ok(), "18.14 cannot decode the drafted row: {old:?}");
+    let old = old.unwrap();
+    assert_eq!(
+        (old.name.as_str(), &old.draft),
+        (drafted.name.as_str(), &drafted.draft)
+    );
+    assert_eq!(
+        [
+            old.facts.languages,
+            old.facts.build_commands,
+            old.facts.test_commands,
+            old.facts.entry_points
+        ],
+        [vec!["Rust".to_owned()], vec![], vec![], vec![]]
+    );
+
+    let shown = |database: &mut Connection| {
+        let tx = database.transaction().unwrap();
+        let view =
+            crate::onboarding::status(&tx, &crate::protocol::ProjectId::new("mapped").unwrap());
+        assert!(view.is_ok(), "{view:?}");
+        let facts = view.unwrap().unwrap().facts;
+        (facts.research, facts.documents)
+    };
+    let found = (
+        drafted.facts.research.clone(),
+        drafted.facts.documents.clone(),
+    );
+    assert_eq!(shown(&mut database), found);
+
+    database
+        .execute(
+            "UPDATE onboarding SET mapping_state='waiting' WHERE project='mapped'",
+            [],
+        )
+        .unwrap();
+    let again = claim(&database, "claim-test").unwrap().unwrap();
+    assert!(again.drafted.facts.research.is_empty());
+    assert_eq!(
+        finish(
+            &database,
+            "claim-test",
+            &again,
+            &Step::Done,
+            Some(&again.drafted)
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        shown(&mut database),
+        found,
+        "a later draft naming nothing keeps the earlier map"
+    );
+}

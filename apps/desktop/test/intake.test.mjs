@@ -511,6 +511,21 @@ test("an overview the engine did not write is shown apart and labelled, never as
   assert.doesNotMatch(found, />Overview</);
 });
 
+test("the setup review shows each research toggle the repo already covers and the documents found", () => {
+  const catalog = ok({ tech_stack: [], platforms: [], research: [{ kind: "market_research", label: "Market research" }, { kind: "competitor_research", label: "Competitor research" }], document_extensions: [], documents_max: 16, document_bytes_max: 1, project_document_bytes_max: 1, default_team: stored().team });
+  const base = { name: "Plant shop", catalog, errors: {}, showErrors: false, busy: false, problem: "", onDraft: noop, onConfirm: noop, onOpenLink: noop };
+  const facts = { ...view().facts, research: [{ kind: "competitor_research", files: ["research/landscape-2026.md", "notes/rivals.txt"] }], documents: ["docs/q3-plan.md"] };
+  const mapped = view({ facts });
+  const markup = html(OnboardingReviewView, { ...base, view: ok(mapped), draft: intake.onboardingDraft(mapped, stored()) });
+  const items = markup.split('class="pj-switch-item"').slice(1);
+  assert.equal(items.length, 2);
+  assert.doesNotMatch(items[0], /Already in the repo/);
+  assert.match(items[1], /Already in the repo: research\/landscape-2026\.md, notes\/rivals\.txt/);
+  assert.match(markup, /Project documents found[\s\S]*<li>docs\/q3-plan\.md<\/li>/);
+  const plain = html(OnboardingReviewView, { ...base, view: ok(view()), draft: intake.onboardingDraft(view(), stored()) });
+  assert.doesNotMatch(plain, /Already in the repo|Project documents found/);
+});
+
 test("a repository CrazyAgent can't clone is listed with why and without a working Clone", () => {
   const repos = [
     { full_name: "octo-cat/.github", private: false, default_branch: "main", size_kb: 4, refused: "github_repo_name_unsupported" },
