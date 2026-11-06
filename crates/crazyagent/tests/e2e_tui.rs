@@ -494,6 +494,9 @@ fn nothing_left_setting_up(screen: &str) {
 fn tab_shown(screen: &str, project: &str) -> Option<String> {
     let crumb = format!("Home  /  {project}");
     let line = screen.lines().next()?;
+    if line.contains(&format!("CrazyAgent  /  {project}  /  Master")) {
+        return Some("Master".to_owned());
+    }
     let rest = &line[line.find(&crumb)? + crumb.len()..];
     Some(match rest.strip_prefix("  /  ") {
         Some(tab) => tab.split("  ").next()?.trim().to_owned(),
