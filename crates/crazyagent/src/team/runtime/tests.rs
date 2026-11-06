@@ -19627,6 +19627,7 @@ fn neither_a_native_lead_nor_a_teammate_moves_its_home_away_but_both_still_work_
         format!("'{text}'")
     };
 
+    let mut tried = Vec::new();
     for (who, profile, own, folder) in [
         ("lead", plan.sandbox_profile.clone(), &home, &work),
         (
@@ -19662,17 +19663,24 @@ fn neither_a_native_lead_nor_a_teammate_moves_its_home_away_but_both_still_work_
         )
         .unwrap();
         let text = std::fs::read_to_string(folder.join("codes.txt")).unwrap_or_default();
+        tried.push((who, text, output));
+    }
+    let report: Vec<String> = tried
+        .iter()
+        .map(|(who, text, _)| format!("{who}: {}", text.replace('\n', " ")))
+        .collect();
+    for (who, text, output) in &tried {
         let code = |name: &str| {
             text.lines()
                 .filter_map(|line| line.split_once('='))
                 .find(|(key, _)| *key == name)
                 .map(|(_, value)| value.parse::<i32>().unwrap())
-                .unwrap_or_else(|| panic!("{who}: {name} missing: {text} {output:?}"))
+                .unwrap_or_else(|| panic!("{who}: {name} missing: {report:?} {output:?}"))
         };
-        assert_ne!(code("home_away"), 0, "{who}: {text}");
-        assert_ne!(code("state_away"), 0, "{who}: {text}");
+        assert_ne!(code("home_away"), 0, "{who}: {report:?}");
+        assert_ne!(code("state_away"), 0, "{who}: {report:?}");
         for name in ["home_files", "work_files", "mkdir_roots", "home_exists"] {
-            assert_eq!(code(name), 0, "{who} {name}: {text}");
+            assert_eq!(code(name), 0, "{who} {name}: {report:?}");
         }
     }
     assert_eq!(std::fs::read(home.join("settings.json")).ok(), settings);
