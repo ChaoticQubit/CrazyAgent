@@ -363,9 +363,10 @@ mod failed {
 
     /// A Codex stand-in that resumes the rollout it is named by `resume <id>`, logs each
     /// launch and every typed line, and in a fresh session hangs once in a task that started
-    /// a command it never finishes, as a turn cut short does, still reading what is typed, as
-    /// Codex does after Escape stops a turn; any other turn, and every turn of a resumed
-    /// session, even one whose note quotes that task, ends with "Done.".
+    /// a command it never finishes, as a turn cut short does, reading single keys until
+    /// Escape, which ends that turn as interrupted in its rollout, as Codex records it, and
+    /// then reads what is typed again; any other turn, and every turn of a resumed session,
+    /// even one whose note quotes that task, ends with "Done.".
     const RESUMING_CODEX: &str = r#"#!/bin/sh
 [ "$1" = app-server ] && exit 0
 d="$CODEX_HOME/sessions/2026/10/27"
@@ -408,9 +409,17 @@ while IFS= read -r line; do
   printf '{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"%s"}]}}\n' "$text" >> "$f"
   printf '{"type":"event_msg","payload":{"type":"task_started"}}\n' >> "$f"
   if [ "$hang" = 1 ]; then
+    /bin/stty -icanon min 1
     printf '{"type":"response_item","payload":{"type":"function_call","name":"shell","call_id":"call-1","arguments":"{\\"command\\":[\\"touch\\",\\"page.md\\"]}"}}\n' >> "$f"
     hang=0
     hung=1
+    while :; do
+      c=$(/bin/dd bs=1 count=1 2>/dev/null | /usr/bin/od -An -tx1 | /usr/bin/tr -d ' \n')
+      [ -n "$c" ] || exit 0
+      [ "$c" = 1b ] && break
+    done
+    printf '{"type":"event_msg","payload":{"type":"turn_aborted","reason":"interrupted"}}\n' >> "$f"
+    /bin/stty icanon
     continue
   fi
   /bin/sleep 0.3
