@@ -171,7 +171,7 @@ impl Ctx {
         if let Err(request) = self.queue(request)
             && self.refused.len() < QUEUE_MAX
         {
-            self.refused.push(request);
+            self.refused.push(*request);
         }
         assert!(self.refused.len() <= QUEUE_MAX);
     }
@@ -194,7 +194,7 @@ impl Ctx {
     /// Input: the request. Output: Ok when the engine will see it, or the request back
     /// when the queue already holds 32 requests. A joined terminal input holds at most
     /// the engine's terminal input limit.
-    fn queue(&mut self, request: Request) -> Result<(), Request> {
+    fn queue(&mut self, request: Request) -> Result<(), Box<Request>> {
         if matches!(request, Request::Reconnect) {
             self.reconnect = true;
             return Ok(());
@@ -227,7 +227,7 @@ impl Ctx {
                 "Too many requests are waiting.",
                 "Wait a moment, then try again.",
             ));
-            return Err(request);
+            return Err(Box::new(request));
         }
         match request {
             Request::Profile => self.store.profile = Load::Loading,
