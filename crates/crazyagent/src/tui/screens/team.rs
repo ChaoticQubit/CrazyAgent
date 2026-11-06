@@ -149,12 +149,14 @@ struct Instructions {
 /// focus every key goes to the agent until Ctrl-]. Output: TeamGraph,
 /// TerminalAttach, TerminalInput, TerminalResize and TerminalDetach requests.
 /// s opens the team settings over the whole body, read with `SetupQuery::Team`.
-/// The master view is the same screen showing only the live master's terminal.
+/// The master view is the same screen showing only the live master's terminal; it starts the
+/// live master on a read that shows it off, and once more per open after a stale refusal.
 pub struct Team {
     project: ProjectId,
     name: String,
     master: bool,
     asked: bool,
+    retried: bool,
     checked: bool,
     switch: Option<LiveSwitch>,
     master_agent: Option<Option<i64>>,
@@ -185,6 +187,7 @@ impl Team {
             name,
             master: false,
             asked: false,
+            retried: false,
             checked: false,
             switch: None,
             master_agent: None,
@@ -434,6 +437,10 @@ impl Team {
                     if code == crate::storage::versioned::STALE_CODE =>
                 {
                     self.want = None;
+                    if !self.retried {
+                        self.retried = true;
+                        self.asked = false;
+                    }
                     ctx.say(Message::warning(
                         "The live master switch changed in another window.",
                         plain_problem(code).unwrap_or(code.as_str()),
