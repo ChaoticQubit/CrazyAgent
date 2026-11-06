@@ -1908,6 +1908,38 @@ fn the_apply_setting_flips_between_when_idle_and_at_the_next_start() {
     );
 }
 
+/// A sends Apply a master harness change with the team settings version the view read, and
+/// waits while the read after its last save is on its way, so the engine refuses a change
+/// from an older read as stale instead of letting it undo a newer one (I1).
+#[test]
+fn the_apply_setting_names_the_settings_version_it_read_and_waits_for_the_read_after_a_save() {
+    let mut view = TeamView::new(project());
+    let mut read = team();
+    read.settings_version = 7;
+    reread(&mut view, read, NOW);
+    let reply = view.key(press(KeyCode::Char('A')));
+    let TeamReply::Change(action) = &reply else {
+        panic!("no change was sent: {reply:?}");
+    };
+    assert_eq!(
+        serde_json::to_value(action).unwrap()["version"],
+        serde_json::json!(7),
+        "the change names the version the view read: {action:?}"
+    );
+    applied(&mut view, reply);
+    assert_eq!(
+        view.key(press(KeyCode::Char('A'))),
+        TeamReply::Handled,
+        "the team read after the save has not landed"
+    );
+    assert_eq!(
+        view.notice,
+        Some(Notice::problem(
+            "Still saving the last change. Try again in a moment."
+        ))
+    );
+}
+
 /// H opens the master harness picker: it reads the harness catalog once and the stored
 /// setup, lists the harnesses that can run the master with the running one marked now,
 /// and Enter saves the picked one as the team's master through the project setup at the
