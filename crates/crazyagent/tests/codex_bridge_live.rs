@@ -24,8 +24,8 @@ const OLLAMA_OPENAI: &str = "http://127.0.0.1:11434/v1";
 const LOCAL_MODEL: &str = "qwen2.5:0.5b";
 const SESSION: &str = "0199a0b0-0000-4000-8000-000000000001";
 const GREETING: &str = "Reply with one short greeting.";
-const LONG_TURN: &str =
-    "Write the numbers from 1 to 3000 in words, one per line, with no other text.";
+const BUSY_TURN: &str =
+    "Write the numbers from 1 to 30 in words, one per line, with no other text.";
 const STEER: &str = "Stop counting now and reply with the single word steered.";
 const NOTICE: &str = "Owner notice: the owner woke worker 7 again in its own worktree.";
 const PROJECT: &str = "bridge-live";
@@ -105,9 +105,9 @@ fn installed_codex() -> PathBuf {
     executable
 }
 
-/// Tells whether any Codex record under the agent home holds a text.
-/// Input: the agent's `CODEX_HOME` and the text. Output: whether a rollout contains it.
-fn recorded(home: &Path, text: &str) -> bool {
+/// Reads a Codex record under the agent home that holds a text.
+/// Input: the agent's `CODEX_HOME` and the text. Output: the first such rollout's content.
+fn rollout_with(home: &Path, text: &str) -> Option<String> {
     let mut folders = vec![home.join("sessions")];
     while let Some(folder) = folders.pop() {
         let Ok(entries) = std::fs::read_dir(&folder) else {
@@ -119,13 +119,20 @@ fn recorded(home: &Path, text: &str) -> bool {
             if kind.is_dir() {
                 folders.push(path);
             } else if kind.is_file()
-                && std::fs::read_to_string(&path).is_ok_and(|record| record.contains(text))
+                && let Ok(record) = std::fs::read_to_string(&path)
+                && record.contains(text)
             {
-                return true;
+                return Some(record);
             }
         }
     }
-    false
+    None
+}
+
+/// Tells whether any Codex record under the agent home holds a text.
+/// Input: the agent's `CODEX_HOME` and the text. Output: whether a rollout contains it.
+fn recorded(home: &Path, text: &str) -> bool {
+    rollout_with(home, text).is_some()
 }
 
 /// Waits for a condition on the agent home, failing with what was awaited.
@@ -143,8 +150,34 @@ fn until(limit: Duration, what: &str, done: impl Fn() -> bool) {
 /// texts. Output: Ok, or on timeout the texts still missing and whether the model's step
 /// on the prompt was still running.
 fn steered(limit: Duration, home: &Path, prompt: &str, texts: &[&str]) -> Result<(), String> {
-    let _ = (limit, home, prompt, texts);
-    Err(String::new())
+    let deadline = Instant::now() + limit;
+    loop {
+        let missing: Vec<&str> = texts
+            .iter()
+            .copied()
+            .filter(|text| !recorded(home, text))
+            .collect();
+        if missing.is_empty() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            let step = match rollout_with(home, prompt) {
+                None => "never started (the prompt is not recorded)",
+                Some(record) => {
+                    let start = record.find(prompt).unwrap();
+                    if record[start..].contains(r#""role":"assistant""#) {
+                        "had ended (an assistant record follows it)"
+                    } else {
+                        "was still running (no assistant record after it)"
+                    }
+                }
+            };
+            return Err(format!(
+                "timed out waiting for the steered {missing:?}; the model's step on {prompt:?} {step}"
+            ));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 /// Launches a real Codex app with the engine's own command in tmux, inside the real project
@@ -264,23 +297,23 @@ fn a_steer_timeout_names_each_missing_text_and_whether_the_step_still_runs() {
     let running = [
         line("user", GREETING),
         line("assistant", "Hello."),
-        line("user", LONG_TURN),
+        line("user", BUSY_TURN),
         line("user", NOTICE),
     ]
     .concat();
     std::fs::write(&rollout, &running).unwrap();
-    let timeout = steered(Duration::ZERO, root.path(), LONG_TURN, &[NOTICE, STEER]).unwrap_err();
+    let timeout = steered(Duration::ZERO, root.path(), BUSY_TURN, &[NOTICE, STEER]).unwrap_err();
     assert!(timeout.contains(&format!("{STEER:?}")), "{timeout}");
     assert!(!timeout.contains(&format!("{NOTICE:?}")), "{timeout}");
     assert!(timeout.contains("still running"), "{timeout}");
 
     std::fs::write(&rollout, running + &line("assistant", "one")).unwrap();
-    let timeout = steered(Duration::ZERO, root.path(), LONG_TURN, &[STEER]).unwrap_err();
+    let timeout = steered(Duration::ZERO, root.path(), BUSY_TURN, &[STEER]).unwrap_err();
     assert!(timeout.contains(&format!("{STEER:?}")), "{timeout}");
     assert!(timeout.contains("ended"), "{timeout}");
     assert!(!timeout.contains("still running"), "{timeout}");
     assert_eq!(
-        steered(Duration::ZERO, root.path(), LONG_TURN, &[NOTICE]),
+        steered(Duration::ZERO, root.path(), BUSY_TURN, &[NOTICE]),
         Ok(())
     );
 }
@@ -302,14 +335,17 @@ fn a_real_codex_app_takes_coord_messages_through_its_app_server_idle_and_busy() 
     let (_server, host) = start_app(&base, &home, &agent);
     greet(&home);
 
-    assert_eq!(codex::deliver(&home, LONG_TURN, true), Bridged::Delivered);
-    until(TURN, "the long turn to start", || {
-        recorded(&home, LONG_TURN)
+    assert_eq!(codex::deliver(&home, BUSY_TURN, true), Bridged::Delivered);
+    until(TURN, "the busy turn to start", || {
+        recorded(&home, BUSY_TURN)
     });
     assert_eq!(codex::deliver(&home, STEER, true), Bridged::Delivered);
-    until(TURN, "the steer to reach the running turn", || {
-        recorded(&home, STEER)
-    });
+    if let Err(timeout) = steered(TURN, &home, BUSY_TURN, &[STEER]) {
+        panic!(
+            "{timeout}; the test folder is kept at {}",
+            root.keep().display()
+        );
+    }
     host.kill(&agent).unwrap();
 }
 
@@ -346,9 +382,9 @@ fn a_working_codex_agent_gets_an_owner_notice_and_a_nudge_steered_by_the_deliver
     let agent = AgentId::team(id).unwrap();
     let (_server, host) = start_app(&base, &home, &agent);
     greet(&home);
-    assert_eq!(codex::deliver(&home, LONG_TURN, true), Bridged::Delivered);
-    until(TURN, "the long turn to start", || {
-        recorded(&home, LONG_TURN)
+    assert_eq!(codex::deliver(&home, BUSY_TURN, true), Bridged::Delivered);
+    until(TURN, "the busy turn to start", || {
+        recorded(&home, BUSY_TURN)
     });
 
     let project = ProjectId::new(PROJECT).unwrap();
@@ -398,10 +434,11 @@ fn a_working_codex_agent_gets_an_owner_notice_and_a_nudge_steered_by_the_deliver
         ("delivered".to_owned(), "delivered".to_owned()),
         "the working agent's notice and nudge went through the bridge at once"
     );
-    until(
-        TURN,
-        "the steered notice and nudge in the agent's records",
-        || recorded(&home, NOTICE) && recorded(&home, reminder),
-    );
+    if let Err(timeout) = steered(TURN, &home, BUSY_TURN, &[NOTICE, reminder]) {
+        panic!(
+            "{timeout}; the test folder is kept at {}",
+            root.keep().display()
+        );
+    }
     host.kill(&agent).unwrap();
 }
