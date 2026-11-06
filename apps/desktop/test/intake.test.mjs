@@ -589,8 +589,9 @@ test("the setup review shows each research toggle the repo already covers and th
   const facts = { ...view().facts, research: [{ kind: "competitor_research", files: ["research/landscape-2026.md", "notes/rivals.txt"] }], documents: ["docs/q3-plan.md"] };
   const mapped = view({ facts });
   const markup = html(OnboardingReviewView, { ...base, view: ok(mapped), draft: intake.onboardingDraft(mapped, stored()) });
-  const items = markup.split('class="pj-switch-item"').slice(1);
-  assert.equal(items.length, 2);
+  const research = markup.slice(markup.indexOf("<legend>Research</legend>"), markup.indexOf("</fieldset>", markup.indexOf("<legend>Research</legend>")));
+  const items = research.split('class="pj-switch-item"').slice(1);
+  assert.equal(items.length, 2, "one switch per research kind; the roadmap switch sits outside the Research fieldset");
   assert.doesNotMatch(items[0], /Already in the repo/);
   assert.match(items[1], /Already in the repo: research\/landscape-2026\.md, notes\/rivals\.txt/);
   assert.match(markup, /Project documents found[\s\S]*<li>docs\/q3-plan\.md<\/li>/);
