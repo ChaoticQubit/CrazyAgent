@@ -223,12 +223,31 @@ pub fn mark(
 pub fn requeue_dead(db: &Connection, agent: AgentId, now: i64) -> Result<u32, EngineError> {
     let moved = db
         .execute(
-            "UPDATE coord_messages SET receipt='sent', receipt_at=?2
+            "UPDATE coord_messages SET receipt='sent', receipt_at=?2, turn=NULL
              WHERE to_kind='agent' AND to_agent=?1 AND receipt IN ('delivered','typed')",
             params![agent, now],
         )
         .map_err(state)?;
     u32::try_from(moved).map_err(state)
+}
+
+/// Names the Codex turn a bridge delivery put messages into (b19 P2), kept only while
+/// each stays Delivered since every later receipt change clears it, so an abort of that
+/// turn can put back what it dropped. Takes the database, the messages and the turn id.
+/// Returns Ok or a SQLite failure.
+pub(crate) fn delivered_into(
+    db: &Connection,
+    carried: &[MessageId],
+    turn: &str,
+) -> Result<(), EngineError> {
+    for message in carried {
+        db.execute(
+            "UPDATE coord_messages SET turn=?2 WHERE id=?1 AND receipt='delivered'",
+            params![message, turn],
+        )
+        .map_err(state)?;
+    }
+    Ok(())
 }
 
 /// Puts back to Sent one message the engine marked delivered after `after` and up to
@@ -245,7 +264,7 @@ pub(crate) fn requeue_aborted(
 ) -> Result<bool, EngineError> {
     let moved = db
         .execute(
-            "UPDATE coord_messages SET receipt='sent', receipt_at=?4
+            "UPDATE coord_messages SET receipt='sent', receipt_at=?4, turn=NULL
              WHERE id=?1 AND to_kind='agent' AND receipt='delivered'
              AND receipt_at>?2 AND receipt_at<=?3",
             params![id, after, until, now],
@@ -352,7 +371,7 @@ fn set_receipt(
 ) -> Result<(), EngineError> {
     let changed = tx
         .execute(
-            "UPDATE coord_messages SET receipt=?2, receipt_at=?3 WHERE id=?1",
+            "UPDATE coord_messages SET receipt=?2, receipt_at=?3, turn=NULL WHERE id=?1",
             params![message, receipt.as_str(), now],
         )
         .map_err(state)?;

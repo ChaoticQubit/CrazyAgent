@@ -283,7 +283,7 @@ fn greet(home: &Path) {
     let deadline = Instant::now() + START;
     loop {
         match codex::deliver(home, GREETING, true) {
-            Bridged::Delivered => break,
+            Bridged::Delivered(_) => break,
             Bridged::Unavailable(reason) => {
                 assert!(
                     Instant::now() < deadline,
@@ -396,11 +396,17 @@ fn a_real_codex_app_takes_coord_messages_through_its_app_server_idle_and_busy() 
     let (_server, host) = start_app(&base, &home, &agent);
     greet(&home);
 
-    assert_eq!(codex::deliver(&home, BUSY_TURN, true), Bridged::Delivered);
+    assert!(matches!(
+        codex::deliver(&home, BUSY_TURN, true),
+        Bridged::Delivered(_)
+    ));
     until(TURN, "the busy turn to start", || {
         recorded(&home, BUSY_TURN)
     });
-    assert_eq!(codex::deliver(&home, STEER, false), Bridged::Delivered);
+    assert!(matches!(
+        codex::deliver(&home, STEER, false),
+        Bridged::Delivered(_)
+    ));
     if let Err(problem) =
         steered(TURN, &home, BUSY_TURN, &[STEER]).and_then(|()| joined(&home, BUSY_TURN, &[STEER]))
     {
@@ -445,7 +451,10 @@ fn a_working_codex_agent_gets_an_owner_notice_and_a_nudge_steered_by_the_deliver
     let agent = AgentId::team(id).unwrap();
     let (_server, host) = start_app(&base, &home, &agent);
     greet(&home);
-    assert_eq!(codex::deliver(&home, BUSY_TURN, true), Bridged::Delivered);
+    assert!(matches!(
+        codex::deliver(&home, BUSY_TURN, true),
+        Bridged::Delivered(_)
+    ));
     until(TURN, "the busy turn to start", || {
         recorded(&home, BUSY_TURN)
     });
@@ -508,11 +517,11 @@ fn a_working_codex_agent_gets_an_owner_notice_and_a_nudge_steered_by_the_deliver
     host.kill(&agent).unwrap();
 }
 
-/// b19 P2 live: the delivery tick steers a message into a working Codex agent's busy turn,
-/// where it waits for the model's step to end, and the owner's Esc in the agent's terminal
-/// aborts that turn first, so Codex drops it. The agent's receipts read the abort in its
-/// rollout and put the message back to sent, and the next tick delivers it once, in a turn
-/// of its own. Needs Codex 0.164 and a local Ollama model.
+/// b19 P2 live: the delivery tick steers a message into a working Codex agent's busy turn
+/// and keeps that turn's id, the message waits there for the model's step to end, and the
+/// owner's Esc in the agent's terminal aborts that turn first, so Codex drops it. The
+/// agent's receipts read that turn's abort in its rollout and put the message back to sent,
+/// and the next tick delivers it once, in a new turn. Needs Codex 0.164 and local Ollama.
 #[test]
 fn a_steer_a_codex_turn_aborted_by_esc_dropped_goes_back_to_sent_and_comes_once_more() {
     let root = tempfile::Builder::new()
@@ -541,7 +550,9 @@ fn a_steer_a_codex_turn_aborted_by_esc_dropped_goes_back_to_sent_and_comes_once_
     let agent = AgentId::team(id).unwrap();
     let (_server, host) = start_app(&base, &home, &agent);
     greet(&home);
-    assert_eq!(codex::deliver(&home, BUSY_TURN, true), Bridged::Delivered);
+    let Bridged::Delivered(Some(busy)) = codex::deliver(&home, BUSY_TURN, true) else {
+        panic!("the busy turn started with no turn id named");
+    };
     until(TURN, "the busy turn to start", || {
         recorded(&home, BUSY_TURN)
     });
@@ -563,11 +574,11 @@ fn a_steer_a_codex_turn_aborted_by_esc_dropped_goes_back_to_sent_and_comes_once_
         now_ms(),
     )
     .unwrap();
-    let receipt = || -> String {
+    let receipt = || -> (String, Option<String>) {
         db.query_row(
-            "SELECT receipt FROM coord_messages WHERE id=?1",
+            "SELECT receipt, turn FROM coord_messages WHERE id=?1",
             [message],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .unwrap()
     };
@@ -583,14 +594,22 @@ fn a_steer_a_codex_turn_aborted_by_esc_dropped_goes_back_to_sent_and_comes_once_
     host.input(&agent, ESC).unwrap();
     assert_eq!(
         receipt(),
-        "delivered",
-        "the tick steered the message into the busy turn"
+        ("delivered".to_owned(), Some(busy.clone())),
+        "the tick steered the message into the busy turn and kept that turn"
     );
     let mark = format!("[crazyagent msg {message}]");
     until(ABORT, "the owner's Esc to abort the busy turn", || {
         rollout_with(&home, BUSY_TURN)
             .is_some_and(|record| record.contains(r#""type":"turn_aborted""#))
     });
+    let named = format!(r#""turn_id":"{busy}""#);
+    assert!(
+        rollout_with(&home, BUSY_TURN)
+            .unwrap()
+            .lines()
+            .any(|line| { line.contains(r#""type":"turn_aborted""#) && line.contains(&named) }),
+        "the rollout's abort names the busy turn the message went into"
+    );
     if recorded(&home, &mark) {
         panic!(
             "the steer reached the rollout before the abort, so this run never saw Codex drop it; the test folder is kept at {}",
@@ -601,16 +620,20 @@ fn a_steer_a_codex_turn_aborted_by_esc_dropped_goes_back_to_sent_and_comes_once_
     crazyagent::coord::relay::codex_receipts(&db, id, &home, now_ms()).unwrap();
     assert_eq!(
         receipt(),
-        "sent",
+        ("sent".to_owned(), None),
         "the dropped steer waits for the agent's next turn"
     );
     deliveries
         .tick(&db, &project, now_ms() + RETRY_MS, &reach)
         .unwrap();
+    let (again, next) = receipt();
     assert_eq!(
-        receipt(),
-        "delivered",
+        again, "delivered",
         "the next tick gave the agent the message again"
+    );
+    assert!(
+        next.is_some() && next != Some(busy),
+        "the message went into a new turn: {next:?}"
     );
     until(TURN, "the message delivered again", || {
         recorded(&home, &mark)
