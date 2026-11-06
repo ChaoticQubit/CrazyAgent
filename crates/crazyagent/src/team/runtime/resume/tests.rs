@@ -617,6 +617,26 @@ done
             .unwrap_or_default()
         }
 
+        fn rollouts(&self, agent: i64) -> String {
+            let folder = self
+                .base
+                .join("team/agents")
+                .join(format!("agent-{agent}"))
+                .join("home/sessions/2026/10/27");
+            let mut files = std::fs::read_dir(folder)
+                .map(|entries| {
+                    entries
+                        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            files.sort();
+            files
+                .iter()
+                .map(|file| std::fs::read_to_string(file).unwrap_or_default())
+                .collect()
+        }
+
         fn launches(&self, agent: i64) -> Vec<String> {
             self.home_file(agent, "launches")
                 .lines()
@@ -666,6 +686,7 @@ done
                 f.sub().is_some_and(|sub| {
                     f.task(task) == ("running".into(), Some(sub), 1)
                         && f.home_file(sub, "typed").contains("hang here")
+                        && f.rollouts(sub).contains("\"function_call\"")
                 })
             });
             (task, self.sub().unwrap())
