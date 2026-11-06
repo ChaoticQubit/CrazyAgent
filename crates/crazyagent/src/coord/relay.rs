@@ -9,6 +9,7 @@ use crate::engine::EngineError;
 use crate::protocol::ProjectId;
 use crate::team::AgentStatus;
 use crate::team::tool::{Mailbox, call_id, call_id_valid};
+use crate::usage::capture::Format;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
@@ -374,7 +375,7 @@ pub fn serve(
         }
     }
     if receipts {
-        read_receipts(db, home, &team, now)?;
+        read_receipts(db, home, Format::Claude, team.values().copied(), now)?;
     }
     Ok(())
 }
@@ -1141,18 +1142,33 @@ fn held(
     Ok(held)
 }
 
-/// Marks Read each message delivered or typed to the lead or a teammate whose mark shows
-/// in one of the home's newest Claude Code transcripts (`projects/**/<session>.jsonl`)
-/// with assistant output after it. Reads the last `TRANSCRIPT_TAIL_BYTES` of at most
-/// `TRANSCRIPTS_READ_MAX` files, read-only and never following a link.
+/// Marks Read each message delivered or typed to one Codex agent whose mark shows in one
+/// of its home's newest rollouts with the agent's own output after it, as [`serve`] does
+/// from a Claude Code lead's transcripts. Takes the database, the agent, its `CODEX_HOME`
+/// and the time in ms. Returns Ok or a SQLite failure.
+pub fn codex_receipts(
+    db: &Connection,
+    agent: AgentId,
+    home: &Path,
+    now: i64,
+) -> Result<(), EngineError> {
+    read_receipts(db, home, Format::Codex, [agent], now)
+}
+
+/// Marks Read each message delivered or typed to the agents whose mark shows in one of the
+/// home's newest session records of the format, Claude Code transcripts
+/// (`projects/**/<session>.jsonl`) or Codex rollouts (`sessions/**/rollout-*.jsonl`), with
+/// the session's answer after it ([`answered`]). Reads the last `TRANSCRIPT_TAIL_BYTES` of
+/// at most `TRANSCRIPTS_READ_MAX` files, read-only and never following a link.
 fn read_receipts(
     db: &Connection,
     home: &Path,
-    team: &BTreeMap<String, AgentId>,
+    format: Format,
+    agents: impl IntoIterator<Item = AgentId>,
     now: i64,
 ) -> Result<(), EngineError> {
     let mut unread = BTreeSet::new();
-    for agent in team.values() {
+    for agent in agents {
         let limit = i64::try_from(RECEIPTS_CHECKED_MAX).map_err(state)?;
         let mut statement = db
             .prepare(
@@ -1173,9 +1189,9 @@ fn read_receipts(
         return Ok(());
     }
     let mut read = BTreeSet::new();
-    let records = crate::usage::capture::records(home, crate::usage::capture::Format::Claude).0;
+    let records = crate::usage::capture::records(home, format).0;
     for path in records.into_iter().take(TRANSCRIPTS_READ_MAX) {
-        scan_transcript(&path, &unread, &mut read);
+        scan_transcript(&path, format, &unread, &mut read);
     }
     for id in read {
         advance(db, id, Receipt::Read, now)?;
@@ -1193,9 +1209,34 @@ fn advance(db: &Connection, id: MessageId, receipt: Receipt, now: i64) -> Result
     }
 }
 
-/// Finds in one transcript's tail the unread ids whose mark is followed by an assistant
-/// record. Takes the transcript, the unread ids and the set to add read ids to.
-fn scan_transcript(path: &Path, unread: &BTreeSet<MessageId>, read: &mut BTreeSet<MessageId>) {
+/// Tells whether one session record line is the session answering: a Claude Code
+/// `assistant` record, or a Codex rollout item the agent wrote, its message or tool call,
+/// as the session search reads it (`record_message` names it the agent's). Takes the format
+/// and the line. Returns the answer.
+fn answered(format: Format, text: &str) -> bool {
+    match format {
+        Format::Claude => {
+            text.contains("\"assistant\"")
+                && serde_json::from_str::<serde_json::Value>(text)
+                    .is_ok_and(|record| record["type"] == "assistant")
+        }
+        Format::Codex => {
+            text.contains("\"response_item\"")
+                && crate::harnesses::transcript::record_message("codex", text.as_bytes())
+                    .is_some_and(|(speaker, _)| speaker == "agent")
+        }
+    }
+}
+
+/// Finds in one session record's tail the unread ids whose mark is followed by the
+/// session's answer ([`answered`]). Takes the record, its format, the unread ids and the
+/// set to add read ids to.
+fn scan_transcript(
+    path: &Path,
+    format: Format,
+    unread: &BTreeSet<MessageId>,
+    read: &mut BTreeSet<MessageId>,
+) {
     let Some((mut file, _, length)) = crate::usage::capture::open_record(path) else {
         return;
     };
@@ -1218,11 +1259,7 @@ fn scan_transcript(path: &Path, unread: &BTreeSet<MessageId>, read: &mut BTreeSe
         let Ok(text) = std::str::from_utf8(&line) else {
             continue;
         };
-        if !seen.is_empty()
-            && text.contains("\"assistant\"")
-            && serde_json::from_str::<serde_json::Value>(text)
-                .is_ok_and(|record| record["type"] == "assistant")
-        {
+        if !seen.is_empty() && answered(format, text) {
             read.append(&mut seen);
         }
         for id in marks(text) {
