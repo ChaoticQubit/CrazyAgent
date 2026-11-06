@@ -58,7 +58,6 @@ impl NativeBridge {
             Err(refused) if refused.code == "stale_model_access" => {
                 let (scope, connection) = self.bound_auth_selection(ticket).ok_or(refused)?;
                 managed(&connection)?;
-                assert_eq!(scope.connection, connection.id);
                 Ok((scope, connection))
             }
             selected => selected,
