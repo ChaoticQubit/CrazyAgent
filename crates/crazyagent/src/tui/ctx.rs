@@ -256,6 +256,17 @@ impl Ctx {
         self.requests.pop_front()
     }
 
+    /// Takes the oldest queued request other than the shell's pending-questions count,
+    /// which every refresh queues for the footer badge, so a test reads what a screen sent.
+    /// Input: none. Output: that request, if one waits; the count stays queued.
+    #[cfg(test)]
+    pub fn next_screen_request(&mut self) -> Option<Request> {
+        let index = self.requests.iter().position(|queued| {
+            !matches!(queued, Request::Questions(query) if **query == QuestionsQuery::Counts)
+        })?;
+        self.requests.remove(index)
+    }
+
     /// Takes the oldest queued agent terminal request, ahead of requests
     /// waiting for the engine connection, so typing never waits on a read.
     /// Input: none. Output: the request, if one waits.

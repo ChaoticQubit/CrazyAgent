@@ -1015,6 +1015,9 @@ async fn drive(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static s
                     });
                     connection.settings(*job).unwrap();
                 }
+                Request::Questions(query) => {
+                    connection.questions(*query).unwrap();
+                }
                 other => panic!("the project page never sends {other:?}"),
             }
         }
@@ -1469,6 +1472,9 @@ async fn drive_settings(shell: &mut Shell, connection: &mut Connection) -> Vec<&
                         _ => "settings",
                     });
                     connection.settings(*job).unwrap();
+                }
+                Request::Questions(query) => {
+                    connection.questions(*query).unwrap();
                 }
                 other => panic!("the plugins pages never send {other:?}"),
             }

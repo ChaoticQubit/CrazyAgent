@@ -190,6 +190,9 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                     });
                     connection.intake(*job).unwrap();
                 }
+                Request::Questions(query) => {
+                    connection.questions(*query).unwrap();
+                }
                 other => panic!("intake pages never send {other:?}"),
             }
         }
@@ -1422,7 +1425,8 @@ fn confirmed_with_pool() -> (Shell, ProjectId, Option<Request>) {
         shell.key(Key::Tab);
     }
     shell.key(Key::Enter);
-    let Some(Request::Setup(SetupQuery::Change { action, generation })) = shell.ctx.next_request()
+    let Some(Request::Setup(SetupQuery::Change { action, generation })) =
+        shell.ctx.next_screen_request()
     else {
         panic!("confirm sends the setup change");
     };
@@ -1510,7 +1514,8 @@ fn confirming_the_review_sends_the_edited_setup_and_opens_the_project() {
         shell.key(Key::Tab);
     }
     shell.key(Key::Enter);
-    let Some(Request::Setup(SetupQuery::Change { action, generation })) = shell.ctx.next_request()
+    let Some(Request::Setup(SetupQuery::Change { action, generation })) =
+        shell.ctx.next_screen_request()
     else {
         panic!("confirm sends the setup change");
     };
@@ -1551,7 +1556,7 @@ fn a_pasted_github_token_leaves_only_as_its_own_job_and_is_never_drawn() {
     let mut ctx = ctx(80, 24);
     let screen = open(&Place::CloneRepo, &mut ctx);
     let mut shell = Shell::with(ctx, screen);
-    let Some(request) = shell.ctx.next_request() else {
+    let Some(request) = shell.ctx.next_screen_request() else {
         panic!("the clone page reads the GitHub status");
     };
     assert_eq!(format!("{request:?}"), "Intake");
@@ -1588,7 +1593,7 @@ fn a_repository_the_engine_cannot_clone_is_listed_with_why_and_enter_never_clone
     let mut ctx = ctx(100, 24);
     let screen = open(&Place::CloneRepo, &mut ctx);
     let mut shell = Shell::with(ctx, screen);
-    assert!(shell.ctx.next_request().is_some());
+    assert!(shell.ctx.next_screen_request().is_some());
     shell.arrive(intake(
         IntakeQuery::GitHubStatus,
         Ok(IntakeView::GitHub(GitHubStatus {

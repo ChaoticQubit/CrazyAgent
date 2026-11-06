@@ -170,7 +170,7 @@ fn fresh(width: u16, height: u16) -> Shell {
     let screen = open(&place, &mut ctx);
     let mut shell = Shell::with(ctx, screen);
     assert!(matches!(
-        shell.ctx.next_request(),
+        shell.ctx.next_screen_request(),
         Some(Request::TeamGraph { project: asked }) if asked == project()
     ));
     shell
@@ -213,7 +213,7 @@ fn chars(row: &str, from: usize, to: usize) -> String {
 }
 
 fn requests(shell: &mut Shell) -> Vec<Request> {
-    std::iter::from_fn(|| shell.ctx.next_request()).collect()
+    std::iter::from_fn(|| shell.ctx.next_screen_request()).collect()
 }
 
 fn input(request: &Request) -> Option<(&str, &[u8])> {

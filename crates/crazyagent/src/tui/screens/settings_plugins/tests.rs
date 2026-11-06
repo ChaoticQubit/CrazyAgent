@@ -275,7 +275,7 @@ fn the_server_form_checks_locally_and_hides_secret_values() {
             .any(|row| row.contains("Use the full path of the command")),
         "a command without a path is refused before the engine sees it"
     );
-    assert_eq!(shell.ctx.queued(), 0);
+    assert!(shell.ctx.next_screen_request().is_none());
 }
 
 #[test]
@@ -391,7 +391,7 @@ fn saving_a_secret_sends_it_once_and_never_shows_the_value() {
     let rows = render(&mut shell, 80, 24);
     assert!(rows.iter().all(|row| !row.contains("tidewater42")));
     shell.key(Key::Enter);
-    match shell.ctx.next_request() {
+    match shell.ctx.next_screen_request() {
         Some(Request::Settings(job)) => {
             assert!(!format!("{job:?}").contains("tidewater42"));
             match *job {
@@ -1388,7 +1388,7 @@ fn l_opens_tools_on_the_selected_server_or_on_the_crazyagent_tools() {
         assert!(shown.contains("Reading the tools..."), "{shown}");
         assert!(
             matches!(
-                shell.ctx.next_request(),
+                shell.ctx.next_screen_request(),
                 Some(Request::Settings(job)) if matches!(*job, SettingsJob::Tools { project: None, .. })
             ),
             "the page reads the tools it opened on"

@@ -150,6 +150,9 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                     sent.push("settings");
                     connection.settings(*job).unwrap();
                 }
+                Request::Questions(query) => {
+                    connection.questions(*query).unwrap();
+                }
                 other => panic!("Settings pools never send {other:?}"),
             }
         }
