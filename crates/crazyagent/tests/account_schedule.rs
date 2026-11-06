@@ -311,9 +311,10 @@ async fn a_schedule_larger_than_one_reply_takes_changes_and_is_read_whole() {
         controller.account_schedule().await.unwrap(),
         Schedule {
             projects: stored.projects[1..].to_vec(),
+            version: overrides as u64 + 1,
             ..Schedule::default()
         },
-        "a schedule past one reply is read whole"
+        "a schedule past one reply is read whole, at the version of its last change"
     );
     drop(controller);
     case.close().await;
@@ -371,9 +372,10 @@ async fn a_removed_pool_connection_or_project_takes_its_schedule_row_with_it() {
                 connection: reference("claude-a"),
                 plan,
             }],
+            version: 4,
             ..Schedule::default()
         },
-        "only the connection that stays keeps its plan"
+        "only the connection that stays keeps its plan, at the version of the four changes"
     );
     drop(controller);
     case.close().await;
@@ -445,7 +447,11 @@ async fn a_row_whose_pool_or_connection_was_edited_out_by_hand_can_still_be_dele
     );
     assert_eq!(
         controller.account_schedule().await.unwrap(),
-        Schedule::default()
+        Schedule {
+            version: 4,
+            ..Schedule::default()
+        },
+        "both rows are gone, at the version of the four applied changes"
     );
     drop(controller);
     case.close().await;
