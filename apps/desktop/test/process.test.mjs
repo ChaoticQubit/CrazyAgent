@@ -240,11 +240,11 @@ test("every way an instruction edit reaches running agents is offered with what 
   assert.match(markup, /role="radio" aria-checked="true"[^>]*>Next task</);
   assert.match(markup, /next task starts with the sections you changed/);
   for (const choice of client.EDIT_DELIVERIES) {
-    const shown = agentSettings({ settings: { kind: "ok", value: { mode: "both", transcripts: true, edits: choice.value } } });
+    const shown = agentSettings({ settings: { kind: "ok", value: { settings: { mode: "both", transcripts: true, edits: choice.value }, version: 0 } } });
     assert.match(shown, new RegExp(`role="radio" aria-checked="true"[^>]*>${escaped(choice.label)}</`));
     assert.ok(shown.includes(html(choice.note)), choice.value);
   }
-  assert.match(agentSettings({ settings: { kind: "ok", value: { mode: "both", transcripts: true } } }),
+  assert.match(agentSettings({ settings: { kind: "ok", value: { settings: { mode: "both", transcripts: true }, version: 0 } } }),
     /role="radio" aria-checked="true"[^>]*>Next task</, "an engine reply without the choice shows the default");
   assert.match(client.EDIT_DELIVERIES[1].note, /restarts when it is next idle/);
   assert.match(client.EDIT_DELIVERIES[2].note, /shows Instructions changed/);

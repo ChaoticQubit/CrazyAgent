@@ -1,5 +1,4 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import { readFileSync, readdirSync } from "node:fs";
 import { createElement } from "react";
@@ -164,7 +163,9 @@ test("two saves from one view both name the version that view read, so the secon
   assert.equal(controls.settingsVersion(view), 3, "the second save, an idle stop built from the same view's 1 h task limit before the team read returns, names the same read, which the engine now refuses as stale");
   const source = readFileSync(new URL("../src/screens/team/controls.tsx", import.meta.url), "utf8");
   assert.doesNotMatch(source, /setSaved|Math\.max/, "no version from an earlier save is ever named with values the view did not read");
-  assert.match(source, /const shown = limits \?\? \{ turn: status\.turn_limit_secs \?\? null, session: status\.session_limit_secs \?\? null, idle: status\.idle_stop_secs \?\? null \};/, "the limits a change starts from are the shown status's");
+  assert.match(source, /const saved: Limits = \{ turn: status\.turn_limit_secs \?\? null, session: status\.session_limit_secs \?\? null, idle: status\.idle_stop_secs \?\? null \};/, "the limits a change starts from are read from the shown status");
+  assert.match(source, /const shown = shownChoice\(limits, saved, sameLimits\);/, "a held change shows only while the status still holds what it replaced");
+  assert.match(source, /const result = await send\(settingsVersion\(status\)\);/, "every save names the version of the status the view read");
 });
 
 test("every native flow that changes a team setting names the settings version it read", () => {
