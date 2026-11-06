@@ -2977,6 +2977,299 @@ fn a_message_waiting_as_the_live_switch_goes_off_waits_for_the_stopping_master()
     host.close(&[]).unwrap();
 }
 
+/// `LIVE_CODEX` whose start takes a while, as a real app's boot does: before its ready line
+/// it runs `boot`, then drops whatever was typed meanwhile, since a line typed before the
+/// app reads keys is left unsent in its prompt (row 10, 2026-11-05). Takes the boot lines.
+/// Returns the script.
+#[cfg(target_os = "macos")]
+fn booting_codex(boot: &str) -> String {
+    let ready = "printf '\\033[?2004hCodex stand-in ready\\n'\n";
+    let script = LIVE_CODEX.replacen(
+        ready,
+        &format!(
+            "{boot}/bin/stty -icanon min 0 time 0\n/bin/cat > /dev/null\n/bin/stty icanon\n{ready}"
+        ),
+        1,
+    );
+    assert_ne!(script, LIVE_CODEX);
+    script
+}
+
+/// Starts a live master on `script`, leaves one owner line pending as soon as its pane runs
+/// and waits until that line opened the master's first turn. Takes the script.
+#[cfg(target_os = "macos")]
+fn first_owner_line_opens_a_turn(script: &str) {
+    let mut fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, script);
+    let project = fixture.setup.project_id.clone();
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the live master's pane runs", |f| {
+        live_agent(&f.connection).is_some()
+    });
+    let tx = fixture.connection.transaction().unwrap();
+    let message = append_message(
+        &tx,
+        &project,
+        MessageAuthor::Owner,
+        "Reply with only the word READY.",
+        MessageState::Pending,
+        now_ms(),
+    )
+    .unwrap()
+    .unwrap();
+    tx.commit().unwrap();
+
+    fixture.until(&mut team, "the owner's first line opens a turn", |f| {
+        live_turns(&f.connection).0 >= 1
+    });
+    let state: String = fixture
+        .connection
+        .query_row(
+            "SELECT state FROM team_messages WHERE id=?1",
+            [message],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "answered");
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// An owner line for a live master whose app still boots, with bracketed paste off and no
+/// keys read, waits until the app reads keys and then opens a turn, instead of being typed
+/// at once and left unsent.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_owner_line_waits_until_the_live_masters_app_reads_keys() {
+    first_owner_line_opens_a_turn(&booting_codex("/bin/sleep 2\n"));
+}
+
+/// An owner line for a live master whose app turned bracketed paste on but is still
+/// drawing its start waits until the screen has been quiet as long as an engine-typed turn
+/// waits for, and then opens a turn.
+/// R10-M1 / F1: while the engine cannot watch a new live master's first screen, as when
+/// every terminal viewer of the host is taken, the owner's line waits and the engine looks
+/// again on the next pass; once a viewer is free the app's screen is watched as usual and
+/// the line opens a turn, instead of waiting forever.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_owner_line_reaches_a_live_master_once_its_first_screen_can_be_watched() {
+    let mut fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, LIVE_CODEX);
+    let project = fixture.setup.project_id.clone();
+    let held = AgentId::new("viewers-held").unwrap();
+    let command = InteractiveCommand {
+        argv: vec!["/bin/sh".into(), "-c".into(), "exec /bin/sleep 300".into()],
+        cwd: fixture.base.clone(),
+        env: Vec::new(),
+        transcript: Transcript::Unavailable,
+    };
+    host.spawn(&held, &command).unwrap();
+    let viewers: Vec<_> = (0..crate::terminal::VIEWERS_MAX)
+        .map(|_| host.attach(&held).unwrap())
+        .collect();
+    assert_eq!(
+        host.attach(&held).map(drop).unwrap_err().0,
+        "terminal_viewers_full",
+        "every viewer of the host is taken"
+    );
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the live master's pane runs", |f| {
+        live_agent(&f.connection).is_some()
+    });
+    let tx = fixture.connection.transaction().unwrap();
+    let message = append_message(
+        &tx,
+        &project,
+        MessageAuthor::Owner,
+        "Reply with only the word READY.",
+        MessageState::Pending,
+        now_ms(),
+    )
+    .unwrap()
+    .unwrap();
+    tx.commit().unwrap();
+    let state = |f: &Fixture| -> String {
+        f.connection
+            .query_row(
+                "SELECT state FROM team_messages WHERE id=?1",
+                [message],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let watched = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < watched {
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        state(&fixture),
+        "pending",
+        "the line waits while the first screen cannot be watched"
+    );
+
+    drop(viewers);
+    fixture.until(&mut team, "the owner's line opens a turn", |f| {
+        live_turns(&f.connection).0 >= 1
+    });
+    assert_eq!(state(&fixture), "answered");
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// `LIVE_CODEX` that turns bracketed paste on only once `go` exists in its Codex home, as
+/// an app that reads no keys for a long while. Returns the script.
+#[cfg(target_os = "macos")]
+fn paste_later_codex() -> String {
+    let ready = "printf '\\033[?2004hCodex stand-in ready\\n'\n";
+    let script = LIVE_CODEX.replacen(
+        ready,
+        "( while [ ! -e \"$CODEX_HOME/go\" ]; do /bin/sleep 0.1; done; printf '\\033[?2004h' ) &\nprintf 'Codex stand-in ready\\n'\n",
+        1,
+    );
+    assert_ne!(script, LIVE_CODEX);
+    script
+}
+
+/// F2: an owner line that has waited longer than a first screen may take for the live
+/// master's app to read keys says why, once, in a team note and the live problem line, and
+/// the line goes once the owner's line is typed.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_owner_line_waiting_long_for_the_masters_app_says_so_once() {
+    let mut fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, &paste_later_codex());
+    let project = fixture.setup.project_id.clone();
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the live master's pane runs", |f| {
+        live_agent(&f.connection).is_some()
+    });
+    let master = masters(&fixture.connection)[0];
+    let tx = fixture.connection.transaction().unwrap();
+    append_message(
+        &tx,
+        &project,
+        MessageAuthor::Owner,
+        "Reply with only the word READY.",
+        MessageState::Pending,
+        now_ms(),
+    )
+    .unwrap()
+    .unwrap();
+    tx.commit().unwrap();
+    let line = super::super::master::MASTER_NOT_READING;
+    let deadline = Instant::now() + crate::harnesses::terminal_session::READY_WAIT + WAIT;
+    while fixture.status().live_problem.as_deref() != Some(line) {
+        assert!(
+            Instant::now() < deadline,
+            "the waiting line says why: {:#?}",
+            fixture.status()
+        );
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(noted(&fixture, line), 1, "one note");
+    idle_ticks(&mut team);
+    assert_eq!(noted(&fixture, line), 1, "still one note");
+
+    std::fs::write(stand_in_file(&fixture, master, "go"), "").unwrap();
+    fixture.until(
+        &mut team,
+        "the owner's line is typed and the wait line goes",
+        |f| live_turns(&f.connection).0 >= 1 && f.status().live_problem.is_none(),
+    );
+    assert_eq!(noted(&fixture, line), 1);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// R10R2-L1: the "not reading keys" line an earlier engine stored goes once the next
+/// engine types an owner line into the live master it took over, though no wait of its own
+/// began: the adopted master is briefed already, so nothing else takes the line down.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_stored_not_reading_line_goes_once_a_restarted_engine_types_into_its_master() {
+    let mut fixture = Fixture::new(1);
+    let host = fixture.host();
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, LIVE_CODEX).unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let open = || {
+        let access = fixture.access.clone();
+        TeamRuntime::open(
+            &fixture.base.join("engine.db"),
+            &fixture.base.join("team"),
+            BTreeMap::from([("codex", codex.clone())]),
+            Box::new(move || Some(access.clone())),
+            TeamLimits::default(),
+        )
+        .unwrap()
+        .with_terminal(host.clone())
+        .unwrap()
+    };
+    let project = fixture.setup.project_id.clone();
+    let mut team = open();
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the live master runs idle", |f| {
+        live_agent(&f.connection)
+            .is_some_and(|master| f.agent_status(master).0 == AgentStatus::Idle)
+    });
+    let master = masters(&fixture.connection)[0];
+    assert_eq!(team.shutdown().unwrap(), names(&[master]));
+    let line = super::super::master::MASTER_NOT_READING;
+    assert!(super::super::master::problem(&fixture.connection, &project, Some(line)).unwrap());
+
+    let mut again = open();
+    fixture.until(
+        &mut again,
+        "the next engine takes the live master over",
+        |f| f.agent_status(master) == (AgentStatus::Idle, None) && f.recorded(master),
+    );
+    idle_ticks(&mut again);
+    assert_eq!(
+        fixture.status().live_problem.as_deref(),
+        Some(line),
+        "the adopted master keeps the stored line until something is typed"
+    );
+    let tx = fixture.connection.transaction().unwrap();
+    append_message(
+        &tx,
+        &project,
+        MessageAuthor::Owner,
+        "Reply with only the word READY.",
+        MessageState::Pending,
+        now_ms(),
+    )
+    .unwrap()
+    .unwrap();
+    tx.commit().unwrap();
+    fixture.until(&mut again, "the owner's line opens a turn", |f| {
+        live_turns(&f.connection).0 >= 1
+    });
+    idle_ticks(&mut again);
+    assert_eq!(
+        fixture.status().live_problem,
+        None,
+        "a typed line takes the stored wait line down"
+    );
+    assert_eq!(again.shutdown().unwrap(), names(&[master]));
+    host.close(&[]).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_owner_line_waits_until_the_live_masters_screen_is_quiet() {
+    first_owner_line_opens_a_turn(&booting_codex(
+        "printf '\\033[?2004h'\ni=0\nwhile [ \"$i\" -lt 10 ]; do printf 'loading %s\\n' \"$i\"; /bin/sleep 0.2; i=$((i+1)); done\n",
+    ));
+}
+
 #[cfg(target_os = "macos")]
 const RESUMING_CODEX: &str = r#"#!/bin/sh
 [ "$1" = app-server ] && exit 0
@@ -9687,6 +9980,7 @@ fn between_turns(
         hosted: None,
         live: false,
         briefed: true,
+        input_ready: true,
         kept_session,
         own_turn: None,
         own_rules: None,
