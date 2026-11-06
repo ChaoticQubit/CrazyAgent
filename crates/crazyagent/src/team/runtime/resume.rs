@@ -364,9 +364,11 @@ impl TeamRuntime {
 
     /// Hands an interrupted sub-agent that runs again in the pane this engine took over the
     /// task its run holds, with the note, typed as one turn into the session it never left,
-    /// once its worker is free and its account not paused; the session is already running,
-    /// so the run is resumed once the turn goes out. A task no longer waiting gives the run
-    /// up. Any other agent that runs again keeps the run waiting until it stops.
+    /// once the takeover settled (its worker is ready), its worker is free and its account
+    /// not paused; the session is already running, so the run is resumed once the turn goes
+    /// out. A takeover that fails ends the worker with nothing handed, so the run restarts
+    /// in a new pane. A task no longer waiting gives the run up. Any other agent that runs
+    /// again keeps the run waiting until it stops.
     /// Takes the paused accounts and the run. Returns any SQLite or ledger failure.
     fn resume_in_pane(
         &mut self,
@@ -375,6 +377,7 @@ impl TeamRuntime {
     ) -> Result<(), EngineError> {
         let worker = &self.workers[&run.agent];
         if run.kind != AgentRole::Sub
+            || !worker.ready
             || worker.managed
             || worker.stopping
             || worker.busy.is_some()
