@@ -353,16 +353,21 @@ fn a_drop_file_master_logs_its_questions_and_records_a_chat_answer_from_the_owne
     let master = Asker::Master(41);
     let renamed = asked(&case, &master, "Rename the app?");
     let tx = case.db.unchecked_transaction().unwrap();
-    let owner = crate::team::append_message(
-        &tx,
-        &case.project,
-        crate::team::MessageAuthor::Owner,
-        "Yes, rename it.",
-        crate::team::MessageState::Answered,
-        crate::team::now_ms(),
-    )
-    .unwrap()
-    .unwrap();
+    let typed = crate::team::TeamAction::Message {
+        project_id: case.project.clone(),
+        text: "Yes, rename it.".into(),
+    };
+    assert_eq!(
+        crate::team::execute(&tx, &crate::config::ModelAccess::default(), &typed).unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    let owner: i64 = tx
+        .query_row(
+            "SELECT MAX(id) FROM team_messages WHERE project=?1",
+            [case.project.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
     tx.commit().unwrap();
 
     called(&drop, ASK_TOOL, shipping());
