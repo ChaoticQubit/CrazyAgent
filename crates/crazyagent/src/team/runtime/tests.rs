@@ -6842,7 +6842,7 @@ fn send_own_rules_bounds_a_kept_lead_s_own_turn_by_the_session_time_left() {
 #[cfg(target_os = "macos")]
 #[test]
 fn a_tools_on_sub_agent_s_task_turn_carries_the_task_start_reminder_only_while_it_is_on() {
-    const REMINDER: &str = "Task start reminder: before you work on this task, read the SKILL.md of each of these skills that fits this task and follow it: `meal-tips`.";
+    const REMINDER: &str = "Task start reminder: before you work on this task, query the project graph with `graphify query \"<question>\"` before you read or search source, and check these skills and read and follow the SKILL.md of each one that applies: `meal-tips`.";
     let mut fixture = Fixture::new(1);
     fixture.setup.team.sub_harnesses[0].tools = true;
     fixture
@@ -6891,6 +6891,148 @@ fn a_tools_on_sub_agent_s_task_turn_carries_the_task_start_reminder_only_while_i
     );
     let second = &text[first.len()..];
     assert!(second.contains("Write menu.md"), "{second}");
+    assert!(
+        !second.contains("Task start reminder"),
+        "Off gives none: {second}"
+    );
+}
+
+/// DEC-116: while the Task-start reminder is On, its default, a tools-on master's turn for an
+/// owner message carries the reminder naming its approved skill once, as a sub-agent's task
+/// turn does; after the owner sets it Off, its next turn carries none.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_tools_on_master_s_owner_turn_carries_the_task_start_reminder_only_while_it_is_on() {
+    use crate::protocol::Outcome;
+    use crate::team::TeamAction;
+    const REMINDER: &str = "Task start reminder: before you work on this task, query the project graph with `graphify query \"<question>\"` before you read or search source, and check these skills and read and follow the SKILL.md of each one that applies: `meal-tips`.";
+    let mut fixture = Fixture::new(1);
+    fixture.setup.team.master_tools = true;
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?1 WHERE project=?2",
+            params![serde_json::to_string(&fixture.setup).unwrap(), PROJECT],
+        )
+        .unwrap();
+    approve_skills(&fixture, &["meal-tips"]);
+    let host = fixture.host();
+    let mut team = limited_runtime(&fixture, &host, RESUMING_CODEX, TeamLimits::default());
+    let project = fixture.setup.project_id.clone();
+    let say = |fixture: &mut Fixture, text: &str| {
+        let tx = fixture.connection.transaction().unwrap();
+        assert_eq!(
+            crate::team::execute(
+                &tx,
+                &fixture.access,
+                &TeamAction::Message {
+                    project_id: project.clone(),
+                    text: text.into(),
+                },
+            )
+            .unwrap(),
+            Outcome::Applied
+        );
+        tx.commit().unwrap();
+    };
+    let replies = |f: &Fixture| {
+        f.status()
+            .messages
+            .iter()
+            .filter(|message| message.author == MessageAuthor::Master)
+            .count()
+    };
+
+    say(&mut fixture, "Plan the page");
+    fixture.until(&mut team, "the master answers the first message", |f| {
+        replies(f) == 1
+    });
+    let master = masters(&fixture.connection)[0];
+    let first = typed(&fixture, master);
+    assert!(first.contains("Plan the page"), "{first}");
+    assert_eq!(
+        first.matches(REMINDER).count(),
+        1,
+        "the owner's turn carries the reminder once: {first}"
+    );
+
+    crate::coord::settings::write(
+        &fixture.connection,
+        &fixture.setup.project_id,
+        &crate::coord::settings::CoordSettings {
+            task_start: crate::coord::settings::TaskStart::Off,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    say(&mut fixture, "Plan the title");
+    fixture.until(&mut team, "the master answers the second message", |f| {
+        replies(f) == 2
+    });
+    let text = typed(&fixture, master);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    let second = &text[first.len()..];
+    assert!(second.contains("Plan the title"), "{second}");
+    assert!(
+        !second.contains("Task start reminder"),
+        "Off gives none: {second}"
+    );
+}
+
+/// DEC-116: while the Task-start reminder is On, an owner message the engine types into a
+/// tools-on live master's pane carries the reminder naming its approved skill once; after
+/// the owner sets it Off, the next typed owner message carries none.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_tools_on_live_master_s_typed_owner_message_carries_the_task_start_reminder_only_while_it_is_on()
+ {
+    const REMINDER: &str = "Task start reminder: before you work on this task, query the project graph with `graphify query \"<question>\"` before you read or search source, and check these skills and read and follow the SKILL.md of each one that applies: `meal-tips`.";
+    let mut fixture = Fixture::new(1);
+    fixture.setup.team.master_tools = true;
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?1 WHERE project=?2",
+            params![serde_json::to_string(&fixture.setup).unwrap(), PROJECT],
+        )
+        .unwrap();
+    approve_skills(&fixture, &["meal-tips"]);
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, &recording_codex());
+    super::super::master::set_live(&fixture.connection, &fixture.setup.project_id, true).unwrap();
+    fixture.until(&mut team, "the live master's pane runs", |f| {
+        live_agent(&f.connection).is_some()
+    });
+    let master = masters(&fixture.connection)[0];
+    tell_master(&fixture, "Plan the page");
+    fixture.until(&mut team, "the live master's first turn ends", |f| {
+        typed(f, master).contains("Plan the page") && live_turns(&f.connection) == (1, false)
+    });
+    let first = typed(&fixture, master);
+    assert_eq!(
+        first.matches(REMINDER).count(),
+        1,
+        "the typed owner message carries the reminder once: {first}"
+    );
+
+    crate::coord::settings::write(
+        &fixture.connection,
+        &fixture.setup.project_id,
+        &crate::coord::settings::CoordSettings {
+            task_start: crate::coord::settings::TaskStart::Off,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    tell_master(&fixture, "Plan the title");
+    fixture.until(&mut team, "the live master's second turn ends", |f| {
+        typed(f, master).contains("Plan the title") && live_turns(&f.connection) == (2, false)
+    });
+    let text = typed(&fixture, master);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    let second = &text[first.len()..];
     assert!(
         !second.contains("Task start reminder"),
         "Off gives none: {second}"
