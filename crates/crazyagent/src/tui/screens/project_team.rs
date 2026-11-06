@@ -1,5 +1,6 @@
-use super::new_project::harness_name;
+use super::new_project::{HarnessChoice, HarnessState, harness_name, same_harness};
 use super::new_project_input::TextInput;
+use super::new_project_page::harness_choices_from;
 use super::new_project_view::{Look, Row, columns, list_row, spread, wrap_words};
 use super::project::{REFRESH_MS, plain_problem};
 use super::project_time::{clock, duration};
@@ -7,16 +8,20 @@ use super::team_messages::{ListKey, MASTER_ELSEWHERE, Messages, Shown};
 use crate::coord::settings::{
     COUNTED_TOOL_BYTES_MAX, COUNTED_TOOLS_DEFAULT, COUNTED_TOOLS_MAX, ClaudeDisplay, Delivery,
     HarnessKind, Nudges, Overlaps, QuestionsTo, ROLE_SKILLS_MAX, SkillRole, SubagentMode,
+    TaskStart,
 };
 use crate::engine::owner::OwnerResult;
-use crate::project_setup::{SetupQuery, SetupView};
+use crate::harnesses::HarnessEntry;
+use crate::project_setup::{
+    ProjectSetup, SetupAction, SetupQuery, SetupView, StoredSetup, TeamPlan,
+};
 use crate::protocol::ProjectId;
 use crate::team::agent_messages::{KEPT_CHOICES, MessageSettings, PAGE_CHOICES, ResultsShown};
 use crate::team::events::{EventKind, HOURLY_CAP_MAX, RuleTarget, WakeRule};
 use crate::team::{
     AgentRole, AgentStatus, BackgroundAtEnd, BranchMode, ChildLanding, CoordinationView,
-    DelegationPath, MASTER_BRANCH_BYTES_MAX, SwitchMode, TASK_PROMPT_BYTES_MAX, TaskSource,
-    TaskStatus, TeamAction, TeamAgent, TeamHarness, TeamStatus, TeamTask,
+    DelegationPath, MASTER_BRANCH_BYTES_MAX, SwitchApply, SwitchMode, TASK_PROMPT_BYTES_MAX,
+    TaskSource, TaskStatus, TeamAction, TeamAgent, TeamHarness, TeamStatus, TeamTask,
 };
 use crate::tui::keys::Key;
 use crate::tui::seam::AccountRow;
@@ -93,13 +98,22 @@ pub(in crate::tui) enum TeamFocus {
 }
 
 /// What the Team view asks its host to do after a key.
-/// Ignored lets the host's own keys run; Change is one owner team action.
-/// The host sends a change as `SetupQuery::TeamChange` with a fresh generation.
+/// Ignored lets the host's own keys run; Change is one owner team action, sent as
+/// `SetupQuery::TeamChange`; Save is one project setup change, sent as `SetupQuery::Change`;
+/// both with a fresh generation.
 #[derive(Debug, PartialEq, Eq)]
 pub(in crate::tui) enum TeamReply {
     Ignored,
     Handled,
     Change(TeamAction),
+    Save(SetupAction),
+}
+
+/// The open master harness picker. `cursor` is the picked row among the harnesses that can
+/// run the master; none until the owner moves it, which keeps it on the saved harness.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::tui) struct MasterPick {
+    pub cursor: Option<usize>,
 }
 
 /// A task the owner is writing for a sub-agent.
@@ -151,7 +165,8 @@ pub(in crate::tui) struct CoordEdit {
 
 /// One row of the coordination editor: a harness kind's sub-agent mode or message delivery,
 /// the Claude Code terminal display (N-D9), where sub-agent questions go, overlapping edits,
-/// workflow nudges, the counted tools or the skills one team role gets (DEC-111 R3).
+/// workflow nudges, the Task-start reminder (T3-15), the counted tools or the skills one team
+/// role gets (DEC-111 R3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::tui) enum CoordRow {
     Mode(HarnessKind),
@@ -160,11 +175,12 @@ pub(in crate::tui) enum CoordRow {
     Questions,
     Overlaps,
     Nudges,
+    TaskStart,
     Counted,
     Skills(SkillRole),
 }
 
-const COORD_ROWS: [CoordRow; 14] = [
+const COORD_ROWS: [CoordRow; 15] = [
     CoordRow::Mode(HarnessKind::ClaudeCode),
     CoordRow::Delivery(HarnessKind::ClaudeCode),
     CoordRow::ClaudeDisplay,
@@ -175,6 +191,7 @@ const COORD_ROWS: [CoordRow; 14] = [
     CoordRow::Questions,
     CoordRow::Overlaps,
     CoordRow::Nudges,
+    CoordRow::TaskStart,
     CoordRow::Counted,
     CoordRow::Skills(SkillRole::Master),
     CoordRow::Skills(SkillRole::Lead),
@@ -230,6 +247,7 @@ pub(in crate::tui) struct TeamView {
     pub coord: Option<CoordEdit>,
     pub messages: Option<Messages>,
     pub message_row: Option<usize>,
+    pub master_pick: Option<MasterPick>,
     pub alerts: bool,
     pub notice: Option<Notice>,
     pub now_ms: i64,
@@ -238,6 +256,12 @@ pub(in crate::tui) struct TeamView {
     waiting: bool,
     changing: Option<String>,
     reread: Option<Reread>,
+    stored: Option<Box<StoredSetup>>,
+    setup_waiting: bool,
+    setup_failed_ms: Option<i64>,
+    saving: Option<SetupAction>,
+    catalog: Option<Vec<HarnessChoice>>,
+    catalog_due: bool,
 }
 
 impl TeamView {
@@ -259,6 +283,7 @@ impl TeamView {
             coord: None,
             messages: None,
             message_row: None,
+            master_pick: None,
             alerts: false,
             notice: None,
             now_ms: 0,
@@ -267,13 +292,20 @@ impl TeamView {
             waiting: false,
             changing: None,
             reread: None,
+            stored: None,
+            setup_waiting: false,
+            setup_failed_ms: None,
+            saving: None,
+            catalog: None,
+            catalog_due: false,
         }
     }
 
-    /// Gives the next read: the open Messages list's page first, else the team read, at
-    /// most one team read at a time and one per refresh period.
-    /// Takes the current time in milliseconds.
-    /// Returns `SetupQuery::TeamMessages` or `SetupQuery::Team`, or none while nothing is due.
+    /// Gives the next read: the open Messages list's page first, then the stored setup while
+    /// the master harness picker needs it, a failed one again after a refresh period, else the
+    /// team, at most one team read at a time and one per refresh period.
+    /// Takes the current time in milliseconds. Returns `SetupQuery::TeamMessages`,
+    /// `SetupQuery::Setup` or `SetupQuery::Team`, or none while a read is out or nothing is due.
     pub fn next_query(&mut self, now_ms: i64) -> Option<SetupQuery> {
         self.now_ms = now_ms;
         if let Some(query) = self
@@ -282,6 +314,18 @@ impl TeamView {
             .and_then(|list| list.next_query(now_ms))
         {
             return Some(query);
+        }
+        if self.master_pick.is_some()
+            && self.stored.is_none()
+            && !self.setup_waiting
+            && self
+                .setup_failed_ms
+                .is_none_or(|failed| now_ms - failed >= REFRESH_MS)
+        {
+            self.setup_waiting = true;
+            return Some(SetupQuery::Setup {
+                project: self.project.clone(),
+            });
         }
         if self.waiting || self.read_ms.is_some_and(|last| now_ms - last < REFRESH_MS) {
             return None;
@@ -302,6 +346,27 @@ impl TeamView {
         self.waiting = false;
         if let Some(list) = self.messages.as_mut() {
             list.forget_reads();
+        }
+        self.setup_waiting = false;
+    }
+
+    /// Says once that the open master harness picker needs the harness catalog, which the
+    /// host reads with `SettingsJob::Harnesses`. Takes the view. Returns true at most once
+    /// per open of the picker, and never once the catalog is read.
+    pub fn wants_catalog(&mut self) -> bool {
+        std::mem::take(&mut self.catalog_due)
+    }
+
+    /// Takes the engine's harness catalog for the master harness picker.
+    /// Takes the read or its plain problem code. Returns nothing; a failed read is said
+    /// while the picker is open and read again at its next open.
+    pub fn take_catalog(&mut self, result: &Result<Vec<HarnessEntry>, String>) {
+        match result {
+            Ok(entries) => self.catalog = Some(harness_choices_from(entries)),
+            Err(code) if self.master_pick.is_some() => {
+                self.notice = Some(Notice::problem(team_plain(code)));
+            }
+            Err(_) => {}
         }
     }
 
@@ -330,6 +395,43 @@ impl TeamView {
                     }
                     Ok(_) => {}
                     Err(code) => self.notice = Some(Notice::problem(team_plain(&code))),
+                }
+            }
+            SetupQuery::Setup { project } if project == &self.project => {
+                self.setup_waiting = false;
+                match result {
+                    Ok(SetupView::Setup(Some(stored))) => {
+                        assert_eq!(stored.project_id, self.project);
+                        self.setup_failed_ms = None;
+                        self.stored = Some(stored);
+                    }
+                    Ok(SetupView::Setup(None)) => {
+                        self.master_pick = None;
+                        self.notice = Some(Notice::problem(
+                            "This project has no saved setup, so its master harness cannot change.",
+                        ));
+                    }
+                    Ok(_) => {}
+                    Err(code) => {
+                        self.setup_failed_ms = Some(self.now_ms);
+                        self.notice = Some(Notice::problem(team_plain(&code)));
+                    }
+                }
+            }
+            SetupQuery::Change { action, .. } if self.saving.as_ref() == Some(action) => {
+                self.saving = None;
+                let done = self.changing.take();
+                self.stored = None;
+                match result {
+                    Ok(SetupView::Changed(OwnerResult::Applied)) => {
+                        self.master_pick = None;
+                        self.notice = done.map(Notice::plain);
+                        self.read_ms = None;
+                    }
+                    Ok(SetupView::Changed(OwnerResult::Rejected { code })) | Err(code) => {
+                        self.notice = Some(Notice::problem(team_plain(&code)));
+                    }
+                    Ok(_) => {}
                 }
             }
             SetupQuery::TeamChange { action, .. }
@@ -557,6 +659,9 @@ impl TeamView {
         if self.message_row.is_some() {
             return self.message_key(key);
         }
+        if self.master_pick.is_some() {
+            return self.pick_key(key);
+        }
         if self.alerts {
             return match key.code {
                 KeyCode::Char('s') => self.mark_seen(),
@@ -608,6 +713,8 @@ impl TeamView {
             KeyCode::Char('l') => self.time_limit(Limit::Session),
             KeyCode::Char('i') => self.time_limit(Limit::Idle),
             KeyCode::Char('h') => self.harness_switch(),
+            KeyCode::Char('H') => self.open_master_pick(),
+            KeyCode::Char('A') => self.apply_switch(),
             KeyCode::Char('d') => self.sub_agent_depth(),
             KeyCode::Char('k') => self.child_landing(),
             KeyCode::Char('b') => self.agent_branches(),
@@ -1486,6 +1593,227 @@ impl TeamView {
         })
     }
 
+    /// Flips Apply a master harness change between When the master is idle and At the next
+    /// start (N-D26). Output: the change to send, or Handled with a notice while loading or
+    /// saving.
+    fn apply_switch(&mut self) -> TeamReply {
+        let Some(status) = &self.status else {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        };
+        if self.changing.is_some() {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+            return TeamReply::Handled;
+        }
+        let mode = match status.apply_harness_switch {
+            SwitchApply::WhenIdle => SwitchApply::NextStart,
+            SwitchApply::NextStart => SwitchApply::WhenIdle,
+        };
+        self.changing = Some(
+            match mode {
+                SwitchApply::WhenIdle => {
+                    "A saved master harness change now reaches the running master once it is idle."
+                }
+                SwitchApply::NextStart => {
+                    "A saved master harness change now waits for the master's next start."
+                }
+            }
+            .to_owned(),
+        );
+        TeamReply::Change(TeamAction::ApplyHarnessSwitch {
+            project_id: self.project.clone(),
+            mode,
+        })
+    }
+
+    /// The saved master harness: the team's master harness row. Takes the view. Returns its
+    /// engine id, none before the first read.
+    fn saved_master(&self) -> Option<&str> {
+        self.status
+            .as_ref()?
+            .harnesses
+            .iter()
+            .find(|harness| harness.role == AgentRole::Master)
+            .map(|harness| harness.harness.as_str())
+    }
+
+    /// The harness the running master uses, else the saved one. Takes the view. Returns its
+    /// engine id, none before the first read.
+    fn running_master(&self) -> Option<&str> {
+        self.status
+            .as_ref()?
+            .agents
+            .iter()
+            .find(|agent| agent.role == AgentRole::Master && agent.status.live())
+            .map(|agent| agent.harness.as_str())
+            .or_else(|| self.saved_master())
+    }
+
+    /// The harnesses the master harness picker offers: the catalog's that can run the
+    /// master, in its order. Takes the view. Returns them, none before the catalog is read.
+    fn master_choices(&self) -> Option<Vec<&HarnessChoice>> {
+        self.catalog.as_ref().map(|catalog| {
+            catalog
+                .iter()
+                .filter(|choice| {
+                    matches!(
+                        choice.state,
+                        HarnessState::Ready | HarnessState::MasterOnly | HarnessState::Unknown
+                    )
+                })
+                .collect()
+        })
+    }
+
+    /// The picked row of the master harness picker: the owner's, else the saved harness,
+    /// else the first. Takes the view and the offered harnesses. Returns a row index.
+    fn pick_cursor(&self, choices: &[&HarnessChoice]) -> usize {
+        let saved = || {
+            self.saved_master().and_then(|saved| {
+                choices
+                    .iter()
+                    .position(|choice| same_harness(&choice.id, saved))
+            })
+        };
+        self.master_pick
+            .and_then(|pick| pick.cursor)
+            .or_else(saved)
+            .unwrap_or(0)
+            .min(choices.len().saturating_sub(1))
+    }
+
+    /// Opens the master harness picker; the host reads the catalog and the stored setup
+    /// for it. Output: Handled, with a notice while the team is loading.
+    fn open_master_pick(&mut self) -> TeamReply {
+        if self.status.is_none() {
+            self.notice = Some(Notice::plain("The team is still loading."));
+            return TeamReply::Handled;
+        }
+        self.master_pick = Some(MasterPick { cursor: None });
+        self.catalog_due = self.catalog.is_none();
+        TeamReply::Handled
+    }
+
+    /// Handles one key while the master harness picker is open: arrows move, Enter saves
+    /// the picked harness, Esc closes. Takes the key. Output: the save to send, or Handled.
+    fn pick_key(&mut self, key: KeyEvent) -> TeamReply {
+        match key.code {
+            KeyCode::Esc => {
+                self.master_pick = None;
+                TeamReply::Handled
+            }
+            KeyCode::Up | KeyCode::Down => {
+                if let Some(choices) = self.master_choices().filter(|list| !list.is_empty()) {
+                    let at = self.pick_cursor(&choices);
+                    let last = choices.len() - 1;
+                    let next = if key.code == KeyCode::Down {
+                        (at + 1).min(last)
+                    } else {
+                        at.saturating_sub(1)
+                    };
+                    self.master_pick = Some(MasterPick { cursor: Some(next) });
+                }
+                TeamReply::Handled
+            }
+            KeyCode::Enter => self.save_master(),
+            _ => TeamReply::Handled,
+        }
+    }
+
+    /// Saves the picked harness as the team's master through the project setup at the
+    /// revision read, the rest of the setup as stored; the saved one closes the picker
+    /// with nothing sent. Output: the save, or Handled while reading or saving.
+    fn save_master(&mut self) -> TeamReply {
+        let picked = self.master_choices().and_then(|choices| {
+            let choice = choices.get(self.pick_cursor(&choices))?;
+            Some((choice.id.clone(), choice.name.clone()))
+        });
+        let (Some((id, name)), Some(stored), Some(status)) =
+            (picked, self.stored.as_deref(), self.status.as_ref())
+        else {
+            return TeamReply::Handled;
+        };
+        if same_harness(&id, &stored.team.master) {
+            self.master_pick = None;
+            self.notice = Some(Notice::plain(format!("The master already uses {name}.")));
+            return TeamReply::Handled;
+        }
+        if self.changing.is_some() {
+            self.notice = Some(Notice::problem(
+                "Still saving the last change. Try again in a moment.",
+            ));
+            return TeamReply::Handled;
+        }
+        let action = SetupAction::Update {
+            project_id: stored.project_id.clone(),
+            expected_revision: stored.revision,
+            name: None,
+            setup: ProjectSetup {
+                about: stored.about.clone(),
+                tech_stack: stored.tech_stack.clone(),
+                platforms: stored.platforms.clone(),
+                research: stored.research.clone(),
+                pool: stored.pool.clone(),
+                team: Some(TeamPlan {
+                    master: id,
+                    ..stored.team.clone()
+                }),
+                documents: Vec::new(),
+            },
+        };
+        self.changing = Some(match status.apply_harness_switch {
+            SwitchApply::WhenIdle => format!("The master switches to {name} once it is idle."),
+            SwitchApply::NextStart => format!("The master switches to {name} at its next start."),
+        });
+        self.saving = Some(action.clone());
+        TeamReply::Save(action)
+    }
+
+    /// The master harness picker's rows: its title, each harness that can run the master
+    /// with the running one marked now, and when a saved change reaches the running master.
+    /// Takes the content width and the look. Returns the rows.
+    fn pick_rows(&self, content: usize, look: &Look) -> Vec<Row> {
+        let mut rows = vec![Row::of("Harness for the master", look.heading)];
+        let (Some(choices), Some(_)) = (self.master_choices(), self.stored.as_ref()) else {
+            rows.push(Row::of("Reading the harnesses...", look.muted));
+            return rows;
+        };
+        if choices.is_empty() {
+            rows.push(Row::of(
+                "No harness can run the master. Install one in Settings, Harnesses.",
+                look.muted,
+            ));
+            return rows;
+        }
+        let at = self.pick_cursor(&choices);
+        let running = self.running_master();
+        for (index, choice) in choices.iter().enumerate() {
+            let mut row = Row::of(choice.name.clone(), look.fg);
+            if running.is_some_and(|id| same_harness(&choice.id, id)) {
+                row = row.push("  now", look.muted);
+            }
+            rows.push(list_row(row, content, index == at, true, look));
+        }
+        let when = match self
+            .status
+            .as_ref()
+            .map(|status| status.apply_harness_switch)
+        {
+            Some(SwitchApply::NextStart) => {
+                "The running master keeps its harness until it starts again."
+            }
+            Some(SwitchApply::WhenIdle) | None => "The running master switches once it is idle.",
+        };
+        rows.extend(
+            wrap_words(&format!("Enter saves it. {when}"), content)
+                .into_iter()
+                .map(|line| Row::of(line, look.muted)),
+        );
+        rows
+    }
+
     /// Moves the Sub-agent depth setting to its next choice, 1 after 3.
     /// Output: the change to send, or Handled with a notice while loading or saving.
     fn sub_agent_depth(&mut self) -> TeamReply {
@@ -1995,6 +2323,20 @@ impl TeamView {
                     done,
                 )
             }
+            CoordRow::TaskStart => {
+                settings.task_start = cycle(&TaskStart::ALL, settings.task_start, forward);
+                let done = format!(
+                    "Task-start reminder: {}.",
+                    settings.task_start.words().to_lowercase()
+                );
+                (
+                    TeamAction::CoordSettings {
+                        project_id,
+                        settings,
+                    },
+                    done,
+                )
+            }
             CoordRow::Counted => return TeamReply::Handled,
             CoordRow::Skills(role) => {
                 if settings.role_skills.of(role).is_none() {
@@ -2193,6 +2535,11 @@ impl TeamView {
                     view.settings.nudges.words().to_owned(),
                     "",
                 ),
+                CoordRow::TaskStart => (
+                    "Task-start reminder".to_owned(),
+                    view.settings.task_start.words().to_owned(),
+                    "",
+                ),
                 CoordRow::Counted => (
                     "Counted tools".to_owned(),
                     view.settings.counted_tools.join(", "),
@@ -2330,7 +2677,9 @@ impl TeamView {
         let tree = self.agent_tree();
         let agents: Vec<&TeamAgent> = tree.iter().map(|(agent, _)| *agent).collect();
         let tasks = self.tasks();
+        let picking = self.master_pick.is_some();
         let (panel, caret) = match (&self.draft, &self.branch_edit, self.wake, self.message_row) {
+            _ if picking => (self.pick_rows(content, look), None),
             (Some(draft), _, _, _) => {
                 let (rows, at) = draft_rows(draft, content, look);
                 (rows, Some(at))
@@ -2478,7 +2827,8 @@ impl TeamView {
     }
 
     /// The Team rows: the agent counts, a stopped team and alerts, then every team setting
-    /// in order (Keep warm, Task, Session, Idle stop, On harness switch, Sub-agent depth,
+    /// in order (Keep warm, Task, Session, Idle stop, On harness switch with when a master
+    /// harness change applies, Sub-agent depth,
     /// Worker lands, Agent branches, Max harnesses, Max teammates, Spread accounts, Token
     /// budget, Master's branch, Land on, Ask before merge, New folder limit, Background
     /// commands), each whole. A
@@ -2556,7 +2906,11 @@ impl TeamView {
             setting("Idle stop", limit_label(status.idle_stop_secs)),
             setting(
                 "On harness switch",
-                switch_words(status.on_harness_switch).to_owned(),
+                format!(
+                    "{}, {}",
+                    switch_words(status.on_harness_switch),
+                    apply_words(status.apply_harness_switch)
+                ),
             ),
             setting("Sub-agent depth", status.sub_agent_depth.to_string()),
             setting(
@@ -2874,6 +3228,13 @@ impl TeamView {
         if self.branch_edit.is_some() {
             return vec![("Enter", "Save"), ("Esc", "Close")];
         }
+        if self.master_pick.is_some() {
+            return vec![
+                ("\u{2191}\u{2193}", "Move"),
+                ("Enter", "Save"),
+                ("Esc", "Close"),
+            ];
+        }
         if self.confirm.is_some() {
             return vec![("y", "Cancel task"), ("n", "Keep")];
         }
@@ -2929,6 +3290,8 @@ impl TeamView {
             ("l", "Session limit"),
             ("i", "Idle stop"),
             ("h", "On harness switch"),
+            ("H", "Master harness"),
+            ("A", "Apply master change"),
             ("d", "Sub-agent depth"),
             ("k", "Worker lands"),
             ("b", "Agent branches"),
@@ -3460,6 +3823,18 @@ fn landing_words(mode: ChildLanding) -> &'static str {
     }
 }
 
+/// The words for the Apply a master harness change setting, after the On harness switch
+/// choice on the team summary row, where the plan line already names the saved master.
+/// Takes the mode. Returns its choice name in lower case.
+fn apply_words(mode: SwitchApply) -> &'static str {
+    match mode {
+        SwitchApply::WhenIdle => "when the master is idle",
+        SwitchApply::NextStart => "at the next start",
+    }
+}
+
+/// The short words for the On harness switch setting on the team summary row.
+/// Takes the mode. Returns its choice name.
 fn switch_words(mode: SwitchMode) -> &'static str {
     match mode {
         SwitchMode::Carry => "Carry over",

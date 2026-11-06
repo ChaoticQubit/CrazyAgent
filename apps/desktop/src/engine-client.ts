@@ -805,6 +805,10 @@ export interface TeamMessage {
  * over to the new harness, or start the new harness fresh. */
 export type SwitchMode = "carry" | "fresh";
 
+/** When a saved master harness change reaches the running live master: once it is idle, or at
+ * its next start. */
+export type SwitchApply = "when_idle" | "next_start";
+
 /** What a task does at its turn end while commands its agent started in the background
  * still run: wait for them, give them a grace time in seconds and stop them, or stop them
  * with the turn and tell the agent first. */
@@ -847,9 +851,13 @@ export interface RoleSkills {
  * view, which takes the mouse. */
 export type ClaudeDisplay = "classic" | "fullscreen";
 
+/** Whether the first turn of each task of a team agent carries the Task-start reminder: the
+ * context-mode tools to load and the approved skills to check for the task. */
+export type TaskStart = "on" | "off";
+
 /** A project's coordination settings: question routing, claim overlaps, workflow nudges, the
- * tool names the adoption counts include, the skills each team role gets and the Claude Code
- * terminal display. */
+ * tool names the adoption counts include, the skills each team role gets, the Claude Code
+ * terminal display and the Task-start reminder. */
 export interface CoordSettings {
   questions_to: QuestionsTo;
   overlaps: Overlaps;
@@ -857,6 +865,7 @@ export interface CoordSettings {
   counted_tools: string[];
   role_skills: RoleSkills;
   claude_display: ClaudeDisplay;
+  task_start: TaskStart;
 }
 
 /** One harness kind's sub-agent mode and delivery, and whether it has native teammates at all. */
@@ -886,6 +895,7 @@ export interface TeamStatus {
   session_limit_secs?: number | null;
   idle_stop_secs?: number | null;
   on_harness_switch?: SwitchMode;
+  apply_harness_switch?: SwitchApply;
   sub_agent_depth?: number;
   child_landing?: ChildLanding;
   show_finished?: boolean;
@@ -1117,6 +1127,12 @@ export function teamTimeLimits(id: string, turnSecs: number | null, sessionSecs:
 
 export function teamOnHarnessSwitch(id: string, mode: SwitchMode, revision: number, generation: number): Promise<IntentReceipt> {
   return invoke<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, revision, generation });
+}
+
+/** Sets when a saved master harness change reaches the running live master. Inputs: the project
+ * id, the choice and a generation. Output: the engine receipt. */
+export function teamApplyHarnessSwitch(id: string, mode: SwitchApply, generation: number): Promise<IntentReceipt> {
+  return invoke<IntentReceipt>("desktop_team_apply_harness_switch", { id, mode, generation });
 }
 
 /** Sets how deep sub-agents may start workers of their own. Inputs: the project id, the depth

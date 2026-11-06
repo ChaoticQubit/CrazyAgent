@@ -34,6 +34,8 @@ mod native_auth_custody_tests;
 pub(crate) mod plugins;
 pub(crate) mod setup;
 pub(crate) mod trash;
+#[cfg(unix)]
+pub(crate) use native_auth::CUSTODIAN_CODES;
 #[cfg(all(test, unix))]
 pub(crate) use native_auth::NativeAuthRetirementCheckpoint;
 #[cfg(all(test, unix))]

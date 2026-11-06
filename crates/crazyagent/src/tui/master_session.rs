@@ -38,6 +38,15 @@ pub(super) const RENEWAL_NOT_STARTED: &str = "New session not started.";
 /// project while they were read.
 const RENEWAL_LEFT: &str = "You left the project before the settings were read.";
 
+/// What the owner reads when New session is pressed again while the last one is still under
+/// way: reading the current settings, being sent or waiting for the engine (P2).
+pub(super) const NEW_SESSION_STARTING: &str = "A new session is already starting.";
+
+/// What the owner reads when New session is pressed while another master step, such as a
+/// sent message, a session switch or a stop, is still under way (P2 r1, TUIP2-L1).
+const LAST_STEP_UNDER_WAY: &str =
+    "Your last request is still being handled. Press n again when it is done.";
+
 /// Why a New session waiting for the current settings ended unsent when the engine
 /// connection changed while they were read.
 const RENEWAL_DROPPED: &str =
@@ -624,6 +633,28 @@ impl State {
         })
     }
 
+    /// Tells whether a New session the owner asked for is still under way: waiting for the
+    /// current settings, queued, sent or waiting for the engine's read after its receipt.
+    /// Input: none. Output: true while one is.
+    fn renewing(&self) -> bool {
+        let new = |submission: &Submission| {
+            matches!(submission.action, MasterOwnerAction::NewSession { .. })
+        };
+        self.renewal.is_some()
+            || self
+                .pending
+                .as_ref()
+                .is_some_and(|pending| new(&pending.submission))
+            || match &self.job {
+                Some(Job::Mutation { submission, .. }) => new(submission),
+                Some(Job::Read {
+                    confirmation: Some(confirmation),
+                    ..
+                }) => new(&confirmation.submission),
+                _ => false,
+            }
+    }
+
     fn intent_free(&self) -> Result<(), String> {
         if !self.ready || self.pending.is_some() || self.job.is_some() || self.renewal.is_some() {
             return Err(concat!(
@@ -741,6 +772,12 @@ impl State {
             .is_none()
         {
             return self.open();
+        }
+        if self.renewing() {
+            return Err(NEW_SESSION_STARTING.into());
+        }
+        if self.pending.is_some() || self.job.is_some() {
+            return Err(LAST_STEP_UNDER_WAY.into());
         }
         self.intent_free()?;
         self.renewal = Some(cancel_running);

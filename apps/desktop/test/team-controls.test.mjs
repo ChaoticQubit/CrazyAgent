@@ -219,3 +219,18 @@ test("team settings changes send the revision the window read, so the engine ref
     assert.ok(reads.includes(`read("${key}")`), `the native command reads ${key} as its own key`);
   }
 });
+
+test("Settings, Team offers Apply a master harness change with When the master is idle by default and At the next start (N-D26)", async () => {
+  const settings = await import("../src/screens/project/settings.tsx");
+  assert.ok(Array.isArray(settings.APPLY_OPTIONS), "Settings, Team names the choices for a saved master harness change");
+  assert.deepEqual(settings.APPLY_OPTIONS.map((option) => [option.value, option.label]), [["when_idle", "When the master is idle"], ["next_start", "At the next start"]]);
+  assert.equal(settings.applyMode(status()), "when_idle", "an engine that sends no choice reads the default");
+  assert.equal(settings.applyMode(status({ apply_harness_switch: "next_start" })), "next_start");
+  const data = (value) => ({ id: "chores", team: { result: { kind: "ok", value }, at: 1 }, reloadTeam() {} });
+  const idle = renderToStaticMarkup(createElement(settings.ApplySwitch, { data: data(status()) }));
+  assert.match(idle, /Apply a master harness change/);
+  assert.deepEqual(picked(idle, "ps-apply-switch"), ["when_idle"]);
+  const next = renderToStaticMarkup(createElement(settings.ApplySwitch, { data: data(status({ apply_harness_switch: "next_start" })) }));
+  assert.deepEqual(picked(next, "ps-apply-switch"), ["next_start"]);
+  assert.equal(renderToStaticMarkup(createElement(settings.ApplySwitch, { data: { id: "chores", team: { result: undefined, at: 0 }, reloadTeam() {} } })), "", "nothing before the team status is read");
+});

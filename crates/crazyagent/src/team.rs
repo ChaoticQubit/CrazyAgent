@@ -407,6 +407,34 @@ impl SwitchMode {
     }
 }
 
+/// When a saved master harness change reaches the running live master: `WhenIdle`, the
+/// default, switches it once it is idle and an account of its pool can run the new harness;
+/// `NextStart` keeps it on its harness until it starts again.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SwitchApply {
+    #[default]
+    WhenIdle,
+    NextStart,
+}
+
+impl SwitchApply {
+    /// The stored name of the choice. Output: `when_idle` or `next_start`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::WhenIdle => "when_idle",
+            Self::NextStart => "next_start",
+        }
+    }
+
+    /// Reads a stored choice name. Input: the name. Output: the choice, or None.
+    pub fn named(name: &str) -> Option<Self> {
+        [Self::WhenIdle, Self::NextStart]
+            .into_iter()
+            .find(|apply| apply.name() == name)
+    }
+}
+
 /// The owner's Max harnesses per project and Max teammates per harness choices besides No
 /// limit, the default. The largest is the most agents one project runs at once.
 pub const CAP_CHOICES: [u8; 9] = [1, 2, 3, 4, 5, 6, 8, 10, 15];
@@ -615,6 +643,10 @@ pub enum TeamAction {
         /// The team settings revision the client last read; a stale one is refused.
         #[serde(default)]
         revision: u64,
+    },
+    ApplyHarnessSwitch {
+        project_id: ProjectId,
+        mode: SwitchApply,
     },
     SubAgentDepth {
         project_id: ProjectId,
@@ -930,6 +962,7 @@ impl TeamAction {
             | Self::SpreadAccounts { .. }
             | Self::ChildLanding { .. }
             | Self::OnHarnessSwitch { .. }
+            | Self::ApplyHarnessSwitch { .. }
             | Self::FinishedAgents { .. }
             | Self::AgentBranches { .. }
             | Self::AskBeforeMerge { .. }
@@ -952,6 +985,7 @@ impl TeamAction {
             | Self::KeepWarm { project_id, .. }
             | Self::TimeLimits { project_id, .. }
             | Self::OnHarnessSwitch { project_id, .. }
+            | Self::ApplyHarnessSwitch { project_id, .. }
             | Self::SubAgentDepth { project_id, .. }
             | Self::ChildLanding { project_id, .. }
             | Self::FinishedAgents { project_id, .. }
@@ -1394,6 +1428,10 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE TABLE IF NOT EXISTS team_settings_revision (
                 project TEXT PRIMARY KEY,
                 revision INTEGER NOT NULL CHECK(revision > 0)
+            );
+            CREATE TABLE IF NOT EXISTS team_master_apply (
+                project TEXT PRIMARY KEY,
+                mode TEXT NOT NULL CHECK(mode IN ('when_idle','next_start'))
             );
             CREATE TABLE IF NOT EXISTS team_finished_view (
                 project TEXT PRIMARY KEY,
@@ -2237,6 +2275,15 @@ pub fn execute(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
+        TeamAction::ApplyHarnessSwitch { mode, .. } => {
+            tx.execute(
+                "INSERT INTO team_master_apply(project,mode) VALUES (?1,?2)
+                 ON CONFLICT(project) DO UPDATE SET mode=excluded.mode",
+                params![project.as_str(), mode.name()],
+            )
+            .map_err(error)?;
+            Ok(Outcome::Applied)
+        }
         TeamAction::SubAgentDepth { depth, .. } => {
             tx.execute(
                 "INSERT INTO team_nesting(project,depth,lands) VALUES (?1,?2,?3)
@@ -2907,6 +2954,8 @@ pub struct TeamStatus {
     pub idle_stop_secs: Option<u32>,
     #[serde(default)]
     pub on_harness_switch: SwitchMode,
+    #[serde(default)]
+    pub apply_harness_switch: SwitchApply,
     #[serde(default = "depth_default")]
     pub sub_agent_depth: u8,
     #[serde(default)]
@@ -3200,6 +3249,27 @@ pub fn settings_revision(connection: &Connection, project: &ProjectId) -> Result
             .ok()
             .filter(|revision| *revision > 0)
             .ok_or_else(|| error("team_settings_revision_invalid")),
+    }
+}
+
+/// When a saved master harness change reaches the project's running live master: the
+/// owner's choice, when the master is idle by default. Takes a connection and the project.
+/// Returns the choice.
+pub fn apply_harness_switch(
+    connection: &Connection,
+    project: &ProjectId,
+) -> Result<SwitchApply, EngineError> {
+    let mode: Option<String> = connection
+        .query_row(
+            "SELECT mode FROM team_master_apply WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    match mode.as_deref() {
+        None => Ok(SwitchApply::default()),
+        Some(name) => SwitchApply::named(name).ok_or_else(|| error("team_switch_apply_invalid")),
     }
 }
 
@@ -4208,6 +4278,7 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         session_limit_secs: limits.session,
         idle_stop_secs: limits.idle,
         on_harness_switch: on_harness_switch(connection, project)?,
+        apply_harness_switch: apply_harness_switch(connection, project)?,
         sub_agent_depth: nested.depth,
         child_landing: nested.lands,
         show_finished: show_finished(connection, project)?,

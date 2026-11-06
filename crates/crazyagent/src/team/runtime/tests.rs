@@ -3233,6 +3233,299 @@ fn a_message_waiting_as_the_live_switch_goes_off_waits_for_the_stopping_master()
     host.close(&[]).unwrap();
 }
 
+/// `LIVE_CODEX` whose start takes a while, as a real app's boot does: before its ready line
+/// it runs `boot`, then drops whatever was typed meanwhile, since a line typed before the
+/// app reads keys is left unsent in its prompt (row 10, 2026-11-05). Takes the boot lines.
+/// Returns the script.
+#[cfg(target_os = "macos")]
+fn booting_codex(boot: &str) -> String {
+    let ready = "printf '\\033[?2004hCodex stand-in ready\\n'\n";
+    let script = LIVE_CODEX.replacen(
+        ready,
+        &format!(
+            "{boot}/bin/stty -icanon min 0 time 0\n/bin/cat > /dev/null\n/bin/stty icanon\n{ready}"
+        ),
+        1,
+    );
+    assert_ne!(script, LIVE_CODEX);
+    script
+}
+
+/// Starts a live master on `script`, leaves one owner line pending as soon as its pane runs
+/// and waits until that line opened the master's first turn. Takes the script.
+#[cfg(target_os = "macos")]
+fn first_owner_line_opens_a_turn(script: &str) {
+    let mut fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, script);
+    let project = fixture.setup.project_id.clone();
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the live master's pane runs", |f| {
+        live_agent(&f.connection).is_some()
+    });
+    let tx = fixture.connection.transaction().unwrap();
+    let message = append_message(
+        &tx,
+        &project,
+        MessageAuthor::Owner,
+        "Reply with only the word READY.",
+        MessageState::Pending,
+        now_ms(),
+    )
+    .unwrap()
+    .unwrap();
+    tx.commit().unwrap();
+
+    fixture.until(&mut team, "the owner's first line opens a turn", |f| {
+        live_turns(&f.connection).0 >= 1
+    });
+    let state: String = fixture
+        .connection
+        .query_row(
+            "SELECT state FROM team_messages WHERE id=?1",
+            [message],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(state, "answered");
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// An owner line for a live master whose app still boots, with bracketed paste off and no
+/// keys read, waits until the app reads keys and then opens a turn, instead of being typed
+/// at once and left unsent.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_owner_line_waits_until_the_live_masters_app_reads_keys() {
+    first_owner_line_opens_a_turn(&booting_codex("/bin/sleep 2\n"));
+}
+
+/// An owner line for a live master whose app turned bracketed paste on but is still
+/// drawing its start waits until the screen has been quiet as long as an engine-typed turn
+/// waits for, and then opens a turn.
+/// R10-M1 / F1: while the engine cannot watch a new live master's first screen, as when
+/// every terminal viewer of the host is taken, the owner's line waits and the engine looks
+/// again on the next pass; once a viewer is free the app's screen is watched as usual and
+/// the line opens a turn, instead of waiting forever.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_owner_line_reaches_a_live_master_once_its_first_screen_can_be_watched() {
+    let mut fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, LIVE_CODEX);
+    let project = fixture.setup.project_id.clone();
+    let held = AgentId::new("viewers-held").unwrap();
+    let command = InteractiveCommand {
+        argv: vec!["/bin/sh".into(), "-c".into(), "exec /bin/sleep 300".into()],
+        cwd: fixture.base.clone(),
+        env: Vec::new(),
+        transcript: Transcript::Unavailable,
+    };
+    host.spawn(&held, &command).unwrap();
+    let viewers: Vec<_> = (0..crate::terminal::VIEWERS_MAX)
+        .map(|_| host.attach(&held).unwrap())
+        .collect();
+    assert_eq!(
+        host.attach(&held).map(drop).unwrap_err().0,
+        "terminal_viewers_full",
+        "every viewer of the host is taken"
+    );
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the live master's pane runs", |f| {
+        live_agent(&f.connection).is_some()
+    });
+    let tx = fixture.connection.transaction().unwrap();
+    let message = append_message(
+        &tx,
+        &project,
+        MessageAuthor::Owner,
+        "Reply with only the word READY.",
+        MessageState::Pending,
+        now_ms(),
+    )
+    .unwrap()
+    .unwrap();
+    tx.commit().unwrap();
+    let state = |f: &Fixture| -> String {
+        f.connection
+            .query_row(
+                "SELECT state FROM team_messages WHERE id=?1",
+                [message],
+                |row| row.get(0),
+            )
+            .unwrap()
+    };
+    let watched = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < watched {
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        state(&fixture),
+        "pending",
+        "the line waits while the first screen cannot be watched"
+    );
+
+    drop(viewers);
+    fixture.until(&mut team, "the owner's line opens a turn", |f| {
+        live_turns(&f.connection).0 >= 1
+    });
+    assert_eq!(state(&fixture), "answered");
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// `LIVE_CODEX` that turns bracketed paste on only once `go` exists in its Codex home, as
+/// an app that reads no keys for a long while. Returns the script.
+#[cfg(target_os = "macos")]
+fn paste_later_codex() -> String {
+    let ready = "printf '\\033[?2004hCodex stand-in ready\\n'\n";
+    let script = LIVE_CODEX.replacen(
+        ready,
+        "( while [ ! -e \"$CODEX_HOME/go\" ]; do /bin/sleep 0.1; done; printf '\\033[?2004h' ) &\nprintf 'Codex stand-in ready\\n'\n",
+        1,
+    );
+    assert_ne!(script, LIVE_CODEX);
+    script
+}
+
+/// F2: an owner line that has waited longer than a first screen may take for the live
+/// master's app to read keys says why, once, in a team note and the live problem line, and
+/// the line goes once the owner's line is typed.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_owner_line_waiting_long_for_the_masters_app_says_so_once() {
+    let mut fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, &paste_later_codex());
+    let project = fixture.setup.project_id.clone();
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the live master's pane runs", |f| {
+        live_agent(&f.connection).is_some()
+    });
+    let master = masters(&fixture.connection)[0];
+    let tx = fixture.connection.transaction().unwrap();
+    append_message(
+        &tx,
+        &project,
+        MessageAuthor::Owner,
+        "Reply with only the word READY.",
+        MessageState::Pending,
+        now_ms(),
+    )
+    .unwrap()
+    .unwrap();
+    tx.commit().unwrap();
+    let line = super::super::master::MASTER_NOT_READING;
+    let deadline = Instant::now() + crate::harnesses::terminal_session::READY_WAIT + WAIT;
+    while fixture.status().live_problem.as_deref() != Some(line) {
+        assert!(
+            Instant::now() < deadline,
+            "the waiting line says why: {:#?}",
+            fixture.status()
+        );
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(noted(&fixture, line), 1, "one note");
+    idle_ticks(&mut team);
+    assert_eq!(noted(&fixture, line), 1, "still one note");
+
+    std::fs::write(stand_in_file(&fixture, master, "go"), "").unwrap();
+    fixture.until(
+        &mut team,
+        "the owner's line is typed and the wait line goes",
+        |f| live_turns(&f.connection).0 >= 1 && f.status().live_problem.is_none(),
+    );
+    assert_eq!(noted(&fixture, line), 1);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+}
+
+/// R10R2-L1: the "not reading keys" line an earlier engine stored goes once the next
+/// engine types an owner line into the live master it took over, though no wait of its own
+/// began: the adopted master is briefed already, so nothing else takes the line down.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_stored_not_reading_line_goes_once_a_restarted_engine_types_into_its_master() {
+    let mut fixture = Fixture::new(1);
+    let host = fixture.host();
+    let bin = fixture.base.join("bin");
+    std::fs::create_dir(&bin).unwrap();
+    let codex = bin.join("codex");
+    std::fs::write(&codex, LIVE_CODEX).unwrap();
+    std::fs::set_permissions(&codex, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let open = || {
+        let access = fixture.access.clone();
+        TeamRuntime::open(
+            &fixture.base.join("engine.db"),
+            &fixture.base.join("team"),
+            BTreeMap::from([("codex", codex.clone())]),
+            Box::new(move || Some(access.clone())),
+            TeamLimits::default(),
+        )
+        .unwrap()
+        .with_terminal(host.clone())
+        .unwrap()
+    };
+    let project = fixture.setup.project_id.clone();
+    let mut team = open();
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    fixture.until(&mut team, "the live master runs idle", |f| {
+        live_agent(&f.connection)
+            .is_some_and(|master| f.agent_status(master).0 == AgentStatus::Idle)
+    });
+    let master = masters(&fixture.connection)[0];
+    assert_eq!(team.shutdown().unwrap(), names(&[master]));
+    let line = super::super::master::MASTER_NOT_READING;
+    assert!(super::super::master::problem(&fixture.connection, &project, Some(line)).unwrap());
+
+    let mut again = open();
+    fixture.until(
+        &mut again,
+        "the next engine takes the live master over",
+        |f| f.agent_status(master) == (AgentStatus::Idle, None) && f.recorded(master),
+    );
+    idle_ticks(&mut again);
+    assert_eq!(
+        fixture.status().live_problem.as_deref(),
+        Some(line),
+        "the adopted master keeps the stored line until something is typed"
+    );
+    let tx = fixture.connection.transaction().unwrap();
+    append_message(
+        &tx,
+        &project,
+        MessageAuthor::Owner,
+        "Reply with only the word READY.",
+        MessageState::Pending,
+        now_ms(),
+    )
+    .unwrap()
+    .unwrap();
+    tx.commit().unwrap();
+    fixture.until(&mut again, "the owner's line opens a turn", |f| {
+        live_turns(&f.connection).0 >= 1
+    });
+    idle_ticks(&mut again);
+    assert_eq!(
+        fixture.status().live_problem,
+        None,
+        "a typed line takes the stored wait line down"
+    );
+    assert_eq!(again.shutdown().unwrap(), names(&[master]));
+    host.close(&[]).unwrap();
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn an_owner_line_waits_until_the_live_masters_screen_is_quiet() {
+    first_owner_line_opens_a_turn(&booting_codex(
+        "printf '\\033[?2004h'\ni=0\nwhile [ \"$i\" -lt 10 ]; do printf 'loading %s\\n' \"$i\"; /bin/sleep 0.2; i=$((i+1)); done\n",
+    ));
+}
+
 #[cfg(target_os = "macos")]
 const RESUMING_CODEX: &str = r#"#!/bin/sh
 [ "$1" = app-server ] && exit 0
@@ -6543,6 +6836,67 @@ fn send_own_rules_bounds_a_kept_lead_s_own_turn_by_the_session_time_left() {
     );
 }
 
+/// T3-15: while the Task-start reminder is On, its default, a tools-on Codex sub-agent's task
+/// turn carries the reminder naming its approved skill once; after the owner sets it Off,
+/// its next task's turn carries none.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_tools_on_sub_agent_s_task_turn_carries_the_task_start_reminder_only_while_it_is_on() {
+    const REMINDER: &str = "Task start reminder: before you work on this task, read the SKILL.md of each of these skills that fits this task and follow it: `meal-tips`.";
+    let mut fixture = Fixture::new(1);
+    fixture.setup.team.sub_harnesses[0].tools = true;
+    fixture
+        .connection
+        .execute(
+            "UPDATE project_setups SET body=?1 WHERE project=?2",
+            params![serde_json::to_string(&fixture.setup).unwrap(), PROJECT],
+        )
+        .unwrap();
+    approve_skills(&fixture, &["meal-tips"]);
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, &recording_codex());
+    owner(&fixture, &[hand_off(&fixture, "Write page.md")]);
+    fixture.until(&mut team, "the first task is done", |f| {
+        task_of(f, "Write page.md").0 == "done"
+    });
+    let agent = subs(&fixture)[0];
+    let first = typed(&fixture, agent);
+    assert!(first.contains("Write page.md"), "{first}");
+    assert_eq!(
+        first.matches(REMINDER).count(),
+        1,
+        "the first turn carries the reminder once: {first}"
+    );
+
+    crate::coord::settings::write(
+        &fixture.connection,
+        &fixture.setup.project_id,
+        &crate::coord::settings::CoordSettings {
+            task_start: crate::coord::settings::TaskStart::Off,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    owner(&fixture, &[hand_off(&fixture, "Write menu.md")]);
+    fixture.until(&mut team, "the second task is done", |f| {
+        task_of(f, "Write menu.md").0 == "done"
+    });
+    let text = typed(&fixture, agent);
+    team.shutdown().unwrap();
+    host.close(&[]).unwrap();
+    assert_eq!(
+        subs(&fixture),
+        [agent],
+        "the same agent took the second task"
+    );
+    let second = &text[first.len()..];
+    assert!(second.contains("Write menu.md"), "{second}");
+    assert!(
+        !second.contains("Task start reminder"),
+        "Off gives none: {second}"
+    );
+}
+
 /// Under Stop, a Codex sub-agent whose app keeps running between tasks is not told that its
 /// background commands stop when its turn ends: its rollout reports no such commands, so
 /// the engine neither holds its turn for them nor stops them, and the line would be untrue
@@ -7017,6 +7371,271 @@ fn a_master_harness_switch_starts_fresh_when_the_owner_chose_it() {
         masters(&fixture.connection),
         [first, second],
         "a new master on the new harness"
+    );
+}
+
+/// Starts the switching runtime's Codex master for session s-one and waits until the
+/// owner's first turn to it ended, so the master is idle. Takes the fixture, the host and
+/// the runtime. Returns the Codex master's agent id.
+#[cfg(target_os = "macos")]
+fn idle_codex_master(fixture: &Fixture, host: &Arc<dyn Host>, team: &mut TeamRuntime) -> i64 {
+    switch_session(&fixture.connection, "s-one");
+    super::super::master::set_live(&fixture.connection, &fixture.setup.project_id, true).unwrap();
+    fixture.until(team, "the Codex master runs and is kept", |f| {
+        live_agent(&f.connection).is_some() && kept_conversation(&f.connection, "s-one").is_some()
+    });
+    let first = masters(&fixture.connection)[0];
+    host.input(&AgentId::team(first).unwrap(), b"hello\r")
+        .unwrap();
+    fixture.until(team, "the owner's turn ends", |f| {
+        live_turns(&f.connection) == (1, false)
+    });
+    first
+}
+
+/// With When the master is idle, the default (N-D26, owner 2026-11-05), a saved master
+/// harness change reaches the running live master once it is idle, with nobody turning the
+/// live master off and on: the same session goes on under the new harness with one
+/// "Switched to" note, the divider and the owner's next line on the new harness.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_saved_master_harness_switch_reaches_the_live_master_once_it_is_idle() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = switching_runtime(&fixture, &host);
+    let project = fixture.setup.project_id.clone();
+    let first = idle_codex_master(&fixture, &host, &mut team);
+    assert_eq!(
+        fixture.status().apply_harness_switch,
+        crate::team::SwitchApply::WhenIdle
+    );
+
+    set_master(&fixture, "claude-code");
+    let note = crate::master_sessions::switched_note("Claude Code", crate::team::SwitchMode::Carry);
+    fixture.until(
+        &mut team,
+        "the idle Codex master hands over to Claude Code",
+        |f| {
+            let all = masters(&f.connection);
+            noted(f, &note) == 1 && all.len() == 2 && live_agent(&f.connection) == Some(all[1])
+        },
+    );
+    let second = masters(&fixture.connection)[1];
+    assert_eq!(masters(&fixture.connection), [first, second]);
+    assert!(
+        super::super::master::live(&fixture.connection, &project).unwrap(),
+        "the live master stayed on"
+    );
+    assert_eq!(
+        fixture.status().live_switch.map(|switch| switch.note),
+        Some(note.clone()),
+        "the session's conversation shows where Claude Code took over"
+    );
+    host.input(&AgentId::team(second).unwrap(), b"hello again\r")
+        .unwrap();
+    fixture.until(
+        &mut team,
+        "the owner's next line goes to Claude Code",
+        |f| {
+            kept_conversation(&f.connection, "s-one").is_some_and(|(_, record)| {
+                record.starts_with(f.base.join("team/agents").join(format!("agent-{second}")))
+            })
+        },
+    );
+    assert_eq!(
+        crate::master_sessions::live_session(&fixture.connection, &project)
+            .unwrap()
+            .as_deref(),
+        Some("s-one"),
+        "the same session goes on"
+    );
+    idle_ticks(&mut team);
+    assert_eq!(
+        masters(&fixture.connection),
+        [first, second],
+        "the switch happens once"
+    );
+}
+
+/// With At the next start, a saved master harness change waits: the idle master keeps its
+/// harness and the conversation shows no switch until the live master starts again, which
+/// then switches it with the note and the divider.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_saved_master_harness_switch_waits_for_the_next_start_when_the_owner_chose_it() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = switching_runtime(&fixture, &host);
+    let project = fixture.setup.project_id.clone();
+    let mut connection = Connection::open(fixture.base.join("engine.db")).unwrap();
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        crate::team::execute(
+            &tx,
+            &fixture.access,
+            &crate::team::TeamAction::ApplyHarnessSwitch {
+                project_id: project.clone(),
+                mode: crate::team::SwitchApply::NextStart,
+            },
+        )
+        .unwrap(),
+        crate::protocol::Outcome::Applied
+    );
+    tx.commit().unwrap();
+    assert_eq!(
+        fixture.status().apply_harness_switch,
+        crate::team::SwitchApply::NextStart
+    );
+    let first = idle_codex_master(&fixture, &host, &mut team);
+
+    set_master(&fixture, "claude-code");
+    idle_ticks(&mut team);
+    assert_eq!(
+        masters(&fixture.connection),
+        [first],
+        "the Codex master runs on"
+    );
+    assert_eq!(live_agent(&fixture.connection), Some(first));
+    assert_eq!(
+        fixture.status().live_switch,
+        None,
+        "no divider before the switch"
+    );
+
+    stop_live(&fixture, &mut team);
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    let note = crate::master_sessions::switched_note("Claude Code", crate::team::SwitchMode::Carry);
+    fixture.until(&mut team, "the next start switches to Claude Code", |f| {
+        noted(f, &note) == 1 && masters(&f.connection).len() == 2
+    });
+    assert_eq!(
+        fixture.status().live_switch.map(|switch| switch.note),
+        Some(note)
+    );
+}
+
+/// A saved switch to a harness that no account of the pool can run leaves the idle live
+/// master running on its own harness instead of stopping it for a start that would fail.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_saved_master_harness_switch_no_pool_account_can_run_leaves_the_master_running() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = live_runtime(&fixture, &host, RESUMING_CODEX);
+    let project = fixture.setup.project_id.clone();
+    let first = idle_codex_master(&fixture, &host, &mut team);
+
+    set_master(&fixture, "claude-code");
+    idle_ticks(&mut team);
+    assert_eq!(masters(&fixture.connection), [first]);
+    assert_eq!(live_agent(&fixture.connection), Some(first));
+    assert!(super::super::master::live(&fixture.connection, &project).unwrap());
+    assert_eq!(fixture.status().live_problem, None);
+    assert_eq!(fixture.status().live_switch, None);
+}
+
+/// `RESUMING_CODEX` whose turn on a line with "long" in it stays open until `go` exists in
+/// the agent's Codex home. Returns the script.
+#[cfg(target_os = "macos")]
+fn holding_codex() -> String {
+    let script = RESUMING_CODEX.replacen(
+        "  printf '{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\\n' >> \"$f\"\n",
+        "  printf '{\"type\":\"event_msg\",\"payload\":{\"type\":\"task_started\"}}\\n' >> \"$f\"\n  case \"$line\" in *long*) while [ ! -e \"$CODEX_HOME/go\" ]; do /bin/sleep 0.1; done ;; esac\n",
+        1,
+    );
+    assert_ne!(script, RESUMING_CODEX);
+    script
+}
+
+/// Ticks the runtime for longer than the owner's quiet time after a key, so only an open
+/// turn or an unsent line can still hold a saved switch back. Takes the runtime.
+#[cfg(target_os = "macos")]
+fn ticks_past_owner_quiet(team: &mut TeamRuntime) {
+    let deadline =
+        Instant::now() + Duration::from_millis(super::super::master::OWNER_QUIET_MS as u64 + 2000);
+    while Instant::now() < deadline {
+        team.tick().unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// With When the master is idle, a master harness change saved while the live master is in
+/// a turn waits for that turn: the master keeps its harness through the rest of the turn,
+/// and once the turn ends it hands over to the new harness with one "Switched to" note.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_saved_master_harness_switch_waits_until_the_live_masters_turn_ends() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = switching_runtime(&fixture, &host);
+    std::fs::write(fixture.base.join("bin/codex"), holding_codex()).unwrap();
+    let first = idle_codex_master(&fixture, &host, &mut team);
+    host.input(&AgentId::team(first).unwrap(), b"a long turn\r")
+        .unwrap();
+    fixture.until(&mut team, "the long turn opens", |f| {
+        live_turns(&f.connection).1
+    });
+
+    set_master(&fixture, "claude-code");
+    ticks_past_owner_quiet(&mut team);
+    assert!(live_turns(&fixture.connection).1, "the turn is still open");
+    assert_eq!(
+        masters(&fixture.connection),
+        [first],
+        "the Codex master is not stopped in its turn"
+    );
+    assert_eq!(live_agent(&fixture.connection), Some(first));
+    assert_eq!(
+        fixture.status().live_switch,
+        None,
+        "no switch while the turn runs"
+    );
+
+    std::fs::write(stand_in_file(&fixture, first, "go"), "").unwrap();
+    let note = crate::master_sessions::switched_note("Claude Code", crate::team::SwitchMode::Carry);
+    fixture.until(
+        &mut team,
+        "the turn ends and the Codex master hands over to Claude Code",
+        |f| {
+            let all = masters(&f.connection);
+            noted(f, &note) == 1 && all.len() == 2 && live_agent(&f.connection) == Some(all[1])
+        },
+    );
+    assert_eq!(masters(&fixture.connection)[0], first);
+}
+
+/// With When the master is idle, a master harness change waits while the owner holds an
+/// unsent line in the live master's terminal, past the quiet time after a key, so the stop
+/// for the switch never drops the line; once the owner clears it, the master hands over.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_saved_master_harness_switch_waits_while_the_owner_holds_an_unsent_line() {
+    let fixture = Fixture::new(1);
+    let host = fixture.host();
+    let mut team = switching_runtime(&fixture, &host);
+    let first = idle_codex_master(&fixture, &host, &mut team);
+    super::super::master::owner_typed(&fixture.connection, first, b"half a line", now_ms())
+        .unwrap();
+
+    set_master(&fixture, "claude-code");
+    ticks_past_owner_quiet(&mut team);
+    assert_eq!(
+        masters(&fixture.connection),
+        [first],
+        "the Codex master is not stopped under the owner's unsent line"
+    );
+    assert_eq!(live_agent(&fixture.connection), Some(first));
+    assert_eq!(fixture.status().live_switch, None);
+
+    super::super::master::owner_typed(&fixture.connection, first, b"\x15", now_ms()).unwrap();
+    let note = crate::master_sessions::switched_note("Claude Code", crate::team::SwitchMode::Carry);
+    fixture.until(
+        &mut team,
+        "the owner clears the line and the Codex master hands over to Claude Code",
+        |f| {
+            let all = masters(&f.connection);
+            noted(f, &note) == 1 && all.len() == 2 && live_agent(&f.connection) == Some(all[1])
+        },
     );
 }
 
@@ -8078,6 +8697,7 @@ fn each_start_runs_at_the_saved_level_and_a_lowered_clone_is_refused() {
         scratch_pin: None,
         proxy: None,
         claude_display: crate::coord::settings::ClaudeDisplay::Classic,
+        task_start: None,
     };
     let account = || AccountBinding::Subscription {
         home: PathBuf::from("/tmp/home"),
@@ -9768,6 +10388,46 @@ fn a_teammate_row_kept_before_rows_held_their_pane_process_is_pinned_at_its_next
 /// A worker record for an agent that has no session thread, as a per-turn agent between
 /// turns. Takes the project, the role, whether it runs one session per turn and whether
 /// it keeps a native lead's session. Returns the worker, idle and not live.
+/// LMS-1 r1: a live master whose grant fails after it waited for its account's profile
+/// stops with its own note, and its wait line goes with it, so the switch no longer says
+/// the profile is in use until the next start.
+#[test]
+fn a_failed_brief_after_a_profile_wait_clears_the_wait_line() {
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let mut team = fixture.runtime();
+    let mut master = between_turns(&project, AgentRole::Master, true, false);
+    master.connection = reference("left-the-pool");
+    master.live = true;
+    master.briefed = false;
+    team.workers.insert(7, master);
+    super::super::master::set_live(&fixture.connection, &project, true).unwrap();
+    assert!(
+        super::super::master::problem(
+            &fixture.connection,
+            &project,
+            Some(super::super::master::PROFILE_IN_USE)
+        )
+        .unwrap()
+    );
+
+    team.brief(&fixture.setup, &fixture.access, 7).unwrap();
+    assert!(team.workers[&7].stopping, "the master stops");
+    assert!(
+        fixture
+            .status()
+            .messages
+            .iter()
+            .any(|message| message.text.starts_with("The live master could not start")),
+        "the failure has its own note"
+    );
+    assert_eq!(
+        fixture.status().live_problem,
+        None,
+        "the profile wait line goes with the stop"
+    );
+}
+
 fn between_turns(
     project: &ProjectId,
     role: AgentRole,
@@ -9800,6 +10460,7 @@ fn between_turns(
         hosted: None,
         live: false,
         briefed: true,
+        input_ready: true,
         kept_session,
         own_turn: None,
         own_rules: None,
@@ -9820,6 +10481,7 @@ fn between_turns(
         ready: true,
         reask: None,
         reasked: None,
+        starts: crate::coord::relay::TaskStarts::default(),
     }
 }
 
@@ -13091,6 +13753,7 @@ fn hooks_plan(harness: &str, hookless: bool) -> Plan {
         toolchains: Vec::new(),
         proxy: None,
         claude_display: crate::coord::settings::ClaudeDisplay::Classic,
+        task_start: None,
     }
 }
 
@@ -13735,6 +14398,7 @@ fn reap_keeps_a_kept_lead_past_its_idle_limit_while_its_teammate_works() {
             toolchains: Some(Vec::new()),
             network: crate::sandbox::policy::AgentNetwork::Open,
             proxy: None,
+            task_start: None,
         })),
         Seat {
             project: ProjectId::new(PROJECT).unwrap(),
@@ -13815,6 +14479,7 @@ fn kept_lead_with_a_task(fixture: &Fixture) -> (TeamRuntime, i64, i64) {
             toolchains: Some(Vec::new()),
             network: crate::sandbox::policy::AgentNetwork::Open,
             proxy: None,
+            task_start: None,
         })),
         Seat {
             project: ProjectId::new(PROJECT).unwrap(),
@@ -13952,6 +14617,7 @@ fn wiring_a_native_lead_adopted_without_its_account_is_killed() {
             toolchains: Some(Vec::new()),
             network: crate::sandbox::policy::AgentNetwork::Open,
             proxy: None,
+            task_start: None,
         };
         let (orders, ordered) = channel();
         let (reports, reported) = channel();
@@ -14253,6 +14919,7 @@ fn a_native_lead_plan_is_refused_at_full_access_and_starts_inside_its_profile_ot
         toolchains: Vec::new(),
         proxy: None,
         claude_display: crate::coord::settings::ClaudeDisplay::Classic,
+        task_start: None,
     };
     let account = || AccountBinding::Subscription {
         home: PathBuf::from("/private/tmp/agent-1-home"),
@@ -19022,4 +19689,28 @@ fn a_native_teammate_cannot_change_its_lead_s_skills_or_relay_plugin() {
         );
     }
     drop(installed);
+}
+
+/// LMS-1 r1 L1: the runtime's grant wait record for an agent holds only its newest grant's
+/// answer: a grant that fails another way after a profile wait drops the earlier
+/// `native_profile_in_use`, so a live test never reads BLOCKED over that failure.
+#[test]
+fn a_grant_that_fails_after_a_profile_wait_drops_the_wait_record() {
+    let fixture = Fixture::new(1);
+    let project = ProjectId::new(PROJECT).unwrap();
+    let mut team = fixture.runtime();
+    let mut master = between_turns(&project, AgentRole::Master, true, false);
+    master.connection = reference("left-the-pool");
+    team.workers.insert(7, master);
+    team.grant_waited
+        .insert(7, "native_profile_in_use".to_owned());
+    assert!(
+        team.grant(&fixture.access, 7, &project).is_err(),
+        "an account that left the pool is refused"
+    );
+    assert_eq!(
+        team.grant_waited.get(&7),
+        None,
+        "the earlier profile wait is not the newest grant answer"
+    );
 }

@@ -20,7 +20,7 @@ use crate::tui::client::process::ProcessQuery;
 use crate::tui::client::settings::SettingsJob;
 use crate::tui::client::{Connection, OwnerEvent};
 use crate::tui::ctx::{Ctx, Load};
-use crate::tui::frame::Tone;
+use crate::tui::frame::{Message, Tone};
 use crate::tui::glyphs::UNICODE;
 use crate::tui::keys::Key;
 use crate::tui::master_session::{Event as MasterEvent, Job as MasterJob};
@@ -687,7 +687,9 @@ async fn shell_opens_a_real_project_and_applies_only_its_own_reads() {
                     | Request::Changes(_)
                     | Request::TeamGraph { .. }
                     | Request::Setup(
-                        SetupQuery::Jobs { .. }
+                        SetupQuery::Setup { .. }
+                            | SetupQuery::Jobs { .. }
+                            | SetupQuery::Log { .. }
                             | SetupQuery::Context { .. }
                             | SetupQuery::Memories { .. }
                             | SetupQuery::Team { .. }
@@ -967,6 +969,106 @@ async fn a_project_is_edited_given_a_file_and_removed_through_the_engine() {
         !matches!(after, Ok(SetupView::Setup(Some(_)))),
         "the engine forgot the project: {after:?}"
     );
+}
+
+/// A master harness saved from the Team screen over the project page, as Team settings save
+/// it, is read again once the owner is back on the page: the Conversation tab routes by the
+/// new master, here an RCLI console instead of the live master view, its head names the new
+/// master, and a General edit saves at the engine's revision instead of being refused as
+/// changed (rv-code TP1-M1, rv-secreview).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_master_saved_from_the_team_screen_is_read_again_by_the_project_page() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let tab = |tab: ProjectTab| Place::Project {
+        id: notes.clone(),
+        name: "Notes CLI".into(),
+        tab,
+    };
+    let mut connection = engine.connect();
+    let mut shell = shell_on(&tab(ProjectTab::Agents));
+    pump(&mut shell, &mut connection).await;
+
+    shell.key(Key::Char('t'));
+    assert_eq!(shell.depth(), 2, "t opens the Team screen over the page");
+    pump(&mut shell, &mut connection).await;
+    let stored = engine
+        .controller
+        .project_setup(notes.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_ne!(
+        stored.team.master, "rcli",
+        "the project starts on a live master"
+    );
+    let generation = shell.ctx.next_generation();
+    shell.ctx.request(Request::Setup(SetupQuery::Change {
+        action: crate::project_setup::SetupAction::Update {
+            project_id: notes.clone(),
+            expected_revision: stored.revision,
+            name: None,
+            setup: ProjectSetup {
+                about: stored.about.clone(),
+                tech_stack: stored.tech_stack.clone(),
+                platforms: stored.platforms.clone(),
+                research: stored.research.clone(),
+                pool: stored.pool.clone(),
+                team: Some(TeamPlan {
+                    master: "rcli".into(),
+                    master_tools: true,
+                    sub_harnesses: vec![],
+                    min_agents: 1,
+                    max_agents: 1,
+                }),
+                documents: Vec::new(),
+            },
+        },
+        generation,
+    }));
+    pump(&mut shell, &mut connection).await;
+    let saved = engine
+        .controller
+        .project_setup(notes.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        saved.revision > stored.revision && saved.team.master == "rcli",
+        "the master saved from the Team screen landed"
+    );
+
+    shell.key(Key::Esc);
+    assert_eq!(shell.depth(), 1, "Esc goes back to the page");
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::ShiftLeft);
+    pump(&mut shell, &mut connection).await;
+    assert_eq!(
+        shell.place(),
+        Some(tab(ProjectTab::Conversation)),
+        "an RCLI master keeps the console, not the live master view"
+    );
+    let shown = render(&mut shell, 100, 40);
+    assert!(
+        shown.contains("Master  rcli"),
+        "the console names the saved master:\n{shown}"
+    );
+
+    shell.key(Key::ShiftLeft);
+    pump(&mut shell, &mut connection).await;
+    shell.key(Key::ShiftLeft);
+    pump(&mut shell, &mut connection).await;
+    assert_eq!(shell.place(), Some(tab(ProjectTab::Settings)));
+    shell.key(Key::Char('g'));
+    let shown = render(&mut shell, 100, 40);
+    assert!(shown.contains("Edit project"), "{shown}");
+    shell.key(Key::Paste(" Pro".into()));
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(sent.first(), Some(&"change"), "{sent:?}");
+    let shown = render(&mut shell, 100, 40);
+    assert!(shown.contains("Changes saved."), "{shown}");
+    assert!(!shown.contains("This project changed"), "{shown}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1529,6 +1631,167 @@ async fn n_whose_settings_read_fails_says_the_new_session_was_not_started() {
         first.session_id,
         "no new session was started"
     );
+}
+
+/// A second n while the first New session still starts says so in plain words on the
+/// page, not the client's internal intent line, and only one new session is made (P2,
+/// trial 4 run 6 N-T2): the first n is still reading the current settings when the
+/// second arrives. Once the new session lands, the wait is over and the error is gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_n_while_the_first_new_session_starts_says_it_is_already_starting() {
+    let mut engine = Engine::start().await;
+    let (notes, mut shell, mut connection, first) =
+        conversation_with_a_settled_turn(&mut engine).await;
+    shell.key(Key::Esc);
+    until(&mut shell, &mut connection, |shown| {
+        shown.contains("Session  started")
+    })
+    .await;
+    shell.key(Key::Char('n'));
+    shell.key(Key::Char('n'));
+    let message = shell
+        .ctx
+        .message()
+        .cloned()
+        .expect("the second n is answered on the page");
+    assert_eq!(message.tone, Tone::Error);
+    assert_eq!(message.lead, "The session did not switch.");
+    assert_eq!(message.rest, "A new session is already starting.");
+    let shown = render(&mut shell, 100, 40);
+    assert!(
+        shown.contains("A new session is already starting."),
+        "{shown}"
+    );
+    for internal in ["intent", "exact identity", "Ctrl-R recovers"] {
+        assert!(!shown.contains(internal), "{internal}:\n{shown}");
+    }
+    until(&mut shell, &mut connection, |shown| {
+        shown.contains("No messages yet.") && !shown.contains("Plan the first slice")
+    })
+    .await;
+    let (fresh, _) = latest_master(&mut engine, &notes).await;
+    assert_ne!(fresh.unwrap().session_id, first.session_id);
+    assert_eq!(
+        master_sessions(&engine, &notes),
+        2,
+        "one new session, not two"
+    );
+    assert_eq!(
+        shell.ctx.message(),
+        None,
+        "the wait ended, so its error is gone"
+    );
+    let shown = render(&mut shell, 100, 40);
+    assert!(
+        !shown.contains("A new session is already starting."),
+        "{shown}"
+    );
+}
+
+/// A second n once the first New session has its settings and waits on the engine says
+/// the same plain words (P2): the settings read is answered by hand, so the New session
+/// is queued for the engine and not yet made when the second n arrives. An error said
+/// after it stays when the new session lands.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_n_while_the_engine_makes_the_first_new_session_says_it_is_already_starting() {
+    let mut engine = Engine::start().await;
+    let (notes, mut shell, mut connection, first) =
+        conversation_with_a_settled_turn(&mut engine).await;
+    shell.key(Key::Esc);
+    until(&mut shell, &mut connection, |shown| {
+        shown.contains("Session  started")
+    })
+    .await;
+    shell.key(Key::Char('n'));
+    let mut read = None;
+    for _ in 0..shell.ctx.queued() {
+        match shell.ctx.next_request().unwrap() {
+            Request::Master(job) if matches!(*job, MasterJob::Catalog { .. }) => read = Some(job),
+            other => shell.ctx.request(other),
+        }
+    }
+    connection
+        .master(*read.expect("n reads the current settings first"))
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        assert!(
+            Instant::now() < deadline,
+            "the settings read was never answered"
+        );
+        match connection.poll_owner().unwrap() {
+            Some(OwnerEvent::Master(event))
+                if matches!(event.as_ref(), MasterEvent::Catalog { .. }) =>
+            {
+                shell.arrive(owner_arrival(OwnerEvent::Master(event)));
+                break;
+            }
+            Some(event) => shell.arrive(owner_arrival(event)),
+            None => tokio::time::sleep(Duration::from_millis(20)).await,
+        }
+    }
+    shell.key(Key::Char('n'));
+    let message = shell
+        .ctx
+        .message()
+        .cloned()
+        .expect("the second n is answered on the page");
+    assert_eq!(message.lead, "The session did not switch.");
+    assert_eq!(message.rest, "A new session is already starting.");
+    let other = Message::error("The master's turn did not stop.", "It had already ended.");
+    shell.ctx.say(other.clone());
+    until(&mut shell, &mut connection, |shown| {
+        shown.contains("No messages yet.") && !shown.contains("Plan the first slice")
+    })
+    .await;
+    let (fresh, _) = latest_master(&mut engine, &notes).await;
+    assert_ne!(fresh.unwrap().session_id, first.session_id);
+    assert_eq!(
+        master_sessions(&engine, &notes),
+        2,
+        "one new session, not two"
+    );
+    assert_eq!(
+        shell.ctx.message(),
+        Some(&other),
+        "an error said after the wait stays"
+    );
+}
+
+/// n while another master step is still under way, here a message just sent and not yet
+/// taken by the engine, says so in plain words, not the client's internal intent line
+/// (P2 r1, TUIP2-L1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn n_while_a_sent_message_is_under_way_says_so_in_plain_words() {
+    let mut engine = Engine::start().await;
+    let (_, mut shell, mut connection, _) = conversation_with_a_settled_turn(&mut engine).await;
+    shell.key(Key::Esc);
+    until(&mut shell, &mut connection, |shown| {
+        shown.contains("Session  started")
+    })
+    .await;
+    shell.key(Key::Enter);
+    for character in "Plan the second slice".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::Enter);
+    shell.key(Key::Esc);
+    shell.key(Key::Char('n'));
+    let message = shell
+        .ctx
+        .message()
+        .cloned()
+        .expect("n is answered on the page");
+    assert_eq!(message.tone, Tone::Error);
+    assert_eq!(message.lead, "The session did not switch.");
+    assert_eq!(
+        message.rest,
+        "Your last request is still being handled. Press n again when it is done."
+    );
+    let shown = render(&mut shell, 100, 40);
+    for internal in ["intent", "exact identity", "Ctrl-R recovers"] {
+        assert!(!shown.contains(internal), "{internal}:\n{shown}");
+    }
 }
 
 /// A new session on a project whose master runs live turns the live switch on once the
@@ -2311,6 +2574,18 @@ async fn team_settings(shell: &mut Shell, connection: &mut Connection) {
     assert!(shown.contains("Team settings"), "{shown}");
 }
 
+fn master_sessions(engine: &Engine, project: &ProjectId) -> i64 {
+    let connection = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
+    connection.busy_timeout(Duration::from_secs(5)).unwrap();
+    connection
+        .query_row(
+            "SELECT COUNT(*) FROM master_sessions WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap()
+}
+
 fn seed_question(engine: &Engine, project: &ProjectId, text: &str) {
     let connection = rusqlite::Connection::open(engine.root.path().join("engine.db")).unwrap();
     connection.busy_timeout(Duration::from_secs(5)).unwrap();
@@ -2475,6 +2750,57 @@ async fn the_team_settings_reach_the_coordination_editor_and_spread_accounts() {
             .await
             .unwrap()
             .spread_accounts
+    );
+}
+
+/// The Team settings screen a project opens with s (TUI-REACH-1) runs the master harness
+/// picker as the Team screen does (OP-28): H reads the harness catalog and the stored setup,
+/// and Enter on the next harness saves it in the engine through the project setup.
+#[tokio::test]
+async fn the_team_settings_screen_reads_the_harness_catalog_and_saves_the_picked_master() {
+    let mut engine = Engine::start().await;
+    let notes = engine.project("notes-cli", "Notes CLI", 1).await;
+    let before = engine
+        .controller
+        .project_setup(notes.clone())
+        .await
+        .unwrap()
+        .unwrap();
+    let mut connection = engine.connect();
+    let mut ctx = ctx(200, 40);
+    let screen = open(
+        &Place::TeamSettings {
+            id: notes.clone(),
+            name: "Notes CLI".into(),
+        },
+        &mut ctx,
+    );
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+
+    shell.key(Key::Char('H'));
+    let sent = pump(&mut shell, &mut connection).await;
+    assert!(sent.contains(&"harnesses"), "{sent:?}");
+    assert!(sent.contains(&"setup"), "{sent:?}");
+    let shown = render(&mut shell, 200, 40);
+    assert!(shown.contains("Harness for the master"), "{shown}");
+    assert!(!shown.contains("Reading the harnesses"), "{shown}");
+
+    shell.key(Key::Down);
+    shell.key(Key::Enter);
+    let sent = pump(&mut shell, &mut connection).await;
+    assert_eq!(sent.first(), Some(&"change"), "{sent:?}");
+    let after = engine
+        .controller
+        .project_setup(notes)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        after.revision > before.revision && after.team.master != before.team.master,
+        "the picked master landed in the project setup: {} then {}",
+        before.team.master,
+        after.team.master
     );
 }
 

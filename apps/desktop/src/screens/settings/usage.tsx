@@ -279,6 +279,12 @@ function WindowLine({ limits, kind, nowMs, pending, onSetReset }: {
   const current = windowNow(kind === "five_hour" ? limits.five_hour : limits.weekly, override, nowMs);
   const label = kind === "five_hour" ? "5-hour" : "Weekly";
   const [missing, why] = missingWindow(limits.failure);
+  const leftOut = kind === "five_hour" ? limits.five_hour_left_out_label : limits.weekly_left_out_label;
+  const failed = limits.failure !== null && limits.failure !== API_KEY_ACCOUNT;
+  if (!current && leftOut !== null && !failed) return <div className="usage-window">
+    <div className="row usage-window-head"><strong>{label}</strong></div>
+    <span className="muted small">{leftOut}</span>
+  </div>;
   return <div className="usage-window">
     <div className="row usage-window-head">
       <strong>{label}</strong>

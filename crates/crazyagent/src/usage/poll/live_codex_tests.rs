@@ -1,5 +1,7 @@
 use super::{CODEX_USAGE_URL, FIVE_HOUR_SECONDS, Provider, WEEK_SECONDS, poll};
+use crate::protocol::CredentialRef;
 use crate::team::runtime::managed_agent::{SignedIn, codex};
+use crate::usage::{LimitSource, LimitWindow, Observation, limits, open, record_observation};
 
 const CLOCK_SLACK_MS: i64 = 60_000;
 
@@ -21,6 +23,10 @@ fn refused(code: &str) -> ! {
     }
 }
 
+/// A real ChatGPT Codex slot's usage read names Codex and reads the weekly window. A plan
+/// whose reply leaves the 5-hour window out, as prolite's does, is a good read: stored over
+/// an older 5-hour window, it leaves no stale 5-hour use and marks the window left out by
+/// Codex (N-D16); a 5-hour window it reports replaces the old one with no mark.
 #[test]
 #[ignore = "live qualification: needs Codex signed in with ChatGPT, CRAZYAGENT_MANAGED_CODEX_PROFILE"]
 fn a_real_codex_chatgpt_slot_reads_its_5_hour_and_weekly_windows() {
@@ -48,13 +54,18 @@ fn a_real_codex_chatgpt_slot_reads_its_5_hour_and_weekly_windows() {
         "real Codex usage: plan={:?} 5-hour={:?} weekly={:?}",
         observation.plan, observation.five_hour, observation.weekly
     );
+    assert_eq!(observation.provider, Some(Provider::Codex));
+    assert!(
+        observation.weekly.is_some(),
+        "the Codex usage read reported no weekly window: {observation:?}"
+    );
     for (name, window, seconds) in [
         ("5-hour", observation.five_hour, FIVE_HOUR_SECONDS),
         ("weekly", observation.weekly, WEEK_SECONDS),
     ] {
-        let window = window.unwrap_or_else(|| {
-            panic!("the Codex usage read reported no {name} window: {observation:?}")
-        });
+        let Some(window) = window else {
+            continue;
+        };
         assert!(
             (0.0..=100.0).contains(&window.used_percent),
             "the {name} window's use is not a share: {window:?}"
@@ -67,6 +78,38 @@ fn a_real_codex_chatgpt_slot_reads_its_5_hour_and_weekly_windows() {
             );
         }
     }
+    let root = tempfile::tempdir().unwrap();
+    let db = open(root.path()).unwrap();
+    let account = CredentialRef::new("codex-live-usage").unwrap();
+    let older = Observation {
+        plan: None,
+        five_hour: Some(LimitWindow {
+            used_percent: 99.0,
+            resets_at_ms: Some(now - 150 * 3_600_000),
+        }),
+        weekly: observation.weekly,
+        provider: Some(Provider::Codex),
+    };
+    record_observation(
+        &db,
+        &account,
+        &older,
+        LimitSource::Poll,
+        now - 151 * 3_600_000,
+    )
+    .unwrap();
+    record_observation(&db, &account, &observation, LimitSource::Poll, now).unwrap();
+    let stored = limits(&db, &account).unwrap().unwrap();
+    assert_eq!(stored.five_hour, observation.five_hour);
+    assert_eq!(stored.polled_five_hour, observation.five_hour);
+    assert_eq!(stored.five_hour_at(now), observation.five_hour);
+    assert_eq!(
+        stored.five_hour_left_out,
+        observation.five_hour.is_none().then_some(Provider::Codex),
+        "a read that leaves the 5-hour window out marks it left out by Codex: {stored:?}"
+    );
+    assert_eq!(stored.weekly, observation.weekly);
+    assert_eq!(stored.weekly_left_out, None);
 }
 
 #[test]

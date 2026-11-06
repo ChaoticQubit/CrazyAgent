@@ -222,8 +222,35 @@ impl<'de> Deserialize<'de> for Nudges {
     }
 }
 
+/// Whether the first turn of each task of a team agent carries the Task-start reminder
+/// (T3-15): On, the default, names the context-mode tools to load and the approved skills
+/// to check for the task; Off gives none. It is advice, never a guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStart {
+    #[default]
+    On,
+    Off,
+}
+
+named!(TaskStart { On => "on", Off => "off" });
+
+impl TaskStart {
+    /// Every option, in the order settings list them.
+    pub const ALL: [Self; 2] = [Self::On, Self::Off];
+
+    /// The words settings show for this option. Takes the option. Returns its fixed text.
+    pub fn words(self) -> &'static str {
+        match self {
+            Self::On => "On",
+            Self::Off => "Off",
+        }
+    }
+}
+
 /// A project's coordination settings. Every option is the owner's choice; the defaults
-/// are Lead, Warn, nudges Off, `COUNTED_TOOLS_DEFAULT` and the Classic Claude Code display.
+/// are Lead, Warn, nudges Off, `COUNTED_TOOLS_DEFAULT`, the Classic Claude Code display and
+/// the Task-start reminder On.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CoordSettings {
@@ -235,6 +262,8 @@ pub struct CoordSettings {
     pub role_skills: RoleSkills,
     #[serde(default)]
     pub claude_display: ClaudeDisplay,
+    #[serde(default)]
+    pub task_start: TaskStart,
 }
 
 impl Default for CoordSettings {
@@ -246,6 +275,7 @@ impl Default for CoordSettings {
             counted_tools: COUNTED_TOOLS_DEFAULT.map(str::to_owned).to_vec(),
             role_skills: RoleSkills::default(),
             claude_display: ClaudeDisplay::Classic,
+            task_start: TaskStart::On,
         }
     }
 }

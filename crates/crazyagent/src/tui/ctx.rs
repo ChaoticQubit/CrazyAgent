@@ -259,6 +259,14 @@ impl Ctx {
         self.message = Some(message);
     }
 
+    /// Clears the message line when it still shows a message said earlier, so any message
+    /// said after it stays. Input: the message as it was said. Output: none.
+    pub fn unsay(&mut self, said: &Message) {
+        if self.message.as_ref() == Some(said) {
+            self.message = None;
+        }
+    }
+
     /// The message line content while it should still show.
     /// Input: none. Output: the message, or None once a success expired.
     pub fn message(&self) -> Option<&Message> {

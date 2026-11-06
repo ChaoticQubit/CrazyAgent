@@ -14,7 +14,7 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-const COMMANDS: [&str; 13] = [
+const COMMANDS: [&str; 14] = [
     "desktop_team_status",
     "desktop_team_message",
     "desktop_team_delegate",
@@ -22,6 +22,7 @@ const COMMANDS: [&str; 13] = [
     "desktop_team_keep_warm",
     "desktop_team_time_limits",
     "desktop_team_on_harness_switch",
+    "desktop_team_apply_harness_switch",
     "desktop_team_finished_agents",
     "desktop_team_live_master",
     "desktop_team_pause",
@@ -562,7 +563,7 @@ fn tool_switch_and_coordination_commands_are_registered_where_the_web_view_calls
 async fn coordinated(root: &Path) -> Result<(), Box<dyn Error>> {
     use crazyagent::coord::settings::{
         ClaudeDisplay, CoordSettings, Delivery, HarnessKind, Nudges, Overlaps, QuestionsTo,
-        RoleSkills, SubagentMode,
+        RoleSkills, SubagentMode, TaskStart,
     };
     use crazyagent::coord::tool_switches::Switch;
     let mut bridge = NativeBridge::new(Some(root.join("e.sock")));
@@ -643,6 +644,7 @@ async fn coordinated(root: &Path) -> Result<(), Box<dyn Error>> {
             worker: Some(vec!["release-notes".into()]),
         },
         claude_display: ClaudeDisplay::Fullscreen,
+        task_start: TaskStart::Off,
     };
     for receipt in [
         bridge.team_coordination(&id, chosen.clone(), 2).await?,

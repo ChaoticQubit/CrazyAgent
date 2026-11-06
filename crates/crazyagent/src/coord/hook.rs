@@ -240,8 +240,8 @@ fn in_mailbox(event: Event, folder: &Mailbox, who: &Identity, input: &Value) -> 
 /// Runs one relay hook of a native teammate's session over its lead's caller socket, never
 /// through the mailbox, which every teammate writes (relay over the caller socket, OQ-7 B):
 /// each event is one request the engine carries out for the pane it finds this process in,
-/// and its letters, overlap answer and first-edit reminder come back on the same
-/// connection. Only the roster the edit guard reads stays a file, the engine's own in the
+/// and its letters, overlap answer, first-edit reminder and Task-start reminder come back on
+/// the same connection. Only the roster the edit guard reads stays a file, the engine's own in the
 /// lead's part. Takes the event, the mailbox, the teammates' folder, the identity and the
 /// hook input. Returns the answer, or None for none.
 fn teammate(
@@ -288,8 +288,14 @@ fn teammate(
         }
         Event::Prompt => {
             let kind = if typed(input) { "typed" } else { "other" };
-            request(mailbox, &format!("prompt {kind}"), REQUEST_WAIT);
-            None
+            request(mailbox, &format!("prompt {kind}"), REQUEST_WAIT)
+                .and_then(text)
+                .map(|text| {
+                    json!({"hookSpecificOutput": {
+                        "hookEventName": "UserPromptSubmit",
+                        "additionalContext": text,
+                    }})
+                })
         }
         Event::Edit => edit_answer(folder, Some(mailbox), who, input),
     }

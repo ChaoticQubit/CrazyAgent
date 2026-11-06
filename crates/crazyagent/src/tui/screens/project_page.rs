@@ -27,8 +27,8 @@ use crate::tui::ctx::{Ctx, Link, Load};
 use crate::tui::frame::{Hint, Message, Modal, draw_lines, hint};
 use crate::tui::keys::Key;
 use crate::tui::master_session::{
-    Context as MasterContext, Event as MasterEvent, Job as MasterJob, RENEWAL_NOT_STARTED,
-    State as MasterState, Submission as MasterSubmission,
+    Context as MasterContext, Event as MasterEvent, Job as MasterJob, NEW_SESSION_STARTING,
+    RENEWAL_NOT_STARTED, State as MasterState, Submission as MasterSubmission,
 };
 use crate::tui::seam::{Arrival, NOT_READY, PoolChange, Request};
 use crate::tui::text::{cut, styled, wrap};
@@ -193,6 +193,7 @@ pub(in crate::tui) struct ProjectPage {
     master: MasterState,
     master_sent: Vec<MasterSent>,
     waiting: Option<Waiting>,
+    starting: Option<Message>,
     retried: bool,
     renewed: bool,
     schedule_asked: bool,
@@ -280,6 +281,7 @@ impl ProjectPage {
             master: MasterState::default(),
             master_sent: Vec::new(),
             waiting: None,
+            starting: None,
             retried: false,
             renewed: false,
             schedule_asked: false,
@@ -823,13 +825,20 @@ impl ProjectPage {
     /// waiting message, a conversation ended for a renewal opens a new one, a session
     /// switch the owner started from the live master view opens that view again, and a new
     /// session of a master that runs live turns the live switch on, so the live master
-    /// starts on the fresh session. Takes the confirmed action and the context.
+    /// starts on the fresh session. A new session also clears the error that said it was
+    /// already starting, while that error still shows. Takes the confirmed action and the
+    /// context.
     fn confirmed(&mut self, action: &MasterOwnerAction, ctx: &mut Ctx) {
         match action {
             MasterOwnerAction::NewSession { .. } | MasterOwnerAction::Resume { .. } => {
                 if self.from_master {
                     self.from_master = false;
                     self.reopen_master = true;
+                }
+                if matches!(action, MasterOwnerAction::NewSession { .. })
+                    && let Some(said) = self.starting.take()
+                {
+                    ctx.unsay(&said);
                 }
                 if matches!(action, MasterOwnerAction::NewSession { .. })
                     && self.screen.live_master()
@@ -1254,7 +1263,11 @@ impl ProjectPage {
                     .transcript()
                     .is_some_and(|(session, _, _)| session.is_some());
                 if let Err(problem) = super::sessions::act(&mut self.master, &action) {
-                    ctx.say(Message::error("The session did not switch.", &problem));
+                    let said = Message::error("The session did not switch.", &problem);
+                    if problem == NEW_SESSION_STARTING {
+                        self.starting = Some(said.clone());
+                    }
+                    ctx.say(said);
                 } else if matches!(action, super::sessions::SessionsAction::New { .. })
                     && !in_view
                     && self.screen.live_master()
@@ -1556,6 +1569,7 @@ impl Screen for ProjectPage {
         ctx.request(Request::PoolProjects);
         self.schedule_asked = false;
         self.covered = false;
+        self.screen.setup_due = true;
         if let Some((_, code)) = ctx
             .sessions_key
             .take_if(|(project, _)| *project == self.screen.project)

@@ -1,6 +1,6 @@
 import { type Channel, type InvokeArgs } from "@tauri-apps/api/core";
 import { bridgeCall, errorMessage, withCode } from "./engine-client";
-import type { ActionReceipt, BackgroundAtEnd, BranchMode, ChildLanding, CoordHarness, CoordSettings, Delivery, PendingIntent, SubagentMode, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
+import type { ActionReceipt, BackgroundAtEnd, BranchMode, ChildLanding, CoordHarness, CoordSettings, Delivery, PendingIntent, SubagentMode, SwitchApply, SwitchMode, TeamUse, ToolSwitch, ToolView } from "./engine-client";
 import type { AccountPool, AccountUse, AgentView, AccountProfileView, IntentReceipt, MemoryItem, McpServerSpec, McpServerView, ModelAccessDetail, ModelAccessEdit, ModelAccessPage, PluginScope, ProjectList, AgentMemoryWrites, SavedMemoryPage, SkillDetail, SkillView, HookView, TeamGraph, TerminalMessage, ImportList, ImportedSkill, QuestionsInbox } from "./engine-client";
 
 export type { AgentMemoryWrites, SavedMemory, SavedMemoryPage } from "./engine-client";
@@ -1163,6 +1163,13 @@ export function setTeamTimeLimits(id: string, turnSecs: number | null, sessionSe
  * or a plain error. */
 export function setOnHarnessSwitch(id: string, mode: SwitchMode, revision: number): Promise<Result<IntentReceipt>> {
   return call<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, revision, generation: nextGeneration() });
+}
+
+/** Sets when a saved master harness change reaches the running live master: once it is idle, or
+ * at its next start. Inputs: the project id and the choice. Output: the engine receipt, not
+ * ready, or a plain error. */
+export function setApplyHarnessSwitch(id: string, mode: SwitchApply): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_apply_harness_switch", { id, mode, generation: nextGeneration() });
 }
 
 /** Sets how deep sub-agents may start workers of their own: 1, 2 or 3. Inputs: the project id

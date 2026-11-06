@@ -1,4 +1,4 @@
-import { nextGeneration, poolSummaries } from "../../api";
+import { nextGeneration, poolSummaries, setApplyHarnessSwitch } from "../../api";
 import type { Result } from "../../api";
 import { useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
@@ -6,8 +6,9 @@ import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, load
 import type { AgentAccess, AgentNetwork, PolicyView, ProjectCatalog, StoredSetup } from "../../api-projects";
 import { AccessLevels, FULL_ACCESS_WARNING, LOWERING_STOPS_AGENTS, NetworkChoices, TOOLCHAIN_OFF_STOPS_AGENTS, ToolchainSwitches, accessLabel, confirmFirst, policyOf } from "./access";
 import { DEFAULT_MESSAGE_SETTINGS, MESSAGE_SETTING_FIELDS, changeMessageSetting, fieldValue, messageSettingsOf } from "../../api-messages";
-import type { MessageSettings } from "../../engine-client";
-import { Button, ConfirmDialog, Segmented } from "../../ui";
+import type { MessageSettings, SwitchApply, TeamStatus } from "../../engine-client";
+import { Button, ConfirmDialog, Segmented, Select } from "../../ui";
+import type { SelectOption } from "../../ui";
 import { displayText } from "../conversation";
 import { BasicsFields, ResearchSwitches } from "../new-project/fields";
 import { PoolPicker } from "../new-project/pool-picker";
@@ -127,9 +128,45 @@ function TeamSection({ data, setup }: { data: ProjectData; setup: StoredSetup })
     <h2>Team</h2>
     <TeamEditor prefix="ps" team={team} harnesses={harnesses} pool={data.assigned} research={setup.research} onChange={setTeam} />
     {note && <p className="pj-note warn" role="status">{note}</p>}
-    <div className="pj-summary"><span>Running agents keep their current harness. Changes apply to agents started after you save; waiting research moves to the new team.</span>
+    <div className="pj-summary"><span>Running sub-agents keep their current harness; changes apply to agents started after you save, and the master follows Apply a master harness change. Waiting research moves to the new team.</span>
       <button type="button" className="btn primary" disabled={!teamValid(team, harnesses) || JSON.stringify(wireTeam(team)) === JSON.stringify(setup.team)} onClick={() => void save()}>Save team</button></div>
+    <ApplySwitch data={data} />
   </div>;
+}
+
+/** The choices for when a saved master harness change reaches the running live master. */
+export const APPLY_OPTIONS: SelectOption[] = [
+  { value: "when_idle", label: "When the master is idle" },
+  { value: "next_start", label: "At the next start" },
+];
+
+/** The Apply a master harness change choice a team status holds, When the master is idle when
+ * an older engine sends none. Input: the status. Output: the choice. */
+export function applyMode(status: Pick<TeamStatus, "apply_harness_switch">): SwitchApply {
+  return status.apply_harness_switch ?? "when_idle";
+}
+
+/** The Apply a master harness change setting (N-D26), saved at once like the team's other
+ * switches. Input: the project data with its team status read. Output: the select with the
+ * last change's note, or nothing before the team status is read. */
+export function ApplySwitch({ data }: { data: Pick<ProjectData, "id" | "team" | "reloadTeam"> }) {
+  const [chosen, setChosen] = useState<SwitchApply | null>(null);
+  const [note, setNote] = useState("");
+  const status = data.team.result?.kind === "ok" ? data.team.result.value : null;
+  if (status === null) return null;
+  async function choose(mode: SwitchApply) {
+    setChosen(mode);
+    const message = changeNote(await setApplyHarnessSwitch(data.id, mode), "the Apply a master harness change setting");
+    setChosen(null);
+    setNote(message);
+    data.reloadTeam();
+  }
+  return <>
+    <Select id="ps-apply-switch" label="Apply a master harness change" value={chosen ?? applyMode(status)} options={APPLY_OPTIONS}
+      onValue={(value) => { if (chosen === null && (value === "when_idle" || value === "next_start")) void choose(value); }}
+      helper="When the master is idle switches the running master once it finishes its turn and an account of the pool can run the new harness. At the next start keeps it on its harness until it starts again." />
+    {note && <p className="pj-note warn" role="status">{displayText(note)}</p>}
+  </>;
 }
 
 /** What removing a project does, for the section and its confirm. Inputs: the project folder, or

@@ -1183,6 +1183,24 @@ fn set_live_on_clears_problem_and_off_clears_only_wait_line() {
     );
 }
 
+/// LMS-1: the line that the live master waits for its account's profile is a wait line
+/// too: turning the live master off clears it, as it clears the sign-in wait line.
+#[test]
+fn set_live_off_clears_the_profile_wait_line() {
+    let (_directory, connection) = database();
+    let setup = stored("live-profile-wait", Vec::new());
+    let project = &setup.project_id;
+    master::set_live(&connection, project, true).unwrap();
+    assert!(master::problem(&connection, project, Some(master::PROFILE_IN_USE)).unwrap());
+    master::set_live(&connection, project, false).unwrap();
+    let team = status(&connection, &setup).unwrap();
+    assert_eq!(
+        (team.live_master, team.live_problem),
+        (Some(false), None),
+        "a profile wait line no longer applies once the master is off"
+    );
+}
+
 #[test]
 fn the_owner_renames_a_sub_agent_and_the_team_status_names_every_agent() {
     let (_directory, mut connection) = database();
@@ -3710,6 +3728,102 @@ fn the_team_status_counts_an_agent_stored_under_a_harness_alias_as_live() {
     );
 }
 
+/// T3-15: while the Task-start reminder is On, a native teammate's first prompt and its
+/// first prompt after it rested get the lead's reminder, a prompt mid-task and a lead whose
+/// launch names nothing give none, and with the setting Off no prompt gets it.
+#[test]
+fn a_native_teammate_gets_the_task_start_reminder_on_the_first_prompt_of_each_task_while_on() {
+    const TEXT: &str = "Task start reminder: before you work on this task, call the Skill tool for each of these skills that fits this task: `crazyagent:tdd`.";
+    let (_directory, connection) = database();
+    let project = crate::protocol::ProjectId::new("tidepool").unwrap();
+    connection
+        .execute_batch("CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, body TEXT NOT NULL); INSERT INTO projects VALUES ('tidepool','{}');")
+        .unwrap();
+    let add = |role: &str, parent: Option<i64>, pane: Option<&str>| {
+        connection
+            .execute(
+                "INSERT INTO team_agents(project,role,harness,tools,connection,status,created_ms,heartbeat_ms,parent,pane)
+                 VALUES (?1,?2,'claude-code',1,'acct','working',1,1,?3,?4)",
+                rusqlite::params![project.as_str(), role, parent, pane],
+            )
+            .unwrap();
+        connection.last_insert_rowid()
+    };
+    let lead = add("sub", None, None);
+    add("teammate", Some(lead), Some("%7"));
+    add("teammate", Some(lead), Some("%8"));
+    let report = |pane: &str, request: &[u8], starts: &mut crate::coord::relay::TaskStarts| {
+        let mut answer = Vec::new();
+        crate::coord::relay::answer(
+            &connection,
+            crate::coord::relay::ForLead {
+                project: &project,
+                id: lead,
+                starts,
+            },
+            pane,
+            request,
+            &mut answer,
+            10,
+        )
+        .unwrap();
+        String::from_utf8(answer).unwrap()
+    };
+    let given = format!("ok\n{TEXT}");
+    let mut starts = crate::coord::relay::TaskStarts {
+        text: Some(TEXT.into()),
+        ..Default::default()
+    };
+
+    assert_eq!(
+        report("%7", b"prompt other", &mut starts),
+        given,
+        "a teammate's first prompt"
+    );
+    assert_eq!(
+        report("%7", b"prompt typed", &mut starts),
+        "ok\n",
+        "a prompt mid-task"
+    );
+    assert_eq!(report("%7", b"post own Read", &mut starts), "ok\n");
+    assert_eq!(
+        report("%8", b"prompt typed", &mut starts),
+        given,
+        "the other teammate's first prompt"
+    );
+    assert_eq!(report("%7", b"stop own", &mut starts), "ok\n");
+    assert_eq!(
+        report("%7", b"prompt other", &mut starts),
+        given,
+        "the first prompt after it rested"
+    );
+    assert_eq!(report("%7", b"prompt other", &mut starts), "ok\n");
+
+    let mut nothing = crate::coord::relay::TaskStarts::default();
+    assert_eq!(report("%7", b"stop own", &mut nothing), "ok\n");
+    assert_eq!(
+        report("%7", b"prompt other", &mut nothing),
+        "ok\n",
+        "a lead whose launch names nothing"
+    );
+
+    crate::coord::settings::write(
+        &connection,
+        &project,
+        &crate::coord::settings::CoordSettings {
+            task_start: crate::coord::settings::TaskStart::Off,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(report("%8", b"stop own", &mut starts), "ok\n");
+    assert_eq!(
+        report("%8", b"prompt other", &mut starts),
+        "ok\n",
+        "Off gives none"
+    );
+}
+
 #[test]
 fn a_native_teammate_row_reads_idle_while_its_session_rests_and_working_once_it_works_again() {
     let (directory, connection) = database();
@@ -3739,8 +3853,19 @@ fn a_native_teammate_row_reads_idle_while_its_session_rests_and_working_once_it_
     };
     let report = |pane: &str, request: &[u8], now: i64| -> Vec<u8> {
         let mut answer = Vec::new();
-        crate::coord::relay::answer(&connection, &project, lead, pane, request, &mut answer, now)
-            .unwrap();
+        crate::coord::relay::answer(
+            &connection,
+            crate::coord::relay::ForLead {
+                project: &project,
+                id: lead,
+                starts: &mut crate::coord::relay::TaskStarts::default(),
+            },
+            pane,
+            request,
+            &mut answer,
+            now,
+        )
+        .unwrap();
         answer
     };
     let tick = |now: i64| {
@@ -4648,6 +4773,7 @@ fn coordination_settings_are_checked_saved_and_read_back_per_harness_kind() {
             ..Default::default()
         },
         claude_display: crate::coord::settings::ClaudeDisplay::Fullscreen,
+        task_start: crate::coord::settings::TaskStart::Off,
     };
     for action in [
         TeamAction::CoordSettings {

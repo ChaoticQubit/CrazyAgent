@@ -249,6 +249,7 @@ pub(super) fn shown(reports: &[Report]) -> Vec<String> {
             Report::Own { end, text } => format!("Own end={end:?} text={:?}", cut(text)),
             Report::Conversation(_) => "Conversation".to_owned(),
             Report::ResumeRefused => "ResumeRefused".to_owned(),
+            Report::InputReady => "InputReady".to_owned(),
         })
         .collect()
 }
@@ -835,6 +836,7 @@ impl ManagedAgent {
             toolchains: Some(Vec::new()),
             network: crate::sandbox::policy::AgentNetwork::Open,
             proxy: None,
+            task_start: None,
         };
         let (orders, ordered) = channel();
         let (reports, reported) = channel();

@@ -285,6 +285,7 @@ fn codex_line(
             .map(str::to_owned),
         five_hour: None,
         weekly: None,
+        provider: None,
     };
     for key in ["primary", "secondary"] {
         match codex_window(&limits[key], now_ms) {

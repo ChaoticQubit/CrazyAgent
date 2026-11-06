@@ -31,6 +31,30 @@ export function masterNode(nodes: GraphNode[]): GraphNode | null {
   return nodes.find((node) => node.kind === "master") ?? null;
 }
 
+/** The master area's head (N-D26): the harness the running master uses, or the saved one
+ * while none runs, and the saved harness it switches to next while the two differ. Inputs:
+ * the saved harness id, the running master's harness id or null, and the name lookup.
+ * Output: the title and the waiting switch's words, or null for none. */
+export function masterHead(saved: string, running: string | null, name: (id: string) => string): { title: string; waits: string | null } {
+  if (running === null || running === "") return { title: name(saved), waits: null };
+  const title = name(running);
+  return { title, waits: title === name(saved) ? null : `${name(saved)} from the next start` };
+}
+
+const LIVE_STATUSES: readonly string[] = ["starting", "idle", "working"];
+
+/** The harness the running master uses (N-D26), from the team status agents, since the
+ * master card names the saved plan: the agent behind the card, else the newest live master.
+ * Inputs: the team status read, the project shown and the card's agent id. Output: the
+ * harness id, or null without a good read of this project or a live master. */
+export function runningHarness(team: Result<TeamStatus> | undefined, projectId: string, agent: number | null | undefined): string | null {
+  if (team?.kind !== "ok" || team.value.project_id !== projectId) return null;
+  const masters = team.value.agents.filter((row) => row.role === "master");
+  const behind = agent === null || agent === undefined ? undefined : masters.find((row) => row.id === agent);
+  const found = behind ?? [...masters].reverse().find((row) => LIVE_STATUSES.includes(row.status));
+  return found?.harness ?? null;
+}
+
 /** The live master's state as this area knows it: starting, not in this build, refused by
  * the engine with its code and plain copy, stopped with why the master last could not start,
  * or running with the master's terminal node once the team lists one. */
@@ -281,8 +305,9 @@ export function liveWord(live: Live): { word: string; tone: "ok" | "muted" | "wa
 /** The live master area in one state: one console whose head names the master, its state
  * and account, then New session and Sessions, which restart the live terminal on a fresh or
  * resumed conversation and start the live master when it is stopped, above the master's
- * terminal filling the rest, typed into as the owner's Master input setting says, or a line
- * while it starts, can't or is stopped; a stopped team (Stop all) says so and offers
+ * terminal filling the rest, typed into as the owner's Master input setting says, under the
+ * engine's line while that terminal waits to start, or a line while it starts, can't or is
+ * stopped; a stopped team (Stop all) says so and offers
  * Start all. An engine that says the master has no terminal app
  * gets today's conversation instead. Inputs: the project data, the master harness id, the
  * state, the start action, the session check Start all sends once the team runs again, the
@@ -296,6 +321,7 @@ export function LiveMasterView({ data, harness, live, onStart, onSession, sessio
   const sessions = held ?? own;
   const harnesses = valueOf(data.harnesses);
   const name = (id: string) => harnessName(harnesses, id);
+  const waits = liveSwitch(data.team.result, data.id)?.problem ?? null;
   if (live.kind === "refused" && live.code === NO_TERMINAL) return <ConversationTab data={data} />;
   const off = live.kind === "stopped" || live.kind === "refused";
   const startTeam = async () => {
@@ -309,13 +335,15 @@ export function LiveMasterView({ data, harness, live, onStart, onSession, sessio
   };
   const state = liveWord(live);
   const account = live.kind === "running" ? live.node?.account : null;
+  const head = masterHead(harness, live.kind === "running" && live.node ? runningHarness(data.team.result, data.id, live.node.agent) : null, name);
   return <div className="pj-master-live pj-console">
     <div className="pj-console-head">
-      <span className="pj-console-title"><Icon name="square-terminal" size={15} />{displayText(name(harness))}</span>
+      <span className="pj-console-title"><Icon name="square-terminal" size={15} />{displayText(head.title)}</span>
       <span className={`pj-console-state ${state.tone}`}>{state.word}</span>
       {account && <span className="pj-console-detail">{displayText(account)}</span>}
+      {head.waits && <span className="pj-console-detail" data-testid="master-switch-waits">{displayText(head.waits)}</span>}
     </div>
-    {live.kind !== "not_ready" && <SessionsBar ticket={sessions.ticket} liveId={sessions.liveId} onSwitched={async () => {
+    {live.kind !== "not_ready" && <SessionsBar ticket={sessions.ticket} liveId={sessions.liveId} mark={live.kind === "running" ? live.node?.status ?? null : null} onSwitched={async () => {
       await sessions.reread();
       if (off) await onStart();
       data.reloadTeam();
@@ -338,7 +366,7 @@ export function LiveMasterView({ data, harness, live, onStart, onSession, sessio
       <Button size="small" icon="refresh-cw" onClick={() => void onStart()}>Try again</Button>
     </div>}
     {live.kind === "starting" && <p className="tg-terminal-state" role="status"><Icon name="loader-circle" size={14} spin />Starting the master ({displayText(name(harness))})...</p>}
-    {live.kind === "running" && !live.node && <p className="tg-terminal-state" role="status"><Icon name="loader-circle" size={14} spin />{displayText(liveSwitch(data.team.result, data.id)?.problem ?? WAITING)}</p>}
+    {live.kind === "running" && (!live.node || waits !== null) && <p className="tg-terminal-state" role="status"><Icon name="loader-circle" size={14} spin />{displayText(waits ?? WAITING)}</p>}
     {live.kind === "running" && live.node && <TerminalPanel key={`${live.node.terminal ?? live.node.id}:${sessions.liveId ?? ""}`} node={live.node} harness={name} embedded input={input} follow />}
   </div>;
 }

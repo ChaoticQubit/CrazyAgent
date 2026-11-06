@@ -288,7 +288,7 @@ export function ConversationTab({ data, readOnly = false }: { data: ProjectData;
           { label: "Change master", icon: "settings", onSelect: () => data.navigate(`${settings}?section=team`) },
         ]} /></span>
     </div>}
-    {!readOnly && <SessionsBar ticket={ticket} liveId={active && session ? session.session_id : null} onSwitched={() => { setSent({}); return refresh(); }} />}
+    {!readOnly && <SessionsBar ticket={ticket} liveId={active && session ? session.session_id : null} mark={`${turns.length}:${turns.filter(turnSettled).length}`} onSwitched={() => { setSent({}); return refresh(); }} />}
     {notReady && <NotReady what="the master conversation isn't reachable in this build." />}
     {!readOnly && <>
       {missing && <div className="pj-note warn" role="alert"><p>{displayText(missing)}</p>

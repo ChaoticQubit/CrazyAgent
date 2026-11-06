@@ -2,7 +2,7 @@ use super::*;
 use crate::harnesses::interactive::{InteractiveCommand, Transcript};
 use crate::project_setup::{HarnessSlot, TeamPlan};
 use crate::terminal::FOLDER;
-use crate::terminal::tmux::{SOCKET, Tmux, installed};
+use crate::terminal::tmux::{SESSION, SOCKET, Tmux, installed};
 use serde_json::{Value, json};
 use std::io::Cursor;
 use std::os::unix::fs::PermissionsExt;
@@ -122,6 +122,170 @@ impl Drop for Fixture {
     }
 }
 
+/// R10-L1: an input whose typing fails after its checks passed frees the master for the
+/// next one, since its input time is cleared. With the master's pane gone, tmux answers the
+/// bracketed paste question for its current window (IMP-RVDS-PR3), here the other pane, so
+/// the check passes and only the typing fails; the other pane gets nothing.
+#[test]
+fn a_failed_typing_frees_the_live_master_for_the_next_input() {
+    let mut fixture = Fixture::new();
+    let host = fixture.host();
+    let project = fixture.setup.project_id.clone();
+    let app = |file: &Path| InteractiveCommand {
+        argv: vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            format!(
+                "/bin/stty raw -echo; printf '\\033[?2004hready\\n'; exec /bin/cat > '{}'",
+                file.display()
+            ),
+        ],
+        cwd: fixture.base.clone(),
+        env: Vec::new(),
+        transcript: Transcript::Unavailable,
+    };
+    let master = AgentId::team(MASTER).unwrap();
+    let other = AgentId::team(MASTER + 1).unwrap();
+    let other_typed = fixture.base.join("other-typed");
+    host.spawn(&master, &app(&fixture.base.join("typed")))
+        .unwrap();
+    host.spawn(&other, &app(&other_typed)).unwrap();
+    reads_keys(host.as_ref(), &master);
+    reads_keys(host.as_ref(), &other);
+    fixture.live(Some(MASTER));
+    let tmux = fixture.tmux.clone().unwrap();
+    let selected = crate::spawn_gate::status(
+        Command::new(&tmux)
+            .arg("-S")
+            .arg(fixture.base.join(FOLDER).join(SOCKET))
+            .args(["select-window", "-t"])
+            .arg(format!("{SESSION}:={other}"))
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null()),
+    )
+    .unwrap();
+    assert!(
+        selected.success(),
+        "the other pane is tmux's current window"
+    );
+    host.kill(&master).unwrap();
+    assert!(
+        host.input_live(&master).unwrap(),
+        "tmux answers for another pane of its server"
+    );
+
+    let gone = master_input_at(
+        &fixture.connection,
+        host.as_ref(),
+        None,
+        &project,
+        "hello",
+        NOW,
+    );
+    assert!(matches!(gone, Err(InputRefused::Failed(_))), "{gone:?}");
+    let input_ms: Option<i64> = fixture
+        .connection
+        .query_row(
+            "SELECT input_ms FROM team_live_masters WHERE project=?1",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        input_ms, None,
+        "a failed input frees the master for the next one"
+    );
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        std::fs::read(&other_typed).unwrap_or_default(),
+        b"",
+        "the other pane gets nothing"
+    );
+}
+
+/// F3: engine input asks the host whether the app reads keys outside its write
+/// transaction, so a tmux server slow to answer never holds the engine database's write
+/// lock: while the fixture's tmux server is stopped and the input waits on it, another
+/// connection takes the write lock at once.
+#[test]
+fn engine_input_asks_the_host_outside_its_write_transaction() {
+    let mut fixture = Fixture::new();
+    let host = fixture.host();
+    let project = fixture.setup.project_id.clone();
+    let typed = fixture.base.join("typed");
+    let command = InteractiveCommand {
+        argv: vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            format!(
+                "/bin/stty raw -echo; printf '\\033[?2004hready\\n'; exec /bin/cat > '{}'",
+                typed.display()
+            ),
+        ],
+        cwd: fixture.base.clone(),
+        env: Vec::new(),
+        transcript: Transcript::Unavailable,
+    };
+    let pane = AgentId::team(MASTER).unwrap();
+    host.spawn(&pane, &command).unwrap();
+    reads_keys(host.as_ref(), &pane);
+    fixture.live(Some(MASTER));
+    let tmux = fixture.tmux.clone().unwrap();
+    let shown = crate::spawn_gate::output(
+        Command::new(&tmux)
+            .arg("-S")
+            .arg(fixture.base.join(FOLDER).join(SOCKET))
+            .args(["display-message", "-p", "#{pid}"])
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped()),
+    )
+    .unwrap();
+    let pid = String::from_utf8(shown.stdout).unwrap().trim().to_owned();
+    assert!(pid.parse::<u32>().is_ok(), "{pid:?}");
+    let signal = |name: &str| {
+        crate::spawn_gate::status(Command::new("/bin/kill").args([name, pid.as_str()]))
+            .is_ok_and(|status| status.success())
+    };
+    let db = fixture.base.join("engine.db");
+    let other = Connection::open(&db).unwrap();
+    other.busy_timeout(Duration::ZERO).unwrap();
+
+    assert!(signal("-STOP"), "the tmux server stops");
+    let input = std::thread::spawn({
+        let host = host.clone();
+        let project = project.clone();
+        move || {
+            let connection = Connection::open(&db).unwrap();
+            master_input_at(&connection, host.as_ref(), None, &project, "hello", NOW)
+        }
+    });
+    std::thread::sleep(Duration::from_millis(500));
+    let locked = other.execute_batch("BEGIN IMMEDIATE; ROLLBACK;");
+    let resumed = signal("-CONT");
+    let typed_input = input.join().unwrap();
+    assert!(resumed, "the tmux server goes on");
+    assert!(
+        locked.is_ok(),
+        "the write lock is free while tmux has not answered: {locked:?}"
+    );
+    assert_eq!(typed_input, Ok(()));
+    let pasted = b"\x1b[200~hello\x1b[201~\r";
+    assert_eq!(typed_until(&typed, pasted), pasted);
+}
+
+/// Waits until a pane's app has turned bracketed paste on, which engine input to a live
+/// master waits for. Takes the host and the pane.
+fn reads_keys(host: &dyn Host, pane: &AgentId) {
+    let until = Instant::now() + Duration::from_secs(15);
+    while !host.input_live(pane).unwrap() {
+        assert!(Instant::now() < until, "the app turns bracketed paste on");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
 fn typed_until(file: &Path, wanted: &[u8]) -> Vec<u8> {
     let until = Instant::now() + Duration::from_secs(15);
     loop {
@@ -154,6 +318,7 @@ fn engine_input_reaches_an_idle_live_master_only_while_the_owner_is_not_typing()
     };
     host.spawn(&AgentId::team(MASTER).unwrap(), &command)
         .unwrap();
+    reads_keys(host.as_ref(), &AgentId::team(MASTER).unwrap());
     let input = |text: &str, now: i64| {
         master_input_at(
             &fixture.connection,
@@ -215,7 +380,11 @@ fn engine_input_reaches_an_idle_live_master_only_while_the_owner_is_not_typing()
 
     host.kill(&AgentId::team(MASTER).unwrap()).unwrap();
     let gone = input("fourth", NOW + DRAFT_ABANDONED_MS + 1 + INPUT_SETTLE_MS);
-    assert!(matches!(gone, Err(InputRefused::Failed(_))), "{gone:?}");
+    assert_eq!(
+        gone,
+        Err(InputRefused::Unready),
+        "an ended pane reads no keys"
+    );
     let input_ms: Option<i64> = fixture
         .connection
         .query_row(
@@ -225,8 +394,74 @@ fn engine_input_reaches_an_idle_live_master_only_while_the_owner_is_not_typing()
         )
         .unwrap();
     assert_eq!(
-        input_ms, None,
-        "a failed input frees the master for the next one"
+        input_ms,
+        Some(NOW + DRAFT_ABANDONED_MS + 1),
+        "a refused input keeps the last typed input's time"
+    );
+}
+
+/// Engine input waits while the live master's app has not turned bracketed paste on, as
+/// while it still boots: nothing is typed and no input time is kept, so the line is never
+/// left unsent in a prompt that does not read keys yet (row 10, 2026-11-05). Once the app
+/// turns bracketed paste on, the same input is typed.
+#[test]
+fn engine_input_waits_until_the_live_masters_app_reads_keys() {
+    let mut fixture = Fixture::new();
+    let host = fixture.host();
+    let project = fixture.setup.project_id.clone();
+    let typed = fixture.base.join("typed");
+    let go = fixture.base.join("go");
+    let command = InteractiveCommand {
+        argv: vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            format!(
+                "/bin/stty raw -echo; printf 'booting\\n'; while [ ! -e '{}' ]; do /bin/sleep 0.1; done; printf '\\033[?2004hready\\n'; exec /bin/cat > '{}'",
+                go.display(),
+                typed.display()
+            ),
+        ],
+        cwd: fixture.base.clone(),
+        env: Vec::new(),
+        transcript: Transcript::Unavailable,
+    };
+    let pane = AgentId::team(MASTER).unwrap();
+    host.spawn(&pane, &command).unwrap();
+    fixture.live(Some(MASTER));
+    let input = |now: i64| {
+        master_input_at(
+            &fixture.connection,
+            host.as_ref(),
+            None,
+            &project,
+            "hello",
+            now,
+        )
+    };
+
+    assert_eq!(
+        input(NOW),
+        Err(InputRefused::Unready),
+        "the app does not read keys yet"
+    );
+    let input_ms: Option<i64> = fixture
+        .connection
+        .query_row(
+            "SELECT input_ms FROM team_live_masters WHERE project=?1",
+            [PROJECT],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(input_ms, None, "a refused input keeps no input time");
+
+    std::fs::write(&go, "").unwrap();
+    reads_keys(host.as_ref(), &pane);
+    assert_eq!(input(NOW), Ok(()));
+    let pasted = b"\x1b[200~hello\x1b[201~\r";
+    let seen = typed_until(&typed, pasted);
+    assert_eq!(
+        seen, pasted,
+        "the line is typed once, after the app reads keys"
     );
 }
 
@@ -283,6 +518,7 @@ fn owner_typing_kept_in_memory_holds_engine_input_back_before_any_write_lands() 
     };
     host.spawn(&AgentId::team(MASTER).unwrap(), &command)
         .unwrap();
+    reads_keys(host.as_ref(), &AgentId::team(MASTER).unwrap());
     fixture.live(Some(MASTER));
     let typing = OwnerTyping::new(fixture.base.join("never-written.db"));
     let input = |text: &str, now: i64| {

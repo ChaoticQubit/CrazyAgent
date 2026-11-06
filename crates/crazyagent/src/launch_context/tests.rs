@@ -1466,6 +1466,135 @@ fn tools_section(text: &str) -> &str {
     &rest[..end]
 }
 
+/// T3-15: the Task-start reminder names the exact ToolSearch select string the launch's own
+/// "Tools to use" section gives Claude Code and the approved skills by their Skill tool
+/// names, Codex's context-mode tools on their MCP server and its skills by SKILL.md, and
+/// nothing with tools off, for a harness without either, or with nothing to name.
+#[test]
+fn the_task_start_reminder_names_the_select_string_and_skills_per_harness_and_nothing_else() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let skill = |name: &str| EffectiveSkill {
+        name: name.into(),
+        folder: root.join("skill-store").join(name),
+    };
+    for name in ["brainstorming", "tdd"] {
+        fs::create_dir_all(root.join("skill-store").join(name)).unwrap();
+        fs::write(
+            root.join("skill-store").join(name).join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: Teaches {name}.\n---\n\nSteps.\n"),
+        )
+        .unwrap();
+    }
+    let plugins = |skills: Vec<EffectiveSkill>, context_mode: bool| LaunchPlugins {
+        skills,
+        servers: match context_mode {
+            true => vec![command_server("context-mode"), command_server("graph")],
+            false => vec![command_server("graph")],
+        },
+    };
+    let off = |tools: &[&str]| {
+        vec![(
+            "context-mode".to_owned(),
+            tools.iter().map(|tool| (*tool).to_owned()).collect(),
+        )]
+    };
+    let both = context_with(
+        &root,
+        plugins(vec![skill("brainstorming"), skill("tdd")], true),
+        off(&["ctx_fetch_and_index"]),
+    );
+    let select = "select:mcp__plugin_context-mode_context-mode__ctx_batch_execute,mcp__plugin_context-mode_context-mode__ctx_execute,mcp__plugin_context-mode_context-mode__ctx_execute_file,mcp__plugin_context-mode_context-mode__ctx_search";
+    assert_eq!(
+        both.task_start("claude-code", true).as_deref(),
+        Some(
+            format!(
+                "Task start reminder: before you work on this task, run ToolSearch with `{select}` and use those context-mode tools for any command, test, search or file read whose output may pass 20 lines, and call the Skill tool for each of these skills that fits this task: `crazyagent:brainstorming`, `crazyagent:tdd`."
+            )
+            .as_str()
+        )
+    );
+    assert_eq!(
+        both.task_start("claude", true),
+        both.task_start("claude-code", true)
+    );
+    let home = private_home(&root, "claude");
+    let installed = both.install("claude-code", &home, true).unwrap();
+    let prompt = fs::read_to_string(home.join(STATE).join("instructions.md")).unwrap();
+    drop(installed);
+    assert!(
+        tools_section(&prompt).contains(&format!("ToolSearch with `{select}`")),
+        "the reminder's select string is the one the launch's own section gives: {prompt}"
+    );
+    assert_eq!(
+        both.task_start("codex", true).as_deref(),
+        Some(
+            "Task start reminder: before you work on this task, use the `ctx_batch_execute`, `ctx_execute`, `ctx_execute_file`, `ctx_search` tools of the `plugin_context-mode_context-mode` MCP server for any command, test, search or file read whose output may pass 20 lines, and read the SKILL.md of each of these skills that fits this task and follow it: `brainstorming`, `tdd`."
+        )
+    );
+    assert_eq!(both.task_start("claude-code", false), None, "tools off");
+    assert_eq!(both.task_start("codex", false), None, "tools off");
+    assert_eq!(both.task_start("rcli", true), None, "no reminder for rcli");
+
+    let skills_only = context_with(&root, plugins(vec![skill("tdd")], false), Vec::new());
+    assert_eq!(
+        skills_only.task_start("claude-code", true).as_deref(),
+        Some(
+            "Task start reminder: before you work on this task, call the Skill tool for each of these skills that fits this task: `crazyagent:tdd`."
+        )
+    );
+    let tools_only = context_with(&root, plugins(Vec::new(), true), Vec::new());
+    assert_eq!(
+        tools_only.task_start("codex", true).as_deref(),
+        Some(
+            "Task start reminder: before you work on this task, use the `ctx_batch_execute`, `ctx_execute`, `ctx_execute_file`, `ctx_fetch_and_index`, `ctx_search` tools of the `plugin_context-mode_context-mode` MCP server for any command, test, search or file read whose output may pass 20 lines."
+        )
+    );
+    let every_tool_off = context_with(
+        &root,
+        plugins(Vec::new(), true),
+        off(&[
+            "ctx_batch_execute",
+            "ctx_execute",
+            "ctx_execute_file",
+            "ctx_fetch_and_index",
+            "ctx_search",
+        ]),
+    );
+    assert_eq!(every_tool_off.task_start("claude-code", true), None);
+    let nothing = context_with(&root, plugins(Vec::new(), false), Vec::new());
+    assert_eq!(nothing.task_start("claude-code", true), None);
+
+    let many: Vec<EffectiveSkill> = (0..200)
+        .map(|at| skill(&format!("{at:03}{}", "s".repeat(61))))
+        .collect();
+    let bounded = context_with(&root, plugins(many, true), Vec::new());
+    for harness in ["claude-code", "codex"] {
+        let text = bounded.task_start(harness, true).unwrap();
+        assert!(
+            text.len() <= TASK_START_BYTES_MAX,
+            "{harness}: {}",
+            text.len()
+        );
+        assert!(
+            text.contains(&format!(
+                "`{}000{}`",
+                if harness == "codex" {
+                    ""
+                } else {
+                    "crazyagent:"
+                },
+                "s".repeat(61)
+            )),
+            "{harness}: {text}"
+        );
+        assert!(
+            text.ends_with(", and the other skills in the Skills section."),
+            "{harness}: {text}"
+        );
+    }
+}
+
 #[test]
 fn a_tools_on_launch_is_told_when_to_use_context_mode_graphify_and_its_skills() {
     let directory = tempfile::tempdir().unwrap();

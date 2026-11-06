@@ -1,7 +1,7 @@
 #[cfg(unix)]
 use super::settings::{
     self, CoordSettings, Delivery, HarnessKind, Nudges, Overlaps, QuestionsTo, RoleSkills,
-    SkillRole, SubagentMode,
+    SkillRole, SubagentMode, TaskStart,
 };
 #[cfg(unix)]
 use super::store::Change;
@@ -1433,6 +1433,47 @@ fn coordination_settings_default_validate_and_keep_each_harness_column() {
         Some(HarnessKind::ClaudeCode)
     );
     assert_eq!(HarnessKind::from_harness("gemini"), None);
+}
+
+/// T3-15: the Task-start reminder is On for a new project and for a row saved before the
+/// setting existed, Off saves and reads back, and each option keeps its stored name and the
+/// words settings show.
+#[test]
+fn the_task_start_reminder_is_on_by_default_and_for_older_rows_and_off_round_trips() {
+    let connection = db();
+    let project = project();
+    assert_eq!(CoordSettings::default().task_start, TaskStart::On);
+    assert_eq!(
+        settings::read(&connection, &project).unwrap().task_start,
+        TaskStart::On
+    );
+    let off = CoordSettings {
+        task_start: TaskStart::Off,
+        ..CoordSettings::default()
+    };
+    settings::write(&connection, &project, &off).unwrap();
+    assert_eq!(settings::read(&connection, &project).unwrap(), off);
+    connection
+        .execute(
+            "UPDATE coord_settings SET json=?2 WHERE project=?1",
+            params![
+                PROJECT,
+                r#"{"questions_to":"lead","overlaps":"warn","nudges":"off","counted_tools":[]}"#
+            ],
+        )
+        .unwrap();
+    assert_eq!(
+        settings::read(&connection, &project).unwrap().task_start,
+        TaskStart::On,
+        "a row saved before the setting existed reads On"
+    );
+    assert_eq!(
+        TaskStart::ALL.map(|option| (option.as_str(), option.words())),
+        [("on", "On"), ("off", "Off")]
+    );
+    for option in TaskStart::ALL {
+        assert_eq!(TaskStart::parse(option.as_str()), Some(option));
+    }
 }
 
 /// DEC-111 R3: each team role's skill choice validates with the skill name rule, keeps its

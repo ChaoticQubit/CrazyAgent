@@ -144,6 +144,7 @@ fn the_report_sums_ranges_groups_local_days_lines_and_limits() {
                 resets_at_ms: Some(MIDNIGHT + 2 * HOUR),
             }),
             weekly: None,
+            provider: Some(crate::usage::poll::Provider::Claude),
         },
         LimitSource::Poll,
         MIDNIGHT,

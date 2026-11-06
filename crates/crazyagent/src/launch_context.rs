@@ -96,6 +96,8 @@ const CONTEXT_MODE_TOOLS: [&str; 5] = [
 /// The most bytes of the section that tells a tools-on launch when to use context-mode,
 /// graphify and its skills.
 pub const TOOL_USE_BYTES_MAX: usize = 2 * 1024;
+/// The most bytes of the Task-start reminder the first turn of a task carries (T3-15).
+pub const TASK_START_BYTES_MAX: usize = 1024;
 const TEAMMATE_COMMAND: &str = "teammate";
 const TEAMMATE_INSTRUCTIONS: &str = "teammate.md";
 const MATES_HOME: &str = "mates-home";
@@ -533,6 +535,77 @@ impl AgentContext {
     /// Returns the approved skills and MCP servers given to agents whose tools are on.
     pub fn plugins(&self) -> &LaunchPlugins {
         &self.plugins
+    }
+
+    /// Builds the Task-start reminder the first turn of each task carries while the setting
+    /// is On (T3-15): for Claude Code the ToolSearch select string of the context-mode tools
+    /// left on, the one its "Tools to use" section gives, and the approved skills by their
+    /// Skill tool names; for Codex those tools on their MCP server and the skills' SKILL.md.
+    /// Skills past the bound are named as the rest of the Skills section. Inputs: the harness
+    /// id and the launch's tools switch. Output: at most `TASK_START_BYTES_MAX` bytes, or None
+    /// with tools off, for another harness, or with no context-mode tool and no skill to name.
+    pub fn task_start(&self, harness: &str, tools: bool) -> Option<String> {
+        const MORE: &str = ", and the other skills in the Skills section";
+        let id = crate::harnesses::spec(harness)
+            .map(|spec| spec.id)
+            .filter(|id| matches!(*id, "codex" | "claude-code"))?;
+        let claude = id == "claude-code";
+        let names = context_mode_names(claude, &self.off_tools);
+        let context_mode = !names.is_empty()
+            && self
+                .plugins
+                .servers
+                .iter()
+                .any(|server| server.name == CONTEXT_MODE_SERVER);
+        if !tools || (!context_mode && self.plugins.skills.is_empty()) {
+            return None;
+        }
+        let mut text = String::from("Task start reminder: before you work on this task, ");
+        if context_mode {
+            text.push_str(&match claude {
+                true => format!(
+                    "run ToolSearch with `select:{}` and use those context-mode tools",
+                    names.join(",")
+                ),
+                false => format!(
+                    "use the `{}` tools of the `{CONTEXT_MODE_DECLARED}` MCP server",
+                    names.join("`, `")
+                ),
+            });
+            text.push_str(
+                " for any command, test, search or file read whose output may pass 20 lines",
+            );
+        }
+        if !self.plugins.skills.is_empty() {
+            if context_mode {
+                text.push_str(", and ");
+            }
+            text.push_str(match claude {
+                true => "call the Skill tool for each of these skills that fits this task: ",
+                false => {
+                    "read the SKILL.md of each of these skills that fits this task and follow it: "
+                }
+            });
+            let room = TASK_START_BYTES_MAX.saturating_sub(text.len() + MORE.len() + 1);
+            let mut listed = String::new();
+            for skill in &self.plugins.skills {
+                let name = match claude {
+                    true => format!("`crazyagent:{}`", skill.name),
+                    false => format!("`{}`", skill.name),
+                };
+                let gap = if listed.is_empty() { "" } else { ", " };
+                if listed.len() + gap.len() + name.len() > room {
+                    listed.push_str(MORE);
+                    break;
+                }
+                listed.push_str(gap);
+                listed.push_str(&name);
+            }
+            text.push_str(&listed);
+        }
+        text.push('.');
+        assert!(text.len() <= TASK_START_BYTES_MAX);
+        Some(text)
     }
 
     /// Keeps only the approved skills the owner chose for one team role (DEC-111 R3); a
@@ -1269,18 +1342,7 @@ fn tool_use_section(
     let mut section = String::from(
         "\n## Tools to use\n\nThe owner's instructions and the sections above come first. This section only names the tools this launch has as you call them; where other instructions name one another way, use the name here.\n\n",
     );
-    let off = off_tools
-        .iter()
-        .find(|(name, _)| name == CONTEXT_MODE_SERVER)
-        .map_or(&[][..], |(_, off)| off.as_slice());
-    let names: Vec<String> = CONTEXT_MODE_TOOLS
-        .into_iter()
-        .filter(|tool| !off.iter().any(|name| name == tool))
-        .map(|tool| match claude {
-            true => format!("mcp__{CONTEXT_MODE_DECLARED}__{tool}"),
-            false => tool.to_owned(),
-        })
-        .collect();
+    let names = context_mode_names(claude, off_tools);
     let context_mode = servers
         .iter()
         .any(|server| server.name == CONTEXT_MODE_SERVER);
@@ -1311,8 +1373,27 @@ fn tool_use_section(
         });
     }
     assert!(section.len() <= TOOL_USE_BYTES_MAX);
-    assert!(!names.is_empty() || off.len() >= CONTEXT_MODE_TOOLS.len());
     section
+}
+
+/// Names the context-mode tools a launch keeps on, as its harness calls them: Claude Code by
+/// their declared MCP names, Codex by the bare tool names. Inputs: whether the harness is
+/// Claude Code and the tools switched off. Output: the names, in `CONTEXT_MODE_TOOLS` order.
+fn context_mode_names(claude: bool, off_tools: &[(String, Vec<String>)]) -> Vec<String> {
+    let off = off_tools
+        .iter()
+        .find(|(name, _)| name == CONTEXT_MODE_SERVER)
+        .map_or(&[][..], |(_, off)| off.as_slice());
+    let names: Vec<String> = CONTEXT_MODE_TOOLS
+        .into_iter()
+        .filter(|tool| !off.iter().any(|name| name == tool))
+        .map(|tool| match claude {
+            true => format!("mcp__{CONTEXT_MODE_DECLARED}__{tool}"),
+            false => tool.to_owned(),
+        })
+        .collect();
+    assert!(!names.is_empty() || off.len() >= CONTEXT_MODE_TOOLS.len());
+    names
 }
 
 /// Lists the skills the owner approved for one launch, each with its one-line description

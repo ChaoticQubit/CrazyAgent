@@ -22,6 +22,7 @@ const STEPS_MAX: usize = 12;
 const SHIFT_RIGHT: [&str; 6] = ["1b", "5b", "31", "3b", "32", "43"];
 const SHIFT_LEFT: [&str; 6] = ["1b", "5b", "31", "3b", "32", "44"];
 const SETTLE_TIME: Duration = Duration::from_secs(180);
+const PICK_TIME: Duration = Duration::from_secs(5);
 const TURN_TIME: Duration = Duration::from_secs(60);
 const REPO: &str = "plant-shop";
 const ABOUT: &str = "A small shop that sells house plants online.";
@@ -147,11 +148,65 @@ fn at_home(screen: &str, project: &str) -> bool {
 }
 
 fn on_agents(screen: &str, project: &str) -> bool {
-    screen.contains(&format!("{project}  /  Agents"))
+    screen.contains(&format!("/  {project}  /  Agents"))
 }
 
 fn on_team(screen: &str, project: &str) -> bool {
-    screen.contains(&format!("{project}  /  Team")) && screen.contains("Master")
+    screen.contains(&format!("/  {project}  /  Team")) && screen.contains("Master")
+}
+
+/// Whether the crumbs end on the project named exactly `project`, or go on to one of its
+/// tabs. Inputs: the screen and the project name. Output: true when the crumbs name it.
+fn in_project(screen: &str, project: &str) -> bool {
+    let crumbs = screen.lines().next().unwrap_or_default().trim_end();
+    let place = format!("/  {project}");
+    crumbs.ends_with(&place) || crumbs.contains(&format!("{place}  /  "))
+}
+
+/// Whether Home's selection bar marks the card named exactly `project`: the bar, then the
+/// name, then nothing or the gap before the card's state.
+/// Inputs: the screen and the project name. Output: true when the picked card is it.
+fn picked_card(screen: &str, project: &str) -> bool {
+    let gap = format!("{project}  ");
+    screen.lines().any(|line| {
+        ["\u{258c} ", "| "].iter().any(|bar| {
+            line.trim_start()
+                .strip_prefix(bar)
+                .is_some_and(|rest| rest.trim_end() == project || rest.starts_with(&gap))
+        })
+    })
+}
+
+/// Moves Home's selection to the card named exactly `project`: filters Home by the name,
+/// then steps down until the bar marks that card, so a newer card whose name starts with it
+/// is passed over. Inputs: the TUI on Home with its project list focused and the name.
+/// Output: none; panics when no card has exactly that name.
+fn pick_card(pty: &Pty, project: &str) {
+    pty.keys(&["/"]);
+    pty.text(project);
+    let filter = format!("/ {project}");
+    pty.until("Home's filter holds the project name", |screen| {
+        screen.contains(&filter)
+    });
+    pty.keys(&["Enter"]);
+    for step in 0..=STEPS_MAX {
+        let screen = pty.until("Home keeps the filter", |screen| {
+            !screen.contains("Keep filter")
+        });
+        if picked_card(&screen, project) {
+            return;
+        }
+        assert!(
+            step < STEPS_MAX && !screen.contains("No project matches"),
+            "no Home card is named exactly {project}:\n{screen}"
+        );
+        pty.keys(&["Down"]);
+        pty.until_within(
+            &format!("no Home card below the picked one is named exactly {project}"),
+            PICK_TIME,
+            |now| now != screen,
+        );
+    }
 }
 
 fn reach_home(pty: &Pty, home: impl Fn(&str) -> bool) {
@@ -190,10 +245,15 @@ fn open_team(pty: &Pty, project: &str) {
     pty.until("Home offers to open the project", |screen| {
         screen.contains("Open")
     });
+    pick_card(pty, project);
     pty.keys(&["Enter"]);
-    pty.until("the project screen opens with its tabs", |screen| {
-        screen.contains(project) && screen.contains("Tabs")
+    let screen = pty.until("the project screen opens with its tabs", |screen| {
+        screen.contains("Tabs")
     });
+    assert!(
+        in_project(&screen, project),
+        "Home opened another project than {project}:\n{screen}"
+    );
     for step in 0..=STEPS_MAX {
         let screen = pty.screen();
         if on_agents(&screen, project) {
@@ -236,6 +296,48 @@ fn the_tui_walks_from_home_into_the_project_team_tree() {
     let screen = pty.screen();
     assert!(screen.contains("Master"), "{screen}");
     assert!(!screen.contains("Not ready yet"), "{screen}");
+    drop(pty);
+    engine.stop();
+}
+
+const NEWER_PROJECT: &str = "Tidepool e2e readd";
+
+/// Home highlights its most recent card; a project whose name that newer card's name starts
+/// with is still the one opened, by its exact name (live row 7 on 18.15 opened
+/// ca-trial-4-readd-202611051754 for ca-trial-4).
+#[test]
+fn the_tui_opens_the_project_named_exactly_when_a_newer_card_starts_with_its_name() {
+    let mut engine = Engine::start("ca-e2e-tui-");
+    let tmux = installed(engine.path()).expect(TMUX);
+    let disk = scratch("ca-e2e-home-");
+    let home = disk.path().join("Projects");
+    std::fs::create_dir(&home).unwrap();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut owner = Owner::attach(&engine).await;
+            assert_eq!(owner.save_profile(profile()).await, OwnerResult::Applied);
+            assert_eq!(owner.set_home(&home).await, OwnerResult::Applied);
+            assert_eq!(
+                owner.create_project("e2e-tui", PROJECT).await,
+                OwnerResult::Applied
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            assert_eq!(
+                owner.create_project("e2e-tui-readd", NEWER_PROJECT).await,
+                OwnerResult::Applied
+            );
+            owner.controller.detach();
+        });
+
+    let pty = Pty::launch(tmux, &engine.socket());
+    reach_home(&pty, |screen| at_home(screen, NEWER_PROJECT));
+    open_team(&pty, PROJECT);
+    let screen = pty.screen();
+    assert!(on_team(&screen, PROJECT), "{screen}");
+    assert!(!screen.contains(NEWER_PROJECT), "{screen}");
     drop(pty);
     engine.stop();
 }
@@ -392,6 +494,9 @@ fn nothing_left_setting_up(screen: &str) {
 fn tab_shown(screen: &str, project: &str) -> Option<String> {
     let crumb = format!("Home  /  {project}");
     let line = screen.lines().next()?;
+    if line.contains(&format!("CrazyAgent  /  {project}  /  Master")) {
+        return Some("Master".to_owned());
+    }
     let rest = &line[line.find(&crumb)? + crumb.len()..];
     Some(match rest.strip_prefix("  /  ") {
         Some(tab) => tab.split("  ").next()?.trim().to_owned(),
@@ -1166,5 +1271,231 @@ fn a_saved_shift_enter_choice_switches_the_keyboard_protocol_at_once() {
             && leaves.last().is_some_and(|leave| pops[1] < *leave),
         "push, pop on Off, push on Auto, pop before the alternate screen is left: {pushes:?} {pops:?} {leaves:?}"
     );
+    engine.stop();
+}
+
+const SWITCH_ID: &str = "e2e-master-switch";
+const SWITCH_PROJECT: &str = "Master switch e2e";
+const APPLY_IDLE: &str = ", when the master is idle";
+const APPLY_NEXT: &str = ", at the next start";
+
+/// Whether the Team settings summary shows the Apply a master harness change choice after
+/// the On harness switch choice. Inputs: the screen and the choice words. Output: a boolean.
+fn applied(screen: &str, choice: &str) -> bool {
+    screen
+        .lines()
+        .any(|line| line.contains("On harness switch  ") && line.contains(choice))
+}
+
+/// Starts an engine with one fresh project and opens that project's Team settings in the
+/// TUI. Input: a scratch prefix. Output: the engine, the TUI, the project id and the
+/// projects home, which lives as long as the test needs it.
+fn switch_settings(prefix: &str) -> (Engine, Pty, ProjectId, tempfile::TempDir) {
+    let engine = Engine::start(prefix);
+    let tmux = installed(engine.path()).expect(TMUX);
+    let disk = scratch("ca-e2e-home-");
+    let home = disk.path().join("Projects");
+    std::fs::create_dir(&home).unwrap();
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            let mut owner = Owner::attach(&engine).await;
+            assert_eq!(owner.save_profile(profile()).await, OwnerResult::Applied);
+            assert_eq!(owner.set_home(&home).await, OwnerResult::Applied);
+            assert_eq!(
+                owner.create_project(SWITCH_ID, SWITCH_PROJECT).await,
+                OwnerResult::Applied
+            );
+            owner.controller.detach();
+        });
+    let pty = Pty::launch(tmux, &engine.socket());
+    open_team(&pty, SWITCH_PROJECT);
+    pty.keys(&["s"]);
+    pty.until("s on the team tree opens the Team settings", |screen| {
+        screen.contains("Team settings") && screen.contains("On harness switch  ")
+    });
+    (engine, pty, ProjectId::new(SWITCH_ID).unwrap(), disk)
+}
+
+/// Reads what the engine keeps for the master harness switch.
+/// Inputs: the engine and the project. Output: the Apply a master harness change mode and
+/// the master harness id saved in the project setup.
+async fn switch_state(
+    engine: &Engine,
+    project: &ProjectId,
+) -> (crazyagent::team::SwitchApply, String) {
+    let mut owner = Owner::attach(engine).await;
+    let status = owner
+        .controller
+        .read(OwnerRead::TeamStatus {
+            project_id: project.clone(),
+        })
+        .await
+        .unwrap();
+    let OwnerData::TeamStatus { status } = status.data else {
+        panic!("the engine answers with the team status")
+    };
+    let setup = owner
+        .controller
+        .read(OwnerRead::ProjectSetup {
+            project_id: project.clone(),
+        })
+        .await
+        .unwrap();
+    owner.controller.detach();
+    let OwnerData::ProjectSetup {
+        setup: Some(setup), ..
+    } = setup.data
+    else {
+        panic!("the engine answers with the saved project setup")
+    };
+    (status.apply_harness_switch, setup.team.master)
+}
+
+/// The master harness picker as the screen shows it: each offered harness name in order
+/// and the picked row. Input: the screen. Output: the names and the picked index, none
+/// when no row is picked.
+fn picker_rows(screen: &str) -> (Vec<String>, Option<usize>) {
+    let lines: Vec<&str> = screen.lines().collect();
+    let Some(top) = lines
+        .iter()
+        .position(|line| line.contains("Harness for the master"))
+    else {
+        return (Vec::new(), None);
+    };
+    let mut names = Vec::new();
+    let mut picked = None;
+    for line in &lines[top + 1..] {
+        let inner = match (line.find('│'), line.rfind('│')) {
+            (Some(left), Some(right)) if left < right => &line[left + '│'.len_utf8()..right],
+            _ => line,
+        }
+        .trim();
+        if inner.is_empty() || inner.starts_with("Enter saves it.") {
+            break;
+        }
+        let (chosen, name) = match inner.strip_prefix("> ") {
+            Some(name) => (true, name),
+            None => (false, inner),
+        };
+        if chosen {
+            picked = Some(names.len());
+        }
+        names.push(name.trim_end_matches("  now").trim().to_owned());
+    }
+    (names, picked)
+}
+
+/// Opens the master harness picker with H and saves the harness next to the saved one.
+/// Input: the TUI on the Team settings. Output: the name of the harness it saved; panics
+/// as a missing prerequisite when fewer than two harnesses can run the master here.
+fn pick_other_master(pty: &Pty) -> String {
+    pty.keys(&["H"]);
+    let screen = pty.until(
+        "H opens the master harness picker with its harnesses",
+        |screen| {
+            screen.contains("Enter saves it.") || screen.contains("No harness can run the master")
+        },
+    );
+    let (names, picked) = picker_rows(&screen);
+    assert!(
+        names.len() >= 2,
+        "prerequisite: switching the master needs two harnesses that can run it; the picker offers {names:?}:\n{screen}"
+    );
+    let picked =
+        picked.unwrap_or_else(|| panic!("the picker starts on the saved harness:\n{screen}"));
+    let (key, target) = if picked + 1 < names.len() {
+        ("Down", picked + 1)
+    } else {
+        ("Up", picked - 1)
+    };
+    pty.keys(&[key]);
+    pty.until("the picker moves to the other harness", |screen| {
+        picker_rows(screen).1 == Some(target)
+    });
+    pty.keys(&["Enter"]);
+    names[target].clone()
+}
+
+/// When the master is idle (the default, OP-28): the TUI saves a master harness picked in
+/// Team settings through the project setup and says the running master switches once it is
+/// idle.
+#[test]
+fn the_tui_saves_a_master_harness_that_reaches_the_master_once_it_is_idle() {
+    let (mut engine, pty, project, _disk) = switch_settings("ca-e2e-idle-");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let (mode, before) = runtime.block_on(switch_state(&engine, &project));
+    assert_eq!(mode, crazyagent::team::SwitchApply::WhenIdle);
+    pty.until("the summary names the default", |screen| {
+        applied(screen, APPLY_IDLE)
+    });
+
+    let name = pick_other_master(&pty);
+    let said = format!("The master switches to {name} once it is idle.");
+    pty.until("the save says when the running master switches", |screen| {
+        screen.contains(&said) && !screen.contains("Harness for the master")
+    });
+    let saved = format!("{name} leads.");
+    pty.until("the summary names the saved harness", |screen| {
+        screen.contains(&saved) && applied(screen, APPLY_IDLE)
+    });
+    let (mode, after) = runtime.block_on(switch_state(&engine, &project));
+    assert_eq!(mode, crazyagent::team::SwitchApply::WhenIdle);
+    assert_ne!(after, before, "the project setup keeps the picked master");
+    drop(pty);
+    engine.stop();
+}
+
+/// At the next start (OP-28): A saves the choice in the engine, a master harness picked
+/// after it says it waits for the master's next start, and A again goes back to When the
+/// master is idle.
+#[test]
+fn the_tui_saves_a_master_harness_that_waits_for_the_masters_next_start() {
+    let (mut engine, pty, project, _disk) = switch_settings("ca-e2e-next-");
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    pty.until("the summary names the default", |screen| {
+        applied(screen, APPLY_IDLE)
+    });
+    pty.keys(&["A"]);
+    pty.until("A picks At the next start", |screen| {
+        applied(screen, APPLY_NEXT)
+            && screen
+                .contains("A saved master harness change now waits for the master's next start.")
+    });
+    let (mode, before) = runtime.block_on(switch_state(&engine, &project));
+    assert_eq!(mode, crazyagent::team::SwitchApply::NextStart);
+
+    let name = pick_other_master(&pty);
+    let said = format!("The master switches to {name} at its next start.");
+    pty.until(
+        "the save says the change waits for the next start",
+        |screen| screen.contains(&said) && !screen.contains("Harness for the master"),
+    );
+    let saved = format!("{name} leads.");
+    pty.until("the summary names the saved harness", |screen| {
+        screen.contains(&saved) && applied(screen, APPLY_NEXT)
+    });
+    let (mode, after) = runtime.block_on(switch_state(&engine, &project));
+    assert_eq!(mode, crazyagent::team::SwitchApply::NextStart);
+    assert_ne!(after, before, "the project setup keeps the picked master");
+
+    pty.keys(&["A"]);
+    pty.until("A goes back to When the master is idle", |screen| {
+        applied(screen, APPLY_IDLE)
+            && screen.contains(
+                "A saved master harness change now reaches the running master once it is idle.",
+            )
+    });
+    let (mode, _) = runtime.block_on(switch_state(&engine, &project));
+    assert_eq!(mode, crazyagent::team::SwitchApply::WhenIdle);
+    drop(pty);
     engine.stop();
 }

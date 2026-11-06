@@ -2,10 +2,11 @@ use super::new_project_page::{key_event, look};
 use super::new_project_view::Row;
 use super::project_team::{TABS, TeamReply, TeamView};
 use super::{Flow, Place, Screen};
-use crate::project_setup::SetupQuery;
+use crate::project_setup::{SetupAction, SetupQuery};
 use crate::protocol::ProjectId;
 use crate::team::TeamAction;
 use crate::tui::client::OwnerEvent;
+use crate::tui::client::settings::{SettingsEvent, SettingsJob};
 use crate::tui::clock::{local_offset, now_ms};
 use crate::tui::ctx::Ctx;
 use crate::tui::frame::{Hint, draw_lines, hint};
@@ -37,6 +38,9 @@ impl TeamSettings {
     }
 
     fn read(&mut self, ctx: &mut Ctx) {
+        if self.view.wants_catalog() {
+            ctx.request(Request::Settings(Box::new(SettingsJob::Harnesses)));
+        }
         if let Some(query) = self.view.next_query(now_ms())
             && !ctx.try_request(Request::Setup(query))
         {
@@ -46,6 +50,19 @@ impl TeamSettings {
 
     fn change(&mut self, action: TeamAction, ctx: &mut Ctx) {
         let query = SetupQuery::TeamChange {
+            action,
+            generation: ctx.next_generation(),
+        };
+        if !ctx.try_request(Request::Setup(query.clone())) {
+            self.view.apply(&query, Err("owner_busy".into()));
+        }
+    }
+
+    /// Sends a project setup save from the settings, as the master harness picker gives it,
+    /// as `SetupQuery::Change`; a full request queue is said as the owner being busy.
+    /// Takes the save and the context. Returns nothing.
+    fn save(&mut self, action: SetupAction, ctx: &mut Ctx) {
+        let query = SetupQuery::Change {
             action,
             generation: ctx.next_generation(),
         };
@@ -91,6 +108,7 @@ impl Screen for TeamSettings {
             TeamReply::Ignored => return Flow::Ignored,
             TeamReply::Handled => {}
             TeamReply::Change(action) => self.change(action, ctx),
+            TeamReply::Save(action) => self.save(action, ctx),
         }
         self.read(ctx);
         Flow::Handled
@@ -98,12 +116,18 @@ impl Screen for TeamSettings {
 
     fn arrive(&mut self, arrival: &Arrival, ctx: &mut Ctx) -> Flow {
         match arrival {
-            Arrival::Owner(event) => {
-                if let OwnerEvent::Setup(event) = event.as_ref() {
+            Arrival::Owner(event) => match event.as_ref() {
+                OwnerEvent::Setup(event) => {
                     self.view.apply(&event.query, event.result.clone());
                     self.read(ctx);
                 }
-            }
+                OwnerEvent::Settings(event) => {
+                    if let SettingsEvent::Harnesses(result) = event.as_ref() {
+                        self.view.take_catalog(result);
+                    }
+                }
+                _ => {}
+            },
             Arrival::Disconnected(_) => self.view.forget_reads(),
             _ => {}
         }

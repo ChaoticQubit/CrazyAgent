@@ -276,6 +276,7 @@ pub(in crate::tui) struct SignInView {
     pub generation: u64,
     pub page: Option<String>,
     pub device_code: Option<String>,
+    pub code_left: Option<std::time::Duration>,
     pub claude_prompt: Option<u64>,
     pub email: Option<String>,
     pub plan: Option<String>,
@@ -419,6 +420,7 @@ impl SignInView {
             generation: reply.fact.generation,
             page: None,
             device_code: None,
+            code_left: None,
             claude_prompt: None,
             email: None,
             plan: None,
@@ -435,6 +437,7 @@ impl SignInView {
                 } => {
                     view.page = shown(verification_url.expose());
                     view.device_code = shown(user_code.expose());
+                    view.code_left = challenge.left();
                 }
             }
         }

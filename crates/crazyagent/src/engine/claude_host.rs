@@ -6,7 +6,9 @@ use crate::adapters::NativeHarness;
 #[cfg(unix)]
 use crate::adapters::claude::{ClaudeProtocol, ProtocolError};
 use crate::adapters::events::ObservedEvent;
-use crate::harnesses::launch::{CLAUDE_BUILT_IN_AGENTS, CLAUDE_DENY_FLAG, CLAUDE_NO_TOOLS_PROMPT};
+#[cfg(unix)]
+use crate::harnesses::launch::CLAUDE_NO_TOOLS_PROMPT;
+use crate::harnesses::launch::{CLAUDE_BUILT_IN_AGENTS, CLAUDE_DENY_FLAG};
 #[cfg(unix)]
 use crate::protocol::FRAME_BYTES_MAX;
 use crate::protocol::{CredentialRef, RequestId};

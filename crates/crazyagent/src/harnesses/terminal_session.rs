@@ -7,7 +7,7 @@ use super::leftovers::{Lineage, Unstopped};
 use super::transcript::{TranscriptEvent, TranscriptReader};
 use crate::launch_context::{AgentContext, Installed};
 use crate::model_gateway::relay::{Relay, is_placeholder};
-use crate::terminal::{AgentId, Host, HostError, INPUT_BYTES_MAX};
+use crate::terminal::{AgentId, Host, HostError, INPUT_BYTES_MAX, TerminalStream};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, VecDeque};
 use std::path::PathBuf;
@@ -20,7 +20,7 @@ mod adopt;
 pub use adopt::{PaneRecord, RecordSource};
 
 pub const PROMPT_BYTES_MAX: usize = 1024 * 1024;
-const READY_WAIT: Duration = Duration::from_secs(30);
+pub(crate) const READY_WAIT: Duration = Duration::from_secs(30);
 const READY_QUIET: Duration = Duration::from_millis(700);
 const PASTE_SETTLE: Duration = Duration::from_millis(200);
 const POLL: Duration = Duration::from_millis(100);
@@ -53,6 +53,7 @@ pub struct TerminalSession {
     checked: Instant,
     events: usize,
     ready: bool,
+    first: Option<FirstScreen>,
     turn: bool,
     held: bool,
     own_held: bool,
@@ -73,6 +74,16 @@ pub struct TerminalSession {
 
 /// The most bytes a key file the engine reads back may hold: the longest key it writes.
 const KEY_FILE_BYTES_MAX: u64 = crate::model_gateway::relay::KEY_BYTES_MAX as u64;
+
+/// What the engine saw of an app's first screen while it waits for the app to read keys:
+/// the attached stream once an attach worked, when the wait began, whether anything was
+/// drawn and when the screen last changed.
+struct FirstScreen {
+    stream: Option<TerminalStream>,
+    started: Instant,
+    drawn: bool,
+    quiet: Instant,
+}
 
 /// An account's key file and the SHA-256 of the exact bytes this launch wrote into it, so
 /// the guard keeps no copy of the key. The file is removed when the agent session holding it
@@ -291,6 +302,7 @@ impl TerminalSession {
             checked: Instant::now(),
             events: 0,
             ready: false,
+            first: None,
             turn: false,
             held: false,
             own_held: false,
@@ -538,39 +550,77 @@ impl TerminalSession {
         self.host.input(&self.agent, bytes).map_err(host_failure)
     }
 
+    /// Looks once, without waiting, whether the app reads keys yet by the rule its first
+    /// prompt waits for: it has drawn its screen, nothing changed on it for `READY_QUIET`
+    /// and it turned bracketed paste on (see [`Host::input_live`]), or `READY_WAIT` passed
+    /// since the first look. A failed look keeps the wait, so the next look tries again
+    /// within the same bound. Output: the answer, the failed look's problem, or
+    /// `launch_closed` once the pane ended.
+    pub fn poll_ready(&mut self) -> Result<bool, LaunchError> {
+        if self.ready {
+            return Ok(true);
+        }
+        let first = self.first.get_or_insert_with(|| FirstScreen {
+            stream: None,
+            started: Instant::now(),
+            drawn: false,
+            quiet: Instant::now(),
+        });
+        if first.started.elapsed() >= READY_WAIT {
+            self.ready = true;
+            self.first = None;
+            return Ok(true);
+        }
+        let stream = match &mut first.stream {
+            Some(stream) => stream,
+            None => {
+                let stream = self.host.attach(&self.agent).map_err(host_failure)?;
+                first.drawn = !stream.screen.iter().all(u8::is_ascii_whitespace);
+                first.quiet = Instant::now();
+                first.stream.insert(stream)
+            }
+        };
+        loop {
+            match stream.chunks.try_recv() {
+                Ok(chunk) => {
+                    first.drawn |= !chunk.is_empty();
+                    first.quiet = Instant::now();
+                }
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.first = None;
+                    self.exited = true;
+                    self.end_group(true);
+                    return Err(failure("launch_closed"));
+                }
+            }
+        }
+        let ready = first.drawn
+            && first.quiet.elapsed() >= READY_QUIET
+            && self.host.input_live(&self.agent).map_err(host_failure)?;
+        if ready {
+            self.ready = true;
+            self.first = None;
+        }
+        Ok(ready)
+    }
+
     fn wait_ready(&mut self, cancel: &AtomicBool) -> Result<(), LaunchError> {
-        let mut stream = self.host.attach(&self.agent).map_err(host_failure)?;
-        let started = Instant::now();
-        let mut drawn = !stream.screen.iter().all(u8::is_ascii_whitespace);
-        let mut quiet = Instant::now();
-        while started.elapsed() < READY_WAIT {
+        loop {
+            match self.poll_ready() {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(problem) => {
+                    self.first = None;
+                    return Err(problem);
+                }
+            }
             if cancel.load(Ordering::SeqCst) {
+                self.first = None;
                 return Err(failure("launch_cancelled"));
             }
             std::thread::sleep(POLL);
-            loop {
-                match stream.chunks.try_recv() {
-                    Ok(chunk) => {
-                        drawn |= !chunk.is_empty();
-                        quiet = Instant::now();
-                    }
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => {
-                        self.exited = true;
-                        self.end_group(true);
-                        return Err(failure("launch_closed"));
-                    }
-                }
-            }
-            if drawn
-                && quiet.elapsed() >= READY_QUIET
-                && self.host.input_live(&self.agent).map_err(host_failure)?
-            {
-                break;
-            }
         }
-        self.ready = true;
-        Ok(())
     }
 
     fn poll(&mut self) -> Result<(), LaunchError> {
