@@ -19786,7 +19786,7 @@ fn a_fresh_switch_whose_new_harness_ends_before_reporting_starts_fresh_again() {
         launches(f, second).len() == 2
     });
     let briefed = instructions_file(&fixture, second).unwrap();
-    assert_eq!(typed(&fixture, second), "", "nothing is typed");
+    assert_eq!(pasted(&fixture, second), "", "nothing is pasted into the new master");
     assert!(!briefed.contains("You: Done."), "{briefed}");
     assert!(
         !briefed.contains("earlier harness conversation"),
