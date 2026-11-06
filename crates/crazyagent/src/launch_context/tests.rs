@@ -2371,7 +2371,7 @@ fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandb
 /// agent with its short temp folder, with the harness's variables and the ones Claude Code
 /// adds for an MCP server, runs a script whose temp folder is in that short folder, where the
 /// launch's own `getconf` points context-mode, not in the per-user temp folder the profile
-/// denies. The agent can neither change, add to nor move that `getconf`'s folder.
+/// denies.
 #[cfg(target_os = "macos")]
 #[test]
 fn an_agent_runs_ctx_execute_of_the_engine_install_in_its_sandbox() {
@@ -2379,11 +2379,6 @@ fn an_agent_runs_ctx_execute_of_the_engine_install_in_its_sandbox() {
     use crate::sandbox::{ProjectSandbox, SandboxNetwork};
     const MARKER: &str = "ctx-execute-4471";
     const CALL_LIMIT: Duration = Duration::from_secs(60);
-    const CHANGE: &str = r#"printf x >> "$1/getconf" 2>/dev/null && echo changed
-mkdir "$1/planted" 2>/dev/null && echo planted
-mv "$1" "$1-moved" 2>/dev/null && echo moved
-[ -f "$1/getconf" ] || echo missing
-exit 0"#;
     let directory = tempfile::tempdir().unwrap();
     let base = directory.path().canonicalize().unwrap();
     let (context, _connection, _install) = shared_context_mode(&base);
@@ -2443,8 +2438,41 @@ exit 0"#;
             && text.contains(&format!("{MARKER} {}/.ctx-mode-", scratch.display())),
         "ctx_execute runs with its temp folder in the agent's own: {reply}"
     );
+    drop(installed);
+    toolchains::remove_tmp(&home).unwrap();
+}
 
+/// T3-15/18: under the deny-default agent profile with its short temp folder, the agent can
+/// neither change nor replace its launch's own `getconf`, add a program beside it or move its
+/// folder: the file stays the one the engine wrote.
+#[cfg(target_os = "macos")]
+#[test]
+fn an_agent_cannot_change_its_launch_getconf() {
+    use crate::sandbox::toolchains;
+    use crate::sandbox::{ProjectSandbox, SandboxNetwork};
+    const CHANGE: &str = r#"printf x 2>/dev/null >> "$1/getconf" && echo changed
+printf x 2>/dev/null > "$1/getconf.new" && mv "$1/getconf.new" "$1/getconf" 2>/dev/null && echo replaced
+mkdir "$1/planted" 2>/dev/null && echo planted
+mv "$1" "$1-moved" 2>/dev/null && echo moved
+[ -f "$1/getconf" ] || echo missing
+exit 0"#;
+    let directory = tempfile::tempdir().unwrap();
+    let root = directory.path().canonicalize().unwrap();
+    let home = private_folder(&root.join("home"));
+    let scratch = toolchains::make_tmp(&home).unwrap();
+    let installed = context_with(&root, LaunchPlugins::default(), Vec::new())
+        .install("claude-code", &home, true)
+        .unwrap();
+    let project = private_folder(&root.join("work"));
+    let tmp = private_folder(&root.join("tmp"));
+    let sandbox = ProjectSandbox::new(&project, &home, &tmp, SandboxNetwork::Only(Vec::new()))
+        .unwrap()
+        .allow_scratch(&scratch)
+        .unwrap();
+    let profile = root.join("agent.sb");
+    sandbox.install(&profile).unwrap();
     let bin = home.join(STATE).join("bin");
+    let written = fs::read(bin.join("getconf")).ok();
     let mut change = sandbox.command(&profile, Path::new("/bin/sh"));
     change
         .args(["-c", CHANGE, "sh"])
@@ -2457,8 +2485,10 @@ exit 0"#;
     assert_eq!(
         String::from_utf8_lossy(&changed.stdout),
         "",
-        "the agent's getconf stays the one the engine wrote"
+        "the agent's getconf stays the one the engine wrote: {changed:?}"
     );
+    assert!(written.is_some());
+    assert_eq!(fs::read(bin.join("getconf")).ok(), written);
     drop(installed);
     toolchains::remove_tmp(&home).unwrap();
 }
