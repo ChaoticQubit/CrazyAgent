@@ -800,7 +800,7 @@ fn an_implausible_token_count_is_bounded_and_later_growth_never_overflows_its_ro
         )
         .unwrap();
     assert_eq!(stored, (ROW_TOKENS_MAX, "integer".into(), ROW_TOKENS_MAX));
-    let report = super::super::report::report(&db, None, None, 0, NOW + 4).unwrap();
+    let report = super::super::report::report(&db, None, None, 0, NOW + 4, &[]).unwrap();
     assert_eq!(report.total.input, ROW_TOKENS_MAX as u64);
 }
 
@@ -1157,7 +1157,7 @@ fn a_home_past_the_entry_bound_counts_the_record_written_last_and_reads_as_parti
     }
     let who = attribution(RunKind::Agent, None);
     let partial = |db: &Connection| {
-        let report = super::super::report::report(db, None, None, 0, NOW).unwrap();
+        let report = super::super::report::report(db, None, None, 0, NOW, &[]).unwrap();
         serde_json::to_value(report).unwrap()["partial_homes"].as_u64()
     };
     let added = scan_home(&db, home.path(), Format::Claude, &who, NOW).unwrap();
@@ -1196,7 +1196,7 @@ fn a_home_whose_scan_leaves_out_an_uncounted_record_reads_as_partial_until_it_is
     }
     let who = attribution(RunKind::Agent, None);
     let partial = |db: &Connection| {
-        let report = super::super::report::report(db, None, None, 0, NOW).unwrap();
+        let report = super::super::report::report(db, None, None, 0, NOW, &[]).unwrap();
         serde_json::to_value(report).unwrap()["partial_homes"].as_u64()
     };
     let scan = |at: i64| {
@@ -1269,7 +1269,7 @@ fn a_home_that_grows_past_the_bound_with_counted_records_reads_as_complete() {
     }
     let who = attribution(RunKind::Agent, None);
     let partial = |db: &Connection| {
-        let report = super::super::report::report(db, None, None, 0, NOW).unwrap();
+        let report = super::super::report::report(db, None, None, 0, NOW, &[]).unwrap();
         serde_json::to_value(report).unwrap()["partial_homes"].as_u64()
     };
     let read = scan_home(&db, home.path(), Format::Claude, &who, NOW).unwrap();
@@ -1324,7 +1324,7 @@ fn a_home_whose_left_out_records_end_in_a_torn_or_skipped_line_reads_as_complete
     }
     let who = attribution(RunKind::Agent, None);
     let partial = |db: &Connection| {
-        let report = super::super::report::report(db, None, None, 0, NOW).unwrap();
+        let report = super::super::report::report(db, None, None, 0, NOW, &[]).unwrap();
         serde_json::to_value(report).unwrap()["partial_homes"].as_u64()
     };
     let scan = |at: i64| {
@@ -1385,7 +1385,7 @@ fn a_home_whose_left_out_tails_pass_one_read_reads_as_partial() {
     }
     let who = attribution(RunKind::Agent, None);
     let partial = |db: &Connection| {
-        let report = super::super::report::report(db, None, None, 0, NOW).unwrap();
+        let report = super::super::report::report(db, None, None, 0, NOW, &[]).unwrap();
         serde_json::to_value(report).unwrap()["partial_homes"].as_u64()
     };
     let read = scan_home(&db, home.path(), Format::Claude, &who, NOW).unwrap();

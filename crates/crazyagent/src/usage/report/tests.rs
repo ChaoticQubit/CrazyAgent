@@ -134,24 +134,27 @@ fn the_report_sums_ranges_groups_local_days_lines_and_limits() {
         )
         .unwrap();
     }
-    record_observation(
-        &db,
-        &CredentialRef::new("claude-1").unwrap(),
-        &Observation {
-            plan: Some("max".into()),
-            five_hour: Some(LimitWindow {
-                used_percent: 20.0,
-                resets_at_ms: Some(MIDNIGHT + 2 * HOUR),
-            }),
-            weekly: None,
-            provider: Some(crate::usage::poll::Provider::Claude),
-        },
-        LimitSource::Poll,
-        MIDNIGHT,
-    )
-    .unwrap();
+    let claude_1 = CredentialRef::new("claude-1").unwrap();
+    for account in [&claude_1, &CredentialRef::new("claude-gone").unwrap()] {
+        record_observation(
+            &db,
+            account,
+            &Observation {
+                plan: Some("max".into()),
+                five_hour: Some(LimitWindow {
+                    used_percent: 20.0,
+                    resets_at_ms: Some(MIDNIGHT + 2 * HOUR),
+                }),
+                weekly: None,
+                provider: Some(crate::usage::poll::Provider::Claude),
+            },
+            LimitSource::Poll,
+            MIDNIGHT,
+        )
+        .unwrap();
+    }
 
-    let all = report(&db, None, None, 0, MIDNIGHT + DAY).unwrap();
+    let all = report(&db, None, None, 0, MIDNIGHT + DAY, &[claude_1.clone()]).unwrap();
     assert_eq!(
         all.total,
         Tokens {
@@ -191,15 +194,16 @@ fn the_report_sums_ranges_groups_local_days_lines_and_limits() {
         }]
     );
     assert_eq!(all.limits.len(), 1);
+    assert_eq!(all.limits[0].account, claude_1);
     assert_eq!(all.limits[0].plan.as_deref(), Some("max"));
 
-    let today = report(&db, None, Some(MIDNIGHT), 0, MIDNIGHT + DAY).unwrap();
+    let today = report(&db, None, Some(MIDNIGHT), 0, MIDNIGHT + DAY, &[]).unwrap();
     assert_eq!(today.total.input, 48);
     assert_eq!(keys(&today.agents), vec!["team-2", "research-r1"]);
     assert_eq!(today.lines[0].change_sets, 2);
     assert_eq!(today.lines[0].commits, 1);
 
-    let east = report(&db, None, Some(MIDNIGHT), 120, MIDNIGHT + DAY).unwrap();
+    let east = report(&db, None, Some(MIDNIGHT), 120, MIDNIGHT + DAY, &[]).unwrap();
     assert_eq!(
         east.days
             .iter()
@@ -208,11 +212,13 @@ fn the_report_sums_ranges_groups_local_days_lines_and_limits() {
         vec![(MIDNIGHT - 2 * HOUR, 47), (MIDNIGHT + 22 * HOUR, 1)]
     );
     assert_eq!(
-        report(&db, None, None, 15 * 60, MIDNIGHT).unwrap_err().0,
+        report(&db, None, None, 15 * 60, MIDNIGHT, &[])
+            .unwrap_err()
+            .0,
         "usage_request_invalid"
     );
     assert_eq!(
-        report(&db, None, Some(MIDNIGHT + 1), 0, MIDNIGHT)
+        report(&db, None, Some(MIDNIGHT + 1), 0, MIDNIGHT, &[])
             .unwrap_err()
             .0,
         "usage_request_invalid"
@@ -234,7 +240,7 @@ fn runs_tied_to_no_project_or_account_show_as_unattributed_rows() {
         harness: "claude-code".into(),
     };
     scan_home(&db, home.path(), Format::Claude, &lost, MIDNIGHT).unwrap();
-    let all = report(&db, None, None, 0, MIDNIGHT + HOUR).unwrap();
+    let all = report(&db, None, None, 0, MIDNIGHT + HOUR, &[]).unwrap();
     assert_eq!(all.total.input, 9);
     assert_eq!(
         all.projects
@@ -295,7 +301,7 @@ fn a_project_report_keeps_only_its_runs_and_names_lines_by_the_agent_that_made_t
         .unwrap();
     }
     let alpha = crate::protocol::ProjectId::new("alpha").unwrap();
-    let only = report(&db, Some(&alpha), None, 0, MIDNIGHT + HOUR).unwrap();
+    let only = report(&db, Some(&alpha), None, 0, MIDNIGHT + HOUR, &[]).unwrap();
     assert_eq!(only.total.input, 60);
     assert_eq!(only.runs, 2);
     let keys = |rows: &[UsageRow]| rows.iter().map(|r| r.key.clone()).collect::<Vec<_>>();
@@ -326,7 +332,7 @@ fn a_project_report_keeps_only_its_runs_and_names_lines_by_the_agent_that_made_t
             },
         ]
     );
-    let all = report(&db, None, None, 0, MIDNIGHT + HOUR).unwrap();
+    let all = report(&db, None, None, 0, MIDNIGHT + HOUR, &[]).unwrap();
     assert_eq!(all.total.input, 560);
     assert_eq!(all.agent_lines[0].agent, "team-9");
     assert_eq!(all.agent_lines.len(), 3);
@@ -350,7 +356,7 @@ fn token_sums_past_the_integer_range_still_report_saturated() {
         )
         .unwrap();
     }
-    let report = report(&db, None, None, 0, MIDNIGHT + DAY).unwrap();
+    let report = report(&db, None, None, 0, MIDNIGHT + DAY, &[]).unwrap();
     assert_eq!(report.total.input, u64::MAX);
     assert_eq!(report.total.output, 3);
     assert_eq!(report.projects[0].tokens.input, u64::MAX);
@@ -367,13 +373,15 @@ pub(crate) fn wide(prefix: &str, index: usize) -> String {
     format!("{:x<128}", format!("{prefix}-{index:03}-"))
 }
 
-/// Fills a usage store past what one reply frame holds: `WIDE_ROWS` accounts' limits with
-/// every field at its widest, and one run on each of `WIDE_ROWS` days with its own 128-byte
-/// project, pool, account and agent, the newest run spending the most tokens.
+/// Fills a usage store past what one reply frame holds: `WIDE_ROWS` saved accounts' limits
+/// with every field at its widest, and one run on each of `WIDE_ROWS` days with its own
+/// 128-byte project, pool, account and agent, the newest run spending the most tokens.
 /// Inputs: the store and the time of the newest run.
 pub(crate) fn fill_past_one_frame(db: &Connection, now_ms: i64) {
     let percent = 100.0_f64 / 3.0;
+    crate::storage::accounts::initialize(db).unwrap();
     for index in 0..WIDE_ROWS {
+        save_account(db, &wide("account", index));
         db.execute(
             "INSERT INTO account_limits (account,plan,five_hour_percent,five_hour_resets_ms,
                 weekly_percent,weekly_resets_ms,five_hour_reset_override_ms,
@@ -407,6 +415,41 @@ pub(crate) fn fill_past_one_frame(db: &Connection, now_ms: i64) {
     }
 }
 
+/// Saves one API key account in the accounts table as Settings > Accounts stores it.
+/// Inputs: the engine store and the account id.
+fn save_account(db: &Connection, id: &str) {
+    let reference = |value: &str| CredentialRef::new(value).unwrap();
+    let connection = crate::config::ModelConnection {
+        id: reference(id),
+        provider: reference("openai-compatible"),
+        harness: reference("rcli"),
+        protocol: reference("openai-chat"),
+        account_ref: reference("local-account"),
+        endpoint: crate::config::ModelEndpoint::Http {
+            url: "http://127.0.0.1:8000/v1".into(),
+        },
+        model: crate::config::ModelReference {
+            id: "m".into(),
+            author: reference("openai-compatible"),
+        },
+        auth: crate::config::ModelAuthentication::ApiKey {
+            credential_ref: reference("wide-key"),
+        },
+    };
+    let details = crate::accounts::AccountDetails {
+        name: "Wide".into(),
+        provider: crate::accounts::Provider::OpenaiCompatible,
+    };
+    let body =
+        serde_json::to_vec(&serde_json::json!({"connection": connection, "details": details}))
+            .unwrap();
+    db.execute(
+        "INSERT INTO accounts(id, body) VALUES (?1, ?2)",
+        params![id, body],
+    )
+    .unwrap();
+}
+
 /// Tokens the run at `index` spent: near the integer range, falling with the index.
 /// Input: the index. Output: the tokens.
 fn spent(index: usize) -> i64 {
@@ -419,14 +462,16 @@ fn an_offset_beyond_fourteen_hours_is_refused_even_at_the_integer_edges() {
     let db = crate::usage::open(root.path()).unwrap();
     for offset in [i32::MIN, i32::MIN + 1, -841, 841, i32::MAX] {
         assert_eq!(
-            report(&db, None, None, offset, MIDNIGHT).unwrap_err().0,
+            report(&db, None, None, offset, MIDNIGHT, &[])
+                .unwrap_err()
+                .0,
             "usage_request_invalid",
             "offset {offset}"
         );
     }
     for offset in [-840, 0, 840] {
         assert!(
-            report(&db, None, None, offset, MIDNIGHT).is_ok(),
+            report(&db, None, None, offset, MIDNIGHT, &[]).is_ok(),
             "offset {offset}"
         );
     }
@@ -447,7 +492,7 @@ fn a_report_past_one_reply_frame_keeps_its_largest_rows_and_newest_days_and_fits
         .unwrap();
     }
 
-    let report = report(&db, None, None, 0, now).unwrap();
+    let report = report(&db, None, None, 0, now, &[]).unwrap();
     let encoded = serde_json::to_vec(&report).unwrap();
     assert!(encoded.len() <= REPORT_BYTES_MAX, "{} bytes", encoded.len());
     assert!(

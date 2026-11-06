@@ -225,20 +225,24 @@ async fn prepare(
             project,
             since_ms,
             offset_minutes,
-        } => Prepared::Report(Box::new(
-            tokio::task::spawn_blocking(move || {
-                let db = usage::open(&root)?;
-                usage::report::report(
-                    &db,
-                    project.as_ref(),
-                    since_ms,
-                    offset_minutes,
-                    crate::team::now_ms(),
-                )
-            })
-            .await
-            .map_err(|_| failure("usage_unavailable"))??,
-        )),
+        } => {
+            let held = held_accounts(engine, admission).await?;
+            Prepared::Report(Box::new(
+                tokio::task::spawn_blocking(move || {
+                    let db = usage::open(&root)?;
+                    usage::report::report(
+                        &db,
+                        project.as_ref(),
+                        since_ms,
+                        offset_minutes,
+                        crate::team::now_ms(),
+                        &held,
+                    )
+                })
+                .await
+                .map_err(|_| failure("usage_unavailable"))??,
+            ))
+        }
         Action::Refresh => Prepared::Change(root, Change::Refresh),
         Action::SetReset {
             account,
@@ -246,6 +250,28 @@ async fn prepare(
             at_ms,
         } => Prepared::Change(root, Change::SetReset(account, window, at_ms)),
     })
+}
+
+/// The accounts the live config holds, which storage alone knows, so the report shows
+/// limits only for accounts that exist now. Inputs: the engine and the owner admission.
+/// Output: the account ids, or storage's refusal.
+async fn held_accounts(
+    engine: &Engine,
+    admission: &Admission,
+) -> Result<Vec<CredentialRef>, EngineError> {
+    match engine
+        .native_auth_job(|reply| {
+            Job::Accounts(
+                admission.clone(),
+                crate::storage::accounts::Command::Held,
+                reply,
+            )
+        })
+        .await?
+    {
+        crate::storage::accounts::ResultValue::Held(held) => Ok(held),
+        _ => Err(unknown()),
+    }
 }
 
 /// Answers a prepared request under the owner barrier its caller holds: checks the grant
