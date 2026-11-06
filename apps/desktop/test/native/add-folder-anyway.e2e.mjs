@@ -244,7 +244,7 @@ after(async () => {
   if (run.root) rmSync(run.root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 });
 
-/** Move anyway on a folder with no git (DEC-115 addendum, leader 09:35 N-D35): the question shows
+/** Move anyway on a folder with no git (DEC-115 addendum): the question shows
  * the data loss line first, then the old place, no git and the quick rename, starts on Use where
  * it is, and Move anyway moves every file into the projects folder with no override sent. */
 test("Move anyway moves a folder with no git into the projects folder after the data loss warning", { timeout: 600000 }, async () => {
@@ -266,7 +266,7 @@ test("Move anyway moves a folder with no git into the projects folder after the 
   movedOnce(real, []);
 });
 
-/** Use where it is in the Move anyway question (DEC-115 addendum, leader 09:35 N-D6): the owner
+/** Use where it is in the Move anyway question (DEC-115 addendum): the owner
  * says no to the move, the Set up dialog opens for the folder where it is, setup starts there,
  * and nothing lands in the projects folder or is sent to Add folder. */
 test("Use where it is in the Move anyway question sets the folder up where it is", { timeout: 600000 }, async () => {
@@ -336,7 +336,7 @@ test("the Move anyway question names linked worktrees, and closing it changes no
   for (const name of [repoName, treeName]) assert.ok(!existsSync(join(run.projects, name)), `nothing named ${name} lands in the projects folder`);
 });
 
-/** Move anyway on a very large folder across disks (DEC-115 addendum, leader 09:35 N-D36, 09:40 A):
+/** Move anyway on a very large folder across disks (DEC-115 addendum):
  * a git folder holding a 1.1 GB file on a scratch disk image is asked about with apps still using
  * it first, then the size and the copy across disks, and Move anyway copies every byte into the
  * projects folder, keeps git working there and removes the original. */
