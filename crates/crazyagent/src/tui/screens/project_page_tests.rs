@@ -4119,7 +4119,7 @@ async fn a_tui_team_setting_from_before_a_desktop_change_is_refused_and_the_desk
     );
     let shown = render(&mut shell, 120, 30);
     assert!(
-        shown.contains("These settings changed elsewhere."),
+        shown.contains("This changed in another window, so yours was not saved."),
         "{shown}"
     );
 
