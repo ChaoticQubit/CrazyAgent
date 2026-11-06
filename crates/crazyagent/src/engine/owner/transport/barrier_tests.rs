@@ -226,6 +226,36 @@ fn fresh_client(owner: &Usage) -> OwnerClient {
     .unwrap()
 }
 
+/// Revokes the TUI client and returns what storage committed, reconciling the same control
+/// when the answer outlasts a short owner wait. Inputs: the engine and the operation name.
+/// Output: the committed reply.
+async fn revoke_settled(owner: &Usage, name: &str) -> OwnerControlReply {
+    let runtime = owner.runtime();
+    let control = revocation(runtime, OwnerClientKind::Tui, name);
+    match runtime.control(control.clone()).await {
+        Ok(reply) => reply,
+        Err(error) => {
+            assert_eq!(
+                error,
+                failure("owner_outcome_unknown_reconcile_same_identity")
+            );
+            storage_settled(owner).await;
+            runtime.reconcile_control(control).await.unwrap().unwrap()
+        }
+    }
+}
+
+/// The owner control that reactivates the TUI client at an epoch. Inputs: the operation
+/// name and the expected epoch. Output: the control.
+fn reactivation(name: &str, expected_epoch: i64) -> OwnerControl {
+    OwnerControl {
+        operation_id: RequestId::new(name).unwrap(),
+        target: OwnerClientKind::Tui,
+        expected_epoch,
+        decision: OwnerDecision::Reactivate,
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_cleanup_removal_runs_without_the_owner_barrier_and_a_revoked_client_removes_nothing_after()
  {
@@ -535,28 +565,12 @@ async fn a_reactivation_that_outlasts_the_owner_wait_admits_the_client_once_stor
     let _disk = super::usage_tests::busy_storage().await;
     let owner = Usage::start_waiting(LAPSE_WAIT_MS).await;
     let runtime = owner.runtime();
-    let first = revocation(runtime, OwnerClientKind::Tui, "revoke-first");
-    let revoked = match runtime.control(first.clone()).await {
-        Ok(reply) => reply,
-        Err(error) => {
-            assert_eq!(
-                error,
-                failure("owner_outcome_unknown_reconcile_same_identity")
-            );
-            storage_settled(&owner).await;
-            runtime.reconcile_control(first).await.unwrap().unwrap()
-        }
-    };
+    let revoked = revoke_settled(&owner, "revoke-first").await;
     assert!(!revoked.active);
     assert!(!admitted(runtime, &owner.client));
     let (swept, sweep) = occupy_storage(&owner);
     let lapsed = runtime
-        .control(OwnerControl {
-            operation_id: RequestId::new("reactivate-lapsed").unwrap(),
-            target: OwnerClientKind::Tui,
-            expected_epoch: revoked.owner_epoch,
-            decision: OwnerDecision::Reactivate,
-        })
+        .control(reactivation("reactivate-lapsed", revoked.owner_epoch))
         .await;
     assert_eq!(
         lapsed.map(|reply| reply.active),
@@ -612,5 +626,111 @@ async fn a_late_publication_never_replaces_a_newer_registration_or_reopens_a_clo
         "a settle of the same epoch never reopens a closed slot"
     );
     assert!(!admitted(runtime, &fresh_client(&owner)));
+    owner.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reactivation_sent_before_a_lapsed_revocation_never_reopens_the_slot() {
+    let _disk = super::usage_tests::busy_storage().await;
+    let owner = Usage::start_waiting(LAPSE_WAIT_MS).await;
+    let runtime = owner.runtime();
+    let revoked = revoke_settled(&owner, "revoke-before-both").await;
+    assert!(!revoked.active);
+    let (swept, sweep) = occupy_storage(&owner);
+    let reactivated = runtime
+        .control(reactivation(
+            "reactivate-before-revoke",
+            revoked.owner_epoch,
+        ))
+        .await;
+    assert_eq!(
+        reactivated.map(|reply| reply.active),
+        Err(failure("owner_outcome_unknown_reconcile_same_identity")),
+        "the reactivation outlasts the owner wait"
+    );
+    let lapsed = runtime
+        .control(revocation(
+            runtime,
+            OwnerClientKind::Tui,
+            "revoke-after-reactivate",
+        ))
+        .await;
+    assert_eq!(
+        lapsed.map(|reply| reply.active),
+        Err(failure("owner_outcome_unknown_reconcile_same_identity")),
+        "the revocation outlasts the owner wait"
+    );
+    assert!(!admitted(runtime, &owner.client));
+
+    tokio::time::timeout(SWEEP_TIME_MAX, sweep)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(!swept.exists());
+    storage_settled(&owner).await;
+    assert!(
+        published(runtime, revoked.owner_epoch + 1).await,
+        "memory takes the epoch storage committed"
+    );
+    assert!(
+        !tui_registration(runtime).active,
+        "a reactivation sent before the revocation never reopens the slot"
+    );
+    assert!(
+        !admitted(runtime, &fresh_client(&owner)),
+        "the client the revocation refused stays refused"
+    );
+    owner.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_revocation_storage_refuses_still_refuses_the_client_until_a_newer_reactivation() {
+    let owner = Usage::start().await;
+    let runtime = owner.runtime();
+    let epoch = runtime.epoch(OwnerClientKind::Tui).unwrap();
+    let mut stale = revocation(runtime, OwnerClientKind::Tui, "revoke-stale");
+    stale.expected_epoch = epoch + 1;
+    assert_eq!(
+        runtime.control(stale).await.map(|reply| reply.active),
+        Err(failure("owner_control_stale")),
+        "storage refuses the revocation"
+    );
+    assert!(
+        !admitted(runtime, &owner.client),
+        "a revocation storage refused still refuses the client"
+    );
+
+    let reactivated = runtime
+        .control(reactivation("reactivate-after-refusal", epoch))
+        .await
+        .unwrap();
+    assert!(reactivated.active);
+    assert_eq!(runtime.epoch(OwnerClientKind::Tui).unwrap(), epoch + 1);
+    assert!(
+        admitted(runtime, &fresh_client(&owner)),
+        "a newer committed reactivation admits the client again"
+    );
+    owner.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_revocation_that_never_reaches_storage_still_refuses_the_client() {
+    let owner = Usage::start_waiting(LAPSE_WAIT_MS).await;
+    let runtime = owner.runtime();
+    let held = runtime.engine.owner_egress.read().await;
+    assert_eq!(
+        runtime
+            .control(revocation(runtime, OwnerClientKind::Tui, "revoke-held"))
+            .await
+            .map(|reply| reply.active),
+        Err(failure("owner_control_not_submitted")),
+        "the revocation never gets the owner barrier"
+    );
+    drop(held);
+    assert!(
+        !admitted(runtime, &owner.client),
+        "a revocation that never reached storage still refuses the client"
+    );
     owner.stop().await;
 }
