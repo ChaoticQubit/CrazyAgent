@@ -78,7 +78,6 @@ const TEAMMATES_MAX: usize = 64;
 const TRANSCRIPTS_READ_MAX: usize = 8;
 const TRANSCRIPT_TAIL_BYTES: u64 = 1024 * 1024;
 const RECEIPTS_CHECKED_MAX: usize = 64;
-const ABORTS_KEPT_MAX: usize = 32;
 const LEFT_STALE: Duration = Duration::from_secs(10 * 60);
 
 const _: () = assert!(INBOX_MAX <= PENDING_MAX && TEAMMATES_MAX >= 1);
@@ -1145,9 +1144,9 @@ fn held(
 
 /// Marks Read each message delivered or typed to one Codex agent whose mark shows in one
 /// of its home's newest rollouts with the agent's own output after it, as [`serve`] does
-/// from a Claude Code lead's transcripts, and puts back to Sent each one a turn that ended
-/// aborted dropped (`Tails`). Takes the database, the agent, its `CODEX_HOME` and the
-/// time in ms. Returns Ok or a SQLite failure.
+/// from a Claude Code lead's transcripts, and puts back to Sent each one the turn it went
+/// into dropped when it ended aborted (`Tails`). Takes the database, the agent, its
+/// `CODEX_HOME` and the time in ms. Returns Ok or a SQLite failure.
 pub fn codex_receipts(
     db: &Connection,
     agent: AgentId,
@@ -1160,10 +1159,10 @@ pub fn codex_receipts(
 /// Marks Read each message delivered or typed to the agents whose mark shows in one of the
 /// home's newest session records of the format, Claude Code transcripts
 /// (`projects/**/<session>.jsonl`) or Codex rollouts (`sessions/**/rollout-*.jsonl`), with
-/// the session's answer after it ([`answered`]), and puts back to Sent each message
-/// delivered inside a Codex turn the rollout shows ended aborted whose mark it never shows.
-/// Reads the last `TRANSCRIPT_TAIL_BYTES` of at most `TRANSCRIPTS_READ_MAX` files,
-/// read-only and never following a link.
+/// the session's answer after it ([`answered`]), and puts back to Sent each message the
+/// Codex bridge delivered into a turn (its `turn`) that a rollout shows ended aborted, when
+/// no tail shows its mark. Reads the last `TRANSCRIPT_TAIL_BYTES` of at most
+/// `TRANSCRIPTS_READ_MAX` files, read-only and never following a link.
 fn read_receipts(
     db: &Connection,
     home: &Path,
@@ -1172,53 +1171,59 @@ fn read_receipts(
     now: i64,
 ) -> Result<(), EngineError> {
     let mut unread = BTreeSet::new();
+    let mut turns: BTreeMap<MessageId, (AgentId, String)> = BTreeMap::new();
     for agent in agents {
         let limit = i64::try_from(RECEIPTS_CHECKED_MAX).map_err(state)?;
         let mut statement = db
             .prepare(
-                "SELECT id FROM coord_messages WHERE to_kind='agent' AND to_agent=?1
+                "SELECT id, turn FROM coord_messages WHERE to_kind='agent' AND to_agent=?1
                  AND receipt IN ('delivered','typed') ORDER BY id DESC LIMIT ?2",
             )
             .map_err(state)?;
         let rows = statement
-            .query_map(params![agent, limit], |row| row.get::<_, i64>(0))
+            .query_map(params![agent, limit], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, Option<String>>(1)?))
+            })
             .map_err(state)?;
         for row in rows {
+            let (id, turn) = row.map_err(state)?;
             if unread.len() < RECEIPTS_CHECKED_MAX {
-                unread.insert(row.map_err(state)?);
+                unread.insert(id);
+                if let Some(turn) = turn {
+                    turns.insert(id, (agent, turn));
+                }
             }
         }
     }
     if unread.is_empty() {
         return Ok(());
     }
+    let wanted: BTreeSet<&str> = turns.values().map(|(_, turn)| turn.as_str()).collect();
     let mut tails = Tails::default();
     let records = crate::usage::capture::records(home, format).0;
     for path in records.into_iter().take(TRANSCRIPTS_READ_MAX) {
-        scan_transcript(&path, format, &unread, &mut tails);
+        scan_transcript(&path, format, &unread, &wanted, &mut tails);
     }
     for id in &tails.read {
         advance(db, *id, Receipt::Read, now)?;
     }
-    for id in unread.difference(&tails.shown) {
-        for (after, until) in &tails.aborted {
-            if super::messages::requeue_aborted(db, *id, *after, *until, now)? {
-                break;
-            }
+    for (id, (agent, turn)) in &turns {
+        if !tails.shown.contains(id) && tails.aborted.contains(turn) {
+            super::messages::requeue_aborted(db, *id, *agent, turn, now)?;
         }
     }
     Ok(())
 }
 
 /// What the tails of a home's session records showed: the unread ids answered after their
-/// mark, every unread id whose mark shows at all, and each Codex turn that ended aborted as
-/// the span of ms, after one time and up to the other, a message delivered into it went in;
-/// Codex 0.164 drops a steer still waiting when its turn aborts (b19 P2).
+/// mark, every unread id whose mark shows at all, and the turns unread messages went into
+/// that a Codex rollout shows ended aborted; Codex 0.164 drops a steer still waiting when
+/// its turn aborts (b19 P2).
 #[derive(Default)]
 struct Tails {
     read: BTreeSet<MessageId>,
     shown: BTreeSet<MessageId>,
-    aborted: Vec<(i64, i64)>,
+    aborted: BTreeSet<String>,
 }
 
 /// Moves a message's receipt forward, leaving one that already moved past it alone.
@@ -1250,58 +1255,32 @@ fn answered(format: Format, text: &str) -> bool {
     }
 }
 
-/// Follows the turn edges of one Codex rollout line, by the line's own time: the session's
-/// start, or a turn's start when the tail began in an earlier gap, sets the time messages
-/// count from, and a turn's end moves it; an aborted end also keeps the span its messages
-/// went in, the newest `ABORTS_KEPT_MAX`. Takes the line, that time and the spans.
-fn turn_edge(text: &str, since: &mut Option<i64>, aborted: &mut Vec<(i64, i64)>) {
-    const EDGES: [&str; 4] = [
-        "\"session_meta\"",
-        "\"task_started\"",
-        "\"task_complete\"",
-        "\"turn_aborted\"",
-    ];
-    if !EDGES.iter().any(|edge| text.contains(edge)) {
-        return;
+/// Reads the turn one Codex rollout line ends aborted, an `event_msg` `turn_aborted` with
+/// its `turn_id` as 0.164 writes it, when it is one of the wanted turns. Takes the line
+/// and the wanted turn ids. Returns that turn id, or none for any other line.
+fn aborted_turn(text: &str, wanted: &BTreeSet<&str>) -> Option<String> {
+    if wanted.is_empty() || !text.contains("\"turn_aborted\"") {
+        return None;
     }
-    let Ok(record) = serde_json::from_str::<serde_json::Value>(text) else {
-        return;
-    };
-    let Some(at) = record["timestamp"]
-        .as_str()
-        .and_then(crate::usage::poll::rfc3339_ms)
-    else {
-        return;
-    };
-    let edge = match record["type"].as_str() {
-        Some("session_meta") => "session_meta",
-        Some("event_msg") => record["payload"]["type"].as_str().unwrap_or_default(),
-        _ => return,
-    };
-    match edge {
-        "session_meta" | "task_started" => {
-            since.get_or_insert(at);
-        }
-        "task_complete" => *since = Some(at),
-        "turn_aborted" => {
-            if let Some(after) = since.replace(at)
-                && after <= at
-            {
-                if aborted.len() == ABORTS_KEPT_MAX {
-                    aborted.remove(0);
-                }
-                aborted.push((after, at));
-            }
-        }
-        _ => {}
+    let record = serde_json::from_str::<serde_json::Value>(text).ok()?;
+    if record["type"] != "event_msg" || record["payload"]["type"] != "turn_aborted" {
+        return None;
     }
+    let turn = record["payload"]["turn_id"].as_str()?;
+    wanted.contains(turn).then(|| turn.to_owned())
 }
 
 /// Finds in one session record's tail the unread ids whose mark is followed by the
 /// session's answer ([`answered`]), the unread ids whose mark shows at all and, in a Codex
-/// rollout, the turns that ended aborted ([`turn_edge`]). Takes the record, its format, the
-/// unread ids and what the tails showed so far.
-fn scan_transcript(path: &Path, format: Format, unread: &BTreeSet<MessageId>, tails: &mut Tails) {
+/// rollout, the wanted turns that ended aborted ([`aborted_turn`]). Takes the record, its
+/// format, the unread ids, the turns they went into and what the tails showed so far.
+fn scan_transcript(
+    path: &Path,
+    format: Format,
+    unread: &BTreeSet<MessageId>,
+    wanted: &BTreeSet<&str>,
+    tails: &mut Tails,
+) {
     let Some((mut file, _, length)) = crate::usage::capture::open_record(path) else {
         return;
     };
@@ -1315,7 +1294,6 @@ fn scan_transcript(path: &Path, format: Format, unread: &BTreeSet<MessageId>, ta
         return;
     }
     let mut seen: BTreeSet<MessageId> = BTreeSet::new();
-    let mut since = None;
     loop {
         line.clear();
         match reader.read_until(b'\n', &mut line) {
@@ -1336,8 +1314,10 @@ fn scan_transcript(path: &Path, format: Format, unread: &BTreeSet<MessageId>, ta
                 }
             }
         }
-        if format == Format::Codex {
-            turn_edge(text, &mut since, &mut tails.aborted);
+        if format == Format::Codex
+            && let Some(turn) = aborted_turn(text, wanted)
+        {
+            tails.aborted.insert(turn);
         }
     }
 }
