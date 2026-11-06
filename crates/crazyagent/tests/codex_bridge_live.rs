@@ -138,6 +138,15 @@ fn until(limit: Duration, what: &str, done: impl Fn() -> bool) {
     }
 }
 
+/// Waits for the texts steered into a running turn to reach the agent's records.
+/// Input: how long, the agent's `CODEX_HOME`, the running turn's prompt and the steered
+/// texts. Output: Ok, or on timeout the texts still missing and whether the model's step
+/// on the prompt was still running.
+fn steered(limit: Duration, home: &Path, prompt: &str, texts: &[&str]) -> Result<(), String> {
+    let _ = (limit, home, prompt, texts);
+    Err(String::new())
+}
+
 /// Launches a real Codex app with the engine's own command in tmux, inside the real project
 /// sandbox with only its control socket granted, and waits for its app server's socket.
 /// Input: the private base folder, the agent's private `CODEX_HOME` and its terminal id.
@@ -236,6 +245,44 @@ fn now_ms() -> i64 {
             .as_millis(),
     )
     .unwrap()
+}
+
+/// The wait for steered texts, on a fake agent home: on timeout it names each text still
+/// missing, and it tells a model step still running on the prompt (only an older assistant
+/// record) from one that ended. Needs no Codex and no model.
+#[test]
+fn a_steer_timeout_names_each_missing_text_and_whether_the_step_still_runs() {
+    let root = tempfile::tempdir().unwrap();
+    let day = root.path().join("sessions/2026/11/06");
+    std::fs::create_dir_all(&day).unwrap();
+    let rollout = day.join("rollout.jsonl");
+    let line = |role: &str, text: &str| {
+        format!(
+            "{{\"type\":\"message\",\"role\":\"{role}\",\"content\":[{{\"text\":\"{text}\"}}]}}\n"
+        )
+    };
+    let running = [
+        line("user", GREETING),
+        line("assistant", "Hello."),
+        line("user", LONG_TURN),
+        line("user", NOTICE),
+    ]
+    .concat();
+    std::fs::write(&rollout, &running).unwrap();
+    let timeout = steered(Duration::ZERO, root.path(), LONG_TURN, &[NOTICE, STEER]).unwrap_err();
+    assert!(timeout.contains(&format!("{STEER:?}")), "{timeout}");
+    assert!(!timeout.contains(&format!("{NOTICE:?}")), "{timeout}");
+    assert!(timeout.contains("still running"), "{timeout}");
+
+    std::fs::write(&rollout, running + &line("assistant", "one")).unwrap();
+    let timeout = steered(Duration::ZERO, root.path(), LONG_TURN, &[STEER]).unwrap_err();
+    assert!(timeout.contains(&format!("{STEER:?}")), "{timeout}");
+    assert!(timeout.contains("ended"), "{timeout}");
+    assert!(!timeout.contains("still running"), "{timeout}");
+    assert_eq!(
+        steered(Duration::ZERO, root.path(), LONG_TURN, &[NOTICE]),
+        Ok(())
+    );
 }
 
 /// K2b live: a real tools-on Codex app launched by the engine's own command, inside the real
