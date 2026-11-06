@@ -8303,8 +8303,9 @@ fn live_serve(
 type Held = (AgentCredential, NativeProfileUse);
 
 /// Settles what an agent's harness stop leaves behind: a clean stop drops the credential
-/// copy and lease; a stop no warden confirmed keeps both for the engine's life; a Full
-/// access stop that left processes running, or could not list them, keeps both until a
+/// copy and lease; a stop no warden confirmed keeps both for the engine's life; a stop at
+/// Full access, or of a pane run without the keeper, that left processes running, or could
+/// not list them, keeps both until a
 /// listing shows none running (see [`crate::harnesses::leftovers::Leftovers::hold`]), with
 /// the copy's keeper stopped so no renewed token reaches it. Inputs: the stop's outcome and what the
 /// harness held, if anything. Output: none for a clean stop, or the plain problem, naming
