@@ -3705,10 +3705,11 @@ impl TeamRuntime {
     /// holds the relay plugin: delivers its and its native teammates' messages through the
     /// mailbox, split into the lead's part and its teammates' for a native lead, applies
     /// their reported activity and waits, answers their overlap questions and, at most once
-    /// each `events::SCAN_EVERY` per project, marks read receipts from their transcripts. A
-    /// relay that fails is skipped until the next tick, like the agents' team calls, and so
-    /// is one whose agent's stored mode cannot be read, never served in the single layout a
-    /// native lead's teammates could write into. Takes the project.
+    /// each `events::SCAN_EVERY` per project, marks read receipts from their transcripts,
+    /// and those of each running Codex agent from its rollouts. A relay or receipt read that
+    /// fails is skipped until the next tick, like the agents' team calls, and so is a relay
+    /// whose agent's stored mode cannot be read, never served in the single layout a native
+    /// lead's teammates could write into. Takes the project.
     fn serve_relays(&mut self, project: &ProjectId) {
         let now = Instant::now();
         let receipts = self
@@ -3719,20 +3720,25 @@ impl TeamRuntime {
             self.receipts_next
                 .insert(project.clone(), now + super::events::SCAN_EVERY);
         }
-        let relays: Vec<i64> = self
+        let served: Vec<(i64, Option<crate::coord::settings::HarnessKind>)> = self
             .workers
             .iter()
-            .filter(|(_, worker)| {
-                &worker.project == project
-                    && !worker.stopping
-                    && crate::coord::settings::HarnessKind::from_harness(&worker.harness)
-                        == Some(crate::coord::settings::HarnessKind::ClaudeCode)
+            .filter(|(_, worker)| &worker.project == project && !worker.stopping)
+            .map(|(id, worker)| {
+                (
+                    *id,
+                    crate::coord::settings::HarnessKind::from_harness(&worker.harness),
+                )
             })
-            .map(|(id, _)| *id)
             .collect();
-        for id in relays {
+        for (id, kind) in served {
             let home = agent_home(&self.state, id);
-            if !crate::coord::relay::installed(&home) {
+            if receipts && kind == Some(crate::coord::settings::HarnessKind::Codex) {
+                let _ = crate::coord::relay::codex_receipts(&self.connection, id, &home, now_ms());
+            }
+            if kind != Some(crate::coord::settings::HarnessKind::ClaudeCode)
+                || !crate::coord::relay::installed(&home)
+            {
                 continue;
             }
             let layout = match self.stored_mode(id) {
