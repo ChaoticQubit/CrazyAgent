@@ -123,14 +123,15 @@ async function onAddFolder(label, steps) {
   });
 }
 
-/** Picks a folder through Choose folder, answered with that folder as the macOS chooser would,
- * then chooses Move and asks to move it. Inputs: the page helpers and the real folder.
- * Output: none, once the page took the pick and Move was pressed. */
+/** Picks a folder through Choose folder, or Choose another folder after a first pick, answered
+ * with that folder as the macOS chooser would, then chooses Move and asks to move it. A new pick
+ * keeps the way chosen before, so the page reads either line for it. Inputs: the page helpers and
+ * the real folder. Output: none, once the page took the pick and Move was pressed. */
 async function askMove(me, folder) {
   const picked = run.log.picked;
   run.picks.push(folder);
-  await me.click("Choose folder");
-  await me.waitFor(`the picked folder ${basename(folder)}`, (text) => text.includes(`${basename(folder)} stays where it is.`));
+  await me.click((await me.seen()).includes("Choose another folder") ? "Choose another folder" : "Choose folder");
+  await me.waitFor(`the picked folder ${basename(folder)}`, (text) => text.includes(`${basename(folder)} stays where it is.`) || text.includes(`${basename(folder)} goes to `));
   assert.equal(run.log.picked, picked + 1, "the owner picked the folder once");
   await me.click("Move", WAYS);
   await me.click("Move into projects folder");
@@ -297,16 +298,17 @@ test("Use where it is in the Move anyway question sets the folder up where it is
   assert.equal(readFileSync(join(real, "notes", "todo.md"), "utf8"), notes, "the folder stays where it is with its files");
   assert.ok(!existsSync(join(run.projects, name)), `nothing named ${name} lands in the projects folder`);
   assert.deepEqual(addsOf(real), [], "Use where it is sends no Add folder call");
-  const found = (await value(run.bridge, "desktop_found_projects")).filter((entry) => entry.path === real);
-  assert.equal(found.length, 1, `the engine lists ${real} once`);
-  assert.ok(["onboarding", "ready"].includes(found[0].state), `the engine sets ${real} up where it is: ${JSON.stringify(found[0])}`);
-  assert.equal(found[0].project_id, id, "the setup the page opened is the folder's project");
+  const listed = (await value(run.bridge, "desktop_project_list")).items.filter((item) => item.id === id);
+  assert.equal(listed.length, 1, `the engine lists the project ${id} the page set up once`);
+  const setup = await value(run.bridge, "desktop_project_setup", { id });
+  assert.equal(setup.folder, join(real, ".crazyagent"), `the engine sets ${name} up where it is: ${JSON.stringify(setup.folder)}`);
 });
 
 /** The linked worktree warnings (DEC-115 addendum, add-folder r2 close): a repository with a
  * linked worktree is asked about with that worktree listed, a folder that is itself a linked
  * worktree is asked about with the staged changes loss first, and closing either question
- * changes nothing on disk or in git. */
+ * changes nothing on disk or in git. Close keeps Move chosen, and asking to move again asks the
+ * same question again, with no Add folder call. */
 test("the Move anyway question names linked worktrees, and closing it changes nothing", { timeout: 600000 }, async () => {
   const made = scratchRepo(join(run.repos, "garden-log"));
   const repoName = basename(made.repo);
@@ -318,7 +320,12 @@ test("the Move anyway question names linked worktrees, and closing it changes no
     inOrder(repoBody, [SAID.close_apps, SAID.old_place, SAID.worktrees, made.worktree], "a Move of a repository with a linked worktree");
     assert.ok(!repoBody.includes(SAID.linked_worktree), "the repository is not itself a linked worktree");
     await me.click("Close", "dialog[open] button");
-    await me.waitFor("the question closed", (text) => !text.includes(`Move ${repoName} anyway?`) && text.includes(`${repoName} stays where it is.`));
+    await me.waitFor("the question closed with Move still chosen", (text) => !text.includes(`Move ${repoName} anyway?`) && text.includes(`${repoName} goes to `));
+    await me.click("Move into projects folder");
+    assert.equal(await question(page, me, repoName), repoBody, "asking to move again after Close asks the same question again");
+    await me.click("Close", "dialog[open] button");
+    await me.waitFor("the asked again question closed", (text) => !text.includes(`Move ${repoName} anyway?`) && text.includes(`${repoName} goes to `));
+    assert.deepEqual(addsOf(made.repo), [], "asking to move again after Close sends no Add folder call");
 
     await askMove(me, made.worktree);
     const treeBody = await question(page, me, treeName);
@@ -326,11 +333,12 @@ test("the Move anyway question names linked worktrees, and closing it changes no
     inOrder(treeBody, [SAID.linked_worktree, SAID.close_apps, SAID.old_place], "a Move of a folder that is a linked worktree");
     assert.ok(!treeBody.includes(SAID.worktrees), "a worktree has no linked worktrees of its own");
     await me.click("Close", "dialog[open] button");
-    await me.waitFor("the second question closed", (text) => !text.includes(`Move ${treeName} anyway?`) && text.includes(`${treeName} stays where it is.`));
+    await me.waitFor("the second question closed", (text) => !text.includes(`Move ${treeName} anyway?`) && text.includes(`${treeName} goes to `));
     await me.capture("worktrees-closed");
   });
   assert.deepEqual(addsOf(made.repo), [], "closing the question sends no Add folder call for the repository");
   assert.deepEqual(addsOf(made.worktree), [], "closing the question sends no Add folder call for the worktree");
+  assert.ok(existsSync(join(made.repo, ".git")), "the repository stays where it is with its git");
   assert.deepEqual(linkedWorktrees(made.repo), [made.worktree], "the repository keeps its linked worktree");
   assert.equal(git(made.worktree, ["rev-parse", "--abbrev-ref", "HEAD"]), "trial4-side", "git still works in the worktree on its branch");
   for (const name of [repoName, treeName]) assert.ok(!existsSync(join(run.projects, name)), `nothing named ${name} lands in the projects folder`);
