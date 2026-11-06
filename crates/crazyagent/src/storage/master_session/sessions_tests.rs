@@ -952,10 +952,38 @@ async fn resume_refuses_a_session_the_current_settings_or_engine_run_no_longer_a
     case.close().await;
 }
 
+/// Has the owner replace the native pool with one serving the given projects, its
+/// members, roles, fallback and quota policy as in CONFIG. Inputs: the case, the edit id
+/// and the projects. Output: the owner's result.
+async fn replace_native_pool(case: &Case, id: &str, projects: &[&str]) -> OwnerResult {
+    let (expected_config_id, expected_source_hash, _) = case.basis().await;
+    case.apply(
+        id,
+        OwnerMutation::ModelAccess {
+            expected_config_id,
+            expected_source_hash,
+            edit: ModelAccessEdit::ReplacePool {
+                pool: AccountPool {
+                    id: reference("native-pool"),
+                    name: None,
+                    members: vec![reference("native-connection")],
+                    projects: projects.iter().copied().map(reference).collect(),
+                    roles: vec![reference("project_leader")],
+                    fallback_allowed: false,
+                    provider_quota_policy: Default::default(),
+                },
+            },
+        },
+    )
+    .await
+}
+
 /// Parks a used native session behind a fresh one, then has the owner replace the native
 /// pool with one serving the given projects, as adding a folder again did in run 7 (N-D15).
-/// A second project exists first so the pool can name it. Inputs: the case and the
-/// projects. Output: the parked session, after asserting the edit changed the settings.
+/// A second project exists first so the pool can name it, and one unchanged pool edit runs
+/// before any session opens: every pool edit writes the assigned pools' approvals and
+/// destinations into the settings (config.rs:912-975), which CONFIG lacks for the native
+/// connection. Inputs: the case and the projects. Output: the parked session.
 async fn parked_native_after_pool_edit(case: &Case, projects: &[&str]) -> SessionId {
     let repository = case.root.path().join("joined-repository");
     std::fs::create_dir(&repository).unwrap();
@@ -974,6 +1002,10 @@ async fn parked_native_after_pool_edit(case: &Case, projects: &[&str]) -> Sessio
         .await,
         OwnerResult::Applied
     );
+    assert_eq!(
+        replace_native_pool(case, "settle-native-pool", &["session-project"]).await,
+        OwnerResult::Applied
+    );
     assert_eq!(case.open("open-rcli").await, OwnerResult::Applied);
     let rcli = case.shown().await;
     case.used_in_terminal(&rcli.session_id);
@@ -985,34 +1017,14 @@ async fn parked_native_after_pool_edit(case: &Case, projects: &[&str]) -> Sessio
     let native = case.shown().await;
     case.used_in_terminal(&native.session_id);
     assert_eq!(case.renew("renew-last", false).await, OwnerResult::Applied);
-    let (expected_config_id, expected_source_hash, _) = case.basis().await;
-    assert_eq!(native.config_id, expected_config_id);
-    let replaced = case
-        .apply(
-            "replace-native-pool",
-            OwnerMutation::ModelAccess {
-                expected_config_id: expected_config_id.clone(),
-                expected_source_hash,
-                edit: ModelAccessEdit::ReplacePool {
-                    pool: AccountPool {
-                        id: reference("native-pool"),
-                        name: None,
-                        members: vec![reference("native-connection")],
-                        projects: projects.iter().copied().map(reference).collect(),
-                        roles: vec![reference("project_leader")],
-                        fallback_allowed: false,
-                        provider_quota_policy: Default::default(),
-                    },
-                },
-            },
-        )
-        .await;
-    assert_eq!(replaced, OwnerResult::Applied);
-    let (after, _, _) = case.basis().await;
-    assert_ne!(
-        after, expected_config_id,
-        "the pool edit changes the settings"
+    let (bound, _, _) = case.basis().await;
+    assert_eq!(native.config_id, bound);
+    assert_eq!(
+        replace_native_pool(case, "replace-native-pool", projects).await,
+        OwnerResult::Applied
     );
+    let (after, _, _) = case.basis().await;
+    assert_ne!(after, bound, "the pool edit changes the settings");
     native.session_id
 }
 
