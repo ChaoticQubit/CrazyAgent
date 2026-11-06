@@ -2352,6 +2352,97 @@ mod creation_recovery_tests {
     }
 
     #[tokio::test]
+    async fn actual_barrier_retry_the_engine_refuses_busy_stays_allowed_and_applies_once_served() {
+        let mut h = RealNative::new().await;
+        let submission = h.submission();
+        h.native.prepare_creation(&submission).await.unwrap();
+        h.control(OwnerDecision::Revoke, "revoke-before-busy-retry")
+            .await;
+        let result = h
+            .native
+            .deliver_creation(MutationDelivery::Submit)
+            .await
+            .map(Box::new);
+        let event = h.native.creation_event(submission.clone(), result);
+        assert!(event.result.is_err());
+        assert!(event.retained);
+        h.control(OwnerDecision::Reactivate, "reactivate-before-busy-retry")
+            .await;
+        let (_, access) = h.native.attach().await;
+        assert!(matches!(access, OwnerEvent::Access { ready: true, .. }));
+        let barrier = h
+            .native
+            .creation(CreationJob {
+                submission: submission.clone(),
+                delivery: MutationDelivery::Reconcile,
+            })
+            .await;
+        assert!(matches!(
+            barrier.result.as_deref(),
+            Ok(OwnerResponse::NotRecordedAtBarrier { .. })
+        ));
+
+        let owner_socket = std::fs::read_dir(h.root.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path().join("owner.sock"))
+            .find(|path| path.exists())
+            .expect("the engine serves its owner socket in a generation under the root");
+        let mut silent = Vec::new();
+        for _ in 0..crate::protocol::OWNER_CLIENTS_MAX {
+            silent.push(
+                crate::spawn_gate::connect_unix(&owner_socket)
+                    .await
+                    .unwrap(),
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let busy = h
+            .native
+            .creation(CreationJob {
+                submission: submission.clone(),
+                delivery: MutationDelivery::Retry,
+            })
+            .await;
+        assert!(
+            matches!(busy.result.as_deref(), Ok(OwnerResponse::Rejected { code }) if code == "owner_busy"),
+            "the engine refuses the retry while its owner queue is full: {:?}",
+            busy.result
+        );
+        assert!(
+            busy.retained,
+            "the busy retry changed nothing, so the submission is kept"
+        );
+        drop(silent);
+
+        let mut applied = None;
+        for _ in 0..50 {
+            let event = h
+                .native
+                .creation(CreationJob {
+                    submission: submission.clone(),
+                    delivery: MutationDelivery::Retry,
+                })
+                .await;
+            if !matches!(event.result.as_deref(), Ok(OwnerResponse::Rejected { code }) if code == "owner_busy")
+            {
+                applied = Some(event);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let applied = applied.expect("the engine serves again once the queue empties");
+        assert!(
+            matches!(applied.result.as_deref(), Ok(OwnerResponse::Applied { operation })
+                if operation.result == OwnerResult::Applied),
+            "the same retry applies once the engine has room: {:?}",
+            applied.result
+        );
+        assert!(!applied.retained);
+        assert!(h.native.creation_pending.is_none());
+        h.close().await;
+    }
+
+    #[tokio::test]
     async fn a_creation_the_engine_refuses_frees_its_slot_for_the_next_creation_and_master_change()
     {
         let mut h = RealNative::new().await;

@@ -4348,3 +4348,130 @@ async fn a_creation_reconcile_the_full_queue_refuses_keeps_the_submission_and_re
         "the same submission and project id, never a second one"
     );
 }
+
+/// Opens New project on a real engine, names the project Tidepool and presses Enter on
+/// Review, then takes every request that event made. Takes the engine. Returns the shell,
+/// its connection and the submission the creation sent.
+async fn submitted_creation(
+    engine: &Engine,
+) -> (Shell, Connection, crate::tui::client::CreationSubmission) {
+    let mut connection = engine.connect();
+    let mut ctx = ctx(80, 24);
+    ctx.store.pools = Load::Ready(Vec::new());
+    let screen = open(&Place::NewProject, &mut ctx);
+    let mut shell = Shell::with(ctx, screen);
+    pump(&mut shell, &mut connection).await;
+    for character in "Tidepool".chars() {
+        shell.key(Key::Char(character));
+    }
+    shell.key(Key::ShiftLeft);
+    shell.key(Key::Enter);
+    let submission = std::iter::from_fn(|| shell.ctx.next_request())
+        .find_map(|request| match request {
+            Request::Creation(job) => Some(job.submission),
+            _ => None,
+        })
+        .expect("Enter sends the creation");
+    while shell.ctx.next_request().is_some() {}
+    (shell, connection, submission)
+}
+
+/// Hands the page one creation reply from the engine worker. Takes the shell, the
+/// submission, the result and whether the worker still holds the submission. Returns the
+/// creation requests the page sent in answer, oldest first.
+fn creation_reply(
+    shell: &mut Shell,
+    submission: &crate::tui::client::CreationSubmission,
+    result: Result<Box<OwnerResponse>, String>,
+    retained: bool,
+) -> Vec<crate::tui::client::CreationJob> {
+    shell.arrive(owner_arrival(OwnerEvent::Creation(Box::new(
+        crate::tui::client::CreationEvent {
+            submission: submission.clone(),
+            operation: None,
+            result,
+            retained,
+        },
+    ))));
+    std::iter::from_fn(|| shell.ctx.next_request())
+        .filter_map(|request| match request {
+            Request::Creation(job) => Some(*job),
+            _ => None,
+        })
+        .collect()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reconcile_that_finds_the_creation_unrecorded_retries_it_and_a_busy_retry_the_engine_dropped_says_busy()
+ {
+    use crate::tui::client::MutationDelivery;
+    let engine = Engine::start().await;
+    let (mut shell, _connection, submission) = submitted_creation(&engine).await;
+
+    let sent = creation_reply(
+        &mut shell,
+        &submission,
+        Err("trusted_owner_connection_failed".into()),
+        true,
+    );
+    assert_eq!(sent.len(), 1, "a lost reply is reconciled once");
+    assert!(matches!(sent[0].delivery, MutationDelivery::Reconcile));
+
+    let sent = creation_reply(
+        &mut shell,
+        &submission,
+        Ok(Box::new(OwnerResponse::NotRecordedAtBarrier {
+            revision: crate::protocol::Cursor::new(0),
+        })),
+        true,
+    );
+    assert_eq!(
+        sent.len(),
+        1,
+        "a creation the engine never recorded is sent again as the same request: {}",
+        render(&mut shell, 160, 24)
+    );
+    assert!(matches!(sent[0].delivery, MutationDelivery::Retry));
+    assert_eq!(
+        sent[0].submission, submission,
+        "the same submission and project id, never a second one"
+    );
+
+    let sent = creation_reply(
+        &mut shell,
+        &submission,
+        Ok(Box::new(OwnerResponse::Rejected {
+            code: crate::tui::seam::OWNER_BUSY.to_owned(),
+        })),
+        false,
+    );
+    assert!(sent.is_empty());
+    let shown = render(&mut shell, 160, 24);
+    assert!(
+        shown.contains("CrazyAgent is busy with other windows."),
+        "a busy retry the engine dropped changed nothing, so the page says busy: {shown}"
+    );
+    shell.tick();
+    assert!(
+        std::iter::from_fn(|| shell.ctx.next_request())
+            .all(|request| !matches!(request, Request::Creation(_))),
+        "nothing is held for the busy retry, so nothing is sent again"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_second_lost_reply_on_a_recovering_creation_says_the_project_is_unconfirmed() {
+    let engine = Engine::start().await;
+    let (mut shell, _connection, submission) = submitted_creation(&engine).await;
+    let lost = || Err("trusted_owner_connection_failed".to_owned());
+
+    let sent = creation_reply(&mut shell, &submission, lost(), true);
+    assert_eq!(sent.len(), 1, "a lost reply is reconciled once");
+    let sent = creation_reply(&mut shell, &submission, lost(), true);
+    assert!(sent.is_empty(), "recovery runs once");
+    let shown = render(&mut shell, 160, 24);
+    assert!(
+        shown.contains("CrazyAgent could not confirm the new project."),
+        "the reconcile's reply was lost too, so the outcome is still unknown: {shown}"
+    );
+}
