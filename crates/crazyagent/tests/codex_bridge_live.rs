@@ -32,6 +32,11 @@ const PROJECT: &str = "bridge-live";
 const START: Duration = Duration::from_secs(60);
 const TURN: Duration = Duration::from_secs(400);
 const GROUP_GONE: Duration = Duration::from_secs(10);
+const TURN_EVENTS: [&str; 3] = [
+    r#""type":"task_started""#,
+    r#""type":"task_complete""#,
+    r#""type":"turn_aborted""#,
+];
 
 /// A test's private tmux server and the process group of the app's pane, read from tmux
 /// once the app started. Dropping it kills that group and waits until it is gone, so the
@@ -143,6 +148,27 @@ fn until(limit: Duration, what: &str, done: impl Fn() -> bool) {
         assert!(Instant::now() < deadline, "timed out waiting for {what}");
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+/// Tells whether steered texts joined the running turn of a prompt: the rollout holding the
+/// prompt records each text after it with no turn start, end or abort in between, so no
+/// text reached the agent as a new turn. Input: the agent's `CODEX_HOME`, the prompt and the
+/// texts. Output: Ok, or the first text outside that turn and the turn event before it.
+fn joined(home: &Path, prompt: &str, texts: &[&str]) -> Result<(), String> {
+    let record = rollout_with(home, prompt).ok_or_else(|| format!("no record holds {prompt:?}"))?;
+    let start = record.find(prompt).unwrap();
+    for text in texts {
+        let Some(at) = record[start..].find(text) else {
+            return Err(format!("{text:?} is not recorded after {prompt:?}"));
+        };
+        let between = &record[start..start + at];
+        if let Some(event) = TURN_EVENTS.iter().find(|event| between.contains(*event)) {
+            return Err(format!(
+                "{text:?} joined no running turn: {event} lies between {prompt:?} and it"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Waits for the texts steered into a running turn to reach the agent's records.
@@ -318,6 +344,38 @@ fn a_steer_timeout_names_each_missing_text_and_whether_the_step_still_runs() {
     );
 }
 
+/// The proof that a steer joined a running turn, on a fake agent home: a text recorded in
+/// the prompt's turn joined it, and one recorded after that turn ended, aborted or another
+/// began did not. Needs no Codex and no model.
+#[test]
+fn a_steered_text_joined_the_busy_turn_only_with_no_turn_event_before_it() {
+    let root = tempfile::tempdir().unwrap();
+    let day = root.path().join("sessions/2026/11/06");
+    std::fs::create_dir_all(&day).unwrap();
+    let rollout = day.join("rollout.jsonl");
+    let user = |text: &str| {
+        format!(
+            "{{\"type\":\"response_item\",\"payload\":{{\"type\":\"message\",\"role\":\"user\",\"content\":[{{\"text\":\"{text}\"}}]}}}}\n"
+        )
+    };
+    let event = |kind: &str| {
+        format!(
+            "{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"{kind}\",\"turn_id\":\"t\"}}}}\n"
+        )
+    };
+    let busy = [event("task_started"), user(BUSY_TURN), user(NOTICE)].concat();
+    std::fs::write(&rollout, &busy).unwrap();
+    assert_eq!(joined(root.path(), BUSY_TURN, &[NOTICE]), Ok(()));
+    let missing = joined(root.path(), BUSY_TURN, &[STEER]).unwrap_err();
+    assert!(missing.contains("not recorded"), "{missing}");
+    for kind in ["task_complete", "turn_aborted", "task_started"] {
+        std::fs::write(&rollout, [busy.clone(), event(kind), user(STEER)].concat()).unwrap();
+        let stray = joined(root.path(), BUSY_TURN, &[NOTICE, STEER]).unwrap_err();
+        assert!(stray.contains(&format!("{STEER:?}")), "{stray}");
+        assert!(stray.contains(kind), "{stray}");
+    }
+}
+
 /// K2b live: a real tools-on Codex app launched by the engine's own command, inside the real
 /// project sandbox with only its control socket granted, starts its app server through the
 /// bridge and attaches to it (a tools-off app runs without the shared app server and is
@@ -340,9 +398,11 @@ fn a_real_codex_app_takes_coord_messages_through_its_app_server_idle_and_busy() 
         recorded(&home, BUSY_TURN)
     });
     assert_eq!(codex::deliver(&home, STEER, true), Bridged::Delivered);
-    if let Err(timeout) = steered(TURN, &home, BUSY_TURN, &[STEER]) {
+    if let Err(problem) =
+        steered(TURN, &home, BUSY_TURN, &[STEER]).and_then(|()| joined(&home, BUSY_TURN, &[STEER]))
+    {
         panic!(
-            "{timeout}; the test folder is kept at {}",
+            "{problem}; the test folder is kept at {}",
             root.keep().display()
         );
     }
@@ -434,9 +494,11 @@ fn a_working_codex_agent_gets_an_owner_notice_and_a_nudge_steered_by_the_deliver
         ("delivered".to_owned(), "delivered".to_owned()),
         "the working agent's notice and nudge went through the bridge at once"
     );
-    if let Err(timeout) = steered(TURN, &home, BUSY_TURN, &[NOTICE, reminder]) {
+    if let Err(problem) = steered(TURN, &home, BUSY_TURN, &[NOTICE, reminder])
+        .and_then(|()| joined(&home, BUSY_TURN, &[NOTICE, reminder]))
+    {
         panic!(
-            "{timeout}; the test folder is kept at {}",
+            "{problem}; the test folder is kept at {}",
             root.keep().display()
         );
     }
