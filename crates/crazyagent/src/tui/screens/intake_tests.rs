@@ -827,10 +827,10 @@ async fn a_move_reads_the_folder_size_first_and_warns_about_unreadable_files() {
     let mut engine = Engine::start().await;
     engine.set_home().await;
     let source = engine.user().join("outside").join("notes");
-    std::fs::create_dir_all(source.join("secret")).unwrap();
+    std::fs::create_dir_all(source.join(".secret")).unwrap();
     std::fs::write(source.join("README.md"), "notes\n").unwrap();
     std::fs::set_permissions(
-        source.join("secret"),
+        source.join(".secret"),
         std::fs::Permissions::from_mode(0o000),
     )
     .unwrap();
@@ -845,7 +845,7 @@ async fn a_move_reads_the_folder_size_first_and_warns_about_unreadable_files() {
     shell.key(Key::Enter);
     let sent = pump(&mut shell, &mut connection).await;
     std::fs::set_permissions(
-        source.join("secret"),
+        source.join(".secret"),
         std::fs::Permissions::from_mode(0o755),
     )
     .unwrap();
