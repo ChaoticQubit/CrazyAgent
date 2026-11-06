@@ -5,7 +5,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 const { PackConfirmDialogs, PackSettingsView, packConfirm, TOOLS_BUSY } = await import("../src/screens/settings/pack.tsx");
-const { ProjectsHomeSettingsView, homePickProblem, homeMoveLine } = await import("../src/screens/settings/projects-home.tsx");
+const { ProjectsHomeSettingsView, homePickProblem, homeMoveLine, sizedAsk } = await import("../src/screens/settings/projects-home.tsx");
 const { GitHubSettingsView, GitHubAccountView } = await import("../src/screens/settings/github.tsx");
 const { GitHubSignIn } = await import("../src/screens/intake/clone.tsx");
 const { Icon } = await import("../src/ui/icon.tsx");
@@ -218,4 +218,14 @@ test("Settings, Pack, Projects folder and GitHub draw their Lucide icons", () =>
   assert.ok(picked.includes(`${svg("folder-input", 15)}Move my projects there</button>`), picked);
   const account = html(GitHubAccountView, { status: { signed_in: true, login: "mira", method: "device", waiting: false, problem: null }, busy: false, problem: "", onSignOut: forbidden });
   assert.ok(account.includes(`<h2 class="row">${svg("git-branch", 16)}GitHub account</h2>`), account);
+});
+
+test("Move my projects waits for a size and names why a folder could not be measured", () => {
+  assert.deepEqual(sizedAsk("/Users/mira/Work", ok({ bytes: 3 * GB })), { path: "/Users/mira/Work", bytes: 3 * GB, sizeProblem: "" });
+  assert.deepEqual(sizedAsk("/Users/mira/Work", ok({ bytes: null, size_problem: "folder_size_timeout" })),
+    { path: "/Users/mira/Work", bytes: null, sizeProblem: "This folder is very large. Use it where it is instead of copying it." });
+  assert.deepEqual(sizedAsk("/Users/mira/Work", ok({ bytes: null })),
+    { path: "/Users/mira/Work", bytes: null, sizeProblem: "Some files in that folder can't be read." });
+  assert.deepEqual(sizedAsk("/Users/mira/Work", notReady), { path: "/Users/mira/Work", bytes: null, sizeProblem: "Measuring the folder isn't in this build." });
+  assert.equal(sizedAsk("/Users/mira/Work", { kind: "error", code: "folder_size_unsafe", message: "That folder can't be measured." }).sizeProblem, "That folder can't be measured.");
 });
