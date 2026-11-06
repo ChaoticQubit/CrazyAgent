@@ -241,7 +241,7 @@ after(async () => {
   assert.deepEqual(left, [], "the scratch disk is detached and its image deleted");
   assert.deepEqual(run.log.invalid, [], "the bridge accepted every command's arguments");
   assert.deepEqual(run.log.dropped, [], "the bridge answered every call");
-  if (run.root && !process.env.E2E_EVIDENCE) rmSync(run.root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  if (run.root) rmSync(run.root, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
 });
 
 /** Move anyway on a folder with no git (DEC-115 addendum, leader 09:35 N-D35): the question shows
