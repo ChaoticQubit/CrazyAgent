@@ -3391,17 +3391,18 @@ fn time_limits_are_owner_settings_off_by_default_from_the_listed_choices() {
         Some(IDLE_STOP_DEFAULT_SECS),
         "an idle sub-agent stops after 10 minutes until the owner changes it"
     );
-    let limits = |turn_secs, session_secs, idle_secs| TeamAction::TimeLimits {
+    let limits = |turn_secs, session_secs, idle_secs, revision| TeamAction::TimeLimits {
         project_id: project.clone(),
         turn_secs,
         session_secs,
         idle_secs,
+        revision,
     };
     for refused in [
-        limits(Some(60), None, None),
-        limits(Some(3600), Some(1800), None),
-        limits(Some(3600), Some(86_400), None),
-        limits(None, None, Some(300)),
+        limits(Some(60), None, None, 0),
+        limits(Some(3600), Some(1800), None, 0),
+        limits(Some(3600), Some(86_400), None, 0),
+        limits(None, None, Some(300), 0),
     ] {
         assert_eq!(
             refused.validate().unwrap_err().0,
@@ -3410,13 +3411,13 @@ fn time_limits_are_owner_settings_off_by_default_from_the_listed_choices() {
         );
     }
     assert!(
-        limits(None, Some(3600), None).validate().is_ok(),
+        limits(None, Some(3600), None, 0).validate().is_ok(),
         "a session limit needs no task limit"
     );
     let pool = access("team-limits", &["local-a"]);
     let tx = connection.transaction().unwrap();
     assert_eq!(
-        execute(&tx, &pool, &limits(Some(3600), Some(28_800), Some(120))).unwrap(),
+        execute(&tx, &pool, &limits(Some(3600), Some(28_800), Some(120), 0)).unwrap(),
         Outcome::Applied
     );
     tx.commit().unwrap();
@@ -3439,7 +3440,7 @@ fn time_limits_are_owner_settings_off_by_default_from_the_listed_choices() {
     );
     let tx = connection.transaction().unwrap();
     assert_eq!(
-        execute(&tx, &pool, &limits(None, None, None)).unwrap(),
+        execute(&tx, &pool, &limits(None, None, None, 1)).unwrap(),
         Outcome::Applied
     );
     tx.commit().unwrap();
@@ -3462,6 +3463,87 @@ fn time_limits_are_owner_settings_off_by_default_from_the_listed_choices() {
         time_limits(&connection, &project).unwrap_err().0,
         "team_time_limits_invalid"
     );
+}
+
+#[test]
+fn a_team_settings_change_from_an_old_read_is_refused_and_the_newer_change_stays() {
+    let (_directory, mut connection) = database();
+    let setup = stored(
+        "team-stale",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![
+                setup.project_id.as_str(),
+                serde_json::to_string(&setup).unwrap()
+            ],
+        )
+        .unwrap();
+    let project = setup.project_id.clone();
+    let pool = access("team-stale", &["local-a"]);
+    let old = status(&connection, &setup).unwrap().settings_revision;
+    let limits = |session_secs, revision| TeamAction::TimeLimits {
+        project_id: project.clone(),
+        turn_secs: None,
+        session_secs,
+        idle_secs: Some(IDLE_STOP_DEFAULT_SECS),
+        revision,
+    };
+    let switch = |mode, revision| TeamAction::OnHarnessSwitch {
+        project_id: project.clone(),
+        mode,
+        revision,
+    };
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(&tx, &pool, &limits(Some(7200), old)).unwrap(),
+        Outcome::Applied,
+        "the desktop change from the current read applies"
+    );
+    tx.commit().unwrap();
+    let newer = status(&connection, &setup).unwrap().settings_revision;
+    assert_ne!(newer, old, "an applied change moves the revision");
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(&tx, &pool, &limits(None, old)).unwrap(),
+        rejected("stale_revision"),
+        "a TUI change from the read before the desktop change is refused"
+    );
+    assert_eq!(
+        execute(&tx, &pool, &switch(SwitchMode::Fresh, old)).unwrap(),
+        rejected("stale_revision"),
+        "the On harness switch setting from the old read is refused too"
+    );
+    tx.commit().unwrap();
+    let shown = status(&connection, &setup).unwrap();
+    assert_eq!(
+        (shown.session_limit_secs, shown.on_harness_switch),
+        (Some(7200), SwitchMode::Carry),
+        "the desktop session limit survives and the switch setting is unchanged"
+    );
+    assert_eq!(
+        shown.settings_revision, newer,
+        "a refusal leaves the revision"
+    );
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(&tx, &pool, &switch(SwitchMode::Fresh, newer)).unwrap(),
+        Outcome::Applied,
+        "a change from the current read applies"
+    );
+    tx.commit().unwrap();
+    let shown = status(&connection, &setup).unwrap();
+    assert_eq!(
+        (shown.session_limit_secs, shown.on_harness_switch),
+        (Some(7200), SwitchMode::Fresh)
+    );
+    assert_ne!(shown.settings_revision, newer);
 }
 
 /// Fills a project's team with long history: `before` finished tasks, two queued tasks,
@@ -3840,14 +3922,14 @@ fn a_native_teammate_row_reads_idle_while_its_session_rests_and_working_once_it_
     );
 }
 
-/// The late team columns of `team_agents` and `team_tasks` an engine database has. Takes
-/// the connection. Returns (table, column) pairs in name order.
+/// The late team columns of `team_agents`, `team_tasks` and `team_task_pins` an engine
+/// database has. Takes the connection. Returns (table, column) pairs in name order.
 fn late_columns(connection: &Connection) -> Vec<(String, String)> {
     let mut statement = connection
         .prepare(
             "SELECT m.name,p.name FROM sqlite_schema m, pragma_table_info(m.name) p
-             WHERE m.type='table' AND m.name IN ('team_agents','team_tasks')
-             AND p.name IN ('pane','mode','hookless') ORDER BY 1,2",
+             WHERE m.type='table' AND m.name IN ('team_agents','team_tasks','team_task_pins')
+             AND p.name IN ('pane','mode','hookless','held') ORDER BY 1,2",
         )
         .unwrap();
     statement
@@ -3879,8 +3961,12 @@ fn an_engine_db_from_before_lead_modes_gains_its_late_columns_once() {
                 created_ms INTEGER NOT NULL, started_ms INTEGER, finished_ms INTEGER,
                 session TEXT, parent INTEGER
             );
+            CREATE TABLE team_task_pins (
+                task INTEGER PRIMARY KEY, project TEXT NOT NULL, agent INTEGER NOT NULL
+            );
             INSERT INTO team_agents(project,role,harness,tools,status,created_ms,heartbeat_ms)
-                VALUES ('old','sub','claude-code',1,'stopped',1,1);",
+                VALUES ('old','sub','claude-code',1,'stopped',1,1);
+            INSERT INTO team_task_pins(task,project,agent) VALUES (7,'old',1);",
         )
         .unwrap();
     assert!(late_columns(&connection).is_empty());
@@ -3888,6 +3974,7 @@ fn an_engine_db_from_before_lead_modes_gains_its_late_columns_once() {
         ("team_agents", "hookless"),
         ("team_agents", "mode"),
         ("team_agents", "pane"),
+        ("team_task_pins", "held"),
         ("team_tasks", "mode"),
     ]
     .iter()
@@ -3905,6 +3992,15 @@ fn an_engine_db_from_before_lead_modes_gains_its_late_columns_once() {
         )
         .unwrap();
     assert_eq!(old, (None, None, 0));
+    let held: i64 = connection
+        .query_row("SELECT held FROM team_task_pins WHERE task=7", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        held, 0,
+        "a pin from before the mark counts as its task's own"
+    );
 }
 
 #[test]
@@ -5201,6 +5297,113 @@ fn every_new_folder_limit_choice_is_saved_and_shown() {
     assert_eq!(
         new_folder_files_max(&connection, &ProjectId::new("team-elsewhere").unwrap()).unwrap(),
         NEW_FOLDER_FILES_DEFAULT,
+        "the choice is per project"
+    );
+}
+/// The six Messages settings (MSG-E) start at the proposed defaults, an owner save through the
+/// team action is stored whole and read back in the team status, a value outside the listed
+/// choices is refused before any row is written, and the choice is per project.
+#[test]
+fn messages_settings_start_at_the_defaults_save_whole_per_project_and_refuse_unlisted_values() {
+    use agent_messages::{MessageSettings, ResultsShown};
+    let (_directory, mut connection) = database();
+    let setup = stored("team-messages", vec![]);
+    let other = stored("team-messages-other", vec![]);
+    for stored in [&setup, &other] {
+        connection
+            .execute(
+                "INSERT INTO project_setups VALUES (?1,?2)",
+                params![
+                    stored.project_id.as_str(),
+                    serde_json::to_string(stored).unwrap()
+                ],
+            )
+            .unwrap();
+    }
+    assert_eq!(
+        status(&connection, &setup).unwrap().message_settings,
+        MessageSettings {
+            keep_master_messages: true,
+            kept_per_project: 2000,
+            progress_shown: true,
+            results: ResultsShown::FirstLine,
+            owner_items_shown: true,
+            page_size: 50,
+        },
+        "the proposal's defaults until the owner saves"
+    );
+    let save = |connection: &mut Connection, settings: MessageSettings| {
+        let tx = connection.transaction().unwrap();
+        let outcome = execute(
+            &tx,
+            &access("team-messages", &["local-a"]),
+            &TeamAction::MessageSettings {
+                project_id: setup.project_id.clone(),
+                settings,
+            },
+        );
+        tx.commit().unwrap();
+        outcome
+    };
+    let chosen = MessageSettings {
+        keep_master_messages: false,
+        kept_per_project: 5000,
+        progress_shown: false,
+        results: ResultsShown::Full,
+        owner_items_shown: false,
+        page_size: 100,
+    };
+    assert_eq!(save(&mut connection, chosen).unwrap(), Outcome::Applied);
+    assert_eq!(
+        status(&connection, &setup).unwrap().message_settings,
+        chosen
+    );
+    for kept in agent_messages::KEPT_CHOICES {
+        for page_size in agent_messages::PAGE_CHOICES {
+            let listed = MessageSettings {
+                kept_per_project: kept,
+                page_size,
+                ..chosen
+            };
+            assert_eq!(save(&mut connection, listed).unwrap(), Outcome::Applied);
+            assert_eq!(
+                status(&connection, &setup).unwrap().message_settings,
+                listed
+            );
+        }
+    }
+    let last = status(&connection, &setup).unwrap().message_settings;
+    for unlisted in [
+        MessageSettings {
+            kept_per_project: 1000,
+            ..chosen
+        },
+        MessageSettings {
+            kept_per_project: 0,
+            ..chosen
+        },
+        MessageSettings {
+            page_size: 30,
+            ..chosen
+        },
+        MessageSettings {
+            page_size: 0,
+            ..chosen
+        },
+        MessageSettings {
+            page_size: 200,
+            ..chosen
+        },
+    ] {
+        assert_eq!(
+            save(&mut connection, unlisted).unwrap_err().0,
+            "team_message_settings_invalid"
+        );
+        assert_eq!(status(&connection, &setup).unwrap().message_settings, last);
+    }
+    assert_eq!(
+        status(&connection, &other).unwrap().message_settings,
+        MessageSettings::default(),
         "the choice is per project"
     );
 }

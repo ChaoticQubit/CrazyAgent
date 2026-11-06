@@ -2,6 +2,7 @@ use super::{BridgeError, IntentReceipt, NativeBridge, bounded, caused, failure};
 use crazyagent::coord::settings::{CoordSettings, Delivery, HarnessKind, SubagentMode};
 use crazyagent::engine::owner::OwnerMutation;
 use crazyagent::protocol::ProjectId;
+use crazyagent::team::agent_messages::{AgentMessages, Cursor, MessageSettings};
 use crazyagent::team::events::{AppEvents, RuleTarget, WakeRule};
 use crazyagent::team::{
     BackgroundAtEnd, BranchMode, ChildLanding, SwitchApply, SwitchMode, TeamAction, TeamStatus,
@@ -34,6 +35,49 @@ impl NativeBridge {
             .await
             .map_err(|e| read_failure(&e.0))?;
         bounded(status)
+    }
+
+    /// Reads one page of a project sub-agent's Messages timeline, newest first: its tasks,
+    /// what the master and the owner said to it and its events, each with the speaker the
+    /// engine stored. Takes the project id, the agent, the cursor of the newest entry not
+    /// wanted and the page size, none for the project's setting. Returns the bounded page or a
+    /// plain failure code.
+    pub async fn team_agent_messages(
+        &self,
+        id: &str,
+        agent: i64,
+        before: Option<Cursor>,
+        limit: Option<u16>,
+    ) -> Result<AgentMessages, BridgeError> {
+        let project_id = project(id)?;
+        let messages = self
+            .reader()?
+            .team_agent_messages(project_id, agent, before, limit)
+            .await
+            .map_err(|e| read_failure(&e.0))?;
+        bounded(messages)
+    }
+
+    /// Stores a project's Messages settings whole: keeping the master's messages, the kept
+    /// count, progress events, how results show, the owner's own items and the page size.
+    /// Takes the project id, the settings and the client generation. Returns the actual
+    /// commit receipt; a value outside the choices is refused as `team_action_invalid` with
+    /// `team_message_settings_invalid` behind it.
+    pub async fn team_message_settings(
+        &mut self,
+        id: &str,
+        settings: MessageSettings,
+        generation: u64,
+    ) -> Result<IntentReceipt, BridgeError> {
+        let project_id = project(id)?;
+        self.team_action(
+            TeamAction::MessageSettings {
+                project_id,
+                settings,
+            },
+            generation,
+        )
+        .await
     }
 
     /// Reads the app's own wake rule and every project's newest owner notifications.
@@ -137,15 +181,17 @@ impl NativeBridge {
 
     /// Sets the project team's task and session time limits and its sub-agent idle stop, in
     /// seconds from the listed choices, none for no limit. Takes the project id, the three
-    /// limits and the client generation. Returns the actual commit receipt; a value outside
-    /// the choices, or a session limit below a set task limit, is refused as
-    /// `team_action_invalid` with `team_time_limits_invalid` behind it.
+    /// limits, the team settings revision the window read and the client generation. Returns
+    /// the actual commit receipt; a value outside the choices, or a session limit below a set
+    /// task limit, is refused as `team_action_invalid` with `team_time_limits_invalid` behind
+    /// it, and a revision another client moved since is refused as `stale_revision`.
     pub async fn team_time_limits(
         &mut self,
         id: &str,
         turn_secs: Option<u32>,
         session_secs: Option<u32>,
         idle_secs: Option<u32>,
+        revision: u64,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
         let project_id = project(id)?;
@@ -154,24 +200,31 @@ impl NativeBridge {
             turn_secs,
             session_secs,
             idle_secs,
+            revision,
         };
         self.team_action(action, generation).await
     }
 
     /// Sets what the live master does with the conversation when the master harness changes:
     /// `carry` hands the new harness the earlier turns and open tasks, `fresh` starts it
-    /// without them. Takes the project id, the mode and the client generation. Returns the
-    /// actual commit receipt, or `team_action_invalid` for any other mode.
+    /// without them. Takes the project id, the mode, the team settings revision the window
+    /// read and the client generation. Returns the actual commit receipt, `team_action_invalid`
+    /// for any other mode, or `stale_revision` once another client moved the revision.
     pub async fn team_on_harness_switch(
         &mut self,
         id: &str,
         mode: &str,
+        revision: u64,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
         let project_id = project(id)?;
         let mode = SwitchMode::named(mode).ok_or_else(|| failure("team_action_invalid"))?;
-        self.team_action(TeamAction::OnHarnessSwitch { project_id, mode }, generation)
-            .await
+        let action = TeamAction::OnHarnessSwitch {
+            project_id,
+            mode,
+            revision,
+        };
+        self.team_action(action, generation).await
     }
 
     /// Sets when a saved master harness change reaches the running live master: `when_idle`

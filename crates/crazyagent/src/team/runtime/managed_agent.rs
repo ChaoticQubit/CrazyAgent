@@ -833,6 +833,7 @@ impl ManagedAgent {
                 executable: self.plan.executable.clone(),
             }),
             access: crate::sandbox::policy::AgentAccess::Sandboxed,
+            toolchains: Some(Vec::new()),
             network: crate::sandbox::policy::AgentNetwork::Open,
             proxy: None,
             task_start: None,
@@ -1116,8 +1117,8 @@ impl NativeTeam {
             },
         )
         .unwrap();
-        self.runtime
-            .retire_lowered(&ProjectId::new(PROJECT).unwrap());
+        let (stored, _) = self.setup();
+        self.runtime.retire_narrowed(&stored);
     }
 
     /// Types one prompt into the lead's pane as a person at its terminal does, outside the

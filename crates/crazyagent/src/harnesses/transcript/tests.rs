@@ -3,6 +3,9 @@ use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 
 const SHORT_LINES_READ_TIME: Duration = Duration::from_secs(10);
+const IDLE_POLLS: usize = 1000;
+const IDLE_POLLS_TIME: Duration = Duration::from_secs(2);
+const PARKED_LINE_WAIT: Duration = Duration::from_secs(60);
 
 struct Case {
     root: tempfile::TempDir,
@@ -281,7 +284,10 @@ fn line_above_the_limit_is_refused() {
     }
     assert_eq!(
         outcome,
-        Err(LaunchError("launch_transcript_line_too_long".to_owned()))
+        Err(LaunchError(
+            "launch_transcript_line_too_long".to_owned(),
+            None
+        ))
     );
 }
 
@@ -506,7 +512,7 @@ fn a_reader_names_its_conversation_and_a_resumed_one_reads_only_new_turns() {
     ] {
         assert_eq!(
             TranscriptReader::resumed(source.clone(), &case.work(), &refused, None).err(),
-            Some(LaunchError("launch_resume_unavailable".to_owned())),
+            Some(LaunchError("launch_resume_unavailable".to_owned(), None)),
             "{}",
             refused.display()
         );
@@ -534,7 +540,7 @@ fn a_reader_names_its_conversation_and_a_resumed_one_reads_only_new_turns() {
             None
         )
         .err(),
-        Some(LaunchError("launch_resume_unavailable".to_owned()))
+        Some(LaunchError("launch_resume_unavailable".to_owned(), None))
     );
     let middle = resumed.start();
     assert!(middle > 0);
@@ -545,7 +551,7 @@ fn a_reader_names_its_conversation_and_a_resumed_one_reads_only_new_turns() {
     let past = std::fs::metadata(&file).unwrap().len() + 1;
     assert_eq!(
         TranscriptReader::resumed(claude, &case.work(), &file, Some(past)).err(),
-        Some(LaunchError("launch_resume_unavailable".to_owned()))
+        Some(LaunchError("launch_resume_unavailable".to_owned(), None))
     );
 }
 
@@ -641,7 +647,7 @@ fn a_fifo_in_place_of_a_transcript_never_blocks_a_reader() {
     assert_eq!(named, None);
     assert_eq!(
         resumed,
-        Some(LaunchError("launch_resume_unavailable".to_owned()))
+        Some(LaunchError("launch_resume_unavailable".to_owned(), None))
     );
     assert!(messages.is_empty());
 }
@@ -669,6 +675,37 @@ fn a_read_of_a_million_short_lines_drains_them_in_one_pass() {
     assert!(took < SHORT_LINES_READ_TIME, "{took:?}");
 }
 
+/// A long line the harness has not finished is scanned once: a poll that finds no new
+/// bytes does not rescan it, so a thousand idle polls of a 15 MiB partial line cost the
+/// engine thread almost nothing, and the line still ends where the next newline arrives.
+#[test]
+fn a_parked_partial_line_is_not_rescanned_by_polls_without_new_bytes() {
+    let case = Case::new();
+    let (file, mut reader) = case.claude();
+    let parked = LINE_BYTES_MAX - READ_BYTES_MAX;
+    append(&file, &"x".repeat(parked));
+    let (sent, read) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        while reader.bytes() < parked as u64 {
+            assert_eq!(reader.read().unwrap(), Vec::new());
+        }
+        let started = std::time::Instant::now();
+        for _ in 0..IDLE_POLLS {
+            assert_eq!(reader.read().unwrap(), Vec::new());
+        }
+        let _ = sent.send((reader, started.elapsed()));
+    });
+    let (mut reader, took) = read
+        .recv_timeout(PARKED_LINE_WAIT)
+        .expect("idle polls rescan the parked line");
+    assert!(
+        took < IDLE_POLLS_TIME,
+        "{IDLE_POLLS} idle polls took {took:?}"
+    );
+    let prompt = r#"{"type":"user","message":{"role":"user","content":"Fix the build"}}"#;
+    append(&file, &format!("\n{prompt}\n"));
+    assert_eq!(reader.read().unwrap(), vec![TranscriptEvent::TurnStarted]);
+}
 /// OP-25 OP25-2: a tool input nested as deep as a record line allows is formatted only up
 /// to the bound the session search keeps, so it costs about what a flat input of the same
 /// size costs, and its text is cut at that bound.

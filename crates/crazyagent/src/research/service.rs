@@ -132,7 +132,7 @@ where
         return;
     };
     while !stop.load(Ordering::SeqCst) {
-        let _ = jobs.recover_stale(STALE_MS);
+        let _ = jobs.recover_stale(STALE_MS, runner.attempts_max());
         for (project, harness) in jobs.work().unwrap_or_default() {
             if stop.load(Ordering::SeqCst) || runs.len() >= RUNS_MAX {
                 break;

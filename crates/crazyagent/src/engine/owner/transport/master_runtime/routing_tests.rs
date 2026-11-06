@@ -1386,6 +1386,66 @@ async fn an_unclassified_cause_is_kept_as_a_code_and_private_text_is_redacted() 
     }
 }
 
+/// A running master turn reads the agent policy the owner saved now through the storage
+/// actor, with the same scope check as its inspect; a toolchain turned off stops it as a
+/// settings change, and an unreadable policy reads as none.
+#[tokio::test]
+async fn a_running_turn_reads_the_saved_agent_policy_and_an_unreadable_one_as_none() {
+    use crate::sandbox::policy::{
+        AgentAccess, AgentPolicy, Narrowing, ToolchainChoice, narrowing, save,
+    };
+    use crate::sandbox::toolchains::Toolchain;
+    let case = Fixture::new(MasterBackend::Rcli, true).await;
+    let read = || {
+        case.command(MasterRuntimeCommand::Policy {
+            host: case.runtime().identity(),
+            project_id: case.session.project_id.clone(),
+            session_id: case.session.session_id.clone(),
+            turn_id: case.turn.id.clone(),
+        })
+    };
+    let saved = |result: MasterRuntimeResult| match result {
+        MasterRuntimeResult::Policy(policy) => *policy,
+        _ => panic!("the policy read returns the saved policy"),
+    };
+    assert_eq!(saved(read().await.unwrap()), Some(AgentPolicy::default()));
+    let off = AgentPolicy {
+        access: AgentAccess::Sandboxed,
+        toolchains: vec![ToolchainChoice {
+            toolchain: Toolchain::Rust,
+            allowed: false,
+        }],
+        network: crate::sandbox::policy::AgentNetwork::default(),
+    };
+    let writer = Connection::open(case.root.path().join("engine.db")).unwrap();
+    writer.busy_timeout(Duration::from_secs(5)).unwrap();
+    save(&writer, case.session.project_id.as_str(), &off).unwrap();
+    let read_off = saved(read().await.unwrap());
+    assert_eq!(read_off, Some(off));
+    let stopped = narrowing(
+        read_off.as_ref(),
+        None,
+        Some(AgentAccess::Sandboxed),
+        None,
+        &[Toolchain::Rust],
+    )
+    .map(Narrowing::code)
+    .unwrap();
+    assert_eq!(stopped, "agent_toolchain_lowered");
+    assert_eq!(
+        reason_for_error(&EngineError(stopped.into())),
+        MasterReason::ConnectionChanged
+    );
+    writer
+        .execute(
+            "UPDATE project_agent_policy SET body='{' WHERE project=?1",
+            [case.session.project_id.as_str()],
+        )
+        .unwrap();
+    assert_eq!(saved(read().await.unwrap()), None);
+    case.finish().await;
+}
+
 #[tokio::test]
 async fn rcli_drive_reaches_f_using_the_real_prepared_proof_and_busy_physical_guard() {
     let case = Fixture::new(MasterBackend::Rcli, true).await;
@@ -2482,6 +2542,8 @@ async fn console_claude_master(
             worktree_lease: prepared.worktree_lease.clone(),
         },
         reported: Tokens::default(),
+        access: crate::sandbox::policy::AgentAccess::Sandboxed,
+        toolchains: Vec::new(),
     };
     (fixture, active, record, mailbox)
 }

@@ -108,12 +108,10 @@ impl State {
         validate_connection(&connection)?;
         if self
             .native_auth
-            .stuck()
-            .is_some_and(|stuck| crate::config::same_account(stuck, &connection))
+            .open_account()
+            .is_some_and(|open| crate::config::same_account(open, &connection))
         {
-            return Err(
-                "A sign-in for this account is still open; c clears a stuck sign-in".into(),
-            );
+            return Err(self.native_auth.open_refusal(self.basis.as_ref()).into());
         }
         let id = crate::engine::owner::random_id()
             .map_err(|_| "account_profile_request_identity_unavailable")?;

@@ -1,6 +1,7 @@
 #![cfg(unix)]
 
 use crazyagent::harnesses::interactive::{InteractiveCommand, Transcript};
+use crazyagent::harnesses::terminal_session::end_left_pane;
 use crazyagent::terminal::buffer::skipped_marker;
 use crazyagent::terminal::tmux::{SOCKET, Tmux, installed};
 use crazyagent::terminal::{
@@ -658,6 +659,178 @@ fn server_pid(tmux: &Path, socket: &Path) -> u32 {
         .trim()
         .parse()
         .unwrap()
+}
+
+/// PR-3 (rv-code final review of fix/rv-ds-process): ending a leftover pane whose window is
+/// already gone names no process to kill, although tmux answers a display for a missing
+/// target with another pane. The engine's holder and another agent's pane keep running, and
+/// the call reports the pane unknown.
+#[test]
+fn ending_a_gone_leftover_pane_kills_no_other_pane() {
+    let root = root();
+    let tmux = tmux(root.path());
+    let folder = root.path().join(FOLDER);
+    let socket = folder.join(SOCKET);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: socket.clone(),
+    };
+    let host = Tmux::open(Some(tmux.clone()), &folder);
+    let gone = AgentId::team(3).unwrap();
+    let other = AgentId::team(4).unwrap();
+    let sleeper = shell(
+        root.path(),
+        Vec::new(),
+        &["/bin/sh", "-c", "exec /bin/sleep 300"],
+    );
+    host.spawn(&gone, &sleeper).unwrap();
+    let other_pid = host.spawn(&other, &sleeper).unwrap().pid;
+    let holder_pid: u32 = tmux_reply(
+        &tmux,
+        &socket,
+        &[
+            "list-panes",
+            "-t",
+            "crazyagent:=_crazyagent",
+            "-F",
+            "#{pane_pid}",
+        ],
+    )
+    .trim()
+    .parse()
+    .unwrap();
+    host.kill(&gone).unwrap();
+
+    let ended = end_left_pane(&host, &gone, "test").map_err(|problem| problem.0);
+
+    assert!(
+        process_running(holder_pid),
+        "ending a gone pane killed the engine's tmux holder"
+    );
+    assert!(
+        process_running(other_pid),
+        "ending a gone pane killed another agent's pane"
+    );
+    assert_eq!(ended, Err("terminal_agent_unknown".to_owned()));
+    host.kill(&other).unwrap();
+}
+
+/// A process a test started that the code under test should end, killed when the test ends
+/// either way while `ps` still names it by its marker, so a red run leaves nothing running.
+struct Stray {
+    pid: u32,
+    marker: &'static str,
+}
+
+impl Drop for Stray {
+    fn drop(&mut self) {
+        let named = crazyagent::spawn_gate::output(
+            Command::new("/bin/ps")
+                .args(["-o", "command=", "-p", &self.pid.to_string()])
+                .env_clear()
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null()),
+        )
+        .is_ok_and(|output| String::from_utf8_lossy(&output.stdout).contains(self.marker));
+        if named {
+            let _ = crazyagent::spawn_gate::status(
+                Command::new("/bin/kill")
+                    .args(["-KILL", &self.pid.to_string()])
+                    .env_clear()
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null()),
+            );
+        }
+    }
+}
+
+/// B19L-H1 (rv-code r1 of chore/b19-line): the engine's production host names a leftover
+/// pane's first process, so ending the pane also ends a background process it started that
+/// ignores hangup and terminate, and the cleanup is confirmed.
+#[test]
+fn ending_a_leftover_pane_through_the_engine_host_ends_what_it_started() {
+    let root = root();
+    let tmux = tmux(root.path());
+    let path = root.path().canonicalize().unwrap();
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: path.join(FOLDER).join(SOCKET),
+    };
+    let host = crazyagent::terminal::tmux_host(&path, Some(tmux));
+    let agent = AgentId::team(5).unwrap();
+    let written = path.join("child.pid");
+    let script = format!(
+        "(trap '' HUP TERM; exec /bin/sleep 317) < /dev/null > /dev/null 2>&1 & echo $! > {}; exec /bin/sleep 300",
+        written.display()
+    );
+    let first = host
+        .spawn(
+            &agent,
+            &shell(&path, Vec::new(), &["/bin/sh", "-c", &script]),
+        )
+        .unwrap()
+        .pid;
+    let child = Stray {
+        pid: wait_text(&written).trim().parse().unwrap(),
+        marker: "sleep 317",
+    };
+    assert!(process_running(child.pid));
+
+    let named = host.pane_pid(&agent).map_err(|problem| problem.0);
+    let ended = end_left_pane(host.as_ref(), &agent, "test").map_err(|problem| problem.0);
+
+    assert_eq!(ended, Ok(true));
+    assert!(
+        ends(&[child.pid]),
+        "a background process that ignores hangup outlived its ended pane"
+    );
+    assert_eq!(named, Ok(Some(first)));
+    assert!(!host.alive().unwrap().contains(&agent));
+}
+
+/// B19L-H1: an agent's window on the engine's server can hold panes its app split off; the
+/// engine's host names the window's first pane, the agent's own, rather than refusing.
+#[test]
+fn the_engine_host_names_the_first_pane_of_a_split_agent_window() {
+    let root = root();
+    let tmux = tmux(root.path());
+    let path = root.path().canonicalize().unwrap();
+    let socket = path.join(FOLDER).join(SOCKET);
+    let _server = Server {
+        tmux: tmux.clone(),
+        socket: socket.clone(),
+    };
+    let host = crazyagent::terminal::tmux_host(&path, Some(tmux.clone()));
+    let agent = AgentId::team(6).unwrap();
+    let first = host
+        .spawn(
+            &agent,
+            &shell(&path, Vec::new(), &["/bin/sh", "-c", "exec /bin/sleep 300"]),
+        )
+        .unwrap()
+        .pid;
+    tmux_reply(
+        &tmux,
+        &socket,
+        &[
+            "split-window",
+            "-d",
+            "-t",
+            &format!("crazyagent:={agent}"),
+            "exec /bin/sleep 301",
+        ],
+    );
+    let panes = host.panes(&agent).unwrap();
+    assert_eq!(panes.len(), 2, "{panes:?}");
+    assert!(panes.iter().any(|pane| pane.pid != first), "{panes:?}");
+
+    assert_eq!(
+        host.pane_pid(&agent).map_err(|problem| problem.0),
+        Ok(Some(first))
+    );
+    host.kill(&agent).unwrap();
 }
 
 #[test]
@@ -1581,6 +1754,51 @@ fn an_adopted_teammate_pane_is_reached_and_ended_by_its_own_name_even_after_a_re
     restarted.close(&[]).unwrap();
 }
 
+/// B19L-H1: through the engine's production host a native lead and each teammate adopted
+/// into its window are named by their own pane's first process, though the teammates share
+/// one window with the lead's anchor, and ending a left teammate pane ends only that pane.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_native_lead_and_each_adopted_teammate_name_their_own_first_process() {
+    let lead = Lead::new();
+    let root = lead.path();
+    let host = crazyagent::terminal::tmux_host(&root, Some(lead.tmux.clone()));
+    let leader = AgentId::team(1).unwrap();
+    let [ann, bob] = [2, 3].map(|id| AgentId::team(id).unwrap());
+    host.spawn_own_server(&leader, &lead.confined("lead$ ", &["/bin/sh"]))
+        .unwrap();
+    let ann_pane = lead.new_pane(host.as_ref(), &leader, "split-window -d", "sleep 600");
+    let bob_pane = lead.new_pane(host.as_ref(), &leader, "split-window -d", "sleep 601");
+    host.adopt_pane(&ann, &leader, &ann_pane).unwrap();
+    host.adopt_pane(&bob, &leader, &bob_pane).unwrap();
+    let panes = host.panes(&leader).unwrap();
+    let own_pane = panes[0].id.clone();
+    let pids: BTreeMap<String, u32> = panes.into_iter().map(|pane| (pane.id, pane.pid)).collect();
+    assert_eq!(pids.len(), 3, "{pids:?}");
+
+    for (agent, pane) in [(&leader, &own_pane), (&ann, &ann_pane), (&bob, &bob_pane)] {
+        assert_eq!(
+            host.pane_pid(agent).map_err(|problem| problem.0),
+            Ok(Some(pids[pane])),
+            "{agent}"
+        );
+    }
+
+    assert_eq!(
+        end_left_pane(host.as_ref(), &bob, "test").map_err(|problem| problem.0),
+        Ok(true)
+    );
+    assert!(ends(&[pids[&bob_pane]]));
+    let left: Vec<String> = host
+        .panes(&leader)
+        .unwrap()
+        .into_iter()
+        .map(|pane| pane.id)
+        .collect();
+    assert_eq!(left, [own_pane, ann_pane.clone()]);
+    assert!(process_running(pids[&ann_pane]));
+    host.close(&[]).unwrap();
+}
 /// PLC (d): a native lead's team panes live only on the teammates' server its start named.
 /// Its own server numbers its panes on its own, so a teammate pane's id can name a pane the
 /// lead split there; once the teammates' server ends no team pane call goes to the lead's

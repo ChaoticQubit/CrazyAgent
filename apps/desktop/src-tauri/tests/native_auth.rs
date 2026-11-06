@@ -945,15 +945,8 @@ async fn desktop_native_auth_settings_change_mid_sign_in_does_not_wedge_the_desk
             .unwrap();
         let moved = inspect(&mut bridge, "connection-z").await;
         assert_ne!(moved.source_hash, detail.source_hash);
-        assert_eq!(
-            bridge
-                .cancel_native_auth(&moved.ticket)
-                .await
-                .err()
-                .unwrap()
-                .code,
-            "native_profile_source_conflict"
-        );
+        bridge.cancel_native_auth(&moved.ticket).await.unwrap();
+        settle(&mut bridge, "cancelled").await;
         add_account_ref(&mut bridge, "account-after-source-change", 1).await;
         bridge
             .add_account(claude_draft("Added after the source moved"), None)

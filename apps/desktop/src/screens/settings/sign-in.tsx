@@ -85,8 +85,8 @@ export function codeLeftLine(leftS: number): string {
   return `This code works for ${minutes} more ${minutes === 1 ? "minute" : "minutes"}.`;
 }
 
-const GONE = new Set(["native_auth_operation_missing", "native_profile_source_conflict"]);
-const STUCK = new Set(["native_auth_operation_scope_conflict", "native_auth_recovery_required"]);
+const GONE = new Set(["native_auth_operation_missing"]);
+const STUCK = new Set(["native_auth_operation_scope_conflict", "native_auth_recovery_required", "native_profile_source_conflict"]);
 
 /** The sentence when a sign-in could not be cancelled. Input: the refusal code. Output: the
  * sentence, or undefined when the sign-in had already stopped. */

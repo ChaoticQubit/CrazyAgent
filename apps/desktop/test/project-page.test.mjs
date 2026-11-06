@@ -25,6 +25,10 @@ test("elapsed time reads in seconds, minutes and hours", () => {
 test("research rows use the fixed status words and only real progress", () => {
   const now = 1_000 + 18 * 60_000;
   assert.deepEqual(research.researchRow(job("queued"), now), { title: "Market research", status: "Queued", tone: "neutral", progress: "Waiting to start", elapsed: "", report: false, active: true });
+  const requeued = "A toolchain this research ran with was turned off, so it was stopped and queued again; its next run goes without it";
+  assert.deepEqual(research.researchRow(job("queued", { error: requeued, started_ms: 1_000 }), now),
+    { title: "Market research", status: "Queued", tone: "neutral", progress: requeued, elapsed: "", report: false, active: true });
+  assert.equal(research.researchRow(job("queued", { error: "  " }), now).progress, "Waiting to start");
   assert.deepEqual(research.researchRow(job("needs_pool"), now), { title: "Market research", status: "Needs a pool", tone: "warn", progress: "Waiting for a pool", elapsed: "", report: false, active: false });
   assert.deepEqual(research.researchRow(job("needs_pool", { error: "No account in this project's pool can run this research" }), now),
     { title: "Market research", status: "Needs a pool", tone: "warn", progress: "No account in this project's pool can run this research", elapsed: "", report: false, active: false });

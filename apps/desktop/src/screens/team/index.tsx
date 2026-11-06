@@ -13,8 +13,8 @@ import {
   graphLive, graphSummary, layoutCards, layoutGraph, namedAccounts, nodeActions, nodeDetail, nodeStatus, panView, questionCount,
   receiptTicks, tipPlace, viewKey, waitingOnOwner, wheelZoom, zoomView, type Link, type PlacedCard, type Size, type View,
 } from "./graph";
-import { AgentInstructions } from "./agent-instructions";
-import { TerminalPanel } from "./terminal-panel";
+import { AgentSide } from "./agent-instructions";
+import { NodeMessages } from "./agent-messages";
 import "./team-graph.css";
 
 export { TerminalPanel } from "./terminal-panel";
@@ -403,10 +403,9 @@ export function TeamGraphView({ projectId, harness, account }: {
           </div>}
         </div>
       </div>
-      {openNode && <div className="tg-side">
-        <TerminalPanel key={openNode.id} node={openNode} harness={harness} onClose={() => setOpen(null)} />
-        <AgentInstructions key={openNode.id} projectId={projectId} node={openNode} />
-      </div>}
+      {openNode && <AgentSide key={openNode.id} projectId={projectId} node={openNode} harness={harness} onClose={() => setOpen(null)}>
+        <NodeMessages projectId={projectId} node={openNode} refresh={graph} />
+      </AgentSide>}
     </div>
     {acting?.kind === "skills" && <AgentSkillsDialog projectId={projectId} agent={acting.agent}
       label={displayText(acting.node.label)} onClose={() => setActing(null)} />}

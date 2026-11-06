@@ -1013,6 +1013,37 @@ pub fn switched_from(
     Ok(earlier.filter(|earlier| !crate::harnesses::same(earlier, harness)))
 }
 
+/// Tells whether a session's master starts new because its last switch, to this harness
+/// under Start fresh, is not yet followed by a conversation the new harness reported: the
+/// kept conversation, if any, is still another harness's, which the owner chose not to
+/// carry over (HSL-1). Takes the connection, project, session and the harness about to
+/// start. Returns whether to start new.
+pub fn fresh_after_switch(
+    connection: &Connection,
+    project: &ProjectId,
+    session: &SessionId,
+    harness: &str,
+) -> Result<bool, EngineError> {
+    let switch: Option<(Option<String>, String)> = connection
+        .query_row(
+            "SELECT CASE WHEN length(CAST(harness AS BLOB))<=64 THEN harness END, mode
+             FROM team_session_switches WHERE session=?1 AND project=?2",
+            params![session.as_str(), project.as_str()],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(error)?;
+    let Some((Some(to), mode)) = switch else {
+        return Ok(false);
+    };
+    if !crate::harnesses::same(&to, harness) || SwitchMode::named(&mode) != Some(SwitchMode::Fresh)
+    {
+        return Ok(false);
+    }
+    let kept = crate::team::master::session_conversation(connection, project, session.as_str())?;
+    Ok(kept.is_none_or(|kept| !crate::harnesses::same(&kept.harness, harness)))
+}
+
 /// The display name of a harness: its catalog name, or the stored name the catalog does
 /// not know. Takes the stored name. Returns the name.
 pub fn harness_label(harness: &str) -> &str {
@@ -1287,19 +1318,26 @@ fn error(value: impl std::fmt::Display) -> EngineError {
 
 #[cfg(all(test, unix))]
 mod tests {
+    #[cfg(unix)]
     use super::{
         HANDOFF_BYTES_MAX, HANDOFF_OMITTED, HANDOFF_TURN_BYTES_MAX, LOST_NOTE, ResumePlan,
-        STATE_BYTES_MAX, TURN_OMITTED, clip, flat, handoff, resume_harness, switched_from,
+        STATE_BYTES_MAX, TURN_OMITTED, handoff, resume_harness, switched_from,
     };
+    use super::{clip, flat};
+    #[cfg(unix)]
     use crate::harnesses::terminal_session::Resume;
+    #[cfg(unix)]
     use crate::protocol::{ProjectId, SessionId};
+    #[cfg(unix)]
     use crate::team::master::{SessionConversation, keep_conversation};
+    #[cfg(unix)]
     use std::time::Duration;
 
     /// A switch handoff gives the new harness the session's earlier turns newest first, as
     /// many as fit its byte bound with a line saying older ones were left out, then the
     /// session's open tasks; and the switch is seen only for another harness, never for an
     /// alias of the one the conversation ran on.
+    #[cfg(unix)]
     #[test]
     fn a_switch_handoff_is_newest_first_bounded_and_lists_open_tasks() {
         let folder = tempfile::tempdir().unwrap();
@@ -1383,6 +1421,7 @@ mod tests {
     /// exceed the whole handoff, is cut to fit, never dropped: the new harness gets that
     /// turn's input and its last replies, a line saying earlier replies were left out, and
     /// the older turns after it.
+    #[cfg(unix)]
     #[test]
     fn a_long_newest_turn_is_cut_to_fit_the_handoff_not_dropped() {
         let folder = tempfile::tempdir().unwrap();
@@ -1453,6 +1492,7 @@ mod tests {
     /// A session with turns in both the kept harness conversation and the engine's master
     /// conversation hands over each in its own part, newest first, so the newest engine
     /// turns are never crowded out by a long harness conversation.
+    #[cfg(unix)]
     #[test]
     fn a_switch_handoff_keeps_a_part_for_each_conversation_newest_first() {
         let folder = tempfile::tempdir().unwrap();
@@ -1544,6 +1584,7 @@ mod tests {
     /// A switch is seen once: after the session's master switched to Codex, a later start on
     /// Codex is no switch even before Codex reported a conversation of its own, and a start
     /// on Claude Code again is a switch back from Codex.
+    #[cfg(unix)]
     #[test]
     fn a_switch_is_seen_once_even_before_the_new_harness_reports_its_conversation() {
         let folder = tempfile::tempdir().unwrap();
@@ -1593,6 +1634,7 @@ mod tests {
 
     /// An engine turn of multi-byte text longer than one handed-over turn is cut with a
     /// visible "..." where its reply was cut, never silently.
+    #[cfg(unix)]
     #[test]
     fn a_multi_byte_engine_turn_cut_to_fit_shows_where_it_was_cut() {
         let folder = tempfile::tempdir().unwrap();

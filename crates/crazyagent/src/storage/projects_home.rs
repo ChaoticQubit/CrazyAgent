@@ -267,11 +267,16 @@ pub(super) fn add_plan(
 
 /// Plans a MoveProjectsHome that moves the project folders and records the
 /// move as pending before any disk work, so a move whose result is never
-/// recorded is still finished from what landed on disk.
+/// recorded is still finished from what landed on disk. The pending record is
+/// also the hold: no agent or research run starts in the old home until the move
+/// is finished or forgotten (`crate::projects_home::move_holds`). The check and
+/// the record are one write transaction, so a launch recorded first refuses the
+/// move and a launch recorded later sees the hold.
 /// Input: the connection, database path, owner admission, the revision the
 /// owner saw, the new home, the request and the transport exchange that will
 /// run the move. Output: the checked plan, or the refusal code
-/// (`home_move_in_progress` while another move is pending).
+/// (`home_move_in_progress` while another move is pending, or the code
+/// `agent_work_inside` names while agent work is inside the home).
 pub(super) fn move_plan(
     db: &mut Connection,
     path: &Path,
@@ -282,7 +287,9 @@ pub(super) fn move_plan(
     exchange: u64,
 ) -> Result<MovePlan, EngineError> {
     let exchange = i64::try_from(exchange).map_err(error)?;
-    let tx = db.transaction().map_err(error)?;
+    let tx = db
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(error)?;
     check_owner_admission(&tx, a)?;
     if owner_revision(&tx)? != expected.value() {
         return Err(error("stale_revision"));
@@ -291,6 +298,9 @@ pub(super) fn move_plan(
         return Err(error("home_move_in_progress"));
     }
     let saved = home::load(&tx)?.ok_or_else(|| error("projects_home_unset"))?;
+    if let Some(code) = agent_work_inside(&tx, &saved)? {
+        return Err(error(code));
+    }
     let plan = home::plan_move(&saved, Path::new(picked), &engine_root(path)?)?;
     tx.execute(
         "INSERT INTO projects_home_move VALUES (1, ?1, ?2, ?3, ?4, ?5)",
@@ -305,6 +315,137 @@ pub(super) fn move_plan(
     .map_err(error)?;
     tx.commit().map_err(error)?;
     Ok(plan)
+}
+
+/// Checks again, under the hold of the pending move, that no agent work appeared in the old
+/// home since the plan: the last check before the first folder moves. Inputs: the
+/// connection and the transport exchange running the move. Output: the refusal code when
+/// agent work is there now, or `home_move_not_pending` when this exchange has no move.
+pub(super) fn recheck(
+    db: &mut Connection,
+    exchange: u64,
+) -> Result<Result<(), String>, EngineError> {
+    let exchange = i64::try_from(exchange).map_err(error)?;
+    let tx = db.transaction().map_err(error)?;
+    let pending = pending_move(&tx)?
+        .filter(|pending| pending.exchange == exchange)
+        .ok_or_else(|| error("home_move_not_pending"))?;
+    let found = agent_work_inside(&tx, &pending.origin)?;
+    tx.commit().map_err(error)?;
+    Ok(found.map_or(Ok(()), |code| Err(code.to_owned())))
+}
+
+/// Names the agent work inside the home that a home move would cut off, as its refusal
+/// code: `home_move_agent_work` for a team agent's worktree or own clone, an agent starting
+/// there, one waiting for removal, or a change set that is open or has a step in flight;
+/// `home_move_research_running` for a research job running for a project in the home,
+/// whose worktree is a linked worktree of the project's repository; otherwise
+/// `home_move_changes_restorable` for a discarded change set that can still be restored,
+/// for `crate::landing::RESTORE_WINDOW_MS` after the discard. Their records, each own
+/// clone's alternates line and each linked worktree's git files name absolute paths inside
+/// the home. A finished research job's worktree is never used again, so it holds no move.
+/// Inputs: the transaction and the saved home. Output: the code, or None.
+fn agent_work_inside(
+    tx: &Transaction<'_>,
+    home: &Path,
+) -> Result<Option<&'static str>, EngineError> {
+    if held_inside(
+        tx,
+        home,
+        "team_worktrees",
+        "SELECT repository, worktree FROM team_worktrees",
+        params![],
+    )? || held_inside(
+        tx,
+        home,
+        "team_retiring",
+        "SELECT repository, worktree FROM team_retiring",
+        params![],
+    )? || held_inside(
+        tx,
+        home,
+        "team_agents",
+        "SELECT json_extract(s.body, '$.folder') FROM team_agents a
+         JOIN project_setups s ON s.project=a.project WHERE a.status='starting'",
+        params![],
+    )? || held_inside(
+        tx,
+        home,
+        "landing_change_sets",
+        "SELECT repository, worktree FROM landing_change_sets
+         WHERE state IN ('pending','conflict','updating') OR intent IS NOT NULL",
+        params![],
+    )? {
+        return Ok(Some("home_move_agent_work"));
+    }
+    if held_inside(
+        tx,
+        home,
+        "research_jobs",
+        "SELECT json_extract(s.body, '$.folder') FROM research_jobs j
+         JOIN project_setups s ON s.project=j.project WHERE j.status='running'",
+        params![],
+    )? {
+        return Ok(Some("home_move_research_running"));
+    }
+    let now = i64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(error)?
+            .as_millis(),
+    )
+    .map_err(error)?;
+    Ok(held_inside(
+        tx,
+        home,
+        "landing_change_sets",
+        "SELECT repository, worktree FROM landing_change_sets
+         WHERE state='discarded' AND pruned=0 AND restorable_until_ms>?1",
+        params![now],
+    )?
+    .then_some("home_move_changes_restorable"))
+}
+
+/// Tells whether a table of agent work records holds one with a path inside the home, as
+/// recorded or as the path resolves now. A table the engine has not made yet holds none.
+/// Inputs: the transaction, the home, the table, the query whose every column is a path
+/// and that query's parameters. Output: the answer.
+fn held_inside(
+    tx: &Transaction<'_>,
+    home: &Path,
+    table: &str,
+    query: &str,
+    parameters: impl rusqlite::Params,
+) -> Result<bool, EngineError> {
+    let present = tx
+        .query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
+            [table],
+            |_| Ok(()),
+        )
+        .optional()
+        .map_err(error)?
+        .is_some();
+    if !present {
+        return Ok(false);
+    }
+    let inside = |text: &str| {
+        let path = Path::new(text);
+        path.starts_with(home)
+            || std::fs::canonicalize(path).is_ok_and(|real| real.starts_with(home))
+    };
+    let mut statement = tx.prepare(query).map_err(error)?;
+    let columns = statement.column_count();
+    let mut rows = statement.query(parameters).map_err(error)?;
+    while let Some(row) = rows.next().map_err(error)? {
+        for column in 0..columns {
+            let path: String = row.get(column).map_err(error)?;
+            if inside(&path) {
+                return Ok(true);
+            }
+        }
+    }
+    Ok(false)
 }
 
 /// A projects home move recorded before its folders moved: its request, the

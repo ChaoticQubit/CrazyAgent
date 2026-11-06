@@ -398,6 +398,10 @@ async fn keys_typed_into_a_sub_agent_never_reach_the_engine_database() {
     sub.stop().await;
 }
 
+/// finding_855af84870d65746: a revoked viewer's next key, prompt or resize never reaches the
+/// terminal. A view checks its grant at once and then every 5 s, so the viewer first types
+/// one key and idles, and the revoke lands between those checks, where only the per-key
+/// check stands between the revoked viewer and the terminal.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_revoked_viewer_cannot_type_one_more_key_into_the_terminal() {
     use crazyagent::engine::owner::{OwnerControl, OwnerDecision};
@@ -414,6 +418,12 @@ async fn a_revoked_viewer_cannot_type_one_more_key_into_the_terminal() {
         .unwrap();
     let mut seen = Vec::new();
     assert!(read_until(&mut output, &mut seen, b"ready$ ").await);
+    control
+        .input(b"echo before-revoke\r".to_vec())
+        .await
+        .unwrap();
+    assert!(read_until(&mut output, &mut seen, b"\r\nbefore-revoke\r\n").await);
+    tokio::time::sleep(Duration::from_millis(300)).await;
 
     let host = sub.service.owner_runtime().unwrap();
     host.control(OwnerControl {

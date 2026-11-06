@@ -963,15 +963,14 @@ pub(crate) fn decode_reply(
 
 /// Tells whether an engine refusal of a read or cancel ends a native sign-in for good: the
 /// engine no longer runs it, or its scope no longer names a managed profile of this
-/// database. Input: the refusal code. Output: true for such a definite answer.
+/// database. A settings conflict is not one: the engine answers it while it still runs the
+/// sign-in. Input: the refusal code. Output: true for such a definite answer.
 pub fn ends_operation(code: &str) -> bool {
     matches!(
         code,
         "native_auth_not_active"
             | "native_auth_operation_missing"
             | "native_auth_database_mismatch"
-            | "native_profile_source_conflict"
-            | "native_profile_source_invalid"
             | "native_profile_connection_missing"
             | "native_profile_not_managed"
     )

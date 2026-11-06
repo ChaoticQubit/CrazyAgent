@@ -3,6 +3,7 @@ use super::process::{
 };
 use crate::engine::EngineError;
 use crate::engine::bootstrap::NativeProfileUse;
+use crate::harnesses::leftovers::{Lineage, Unstopped};
 use crate::sandbox::warden::{self, Warden};
 #[cfg(unix)]
 use rustix::fs::{OFlags, fcntl_getfl, fcntl_setfl};
@@ -36,6 +37,8 @@ struct PendingWrite {
 struct OwnedChild {
     child: Child,
     warden: Option<Warden>,
+    unconfined: bool,
+    lineage: Option<Result<Lineage, Unstopped>>,
     profile: Option<NativeProfileUse>,
     stdin: Option<ChildStdin>,
     stdout: Option<ChildStdout>,
@@ -58,12 +61,13 @@ struct Custody(Option<OwnedChild>);
 pub(super) fn run(
     command: Command,
     profile: Option<NativeProfileUse>,
+    unconfined: bool,
     mut input: mpsc::Receiver<WriteRequest>,
     shared: Arc<ProcessShared>,
     deadline: Instant,
     output_limit: u64,
 ) {
-    let mut custody = match start(command, profile, &shared) {
+    let mut custody = match start(command, profile, unconfined, &shared) {
         Ok(custody) => custody,
         Err(code) => {
             if let Ok(mut state) = shared.lock() {
@@ -101,6 +105,7 @@ pub(super) fn run(
 fn start(
     command: Command,
     profile: Option<NativeProfileUse>,
+    unconfined: bool,
     shared: &Arc<ProcessShared>,
 ) -> Result<Custody, &'static str> {
     if let Some(profile) = &profile {
@@ -122,6 +127,8 @@ fn start(
     let mut custody = Custody(Some(OwnedChild {
         child,
         warden,
+        unconfined,
+        lineage: None,
         profile,
         stdin: None,
         stdout: None,
@@ -280,7 +287,13 @@ impl OwnedChild {
         }
     }
 
+    /// Stops the harness: closes its input and kills its group and itself. At Full access it
+    /// first finds the harness's lineage, once, so what left the group can be checked when
+    /// the run completes. Takes nothing.
     fn stop(&mut self) {
+        if self.unconfined && self.lineage.is_none() {
+            self.lineage = Some(Lineage::of(self.child.id()));
+        }
         self.stopped_at.get_or_insert_with(Instant::now);
         self.stdin = None;
         self.pending = None;
@@ -418,6 +431,11 @@ impl OwnedChild {
         }
     }
 
+    /// Publishes the run's end and releases the account lease. At Full access, no warden
+    /// reaches what left the group, so the lineage found at the stop, or now when the harness
+    /// ended on its own, is checked first; while some of it still runs the run ends with that
+    /// code and the lease stays held until it ends or the owner signs the account out.
+    /// Takes nothing.
     fn publish_completion(&mut self) {
         assert!(self.complete());
         assert!(self.status.is_some() || self.abandoned);
@@ -426,6 +444,22 @@ impl OwnedChild {
         {
             self.shared.fail("codex_host_profile_invalid");
         }
+        let mut left = None;
+        if self.unconfined {
+            let lineage = self
+                .lineage
+                .take()
+                .unwrap_or_else(|| Lineage::of(self.child.id()));
+            if let Err(unstopped) = lineage.and_then(Lineage::settle) {
+                left = Some(unstopped.code());
+                self.shared.fail(unstopped.code());
+                if let (Unstopped::Left(leftovers), Some(profile)) =
+                    (unstopped, self.profile.take())
+                {
+                    leftovers.hold(Some(profile.account().clone()), profile);
+                }
+            }
+        }
         self.profile = None;
         if let Ok(mut state) = self.shared.lock() {
             state.status = self.status;
@@ -433,7 +467,9 @@ impl OwnedChild {
             state.cleanup_error = if self.accounting_failed {
                 Some("codex_host_pipe_accounting")
             } else {
-                self.abandoned.then_some("codex_host_cleanup_uncertain")
+                self.abandoned
+                    .then_some("codex_host_cleanup_uncertain")
+                    .or(left)
             };
         }
     }

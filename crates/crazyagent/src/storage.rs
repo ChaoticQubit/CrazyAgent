@@ -47,6 +47,8 @@ mod model_access_page_tests;
 #[cfg(all(test, unix))]
 mod native_auth_host_tests;
 mod projects_home;
+#[cfg(all(test, unix))]
+mod projects_home_tests;
 mod settings;
 pub(crate) mod worker_dispatch;
 
@@ -175,6 +177,10 @@ pub(crate) enum Job {
         oneshot::Sender<Result<OwnerApplied, EngineError>>,
     ),
     HomeMoveSettle(u64, bool, oneshot::Sender<Result<(), EngineError>>),
+    HomeMoveRecheck(
+        u64,
+        oneshot::Sender<Result<Result<(), String>, EngineError>>,
+    ),
     SetupPlan(
         Admission,
         Box<OwnerRequest>,
@@ -564,6 +570,14 @@ impl Storage {
                             };
                             let _ = reply.send(result);
                         }
+                        Job::HomeMoveRecheck(exchange, reply) => {
+                            let result = if readonly {
+                                Err(error("projects_home_readonly"))
+                            } else {
+                                projects_home::recheck(&mut connection, exchange)
+                            };
+                            let _ = reply.send(result);
+                        }
                         Job::HomeMoveSettle(exchange, ran, reply) => {
                             let result = if readonly {
                                 Err(error("projects_home_readonly"))
@@ -943,6 +957,7 @@ pub(crate) fn initialize_authority_schemas(connection: &Connection) -> Result<()
     crate::project_setup::initialize(connection)?;
     crate::onboarding::initialize(connection)?;
     crate::projects_home::initialize(connection)?;
+    crate::sandbox_settings::initialize(connection)?;
     crate::project_setup::repair_repositories(connection)?;
     crate::team::initialize(connection)?;
     crate::coord::ensure(connection)?;
@@ -1279,6 +1294,7 @@ fn apply(
         Command::OwnerConversation { .. }
             | Command::OwnerModelAccess { .. }
             | Command::OwnerProfile { .. }
+            | Command::OwnerSandbox { .. }
             | Command::OwnerMemory { .. }
             | Command::OwnerSetup { .. }
     ) {
@@ -1463,6 +1479,7 @@ fn execute(
             crate::conversation::apply(tx, mutation, revision)
         }
         Command::OwnerProfile { profile } => crate::owner_profile::save(tx, profile),
+        Command::OwnerSandbox { settings } => crate::sandbox_settings::save(tx, settings),
         Command::OwnerMemory { action } => {
             crate::memory::library::execute(tx, config, action, revision)
         }
@@ -1561,13 +1578,30 @@ fn execute(
 /// behind, so a reused id (re-adding a folder with the same name is the normal way to reuse
 /// one) inherits none of the old project's MCP servers, secrets, skills or switches. The
 /// clear runs only once the row is confirmed new, so a rejected duplicate leaves a live
-/// project's plugins untouched. Inputs: the transaction, the id and the spec. Output: Applied,
-/// or Rejected when the id is already in use.
+/// project's plugins untouched. The reused id's old skill store folder is removed at once,
+/// not left for the next start's trash sweep, so the new project starts with a clean skill
+/// store and a same-name skill import is not refused by a stale folder. Creation is refused
+/// before any clearing when an existing project id equals the new one ignoring ASCII case,
+/// so a case-insensitive filesystem never lets one project's skill store delete another's.
+/// Inputs: the transaction, the id and the spec. Output: Applied, or Rejected when the id is
+/// already in use or clashes with one only by ASCII case.
 pub(crate) fn create_project(
     tx: &Transaction<'_>,
     project_id: &ProjectId,
     spec: &ProjectSpec,
 ) -> Result<Outcome, EngineError> {
+    let case_clash: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM projects WHERE lower(id)=lower(?1) AND id<>?1)",
+            [project_id.as_str()],
+            |row| row.get(0),
+        )
+        .map_err(error)?;
+    if case_clash {
+        return Ok(Outcome::Rejected {
+            code: "project_id_case_conflict".into(),
+        });
+    }
     let stored = StoredProject {
         project_id: project_id.clone(),
         spec: spec.clone(),
@@ -1589,6 +1623,9 @@ pub(crate) fn create_project(
     enforce_snapshot_bound(tx)?;
     assert_eq!(count, 1);
     plugins::remove_project(tx, project_id)?;
+    if let Some(root) = tx.path().map(Path::new).and_then(Path::parent) {
+        plugins::remove_skill_project_folder(root, project_id.as_str())?;
+    }
     assert!(!tx.is_autocommit());
     Ok(Outcome::Applied)
 }
@@ -2461,6 +2498,19 @@ fn owner_read(
                 config.settings.model_access.as_ref(),
             )?),
         },
+        OwnerRead::TeamAgentMessages {
+            project_id,
+            agent,
+            before,
+            limit,
+        } => {
+            stored_setup(&tx, project_id)?;
+            OwnerData::TeamAgentMessages {
+                messages: Box::new(crate::team::agent_messages::owner_read(
+                    &tx, project_id, *agent, *before, *limit,
+                )?),
+            }
+        }
         OwnerRead::TeamEvents => OwnerData::TeamEvents {
             events: Box::new(crate::team::events::app(&tx)?),
         },
@@ -2505,6 +2555,7 @@ fn owner_read(
             )?,
         },
         OwnerRead::OwnerProfile => crate::owner_profile::read(&tx)?,
+        OwnerRead::SandboxSettings => crate::sandbox_settings::read(&tx)?,
         OwnerRead::SetupStatus => OwnerData::SetupStatus {
             status: setup::status(&tx, path)?,
         },

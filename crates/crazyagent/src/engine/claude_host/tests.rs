@@ -528,12 +528,27 @@ async fn stand_in_master(
     fixture: &mut crate::engine::master_host_fixture::MasterFixture,
     body: &str,
 ) -> ClaudeHost {
+    stand_in_master_at(fixture, body, false).await
+}
+
+/// Starts a stand-in Claude Code master host running `body`, at Full access when
+/// `unconfined`. Takes the fixture, the script body and the access. Returns the host.
+async fn stand_in_master_at(
+    fixture: &mut crate::engine::master_host_fixture::MasterFixture,
+    body: &str,
+    unconfined: bool,
+) -> ClaudeHost {
     let profile = fixture.lease("claude-group-turn", 1).unwrap();
     let home = profile.profile_path().unwrap();
     let harness = fixture.stand_in("claude", body);
     let command =
         launch_command(&harness, &fixture.project, &home, "native-default", None).unwrap();
     let sandbox = fixture.sandbox(&home, harness.parent().unwrap());
+    let sandbox = if unconfined {
+        sandbox.unconfined()
+    } else {
+        sandbox
+    };
     ClaudeHost::spawn(
         command,
         sandbox,
@@ -717,6 +732,49 @@ async fn cancelling_a_claude_master_stops_what_its_shells_detached() {
     assert!(cancelled.is_ok(), "{cancelled:?} after {elapsed:?}");
     assert!(elapsed < Duration::from_secs(5), "{elapsed:?}");
     processes.assert_gone();
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn cancelling_a_full_access_claude_master_names_what_it_left_running_and_keeps_the_lease_until_it_ends()
+ {
+    use crate::engine::master_host_fixture::{DETACHING_HARNESS, DetachedProcesses, MasterFixture};
+    use crate::harnesses::leftovers;
+
+    let mut fixture = MasterFixture::new("claude");
+    let body = format!("{DETACHING_HARNESS}exec /bin/sleep 30\n");
+    let mut claude = stand_in_master_at(&mut fixture, &body, true).await;
+    let processes = DetachedProcesses::wait(&fixture.project);
+    let cancelled = claude.cancel().await;
+    assert_eq!(
+        cancelled.map_err(|error| error.0),
+        Err(leftovers::LEFT.to_owned()),
+        "a Full access master turn ended clean while what it started outside its terminal ran"
+    );
+    let named = format!("{} perl", processes.session.as_raw_nonzero());
+    let reports = leftovers::held_by(&fixture.connection.id);
+    assert!(
+        reports.iter().any(|report| report.contains(&named)),
+        "{reports:?}"
+    );
+    assert_eq!(
+        fixture
+            .sign_in("claude-full-busy", 2)
+            .err()
+            .map(|error| error.0)
+            .as_deref(),
+        Some("native_profile_in_use"),
+        "the account lease was released while the master's leftover ran"
+    );
+    let _ = rustix::process::kill_process(processes.session, rustix::process::Signal::KILL);
+    let started = std::time::Instant::now();
+    while fixture.sign_in("claude-full-next", 3).is_err() {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the account lease stayed held after the leftover ended"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 #[cfg(target_os = "macos")]

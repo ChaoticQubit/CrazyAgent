@@ -1,4 +1,5 @@
 use super::interactive::KEY_FILE;
+use super::leftovers::{Lineage, Unstopped};
 use super::terminal_session::{KeyFile, write_key_file};
 use crate::adapters::claude::{ClaudeProtocol, State as ClaudeState};
 use crate::adapters::codex::{CodexProtocol, Event as CodexEvent, State as CodexState, TurnStatus};
@@ -42,6 +43,8 @@ pub const DURABLE_OUTPUT: &str = "output.log";
 #[cfg(unix)]
 const MKFIFO: &str = "/usr/bin/mkfifo";
 const TAIL_POLL: Duration = Duration::from_millis(20);
+#[cfg(unix)]
+const GROUP_EXIT_WAIT: Duration = Duration::from_secs(10);
 /// The Codex `-c` settings every tools-off launch passes: a read-only sandbox,
 /// no shell or exec, patch, image, sub-agent, code mode, app, plugin, goal or
 /// web search tool and no MCP server.
@@ -361,12 +364,68 @@ fn claude_limit_line(line: &str) -> bool {
         })
 }
 
-/// A plain failure code from a launch adapter. It never carries secrets or raw output.
+/// A plain failure code from a launch adapter. It never carries secrets or raw output; a
+/// `launch_secret_in_command` refusal also names the MCP server and secret, never the value.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LaunchError(pub String);
+pub struct LaunchError(pub String, pub Option<Box<SecretInCommand>>);
+
+/// The owner-given names of the MCP server and secret whose value a refused launch command
+/// would have held. Names are validated when saved, so they are plain text to show.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SecretInCommand {
+    pub server: String,
+    pub secret: String,
+}
 
 pub(super) fn failure(code: &str) -> LaunchError {
-    LaunchError(code.into())
+    LaunchError(code.into(), None)
+}
+
+/// Sends SIGKILL to every process of an agent's process group. Takes the group id, which
+/// names the group's leader and is above 1; an id that names no process does nothing.
+#[cfg(unix)]
+pub(crate) fn kill_group(group: u32) {
+    let Ok(raw) = i32::try_from(group) else {
+        return;
+    };
+    let Some(pid) = rustix::process::Pid::from_raw(raw) else {
+        return;
+    };
+    assert!(pid.as_raw_nonzero().get() > 1);
+    let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+}
+
+/// Waits until no process of a killed agent's group is left, killing again
+/// any member that is still there. Takes the group id; returns once the group
+/// is empty or after `GROUP_EXIT_WAIT`, so a run never reports an agent as
+/// stopped while one of its processes still lingers unnoticed. Output: whether
+/// the group is empty.
+#[cfg(unix)]
+pub(crate) fn await_group_exit(group: u32) -> bool {
+    let Some(pid) = i32::try_from(group)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+    else {
+        return true;
+    };
+    let started = Instant::now();
+    while rustix::process::test_kill_process_group(pid).is_ok()
+        && started.elapsed() < GROUP_EXIT_WAIT
+    {
+        let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    !group_alive(group)
+}
+
+/// Tells whether a process of a group is still there, without signalling it. Takes the
+/// group id. Output: false for an id that names no process.
+#[cfg(unix)]
+pub(crate) fn group_alive(group: u32) -> bool {
+    i32::try_from(group)
+        .ok()
+        .and_then(rustix::process::Pid::from_raw)
+        .is_some_and(|pid| rustix::process::test_kill_process_group(pid).is_ok())
 }
 
 /// Routes a launch that carries a real provider key through an engine-owned key relay on
@@ -392,7 +451,7 @@ pub fn route(mut request: LaunchRequest) -> Result<(LaunchRequest, Option<Relay>
     let upstream = request.account.base_url().unwrap_or(default).to_owned();
     let secret = SecretString::new(key.reveal().as_bytes().to_vec())
         .map_err(|_| failure("launch_secret_invalid"))?;
-    let relay = Relay::start(&upstream, secret).map_err(|error| LaunchError(error.0))?;
+    let relay = Relay::start(&upstream, secret).map_err(|error| LaunchError(error.0, None))?;
     let home = request.account.home().to_path_buf();
     request.account = AccountBinding::Url {
         home,
@@ -1179,6 +1238,7 @@ pub struct Session {
     child: Child,
     warden: Option<crate::sandbox::warden::Warden>,
     uncertain: bool,
+    unconfined: bool,
     stdin: Option<File>,
     lines: Receiver<Line>,
     driver: Driver,
@@ -1213,9 +1273,9 @@ impl Session {
         context: AgentContext,
     ) -> Result<Self, LaunchError> {
         let (request, relay) = route(request)?;
-        let key = write_key_file(&request)?;
         let (command, installed) = command_with_context(&request, &context)?;
         drop(context);
+        let key = write_key_file(&request)?;
         Self::spawn(request, command, Some(installed), None, (relay, key))
     }
 
@@ -1230,16 +1290,19 @@ impl Session {
         state: &Path,
     ) -> Result<Self, LaunchError> {
         let (request, relay) = route(request)?;
-        let key = write_key_file(&request)?;
         let (command, installed) = match &context {
             Some(context) => {
                 let (command, installed) = command_with_context(&request, context)?;
                 (command, Some(installed))
             }
-            None => (command(&request)?, None),
+            None => {
+                let installed = crate::launch_context::lock_only(request.account.home())?;
+                (command(&request)?, Some(installed))
+            }
         };
         drop(context);
         let io = DurableIo::create(state)?;
+        let key = write_key_file(&request)?;
         Self::spawn(request, command, installed, Some(io), (relay, key))
     }
 
@@ -1302,6 +1365,7 @@ impl Session {
             child,
             warden,
             uncertain: false,
+            unconfined: request.unconfined,
             stdin,
             lines,
             driver,
@@ -1400,14 +1464,20 @@ impl Session {
     }
 
     /// Stops the whole process group: TERM, a bounded grace wait, then KILL, and then has the
-    /// run's warden, when it has one, stop every process left in its sandbox.
-    /// Output: the leader's exit code when it exited normally, or
-    /// `harness_cleanup_uncertain` when a warden did not confirm that its sandbox is empty.
-    pub fn stop(mut self) -> Result<Option<i32>, LaunchError> {
+    /// run's warden, when it has one, stop every process left in its sandbox. A Full access
+    /// run has no warden, so the processes found in its lineage before the kill are checked
+    /// after it. Output: the leader's exit code when it exited normally,
+    /// [`Unstopped::Uncertain`] when a warden did not confirm that its sandbox is empty, or
+    /// [`Unstopped::Left`] naming what a Full access run left running.
+    pub fn stop(mut self) -> Result<Option<i32>, Unstopped> {
+        let lineage = self.unconfined.then(|| Lineage::of(self.process_group()));
         let code = self.stop_group();
         assert!(self.stopped && self.warden.is_none());
         if self.uncertain {
-            return Err(failure("harness_cleanup_uncertain"));
+            return Err(Unstopped::Uncertain);
+        }
+        if let Some(lineage) = lineage {
+            lineage?.settle()?;
         }
         Ok(code)
     }

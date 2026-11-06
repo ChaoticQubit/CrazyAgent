@@ -456,7 +456,12 @@ impl ClaudeHost {
             stop: Arc::clone(&stop),
             group: Arc::clone(&group),
             diagnostic: Arc::clone(&kept),
-            close_time: limits.cleanup_time,
+            close_time: limits.cleanup_time
+                + if sandbox.is_unconfined() {
+                    crate::harnesses::leftovers::STOP_TIME
+                } else {
+                    Duration::ZERO
+                },
             expires: tokio::time::Instant::now() + limits.run_time,
         };
         let _custodian = std::thread::Builder::new()

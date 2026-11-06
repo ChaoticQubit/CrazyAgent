@@ -1284,6 +1284,10 @@ impl ProjectPage {
                 id: self.screen.project.clone(),
                 name: self.screen.name.clone(),
             }),
+            ProjectReply::TeamSettings => Flow::Open(Place::TeamSettings {
+                id: self.screen.project.clone(),
+                name: self.screen.name.clone(),
+            }),
             ProjectReply::Master => Flow::Open(Place::Master {
                 id: self.screen.project.clone(),
                 name: self.screen.name.clone(),

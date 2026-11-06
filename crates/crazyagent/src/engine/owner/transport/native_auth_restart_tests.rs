@@ -1618,10 +1618,13 @@ async fn reproving_clears_when_reproof_ends() {
         for registration in registrations {
             handle
                 .authority
-                .publish(Registration {
-                    active: false,
-                    ..registration
-                })
+                .publish(
+                    Registration {
+                        active: false,
+                        ..registration
+                    },
+                    handle.authority.next_control(),
+                )
                 .unwrap();
         }
         assert!(

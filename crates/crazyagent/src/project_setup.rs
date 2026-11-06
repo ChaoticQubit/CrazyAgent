@@ -697,6 +697,11 @@ pub enum SetupQuery {
     CoordQuestions {
         project: ProjectId,
     },
+    TeamMessages {
+        project: ProjectId,
+        agent: i64,
+        before: Option<crate::team::agent_messages::Cursor>,
+    },
     /// Sends the owner's default master Open for a project whose live master switch is
     /// already on when no live session holds the master, so an existing project's master
     /// gets its session and restarts on it (LMS-1).
@@ -722,6 +727,7 @@ pub enum SetupView {
     Memories(Vec<crate::memory::KnowledgeEntry>),
     Team(Box<crate::team::TeamStatus>),
     CoordQuestions(Box<crate::team::questions::Inbox>),
+    TeamMessages(Box<crate::team::agent_messages::AgentMessages>),
     Library(crate::memory::library::LibraryView),
     /// A live master switch that is on although the owner's default Open opened no session
     /// for it, with the engine's code or the plain reason, so the owner sees why (LMS-M1).
@@ -2242,15 +2248,19 @@ fn retry_research(
 
 /// The tables whose rows belong to one project and go with it when it is removed.
 /// Live team agents are not listed: the team runtime stops them and keeps their rows.
-const REMOVED_WITH_PROJECT: [&str; 30] = [
+const REMOVED_WITH_PROJECT: [&str; 34] = [
     "research_jobs",
     "onboarding",
     "team_messages",
+    "team_events",
+    "team_agent_messages",
+    "team_message_settings",
     "team_tasks",
     "team_owner_prompts",
     "team_settings",
     "team_time_limits",
     "team_master_switch",
+    "team_settings_revision",
     "team_master_apply",
     "team_session_switches",
     "team_finished_view",

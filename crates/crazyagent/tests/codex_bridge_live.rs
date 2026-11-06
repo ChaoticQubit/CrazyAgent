@@ -1,5 +1,7 @@
 #![cfg(target_os = "macos")]
 
+mod pgid_support;
+
 use crazyagent::coord::adoption::Flag;
 use crazyagent::coord::delivery::codex::{self, Bridged, CONTROL_SOCKET};
 use crazyagent::coord::delivery::{Deliveries, NOTICES_KEY, RETRY_MS, Reach};
@@ -196,13 +198,7 @@ fn start_app(base: &Path, home: &Path, agent: &AgentId) -> (Server, Tmux) {
     };
     let host = Tmux::open(Some(tmux), &folder);
     let pane = host.spawn(agent, &built).unwrap();
-    let leader = rustix::process::Pid::from_raw(i32::try_from(pane.pid).unwrap()).unwrap();
-    assert_eq!(
-        rustix::process::getpgid(Some(leader)),
-        Ok(leader),
-        "tmux makes the app's pane process lead its own group"
-    );
-    server.group = Some(leader);
+    server.group = Some(pgid_support::pane_group(pane.pid));
     until(START, "the app server's control socket", || {
         std::fs::metadata(home.join(CONTROL_SOCKET))
             .is_ok_and(|socket| socket.file_type().is_socket())

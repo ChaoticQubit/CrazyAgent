@@ -238,6 +238,114 @@ fn a_home_is_free_once_its_launch_ends_even_while_a_child_shares_its_lock() {
     );
 }
 
+/// RV-DS-74: a second keyed launch on an account home whose agent is already running is
+/// refused at the home lock before it writes the key file, so the running agent's relay key
+/// file survives. The lock is taken by `command_with_context` ahead of `write_key_file`; the
+/// refusal must leave the earlier key file exactly as it was.
+#[cfg(unix)]
+#[test]
+fn a_refused_keyed_launch_on_a_busy_home_keeps_the_running_agents_key_file() {
+    use crate::harnesses::launch::{AccountBinding, LaunchLimits, LaunchRequest, Secret, Session};
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let home = base.join("codex");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let work = base.join("work");
+    fs::create_dir(&work).unwrap();
+    let profile = base.join("project.sb");
+    fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    let context = || AgentContext {
+        plugins: LaunchPlugins::default(),
+        instructions: "# Project context from CrazyAgent\n".into(),
+        process: None,
+        transcripts: true,
+        off_tools: Vec::new(),
+        native_team: None,
+        relay: None,
+        model_proxy: None,
+        claude_display: ClaudeDisplay::Classic,
+    };
+    let held = context().install("codex", &home, false).unwrap();
+    let key_path = home.join(".crazyagent-key");
+    fs::write(&key_path, b"running-agent-relay-token").unwrap();
+    let request = LaunchRequest {
+        harness: "codex".into(),
+        executable: std::path::PathBuf::from("/usr/bin/true"),
+        working_dir: work,
+        account: AccountBinding::Url {
+            home: home.clone(),
+            base_url: "http://127.0.0.1:11434".into(),
+            key: Some(Secret::new("crazyagent-local".to_owned()).unwrap()),
+        },
+        model: None,
+        tools: false,
+        sandbox_profile: Some(profile),
+        unconfined: false,
+        git_identity: None,
+        limits: LaunchLimits::default(),
+    };
+    let refused = Session::start_with_context(request, context());
+    assert_eq!(
+        refused.err().map(|error| error.0).as_deref(),
+        Some("launch_home_busy")
+    );
+    assert_eq!(fs::read(&key_path).unwrap(), b"running-agent-relay-token");
+    drop(held);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_refused_context_less_durable_launch_on_a_busy_home_keeps_the_running_agents_key_file() {
+    use crate::harnesses::launch::{AccountBinding, LaunchLimits, LaunchRequest, Secret, Session};
+    let directory = tempfile::tempdir().unwrap();
+    let base = directory.path().canonicalize().unwrap();
+    let home = base.join("codex");
+    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    let work = base.join("work");
+    fs::create_dir(&work).unwrap();
+    let state = base.join("state");
+    fs::DirBuilder::new().mode(0o700).create(&state).unwrap();
+    let profile = base.join("project.sb");
+    fs::write(&profile, "(version 1)\n(allow default)\n").unwrap();
+    let context = || AgentContext {
+        plugins: LaunchPlugins::default(),
+        instructions: "# Project context from CrazyAgent\n".into(),
+        process: None,
+        transcripts: true,
+        off_tools: Vec::new(),
+        native_team: None,
+        relay: None,
+        model_proxy: None,
+        claude_display: ClaudeDisplay::Classic,
+    };
+    let held = context().install("codex", &home, false).unwrap();
+    let key_path = home.join(".crazyagent-key");
+    fs::write(&key_path, b"running-agent-relay-token").unwrap();
+    let request = LaunchRequest {
+        harness: "codex".into(),
+        executable: std::path::PathBuf::from("/usr/bin/true"),
+        working_dir: work,
+        account: AccountBinding::Url {
+            home: home.clone(),
+            base_url: "http://127.0.0.1:11434".into(),
+            key: Some(Secret::new("crazyagent-local".to_owned()).unwrap()),
+        },
+        model: None,
+        tools: false,
+        sandbox_profile: Some(profile),
+        unconfined: false,
+        git_identity: None,
+        limits: LaunchLimits::default(),
+    };
+    let refused = Session::start_durable(request, None, &state);
+    assert_eq!(
+        refused.err().map(|error| error.0).as_deref(),
+        Some("launch_home_busy")
+    );
+    assert_eq!(fs::read(&key_path).unwrap(), b"running-agent-relay-token");
+    drop(held);
+}
+
 #[test]
 fn a_team_master_with_tools_on_gets_the_engine_delegate_tool() {
     let directory = tempfile::tempdir().unwrap();
@@ -806,11 +914,27 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
         unconfined: false,
     };
     assert!(context().exposes_secret(home.as_os_str().as_encoded_bytes()));
+    let named = LaunchError(
+        "launch_secret_in_command".into(),
+        Some(Box::new(crate::harnesses::launch::SecretInCommand {
+            server: "tools".into(),
+            secret: "TOKEN".into(),
+        })),
+    );
 
     let headless = crate::harnesses::launch::command_with_context(&request(), &context());
+    let refused = headless.err().unwrap();
+    assert_eq!(refused, named);
+    let sentence = secret_in_command_text(&refused).unwrap();
     assert_eq!(
-        headless.err().map(|refused| refused.0).as_deref(),
-        Some("launch_secret_in_command")
+        sentence,
+        "The MCP server \"tools\" secret \"TOKEN\" is part of the launch command, so it cannot \
+         be kept hidden. Replace it in Plugins."
+    );
+    assert!(!sentence.contains(home.to_str().unwrap()));
+    assert_eq!(
+        secret_in_command_text(&LaunchError("launch_home_busy".into(), None)),
+        None
     );
     let tmux =
         crate::terminal::tmux::installed(&root).expect("tmux must be installed on this machine");
@@ -823,10 +947,12 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
         request(),
         Some(context()),
     );
-    assert_eq!(
-        pane.err().map(|refused| refused.0).as_deref(),
-        Some("launch_secret_in_command")
-    );
+    let refused_pane = match std::env::consts::OS {
+        "macos" => named,
+        "linux" => LaunchError("launch_unavailable_on_linux".into(), None),
+        _ => LaunchError("launch_unavailable".into(), None),
+    };
+    assert_eq!(pane.err(), Some(refused_pane));
     assert!(
         !home.join("config.toml").exists(),
         "a refused launch leaves no generated file holding the secret"
@@ -835,6 +961,7 @@ fn an_mcp_secret_found_in_the_launch_command_refuses_the_launch_with_a_plain_cod
 
 /// A Codex agent pane started with an MCP secret in its project context and left running,
 /// as an engine leaves it when it quits, with what a later engine needs to adopt it.
+#[cfg(target_os = "macos")]
 struct LeftPane {
     _directory: tempfile::TempDir,
     config: PathBuf,
@@ -845,6 +972,7 @@ struct LeftPane {
     socket: PathBuf,
 }
 
+#[cfg(target_os = "macos")]
 impl LeftPane {
     /// Starts the pane as team agent `team` in a fresh private home under a `prefix`
     /// folder, then leaves it. Returns the left pane.
@@ -961,12 +1089,14 @@ impl LeftPane {
     }
 }
 
+#[cfg(target_os = "macos")]
 impl Drop for LeftPane {
     fn drop(&mut self) {
         self.kill_server();
     }
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn an_adopted_pane_removes_the_files_holding_its_mcp_secrets_when_it_stops() {
     let pane = LeftPane::start("ca-adopt-ctx-", 7);
@@ -978,6 +1108,7 @@ fn an_adopted_pane_removes_the_files_holding_its_mcp_secrets_when_it_stops() {
     );
 }
 
+#[cfg(target_os = "macos")]
 #[test]
 fn a_left_pane_that_cannot_be_taken_over_has_its_mcp_secret_files_removed() {
     let pane = LeftPane::start("ca-adopt-gone-", 8);
@@ -2155,6 +2286,17 @@ fn the_engine_install_of_context_mode_answers_the_mcp_handshake_in_a_fresh_sandb
     );
 }
 
+#[test]
+#[should_panic(expected = "launch_secret_in_command")]
+fn secret_names_ride_only_on_a_secret_in_command_refusal() {
+    let _ = secret_in_command_text(&LaunchError(
+        "launch_home_busy".into(),
+        Some(Box::new(SecretInCommand {
+            server: "tools".into(),
+            secret: "TOKEN".into(),
+        })),
+    ));
+}
 /// Starts a local model endpoint that records each request body and answers 500, so a real
 /// harness sends its first model request and no reply is made up. Output: the port and the
 /// recorded bodies.

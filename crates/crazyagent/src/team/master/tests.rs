@@ -3988,6 +3988,95 @@ fn a_sub_agent_remembers_through_its_own_mailbox_under_its_name_and_ask_me_first
     assert_eq!(std::fs::read_dir(&mailbox).unwrap().count(), 0);
 }
 
+/// MSG-SEC-1: a live master can neither read a sub-agent's Messages timeline nor change the
+/// project's Messages settings. Asked through its tool server by any timeline or settings
+/// name it gets an unknown tool, a call planted in its mailbox under such a name is answered
+/// as unreadable and changes nothing, and its `status` tool, from either handler set, never
+/// shows a word the timeline keeps.
+#[test]
+fn a_live_master_can_neither_read_a_messages_timeline_nor_change_its_settings() {
+    use super::super::agent_messages::{self, MessageSettings, Said};
+    let mut fixture = Fixture::new();
+    let project = ProjectId::new(PROJECT).unwrap();
+    let agent = named_sub(&fixture, "page-writer", "working");
+    let saved = MessageSettings {
+        page_size: 25,
+        ..MessageSettings::default()
+    };
+    let kept = "Kept for the owner 7Q4Z";
+    let tx = rusqlite::Transaction::new_unchecked(
+        &fixture.connection,
+        rusqlite::TransactionBehavior::Immediate,
+    )
+    .unwrap();
+    agent_messages::save_settings(&tx, &project, &saved).unwrap();
+    agent_messages::record(&tx, &project, agent, Said::Message, kept, NOW).unwrap();
+    tx.commit().unwrap();
+    let mailbox = fixture.base.join(tool::MAILBOX_FOLDER);
+    std::fs::create_dir(&mailbox).unwrap();
+    let names = [
+        "team_agent_messages",
+        "TeamAgentMessages",
+        "message_settings",
+        "MessageSettings",
+        "timeline",
+    ];
+    let arguments = json!({"agent": "@page-writer", "settings": {"page_size": 100, "keep_master_messages": false}});
+    let answers = serve_while(
+        &mut fixture,
+        &mailbox,
+        (1u64..)
+            .zip(names)
+            .map(|(id, name)| tool_call(id, name, arguments.clone()))
+            .collect(),
+    );
+    assert_eq!(answers.len(), names.len(), "{answers:#?}");
+    for answer in &answers {
+        assert_eq!(answer["error"]["code"], -32602, "{answer}");
+    }
+    let planted: Vec<String> = (0..names.len()).map(|n| format!("{n:032x}")).collect();
+    for (id, name) in planted.iter().zip(names) {
+        std::fs::write(
+            mailbox.join(format!("{id}.call")),
+            json!({"tool": name, "agent": "@page-writer", "settings": {"page_size": 100}})
+                .to_string(),
+        )
+        .unwrap();
+    }
+    let access = ModelAccess::default();
+    let setup = fixture.setup.clone();
+    let landing = fixture.base.clone();
+    let answering = Answering {
+        access: &access,
+        stored: &setup,
+        landing: &landing,
+        agents: &landing,
+        events: Some(&EVENTS),
+        host: None,
+    };
+    assert_eq!(
+        serve_calls(&mut fixture.connection, &answering, MASTER, &mailbox).unwrap(),
+        names.len()
+    );
+    for id in &planted {
+        let reply: Value =
+            serde_json::from_slice(&std::fs::read(mailbox.join(format!("{id}.reply"))).unwrap())
+                .unwrap();
+        assert_eq!(
+            (reply["text"].as_str(), reply["error"].as_bool()),
+            (Some(UNREAD), Some(true))
+        );
+    }
+    assert_eq!(
+        agent_messages::settings(&fixture.connection, &project).unwrap(),
+        saved
+    );
+    for status in [EVENTS.status, crate::team::events::HANDLERS.status] {
+        let told = status(&fixture.connection, &project).unwrap();
+        assert!(!told.trim().is_empty());
+        assert!(!told.contains(kept), "{told}");
+    }
+}
 /// Runs a reply-turn master's `team-mcp` server on its drop file and mailbox in a thread,
 /// answering its memory calls the way the runtime's tick does, until the requests end.
 /// Takes the fixture, the drop file, the mailbox, the tools switched off and the requests.

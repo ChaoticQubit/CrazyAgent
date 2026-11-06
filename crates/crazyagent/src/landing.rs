@@ -193,7 +193,8 @@ pub enum FileKind {
 }
 
 /// A property of a changed path the owner should look at before accepting: an
-/// executable bit, a symlink, a `.gitattributes` or `.gitmodules` edit, or a mode change.
+/// executable bit, a symlink, a `.gitattributes` or `.gitmodules` edit, a mode change, or
+/// an instruction file such as `AGENTS.md`, which changes what every agent is told.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FileMark {
@@ -202,6 +203,7 @@ pub enum FileMark {
     Attributes,
     Modules,
     Mode,
+    Instructions,
 }
 
 /// One changed path. `old_path` is set for a rename.
@@ -226,6 +228,16 @@ pub struct ChangeDiff {
     pub text: String,
     pub next: Option<u16>,
     pub truncated: bool,
+}
+
+/// The change sets waiting for the owner: `all` counts every project the engine has, and
+/// `here` counts the one project asked about, None when the count was not for a project.
+/// `here` is never more than `all`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WaitingChanges {
+    pub all: u32,
+    pub here: Option<u32>,
 }
 
 /// What an Accept did: landed one squash commit on the owner's checked-out branch, or
@@ -783,6 +795,22 @@ pub fn settle_sub_agents(
         Err(unavailable())
     }
 }
+/// Counts the change sets waiting for the owner in Changes: ready to review or conflicting
+/// with their branch, in the projects the engine still has. One its agent is updating waits
+/// on the agent instead. Inputs: the store and the project whose own count is wanted, if
+/// any. Output: the count in every project, and that project's count when one was given.
+pub fn waiting(
+    db: &Connection,
+    project: Option<&ProjectId>,
+) -> Result<WaitingChanges, EngineError> {
+    #[cfg(unix)]
+    return store::waiting(db, project);
+    #[cfg(not(unix))]
+    {
+        let _ = (db, project);
+        Err(unavailable())
+    }
+}
 
 /// Lists one project's change sets, open ones first, then newest first, at most
 /// `LIST_MAX`. Inputs: the store and the project. Output: the change sets.
@@ -869,16 +897,26 @@ pub fn open_teammate_sets(
 }
 
 /// Reads one page of a change set's diff, produced by the engine with no external diff or
-/// text conversion: for an open set, first noticed against the owner's branch, only what
-/// would change on that branch (DEC-107), from the merge base of its tip and the set's
-/// head, or only what is not yet on it when the owner landed part of it outside the app;
-/// else the whole change between its base and head. Inputs: the store, the change set and
-/// the page. Output: the page.
-pub fn diff(db: &Connection, id: &ChangeSetId, page: u16) -> Result<ChangeDiff, EngineError> {
+/// text conversion, only while the set is still at the head the owner is reading, so every
+/// page shown is of the head Accept and Discard name (RV-DS-13, RV-DS-79): for an open
+/// set, first noticed against the owner's branch, only what would change on that branch
+/// (DEC-107), from the merge base of its tip and the set's head, or only what is not yet
+/// on it when the owner landed part of it outside the app; else the whole change between
+/// its base and head. Inputs: the store, the change set, that head and the page. Output:
+/// the page, or `changes_stale` once the set moved to another head.
+pub fn diff(
+    db: &Connection,
+    id: &ChangeSetId,
+    head: &str,
+    page: u16,
+) -> Result<ChangeDiff, EngineError> {
     #[cfg(unix)]
     {
         store::initialize(db)?;
         let record = store::load(db, id)?;
+        if record.head != head {
+            return Err(EngineError("changes_stale".into()));
+        }
         let shown = owner::observe_for_diff(db, id).unwrap_or_else(|error| {
             eprintln!(
                 "landing_observe_failed cause={}",
@@ -893,7 +931,7 @@ pub fn diff(db: &Connection, id: &ChangeSetId, page: u16) -> Result<ChangeDiff, 
     }
     #[cfg(not(unix))]
     {
-        let _ = (db, id, page);
+        let _ = (db, id, head, page);
         Err(unavailable())
     }
 }

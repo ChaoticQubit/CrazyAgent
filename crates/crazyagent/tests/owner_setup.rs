@@ -11,6 +11,8 @@ use crazyagent::master_session::{MasterBackend, MasterOwnerAction};
 use crazyagent::owner_profile::{AnswerDetail, Initiative, OwnerProfile, WorkingStyle};
 use crazyagent::project_setup::{ProjectSetup, TeamPlan};
 use crazyagent::protocol::{CredentialRef, ProjectId, ProjectSpec};
+use crazyagent::sandbox::LinuxSockets;
+use crazyagent::sandbox_settings::SandboxSettings;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
@@ -234,6 +236,43 @@ async fn the_owner_profile_is_absent_on_first_run_then_saved_updated_and_durable
     case.restart().await;
     let mut controller = case.controller().await;
     assert_eq!(controller.owner_profile().await.unwrap(), Some(updated));
+    drop(controller);
+    case.close().await;
+}
+
+#[tokio::test]
+async fn each_linux_sockets_option_is_saved_in_the_engine_and_survives_a_restart() {
+    let mut case = Case::new().await;
+    let mut controller = case.controller().await;
+    assert_eq!(
+        controller.sandbox_settings().await.unwrap().linux_sockets,
+        LinuxSockets::TcpOnly
+    );
+    for (generation, linux_sockets) in [
+        (1, LinuxSockets::Refuse),
+        (2, LinuxSockets::TcpPorts),
+        (3, LinuxSockets::TcpOnly),
+        (4, LinuxSockets::TcpPorts),
+    ] {
+        let settings = SandboxSettings { linux_sockets };
+        assert_eq!(
+            applied(
+                controller
+                    .set_sandbox_settings(settings, generation)
+                    .await
+                    .unwrap()
+            ),
+            OwnerResult::Applied
+        );
+        assert_eq!(controller.sandbox_settings().await.unwrap(), settings);
+    }
+    drop(controller);
+    case.restart().await;
+    let mut controller = case.controller().await;
+    assert_eq!(
+        controller.sandbox_settings().await.unwrap().linux_sockets,
+        LinuxSockets::TcpPorts
+    );
     drop(controller);
     case.close().await;
 }

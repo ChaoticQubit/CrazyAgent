@@ -1,6 +1,8 @@
 use super::settings::connection_lost;
 use super::*;
-use crate::landing::{AcceptOutcome, ChangeDiff, ChangeSetId, ChangeSetView, TargetBranches};
+use crate::landing::{
+    AcceptOutcome, ChangeDiff, ChangeSetId, ChangeSetView, TargetBranches, WaitingChanges,
+};
 
 #[cfg(all(test, unix))]
 mod tests;
@@ -15,6 +17,7 @@ pub(in crate::tui) enum ChangesQuery {
     },
     Diff {
         id: ChangeSetId,
+        head: String,
         page: u16,
     },
     Accept {
@@ -41,6 +44,9 @@ pub(in crate::tui) enum ChangesQuery {
     Update {
         id: ChangeSetId,
     },
+    Waiting {
+        project: Option<ProjectId>,
+    },
 }
 
 /// What the engine answered to one Changes request.
@@ -55,6 +61,7 @@ pub(in crate::tui) enum ChangesView {
     Discarded { restorable_until_ms: u64 },
     Restored,
     Updating,
+    Waiting(WaitingChanges),
 }
 
 /// One Changes reply for the screens.
@@ -122,9 +129,12 @@ impl NativeOwner {
             ChangesQuery::List { project } => {
                 ChangesView::List(controller.change_sets(project).await.map_err(problem)?)
             }
-            ChangesQuery::Diff { id, page } => {
-                ChangesView::Diff(controller.change_diff(id, page).await.map_err(problem)?)
-            }
+            ChangesQuery::Diff { id, head, page } => ChangesView::Diff(
+                controller
+                    .change_diff(id, head, page)
+                    .await
+                    .map_err(problem)?,
+            ),
             ChangesQuery::Accept {
                 id,
                 expected_head,
@@ -162,6 +172,9 @@ impl NativeOwner {
             ChangesQuery::Update { id } => {
                 controller.update_changes(id).await.map_err(problem)?;
                 ChangesView::Updating
+            }
+            ChangesQuery::Waiting { project } => {
+                ChangesView::Waiting(controller.waiting_changes(project).await.map_err(problem)?)
             }
         })
     }

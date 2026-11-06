@@ -95,6 +95,8 @@ fn status() -> TeamStatus {
         reask_empty_reply: true,
         new_folder_files_max: crate::team::NEW_FOLDER_FILES_DEFAULT,
         coordination: None,
+        message_settings: crate::team::agent_messages::MessageSettings::default(),
+        settings_revision: 0,
         live_switch: None,
         paused: false,
         live_master: None,
@@ -1145,6 +1147,7 @@ fn branches_name_what_each_real_linked_worktree_and_own_clone_has_checked_out() 
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn hookless_agent_marks_its_node() {
     let directory = tempfile::tempdir().unwrap();

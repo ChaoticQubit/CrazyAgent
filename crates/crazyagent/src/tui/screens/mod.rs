@@ -33,6 +33,8 @@ pub mod settings_memory;
 pub mod settings_plugins;
 pub mod startup;
 pub mod team;
+pub(in crate::tui) mod team_messages;
+pub(in crate::tui) mod team_settings;
 pub(in crate::tui) mod usage;
 pub mod welcome;
 
@@ -177,6 +179,10 @@ pub enum Place {
         first_run: bool,
     },
     Team {
+        id: ProjectId,
+        name: String,
+    },
+    TeamSettings {
         id: ProjectId,
         name: String,
     },
@@ -326,6 +332,34 @@ pub trait Screen {
     fn place(&self) -> Option<Place> {
         None
     }
+
+    /// The project this screen belongs to, so the header can tell that project's waiting
+    /// change sets from the rest. Input: none. Output: the project of `place`, or None
+    /// outside a project.
+    fn project(&self) -> Option<ProjectId> {
+        match self.place()? {
+            Place::Project { id, .. }
+            | Place::Team { id, .. }
+            | Place::TeamSettings { id, .. }
+            | Place::Master { id, .. }
+            | Place::ProjectProcess { id, .. } => Some(id),
+            Place::Onboarding { project, .. } => project,
+            Place::Home
+            | Place::Welcome
+            | Place::Settings(_)
+            | Place::AddAccount
+            | Place::NewPool
+            | Place::NewPoolFrom(_)
+            | Place::EditPool(_)
+            | Place::NewProject
+            | Place::Setup { .. }
+            | Place::HomeFolder { .. }
+            | Place::AddProject
+            | Place::AddFolder
+            | Place::CloneRepo
+            | Place::Usage => None,
+        }
+    }
 }
 
 /// Builds the screen for a place.
@@ -345,6 +379,9 @@ pub fn open(place: &Place, ctx: &mut Ctx) -> Box<dyn Screen> {
         Place::NewProject => Box::new(new_project_page::NewProjectPage::new(ctx)),
         Place::Setup { first_run } => Box::new(app_setup::AppSetup::new(*first_run)),
         Place::Team { id, name } => Box::new(team::Team::new(id.clone(), name.clone())),
+        Place::TeamSettings { id, name } => {
+            Box::new(team_settings::TeamSettings::new(id.clone(), name.clone()))
+        }
         Place::Master { id, name } => Box::new(team::Team::master(id.clone(), name.clone())),
         Place::ProjectProcess { id, name } => {
             Box::new(process::ProcessPage::new(process::Scope::Project {

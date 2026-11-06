@@ -40,6 +40,7 @@ use crazyagent::project_setup::{
 };
 use crazyagent::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crazyagent::protocol::ProjectSpec;
+use crazyagent::sandbox_settings::SandboxSettings;
 use crazyagent::scheduling::{PoolRanking, Schedule, ScheduleChange};
 use crazyagent::setup::SetupStatus;
 use crazyagent::team::cleanup::FinishedAgent;
@@ -48,7 +49,7 @@ use crazyagent::terminal::TerminalRequest;
 use crazyagent::usage::report::UsageReport;
 use std::sync::Arc;
 use tauri::ipc::{Channel, InvokeResponseBody};
-use tauri::{AppHandle, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindow, WebviewWindowBuilder};
 use tokio::sync::{RwLockReadGuard, RwLockWriteGuard};
 use updates::{AvailableUpdate, InstallOutcome, UpdateProgress, UpdateSettings, UpdateState};
 
@@ -712,7 +713,7 @@ async fn desktop_project_files(
     query: String,
 ) -> Result<Vec<String>, BridgeError> {
     main_window(&window)?;
-    read(&state).await?.project_files(&id, &query).await
+    state.0.project_files(&id, &query).await
 }
 
 #[tauri::command]
@@ -768,6 +769,37 @@ async fn desktop_team_status(
 ) -> Result<TeamStatus, BridgeError> {
     main_window(&window)?;
     read(&state).await?.team_status(&id).await
+}
+
+#[tauri::command]
+async fn desktop_team_agent_messages(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    agent: i64,
+    before: Option<crazyagent::team::agent_messages::Cursor>,
+    limit: Option<u16>,
+) -> Result<crazyagent::team::agent_messages::AgentMessages, BridgeError> {
+    main_window(&window)?;
+    read(&state)
+        .await?
+        .team_agent_messages(&id, agent, before, limit)
+        .await
+}
+
+#[tauri::command]
+async fn desktop_team_message_settings(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    id: String,
+    settings: crazyagent::team::agent_messages::MessageSettings,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .team_message_settings(&id, settings, generation)
+        .await
 }
 
 #[tauri::command]
@@ -828,6 +860,46 @@ async fn desktop_team_keep_warm(
         .await
 }
 
+/// The three Team settings time limits one change sets: seconds for a task turn, an agent
+/// session and a sub-agent's idle stop, each from the listed choices or none for no limit.
+/// The window sends them as the separate `turnSecs`, `sessionSecs` and `idleSecs` keys.
+struct TeamTimeLimits {
+    turn_secs: Option<u32>,
+    session_secs: Option<u32>,
+    idle_secs: Option<u32>,
+}
+
+impl<'de, R: tauri::Runtime> tauri::ipc::CommandArg<'de, R> for TeamTimeLimits {
+    /// Reads each limit from its own key of the command call, the way Tauri reads an optional
+    /// argument: a missing key or null is no limit, any other non-number is refused. Input:
+    /// the command item. Output: the limits, or Tauri's invalid-argument error for that key.
+    fn from_command(
+        command: tauri::ipc::CommandItem<'de, R>,
+    ) -> Result<Self, tauri::ipc::InvokeError> {
+        let tauri::ipc::CommandItem {
+            plugin,
+            name,
+            message,
+            acl,
+            ..
+        } = command;
+        let read = |key| {
+            <Option<u32> as tauri::ipc::CommandArg<'de, R>>::from_command(tauri::ipc::CommandItem {
+                plugin,
+                name,
+                key,
+                message,
+                acl,
+            })
+        };
+        Ok(Self {
+            turn_secs: read("turnSecs")?,
+            session_secs: read("sessionSecs")?,
+            idle_secs: read("idleSecs")?,
+        })
+    }
+}
+
 /// Sets a project team's task and session time limits and sub-agent idle stop from Team
 /// settings: seconds from the listed choices, or none for no limit. Output: the receipt.
 #[tauri::command]
@@ -835,15 +907,26 @@ async fn desktop_team_time_limits(
     window: WebviewWindow,
     state: State<'_, NativeState>,
     id: String,
-    turn_secs: Option<u32>,
-    session_secs: Option<u32>,
-    idle_secs: Option<u32>,
+    limits: TeamTimeLimits,
+    revision: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
+    let TeamTimeLimits {
+        turn_secs,
+        session_secs,
+        idle_secs,
+    } = limits;
     lock(&state)
         .await?
-        .team_time_limits(&id, turn_secs, session_secs, idle_secs, generation)
+        .team_time_limits(
+            &id,
+            turn_secs,
+            session_secs,
+            idle_secs,
+            revision,
+            generation,
+        )
         .await
 }
 
@@ -853,12 +936,13 @@ async fn desktop_team_on_harness_switch(
     state: State<'_, NativeState>,
     id: String,
     mode: String,
+    revision: u64,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
     lock(&state)
         .await?
-        .team_on_harness_switch(&id, &mode, generation)
+        .team_on_harness_switch(&id, &mode, revision, generation)
         .await
 }
 
@@ -2059,6 +2143,29 @@ async fn desktop_save_owner_profile(
 }
 
 #[tauri::command]
+async fn desktop_sandbox_settings(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+) -> Result<SandboxSettings, BridgeError> {
+    main_window(&window)?;
+    lock(&state).await?.sandbox_settings().await
+}
+
+#[tauri::command]
+async fn desktop_set_sandbox_settings(
+    window: WebviewWindow,
+    state: State<'_, NativeState>,
+    settings: SandboxSettings,
+    generation: u64,
+) -> Result<IntentReceipt, BridgeError> {
+    main_window(&window)?;
+    lock(&state)
+        .await?
+        .set_sandbox_settings(settings, generation)
+        .await
+}
+
+#[tauri::command]
 async fn desktop_pool_summaries(
     window: WebviewWindow,
     state: State<'_, NativeState>,
@@ -2601,10 +2708,11 @@ async fn desktop_change_diff(
     window: WebviewWindow,
     state: State<'_, NativeState>,
     id: String,
+    head: String,
     page: u16,
 ) -> Result<ChangeDiff, BridgeError> {
     main_window(&window)?;
-    let call = lock(&state).await?.change_diff(id, page)?;
+    let call = lock(&state).await?.change_diff(id, head, page)?;
     call.await
 }
 
@@ -3093,6 +3201,8 @@ pub fn run() {
             desktop_project_agent_policy,
             desktop_set_project_agent_policy,
             desktop_team_status,
+            desktop_team_agent_messages,
+            desktop_team_message_settings,
             desktop_team_message,
             desktop_team_delegate,
             desktop_team_cancel,
@@ -3211,6 +3321,8 @@ pub fn run() {
             desktop_submit_claude_auth_code,
             desktop_owner_profile,
             desktop_save_owner_profile,
+            desktop_sandbox_settings,
+            desktop_set_sandbox_settings,
             desktop_pool_summaries,
             desktop_account_schedule,
             desktop_account_ranking,
@@ -3302,6 +3414,11 @@ pub fn run() {
                             && url.scheme() == "http"
                             && url.host_str() == Some("127.0.0.1")
                             && url.port() == Some(1420))
+                })
+                .on_page_load(|window, payload| {
+                    if matches!(payload.event(), tauri::webview::PageLoadEvent::Started) {
+                        window.state::<TerminalState>().0.page_started();
+                    }
                 })
                 .build()?;
             Ok(())

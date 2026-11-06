@@ -6,6 +6,7 @@ use rusqlite::{Connection, OptionalExtension, Transaction, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
+pub mod agent_messages;
 #[cfg(unix)]
 pub mod caller;
 pub mod caps;
@@ -632,10 +633,16 @@ pub enum TeamAction {
         turn_secs: Option<u32>,
         session_secs: Option<u32>,
         idle_secs: Option<u32>,
+        /// The team settings revision the client last read; a stale one is refused.
+        #[serde(default)]
+        revision: u64,
     },
     OnHarnessSwitch {
         project_id: ProjectId,
         mode: SwitchMode,
+        /// The team settings revision the client last read; a stale one is refused.
+        #[serde(default)]
+        revision: u64,
     },
     ApplyHarnessSwitch {
         project_id: ProjectId,
@@ -714,6 +721,10 @@ pub enum TeamAction {
     WakeAgent {
         project_id: ProjectId,
         agent: i64,
+    },
+    MessageSettings {
+        project_id: ProjectId,
+        settings: agent_messages::MessageSettings,
     },
     StopAgent {
         project_id: ProjectId,
@@ -946,6 +957,7 @@ impl TeamAction {
                     .then_some(())
                     .ok_or_else(|| failure("team_answer_invalid"))
             }
+            Self::MessageSettings { settings, .. } => settings.validate(),
             Self::KeepWarm { .. }
             | Self::SpreadAccounts { .. }
             | Self::ChildLanding { .. }
@@ -984,6 +996,7 @@ impl TeamAction {
             | Self::AskBeforeMerge { project_id, .. }
             | Self::ReaskEmptyReply { project_id, .. }
             | Self::NewFolderLimit { project_id, .. }
+            | Self::MessageSettings { project_id, .. }
             | Self::LiveMaster { project_id, .. }
             | Self::Pause { project_id }
             | Self::Resume { project_id }
@@ -1412,6 +1425,10 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
                 project TEXT PRIMARY KEY,
                 mode TEXT NOT NULL CHECK(mode IN ('carry','fresh'))
             );
+            CREATE TABLE IF NOT EXISTS team_settings_revision (
+                project TEXT PRIMARY KEY,
+                revision INTEGER NOT NULL CHECK(revision > 0)
+            );
             CREATE TABLE IF NOT EXISTS team_master_apply (
                 project TEXT PRIMARY KEY,
                 mode TEXT NOT NULL CHECK(mode IN ('when_idle','next_start'))
@@ -1467,7 +1484,8 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
             CREATE TABLE IF NOT EXISTS team_task_pins (
                 task INTEGER PRIMARY KEY,
                 project TEXT NOT NULL,
-                agent INTEGER NOT NULL
+                agent INTEGER NOT NULL,
+                held INTEGER NOT NULL DEFAULT 0
             );
             CREATE TABLE IF NOT EXISTS team_worktrees (
                 agent INTEGER PRIMARY KEY,
@@ -1537,6 +1555,7 @@ pub fn initialize(connection: &Connection) -> Result<(), EngineError> {
         .map_err(error)?;
     add_late_columns(connection)?;
     events::initialize(connection)?;
+    agent_messages::initialize(connection)?;
     master::initialize(connection)?;
     names::initialize(connection)?;
     questions::initialize(connection)?;
@@ -2021,6 +2040,37 @@ fn rejected(code: &str) -> Outcome {
     Outcome::Rejected { code: code.into() }
 }
 
+/// Refuses a time limits or On harness switch change made from a read older than another
+/// client's change, so one client never silently reverts the other, then moves the revision
+/// for the change about to be written. Takes the transaction, the project and the revision the
+/// client read. Returns the `stale_revision` refusal, or none once the revision moved.
+fn claim_settings_revision(
+    tx: &Transaction<'_>,
+    project: &ProjectId,
+    read: u64,
+) -> Result<Option<Outcome>, EngineError> {
+    let current = settings_revision(tx, project)?;
+    if current != read {
+        return Ok(Some(rejected("stale_revision")));
+    }
+    let next = current
+        .checked_add(1)
+        .and_then(|next| i64::try_from(next).ok())
+        .ok_or_else(|| error("team_settings_revision_invalid"))?;
+    tx.execute(
+        "INSERT INTO team_settings_revision(project,revision) VALUES (?1,?2)
+         ON CONFLICT(project) DO UPDATE SET revision=excluded.revision",
+        params![project.as_str(), next],
+    )
+    .map_err(error)?;
+    assert_eq!(
+        settings_revision(tx, project)?,
+        current + 1,
+        "an applied team settings change moves the revision by one"
+    );
+    Ok(None)
+}
+
 /// Deletes a project's oldest history rows so that one more row fits within `max`.
 /// Takes the transaction, the table, the SQL condition that marks history, the project and the bound.
 /// Returns any SQLite failure; live rows are never deleted, so live rows filling the bound is a broken invariant.
@@ -2198,8 +2248,12 @@ pub fn execute(
             turn_secs,
             session_secs,
             idle_secs,
+            revision,
             ..
         } => {
+            if let Some(stale) = claim_settings_revision(tx, project, *revision)? {
+                return Ok(stale);
+            }
             tx.execute(
                 "INSERT INTO team_time_limits(project,turn_secs,session_secs,idle_secs) VALUES (?1,?2,?3,?4)
                  ON CONFLICT(project) DO UPDATE SET turn_secs=excluded.turn_secs,
@@ -2209,7 +2263,10 @@ pub fn execute(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
-        TeamAction::OnHarnessSwitch { mode, .. } => {
+        TeamAction::OnHarnessSwitch { mode, revision, .. } => {
+            if let Some(stale) = claim_settings_revision(tx, project, *revision)? {
+                return Ok(stale);
+            }
             tx.execute(
                 "INSERT INTO team_master_switch(project,mode) VALUES (?1,?2)
                  ON CONFLICT(project) DO UPDATE SET mode=excluded.mode",
@@ -2347,6 +2404,10 @@ pub fn execute(
             harness, delivery, ..
         } => {
             crate::coord::settings::set_delivery(tx, project, *harness, *delivery)?;
+            Ok(Outcome::Applied)
+        }
+        TeamAction::MessageSettings { settings, .. } => {
+            agent_messages::save_settings(tx, project, settings)?;
             Ok(Outcome::Applied)
         }
         TeamAction::LiveMaster { on, .. } => {
@@ -2901,6 +2962,12 @@ pub struct TeamStatus {
     pub child_landing: ChildLanding,
     #[serde(default)]
     pub show_finished: bool,
+    /// The revision of the time limits and the On harness switch setting; a change to
+    /// either sends it back and is refused once another client changed them since.
+    #[serde(default)]
+    pub settings_revision: u64,
+    #[serde(default)]
+    pub message_settings: agent_messages::MessageSettings,
     #[serde(default)]
     pub agent_branches: BranchMode,
     #[serde(default)]
@@ -3164,6 +3231,27 @@ pub fn on_harness_switch(
     }
 }
 
+/// Reads the revision of a project's time limits and On harness switch setting, which every
+/// applied change to either moves by one. Takes a connection and the project.
+/// Returns 0 until the first change; a stored value below 1 is refused as invalid.
+pub fn settings_revision(connection: &Connection, project: &ProjectId) -> Result<u64, EngineError> {
+    let stored: Option<i64> = connection
+        .query_row(
+            "SELECT revision FROM team_settings_revision WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(error)?;
+    match stored {
+        None => Ok(0),
+        Some(value) => u64::try_from(value)
+            .ok()
+            .filter(|revision| *revision > 0)
+            .ok_or_else(|| error("team_settings_revision_invalid")),
+    }
+}
+
 /// When a saved master harness change reaches the project's running live master: the
 /// owner's choice, when the master is idle by default. Takes a connection and the project.
 /// Returns the choice.
@@ -3241,8 +3329,9 @@ const _: () = assert!(DEPTH_WALK_MAX > DEPTH_CHOICES[2] as i64);
 /// default: `team_agents.pane` (a native teammate's tmux pane id), `team_agents.mode` (the
 /// sub-agent mode a lead started in, DEC-104), `team_tasks.mode` (the mode the master asked
 /// for a lead's task), `team_agents.hookless` (1 when the agent's launch fires no hooks,
-/// DEC-104 bare-hooks) and `team_agents.pane_pid` (the pane process a native teammate was
-/// first named by, PLC (b)). Runs on every open and adds each column once. Takes the engine
+/// DEC-104 bare-hooks), `team_agents.pane_pid` (the pane process a native teammate was
+/// first named by, PLC (b)) and `team_task_pins.held` (1 when a hold pinned the task, not
+/// its own purpose). Runs on every open and adds each column once. Takes the engine
 /// connection. Returns any SQLite failure.
 fn add_late_columns(connection: &Connection) -> Result<(), EngineError> {
     for (table, column, definition) in [
@@ -3251,6 +3340,7 @@ fn add_late_columns(connection: &Connection) -> Result<(), EngineError> {
         ("team_tasks", "mode", "TEXT"),
         ("team_agents", "hookless", "INTEGER NOT NULL DEFAULT 0"),
         ("team_agents", "pane_pid", "INTEGER"),
+        ("team_task_pins", "held", "INTEGER NOT NULL DEFAULT 0"),
     ] {
         let present: bool = connection
             .query_row(
@@ -4200,6 +4290,8 @@ pub fn status(connection: &Connection, stored: &StoredSetup) -> Result<TeamStatu
         reask_empty_reply: reask_empty_reply(connection, project)?,
         new_folder_files_max: new_folder_files_max(connection, project)?,
         coordination: Some(coordination(connection, project)?),
+        message_settings: agent_messages::settings(connection, project)?,
+        settings_revision: settings_revision(connection, project)?,
         live_switch: live_switch(connection, project)?,
         paused: paused(connection, project)?,
         max_harnesses: limited.harnesses,

@@ -82,6 +82,12 @@ pub(crate) enum MasterRuntimeCommand {
         session_id: SessionId,
         turn_id: RequestId,
     },
+    Policy {
+        host: HostStamp,
+        project_id: ProjectId,
+        session_id: SessionId,
+        turn_id: RequestId,
+    },
     AcquireProfile {
         host: HostStamp,
         project_id: ProjectId,
@@ -189,6 +195,7 @@ pub(crate) enum MasterRuntimeResult {
     ConfiguredProfile(Box<RcliConfiguredProfileProof>),
     Prepared(Box<PreparedMasterTurn>),
     Turn(Box<MasterTurnView>),
+    Policy(Box<Option<crate::sandbox::policy::AgentPolicy>>),
     Profile(Box<NativeProfileUse>),
     Checkout(Box<MasterCheckout>),
     Waiting,
@@ -4021,6 +4028,12 @@ pub(super) fn runtime(
             session_id,
             turn_id,
         }
+        | MasterRuntimeCommand::Policy {
+            host,
+            project_id,
+            session_id,
+            turn_id,
+        }
         | MasterRuntimeCommand::AcquireProfile {
             host,
             project_id,
@@ -4104,6 +4117,12 @@ pub(super) fn runtime(
             }
             tx.commit().map_err(error)?;
             Ok(MasterRuntimeResult::Turn(Box::new(turn)))
+        }
+        MasterRuntimeCommand::Policy { ref host, .. } => {
+            current_scope(&tx, config, sources, host, &session, &turn)?;
+            let policy = crate::sandbox::policy::load(&tx, session.project_id.as_str()).ok();
+            tx.commit().map_err(error)?;
+            Ok(MasterRuntimeResult::Policy(Box::new(policy)))
         }
         MasterRuntimeCommand::AcquireProfile {
             ref host,

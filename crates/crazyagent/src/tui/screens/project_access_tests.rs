@@ -1,5 +1,6 @@
 use super::project_access::{
-    AccessEdit, LOWERING_STOPS_AGENTS, NETWORK_IGNORED_UNDER_FULL, network_help, summary,
+    AccessEdit, LOWERING_STOPS_AGENTS, NETWORK_IGNORED_UNDER_FULL, TOOLCHAIN_OFF_STOPS_AGENTS,
+    network_help, summary,
 };
 #[cfg(target_os = "macos")]
 use super::project_access::{AccessKey, FULL_ACCESS_WARNING};
@@ -164,6 +165,27 @@ fn the_access_box_says_beside_the_level_that_lowering_it_stops_agents_running_ab
     assert!(words(&beside).contains(LOWERING_STOPS_AGENTS), "{beside}");
     assert_eq!(
         LOWERING_STOPS_AGENTS,
-        "Lowering the level stops agents running above it; they restart at the new level."
+        "Lowering the level stops agents running above it; they restart at the new level. It does not reach processes a Full access agent started outside its terminal."
+    );
+}
+
+#[test]
+fn the_access_box_says_beside_the_toolchains_that_turning_one_off_stops_agents_running_with_it() {
+    let edit = AccessEdit::of(&view());
+    let look = super::new_project_view::Look::plain();
+    let rows: Vec<String> = edit.body(&look).iter().map(|row| row.text()).collect();
+    let heading = rows
+        .iter()
+        .position(|row| row.contains("Toolchains agents may use"))
+        .expect("the toolchain heading");
+    let beside = rows[heading..].join(" ");
+    let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        words(&beside).contains(TOOLCHAIN_OFF_STOPS_AGENTS),
+        "{beside}"
+    );
+    assert_eq!(
+        TOOLCHAIN_OFF_STOPS_AGENTS,
+        "Turning a toolchain off stops agents, research jobs and master turns running with it; their next start goes without it."
     );
 }

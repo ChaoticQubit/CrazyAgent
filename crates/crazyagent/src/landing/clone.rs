@@ -19,6 +19,7 @@ const REF_ENTRIES_MAX: usize = 1024;
 const REF_DEPTH_MAX: usize = 16;
 const PACKED_REFS_BYTES_MAX: u64 = 65_536;
 const REFS_LISTED_MAX: usize = 16;
+const BASE_NAME_BYTES_MAX: usize = 128;
 const REF_STORES: [&str; 2] = ["reftable", "worktrees"];
 const TEAMMATES_MAX: usize = 64;
 
@@ -29,6 +30,26 @@ thread_local! {
     /// None runs nothing.
     pub(super) static BETWEEN_CHECK_AND_FETCH: std::cell::Cell<Option<fn(&Path)>> =
         const { std::cell::Cell::new(None) };
+}
+
+/// The engine ref in the owner repository that keeps the commit an agent's own clone
+/// borrows as its base, so the owner's gc never drops objects the clone reads through its
+/// alternates (GA-R5). Input: the clone folder. Output: the ref, or
+/// `changes_workspace_invalid` for a folder whose name is not one plain ref part.
+pub(super) fn base_ref(worktree: &Path) -> Result<String, EngineError> {
+    let name = worktree
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(invalid)?;
+    let plain = !name.is_empty()
+        && name.len() <= BASE_NAME_BYTES_MAX
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_');
+    if !plain {
+        return Err(invalid());
+    }
+    Ok(format!("refs/crazyagent/base/{name}"))
 }
 
 fn invalid() -> EngineError {

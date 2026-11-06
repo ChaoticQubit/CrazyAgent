@@ -57,6 +57,11 @@ CREATE INDEX IF NOT EXISTS usage_runs_started ON usage_runs(started_ms);
 CREATE TABLE IF NOT EXISTS usage_refresh (
     singleton INTEGER PRIMARY KEY CHECK(singleton=1),
     requested_ms INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS usage_cut (
+    home TEXT PRIMARY KEY,
+    project TEXT NOT NULL,
+    cut_ms INTEGER NOT NULL
 );";
 
 /// Token counts a run used: fresh input, output, input read from the provider's cache and
@@ -349,14 +354,17 @@ fn claude_tools(value: &Value) -> Vec<String> {
 }
 
 /// Lists a home's session records, at most `FILES_PER_SCAN_MAX`, most recently changed
-/// first: Claude Code's `projects/<folder>/<session>.jsonl` with its sub-agent records
-/// further down, also in the home a native lead's teammates run with beside it (TPH-2 C),
-/// or Codex's `sessions/<year>/<month>/<day>/rollout-*.jsonl`. A linked top folder is
-/// never walked. The walk examines at most `ENTRIES_PER_SCAN_MAX` entries in all, entering
-/// the most recently changed folder first, and keeps only the newest records it saw, so a
-/// home an agent filled costs a bounded scan that leaves out its least recently changed
-/// folders. Inputs: the home and the format. Output: the paths.
-pub(crate) fn records(home: &Path, format: Format) -> Vec<PathBuf> {
+/// first by [`changed_at`]: Claude Code's `projects/<folder>/<session>.jsonl` with its
+/// sub-agent records further down, also in the home a native lead's teammates run with
+/// beside it (TPH-2 C), or Codex's `sessions/<year>/<month>/<day>/rollout-*.jsonl`. A
+/// linked top folder is never walked. The walk examines at most `ENTRIES_PER_SCAN_MAX`
+/// entries and `FILES_PER_SCAN_MAX * 4` folders of the home, entering the most recently
+/// changed folder first, and keeps only the newest records it saw, so a home an agent filled
+/// costs a bounded scan that leaves out its least recently changed folders. Inputs: the home
+/// and the format. Output: the paths, the records it saw but left out with their identity
+/// and length, fewer than `ENTRIES_PER_SCAN_MAX` since each is one examined entry, and
+/// whether the walk stopped at a bound before it saw every entry.
+pub(crate) fn records(home: &Path, format: Format) -> (Vec<PathBuf>, Vec<LeftOut>, bool) {
     let mut folders = match format {
         Format::Claude => vec![
             (crate::launch_context::mates_home(home).join("projects"), 0),
@@ -367,15 +375,19 @@ pub(crate) fn records(home: &Path, format: Format) -> Vec<PathBuf> {
     let mut newest = std::collections::BinaryHeap::with_capacity(FILES_PER_SCAN_MAX + 1);
     let mut visited = 0;
     let mut examined = 0;
+    let mut cut = false;
+    let mut left = Vec::new();
     let changed = |entry: &std::fs::DirEntry| {
         entry
             .metadata()
-            .and_then(|metadata| metadata.modified())
-            .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+            .map_or(std::time::SystemTime::UNIX_EPOCH, |metadata| {
+                changed_at(&metadata)
+            })
     };
     'walk: while let Some((folder, level)) = folders.pop() {
         visited += 1;
         if visited > FILES_PER_SCAN_MAX * 4 {
+            cut = true;
             break;
         }
         if level == 0 && !std::fs::symlink_metadata(&folder).is_ok_and(|metadata| metadata.is_dir())
@@ -388,6 +400,7 @@ pub(crate) fn records(home: &Path, format: Format) -> Vec<PathBuf> {
         let mut below = Vec::new();
         for entry in entries.flatten() {
             if examined == ENTRIES_PER_SCAN_MAX {
+                cut = true;
                 break 'walk;
             }
             examined += 1;
@@ -402,9 +415,23 @@ pub(crate) fn records(home: &Path, format: Format) -> Vec<PathBuf> {
                 && name.ends_with(".jsonl")
                 && (format == Format::Claude || name.starts_with("rollout-"))
             {
-                newest.push((std::cmp::Reverse(changed(&entry)), entry.path()));
-                if newest.len() > FILES_PER_SCAN_MAX {
-                    newest.pop();
+                let Ok(metadata) = entry.metadata() else {
+                    continue;
+                };
+                newest.push((
+                    std::cmp::Reverse(changed_at(&metadata)),
+                    entry.path(),
+                    file_identity(&metadata),
+                    metadata.len(),
+                ));
+                if newest.len() > FILES_PER_SCAN_MAX
+                    && let Some((_, path, identity, length)) = newest.pop()
+                {
+                    left.push(LeftOut {
+                        path,
+                        identity,
+                        length,
+                    });
                 }
             }
         }
@@ -412,11 +439,158 @@ pub(crate) fn records(home: &Path, format: Format) -> Vec<PathBuf> {
         folders.extend(below.into_iter().map(|(_, path)| (path, level + 1)));
     }
     assert!(examined <= ENTRIES_PER_SCAN_MAX && newest.len() <= FILES_PER_SCAN_MAX);
-    newest
+    assert!(cut || folders.is_empty());
+    assert!(left.len() + newest.len() <= examined);
+    assert!(left.is_empty() || newest.len() == FILES_PER_SCAN_MAX);
+    let paths = newest
         .into_sorted_vec()
         .into_iter()
-        .map(|(_, path)| path)
-        .collect()
+        .map(|(_, path, _, _)| path)
+        .collect();
+    (paths, left, cut)
+}
+
+/// A record the walk saw but left out: its path, its file identity and its length then. One
+/// scan holds fewer than `ENTRIES_PER_SCAN_MAX` of them.
+pub(crate) struct LeftOut {
+    path: PathBuf,
+    identity: (u64, u64),
+    length: u64,
+}
+
+/// The identity a record's progress is kept under: its device and inode on unix, none
+/// elsewhere, as [`open_record`] reads it. Input: the metadata. Output: the identity.
+#[cfg(unix)]
+fn file_identity(metadata: &std::fs::Metadata) -> (u64, u64) {
+    use std::os::unix::fs::MetadataExt;
+    (metadata.dev(), metadata.ino())
+}
+
+/// The identity a record's progress is kept under: none on this platform, as
+/// [`open_record`] reads it. Input: the metadata. Output: the identity.
+#[cfg(not(unix))]
+fn file_identity(_: &std::fs::Metadata) -> (u64, u64) {
+    (0, 0)
+}
+
+/// When a walked entry last changed, by a clock no agent can set: the inode change time,
+/// which every write and every change of a file's dates moves to now, so an agent can never
+/// make a record it wrote, or its folder, look older. Input: the entry's metadata. Output:
+/// the time, the epoch for a time before it.
+#[cfg(unix)]
+fn changed_at(metadata: &std::fs::Metadata) -> std::time::SystemTime {
+    use std::os::unix::fs::MetadataExt;
+    let seconds = u64::try_from(metadata.ctime()).unwrap_or(0);
+    let nanos = u32::try_from(metadata.ctime_nsec()).unwrap_or(0) % 1_000_000_000;
+    std::time::UNIX_EPOCH
+        .checked_add(std::time::Duration::new(seconds, nanos))
+        .unwrap_or(std::time::UNIX_EPOCH)
+}
+
+/// When a walked entry last changed: its modification time, as this platform has no inode
+/// change time. Input: the entry's metadata. Output: the time, the epoch when unreadable.
+#[cfg(not(unix))]
+fn changed_at(metadata: &std::fs::Metadata) -> std::time::SystemTime {
+    metadata
+        .modified()
+        .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+}
+
+/// Keeps whether the last scan of a home left usage uncounted, so the usage page can say its
+/// reading is partial: the walk stopped at a bound, or a record it left out is [`uncounted`]
+/// (MSL2B-R3-1), reading at most `READ_BYTES_MAX` bytes of their tails in all (CUT-L1). A cut
+/// scan stores the home with the time, keeping the `FILES_PER_SCAN_MAX` most recently cut
+/// homes; a whole scan removes it. Inputs: the store, the home, its attribution, the records
+/// left out, whether the walk stopped and the time. Output: done, or `usage_unavailable`.
+fn mark_cut(
+    db: &Connection,
+    home: &Path,
+    attribution: &Attribution,
+    left: &[LeftOut],
+    stopped: bool,
+    now_ms: i64,
+) -> Result<(), EngineError> {
+    let key = home.to_string_lossy();
+    let mut cut = stopped;
+    let mut budget = READ_BYTES_MAX as u64;
+    for record in left {
+        if cut {
+            break;
+        }
+        cut = uncounted(db, record, &mut budget)?;
+    }
+    if !cut {
+        let stored: bool = db
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM usage_cut WHERE home=?1)",
+                [key.as_ref()],
+                |row| row.get(0),
+            )
+            .map_err(storage)?;
+        if stored {
+            db.execute("DELETE FROM usage_cut WHERE home=?1", [key.as_ref()])
+                .map_err(storage)?;
+        }
+        return Ok(());
+    }
+    db.execute(
+        "INSERT INTO usage_cut (home,project,cut_ms) VALUES (?1,?2,?3)
+         ON CONFLICT(home) DO UPDATE SET project=excluded.project,cut_ms=excluded.cut_ms",
+        params![
+            key,
+            text(attribution.project.as_ref().map(ProjectId::as_str)),
+            now_ms
+        ],
+    )
+    .map_err(storage)?;
+    db.execute(
+        "DELETE FROM usage_cut WHERE home NOT IN
+         (SELECT home FROM usage_cut ORDER BY cut_ms DESC LIMIT ?1)",
+        [FILES_PER_SCAN_MAX as i64],
+    )
+    .map_err(storage)?;
+    Ok(())
+}
+
+/// Whether a record the walk left out holds lines no scan counted: it is not empty and its
+/// stored progress is missing or belongs to another file, or the bytes past its stored
+/// offset hold a line a scan would count (CUT-L1). Inputs: the store, the record and the
+/// tail bytes this scan may still read. Output: the answer, or `usage_unavailable`.
+fn uncounted(db: &Connection, record: &LeftOut, budget: &mut u64) -> Result<bool, EngineError> {
+    if record.length == 0 {
+        return Ok(false);
+    }
+    let progress = stored_progress(db, &record.path.to_string_lossy())?;
+    if progress.identity != record.identity {
+        return Ok(true);
+    }
+    Ok(progress.offset < record.length && countable_line(record, &progress, budget))
+}
+
+/// Whether the bytes of a left-out record from its stored offset to the length the walk saw
+/// end a line a scan would count. A last line still being written or torn by a stopped agent
+/// ends none, and the first ending closes the rest of a line the reads are skipping. Spends
+/// the tail on `budget`; a tail past it, or a record replaced or unreadable since the walk,
+/// answers true. Inputs: the record, its progress and the budget. Output: the answer.
+fn countable_line(record: &LeftOut, progress: &Progress, budget: &mut u64) -> bool {
+    let tail = record.length - progress.offset;
+    if tail > *budget {
+        return true;
+    }
+    *budget -= tail;
+    let Some((mut file, identity, _)) = open_record(&record.path) else {
+        return true;
+    };
+    let mut bytes = Vec::new();
+    if identity != record.identity
+        || file.seek(SeekFrom::Start(progress.offset)).is_err()
+        || file.take(tail).read_to_end(&mut bytes).is_err()
+        || bytes.len() as u64 != tail
+    {
+        return true;
+    }
+    let endings = bytes.iter().filter(|byte| **byte == b'\n').count();
+    endings > usize::from(progress.skipping)
 }
 
 #[cfg(unix)]
@@ -646,8 +820,10 @@ fn scan(
         _ => None,
     };
     let hour_ms = now_ms - now_ms.rem_euclid(HOUR_MS);
+    let (paths, left, stopped) = records(home, format);
+    mark_cut(db, home, attribution, &left, stopped, now_ms)?;
     let mut changed = Vec::new();
-    for path in records(home, format) {
+    for path in paths {
         let key = path.to_string_lossy().into_owned();
         let before = stored_progress(db, &key)?;
         let mut progress = before.clone();
@@ -941,6 +1117,8 @@ fn forget_finished_runs(db: &Connection, now_ms: i64) -> Result<(), EngineError>
             params![format!("{home}/")],
         )
         .map_err(storage)?;
+        db.execute("DELETE FROM usage_cut WHERE home=?1", [&home])
+            .map_err(storage)?;
         db.execute(
             "DELETE FROM usage_runs WHERE home=?1 AND started_ms<?2",
             params![home, ended],

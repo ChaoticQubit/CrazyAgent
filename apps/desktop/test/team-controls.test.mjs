@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { readFileSync } from "node:fs";
 import "./load-source.mjs";
 
 const controls = await import("../src/screens/team/controls.tsx");
@@ -192,6 +192,32 @@ test("every cap, token budget, depth and landing choice is offered once, from th
   assert.deepEqual([999_999, 1_000_000, 12_500_000, 12_590_000].map(controls.tokenWords), ["999999 tokens", "1M tokens", "12.5M tokens", "12.5M tokens"]);
   assert.equal(controls.DEPTH_DEFAULT, 2);
   assert.deepEqual(controls.LANDING_OPTIONS.map((option) => option.value), ["lead", "owner"]);
+});
+
+test("team settings changes send the revision the window read, so the engine refuses a stale one", () => {
+  const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
+  const source = read("../src/screens/team/controls.tsx");
+  assert.match(source, /setTeamTimeLimits\(projectId, next\.turn, next\.session, next\.idle, status\.settings_revision \?\? 0\)/);
+  assert.match(source, /setOnHarnessSwitch\(projectId, mode, status\.settings_revision \?\? 0\)/);
+  const api = read("../src/api.ts");
+  assert.match(api, /call<IntentReceipt>\("desktop_team_time_limits", \{ id, turnSecs, sessionSecs, idleSecs, revision, generation: nextGeneration\(\) \}\)/);
+  assert.match(api, /call<IntentReceipt>\("desktop_team_on_harness_switch", \{ id, mode, revision, generation: nextGeneration\(\) \}\)/);
+  const client = read("../src/engine-client.ts");
+  assert.match(client, /invoke<IntentReceipt>\("desktop_team_time_limits", \{ id, turnSecs, sessionSecs, idleSecs, revision, generation \}\)/);
+  assert.match(client, /invoke<IntentReceipt>\("desktop_team_on_harness_switch", \{ id, mode, revision, generation \}\)/);
+  assert.match(client, /settings_revision\?: number;/);
+  const lib = read("../src-tauri/src/lib.rs");
+  for (const command of ["desktop_team_time_limits", "desktop_team_on_harness_switch"]) {
+    const start = lib.indexOf(`fn ${command}(`);
+    assert.ok(start >= 0, command);
+    assert.ok(lib.slice(start, lib.indexOf(")", start)).includes("revision: u64"), `${command} takes the revision`);
+  }
+  const limits = lib.indexOf("CommandArg<'de, R> for TeamTimeLimits");
+  assert.ok(limits >= 0, "the native command reads the time limits through one argument");
+  const reads = lib.slice(limits, lib.indexOf("\n}\n", limits));
+  for (const key of ["turnSecs", "sessionSecs", "idleSecs"]) {
+    assert.ok(reads.includes(`read("${key}")`), `the native command reads ${key} as its own key`);
+  }
 });
 
 test("Settings, Team offers Apply a master harness change with When the master is idle by default and At the next start (N-D26)", async () => {

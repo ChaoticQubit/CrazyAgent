@@ -1,14 +1,15 @@
 import { nextGeneration } from "../../api";
 import type { HarnessEntry } from "../../api";
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { cancelTeamTask, failureCopy, loadTeamStatus, receiptState, renameTeamAgent, stopTeamAgent, stopTeammate, wakeTeamAgent } from "../../api-projects";
 import { ConfirmDialog, Icon, StatusBadge } from "../../ui";
 import { displayText } from "../conversation";
 import { harnessName } from "../new-project/team-editor";
+import { AgentMessages } from "../team/agent-messages";
 import { useLinkOpener } from "./links";
 import { MarkdownView } from "./markdown";
-import { finishedLabel, finishedRows, teamPanel } from "./research";
+import { agentKey, finishedLabel, finishedRows, liveAgent, teamPanel } from "./research";
 import type { FinishedRow, TeamAgentRow, TeamFilter, TeamTaskRow, TeammateRow } from "./research";
 import { NotReady } from "./shared";
 import type { ProjectData, TeamRead } from "./shared";
@@ -50,6 +51,7 @@ export function TeamPanel({ data, team, filter, harnesses, accounts, reload }: {
   const [note, setNote] = useState("");
   const [renaming, setRenaming] = useState<{ agent: number; text: string } | null>(null);
   const [halting, setHalting] = useState<TeamAgentRow | null>(null);
+  const [messages, setMessages] = useState<string | null>(null);
   const openLink = useLinkOpener(data.notify);
 
   async function rename() {
@@ -105,6 +107,7 @@ export function TeamPanel({ data, team, filter, harnesses, accounts, reload }: {
   const status = team.result.value;
   const panel = teamPanel(status, accounts, (id) => harnessName(harnesses, id), filter, team.at);
   const working = status.agents.filter((agent) => agent.status === "working").length;
+  const subs = new Map(status.agents.filter((agent) => agent.role === "sub").map((agent) => [agentKey(agent.id), agent]));
   return <section className="pj-stack-s" aria-labelledby="pj-team-title">
     <div className="pj-row between">
       <h3 id="pj-team-title">Team</h3>
@@ -114,7 +117,7 @@ export function TeamPanel({ data, team, filter, harnesses, accounts, reload }: {
     {panel.agents.length > 0 ? <div className="pj-table-wrap"><table className="pj-table">
       <caption className="pj-sr">Team agents</caption>
       <thead><tr><th scope="col">Agent</th><th scope="col">Harness</th><th scope="col">Account</th><th scope="col">Status</th><th scope="col">Current task</th></tr></thead>
-      <tbody>{panel.agents.map((row) => <tr key={row.key}>
+      <tbody>{panel.agents.map((row) => { const sub = subs.get(row.key); return <Fragment key={row.key}><tr>
         <th scope="row" style={row.depth > 0 ? { paddingInlineStart: `${row.depth * 1.5}rem` } : undefined}>{renaming && row.rename?.agent === renaming.agent
           ? <form className="pj-row" onSubmit={(event) => { event.preventDefault(); void rename(); }}>
             <label htmlFor={`pj-rename-${row.key}`} className="pj-sr">New @name for {displayText(row.name)}</label>
@@ -136,7 +139,9 @@ export function TeamPanel({ data, team, filter, harnesses, accounts, reload }: {
             <StatusBadge word={mate.word} />
             {mate.stop && <button type="button" className="btn danger-text" disabled={busy} aria-label={`Stop the teammate in pane ${displayText(mate.pane)}`}
               onClick={() => void haltTeammate(mate)}>Stop</button>}
-          </li>)}</ul>}</th>
+          </li>)}</ul>}
+          {sub && <span className="pj-block"><button type="button" className="btn quiet small" aria-label={`Messages for ${displayText(row.name)}`}
+            aria-expanded={messages === row.key} onClick={() => setMessages(messages === row.key ? null : row.key)}>Messages</button></span>}</th>
         <td>{displayText(row.harness)}</td>
         <td>{displayText(row.account)}</td>
         <td><StatusBadge word={row.word} />
@@ -144,7 +149,10 @@ export function TeamPanel({ data, team, filter, harnesses, accounts, reload }: {
           {row.stop && <button type="button" className="btn danger-text" disabled={busy} aria-label={row.lead ? `Stop ${displayText(row.name)}` : `Stop ${displayText(row.name)} and every agent it leads`}
             onClick={() => setHalting(row)}>Stop</button>}</td>
         <td className="pj-secondary">{displayText(row.task)}</td>
-      </tr>)}</tbody>
+      </tr>
+      {sub && messages === row.key && <tr><td colSpan={5}>
+        <AgentMessages projectId={data.id} agent={sub.id} name={sub.label} refresh={liveAgent(sub.status) ? team.at : 0} notify={data.notify} />
+      </td></tr>}</Fragment>; })}</tbody>
     </table></div> : <p className="pj-muted">{filter === "running" ? "No team agents are working. The master starts them when you ask it to build something." : "No team agents yet."}</p>}
     <h4>Tasks</h4>
     {panel.tasks.length > 0 ? <ul className="pj-rows" aria-label="Team tasks">{panel.tasks.map((row) => <li key={row.key} className="pj-task">
@@ -187,6 +195,7 @@ export function FinishedAgentsPanel({ data, team, harnesses, reload, children }:
 }) {
   const [shown, setShown] = useState<string | null>(null);
   const [waking, setWaking] = useState<number | null>(null);
+  const [messages, setMessages] = useState<number | null>(null);
   const [note, setNote] = useState("");
   const openLink = useLinkOpener(data.notify);
   if (team.result?.kind !== "ok") return null;
@@ -230,6 +239,9 @@ export function FinishedAgentsPanel({ data, team, harnesses, reload, children }:
           onClick={() => setShown(shown === row.key ? null : row.key)}>{shown === row.key ? "Hide result" : "Show result"}</button>
       </span>}
       {row.result !== null && shown === row.key && <div className="pj-md" id={`pj-finished-${row.key}`}><MarkdownView source={row.result} onOpenLink={openLink} /></div>}
+      <span><button type="button" className="btn quiet small" aria-label={`Messages for ${displayText(row.name)}`} aria-expanded={messages === row.agent}
+        onClick={() => setMessages(messages === row.agent ? null : row.agent)}>Messages</button></span>
+      {messages === row.agent && <AgentMessages projectId={data.id} agent={row.agent} name={row.name} refresh={0} notify={data.notify} />}
     </li>)}</ul>
     {children}
   </details>;

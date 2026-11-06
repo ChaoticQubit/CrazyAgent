@@ -118,7 +118,7 @@ fn referenced(connection: &Connection, kind: &str, name: &str) -> Result<bool, E
             name,
         ),
         SKILL_FOLDER => (
-            "SELECT EXISTS(SELECT 1 FROM plugin_items WHERE kind='skill' AND scope=?1)",
+            "SELECT EXISTS(SELECT 1 FROM plugin_items WHERE kind='skill' AND lower(scope)=lower(?1))",
             scoped.as_str(),
         ),
         HOOK_FOLDER => (

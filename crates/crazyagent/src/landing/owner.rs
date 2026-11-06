@@ -710,11 +710,11 @@ fn edited(text: &str) -> Result<String, EngineError> {
 /// an unusable checkout or a configured filter or merge driver, merges with merge-tree
 /// from the merge base of the branch tip and the set's head, so only what would change
 /// on that branch lands (DEC-107), refuses a merge that completes a bare-repository
-/// layout (SR1-1), makes the commit with the owner's identity, records the intent, writes
-/// the index and files with a two-tree read-tree and moves the branch by compare and
-/// swap. Inputs: the store, the owner's home, the change set, the reviewed head, the
-/// owner's edited message and where a test stops it. Output: the landed commit and
-/// branch, or the conflicts.
+/// layout or a link chain out of the project (SR1-1, SR1-2), makes the commit with the
+/// owner's identity, records the intent, writes the index and files with a two-tree
+/// read-tree and moves the branch by compare and swap. Inputs: the store, the owner's
+/// home, the change set, the reviewed head, the owner's edited message and where a test
+/// stops it. Output: the landed commit and branch, or the conflicts.
 pub(super) fn accept(
     db: &Connection,
     home: &Path,
@@ -777,7 +777,7 @@ pub(super) fn accept_to(
     if uses_configured_commands(&owner, &paths, &[&tree])? {
         return Err(failure("changes_git_unsupported"));
     }
-    flow::check_layout(&owner, &from, &record.head, &tree)?;
+    flow::check_merged(&owner, &repository, &from, &record.head, &tree)?;
     match &target {
         Target::Checkout => check_clean(&owner, &repository, &tip, &tree)?,
         Target::Ref => {}
@@ -1062,7 +1062,13 @@ fn settle(db: &Connection, record: &mut Record) -> Result<(), EngineError> {
             }
             if !record.is_open() {
                 let start = if reset { &target } else { &record.head };
-                store::set_base(db, &record.worktree, start)?;
+                flow::set_base(
+                    db,
+                    &record.repository,
+                    &record.worktree,
+                    &record.git_dir,
+                    start,
+                )?;
             }
             record.intent = None;
             store::save(db, record)?;

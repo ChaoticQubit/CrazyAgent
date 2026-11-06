@@ -1766,7 +1766,15 @@ fn message_agent(
     agent: &str,
     text: &str,
 ) -> Result<String, String> {
-    type_to_agent(connection, host, project, agent, text).map(|name| format!("Sent to {name}."))
+    type_to_agent(
+        connection,
+        host,
+        project,
+        agent,
+        super::events::Said::Message,
+        text,
+    )
+    .map(|name| format!("Sent to {name}."))
 }
 
 fn answer_agent(
@@ -1776,23 +1784,33 @@ fn answer_agent(
     agent: &str,
     text: &str,
 ) -> Result<String, String> {
-    type_to_agent(connection, host, project, agent, text).map(|name| format!("Answered {name}."))
+    type_to_agent(
+        connection,
+        host,
+        project,
+        agent,
+        super::events::Said::Answer,
+        text,
+    )
+    .map(|name| format!("Answered {name}."))
 }
 
 /// Types a master's text into the running sub-agent it names: a persona or `@handle` first,
 /// then the `<harness>-<id>` names events use, and types into the agent found by its id, so
-/// the name is read once (RV-DS-62). Takes the database, terminal host, project, the name
-/// and the text. Returns the agent's label, or the plain reason it was not sent.
+/// the name is read once (RV-DS-62). Takes the database, terminal host, project, the name,
+/// whether it is a message or an answer and the text. Returns the agent's label, or the plain
+/// reason it was not sent.
 fn type_to_agent(
     connection: &Connection,
     host: &dyn Host,
     project: &ProjectId,
     agent: &str,
+    said: super::events::Said,
     text: &str,
 ) -> Result<String, String> {
     let shown = super::bound_text(agent, AGENT_SHOWN_MAX);
     let found = super::events::resolve(connection, project, agent).map_err(unreadable)?;
-    match super::events::send_to(connection, host, found, text).map_err(unreadable)? {
+    match super::events::send_to(connection, host, found, said, text).map_err(unreadable)? {
         Ok(id) => super::events::label(connection, id).map_err(unreadable),
         Err("team_message_invalid") => Err(format!(
             "Not sent: give plain text up to {} bytes.",

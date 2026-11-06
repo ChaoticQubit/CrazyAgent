@@ -13,6 +13,7 @@ use std::os::unix::process::CommandExt;
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
+pub mod elf;
 pub mod extra_paths;
 pub mod hidden_paths;
 #[cfg(target_os = "linux")]
@@ -438,6 +439,16 @@ pub fn agent_env<'a>(
     Ok(env)
 }
 
+/// The end of the agent shims: forks the run's warden when handed a [`warden::WARDEN_FD`],
+/// keeping that descriptor and variable from the harness, then replaces the shim with the
+/// harness program and its arguments.
+#[cfg(unix)]
+macro_rules! warden_then_harness {
+    () => {
+        r#"if (defined(my $fd = delete $ENV{CRAZYAGENT_WARDEN_FD})) { my $engine = getppid(); $fd =~ /\A[0-9]{1,6}\z/ && $engine > 1 or die "crazyagent: no warden\n"; defined(my $warden = fork()) or die "crazyagent: no warden: $!\n"; if (!$warden) { POSIX::setsid(); POSIX::close($_) for 0, 1, 2; $SIG{PIPE} = "IGNORE"; open(my $line, "+<&=", $fd) or POSIX::_exit(1); my $armed = !kill(0, $engine) && $!{EPERM}; syswrite($line, $armed ? "A" : "U"); $armed or POSIX::_exit(0); my $byte; 1 while sysread($line, $byte, 1); syswrite($line, "F"); kill(9, -1); POSIX::_exit(1) } POSIX::close($fd) } exec {$ARGV[0]} @ARGV or die "crazyagent: cannot start $ARGV[0]: $!\n""#
+    };
+}
+
 /// The session shim a headless agent starts through inside `sandbox-exec`, followed by the
 /// harness program and its arguments. It joins the engine's process group, starts a new
 /// session and replaces itself with the harness, so the agent holds no controlling terminal
@@ -450,9 +461,62 @@ pub const SESSION_SHIM: [&str; 5] = [
     "/usr/bin/perl",
     "-mPOSIX",
     "-e",
-    r#"setpgrp(0, getpgrp(getppid())) or die "crazyagent: no new session: $!\n"; my $tries = 0; until (POSIX::setsid() > 0) { $!{EPERM} && ++$tries < 200 or die "crazyagent: no new session: $!\n"; select(undef, undef, undef, 0.005) } if (defined(my $fd = delete $ENV{CRAZYAGENT_WARDEN_FD})) { my $engine = getppid(); $fd =~ /\A[0-9]{1,6}\z/ && $engine > 1 or die "crazyagent: no warden\n"; defined(my $warden = fork()) or die "crazyagent: no warden: $!\n"; if (!$warden) { POSIX::setsid(); POSIX::close($_) for 0, 1, 2; $SIG{PIPE} = "IGNORE"; open(my $line, "+<&=", $fd) or POSIX::_exit(1); my $armed = !kill(0, $engine) && $!{EPERM}; syswrite($line, $armed ? "A" : "U"); $armed or POSIX::_exit(0); my $byte; 1 while sysread($line, $byte, 1); syswrite($line, "F"); kill(9, -1); POSIX::_exit(1) } POSIX::close($fd) } exec {$ARGV[0]} @ARGV or die "crazyagent: cannot start $ARGV[0]: $!\n""#,
+    concat!(
+        r#"setpgrp(0, getpgrp(getppid())) or die "crazyagent: no new session: $!\n"; my $tries = 0; until (POSIX::setsid() > 0) { $!{EPERM} && ++$tries < 200 or die "crazyagent: no new session: $!\n"; select(undef, undef, undef, 0.005) } "#,
+        warden_then_harness!()
+    ),
     "--",
 ];
+
+/// The shim a pane agent starts through inside `sandbox-exec`, followed by the harness
+/// program and its arguments: the [`SESSION_SHIM`] without its new session, since a pane's
+/// harness keeps the pane's terminal and process group. Handed a [`warden::WARDEN_FD`] by
+/// the pane's [`KEEPER`], it forks the run's warden first.
+#[cfg(target_os = "macos")]
+pub const PANE_SHIM: [&str; 5] = [
+    "/usr/bin/perl",
+    "-mPOSIX",
+    "-e",
+    warden_then_harness!(),
+    "--",
+];
+
+/// A pane's first process, outside the sandbox, followed by the sandboxed command it keeps.
+/// It starts that command holding one end of a socket pair as the run's warden descriptor
+/// and waits until the command exits or the pane is asked to stop with hangup or terminate.
+/// Then it shuts its end, so the warden kills every process left in the sandbox, sessions
+/// of their own included, and it exits only once the warden confirmed that or found
+/// signals not confined; otherwise it keeps the pane open, ignoring terminate, until a
+/// hangup. A confining profile keeps every agent signal from it, and the terminal keys
+/// that signal the pane's group do not end it.
+#[cfg(target_os = "macos")]
+pub const KEEPER: [&str; 6] = [
+    "/usr/bin/perl",
+    "-mPOSIX",
+    "-MSocket",
+    "-e",
+    r#"$^F = 1023; my $why = ""; $SIG{$_} = "IGNORE" for qw(INT QUIT TSTP TTIN TTOU PIPE); $SIG{HUP} = sub { $why ||= "HUP" }; $SIG{TERM} = sub { $why ||= "TERM" }; $SIG{CHLD} = sub { 1 }; socketpair(my $keep, my $line, AF_UNIX, SOCK_STREAM, PF_UNSPEC) or die "crazyagent: no warden: $!\n"; defined(my $harness = fork()) or die "crazyagent: no warden: $!\n"; if (!$harness) { $SIG{$_} = "DEFAULT" for qw(INT QUIT TSTP TTIN TTOU PIPE HUP TERM CHLD); close($keep); $ENV{CRAZYAGENT_WARDEN_FD} = fileno($line); exec {$ARGV[0]} @ARGV or die "crazyagent: cannot start $ARGV[0]: $!\n" } close($line); until ($why || waitpid($harness, POSIX::WNOHANG()) > 0) { select(undef, undef, undef, 1) } shutdown($keep, 1); my ($report, $wanted) = ("", ""); vec($wanted, fileno($keep), 1) = 1; my $until = time + 4; while (time < $until && length($report) < 8) { select(my $ready = $wanted, undef, undef, 0.25) > 0 or next; sysread($keep, my $more, 8) or last; $report .= $more } POSIX::_exit(0) if $report eq "AF" || $report eq "U" || $why eq "HUP"; $SIG{TERM} = "IGNORE"; $SIG{HUP} = "DEFAULT"; sleep(3600) while 1"#,
+    "--",
+];
+
+/// Puts a pane's sandboxed command under the [`KEEPER`] and the [`PANE_SHIM`], so stopping
+/// the pane ends every process its agent started. Input: the argv `sandbox-exec -f
+/// <profile> <program> <arguments>`. Output: the kept argv, or none for any other argv.
+#[cfg(target_os = "macos")]
+pub fn kept_pane(argv: Vec<String>) -> Option<Vec<String>> {
+    if argv.len() < 4 || argv[0] != SANDBOX_EXEC || argv[1] != "-f" {
+        return None;
+    }
+    let length = argv.len();
+    let mut kept: Vec<String> = KEEPER.iter().map(|part| (*part).to_owned()).collect();
+    let mut rest = argv.into_iter();
+    kept.extend(rest.by_ref().take(3));
+    kept.extend(PANE_SHIM.iter().map(|part| (*part).to_owned()));
+    kept.extend(rest);
+    assert_eq!(kept.len(), KEEPER.len() + PANE_SHIM.len() + length);
+    assert_eq!(kept[KEEPER.len()], SANDBOX_EXEC);
+    Some(kept)
+}
 
 /// Builds the one command every sandboxed headless agent process starts from: `-f
 /// <profile>`, the [`SESSION_SHIM`] and `<program>` under `sandbox-exec`, a cleared
@@ -591,6 +655,32 @@ impl SandboxRemote {
     }
 }
 
+/// How a limited-network agent's sockets are held on Linux, the owner's setting "Linux
+/// limited-network sockets". Landlock limits outbound TCP by port only, so a UDP, ping or
+/// other socket would reach any host. `TcpOnly` (the default) refuses every socket but TCP
+/// and has names looked up over TCP, `Refuse` starts no limited-network agent, and
+/// `TcpPorts` keeps only Landlock's TCP port rules. Other systems ignore it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LinuxSockets {
+    #[default]
+    TcpOnly,
+    Refuse,
+    TcpPorts,
+}
+
+/// The launch refusal when the Linux sockets setting starts no limited-network agent.
+pub const LINUX_LIMITED_NETWORK_OFF: &str = "linux_limited_network_off";
+
+/// The launch refusal when, under `TcpOnly`, a harness that looks host names up is not a
+/// glibc program: only glibc's resolver asks over TCP, so it could not reach its model.
+pub const LINUX_RESOLVER_NEEDS_UDP: &str = "linux_resolver_needs_udp";
+
+/// The launch refusal when, under `TcpOnly`, a harness that looks host names up is a script
+/// whose interpreter cannot be checked ([`elf::Lookup::Unjudged`]), such as a script that
+/// runs another script: the check follows a `#!` line one level only and never guesses.
+pub const LINUX_HARNESS_UNCHECKED: &str = "linux_harness_unchecked";
+
 /// Refusal to build or install a project sandbox, with a plain reason.
 #[derive(Debug)]
 pub enum SandboxError {
@@ -637,6 +727,7 @@ pub struct ProjectSandbox {
     kept_out: Vec<PathBuf>,
     revealed: Vec<PathBuf>,
     network: SandboxNetwork,
+    linux_sockets: LinuxSockets,
     kept_ports: Vec<u16>,
     owner_home: PathBuf,
     engine_secrets: Vec<PathBuf>,
@@ -709,6 +800,7 @@ impl ProjectSandbox {
             kept_out: Vec::new(),
             revealed: Vec::new(),
             network,
+            linux_sockets: LinuxSockets::default(),
             kept_ports: Vec::new(),
             owner_home: owner,
             engine_secrets: Vec::new(),
@@ -1439,6 +1531,47 @@ impl ProjectSandbox {
     /// The network reach this sandbox grants the agent.
     pub fn network(&self) -> &SandboxNetwork {
         &self.network
+    }
+
+    /// Sets how this agent's sockets are held on Linux when its network is limited. Input:
+    /// the owner's setting. Output: the sandbox.
+    pub fn limit_sockets(mut self, sockets: LinuxSockets) -> Self {
+        self.linux_sockets = sockets;
+        self
+    }
+
+    /// How this agent's sockets are held on Linux when its network is limited.
+    pub fn linux_sockets(&self) -> LinuxSockets {
+        self.linux_sockets
+    }
+
+    /// True when, on Linux, this agent looks host names up over TCP: the setting is
+    /// `TcpOnly` and its limited network names a remote on any host. It then may reach TCP
+    /// port 53 and gets `RES_OPTIONS=use-vc`; loopback-only and empty networks get neither.
+    pub fn resolves_over_tcp(&self) -> bool {
+        self.linux_sockets == LinuxSockets::TcpOnly
+            && matches!(&self.network, SandboxNetwork::Only(remotes)
+                if remotes.iter().any(|remote| matches!(remote, SandboxRemote::AnyHost(_))))
+    }
+
+    /// Why the Linux sockets setting refuses to start `program` in this sandbox:
+    /// [`LINUX_LIMITED_NETWORK_OFF`] for any limited network under `Refuse`, and
+    /// [`LINUX_RESOLVER_NEEDS_UDP`] under `TcpOnly` when the agent resolves names and the
+    /// program, or the interpreter a script names, is not a glibc one, and
+    /// [`LINUX_HARNESS_UNCHECKED`] when that interpreter cannot be checked ([`elf::lookup`]).
+    /// The setting never changes silently. Input: the harness program. Output: the refusal
+    /// code, or None.
+    pub fn linux_refusal(&self, program: &Path) -> Option<&'static str> {
+        match (&self.network, self.linux_sockets) {
+            (SandboxNetwork::Open, _) => None,
+            (SandboxNetwork::Only(_), LinuxSockets::Refuse) => Some(LINUX_LIMITED_NETWORK_OFF),
+            _ if self.resolves_over_tcp() => match elf::lookup(program) {
+                elf::Lookup::OverTcp => None,
+                elf::Lookup::NotOverTcp => Some(LINUX_RESOLVER_NEEDS_UDP),
+                elf::Lookup::Unjudged => Some(LINUX_HARNESS_UNCHECKED),
+            },
+            _ => None,
+        }
     }
 
     /// Paths no agent may write although they sit in a writable root: both `context/`
@@ -2837,5 +2970,199 @@ mod windows_path_tests {
         assert!(!windows_clean_text(&long));
         let fits = format!(r"C:\{}", "a".repeat(super::PATH_BYTES_MAX - 3));
         assert!(windows_clean_text(&fits));
+    }
+}
+
+#[cfg(test)]
+mod linux_sockets_tests {
+    use super::*;
+    use crate::sandbox::elf::tests::executable;
+
+    struct Case {
+        _temp: tempfile::TempDir,
+        root: PathBuf,
+    }
+
+    fn case() -> Case {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        for folder in ["project", "home", "tmp"] {
+            fs::create_dir_all(root.join(folder)).unwrap();
+        }
+        fs::write(
+            root.join("glibc"),
+            executable(true, false, Some("/lib64/ld-linux-x86-64.so.2")),
+        )
+        .unwrap();
+        fs::write(
+            root.join("musl"),
+            executable(true, false, Some("/lib/ld-musl-x86_64.so.1")),
+        )
+        .unwrap();
+        fs::write(root.join("static"), executable(true, false, None)).unwrap();
+        for (script, interpreter) in [
+            ("on_glibc", root.join("glibc")),
+            ("on_musl", root.join("musl")),
+            ("on_script", root.join("on_glibc")),
+            ("on_relative", PathBuf::from("node")),
+        ] {
+            fs::write(root.join(script), format!("#!{}\n", interpreter.display())).unwrap();
+        }
+        Case { _temp: temp, root }
+    }
+
+    fn sandbox(case: &Case, network: SandboxNetwork, sockets: LinuxSockets) -> ProjectSandbox {
+        ProjectSandbox::new(
+            &case.root.join("project"),
+            &case.root.join("home"),
+            &case.root.join("tmp"),
+            network,
+        )
+        .unwrap()
+        .limit_sockets(sockets)
+    }
+
+    fn model() -> SandboxNetwork {
+        SandboxNetwork::Only(vec![SandboxRemote::AnyHost(443)])
+    }
+
+    fn local() -> SandboxNetwork {
+        SandboxNetwork::Only(vec![SandboxRemote::Loopback(8080)])
+    }
+
+    #[test]
+    fn the_setting_defaults_to_tcp_only_and_keeps_its_wire_names() {
+        let case = case();
+        let fresh = ProjectSandbox::new(
+            &case.root.join("project"),
+            &case.root.join("home"),
+            &case.root.join("tmp"),
+            model(),
+        )
+        .unwrap();
+        assert_eq!(fresh.linux_sockets(), LinuxSockets::TcpOnly);
+        for (sockets, name) in [
+            (LinuxSockets::TcpOnly, "\"tcp_only\""),
+            (LinuxSockets::Refuse, "\"refuse\""),
+            (LinuxSockets::TcpPorts, "\"tcp_ports\""),
+        ] {
+            assert_eq!(serde_json::to_string(&sockets).unwrap(), name);
+            assert_eq!(serde_json::from_str::<LinuxSockets>(name).unwrap(), sockets);
+        }
+        assert!(serde_json::from_str::<LinuxSockets>("\"udp\"").is_err());
+    }
+
+    #[test]
+    fn tcp_only_starts_a_glibc_harness_and_refuses_one_that_cannot_ask_over_tcp() {
+        let case = case();
+        let named = sandbox(&case, model(), LinuxSockets::TcpOnly);
+        assert!(named.resolves_over_tcp());
+        assert_eq!(named.linux_refusal(&case.root.join("glibc")), None);
+        for program in ["musl", "static", "on_musl", "absent"] {
+            assert_eq!(
+                named.linux_refusal(&case.root.join(program)),
+                Some(LINUX_RESOLVER_NEEDS_UDP),
+                "{program}"
+            );
+        }
+        for network in [
+            local(),
+            SandboxNetwork::Only(Vec::new()),
+            SandboxNetwork::Open,
+        ] {
+            let quiet = sandbox(&case, network, LinuxSockets::TcpOnly);
+            assert!(!quiet.resolves_over_tcp());
+            assert_eq!(quiet.linux_refusal(&case.root.join("musl")), None);
+        }
+    }
+
+    #[test]
+    fn tcp_only_judges_a_script_by_its_interpreter_and_names_a_deeper_chain_plainly() {
+        let case = case();
+        let named = sandbox(&case, model(), LinuxSockets::TcpOnly);
+        assert_eq!(named.linux_refusal(&case.root.join("on_glibc")), None);
+        assert_eq!(
+            named.linux_refusal(&case.root.join("on_musl")),
+            Some(LINUX_RESOLVER_NEEDS_UDP)
+        );
+        for program in ["on_script", "on_relative"] {
+            assert_eq!(
+                named.linux_refusal(&case.root.join(program)),
+                Some(LINUX_HARNESS_UNCHECKED),
+                "{program}"
+            );
+        }
+        let quiet = sandbox(&case, local(), LinuxSockets::TcpOnly);
+        assert_eq!(quiet.linux_refusal(&case.root.join("on_script")), None);
+        let unchecked = crate::config::plain_problem(LINUX_HARNESS_UNCHECKED).unwrap();
+        for part in [
+            "cannot check",
+            "'TCP only'",
+            "does not start",
+            "'TCP ports only'",
+            "reach any host",
+            "Settings",
+        ] {
+            assert!(unchecked.contains(part), "{unchecked}");
+        }
+    }
+
+    #[test]
+    fn refuse_starts_no_limited_network_agent() {
+        let case = case();
+        for network in [model(), local(), SandboxNetwork::Only(Vec::new())] {
+            let refused = sandbox(&case, network, LinuxSockets::Refuse);
+            assert!(!refused.resolves_over_tcp());
+            assert_eq!(
+                refused.linux_refusal(&case.root.join("glibc")),
+                Some(LINUX_LIMITED_NETWORK_OFF)
+            );
+        }
+        let open = sandbox(&case, SandboxNetwork::Open, LinuxSockets::Refuse);
+        assert_eq!(open.linux_refusal(&case.root.join("glibc")), None);
+    }
+
+    #[test]
+    fn each_refusal_reads_plainly_and_names_the_setting() {
+        let udp = crate::config::plain_problem(LINUX_RESOLVER_NEEDS_UDP).unwrap();
+        for part in [
+            "cannot look up names over TCP",
+            "'TCP only'",
+            "'TCP ports only'",
+            "Settings",
+            "UDP and other sockets reach any host",
+        ] {
+            assert!(udp.contains(part), "{udp}");
+        }
+        let off = crate::config::plain_problem(LINUX_LIMITED_NETWORK_OFF).unwrap();
+        for part in [
+            "Linux limited-network sockets",
+            "does not start",
+            "Settings",
+        ] {
+            assert!(off.contains(part), "{off}");
+        }
+    }
+
+    #[test]
+    fn tcp_ports_starts_any_harness_and_moves_no_lookup_to_tcp() {
+        let case = case();
+        let ports = sandbox(&case, model(), LinuxSockets::TcpPorts);
+        assert!(!ports.resolves_over_tcp());
+        for program in [
+            "glibc",
+            "musl",
+            "static",
+            "on_glibc",
+            "on_musl",
+            "on_script",
+            "on_relative",
+        ] {
+            assert_eq!(
+                ports.linux_refusal(&case.root.join(program)),
+                None,
+                "{program}"
+            );
+        }
     }
 }

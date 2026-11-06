@@ -26,7 +26,7 @@ const report = (patch = {}) => ({
   projects: [row("project-harbor")], pools: [row("pool-main")], accounts: [row("acct-claude")], agents: [row("team-7"), row("research-scout")],
   days: [{ day_ms: NOW - 9 * HOUR, tokens: tokens({ input: 1200 }) }],
   lines: [{ project: "project-harbor", change_sets: 3, added: 90, removed: 57, commits: 2, committed_added: 80, committed_removed: 55 }],
-  limits: [limits()], ...patch,
+  limits: [limits()], partial_homes: 0, ...patch,
 });
 const names = {
   projects: new Map([["project-harbor", "Harbor Notes"]]),
@@ -156,6 +156,15 @@ test("every usage refusal and failed limit check reads as its own sentence", () 
   assert.equal(client.usageNotReady({ kind: "not_ready" }), true);
   assert.equal(client.usageNotReady({ kind: "error", code: "usage_unavailable", message: "" }), true);
   assert.equal(client.usageNotReady({ kind: "error", code: "usage_outcome_unknown", message: "" }), false);
+});
+
+test("a reading with a home cut at the scan bound says it is partial", () => {
+  assert.equal(usage.partialLine(0), null);
+  assert.equal(usage.partialLine(1), "Some usage may be missing: 1 agent home holds more records than one scan reads, so its least recently changed records are not counted.");
+  assert.equal(usage.partialLine(3), "Some usage may be missing: 3 agent homes hold more records than one scan reads, so their least recently changed records are not counted.");
+  assert.doesNotMatch(text(render()), /may be missing/);
+  const cut = text(render({ report: { kind: "ok", value: report({ partial_homes: 2 }) } }));
+  assert.match(cut, /Some usage may be missing: 2 agent homes hold more records than one scan reads/);
 });
 
 test("a sign-in the limits check cannot use says on the card what it is and what to do, never the fallback", () => {

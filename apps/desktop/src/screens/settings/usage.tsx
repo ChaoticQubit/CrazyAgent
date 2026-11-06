@@ -155,6 +155,23 @@ export function manualReset(value: string, nowMs: number): { kind: "ok"; at: num
   return { kind: "ok", at };
 }
 
+/** The plain line a reading shows when a scan left records out. Input: how many agent homes
+ * held more records than one scan reads. Output: the line, or null when every home was read
+ * whole. */
+export function partialLine(homes: number): string | null {
+  if (!(homes > 0)) return null;
+  return homes === 1
+    ? "Some usage may be missing: 1 agent home holds more records than one scan reads, so its least recently changed records are not counted."
+    : `Some usage may be missing: ${homes} agent homes hold more records than one scan reads, so their least recently changed records are not counted.`;
+}
+
+/** A warning that a reading is partial, shown only when a scan left records out. Input: how
+ * many agent homes held more records than one scan reads. Output: the notice, or nothing. */
+export function PartialNotice({ homes }: { homes: number }) {
+  const line = partialLine(homes);
+  return line === null ? null : <Notice tone="warn">{line}</Notice>;
+}
+
 function Tile({ label, value, detail }: { label: string; value: string; detail?: string }) {
   return <div className="usage-tile">
     <span className="muted small">{label}</span>
@@ -332,6 +349,7 @@ export function UsageView({ report, range, names, nowMs, failure, busy, next, on
     {head}
     {failure && <Notice tone="danger" alert>{failure}</Notice>}
     <Totals report={value} />
+    <PartialNotice homes={value.partial_homes} />
     <Panel title="Account limits">
       {value.limits.length === 0
         ? <p className="muted">No limits read yet. Signed-in Claude and ChatGPT accounts show here after their first check.</p>

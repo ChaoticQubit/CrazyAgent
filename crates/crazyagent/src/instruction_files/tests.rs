@@ -1267,3 +1267,30 @@ mod import {
         );
     }
 }
+
+#[test]
+fn names_a_case_insensitive_volume_opens_as_instruction_files_are_marked() {
+    for path in [
+        "AGENT\u{17F}.md",
+        "web/agent\u{17F}.md",
+        "AGENTS.overr\u{131}de.md",
+        "docs/CLAUDE\u{200D}.md",
+        "CLA\u{FEFF}UDE.local.md",
+        ".codex\u{200C}/config.toml",
+        "notes/.CLAUDE\u{202E}/x.md",
+    ] {
+        assert!(instruction_file(path), "{path:?} is an instruction file");
+    }
+    for path in [
+        "AGENTS\u{FF33}.md",
+        "\u{FF21}GENTS.md",
+        "notes.md",
+        "docs/AGENTS.md.txt",
+        "codex/config.toml",
+    ] {
+        assert!(
+            !instruction_file(path),
+            "{path:?} is not an instruction file"
+        );
+    }
+}

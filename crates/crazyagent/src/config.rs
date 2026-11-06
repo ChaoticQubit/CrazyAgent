@@ -803,6 +803,15 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         "model_access_edit_bounds" => {
             Some("This change is too large to save at once. Make it in smaller steps.")
         }
+        "linux_limited_network_off" => Some(
+            "The Linux limited-network sockets setting is 'Do not start limited-network agents', so this master does not start. Pick another Linux limited-network sockets option in Settings.",
+        ),
+        "linux_resolver_needs_udp" => Some(
+            "This harness cannot look up names over TCP, which the Linux setting 'TCP only' needs. Choose 'TCP ports only' for Linux limited-network sockets in Settings, which lets UDP and other sockets reach any host.",
+        ),
+        "linux_harness_unchecked" => Some(
+            "This harness starts through a script CrazyAgent cannot check for the Linux setting 'TCP only', so it does not start. Start it from a program, or a script whose first line names a program by its full path, or choose 'TCP ports only' for Linux limited-network sockets in Settings, which lets UDP and other sockets reach any host.",
+        ),
         "team_master_no_terminal" => Some(
             "This master harness has no terminal app. Its conversation stays on the Conversation tab.",
         ),

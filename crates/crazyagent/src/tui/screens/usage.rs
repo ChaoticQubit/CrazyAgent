@@ -324,6 +324,22 @@ fn group(
     lines
 }
 
+/// The plain line a reading shows when a scan left records out. Input: how many agent homes
+/// held more records than one scan reads. Output: the line, or None when every home was read
+/// whole.
+pub fn partial_line(homes: u64) -> Option<String> {
+    match homes {
+        0 => None,
+        1 => Some(
+            "Some usage may be missing: 1 agent home holds more records than one scan reads, so its least recently changed records are not counted."
+                .into(),
+        ),
+        homes => Some(format!(
+            "Some usage may be missing: {homes} agent homes hold more records than one scan reads, so their least recently changed records are not counted."
+        )),
+    }
+}
+
 /// The Usage summary's lines: totals, each account's limits with reset countdowns, and
 /// tokens by project, pool and account. Inputs: the report, its range, names by id, now,
 /// the local offset in seconds, the content width and the theme. Output: the lines.
@@ -362,9 +378,12 @@ pub fn summary(
             compact(added),
             compact(removed)
         )),
-        Line::default(),
-        styled("Account limits", Role::Heading, theme),
     ];
+    if let Some(partial) = partial_line(report.partial_homes) {
+        lines.push(styled(partial, Role::Warning, theme));
+    }
+    lines.push(Line::default());
+    lines.push(styled("Account limits", Role::Heading, theme));
     if report.limits.is_empty() {
         lines.push(styled(
             "  No limits read yet. Signed-in Claude and ChatGPT accounts show here after their first check.",

@@ -1360,6 +1360,73 @@ async fn unit_refused_logout_names_the_agents_using_the_account_and_stops_them_b
     .await;
 }
 
+/// Unit input: a synthetic holder list into the real reducer and label. A sign-out refused
+/// because a Full access agent left processes running names them plainly, offers to sign
+/// out anyway, and that action releases the account.
+#[tokio::test]
+async fn unit_refused_logout_names_what_full_access_left_running_and_signs_out_anyway() {
+    run(|case| async move {
+        let (basis, connection) = case.selected("a-codex").await;
+        let mut state = unit_inspected(basis, connection);
+        advance(&mut state, 4);
+        state.reduce(&UiEvent::Submit).unwrap();
+        state.reduce(&UiEvent::SelectionNext).unwrap();
+        state.reduce(&UiEvent::Submit).unwrap();
+        let logout = state.request().unwrap();
+        state
+            .apply(Event {
+                job: logout,
+                result: Err("native_profile_in_use".into()),
+            })
+            .unwrap();
+        let using = state.request().unwrap();
+        let report = "Full access cannot stop what the agent started outside its terminal; still running: 4242 node. Its account stays held until they end or you sign it out";
+        let leftover = crate::agents::Holder::Leftover {
+            report: report.into(),
+        };
+        state
+            .apply(Event {
+                job: using,
+                result: Ok(Output::Using(crate::agents::AccountUse {
+                    agents: Vec::new(),
+                    holders: vec![leftover.clone()],
+                })),
+            })
+            .unwrap();
+        let shown = state.render(false);
+        assert!(shown.contains(&format!("In use by: {report}")), "{shown}");
+        assert!(shown.contains("> Back |   Sign out anyway"), "{shown}");
+        let research = crate::agents::Holder::Research {
+            project: crate::protocol::ProjectId::new("beta").unwrap(),
+            job: 7,
+            title: "Market research".into(),
+        };
+        assert_eq!(
+            super::release_label(&crate::agents::AccountUse {
+                agents: Vec::new(),
+                holders: vec![research, leftover],
+            }),
+            "Stop agents and sign out"
+        );
+
+        state.reduce(&UiEvent::SelectionNext).unwrap();
+        state.reduce(&UiEvent::Submit).unwrap();
+        let release = state.request().unwrap();
+        assert!(matches!(release.command, Command::Release));
+        state
+            .apply(Event {
+                job: release,
+                result: Ok(Output::Using(crate::agents::AccountUse::default())),
+            })
+            .unwrap();
+        assert!(matches!(
+            state.request().unwrap().command,
+            Command::Logout(_)
+        ));
+    })
+    .await;
+}
+
 /// Unit input: synthetic holder lists into the real reducer and label. A refused sign-out
 /// names a master conversation and a research job with their projects, and the one owner
 /// action is named by what it ends.
@@ -1512,7 +1579,7 @@ async fn real_clear_stuck_sign_in_ends_it_once_the_engine_answers_for_it() {
         let cleared = ui.auth().await;
         assert_eq!(
             cleared.result.as_ref().err().map(String::as_str),
-            Some("native_profile_source_conflict")
+            Some("native_auth_operation_missing")
         );
         ui.apply(cleared);
         assert!(!ui.app.model_access.signing_in());

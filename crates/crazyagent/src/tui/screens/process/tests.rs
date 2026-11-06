@@ -43,6 +43,12 @@ fn opened(scope: Scope, saved: &str) -> Shell {
     };
     assert_eq!(requests(&mut shell), vec![read.clone()]);
     shell.arrive(reply(read, Ok(saved)));
+    #[cfg(not(unix))]
+    assert!(
+        project.is_none(),
+        "a project page reads its adoption from the engine store, which is unix-only"
+    );
+    #[cfg(unix)]
     if let Some(project) = project {
         let query = ProcessQuery::Settings {
             project: project.clone(),
@@ -62,6 +68,7 @@ fn opened(scope: Scope, saved: &str) -> Shell {
 
 /// A project's adoption view as the real coordination store reads it before any agent ran.
 /// Input: the project. Output: the view, with no agents.
+#[cfg(unix)]
 fn no_agents(project: &ProjectId) -> Adoption {
     let root = tempfile::tempdir().unwrap();
     let db = rusqlite::Connection::open(root.path().join("engine.db")).unwrap();
@@ -428,6 +435,7 @@ fn the_owners_global_instructions_are_read_only_on_ctrl_g_and_land_only_after_a_
     assert!(screen(&mut shell).contains("That file doesn't exist. Check the path."));
 }
 
+#[cfg(unix)]
 #[test]
 fn a_project_page_has_no_seeds_and_reads_and_saves_its_own_text() {
     let project = ProjectId::new("harbor-notes").unwrap();
@@ -466,6 +474,7 @@ fn a_project_page_has_no_seeds_and_reads_and_saves_its_own_text() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn a_project_page_offers_every_agent_setting_and_saves_each_change_at_once() {
     let project = ProjectId::new("harbor-notes").unwrap();
@@ -578,6 +587,7 @@ fn a_project_page_offers_every_agent_setting_and_saves_each_change_at_once() {
     assert!(shown.contains("couldn't be read"), "{shown}");
 }
 
+#[cfg(unix)]
 #[test]
 fn unreadable_agent_settings_say_why_and_a_change_replaces_them_from_the_defaults() {
     let project = ProjectId::new("harbor-notes").unwrap();
@@ -933,6 +943,7 @@ fn each_import_from_file_refusal_reads_as_a_plain_sentence_and_keeps_the_editor(
 /// enable, and was reminded of its flag with the project's nudges turned on, and a newer
 /// agent whose launch fires no hooks that edited and read the tdd skill, reminded the same
 /// way. Input: the project. Output: the view and the master, sub-agent and hookless ids.
+#[cfg(unix)]
 fn adoption_read(project: &ProjectId) -> (Adoption, i64, i64, i64) {
     const NOW: i64 = 1_800_000_000_000;
     let root = tempfile::tempdir().unwrap();
@@ -1027,6 +1038,7 @@ fn opened_for_adoption(project: &ProjectId) -> Shell {
     shell
 }
 
+#[cfg(unix)]
 #[test]
 fn a_project_page_shows_workflow_adoption_after_its_settings() {
     let project = ProjectId::new("harbor-notes").unwrap();

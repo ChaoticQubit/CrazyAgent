@@ -10,6 +10,7 @@ import { Pools } from "./pools";
 import { ProcessSettings } from "../process";
 import { ProfileSettings } from "./profile";
 import { ProjectsHomeSettings } from "./projects-home";
+import { SandboxSettingsTab } from "./sandbox";
 import { TeamAlertsSettings } from "./team-alerts";
 import { UpdatesSettings } from "./updates";
 import { UsageSettings } from "./usage";
@@ -23,6 +24,7 @@ const TABS: { id: SettingsTab; label: string; icon: IconName }[] = [
   { id: "pack", label: "Pack", icon: "boxes" },
   { id: "home", label: "Projects folder", icon: "folder" },
   { id: "github", label: "GitHub", icon: "git-branch" },
+  { id: "sandbox", label: "Sandbox", icon: "shield-check" },
   { id: "memory", label: "Memory", icon: "brain" },
   { id: "usage", label: "Usage", icon: "trending-up" },
   { id: "alerts", label: "Team alerts", icon: "inbox" },
@@ -46,6 +48,7 @@ export function Settings({ tab, action, account, skill }: { tab: SettingsTab; ac
         : tab === "pack" ? <PackSettings />
         : tab === "home" ? <ProjectsHomeSettings />
         : tab === "github" ? <GitHubSettings />
+        : tab === "sandbox" ? <SandboxSettingsTab />
         : tab === "memory" ? <MemorySettings />
         : tab === "usage" ? <UsageSettings />
         : tab === "alerts" ? <TeamAlertsSettings />

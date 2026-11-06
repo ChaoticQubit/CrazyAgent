@@ -142,6 +142,16 @@ impl NativeOwner {
                 Some(why) => SetupView::LiveWithoutSession(why),
                 None => SetupView::Changed(crate::engine::owner::OwnerResult::Applied),
             },
+            SetupQuery::TeamMessages {
+                project,
+                agent,
+                before,
+            } => SetupView::TeamMessages(Box::new(
+                controller
+                    .team_agent_messages(project, agent, before, None)
+                    .await
+                    .map_err(problem)?,
+            )),
             SetupQuery::Library(query) => SetupView::Library(match query {
                 LibraryQuery::Page {
                     scope,
@@ -320,6 +330,9 @@ fn owner_result(response: OwnerResponse) -> Result<crate::engine::owner::OwnerRe
 
 #[cfg(all(test, unix))]
 mod memory_tests;
+
+#[cfg(all(test, unix))]
+mod messages_tests;
 
 #[cfg(all(test, unix))]
 mod tests {

@@ -4,11 +4,11 @@ import { useContext, useEffect, useState } from "react";
 import type { ReactNode } from "react";
 import { failureCopy, loadAgentPolicy, loadHiddenPaths, loadProjectCatalog, loadProjects, loadReadPaths, receiptState, removeProject, saveAgentPolicy, saveHiddenPaths, saveReadPaths, setProjectPool, updateProjectSetup } from "../../api-projects";
 import type { AgentAccess, AgentNetwork, PolicyView, ProjectCatalog, StoredSetup } from "../../api-projects";
-import { AccessLevels, FULL_ACCESS_WARNING, LOWERING_STOPS_AGENTS, NetworkChoices, ToolchainSwitches, accessLabel, confirmFirst, policyOf } from "./access";
-import { Button, ConfirmDialog, Select } from "../../ui";
+import { AccessLevels, FULL_ACCESS_WARNING, LOWERING_STOPS_AGENTS, NetworkChoices, TOOLCHAIN_OFF_STOPS_AGENTS, ToolchainSwitches, accessLabel, confirmFirst, policyOf } from "./access";
+import { DEFAULT_MESSAGE_SETTINGS, MESSAGE_SETTING_FIELDS, changeMessageSetting, fieldValue, messageSettingsOf } from "../../api-messages";
+import type { MessageSettings, SwitchApply, TeamStatus } from "../../engine-client";
+import { Button, ConfirmDialog, Segmented, Select } from "../../ui";
 import type { SelectOption } from "../../ui";
-import type { SwitchApply, TeamStatus } from "../../engine-client";
-import { changeNote } from "../team/controls";
 import { displayText } from "../conversation";
 import { BasicsFields, ResearchSwitches } from "../new-project/fields";
 import { PoolPicker } from "../new-project/pool-picker";
@@ -20,6 +20,7 @@ import { changeOutcome } from "./research";
 import { SessionContext, useLoad } from "../../state";
 import { ProjectAccountOrder } from "../settings/account-choice";
 import { PluginsAndSkills } from "../settings/plugins";
+import { changeNote } from "../team/controls";
 import { NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 
@@ -30,6 +31,7 @@ const SECTIONS = [
   { id: "plugins", label: "Plugins and skills" },
   { id: "access", label: "Agent access" },
   { id: "sandbox", label: "Sandbox" },
+  { id: "messages", label: "Messages" },
   { id: "remove", label: "Remove project" },
 ] as const;
 
@@ -459,6 +461,7 @@ function AccessSection({ data }: { data: ProjectData }) {
     {view && <p className="pj-help">{LOWERING_STOPS_AGENTS}</p>}
     {view && <NetworkChoices name="ps-network" value={network} access={access} onChange={setNetwork} />}
     {view && <ToolchainSwitches prefix="ps" view={view} allowed={allowed} onChange={setAllowed} />}
+    {view && <p className="pj-help">{TOOLCHAIN_OFF_STOPS_AGENTS}</p>}
     {note && <p className="pj-note warn" role="status">{note}</p>}
     <div><Button variant="primary" pending={busy} pendingLabel="Saving..." disabled={!changed || busy}
       onClick={() => confirmFirst(view?.access ?? null, access) ? setConfirming(true) : void save()}>Save agent access</Button></div>
@@ -469,6 +472,54 @@ function AccessSection({ data }: { data: ProjectData }) {
   </div>;
 }
 
+/** The Messages section: the six settings of the sub-agents' Messages timelines, each with every
+ * choice and the proposed default named. A choice changes its one setting against what the
+ * engine stores now; when another client changed the settings since this view was read, it
+ * saves nothing and shows the stored ones. The section shows the outcome until the next team
+ * read, then what the engine stored. Input: the project data. Output: the section. */
+function MessagesSection({ data }: { data: ProjectData }) {
+  const [pending, setPending] = useState<{ settings: MessageSettings; at: number } | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState("");
+  const read = data.team.result;
+  const saved = read?.kind === "ok" ? messageSettingsOf(read.value) : null;
+  const shown = pending !== null && data.team.at < pending.at ? pending.settings : saved;
+
+  async function choose(key: keyof MessageSettings, value: string) {
+    if (busy || shown === null) return;
+    setBusy(true);
+    const change = await changeMessageSetting(data.id, shown, key, value);
+    setBusy(false);
+    if (change.kind === "elsewhere") {
+      setPending({ settings: change.settings, at: Date.now() });
+      setNote("Messages settings changed elsewhere, so nothing was saved. This shows what's saved now; choose again.");
+    } else {
+      const message = changeNote(change.result, "Messages settings");
+      setPending(message || change.kind === "unread" ? null : { settings: change.settings, at: Date.now() });
+      setNote(message);
+    }
+    data.reloadTeam();
+  }
+
+  return <div className="pj-stack">
+    <h2>Messages</h2>
+    <p className="pj-secondary">Each sub-agent's Messages show its tasks, what the master and you told it, and its questions, progress and results, newest first. Open them from the Agents tab or the team graph.</p>
+    {read === undefined && <p className="pj-muted" role="status">Loading...</p>}
+    {read?.kind === "not_ready" && <NotReady what="the live team isn't in this build." />}
+    {read?.kind === "error" && <p className="pj-error" role="alert">Couldn't load the team. {failureCopy(read)}</p>}
+    {read?.kind === "ok" && shown === null && <NotReady what="Messages settings aren't in this build." />}
+    {shown !== null && MESSAGE_SETTING_FIELDS.map((field) => {
+      const proposed = field.options.find((option) => option.value === fieldValue(DEFAULT_MESSAGE_SETTINGS, field.key));
+      return <div className="pj-field" key={field.key}>
+        <span className="pj-label" aria-hidden="true">{field.label}</span>
+        <Segmented label={field.label} value={fieldValue(shown, field.key)} options={[...field.options]} onValue={(value) => void choose(field.key, value)} />
+        <p className="pj-help">{field.help} Recommended: {proposed?.label}.</p>
+      </div>;
+    })}
+    {note && <p className="pj-note warn" role="status">{note}</p>}
+  </div>;
+}
+
 /** Picks the Settings section a route asks for. Links from before skills and MCP servers shared
  * one section still open it. Input: the route's section, if any. Output: a known section. */
 export function settingsSection(wanted: string | null | undefined): SectionId {
@@ -476,7 +527,7 @@ export function settingsSection(wanted: string | null | undefined): SectionId {
   return SECTIONS.find((item) => item.id === wanted)?.id ?? "general";
 }
 
-/** Project Settings tab: General, Pool, Team, Plugins and skills, Agent access, Sandbox and Remove project. A setup
+/** Project Settings tab: General, Pool, Team, Plugins and skills, Agent access, Sandbox, Messages and Remove project. A setup
  * that belongs to another project counts as still loading, so no form seeds from it.
  * Inputs: the project data and an optional section from the route. Output: the tab. */
 export function SettingsTab({ data, section }: { data: ProjectData; section?: string }) {
@@ -502,6 +553,7 @@ export function SettingsTab({ data, section }: { data: ProjectData; section?: st
       </div>}
       {active === "access" && <AccessSection data={data} />}
       {active === "sandbox" && <div className="pj-stack"><SandboxSection data={data} /><HiddenSection data={data} /></div>}
+      {active === "messages" && <MessagesSection data={data} />}
       {active === "remove" && <RemoveSection data={data} setup={setup} />}
     </div>
   </div>;

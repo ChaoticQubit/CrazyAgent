@@ -54,19 +54,22 @@ struct Place {
     git_dir: PathBuf,
 }
 
-/// One agent a removal may take: where its worktree lives and whether the owner had
-/// already confirmed it before, so its record waits in `team_retiring`.
+/// One agent a removal may take: where its worktree lives, whether the owner had already
+/// confirmed it before, so its record waits in `team_retiring`, and whether git already
+/// removed its worktree record there and left files the engine could not delete.
 struct Target {
     id: i64,
     place: Place,
     retiring: bool,
+    leftover: bool,
 }
 
 impl Target {
-    /// Says whether git already removed this confirmed agent's worktree, so only its
-    /// folder and profile are left to delete.
+    /// Says whether git already removed this confirmed agent's worktree record, so only
+    /// files git left, if any, its folder and its profile are left to delete (RVD-C-N1).
     fn worktree_removed(&self) -> bool {
-        self.retiring && missing(&self.place.worktree) && missing(&self.place.git_dir)
+        self.retiring
+            && (self.leftover || (missing(&self.place.worktree) && missing(&self.place.git_dir)))
     }
 }
 
@@ -107,9 +110,38 @@ fn initialize(db: &Connection) -> Result<(), EngineError> {
             repository TEXT NOT NULL,
             worktree TEXT NOT NULL,
             git_dir TEXT NOT NULL,
-            since_ms INTEGER NOT NULL
+            since_ms INTEGER NOT NULL,
+            leftover INTEGER NOT NULL DEFAULT 0
         );",
     )
+    .map_err(unavailable)?;
+    let leftover: bool = db
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('team_retiring') WHERE name='leftover')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(unavailable)?;
+    if !leftover {
+        db.execute_batch(
+            "ALTER TABLE team_retiring ADD COLUMN leftover INTEGER NOT NULL DEFAULT 0;",
+        )
+        .map_err(unavailable)?;
+    }
+    Ok(())
+}
+
+/// Says whether a confirmed agent's waiting record is marked as one whose worktree record
+/// git already removed, leaving files the engine could not delete. Inputs: the store, the
+/// project and the agent. Output: the answer, false when no record waits.
+fn left_behind(db: &Connection, project: &ProjectId, id: i64) -> Result<bool, EngineError> {
+    db.query_row(
+        "SELECT leftover FROM team_retiring WHERE agent=?1 AND project=?2",
+        params![id, project.as_str()],
+        |row| row.get(0),
+    )
+    .optional()
+    .map(|found| found.unwrap_or(false))
     .map_err(unavailable)
 }
 
@@ -200,12 +232,14 @@ fn check(
             id,
             place,
             retiring: true,
+            leftover: left_behind(db, project, id)?,
         },
         None => match place(db, Record::Live, project, id)? {
             Some(place) => Target {
                 id,
                 place,
                 retiring: false,
+                leftover: false,
             },
             None => return Ok(Err("cleanup_agent_not_found")),
         },
@@ -300,7 +334,7 @@ pub fn finished(
         let Ok(target) = check(db, project, agent.id, now)? else {
             continue;
         };
-        let (worktree, all_worktree) = if target.worktree_removed() {
+        let (worktree, all_worktree) = if missing(&target.place.worktree) {
             (0, true)
         } else {
             disk_bytes(&target.place.worktree, &mut budget)
@@ -381,7 +415,9 @@ pub fn remove(
 
 /// Checks every claimed worktree again, then per agent checks its row once more, removes
 /// its worktree, deleting what git left when it removed its record only part way, then its
-/// agent folder and sandbox profile and last its waiting record, in claim order. Inputs:
+/// agent folder and sandbox profile and last its waiting record, in claim order. A
+/// worktree whose leftover cannot be deleted marks its waiting record, so a later removal
+/// deletes the leftover without asking git again (RVD-C-N1). Inputs:
 /// the store, the team state folder, the project, the claims, the time now and the list
 /// each removed agent joins. Output: None once all are removed, or the plain code of the
 /// first one kept.
@@ -407,7 +443,11 @@ fn retire_claimed(
     }
     for target in claimed {
         let place = &target.place;
-        if !target.worktree_removed() {
+        if target.worktree_removed() {
+            if !missing(&place.worktree) && remove_tree(&place.worktree).is_err() {
+                return Ok(Some("cleanup_worktree_leftover"));
+            }
+        } else {
             if let Some(code) = agent_blocker(db, project, target.id)? {
                 return Ok(Some(code));
             }
@@ -419,7 +459,18 @@ fn retire_claimed(
                 now,
             )? {
                 Ok(()) => {}
-                Err("cleanup_worktree_leftover") if remove_tree(&place.worktree).is_ok() => {}
+                Err("cleanup_worktree_leftover") => {
+                    let marked = db
+                        .execute(
+                            "UPDATE team_retiring SET leftover=1 WHERE agent=?1 AND project=?2",
+                            params![target.id, project.as_str()],
+                        )
+                        .map_err(unavailable)?;
+                    assert_eq!(marked, 1);
+                    if remove_tree(&place.worktree).is_err() {
+                        return Ok(Some("cleanup_worktree_leftover"));
+                    }
+                }
                 Err(code) => return Ok(Some(code)),
             }
         }
@@ -464,6 +515,7 @@ fn claim(
                 id: *id,
                 place,
                 retiring: true,
+                leftover: left_behind(&tx, project, *id)?,
             });
             continue;
         }
@@ -486,6 +538,7 @@ fn claim(
             id: *id,
             place,
             retiring: false,
+            leftover: false,
         });
     }
     tx.commit().map_err(unavailable)?;
@@ -494,8 +547,9 @@ fn claim(
 }
 
 /// Hands back claims whose worktree stays: their records move from `team_retiring` back
-/// to `team_worktrees`. Inputs: the store, the project and the agents. Output: Ok once
-/// stored.
+/// to `team_worktrees`, except a record marked as left behind by git, which stays waiting
+/// for the removal that deletes its leftover. Inputs: the store, the project and the
+/// agents. Output: Ok once stored.
 fn unclaim(db: &Connection, project: &ProjectId, agents: &[i64]) -> Result<(), EngineError> {
     if agents.is_empty() {
         return Ok(());
@@ -505,12 +559,12 @@ fn unclaim(db: &Connection, project: &ProjectId, agents: &[i64]) -> Result<(), E
         tx.execute(
             "INSERT INTO team_worktrees(agent,project,repository,worktree,git_dir)
              SELECT agent,project,repository,worktree,git_dir FROM team_retiring
-             WHERE agent=?1 AND project=?2",
+             WHERE agent=?1 AND project=?2 AND leftover=0",
             params![id, project.as_str()],
         )
         .map_err(unavailable)?;
         tx.execute(
-            "DELETE FROM team_retiring WHERE agent=?1 AND project=?2",
+            "DELETE FROM team_retiring WHERE agent=?1 AND project=?2 AND leftover=0",
             params![id, project.as_str()],
         )
         .map_err(unavailable)?;

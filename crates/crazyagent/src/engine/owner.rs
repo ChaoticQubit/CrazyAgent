@@ -227,6 +227,9 @@ pub enum OwnerMutation {
     SaveOwnerProfile {
         profile: crate::owner_profile::OwnerProfile,
     },
+    SetSandboxSettings {
+        settings: crate::sandbox_settings::SandboxSettings,
+    },
     Memory {
         action: crate::memory::library::LibraryAction,
     },
@@ -481,6 +484,9 @@ impl OwnerMutation {
                     profile: profile.clone(),
                 }
             }
+            Self::SetSandboxSettings { settings } => Command::OwnerSandbox {
+                settings: *settings,
+            },
             Self::Memory { action } => {
                 action.validate()?;
                 Command::OwnerMemory {
@@ -635,6 +641,12 @@ pub enum OwnerRead {
     TeamGraph {
         project_id: ProjectId,
     },
+    TeamAgentMessages {
+        project_id: ProjectId,
+        agent: i64,
+        before: Option<crate::team::agent_messages::Cursor>,
+        limit: Option<u16>,
+    },
     ProjectFiles {
         project_id: ProjectId,
         query: String,
@@ -657,6 +669,7 @@ pub enum OwnerRead {
         job: i64,
     },
     OwnerProfile,
+    SandboxSettings,
     ProjectsHome,
     SetupStatus,
     FoundProjects,
@@ -752,6 +765,7 @@ impl OwnerRead {
             | Self::CoordQuestions { .. }
             | Self::ProjectContext { .. }
             | Self::OwnerProfile
+            | Self::SandboxSettings
             | Self::ProjectsHome
             | Self::SetupStatus
             | Self::FoundProjects
@@ -774,6 +788,17 @@ impl OwnerRead {
             Self::ProjectContextItem { path, .. } => {
                 if path.is_empty() || path.len() > 512 || path.chars().any(char::is_control) {
                     return Err(failure("context_path_invalid"));
+                }
+                return Ok(None);
+            }
+            Self::TeamAgentMessages { agent, limit, .. } => {
+                if *agent <= 0 {
+                    return Err(failure("team_agent_not_found"));
+                }
+                if limit.is_some_and(|limit| {
+                    limit == 0 || limit > crate::team::agent_messages::PAGE_MAX
+                }) {
+                    return Err(failure("team_messages_limit_invalid"));
                 }
                 return Ok(None);
             }
@@ -1119,6 +1144,9 @@ pub enum OwnerData {
     TeamGraph {
         graph: Box<crate::team::TeamGraph>,
     },
+    TeamAgentMessages {
+        messages: Box<crate::team::agent_messages::AgentMessages>,
+    },
     ProjectFiles {
         project_id: ProjectId,
         paths: Vec<String>,
@@ -1142,6 +1170,9 @@ pub enum OwnerData {
     },
     OwnerProfile {
         profile: Option<crate::owner_profile::OwnerProfile>,
+    },
+    SandboxSettings {
+        settings: crate::sandbox_settings::SandboxSettings,
     },
     SetupStatus {
         status: crate::setup::SetupStatus,

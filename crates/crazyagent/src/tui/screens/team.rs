@@ -23,6 +23,7 @@ use crate::tui::screens::process::{message, size};
 use crate::tui::screens::project_markdown::sanitize;
 use crate::tui::screens::project_team::{TeamReply, TeamView, account_name, team_plain};
 use crate::tui::screens::project_time::local_offset;
+use crate::tui::screens::team_messages::{ListKey, MASTER_ELSEWHERE, Messages};
 use crate::tui::screens::{Flow, Place, Screen};
 use crate::tui::seam::{Arrival, NOT_READY, Request};
 use crate::tui::terminal_pane::{LEADER, TerminalPane};
@@ -169,6 +170,7 @@ pub struct Team {
     finished: finished::Finished,
     questions: questions::Questions,
     instructions: Option<Instructions>,
+    messages: Option<Messages>,
     settings: Option<TeamView>,
     held: Vec<Key>,
 }
@@ -198,6 +200,7 @@ impl Team {
             finished: finished::Finished::new(),
             questions: questions::Questions::new(),
             instructions: None,
+            messages: None,
             settings: None,
             held: Vec::new(),
         }
@@ -814,6 +817,47 @@ impl Team {
         });
     }
 
+    /// Opens the Messages list of one card's sub-agent in the right box, the same list the
+    /// Team view opens; the master card says where the master's own conversation is.
+    /// Inputs: the node index and context. Output: none; the first page read is queued.
+    fn open_messages(&mut self, node: usize, ctx: &mut Ctx) {
+        let Some(target) = self.graph.ready().and_then(|graph| graph.nodes.get(node)) else {
+            return;
+        };
+        if target.kind == NodeKind::Master {
+            ctx.say(Message::warning(
+                "The master has no Messages list.",
+                MASTER_ELSEWHERE,
+            ));
+            return;
+        }
+        let Some(agent) = AgentId::new(&target.id).ok().and_then(|id| id.team_agent()) else {
+            ctx.say(Message::warning(
+                "This card has no messages to show.",
+                "Only team sub-agents have a Messages list.",
+            ));
+            return;
+        };
+        let now = crate::tui::clock::now_ms();
+        self.task = None;
+        self.instructions = None;
+        self.messages = Some(Messages::new(
+            self.project.clone(),
+            agent,
+            &target.label,
+            local_offset(now),
+        ));
+        self.ask_messages(ctx);
+    }
+
+    /// Sends the open Messages list's next page read, if one is due.
+    fn ask_messages(&mut self, ctx: &mut Ctx) {
+        let now = crate::tui::clock::now_ms();
+        if let Some(query) = self.messages.as_mut().and_then(|list| list.next_query(now)) {
+            ctx.request(Request::Setup(query));
+        }
+    }
+
     fn take_instructions(&mut self, event: &ProcessEvent) {
         let Some(open) = self
             .instructions
@@ -1078,6 +1122,18 @@ impl Team {
         let theme = &ctx.theme;
         let inner = inside(area);
         let limit = usize::from(inner.width).max(1);
+        if let Some(list) = &self.messages {
+            let lines = list
+                .lines(limit, usize::from(inner.height))
+                .into_iter()
+                .map(|line| match line.role {
+                    Some(role) => styled(line.text, role, theme),
+                    None => Line::raw(line.text),
+                })
+                .collect();
+            boxed(frame, area, &list.title(), false, lines, ctx);
+            return None;
+        }
         if let Some((title, lines)) = self.cleanup.lines(limit, usize::from(inner.height), ctx) {
             boxed(frame, area, &title, false, lines, ctx);
             return None;
@@ -1272,6 +1328,13 @@ impl Screen for Team {
                 .map(|(key, label)| hint(key, label))
                 .collect();
         }
+        if let Some(list) = &self.messages {
+            return list
+                .help()
+                .into_iter()
+                .map(|(key, label)| hint(key, label))
+                .collect();
+        }
         if self.cleanup.open() {
             return self.cleanup.hints();
         }
@@ -1286,6 +1349,7 @@ impl Screen for Team {
             hint(&vertical, "Move"),
             hint("Enter", "Open"),
             hint("i", "Instructions"),
+            hint("m", "Messages"),
         ];
         if self
             .attached
@@ -1342,6 +1406,13 @@ impl Screen for Team {
         if self.settings.is_some() {
             return self.settings_key(key, ctx);
         }
+        if let Some(list) = self.messages.as_mut() {
+            if list.key(key) == ListKey::Closed {
+                self.messages = None;
+            }
+            self.ask_messages(ctx);
+            return Flow::Handled;
+        }
         if !self.cleanup.open()
             && !self.finished.open()
             && let Some(took) = self.questions.key(key, &self.project, ctx)
@@ -1386,6 +1457,11 @@ impl Screen for Team {
                     self.read_instructions(*node, ctx);
                 }
             }
+            Key::Char('m') => {
+                if let Some(Item::Node(node)) = items.get(self.cursor) {
+                    self.open_messages(*node, ctx);
+                }
+            }
             Key::PageDown if self.instructions.is_some() => {
                 if let Some(open) = self.instructions.as_mut() {
                     open.top = open.top.saturating_add(PAGE_STEP);
@@ -1414,6 +1490,17 @@ impl Screen for Team {
         self.cleanup.arrive(arrival, &self.project, ctx);
         self.finished.arrive(arrival, &self.project, ctx);
         self.questions.arrive(arrival, &self.project, ctx);
+        if let Some(list) = self.messages.as_mut() {
+            match arrival {
+                Arrival::Owner(event) => {
+                    if let OwnerEvent::Setup(event) = event.as_ref() {
+                        list.apply(&event.query, &event.result);
+                    }
+                }
+                Arrival::Disconnected(_) => list.forget_reads(),
+                _ => {}
+            }
+        }
         match arrival {
             Arrival::TeamGraph { project, result } if *project == self.project => {
                 self.take_graph(result, ctx.glyphs);
@@ -1449,6 +1536,7 @@ impl Screen for Team {
             }
             _ => {}
         }
+        self.ask_messages(ctx);
         if !self.starting() {
             self.drop_held(ctx);
         }
@@ -1962,10 +2050,19 @@ fn instruction_lines(
     lines
 }
 
+const CLAUDE_GIVEN: &str =
+    "none loaded by Claude itself; CrazyAgent gives its instructions in the launch prompt";
+const CLAUDE_NO_RECORD: &str =
+    "A headless Claude run reports nothing while Keep transcripts for headless Claude runs is off.";
+
 /// The lines saying what an agent's harness reported in its own session records: the
 /// instruction file names it loaded and the skills it invoked, then each file's place.
+/// Claude loads no instruction file itself, since CrazyAgent gives it the instructions in
+/// its launch prompt, and a headless Claude run writes no session record while its project
+/// keeps no transcripts, so the lines say so.
 /// Inputs: the view, the box width and context. Output: the lines and a blank line.
 fn reported_lines(view: &AgentInstructions, limit: usize, ctx: &Ctx) -> Vec<Line<'static>> {
+    let claude = view.harness == "claude-code";
     let mut names: Vec<&str> = Vec::new();
     for file in &view.loaded {
         if !names.contains(&file.name.as_str()) {
@@ -1980,7 +2077,14 @@ fn reported_lines(view: &AgentInstructions, limit: usize, ctx: &Ctx) -> Vec<Line
     let (files, skills) = match view.sessions {
         0 => ("not reported yet".to_owned(), "not reported yet".to_owned()),
         _ => (
-            listed(&names, "none loaded by its harness"),
+            listed(
+                &names,
+                if claude {
+                    CLAUDE_GIVEN
+                } else {
+                    "none loaded by its harness"
+                },
+            ),
             listed(&used, "none"),
         ),
     };
@@ -1990,6 +2094,13 @@ fn reported_lines(view: &AgentInstructions, limit: usize, ctx: &Ctx) -> Vec<Line
         format!("Skills used: {skills}"),
     ] {
         lines.extend(wrap(&plain(&text), limit).into_iter().map(Line::raw));
+    }
+    if claude && view.sessions == 0 {
+        lines.extend(
+            wrap(CLAUDE_NO_RECORD, limit)
+                .into_iter()
+                .map(|line| styled(line, Role::Muted, &ctx.theme)),
+        );
     }
     for file in &view.loaded {
         let place = plain(&format!("{} {}  {}", ctx.glyphs.dot, file.name, file.path));

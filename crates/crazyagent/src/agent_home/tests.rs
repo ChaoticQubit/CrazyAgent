@@ -170,11 +170,14 @@ fn render_puts_app_text_first_and_project_text_last_under_headings() {
     );
 }
 
-#[cfg(unix)]
 fn home(root: &Path, name: &str) -> PathBuf {
-    use std::os::unix::fs::DirBuilderExt;
     let home = root.join(name);
-    fs::DirBuilder::new().mode(0o700).create(&home).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut fs::DirBuilder::new(), 0o700)
+        .create(&home)
+        .unwrap();
+    #[cfg(not(unix))]
+    fs::create_dir(&home).unwrap();
     home
 }
 

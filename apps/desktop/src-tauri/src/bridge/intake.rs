@@ -19,7 +19,7 @@ pub const GITHUB_PAGE_MAX: u32 = 100;
 pub const PACK_TICKS_MAX: usize = 64;
 pub const PACK_ID_BYTES_MAX: usize = 64;
 
-pub const INTAKE_CODES: [&str; 58] = [
+pub const INTAKE_CODES: [&str; 61] = [
     "projects_home_unset",
     "projects_home_path_invalid",
     "projects_home_missing",
@@ -51,6 +51,9 @@ pub const INTAKE_CODES: [&str; 58] = [
     "home_move_too_many",
     "home_move_in_progress",
     "home_override_invalid",
+    "home_move_agent_work",
+    "home_move_changes_restorable",
+    "home_move_research_running",
     "home_folder_name_invalid",
     "home_new_project_failed",
     "home_add_unverified",
@@ -873,10 +876,13 @@ mod tests {
         refusals.sort_unstable();
         refusals.dedup();
         assert!(refusals.contains(&"home_copy_failed"), "{refusals:?}");
-        for code in refusals
-            .into_iter()
-            .chain(["home_move_in_progress", "home_new_project_failed"])
-        {
+        for code in refusals.into_iter().chain([
+            "home_move_in_progress",
+            "home_move_agent_work",
+            "home_move_changes_restorable",
+            "home_move_research_running",
+            "home_new_project_failed",
+        ]) {
             assert_eq!(intake_code(code), Some(code), "{code}");
         }
         assert_eq!(

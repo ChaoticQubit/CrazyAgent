@@ -58,6 +58,9 @@ test("intake failures read as plain sentences", () => {
   assert.equal(api.intakeCopy("home_move_worktrees"), "This folder has git worktrees linked to it, so moving it would break them. Use it where it is or copy it.");
   assert.equal(api.intakeCopy("home_copy_linked_checkout"), "This folder is a git worktree or submodule of another repository, so a copy would still share it. Use it where it is, or copy the main repository folder.");
   assert.equal(api.intakeCopy("home_move_project"), "This folder holds or sits inside a project you already added. Use it where it is or copy it.");
+  assert.equal(api.intakeCopy("home_move_agent_work"), "Agents still have work in projects in this folder, and moving it would cut them off from it. Land their changes and remove those agents first. An agent whose change you discarded can be removed 7 days later, when the change can no longer be restored. Nothing was moved.");
+  assert.equal(api.intakeCopy("home_move_changes_restorable"), "A change you discarded in a project in this folder can still be restored, and moving the folder would break that. You can move it 7 days after the discard, when the change can no longer be restored. Nothing was moved.");
+  assert.equal(api.intakeCopy("home_move_research_running"), "A research job is running in a project in this folder, and moving it would cut the job off. Wait for the job to finish or cancel it, then try again. Nothing was moved.");
   assert.equal(api.intakeCopy("pending_intent"), "Another change isn't confirmed yet. Use Check again at the top of the window, then try again.");
   assert.equal(api.intakeCopy("made_up"), "Something went wrong. Try again. (made_up)");
   assert.equal(api.intakeCopy({ code: "made_up", cause: "engine_detail" }), "Something went wrong. Try again. (engine_detail)");

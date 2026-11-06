@@ -38,6 +38,7 @@ pub(super) struct Operation {
     request_id: RequestId,
     generation: Option<u64>,
     unresolved: bool,
+    uncertain: bool,
     running: bool,
     claude_prompt: Option<(u64, String)>,
     claude_input_attempted: bool,
@@ -101,8 +102,8 @@ impl NativeBridge {
     }
 
     pub async fn read_native_auth(&mut self, ticket: &str) -> Result<NativeAuthView, BridgeError> {
-        let (scope, _) = self.native_auth_selection(ticket)?;
-        let operation_id = self.auth_operation(&scope)?;
+        let (scope, connection) = self.native_auth_selection(ticket)?;
+        let (operation_id, scope) = self.auth_operation(&scope, &connection)?;
         let request = NativeAuthQuery {
             request_id: self.auth_request_id()?,
             scope,
@@ -116,8 +117,8 @@ impl NativeBridge {
         &mut self,
         ticket: &str,
     ) -> Result<NativeAuthView, BridgeError> {
-        let (scope, _) = self.native_auth_selection(ticket)?;
-        let operation_id = self.auth_operation(&scope)?;
+        let (scope, connection) = self.native_auth_selection(ticket)?;
+        let (operation_id, scope) = self.auth_operation(&scope, &connection)?;
         let request = NativeAuthCancel {
             request_id: self.auth_request_id()?,
             scope,
@@ -147,13 +148,13 @@ impl NativeBridge {
     /// still runs, is asked to cancel it. Output: true when no stuck sign-in remains, false
     /// while the engine still runs it; an unconfirmed answer keeps it and returns that error.
     pub async fn clear_native_auth(&mut self) -> Result<bool, BridgeError> {
-        let Some(operation) = self
-            .native_auth
-            .as_ref()
-            .filter(|value| value.unresolved && !value.running)
-        else {
+        let Some(operation) = self.native_auth.as_ref().filter(|value| value.unresolved) else {
             return Ok(true);
         };
+        if self.stuck_auth().is_none() {
+            return Err(failure("native_auth_in_progress"));
+        }
+        let unconfirmed = operation.uncertain || !operation.running;
         let scope = operation.original.scope().clone();
         let operation_id = operation.original.id().clone();
         let request = NativeAuthQuery {
@@ -163,6 +164,9 @@ impl NativeBridge {
         };
         let read = self.controller()?.read_native_auth(request).await;
         if !self.settle_auth(read)? {
+            if !unconfirmed {
+                return Err(failure("native_auth_in_progress"));
+            }
             let request = NativeAuthCancel {
                 request_id: self.auth_request_id()?,
                 scope,
@@ -178,12 +182,16 @@ impl NativeBridge {
         Ok(true)
     }
 
-    /// Names the connection of the sign-in whose outcome is still unconfirmed, if any. One the
-    /// engine last answered as still running is not stuck.
+    /// Names the connection of a stuck sign-in, if any: still open, and either its outcome is
+    /// unconfirmed (the engine did not last answer it as running, or an answer about it was
+    /// uncertain) or its sign-in page can no longer reach it. One the engine last answered as
+    /// still running, which the owner may still be completing, is not stuck.
     pub(super) fn stuck_auth(&self) -> Option<&ModelConnection> {
         self.native_auth
             .as_ref()
-            .filter(|value| value.unresolved && !value.running)
+            .filter(|value| {
+                value.unresolved && (!value.running || value.uncertain || self.auth_moved(value))
+            })
             .map(|value| &value.connection)
     }
 
@@ -193,6 +201,18 @@ impl NativeBridge {
             .as_ref()
             .filter(|value| value.unresolved)
             .map(|value| &value.connection)
+    }
+
+    /// Tells whether the engine database or settings moved on since a sign-in started, so its
+    /// sign-in page can no longer reach it. Input: the sign-in. Output: false while the bridge
+    /// has nothing to compare.
+    fn auth_moved(&self, operation: &Operation) -> bool {
+        let scope = operation.original.scope();
+        self.controller.as_ref().is_some_and(|controller| {
+            controller.identity().database_instance() != scope.expected_database_instance
+        }) || self
+            .current_view()
+            .is_some_and(|view| view.state.config_id != scope.expected_config_id)
     }
 
     /// Re-reads, with the scope it started with, a held sign-in the engine last answered as
@@ -221,18 +241,21 @@ impl NativeBridge {
         Ok(())
     }
 
-    /// The refusal while a sign-in is held: one the engine still runs names its account, so
-    /// the window says to wait for it or cancel it; one whose end the bridge could not confirm
-    /// is stuck and needs Clear stuck sign-in. Output: the error.
+    /// The refusal while a sign-in is held: one the engine still runs and that is not stuck
+    /// names its account, so the window says to wait for it or cancel it; a stuck one needs
+    /// Clear stuck sign-in. Output: the error.
     fn held_refusal(&self) -> BridgeError {
         let operation = self.native_auth.as_ref().filter(|value| value.unresolved);
         assert!(operation.is_some(), "a refusal follows only a held sign-in");
         match operation {
-            Some(operation) if operation.running => BridgeError {
-                code: "native_auth_sign_in_running",
-                cause: None,
-                account: Some(operation.connection.id.as_str().to_owned()),
-            },
+            Some(operation) if self.stuck_auth().is_none() => {
+                assert!(operation.running);
+                BridgeError {
+                    code: "native_auth_sign_in_running",
+                    cause: None,
+                    account: Some(operation.connection.id.as_str().to_owned()),
+                }
+            }
             _ => failure("native_auth_recovery_required"),
         }
     }
@@ -323,6 +346,7 @@ impl NativeBridge {
             request_id,
             generation: None,
             unresolved: true,
+            uncertain: false,
             running: false,
             claude_prompt: None,
             claude_input_attempted: false,
@@ -332,7 +356,14 @@ impl NativeBridge {
         assert!(operation.unresolved && !operation.running);
     }
 
-    fn auth_operation(&mut self, scope: &NativeAuthScope) -> Result<RequestId, BridgeError> {
+    /// Finds the retained sign-in for a page's request and the scope to send for it: the one it
+    /// started with, which still holds while only other accounts changed. Inputs: the page's
+    /// current scope and connection. Output: the operation id and that scope, or the refusal.
+    fn auth_operation(
+        &mut self,
+        scope: &NativeAuthScope,
+        connection: &ModelConnection,
+    ) -> Result<(RequestId, NativeAuthScope), BridgeError> {
         let operation = self
             .native_auth
             .as_mut()
@@ -345,11 +376,11 @@ impl NativeBridge {
         if original.connection != scope.connection {
             return Err(failure("native_auth_operation_scope_conflict"));
         }
-        if original != scope {
-            operation.unresolved = false;
+        if original != scope && &operation.connection != connection {
+            operation.uncertain = true;
             return Err(failure("native_profile_source_conflict"));
         }
-        Ok(operation.original.id().clone())
+        Ok((operation.original.id().clone(), original.clone()))
     }
 
     fn auth_request_id(&mut self) -> Result<RequestId, BridgeError> {
@@ -381,15 +412,11 @@ impl NativeBridge {
                         operation.unresolved = true;
                         operation.running = false;
                     } else if operation.generation.is_none()
-                        || matches!(
-                            error.code,
-                            "native_auth_not_active"
-                                | "native_auth_operation_missing"
-                                | "native_auth_database_mismatch"
-                                | "native_profile_source_conflict"
-                        )
+                        || crazyagent::engine::owner::ends_operation(error.code)
                     {
                         operation.unresolved = false;
+                    } else if error.code == "native_profile_source_conflict" {
+                        operation.uncertain = true;
                     }
                 }
                 return Err(self.auth_failure(error));
@@ -405,6 +432,7 @@ impl NativeBridge {
         let operation = self.native_auth.as_mut().expect("validated auth operation");
         operation.generation = Some(reply.fact.generation);
         operation.unresolved = reply.fact.phase.unfinished();
+        operation.uncertain = false;
         operation.running = operation.unresolved;
         let view = presentation::project(ticket, reply)?;
         if view.display_error.is_none()
@@ -425,6 +453,14 @@ impl NativeBridge {
     }
 
     fn auth_failure(&mut self, error: BridgeError) -> BridgeError {
+        if matches!(
+            error.code,
+            "native_auth_outcome_unknown_read_same_operation"
+                | "native_auth_claude_input_outcome_unknown"
+        ) && let Some(operation) = self.native_auth.as_mut()
+        {
+            operation.uncertain = true;
+        }
         if matches!(
             error.code,
             "not_connected"

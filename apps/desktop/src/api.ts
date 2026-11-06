@@ -37,6 +37,9 @@ const COPY: Record<string, string> = {
   rejected: "The engine didn't accept this change.",
   unavailable: "This isn't available right now. Try again.",
   pool_member_limit: "A pool can hold up to 15 accounts.",
+  linux_limited_network_off: "The Linux limited-network sockets setting is 'Do not start limited-network agents', so this master does not start. Pick another Linux limited-network sockets option in Settings.",
+  linux_resolver_needs_udp: "This harness cannot look up names over TCP, which the Linux setting 'TCP only' needs. Choose 'TCP ports only' for Linux limited-network sockets in Settings, which lets UDP and other sockets reach any host.",
+  linux_harness_unchecked: "This harness starts through a script CrazyAgent cannot check for the Linux setting 'TCP only', so it does not start. Start it from a program, or a script whose first line names a program by its full path, or choose 'TCP ports only' for Linux limited-network sockets in Settings, which lets UDP and other sockets reach any host.",
   pool_needs_account: "A pool needs at least one account. Add another account first, or delete the pool.",
   pool_project_limit: "A pool can serve up to 64 projects. Pick another pool for this project.",
   pool_name_bounds: "Use a pool name of 1 to 60 characters on one line.",
@@ -84,6 +87,7 @@ const COPY: Record<string, string> = {
   native_auth_outcome_unknown_read_same_operation: "We couldn't confirm the sign-in. Check again.",
   native_auth_sign_in_running: "A sign-in is still running. Wait for it to finish or cancel it, then try again.",
   native_auth_recovery_required: "A sign-in didn't confirm how it ended, so changes to its account and new sign-ins wait. Use Clear stuck sign-in at the top of the window, then try again.",
+  native_auth_in_progress: "A sign-in is still running. Finish or cancel it on its sign-in page first.",
   native_auth_claude_input_invalid: "Paste the complete code from the Claude page.",
   native_auth_claude_input_outcome_unknown: "We couldn't confirm the code was sent. Check again before sending it a second time.",
   picker_failed: "Couldn't open the folder chooser. Type the full path instead.",
@@ -137,6 +141,10 @@ const COPY: Record<string, string> = {
   agent_access_unavailable: "That agent access level can't run on this computer. Pick another level.",
   agent_policy_invalid: "That agent access choice isn't valid. Open Agent access and save again.",
   agent_policy_unreadable: "CrazyAgent couldn't read this project's agent access. Try again.",
+  agent_access_lowered: "This project's agent access was lowered below what the agent started with, so it was stopped. What it changed in its own folder is still in Changes; an agent that ran at Full access may also have changed files outside it.",
+  agent_network_narrowed: "This project's agent network was narrowed, so the agent was stopped. Its next start uses the new network.",
+  agent_toolchain_lowered: "A toolchain the agent started with is no longer allowed for this project, so the agent was stopped. Its next start goes without it.",
+  agent_project_unreadable: "CrazyAgent couldn't read the project folder to check the agent's toolchains, so the agent was stopped. Try again.",
   agent_git_needs_tools: "Agent git needs the Command Line Tools: run xcode-select --install.",
   project_network_unreadable: "CrazyAgent couldn't read this project's network choice, so the check was refused. Try again.",
 };
@@ -326,6 +334,7 @@ const CHANGE: Record<PendingIntent["kind"], string> = {
   memory_selection: "changing the memory selection",
   master: "changing the master conversation",
   owner_profile: "saving your profile",
+  sandbox_settings: "changing the sandbox setting",
   projects_home: "changing the projects folder",
   move_projects_home: "moving your projects",
   add_existing_folder: "adding a folder",
@@ -386,6 +395,24 @@ export function getProfile(): Promise<Result<OwnerProfile | null>> {
 /** Saves or updates the owner profile. Input: the full profile. Output: ok once saved. */
 export function saveProfile(profile: OwnerProfile): Promise<Result<void>> {
   return change("desktop_save_owner_profile", { profile, generation: nextGeneration() });
+}
+
+/** How a limited-network agent's sockets are held on Linux, the engine's `LinuxSockets`. */
+export type LinuxSockets = "tcp_only" | "refuse" | "tcp_ports";
+
+/** The owner's app-wide sandbox settings, the engine's `SandboxSettings`. */
+export interface SandboxSettings {
+  linux_sockets: LinuxSockets;
+}
+
+/** Reads the owner's sandbox settings. Output: the stored settings, or the defaults before the first save. */
+export function getSandboxSettings(): Promise<Result<SandboxSettings>> {
+  return call<SandboxSettings>("desktop_sandbox_settings");
+}
+
+/** Saves the owner's sandbox settings. Input: the full settings. Output: ok once saved. */
+export function saveSandboxSettings(settings: SandboxSettings): Promise<Result<void>> {
+  return change("desktop_set_sandbox_settings", { settings, generation: nextGeneration() });
 }
 
 export type AccountProvider = "chatgpt" | "claude" | "openrouter" | "openai_api" | "anthropic_api" | "openai_compatible" | "local";
@@ -543,6 +570,9 @@ export function profileSettledLine(check: ProfileCheck): string | null {
 /** The banner line while a sign-in's outcome is unconfirmed. */
 export const STUCK_SIGN_IN_LINE = "A sign-in didn't confirm how it ended. Changes to that account and new sign-ins wait until you clear it.";
 
+/** The toast when settings changed after a stuck sign-in started: only the engine can end it. */
+export const STALE_SIGN_IN_LINE = "Settings changed after this sign-in started, so only the engine can end it, within 10 minutes of its start. Clear it again after that.";
+
 /** Asks the engine about the stuck sign-in and, while it still runs, asks it to stop. The app
  * forgets the sign-in only once the engine answers for it. Output: true when cleared, false
  * while the engine is still stopping it, or a plain error. */
@@ -553,7 +583,8 @@ export function clearStuckSignIn(): Promise<Result<boolean>> {
 /** The toast after Clear stuck sign-in. Input: the clear result. Output: the line. */
 export function stuckClearedLine(result: Result<boolean>): string {
   if (result.kind === "ok") return result.value ? "Stuck sign-in cleared." : plainError("native_auth_cancel_pending");
-  return result.kind === "error" ? result.message : plainError("unknown");
+  if (result.kind === "error") return result.code === "native_profile_source_conflict" ? STALE_SIGN_IN_LINE : result.message;
+  return plainError("unknown");
 }
 
 export interface PoolMember {
@@ -1123,16 +1154,19 @@ export function keepTeamWarm(id: string, on: boolean): Promise<Result<IntentRece
 }
 
 /** Sets how long one task turn and one agent session of the team may run, and how long a
- * sub-agent may sit idle; null is no limit. Inputs: the project id and the three limits in
- * seconds. Output: the engine receipt, not ready, or a plain error. */
-export function setTeamTimeLimits(id: string, turnSecs: number | null, sessionSecs: number | null, idleSecs: number | null): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_team_time_limits", { id, turnSecs, sessionSecs, idleSecs, generation: nextGeneration() });
+ * sub-agent may sit idle; null is no limit. Inputs: the project id, the three limits in
+ * seconds and the team settings revision the window read. Output: the engine receipt, refused
+ * as stale once another client changed the settings, not ready, or a plain error. */
+export function setTeamTimeLimits(id: string, turnSecs: number | null, sessionSecs: number | null, idleSecs: number | null, revision: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_time_limits", { id, turnSecs, sessionSecs, idleSecs, revision, generation: nextGeneration() });
 }
 
 /** Sets what the live master does with the conversation when the master harness changes.
- * Inputs: the project id and the mode. Output: the engine receipt, not ready, or a plain error. */
-export function setOnHarnessSwitch(id: string, mode: SwitchMode): Promise<Result<IntentReceipt>> {
-  return call<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, generation: nextGeneration() });
+ * Inputs: the project id, the mode and the team settings revision the window read. Output:
+ * the engine receipt, refused as stale once another client changed the settings, not ready,
+ * or a plain error. */
+export function setOnHarnessSwitch(id: string, mode: SwitchMode, revision: number): Promise<Result<IntentReceipt>> {
+  return call<IntentReceipt>("desktop_team_on_harness_switch", { id, mode, revision, generation: nextGeneration() });
 }
 
 /** Sets when a saved master harness change reaches the running live master: once it is idle, or

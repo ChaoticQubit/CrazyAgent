@@ -1,5 +1,7 @@
 use super::*;
 use crate::github::GitHubMethod;
+use crate::sandbox::LinuxSockets;
+use crate::sandbox_settings::SandboxSettings;
 use crate::setup::{Dependency, DependencyStatus, PackGroup, Version};
 use crate::tui::client::OwnerEvent;
 use crate::tui::glyphs::Status;
@@ -160,15 +162,35 @@ fn first_run(width: u16, height: u16) -> Shell {
 }
 
 fn settings(width: u16, height: u16) -> Shell {
+    settings_with(width, height, LinuxSockets::TcpOnly)
+}
+
+fn settings_with(width: u16, height: u16, linux_sockets: LinuxSockets) -> Shell {
     let mut shell = Shell::with(ctx(width, height), Box::new(AppSetup::new(false)));
     assert!(matches!(
         jobs(&mut shell).as_slice(),
-        [AppSetupJob::Status, AppSetupJob::Home, AppSetupJob::GitHub]
+        [
+            AppSetupJob::Status,
+            AppSetupJob::Home,
+            AppSetupJob::GitHub,
+            AppSetupJob::Sandbox
+        ]
     ));
     shell.arrive(event(AppSetupEvent::Status(Ok(installed_status()))));
     shell.arrive(event(AppSetupEvent::Home(Ok(home()))));
     shell.arrive(event(AppSetupEvent::GitHub(Ok(signed_in()))));
+    shell.arrive(event(AppSetupEvent::Sandbox(Ok(SandboxSettings {
+        linux_sockets,
+    }))));
     shell
+}
+
+fn chosen(shell: &mut Shell) -> LinuxSockets {
+    let sent = jobs(shell);
+    let [AppSetupJob::SetSandbox { settings, .. }] = sent.as_slice() else {
+        panic!("one sandbox change required, got {} jobs", sent.len())
+    };
+    settings.linux_sockets
 }
 
 fn find<'a>(rows: &'a [String], needle: &str) -> &'a str {
@@ -747,4 +769,99 @@ fn a_long_pack_scrolls_with_the_cursor() {
     assert!(find(&rows, "entry-16").contains("> [x] entry-16"));
     assert!(rows.iter().all(|row| !row.contains("entry-0 ")));
     assert!(rows.iter().all(|row| row.chars().count() <= 80));
+}
+
+#[test]
+fn settings_show_the_linux_sockets_setting_and_its_risk() {
+    let mut shell = settings(120, 60);
+    let rows = render(&mut shell, 120, 60);
+    assert!(find(&rows, "Linux sockets  ").contains("TCP only, names looked up over TCP"));
+    find(&rows, "RES_OPTIONS");
+    assert!(
+        sockets_words(LinuxSockets::TcpOnly)
+            .1
+            .contains("Wrappers are judged by their first file, a script by its interpreter")
+    );
+    assert!(rows.last().unwrap().contains("l Linux sockets"));
+    shell.key(Key::Char('l'));
+    let rows = render(&mut shell, 120, 60);
+    find(
+        &rows,
+        "how an agent limited to its model reaches the network",
+    );
+    for title in [
+        "> TCP only, names looked up over TCP (recommended)",
+        "  Do not start limited-network agents",
+        "  TCP ports only",
+    ] {
+        find(&rows, title);
+    }
+    find(&rows, "Hosts and UDP are not limited");
+    find(&rows, "the master is unavailable there");
+    shell.key(Key::Enter);
+    assert!(
+        jobs(&mut shell).is_empty(),
+        "the current option saves nothing"
+    );
+    assert_eq!(lead(&shell), "That is already the setting.");
+}
+
+#[test]
+fn choosing_tcp_only_saves_it_in_the_engine() {
+    let mut shell = settings_with(120, 60, LinuxSockets::TcpPorts);
+    assert!(find(&render(&mut shell, 120, 60), "Linux sockets  ").contains("TCP ports only"));
+    shell.key(Key::Char('l'));
+    find(&render(&mut shell, 120, 60), "> TCP ports only");
+    shell.key(Key::Up);
+    shell.key(Key::Up);
+    shell.key(Key::Up);
+    shell.key(Key::Enter);
+    assert_eq!(chosen(&mut shell), LinuxSockets::TcpOnly);
+    shell.arrive(event(AppSetupEvent::SandboxSet(Ok(()))));
+    assert_eq!(
+        lead(&shell),
+        "Linux sockets: TCP only, names looked up over TCP (recommended)."
+    );
+    assert!(
+        jobs(&mut shell)
+            .iter()
+            .any(|job| matches!(job, AppSetupJob::Sandbox)),
+        "a saved change reads the setting back"
+    );
+}
+
+#[test]
+fn choosing_do_not_start_saves_refuse_in_the_engine() {
+    let mut shell = settings(120, 60);
+    shell.key(Key::Char('l'));
+    shell.key(Key::Down);
+    find(
+        &render(&mut shell, 120, 60),
+        "> Do not start limited-network agents",
+    );
+    shell.key(Key::Enter);
+    assert_eq!(chosen(&mut shell), LinuxSockets::Refuse);
+    shell.arrive(event(AppSetupEvent::SandboxSet(Ok(()))));
+    assert_eq!(
+        lead(&shell),
+        "Linux sockets: Do not start limited-network agents."
+    );
+}
+
+#[test]
+fn choosing_tcp_ports_saves_it_and_a_refused_save_says_why() {
+    let mut shell = settings(120, 60);
+    shell.key(Key::Char('l'));
+    shell.key(Key::Down);
+    shell.key(Key::Down);
+    shell.key(Key::Down);
+    find(&render(&mut shell, 120, 60), "> TCP ports only");
+    shell.key(Key::Enter);
+    assert_eq!(chosen(&mut shell), LinuxSockets::TcpPorts);
+    shell.arrive(event(AppSetupEvent::SandboxSet(Err("busy".into()))));
+    assert_ne!(lead(&shell), "Linux sockets: TCP ports only.");
+    assert!(!lead(&shell).is_empty());
+    shell.key(Key::Char('l'));
+    shell.key(Key::Esc);
+    assert!(jobs(&mut shell).is_empty(), "Esc changes nothing");
 }

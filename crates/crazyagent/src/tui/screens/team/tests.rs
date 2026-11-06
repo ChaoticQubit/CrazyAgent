@@ -866,6 +866,8 @@ fn finished_team() -> crate::team::TeamStatus {
         budget_reached: false,
         spread_accounts: false,
         show_finished: false,
+        message_settings: crate::team::agent_messages::MessageSettings::default(),
+        settings_revision: 0,
         agent_branches: crate::team::BranchMode::Named,
         master_branch: None,
         land_on: None,
@@ -920,6 +922,55 @@ fn finished_team() -> crate::team::TeamStatus {
         events: Default::default(),
         partial: false,
     }
+}
+
+#[test]
+fn the_finished_box_keeps_the_picked_agent_drawn_when_the_list_is_longer_than_the_box() {
+    use crate::project_setup::{SetupQuery, SetupView};
+    use crate::team::{AgentRole, TeamAction, TeamAgent};
+    let mut status = finished_team();
+    let stopped = status.agents[1].clone();
+    status.agents = (3..15)
+        .map(|id| TeamAgent {
+            id,
+            label: AgentRole::Sub.agent_label(id),
+            ..stopped.clone()
+        })
+        .collect();
+    let mut shell = fresh(120, 24);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    requests(&mut shell);
+    shell.key(Key::Char('f'));
+    requests(&mut shell);
+    shell.arrive(setup_reply(
+        SetupQuery::Team { project: project() },
+        Ok(SetupView::Team(Box::new(status))),
+    ));
+    for _ in 0..8 {
+        shell.key(Key::Down);
+    }
+    let text = render(&mut shell).join("\n");
+    assert!(text.contains("Finished (12)"), "{text}");
+    assert!(
+        text.contains("> Sub-agent 6"),
+        "the ninth agent, picked with eight Downs, is drawn: {text}"
+    );
+    assert!(text.contains("more above"), "{text}");
+    shell.key(Key::Char('w'));
+    let sent = requests(&mut shell);
+    assert!(
+        matches!(
+            &sent[..],
+            [Request::Setup(SetupQuery::TeamChange {
+                action: TeamAction::WakeAgent { agent: 6, .. },
+                ..
+            })]
+        ),
+        "w wakes the agent drawn as picked: {sent:?}"
+    );
 }
 
 fn setup_reply(
@@ -1108,6 +1159,54 @@ fn f_lists_finished_agents_w_wakes_one_by_its_team_id_and_h_switches_the_setting
 }
 
 #[test]
+fn the_finished_setting_counts_the_running_and_all_agents_the_team_tree_lists() {
+    use crate::project_setup::{SetupQuery, SetupView};
+    use crate::team::TeamAction;
+    let mut shell = fresh(120, 30);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    requests(&mut shell);
+    shell.key(Key::Char('f'));
+    requests(&mut shell);
+    shell.arrive(setup_reply(
+        SetupQuery::Team { project: project() },
+        Ok(SetupView::Team(Box::new(finished_team()))),
+    ));
+    let text = render(&mut shell).join("\n");
+    assert!(text.contains("Finished agents: Hide."), "{text}");
+    assert!(text.contains("Team tree: Running (1)  All (1)"), "{text}");
+
+    shell.key(Key::Char('h'));
+    let sent = requests(&mut shell);
+    let [
+        Request::Setup(SetupQuery::TeamChange {
+            action: TeamAction::FinishedAgents { show: true, .. },
+            generation,
+        }),
+    ] = &sent[..]
+    else {
+        panic!("{sent:?}");
+    };
+    shell.arrive(setup_reply(
+        SetupQuery::TeamChange {
+            action: TeamAction::FinishedAgents {
+                project_id: project(),
+                show: true,
+            },
+            generation: *generation,
+        },
+        Ok(SetupView::Changed(
+            crate::engine::owner::OwnerResult::Applied,
+        )),
+    ));
+    let text = render(&mut shell).join("\n");
+    assert!(text.contains("Finished agents: Show."), "{text}");
+    assert!(text.contains("Team tree: Running (1)  All (3)"), "{text}");
+}
+
+#[test]
 fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_tasks() {
     use crate::team::{AgentRole, TaskStatus, TeamAgent, TeamHarness, TeamStatus, TeamTask};
     let harness = |role: AgentRole, agents_max: u8| TeamHarness {
@@ -1137,6 +1236,8 @@ fn the_owners_stopped_codex_team_lists_every_sub_agent_with_its_account_and_task
         budget_reached: false,
         spread_accounts: false,
         show_finished: false,
+        message_settings: crate::team::agent_messages::MessageSettings::default(),
+        settings_revision: 0,
         agent_branches: crate::team::BranchMode::Named,
         master_branch: None,
         land_on: None,
@@ -1562,6 +1663,8 @@ fn master_status(
         budget_reached: false,
         spread_accounts: false,
         show_finished: false,
+        message_settings: crate::team::agent_messages::MessageSettings::default(),
+        settings_revision: 0,
         agent_branches: crate::team::BranchMode::Named,
         master_branch: None,
         land_on: None,
@@ -2855,6 +2958,70 @@ fn switch_off_unswitched() -> Arrival {
 }
 
 #[test]
+fn the_instructions_box_says_why_claude_loads_no_file_and_when_a_headless_run_reports_nothing() {
+    let ctx = Ctx::new(
+        Depth::NoColor,
+        Colors::Dark,
+        Appearance::Dark,
+        &UNICODE,
+        String::new(),
+    );
+    let view = AgentInstructions {
+        agent: 5,
+        harness: "claude-code".into(),
+        launched: true,
+        text: "Use tdd.\n".into(),
+        skills: Vec::new(),
+        sessions: 2,
+        loaded: Vec::new(),
+        skills_used: Vec::new(),
+        files: Vec::new(),
+    };
+    let text = |view: AgentInstructions| -> String {
+        super::instruction_lines(&Load::Ready(Box::new(view)), 120, &ctx)
+            .iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let claude = text(view.clone());
+    assert!(
+        claude.contains(
+            "Instructions: none loaded by Claude itself; CrazyAgent gives its instructions in the launch prompt"
+        ),
+        "{claude}"
+    );
+    let codex = text(AgentInstructions {
+        harness: "codex".into(),
+        ..view.clone()
+    });
+    assert!(
+        codex.contains("Instructions: none loaded by its harness"),
+        "{codex}"
+    );
+    let unreported = text(AgentInstructions {
+        sessions: 0,
+        ..view.clone()
+    });
+    assert!(
+        unreported.contains("Instructions: not reported yet")
+            && unreported.contains(
+                "A headless Claude run reports nothing while Keep transcripts for headless Claude runs is off."
+            ),
+        "{unreported}"
+    );
+    assert!(
+        !text(AgentInstructions {
+            harness: "codex".into(),
+            sessions: 0,
+            ..view
+        })
+        .contains("headless Claude"),
+        "a Codex run is never told about the Claude transcript setting"
+    );
+}
+
+#[test]
 fn the_instructions_box_lists_each_instruction_file_the_engine_recorded() {
     use crate::engine::owner::InstructionRecord;
     use crate::instruction_files::State;
@@ -3516,6 +3683,171 @@ fn a_hookless_agent_row_says_only_its_receipts_are_unavailable_for_its_account_k
     assert!(
         !tree[hooked + 1].contains("Receipts"),
         "a hooked agent keeps its account row only: {tree:#?}"
+    );
+}
+
+fn messages_page(agent: i64, older: bool) -> Box<crate::team::agent_messages::AgentMessages> {
+    use crate::team::agent_messages::{
+        AgentMessage, AgentMessages, EntryKind, MessageSettings, Source, Speaker,
+    };
+    let said = |id: i64, from: Speaker, kind: EntryKind, source: Source, text: &str| AgentMessage {
+        at_ms: 1_793_000_000_000 + id * 60_000,
+        source,
+        id,
+        from,
+        kind,
+        text: Some(text.into()),
+        task: Some(7),
+        state: None,
+        result: None,
+        result_more: false,
+    };
+    Box::new(AgentMessages {
+        project_id: project(),
+        agent,
+        entries: vec![
+            said(
+                2,
+                Speaker::Agent,
+                EntryKind::Question,
+                Source::Event,
+                "Should the token\u{1b}[2J last a day?",
+            ),
+            said(
+                1,
+                Speaker::Master,
+                EntryKind::Task,
+                Source::Task,
+                "Fix the login bug",
+            ),
+        ],
+        older,
+        settings: MessageSettings::default(),
+    })
+}
+
+fn messages_asked(shell: &mut Shell) -> Vec<crate::project_setup::SetupQuery> {
+    requests(shell)
+        .into_iter()
+        .filter_map(|request| match request {
+            Request::Setup(query @ crate::project_setup::SetupQuery::TeamMessages { .. }) => {
+                Some(query)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn m_on_an_agent_card_opens_its_messages_in_the_right_box_and_esc_closes_it() {
+    use crate::project_setup::{SetupQuery, SetupView};
+    let mut team = graph();
+    team.nodes[1].id = "team-2".into();
+    team.edges[0].to = "team-2".into();
+    for (width, height) in [(120, 30), (80, 24)] {
+        let mut shell = fresh(width, height);
+        shell.arrive(Arrival::TeamGraph {
+            project: project(),
+            result: Ok(team.clone()),
+        });
+        let screen = render(&mut shell).join("\n");
+        if width == 120 {
+            assert!(screen.contains("m Messages"), "{screen}");
+        }
+        shell.key(Key::Down);
+        shell.key(Key::Char('m'));
+        let read = SetupQuery::TeamMessages {
+            project: project(),
+            agent: 2,
+            before: None,
+        };
+        assert_eq!(messages_asked(&mut shell), std::slice::from_ref(&read));
+        let screen = render(&mut shell).join("\n");
+        assert!(screen.contains("Messages: claude-1"), "{screen}");
+        assert!(screen.contains("Reading messages..."), "{screen}");
+
+        shell.arrive(setup_reply(
+            read.clone(),
+            Ok(SetupView::TeamMessages(messages_page(2, true))),
+        ));
+        let rows = render(&mut shell);
+        let screen = rows.join("\n");
+        assert!(
+            screen.contains("PgUp at the top reads older messages."),
+            "{screen}"
+        );
+        assert!(
+            screen.contains("Master > task: Fix the login bug"),
+            "{screen}"
+        );
+        assert!(
+            rows.iter().any(|row| row.contains("> ")
+                && row.contains("Agent < question: Should the token")),
+            "the newest entry is picked\n{screen}"
+        );
+        assert!(!screen.contains('\u{1b}'), "{screen}");
+        assert!(screen.contains("Esc Back"), "{screen}");
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("│>") && row.contains("claude-1")),
+            "the tree keeps its cursor while the list is open\n{screen}"
+        );
+
+        shell.key(Key::Home);
+        shell.key(Key::PageUp);
+        let older = messages_asked(&mut shell);
+        assert!(
+            matches!(
+                older.as_slice(),
+                [SetupQuery::TeamMessages {
+                    agent: 2,
+                    before: Some(cursor),
+                    ..
+                }] if cursor.id == 1
+            ),
+            "{older:?}"
+        );
+        shell.key(Key::Esc);
+        let screen = render(&mut shell).join("\n");
+        assert!(!screen.contains("Messages: claude-1"), "{screen}");
+        assert!(screen.contains("Enter on an agent opens"), "{screen}");
+        shell.key(Key::Char('m'));
+        assert_eq!(
+            messages_asked(&mut shell),
+            std::slice::from_ref(&read),
+            "m opens the same list again"
+        );
+    }
+}
+
+#[test]
+fn m_on_the_master_card_says_where_its_conversation_is_and_reads_nothing() {
+    let mut shell = team();
+    shell.key(Key::Home);
+    shell.key(Key::Char('m'));
+    assert!(messages_asked(&mut shell).is_empty());
+    let message = shell
+        .ctx
+        .message()
+        .expect("m on the master says why it opens nothing");
+    assert_eq!(message.lead, "The master has no Messages list.");
+    assert_eq!(
+        message.rest,
+        crate::tui::screens::team_messages::MASTER_ELSEWHERE
+    );
+    shell.key(Key::Down);
+    shell.key(Key::Char('m'));
+    assert!(
+        messages_asked(&mut shell).is_empty(),
+        "a card without a team agent id reads nothing"
+    );
+    assert_eq!(
+        shell
+            .ctx
+            .message()
+            .expect("m on a card without a team agent says why")
+            .lead,
+        "This card has no messages to show."
     );
 }
 

@@ -1,6 +1,6 @@
 import { useEffect, useId, useState } from "react";
 import type { Failure, Result } from "../../api";
-import { acceptChange, changesRefusal, discardChange, loadChangeDiff, loadChanges, loadTargetBranches, notReady, restoreChange, updateChange } from "../../api-changes";
+import { acceptChange, changesRefusal, discardChange, loadChangeDiff, loadTargetBranches, notReady, restoreChange, updateChange } from "../../api-changes";
 import type { ChangeDiff, ChangeSet, TargetBranches } from "../../api-changes";
 import { Button, ConfirmDialog, Dialog, Select, TextArea } from "../../ui";
 import { displayText } from "../conversation";
@@ -8,9 +8,8 @@ import { Badge, NotReady, ProjectEmpty } from "../project/shared";
 import type { ProjectData } from "../project/shared";
 import { acceptBlocked, acceptNote, acceptTarget, actions, agentName, branchLabel, checkedNote, commitMessage, conflictNote, diffText, fileLine, fileMarks, lastPageSeen, movedNote, outcomeNote, restoreNote, reviewed, reviewOf, sizeLine, stateBadge, updatingNote } from "./model";
 import type { Review } from "./model";
+import { useChangeList } from "./poll";
 import "./changes.css";
-
-const LIST_POLL_MS = 5000;
 
 type Asking = { kind: "accept" | "discard"; set: ChangeSet } | null;
 
@@ -72,13 +71,14 @@ function refusalOf(failure: Failure): string {
   return failure.kind === "error" ? changesRefusal({ code: failure.code, cause: failure.cause }) : "";
 }
 
-function Detail({ set, now, busy, onAsk, onUpdate, onRestore }: {
+function Detail({ set, now, busy, onAsk, onUpdate, onRestore, onMoved }: {
   set: ChangeSet;
   now: number;
   busy: boolean;
   onAsk: (asking: Asking) => void;
   onUpdate: (set: ChangeSet) => void;
   onRestore: (set: ChangeSet) => void;
+  onMoved: () => void;
 }) {
   const [pages, setPages] = useState<number[]>([0]);
   const page = pages[pages.length - 1];
@@ -96,10 +96,11 @@ function Detail({ set, now, busy, onAsk, onUpdate, onRestore }: {
   useEffect(() => {
     let current = true;
     setDiff(undefined);
-    void loadChangeDiff(set.id, page).then((result) => {
+    void loadChangeDiff(set.id, head, page).then((result) => {
       if (!current) return;
       setDiff(result);
       if (result.kind === "ok" && result.value.next === null) setReview((shown) => lastPageSeen(shown, head));
+      if (result.kind === "error" && result.code === "changes_stale") onMoved();
     });
     return () => { current = false; };
   }, [set.id, head, page]);
@@ -140,20 +141,13 @@ function Detail({ set, now, busy, onAsk, onUpdate, onRestore }: {
 /** Changes tab: every change set the project's agents made, newest first, with its diff and
  * the owner's Accept, Discard, Restore and Ask agent to update. A refused action is shown only
  * while the set it was about is the one shown, never under another set. Input: the project
- * data. Output: the tab; the list rereads every few seconds while it is open. */
+ * data. Output: the tab; the list rereads a few seconds after each reply while it is open. */
 export function ChangesTab({ data }: { data: ProjectData }) {
-  const [list, setList] = useState<Result<ChangeSet[]>>();
-  const [round, setRound] = useState(0);
+  const [list, reread] = useChangeList(data.id);
   const [selected, setSelected] = useState<string | null>(null);
   const [asking, setAsking] = useState<Asking>(null);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<{ set: string; text: string } | null>(null);
-  useEffect(() => {
-    let current = true;
-    void loadChanges(data.id).then((result) => { if (current) setList(result); });
-    const timer = setInterval(() => setRound((value) => value + 1), LIST_POLL_MS);
-    return () => { current = false; clearInterval(timer); };
-  }, [data.id, round]);
   const sets = list?.kind === "ok" ? list.value : [];
   const shown = sets.find((set) => set.id === selected) ?? sets[0] ?? null;
 
@@ -165,7 +159,7 @@ export function ChangesTab({ data }: { data: ProjectData }) {
       const message = done(result.value);
       if (message !== null) data.notify(message);
     } else setNote({ set: set.id, text: notReady(result) ? "Landing changes isn't ready in this engine yet." : refusalOf(result) });
-    setRound((value) => value + 1);
+    reread();
   }
 
   async function accept(set: ChangeSet, message: string, target: string | null) {
@@ -204,7 +198,7 @@ export function ChangesTab({ data }: { data: ProjectData }) {
           <span className="pj-small pj-secondary">{sizeLine(set)}</span>
         </button>
       </li>)}</ul>
-      {shown && <Detail set={shown} now={data.now} busy={busy} onAsk={setAsking} onUpdate={(set) => void update(set)} onRestore={(set) => void restore(set)} />}
+      {shown && <Detail set={shown} now={data.now} busy={busy} onAsk={setAsking} onUpdate={(set) => void update(set)} onRestore={(set) => void restore(set)} onMoved={reread} />}
     </div>}
     {asking?.kind === "accept" && <AcceptDialog key={`${asking.set.id}:${asking.set.head}`} set={asking.set} pending={busy}
       onCancel={() => setAsking(null)} onAccept={(message, target) => void accept(asking.set, message, target)} />}

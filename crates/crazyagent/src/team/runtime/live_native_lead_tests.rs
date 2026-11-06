@@ -225,7 +225,7 @@ fn live_retire_lowered_stops_idle_kept_session() {
     assert!(team.pane_alive());
     team.save_access(AgentAccess::Sandboxed);
     assert!(
-        team.lead().stopping && team.lead().lowered,
+        team.lead().stopping && team.lead().narrowed.is_some(),
         "lowering the level stops the idle kept lead at once, not at its idle limit"
     );
     let (reports, problem) = team.until_ended(STOP);
@@ -935,7 +935,8 @@ fn live_native_teammates_work_from_their_own_home_through_the_lead_s_team_folder
     let transcripts = files_under(&mates.join("projects"), 3);
     let shared = files_under(&team.home.join("teams"), 3);
     let tasks = files_under(&team.home.join("tasks"), 2);
-    let walked = crate::usage::capture::records(&team.home, crate::usage::capture::Format::Claude);
+    let (walked, _, _) =
+        crate::usage::capture::records(&team.home, crate::usage::capture::Format::Claude);
     let denials = crate::spawn_gate::output(
         Command::new("/usr/bin/log")
             .args(["show", "--style", "compact", "--start", &started_at, "--predicate"])
