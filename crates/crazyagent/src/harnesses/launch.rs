@@ -438,9 +438,13 @@ impl Drop for Ending {
     }
 }
 
-/// Ends a pane's process group once its pane is gone: KILL until no member is left, for at
-/// most `GROUP_EXIT_WAIT`. Inputs: the group id and this path's hold on it, if any. Output:
-/// whether the group is gone.
+/// Ends a pane's process group once its pane is gone, from the one path that holds it
+/// (CB-2 one signal): KILL every 10 ms while the group answers, for at most
+/// `GROUP_EXIT_WAIT`, testing it before each KILL, so a group that answered ESRCH is never
+/// signalled again, as its number may lead a new group by then. macOS answers EPERM for a
+/// group whose last member it just reaped, so only ESRCH ends it. A group another path
+/// holds, as the terminal host's close of that pane, is only watched. Inputs: the group id
+/// and this path's hold, taken here when none. Output: whether the group is gone.
 #[cfg(unix)]
 pub(crate) fn end_pane_group(group: u32, held: Option<Ending>) -> bool {
     let Some(pid) = i32::try_from(group)
@@ -450,9 +454,9 @@ pub(crate) fn end_pane_group(group: u32, held: Option<Ending>) -> bool {
         return true;
     };
     end_pane_group_with(
-        held,
+        held.or_else(|| Ending::claim(group)),
         GROUP_EXIT_WAIT,
-        || rustix::process::test_kill_process_group(pid).is_ok(),
+        || rustix::process::test_kill_process_group(pid) != Err(rustix::io::Errno::SRCH),
         || {
             let _ = rustix::process::kill_process_group(pid, rustix::process::Signal::KILL);
         },
@@ -460,8 +464,9 @@ pub(crate) fn end_pane_group(group: u32, held: Option<Ending>) -> bool {
 }
 
 /// Ends a group as `end_pane_group` describes, through `left`, which tells whether the
-/// group still answers, and `kill`, which sends it KILL. Inputs: the hold, the longest wait
-/// and both calls. Output: whether the group is gone.
+/// group still answers, and `kill`, which sends it KILL, called only with a hold. The hold
+/// is freed on return. Inputs: the hold, the longest wait and both calls. Output: whether
+/// the group is gone.
 #[cfg(unix)]
 fn end_pane_group_with(
     held: Option<Ending>,
@@ -469,14 +474,19 @@ fn end_pane_group_with(
     mut left: impl FnMut() -> bool,
     mut kill: impl FnMut(),
 ) -> bool {
-    drop(held);
-    kill();
-    let started = Instant::now();
-    while left() && started.elapsed() < wait {
-        kill();
+    let deadline = Instant::now() + wait;
+    loop {
+        if !left() {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        if held.is_some() {
+            kill();
+        }
         std::thread::sleep(Duration::from_millis(10));
     }
-    !left()
 }
 
 /// Waits until no process of a killed agent's group is left, killing again

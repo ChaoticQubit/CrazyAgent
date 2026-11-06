@@ -998,11 +998,13 @@ fn a_group_once_gone_is_never_tested_or_signalled_again() {
     .unwrap();
     let survivor_group = rustix::process::Pid::from_child(&survivor);
     let guard = Group(survivor_group, std::cell::Cell::new(false));
+    let held = [ended.id(), survivor.id()]
+        .map(|group| Ending::claim(group).expect("no path holds a new group"));
     let reaped = std::thread::spawn(move || survivor.wait());
     let calls = std::cell::RefCell::new(Vec::new());
 
     end_groups_with(
-        vec![ended_group, survivor_group],
+        held.into(),
         |group| {
             let answer = rustix::process::test_kill_process_group(group);
             calls.borrow_mut().push(("test", group, answer));
