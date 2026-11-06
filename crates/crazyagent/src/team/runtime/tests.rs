@@ -8791,6 +8791,7 @@ fn a_saved_master_harness_switch_waits_for_the_next_start_when_the_owner_chose_i
             &crate::team::TeamAction::ApplyHarnessSwitch {
                 project_id: project.clone(),
                 mode: crate::team::SwitchApply::NextStart,
+                version: crate::team::settings_version(&tx, &project).unwrap(),
             },
         )
         .unwrap(),

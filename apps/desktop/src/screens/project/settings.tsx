@@ -21,7 +21,7 @@ import { PlanningLine } from "./planning";
 import { SessionContext, useLoad } from "../../state";
 import { ProjectAccountOrder } from "../settings/account-choice";
 import { PluginsAndSkills } from "../settings/plugins";
-import { changeNote } from "../team/controls";
+import { TEAM_SETTINGS_STALE, changeNote, settingsVersion } from "../team/controls";
 import { NotReady, valueOf } from "./shared";
 import type { ProjectData } from "./shared";
 
@@ -148,20 +148,23 @@ export function applyMode(status: Pick<TeamStatus, "apply_harness_switch">): Swi
 }
 
 /** The Apply a master harness change setting (N-D26), saved at once like the team's other
- * switches. Input: the project data with its team status read. Output: the select with the
- * last change's note, or nothing before the team status is read. */
+ * switches with the team settings version the page read; a save from an older read says the
+ * settings changed and the page reads the team again. Input: the project data with its team
+ * status read. Output: the select with the last change's note, or nothing before the team
+ * status is read. */
 export function ApplySwitch({ data }: { data: Pick<ProjectData, "id" | "team" | "reloadTeam"> }) {
   const [chosen, setChosen] = useState<SwitchApply | null>(null);
   const [note, setNote] = useState("");
   const status = data.team.result?.kind === "ok" ? data.team.result.value : null;
   if (status === null) return null;
-  async function choose(mode: SwitchApply) {
+  const choose = async (mode: SwitchApply) => {
     setChosen(mode);
-    const message = changeNote(await setApplyHarnessSwitch(data.id, mode), "the Apply a master harness change setting");
+    const result = await setApplyHarnessSwitch(data.id, mode, settingsVersion(status));
+    const message = savedStale(result) ? TEAM_SETTINGS_STALE : changeNote(result, "the Apply a master harness change setting");
     setChosen(null);
     setNote(message);
     data.reloadTeam();
-  }
+  };
   return <>
     <Select id="ps-apply-switch" label="Apply a master harness change" value={chosen ?? applyMode(status)} options={APPLY_OPTIONS}
       onValue={(value) => { if (chosen === null && (value === "when_idle" || value === "next_start")) void choose(value); }}

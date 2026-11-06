@@ -1626,19 +1626,18 @@ impl TeamView {
     }
 
     /// Flips Apply a master harness change between When the master is idle and At the next
-    /// start (N-D26). Output: the change to send, or Handled with a notice while loading or
-    /// saving.
+    /// start (N-D26), naming the team settings version the view read so the engine refuses it
+    /// as stale after a change made elsewhere. Output: the change to send, or Handled with a
+    /// notice while loading or saving.
     fn apply_switch(&mut self) -> TeamReply {
+        if self.status.is_some() && self.still_saving() {
+            return TeamReply::Handled;
+        }
         let Some(status) = &self.status else {
             self.notice = Some(Notice::plain("The team is still loading."));
             return TeamReply::Handled;
         };
-        if self.changing.is_some() {
-            self.notice = Some(Notice::problem(
-                "Still saving the last change. Try again in a moment.",
-            ));
-            return TeamReply::Handled;
-        }
+        let version = status.settings_version;
         let mode = match status.apply_harness_switch {
             SwitchApply::WhenIdle => SwitchApply::NextStart,
             SwitchApply::NextStart => SwitchApply::WhenIdle,
@@ -1657,6 +1656,7 @@ impl TeamView {
         TeamReply::Change(TeamAction::ApplyHarnessSwitch {
             project_id: self.project.clone(),
             mode,
+            version,
         })
     }
 

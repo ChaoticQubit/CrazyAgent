@@ -201,6 +201,7 @@ test("each team setting sends the version it read, and a stale save says so and 
     ["desktop_team_keep_warm", "id, on, version"],
     ["desktop_team_time_limits", "id, turnSecs, sessionSecs, idleSecs, version"],
     ["desktop_team_on_harness_switch", "id, mode, version"],
+    ["desktop_team_apply_harness_switch", "id, mode, version"],
     ["desktop_team_finished_agents", "id, show, version"],
     ["desktop_team_live_master", "id, on, version"],
   ]) {
@@ -253,7 +254,7 @@ test("team settings changes send the version the window read, so the engine refu
   assert.match(client, /settings_version\?: number;/);
   assert.doesNotMatch(client, /settings_revision/, "one settings version, no second revision");
   const lib = read("../src-tauri/src/lib.rs");
-  for (const command of ["desktop_team_time_limits", "desktop_team_on_harness_switch"]) {
+  for (const command of ["desktop_team_time_limits", "desktop_team_on_harness_switch", "desktop_team_apply_harness_switch"]) {
     const start = lib.indexOf(`fn ${command}(`);
     assert.ok(start >= 0, command);
     assert.ok(lib.slice(start, lib.indexOf(")", start)).includes("version: u64"), `${command} takes the version`);
@@ -279,4 +280,9 @@ test("Settings, Team offers Apply a master harness change with When the master i
   const next = renderToStaticMarkup(createElement(settings.ApplySwitch, { data: data(status({ apply_harness_switch: "next_start" })) }));
   assert.deepEqual(picked(next, "ps-apply-switch"), ["next_start"]);
   assert.equal(renderToStaticMarkup(createElement(settings.ApplySwitch, { data: { id: "chores", team: { result: undefined, at: 0 }, reloadTeam() {} } })), "", "nothing before the team status is read");
+  const source = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
+  const choose = source.slice(source.indexOf("export function ApplySwitch("), source.indexOf("\n  return <>", source.indexOf("export function ApplySwitch(")));
+  assert.match(choose, /const result = await setApplyHarnessSwitch\(data\.id, mode, settingsVersion\(status\)\);/, "the change names the team settings version the page read (I1)");
+  assert.match(choose, /const message = savedStale\(result\) \? TEAM_SETTINGS_STALE : changeNote\(result, "the Apply a master harness change setting"\);/, "a change from an older read says the settings changed and shows the saved ones");
+  assert.match(choose, /setNote\(message\);\s*data\.reloadTeam\(\);/, "the page reads the team again after every save, stale or not");
 });

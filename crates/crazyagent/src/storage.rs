@@ -3340,6 +3340,59 @@ mod owner_actor_tests {
         );
     }
 
+    /// An engine database an earlier b19 build wrote keeps its `team_settings_revision` table,
+    /// which no code of this engine reads or writes: it opens again, the owner starts on it,
+    /// and removing a project works and leaves that table as it was (I3).
+    /// Input: a fresh engine database given the b19 table. Output: none.
+    #[test]
+    fn a_database_with_the_b19_team_settings_revision_table_opens_and_removes_projects() {
+        let (_root, path, cfg) = fixture();
+        {
+            let (db, _lock) = open_database(&path, false).unwrap();
+            db.execute_batch(
+                "CREATE TABLE team_settings_revision (
+                     project TEXT PRIMARY KEY,
+                     revision INTEGER NOT NULL CHECK(revision > 0)
+                 );
+                 INSERT INTO team_settings_revision VALUES ('old', 4);",
+            )
+            .unwrap();
+        }
+        let (mut db, _lock) = open_database(&path, false).unwrap();
+        let started = owner_start(&mut db).unwrap();
+        owner_stop(&mut db, &started.host).unwrap();
+        db.execute("INSERT INTO projects(id, body) VALUES ('old', '{}')", [])
+            .unwrap();
+        let tx = db.transaction().unwrap();
+        assert_eq!(
+            crate::project_setup::execute(
+                &tx,
+                &cfg,
+                &crate::project_setup::SetupAction::Remove {
+                    project_id: crate::protocol::ProjectId::new("old").unwrap(),
+                },
+                2,
+            )
+            .unwrap(),
+            crate::protocol::Outcome::Applied
+        );
+        tx.commit().unwrap();
+        let kept = db
+            .prepare("SELECT project, revision FROM team_settings_revision")
+            .unwrap()
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            kept,
+            [("old".to_owned(), 4)],
+            "the engine leaves the old table as it was"
+        );
+    }
+
     /// The owner's questions log keeps out of the names the owner schema check reserves, so
     /// an engine whose committed questions write made the log starts again ready.
     /// Input: a fresh engine database. Output: none; the second owner start succeeds.

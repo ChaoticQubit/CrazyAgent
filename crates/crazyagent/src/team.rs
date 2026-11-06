@@ -646,6 +646,7 @@ pub enum TeamAction {
     ApplyHarnessSwitch {
         project_id: ProjectId,
         mode: SwitchApply,
+        version: u64,
     },
     SubAgentDepth {
         project_id: ProjectId,
@@ -2319,7 +2320,10 @@ fn perform(
             .map_err(error)?;
             Ok(Outcome::Applied)
         }
-        TeamAction::ApplyHarnessSwitch { mode, .. } => {
+        TeamAction::ApplyHarnessSwitch { mode, version, .. } => {
+            if !settings_write(tx, project, *version)? {
+                return Ok(rejected(STALE_CODE));
+            }
             tx.execute(
                 "INSERT INTO team_master_apply(project,mode) VALUES (?1,?2)
                  ON CONFLICT(project) DO UPDATE SET mode=excluded.mode",

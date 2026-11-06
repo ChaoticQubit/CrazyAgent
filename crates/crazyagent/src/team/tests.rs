@@ -1002,8 +1002,8 @@ type Setting = (
 /// Every owner team setting change names the team settings version the owner's screen read:
 /// one from the current version applies and moves it on by one; one from an older read is
 /// refused as stale and the newer value survives. Covers keep warm, the time limits with the
-/// idle stop, the harness switch setting, the live master switch and where finished agents
-/// show (V2SYNC-2).
+/// idle stop, the harness switch setting, the live master switch, where finished agents show
+/// (V2SYNC-2) and when a saved master harness change applies (I1).
 #[test]
 fn a_team_setting_saved_from_an_older_read_is_refused_and_the_newer_value_survives() {
     let (_directory, mut connection) = database();
@@ -1031,7 +1031,7 @@ fn a_team_setting_saved_from_an_older_read_is_refused_and_the_newer_value_surviv
         0,
         "team settings nobody saved are at version 0"
     );
-    let settings: [Setting; 5] = [
+    let settings: [Setting; 6] = [
         (
             "keep warm",
             |project_id, version, newer| TeamAction::KeepWarm {
@@ -1092,6 +1092,19 @@ fn a_team_setting_saved_from_an_older_read_is_refused_and_the_newer_value_surviv
             },
             |status| status.show_finished.to_string(),
         ),
+        (
+            "apply harness switch",
+            |project_id, version, newer| TeamAction::ApplyHarnessSwitch {
+                project_id,
+                mode: if newer {
+                    SwitchApply::NextStart
+                } else {
+                    SwitchApply::WhenIdle
+                },
+                version,
+            },
+            |status| format!("{:?}", status.apply_harness_switch),
+        ),
     ];
     for (name, change, value) in settings {
         let read = settings_version(&connection, &project).unwrap();
@@ -1138,6 +1151,83 @@ fn a_team_setting_saved_from_an_older_read_is_refused_and_the_newer_value_surviv
         assert_ne!(value(&changed), value(&newer), "{name}");
         assert_eq!(changed.settings_version, read + 2, "{name}");
     }
+}
+
+/// Team settings stay versioned on a database an earlier b19 build wrote, whose
+/// `team_settings_revision` table this engine neither reads nor writes: the old revision is
+/// not read, a change from the current read applies, one from the read before it is refused
+/// as stale, and the old table keeps its row (I3).
+#[test]
+fn team_settings_stay_versioned_on_a_database_with_the_b19_revision_table() {
+    let setup = stored(
+        "team-b19",
+        vec![HarnessSlot {
+            harness: "codex".into(),
+            agents: 1,
+            tools: false,
+        }],
+    );
+    let project = setup.project_id.clone();
+    let directory = tempfile::tempdir().unwrap();
+    let mut connection = Connection::open(directory.path().join("engine.db")).unwrap();
+    connection
+        .execute_batch(
+            "CREATE TABLE team_settings_revision (
+                 project TEXT PRIMARY KEY,
+                 revision INTEGER NOT NULL CHECK(revision > 0)
+             );",
+        )
+        .unwrap();
+    connection
+        .execute(
+            "INSERT INTO team_settings_revision VALUES (?1, 4)",
+            [project.as_str()],
+        )
+        .unwrap();
+    initialize(&connection).unwrap();
+    crate::project_setup::initialize(&connection).unwrap();
+    crate::coord::ensure(&connection).unwrap();
+    connection
+        .execute(
+            "INSERT INTO project_setups VALUES (?1,?2)",
+            params![project.as_str(), serde_json::to_string(&setup).unwrap()],
+        )
+        .unwrap();
+    let pool = access("team-b19", &["local-a"]);
+    assert_eq!(
+        status(&connection, &setup).unwrap().settings_version,
+        0,
+        "the old revision is not read"
+    );
+    let warm = |on, version| TeamAction::KeepWarm {
+        project_id: project.clone(),
+        on,
+        version,
+    };
+    let tx = connection.transaction().unwrap();
+    assert_eq!(
+        execute(&tx, &pool, &warm(true, 0)).unwrap(),
+        Outcome::Applied
+    );
+    assert_eq!(
+        execute(&tx, &pool, &warm(false, 0)).unwrap(),
+        Outcome::Rejected {
+            code: STALE_CODE.into()
+        },
+        "a change from the read before the applied one"
+    );
+    tx.commit().unwrap();
+    let shown = status(&connection, &setup).unwrap();
+    assert!(shown.keep_warm);
+    assert_eq!(shown.settings_version, 1);
+    let old: i64 = connection
+        .query_row(
+            "SELECT revision FROM team_settings_revision WHERE project=?1",
+            [project.as_str()],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(old, 4, "the old table keeps its row");
 }
 
 #[test]

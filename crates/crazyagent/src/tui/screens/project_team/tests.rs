@@ -1877,6 +1877,7 @@ fn the_apply_setting_flips_between_when_idle_and_at_the_next_start() {
         TeamReply::Change(TeamAction::ApplyHarnessSwitch {
             project_id: project(),
             mode: crate::team::SwitchApply::NextStart,
+            version: 7,
         })
     );
     let TeamReply::Change(action) = reply else {
@@ -1904,7 +1905,40 @@ fn the_apply_setting_flips_between_when_idle_and_at_the_next_start() {
         TeamReply::Change(TeamAction::ApplyHarnessSwitch {
             project_id: project(),
             mode: crate::team::SwitchApply::WhenIdle,
+            version: 7,
         })
+    );
+}
+
+/// A sends Apply a master harness change with the team settings version the view read, and
+/// waits while the read after its last save is on its way, so the engine refuses a change
+/// from an older read as stale instead of letting it undo a newer one (I1).
+#[test]
+fn the_apply_setting_names_the_settings_version_it_read_and_waits_for_the_read_after_a_save() {
+    let mut view = TeamView::new(project());
+    let mut read = team();
+    read.settings_version = 7;
+    reread(&mut view, read, NOW);
+    let reply = view.key(press(KeyCode::Char('A')));
+    let TeamReply::Change(action) = &reply else {
+        panic!("no change was sent: {reply:?}");
+    };
+    assert_eq!(
+        serde_json::to_value(action).unwrap()["version"],
+        serde_json::json!(7),
+        "the change names the version the view read: {action:?}"
+    );
+    applied(&mut view, reply);
+    assert_eq!(
+        view.key(press(KeyCode::Char('A'))),
+        TeamReply::Handled,
+        "the team read after the save has not landed"
+    );
+    assert_eq!(
+        view.notice,
+        Some(Notice::problem(
+            "Still saving the last change. Try again in a moment."
+        ))
     );
 }
 
