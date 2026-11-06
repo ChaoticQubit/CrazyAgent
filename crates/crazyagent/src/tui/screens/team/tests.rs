@@ -3892,3 +3892,73 @@ fn an_agent_the_delivery_setting_leaves_without_messages_says_so_under_its_row()
         "only the noted agent says it: {tree:#?}"
     );
 }
+
+fn fill_queue(shell: &mut Shell) {
+    let mut filled = 0;
+    while filled < 64 && {
+        let queued = shell.ctx.queued();
+        shell.ctx.request(Request::TeamGraph { project: project() });
+        shell.ctx.queued() > queued
+    } {
+        filled += 1;
+    }
+    assert!(filled < 64, "the request queue is bounded");
+}
+
+#[test]
+fn a_team_tab_settings_change_the_full_queue_refuses_says_busy_and_can_be_made_again() {
+    use crate::project_setup::{SetupQuery, SetupView};
+    use crate::team::TeamAction;
+    let mut shell = fresh(100, 40);
+    shell.arrive(Arrival::TeamGraph {
+        project: project(),
+        result: Ok(graph()),
+    });
+    requests(&mut shell);
+    shell.key(Key::Char('s'));
+    requests(&mut shell);
+    shell.arrive(setup_reply(
+        SetupQuery::Team { project: project() },
+        Ok(SetupView::Team(Box::new(finished_team()))),
+    ));
+    requests(&mut shell);
+    fill_queue(&mut shell);
+    shell.key(Key::Char('w'));
+    let text = render(&mut shell).join("\n");
+    assert!(
+        text.contains("CrazyAgent is busy"),
+        "the refused change is said, not dropped: {text}"
+    );
+    assert!(!text.contains("Still saving"), "{text}");
+    requests(&mut shell);
+    shell.key(Key::Char('w'));
+    let sent = requests(&mut shell);
+    assert!(
+        sent.iter().any(|request| matches!(
+            request,
+            Request::Setup(SetupQuery::TeamChange {
+                action: TeamAction::KeepWarm { .. },
+                ..
+            })
+        )),
+        "the change goes out once the queue has room: {sent:?}"
+    );
+}
+
+#[test]
+fn a_team_tab_settings_read_the_full_queue_refuses_is_asked_again_on_the_next_key() {
+    use crate::project_setup::SetupQuery;
+    let mut shell = team();
+    fill_queue(&mut shell);
+    shell.key(Key::Char('s'));
+    requests(&mut shell);
+    shell.key(Key::Down);
+    let sent = requests(&mut shell);
+    assert!(
+        sent.iter().any(|request| matches!(
+            request,
+            Request::Setup(SetupQuery::Team { project: asked }) if *asked == project()
+        )),
+        "the dropped read is not counted as out: {sent:?}"
+    );
+}
