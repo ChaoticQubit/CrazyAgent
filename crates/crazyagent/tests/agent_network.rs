@@ -16,6 +16,7 @@ use tokio::sync::watch;
 
 const SETTINGS: &str = "version = 1\ntimeout_ms = 2000\nallowed_destinations = []\n";
 const FIXTURE: &str = include_str!("fixtures/mcp_network_fixture.py");
+const UNWRITTEN_POLICY_VERSION: u64 = 0;
 
 struct Case {
     root: tempfile::TempDir,
@@ -93,16 +94,11 @@ async fn create_project(controller: &mut OwnerController, id: &str) -> ProjectId
 
 async fn set_network(controller: &mut OwnerController, project: ProjectId, network: AgentNetwork) {
     controller.read(OwnerRead::Capabilities).await.unwrap();
-    let version = controller
-        .project_agent_policy(project.clone())
-        .await
-        .unwrap()
-        .version;
     controller
         .begin_mutation(
             OwnerMutation::SetProjectAgentPolicy {
                 project_id: project,
-                version,
+                version: UNWRITTEN_POLICY_VERSION,
                 policy: AgentPolicy {
                     network,
                     ..AgentPolicy::default()
