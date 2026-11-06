@@ -1095,10 +1095,21 @@ done
 
     /// A kept pane whose takeover fails while the engine cannot confirm its processes gone
     /// is never started again beside them: its run waits, failed for now with that reason
-    /// and a team note, and its task stays held for the owner's retry with no new pane.
+    /// and a team note, and its task stays held for the owner's retry with no new pane. The
+    /// agent runs at Full access, so no sandbox keeper ends its pane and the stand-in that
+    /// ignores terminate outlasts the cleanup's stop.
     #[test]
     fn a_kept_pane_whose_takeover_cleanup_is_unconfirmed_holds_its_task() {
         let fixture = Team::new();
+        crate::sandbox::policy::save(
+            &fixture.connection,
+            PROJECT,
+            &crate::sandbox::policy::AgentPolicy {
+                access: crate::sandbox::policy::AgentAccess::Full,
+                ..crate::sandbox::policy::AgentPolicy::default()
+            },
+        )
+        .unwrap();
         let host = fixture.host();
         let mut team = fixture.runtime(&host);
         let (task, sub) = fixture.hung(&mut team);
