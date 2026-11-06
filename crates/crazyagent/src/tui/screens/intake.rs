@@ -10,6 +10,66 @@ pub(in crate::tui) const NOT_READY: &str = "Not ready yet.";
 /// Bytes above which copying a folder gets a warning before it starts.
 pub(in crate::tui) const COPY_WARN_BYTES: u64 = 1 << 30;
 
+/// One warning shown before a Move anyway or Copy anyway, in the owner's words. The texts
+/// match the desktop's `ADD_WARNINGS` map.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::tui) enum AddWarning {
+    CloseApps,
+    OldPlace,
+    AcrossDisks,
+    SameDisk,
+    CopyAll,
+    Large,
+    Unmeasured,
+    TooMany,
+    Unreadable,
+    UnreadableCopy,
+    Worktrees,
+    LinkedCheckout,
+    NoGit,
+}
+
+impl AddWarning {
+    /// The sentence for this warning. Takes the warning. Returns its fixed text.
+    pub(in crate::tui) fn text(self) -> &'static str {
+        match self {
+            Self::CloseApps => {
+                "Close editors, terminals and apps that use this folder first. Files saved while it moves can be lost."
+            }
+            Self::OldPlace => {
+                "Anything that points at the old place (terminals, editors, scripts, shortcuts) stops working."
+            }
+            Self::AcrossDisks => {
+                "This copies every file to the other disk, then removes the original. It can take a long time and needs as much free space again. If the Mac sleeps, loses power or the disk fills, the move stops: your original stays, and a part copy may be left in your projects folder to delete."
+            }
+            Self::SameDisk => "This is a rename on the same disk; it is quick.",
+            Self::CopyAll => {
+                "This copies every file into your projects folder. It can take a long time and needs as much free space again. If the Mac sleeps, loses power or the disk fills, the copy stops: your original stays, and a part copy may be left in your projects folder to delete."
+            }
+            Self::Large => "This folder is very large.",
+            Self::Unmeasured => "CrazyAgent couldn't measure it.",
+            Self::TooMany => {
+                "The folder is deeper or bigger than CrazyAgent checks, so the copy check can take a long time."
+            }
+            Self::Unreadable => {
+                "Some files can't be read. They can't be copied, so a move across disks keeps the original in place and fails rather than leave them behind."
+            }
+            Self::UnreadableCopy => {
+                "Some files can't be read. They can't be copied, so the copy fails rather than leave them behind."
+            }
+            Self::Worktrees => {
+                "Git worktrees linked to this folder stop working until you run git worktree repair in each. Their files stay, but git there fails until repaired."
+            }
+            Self::LinkedCheckout => {
+                "The copy still uses the original repository's git data. Commits made in the copy change the original repository."
+            }
+            Self::NoGit => {
+                "This folder has no git history. Agents' changes can't be shown or undone with git until you run git init here."
+            }
+        }
+    }
+}
+
 /// Sends one intake query to the engine.
 /// Takes the context and the query.
 /// Returns nothing; the reply arrives as an `OwnerEvent::Intake` holding the same query.
@@ -77,6 +137,9 @@ pub(in crate::tui) fn known(code: &str) -> Option<&'static str> {
         }
         "home_copy_special_file" => "The folder holds a device or pipe file that can't be copied.",
         "home_copy_too_large" => "The folder has too many files or levels to copy.",
+        "home_override_invalid" => {
+            "CrazyAgent couldn't match what you agreed to with this folder. Choose the folder again."
+        }
         "home_copy_failed" | "home_move_failed" => {
             "The folder could not be added. Nothing was removed. Try again."
         }

@@ -2,7 +2,7 @@ import { useState } from "react";
 import { nextGeneration, pickFolder } from "../../api";
 import { intakeCopy, loadFolderSize, loadProjectsHome, moveProjectsHome, setProjectsHome } from "../../api-intake";
 import { receiptState } from "../../api-projects";
-import type { ProjectsHome } from "../../engine-client";
+import type { FolderSize, ProjectsHome } from "../../engine-client";
 import { useAppSession, useLoad, type Loaded } from "../../state";
 import { Button, ConfirmDialog, LoadError, NotReady, Skeleton } from "../../ui";
 import { displayText } from "../conversation";
@@ -36,6 +36,16 @@ export function homeMoveLine(current: string, next: string, bytes: number | null
 }
 
 export type HomeAsk = { path: string; bytes: number | null; sizeProblem: string };
+
+/** The Move my projects question once the old folder's size read is back: its size, or why
+ * it could not be measured, which holds the move. Inputs: the new folder and the size read.
+ * Output: the question state. */
+export function sizedAsk(path: string, size: Exclude<Loaded<FolderSize>, { kind: "loading" }>): HomeAsk {
+  if (size.kind === "not_ready") return { path, bytes: null, sizeProblem: "Measuring the folder isn't in this build." };
+  if (size.kind !== "ok") return { path, bytes: null, sizeProblem: size.message };
+  if (typeof size.value.bytes === "number") return { path, bytes: size.value.bytes, sizeProblem: "" };
+  return { path, bytes: null, sizeProblem: intakeCopy(size.value.size_problem ?? "folder_size_unreadable") };
+}
 
 /** Settings, Projects folder as a view of its state: the folder in use, a picked folder with
  * Use this folder (moves nothing) and Move my projects there. Inputs: the home read, the picked
@@ -118,9 +128,7 @@ export function ProjectsHomeSettings() {
     const path = picked;
     setAsk({ path, bytes: null, sizeProblem: "" });
     const size = await loadFolderSize(current);
-    setAsk((old) => old?.path !== path ? old
-      : size.kind === "ok" ? { path, bytes: size.value.bytes, sizeProblem: "" }
-      : { path, bytes: null, sizeProblem: size.kind === "not_ready" ? "Measuring the folder isn't in this build." : intakeCopy(size) });
+    setAsk((old) => old?.path !== path ? old : sizedAsk(path, size));
   };
 
   return <>

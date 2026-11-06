@@ -19,7 +19,7 @@ pub const GITHUB_PAGE_MAX: u32 = 100;
 pub const PACK_TICKS_MAX: usize = 64;
 pub const PACK_ID_BYTES_MAX: usize = 64;
 
-pub const INTAKE_CODES: [&str; 57] = [
+pub const INTAKE_CODES: [&str; 58] = [
     "projects_home_unset",
     "projects_home_path_invalid",
     "projects_home_missing",
@@ -50,6 +50,7 @@ pub const INTAKE_CODES: [&str; 57] = [
     "home_move_project",
     "home_move_too_many",
     "home_move_in_progress",
+    "home_override_invalid",
     "home_folder_name_invalid",
     "home_new_project_failed",
     "home_add_unverified",
@@ -153,20 +154,32 @@ const SETUP_CODES: [&str; 33] = [
     "owner_unavailable",
 ];
 
-/// A folder's size before it is copied in, the GitHub owner/name of its `origin`
-/// remote when that remote is on github.com, so the window can suggest a clone instead,
-/// how many linked git worktrees it has, which a copy leaves with the original, whether it
-/// can move: not when moving it would break its git worktree links, and whether it can be
-/// copied: not when it is itself a linked worktree or submodule checkout. The engine
-/// refuses both, so the window offers neither.
+/// What the window asks about before a Move or Copy: the folder's size, or None with the
+/// soft size code (timeout, too large, unreadable) when it could not be measured, the
+/// GitHub owner/name of its `origin` remote on github.com, its linked git worktrees and their
+/// folders, whether a Move keeps its git links and a Copy its own git data, whether it has git
+/// at all, and whether it is on the projects folder's disk (None when that is unknown).
 #[derive(Debug, Serialize)]
 pub struct FolderSize {
-    pub bytes: u64,
+    pub bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_problem: Option<&'static str>,
     pub github: Option<String>,
     pub worktrees: usize,
+    pub worktree_paths: Vec<String>,
     pub movable: bool,
     pub copyable: bool,
+    pub git: bool,
+    pub same_volume: Option<bool>,
 }
+
+pub const WORKTREE_PATHS_MAX: usize = 16;
+
+const SIZE_PROBLEMS: [&str; 3] = [
+    "folder_size_timeout",
+    "folder_size_too_large",
+    "folder_size_unreadable",
+];
 
 fn known(code: &str, list: &[&'static str], fallback: &'static str) -> BridgeError {
     let code = if code == "controller_disconnected" {
@@ -362,27 +375,57 @@ impl NativeBridge {
         }
     }
 
-    /// Measures a folder before Copy, names its GitHub repository when it has one, counts
-    /// its linked git worktrees and checks a Move or a Copy would keep its git links. Input:
-    /// an absolute folder path. Output: its size, the GitHub owner/name, if any, the linked
-    /// worktree count and whether it can move and be copied.
+    /// Reads what a Move or Copy of a folder would meet: its size, its GitHub repository,
+    /// its linked git worktrees and their folders, its git links, whether it has git and
+    /// whether it shares the projects folder's disk. A size the engine could not measure is a
+    /// soft code in the answer, not an error, so the other facts still reach the window.
+    /// Input: an absolute folder path. Output: the facts, or the hard error.
     pub async fn folder_size(&mut self, path: String) -> Result<FolderSize, BridgeError> {
         crazyagent::projects_home::path_text(&path, "folder_size_path_invalid")
             .map_err(intake_failure)?;
-        let github = origin_on_github(Path::new(&path));
-        let worktrees = crazyagent::projects_home::linked_worktrees(Path::new(&path));
-        let movable = !crazyagent::projects_home::git_links(Path::new(&path));
-        let copyable = !crazyagent::projects_home::linked_checkout(Path::new(&path));
-        match self.owner_read(OwnerRead::FolderSize { path }).await? {
-            OwnerData::FolderSize { bytes } => bounded(FolderSize {
-                bytes,
-                github,
-                worktrees,
-                movable,
-                copyable,
-            }),
-            _ => Err(failure("owner_read_failed")),
-        }
+        let folder = Path::new(&path);
+        let github = origin_on_github(folder);
+        let worktrees = crazyagent::projects_home::linked_worktrees(folder);
+        let worktree_paths: Vec<String> =
+            crazyagent::projects_home::linked_worktree_paths(folder, WORKTREE_PATHS_MAX)
+                .into_iter()
+                .filter_map(|worktree| worktree.to_str().map(str::to_owned))
+                .collect();
+        assert!(worktree_paths.len() <= WORKTREE_PATHS_MAX);
+        let movable = !crazyagent::projects_home::git_links(folder);
+        let copyable = !crazyagent::projects_home::linked_checkout(folder);
+        let git = std::fs::symlink_metadata(folder.join(".git")).is_ok();
+        let same_volume = match self.owner_read(OwnerRead::ProjectsHome).await? {
+            OwnerData::ProjectsHome { home } => home
+                .path
+                .as_deref()
+                .and_then(|root| crazyagent::projects_home::same_volume(folder, Path::new(root))),
+            _ => return Err(failure("owner_read_failed")),
+        };
+        let (bytes, size_problem) = match self.owner_read(OwnerRead::FolderSize { path }).await {
+            Ok(OwnerData::FolderSize { bytes }) => (Some(bytes), None),
+            Ok(_) => return Err(failure("owner_read_failed")),
+            Err(error) => match SIZE_PROBLEMS
+                .iter()
+                .copied()
+                .find(|code| *code == error.code)
+            {
+                Some(code) => (None, Some(code)),
+                None => return Err(error),
+            },
+        };
+        assert!(bytes.is_some() != size_problem.is_some());
+        bounded(FolderSize {
+            bytes,
+            size_problem,
+            github,
+            worktrees,
+            worktree_paths,
+            movable,
+            copyable,
+            git,
+            same_volume,
+        })
     }
 
     /// Moves or copies an existing folder into the projects home.

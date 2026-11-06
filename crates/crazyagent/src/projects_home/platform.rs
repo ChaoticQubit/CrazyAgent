@@ -10,6 +10,21 @@ pub(super) const OWNER_HOME_VARIABLE: &str = "HOME";
 #[cfg(target_os = "windows")]
 pub(super) const OWNER_HOME_VARIABLE: &str = "USERPROFILE";
 
+/// The disk a folder is on, to tell a quick rename from a copy across disks.
+/// Unix: the device number of what the path names. Output: None when unreadable.
+#[cfg(unix)]
+pub(super) fn volume(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    fs::metadata(path).ok().map(|metadata| metadata.dev())
+}
+
+/// The disk a folder is on. Windows: not read, so a Move there is never called
+/// a quick rename up front. Written, not tested.
+#[cfg(target_os = "windows")]
+pub(super) fn volume(_path: &Path) -> Option<u64> {
+    None
+}
+
 /// Permission bits compared between a source and its copy.
 /// Unix: the mode's permission, setuid, setgid and sticky bits.
 #[cfg(unix)]

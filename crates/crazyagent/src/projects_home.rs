@@ -3,7 +3,10 @@ mod layout;
 mod platform;
 mod watch;
 
-pub use intake::{AddPlan, MovePlan, copy_tree, folder_size, move_by_copy, verify_tree};
+pub use intake::{
+    AddPlan, COPY_BOUNDS, CopyBounds, FORCED_COPY_BOUNDS, MovePlan, copy_tree, folder_size,
+    move_by_copy, verify_tree,
+};
 pub use layout::{CRAZYAGENT_DIRECTORY, EXCLUDES, LAYOUT, exclude_from_git, prepare_layout};
 pub use watch::{FOLDERS_MAX, HomeWatch, scan};
 
@@ -95,6 +98,26 @@ pub enum AddOverride {
 
 pub const ADD_OVERRIDES_MAX: usize = 3;
 
+/// Checks the overrides of one add: at most one of each, `worktrees` only with a Move
+/// and `linked_checkout` only with a Copy. Inputs: the mode and the overrides.
+/// Output: Ok, or `home_override_invalid`.
+fn check_overrides(mode: AddMode, overrides: &[AddOverride]) -> Result<(), EngineError> {
+    let repeated = overrides
+        .iter()
+        .enumerate()
+        .any(|(at, item)| overrides[..at].contains(item));
+    let wrong_mode = overrides.iter().any(|item| match item {
+        AddOverride::Worktrees => mode != AddMode::Move,
+        AddOverride::LinkedCheckout => mode != AddMode::Copy,
+        AddOverride::TooLarge => false,
+    });
+    if overrides.len() > ADD_OVERRIDES_MAX || repeated || wrong_mode {
+        return Err(refused("home_override_invalid"));
+    }
+    assert!(overrides.len() <= ADD_OVERRIDES_MAX);
+    Ok(())
+}
+
 /// An owner change to the projects home recorded by the engine: picking the
 /// home folder, switching to a new one and optionally moving every project
 /// folder there, or recording a folder the transport moved or copied in.
@@ -120,14 +143,22 @@ pub enum HomeAction {
 }
 
 impl HomeAction {
-    /// Checks the owner-supplied path text before anything touches the disk.
-    /// Input: an untrusted action. Output: Ok, or the code of the bad path.
+    /// Checks the owner-supplied path text and an add's overrides before anything
+    /// touches the disk. Input: an untrusted action. Output: Ok, or the code of the
+    /// bad path or `home_override_invalid`.
     pub fn validate(&self) -> Result<(), EngineError> {
         match self {
             Self::SetHome { path } | Self::MoveHome { path, .. } => {
                 path_text(path, "projects_home_path_invalid")
             }
-            Self::Added { source, .. } => path_text(source, "home_source_invalid"),
+            Self::Added {
+                source,
+                mode,
+                overrides,
+            } => {
+                path_text(source, "home_source_invalid")?;
+                check_overrides(*mode, overrides)
+            }
             Self::Trash { path } => path_text(path, "home_trash_invalid"),
         }
     }
@@ -293,16 +324,48 @@ pub fn linked_worktrees(folder: &Path) -> usize {
 /// worktree folder its `.git/worktrees/<name>/gitdir` names, in name order; none without a
 /// plain `.git` folder, and unreadable entries left out.
 pub fn linked_worktree_paths(folder: &Path, max: usize) -> Vec<PathBuf> {
-    let _ = (folder, max);
-    Vec::new()
+    let git = folder.join(".git");
+    let plain = std::fs::symlink_metadata(&git)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink());
+    if !plain || max == 0 {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(git.join("worktrees")) else {
+        return Vec::new();
+    };
+    let mut names: Vec<std::ffi::OsString> = entries
+        .flatten()
+        .take(LINKED_WORKTREES_MAX)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .map(|entry| entry.file_name())
+        .collect();
+    names.sort();
+    let paths: Vec<PathBuf> = names
+        .iter()
+        .filter_map(|name| {
+            let text = crate::platform::read_plain_file(
+                &git.join("worktrees").join(name).join("gitdir"),
+                PATH_BYTES_MAX as u64 + 1,
+            )?;
+            let named = PathBuf::from(text.trim_end_matches(['\n', '\r']));
+            let worktree = if named.file_name() == Some(std::ffi::OsStr::new(".git")) {
+                named.parent()?.to_path_buf()
+            } else {
+                named
+            };
+            worktree.is_absolute().then_some(worktree)
+        })
+        .take(max)
+        .collect();
+    assert!(paths.len() <= max);
+    paths
 }
 
 /// Whether a folder and the projects home are on the same disk, so a Move is a quick
 /// rename rather than a copy, a check and a removal. Input: the two folders. Output: the
 /// answer, or None when either cannot be read or the platform cannot tell.
 pub fn same_volume(folder: &Path, home: &Path) -> Option<bool> {
-    let _ = (folder, home);
-    None
+    Some(platform::volume(folder)? == platform::volume(home)?)
 }
 
 /// Plans bringing an existing folder into the projects home.
@@ -313,7 +376,9 @@ pub fn same_volume(folder: &Path, home: &Path) -> Option<bool> {
 /// or engine data, hidden folders, names already taken in the home, a Move
 /// of a folder with git worktree links or nested with a folder or repository
 /// a project uses, and a Copy of a folder that is itself a linked worktree or
-/// submodule checkout.
+/// submodule checkout. Each override lifts exactly one soft refusal for this add:
+/// `worktrees` the git worktree links, `linked_checkout` the linked checkout, and
+/// `too_large` raises the copy bounds to [`FORCED_COPY_BOUNDS`].
 pub fn plan_add(
     home: &Path,
     engine_root: &Path,
@@ -322,8 +387,8 @@ pub fn plan_add(
     overrides: &[AddOverride],
     registered: &[Registered],
 ) -> Result<AddPlan, EngineError> {
-    let _ = overrides;
     path_text(source, "home_source_invalid")?;
+    check_overrides(mode, overrides)?;
     let real = real_folder(
         Path::new(source),
         "home_source_missing",
@@ -345,18 +410,26 @@ pub fn plan_add(
     }
     folder_name(name).map_err(|_| refused("home_source_name"))?;
     if mode == AddMode::Move {
-        if git_links(&real) {
+        if !overrides.contains(&AddOverride::Worktrees) && git_links(&real) {
             return Err(refused("home_move_worktrees"));
         }
         if registered.iter().any(|project| in_use(&real, project)) {
             return Err(refused("home_move_project"));
         }
     }
-    if mode == AddMode::Copy && linked_checkout(&real) {
+    if mode == AddMode::Copy
+        && !overrides.contains(&AddOverride::LinkedCheckout)
+        && linked_checkout(&real)
+    {
         return Err(refused("home_copy_linked_checkout"));
     }
+    let bounds = if overrides.contains(&AddOverride::TooLarge) {
+        FORCED_COPY_BOUNDS
+    } else {
+        COPY_BOUNDS
+    };
     let destination = destination(home, name)?;
-    Ok(AddPlan::new(real, destination, mode))
+    Ok(AddPlan::new(real, destination, mode, bounds))
 }
 
 /// Checks a name for a folder directly inside the projects home. This one rule
@@ -678,6 +751,9 @@ pub fn plain_problem(code: &str) -> Option<&'static str> {
         }
         "home_copy_special_file" => "The folder holds a device or pipe file that cannot be copied.",
         "home_copy_too_large" => "The folder has too many files or levels to copy.",
+        "home_override_invalid" => {
+            "That add asked to go past a check it cannot go past. Choose the folder again."
+        }
         "home_copy_failed" | "home_move_failed" => {
             "The folder could not be added. Nothing was removed."
         }
