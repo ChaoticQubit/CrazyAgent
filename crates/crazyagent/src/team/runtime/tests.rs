@@ -19609,7 +19609,14 @@ fn neither_a_native_lead_nor_a_teammate_moves_its_home_away_but_both_still_work_
     let home = agent_home(&runtime.state, id);
     let mates = crate::launch_context::mates_home(&home);
     let state = crate::launch_context::STATE;
-    assert!(home.join(state).is_dir() && mates.is_dir());
+    let context = plan.team_context(
+        runtime
+            .context(&project, id, AgentRole::Sub, true, Layout::Linked)
+            .unwrap(),
+    );
+    let _installed = context.install("claude-code", &home, true).unwrap();
+    assert!(home.join(state).is_dir(), "the lead's launch folder");
+    assert!(mates.is_dir(), "the teammates' home");
     let work = plan.working_dir.clone();
     let probe = work.join(crate::agent_git::TEAMMATES_FOLDER).join("probe");
     std::fs::create_dir_all(&probe).unwrap();
