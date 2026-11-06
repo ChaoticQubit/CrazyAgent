@@ -554,7 +554,12 @@ async fn desktop_native_auth_source_conflict_preserves_original_operation() {
         .unwrap();
         let fact = fixture.owner_fact(&original).await.fact;
         let global = fixture.root.path().join("global.toml");
-        let changed = format!("{CATALOG}\n");
+        std::fs::write(&global, format!("{CATALOG}\n")).unwrap();
+        let kept =
+            serde_json::to_value(bridge.read_native_auth(&detail.ticket).await.unwrap()).unwrap();
+        assert_eq!(kept["operation_id"], original["operation_id"]);
+        assert_eq!(CATALOG.matches(r#"id = "model-a""#).count(), 1);
+        let changed = CATALOG.replace(r#"id = "model-a""#, r#"id = "model-a2""#);
         std::fs::write(&global, &changed).unwrap();
         assert_eq!(
             bridge
