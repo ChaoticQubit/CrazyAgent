@@ -570,7 +570,9 @@ test("the Move anyway warnings put every data loss case first, each in the owner
   assert.deepEqual(flat(linked), [W.close_apps, W.old_place, W.worktrees, W.same_disk]);
   assert.deepEqual(linked.find((block) => block.lines.includes(W.worktrees)).paths, ["/Users/mira/Code/shop-a", "/Users/mira/Code/shop-b"]);
   assert.deepEqual(flat(warnings("copy", read({ copyable: false, git: false }))), [W.linked_checkout, W.no_git]);
-  assert.deepEqual(flat(warnings("move", read({ movable: false, git_link: "linked_worktree" }))), [W.close_apps, W.old_place, W.linked_worktree, W.same_disk]);
+  const worktree = warnings("move", read({ movable: false, git_link: "linked_worktree" }));
+  assert.deepEqual(worktree[0], { loss: true, lines: [W.linked_worktree], paths: [] }, "a moved linked worktree can lose its staged changes and branch link, so it leads the loss blocks");
+  assert.deepEqual(flat(worktree), [W.linked_worktree, W.close_apps, W.old_place, W.same_disk]);
   assert.deepEqual(flat(warnings("move", read({ movable: false, git_link: "submodule" }))), [W.close_apps, W.old_place, W.submodule, W.same_disk]);
   assert.deepEqual(flat(warnings("move", read({ movable: false, git_link: "unreadable" }))), [W.close_apps, W.old_place, W.git_data_unread, W.same_disk]);
   const shared = warnings("copy", read({ copyable: false, git: false, bytes: 42 * GB }));

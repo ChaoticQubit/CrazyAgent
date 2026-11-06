@@ -774,6 +774,11 @@ async fn a_move_of_a_linked_worktree_names_it_and_git_worktree_repair_in_it() {
         "{rows:#?}"
     );
     assert!(
+        row_of(&rows, "This folder is a git worktree of another repository")
+            < row_of(&rows, "Close editors, terminals and apps"),
+        "a moved linked worktree can lose its staged changes, so it is the first loss line: {rows:#?}"
+    );
+    assert!(
         !shows(&rows, "Git worktrees linked to this folder"),
         "{rows:#?}"
     );
@@ -784,6 +789,7 @@ async fn a_move_of_a_submodule_says_its_parent_no_longer_finds_it() {
     let rows = move_question(|outside| {
         let sub = outside.join("vendored");
         std::fs::create_dir_all(&sub).unwrap();
+        std::fs::create_dir_all(outside.join("shop/.git/modules/vendored")).unwrap();
         std::fs::write(sub.join(".git"), "gitdir: ../shop/.git/modules/vendored\n").unwrap();
         sub
     })

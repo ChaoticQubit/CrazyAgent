@@ -1629,11 +1629,23 @@ fn each_git_link_a_move_breaks_is_told_apart() {
     repo_with_worktree(&repo, &worktree);
     let submodule = case.sources.join("vendored");
     fs::create_dir(&submodule).unwrap();
+    fs::create_dir_all(repo.join(".git/modules/vendored")).unwrap();
     fs::write(
         submodule.join(".git"),
         "gitdir: ../repo/.git/modules/vendored\n",
     )
     .unwrap();
+    let named_worktrees = case.sources.join("worktrees-sub");
+    fs::create_dir(&named_worktrees).unwrap();
+    fs::create_dir_all(repo.join(".git/modules/worktrees/tools")).unwrap();
+    fs::write(
+        named_worktrees.join(".git"),
+        "gitdir: ../repo/.git/modules/worktrees/tools\n",
+    )
+    .unwrap();
+    let gone = case.sources.join("gone-sub");
+    fs::create_dir(&gone).unwrap();
+    fs::write(gone.join(".git"), "gitdir: ../repo/.git/modules/gone\n").unwrap();
     let elsewhere = case.sources.join("elsewhere");
     fs::create_dir(&elsewhere).unwrap();
     fs::write(elsewhere.join(".git"), "gitdir: /var/empty/git\n").unwrap();
@@ -1648,6 +1660,8 @@ fn each_git_link_a_move_breaks_is_told_apart() {
         (&repo, GitLink::Worktrees),
         (&worktree, GitLink::LinkedWorktree),
         (&submodule, GitLink::Submodule),
+        (&named_worktrees, GitLink::Submodule),
+        (&gone, GitLink::Unreadable),
         (&elsewhere, GitLink::Unreadable),
         (&locked, GitLink::Unreadable),
         (&linked, GitLink::Unreadable),
