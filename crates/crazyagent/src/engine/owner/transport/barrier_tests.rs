@@ -360,23 +360,14 @@ async fn a_revocation_waits_for_a_plugin_change_in_flight_and_refuses_the_next()
         runtime.engine.owner_egress.try_write().is_err(),
         "the change holds the owner barrier while it waits"
     );
-    let mut revoke = Box::pin(runtime.control(revocation(
-        runtime,
-        OwnerClientKind::Tui,
-        "revoke-during-plugin-change",
-    )));
+    let control = revocation(runtime, OwnerClientKind::Tui, "revoke-during-plugin-change");
+    let mut revoke = Box::pin(runtime.control(control.clone()));
     assert!(
         tokio::time::timeout(IN_FLIGHT, &mut revoke).await.is_err(),
         "a revocation waits for the change already in flight"
     );
     let answered = tokio::time::timeout(SWEEP_TIME_MAX, added).await.unwrap();
-    assert!(
-        !tokio::time::timeout(SWEEP_TIME_MAX, revoke)
-            .await
-            .unwrap()
-            .unwrap()
-            .active
-    );
+    let revoked = tokio::time::timeout(SWEEP_TIME_MAX, revoke).await.unwrap();
     tokio::time::timeout(SWEEP_TIME_MAX, sweep)
         .await
         .unwrap()
@@ -388,7 +379,7 @@ async fn a_revocation_waits_for_a_plugin_change_in_flight_and_refuses_the_next()
         Ok(server) => {
             assert_eq!(
                 stored,
-                [server.id.clone()],
+                std::slice::from_ref(&server.id),
                 "the confirmed change is the one storage holds"
             );
             server.id
@@ -403,6 +394,17 @@ async fn a_revocation_waits_for_a_plugin_change_in_flight_and_refuses_the_next()
         }
         Err(error) => panic!("the held change answered {}", error.0),
     };
+    match revoked {
+        Ok(reply) => assert!(!reply.active),
+        Err(error) if error.0 == "owner_outcome_unknown_reconcile_same_identity" => {
+            let reconciled = runtime.reconcile_control(control).await.unwrap();
+            assert!(
+                reconciled.is_some_and(|reply| !reply.active),
+                "storage holds the revocation the owner wait could not confirm"
+            );
+        }
+        Err(error) => panic!("the revocation answered {}", error.0),
+    }
 
     assert!(
         owner.client.plugin_server(id).await.is_err(),

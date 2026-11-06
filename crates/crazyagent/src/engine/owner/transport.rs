@@ -817,6 +817,10 @@ impl Authority {
         Ok(slot.registration.admission.clone())
     }
 
+    /// Makes a registration storage committed the one this engine admits, with a fresh
+    /// capability when it is active. A late answer never replaces a newer epoch of the same
+    /// owner, nor reopens a slot closed at its own epoch. Input: the registration.
+    /// Output: Ok, or a capability write or native sign-in cleanup failure.
     fn publish(&self, registration: Registration) -> Result<(), EngineError> {
         let i = match registration.kind {
             OwnerClientKind::Tui => 0,
@@ -829,6 +833,16 @@ impl Authority {
         let slot = &mut slots[i];
         if slot.registration.admission == registration.admission
             && slot.registration.active == registration.active
+        {
+            return Ok(());
+        }
+        let (held, next) = (&slot.registration.admission, &registration.admission);
+        if (&held.db_instance, &held.engine_epoch, &held.owner_id)
+            == (&next.db_instance, &next.engine_epoch, &next.owner_id)
+            && (next.owner_epoch < held.owner_epoch
+                || next.owner_epoch == held.owner_epoch
+                    && registration.active
+                    && !slot.registration.active)
         {
             return Ok(());
         }
@@ -850,6 +864,24 @@ impl Authority {
         drop(slots);
         let cleanup = self.invalidate_native_auth_dispatch(Some(&previous));
         result.and(cleanup)
+    }
+
+    /// Refuses one client kind at once and keeps its epoch, for a revocation whose answer
+    /// the owner did not wait for; only a newer epoch storage commits opens it again.
+    /// Input: the client kind. Output: Ok, or a lock or native sign-in cleanup failure.
+    fn close(&self, kind: OwnerClientKind) -> Result<(), EngineError> {
+        let i = match kind {
+            OwnerClientKind::Tui => 0,
+            OwnerClientKind::Desktop => 1,
+        };
+        let mut slots = self
+            .slots
+            .lock()
+            .map_err(|_| failure("owner_authority_unavailable"))?;
+        let previous = slots[i].registration.admission.clone();
+        slots[i].registration.active = false;
+        drop(slots);
+        self.invalidate_native_auth_dispatch(Some(&previous))
     }
 
     /// Unlinks the owner socket, both owner keys and every runner key this server made,
@@ -1055,20 +1087,36 @@ impl OwnerRuntimeHandle {
     }
 
     /// Orders a trusted host grant change with actor work and response delivery.
-    /// Takes an exact control identity, client kind and expected grant epoch.
-    /// Returns committed status; prior delivered data cannot be recalled.
+    /// Takes an exact control identity, client kind and expected grant epoch. Returns
+    /// committed status; prior delivered data cannot be recalled. A revocation whose answer
+    /// is unknown refuses the client at once; what storage commits late still takes effect.
     pub async fn control(&self, control: OwnerControl) -> Result<OwnerControlReply, EngineError> {
         let _barrier = tokio::time::timeout(self.engine.timeout, self.engine.owner_egress.write())
             .await
             .map_err(|_| failure("owner_control_not_submitted"))?;
-        let (result, registration) = self
+        let (target, decision) = (control.target, control.decision);
+        let authority = self.authority.clone();
+        let committed = self
             .engine
-            .owner_job(|reply| Job::OwnerControl(self.authority.host.clone(), control, reply))
-            .await?;
-        self.authority
-            .publish(registration)
-            .map_err(|_| failure("owner_control_committed_publication_unavailable"))?;
-        Ok(result)
+            .settled_owner_job(
+                |reply| Job::OwnerControl(self.authority.host.clone(), control, reply),
+                move |stored| {
+                    let (result, registration) = stored?;
+                    authority
+                        .publish(registration)
+                        .map_err(|_| failure("owner_control_committed_publication_unavailable"))?;
+                    Ok(result)
+                },
+            )
+            .await;
+        let unknown = committed.as_ref().is_err_and(|error| {
+            error.0 == "owner_outcome_unknown_reconcile_same_identity"
+                || error.0 == "owner_actor_stopped_outcome_unknown"
+        });
+        if unknown && decision == OwnerDecision::Revoke {
+            return self.authority.close(target).and(committed);
+        }
+        committed
     }
 
     /// Looks up an exact host control through the current storage actor.
@@ -1508,6 +1556,34 @@ impl Engine {
             .try_send(job)
             .map_err(|_| failure("owner_queue_not_submitted"))?;
         tokio::time::timeout(deadline, receive)
+            .await
+            .map_err(|_| failure("owner_outcome_unknown_reconcile_same_identity"))?
+            .map_err(|_| failure("owner_actor_stopped_outcome_unknown"))?
+    }
+
+    /// Runs one owner storage job and hands storage's answer to `settle` even when the owner
+    /// stops waiting first, so what storage commits late still takes effect in memory.
+    /// Inputs: the job and the settle step. Output: the settle step's answer, or the owner
+    /// outcome-unknown error while storage has not answered in time or went away.
+    async fn settled_owner_job<T: Send + 'static, U: Send + 'static>(
+        &self,
+        build: impl FnOnce(oneshot::Sender<Result<T, EngineError>>) -> Job,
+        settle: impl FnOnce(Result<T, EngineError>) -> Result<U, EngineError> + Send + 'static,
+    ) -> Result<U, EngineError> {
+        let (send, receive) = oneshot::channel();
+        let job = build(send);
+        let deadline = job.reply_deadline(self.timeout);
+        self.storage
+            .sender
+            .try_send(job)
+            .map_err(|_| failure("owner_queue_not_submitted"))?;
+        let settled = tokio::spawn(async move {
+            match receive.await {
+                Ok(stored) => settle(stored),
+                Err(_) => Err(failure("owner_actor_stopped_outcome_unknown")),
+            }
+        });
+        tokio::time::timeout(deadline, settled)
             .await
             .map_err(|_| failure("owner_outcome_unknown_reconcile_same_identity"))?
             .map_err(|_| failure("owner_actor_stopped_outcome_unknown"))?
