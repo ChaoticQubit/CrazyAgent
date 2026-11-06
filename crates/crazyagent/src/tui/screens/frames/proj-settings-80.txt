@@ -10,11 +10,10 @@
   Accounts  Loading...   u Change order
   Team      Codex leads. Codex x3. Tools on.
   Folders   Loading...   f Edit read-only folders
-  Hidden    Loading...   p Edit hidden folders
+  Hidden    Loading...   k Edit hidden folders
   Access    Loading...   c Agent access
   Process   Instructions for this project's agents   i Edit
   Roadmap   Not planned   p Plan roadmap now
-
   Skills  0                                   From Settings, plus this project
     Loading...
 

@@ -2046,7 +2046,7 @@ fn hidden_line(screen: &ProjectScreen, look: &Look) -> Row {
         Some([one]) => one.clone(),
         Some(many) => format!("{} hidden folders", many.len()),
     };
-    Row::of(text, look.fg).push("   p Edit hidden folders", look.muted)
+    Row::of(text, look.fg).push("   k Edit hidden folders", look.muted)
 }
 
 fn settings(screen: &ProjectScreen, content: usize, room: usize, look: &Look) -> Drawn {
