@@ -37,11 +37,13 @@ const AGENT_SHOWN_MAX: usize = 64;
 /// Why the engine did not type into a project's live master. `NoMaster`: no live master
 /// runs. `Busy`: a turn is open or an earlier engine input has not started its turn yet.
 /// `OwnerTyping`: the owner typed within the quiet window or left an unsent draft.
+/// `Unready`: the master's app does not read keys yet (bracketed paste off).
 /// `Invalid`: the text is empty or too long. `Failed`: the pane or state could not be used.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputRefused {
     NoMaster,
     Busy,
+    Unready,
     OwnerTyping,
     Invalid,
     Failed(String),
@@ -234,15 +236,22 @@ pub(crate) const MASTER_NOT_READING: &str =
 
 /// Turns a project's live master on or off: on, the runtime keeps the master's own app
 /// running in a terminal; off, the master ends with its next stop. Turning it on clears why
-/// it last could not start, and either way a sign-in or profile wait line no longer applies.
+/// it last could not start, and either way a sign-in, profile or key-reading wait line no
+/// longer applies.
 /// Takes the owner transaction, the project and the switch. Returns any SQLite failure.
 pub fn set_live(connection: &Connection, project: &ProjectId, on: bool) -> Result<(), EngineError> {
     connection
         .execute(
             "INSERT INTO team_live_masters(project,live) VALUES (?1,?2)
              ON CONFLICT(project) DO UPDATE SET live=excluded.live,
-               problem=CASE WHEN excluded.live OR problem IN (?3,?4) THEN NULL ELSE problem END",
-            params![project.as_str(), on, SIGN_INS_CHECKING, PROFILE_IN_USE],
+               problem=CASE WHEN excluded.live OR problem IN (?3,?4,?5) THEN NULL ELSE problem END",
+            params![
+                project.as_str(),
+                on,
+                SIGN_INS_CHECKING,
+                PROFILE_IN_USE,
+                MASTER_NOT_READING
+            ],
         )
         .map_err(state)?;
     Ok(())
@@ -295,6 +304,23 @@ pub(crate) fn problem(
         )
         .map_err(state)?;
     Ok(changed > 0 && reason.is_some())
+}
+
+/// Clears a project's live master problem line while it still reads the given wait line,
+/// so a wait that ended leaves nothing behind. Takes the engine database, the project and
+/// the line. Returns any SQLite failure.
+pub(crate) fn clear_problem(
+    connection: &Connection,
+    project: &ProjectId,
+    line: &str,
+) -> Result<(), EngineError> {
+    connection
+        .execute(
+            "UPDATE team_live_masters SET problem=NULL WHERE project=?1 AND problem=?2",
+            params![project.as_str(), line],
+        )
+        .map_err(state)?;
+    Ok(())
 }
 
 /// Records that a live master's pane runs, so engine input finds it. Takes the engine
@@ -428,7 +454,9 @@ pub fn master_input(
     master_input_at(connection, host, typing, project, text, now_ms())
 }
 
-/// [`master_input`] at a given time. Takes the same inputs and the time in milliseconds.
+/// [`master_input`] at a given time. It asks the host whether the app reads keys before it
+/// takes the write lock, so a slow terminal reply holds no engine writer, and checks the
+/// master again under the lock. Takes the same inputs and the time in milliseconds.
 pub(crate) fn master_input_at(
     connection: &Connection,
     host: &dyn Host,
@@ -442,14 +470,17 @@ pub(crate) fn master_input_at(
         return Err(InputRefused::Invalid);
     }
     let failed = |problem: rusqlite::Error| InputRefused::Failed(state(problem).0);
-    let tx =
-        Transaction::new_unchecked(connection, TransactionBehavior::Immediate).map_err(failed)?;
-    let agent = input_open(&tx, typing, project, now)?;
+    let agent = input_open(connection, typing, project, now)?;
     let pane = AgentId::team(agent).map_err(|problem| InputRefused::Failed(problem.0))?;
     if !host
         .input_live(&pane)
         .map_err(|problem| InputRefused::Failed(problem.0))?
     {
+        return Err(InputRefused::Unready);
+    }
+    let tx =
+        Transaction::new_unchecked(connection, TransactionBehavior::Immediate).map_err(failed)?;
+    if input_open(&tx, typing, project, now)? != agent {
         return Err(InputRefused::Busy);
     }
     tx.execute(

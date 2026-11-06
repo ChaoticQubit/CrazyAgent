@@ -523,6 +523,7 @@ pub struct TeamRuntime {
     teammate_conflicts_told: BTreeMap<i64, BTreeMap<String, (String, String)>>,
     receipts_next: BTreeMap<ProjectId, Instant>,
     live_starts: BTreeMap<ProjectId, Vec<Instant>>,
+    unread: BTreeMap<ProjectId, (i64, Instant)>,
     resuming: Option<(i64, Resume)>,
     naming: Option<i64>,
     deliveries: crate::coord::delivery::Deliveries,
@@ -729,6 +730,7 @@ impl TeamRuntime {
             teammate_conflicts_told: BTreeMap::new(),
             receipts_next: BTreeMap::new(),
             live_starts: BTreeMap::new(),
+            unread: BTreeMap::new(),
             resuming: None,
             naming: None,
             deliveries: crate::coord::delivery::Deliveries::default(),
@@ -3340,9 +3342,10 @@ impl TeamRuntime {
     }
 
     /// Says once, in the live master's problem line and one team note, why it waits: for
-    /// this engine run's sign-in re-checks of the pool (DEC-108), or for its account's
-    /// profile another process holds (LMS-1). It stays on, counts no start and starts on a
-    /// later tick. Takes the project and the wait line. Returns any SQLite failure.
+    /// this engine run's sign-in re-checks of the pool (DEC-108) or for its account's
+    /// profile another process holds (LMS-1), where it stays on, counts no start and starts
+    /// on a later tick, or for its app to read keys while an owner line waits (F2). Takes
+    /// the project and the wait line. Returns any SQLite failure.
     fn wait_line(&mut self, project: &ProjectId, line: &str) -> Result<(), EngineError> {
         if super::master::problem(&self.connection, project, Some(line))? {
             self.note(project, line)?;
@@ -3647,9 +3650,10 @@ impl TeamRuntime {
     /// and under the Next task choice the owner's instruction edit first, once, cut to the
     /// room the input limit leaves beside the message; when not even the cut block fits, a
     /// team note says the edit waits for a later message, once per edited text until it is
-    /// delivered (DEC-111 QR1). Takes the project.
-    /// Returns any SQLite failure; a message that cannot be typed is failed with a team
-    /// note, one that must wait stays pending.
+    /// delivered (DEC-111 QR1). While the master's app does not read keys the message
+    /// waits, and past `READY_WAIT` one note and the problem line say so (F2). Takes the
+    /// project. Returns any SQLite failure; a message that cannot be typed is failed with a
+    /// team note, one that must wait stays pending.
     fn feed_live(&mut self, project: &ProjectId) -> Result<(), EngineError> {
         let Some(id) = self.master(project) else {
             return Ok(());
@@ -3658,9 +3662,10 @@ impl TeamRuntime {
             return Ok(());
         };
         let worker = &self.workers[&id];
-        if !worker.live || !worker.briefed || !worker.input_ready {
+        if !worker.live || !worker.briefed {
             return Ok(());
         }
+        let reads_keys = worker.input_ready;
         let pending: Option<(i64, String, String)> = self
             .connection
             .query_row(
@@ -3671,8 +3676,11 @@ impl TeamRuntime {
             .optional()
             .map_err(error)?;
         let Some((message, author, text)) = pending else {
-            return Ok(());
+            return self.unread_ended(project);
         };
+        if !reads_keys {
+            return self.unread_wait(project, id);
+        }
         let (heard, newest) = super::direct::notes(&self.connection, project)?;
         let (typed, noted) = live_input(&heard, &author, &text);
         let newest = newest.filter(|_| noted);
@@ -3701,8 +3709,10 @@ impl TeamRuntime {
         ) {
             Ok(()) => "answered",
             Err(super::master::InputRefused::Invalid) => "failed",
+            Err(super::master::InputRefused::Unready) => return self.unread_wait(project, id),
             Err(_) => return Ok(()),
         };
+        self.unread_ended(project)?;
         self.connection
             .execute(
                 "UPDATE team_messages SET state=?2 WHERE id=?1",
@@ -3729,6 +3739,50 @@ impl TeamRuntime {
         }
         if let Some(newest) = newest {
             super::direct::delivered(&self.connection, project, newest)?;
+        }
+        Ok(())
+    }
+
+    /// Counts how long team messages have waited for a live master's app to read keys,
+    /// from the first refused look under this master; past `READY_WAIT` while an owner line
+    /// waits it says so once with the wait line (F2). Takes the project and the master.
+    /// Returns any SQLite failure.
+    fn unread_wait(&mut self, project: &ProjectId, master: i64) -> Result<(), EngineError> {
+        let since = match self.unread.get(project) {
+            Some(&(agent, since)) if agent == master => since,
+            _ => {
+                self.unread
+                    .insert(project.clone(), (master, Instant::now()));
+                return Ok(());
+            }
+        };
+        if since.elapsed() < crate::harnesses::terminal_session::READY_WAIT {
+            return Ok(());
+        }
+        let owner_waits: bool = self
+            .connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM team_messages WHERE project=?1 AND state='pending' AND author='owner')",
+                [project.as_str()],
+                |row| row.get(0),
+            )
+            .map_err(error)?;
+        if owner_waits {
+            self.wait_line(project, super::master::MASTER_NOT_READING)?;
+        }
+        Ok(())
+    }
+
+    /// Ends a project's wait for its live master's app to read keys once nothing waits or
+    /// a message was typed, and takes its wait line down. Takes the project. Returns any
+    /// SQLite failure.
+    fn unread_ended(&mut self, project: &ProjectId) -> Result<(), EngineError> {
+        if self.unread.remove(project).is_some() {
+            super::master::clear_problem(
+                &self.connection,
+                project,
+                super::master::MASTER_NOT_READING,
+            )?;
         }
         Ok(())
     }
@@ -7986,8 +8040,10 @@ fn live_adopted(
 /// delegation. A turn the provider refused for a rate limit ends the session so the
 /// engine moves the master to another pool account. Nothing is typed into the pane at
 /// start; once the app reads keys by the rule a first prompt waits for, it tells the
-/// engine, which types no message before that. Takes the session, the worker's channels and flags, and whether a later engine
-/// may take the pane over. Returns the problem that ended it, if any.
+/// engine, which types no message before that, and a look that fails before the pane
+/// ends is tried again on the next pass. Takes the session, the worker's channels and
+/// flags, and whether a later engine may take the pane over. Returns the problem that
+/// ended it, if any.
 fn live_serve(
     mut session: TerminalSession,
     orders: &Receiver<Order>,
@@ -8014,7 +8070,8 @@ fn live_serve(
                     reads_keys = true;
                     let _ = reports.send(Report::InputReady);
                 }
-                Err(_) => reads_keys = true,
+                Err(problem) if problem.0 == "launch_closed" => reads_keys = true,
+                Err(_) => {}
             }
         }
         if !named && let Some(conversation) = session.conversation() {

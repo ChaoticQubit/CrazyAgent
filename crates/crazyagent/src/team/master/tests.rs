@@ -380,7 +380,11 @@ fn engine_input_reaches_an_idle_live_master_only_while_the_owner_is_not_typing()
 
     host.kill(&AgentId::team(MASTER).unwrap()).unwrap();
     let gone = input("fourth", NOW + DRAFT_ABANDONED_MS + 1 + INPUT_SETTLE_MS);
-    assert_eq!(gone, Err(InputRefused::Busy), "an ended pane reads no keys");
+    assert_eq!(
+        gone,
+        Err(InputRefused::Unready),
+        "an ended pane reads no keys"
+    );
     let input_ms: Option<i64> = fixture
         .connection
         .query_row(
@@ -437,7 +441,7 @@ fn engine_input_waits_until_the_live_masters_app_reads_keys() {
 
     assert_eq!(
         input(NOW),
-        Err(InputRefused::Busy),
+        Err(InputRefused::Unready),
         "the app does not read keys yet"
     );
     let input_ms: Option<i64> = fixture

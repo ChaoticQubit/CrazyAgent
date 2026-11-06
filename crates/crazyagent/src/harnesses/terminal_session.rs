@@ -63,10 +63,10 @@ pub struct TerminalSession {
 }
 
 /// What the engine saw of an app's first screen while it waits for the app to read keys:
-/// the attached stream, when the wait began, whether anything was drawn and when the
-/// screen last changed.
+/// the attached stream once an attach worked, when the wait began, whether anything was
+/// drawn and when the screen last changed.
 struct FirstScreen {
-    stream: TerminalStream,
+    stream: Option<TerminalStream>,
     started: Instant,
     drawn: bool,
     quiet: Instant,
@@ -469,26 +469,35 @@ impl TerminalSession {
     /// Looks once, without waiting, whether the app reads keys yet by the rule its first
     /// prompt waits for: it has drawn its screen, nothing changed on it for `READY_QUIET`
     /// and it turned bracketed paste on (see [`Host::input_live`]), or `READY_WAIT` passed
-    /// since the first look. Output: the answer, or `launch_closed` once the pane ended.
+    /// since the first look. A failed look keeps the wait, so the next look tries again
+    /// within the same bound. Output: the answer, the failed look's problem, or
+    /// `launch_closed` once the pane ended.
     pub fn poll_ready(&mut self) -> Result<bool, LaunchError> {
         if self.ready {
             return Ok(true);
         }
-        let first = match &mut self.first {
-            Some(first) => first,
+        let first = self.first.get_or_insert_with(|| FirstScreen {
+            stream: None,
+            started: Instant::now(),
+            drawn: false,
+            quiet: Instant::now(),
+        });
+        if first.started.elapsed() >= READY_WAIT {
+            self.ready = true;
+            self.first = None;
+            return Ok(true);
+        }
+        let stream = match &mut first.stream {
+            Some(stream) => stream,
             None => {
                 let stream = self.host.attach(&self.agent).map_err(host_failure)?;
-                let drawn = !stream.screen.iter().all(u8::is_ascii_whitespace);
-                self.first.insert(FirstScreen {
-                    stream,
-                    started: Instant::now(),
-                    drawn,
-                    quiet: Instant::now(),
-                })
+                first.drawn = !stream.screen.iter().all(u8::is_ascii_whitespace);
+                first.quiet = Instant::now();
+                first.stream.insert(stream)
             }
         };
         loop {
-            match first.stream.chunks.try_recv() {
+            match stream.chunks.try_recv() {
                 Ok(chunk) => {
                     first.drawn |= !chunk.is_empty();
                     first.quiet = Instant::now();
@@ -501,10 +510,9 @@ impl TerminalSession {
                 }
             }
         }
-        let ready = first.started.elapsed() >= READY_WAIT
-            || (first.drawn
-                && first.quiet.elapsed() >= READY_QUIET
-                && self.host.input_live(&self.agent).map_err(host_failure)?);
+        let ready = first.drawn
+            && first.quiet.elapsed() >= READY_QUIET
+            && self.host.input_live(&self.agent).map_err(host_failure)?;
         if ready {
             self.ready = true;
             self.first = None;
@@ -513,14 +521,21 @@ impl TerminalSession {
     }
 
     fn wait_ready(&mut self, cancel: &AtomicBool) -> Result<(), LaunchError> {
-        while !self.poll_ready()? {
+        loop {
+            match self.poll_ready() {
+                Ok(true) => return Ok(()),
+                Ok(false) => {}
+                Err(problem) => {
+                    self.first = None;
+                    return Err(problem);
+                }
+            }
             if cancel.load(Ordering::SeqCst) {
                 self.first = None;
                 return Err(failure("launch_cancelled"));
             }
             std::thread::sleep(POLL);
         }
-        Ok(())
     }
 
     fn poll(&mut self) -> Result<(), LaunchError> {
