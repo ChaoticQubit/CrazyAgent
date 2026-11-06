@@ -860,3 +860,15 @@ test("the projects folder, Add, clone and setup screens draw their Lucide icons"
   assert.equal(intake.entryIcon(pack[1]), "blocks");
   assert.equal(intake.entryIcon(pack[2]), "server");
 });
+
+test("a soft engine refusal asks again only when the override for it was not sent", () => {
+  assert.equal(intake.asksAgain("home_move_worktrees", []), true);
+  assert.equal(intake.asksAgain("home_move_worktrees", ["worktrees"]), false);
+  assert.equal(intake.asksAgain("home_copy_linked_checkout", ["too_large"]), true);
+  assert.equal(intake.asksAgain("home_copy_linked_checkout", ["linked_checkout"]), false);
+  assert.equal(intake.asksAgain("home_copy_too_large", []), true);
+  assert.equal(intake.asksAgain("home_copy_too_large", ["too_large"]), false);
+  assert.equal(intake.asksAgain("home_destination_exists", []), false);
+  assert.equal(intake.asksAgain("home_move_project", ["worktrees", "too_large"]), false);
+  assert.equal(intake.asksAgain("constructor", []), false);
+});
