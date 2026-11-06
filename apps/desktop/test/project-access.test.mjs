@@ -69,6 +69,13 @@ test("every engine refusal for agent access has its own sentence", () => {
   assert.deepEqual([...missing], [], "every access, policy, network, toolchain and project refusal has a sentence");
 });
 
+test("a stop for lowered access claims only what is true at every level", () => {
+  assert.equal(
+    api.knownError("agent_access_lowered"),
+    "This project's agent access was lowered below what the agent started with, so it was stopped. What it changed in its own folder is still in Changes; an agent that ran at Full access may also have changed files outside it.",
+  );
+});
+
 test("Settings says beside the level choice that lowering it stops agents running above it, in both UIs", () => {
   assert.equal(access.LOWERING_STOPS_AGENTS, "Lowering the level stops agents running above it; they restart at the new level. It does not reach processes a Full access agent started outside its terminal.");
   const page = readFileSync(new URL("../src/screens/project/settings.tsx", import.meta.url), "utf8");
