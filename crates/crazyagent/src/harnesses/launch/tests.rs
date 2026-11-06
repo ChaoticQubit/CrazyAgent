@@ -790,7 +790,7 @@ fn a_pane_group_another_path_holds_is_only_watched() {
         || kills.set(kills.get() + 1),
     );
     drop(other);
-    let ended = super::end_pane_group(id, None);
+    let ended = super::end_pane_group(id, super::Ending::claim(id));
     if !ended {
         let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
     }
@@ -801,6 +801,61 @@ fn a_pane_group_another_path_holds_is_only_watched() {
         0,
         "a stop never signals a group another path holds"
     );
-    assert!(ended, "a stop ends a group no other path holds");
+    assert!(
+        ended,
+        "a hold freed before its group ended leaves the group claimable, and a stop ends it"
+    );
     assert_eq!(status.signal(), Some(9), "the group ended by KILL");
+}
+
+/// CB-2 r1 F1: once a holder saw its group answer ESRCH, the number stays refused for a
+/// while, so no later path, such as a session that notices its pane gone, claims and
+/// signals a number a new group may lead by then.
+#[cfg(unix)]
+#[test]
+fn a_group_its_holder_saw_end_stays_refused_to_later_paths() {
+    use std::os::unix::process::ExitStatusExt;
+    let (mut survivor, _) = group_leader("/bin/sleep", &["120"]);
+    let id = survivor.id();
+    let held = super::Ending::claim(id).expect("no path holds a new group");
+    let reaped = std::thread::spawn(move || survivor.wait());
+
+    let ended = super::end_pane_group(id, Some(held));
+    let later = super::Ending::claim(id);
+    let status = reaped.join().unwrap().unwrap();
+    assert!(ended, "the holder ends its group");
+    assert_eq!(status.signal(), Some(9), "the group ended by KILL");
+    assert!(
+        later.is_none(),
+        "a number whose group just ended is refused to a later path"
+    );
+}
+
+/// CB-2 r1 F1: a path that has no hold, because another path held the group or just ended
+/// it, only watches the group for the wait and never claims or signals it itself.
+#[cfg(unix)]
+#[test]
+fn a_path_without_a_hold_only_watches_and_never_claims() {
+    use std::os::unix::process::ExitStatusExt;
+    let (mut survivor, group) = group_leader("/bin/sleep", &["120"]);
+    let id = survivor.id();
+    let reaped = std::thread::spawn(move || survivor.wait());
+    let started = std::time::Instant::now();
+
+    let ended = super::end_pane_group(id, None);
+    let watched = started.elapsed();
+    if rustix::process::test_kill_process_group(group) != Err(rustix::io::Errno::SRCH) {
+        let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);
+    }
+    let status = reaped.join().unwrap().unwrap();
+    assert!(!ended, "a path without a hold never ends the group itself");
+    assert!(
+        watched >= super::GROUP_EXIT_WAIT,
+        "it watched the whole wait: {watched:?}"
+    );
+    assert_eq!(
+        status.signal(),
+        Some(9),
+        "the group ran until the test ended it"
+    );
 }
