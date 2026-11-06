@@ -4199,3 +4199,27 @@ fn a_cleanup_removal_the_full_queue_refuses_says_nothing_was_removed() {
         "the box does not wait for a removal that never went out"
     );
 }
+
+#[test]
+fn a_terminal_attach_the_full_queue_refuses_says_busy_and_enter_attaches_again() {
+    let mut shell = team();
+    fill_queue(&mut shell);
+    shell.key(Key::Enter);
+    let text = render(&mut shell).join("\n");
+    assert!(
+        text.contains("The terminal closed."),
+        "the refused attach closes the box instead of waiting for frames: {text}"
+    );
+    assert!(text.contains("CrazyAgent is busy"), "{text}");
+    requests(&mut shell);
+    shell.key(LEADER);
+    shell.key(Key::Enter);
+    let sent = requests(&mut shell);
+    assert!(
+        sent.iter().any(|request| matches!(
+            request,
+            Request::TerminalAttach { agent } if agent.as_str() == "team-1"
+        )),
+        "Enter on the agent asks for its terminal again: {sent:?}"
+    );
+}

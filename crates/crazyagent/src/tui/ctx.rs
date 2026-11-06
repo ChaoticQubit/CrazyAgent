@@ -395,6 +395,63 @@ mod tests {
         assert!(matches!(ctx.next_request(), Some(Request::Pools)));
     }
 
+    fn full() -> Ctx {
+        let mut ctx = ctx();
+        while ctx.try_request(pool_removal()) {}
+        assert_eq!(ctx.queued(), QUEUE_MAX);
+        ctx
+    }
+
+    fn pool_removal() -> Request {
+        Request::EditPool {
+            change: crate::tui::seam::PoolChange::Remove {
+                id: crate::protocol::CredentialRef::new("pool-a").unwrap(),
+                opened_projects: 0,
+            },
+        }
+    }
+
+    #[test]
+    fn every_refused_request_one_event_makes_is_kept_for_its_busy_reply() {
+        let mut ctx = full();
+        for _ in 0..40 {
+            ctx.request(pool_removal());
+        }
+        assert_eq!(
+            ctx.take_refused().len(),
+            40,
+            "no refused request past the first 32 is dropped without a reply"
+        );
+        assert!(ctx.take_refused().is_empty());
+    }
+
+    #[test]
+    fn refused_keystrokes_leave_room_for_the_replies_screens_wait_on() {
+        let mut ctx = full();
+        let agent = crate::terminal::AgentId::team(1).unwrap();
+        for _ in 0..40 {
+            ctx.request(Request::TerminalInput {
+                agent: agent.clone(),
+                bytes: b"x".to_vec(),
+            });
+        }
+        ctx.request(pool_removal());
+        assert_eq!(
+            ctx.take_refused().len(),
+            1,
+            "only the pool change waits on a reply"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "more than 1024")]
+    fn an_event_that_asks_the_engine_more_than_1024_times_is_a_bug() {
+        let mut ctx = full();
+        for _ in 0..1025 {
+            ctx.request(pool_removal());
+        }
+    }
+
     #[test]
     fn a_refresh_keeps_shown_data_instead_of_a_spinner() {
         let mut ctx = ctx();
