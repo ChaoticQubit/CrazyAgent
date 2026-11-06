@@ -951,6 +951,64 @@ async fn resume_refuses_a_session_the_current_settings_or_engine_run_no_longer_a
     case.close().await;
 }
 
+const NATIVE_POOL_PROJECTS: &str =
+    "members = [\"native-connection\"]\nprojects = [\"session-project\"]";
+
+/// Parks a used native session behind a fresh one, then restarts the engine under
+/// settings whose native pool lists the given projects instead of the session's own.
+/// Inputs: the case and the projects line. Output: the restarted case and the parked session.
+async fn parked_native_under(case: Case, projects: &str) -> (Case, SessionId) {
+    assert_eq!(CONFIG.matches(NATIVE_POOL_PROJECTS).count(), 1);
+    assert_eq!(case.open("open-rcli").await, OwnerResult::Applied);
+    let rcli = case.shown().await;
+    case.used_in_terminal(&rcli.session_id);
+    assert_eq!(
+        case.renew_with("renew-native", false, MasterBackend::Claude)
+            .await,
+        OwnerResult::Applied
+    );
+    let native = case.shown().await;
+    case.used_in_terminal(&native.session_id);
+    assert_eq!(case.renew("renew-last", false).await, OwnerResult::Applied);
+    let changed = CONFIG.replace(
+        NATIVE_POOL_PROJECTS,
+        &format!("members = [\"native-connection\"]\nprojects = {projects}"),
+    );
+    assert_ne!(changed, CONFIG);
+    (case.reopen_with(Some(&changed)).await, native.session_id)
+}
+
+#[tokio::test]
+async fn resume_continues_a_session_after_another_project_joins_its_pool() {
+    let (case, native) = parked_native_under(
+        Case::new().await,
+        "[\"session-project\", \"joined-project\"]",
+    )
+    .await;
+    assert_eq!(
+        case.resume("resume-joined", &native, false).await,
+        OwnerResult::Applied,
+        "another project joining the session's pool leaves what the session runs on as it was"
+    );
+    assert_eq!(case.shown().await.session_id, native);
+    case.close().await;
+}
+
+#[tokio::test]
+async fn resume_refuses_a_session_whose_own_project_left_its_pool() {
+    let (case, native) = parked_native_under(Case::new().await, "[\"joined-project\"]").await;
+    let before = snapshot(&case);
+    assert_eq!(
+        case.resume("resume-left", &native, false).await,
+        OwnerResult::Rejected {
+            code: "master_source_conflict".into()
+        },
+        "the session's own project left its pool, so it no longer runs under the current settings"
+    );
+    assert_eq!(snapshot(&case), before, "a refused Resume changes nothing");
+    case.close().await;
+}
+
 #[tokio::test]
 async fn a_parked_session_s_owner_messages_are_read_back_for_its_turns_only() {
     let case = Case::new().await;
