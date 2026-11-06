@@ -541,7 +541,7 @@ async fn desktop_native_auth_selection_and_reconnect_do_not_retarget_original_op
 }
 
 #[tokio::test]
-async fn desktop_native_auth_source_conflict_preserves_original_operation() {
+async fn desktop_native_auth_settings_changes_never_lose_the_original_operation() {
     run_case(|fixture| async move {
         let mut bridge = fixture.bridge().await;
         let detail = inspect(&mut bridge, "connection-a").await;
@@ -553,8 +553,14 @@ async fn desktop_native_auth_source_conflict_preserves_original_operation() {
         )
         .unwrap();
         let fact = fixture.owner_fact(&original).await.fact;
+        assert_eq!(fact.phase, NativeAuthPhase::Unavailable);
         let global = fixture.root.path().join("global.toml");
-        let changed = format!("{CATALOG}\n");
+        std::fs::write(&global, format!("{CATALOG}\n")).unwrap();
+        let kept =
+            serde_json::to_value(bridge.read_native_auth(&detail.ticket).await.unwrap()).unwrap();
+        assert_eq!(kept["operation_id"], original["operation_id"]);
+        assert_eq!(CATALOG.matches(r#"id = "model-a""#).count(), 1);
+        let changed = CATALOG.replace(r#"id = "model-a""#, r#"id = "model-a2""#);
         std::fs::write(&global, &changed).unwrap();
         assert_eq!(
             bridge
@@ -563,7 +569,7 @@ async fn desktop_native_auth_source_conflict_preserves_original_operation() {
                 .err()
                 .unwrap()
                 .code,
-            "native_profile_source_conflict"
+            "native_auth_not_active"
         );
         assert_eq!(std::fs::read_to_string(&global).unwrap(), changed);
         assert!(bridge.pending_intent().unwrap().is_none());

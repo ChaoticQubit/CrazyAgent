@@ -270,9 +270,12 @@ async fn native_auth_custodian_entry_run_session_check_reads_real_cancel_and_ret
     .await;
 }
 
+/// A custodian's session check refuses a real change of its own entry or a revoked owner.
+/// The engine ends the custody session on a refused own-entry check, so the custodian reads
+/// the channel's end; the engine's refusal code itself is pinned by `native_auth_custody_tests`.
 #[tokio::test]
 async fn native_auth_custodian_entry_run_session_check_rejects_real_source_or_owner_change() {
-    for change in ["source", "owner"] {
+    for change in ["entry", "owner", "bytes"] {
         channel_case(move |case| async move {
             let (committed, launch) = case.launch("entry-run-session-stale").await;
             let mut channel = case.channel().await;
@@ -282,21 +285,21 @@ async fn native_auth_custodian_entry_run_session_check_rejects_real_source_or_ow
                 session.check(&mut channel).await.unwrap(),
                 NativeAuthCustodyControl::Continue
             ));
-            if change == "source" {
-                std::fs::write(&case.global, format!("{CATALOG}\n")).unwrap();
-            } else {
-                case.host
-                    .control(OwnerControl {
-                        operation_id: request("entry-run-session-revoke"),
-                        target: OwnerClientKind::Tui,
-                        expected_epoch: case.admission().owner_epoch,
-                        decision: OwnerDecision::Revoke,
-                    })
-                    .await
-                    .unwrap();
+            case.change(change, "entry-run-session-revoke").await;
+            if change == "bytes" {
+                assert!(matches!(
+                    session.check(&mut channel).await.unwrap(),
+                    NativeAuthCustodyControl::Continue
+                ));
+                drop(session);
+                drop((channel, launch));
+                return;
             }
             let before = case.snapshot();
-            assert!(session.check(&mut channel).await.is_err());
+            let refused = session.check(&mut channel).await.err().unwrap();
+            if change == "entry" {
+                assert_eq!(refused.0, "unexpected end of file");
+            }
             let probe = case.probe();
             assert!(
                 rustix::fs::flock(&probe, rustix::fs::FlockOperation::NonBlockingLockExclusive)

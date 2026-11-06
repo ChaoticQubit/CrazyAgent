@@ -198,6 +198,8 @@ pub enum OwnerMutation {
     AddExistingFolder {
         source: String,
         mode: crate::projects_home::AddMode,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        overrides: Vec<crate::projects_home::AddOverride>,
     },
     DeleteProjectFolder {
         path: String,
@@ -418,10 +420,15 @@ impl OwnerMutation {
                 action.validate()?;
                 Command::ProjectsHome { action }
             }
-            Self::AddExistingFolder { source, mode } => {
+            Self::AddExistingFolder {
+                source,
+                mode,
+                overrides,
+            } => {
                 let action = crate::projects_home::HomeAction::Added {
                     source: source.clone(),
                     mode: *mode,
+                    overrides: overrides.clone(),
                 };
                 action.validate()?;
                 Command::ProjectsHome { action }
