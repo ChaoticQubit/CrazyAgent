@@ -1728,7 +1728,9 @@ async fn live_master_waits_for_restart_recheck() {
 /// LMS-1: while another process holds the signed-in account's profile for a sign-in, the
 /// started live master cannot be handed the account: over more ticks it stays on, its
 /// problem line and one team note say the profile is in use. Once the profile is free it
-/// is handed the account on the next tick and its wait line is cleared.
+/// is handed the account on the next tick and its wait line is cleared, and its terminal
+/// then runs the stand-in Claude Code, which ends at once: a refused handoff fails the
+/// master before its terminal starts.
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_master_says_it_waits_while_another_process_holds_its_profile() {
@@ -1787,6 +1789,24 @@ async fn live_master_says_it_waits_while_another_process_holds_its_profile() {
             "the master is handed the account and its wait line is cleared"
         );
         assert_eq!(restart.messages(&setup).len(), 1, "no second note");
+        let mut master = restart.team_agents("master");
+        for _ in 0..50 {
+            if master.iter().any(|(_, status, _)| status == "failed") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            team.tick().unwrap();
+            master = restart.team_agents("master");
+        }
+        assert_eq!(
+            master,
+            [(
+                "connection-z".to_owned(),
+                "failed".to_owned(),
+                Some("The agent process closed. (launch_closed)".to_owned())
+            )],
+            "the master was handed the account and its terminal ran the stand-in, which ends at once"
+        );
         team.shutdown().unwrap();
         run.stop().await;
     })
