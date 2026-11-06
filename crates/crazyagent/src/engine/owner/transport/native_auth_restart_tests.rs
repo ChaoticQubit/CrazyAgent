@@ -1730,7 +1730,8 @@ async fn live_master_waits_for_restart_recheck() {
 /// problem line and one team note say the profile is in use. Once the profile is free it
 /// is handed the account on the next tick and its wait line is cleared, and its terminal
 /// then runs the stand-in Claude Code, which ends at once: a refused handoff fails the
-/// master before its terminal starts.
+/// master before its terminal starts. The stand-in sign-in stores no Claude record in the
+/// profile keychain, so the test adds the one a real sign-in leaves there.
 #[cfg(target_os = "macos")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn live_master_says_it_waits_while_another_process_holds_its_profile() {
@@ -1740,6 +1741,35 @@ async fn live_master_says_it_waits_while_another_process_holds_its_profile() {
         let run = restart.start().await;
         let signed = run.sign_in(&restart).await;
         run.create_project().await;
+        let profiles = restart.root.path().join("native-profiles");
+        let homes: Vec<PathBuf> = std::fs::read_dir(&profiles)
+            .unwrap()
+            .map(|entry| entry.unwrap().path().join("home"))
+            .filter(|home| home.is_dir())
+            .collect();
+        assert_eq!(homes.len(), 1, "{homes:?}");
+        let home = &homes[0];
+        let keychain = crate::credentials::test_keychain::TestKeychain::adopt(
+            home,
+            home.join("Library/Keychains/login.keychain-db"),
+        );
+        keychain.add(
+            "unknown",
+            &format!(
+                "Claude Code-credentials-{}",
+                &crate::memory::hash(home.to_str().unwrap().as_bytes())[..8]
+            ),
+            &serde_json::json!({
+                "claudeAiOauth": {
+                    "accessToken": "sk-ant-oat01-lms1-unit",
+                    "refreshToken": "sk-ant-ort01-lms1-unit",
+                    "expiresAt": now_ms() + 365 * 86_400_000,
+                    "scopes": ["user:inference", "user:profile"],
+                    "subscriptionType": "max"
+                }
+            })
+            .to_string(),
+        );
         let path = restart.root.path().join("engine.db");
         let held =
             crate::engine::NativeProfileCustody::capture(&path, &std::fs::metadata(&path).unwrap())
