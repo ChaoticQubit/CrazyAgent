@@ -3779,11 +3779,12 @@ impl TeamRuntime {
     /// and under the Next task choice the owner's instruction edit first, once, cut to the
     /// room the input limit leaves beside the message; when not even the cut block fits, a
     /// team note says the edit waits for a later message, once per edited text until it is
-    /// delivered (DEC-111 QR1). While the master's app does not read keys the message
-    /// waits, and past `READY_WAIT` one note and the problem line say so (F2); a typed
-    /// message takes that line down, also one an earlier engine stored. Takes the project.
-    /// Returns any SQLite failure; a message that cannot be typed is failed with a team
-    /// note, one that must wait stays pending.
+    /// delivered (DEC-111 QR1). An owner message ends with the master's Task-start reminder
+    /// while the setting is On and it fits the input limit (DEC-116). While the master's app
+    /// does not read keys the message waits, and past `READY_WAIT` one note and the problem
+    /// line say so (F2); a typed message takes that line down, also one an earlier engine
+    /// stored. Takes the project. Returns any SQLite failure; a message that cannot be typed
+    /// is failed with a team note, one that must wait stays pending.
     fn feed_live(&mut self, project: &ProjectId) -> Result<(), EngineError> {
         let Some(id) = self.master(project) else {
             return Ok(());
@@ -3812,7 +3813,16 @@ impl TeamRuntime {
             return self.unread_wait(project, id);
         }
         let (heard, newest) = super::direct::notes(&self.connection, project)?;
-        let (typed, noted) = live_input(&heard, &author, &text);
+        let (mut typed, noted) = live_input(&heard, &author, &text);
+        if author == "owner"
+            && let Some(reminder) = &self.workers[&id].starts.text
+            && typed.len() + "\n\n".len() + reminder.len() <= super::master::INPUT_TEXT_MAX
+            && crate::coord::settings::read(&self.connection, project)?.task_start
+                == crate::coord::settings::TaskStart::On
+        {
+            typed.push_str("\n\n");
+            typed.push_str(reminder);
+        }
         let newest = newest.filter(|_| noted);
         let home = agent_home(&self.state, id);
         let edit = self
