@@ -5,7 +5,7 @@ use crazyagent::engine::EngineError;
 use crazyagent::engine::owner::{AccountSecret, OwnerClient, OwnerData, OwnerMutation, OwnerRead};
 use crazyagent::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crazyagent::onboarding::OnboardingView;
-use crazyagent::projects_home::{AddMode, FoundProject, ProjectsHome};
+use crazyagent::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crazyagent::protocol::{CredentialRef, ProjectId};
 use crazyagent::setup::SetupStatus;
 use serde::Serialize;
@@ -386,18 +386,24 @@ impl NativeBridge {
     }
 
     /// Moves or copies an existing folder into the projects home.
-    /// Inputs: the absolute source folder, move or copy and the client generation.
+    /// Inputs: the absolute source folder, move or copy, the soft refusals the owner chose
+    /// to go past for this add and the client generation.
     /// Output: the receipt; the folder then shows as found.
     pub async fn add_existing_folder(
         &mut self,
         source: String,
         mode: AddMode,
+        overrides: Vec<AddOverride>,
         generation: u64,
     ) -> Result<IntentReceipt, BridgeError> {
         crazyagent::projects_home::path_text(&source, "home_source_invalid")
             .map_err(intake_failure)?;
         self.home_change(
-            OwnerMutation::AddExistingFolder { source, mode },
+            OwnerMutation::AddExistingFolder {
+                source,
+                mode,
+                overrides,
+            },
             generation,
         )
         .await

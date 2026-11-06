@@ -253,6 +253,7 @@ impl AddFolder {
             IntakeQuery::AddExisting {
                 source,
                 mode,
+                overrides: Vec::new(),
                 generation,
             },
         );

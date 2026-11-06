@@ -38,7 +38,7 @@ use crazyagent::pools::PoolSummary;
 use crazyagent::project_setup::{
     ContextChunk, ProjectCatalog, ProjectContext, ProjectSetup, ResearchKind, StoredSetup,
 };
-use crazyagent::projects_home::{AddMode, FoundProject, ProjectsHome};
+use crazyagent::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crazyagent::protocol::ProjectSpec;
 use crazyagent::scheduling::{PoolRanking, Schedule, ScheduleChange};
 use crazyagent::setup::SetupStatus;
@@ -1546,12 +1546,13 @@ async fn desktop_add_existing_folder(
     state: State<'_, NativeState>,
     source: String,
     mode: AddMode,
+    overrides: Vec<AddOverride>,
     generation: u64,
 ) -> Result<IntentReceipt, BridgeError> {
     main_window(&window)?;
     lock(&state)
         .await?
-        .add_existing_folder(source, mode, generation)
+        .add_existing_folder(source, mode, overrides, generation)
         .await
 }
 

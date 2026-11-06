@@ -2,7 +2,7 @@ use super::*;
 use crate::engine::owner::AccountSecret;
 use crate::github::{CloneReceipt, GitHubDeviceCode, GitHubRepoPage, GitHubStatus};
 use crate::onboarding::OnboardingView;
-use crate::projects_home::{AddMode, FoundProject, ProjectsHome};
+use crate::projects_home::{AddMode, AddOverride, FoundProject, ProjectsHome};
 use crate::protocol::{CredentialRef, ProjectId};
 
 impl OwnerController {
@@ -50,17 +50,23 @@ impl OwnerController {
     }
 
     /// Moves or copies an existing folder into the projects home, where it then shows as Found.
-    /// Takes the absolute source folder, Move or Copy, and the client generation.
+    /// Takes the absolute source folder, Move or Copy, the soft refusals the owner chose to go
+    /// past for this add, and the client generation.
     /// Returns the actual owner response; a rejection carries a plain code.
     pub async fn add_existing_folder(
         &mut self,
         source: String,
         mode: AddMode,
+        overrides: Vec<AddOverride>,
         generation: u64,
     ) -> Result<OwnerResponse, EngineError> {
         self.found_projects().await?;
         self.begin_mutation(
-            OwnerMutation::AddExistingFolder { source, mode },
+            OwnerMutation::AddExistingFolder {
+                source,
+                mode,
+                overrides,
+            },
             generation,
         )?;
         self.send_pending().await

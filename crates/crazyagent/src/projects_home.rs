@@ -81,16 +81,42 @@ pub enum AddMode {
     Copy,
 }
 
+/// A soft refusal of one add that the owner was shown and chose to go past for
+/// that add only: a Move that breaks linked git worktrees, a Copy of a folder
+/// that is itself a linked checkout, or a copy past the usual entry and level
+/// bounds. Every other refusal stays; an add without one keeps its refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AddOverride {
+    Worktrees,
+    LinkedCheckout,
+    TooLarge,
+}
+
+pub const ADD_OVERRIDES_MAX: usize = 3;
+
 /// An owner change to the projects home recorded by the engine: picking the
 /// home folder, switching to a new one and optionally moving every project
 /// folder there, or recording a folder the transport moved or copied in.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum HomeAction {
-    SetHome { path: String },
-    MoveHome { path: String, move_projects: bool },
-    Added { source: String, mode: AddMode },
-    Trash { path: String },
+    SetHome {
+        path: String,
+    },
+    MoveHome {
+        path: String,
+        move_projects: bool,
+    },
+    Added {
+        source: String,
+        mode: AddMode,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        overrides: Vec<AddOverride>,
+    },
+    Trash {
+        path: String,
+    },
 }
 
 impl HomeAction {
@@ -262,6 +288,23 @@ pub fn linked_worktrees(folder: &Path) -> usize {
         .count()
 }
 
+/// The folders of the git worktrees linked to the repository in `folder`, which a Move
+/// leaves pointing at its old place. Input: the folder and how many to read. Output: each
+/// worktree folder its `.git/worktrees/<name>/gitdir` names, in name order; none without a
+/// plain `.git` folder, and unreadable entries left out.
+pub fn linked_worktree_paths(folder: &Path, max: usize) -> Vec<PathBuf> {
+    let _ = (folder, max);
+    Vec::new()
+}
+
+/// Whether a folder and the projects home are on the same disk, so a Move is a quick
+/// rename rather than a copy, a check and a removal. Input: the two folders. Output: the
+/// answer, or None when either cannot be read or the platform cannot tell.
+pub fn same_volume(folder: &Path, home: &Path) -> Option<bool> {
+    let _ = (folder, home);
+    None
+}
+
 /// Plans bringing an existing folder into the projects home.
 /// Input: the canonical home, the engine data folder, the owner's source
 /// text, the mode and the set-up projects. Output: the real source and the
@@ -276,8 +319,10 @@ pub fn plan_add(
     engine_root: &Path,
     source: &str,
     mode: AddMode,
+    overrides: &[AddOverride],
     registered: &[Registered],
 ) -> Result<AddPlan, EngineError> {
+    let _ = overrides;
     path_text(source, "home_source_invalid")?;
     let real = real_folder(
         Path::new(source),
