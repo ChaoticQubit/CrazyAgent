@@ -26,7 +26,11 @@ const LINK_GAP: Duration = Duration::from_secs(1);
 static LINKS: Mutex<Option<Instant>> = Mutex::new(None);
 
 fn refused(code: &'static str) -> BridgeError {
-    BridgeError { code, cause: None }
+    BridgeError {
+        code,
+        cause: None,
+        account: None,
+    }
 }
 
 /// The panel the IDE webview covers, in the main window's logical pixels.
