@@ -25,7 +25,7 @@ const LOCAL_MODEL: &str = "qwen2.5:0.5b";
 const SESSION: &str = "0199a0b0-0000-4000-8000-000000000001";
 const GREETING: &str = "Reply with one short greeting.";
 const BUSY_TURN: &str =
-    "Write the numbers from 1 to 30 in words, one per line, with no other text.";
+    "Write the numbers from 1 to 100 in words, one per line, with no other text.";
 const STEER: &str = "Stop counting now and reply with the single word steered.";
 const NOTICE: &str = "Owner notice: the owner woke worker 7 again in its own worktree.";
 const PROJECT: &str = "bridge-live";
@@ -397,7 +397,7 @@ fn a_real_codex_app_takes_coord_messages_through_its_app_server_idle_and_busy() 
     until(TURN, "the busy turn to start", || {
         recorded(&home, BUSY_TURN)
     });
-    assert_eq!(codex::deliver(&home, STEER, true), Bridged::Delivered);
+    assert_eq!(codex::deliver(&home, STEER, false), Bridged::Delivered);
     if let Err(problem) =
         steered(TURN, &home, BUSY_TURN, &[STEER]).and_then(|()| joined(&home, BUSY_TURN, &[STEER]))
     {
