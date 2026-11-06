@@ -5018,6 +5018,7 @@ fn a_live_master_s_question_box_leaving_without_an_owner_key_is_dismissed() {
 #[cfg(target_os = "macos")]
 fn master_question_box_leaves(owner_keyed: bool) {
     let fixture = Fixture::new(1);
+    committed_project(&fixture);
     std::fs::create_dir_all(
         fixture
             .base
