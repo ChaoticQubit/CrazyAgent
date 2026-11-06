@@ -301,6 +301,7 @@ struct Slot {
     token: [u8; 32],
     file: File,
     identity: Identity,
+    closed: u64,
 }
 
 struct PinnedBootstrap {
@@ -480,6 +481,7 @@ struct Authority {
     native_auth_changed: tokio::sync::Notify,
     usable: std::sync::atomic::AtomicBool,
     deferred: std::sync::atomic::AtomicUsize,
+    controls: std::sync::atomic::AtomicU64,
     master_dispatch: tokio::sync::Mutex<master_dispatch::MasterDispatch>,
     reproof: tokio::sync::Mutex<()>,
     reproving: Arc<std::sync::atomic::AtomicBool>,
@@ -819,9 +821,10 @@ impl Authority {
 
     /// Makes a registration storage committed the one this engine admits, with a fresh
     /// capability when it is active. A late answer never replaces a newer epoch of the same
-    /// owner, nor reopens a slot closed at its own epoch. Input: the registration.
-    /// Output: Ok, or a capability write or native sign-in cleanup failure.
-    fn publish(&self, registration: Registration) -> Result<(), EngineError> {
+    /// owner nor reopens a slot closed at its own epoch, and one from a control sent before
+    /// the slot's last close is adopted closed. Inputs: the registration and its control's
+    /// place in submit order. Output: Ok, or a capability write or native sign-in failure.
+    fn publish(&self, mut registration: Registration, submitted: u64) -> Result<(), EngineError> {
         let i = match registration.kind {
             OwnerClientKind::Tui => 0,
             OwnerClientKind::Desktop => 1,
@@ -831,6 +834,7 @@ impl Authority {
             .lock()
             .map_err(|_| failure("owner_authority_unavailable"))?;
         let slot = &mut slots[i];
+        registration.active &= submitted > slot.closed;
         if slot.registration.admission == registration.admission
             && slot.registration.active == registration.active
         {
@@ -866,10 +870,11 @@ impl Authority {
         result.and(cleanup)
     }
 
-    /// Refuses one client kind at once and keeps its epoch, for a revocation whose answer
-    /// the owner did not wait for; only a newer epoch storage commits opens it again.
-    /// Input: the client kind. Output: Ok, or a lock or native sign-in cleanup failure.
-    fn close(&self, kind: OwnerClientKind) -> Result<(), EngineError> {
+    /// Refuses one client kind at once and keeps its epoch, for a revocation that did not
+    /// commit in time; only a control sent after it that storage commits opens the slot again.
+    /// Inputs: the client kind and the revocation's place in submit order.
+    /// Output: Ok, or a lock or native sign-in cleanup failure.
+    fn close(&self, kind: OwnerClientKind, submitted: u64) -> Result<(), EngineError> {
         let i = match kind {
             OwnerClientKind::Tui => 0,
             OwnerClientKind::Desktop => 1,
@@ -880,8 +885,17 @@ impl Authority {
             .map_err(|_| failure("owner_authority_unavailable"))?;
         let previous = slots[i].registration.admission.clone();
         slots[i].registration.active = false;
+        slots[i].closed = slots[i].closed.max(submitted);
         drop(slots);
         self.invalidate_native_auth_dispatch(Some(&previous))
+    }
+
+    /// Takes the next owner control's place in submit order, so a close can tell the controls
+    /// the owner sent before it from those sent after. Input: none. Output: the place, from 1.
+    fn next_control(&self) -> u64 {
+        self.controls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1
     }
 
     /// Unlinks the owner socket, both owner keys and every runner key this server made,
@@ -1088,35 +1102,36 @@ impl OwnerRuntimeHandle {
 
     /// Orders a trusted host grant change with actor work and response delivery.
     /// Takes an exact control identity, client kind and expected grant epoch. Returns
-    /// committed status; prior delivered data cannot be recalled. A revocation whose answer
-    /// is unknown refuses the client at once; what storage commits late still takes effect.
+    /// committed status; prior delivered data cannot be recalled. A revocation that fails in
+    /// any way refuses the client at once; what storage commits late still takes effect.
     pub async fn control(&self, control: OwnerControl) -> Result<OwnerControlReply, EngineError> {
-        let _barrier = tokio::time::timeout(self.engine.timeout, self.engine.owner_egress.write())
-            .await
-            .map_err(|_| failure("owner_control_not_submitted"))?;
         let (target, decision) = (control.target, control.decision);
-        let authority = self.authority.clone();
-        let committed = self
-            .engine
-            .settled_owner_job(
-                |reply| Job::OwnerControl(self.authority.host.clone(), control, reply),
-                move |stored| {
-                    let (result, registration) = stored?;
-                    authority
-                        .publish(registration)
-                        .map_err(|_| failure("owner_control_committed_publication_unavailable"))?;
-                    Ok(result)
-                },
-            )
-            .await;
-        let unknown = committed.as_ref().is_err_and(|error| {
-            error.0 == "owner_outcome_unknown_reconcile_same_identity"
-                || error.0 == "owner_actor_stopped_outcome_unknown"
-        });
-        if unknown && decision == OwnerDecision::Revoke {
-            return self.authority.close(target).and(committed);
-        }
-        committed
+        let barrier =
+            tokio::time::timeout(self.engine.timeout, self.engine.owner_egress.write()).await;
+        let submitted = self.authority.next_control();
+        let committed = if barrier.is_err() {
+            Err(failure("owner_control_not_submitted"))
+        } else {
+            let authority = self.authority.clone();
+            self.engine
+                .settled_owner_job(
+                    |reply| Job::OwnerControl(self.authority.host.clone(), control, reply),
+                    move |stored| {
+                        let (result, registration) = stored?;
+                        authority.publish(registration, submitted).map_err(|_| {
+                            failure("owner_control_committed_publication_unavailable")
+                        })?;
+                        Ok(result)
+                    },
+                )
+                .await
+        };
+        let closed = match (&committed, decision) {
+            (Err(_), OwnerDecision::Revoke) => self.authority.close(target, submitted),
+            _ => Ok(()),
+        };
+        drop(barrier);
+        closed.and(committed)
     }
 
     /// Looks up an exact host control through the current storage actor.
@@ -1202,6 +1217,7 @@ impl OwnerServer {
                     token,
                     file,
                     identity,
+                    closed: 0,
                 });
             }
             root.verify()?;
@@ -1238,6 +1254,7 @@ impl OwnerServer {
                 native_auth_changed: tokio::sync::Notify::new(),
                 usable: std::sync::atomic::AtomicBool::new(true),
                 deferred: std::sync::atomic::AtomicUsize::new(0),
+                controls: std::sync::atomic::AtomicU64::new(0),
                 master_dispatch: tokio::sync::Mutex::new(master_dispatch::MasterDispatch::new()),
                 reproof: tokio::sync::Mutex::new(()),
                 reproving: Arc::new(std::sync::atomic::AtomicBool::new(true)),

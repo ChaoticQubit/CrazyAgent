@@ -500,7 +500,10 @@ async fn a_folder_add_whose_grant_is_revoked_after_its_plan_moves_nothing() {
         .owner_job(|reply| Job::OwnerControl(runtime.authority.host.clone(), control, reply))
         .await
         .unwrap();
-    runtime.authority.publish(registration).unwrap();
+    runtime
+        .authority
+        .publish(registration, runtime.authority.next_control())
+        .unwrap();
     assert!(!revoked.active);
     drop(barrier);
 
@@ -609,7 +612,10 @@ async fn a_late_publication_never_replaces_a_newer_registration_or_reopens_a_clo
         .unwrap();
     assert!(!revoked.active);
 
-    runtime.authority.publish(older).unwrap();
+    runtime
+        .authority
+        .publish(older, runtime.authority.next_control())
+        .unwrap();
     assert_eq!(
         runtime.epoch(OwnerClientKind::Tui).unwrap(),
         revoked.owner_epoch,
@@ -620,7 +626,10 @@ async fn a_late_publication_never_replaces_a_newer_registration_or_reopens_a_clo
 
     let mut reopened = tui_registration(runtime);
     reopened.active = true;
-    runtime.authority.publish(reopened).unwrap();
+    runtime
+        .authority
+        .publish(reopened, runtime.authority.next_control())
+        .unwrap();
     assert!(
         !tui_registration(runtime).active,
         "a settle of the same epoch never reopens a closed slot"
