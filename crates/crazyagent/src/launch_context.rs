@@ -887,8 +887,9 @@ impl AgentContext {
     /// Writes this context into one agent's private home for one launch of `harness`.
     /// Input: the harness id ("codex" or "claude-code"), the agent's 0700 home (its
     /// CODEX_HOME or CLAUDE_CONFIG_DIR) and the tools switch; with tools off no skill or
-    /// MCP server is given. Output: the guard holding the files and the harness arguments,
-    /// or `launch_home_busy` while another launch uses the home.
+    /// MCP server is given. On macOS the files hold the agent's own `getconf`
+    /// ([`crate::sandbox::toolchains::write_getconf`]). Output: the guard holding the files
+    /// and the harness arguments, or `launch_home_busy` while another launch uses the home.
     pub fn install(
         &self,
         harness: &str,
@@ -1057,6 +1058,9 @@ impl AgentContext {
                 instructions.into_os_string(),
             ]);
         }
+        #[cfg(target_os = "macos")]
+        crate::sandbox::toolchains::write_getconf(home, installed.native.is_some())
+            .map_err(|_| failure("launch_context_unwritable"))?;
         assert!(installed.files.as_ref().is_some_and(|files| {
             files.home == home && files.removals().iter().all(|path| path.starts_with(home))
         }));
