@@ -33,4 +33,4 @@
 
 
 
- ↑↓ Move   x Stop   Enter Open report   t Team   Shift-←→ Tabs   Esc Home                                        ? Help
+ ↑↓ Move   x Stop   Enter Open report   t Team   s Team settings   Shift-←→ Tabs   Esc Home                      ? Help
