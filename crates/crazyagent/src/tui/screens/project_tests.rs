@@ -3598,6 +3598,7 @@ fn a_live_switch_that_opened_no_session_shows_on_and_names_why() {
         action: crate::team::TeamAction::LiveMaster {
             project_id: project.clone(),
             on: true,
+            version: 0,
         },
         generation: 1,
     };

@@ -119,6 +119,7 @@ impl NativeOwner {
                     crate::team::TeamAction::LiveMaster {
                         project_id,
                         on: true,
+                        ..
                     } => open_live_session(controller, project_id, generation).await,
                     _ => None,
                 };
@@ -1016,9 +1017,18 @@ pools = []
 
         let mut opened = Vec::new();
         for _ in 0..2 {
+            let version = native
+                .controller
+                .as_mut()
+                .unwrap()
+                .team_status(project.clone())
+                .await
+                .unwrap()
+                .settings_version;
             app.request_team_change(crate::team::TeamAction::LiveMaster {
                 project_id: project.clone(),
                 on: true,
+                version,
             })
             .unwrap();
             let query = app.take_setup_query().unwrap();
@@ -1097,9 +1107,15 @@ pools = []
                 None,
                 "a new project has no master session"
             );
+            let version = controller
+                .team_status(project.clone())
+                .await
+                .unwrap()
+                .settings_version;
             app.request_team_change(crate::team::TeamAction::LiveMaster {
                 project_id: project.clone(),
                 on: true,
+                version,
             })
             .unwrap();
             let query = app.take_setup_query().unwrap();
@@ -1540,9 +1556,18 @@ pools = []
             .unwrap();
         let (mut service, mut native, mut app, project, _stop, _home) =
             live_project(root.path()).await;
+        let version = native
+            .controller
+            .as_mut()
+            .unwrap()
+            .team_status(project.clone())
+            .await
+            .unwrap()
+            .settings_version;
         app.request_team_change(crate::team::TeamAction::LiveMaster {
             project_id: project.clone(),
             on: true,
+            version,
         })
         .unwrap();
         let query = app.take_setup_query().unwrap();
@@ -1579,11 +1604,17 @@ pools = []
             live_project(root.path()).await;
         let controller = native.controller.as_mut().unwrap();
         assign_live_pool(controller, &project).await;
+        let version = controller
+            .team_status(project.clone())
+            .await
+            .unwrap()
+            .settings_version;
         let switched = controller
             .team_action(
                 crate::team::TeamAction::LiveMaster {
                     project_id: project.clone(),
                     on: true,
+                    version,
                 },
                 1,
             )

@@ -1763,6 +1763,7 @@ async fn live_master_says_it_waits_while_another_process_holds_its_profile() {
         restart.team_action(TeamAction::LiveMaster {
             project_id: setup.project_id.clone(),
             on: true,
+            version: restart.team_settings_version(&setup.project_id),
         });
         for _ in 0..5 {
             team.tick().unwrap();

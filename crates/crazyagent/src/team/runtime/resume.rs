@@ -194,7 +194,12 @@ impl TeamRuntime {
                 RunState::Interrupted,
                 &format!("its note could not be typed into the master: {code}"),
             ),
-            Err(InputRefused::NoMaster | InputRefused::Busy | InputRefused::OwnerTyping) => Ok(()),
+            Err(
+                InputRefused::NoMaster
+                | InputRefused::Busy
+                | InputRefused::Unready
+                | InputRefused::OwnerTyping,
+            ) => Ok(()),
         }
     }
 
@@ -521,8 +526,9 @@ impl TeamRuntime {
         };
         let worker = self.workers.get_mut(&id).expect("worker exists");
         let held = worker.held;
+        let pin = worker.narrowed.is_none().then_some(id);
         if let Some(busy) = worker.busy.take() {
-            self.release(id, busy)?;
+            self.release(pin, busy)?;
         }
         if held {
             recovery::mark(
