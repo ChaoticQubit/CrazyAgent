@@ -190,7 +190,9 @@ async fn pump(shell: &mut Shell, connection: &mut Connection) -> Vec<&'static st
                     });
                     connection.intake(*job).unwrap();
                 }
-                Request::Questions(query) => {
+                Request::Questions(query)
+                    if *query == crate::tui::client::questions::QuestionsQuery::Counts =>
+                {
                     connection.questions(*query).unwrap();
                 }
                 other => panic!("intake pages never send {other:?}"),
@@ -1580,12 +1582,12 @@ fn a_pasted_github_token_leaves_only_as_its_own_job_and_is_never_drawn() {
     let rows = render(&mut shell, 80, 24);
     assert!(!shows(&rows, "ghp_"), "{rows:#?}");
     shell.key(Key::Enter);
-    let Some(Request::Intake(job)) = shell.ctx.next_request() else {
+    let Some(Request::Intake(job)) = shell.ctx.next_screen_request() else {
         panic!("the token goes to the engine");
     };
     assert!(matches!(*job, IntakeJob::GitHubToken(_)));
     assert_eq!(job.query(), IntakeQuery::GitHubStatus);
-    assert!(shell.ctx.next_request().is_none());
+    assert!(shell.ctx.next_screen_request().is_none());
 }
 
 #[test]
@@ -1604,7 +1606,7 @@ fn a_repository_the_engine_cannot_clone_is_listed_with_why_and_enter_never_clone
             problem: None,
         })),
     ));
-    let Some(Request::Intake(job)) = shell.ctx.next_request() else {
+    let Some(Request::Intake(job)) = shell.ctx.next_screen_request() else {
         panic!("a signed-in clone page lists the repositories");
     };
     assert_eq!(job.query(), IntakeQuery::GitHubRepos { page: 1 });
@@ -1630,7 +1632,7 @@ fn a_repository_the_engine_cannot_clone_is_listed_with_why_and_enter_never_clone
     assert!(shows(&rows, "Can't clone this name"), "{rows:#?}");
     assert!(shows(&rows, "octo-cat/notes"), "{rows:#?}");
     shell.key(Key::Enter);
-    assert!(shell.ctx.next_request().is_none());
+    assert!(shell.ctx.next_screen_request().is_none());
     let rows = render(&mut shell, 100, 24);
     assert!(
         shows(
@@ -1642,7 +1644,7 @@ fn a_repository_the_engine_cannot_clone_is_listed_with_why_and_enter_never_clone
     assert!(!shows(&rows, "github_repo_name_unsupported"), "{rows:#?}");
     shell.key(Key::Down);
     shell.key(Key::Enter);
-    let Some(Request::Intake(job)) = shell.ctx.next_request() else {
+    let Some(Request::Intake(job)) = shell.ctx.next_screen_request() else {
         panic!("the other repository still clones");
     };
     assert_eq!(

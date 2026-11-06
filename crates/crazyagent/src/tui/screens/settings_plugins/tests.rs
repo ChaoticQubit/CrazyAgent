@@ -407,7 +407,10 @@ fn saving_a_secret_sends_it_once_and_never_shows_the_value() {
     let rows = render(&mut shell, 80, 24);
     assert!(rows.iter().all(|row| !row.contains("tidewater42")));
     shell.key(Key::Enter);
-    assert_eq!(shell.ctx.queued(), 0, "one change at a time");
+    assert!(
+        shell.ctx.next_screen_request().is_none(),
+        "one change at a time"
+    );
 }
 
 #[test]
